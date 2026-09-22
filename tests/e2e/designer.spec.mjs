@@ -1,11 +1,13 @@
 // Public designer smoke on a TEST tenant: boot, one placement of each wall item, the
 // collision refusals, and the window-overlap rule. Real mouse clicks (the app snaps by the
 // click's client coordinates, so a synthetic click with the wrong CTM lands elsewhere).
-import { test, expect } from "@playwright/test";
-import { CLIENT, bypassGate, watchConsole, designerItems, planPoint } from "./helpers.mjs";
+import { expect } from "@playwright/test";
+// `test` comes from helpers: it answers log_error locally for every page and fails on a boot_* call.
+import { test, guardLogError, CLIENT, SUPABASE_URL, bypassGate, watchConsole, designerItems, planPoint, revealTool } from "./helpers.mjs";
 
 async function arm(page, label) {
-  await page.getByRole("button", { name: label }).first().click();
+  // revealTool opens the option tab the tool lives on (section 03 is tabbed since 2026-09-16).
+  await (await revealTool(page, label)).click();
   await page.waitForTimeout(250); // React commit; a click in the same tick places the previous tool
 }
 async function clickPlan(page, fx, fy) {
@@ -40,6 +42,14 @@ async function placeFixture(page, tool, styleName, confirmLabel, fx, fy) {
 // text); the window picker's is "🪟 Window wall", so anchoring the END excludes the rough
 // opening, whose name ends ") wall".
 const placeDoor = (page, fx, fy) => placeFixture(page, /^Door wall$/, "Single Barn Door", "Place door", fx, fy);
+// A rough opening: arm the Door or Window tool, click the wall, choose the picker's "Rough opening" tile.
+async function placeRo(page, tool, kind, fx, fy) {
+  await arm(page, tool);
+  await clickPlan(page, fx, fy);
+  await page.locator(`[data-ss-ro-tile="${kind}"]`).click();
+  await page.getByRole("button", { name: "Place rough opening" }).click();
+  await page.waitForTimeout(300);
+}
 const placeWindow = (page, fx, fy) => placeFixture(page, /Window wall$/, "Double Hung Window", "Place window", fx, fy);
 
 test("public designer boots and places every wall item", async ({ page }) => {
@@ -85,8 +95,12 @@ test("door and window rough openings place with their own geometry and labels", 
   await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
   await expect(page.locator("svg").filter({ hasText: /ft/ }).first()).toBeVisible();
 
-  await arm(page, "Rough Opening (Door)"); await clickPlan(page, 5, 0);
-  await arm(page, "Rough Opening (Window)"); await clickPlan(page, 10, 6);
+  // Rough openings are a tile inside the door and window pickers since 2026-09-16 (Carolyn: "I want
+  // rough opening to be in the door and in the window as an option, not by itself"), so there is no
+  // palette button left to arm, and the tile must place exactly the item the button used to.
+  await expect(page.getByRole("button", { name: /Rough Opening/ }), "no rough-opening palette buttons").toHaveCount(0);
+  await placeRo(page, /^Door wall$/, "door", 5, 0);
+  await placeRo(page, /Window wall$/, "window", 10, 6);
 
   await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([
     expect.objectContaining({ type: "roughOpeningDoor", wall: "north", sillFt: 0 }),
@@ -121,22 +135,21 @@ test("door and window rough openings place with their own geometry and labels", 
 // the fixtures catalog. The finding did not: a catalog window is still a type:"window" item,
 // so it hits the same carve-out.)
 //
-// checkDoorCollision (StructureStudio.jsx:192) skips existing windows:
-//     if (!c || !c.wallOnly || it.type === "window") continue;
-// Windows ARE wallOnly:true (line 82), so that type check is a DELIBERATE carve-out, not an
-// oversight of the wallOnly test. Removing it is therefore a product decision, not a bug fix:
-// it would also make windows block each other, and it would change AUTO-PLACEMENT — there are
-// ten call sites, including the auto-layout loops that `continue` past a collision, so
-// auto-placed doors could start failing to place where they currently succeed.
+// ✅ RESOLVED 2026-09-10, and the answer was neither yes nor no. The question this comment
+// used to pose — "may a door and a window share a wall span?" — assumed a policy was needed.
+// It is a MEASUREMENT: the `it.type === "window"` carve-out is gone and checkDoorCollision's
+// vertical-band test decides, in both orders. A transom above a door places, because that is
+// how one is built; a window driven through a door is refused, whichever was clicked first.
 //
-// Needs Carolyn's answer to one question: may a door and a window share a wall span? If no,
-// drop the `it.type === "window"` clause and re-run the whole designer suite for auto-layout
-// regressions.
+// Two things the old comment warned about, both checked before this was flipped:
+//   * windows now block each other — INTENDED. Two identical windows could previously sit
+//     perfectly coincident on one span, both priced.
+//   * auto-placement (reflowItems' seat(), electricalAutoItems) shares this guard, so a
+//     resize could in principle strand an item it used to seat. Driven across repeated
+//     resizes with doors and windows on the same walls: nothing stranded, no toast flood.
+//
+// So this test is no longer expected to fail, and the marker below is deliberately absent.
 test("a door dropped onto an existing window is refused", async ({ page }) => {
-  // INSIDE the body, not at file scope. A bare `test.fail()` between tests marks EVERY
-  // subsequent test in the file expected-to-fail, which silently flipped the phone-viewport
-  // test to "failed" for passing.
-  test.fail();
   await bypassGate(page, CLIENT);
   await page.goto(`/?client=${CLIENT}`);
   await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
@@ -150,15 +163,21 @@ test("a door dropped onto an existing window is refused", async ({ page }) => {
   expect(east.length, "no second opening on the window's spot").toBe(1);
 });
 
-test("designer on a phone viewport has no horizontal scroll", async ({ browser }) => {
+test("designer on a phone viewport has no horizontal scroll", async ({ browser }, testInfo) => {
   const ctx = await browser.newContext({ viewport: { width: 375, height: 812 }, isMobile: true, hasTouch: true });
-  const page = await ctx.newPage();
-  await bypassGate(page, CLIENT);
-  await page.goto(`/?client=${CLIENT}`);
-  await page.waitForFunction(() => window.__ssAppBooted === true);
-  const dims = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
-  expect(dims.sw, `scrollWidth ${dims.sw} vs clientWidth ${dims.cw}`).toBeLessThanOrEqual(dims.cw + 1);
-  await ctx.close();
+  // Its own context, so the fixture's log_error guard does not reach it: guard it here.
+  const logs = await guardLogError(ctx);
+  try {
+    const page = await ctx.newPage();
+    await bypassGate(page, CLIENT);
+    await page.goto(`/?client=${CLIENT}`);
+    await page.waitForFunction(() => window.__ssAppBooted === true);
+    const dims = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
+    expect(dims.sw, `scrollWidth ${dims.sw} vs clientWidth ${dims.cw}`).toBeLessThanOrEqual(dims.cw + 1);
+  } finally {
+    await ctx.close();
+    await logs.finish(testInfo);
+  }
 });
 
 // ── SELECTION MUST SURVIVE THE CLICK THAT MAKES IT ───────────────────────────────────────
@@ -271,4 +290,343 @@ test("selecting a wall item draws no dimension chips on the plan", async ({ page
   await clickPlan(page, 5, 0);
   const selected = await ftIn();
   expect(selected, "selecting an item must not paint new dimensions on the plan").toEqual(unselected);
+});
+
+// ── LAYOUT, Carolyn's screen share 2026-09-14 (style bar, Included callout, designs list) ──────
+// These three were proven by throwaway scripts on the branch that shipped them; this is the part
+// worth keeping, so a later edit to one twin cannot quietly undo it.
+//
+// SUPABASE IS ROUTED for these, unlike the tests above. Reads pass through; get_config is
+// REWRITTEN per case (the test tenant has one style and no inclusions, and its stylesPerRow is
+// whatever someone last saved); the design-version RPCs are FAKED; and every other call (a
+// save_design, a log row, an edge function) is answered locally, so nothing is written to the
+// tenant. `o` is mutable: a case sets o.rewrite / o.design before its goto.
+const LAYOUT_READS = /\/rest\/v1\/rpc\/(get_config|get_catalog|get_fixtures)\b/;
+async function routeLayout(page) {
+  const o = { rewrite: null, design: null, versions: [], cfg: null };
+  await page.route(`${SUPABASE_URL}/**`, async (route) => {
+    const req = route.request(); const u = req.url();
+    const json = (body) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+    if (/\/rpc\/get_config\b/.test(u)) {
+      const resp = await route.fetch();
+      const j = await resp.json();
+      if (o.rewrite) o.rewrite(j);
+      o.cfg = j;
+      return route.fulfill({ response: resp, json: j });
+    }
+    if (o.design && /\/rpc\/load_design\b/.test(u)) return json([o.design]);
+    if (o.design && /\/rpc\/list_design_versions\b/.test(u)) return json(o.versions);
+    if (o.design && /\/rpc\/load_design_version\b/.test(u)) {
+      let b = {}; try { b = JSON.parse(req.postData() || "{}"); } catch { /* ignore */ }
+      return json(o.versions.find((v) => v.version === Number(b.p_version)) || null);
+    }
+    if ((req.method() === "GET" || LAYOUT_READS.test(u)) && !/\/functions\/v1\//.test(u)) return route.continue();
+    return json({});
+  });
+  return o;
+}
+const sizeLabel = (s) => (typeof s === "string" ? s : (s && (s.value || s.label || s.size)) || "");
+// The tenant's styles copied out to `count`, each with its own value, so the bar has something to scroll.
+function padStyles(j, count) {
+  const base = j.buildingStyles || [];
+  const out = base.slice(0, count);
+  for (let k = 0; out.length < count && base.length; k++) {
+    const s = base[k % base.length];
+    out.push({ ...s, value: `${s.value}-pw${k}`, label: `${s.label} ${k + 2}` });
+  }
+  j.buildingStyles = out;
+}
+
+// The style bar used to be a wrapping row of cards; a ninth style (Playhouse) dropped onto a second
+// row. It is ONE row of N tiles now, N = branding.stylesPerRow clamped to 5..8, anything missing or
+// unusable = 8 (SSStyleStrip). data-ss-style-strip carries the N it settled on.
+test("style bar is one row of N tiles: 8 by default, the builder's 5, bad values fall back", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const o = await routeLayout(page);
+  await bypassGate(page, CLIENT);
+  for (const [spr, want] of [[undefined, 8], [5, 5], [12, 8], ["abc", 8]]) {
+    o.rewrite = (j) => {
+      padStyles(j, 10);
+      j.branding = { ...(j.branding || {}) };
+      if (spr === undefined) delete j.branding.stylesPerRow; else j.branding.stylesPerRow = spr;
+    };
+    await page.goto(`/?client=${CLIENT}`);
+    await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+    const strip = page.locator("[data-ss-style-strip]");
+    await expect(strip, `stylesPerRow ${JSON.stringify(spr)}`).toHaveAttribute("data-ss-style-strip", String(want));
+    await expect(strip.locator("[data-ss-style]")).toHaveCount(10);
+    const m = await strip.evaluate((el) => ({
+      tops: [...el.children].map((t) => Math.round(t.getBoundingClientRect().top)),
+      overflow: el.scrollWidth > el.clientWidth + 1,
+    }));
+    expect(new Set(m.tops).size, "all 10 tiles on ONE row").toBe(1);
+    expect(m.overflow, "10 styles with N <= 8 scroll sideways").toBe(true);
+    await expect(page.locator('[data-ss-strip-arrow="right"]')).toBeVisible();
+    const doc = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
+    expect(doc.sw, "the strip scrolls, the page does not").toBeLessThanOrEqual(doc.cw + 1);
+  }
+  expect(errors, "page errors").toEqual([]);
+});
+
+// Carolyn 2026-09-14: "place or decline" moves BELOW Additional options, just above the floor-plan
+// toolbar, in a green callout. Order in the DOM is the whole requirement, so that is what is asserted.
+test("the Included callout sits after the option tabs and before Clear floorplan", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const o = await routeLayout(page);
+  // Give every size of the first style one included workbench; the test tenant has no inclusions.
+  o.rewrite = (j) => {
+    const st = j.buildingStyles[0];
+    st.sizeInclusionQty = Object.fromEntries((st.sizes || []).map((s) => [sizeLabel(s), { workbench: 1 }]));
+  };
+  await bypassGate(page, CLIENT);
+  await page.goto(`/?client=${CLIENT}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+  // Inclusions are per SIZE, and picking a style clears the size (onPick sets size: ""), so the
+  // callout cannot exist until a size is chosen too. The label is CSS-uppercased; match its text.
+  await page.locator("[data-ss-style-strip] [data-ss-style]").first().click();
+  await page.locator('xpath=//span[normalize-space(.)="Building Size"]/..//select').first().selectOption({ index: 1 });
+  const callout = page.locator("[data-ss-included]");
+  await expect(callout).toBeVisible();
+  await expect(callout).toContainText(/Included/i);
+  const order = await page.evaluate(() => {
+    const inc = document.querySelector("[data-ss-included]");
+    // The option tabs block carries the hook the "Additional options" sub-head used to (2026-09-16).
+    const lbl = document.querySelector("[data-ss-additional-options]");
+    const clear = [...document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Clear floorplan");
+    const after = (a, b) => !!(a && b && (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING));
+    return { label: !!lbl, clear: !!clear, afterLabel: after(lbl, inc), beforeClear: after(inc, clear) };
+  });
+  expect(order).toEqual({ label: true, clear: true, afterLabel: true, beforeClear: true });
+  expect(errors, "page errors").toEqual([]);
+});
+
+// Section 03 is a tab bar since 2026-09-16 (Building | Exterior | Interior | Services). Before it,
+// Insulation, Foundation and the Electrical Package were only drawn when a builder's palette had TWO
+// or more groups, so a builder selling only interior items silently lost all three. Here the palette
+// is one group (interior only: no catalog doors, windows, ramps or electrical items) and every one of
+// the three must still be offered, each on its own tab, and a tab switch must show its options.
+test("a builder with a single palette group still gets Insulation, Foundation and the package", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const o = await routeLayout(page);
+  o.rewrite = (j) => {
+    j.layoutItems = Object.fromEntries(Object.entries(j.layoutItems || {}).filter(([, c]) => c && c.group === "interior"));
+    j.electricalItems = [];
+    j.foundationItems = [{ id: "gravel_pad", rate: 2.5, basis: "sqft_option", label: null, charged: true }];
+  };
+  // Registered after routeLayout, so it answers first: no catalog doors, windows or ramps.
+  await page.route(`${SUPABASE_URL}/rest/v1/rpc/get_fixtures`, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [], ramp: { enabled: false } }) }));
+  await bypassGate(page, CLIENT);
+  await page.goto(`/?client=${CLIENT}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+  await page.locator("[data-ss-style-strip] [data-ss-style]").first().click();
+  await page.locator('xpath=//span[normalize-space(.)="Building Size"]/..//select').first().selectOption({ index: 1 });
+  const strip = page.locator("[data-ss-opt-strip]");
+  await expect(strip).toBeVisible();
+  const tabs = await strip.locator("[data-ss-opt-tab]").evaluateAll((els) => els.map((e) => e.getAttribute("data-ss-opt-tab")));
+  expect(tabs, "no Exterior tabs without doors or windows").toEqual(expect.not.arrayContaining(["doors", "windows"]));
+  expect(tabs).toEqual(expect.arrayContaining(["interior", "electrical", "insulation", "foundation"]));
+  await strip.locator('[data-ss-opt-tab="foundation"]').click();
+  await expect(strip.locator('[data-ss-opt-panel="services"]')).toContainText("Gravel pad");
+  await strip.locator('[data-ss-opt-tab="electrical"]').click();
+  await expect(strip.locator('[data-ss-opt-panel="interior"]').getByRole("button", { name: /Electrical Package/ })).toBeVisible();
+  await strip.locator('[data-ss-opt-tab="insulation"]').click();
+  await expect(strip.locator('[data-ss-opt-panel="interior"]')).toContainText(/Floor|Walls|Roof/);
+  expect(errors, "page errors").toEqual([]);
+});
+
+// Vents are ONE "Vent" button since 2026-09-16 (Carolyn: "it just needs to say vent. And then if they
+// add more vents, just like when you click on a window… it pops up"). One vent arms at once; two open
+// "Choose a vent", where a card arms that vent. Either way the placed item is the catalog vent itself
+// (its fixtureItemId), which is what keeps its quote line's name unchanged, and the stand-in button's
+// own key is never placed.
+const pwVent = (id, name, widthIn, planLabel) => ({ id, name, price: 25, widthIn, heightIn: 8, category: "vent", colorMode: "fixed", planLabel,
+  sortOrder: 0, imageUrl: null, opLeft: false, opRight: false, opDouble: false, opSlideUp: false, swingIn: false, swingOut: false,
+  opDefault: null, swingDefault: null, hasTrimColor: false });
+for (const n of [1, 2]) {
+  test(`Vent is one button: ${n === 1 ? "a single vent arms at once" : "two vents open Choose a vent"}, and the catalog vent is placed`, async ({ page }) => {
+    const errors = watchConsole(page);
+    await routeLayout(page);
+    const vents = [pwVent("pw-vent-std", "Standard Vent", 12, "SVNT"), pwVent("pw-vent-big", "Big Vent", 18, "BVNT")].slice(0, n);
+    // Registered after routeLayout, so it answers first: the tenant's catalog plus these vents.
+    await page.route(`${SUPABASE_URL}/rest/v1/rpc/get_fixtures`, async (route) => {
+      const resp = await route.fetch();
+      const j = await resp.json();
+      j.items = (Array.isArray(j.items) ? j.items : []).concat(vents);
+      return route.fulfill({ response: resp, json: j });
+    });
+    await bypassGate(page, CLIENT);
+    await page.goto(`/?client=${CLIENT}`);
+    await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+    await expect(page.locator("svg").filter({ hasText: /ft/ }).first()).toBeVisible();
+    const vent = await revealTool(page, /^\W*Vent wall$/u);
+    await expect(vent).toBeVisible();
+    await expect(page.getByRole("button", { name: /Standard Vent|Big Vent/ }), "no per-vent palette buttons").toHaveCount(0);
+    await vent.click();
+    await page.waitForTimeout(250);
+    const want = vents[vents.length - 1];
+    if (n === 1) {
+      await expect(page.getByText("Choose a vent")).toHaveCount(0);
+    } else {
+      await expect(page.getByText("Choose a vent")).toBeVisible();
+      await page.locator(`[data-ss-vent-card="${want.id}"]`).click();
+      await expect(page.getByText("Choose a vent")).toHaveCount(0);
+    }
+    await expect(vent, "the Vent button reads armed").toHaveClass(/is-armed/);
+    await clickPlan(page, 8, 0);
+    await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "window", fixtureItemId: want.id })]));
+    expect((await designerItems(page)).some((i) => i.type === "ventPicker"), "the stand-in is never placed").toBe(false);
+    expect(errors, "console errors").toEqual([]);
+  });
+}
+
+// Delivery moved up into Services (Carolyn 2026-09-16: "services are delivery and foundation"). A
+// builder who automated delivery shows the customer how it is priced before there is an address, then
+// the rule's figure once the address is in (the amount behind the same contact gate as Details), and
+// Details charges exactly that figure — both read ssDeliveryView.
+test("Services › Delivery: priced from the address, and Details charges the same figure", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const o = await routeLayout(page);
+  o.rewrite = (j) => { j.delivery = { automate: true, configured: true, taxable: false, ruleType: "base_plus" }; };
+  const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization, x-client-info, apikey, content-type", "access-control-allow-methods": "POST, OPTIONS" };
+  const quotes = [];
+  // Registered after routeLayout, so it answers first.
+  await page.route(`${SUPABASE_URL}/functions/v1/delivery-quote`, (route) => {
+    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 200, headers: CORS, body: "ok" });
+    quotes.push(route.request().postData());
+    return route.fulfill({ status: 200, headers: { ...CORS, "content-type": "application/json" },
+      body: JSON.stringify({ ok: true, ready: true, autoPriced: true, fee: 150, miles: 12, originName: "Main Lot", desc: "12 mi from Main Lot" }) });
+  });
+  await bypassGate(page, CLIENT);
+  await page.goto(`/?client=${CLIENT}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+  await page.locator("[data-ss-style-strip] [data-ss-style]").first().click();
+  await page.locator('xpath=//span[normalize-space(.)="Building Size"]/..//select').first().selectOption({ index: 1 });
+  const panel = page.locator("[data-ss-delivery-panel]");
+  await expect(page.locator('[data-ss-opt-tab="delivery"]'), "Delivery opens Services").toHaveAttribute("aria-selected", "true");
+  await expect(panel).toContainText("Priced from your delivery address");
+  await page.getByPlaceholder("123 Main St").fill("1 Test Way");
+  await page.getByPlaceholder("City").fill("Kansas City");
+  await page.locator("select").filter({ has: page.locator("option", { hasText: "Select state…" }) }).selectOption({ label: "Missouri" });
+  await page.getByPlaceholder("00000").fill("64105");
+  // Before the contact gate: that delivery is priced, but neither the figure nor the rule's description,
+  // which can carry the price itself ("free within 30 miles").
+  await expect(panel).toContainText("Delivery is priced for your address");
+  await expect(panel, "no description or amount before the contact is complete").not.toContainText(/12 mi from Main Lot|\$150\.00/);
+  await expect(panel.getByRole("button", { name: "Add your address" }), "the address is already in").toHaveCount(0);
+  await page.getByPlaceholder("Full Name").fill("Pat Tester");
+  await page.getByPlaceholder("email@example.com").fill("pat@example.com");
+  await page.getByPlaceholder("(555) 555-5555").fill("5550104477");
+  await expect(panel).toContainText("12 mi from Main Lot");
+  await expect(panel).toContainText("$150.00");
+  await page.getByRole("button", { name: /See your quote details/ }).click();
+  const row = page.locator(".ssd-dt-row").filter({ hasText: "12 mi from Main Lot" });
+  await expect(row).toContainText("$150.00");
+  expect(quotes.length, "delivery-quote was asked").toBeGreaterThan(0);
+  expect(errors, "page errors").toEqual([]);
+});
+
+// A builder whose only door option is a rough opening that the size already INCLUDES: the Included chip
+// offers it, so there is no Door tool that would open an empty "Choose a door" (review 2026-09-17), and the
+// chip still places the rough opening. The window rough opening, not included, stays a tile.
+test("an included rough opening with no catalog doors: no empty Door tool, and the chip places it", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const o = await routeLayout(page);
+  o.rewrite = (j) => {
+    for (const st of j.buildingStyles || []) {
+      st.sizeInclusionQty = Object.fromEntries((st.sizes || []).map((s) => [sizeLabel(s), { roughOpeningDoor: 1 }]));
+    }
+  };
+  // Registered after routeLayout, so it answers first: no catalog doors, windows or ramps at all.
+  await page.route(`${SUPABASE_URL}/rest/v1/rpc/get_fixtures`, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [], ramp: { enabled: false } }) }));
+  await bypassGate(page, CLIENT);
+  await page.goto(`/?client=${CLIENT}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+  await page.locator("[data-ss-style-strip] [data-ss-style]").first().click();
+  await page.locator('xpath=//span[normalize-space(.)="Building Size"]/..//select').first().selectOption({ index: 1 });
+  await expect(page.locator("[data-ss-opt-strip]")).toBeVisible();
+  await expect(page.locator('[data-ss-opt-tab="doors"]'), "no Doors tab: nothing to put in it").toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Door wall$/ })).toHaveCount(0);
+  // The window rough opening is not included, so the Window tool exists and its picker holds only the tile.
+  await arm(page, /Window wall$/);
+  await clickPlan(page, 10, 6);
+  await expect(page.locator('[data-ss-ro-tile="window"]')).toBeVisible();
+  await expect(page.getByRole("button", { name: "Place rough opening" })).toBeEnabled();
+  await page.getByRole("button", { name: "Place rough opening" }).click();
+  await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "roughOpeningWindow", wall: "east" })]));
+  // The included door rough opening is placed from its chip.
+  const chip = page.locator("[data-ss-included]").getByRole("button", { name: /Rough Opening/ }).first();
+  await expect(chip).toBeVisible();
+  await chip.click();
+  await page.waitForTimeout(250);
+  await clickPlan(page, 5, 0);
+  await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "roughOpeningDoor", wall: "north" })]));
+  expect(errors, "page errors").toEqual([]);
+});
+
+// "All designs on this estimate" was a "▾ N versions" toggle nobody opened (Carolyn 2026-09-14).
+// It is always open now: newest first, the one on the plan marked Viewing, the newest marked
+// Latest, and Open loads that version, moves Viewing, puts v= in the URL and scrolls to the plan.
+test("designs on this estimate: always open, Viewing and Latest marked, Open lands on the plan", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const o = await routeLayout(page);
+  await bypassGate(page, CLIENT);
+  await page.goto(`/?client=${CLIENT}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+  await expect.poll(() => !!(o.cfg && o.cfg.buildingStyles && o.cfg.buildingStyles.length)).toBe(true);
+
+  const CODE = "SS-PWLAYOUT9"; // 9 characters after SS-, the shape load_design expects
+  const st = o.cfg.buildingStyles[0];
+  const sizes = (st.sizes || []).map(sizeLabel).filter(Boolean);
+  const mk = (version, size, date) => ({
+    short_code: CODE, version, created_at: date,
+    selections: { style: st.value, size, roofType: "", roofColor: "", cladding: "" },
+    items: [], paint_colors: { body: "", trim: "" }, custom_options: [], ro_dimensions: {}, image_url: null,
+  });
+  o.versions = [mk(2, sizes[0], "2026-09-14T15:00:00Z"), mk(1, sizes[1] || sizes[0], "2026-09-12T15:00:00Z")];
+  o.design = {
+    short_code: CODE, status: "submitted", selections: o.versions[0].selections, items: [], paint_colors: { body: "", trim: "" },
+    custom_options: [], ro_dimensions: {},
+    contact: { name: "Layout Test", email: "layout-test@example.invalid", phone: "5555550188", street: "1 Test St", city: "Testville", state: "PA", zip: "17000" },
+    ghl_contact_id: null, ghl_estimate_id: null, ghl_estimate_number: null, ss_quote_number: null, inventory_unit_id: null,
+  };
+
+  await page.goto(`/?client=${CLIENT}&id=${CODE}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true);
+  const list = page.locator("[data-ss-versions]");
+  await expect(list.locator("[data-ss-version]"), "rows visible with no click").toHaveCount(2);
+  await expect(list).toHaveCount(1);
+  await expect(list).toContainText(/All designs on this estimate \(2\)/i);
+  expect(await page.evaluate(() => /▾ \d+ versions|▴ hide/.test(document.body.innerText)), "no toggle").toBe(false);
+
+  const v2 = page.locator('[data-ss-version="2"]');
+  const v1 = page.locator('[data-ss-version="1"]');
+  await expect(v2).toHaveAttribute("data-ss-viewing", "1");
+  await expect(v2).toContainText("Viewing");
+  await expect(v2).toContainText("Latest");
+  await expect(v2.getByRole("button", { name: "Open" }), "the row on the plan has no Open").toHaveCount(0);
+  await expect(v1).not.toContainText(/Viewing|Latest/);
+
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await v1.getByRole("button", { name: "Open" }).click();
+  await expect(v1).toHaveAttribute("data-ss-viewing", "1");
+  await expect(v1).toContainText("Viewing");
+  await expect(v2).not.toContainText("Viewing");
+  await expect(v2).toContainText("Latest");
+  await expect(v2.getByRole("button", { name: "Open" })).toHaveCount(1);
+  await expect.poll(() => new URL(page.url()).searchParams.get("v")).toBe("1");
+  const planTop = () => page.evaluate(() => {
+    const svg = [...document.querySelectorAll("svg")].find((s) => [...s.querySelectorAll("text")].some((t) => / ft$/.test(t.textContent)));
+    return Math.round(svg.getBoundingClientRect().top);
+  });
+  await expect.poll(planTop, { timeout: 10_000 }).toBeGreaterThanOrEqual(-2);
+  expect(await planTop(), "Open scrolled the plan into view").toBeLessThan(120);
+  expect(errors, "page errors").toEqual([]);
 });

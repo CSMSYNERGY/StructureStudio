@@ -9,7 +9,8 @@
 // Public in practice: the anon key passes the gateway, so verify_jwt is NOT auth. The real
 // gate is the customer_sessions token (checkSession), and on top of it the ownership
 // compare — a payment only ever attaches to a design whose contact phone matches the
-// session's OTP-verified phone.
+// session's OTP-verified phone, or whose contact email matches its code-verified email
+// (_shared/customerIdentity.ts ownsDesign, migration 230; never one resolved to the other).
 //
 // ⚠️ withErrorLog runs at minStatus 400 here, DELIBERATELY, against the customer-function
 //    default of 500. On a money path every refusal deserves a durable row: the 409 that
@@ -24,7 +25,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, SS_REFUSAL_HEADER, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
-import { phoneKey } from "../_shared/phoneKey.ts";
+import { loadAddressStanding, ownsDesign } from "../_shared/customerIdentity.ts";
 import {
   amountRefusalText,
   chargeInvoicePayment,
@@ -156,8 +157,10 @@ async function gate(req: Request, admin: any, identity: any, body: any): Promise
   // status here would confirm that somebody else's quote exists.
   const notYours = json({ error: "That invoice wasn't found on your account." }, 404);
   if (!d) return notYours;
-  const dPhone = phoneKey((d.contact as Record<string, unknown> | null)?.phone);
-  if (!dPhone || dPhone !== phoneKey(identity.phoneDigits)) return notYours;
+  // An email login only pays when its address isn't shared across customers (customerIdentity.ts).
+  const addr = await loadAddressStanding(admin, identity.clientId, identity);
+  if (!addr.standing) return dbFail(req, identity.clientId, "load your invoice", addr.error);
+  if (!ownsDesign(identity, d.contact, addr.standing)) return notYours;
 
   const { data: inv, error: iErr } = await admin.from("invoice_sends")
     .select("invoice_number, status, issued_by, signed_at, updated_at, document_at, deposit_cents")
@@ -371,7 +374,9 @@ Deno.serve(withErrorLog("customer-pay", async (req: Request) => {
     name: typeof contact.name === "string" ? contact.name.slice(0, 60) : undefined,
     ecomind: "E",
     actorKind: "customer",
-    actorRef: identity.phoneDigits,
+    // Who paid: the verified phone, or the verified address for an email session (migration
+    // 230). payments.actor_ref is free text (174), so either reads back as itself.
+    actorRef: identity.phoneDigits ?? identity.emailLower,
   });
 
   if (!result.ok) {

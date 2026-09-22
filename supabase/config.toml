@@ -144,6 +144,12 @@ verify_jwt = true
 # added 2026-07-30. Kept true so a bare unauthenticated request is still refused early.
 verify_jwt = true
 
+[functions.delivery-quote]
+# Same posture as capture-lead (2026-09-14): the customer designer asks it for delivery miles
+# and fee as the address is typed. Real guards are body validation, a tenant existence check,
+# and per-tenant + per-IP caps in rate_buckets. Kept true so a bare request is refused early.
+verify_jwt = true
+
 [functions.customer-auth]
 # Public in practice — the anon key passes the gateway — so this is NOT auth. Its real
 # protections are the Twilio Verify OTP (the caller proves control of the phone), the
@@ -169,6 +175,12 @@ verify_jwt = true
 # customer-accept: the anon key passes the gateway, so verify_jwt is NOT the auth — the
 # customer_sessions token is, and on top of it the ownership compare against the design's
 # contact phone. SS-mode tenants only, and only once the invoice is signed.
+verify_jwt = true
+
+[functions.customer-designs]
+# A signed-in customer's saved designs (migration 231). Same auth story as customer-quotes: the
+# anon key passes the gateway, so verify_jwt is NOT the auth — the customer_sessions token is, and
+# a design is linked only when its contact names an identity that session proved.
 verify_jwt = true
 
 [functions.portal-payments]

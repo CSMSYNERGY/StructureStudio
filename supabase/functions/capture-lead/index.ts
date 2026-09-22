@@ -200,14 +200,21 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   // The PHONE is the identity this whole function is keyed on: captured_leads is unique on
   // (client_id, phone_digits), consent is filed against the phone, and the gate verifies
   // nothing else. Email is enrichment — but both CRM writes below treat it as a MATCH key.
-  // `crm_ensure_contact` resolves by phone THEN email, and GHL's /contacts/upsert matches on
-  // phone OR email. So a visitor who types an address that belongs to someone else — a typo,
-  // a shared household mailbox, or a deliberate one — gets handed that person's contact
-  // record, which is then rewritten with this visitor's name, phone and address, and linked
-  // back onto this lead locally.
+  // GHL's /contacts/upsert matches on phone OR email, so a visitor who types an address that
+  // belongs to someone else — a typo, a shared household mailbox, or a deliberate one — would
+  // be handed that person's GHL contact, rewritten with this visitor's name, phone and address.
+  //
+  // What this guard does NOT do: keep the lead off the email owner's contact in our own CRM.
+  // Since migration 191, `crm_ensure_contact` treats a known email arriving with a different
+  // phone as a second person on that contact (crm_contact_people) instead of overwriting it —
+  // the intended "a second phone stays with that contact" case — and save_design, run by the
+  // same Details-open, passes the email to it. The guard only keeps the contested email out of
+  // the GHL upsert and out of capture-lead's own resolve below.
   //
   // The email is still KEPT on the lead row (it is what the visitor typed and the builder
-  // may want to see it); it is simply not allowed to decide WHO this is.
+  // may want to see it). A conflict is a handled data condition, not a fault, so the row files
+  // as info; it is still filed, so a burst shows up in the repeated-info check. Keep the
+  // message text as it is: that check groups by message.
   let emailMatchable = !!email;
   if (email) {
     const { data: owners } = await sb.from("crm_contacts")
@@ -222,7 +229,7 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
       emailMatchable = false;
       // ⚠️ No email address or phone digits in the message — the PII rule this function keeps.
       await logEdgeError({
-        fn: "capture-lead", req, clientId, code: "email_conflict",
+        fn: "capture-lead", req, clientId, code: "email_conflict", severity: "info",
         message: "captured email already belongs to a different contact in this tenant — " +
                  "kept on the lead, not used as a CRM match key",
       });
@@ -276,8 +283,10 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   // relabel an existing customer as a browsing lead the day they come back to look again.
   //
   // The email handed to the resolver is the vetted one: a contested address falls back to
-  // whatever we already had against this phone, so the resolver cannot match on somebody
-  // else's mailbox and return their contact.
+  // whatever we already had against this phone. That is not a promise the lead stays off the
+  // email owner's contact (see "Whose email is this?" above): the fallback can be the
+  // contested address itself, stored on the lead by an earlier capture, and save_design
+  // resolves with the typed email anyway.
   if (savedLead) {
     try {
       const { data: crmId, error: crmErr } = await sb.rpc("crm_ensure_contact", {
@@ -306,7 +315,26 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   // ⚠️ REFUSED WITHOUT THE SENTENCE. A consent record that cannot say what was shown is not
   // evidence, so a `true` flag with no text is dropped rather than stored as a half-record
   // that looks like proof until someone reads it.
-  if (smsConsent && consentTextOk && phoneDigits.length >= 10) {
+  //
+  // ⚠️ A BUILDER CAN SWITCH THE BOX OFF (client_settings.lead_sms_consent_box, migration 242), and
+  // then a tick is not recorded even if one arrives. The designer stops showing the box once
+  // customer-auth tells it, but a cached bundle, a page opened before the switch, or a direct call
+  // can still send smsConsent: true, and a tick on a box the builder does not show is not a
+  // permission they asked for or can stand behind. Dropping it is the safe direction: nobody is
+  // ever texted because a grant is missing. A failed read (including the column not existing yet)
+  // keeps the old behaviour.
+  let consentBoxOff = false;
+  if (smsConsent) {
+    const { data: boxRow, error: boxErr } = await sb.from("client_settings")
+      .select("lead_sms_consent_box").eq("client_id", clientId).maybeSingle();
+    consentBoxOff = !boxErr && boxRow?.lead_sms_consent_box === false;
+  }
+  if (smsConsent && consentBoxOff) {
+    // Info, not a fault: the builder chose this. Durable so a "why was this consent not recorded"
+    // question has an answer. Bounded by Guard 1 above, which has already run.
+    await logEdgeError({ fn: "capture-lead", req, clientId, code: "consent_box_off", severity: "info",
+      message: "sms consent not recorded - this builder has the designer consent box switched off" });
+  } else if (smsConsent && consentTextOk && phoneDigits.length >= 10) {
     const tenDigits = phoneKey10;
     // ⚠️ ONE GRANT PER (TENANT, PHONE). Append-only is about HISTORY, not about repetition:
     // re-ticking the same box adds no fact, and this is a public endpoint, so an insert on
@@ -387,10 +415,14 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
       console.warn("capture-lead: GHL upsert non-OK", r.status, detail);
       // Logged explicitly: this returns HTTP 200 by design (the gate must never block),
       // so withErrorLog cannot see it — yet a lead was just lost.
+      // A 401/403 is the CRM refusing the tenant's SAVED key: a setup state that repeats on
+      // every capture until the business re-saves it, not a fault, so it files as info (the
+      // lead is already saved locally above). Every other status stays an error.
       await logEdgeError({
         fn: "capture-lead", req, clientId, code: `ghl_${r.status}`,
         message: `GHL contact upsert failed (${r.status}) — lead saved locally only`,
         context: { ghlStatus: r.status, ghlBody: detail },
+        severity: (r.status === 401 || r.status === 403) ? "info" : "error",
       });
       return json({ ok: true, captured: false, reason: `ghl_${r.status}` });
     }

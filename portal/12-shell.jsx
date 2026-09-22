@@ -59,6 +59,543 @@ const ICONS = {
   "reports": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>,
 };
 
+// ── Settings rail glyphs ──────────────────────────────────────────────────────────────
+// A SEPARATE map from ICONS above, keyed by SETTINGS sub-tab id. Several of those ids
+// collide with top-level tab ids meaning a different thing — "designer" is the drawing
+// canvas up there and "how your styles look" down here, "commissions" is the rep's own
+// payout page up there and the rate STRUCTURE down here — so merging the two maps would
+// make every future edit ask which one it was touching.
+//
+// Eight entries deliberately REUSE a glyph from ICONS by reference rather than copying the
+// markup: the two rails are never on screen at the same time, so there is no collision to
+// design around, and a shared reference cannot drift. Same module-scope, built-once
+// reasoning as ICONS — see its comment.
+const SETTINGS_ICONS = {
+  structures: ICONS.pricing,                 // the house — building styles and sizes
+  options: ICONS["layout-pricing"],          // the slider rows — add-ons and rates
+  colors: ICONS.colors,
+  designer: ICONS.designer,
+  branding: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>,
+  company: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="7" width="18" height="14" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M3 13h18"/></svg>,
+  team: ICONS.contacts,                      // two people — the same idea, one rail apart
+  connection: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>,
+  quickbooks: ICONS.quickbooks,
+  email: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>,
+  sms: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8z"/></svg>,
+  commissions: ICONS.commissions,
+  billing: ICONS.billing,                    // the card — labelled "Subscription" in the rail
+  myprofile: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>,
+};
+
+// ─── A style photo, guaranteed small ────────────────────────────────────────────────────
+// Returns a JPEG at or under `maxBytes`, or THROWS. It never hands back the original, and that
+// single property is the whole point of it existing beside ssFitImageForUpload (06-3d.jsx)
+// rather than calling it.
+//
+// ⚠️ THE BUG THIS EXISTS TO PREVENT, because it is genuinely counter-intuitive. The shared
+// helper returns the ORIGINAL file in two cases: when it is already under the cap, and when its
+// quality loop [0.9, 0.8, 0.7] at a FIXED 1600px cannot get the re-encode under the cap. On
+// 2026-09-10 this path was "improved" from the 2.8MB default to a 900KB cap, on the reasoning
+// that smaller is faster. The opposite happened. At 2.8MB a 1600px re-encode cleared the bar on
+// the first try and a shrunk file went up; at 900KB the same photo missed all three quality
+// steps, fell through to `return file`, and the FULL 4-12MB original was base64-encoded into a
+// JSON body. Lowering the cap made the upload bigger. Ahsan saw it as
+// "1 of 9 uploaded. 8 failed: Failed to send a request to the Edge Function" and then, decisively,
+// "0 of 1 uploaded. 1 failed: That upload timed out after 90 seconds" - one image, one lane, so
+// concurrency was never the cause.
+//
+// The fix is to step the RESOLUTION down as well as the quality. A 1600px q0.85 JPEG of a shed
+// is comfortably under 900KB, so the loop almost always exits on its first iteration; the
+// smaller sizes exist so that "I cannot meet the cap" stops being reachable rather than because
+// they are expected to run.
+//
+// It throws rather than falling back for the same reason: an upload that silently sends 12MB is
+// worse than one that refuses, because the refusal can say what to do about it and the silent
+// send just hangs.
+async function ssShrinkStylePhoto(file, maxBytes = 900_000) {
+  if (!file) throw new Error("No file.");
+  // The types portal-settings' style-photo EXT tables accept. Anything else has to be re-encoded
+  // even if it is small, which is what catches an iPhone .heic.
+  const passThrough = /^image\/(jpeg|png|webp|gif)$/.test(file.type || "");
+  if (passThrough && file.size <= maxBytes) return file;
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = () => rej(new Error("decode failed"));
+      i.src = url;
+    });
+    for (const px of [1600, 1200, 900, 700]) {
+      const scale = Math.min(1, px / Math.max(img.naturalWidth, img.naturalHeight));
+      const cv = document.createElement("canvas");
+      cv.width = Math.max(1, Math.round(img.naturalWidth * scale));
+      cv.height = Math.max(1, Math.round(img.naturalHeight * scale));
+      const g = cv.getContext("2d");
+      // Flatten onto white: JPEG has no alpha, and a transparent PNG would otherwise encode its
+      // see-through areas as black.
+      g.fillStyle = "#FFFFFF";
+      g.fillRect(0, 0, cv.width, cv.height);
+      g.drawImage(img, 0, 0, cv.width, cv.height);
+      for (const q of [0.85, 0.7, 0.55]) {
+        const blob = await new Promise((r) => cv.toBlob(r, "image/jpeg", q));
+        if (blob && blob.size <= maxBytes) return new File([blob], "photo.jpg", { type: "image/jpeg" });
+      }
+    }
+    throw new Error("still too large after shrinking");
+  } catch (e) {
+    // One message covering both real failure modes, because from here they are the same act:
+    // the browser could not turn this file into a small JPEG. HEIC is named because it is by
+    // far the most common cause - it is the iPhone default and `accept="image/*"` offers it.
+    const kind = (file.type || "").replace("image/", "") || "unknown";
+    throw new Error(
+      (file.name || "That image") + " could not be prepared for upload (" + kind + ", "
+      + Math.round((file.size || 0) / 1048576) + "MB): " + ((e && e.message) || "unknown error")
+      + ". iPhone photos are HEIC by default \u2014 set Camera \u2192 Formats \u2192 Most Compatible, or export it as JPG."
+    );
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+// ─── Style photos into the bucket: shrink, ONE mint, signed PUTs ───────────────────────────
+// THE ONE UPLOAD ROUTE for style photos, walk-around frames and scan views (2026-09-17).
+// onUploadPhotoBatch hands it a whole pick and onUploadPhoto hands it a single file. This was
+// the body of onUploadPhotoBatch; onUploadPhoto kept a route of its own, a per-file mint with no
+// deadline and then base64 upload_style_photo through the main Supabase host, and the designer
+// fell back to that route, three lanes at a time, whenever the bulk mint failed.
+//
+// WHY THAT FALLBACK IS GONE. It was kept (72f691c) so that a bucket or policy fault affecting
+// only signed uploads could not take the feature down. It never once did that job: every
+// style_photo_signed_fallback row app_errors ever received was a transport failure ("Failed to
+// fetch", "Failed to send a request"). So it only ever ran on a connection that was already
+// failing, where it sent a BIGGER body to the same stalled host behind a 120s Promise.race that
+// stopped waiting without cancelling anything. On a dead link one pick became up to nine
+// upload_style_photo requests plus nine per-file mints, minutes of "Sent 0 of N", and "0 of N
+// uploaded. N failed: Failed to send a request to the Edge Function" (09-10 to 09-14).
+// portal-settings still answers upload_style_photo, because production's older bundle uploads
+// through it; nothing in this bundle calls it.
+//
+// IT THROWS ONLY WHEN NOTHING COULD BE STARTED, i.e. the mint failed. Anything after the mint is
+// reported per image in `errs`, with what already landed kept in `urls`.
+async function ssUploadStylePhotos(files, onProgress, onEach, opts) {
+  const list = Array.prototype.slice.call(files || []).filter(Boolean);
+  if (!list.length) return { urls: [], errs: [], errTransport: [] };
+  // Shrink FIRST, sequentially: each one decodes a multi-megapixel bitmap onto a canvas, and
+  // three of those at once on a phone is how a tab runs out of memory. It is CPU, not
+  // network, so there is nothing to overlap anyway.
+  const prepped = [];
+  const errs = [];
+  // Parallel to `errs`: whether that failure was the connection rather than the image or the
+  // server's answer. onUploadPhoto carries it onto the Error it throws for its one file.
+  const errTransport = [];
+  const addErr = (msg, transport) => { errs.push(msg); errTransport.push(!!transport); };
+  for (let i = 0; i < list.length; i++) {
+    try { prepped.push(await ssShrinkStylePhoto(list[i])); }
+    catch (e) { addErr((e && e.message) || "Could not prepare that image", false); }
+  }
+  if (!prepped.length) return { urls: [], errs, errTransport };
+  // ONE mint for the whole batch. `count` is what makes it one round trip.
+  //
+  // WITH A DEADLINE THAT CANCELS. functions.invoke waits forever unless told otherwise, and on a
+  // stalled connection a mint sat for two minutes before the browser gave up on it. The body is a
+  // few bytes and the function answers in a second or two even cold, so 25s is not slow, it is
+  // stuck. Until 2026-09-17 the deadline was a Promise.race, which stopped WAITING but left the
+  // request open on the wedged connection, to fail and log minutes later. invoke's own `timeout`
+  // (supabase-js 2.112.1 aborts the fetch through an AbortController; 01-core's wrapper passes
+  // opts through) cancels it. The abort still comes back as FunctionsFetchError, and the wrapper
+  // still files it as an error row, which is right: the mint did not get through.
+  const mintBody = { action: "style_photo_upload_url", contentType: "image/jpeg", count: prepped.length };
+  // Test hook, as __ssUploadStallMs below: a harness cannot wait 25s for a mint to time out.
+  const mintMs = (typeof window !== "undefined" && Number(window.__ssUploadMintMs)) || 25000;
+  // TRANSPORT OR REFUSAL, decided in one place because two things hang on it: whether the side
+  // door is worth a try, and what the builder is told. Transport means no answer came back: the
+  // fetch rejected (FunctionsFetchError, which is also what the deadline's abort becomes), the
+  // relay could not reach the function, or the side door's own fetch threw. Anything the server
+  // SAID is a refusal: a 401, a 403 from the settings_structures edit gate, a storage failure, an
+  // {ok:false,error}. A refusal keeps the server's own sentence, and asking again on another
+  // hostname would only say it twice.
+  const mintTransport = (r) => {
+    const e = r && r.error;
+    return !!(e && (e.ssTransport || e.name === "FunctionsFetchError" || e.name === "FunctionsRelayError" || e.name === "AbortError"));
+  };
+  // First try: the normal invoke, through 01-core's wrapper (error logging, view-as injection).
+  let minted = await sb.functions.invoke("portal-settings", { body: mintBody, timeout: mintMs });
+  // SECOND TRY THROUGH THE SIDE DOOR, after a transport failure only: `<ref>.functions.supabase.co`
+  // reaches the same function on a different hostname, so it cannot inherit the main host's
+  // wedged connection - retrying the invoke there rode straight back into the stall. It is a raw
+  // fetch, which means it skips 01-core's wrapper, so it must carry the view-as target ITSELF:
+  // without targetClientId an operator's upload would be minted into the operator's own tenant.
+  // Same deadline, and it cancels too: the controller aborts the fetch and the body read.
+  if (mintTransport(minted)) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), mintMs);
+    minted = await (async () => {
+      try {
+        const { data: auth } = await sb.auth.getSession();
+        const token = auth && auth.session && auth.session.access_token;
+        if (!token) return { data: null, error: { message: "Your session has expired \u2014 sign in again." } };
+        const body = ssTargetClientId ? { ...mintBody, targetClientId: ssTargetClientId } : mintBody;
+        const r = await fetch(`${SUPABASE_URL.replace(".supabase.co", ".functions.supabase.co")}/portal-settings`, {
+          method: "POST",
+          headers: { "content-type": "application/json", apikey: SUPABASE_ANON_KEY, authorization: `Bearer ${token}` },
+          body: JSON.stringify(body),
+          signal: ac.signal,
+        });
+        const data = await r.json().catch(() => null);
+        if (data) return { data, error: null };
+        // No JSON. Cut off mid-body by the deadline is the connection; a body that simply is not
+        // ours is still an answer.
+        return { data: null, error: { message: `Starting the upload failed (${r.status})`, ssTransport: ac.signal.aborted } };
+      } catch (e) {
+        // fetch itself rejected: a dropped connection, or the deadline's abort.
+        return { data: null, error: { message: (e && e.message) || "Starting the upload failed", ssTransport: true } };
+      } finally {
+        clearTimeout(timer);
+      }
+    })();
+  }
+  const { data: sig, error: sigErr } = minted;
+  if (sigErr || !sig || !sig.ok || !Array.isArray(sig.uploads) || !sig.uploads.length) {
+    // No URLs, so nothing was sent and nothing is half-done. There is no other route to fall back
+    // to (see the header), so this one line is the answer for the whole pick.
+    const transport = mintTransport(minted);
+    const e = new Error(transport
+      ? ((opts && opts.unreachable) || "Couldn't reach the upload server, so nothing was uploaded. Check your connection and pick the photos again.")
+      : ((sigErr && sigErr.message) || (sig && sig.error) || "Could not start those uploads"));
+    if (transport) { e.name = "FunctionsFetchError"; e.ssTransport = true; }
+    throw e;
+  }
+  const slots = sig.uploads.slice(0, prepped.length);
+  const urls = new Array(slots.length);
+  let done = 0, next = 0;
+  // TWO DOORS INTO THE SAME BUCKET, AND THE SIDE DOOR GOES FIRST. `<ref>.storage.supabase.co`
+  // is Supabase's direct storage hostname: the same service, the same signed tokens, the same
+  // objects (an identical 171KB frame fetched from each; a PUT with only the apikey header
+  // reaching token validation on each).
+  //
+  // MEASURED IN AHSAN'S CHROME, 2026-09-14, same tab, same minute: two 300KB photos took 137s
+  // through the main host while a 1-byte read on it hung for 20s; the storage host took a
+  // 300KB upload in 1.8s and answered a read in 0.86s. The main host carries every other
+  // request the portal makes, and it is that connection which wedges. On their own hostname
+  // uploads get their own connection, and a stall there retries on the main host - a
+  // DIFFERENT connection either way, which is the whole point: a retry on the host that just
+  // stalled rides the same dead HTTP/2 connection back into the same stall.
+  const hosts = [SUPABASE_URL.replace(".supabase.co", ".storage.supabase.co"), SUPABASE_URL];
+  // Test hook in the spirit of __SS3D_DEBUG: a harness cannot wait thirty seconds per stall.
+  const stallMs = (typeof window !== "undefined" && Number(window.__ssUploadStallMs)) || 30000;
+  // XHR, NOT uploadToSignedUrl, for the one thing fetch cannot do: report upload progress.
+  // Without it a slow upload and a dead one look identical from here, so the only choices are
+  // a deadline short enough to kill honest uploads or one long enough to wait out a corpse.
+  // The request is the one supabase-js sends - same URL, same form fields, same x-upsert.
+  // THE SPEED FLOOR. Measured 2026-09-14: on a connection that has been in use a while,
+  // Chrome's HTTP/2 uploads to Supabase trickle at 4-5KB/s - never silent, so the watchdog
+  // below never fires - while a FRESH connection to the other hostname lands the same photo in
+  // five seconds, and curl on the same machine in the same minute ran 50KB/s. So a first try
+  // on each host that is still under 10KB/s after 15s is abandoned for the other host.
+  //
+  // ONLY ON THE FIRST TRY PER HOST (`floor` false from the third attempt on), so a builder
+  // whose link genuinely IS that slow still gets an attempt with no floor at all: they lose
+  // up to thirty seconds to the switching and then finish, rather than failing forever.
+  const crawlMs = (typeof window !== "undefined" && Number(window.__ssUploadCrawlMs)) || 15000;
+  const putSigned = (host, s, blob, floor) => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const fd = new FormData();
+    fd.append("cacheControl", "3600");
+    fd.append("", blob);
+    const began = Date.now();
+    let last = began;
+    let loaded = 0, total = 0;
+    const bump = () => { last = Date.now(); };
+    // Checked from BOTH the progress event and the interval: progress events are not held
+    // back in a background tab the way timers are, so a crawl is caught on time even there.
+    const crawling = () => floor && total > 0 && loaded < total
+      && Date.now() - began > crawlMs
+      && (loaded / ((Date.now() - began) / 1000)) < 10240;
+    const fail = (msg, stalled, crawled) => {
+      clearInterval(watch);
+      const e = new Error(msg);
+      e.ssTransport = true;
+      e.ssStalled = !!stalled;
+      e.ssCrawled = !!crawled;
+      reject(e);
+    };
+    const giveUpCrawl = () => {
+      try { xhr.abort(); } catch (_a) { /* already finished */ }
+      fail("The upload slowed to a crawl \u2014 your connection could not keep up.", false, true);
+    };
+    // A STALL, NOT A SLOW UPLOAD: thirty seconds in which NOTHING happened - no bytes out, no
+    // reply. Measured in Chrome over HTTP/2, progress fires every ~100ms while the body goes
+    // out (16KB steps) and the reply lands under a second after the last byte, so a live
+    // upload is never silent for anything like thirty seconds, even on a slow link.
+    const watch = setInterval(() => {
+      if (Date.now() - last > stallMs) {
+        try { xhr.abort(); } catch (_a) { /* already finished */ }
+        fail("The upload stalled \u2014 your connection stopped sending.", true);
+      } else if (crawling()) {
+        giveUpCrawl();
+      }
+    }, 1000);
+    xhr.upload.onprogress = (ev) => {
+      bump();
+      if (ev && ev.lengthComputable) { loaded = ev.loaded; total = ev.total; }
+      if (crawling()) giveUpCrawl();
+    };
+    xhr.upload.onload = bump;
+    xhr.onprogress = bump;
+    xhr.onerror = () => fail("Upload failed \u2014 the connection dropped.", false);
+    xhr.onload = () => {
+      clearInterval(watch);
+      if (xhr.status >= 200 && xhr.status < 300) { resolve(); return; }
+      const text = String(xhr.responseText || "");
+      // THE OBJECT IS ALREADY THERE: an attempt that looked dead had in fact landed before the
+      // watchdog gave up on it. Same path, same token, same bytes - that is success.
+      if (/Duplicate|already exists/i.test(text)) { resolve(); return; }
+      let msg = "Upload failed";
+      try { msg = JSON.parse(text).message || msg; } catch (_j) { /* not JSON */ }
+      const e = new Error(msg);
+      // A 5xx is worth another go; a 4xx would say the same thing again.
+      e.ssTransport = xhr.status >= 500;
+      reject(e);
+    };
+    xhr.open("PUT", `${host}/storage/v1/object/upload/sign/branding/${s.path}?token=${encodeURIComponent(s.token)}`);
+    xhr.setRequestHeader("apikey", SUPABASE_ANON_KEY);
+    xhr.setRequestHeader("x-upsert", "false");
+    xhr.send(fd);
+  });
+  // THREE LANES, back from the six of 352865d. Six did not cause the stall - the one-request
+  // mint failed in the same window - and it bought nothing measurable. The "10-15KB/s uplink"
+  // every earlier batch reported was never the uplink: it was the main host's connection. The
+  // same Chrome in the same minute moved 300KB to the storage host in under two seconds.
+  // Three is what the last good batches ran; widen it only on a measurement.
+  const t0 = Date.now();
+  let sentBytes = 0, retries = 0, stalls = 0, crawls = 0, failStreak = 0, firstErr = "";
+  const landed = [0, 0];   // successes per entry in `hosts`
+  await Promise.all(Array.from({ length: Math.min(3, slots.length) }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= slots.length) return;
+      const s = slots[i];
+      for (let attempt = 0; ; attempt++) {
+        // GIVE UP ON A DEAD LINK AS A BATCH, not image by image. Six transport failures in a
+        // row across all lanes, with nothing landing in between, is two full rounds over both
+        // hosts: the connection is gone, and walking every remaining image through its own
+        // retries just to report the same thing is the eight-minute wait all over again.
+        if (failStreak >= 6) { addErr("Your connection to the upload server dropped.", true); break; }
+        try {
+          await putSigned(hosts[attempt % 2], s, prepped[i], attempt < 2);
+          urls[i] = s.url;
+          sentBytes += (prepped[i] && prepped[i].size) || 0;
+          failStreak = 0;
+          landed[attempt % 2]++;
+          // Reported as it lands, so a batch that stalls halfway still shows what made it.
+          if (onEach) { try { onEach(s.url, i); } catch (_c) { /* the caller's problem, not the upload's */ } }
+          break;
+        } catch (e) {
+          if (!firstErr) firstErr = (e && e.message) || "Upload failed";
+          if (e && e.ssStalled) stalls++;
+          if (e && e.ssCrawled) crawls++;
+          // A crawl is NOT evidence of a dead link - bytes were moving - so it must not count
+          // toward the batch-wide give-up. Three lanes crawling twice each would otherwise
+          // abandon a batch on a link that was only slow.
+          if (e && e.ssTransport && !e.ssCrawled) failStreak++;
+          // A signed PUT that never reached storage is safe to repeat, and one that secretly
+          // did comes back as Duplicate, which putSigned already counts as success.
+          if (e && e.ssTransport && attempt < 3) {
+            retries++;
+            await new Promise((r) => setTimeout(r, [1000, 3000, 6000][attempt]));
+            continue;
+          }
+          addErr((e && e.message) || "Upload failed", e && e.ssTransport);
+          break;
+        }
+      }
+      done++;
+      if (onProgress) onProgress(done, slots.length);
+    }
+  }));
+  // WHAT IT ACTUALLY ACHIEVED, on screen and in app_errors. Every upload improvement so far
+  // has been verified as round-trip counts and byte sizes on a fast development machine; the
+  // link that hurts is the builder's, and this is the only way to see it. Filed as `info`
+  // because it is a measurement, not a fault — it must not land in the triage queue.
+  const ms = Math.max(1, Date.now() - t0);
+  const kbs = Math.round((sentBytes / 1024) / (ms / 1000));
+  // onUploadPhoto opts out: one file is not a batch (see its comment).
+  if (!(opts && opts.telemetry === false)) {
+    try {
+      // The first error and the stall count ride along because the 0/9 batch logged neither,
+      // and "0KB in 485s" alone could not say whether it was the link, the token or the bucket.
+      ssLogError("portal", `style photo batch: ${urls.filter(Boolean).length}/${slots.length} in ${Math.round(ms / 100) / 10}s, ${Math.round(sentBytes / 1024)}KB, ${kbs}KB/s, 3 lanes, ${landed[0]} via storage host, ${landed[1]} via main host, ${retries} retries, ${stalls} stalls, ${crawls} crawls${firstErr ? `, first error: ${firstErr}` : ""}`,
+        "style_upload_throughput", { fn: "storage", action: "upload_batch" }, "info");
+    } catch (_t) { /* a measurement must never break the thing it measures */ }
+  }
+  return { urls: urls.filter(Boolean), errs, errTransport, ms, bytes: sentBytes, kbs };
+}
+
+// ── STYLE SAVES: A DEADLINE, A SIDE DOOR, ONE AT A TIME, AND A BASE (2026-09-14) ──────────────
+// Ahsan pressed Save 3D look and watched "Saving…" for 168 seconds. save_style_d3 went through
+// the main Supabase hostname, whose connection on his network stalls for minutes at a time, with
+// no deadline at all — the same stall that had already cost him whole photo batches, fixed for
+// uploads in e70c697/3931fbf and left alone here.
+//
+// FOUR PARTS, and the fourth is the one that makes the first three safe:
+//  1. A 25s deadline. A style save is a few KB; one that has not answered in 25s is stuck.
+//  2. One retry through <ref>.functions.supabase.co — the same function on a different hostname,
+//     so it cannot ride the wedged connection back into the same stall.
+//  3. A queue per style. Media saves fire from uploads and removals without waiting, so two could
+//     be in flight at once and land in either order; now each waits for the one before it.
+//  4. A BASE. A stalled request cannot be cancelled once its bytes are in the socket, and it can
+//     complete minutes later — so a save we gave up on can land AFTER a newer one and silently put
+//     back what the builder replaced. Every save therefore carries the version it was edited from,
+//     and the server refuses one whose base no longer matches (_shared/styleSaveGuard.ts). On that
+//     refusal the save being waited on resends once on the current version, because it IS the
+//     latest intent; the late copy of an older save gets the same refusal and nobody is waiting.
+const SS_STYLE_SAVE_DEADLINE_MS = 25000;
+// When the main hostname last failed a style save. For a minute after, queued saves go straight to
+// the side door: each one used to wait out its own 25s on a host already known to be stalled, so a
+// Save queued behind a media save sat on "Saving…" for 50s or more (review wf_5199a3e0-d65).
+const SS_MAIN_HOST_MEMORY_MS = 60000;
+let ssMainHostStalledUntil = 0;
+// ⛔ NO FAIL-FAST, on purpose. A version of this refused every save for 30s once BOTH hosts had
+// just failed, and the final check (wf_0e1e9235-8e5) upheld what that cost: the newest media list
+// was dropped without being sent, so a stalled OLDER copy became the last write and a removed
+// photo came back; and a builder whose connection had already recovered was refused for the
+// whole window while being told to press Save again. The accepted residue is that with both hosts
+// down, a save queued behind another can wait out one more deadline pair. Slow, not wrong.
+//
+// Media saves issued per style, so a replay can tell whether a newer list has been sent since.
+const ssMediaSeq = new Map();
+// Test hooks, in the spirit of __SS3D_DEBUG: the harness has to be able to start a case clean.
+if (typeof window !== "undefined") {
+  window.__ssForgetStalledHosts = () => { ssMainHostStalledUntil = 0; };
+  window.__ssForgetStyleVersions = () => { ssStyleSaveBase.clear(); };
+}
+// `${view-as target}|${style}` -> { version }: the updated_at the server last CONFIRMED for that
+// style. A VERSION, not the content: review showed a content base lets an old save through after
+// the builder changes something and changes it back (A -> B -> A).
+const ssStyleSaveBase = new Map();
+// Same key -> how many saves have been confirmed, so a slow catalog read cannot overwrite a newer
+// base with the row as it was before those saves.
+const ssStyleSaveGen = new Map();
+// Same key -> the tail of that style's save queue. Never rejects, so one failure cannot jam it.
+const ssStyleSaveTail = new Map();
+
+// Read in the CALLER's tick, like 01-core's wrapper reads the view-as target, and for the same
+// reason: a queued save runs later, by which time an operator may be viewing somebody else.
+function ssStyleSaveKey(styleValue) {
+  return `${ssTargetClientId || ""}|${styleValue}`;
+}
+
+function ssQueueStyleSave(key, run) {
+  const next = (ssStyleSaveTail.get(key) || Promise.resolve()).then(run);
+  ssStyleSaveTail.set(key, next.then(() => {}, () => {}));
+  return next;
+}
+
+// Records the version a save just stamped. An older function answers without `updatedAt`; the base
+// is then FORGOTTEN rather than guessed, so the next save goes unguarded instead of being refused
+// against a version nobody knows.
+function ssConfirmStyleVersion(key, data) {
+  if (data && data.updatedAt !== undefined) ssStyleSaveBase.set(key, { version: data.updatedAt });
+  else ssStyleSaveBase.delete(key);
+}
+
+// The Error a failed style call becomes. A stall says so and says what to do; anything the server
+// REFUSED (the lock, a validation message, a permission) keeps its own sentence.
+function ssStyleSaveError(r) {
+  const e = r && r.error;
+  const stalled = !!(e && (e.ssTimeout || e.name === "FunctionsFetchError" || e.name === "FunctionsRelayError"));
+  const err = new Error(stalled
+    ? "Saving didn't go through \u2014 your connection stalled. Your changes are still on screen; press Save again."
+    : ((e && e.message) || (r && r.data && r.data.error) || "Save failed"));
+  // What the media replay keys on: a stall is worth another try, a refusal is not.
+  err.ssStalled = stalled;
+  return err;
+}
+
+// The JSON body of a refused call. 01-core's wrapper leaves the Response on error.context and has
+// already read one clone of it for the message, so another clone is still readable here.
+async function ssFunctionsErrorBody(err) {
+  if (!err) return null;
+  if (err.ssBody) return err.ssBody;
+  try {
+    if (err.context && typeof err.context.clone === "function") return await err.context.clone().json();
+  } catch (_b) { /* not JSON, or already consumed */ }
+  return null;
+}
+
+// One portal-settings call with a deadline, and on a transport failure one more through the
+// functions hostname. Resolves in the invoke shape: { data, error }.
+async function ssStyleSaveCall(body, label) {
+  const ms = (typeof window !== "undefined" && Number(window.__ssSaveDeadlineMs)) || SS_STYLE_SAVE_DEADLINE_MS;
+  const deadline = () => new Promise((res) => setTimeout(() => res({ data: null, error: { message: "timed out", ssTimeout: true } }), ms));
+  const transport = (r) => !!(r && r.error && (r.error.ssTimeout || r.error.name === "FunctionsFetchError" || r.error.name === "FunctionsRelayError"));
+  if (Date.now() >= ssMainHostStalledUntil) {
+    const first = await Promise.race([sb.functions.invoke("portal-settings", { body }), deadline()]);
+    if (!transport(first)) return first;
+    ssMainHostStalledUntil = Date.now() + ((typeof window !== "undefined" && Number(window.__ssSaveHostMemoryMs)) || SS_MAIN_HOST_MEMORY_MS);
+    try {
+      ssLogError("portal", `${label}: the main host ${first.error.ssTimeout ? "timed out" : "failed"}; retrying through the functions host`,
+        "style_save_side_door", { fn: "portal-settings", action: body.action }, "info");
+    } catch (_l) { /* a log line must never cost the save */ }
+  }
+  const second = await Promise.race([(async () => {
+    try {
+      const { data: auth } = await sb.auth.getSession();
+      const token = auth && auth.session && auth.session.access_token;
+      if (!token) return { data: null, error: { message: "Your session is reconnecting \u2014 try that again in a moment." } };
+      // A raw fetch skips 01-core's wrapper, so the view-as target must already be ON the body —
+      // every caller below puts it there in the click's tick.
+      const r = await fetch(`${SUPABASE_URL.replace(".supabase.co", ".functions.supabase.co")}/portal-settings`, {
+        method: "POST",
+        headers: { "content-type": "application/json", apikey: SUPABASE_ANON_KEY, authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => null);
+      if (r.ok) return { data, error: null };
+      return { data: null, error: { message: (data && (data.error || data.message)) || `Save failed (${r.status})`, ssStatus: r.status, ssBody: data } };
+    } catch (e) {
+      return { data: null, error: { message: (e && e.message) || "Save failed", name: "FunctionsFetchError" } };
+    }
+  })(), deadline()]);
+  return second;
+}
+
+// A style save, queued: base attached, side door on a stall, and one resend on the current version
+// if the server says the base is stale. `build(base)` makes the body; `confirm(data)` records what
+// the server now holds.
+function ssRunStyleSave(key, target, styleValue, label, build, confirm) {
+  return ssQueueStyleSave(key, async () => {
+    // READ THE VERSION FIRST when none is known (re-review wf_9d79b211-18b, high). A save sent with
+    // no base is unguarded, and its stalled main-host copy — the one its side-door retry made
+    // redundant — could still land after newer saves and put back what they replaced. That is the
+    // exact late write the guard exists to stop, and it was open for every style's FIRST save
+    // while the catalog read that supplies the version was hung on the same stalled host. One
+    // extra round trip is cheaper than one unguarded write.
+    if (!ssStyleSaveBase.has(key)) {
+      const v = await ssStyleSaveCall({ action: "catalog", targetClientId: target || null }, `${label}: read the style's version`);
+      if (v.error || !v.data || !v.data.ok) throw ssStyleSaveError(v);
+      const st = (v.data.styles || []).find((x) => x.key === styleValue);
+      // An older function's catalog carries no updated_at: go unguarded rather than refuse forever.
+      if (st && st.updated_at !== undefined && !ssStyleSaveBase.has(key)) ssStyleSaveBase.set(key, { version: st.updated_at });
+    }
+    let r = await ssStyleSaveCall(build(ssStyleSaveBase.get(key)), label);
+    if (r.error && r.error.ssStatus === 409) {
+      // `conflict` is what separates the late-save guard from the LOCK, which is also a 409 and
+      // must stay a refusal the builder sees.
+      const b = await ssFunctionsErrorBody(r.error);
+      if (b && b.conflict && b.current) {
+        ssStyleSaveBase.set(key, { version: b.current.updatedAt === undefined ? null : b.current.updatedAt });
+        r = await ssStyleSaveCall(build(ssStyleSaveBase.get(key)), `${label} (on the current version)`);
+      }
+    }
+    if (r.error || !r.data || !r.data.ok) throw ssStyleSaveError(r);
+    ssStyleSaveGen.set(key, (ssStyleSaveGen.get(key) || 0) + 1);
+    confirm(r.data);
+    return r.data;
+  });
+}
+
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
   // Seeded FROM THE URL, so a refresh or a pasted deep link lands where it says it will.
@@ -85,10 +622,32 @@ function Dashboard({ session }) {
   // app_operators hasn't come back — and silently rewrites /portal/admin to designs before
   // the answer arrives. Cleared the moment it is honoured or provably refused.
   const wanted = useRef((() => { const p = ssParsePath(); return p.page && TAB_META[p.page] ? p.page : null; })());
+  // Where "Back to Workspace" goes. Latched at RENDER time below, on every page that is not
+  // part of the Settings context, so entering Settings from Orders returns you to Orders.
+  //
+  // MUST be declared up here with the other hooks: Dashboard has conditional early returns
+  // further down (tenant loading / no tenant) and a hook after them changes the hook count
+  // between renders — React error #310, blank screen. The designerOpened comment above tells
+  // that story; this is the third time it applies.
+  //
+  // Null until you have been somewhere else, which is the cold-deep-link case
+  // (/portal/settings/colors pasted into the address bar): the reader falls back to
+  // ssFallbackTab, the same landing page a bare /portal login gets.
+  const beforeSettings = useRef(null);
+  // Which rail was up the last time a page actually DECIDED one. My Profile deliberately does
+  // not decide (see settingsMode below), so it needs somewhere to inherit from. Up here with
+  // the other hooks for the usual reason — Dashboard has early returns further down and a hook
+  // after them changes the hook count between renders (React #310).
+  //
+  // Starts false, which is also the answer for a cold deep link straight to
+  // /portal/settings/myprofile: nobody arriving from outside has a context to preserve, and
+  // the workspace rail is the one that can reach everything.
+  const railSettings = useRef(false);
 
-  // Same-document navigation. Anchors and location.assign are deliberately NOT used: the
-  // designer and the operator console are keep-mounted, and a real navigation would
-  // discard an in-progress design or a half-filled admin form.
+  // Same-document navigation. location.assign is deliberately NOT used: the designer and the
+  // operator console are keep-mounted, and a real navigation would discard an in-progress
+  // design or a half-filled admin form. The rail's anchors call THIS from their left-click
+  // handler and leave every other click to the browser — see ssNavClick in 01-core.jsx.
   const navigate = useCallback((page, nextSub = null, replace = false) => {
     wanted.current = null;                 // an explicit click supersedes the boot intent
     setTab(page);
@@ -177,7 +736,8 @@ function Dashboard({ session }) {
   // Fetches the entitlement declared above — split from its useState and placed BELOW
   // `viewing` because Babel compiles const to var, so a `viewing` read above its useState
   // is silently `undefined`, never a throw (the canAdminForUrl comment tells that story).
-  // This state is the OPERATOR's OWN entitlement (gateLocked/featureOn depend on that),
+  // This state is the OPERATOR's OWN entitlement (it is what gateEnt/featureOn read on the
+  // operator's own portal; in view-as they read viewedCtx instead — see mirrorView below),
   // but portal-billing is in SS_TENANT_SCOPED_FNS: with view-as armed the invoke wrapper
   // injects targetClientId, so a TOKEN_REFRESHED re-render used to store the VIEWED
   // tenant's entitlement here and lock the operator's own portal after Exit (audit
@@ -251,39 +811,79 @@ function Dashboard({ session }) {
   // a normal user of the CSM Synergy tenant, and narrowing there would lock them out of
   // their own account.
   const supportView = !!viewing && isSupportOp;
+  // TWO HALVES OF THE MIRROR, and they have different audiences (Carolyn 2026-09-15: "that
+  // account should show for me exactly as it shows for that user … if there are parts of the
+  // software they haven't paid for … it shouldn't be accessible to me either").
+  //   * The ACCESS-MAP half (which tabs the per-area rules allow) is support-only, above: a
+  //     platform operator wears the owner's full map in the viewed tenant, which is what the
+  //     owner sees anyway.
+  //   * The ENTITLEMENT half (what the builder has PAID for) applies to EVERY operator in
+  //     view-as. Until this date platform operators carried an `isOperator ||` blanket over
+  //     every paid add-on, the 3D grant and the billing lock, so Carolyn could never see a
+  //     builder's real portal from inside it.
+  const mirrorView = !!viewing;
 
   // ⚠️ A SEPARATE STATE, NOT `tenant` / `entitlement` — and that separation IS the fix from
   // audit 2026-08-20. Both of those hold the OPERATOR'S OWN values and both effects above
   // skip while viewing, precisely because the invoke wrapper injects targetClientId and a
   // TOKEN_REFRESHED re-render would otherwise overwrite them with the viewed tenant's and
   // lock the operator's own portal after Exit. Writing the viewed values into a third place
-  // gets the support view what it needs without reintroducing that bug.
+  // gets view-as what it needs without reintroducing that bug.
   //
   // Null means NOT LOADED, never "nothing" — the readers below fall back to the operator's
   // own values while it is null, so a slow call shows the old behaviour for a moment rather
-  // than flashing an empty portal at Jonathan mid-call.
+  // than flashing an empty portal at Jonathan mid-call. `entitlement: null` INSIDE a loaded
+  // object is the other state — the billing call answered without one — and the paid-feature
+  // readers treat that as OFF (fail closed on a paid feature), while the base gate treats it
+  // as not locked (fail open, portal-billing's own posture).
   const [viewedCtx, setViewedCtx] = useState(null);
   useEffect(() => {
-    if (!supportView) { setViewedCtx(null); return; }
+    if (!mirrorView) { setViewedCtx(null); return; }
     let cancelled = false;
-    (async () => {
+    let timer = null;
+    // ⚠️ A FAILED invoke IS NOT AN ANSWER OF "nothing", and this effect used to record it as
+    // one. supabase-js RESOLVES `{data, error}` rather than rejecting, so a 403, a 5xx or an
+    // empty body never reached the catch: `(st.data && st.data.access) || null` wrote NULL
+    // into this state as though the tenant genuinely had no access map and no entitlement.
+    // Nothing ever revisited it — the deps are the tenant and the token — so one bad answer
+    // stuck for the whole session, and it lied in two directions at once. featureOn saw a
+    // truthy viewedCtx with a null entitlement and read EVERY paid add-on as off, so a
+    // paying builder's portal looked stripped; and myAccess fell through to the operator's
+    // OWN map, which for a support account is precisely the god view this mirror exists to
+    // remove. Same posture as the three rpcs above: keep "not loaded" rather than store a
+    // non-answer, and ask again.
+    const load = async (attempt) => {
+      let st = null, bl = null;
       try {
         // Both are in SS_TENANT_SCOPED_FNS, so the wrapper injects targetClientId and these
         // answer for the VIEWED tenant — which is exactly what is wanted here and exactly
         // what the two effects above must avoid.
-        const [st, bl] = await Promise.all([
+        [st, bl] = await Promise.all([
           sb.functions.invoke("portal-settings", { body: { action: "status" } }),
           sb.functions.invoke("portal-billing", { body: { action: "status" } }),
         ]);
-        if (cancelled) return;
-        setViewedCtx({
-          access: (st.data && st.data.access) || null,
-          entitlement: (bl.data && bl.data.entitlement) || null,
-        });
-      } catch (_e) { /* leave null — the fallbacks below keep the portal usable */ }
-    })();
-    return () => { cancelled = true; };
-  }, [supportView, viewing && viewing.clientId, session.access_token]);
+      } catch (_e) { /* handled as a failure below, like a resolved {error} */ }
+      if (cancelled) return;
+      if (!st || st.error || !st.data || !bl || bl.error || !bl.data) {
+        // Two more tries before giving up: this is one call behind a cold isolate, and a
+        // blip must not decide what an operator is shown for the rest of the session.
+        if (attempt < 2) { timer = setTimeout(() => load(attempt + 1), 600 * (attempt + 1)); return; }
+        // Definitive failure. LEAVE IT NULL, which every reader below treats as STILL
+        // LOADING: the entitlement half then reads generous (never paywall a builder who
+        // may well have paid — portal-billing's own fail-open posture), and the access half
+        // no longer falls back to the operator's own map (see myAccess). Loud in app_errors
+        // rather than silent, because a portal that quietly shows the wrong account's
+        // permissions is the failure nobody reports.
+        const why = (st && st.error && st.error.message) || (bl && bl.error && bl.error.message) || "empty response";
+        ssLogError("portal", `view-as context unreadable for ${(viewing && viewing.clientId) || "?"}: ${why}`,
+          "viewed_ctx_unreadable", { clientId: viewing && viewing.clientId });
+        return;
+      }
+      setViewedCtx({ access: st.data.access || null, entitlement: bl.data.entitlement || null });
+    };
+    load(0);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [mirrorView, viewing && viewing.clientId, session.access_token]);
 
   // Keep the address bar honest about where you actually are.
   //
@@ -307,8 +907,10 @@ function Dashboard({ session }) {
   // `wanted` holds the URL's request until the gates have actually resolved, so an operator
   // whose app_operators row is still in flight is not mistaken for a refusal.
   // A support operator is NOT an admin of the tenant they are viewing — the clamp has to
-  // apply to them so the access map governs which tabs resolve. Platform operators keep the
-  // blanket, which is what stops a subscription lapse locking us out of fixing an account.
+  // apply to them so the access map governs which tabs resolve. Platform operators wear the
+  // owner's full map (which the owner also has), so the clamp has nothing to narrow for them;
+  // what the tenant has PAID for is a separate question, answered by gateEnt below for every
+  // operator alike since 2026-09-15.
   const canAdminForUrl = viewing ? (isOperator && !supportView) : (tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin"));
   // ⚠️ canProjects belongs in BOTH clamps or a typed /portal/projects gets rewritten away
   // under a team member while the page itself renders correctly — the exact silent,
@@ -316,6 +918,11 @@ function Dashboard({ session }) {
   const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
     (tenant && tenant !== "none") ? tenant.access : null, supportView, canProjects);
   useEffect(() => {
+    // Popout windows never normalise the URL: a resolved refusal (canProjects false, or a
+    // hand-typed non-projects path) would replaceState to the fallback tab, and that URL
+    // then reloads chromeless as the wrong page. The popout branch below pins the surface
+    // to Projects regardless of the path, so the address bar is left alone.
+    if (SS_POPOUT) return;
     if (!tenant || tenant === "none") return;          // nothing routable yet
     const p = ssParsePath();
     const gatesResolved = (isOperator || canAdminForUrl || entitlement !== null) && canProjects !== null;
@@ -720,7 +1327,6 @@ function Dashboard({ session }) {
   // every user predating migration 060 has no name, and until they enter one the portal has
   // been showing their email local-part as their name.
   const [profile, setProfile] = useState(null);
-  const [profileOpen, setProfileOpen] = useState(false);
   const [nudgeHidden, setNudgeHidden] = useState(false);
   const [editUser, setEditUser] = useState(null);        // operator editing someone else
   const [usersRefreshKey, setUsersRefreshKey] = useState(0);
@@ -757,6 +1363,18 @@ function Dashboard({ session }) {
   // THE LINE THAT UNCLAMPS EVERY TAB. For a support operator it must be false, or
   // ssClampTab returns every tab unmodified and the narrowed access map governs nothing.
   const canAdmin = viewing ? (isOperator && !supportView) : isAdmin;
+  // canAdmin answers TWO different questions, and a support operator needs opposite answers.
+  //   (1) "unclamp every tab" — must be FALSE, or ssClampTab returns every tab unmodified and
+  //       the narrowed access map governs nothing. That is what canAdmin keeps meaning.
+  //   (2) "would the owner of this account see this button?" — for the row-level affordances
+  //       (send invoice, delete design, the built-before-delivered override) the answer is
+  //       YES: a support operator wears the viewed tenant's OWNER map, an owner short-circuits
+  //       to edit everywhere, and the server already permits these for any operator holding
+  //       can_write. Answering (2) with canAdmin hid them, so the browser withheld what the
+  //       server would have allowed — the mirror failing in the quiet direction.
+  // Billing is NOT among them: those CTAs stay on canAdmin, because a support operator
+  // genuinely cannot bill and resolveTenant clamps settings_billing to "none".
+  const mirrorAdmin = supportView ? true : canAdmin;
 
   // HOISTED above setup3d (2026-08-21). It used to live ~200 lines further down, which is
   // why the 3D calibration editor was never gated on it: setup3d is the last hook and could
@@ -770,22 +1388,30 @@ function Dashboard({ session }) {
   // a frontend shipped ahead of the backend — which is exactly what happened on 2026-08-19,
   // when this landed on beta before the migration could be applied.
   //
-  // `granted` is emitted ONLY by the new portal-billing and only for features an operator
-  // actually comped, so this is correct in BOTH worlds: against the old function it is
-  // undefined and only operators see 3D; against the new one it honours real grants. It also
-  // cannot be widened by a blanket, ever, which is the property that matters for a feature
-  // whose whole point is "not all clients need to see it" (Carolyn 2026-08-18).
+  // `granted` is emitted ONLY by portal-billing, and only for features this tenant genuinely
+  // holds as a comp rather than a purchase, so reading it keeps the copy honest ("switched on
+  // for you by Structure Studio", never "included in your plan").
+  //
+  // ⚠️ AMENDED 2026-09-21 (migration 228). `granted` is no longer grants alone: portal-billing
+  // now also puts a NON-BILLABLE or INTERNAL account's grantable features in that array, so
+  // ticking Non-billable switches 3D on without a second trip to the Early access card. That
+  // is a deliberate widening and it is still not a blanket — the server names each feature and
+  // filters it through `grantable`, so an ordinary tenant is unaffected and a paying one is
+  // never told their purchase was a comp. The reason for keeping the browser on `granted`
+  // rather than on `features` is unchanged, and is now about honesty of copy rather than
+  // reach: `features` cannot distinguish a comp from a purchase.
   //
   // When view_3d goes on sale, add the subscription check here — do NOT fold it back into
-  // featureOn, or the blanket returns with it.
-  // Support reads the VIEWED tenant's grant, not the operator blanket — otherwise a
-  // support account is shown a 3D tab on a builder who was never granted it.
-  const view3dUnlocked = supportView
+  // featureOn, which would widen it by a blanket rather than feature by feature.
+  // View-as reads the VIEWED tenant's grant, for every operator (Carolyn 2026-09-15) — the
+  // old `isOperator ||` blanket showed a 3D tab on a builder who was never granted it. A null
+  // viewedCtx is still loading and reads as on, the same rule featureOn uses. On the
+  // operator's own portal the operator's own grant decides, exactly like any tenant.
+  const view3dUnlocked = viewing
     ? (!viewedCtx || (!!viewedCtx.entitlement && Array.isArray(viewedCtx.entitlement.granted)
         && viewedCtx.entitlement.granted.indexOf("view_3d") !== -1))
-    : (isOperator
-      || (!viewing && !!entitlement && Array.isArray(entitlement.granted)
-          && entitlement.granted.indexOf("view_3d") !== -1));
+    : (!!entitlement && Array.isArray(entitlement.granted)
+        && entitlement.granted.indexOf("view_3d") !== -1);
   // The tenant every surface should read and write. Feeds the clientId props and the
   // remount keys; the invoke wrapper handles the edge functions. Null until the tenant
   // resolves — every real read happens below the early returns.
@@ -811,17 +1437,39 @@ function Dashboard({ session }) {
   // opens a full editable Structure3DViewer. 3D was reachable by a builder who had not been
   // granted it (found 2026-08-21; shipped 2026-08-04 in 81299d9, so it predates the dock).
   //
-  // Operators keep calibration everywhere, which is the point: view3dUnlocked is
-  // `isOperator || (!viewing && granted has view_3d)`, so an operator passes on their own
-  // portal AND while impersonating a tenant. The operator's PUBLIC-page route
-  // (index.html?admin=1) never came through here at all -- showCal3D is `isAdmin ||
+  // Since 2026-09-15 an operator in view-as gets calibration only where the VIEWED tenant
+  // holds a view_3d grant — the same door the owner uses — because view3dUnlocked mirrors
+  // the viewed entitlement rather than an operator blanket. Comp the grant from the admin
+  // console to calibrate a builder who has not been granted 3D. The operator's PUBLIC-page
+  // route (index.html?admin=1) never came through here at all -- showCal3D is `isAdmin ||
   // Boolean(setup3d)` and isAdmin short-circuits it -- so that flow is untouched.
   const setup3d = useMemo(() => (!canAdmin || !view3dUnlocked ? null : {
-    onSaveSpec: async (styleValue, d3, d3Photos) => {
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_style_d3", styleValue, d3, d3Photos } });
-      if (error) throw new Error(error.message || "Save failed");
-      if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");
-      return data;
+    // d3VideoFrames rides along from 2026-09-10: the walk-around's frames are persisted beside
+    // the photos, not inside them, so reopening a style can still answer "has this got a video".
+    // Through the style-save queue since 2026-09-14: deadline, side door, base — see
+    // ssRunStyleSave above Dashboard.
+    onSaveSpec: (styleValue, d3, d3Photos, d3VideoFrames) => {
+      // Captured NOW, in the click's tick: the save may wait behind another in the queue.
+      const target = ssTargetClientId;
+      const key = ssStyleSaveKey(styleValue);
+      return ssRunStyleSave(key, target, styleValue, "save 3D look", (base) => {
+        // The key is OMITTED, not sent as null, when the caller does not know the frames: the
+        // server distinguishes absence ("leave the column alone") from an empty array ("the
+        // builder removed the video"), and JSON.stringify drops an undefined property for us.
+        const body = { action: "save_style_d3", styleValue, d3, d3Photos };
+        if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
+        // ALWAYS PRESENT, null included (review wf_5199a3e0-d65, high). 01-core's wrapper injects
+        // the view-as target whenever this key is absent, and it reads the target when the call
+        // RUNS — a queued save runs later. An operator's own-tenant save left queued while they
+        // opened a builder's account was injected with that builder and written over the builder's
+        // style of the same key. An explicit null skips the injection, and resolveTenant reads
+        // null as "no override".
+        body.targetClientId = target || null;
+        // No base (this style was never read here, or the function is older) sends none, and the
+        // server writes unconditionally — no worse than before the guard existed.
+        if (base && base.version !== undefined) body.baseVersion = base.version;
+        return body;
+      }, (data) => ssConfirmStyleVersion(key, data));
     },
     // Reference photos are no longer in the customer-facing config (migration 093 stopped
     // get_config broadcasting a builder's photos of their real buildings to anonymous
@@ -870,12 +1518,61 @@ function Dashboard({ session }) {
       if (!data || !data.ok) throw new Error((data && data.error) || "Could not change that");
       return data;
     },
+    // Records WHICH images belong to a style without touching its d3 spec. Called as photos and
+    // frames are added or removed, so a style switch or a reload cannot lose them; the spec is
+    // still only written by the deliberate Save.
+    // Queued behind any other save of the same style, which is the part that matters most here:
+    // uploads and removals fire these without waiting, so two used to race.
+    onSaveMedia: (styleValue, d3Photos, d3VideoFrames) => {
+      const target = ssTargetClientId;
+      const key = ssStyleSaveKey(styleValue);
+      const seq = (ssMediaSeq.get(key) || 0) + 1;
+      ssMediaSeq.set(key, seq);
+      const build = (base) => {
+        const body = { action: "save_style_media", styleValue };
+        if (Array.isArray(d3Photos)) body.d3Photos = d3Photos;
+        if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
+        body.targetClientId = target || null;   // explicit, null included — see onSaveSpec
+        if (base && base.version !== undefined) body.baseVersion = base.version;
+        return body;
+      };
+      // THE NEWEST LIST IS REPLAYED AFTER A STALL (final check wf_0e1e9235-8e5). A media save has
+      // no error on screen, and the version guard rightly refuses a late copy of an OLDER list — so
+      // if the newest list is simply given up on, an older copy still in flight can end up as the
+      // last write, and a photo the builder removed comes back. A stalled save is therefore tried
+      // again, backing off, but only while it is still the newest list issued for this style: the
+      // moment a newer one exists, that one carries the intent and this one stops.
+      const run = (attempt) => ssRunStyleSave(key, target, styleValue, "save style media", build, (data) => ssConfirmStyleVersion(key, data))
+        .catch((e) => {
+          if (!(e && e.ssStalled) || attempt >= 4 || ssMediaSeq.get(key) !== seq) throw e;
+          const wait = (typeof window !== "undefined" && Number(window.__ssMediaReplayMs)) || [5000, 15000, 30000, 60000][attempt];
+          return new Promise((res) => setTimeout(res, wait)).then(() => {
+            if (ssMediaSeq.get(key) !== seq) throw e;
+            return run(attempt + 1);
+          });
+        });
+      return run(0);
+    },
     onLoadStyle3D: async (styleValue) => {
+      // Key and confirmed-save count taken BEFORE the await: a save confirmed while this read is
+      // in flight is newer than anything the read can return, so it must not become the base.
+      const key = ssStyleSaveKey(styleValue);
+      const gen = ssStyleSaveGen.get(key) || 0;
+      // NO DEADLINE ON THIS READ, deliberately (final check wf_0e1e9235-8e5). Put through the
+      // side door it could give up for good, which left the photo grid empty — and the next save
+      // then wrote that empty grid over the stored photos. A stalled plain read still lands in the
+      // end. A save issued before it lands reads the version for itself (ssRunStyleSave).
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
       if (error || !data || !data.ok) return null;
       const st = (data.styles || []).find((x) => x.key === styleValue);
+      // The row's version as the base for this style's next save. A catalog without updated_at
+      // (an older function) gives no base, and that save goes unguarded rather than refused.
+      if (st && st.updated_at !== undefined && (ssStyleSaveGen.get(key) || 0) === gen) {
+        ssStyleSaveBase.set(key, { version: st.updated_at });
+      }
       return {
         photos: (st && Array.isArray(st.d3_photos)) ? st.d3_photos.filter(Boolean) : [],
+        videoFrames: (st && Array.isArray(st.d3_video_frames)) ? st.d3_video_frames.filter(Boolean) : [],
         modelStatus: (st && st.model_status) || "none",
         aiReady: data.aiReady !== false,
       };
@@ -895,15 +1592,120 @@ function Dashboard({ session }) {
        photo caller wants a bare spec. One function returning two shapes is how the wrong one
        gets read.
 
-       It takes the VIDEO prompt server-side, because a combined set still contains the
-       walk-around and that prompt is the one that knows the roof was only ever seen from the
-       ground — the single most important fact about this input. Cap is 12, Carolyn's own
-       "three from each side". */
-    onDraftFromCombined: async (photoUrls, styleValue) => {
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls, styleValue, source: "combined" } });
+       It takes a shape-first prompt server-side, because every set it sends contains the
+       walk-around, and those prompts are the ones that know the roof was only ever seen from
+       the ground — the single most important fact about this input. WHICH one depends on the
+       set (2026-09-16, when photos became optional). With photos beside the walk it goes as
+       source "combined": combinedShapePrompt, cap 12, Carolyn's own "three from each side".
+       A walk with NO photos goes as source "video": VIDEO_SHAPE_PROMPT, cap 8. That second
+       path relies on SS_VID_FRAMES staying at 8 or below, or the server drops the extra
+       frames and only `dropped` says so. */
+    onDraftFromCombined: async (photoUrls, styleValue, videoCount, idempotencyKey, dims) => {
+      // videoCount says how many of the LEADING urls are walk-around frames, so the server can
+      // hand the model a prompt that describes the set it is actually being given rather than
+      // asserting the whole array is one continuous lap.
+      const urls = Array.isArray(photoUrls) ? photoUrls : [];
+      const frames = Math.max(0, Math.floor(Number(videoCount) || 0));
+      // VIDEO REQUIRED (2026-09-16, Ahsan: "make video compulsory and images optional to
+      // generate the 3d model"). Refused HERE as well as in the designer's gate, because this is
+      // the line that spends money: a set with no walk-around frames never reaches the function.
+      if (!frames) throw new Error("A walk-around video is required to generate. Photos are optional.");
+      // A WALK ON ITS OWN GOES AS source "video". Since photos became optional a set can be
+      // frames and nothing else, and "combined" is the wrong description of that: its prompt
+      // (combinedShapePrompt) opens "from two sources", which is false with no photos beside
+      // the walk. VIDEO_SHAPE_PROMPT says exactly what such a set is (every image a frame of one
+      // lap, in walk order), the ledger row reads "video", and the charge is the same hold
+      // either way. Its server cap is 8, which is SS_VID_FRAMES, so a whole lap fits. No
+      // function deploy is needed for any of this: the "video" source has been live since the
+      // walk-around first shipped in August.
+      const source = frames >= urls.length ? "video" : "combined";
+      // ONE PRESS IS ONE HOLD IS ONE CHARGE (2026-09-18). The designer mints this key once per
+      // press and hands the same one back on every retry of that press; the server passes it to
+      // wallet_hold, whose `wallet_tx_idem` unique index refuses a second hold for it. Forwarded
+      // rather than minted here on purpose: only the designer knows where one press ends and the
+      // next begins, and a key minted per CALL would be a key that never dedupes anything.
+      // Absent (an older caller) sends nothing, which is exactly today's behaviour.
+      //
+      // THE BUILDER'S OWN MEASUREMENTS, REQUIRED HERE AS WELL AS IN THE DESIGNER'S GATE
+      // (2026-09-19). Same posture as the videoCount refusal above and for the same reason: this
+      // is the line that spends money. A generation with no ruler costs $20 for a draft whose
+      // wall height came out of the middle of a range - 7, in 74 % of every recorded generation,
+      // on buildings measuring 9 - and nothing afterwards can tell you that is what happened.
+      //
+      // MISSING is what is refused here; OUT OF BAND is the server's to refuse, because it
+      // answers 400 before the ledger row and the wallet hold and its bands are the ones that
+      // actually bind. Two copies of the bands would be two things to drift.
+      const d = (dims && typeof dims === "object") ? dims : null;
+      if (!d || !(Number(d.widthFt) > 0) || !(Number(d.lengthFt) > 0) || !(Number(d.wallHeightFt) > 0)) {
+        throw new Error("Type the building's width, length and wall height before generating — the video cannot show us how big it is.");
+      }
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined, dims: d } });
       if (error) throw new Error(error.message || "Generating failed");
       if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Generating failed");
-      return { d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0, observed: data.observed || null };
+      // `dims` ECHOED BACK AS THE SERVER USED THEM, not as they were sent. The designer says so
+      // in the success line, which is the only thing that proves the numbers reached the model
+      // rather than merely sitting in a form. An older function echoes nothing and the clause
+      // disappears, which is itself the right news.
+      // `frameMap` and `checkId` ride back UNTOUCHED, and they are the two the free second pass
+      // cannot work without. The map says which of the images THIS REQUEST was given shows
+      // which view of the building, and at what angle; the id is the ledger row that already
+      // paid, which is what makes the check free and single-use. An older function sends
+      // neither, and the designer treats that as "no check on this generation" rather than
+      // inventing an angle to render at.
+      return {
+        d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0,
+        observed: data.observed || null, dims: data.dims || null,
+        frameMap: data.frameMap || null, checkId: data.checkId || null,
+      };
+    },
+    /* THE FREE SECOND PASS (2026-09-19). The browser renders the draft from the angles the
+       first pass labelled, and asks one narrow question: where does OUR DRAFT not match THEIR
+       BUILDING? No hold, no charge, no new gate — `calibrate_style_check` sits behind the same
+       settings_structures/edit gate as the generation and is single-use against the ledger row
+       that already paid for it.
+
+       ⚠️ A FAILED CHECK IS NOT A FAILED GENERATION, and this function is where that stops being
+       true by accident. The builder is already holding their draft. So every refusal, timeout
+       and unreachable server comes back as a verdict the panel can render as one quiet line,
+       and the only thing that throws is a 409 on the claim — which means this generation has
+       already been checked, and the caller handles it the same way.
+
+       THE CLIENT ABORT IS REAL, unlike the generation's. The server gives up at 45 s; 60 here
+       is far enough above that a server which answered in time is still heard, and it bounds
+       the wait at something a person will sit through. Abandoning THIS call costs nothing,
+       which is exactly what separates it from the one above. */
+    onSelfCheck: async ({ styleValue, checkId, photoUrls, renders }) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", {
+        body: { action: "calibrate_style_check", styleValue, checkId, photoUrls, renders },
+        signal: AbortSignal.timeout(60000),
+      });
+      // A 4xx carries a body, and the body is what says WHY. supabase-js hands back a
+      // FunctionsHttpError whose response has to be read for it, so a caller that only looked
+      // at error.message would report "Edge Function returned a non-2xx status code" to a
+      // builder for what is usually "that generation has already been checked".
+      //
+      // ⚠️ AND THE SIBLING CASE, which has no body to read at all. A network failure or the
+      // 60 s abort above raises a FunctionsFetchError whose `.context` is the underlying Error,
+      // not a Response — so `.json()` throws, `said` stays empty, and `error.message` is the
+      // vendor's own fixed string, "Failed to send a request to the Edge Function". The panel
+      // renders `note` verbatim under its friendly line, so that sentence landed on the screen
+      // a builder reaches after spending $20. The 409 branch three lines up exists precisely so
+      // vendor wording never gets there; this is the same rule applied to its sibling.
+      //
+      // Matched against the class strings rather than sniffed from the error name: supabase-js
+      // has exactly three and all three are jargon a builder cannot act on. FunctionsRelayError
+      // DOES carry a Response, but a relay body has no `error` key, so it leaks the same way.
+      if (error) {
+        let said = "";
+        try { said = ((await error.context.json()) || {}).error || ""; } catch (_e) { said = ""; }
+        const vendor = /^(Failed to send a request to the Edge Function|Relay Error invoking the Edge Function|Edge Function returned a non-2xx status code)$/;
+        const mine = error.message && !vendor.test(error.message) ? error.message : "";
+        return { ok: false, verdict: "failed", reason: "unreachable", note: said || mine, changed: [], d3: null };
+      }
+      if (!data || !data.ok) {
+        return { ok: false, verdict: "failed", reason: "refused", note: (data && data.error) || "The check could not run.", changed: [], d3: null };
+      }
+      return data;
     },
     // Frames the browser cut out of a walk-around video. Same action, same gate, same
     // 10/day meter as the photo draft — `source` only picks the shape-first prompt and
@@ -914,8 +1716,12 @@ function Dashboard({ session }) {
     // truncated, `observed` carries what the video showed about doors and vents), and the
     // photo caller wants a bare spec. One function returning two shapes is how the wrong
     // one gets read.
-    onDraftFromVideo: async (frameUrls, styleValue) => {
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: frameUrls, styleValue, source: "video" } });
+    onDraftFromVideo: async (frameUrls, styleValue, idempotencyKey) => {
+      // Same key, same reason as onDraftFromCombined above. Nothing calls this today - the
+      // Generate button goes through the combined handler - but it spends the same $20 through
+      // the same meter, and a paid path that cannot be deduplicated is one press away from
+      // mattering again.
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: frameUrls, styleValue, source: "video", idempotencyKey: idempotencyKey || undefined } });
       if (error) throw new Error(error.message || "Reading the video failed");
       if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Reading the video failed");
       return { d3: data.d3, frames: data.frames || 0, observed: data.observed || null };
@@ -927,17 +1733,32 @@ function Dashboard({ session }) {
       if (error || !data || !data.ok) return null;
       return data.url || null;
     },
+    // MANY IMAGES, ONE MINT (2026-09-12). Minting a signed URL is itself a round trip, so eight
+    // images used to cost sixteen and now cost nine.
+    //
+    // The host owns the whole batch — shrink, mint, PUT — because only the host knows that the
+    // mint is bulk-able. The designer just says "upload these" and watches the progress. The body
+    // is ssUploadStylePhotos above Dashboard, which onUploadPhoto shares.
+    onUploadPhotoBatch: (files, onProgress, onEach) => ssUploadStylePhotos(files, onProgress, onEach),
+    // ONE FILE, THE SAME ROUTE (2026-09-17). scanGenerate's four turntable views come through here.
+    // This handler used to mint per file with no deadline and fall back to base64
+    // upload_style_photo; ssUploadStylePhotos' header says why that is gone.
+    //
+    // ssShrinkStylePhoto still runs first, inside the helper, and still GUARANTEES a small JPEG or
+    // fails that file. See its header for why it replaced ssFitImageForUpload here.
+    //
+    // No throughput row for one file: scanGenerate sends four in a row, and four single-image
+    // "batches" would be four rows of noise beside the real measurements. And no "pick the photos
+    // again" when the mint cannot be reached: the scan's views are rendered, not picked.
     onUploadPhoto: async (file) => {
-      const imageBase64 = await new Promise((res, rej) => {
-        const fr = new FileReader();
-        fr.onload = () => res(String(fr.result || "").split(",")[1] || "");
-        fr.onerror = () => rej(new Error("Could not read that file."));
-        fr.readAsDataURL(file);
+      const r = await ssUploadStylePhotos([file], null, null, {
+        telemetry: false,
+        unreachable: "Couldn't reach the upload server, so nothing was uploaded. Check your connection and try again.",
       });
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "upload_style_photo", imageBase64, imageContentType: file.type || "image/jpeg" } });
-      if (error) throw new Error(error.message || "Upload failed");
-      if (!data || !data.ok || !data.url) throw new Error((data && data.error) || "Upload failed");
-      return data.url;
+      if (r.urls.length) return r.urls[0];
+      const e = new Error(r.errs[0] || "Upload failed");
+      if (r.errTransport && r.errTransport[0]) e.ssTransport = true;
+      throw e;
     },
     // `viewing` is listed because onUploadModel now reads it. effClientId moves with it in
     // practice, but leaning on that would make a stale upload handler a one-line edit away.
@@ -958,6 +1779,29 @@ function Dashboard({ session }) {
     );
   }
 
+  // Popout window (?popout=1): the Projects boards only, no shell chrome. No nav renders
+  // here and nothing inside ProjectsTab navigates to another tab, so no other page is
+  // reachable — which is why ssClampTab needs no popout branch. Gated on the SAME two doors
+  // as the normal mount below (canProjects && !supportView); canProjects three-states:
+  // null = the can_open_projects RPC is still in flight -> neutral wait, never the fallback
+  // tab; false -> a plain refusal, still chromeless. The wrapper reproduces the
+  // .ss-projects-active geometry (viewport-height flex column, portal.html) because
+  // ProjectsTab is a flex:1/minHeight:0 column that scrolls its own table.
+  if (SS_POPOUT) {
+    const popMsg = (text) => (
+      <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>{text}</div>
+    );
+    return (
+      <div style={{ height: "100vh", boxSizing: "border-box", display: "flex", flexDirection: "column", padding: "14px 16px" }}>
+        {canProjects === null
+          ? popMsg("Loading…")
+          : (canProjects && !supportView)
+            ? <ProjectsTab sub={tab === "projects" ? sub : null} onSub={(x) => navigate("projects", x)} />
+            : popMsg("You don't have access to Projects.")}
+      </div>
+    );
+  }
+
   // isAdmin / canAdmin / effClientId are declared ABOVE the early returns (null-safe),
   // because the hook-order rules require every hook to run before them. Only the per-area
   // map is resolved here — it needs a settled tenant.
@@ -965,12 +1809,20 @@ function Dashboard({ session }) {
   // The caller's resolved per-area map, straight from the status call (migration 100).
   // Operators viewing a tenant have none — their rights come from app_operators — and
   // canAdmin short-circuits every check below for them.
-  // Support reads the VIEWED tenant's resolved map. While it is still loading, fall back to
-  // the operator's own rather than to null: null clamps to a fallback tab, so the generous
-  // direction for a fraction of a second beats bouncing Jonathan off the page he opened.
+  // Support reads the VIEWED tenant's resolved map, and ONLY that. It used to fall back to
+  // the operator's own map while the fetch was in flight — defensible for the fraction of a
+  // second that was meant to be, and a permanent god view once a failed call could park a
+  // null in viewedCtx forever (see the effect above, which no longer stores one). The
+  // fallback is gone rather than re-timed: the operator's own map is never a safe stand-in
+  // for a builder's, and the brief clamp to a fallback tab is the cheaper wrong answer.
   const myAccess = supportView
-    ? ((viewedCtx && viewedCtx.access) || ((tenant && tenant !== "none") ? tenant.access : null))
+    ? (viewedCtx ? viewedCtx.access : null)
     : ((tenant && tenant !== "none") ? tenant.access : null);
+  // The access map to hand a CONTENT surface. Support gets the viewed tenant's real map, so
+  // the builder's own rules govern what the page offers; a platform operator gets null and
+  // rides canAdmin, as before. Identical to the old `viewing ? null : myAccess` for everyone
+  // who is not a support operator.
+  const mirrorAccess = supportView ? myAccess : (viewing ? null : myAccess);
   // The tab cache has to know WHICH ROWS this map allows, not just who is asking. `contacts`
   // gained an 'own' level on 2026-09-05 that narrows the rows every contact-and-design read
   // returns, so the same person on the same tenant gets a different payload before and after
@@ -1017,6 +1869,13 @@ function Dashboard({ session }) {
   // that array is the role escape hatch and would hand the operator console to every team
   // member. Content renders are ALSO gated (and the server re-checks regardless).
   const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, supportView, canProjects);
+  // Remember the last WORKSPACE page, for Back to Workspace. Assigned during render, not in
+  // an effect, and deliberately: it must already be correct on the very first render in which
+  // the Settings rail appears, and an effect runs after that render has painted. Idempotent
+  // and touches no state, so it cannot loop — the same pattern as ssTargetClientId and
+  // ssSetRowScope below. Reads activeTab (the CLAMPED tab), so a page the clamp refused can
+  // never become the back target.
+  if (!SS_SETTINGS_CONTEXT.includes(activeTab)) beforeSettings.current = activeTab;
 
 
   // ── Sidebar layout (fluid, full-width; collapses to an icon rail <900px) ──
@@ -1036,31 +1895,40 @@ function Dashboard({ session }) {
   const shownBusiness = viewing ? (viewing.companyName || viewing.clientId) : tenant.businessName;
   const tenantInitials = String(shownBusiness || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
 
+  // THE entitlement this shell renders from. In view-as it is the VIEWED tenant's (from
+  // viewedCtx, which the effect above fills for every operator); on your own portal it is
+  // your own. Null = still loading. Every gate, banner and paid-feature switch below reads
+  // this and nothing else, so an operator can never see a portal the builder does not have
+  // (Carolyn 2026-09-15). Before this, view-as read the OPERATOR's own entitlement — which
+  // is why every gate carried a `!viewing` / `isOperator ||` escape hatch.
+  const gateEnt = viewing ? (viewedCtx ? viewedCtx.entitlement : null) : entitlement;
   // Billing gate. Locked = the required subscription isn't active. Nav stays fully
   // visible (locked items get a padlock) and the CONTENT area shows the gate whatever
   // they click — so they can see the whole product and always land on how to switch it
-  // on. Never gate an operator viewing someone else's account: the entitlement loaded
-  // here is the operator's own, not the tenant's.
-  const gateLocked = !viewing && !!entitlement && entitlement.locked;
+  // on. An operator viewing a locked tenant sees the same gate; only the operator
+  // consoles (Accounts / Admin / Projects) stay open, so they can leave. Null reads as
+  // NOT locked — never flash the gate at a paying customer while the answer is in flight.
+  const gateLocked = !!gateEnt && gateEnt.locked;
   // Scheduling suite (Build Schedule + Delivery Schedule + Repairs — ONE feature,
-  // decision 12): live for operators (own tenant or view-as) and for tenants whose
-  // entitlement carries schedule_builds. PAY-ONLY (Carolyn 2026-08-04): portal-billing
-  // requires a real active/grace subscription for this feature — the exempt and
-  // free-period blankets deliberately do NOT cover it, so grandfathered tenants see
-  // the teaser like everyone else until they subscribe.
+  // decision 12): live for tenants whose entitlement carries schedule_builds. PAY-ONLY
+  // (Carolyn 2026-08-04): portal-billing requires a real active/grace subscription for
+  // this feature — the exempt and free-period blankets deliberately do NOT cover it, so
+  // grandfathered tenants see the teaser like everyone else until they subscribe.
   // Is a PAID ADD-ON switched on for this tenant? The one rule for every billable
   // feature — nothing reads entitlement.features directly any more.
   //
-  //   * Operators are never gated (their own tenant or view-as), because the entitlement
-  //     loaded here is the OPERATOR's, not the viewed tenant's.
-  //   * entitlement === null means "still loading" and must NOT read as off, or every page
-  //     load would flash an upgrade card at a paying customer (same reason gateLocked
-  //     tolerates null).
+  //   * In view-as the VIEWED tenant's features decide, for every operator. A null viewedCtx
+  //     is STILL LOADING and reads as on: flashing an upgrade card at a paying builder mid
+  //     support call is the worse failure, and the base gate above tolerates null the same
+  //     way. A loaded viewedCtx with no entitlement (the billing call answered without one)
+  //     reads as OFF — fail closed on a paid feature.
+  //   * On your own portal, entitlement === null (still loading) reads as OFF, and that is
+  //     deliberate, not an oversight:
   //
-  // ⚠️ THE TENANT BRANCH SAYS THE OPPOSITE OF THAT SENTENCE, and it must keep saying it until
-  // the server can answer for these keys. Audit 2026-09-06 (F052) proposed making null read as
-  // ON, which is the right shape for a gate that is only presentation — but it is NOT the shape
-  // for `schedule_builds` and `quickbooks_sync`, where THIS LINE IS THE ONLY ENFORCEMENT
+  // ⚠️ THE TENANT BRANCH FAILS CLOSED, and it must keep doing so until the server can answer
+  // for these keys. Audit 2026-09-06 (F052) proposed making null read as ON, which is the
+  // right shape for a gate that is only presentation — but it is NOT the shape for
+  // `schedule_builds` and `quickbooks_sync`, where THIS LINE IS THE ONLY ENFORCEMENT
   // ANYWHERE: portal-billing's PAID_ONLY_FEATURES set decides who may subscribe, and nothing
   // re-checks those two on the actions themselves. Null-reads-on would hand every tenant the
   // paid scheduler and QuickBooks for the whole load window, and permanently after one failed
@@ -1068,12 +1936,14 @@ function Dashboard({ session }) {
   // token. Fail-closed on a paid feature beats fail-open; the real repair is a third state
   // (loading, which shows neither the feature nor its upsell) plus a server-side check for
   // those two keys, and that is a bigger change than a boolean.
-  // Support resolves the VIEWED tenant's subscription — the whole point of the flag. A null
-  // viewedCtx is STILL LOADING, never "off", the same rule the operator branch already uses:
-  // flashing an upgrade card at a paying builder mid support call is the worse failure.
-  const featureOn = (key) => (supportView
+  //
+  // There is NO operator branch any more. `isOperator ||` used to sit here and it meant
+  // Carolyn could not see what a builder actually had (Carolyn 2026-09-15). On the operator's
+  // own tenant the operator's own entitlement decides, like any tenant — structure-studio is
+  // an internal account, so that is everything.
+  const featureOn = (key) => (viewing
     ? (!viewedCtx || !!(viewedCtx.entitlement && viewedCtx.entitlement.features && viewedCtx.entitlement.features[key]))
-    : (isOperator || (!viewing && !!entitlement && !!(entitlement.features && entitlement.features[key]))));
+    : (!!entitlement && !!(entitlement.features && entitlement.features[key])));
   const schedUnlocked = featureOn("schedule_builds");
   // QuickBooks Sync is a paid add-on ($75/mo) that was SOLD BUT NEVER ENFORCED — the tab was
   // gated on canAdmin alone, so any admin used it free and buying it changed nothing. Gated
@@ -1112,15 +1982,17 @@ function Dashboard({ session }) {
   // both or neither, and an approver who cannot raise a change is a normal, intended state.
   // `change_order_approve` has two levels only (none/edit), like `commissions`.
   const coApproveCanEdit = canAdmin || !!(myAccess && myAccess.change_order_approve === "edit");
-  const gateGrace = !viewing && !!entitlement && entitlement.state === "grace";
-  const graceDaysLeft = gateGrace && entitlement.graceEndsAt
-    ? Math.max(0, Math.ceil((Date.parse(entitlement.graceEndsAt) - Date.now()) / 86400000))
+  // Grace / transition banners read gateEnt too: in view-as they are the VIEWED tenant's
+  // countdowns, so an operator sees exactly the warning the builder sees.
+  const gateGrace = !!gateEnt && gateEnt.state === "grace";
+  const graceDaysLeft = gateGrace && gateEnt.graceEndsAt
+    ? Math.max(0, Math.ceil((Date.parse(gateEnt.graceEndsAt) - Date.now()) / 86400000))
     : null;
   // Dated free period: everything works, with a countdown and the real rate. Distinct from
   // grace — nothing has failed here, they simply haven't started paying yet, so the copy must
   // not imply a payment problem.
-  const gateTransition = !viewing && !!entitlement && entitlement.state === "transition";
-  const transEndsAt = gateTransition && entitlement.transitionEndsAt ? Date.parse(entitlement.transitionEndsAt) : null;
+  const gateTransition = !!gateEnt && gateEnt.state === "transition";
+  const transEndsAt = gateTransition && gateEnt.transitionEndsAt ? Date.parse(gateEnt.transitionEndsAt) : null;
   // Counted in whole CALENDAR days in the viewer's own timezone, which is how people read a
   // deadline. An elapsed-milliseconds ceil() says "9 days" when 8 days and 2 hours remain.
   const transDaysLeft = transEndsAt
@@ -1129,51 +2001,193 @@ function Dashboard({ session }) {
   const transDateLabel = transEndsAt
     ? new Date(transEndsAt).toLocaleDateString(undefined, { month: "long", day: "numeric" })
     : null;
-  const rate = (entitlement && entitlement.requiredRate) || null;
+  const rate = (gateEnt && gateEnt.requiredRate) || null;
+  // Who may act on a billing banner / the gate: the tenant's owner or admin, or an operator
+  // in view-as (canAdmin is the operator grant there; isAdmin describes the operator's OWN
+  // client_users row and is routinely "user"). Support operators resolve canAdmin false and
+  // get the "ask your account owner" copy, which is right — they cannot bill.
+  const billingActor = viewing ? canAdmin : isAdmin;
 
   // Never nag an operator who is looking at someone else's account — the prompt is about
   // the signed-in person's own details, and it would read as if it were the tenant's.
   const showNudge = !viewing && !nudgeHidden && !!profile && profile.needsDetails;
   const fmtRate = (c) => c == null ? null : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: c % 100 ? 2 : 0 });
 
-  // Real <button>s (not href-less anchors) so the nav stays keyboard- and
-  // screen-reader-operable like the old tab bar; .ss-nav styles both alike.
+  // REAL LINKS since 2026-09-11 (Carolyn: "on any and all of the nav buttons I want to be
+  // able to right click and open in a new tab or click the wheel of the mouse to open in a
+  // new tab"). ⚠️ This reverses a note that stood here for months — "real <button>s, not
+  // href-less anchors, so the nav stays keyboard- and screen-reader-operable". That objection
+  // was to anchors with NO href, which are neither focusable nor announced as links. An
+  // anchor with a real href is both, so these satisfy the old requirement and the new one at
+  // once; .ss-nav styles a and button alike, so nothing moved visually. ssNavClick keeps left
+  // click same-document and hands every other click to the browser.
+  //
   // Hidden, not padlocked: a padlock means "yours when you upgrade" (the billing gate).
   // A page your access does not include is not something you can buy your way into, so
   // showing it would just be a dead end. accounts/admin are operator-gated separately.
   const navHidden = (id) =>
     id !== "accounts" && id !== "admin" && id !== "projects" && !canAdmin && !ssCanSeeTab(id, myAccess);
+  // The operator consoles are never padlocked: they are not part of the viewed tenant's
+  // product, and they are how an operator leaves a locked account (their content renders
+  // outside `!gateLocked` below for the same reason).
+  const gateLockedFor = (id) => gateLocked && id !== "accounts" && id !== "admin" && id !== "projects";
   const navItem = (id, label, badge) => navHidden(id) ? null : (
-    <button type="button" className={activeTab === id ? "active" : ""}
-      title={gateLocked ? `${label} — activate your account to use this` : (badge ? `${label} — ${badge.toLowerCase()}` : label)}
-      onClick={() => navigate(id)}>
+    <a href={ssPagePath(id, null)} className={activeTab === id ? "active" : ""}
+      aria-current={activeTab === id ? "page" : undefined}
+      title={gateLockedFor(id) ? `${label} — activate your account to use this` : (badge ? `${label} — ${badge.toLowerCase()}` : label)}
+      onClick={ssNavClick(() => navigate(id))}>
       {ICONS[id]}
       <span className="lbl">{label}</span>
       {badge && <span className="soon">{badge}</span>}
-      {gateLocked && (
+      {gateLockedFor(id) && (
         <svg className="lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-label="locked"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
       )}
-    </button>
+    </a>
   );
   // Same as navItem but with a status pill — "Soon" by default, or a custom badge
   // (e.g. "In Development") for tabs that are further along than the teaser ones.
   const soonItem = (id, label, badge) => navHidden(id) ? null : (
-    <button type="button" className={activeTab === id ? "active" : ""} title={label + " — " + (badge ? badge.toLowerCase() : "coming soon")} onClick={() => navigate(id)}>
+    <a href={ssPagePath(id, null)} className={activeTab === id ? "active" : ""}
+      aria-current={activeTab === id ? "page" : undefined}
+      title={label + " — " + (badge ? badge.toLowerCase() : "coming soon")}
+      onClick={ssNavClick(() => navigate(id))}>
       {ICONS[id]}
       <span className="lbl">{label}</span>
       <span className="soon">{badge || "Soon"}</span>
-    </button>
+    </a>
   );
+
+  // ── The Settings rail ─────────────────────────────────────────────────────────────────
+  // Carolyn 2026-09-11: clicking Settings should ENTER Settings — the workspace nav goes
+  // away and the fourteen sub-pages become the rail, with a way back.
+  //
+  // These three flags used to be computed inline in SettingsShell's JSX props further down.
+  // They are hoisted because the rail needs the SAME answers: two independently-derived lists
+  // is how an owner gets Commissions in one and not the other, and settingsIsOwner in
+  // particular is what withholds Commissions in view-as, pairing with portal-commissions'
+  // hard 403. Derive once, pass to both.
+  const settingsIsOwner = !viewing && tenant.role === "owner";
+  const settingsIsAdmin = !viewing && (tenant.role === "owner" || tenant.role === "admin");
+  // mirrorAccess, not `viewing ? null : myAccess`: ssSettingsTabs short-circuits on a null
+  // map and offers EVERY sub-tab, so a support operator was handed Billing, Wallet and SMS —
+  // the three areas resolveTenant deliberately clamps to "none" for them. The server withheld
+  // the numbers, so what they actually got was a hollow Billing page and buttons that could
+  // only come back 403: the "disabled UI fails silently" shape, one level up.
+  const settingsAccess = mirrorAccess;
+  // Accounts and Admin moved INTO this rail, so it has to stay up on their pages too or
+  // clicking one would throw you straight back to the nav you just left. The settings half is
+  // the IDENTICAL predicate the body render uses — copy it if you change either.
+  //
+  // !gateLocked is load-bearing: a billing-locked tenant clicking Settings gets BillingGate,
+  // not SettingsShell, so swapping the rail there would hand them a sub-nav whose every item
+  // is inert AND hide the padlocked workspace items that explain why.
+  // TWO different questions, and conflating them is what made My Profile jarring.
+  //   settingsPage — are we RENDERING a settings page? (drives the topbar and the sub-tab clamp)
+  //   settingsMode — is the settings RAIL up? (drives the chrome)
+  // They agree everywhere except one page.
+  const settingsPage = !gateLocked && activeTab === "settings"
+    && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a)));
+  // ── MY PROFILE DOES NOT DECIDE THE RAIL ───────────────────────────────────────────────
+  // Carolyn 2026-09-11, on clicking it from a workspace page: "it switches you to the
+  // settings and I feel like people will be confused .... but then the same is true the other
+  // way." Exactly — which is the tell that it belongs to NEITHER context. It is the one thing
+  // on this rail that configures the PERSON, it is reached from the identity menu, and that
+  // menu is in the footer, which renders in both rails. A global control must not change the
+  // global chrome, so this page inherits whichever rail was already up and changes nothing.
+  //
+  // The identity row lights up instead — see .ss-user's `active` class below. Without that,
+  // opening it from the workspace rail would leave nothing in the nav marked and no way to
+  // tell where you were.
+  const onMyProfile = settingsPage && (sub || "") === "myprofile";
+  // Every other page decides. Accounts and Admin are in this rail now, so they put it up.
+  //
+  // !gateLocked is load-bearing: a billing-locked tenant clicking Settings gets BillingGate,
+  // not SettingsShell, so swapping the rail there would hand them a sub-nav whose every item
+  // is inert AND hide the padlocked workspace items that explain why.
+  const railDecided = !gateLocked && (settingsPage || activeTab === "accounts" || activeTab === "admin");
+  if (!onMyProfile) railSettings.current = railDecided;
+  const settingsMode = onMyProfile ? railSettings.current : railDecided;
+  // Needed whenever we are ON a settings page (the topbar reads them) OR the rail is up (it
+  // draws them) — which are no longer the same condition.
+  const settingsTabs = (settingsPage || settingsMode)
+    ? ssSettingsTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess })
+    : null;
+  // Mirrors SettingsShell's own clamp exactly. `sub` is null on a bare /portal/settings, and
+  // can be a slug this build has never heard of — a bookmark to a renamed sub-tab, or a
+  // Client Setup step whose link_page an operator typed by hand. Both must highlight the tab
+  // the BODY is actually showing, which is the first one, rather than highlighting nothing.
+  //
+  // ⚠️ Gated on activeTab === "settings", not merely on settingsMode. Accounts and Admin put
+  // this rail up too, and without the guard the fallback-to-first-tab would light Structures
+  // while navItem separately lit Accounts — two highlighted rows, neither of them wrong on
+  // its own terms, and no way for a reader to tell which one they are on.
+  const onSettingsPage = settingsTabs && settingsPage;
+  // Company and Colors are HUBS: one rail item, several tabs inside, every tab a settings
+  // slug in its own right. The rail has to recognise those slugs — /portal/settings/branding
+  // must light COMPANY and /portal/settings/shingles must light COLORS, rather than falling
+  // through the clamp to Structures. Same lists the pages themselves render, same gates.
+  const hubs = (settingsPage || settingsMode)
+    ? ssSettingsHubs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, schedUnlocked })
+    : null;
+  // Which hub owns the slug in the URL, if any: [rail id, that tab's tuple].
+  const hubHit = onSettingsPage
+    ? (Object.keys(hubs).map((id) => [id, hubs[id].find((t) => t[0] === (sub || ""))]).find((x) => x[1]) || null)
+    : null;
+  const settingsSub = onSettingsPage
+    ? (hubHit ? hubHit[0]
+      : (settingsTabs.some((t) => t[0] === (sub || "")) ? sub : settingsTabs[0][0]))
+    : null;
+  // The topbar names the page you are actually on, so inside a hub it names the TAB —
+  // "Branding", "Crews", "Shingles" — rather than repeating the hub's name over all of them.
+  const settingsActive = onSettingsPage
+    ? ((hubHit && hubHit[1]) || settingsTabs.find((t) => t[0] === settingsSub) || settingsTabs[0])
+    : null;
+  // Where Back goes: the last workspace page you were on, else the same landing page a bare
+  // /portal login gets. Never history.back() — a pasted deep link has no previous entry, and
+  // the ?view= reconciliation in the popstate handler would have to be reasoned about for it.
+  const backTab = beforeSettings.current || ssFallbackTab(myAccess);
+  // A hub opens on the first tab the READER can see, not on a hardcoded slug: someone granted
+  // only settings_team has no Business Details tab, and sending them to `company` would land
+  // them on a page with no matching branch. Everything else targets its own slug.
+  const setTarget = (id) => ((hubs && hubs[id] && hubs[id].length) ? hubs[id][0][0] : id);
+  const setItem = ([id, label]) => (
+    <a key={id} href={ssPagePath("settings", setTarget(id))} className={settingsSub === id ? "active" : ""}
+      aria-current={settingsSub === id ? "page" : undefined} title={label}
+      onClick={ssNavClick(() => navigate("settings", setTarget(id)))}>
+      {SETTINGS_ICONS[id]}
+      <span className="lbl">{label}</span>
+    </a>
+  );
+  // One pass over the list, emitting a heading wherever the group CHANGES to a non-null
+  // value. Structures/Options/Colors/Designer carry a null group and so head the rail with no
+  // label over them at all — Carolyn: they "aren't grouped … they have their own nav on the
+  // side". Each run is its own <nav> so the groups keep the rail's existing spacing.
+  const settingsGroups = [];
+  (settingsTabs || []).forEach((t) => {
+    const last = settingsGroups[settingsGroups.length - 1];
+    if (!last || last.group !== t[3]) settingsGroups.push({ group: t[3], items: [t] });
+    else last.items.push(t);
+  });
 
   return (
     <div className="ss-shell">
-      <aside className="ss-side">
+      {/* ONE rail, two sets of contents. Both are always in the markup and CSS picks which is
+          shown (.ss-side-settings), so there is no resize listener, no second render path,
+          and the <900px icon-rail media query applies to whichever is up without knowing
+          anything about modes. .ss-brand and .ss-foot are OUTSIDE both sets: the logo, the
+          account switcher, Support and Sign Out belong to the app, not to a section — and an
+          operator mid-view-as must never lose the Exit control by walking into Settings. */}
+      <aside className={"ss-side" + (settingsMode ? " ss-side-settings" : "")}>
         {/* The real lockup, at full colour on white — which is why the rail is white. The
             wordmark IS the product name, so the name is no longer typed out beside it. */}
         <div className="ss-brand">
           <img className="ss-logo" src="/assets/logo.png" alt="Structure Studio" />
         </div>
 
+        {/* ── WORKSPACE RAIL ─────────────────────────────────────────────────────────
+            display:contents, so every group below stays a DIRECT flex child of .ss-side and
+            the rail's spacing (and the .ss-spacer push-down) is unchanged by the wrapper. */}
+        <div className="ss-ws-nav">
         <div className="ss-navlabel">Workspace</div>
         <nav className="ss-nav">
           {navItem("designer", "Designer")}
@@ -1224,20 +2238,22 @@ function Dashboard({ session }) {
         </nav>
         </>)}
 
-        {(isOperator || canProjects) && (<>
+        {/* ACCOUNTS AND ADMIN LEFT THIS GROUP on 2026-09-11 (Carolyn) — they are operator
+            CONSOLES, configuration rather than day-to-day work, and they live in the Settings
+            rail now under its own Operator heading. PROJECTS IS IN BOTH RAILS, which she
+            asked for by name: it is the internal bug board and roadmap, work you do between
+            other work, so it stays here AND appears there as a shortcut.
+            Gating is untouched — the same three expressions, in both places. */}
+        {canProjects && !supportView && (<>
         {/* Labelled for whoever is reading it: a CSM team member with Projects and nothing
             else is not an "Operator", and calling the group that would tell them they hold
             access to every builder's account, which they do not. */}
         <div className="ss-navlabel">{isOperator ? "Operator" : "Internal"}</div>
         <nav className="ss-nav">
-          {/* Accounts is the switcher and support needs it — it is how they reach the next
-              builder. Admin and Projects are OUR consoles (delete_client lives in one, our
-              internal bug board is the other) and a support account standing in a builder's
-              shoes has no business in either. ssClampTab refuses the routes too, so a typed
-              URL lands on a real page rather than a hidden-but-reachable one. */}
-          {isOperator && navItem("accounts", "Accounts")}
-          {isOperator && !supportView && navItem("admin", "Admin")}
-          {canProjects && !supportView && navItem("projects", "Projects")}
+          {/* Projects is OUR console (the internal bug board), so a support account standing
+              in a builder's shoes has no business in it. ssClampTab refuses the route too, so
+              a typed URL lands on a real page rather than a hidden-but-reachable one. */}
+          {navItem("projects", "Projects")}
         </nav>
         </>)}
 
@@ -1252,6 +2268,45 @@ function Dashboard({ session }) {
             {navItem("settings", "Settings")}
           </nav>
         )}
+        </div>{/* /.ss-ws-nav */}
+
+        {/* ── SETTINGS RAIL ──────────────────────────────────────────────────────────────
+            Rendered ALWAYS and hidden by CSS, never conditionally: with both sets in the
+            markup the mode is one class on the <aside> rather than a branch, and the
+            collapsed icon-rail media query needs to know nothing about any of this. */}
+        <div className="ss-set-nav">
+          <a className="ss-back" href={ssPagePath(backTab, null)}
+            title={`Back to ${(TAB_META[backTab] || [backTab])[0]}`}
+            onClick={ssNavClick(() => navigate(backTab))}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+            <span>Back to Workspace</span>
+          </a>
+          {/* Keyed by the run's FIRST SLUG, not by its group name. There is more than one
+              ungrouped run now — the leading Structures/Options/Colors/Designer/Company block
+              and Billing further down — so keying on `g.group || "_top"` gave two siblings the
+              same key, which React treats as a duplicate and reconciles wrongly. A slug is
+              unique by construction. */}
+          {settingsGroups.map((g) => (
+            <React.Fragment key={g.items[0][0]}>
+              {g.group && <div className="ss-navlabel">{g.group}</div>}
+              <nav className="ss-nav">{g.items.map(setItem)}</nav>
+            </React.Fragment>
+          ))}
+          {/* The operator consoles, moved here from the workspace rail. SAME three gates as
+              before — Accounts is the switcher and support needs it (it is how they reach the
+              next builder), while Admin holds delete_client and Projects is our bug board, so
+              a support account standing in a builder's shoes gets neither. ssClampTab refuses
+              those routes independently; this only decides what is drawn. */}
+          {(isOperator || (canProjects && !supportView)) && (<>
+            <div className="ss-navlabel">{isOperator ? "Operator" : "Internal"}</div>
+            <nav className="ss-nav">
+              {isOperator && navItem("accounts", "Accounts")}
+              {isOperator && !supportView && navItem("admin", "Admin")}
+              {canProjects && !supportView && navItem("projects", "Projects")}
+            </nav>
+          </>)}
+          <div className="ss-spacer"></div>
+        </div>
 
         <div className="ss-foot">
           {/* Operator account switcher — see the pickerOpen hooks above for the design
@@ -1306,14 +2361,19 @@ function Dashboard({ session }) {
           )}
           {/* ⚠️ Not to be confused with `supportView` in this file, which is a support
               OPERATOR viewing a tenant — a role, not this page. Same word, unrelated. */}
-          <button type="button" className="ss-newlink" onClick={() => navigate("support")} title="Support">
+          <a className="ss-newlink" href={ssPagePath("support", null)} onClick={ssNavClick(() => navigate("support"))} title="Support">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2.35 6.76H21l-5.32 4.02L17.7 20 12 15.6 6.3 20l2.02-7.22L3 8.76h6.65z"/></svg>
             <span>Support</span>
-          </button>
+          </a>
           {/* Hovering (or focusing/tapping) the identity row reveals a small
               flyout menu above it with Sign Out — no standalone button. */}
           <div className="ss-user-wrap">
-            <div className="ss-user" title={session.user.email} tabIndex={0} role="button" aria-haspopup="menu" aria-label={`Account menu for ${displayName}`}>
+            {/* Lit while My Profile is open, because that page deliberately does not light
+                anything in the rail — the control you clicked is the one that shows where you
+                are. Not lit when the SETTINGS rail is up, where My Profile is a nav item and
+                already marks itself; two highlights for one page reads as a bug. */}
+            <div className={"ss-user" + (onMyProfile && !settingsMode ? " active" : "")}
+              title={session.user.email} tabIndex={0} role="button" aria-haspopup="menu" aria-label={`Account menu for ${displayName}`}>
               <div className="ss-avatar">{initials}</div>
               <div className="utext">
                 <div className="uname">{displayName}</div>
@@ -1322,12 +2382,15 @@ function Dashboard({ session }) {
               <svg className="uchev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
             </div>
             <div className="ss-user-menu" role="menu">
-              {/* Reachable by EVERY role. The Settings tab is owner/admin only, so a
-                  "user"-role account would have nowhere else to edit their own details. */}
-              <button type="button" className="neutral" onClick={() => setProfileOpen(true)} role="menuitem">
+              {/* Reachable by EVERY role, which is why My Profile is deliberately the one
+                  Settings sub-tab with NO permission area: a "user"-role account would
+                  otherwise have nowhere to edit their own details. Carolyn 2026-09-11 asked
+                  for this entry to BE My Profile rather than a modal beside it. */}
+              <a className="neutral" href={ssPagePath("settings", "myprofile")} role="menuitem"
+                onClick={ssNavClick(() => navigate("settings", "myprofile"))}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                <span className="mtext">Your details</span>
-              </button>
+                <span className="mtext">My Profile</span>
+              </a>
               {/* Carolyn, 2026-07-23: a direct contact option ALONGSIDE the feedback widget.
                   Deliberately worded to route bugs to the widget, because that path is tracked
                   in monday.com and an untracked mailto would quietly drain its volume — which
@@ -1366,11 +2429,24 @@ function Dashboard({ session }) {
           condition as the host so the gate falls back to a normal scrolling body. */}
       <section className={"ss-main"
         + (activeTab === "designer" && !gateLocked ? " ss-designer-active" : "")
+        /* Projects owns its scroll the way the designer does: the shell takes the viewport
+           height and the board's table scrolls inside it under a pinned header. */
+        + (activeTab === "projects" ? " ss-projects-active" : "")
         + (viewing ? " ss-viewing" : "")}>
         <div className="ss-topbar">
           {/* Title AND description, both on the gradient — this is the one header, so there
-              is nothing below repeating it. */}
-          <div className="ttl">{(TAB_META[activeTab] || [activeTab])[0]}<span>{(TAB_META[activeTab] || [])[1]}</span></div>
+              is nothing below repeating it.
+
+              In Settings it names the SUB-PAGE, not "Settings": the rail already says which
+              section you are in, and the header's job is to say where you actually are. So
+              this reads "Colors — Paint, shingle, and metal palettes" where it used to read
+              "Settings — Structures, options, colors, …" over a gradient banner saying the
+              same thing again over a caption line saying it a third time. Accounts and Admin
+              are in the Settings rail but are ordinary pages, so they keep TAB_META. */}
+          <div className="ttl">
+            {settingsActive ? settingsActive[1] : (TAB_META[activeTab] || [activeTab])[0]}
+            <span>{settingsActive ? settingsActive[2] : (TAB_META[activeTab] || [])[1]}</span>
+          </div>
           {viewing && (
             <div title="You are acting as this builder. Changes you make here are live in THEIR account. Design statuses show the last cached value — the live GHL refresh only runs for the tenant's own login."
               style={{ display: "flex", alignItems: "center", gap: 10, background: "#FEE2E2", border: "1px solid #DC2626", borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 700, color: "#991B1B", whiteSpace: "nowrap" }}>
@@ -1414,7 +2490,7 @@ function Dashboard({ session }) {
                 <span style={{ fontSize: 12.5, fontWeight: 700, color: "#4C1D95" }}>
                   Add your name and phone number so your team knows who's who.
                 </span>
-                <button type="button" onClick={() => setProfileOpen(true)}
+                <button type="button" onClick={() => navigate("settings", "myprofile")}
                   style={{ ...S.btn("#6D28D9", "#FFF"), marginLeft: "auto", padding: "6px 12px", fontSize: 12 }}>Add details</button>
                 <button type="button" onClick={() => setNudgeHidden(true)} title="Dismiss"
                   style={{ background: "none", border: "none", color: "#7C3AED", fontSize: 12, fontWeight: 700, cursor: "pointer", padding: "6px 2px" }}>Later</button>
@@ -1445,7 +2521,7 @@ function Dashboard({ session }) {
                     BillingGate embeds the picker wherever they click), the transition and grace
                     states rely entirely on these two buttons to reach payment, so a non-technical
                     owner concludes the button is broken and may let the grace period lapse. */}
-                {isAdmin && (
+                {billingActor && (
                   <button type="button" onClick={() => navigate("settings", "billing")}
                     style={{ ...S.btn("#1D4ED8", "#FFF"), marginLeft: "auto", padding: "6px 12px", fontSize: 12 }}>Choose your plan</button>
                 )}
@@ -1460,13 +2536,18 @@ function Dashboard({ session }) {
                   Your last payment didn't go through.
                   {graceDaysLeft !== null && ` Access continues for ${graceDaysLeft} more day${graceDaysLeft === 1 ? "" : "s"}.`}
                 </span>
-                {isAdmin && (
+                {billingActor && (
                   <button type="button" onClick={() => navigate("settings", "billing")}
                     style={{ ...S.btn("#92400E", "#FFF"), marginLeft: "auto", padding: "6px 12px", fontSize: 12 }}>Update payment</button>
                 )}
               </div>
             )}
-            {gateLocked && <BillingGate reason={entitlement.reason} isAdmin={isAdmin} />}
+            {/* gateEnt, not entitlement: in view-as the operator's own entitlement is never
+                fetched (null), and this used to read `.reason` off it — a throw the moment an
+                operator could be locked. A platform operator gets the embedded plan picker;
+                portal-billing still refuses card entry on a tenant's behalf and only lets an
+                operator subscribe against a card the owner already vaulted. */}
+            {gateLocked && <BillingGate reason={gateEnt.reason} isAdmin={billingActor} />}
             {/* THE PIPEDRIVE-STYLE RECORD PAGE. Carolyn, 2026-08-24: "the view of being in
                 an opportunity and the view of being in a person are different, but they're
                 the same."
@@ -1511,7 +2592,7 @@ function Dashboard({ session }) {
                 key={sub}
                 kind={sub.charAt(0) === "c" ? "contact" : "design"}
                 recordId={sub.slice(2)}
-                isAdmin={canAdmin}
+                isAdmin={mirrorAdmin}
                 canEdit={canAdmin || !!(myAccess && myAccess.contacts === "edit")}
                 /* The DESIGN record reaches this line without a subscription — the branch
                    above turns a CONTACT record away, but a design record is what the free
@@ -1551,6 +2632,17 @@ function Dashboard({ session }) {
                    the onNavigate comment above documents. */
                 onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView) === "orders"
                   ? (id) => navigate("orders", "o-" + id) : null}
+                /* THE SALES TAX CARD (Avalara stage). Three separate questions, each the area
+                   its server action gates on: moving a quote to another sales location is
+                   designs:'edit'; the tax settings read and the billed lookup are settings_crm,
+                   the area that owns the company rate, so no sales rep can spend on a lookup.
+                   mirrorAdmin / mirrorAccess because these are "would the owner see this
+                   button?" questions — see their declarations. The server refuses regardless. */
+                clientId={effClientId}
+                viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
+                canEditDesigns={mirrorAdmin || ssCanWrite(mirrorAccess, "designs")}
+                canReadTaxSettings={mirrorAdmin || ssCanRead(mirrorAccess, "settings_crm")}
+                canVerifyTax={mirrorAdmin || ssCanWrite(mirrorAccess, "settings_crm")}
               />
             ) : null}
             {/* The merged era's two sub-views correct themselves; see DesignsLegacySub. */}
@@ -1565,7 +2657,7 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "designs" && sub !== "people" && !(sub && /^[cd]-/.test(sub)) && (
               <DesignsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
-                isAdmin={canAdmin} crmUnlocked={crmUnlocked}
+                isAdmin={mirrorAdmin} crmUnlocked={crmUnlocked}
                 onSeeBilling={() => navigate("settings", "billing")}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
                 /* PIPELINE OPENS THE CUSTOMER, not the deal. Carolyn 2026-09-04 @1:07:19,
@@ -1601,7 +2693,7 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "contacts" && !(sub && /^[cd]-/.test(sub)) && (
               crmUnlocked ? (
                 <LeadsTable key={"t-" + effClientId} clientId={effClientId}
-                  fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
+                  fetchDesigns={viewing ? viewingFetch : null} isAdmin={mirrorAdmin}
                   onOpenRecord={(contactId) => navigate("contacts", "c-" + contactId)}
                   onOpenDesign={openInDesigner} />
               ) : (
@@ -1620,7 +2712,10 @@ function Dashboard({ session }) {
                 />
               )
             )}
-            {!gateLocked && activeTab === "accounts" && isOperator && (
+            {/* Deliberately NOT behind `!gateLocked`, like Admin and Projects below: since view-as
+                mirrors the viewed tenant's billing lock (2026-09-15), the switcher is how an
+                operator LEAVES a locked account. Behind the gate it would trap them there. */}
+            {activeTab === "accounts" && isOperator && (
               <AccountsTab viewing={viewing} onOpen={openAccount}
                 onEditUser={(c, u) => setEditUser({ clientId: c.clientId, companyName: c.companyName, user: u })}
                 usersRefreshKey={usersRefreshKey} />
@@ -1692,7 +2787,7 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "support" && (
               <ReleasesView submissionsKey={feedbackKey}
                 sub={activeTab === "support" ? sub : null} onSub={(x) => navigate("support", x)}
-                onNavigate={navigate} canAdmin={canAdmin} />
+                onNavigate={navigate} canAdmin={mirrorAdmin} />
             )}
             {/* Admits exactly who the server admits: every qbo_* action in portal-settings'
                 GATES is gated on settings_quickbooks, and TAB_AREA routes the tab through
@@ -1715,15 +2810,27 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "settings" && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a))) && (
               <SettingsShell key={"t-" + effClientId} clientId={effClientId}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
-                isOwner={!viewing && tenant.role === "owner"}
-                isAdmin={!viewing && (tenant.role === "owner" || tenant.role === "admin")}
-                access={viewing ? null : myAccess}
+                /* The SAME three values the rail's tab list is built from — see
+                   settingsIsOwner above. They were computed inline here until the rail
+                   existed; leaving them inline would have meant two derivations of "is this
+                   an owner", and the first time they disagreed an owner would see Commissions
+                   in the rail and an empty body when they clicked it. */
+                isOwner={settingsIsOwner}
+                isAdmin={settingsIsAdmin}
+                access={settingsAccess}
                 /* MY VIEW settings are the OPERATOR's own even in view-as: they are the
                    person looking at the screen, and borrowing the viewed builder's owner's
                    layout would be both wrong and a small information leak. So this is NOT
                    nulled under `viewing`, unlike `access` above. */
                 prefs={tenant && tenant !== "none" ? tenant.prefs : null}
                 onPrefsSaved={(p) => setTenant((t) => (t && t !== "none" ? { ...t, prefs: p } : t))}
+                /* Your details, for the card at the top of My Profile. Always the SIGNED-IN
+                   person's own row, never the viewed tenant's — same reasoning as prefs
+                   above, and save_profile keys off the verified session's user id anyway, so
+                   the browser could not write someone else's row if it tried. */
+                profile={profile}
+                profileEmail={session.user.email}
+                onProfileSaved={(p) => setProfile((prev) => ({ ...(prev || {}), fullName: p.fullName, phone: p.phone, needsDetails: false }))}
                 schedUnlocked={schedUnlocked}
                 qboUnlocked={qboUnlocked}
                 rtpUnlocked={rtpUnlocked}
@@ -1753,8 +2860,8 @@ function Dashboard({ session }) {
                 pointing admins at Billing. */}
             {!gateLocked && activeTab === "build-schedule" && (
               schedUnlocked ? (
-                <BuildScheduleTab key={"bsched-" + effClientId} clientId={effClientId} canAdmin={canAdmin}
-                  access={viewing ? null : myAccess}
+                <BuildScheduleTab key={"bsched-" + effClientId} clientId={effClientId} canAdmin={mirrorAdmin}
+                  access={mirrorAccess}
                   onOpenDesign={(code) => openInDesigner(code)} />
               ) : (
               <ComingSoon
@@ -1773,8 +2880,8 @@ function Dashboard({ session }) {
             )}
             {!gateLocked && activeTab === "delivery-schedule" && (
               schedUnlocked ? (
-                <DeliveryScheduleTab key={"dsched-" + effClientId} clientId={effClientId} canAdmin={canAdmin}
-                  access={viewing ? null : myAccess} />
+                <DeliveryScheduleTab key={"dsched-" + effClientId} clientId={effClientId} canAdmin={mirrorAdmin}
+                  access={mirrorAccess} />
               ) : (
               <ComingSoon
                 title="Delivery Schedule"
@@ -1794,7 +2901,7 @@ function Dashboard({ session }) {
                 purpose. Queueing a build lives on the Build Schedule; loads live on the
                 Delivery Schedule; a sale follows the customer's invoice. */}
             {!gateLocked && activeTab === "inventory" && (
-              <InventoryTable key={"inv-" + effClientId} clientId={effClientId} isAdmin={canAdmin}
+              <InventoryTable key={"inv-" + effClientId} clientId={effClientId} isAdmin={mirrorAdmin}
                 refreshKey={designsRefreshKey}
                 onOpenDesign={openInDesigner}
                 onSendEstimate={(u) => openInDesigner(u.shortCode, null, { asNew: true, inventoryUnitId: u.id, unitSerial: u.serial, unitLifecycle: u.lifecycle })}
@@ -1806,8 +2913,8 @@ function Dashboard({ session }) {
             )}
             {!gateLocked && activeTab === "repairs" && (
               schedUnlocked ? (
-                <RepairsTab key={"reps-" + effClientId} clientId={effClientId} canAdmin={canAdmin}
-                  access={viewing ? null : myAccess} />
+                <RepairsTab key={"reps-" + effClientId} clientId={effClientId} canAdmin={mirrorAdmin}
+                  access={mirrorAccess} />
               ) : (
               <ComingSoon
                 title="Repairs"
@@ -1825,7 +2932,7 @@ function Dashboard({ session }) {
             )}
             {!gateLocked && activeTab === "view-3d" && (
               view3dUnlocked
-                ? <Studio3DStatus clientId={effClientId} canAdmin={canAdmin} navigate={navigate} />
+                ? <Studio3DStatus clientId={effClientId} canAdmin={mirrorAdmin} navigate={navigate} />
                 : <ComingSoon
                     title="3D Design"
                     icon={ICONS["view-3d"]}
@@ -1911,34 +3018,6 @@ function Dashboard({ session }) {
         />
       )}
 
-      {/* Quick-add: file an item onto a Projects board from anywhere in the portal
-          (Carolyn 2026-08-29). Deliberately visible in view-as too — spotting a bug while
-          inside a builder's account is exactly when you want it, and unlike the Feedback
-          bubble above there is no tenant attribution to get wrong.
-          Gated on `canProjects`, the SAME gate as the Projects tab and its own ＋ Add item
-          row (Carolyn 2026-09-07). It was `isOperator` until then, which is the pre-183
-          gate: a CSM team member granted the Projects area could add items ON the board but
-          not from anywhere else, for no reason anyone chose. This widens nothing — that add
-          row was already open to them, and portal-projects re-checks canWrite on every call.
-          `canProjects` is THREE-STATE (null while can_open_projects is in flight), so this
-          renders nothing for a moment on load rather than flashing a button at someone who
-          cannot use it — the same reason `featureOn` treats a null entitlement as loading. */}
-      {canProjects && !supportView && <PMQuickAdd viewingClientId={viewing ? viewing.clientId : null} />}
-
-      {/* Your own name and phone. Writes via portal-settings save_profile, which keys off the
-          verified session's user id — the browser never says whose row to update. */}
-      {profileOpen && (
-        <ProfileDialog
-          initial={profile}
-          email={session.user.email}
-          onClose={() => setProfileOpen(false)}
-          onSaved={(p) => {
-            setProfile((prev) => ({ ...(prev || {}), fullName: p.fullName, phone: p.phone, needsDetails: false }));
-            setProfileOpen(false);
-          }}
-        />
-      )}
-
       {/* Operator filling in someone else's details from the Accounts tab. Contact fields
           only — role and tenant are not editable here, since either would move access. */}
       {editUser && (
@@ -1994,6 +3073,78 @@ function formatPhone(input) {
 // self-service portal-settings action) and an operator editing someone else's (save injected
 // by the caller). Email is shown read-only — changing a login's email is an auth operation,
 // not a contact-detail edit, and belongs with the deliberate owner-linking flow.
+// ─── Your details, as a CARD (Settings → My Profile) ───
+// Carolyn 2026-09-11: "Move My profile here / move the information in Your details to the top
+// of my profile". The identity menu used to open a modal for this; it now links to the tab and
+// the form lives at the top of it, so a person's own settings are one place instead of two.
+//
+// ⚠️ ProfileDialog BELOW IS NOT DEAD. It still serves the OPERATOR path — editing somebody
+// else's name and phone from the Accounts tab — which is a different person's row, reached
+// from a table, and has no business being a page. This card and that dialog share the same
+// three fields and the same save deliberately; keep them in step.
+function YourDetailsCard({ profile, email, onSaved }) {
+  const [fullName, setFullName] = useState((profile && profile.fullName) || "");
+  // Format what is already stored too, so an operator-typed or legacy value renders the same
+  // as a freshly entered one rather than only tidying up once someone edits it.
+  const [phone, setPhone] = useState(formatPhone((profile && profile.phone) || ""));
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  // Seeded once, then left alone: re-syncing from `profile` would wipe what someone is part
+  // way through typing the moment the shell refreshes it underneath them.
+  const submit = async () => {
+    const n = fullName.trim();
+    if (!n) { setMsg({ err: "Please enter a name." }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", {
+        body: { action: "save_profile", fullName: n, phone: phone.trim() },
+      });
+      if (error) {
+        let m = error.message;
+        try { const ctx = await error.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_e) {}
+        throw new Error(m || "Could not save.");
+      }
+      if (data && data.error) throw new Error(data.error);
+      if (onSaved) onSaved({ fullName: n, phone: phone.trim() });
+      setMsg({ ok: "Saved." });
+    } catch (e) {
+      setMsg({ err: e.message || "Could not save." });
+    }
+    setBusy(false);
+  };
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Your details</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", lineHeight: 1.5 }}>
+        Used so your team knows who&rsquo;s who. Your phone number is visible to admins on this
+        account and to StructureStudio support — it is never shown to your customers.
+      </p>
+      {msg && msg.ok && <div style={{ ...S.okMsg, marginBottom: 12 }}>{msg.ok}</div>}
+      {msg && msg.err && <div style={{ ...S.err, marginBottom: 12 }}>{msg.err}</div>}
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+          <span style={S.lbl}>Name</span>
+          <input value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Jane Yoder"
+            style={{ ...S.input, marginBottom: 12 }} />
+        </div>
+        <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+          <span style={S.lbl}>Phone</span>
+          <input value={phone} onChange={(e) => setPhone(formatPhone(e.target.value))} placeholder="(555) 123-4567"
+            inputMode="tel" autoComplete="tel" style={{ ...S.input, marginBottom: 12 }} />
+        </div>
+        <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+          <span style={S.lbl}>Email</span>
+          <input value={email || ""} readOnly title="Contact StructureStudio to change the email on a login"
+            style={{ ...S.input, marginBottom: 12, background: "#F8FAFC", color: "#94A3B8" }} />
+        </div>
+      </div>
+      <button type="button" onClick={submit} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>
+        {busy ? "Saving…" : "Save"}
+      </button>
+    </div>
+  );
+}
+
 function ProfileDialog({ initial, email, onClose, onSaved, title, save }) {
   const [fullName, setFullName] = useState((initial && initial.fullName) || "");
   // Format what is already stored too, so an operator-typed or legacy value renders the same
@@ -2105,12 +3256,20 @@ function PortalApp() {
       if (errCode || rawErr) {
         const desc = String(pick("error_description") || "").replace(/\+/g, " ");
         const isExpired = /expired/i.test(errCode || "") || /expired/i.test(desc);
+        // "Sign-in link", not "password reset link": this branch fires for invite emails too.
         setLinkError(
           isExpired
-            ? "That password reset link has expired or was already used. Enter your email below and click “Forgot password?” to get a fresh one."
-            : "That password reset link is no longer valid. Enter your email below and click “Forgot password?” to get a new one.",
+            ? "That sign-in link has expired or was already used. Enter your email below and click “Forgot password?” to get a fresh one."
+            : "That sign-in link is no longer valid. Enter your email below and click “Forgot password?” to get a new one.",
         );
-        ssLogError(SS_ERR_SOURCE, "recovery link rejected: " + (desc || "no description"), errCode || rawErr, { expired: isExpired });
+        // Severity: GoTrue answers EVERY used, superseded or out-of-date one-time link with
+        // error_code=otp_expired ("Email link is invalid or has expired"). That is Supabase
+        // correctly refusing a dead link (someone reopened an old reset/invite email), so it is
+        // a refusal and logs as info (migration 141). The row stays, so a spike is still
+        // visible. Any other code (server_error, …) is not explained and stays an error, as do
+        // pkce_exchange_failed and recovery_no_session below: those cannot be told apart from
+        // a link that was mangled on the way.
+        ssLogError(SS_ERR_SOURCE, "recovery link rejected: " + (desc || "no description"), errCode || rawErr, { expired: isExpired }, isExpired ? "info" : "error");
         scrubUrl();
         if (!cancelled) setSession(null);
         return;

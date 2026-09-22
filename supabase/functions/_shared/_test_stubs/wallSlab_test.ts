@@ -264,3 +264,111 @@ Deno.test("a double still hangs above a workbench — the property slice 1 shipp
   const bench = { type: "workbench", wall: "north", x: 100, y: 0, widthFt: 4, heightOffFloorIn: 36 };
   assertFalse(checkWallSlabOverlap(at(100), 4 * SC, [bench], ITEMS, SC, { type: "doubleShelf", heightOffFloorIn: 48 }));
 });
+
+// ── Electrical devices are wall items, not workbenches (2026-09-15) ───────────────────────
+// Carolyn, 2026-09-14: the shelf "can't pass the electrical", a flood light was refused with
+// "something else is already mounted there", and a light over a door was refused. One cause:
+// elecToolsFor built every wall device with wallSnap but NO modelKey, which ssSlabModel reads
+// as a LEGACY workbench with a [0, 1e4] band. The "electrical devices are NOT slabs" case above
+// passed the whole time, because it hand-wrote `modelKey: "outlet"` into its config — a shape
+// the shipped designer never produced. So these cases use the tool EXACTLY as elecToolsFor
+// builds it, and the last one pins that builder's source so the key cannot quietly go missing.
+//
+// A non-slab candidate's band comes from ssItemVBand, and a door's from d3OpeningDefaults, so
+// those are lifted too — by anchor, for the same no-copies reason as everything else here.
+function lift(start: string, end: string) {
+  const a = SRC.indexOf(start), b = SRC.indexOf(end, a);
+  if (a < 0 || b < 0) throw new Error(`wallSlab_test: anchors moved for ${start} (${a}, ${b}) — re-point them`);
+  return SRC.slice(a, b);
+}
+const IS_VENT = /const isVentItem = [^\n]*\n/.exec(SRC);
+if (!IS_VENT) throw new Error("wallSlab_test: isVentItem moved — re-point it");
+const BANDED = new Function(
+  `${IS_VENT[0]}\n${lift("function d3OpeningDefaults(", "// Resolve a palette value")}\n` +
+    `${lift("function checkDoorCollision(", "// Wall SLABS")}\n` +
+    `${lift("function ssItemVBand(", "// A flat wall-face elevation")}\n${BLOCK}; ` +
+    "return { checkDoorCollision, checkWallSlabOverlap, ssItemVBand, ssSlabModel, ssSlabBand };",
+)() as {
+  checkDoorCollision: (ni: Record<string, unknown>, nc: Record<string, unknown>, existing: Record<string, unknown>[], itemTypes: Record<string, unknown>, sc: number) => boolean;
+  checkWallSlabOverlap: typeof checkWallSlabOverlap;
+  ssItemVBand: (item: Record<string, unknown>, cfg: Record<string, unknown>, itemTypes: Record<string, unknown>) => { bottomFt: number; topFt: number } | null;
+  ssSlabModel: typeof ssSlabModel;
+  ssSlabBand: typeof ssSlabBand;
+};
+
+// The fields elecToolsFor emits for a wall-mounted catalog item (mount !== "ceiling").
+const elecTool = (id: string, heightOffFloorIn: number) => ({
+  label: id, wallSnap: true, modelKey: "electrical", width: 0.5, height: 0.3,
+  heightOffFloorIn, noPalette: true, electricalItemId: id,
+});
+const ELEC = {
+  ...ITEMS,
+  OUT: elecTool("OUT", 24),
+  FLOOD: elecTool("FLOOD", 120),
+  LIGHT84: elecTool("LIGHT84", 84),
+  // A catalog door: no d3OpeningDefaults entry, so its band is its own heightIn (6'8").
+  fixtureDoor: { wallOnly: true, width: 3, height: 0.5 },
+};
+const dev = (type: string, x: number, h?: number) => ({
+  type, wall: "north", x, y: 0, widthFt: 0.5, electricalItemId: type,
+  heightOffFloorIn: h != null ? h : (ELEC as Record<string, { heightOffFloorIn?: number }>)[type].heightOffFloorIn,
+});
+
+Deno.test("an electrical tool as elecToolsFor builds it is not a slab", () => {
+  assertEquals(BANDED.ssSlabModel("OUT", ELEC), null);
+  assertEquals(BANDED.ssSlabBand({ type: "OUT" }, ELEC), null);
+  // Its band is its own height, in feet: 24in -> 2.0..2.3 ft, never the whole wall.
+  const b = BANDED.ssItemVBand(dev("OUT", 100), ELEC.OUT, ELEC)!;
+  assertEquals([b.bottomFt, Math.round(b.topFt * 100) / 100], [2, 2.3]);
+  // And the shape it had until 2026-09-15 is exactly the legacy workbench — the whole bug.
+  const { modelKey: _drop, ...noKey } = ELEC.OUT;
+  assertEquals(BANDED.ssSlabModel("OUT", { OUT: noKey }), "legacy");
+});
+
+Deno.test("a workbench slides across an outlet on its span", () => {
+  const outlet = dev("OUT", 100);
+  const bench = { type: "workbench", heightOffFloorIn: 36 };
+  assertFalse(BANDED.checkWallSlabOverlap(at(100), 4 * SC, [outlet], ELEC, SC, bench));
+});
+
+Deno.test("a shelf at 48in hangs over an outlet at 24in, and the outlet goes under the shelf", () => {
+  assertFalse(BANDED.checkWallSlabOverlap(at(100), 4 * SC, [dev("OUT", 100)], ELEC, SC, { type: "shelf", heightOffFloorIn: 48 }));
+  const shelf = { type: "shelf", wall: "north", x: 100, y: 0, widthFt: 4, heightOffFloorIn: 48 };
+  assertFalse(BANDED.checkWallSlabOverlap(at(100), 0.5 * SC, [shelf], ELEC, SC, dev("OUT", 100)));
+});
+
+Deno.test("an outlet BEHIND a workbench top is still refused", () => {
+  // 24in sits inside the bench's 0..36in. Hidden behind the bench is not a usable outlet — which
+  // is why the package lays those out ABOVE the bench instead (electricalLayout_test).
+  const bench = { type: "workbench", wall: "north", x: 100, y: 0, widthFt: 4, heightOffFloorIn: 36 };
+  assert(BANDED.checkWallSlabOverlap(at(100), 0.5 * SC, [bench], ELEC, SC, dev("OUT", 100)));
+});
+
+Deno.test("a flood light at 120in clears a workbench and a double shelf below it", () => {
+  const bench = { type: "workbench", wall: "north", x: 100, y: 0, widthFt: 4, heightOffFloorIn: 36 };
+  const dbl = { type: "doubleShelf", wall: "north", x: 100, y: 0, widthFt: 4, heightOffFloorIn: 36 }; // 36..74
+  assertFalse(BANDED.checkWallSlabOverlap(at(100), 0.5 * SC, [bench, dbl], ELEC, SC, dev("FLOOD", 100)));
+});
+
+Deno.test("a light at 84in clears a door; an outlet at 24in in the doorway is still refused", () => {
+  const door = { type: "fixtureDoor", wall: "north", x: 100, y: 0, widthFt: 3, heightIn: 80 };
+  assertFalse(BANDED.checkDoorCollision(dev("LIGHT84", 100), ELEC.LIGHT84, [door], ELEC, SC));
+  assert(BANDED.checkDoorCollision(dev("OUT", 100), ELEC.OUT, [door], ELEC, SC));
+  // Clear of the door along the wall, the outlet places.
+  assertFalse(BANDED.checkDoorCollision(dev("OUT", 100 + 3 * SC), ELEC.OUT, [door], ELEC, SC));
+});
+
+Deno.test("elecToolsFor stamps modelKey \"electrical\" in BOTH twins", async () => {
+  // The whole fix is one property on one object literal. Nothing else would notice it going:
+  // every case above builds the tool by hand. Read the builder out of both the shipped twin and
+  // its .jsx source, so a mirror that misses the line fails here rather than in Carolyn's plan.
+  const JSX = await Deno.readTextFile(new URL("../../../../StructureStudio.jsx", import.meta.url));
+  for (const [name, text] of [["structure-studio.component.js", SRC], ["StructureStudio.jsx", JSX]]) {
+    const a = text.indexOf("const elecToolsFor = (hasPkg) => {");
+    const b = text.indexOf("const elecItemTools = elecToolsFor(", a);
+    assert(a >= 0 && b > a, `${name}: elecToolsFor anchors moved — re-point, don't delete`);
+    const body = text.slice(a, b);
+    assert(/wallSnap:\s*it\.mount !== "ceiling"/.test(body), `${name}: elecToolsFor no longer builds wall tools the way this test assumes`);
+    assert(/modelKey:\s*"electrical"/.test(body), `${name}: elecToolsFor lost modelKey "electrical" — every outlet is a full-height workbench again`);
+  }
+});

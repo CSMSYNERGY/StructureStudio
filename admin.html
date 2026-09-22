@@ -19,7 +19,7 @@
 <script src="/vendor/react-dom-18.2.0.production.min.js"></script>
 <script src="/vendor/supabase-js-2.112.1.umd.min.js"></script>
 
-<script defer src="/admin.app.compiled.js?v=072b2569" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/admin.app.compiled.js?v=4bf82aa5" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script data-ss-app="admin console">
 /* ── Dependency boot guard ────────────────────────────────────────────────────────────────
    The three /vendor/ tags above are this page's only library dependencies, and the app
@@ -105,14 +105,67 @@
           // transferSize 0 with a body means the HTTP cache answered it. That is the reading
           // that matters most here: a cached copy is the one thing a plain reload cannot fix.
           // decodedBodySize, not encodedBodySize: the decoded length is the one a reader can
-          // hold against the real file (880085 for the component today), so a copy that
-          // stopped short announces itself. encoded is the compressed size and matches
-          // nothing anyone can look up.
+          // hold against the real file (its byte length at the deployed commit - never a
+          // number copied into a comment, which goes stale), so a copy that stopped short
+          // announces itself. encoded is the compressed size and matches nothing anyone can
+          // look up.
           else out.push(name + ": " + (e.decodedBodySize || 0) + "B "
             + (e.transferSize === 0 ? "from browser cache" : "over the network"));
         }
       } catch (_eRT) { /* no Resource Timing - the filenames still go out */ }
       return out;
+    }
+
+    // HEAL BEFORE COMPLAINING - once. Shared by the two failures a broken cached copy causes:
+    // this page's own app script not running (the DOMContentLoaded check below) and the shared
+    // component module not running (index.mount calls ssBootFail with boot_component_missing).
+    // On 2026-09-05 the screen appeared three times, a minute apart, while the server answered
+    // every one of those requests correctly - and the bundles are served `immutable,
+    // max-age=31536000` (see _headers), so a plain reload never re-fetches them. Whatever broke
+    // the copy the browser holds - a truncated transfer, an extension, the DPI box on that
+    // network - the user could not get out of it by reloading, and had no reason to know that
+    // a HARD reload was the escape. So do it for them: fetch each bundle with cache:"reload",
+    // which bypasses the HTTP cache AND overwrites the entry, then reload onto the repaired
+    // copies. Returns true when that reload is under way; the caller must then neither paint
+    // the screen nor report.
+    //
+    // THE LATCH IS WHAT MAKES IT ONCE. sessionStorage survives a reload in the same tab, so the
+    // second failure in a row finds "ss_boot_retry" set and goes to the screen. Only a boot that
+    // WORKED releases it (the DOMContentLoaded check below), never a failed one - a failed load
+    // that cleared it would hand the next load a fresh retry, and a dead network or a module
+    // that never loads would reload forever. For the same reason there is no retry unless the
+    // latch READS BACK as set: storage that throws, or drops the write, gets the screen.
+    function ssRetryOnce() {
+      try {
+        if (sessionStorage.getItem("ss_boot_retry") === "1") return false;
+        sessionStorage.setItem("ss_boot_retry", "1");
+        if (sessionStorage.getItem("ss_boot_retry") !== "1") return false;
+      } catch (_eLatch) { return false; }
+      try {
+        // This document is going away. The flag tells the DOMContentLoaded check that a failure
+        // path owns this load (so it leaves the latch alone); noindex because a crawler that
+        // snapshots before the reload lands would otherwise index an empty page - the screen
+        // this replaces carried the same tag.
+        window.__ssBootBlocked = true;
+        var rmeta = document.createElement("meta");
+        rmeta.setAttribute("name", "robots");
+        rmeta.setAttribute("content", "noindex");
+        document.head.appendChild(rmeta);
+        var jobs = [];
+        var rtags = document.querySelectorAll("script[src]");
+        for (var r = 0; r < rtags.length; r++) {
+          var rraw = rtags[r].getAttribute("src") || "";
+          if (rraw.indexOf(".compiled.js") === -1 && rraw.indexOf("/vendor/") === -1) continue;
+          jobs.push(fetch(rraw, { cache: "reload", credentials: "same-origin" })
+            .then(function (resp) { return resp.arrayBuffer(); })
+            .catch(function () { /* the reload is the recovery, not this fetch */ }));
+        }
+        var done = false;
+        var go = function () { if (!done) { done = true; location.reload(); } };
+        setTimeout(go, 6000);          // never strand anyone behind a hung fetch
+        Promise.all(jobs).then(go, go);
+        return true;
+      } catch (_eRetry) { return false; }
     }
 
     // PUBLISHED so a page's own app script can reuse this exact failure screen for the one
@@ -124,6 +177,20 @@
     // preflight exists to catch. `missing` names the file(s); `code` separates the causes
     // in app_errors.
     function ssBootFail(missing, code, detail) {
+      // THE COMPONENT PATH GETS WHAT THE APP-SCRIPT PATH ALREADY HAD. index.mount calls in here
+      // with boot_component_missing and no detail, which used to mean the screen at once - no
+      // retry, although a broken cached copy is exactly what a retry heals - and a row of nulls,
+      // so the four 2026-09-07 rows could not say whether the module arrived short or threw. So
+      // heal once first, and once that is spent, send the same measurements. `retried` is read
+      // BEFORE the attempt: it says this load is the one after a retry.
+      if (code === "boot_component_missing" && !detail) {
+        var wasRetried = false;
+        try { wasRetried = sessionStorage.getItem("ss_boot_retry") === "1"; } catch (_eWas) {}
+        if (ssRetryOnce()) return;
+        detail = { scripts: ssScriptFacts(), error: ssFirstError,
+          failedToLoad: window.__ssScriptFail || [], retried: wasRetried };
+      }
+
       // Stop the app scripts running on top of the failure screen. Every compiled artifact
       // checks this flag as its first statement (scripts/compile.mjs adds the check); the
       // guard runs during parsing, before any defer'd script executes, so the flag is
@@ -251,45 +318,22 @@
     // DOMContentLoaded in document order, so a quiet page here means this page's own app
     // artifact never ran at all - the failure class the inline-babel world swallowed.
     document.addEventListener("DOMContentLoaded", function () {
+      // A FAILURE PATH ALREADY OWNS THIS LOAD: the screen is up, or a self-heal reload is on its
+      // way (ssRetryOnce sets the flag before starting one). Return WITHOUT touching the latch.
+      // This used to clear it here as well, which was harmless while only this handler retried;
+      // with the component path retrying too, clearing it now - before that reload lands - would
+      // give every load a fresh retry, and a module that never loads would reload forever.
+      if (window.__ssBootBlocked) return;
+
       // A boot that worked clears the latch, so the NEXT failure in this tab still gets its
       // one free retry rather than going straight to the screen.
-      if (window.__ssAppBooted || window.__ssBootBlocked) {
+      if (window.__ssAppBooted) {
         try { sessionStorage.removeItem("ss_boot_retry"); } catch (_eClear) {}
         return;
       }
 
-      // HEAL BEFORE COMPLAINING. On 2026-09-05 this screen appeared three times, a minute
-      // apart, while the server answered every one of those requests correctly - and the two
-      // bundles are served `immutable, max-age=31536000` (see _headers), so a plain reload
-      // never re-fetches them. Whatever broke the copy the browser holds - a truncated
-      // transfer, an extension, the DPI box on that network - the user could not get out of it
-      // by reloading, and had no reason to know that a HARD reload was the escape.
-      //
-      // So do it for them, once: fetch each bundle with cache:"reload", which bypasses the
-      // HTTP cache AND overwrites the entry, then reload onto the repaired copies. The latch
-      // is sessionStorage, so a genuinely dead network cannot loop - the second failure in the
-      // same tab shows the screen and reports.
-      var retried = true;
-      try { retried = sessionStorage.getItem("ss_boot_retry") === "1"; } catch (_eGet) {}
-      if (!retried) {
-        try { sessionStorage.setItem("ss_boot_retry", "1"); } catch (_eSet) {}
-        try {
-          var jobs = [];
-          var rtags = document.querySelectorAll("script[src]");
-          for (var r = 0; r < rtags.length; r++) {
-            var rraw = rtags[r].getAttribute("src") || "";
-            if (rraw.indexOf(".compiled.js") === -1 && rraw.indexOf("/vendor/") === -1) continue;
-            jobs.push(fetch(rraw, { cache: "reload", credentials: "same-origin" })
-              .then(function (resp) { return resp.arrayBuffer(); })
-              .catch(function () { /* the reload is the recovery, not this fetch */ }));
-          }
-          var done = false;
-          var go = function () { if (!done) { done = true; location.reload(); } };
-          setTimeout(go, 6000);          // never strand anyone behind a hung fetch
-          Promise.all(jobs).then(go, go);
-          return;                        // do NOT paint the screen on the first attempt
-        } catch (_eRetry) { /* fall through and report */ }
-      }
+      // Heal before complaining (see ssRetryOnce). Do NOT paint the screen on the first attempt.
+      if (ssRetryOnce()) return;
 
       var srcs = [];
       var tags = document.querySelectorAll("script[defer]");

@@ -1,6 +1,9 @@
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>scan UI mount check</title>
-<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{max-width:1080px;margin:0 auto}</style>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{max-width:1728px;margin:0 auto}</style>
+<!-- #root matches index.html, which caps at 1728px and centres (Carolyn 2026-09-17, after the
+     2026-09-14 full-width call made the designer unusable on a 32" screen). A harness on a
+     different number would measure a layout that does not ship. -->
 </head><body><div id="root"></div>
 <!-- Same CDN set as index.html / portal.html, byte-for-byte (preflight step 2 keeps them locked). -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin="anonymous"></script>

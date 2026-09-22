@@ -1,17 +1,19 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
-import { checkSession } from "../_shared/customerSession.ts";
-import { phoneKey } from "../_shared/phoneKey.ts";
+import { checkSession, identityForClient } from "../_shared/customerSession.ts";
+import { loadAddressStanding, ownsDesign } from "../_shared/customerIdentity.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { amountOwed, subtotalsFromSnapshot, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
+import { consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
 
 // customer-quotes: the authenticated quote list for the CUSTOMER portal (the shed
 // shopper's own view, not the tenant owner's). The caller presents the opaque bearer
 // token minted by customer-auth after Twilio Verify approved their phone OTP
-// (migration 108); identity — tenant + verified phone — comes entirely from that
-// session row, never from the request body.
+// (migration 108), or after they proved an emailed code (migration 230); identity —
+// tenant + verified phone and/or email — comes entirely from that session row, never
+// from the request body.
 //
 // This function serves ONE action, `list`. Logout is deliberately NOT here:
 // customer-auth minted the session, so customer-auth revokes it — one owner for the
@@ -47,7 +49,8 @@ function dbFail(req: Request, clientId: string | null, where: string, err: any) 
  *  renders as "sent" — the safe floor — rather than leaking internal vocabulary. */
 const CUSTOMER_STATUSES = new Set(["sent", "accepted", "invoiced", "delivered"]);
 
-// phoneKey moved to _shared/phoneKey.ts (174) — see the note in customer-accept.
+// phoneKey moved to _shared/phoneKey.ts (174), and the ownership compare built on it to
+// _shared/customerIdentity.ts ownsDesign (230) — see the note in customer-accept.
 
 /**
  * A document link leaves this function only when it names an object in THIS project's own
@@ -164,14 +167,20 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
     .eq("client_id", identity.clientId)
     .order("created_at", { ascending: false }); // newest first
   if (designsErr) return dbFail(req, identity.clientId, "load quotes", designsErr);
+  // The shared-address rule (customerIdentity.ts, review 2026-09-15): an address this tenant has
+  // filed beside more than one phone owns nothing by email. Its own paged read, never `rows`
+  // above: that read is unpaged, and a row cap there would drop the older design that shows the
+  // address is shared. Reads nothing for a phone-only session.
+  const addr = await loadAddressStanding(admin, identity.clientId, identity);
+  if (!addr.standing) return dbFail(req, identity.clientId, "load quotes", addr.error);
+  const standing = addr.standing;
 
-  const identityPhone = phoneKey(identity.phoneDigits);
   const mine = (rows ?? [])
     .filter((d) => {
-      // The verified phone is the identity — only this customer's designs. Both sides
-      // through phoneKey: an 11-digit stored "1816…" must match the 10-digit session.
-      const phone = phoneKey(d?.contact?.phone);
-      if (!phone || phone !== identityPhone) return false;
+      // The verified identity — only this customer's designs. A verified phone matches the
+      // design's phone, a verified email the design's email (unless that address is shared),
+      // and neither is ever resolved to the other through a design (customerIdentity.ts, 230).
+      if (!ownsDesign(identity, d?.contact, standing)) return false;
       // 'inventory' is the tenant's own spec-build master designs — internal stock, never
       // something this customer asked for. 'draft' is a silent capture the visitor never
       // knowingly created (saveDraftSilently fires when they open quote Details) — showing
@@ -282,6 +291,52 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
     }
   }
 
+  // The builder's answer to an accept (migration 229). customer-accept raises a DRAFT invoice
+  // request when the customer accepts, and nothing is numbered or sent until the builder
+  // approves it — so between the two the customer's panel says "Your invoice is being
+  // prepared" instead of nothing at all. Service-role table, same reason as invoice_sends.
+  //
+  // Only the status and when it was asked leave this function. dismiss_note is the team's
+  // words about this customer and never does.
+  //
+  // A missing table is not an error: this function may deploy before migration 229 is applied,
+  // and failing the whole quote list over a status line would be the wrong trade. Any OTHER
+  // read failure is logged and the list still loads without the line.
+  const reqByCode = new Map<string, { status: string; requestedAt: string | null }>();
+  if (ssMode && mine.length > 0) {
+    const { data: reqs, error: reqErr } = await admin.from("invoice_requests")
+      .select("short_code, status, requested_at")
+      .eq("client_id", identity.clientId)
+      .in("short_code", mine.map((d) => d.short_code));
+    const missingTable = reqErr && (
+      String(reqErr.code) === "42P01" || String(reqErr.code) === "PGRST205" ||
+      /does not exist|schema cache/i.test(String(reqErr.message || ""))
+    );
+    if (reqErr && !missingTable) {
+      logEdgeError({
+        fn: "customer-quotes", req, clientId: identity.clientId, code: reqErr.code ?? 500,
+        message: `read invoice requests: ${reqErr.message ?? "unknown database error"}`,
+      }).catch(() => {});
+    }
+    for (const r of reqs ?? []) {
+      reqByCode.set(String(r.short_code), { status: String(r.status), requestedAt: r.requested_at ?? null });
+    }
+  }
+
+  // What each out-for-signature invoice actually bills, computed ONCE per code and used for
+  // both the card's `amountDue` and the sentence the customer signs, so the two can never
+  // name different money. The inputs are exactly customer-accept sign_invoice's: the AGREED
+  // lines, the acknowledged change orders, and the order's own total.
+  const amountDueByCode = new Map<string, number | null>();
+  for (const d of mine) {
+    if (!invByCode.has(d.short_code)) continue;
+    amountDueByCode.set(d.short_code, amountOwed(
+      agreedBaseline(d).lines,
+      ackedByCode.get(d.short_code) ?? [],
+      orderTotalByCode.get(d.short_code) ?? null,
+    ));
+  }
+
   const quotes = mine
     // NARROW projection — the migration-048 lesson (a phone number once bridged to full
     // contact PII, and 048's fix was to stop returning it). Never echo `contact` back:
@@ -334,14 +389,35 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
           // live on purpose — that is the quote headline, and while a change is pending the
           // customer is meant to see the old and new figures side by side on the change card.
           invoice: invByCode.has(d.short_code)
-            ? {
-              ...invByCode.get(d.short_code),
-              amountDue: amountOwed(
-                agreedBaseline(d).lines,
-                ackedByCode.get(d.short_code) ?? [],
-                orderTotalByCode.get(d.short_code) ?? null,
-              ),
-            }
+            ? { ...invByCode.get(d.short_code), amountDue: amountDueByCode.get(d.short_code) ?? null }
+            : null,
+          // The invoice REQUEST (migration 229): {status: 'pending'|'approved'|'dismissed',
+          // requestedAt}, or null. Null whenever an invoice is out — the invoice itself is then
+          // the answer, and a stale "being prepared" line beside it would contradict the card.
+          invoiceRequest: invByCode.has(d.short_code) ? null : (reqByCode.get(d.short_code) ?? null),
+          // ⚠️ THE EXACT SENTENCES THE CUSTOMER AGREES TO (2026-09-15). The designer's account
+          // panel prints these beside its checkboxes instead of composing its own, because the
+          // text is stored verbatim as the consent evidence and a hand-kept copy in the browser
+          // is how "what they ticked" and "what the record says" drift apart. Same composer and
+          // same inputs as customer-accept (_shared/consentSentences.ts):
+          //   acceptConsentText — accept_quote method "click": ss_quote_number + the live quote
+          //     total, exactly as accept_quote reads them. Null until the quote has a number.
+          //   signConsentText — sign_invoice: the invoice number + amountDue above. Null until
+          //     an invoice is out.
+          // Always present on an SS quote, as null when not applicable — the same shape rule as
+          // `invoice`. Showing a sentence is not permission to act: canAccept / canSignInvoice
+          // still decide whether the button appears.
+          acceptConsentText: d.ss_quote_number
+            ? consentSentenceClick(
+              String(d.ss_quote_number),
+              (() => { const t = totalFromSnapshot(d.estimate_lines); return t == null ? null : fmtMoney(t); })(),
+            )
+            : null,
+          signConsentText: invByCode.has(d.short_code)
+            ? consentSentenceInvoice(
+              String(invByCode.get(d.short_code).number || ""),
+              (() => { const t = amountDueByCode.get(d.short_code); return t == null ? null : fmtMoney(t); })(),
+            )
             : null,
           // Whether the SIGN button may appear. Every condition the server enforces in
           // customer-accept's sign_invoice is mirrored here, so the button is absent
@@ -360,5 +436,11 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
         : {}),
     }));
 
-  return json({ ok: true, businessName, name: identity.name, ssMode, quotes });
+  // `identity` (2026-09-15): who this session proved to be, for the designer header's
+  // "Signed in as (816) 300-3600" / "Signed in as pat@example.com". {phone?, email?}, each key
+  // present only when that identity was proven by a code. They are the SESSION's own verified
+  // keys — never anything read off a design's contact blob — so the migration-048 rule above
+  // still holds: no other person's data. A token that leaks already lists this identity's
+  // quotes; naming the identity adds nothing.
+  return json({ ok: true, businessName, name: identity.name, identity: identityForClient(identity), ssMode, quotes });
 }));

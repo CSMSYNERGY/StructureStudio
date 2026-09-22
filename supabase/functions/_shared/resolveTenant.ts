@@ -322,11 +322,19 @@ export async function resolveTenant(
   if (!isRead && !op.can_write) {
     return { ok: false, status: 403, body: { error: "This operator account is read-only." } };
   }
-  // A support operator is refused billing REGARDLESS of can_bill. The two flags are separate
-  // axes and an account could carry both; forcing it here means the refusal does not depend on
-  // anyone remembering to clear can_bill when they tick support_only. The area map below
-  // clamps settings_billing to "none" for the same reason, in the other direction.
-  if (opts.requireBilling && (!op.can_bill || op.support_only)) {
+  // A support operator is refused billing WRITES regardless of can_bill. The two flags are
+  // separate axes and an account could carry both; forcing it here means the refusal does not
+  // depend on anyone remembering to clear can_bill when they tick support_only. The area map
+  // below clamps settings_billing to "none" for the same reason, in the other direction.
+  //
+  // WRITES ONLY (`!isRead`), since 2026-09-15. This check used to cover every action of a
+  // requireBilling function, reads included — and portal-billing's `status` is a read, the one
+  // the portal fetches to learn what a tenant is entitled to. So view-as for a support
+  // operator (and for any operator without can_bill) 403'd on that read, the browser stored
+  // "no entitlement", and every paid add-on showed as unbought whatever the builder held.
+  // Nothing is widened for money: subscribe/cancel/top-up are writes and still refuse here,
+  // and portal-billing withholds the commercial detail from a non-billing operator itself.
+  if (opts.requireBilling && !isRead && (!op.can_bill || op.support_only)) {
     return { ok: false, status: 403, body: { error: "This operator account cannot change billing." } };
   }
 
@@ -405,6 +413,10 @@ export async function resolveTenant(
   // Platform operators keep the old behaviour deliberately — their map is full, so running
   // the gate would change nothing, and skipping it keeps this a support-only behaviour
   // change rather than a new way for an existing operator to be refused mid-incident.
+  // This is the PER-AREA map only. What a tenant has PAID for is a different question, and
+  // since 2026-09-15 no operator is exempt from it anywhere (portal-settings' RTP / CRM /
+  // QuickBooks checks run for operators too — Carolyn: what the builder cannot use, we
+  // cannot use on their account either).
   if (supportOnly && gated) {
     const denied = checkGate(gate, opAcc);
     if (denied) return { ok: false, status: 403, body: { error: denied } };

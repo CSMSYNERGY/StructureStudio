@@ -162,6 +162,38 @@ async function api(action, password, body) {
 }
 
 // ── CSV helpers (RFC-4180-ish) ──────────────────────────────────────────────
+// ⚠️ HAND-COPIED TWIN of ssFitImageForUpload in portal/06-3d.jsx — keep the two in step.
+// It cannot be shared: admin.html loads ONLY admin.app.compiled.js (no component artifact and
+// no portal bundle), so the two pages share no scope. Duplicating ~20 stable lines beat the
+// alternatives — publishing it on `window` from a bundle this page never loads, or leaving the
+// operator console as the one surface that still refuses a phone photo.
+//
+// Shrinks an oversized upload instead of refusing it: longest edge 1600px, flattened onto white
+// (JPEG has no alpha, and a transparent PNG would otherwise encode see-through areas as black),
+// quality stepped 0.9/0.8/0.7 until it fits. A file already under the cap is returned untouched,
+// and a file that cannot be decoded is handed back as-is so the server gets to say so.
+async function ssFitImageForUpload(file, maxBytes = 2_800_000, maxPx = 1600) {
+  if (!file || file.size <= maxBytes) return file;
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error("decode failed")); i.src = url; });
+    const scale = Math.min(1, maxPx / Math.max(img.naturalWidth, img.naturalHeight));
+    const cv = document.createElement("canvas");
+    cv.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    cv.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const g = cv.getContext("2d");
+    g.fillStyle = "#FFFFFF"; g.fillRect(0, 0, cv.width, cv.height);
+    g.drawImage(img, 0, 0, cv.width, cv.height);
+    for (const q of [0.9, 0.8, 0.7]) {
+      const blob = await new Promise((r) => cv.toBlob(r, "image/jpeg", q));
+      if (blob && blob.size <= maxBytes) return new File([blob], "photo.jpg", { type: "image/jpeg" });
+    }
+    return file;
+  } catch (_e) {
+    return file;
+  } finally { URL.revokeObjectURL(url); }
+}
+
 function csvEscape(v) { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
 function toCSV(headers, rows) { return [headers, ...rows].map((r) => r.map(csvEscape).join(",")).join("\r\n"); }
 function parseCSV(text) {
@@ -557,10 +589,13 @@ function AdminApp() {
     setBusy(false);
   };
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-  const onPickStyleImg = (file) => {
+  const onPickStyleImg = async (file) => {
     if (!file) { setNewStyleImg(null); return; }
     if (!ALLOWED_IMG.includes(file.type)) { flash({ err: "Use a JPG, PNG, WEBP or GIF image." }); setFileKey((k) => k + 1); return; }
-    if (file.size > 3_000_000) { flash({ err: "Image too large (max 3MB)." }); setFileKey((k) => k + 1); return; }
+    // Shrink oversized photos rather than refusing them — a phone photo is 4-12MB. The check
+    // below now only fires for a file that could not be decoded and re-encoded at all.
+    file = await ssFitImageForUpload(file);
+    if (file.size > 3_000_000) { flash({ err: "That image couldn't be resized small enough — try a JPG or PNG." }); setFileKey((k) => k + 1); return; }
     const r = new FileReader();
     r.onerror = () => flash({ err: "Could not read that image." });
     r.onload = () => setNewStyleImg({ base64: r.result, contentType: file.type || "image/jpeg" });

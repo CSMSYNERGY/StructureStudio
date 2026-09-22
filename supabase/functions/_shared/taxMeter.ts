@@ -4,8 +4,17 @@
 // redeploying EVERY importer in the same push — `portal-settings` and `submit-estimate`
 // today. Leaving one behind means two copies of the billing rule disagreeing, which is
 // unobservable until a builder is charged twice or not at all. Same posture cardpointe.ts
-// and nmi.ts state for themselves. Grep before you deploy:
-//     grep -rl 'taxMeter.ts' supabase/functions/*/index.ts
+// and nmi.ts state for themselves. Derive the importers before you deploy — with something
+// that parses an import (a `grep -rl` over-counts on comments and silently skips
+// changeOrderDiff.ts, which holds a NUL byte):
+//     find supabase/functions -name '*.ts' ! -name '*.test.ts' ! -path '*_test_stubs*' -print0 \
+//       | xargs -0 -I{} perl -0777 -ne 'print "$ARGV\n" if m{import[^;]*?from\s+"[^"]*taxMeter\.ts"}s' {}
+//
+// ⛔ MIGRATION 244 BEFORE THE DEPLOY. Every charge passes `p_meter_kind`, which only 244's
+// wallet_credit accepts; against the old eight-argument function PostgREST finds no match and
+// the charge fails (reported as `error`, never thrown). Harmless while the meters are
+// disarmed — the arming rail returns before the RPC — but it must be true before arming.
+// The other order is safe: 244 defaults the new parameter, so callers that omit it keep working.
 //
 // ── WHY DIRECT-POST AND NOT A HOLD ─────────────────────────────────────────────────
 // 128's rule is that holds are for expensive, slow, failure-prone meters and cheap ones post
@@ -34,6 +43,22 @@ type Admin = any;
 
 export type TaxMeterKind = "tax_invoice" | "tax_lookup";
 
+/**
+ * How a charge is deduplicated — exactly one of:
+ *   `idem`     a key derived from the ACT (taxInvoiceIdem / taxLookupIdem). The automatic paths,
+ *              where the thing to collapse is a retried submit or a resent invoice.
+ *   `lookupId` the `tax_lookups` row id (migration 244). The deliberate paths — the verify
+ *              button and the invoice-time check — where each row is one real request, so a
+ *              second press is a second charge even when it returns the same rate. Keying those
+ *              on the answer would bill one press and let the next ones through free while
+ *              every one of them was a call the account paid for.
+ */
+type ChargeKey =
+  | { idem: string; lookupId?: undefined }
+  | { lookupId: string; idem?: undefined };
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export type TaxChargeResult =
   /** The meter is disarmed, priced at zero, or the tenant is exempt. Nothing was written. */
   | { charged: false; reason: "inactive" | "unpriced" | "exempt" | "unknown_meter" | "error" }
@@ -51,15 +76,18 @@ export type TaxChargeResult =
  * `idem` MUST be derived from the act, never from a timestamp: a resent invoice, a retried
  * submit, or a double-clicked button has to collapse onto the same key or the builder pays
  * twice for one calculation. `wallet_credit` treats a repeated key as a no-op and returns the
- * existing balance.
+ * existing balance. A charge with NO usable key — an empty `idem`, or a `lookupId` that is not
+ * a row id — is never posted (`error`): wallet_credit reads an empty key as "no idempotency",
+ * and a charge nothing can deduplicate is one a retry posts twice.
+ *
+ * The meter kind is recorded on the wallet row (`p_meter_kind`, migration 244), which is what
+ * lets the Billing tab label a tax debit as one instead of the bare word "Usage".
  */
 export async function chargeTaxCalculation(
   admin: Admin,
-  opts: {
+  opts: ChargeKey & {
     clientId: string;
     kind: TaxMeterKind;
-    /** Derived from the act — e.g. `tax:<clientId>:<shortCode>:<invoiceNo>`. */
-    idem: string;
     refType: string;
     refId: string | null;
     memo?: string | null;
@@ -67,6 +95,12 @@ export async function chargeTaxCalculation(
   },
 ): Promise<TaxChargeResult> {
   try {
+    // 0. THE KEY, before anything is read. See ChargeKey.
+    const idem = opts.lookupId != null
+      ? (typeof opts.lookupId === "string" && UUID.test(opts.lookupId) ? taxLedgerIdem(opts.kind, opts.lookupId) : "")
+      : (typeof opts.idem === "string" ? opts.idem : "");
+    if (!idem) return { charged: false, reason: "error" };
+
     // 1. THE ARMING RAIL. A missing row and a disarmed row mean the same thing to the caller
     //    and neither is an error — this is exactly how 179 ships as a provable no-op.
     const { data: price, error: priceErr } = await admin
@@ -95,6 +129,24 @@ export async function chargeTaxCalculation(
     if (acctErr) return { charged: false, reason: "error" };
     if (acct?.metered_exempt === true) return { charged: false, reason: "exempt" };
 
+    // 2b. NON-BILLABLE ACCOUNTS generate free too (Carolyn 2026-09-21: Non-billable means
+    //     "full access to everything", and she was asked about this one specifically
+    //     because it is real model spend rather than a feature flag).
+    //     Deliberately a SECOND lookup rather than a widening of metered_exempt: the two
+    //     answer different questions and both must keep working. metered_exempt is the
+    //     per-wallet override for a tenant who IS billed; billing_exempt is the account
+    //     posture, set from the Billing posture card, and carries the whole entitlement
+    //     map with it (portal-billing, _shared/featureCheck.ts, migration 228).
+    //     Checked only after metered_exempt misses, so a wallet-exempt tenant still costs
+    //     one query, and an absent client_settings row is simply not exempt.
+    const { data: cs, error: csErr } = await admin
+      .from("client_settings")
+      .select("billing_exempt")
+      .eq("client_id", opts.clientId)
+      .maybeSingle();
+    if (csErr) return { charged: false, reason: "error" };
+    if (cs?.billing_exempt === true) return { charged: false, reason: "exempt" };
+
     // 3. The debit. Negative amount, kind 'debit' — the shape wallet_transactions' CHECK
     //    expects and the one wallet_capture uses for held charges.
     const { data: bal, error: creditErr } = await admin.rpc("wallet_credit", {
@@ -104,8 +156,9 @@ export async function chargeTaxCalculation(
       p_ref_type: opts.refType,
       p_ref_id: opts.refId,
       p_memo: opts.memo ?? null,
-      p_idem: opts.idem,
+      p_idem: idem,
       p_actor: opts.actorUserId ?? null,
+      p_meter_kind: opts.kind,
     });
     if (creditErr) return { charged: false, reason: "error" };
 
@@ -134,4 +187,14 @@ export function taxInvoiceIdem(clientId: string, shortCode: string, invoiceNo: s
 export function taxLookupIdem(clientId: string, shortCode: string, rate: number, jurisdiction: string | null): string {
   const r = Number.isFinite(rate) ? rate.toFixed(5) : "0";
   return `tax_lookup:${clientId}:${shortCode}:${r}:${(jurisdiction ?? "").slice(0, 40)}`;
+}
+
+/**
+ * The idempotency key for a charge behind one `tax_lookups` row — the deliberate paths. One
+ * row is one request, so one row is one charge: a replay of the same row collapses, a second
+ * press (a new row) does not. Prefixed apart from the two answer-derived keys above so no key
+ * from one family can ever equal one from another.
+ */
+export function taxLedgerIdem(kind: TaxMeterKind, lookupId: string): string {
+  return `tax_ledger:${kind}:${lookupId}`;
 }

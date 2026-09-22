@@ -18,7 +18,15 @@ const QBO_KINDS = [
   ["layout_item", "Layout items", "One mapping per built-in placeable (lofts, workbenches, rough openings…)"],
   ["custom_option", "Custom options", "Tenant-defined add-on options"],
   ["discount", "Discount", "Optional — QuickBooks' built-in discount is used when unmapped"],
-  ["delivery", "Delivery", "Pushed non-taxable"],
+  ["delivery", "Delivery", "Non-taxable unless Settings → Options → Delivery says otherwise"],
+  // 239: the kinds the estimate already emitted but the map could not name, plus foundation.
+  ["wall_height", "Taller walls", "Wall-height increase lines"],
+  ["build_on_site", "Built on site", "The on-site build fee a tall wall triggers"],
+  ["cladding", "Cladding", "Priced siding lines"],
+  ["insulation", "Insulation", "One line per insulated area"],
+  ["electrical", "Electrical package", "The standard wiring package"],
+  ["electrical_item", "Electrical items", "Devices placed beyond the standard layout"],
+  ["foundation", "Foundation & site work", "Gravel pads, fence removal, piers and slabs"],
   ["fallback", "Fallback", "Used for any line with no mapping of its own"],
 ];
 
@@ -269,8 +277,17 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     const parts = [];
     if (d.saved) parts.push(`${d.saved} saved`);
     if (d.deleted) parts.push(`${d.deleted} removed`);
-    if (d.skipped && d.skipped.length) parts.push(`${d.skipped.length} skipped`);
-    setMsg({ ok: `Mappings updated${parts.length ? ` (${parts.join(", ")})` : ""}.` });
+    const skipped = Array.isArray(d.skipped) ? d.skipped : [];
+    // Name what was skipped and why. A bare "N skipped" is how seven whole line kinds went
+    // unmappable without anyone noticing (2026-09-17): the rows looked saved, the count was easy
+    // to miss, and those lines kept billing against the fallback item.
+    if (skipped.length) {
+      const shown = skipped.slice(0, 3).join("; ");
+      const more = skipped.length > 3 ? `; and ${skipped.length - 3} more` : "";
+      setMsg({ err: `Mappings updated${parts.length ? ` (${parts.join(", ")})` : ""}, but ${skipped.length} ${skipped.length === 1 ? "wasn't" : "weren't"} saved: ${shown}${more}.` });
+    } else {
+      setMsg({ ok: `Mappings updated${parts.length ? ` (${parts.join(", ")})` : ""}.` });
+    }
     setDraft({});
     const g = await sb.functions.invoke("portal-settings", { body: { action: "list_item_map" } });
     if (!g.error && g.data && !g.data.error) setGrid(g.data);
@@ -513,7 +530,7 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   );
 }
 
-// ─── Email Sending (Settings → Email Sending) ───
+// ─── Email sending (Settings → Email Settings) ───
 // Own-domain estimate/invoice email (Postmark-backed, but the provider never appears in
 // tenant-facing copy). Follows QuickBooksView's shape: one status call drives everything,
 // every action re-pulls status afterwards, and the server (portal-settings, area
@@ -870,25 +887,36 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
         </div>
       )}
 
-      {/* ── pending / failed: DNS records + verification ── */}
+      {/* ── pending / failed: DNS records + verification ──
+          BRAND COLOURS, not amber (Carolyn 2026-09-11: "Does this need to be yellow? I'd like
+          it to follow the brand colors"). #EEF2FF / #C7D2FE / ACCENT is the pairing the portal
+          already uses wherever it wants a brand-toned panel — STATUS_COLORS.sent,
+          INV_SALE_COLORS, the "checkout isn't switched on yet" notice, every selected row.
+
+          Three things deliberately did NOT go purple with the body copy. A `failed` lastError
+          is a real failure and reads RED now, where before it was amber text on an amber card
+          — the one thing on this screen that should not blend in. The ★ marker, the MX
+          priority and the verification result keep a contrasting tone (#1B7895, the brand's
+          teal-blue) so they still stand off the panel; the MX priority in particular is a
+          number somebody has to retype, not decoration. */}
       {platformReady && (st === "pending" || st === "failed") && (
-        <div style={{ ...S.card, background: "#FFFBEB", border: "1px solid #FDE68A" }}>
-          <div style={{ ...S.h2, color: "#92400E" }}>Add these records at your DNS host</div>
+        <div style={{ ...S.card, background: "#EEF2FF", border: "1px solid #C7D2FE" }}>
+          <div style={{ ...S.h2, color: ACCENT }}>Add these records at your DNS host</div>
           {st === "failed" && status.lastError && (
-            <div style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600, marginBottom: 10 }}>{status.lastError}</div>
+            <div style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 600, marginBottom: 10 }}>{status.lastError}</div>
           )}
-          <p style={{ fontSize: 12.5, color: "#92400E", marginBottom: 12, lineHeight: 1.5 }}>
+          <p style={{ fontSize: 12.5, color: ACCENT, marginBottom: 12, lineHeight: 1.5 }}>
             These records prove to inbox providers that {status.domain || "your domain"} really is
             yours. Add them wherever your DNS is managed (Cloudflare, GoDaddy, your web host),
             then check verification below.
           </p>
           {dns.length === 0 && (
-            <p style={{ fontSize: 12.5, color: "#92400E", fontWeight: 600 }}>
+            <p style={{ fontSize: 12.5, color: ACCENT, fontWeight: 600 }}>
               The records are being prepared — check again in a moment.
             </p>
           )}
           {dnsAdvisory.length > 0 && (
-            <p style={{ fontSize: 12, color: "#92400E", marginTop: 10, marginBottom: 0, lineHeight: 1.55 }}>
+            <p style={{ fontSize: 12, color: ACCENT, marginTop: 10, marginBottom: 0, lineHeight: 1.55 }}>
               ★ The <strong>_dmarc</strong> record is strongly recommended but not required to
               verify. Without it many inboxes — Gmail especially — send mail from a new domain
               straight to spam. <strong>p=none</strong> only asks for reports; it never blocks
@@ -896,7 +924,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
             </p>
           )}
           {dnsRows.length > 0 && (
-            <div style={{ overflowX: "auto", background: "#FFF", border: "1px solid #FDE68A", borderRadius: 8 }}>
+            <div style={{ overflowX: "auto", background: "#FFF", border: "1px solid #C7D2FE", borderRadius: 8 }}>
               <table style={{ borderCollapse: "collapse", width: "100%" }}>
                 <thead>
                   <tr>
@@ -912,7 +940,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                     <tr key={i}>
                       <td style={{ ...S.td, textAlign: "center" }}>
                         {r.advisory
-                          ? <span title="Recommended, not checked by us" style={{ color: "#B45309", fontWeight: 800 }}>★</span>
+                          ? <span title="Recommended, not checked by us" style={{ color: "#1B7895", fontWeight: 800 }}>★</span>
                           : r.verified
                           ? <span title="Verified" style={{ color: "#16A34A", fontWeight: 800 }}>✓</span>
                           : <span title="Not verified yet" style={{ color: "#CBD5E1" }}>•</span>}
@@ -922,7 +950,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                         {/* An MX WITHOUT its priority cannot be created — the tenant DNS panel refuses
                             it, so the number has to sit on screen next to the type. */}
                         {r.priority != null && (
-                          <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: "#B45309" }}>
+                          <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: "#1B7895" }}>
                             priority {r.priority}
                           </span>
                         )}
@@ -943,30 +971,30 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
           )}
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14, flexWrap: "wrap" }}>
             <button type="button" onClick={verify} disabled={busy}
-              style={{ ...S.btn("#92400E", "#FFF"), opacity: busy ? 0.6 : 1 }}>
+              style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>
               {busy ? "Checking…" : "Check verification"}
             </button>
             {webmasterMailto && (
               <a href={webmasterMailto}
                 title="Opens your email program with the records already written out"
-                style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FDE68A", textDecoration: "none", display: "inline-block" }}>
+                style={{ ...S.btn("#FFF", ACCENT), border: "1px solid #C7D2FE", textDecoration: "none", display: "inline-block" }}>
                 ✉️ Email this to my webmaster
               </a>
             )}
-            {checkNote && <span style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600 }}>{checkNote}</span>}
+            {checkNote && <span style={{ fontSize: 12.5, color: "#1B7895", fontWeight: 600 }}>{checkNote}</span>}
           </div>
           {webmasterMailto && (
-            <p style={{ fontSize: 12, color: "#92400E", marginTop: 8, marginBottom: 0, lineHeight: 1.5 }}>
+            <p style={{ fontSize: 12, color: ACCENT, marginTop: 8, marginBottom: 0, lineHeight: 1.5 }}>
               Not the person who manages your website? The button above opens your email program with
               every record written out, ready to send to whoever does.
             </p>
           )}
-          <p style={{ fontSize: 12, color: "#92400E", marginTop: 12, marginBottom: 0 }}>
+          <p style={{ fontSize: 12, color: ACCENT, marginTop: 12, marginBottom: 0 }}>
             DNS changes can take up to an hour to appear — keep this tab open and check again.
           </p>
           <div style={{ marginTop: 10 }}>
             <button type="button" onClick={disconnect} disabled={busy}
-              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600, color: "#B45309", textDecoration: "underline" }}>
+              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600, color: "#475569", textDecoration: "underline" }}>
               Start over with a different domain
             </button>
           </div>
@@ -1182,6 +1210,13 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
               <div style={S.lbl}>Your wording</div>
               <div style={{ fontSize: 12, color: "#64748B", margin: "2px 0 8px" }}>
                 Leave blank to use ours. Use {"{business}"}, {"{number}"}, {"{total}"}, {"{building}"} and they fill in automatically.
+                {/* Plan 3.1 (Carolyn 2026-09-14, the quote email she highlighted): the quote
+                    email no longer prints the total, so the customer meets the price on the
+                    quote itself. {total} still fills in — saved wording must never print a
+                    literal "{total}" — it is just the one token that works against that. */}
+                {tplKind === "quote" && (
+                  <span data-token-hint="total"> <b>{"{total}"}</b> is not recommended for quotes — the quote email leaves the price out, so the customer sees it when they open the quote.</span>
+                )}
               </div>
               <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
                 {[["estimate", "Estimate"], ["quote", "Quote"], ["invoice", "Invoice"]].map(([k, label]) => (
@@ -1198,7 +1233,9 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 value={(tpl[tplKind] && tpl[tplKind].intro) || ""}
                 onChange={(e) => setTpl((p) => ({ ...p, [tplKind]: { ...(p[tplKind] || {}), intro: e.target.value } }))}
                 rows={3}
-                placeholder="Opening line — e.g. Thanks for designing with {business}! Your {total} quote is ready."
+                placeholder={tplKind === "quote"
+                  ? "Opening line — e.g. Thanks for designing with {business}! Your quote {number} is ready."
+                  : "Opening line — e.g. Thanks for designing with {business}! Your {total} quote is ready."}
                 style={{ ...S.input, resize: "vertical" }} />
               <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
                 <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")}
@@ -1942,6 +1979,7 @@ function CommissionTeamInner() {
             <th style={th}>Name</th>
             <th style={th}>Title</th>
             <th style={th}>Access</th>
+            {(data.locations || []).length > 0 && <th style={th} title="Their home sales lot. Delivery is measured from here when Settings → Options → Delivery says 'from the rep's location'.">Home lot</th>}
             {canSeeRates && <th style={th}>Commission&nbsp;%</th>}
             <th style={th}>Last active</th>
             {isOwner && <th style={th}>Sees all payouts</th>}
@@ -1970,6 +2008,16 @@ function CommissionTeamInner() {
                   )}
                 </td>
                 <td style={{ ...td, fontSize: 12, color: "#475569", maxWidth: 340, lineHeight: 1.45 }}>{ssAccessSummary(m, meta)}</td>
+                {(data.locations || []).length > 0 && <td style={td}>
+                  {(canManageTeam || m.isSelf)
+                    ? <select value={m.locationId || ""} disabled={busy}
+                        onChange={async (e) => { const v = e.target.value || null; setBusy(true); try { await call({ action: "set_home_location", userId: m.userId, locationId: v }); await load(); } catch (err) { setErr(err.message); } setBusy(false); }}
+                        style={{ ...S.input, width: 150, padding: "5px 8px", fontSize: 12 }}>
+                        <option value="">— none —</option>
+                        {data.locations.map((l) => <option key={l.id} value={l.id}>{l.name}{l.city ? " (" + l.city + ")" : ""}</option>)}
+                      </select>
+                    : <span style={{ fontSize: 12, color: "#475569" }}>{(data.locations.find((l) => l.id === m.locationId) || {}).name || <span style={{ color: "#94A3B8" }}>—</span>}</span>}
+                </td>}
                 {canSeeRates && <td style={td}>
                   {m.role === "owner"
                     ? <span style={{ color: "#94A3B8" }}>—</span>
@@ -2637,7 +2685,7 @@ function CommissionsReport({ clientId }) {
 // `replyToEmail` is accepted and discarded until the server edit in
 // .temp/HANDOFF-reply-to-prefs.md lands. That file is owned by someone else; this half was
 // deliberately shipped first so the two can land independently.
-function MyViewSettings({ prefs, onSaved }) {
+function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null }) {
   const [val, setVal] = useState((prefs && prefs.designsView) === "pipeline" ? "pipeline" : "list");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -2700,6 +2748,10 @@ function MyViewSettings({ prefs, onSaved }) {
 
   return (
     <div>
+      {/* YOUR DETAILS FIRST (Carolyn 2026-09-11: "move the information in Your details to the
+          top of my profile"). Who you are, then how the portal behaves for you — and it is the
+          card the name-and-phone nudge sends people to, so it should be the one they land on. */}
+      <YourDetailsCard profile={profile} email={email} onSaved={onProfileSaved} />
       <div style={S.card}>
         <div style={S.h2}>How the Pipeline tab opens</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
@@ -2722,11 +2774,15 @@ function MyViewSettings({ prefs, onSaved }) {
           to go in and say, when somebody replies to an email, send it here. But that should
           be in their profile."
 
-          Her word was "profile", and this card is in My View rather than the profile dialog.
-          Both are per-person and both save through a "self"-gated action; My View is the
-          screen that already exists for "settings that configure the person, not the
-          business", which is what this is. Worth revisiting with her -- noted in
-          .temp/HANDOFF-reply-to-prefs.md rather than decided here.
+          Her word was "profile", and this card sat in a tab called "My View" — which is why
+          the note here said it was worth revisiting with her. ✅ SETTLED 2026-09-11: she
+          renamed the tab itself ("my view should be called my profile in the nav tab and the
+          url"), so the card is in My Profile and the wording matches what she asked for.
+
+          Still TWO per-person surfaces, and the distinction is worth keeping straight: this
+          tab, and the "Your details" DIALOG off the sidebar identity menu. Both save through
+          a "self"-gated action. The dialog is name/phone/password — who you are; this tab is
+          how the portal behaves for you. Do not merge them without asking.
 
           ⚠️ WHAT THE COPY MUST NOT PROMISE. This does not REDIRECT replies, it ADDS a second
           address: the customer's reply reaches this address AND the customer's record in
@@ -2763,104 +2819,695 @@ function MyViewSettings({ prefs, onSaved }) {
   );
 }
 
-// ─── Options tab section headers (Carolyn 2026-09-04 @27:32) ───
-// She drew these on the shared screen: "right here is a header that this says exterior.
-// Stuff that goes on the exterior of the building ... that is doors, that is windows, that
-// is vents ... I've kind of done on all of this other, the insulation, the electrical ...
-// so I think we need to separate exterior, interior."
-//
-// ⚠️ THIS IS THE HALF SHE COULD NOT DO HERSELF. She took "the options page" as her task,
-// but the Options tab was a flat stack of seven components with no grouping layer, so the
-// headers are code and only the CONTENT inside each card was ever hers to reorganise.
-//
-// THREE groups, not the two she named, and the third is not padding: Wall Heights is
-// structural, which is neither an inside nor an outside thing.
-//
-// ⚠️ THIS PARAGRAPH USED TO ARGUE THE OPPOSITE of what the code now does, so read the reason
-// before moving anything back. It said Layout Pricing had to stay in BUILDING because its rows
-// spanned both sides — lofts and workbenches inside, shutters and flower boxes outside. That
-// was true when it was written and is not true now: doors, windows, vents, ramps and the three
-// electrical devices have each since left for their own card, and what remains is loft,
-// workbench, the two shelves and rough opening. So it moved to Interior and was renamed
-// "Interior items" (Carolyn 2026-09-07).
-//
-// Rough opening is the one row that does not fit — it is a hole in an exterior wall. It stays
-// anyway, by her explicit call: "I plan to change things on it later." Do not split it out on
-// tidiness grounds; she is going to change what that row IS.
-//
-// Presentation only. No data moves, no saved design changes, no price changes.
+// (OptionsGroup lived here until 2026-09-11. It drew the coloured full-height bands that
+// separated Building / Exterior / Interior on the one long Options page. The groups are the
+// tab clusters in SubTabs now — see ssOptionTabs — so the component had no caller left.)
 
-// One tone per group, so a builder can see which section they are scrolling through. Every hex
-// here is ALREADY in the portal — INV_SALE_COLORS and two rows of INV_GROUP_COLORS in
-// 01-core.jsx — so the Options tab reads as the same system as the inventory chips rather than
-// introducing a fourth palette. ⛔ Not SYNERGY_TEAL: its own comment reserves it.
-const OPTIONS_GROUP_TONES = {
-  Building: { bg: "#EEF2FF", fg: "#3D3672", hint: "#6B6595" },  // brand purple — structural
-  Exterior: { bg: "#ECFEFF", fg: "#0E7490", hint: "#3F8A9E" },  // cyan  — the outside
-  Interior: { bg: "#F0FDF4", fg: "#15803D", hint: "#3F8A5C" },  // green — the inside
+// ─── Tax codes (Settings → Company → Tax) ───
+// Which Avalara tax code each building style and option heading falls under (migration 246,
+// 2026-09-17). The owner's ask (2026-09-14): every product, installation and delivery carries a
+// code, and each builder codes their own "so they're not coming back to us and saying, oh, it's
+// not correct". The screen is Ahsan's design, which the owner preferred: one row per code, each a
+// code picker plus a multi-select of everything that code covers.
+//
+// Four things about it are deliberate:
+//   • SAVED, NOT USED. No quote, PDF, acceptance, QuickBooks push or change order reads the
+//     mapping yet — per-line tax by code is a later stage. The note under the explainer says so in
+//     every state, and nothing on this card may suggest that a code changes today's tax.
+//   • ONE CODE PER THING. tax_code_assignments' primary key holds one code per style or heading,
+//     and the server refuses a payload naming a target twice. So ticking something another row
+//     covers MOVES it, and the checkbox names the code it sits under before you tick.
+//   • A ROW WITHOUT A CODE IS NOT SAVED. An empty tenant starts on three suggested rows
+//     (Products, Services, Delivery) with their targets ticked and NO code: a code chosen for the
+//     builder would be tax advice. What a codeless row covers stays "Not assigned" until it has
+//     one, and the save sends only rows with a code and something ticked.
+//   • THE SERVER'S ANSWER IS THE STATE. tax_codes_save replaces the whole set and answers with what
+//     the database now holds, so the rows are rebuilt from that answer. Codeless rows the builder
+//     is still filling in are kept, minus anything the save covered.
+// The styles, headings and heading groups all come from tax_codes_get. The heading keys live in
+// _shared/taxCodes.ts only: the QuickBooks item map kept its line kinds in three places, and one
+// of the three drifted.
+
+const taxTargetId = (type, key) => `${type}:${key}`;
+const taxTargetOf = (id) => {
+  const i = id.indexOf(":");
+  return { type: id.slice(0, i), key: id.slice(i + 1) };
 };
-const OPTIONS_GROUP_FALLBACK = { bg: "#F1F5F9", fg: "#334155", hint: "#94A3B8" };
 
-function OptionsGroup({ title, hint, children }) {
-  const tone = OPTIONS_GROUP_TONES[title] || OPTIONS_GROUP_FALLBACK;
+// Every target a tax_codes_get answer offers, in display order: the styles, then the headings.
+// The styles' group is "buildings", a key no heading group uses.
+function taxTargetsOf(d) {
+  return [
+    ...((d && d.styles) || []).map((s) => ({ id: taxTargetId("style", s.id), group: "buildings", label: s.label || "Unnamed style", inactive: s.active === false })),
+    ...((d && d.headings) || []).map((h) => ({ id: taxTargetId("heading", h.key), group: h.group, label: h.label })),
+  ];
+}
+
+// The checklist's sections: Buildings, then the heading groups in the server's order. A heading
+// whose group the answer does not name still gets a section rather than vanishing.
+function taxGroupsOf(d) {
+  const named = (d && d.headingGroups) || [];
+  const seen = new Set(named.map((g) => g.key));
+  const extra = [];
+  for (const h of (d && d.headings) || []) {
+    if (!seen.has(h.group)) { seen.add(h.group); extra.push({ key: h.group, label: h.group }); }
+  }
+  return [{ key: "buildings", label: "Buildings" }, ...named, ...extra];
+}
+
+// The stored mapping as rows: one per code, in the order tax_codes_get lists its codes (the
+// common codes first), each row's targets in display order.
+function taxSavedRows(d) {
+  const rank = new Map(((d && d.codes) || []).map((c, i) => [c.code, i]));
+  const byCode = new Map();
+  for (const a of (d && d.assignments) || []) {
+    if (!byCode.has(a.code)) byCode.set(a.code, new Set());
+    byCode.get(a.code).add(taxTargetId(a.targetType, a.targetKey));
+  }
+  const order = taxTargetsOf(d).map((t) => t.id);
+  const at = (code) => (rank.has(code) ? rank.get(code) : Number.MAX_SAFE_INTEGER);
+  return [...byCode.keys()]
+    .sort((a, b) => at(a) - at(b) || (a < b ? -1 : a > b ? 1 : 0))
+    .map((code) => ({ code, targets: order.filter((id) => byCode.get(code).has(id)) }));
+}
+
+// Where an empty tenant starts: the owner's three groups, ticked, with no code. The group keys
+// are _shared/taxCodes.ts TAX_HEADING_GROUPS'. A key renamed there only leaves a suggestion
+// unticked; the save validates every heading key server-side either way.
+function taxSuggestedRows(d) {
+  const targets = taxTargetsOf(d);
+  const inGroups = (groups) => targets.filter((t) => groups.indexOf(t.group) !== -1).map((t) => t.id);
+  return [
+    { title: "Products", code: "", targets: inGroups(["buildings", "building", "exterior", "interior", "other"]) },
+    { title: "Services", code: "", targets: inGroups(["services"]) },
+    { title: "Delivery", code: "", targets: inGroups(["delivery"]) },
+  ];
+}
+
+// target id → code, over the rows a save would send (a codeless row covers nothing yet).
+function taxCoverage(rows) {
+  const m = new Map();
+  for (const r of rows) {
+    if (!r.code) continue;
+    for (const id of r.targets) m.set(id, r.code);
+  }
+  return m;
+}
+const taxSameCoverage = (a, b) => a.size === b.size && [...a].every(([id, code]) => b.get(id) === code);
+
+// A portal-settings older than this page has no tax code actions: resolveTenant answers 403
+// "Unrecognised action" (no GATES line), the dispatcher 400 "Unknown action". The frontend deploys
+// on push and functions deploy separately, so that window reads "not here yet", not a fault. Any
+// OTHER 403 is a real refusal and shows its sentence — unlike ssTaxReadUnavailable, which treats
+// every 403 as "nothing to show" because its callers render no tax text at all on one.
+function taxCodesUnavailable(err) {
+  if (!err || (err.ssStatus !== 403 && err.ssStatus !== 400)) return false;
+  return /Unrecogni[sz]ed action|^Unknown action\b/i.test(String(err.message || ""));
+}
+
+// One row's code picker: the chosen code with a Change button, or a type-ahead over
+// tax_codes_search — debounced 300ms while typing, at once for an empty box, which lists the
+// common codes first with their hints. The search reads the stored catalog; nothing here reaches
+// Avalara.
+function TaxCodePicker({ code, info, onPick, disabled = false }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  // The latest answer, with the (trimmed) text it answers: { q, codes, err }; null before the first.
+  const [answer, setAnswer] = useState(null);
+  const [hi, setHi] = useState(0);             // the highlighted option, for the arrow keys
+  const seq = useRef(0);
+  const inputRef = useRef(null);
+  const searching = open || !code;
+  useEffect(() => {
+    if (!open) return undefined;
+    const my = ++seq.current;
+    const asked = q.trim();
+    const t = setTimeout(async () => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "tax_codes_search", q } });
+      // Latest search wins: a slow answer for "FR" must not replace the one for "FR01".
+      if (my !== seq.current) return;
+      if (error || !data || data.error) {
+        setAnswer({ q: asked, codes: [], err: (data && data.error) || (error && error.message) || "Couldn't search the tax codes." });
+        return;
+      }
+      setAnswer({ q: asked, codes: data.codes || [], err: null });
+      setHi(0);
+    }, asked ? 300 : 0);
+    return () => clearTimeout(t);
+  }, [open, q]);
+  // Only an answer to what is in the box now counts. The previous answer stays in state through
+  // the debounce and the round trip, and Enter on it would pick a code the builder never searched
+  // for: the empty box's P0000000 still highlighted while "FR010200" waits. Until the answer
+  // catches up the list reads "Searching…", so nothing stale can be picked, clicked or counted.
+  const fresh = !!answer && answer.q === q.trim();
+  const list = fresh ? answer.codes : null;
+  const err = fresh ? answer.err : null;
+  // "Change" swaps the chosen code for the search box; the box should take the typing at once.
+  useEffect(() => { if (open && inputRef.current) inputRef.current.focus(); }, [open]);
+
+  const pick = (c) => {
+    if (!c) return;
+    onPick(c);
+    setQ("");
+    setOpen(false);
+  };
+  const onKey = (e) => {
+    const n = (list || []).length;
+    if (e.key === "ArrowDown") { e.preventDefault(); setOpen(true); if (n) setHi((h) => (h + 1) % n); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); if (n) setHi((h) => (h - 1 + n) % n); }
+    else if (e.key === "Enter") { if (open && n) { e.preventDefault(); pick(list[Math.min(hi, n - 1)]); } }
+    else if (e.key === "Escape") { e.currentTarget.blur(); }
+  };
+  const linkBtn = { background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, color: ACCENT, fontWeight: 700 };
+  const note = { padding: "9px 11px", fontSize: 12.5, color: "#64748B" };
+  const head = { padding: "7px 11px 3px", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8" };
+  const empty = !q.trim();
   return (
-    // The bar runs the FULL HEIGHT of the group, not just the header — that is what makes the
-    // boundary readable while scrolling past several cards. borderRadius stays 0 on the barred
-    // edge: a rounded corner on a single-sided border detaches the bar from the band above it.
-    <div style={{ marginTop: 18, marginBottom: 6, borderLeft: `4px solid ${tone.fg}`, borderRadius: 0, paddingLeft: 12 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10, background: tone.bg, borderRadius: "0 8px 8px 0", padding: "7px 12px", marginBottom: 10 }}>
-        <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1.1, textTransform: "uppercase", color: tone.fg, whiteSpace: "nowrap" }}>{title}</div>
-        {/* Kept truncating rather than wrapping: the band is one line tall by design, and a
-            narrow window should shorten the hint, not push the cards down. */}
-        <div style={{ fontSize: 12, color: tone.hint, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{hint}</div>
-      </div>
-      {children}
+    <div style={{ position: "relative", maxWidth: 640 }}>
+      {!searching ? (
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 10, border: "1px solid #CBD5E1", borderRadius: 8, padding: "8px 11px", background: "#F8FAFC" }}>
+          <div style={{ flex: 1, minWidth: 0, fontSize: 13, color: "#1E293B", lineHeight: 1.4 }}>
+            <strong style={{ fontVariantNumeric: "tabular-nums" }}>{code}</strong>
+            {info && info.description ? <span> — {info.description}</span> : null}
+            {info && info.hint && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>{info.hint}</div>}
+          </div>
+          {/* Hidden, not disabled, while the card saves: the Save button's "Saving…" is the reason. */}
+          {!disabled && <button type="button" onClick={() => setOpen(true)} style={linkBtn}>Change</button>}
+        </div>
+      ) : (
+        <input ref={inputRef} style={S.input} value={q} disabled={disabled}
+          placeholder={code ? `Replace ${code} — search by code or words` : "Pick a code — search by code or words, e.g. delivery or FR01"}
+          aria-label="Search tax codes" role="combobox" aria-expanded={open} aria-autocomplete="list"
+          onFocus={() => setOpen(true)}
+          onBlur={() => { setOpen(false); setQ(""); }}
+          onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+          onKeyDown={onKey} />
+      )}
+      {searching && open && (
+        // mousedown is swallowed so a click on an option (or the list's scrollbar) does not blur
+        // the box and close the list before the click lands.
+        <div role="listbox" onMouseDown={(e) => e.preventDefault()}
+          style={{ position: "absolute", zIndex: 30, left: 0, right: 0, top: "calc(100% + 4px)", background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 8, boxShadow: "0 10px 28px rgba(15,23,42,0.14)", maxHeight: 320, overflowY: "auto" }}>
+          {err && <div style={{ ...note, color: "#B91C1C" }}>{err}</div>}
+          {list === null && !err && <div style={note}>Searching…</div>}
+          {list && list.length === 0 && !err && <div style={note}>No active tax codes match “{q.trim()}”.</div>}
+          {(list || []).map((c, i) => (
+            <React.Fragment key={c.code}>
+              {empty && i === 0 && c.hint && <div style={head}>Common codes</div>}
+              {empty && i > 0 && !c.hint && list[i - 1].hint && <div style={{ ...head, borderTop: "1px solid #E2E8F0" }}>More codes</div>}
+              <button type="button" role="option" aria-selected={i === hi}
+                onMouseEnter={() => setHi(i)} onClick={() => pick(c)}
+                style={{ display: "block", width: "100%", textAlign: "left", fontFamily: "inherit", cursor: "pointer", border: "none", background: i === hi ? "#F1F5F9" : "#FFF", padding: "8px 11px" }}>
+                <div style={{ fontSize: 13, color: "#1E293B", lineHeight: 1.35 }}>
+                  <strong style={{ fontVariantNumeric: "tabular-nums" }}>{c.code}</strong> — {c.description || "No description"}
+                </div>
+                {c.hint && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>{c.hint}</div>}
+              </button>
+            </React.Fragment>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, prefs = null, onPrefsSaved = null }) {
+function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
+  const [data, setData] = useState(null);       // tax_codes_get answer | { err, unavailable } | null while loading
+  const [rows, setRows] = useState([]);         // the editor's working copy: [{ rid, title, code, targets: [id] }]
+  const [codeInfo, setCodeInfo] = useState({}); // code → { code, description, typeId, isActive, hint }
+  const [openRid, setOpenRid] = useState(null); // the row whose checklist is open
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);         // { ok } | { err }
+  const ridSeq = useRef(0);
+  // Latest load wins, the LocationsCard rule: a slow first answer must not land over a retry's.
+  const loadSeq = useRef(0);
+  const withRids = (list) => list.map((r) => ({ title: null, ...r, rid: ++ridSeq.current }));
+  const learnCodes = (codes) => setCodeInfo((cur) => {
+    const next = { ...cur };
+    for (const c of codes || []) {
+      if (c && c.code) next[c.code] = c;
+    }
+    return next;
+  });
+
+  const load = useCallback(async () => {
+    if (!canReadTax) return;
+    const seq = ++loadSeq.current;
+    const { data: d, error } = await sb.functions.invoke("portal-settings", { body: { action: "tax_codes_get" } });
+    if (seq !== loadSeq.current) return;
+    // The invoke wrapper has already swapped a refusal's generic "non-2xx" for the server's sentence.
+    if (error || !d || d.error) {
+      setData({ err: (d && d.error) || (error && error.message) || "Couldn't load your tax codes.", unavailable: taxCodesUnavailable(error) });
+      return;
+    }
+    learnCodes(d.codes);
+    const saved = taxSavedRows(d);
+    setRows(withRids(saved.length ? saved : taxSuggestedRows(d)));
+    setOpenRid(null);
+    setData(d);
+  }, [canReadTax]);
+  useEffect(() => { load(); }, [load]);
+
+  const d = data && !data.err ? data : null;
+  const targets = useMemo(() => taxTargetsOf(d), [d]);
+  const groups = useMemo(() => taxGroupsOf(d), [d]);
+  const savedRows = useMemo(() => (d ? taxSavedRows(d) : []), [d]);
+  const savedCoverage = useMemo(() => taxCoverage(savedRows), [savedRows]);
+  const coverage = taxCoverage(rows);
+  const editing = !!d && canEditTax;
+  // A reader sees what is STORED, never the suggested rows: those are an editor's starting point,
+  // and to someone who cannot change them they would read as codes the business had chosen.
+  const shownCoverage = editing ? coverage : savedCoverage;
+  const dirty = editing && !taxSameCoverage(coverage, savedCoverage);
+  const unassigned = targets.filter((t) => !shownCoverage.has(t.id));
+  const codeless = editing && rows.some((r) => !r.code && r.targets.length > 0);
+
+  // Tick moves the targets into this row (out of any other); untick takes them out of this row.
+  const toggleTargets = (rid, ids, on) => {
+    setMsg(null);
+    const order = targets.map((t) => t.id);
+    setRows((rs) => rs.map((r) => {
+      if (r.rid === rid) {
+        const have = new Set(r.targets);
+        for (const id of ids) {
+          if (on) have.add(id);
+          else have.delete(id);
+        }
+        return { ...r, targets: order.filter((id) => have.has(id)) };
+      }
+      return on ? { ...r, targets: r.targets.filter((id) => ids.indexOf(id) === -1) } : r;
+    }));
+  };
+  const pickCode = (rid, c) => {
+    setMsg(null);
+    learnCodes([c]);
+    setRows((rs) => rs.map((r) => (r.rid === rid ? { ...r, code: c.code } : r)));
+  };
+  const addRow = () => {
+    setMsg(null);
+    const [r] = withRids([{ code: "", targets: [] }]);
+    setRows((rs) => [...rs, r]);
+    setOpenRid(r.rid);
+  };
+  const removeRow = (rid) => {
+    setMsg(null);
+    setRows((rs) => rs.filter((r) => r.rid !== rid));
+    setOpenRid((o) => (o === rid ? null : o));
+  };
+
+  const save = async () => {
+    // tax_codes_save REPLACES the whole set, so a codeless row is dropped from the payload. That is
+    // harmless for a suggested row nobody has coded yet, but an item MOVED into it from a saved row
+    // would have its saved code deleted without a word. Refuse only that case: a codeless row
+    // holding something that already has a code on the server.
+    const saved = data && !data.err ? taxCoverage(taxSavedRows(data)) : new Map();
+    const orphaned = rows.filter((r) => !r.code && r.targets.some((id) => saved.has(id)));
+    if (orphaned.length) {
+      setMsg({ err: "Some items that already have a tax code are now in a row with no code. Pick a code for that row, or move those items back, then save." });
+      return;
+    }
+    const send = rows.filter((r) => r.code && r.targets.length > 0)
+      .map((r) => ({ code: r.code, targets: r.targets.map(taxTargetOf) }));
+    setBusy(true); setMsg(null);
+    const { data: res, error } = await sb.functions.invoke("portal-settings", { body: { action: "tax_codes_save", rows: send } });
+    setBusy(false);
+    if (error || !res || res.error || !Array.isArray(res.assignments)) {
+      setMsg({ err: (res && res.error) || (error && error.message) || "Couldn't save your tax codes." });
+      return;
+    }
+    learnCodes(res.codes);
+    const stored = taxSavedRows(res);
+    const covered = taxCoverage(stored);
+    // A suggested row's title follows its code into the rebuilt list.
+    const titleOf = new Map(rows.filter((r) => r.code && r.title).map((r) => [r.code, r.title]));
+    // Codeless rows were not sent. Keep them, minus whatever the save now covers, and drop one that
+    // covered something and has nothing left (a freshly added, still-empty row stays).
+    const pending = [];
+    for (const r of rows) {
+      if (r.code) continue;
+      const left = r.targets.filter((id) => !covered.has(id));
+      if (left.length || !r.targets.length) pending.push({ ...r, targets: left });
+    }
+    setRows([...withRids(stored.map((r) => ({ ...r, title: titleOf.get(r.code) || null }))), ...pending]);
+    setOpenRid(null);
+    setData(res);
+    const total = taxTargetsOf(res).length;
+    setMsg({ ok: `Tax codes saved — ${covered.size} of your ${total} building styles and option headings ${covered.size === 1 ? "has" : "have"} a code.` });
+  };
+
+  const lbl = { fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8" };
+  const linkBtn = { background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, color: ACCENT, fontWeight: 700 };
+  const chipStyle = { background: "#EEF2FF", color: "#3D3672", borderRadius: 12, fontSize: 11.5, fontWeight: 700, padding: "3px 9px" };
+  const checkRow = { display: "flex", alignItems: "flex-start", gap: 7, fontSize: 12.5, fontWeight: 600, color: "#1E293B", marginTop: 6, cursor: "pointer", lineHeight: 1.35 };
+  // Something another row already covers reads dimmed — the greyed convention the Projects
+  // screen uses. It is NOT disabled: under ONE CODE PER THING, ticking it MOVES the target to
+  // this row, and that is the only one-click way to re-assign one. Colour and title only.
+  const checkRowTaken = { ...checkRow, color: "#94A3B8" };
+  const warn = !!d && (d.ssMode !== true || d.lookupEnabled !== true);
+  // What a row covers, as chips. A whole group collapses to one chip, so a Products row reads
+  // "All buildings (9) · Exterior (all 5)" rather than twenty names.
+  const chipsFor = (ids) => {
+    const have = new Set(ids);
+    const out = [];
+    for (const g of groups) {
+      const inGroup = targets.filter((t) => t.group === g.key);
+      const mine = inGroup.filter((t) => have.has(t.id));
+      if (!mine.length) continue;
+      if (inGroup.length > 1 && mine.length === inGroup.length) {
+        out.push({ key: "all:" + g.key, text: g.key === "buildings" ? `All buildings (${inGroup.length})` : `${g.label} (all ${inGroup.length})` });
+      } else {
+        for (const t of mine) out.push({ key: t.id, text: t.label });
+      }
+    }
+    return out;
+  };
+  const chipList = (ids) => {
+    const chips = chipsFor(ids);
+    return chips.length
+      ? chips.map((c) => <span key={c.key} style={chipStyle}>{c.text}</span>)
+      : <span style={{ fontSize: 12.5, color: "#94A3B8" }}>Nothing yet</span>;
+  };
+
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Tax codes</div>
+      <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5, maxWidth: 780 }}>
+        Every building, option and service you sell falls under a tax code from Avalara's list. Pick a code, then tick
+        everything that code covers — each building style and option heading takes one code. You (or your accountant)
+        choose the codes, so they match how you file. The notes beside common codes are suggestions, not tax advice.
+        {/* Said up front rather than left to missing buttons, as on the location rates. */}
+        {d && !canEditTax && " Only someone who can edit CRM Connection settings can change these codes."}
+      </div>
+      {/* Every state gets the note, because in none of them does a code change a quote yet. It is
+          the amber warning when this account is not on per-line-ready tax at all (CRM mode, or
+          verified lookups off) and a plain note otherwise. */}
+      {d && (
+        <div data-tax-note="" style={warn
+          ? { background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.55, marginBottom: 14, maxWidth: 780 }
+          : { background: "#F8FAFC", border: "1px solid #E2E8F0", color: "#475569", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 500, lineHeight: 1.55, marginBottom: 14, maxWidth: 780 }}>
+          These codes are saved now and will be used when per-line tax with Avalara is switched on for your account.
+          Until then they don't change the tax on any quote.
+        </div>
+      )}
+
+      {!canReadTax && <p style={{ fontSize: 13, color: "#64748B" }}>Only someone who can view CRM Connection settings can see your tax codes.</p>}
+      {canReadTax && !data && <p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p>}
+      {data && data.err && data.unavailable && (
+        <p style={{ fontSize: 13, color: "#64748B" }}>Tax codes aren't available on your account yet — check back soon.</p>
+      )}
+      {data && data.err && !data.unavailable && (
+        <div style={S.err}>
+          {data.err}{" "}
+          <button type="button" onClick={() => { setData(null); load(); }} style={{ ...linkBtn, color: "#B91C1C", textDecoration: "underline" }}>Try again</button>
+        </div>
+      )}
+
+      {/* ── The editor: one row per code ── */}
+      {editing && rows.map((r, i) => {
+        const info = r.code ? codeInfo[r.code] : null;
+        const open = openRid === r.rid;
+        return (
+          <div key={r.rid} data-tax-row={i} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 14px", marginBottom: 10, background: "#FFF" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+              <span style={lbl}>{r.title || "Tax code"}</span>
+              {!r.code && (
+                <span style={{ background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 12, fontSize: 11, fontWeight: 700, padding: "1px 8px" }}>Pick a code</span>
+              )}
+              {/* Hidden while the card saves, like every row control: the answer rebuilds the rows. */}
+              {!busy && <button type="button" onClick={() => removeRow(r.rid)} style={{ ...linkBtn, color: "#94A3B8", marginLeft: "auto" }}>Remove</button>}
+            </div>
+            <TaxCodePicker code={r.code} info={info} disabled={busy} onPick={(c) => pickCode(r.rid, c)} />
+            {info && info.isActive === false && (
+              <div style={{ fontSize: 12, color: "#B45309", fontWeight: 600, marginTop: 6 }}>
+                Avalara no longer lists {r.code} as active, so this row can't be saved with it — pick another code.
+              </div>
+            )}
+            <div style={{ marginTop: 10 }}>
+              <span style={lbl}>Covers</span>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 5, alignItems: "center" }}>
+                {chipList(r.targets)}
+                {!busy && (
+                  <button type="button" onClick={() => setOpenRid(open ? null : r.rid)} aria-expanded={open} style={{ ...linkBtn, marginLeft: 4 }}>
+                    {open ? "Done" : "Change what it covers"}
+                  </button>
+                )}
+              </div>
+            </div>
+            {open && !busy && (
+              <div style={{ marginTop: 10, background: "#F8FAFC", border: "1px dashed #CBD5E1", borderRadius: 10, padding: "11px 12px", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: "12px 18px" }}>
+                {groups.map((g) => {
+                  const inGroup = targets.filter((t) => t.group === g.key);
+                  if (g.key !== "buildings" && !inGroup.length) return null;
+                  const allOn = inGroup.length > 0 && inGroup.every((t) => r.targets.indexOf(t.id) !== -1);
+                  return (
+                    <div key={g.key}>
+                      <div style={lbl}>{g.label}</div>
+                      {g.key === "buildings" && (inGroup.length ? (
+                        <label style={checkRow}>
+                          <input type="checkbox" checked={allOn} onChange={(e) => toggleTargets(r.rid, inGroup.map((t) => t.id), e.target.checked)} />
+                          <span>All buildings</span>
+                        </label>
+                      ) : (
+                        <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>No building styles yet — add them under Structures.</div>
+                      ))}
+                      {inGroup.map((t) => {
+                        const mine = r.targets.indexOf(t.id) !== -1;
+                        const other = mine ? null : rows.find((o) => o.rid !== r.rid && o.targets.indexOf(t.id) !== -1);
+                        return (
+                          <label key={t.id} style={other ? checkRowTaken : checkRow}
+                            title={other ? `Currently under ${other.code || "a row with no code yet"}. Ticking this moves it here.` : undefined}>
+                            <input type="checkbox" checked={mine} onChange={(e) => toggleTargets(r.rid, [t.id], e.target.checked)} />
+                            <span>
+                              {t.label}
+                              {t.inactive && <span style={{ color: "#94A3B8", fontWeight: 500 }}> · not offered right now</span>}
+                              {other && <span style={{ color: "#B45309", fontWeight: 500 }}> · under {other.code || "a row with no code yet"}</span>}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* ── Read-only: the stored mapping, no controls ── */}
+      {d && !editing && (savedRows.length ? savedRows.map((r) => {
+        const info = codeInfo[r.code];
+        return (
+          <div key={r.code} data-tax-row="" style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 14px", marginBottom: 10 }}>
+            <div style={{ fontSize: 13, color: "#1E293B", lineHeight: 1.4 }}>
+              <strong style={{ fontVariantNumeric: "tabular-nums" }}>{r.code}</strong>
+              {info && info.description ? <span> — {info.description}</span> : null}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>{chipList(r.targets)}</div>
+          </div>
+        );
+      }) : <p style={{ fontSize: 13, color: "#64748B" }}>No tax codes have been chosen yet.</p>)}
+
+      {d && (
+        <div data-tax-unassigned="" style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
+          <span style={lbl}>Not assigned</span>
+          {unassigned.length === 0 ? (
+            <div style={{ fontSize: 12.5, color: "#15803D", fontWeight: 600, marginTop: 5 }}>Every building style and option heading has a code.</div>
+          ) : (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 5 }}>
+              {unassigned.map((t) => (
+                <span key={t.id} style={{ background: "#F1F5F9", color: "#475569", borderRadius: 12, fontSize: 11.5, fontWeight: 700, padding: "3px 9px" }}>{t.label}</span>
+              ))}
+            </div>
+          )}
+          {codeless && unassigned.length > 0 && (
+            <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>A row marked “Pick a code” isn't saved until it has one, so what it covers is listed here.</div>
+          )}
+        </div>
+      )}
+
+      {editing && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
+          <button type="button" onClick={addRow} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>+ Add tax code</button>
+          <button type="button" onClick={save} disabled={busy || !dirty} style={S.btn(dirty ? ACCENT : "#CBD5E1", "#FFF")}>
+            {busy ? "Saving…" : "Save tax codes"}
+          </button>
+          {/* A disabled Save says why beside it. */}
+          {!busy && <span style={{ fontSize: 12, color: "#64748B" }}>{dirty ? "Unsaved changes" : "No changes to save"}</span>}
+        </div>
+      )}
+      {msg && msg.ok && <div style={{ ...S.okMsg, marginTop: 12, marginBottom: 0 }}>{msg.ok}</div>}
+      {msg && msg.err && <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>{msg.err}</div>}
+
+      {d && d.catalog && (
+        <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 12 }}>
+          {d.catalog.syncedAt
+            ? `The codes come from Avalara's list: ${Number(d.catalog.count || 0).toLocaleString("en-US")} codes, last updated ${new Date(d.catalog.syncedAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}.`
+            : "Only Avalara's common codes are listed until CSM Synergy loads the full list."}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Company: one rail item, six tabs ─────────────────────────────────────────────────────
+// Carolyn 2026-09-11: "I want to create some top navigation inside company. The first tab is
+// business details, next branding, then we want team, then Locations and move the locations
+// from Team to that tab, then next is Crews and move the crews there, then Drivers with
+// delivery territories and drivers."
+//
+// So Branding and Team stopped being rail items, and Team gave up three of the four cards it
+// was carrying: Locations, Crews and Drivers each became a tab. What is left under Team is
+// the people-and-rates grid, which is what the name always meant.
+//
+// The bar is the underline strip Settings itself used to wear before the rail replaced it —
+// kept here because within ONE page it is a sub-navigation, which is exactly what it is good
+// at, and dropped from Settings because across fourteen pages it was a wall.
+// The underline strip Settings itself used to wear before the rail replaced it. Kept, and now
+// shared by both hubs: within ONE page it is a sub-navigation, which is what it is good at;
+// across fourteen pages it was a wall, which is why the rail exists.
+function SubTabs({ tabs, sub, onSub }) {
+  const active = tabs.find((t) => t[0] === sub) || tabs[0];
+  // GROUPED when the tabs carry a 4th element, flat when they do not — Company, Colors and
+  // Billing pass three-element tuples and render exactly as before. The clustering rule is the
+  // one the rail uses for its own groups (settingsGroups in 12-shell.jsx): start a new run
+  // whenever the group CHANGES, and label it only when it is non-null. One rule, one shape,
+  // two renderers — a second rule here would drift from the rail's the first time either moved.
+  const groups = [];
+  tabs.forEach((t) => {
+    const last = groups[groups.length - 1];
+    if (!last || last.group !== (t[3] || null)) groups.push({ group: t[3] || null, items: [t] });
+    else last.items.push(t);
+  });
+  const tab = ([id, label]) => (
+    <button key={id} type="button" onClick={() => onSub(id)}
+      aria-current={sub === id ? "page" : undefined}
+      style={{
+        background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
+        padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
+        color: sub === id ? ACCENT : "#64748B",
+        borderBottom: sub === id ? `2px solid ${ACCENT}` : "2px solid transparent",
+        marginBottom: -2,
+      }}>
+      {label}
+    </button>
+  );
+  const labelled = groups.some((g) => g.group);
+  return (<>
+    {/* One shared bottom rule under the whole bar either way, so the active tab's underline
+        still reads as part of a single strip rather than of its own cluster. */}
+    <div style={{ display: "flex", gap: labelled ? 22 : 2, flexWrap: "wrap", alignItems: "flex-end", borderBottom: "2px solid #E2E8F0", marginBottom: 14 }}>
+      {groups.map((g) => (
+        <div key={g.items[0][0]} style={{ display: "flex", flexDirection: "column" }}>
+          {g.group && (
+            <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.13em", textTransform: "uppercase", color: "#94A3B8", padding: "2px 2px 0", whiteSpace: "nowrap" }}>{g.group}</div>
+          )}
+          <div style={{ display: "flex", gap: 2, flexWrap: "wrap" }}>{g.items.map(tab)}</div>
+        </div>
+      ))}
+    </div>
+    <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
+  </>);
+}
+
+// ── Options: one rail item, nine tabs in three groups ────────────────────────────────────
+// ⚠️ NINE SEPARATE MOUNTS here, unlike ColorsShell and BillingShell. Those two hand a `section`
+// prop to ONE component because their tabs share a single fetch and a single unsaved-edit
+// buffer, and remounting would throw someone's typing away. These nine are independent
+// components with independent loads, so mounting only the visible one is both correct and a
+// real improvement: opening Options used to fire all nine cards' reads before you had looked
+// at anything.
+function OptionsShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null }) {
+  const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
+  const p = { viewingLabel, clientId };
+  return (
+    <div>
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
+      {sub === "options" && <WallHeights {...p} />}
+      {sub === "doors" && <DoorsView {...p} />}
+      {sub === "windows" && <WindowsView {...p} />}
+      {sub === "vents" && <VentsView {...p} />}
+      {sub === "ramps" && <RampsView {...p} />}
+      {sub === "cladding" && <CladdingView {...p} />}
+      {sub === "interior" && <LayoutPricing {...p} />}
+      {sub === "electrical" && <Electrical {...p} />}
+      {sub === "insulation" && <Insulation {...p} />}
+      {sub === "delivery" && <DeliveryView {...p} />}
+      {sub === "foundation" && <Foundation {...p} />}
+    </div>
+  );
+}
+
+// ── Colors: one rail item, three tabs ────────────────────────────────────────────────────
+// ⚠️ ONE <ColorsView>, with the section as a PROP. Not three mounts behind {sub === ...}
+// branches: the component holds every category in one unsaved-edit buffer and saves the lot,
+// so remounting on a tab switch would discard edits without a word. Same element, same
+// position, so React keeps the instance.
+function ColorsShell({ sub: rawSub, onSub, tabs, viewingLabel = null }) {
+  const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
+  const section = sub === "shingles" ? "shingle" : sub === "metal" ? "metal" : "paint";
+  return (
+    <div>
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
+      <ColorsView viewingLabel={viewingLabel} section={section} />
+    </div>
+  );
+}
+
+// ── Billing: one rail item, two tabs ─────────────────────────────────────────────────────
+// ⚠️ ONE <BillingView>, section as a PROP — see the note on that component. Its single status
+// call carries the plans, the subscriptions AND the wallet, so three of anything here would
+// be two wasted round trips and a tab switch that re-fetched for nothing.
+function BillingShell({ sub: rawSub, onSub, tabs, viewingLabel = null }) {
+  const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
+  return (
+    <div>
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
+      <BillingView viewingLabel={viewingLabel} section={sub === "wallet" ? "wallet" : "subscription"} />
+    </div>
+  );
+}
+
+function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null, canReadTax = false, canEditTax = false }) {
+  // Same clamp SettingsShell runs, for the same reason and one more. A person granted only
+  // settings_team has no Business Details tab, so the rail's Company link cannot be the
+  // `company` slug for them — it points at their first visible tab instead (see 12-shell).
+  // This is the belt to that braces: an unclamped `company` would match no branch below and
+  // render an empty page under a caption that confidently named a different tab.
+  const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
+  return (
+    <div>
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
+      {/* Business Details and Branding are the SAME component in two sections. Its form state
+          covers every field whichever section renders and its save is global, so the two tabs
+          cannot save half a form between them — see the note at the top of SettingsView. */}
+      {/* Building serial numbers ride with Business Details (Carolyn 2026-09-11). They are a
+          shop-wide counter, not a property of any one lot, which is why they left Locations. */}
+      {sub === "company" && (<><SettingsView section="company" /><SerialNumbersCard /></>)}
+      {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
+      {sub === "team" && <CommissionTeam viewingLabel={viewingLabel} />}
+      {sub === "commissions" && <CommissionStructure clientId={clientId} />}
+      {/* The tab and its lots ride on the team/branding areas; the tax rates on it are settings_crm. See LocationsCard. */}
+      {sub === "locations" && <LocationsCard canReadTax={canReadTax} canEditTax={canEditTax} />}
+      {/* Crews and Drivers are two sections of one component — it holds them together because
+          they arrive in one call and reference each other. The tabs only exist when the
+          scheduling entitlement is on (ssCompanyTabs), which is the gate they had in Team. */}
+      {sub === "crews" && <DriversTerritoriesCard section="crews" />}
+      {sub === "drivers" && <DriversTerritoriesCard section="drivers" />}
+      {/* The whole tab is settings_crm (SETTINGS_TAB_AREA.tax), so reading is already implied by
+          the tab being here; editing is passed separately, the same pair LocationsCard gets. */}
+      {sub === "tax" && <TaxCodesCard canReadTax={canReadTax} canEditTax={canEditTax} />}
+    </div>
+  );
+}
+
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
-  const TABS = [
-    ["structures", "Structures", "Building styles, sizes, and base prices"],
-    ["options", "Options", "Add-on items and rates"],
-    ["colors", "Colors", "Paint, shingle, and metal palettes"],
-    ["designer", "Designer", "How your styles look in the designer — including their 3D shape"],
-    ["branding", "Branding", "Your customer link's look & feel, and what customers see priced"],
-    // COMPANY, split out of Branding 2026-09-04 (Carolyn @28:55, mid-onboarding of a real
-    // client: "we need to have everything about the company ... the EIN, all that stuff needs
-    // to be in here. Their terms and conditions, company, branding, company information").
-    // Her structure is Branding / Company / Team, and Team already exists below.
-    ["company", "Company", "Your legal business details, address, and the terms printed on estimates"],
-    ["connection", "CRM Connection", "CRM credentials and pipeline mapping"],
-    ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings"],
-    ["email", "Email Sending", "Send estimates and invoices from your own email domain"],
-    ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business"],
-    ...(isOwner ? [["commissions", "Commissions", "How reps earn — structure, earned-on date, and payout schedule"]] : []),
-    ...(isAdmin || ssCanRead(access, "settings_team") ? [["team", "Team", "People, access, and commission rates"]] : []),
-    ["billing", "Billing", "Your StructureStudio subscription"],
-    // MY VIEW is deliberately last and deliberately ungated. Ahsan, 2026-08-28 @42:28:
-    // "all of these settings for contact cards, the pipeline cards, and the default one, I
-    // think should add, in settings, add another tab ... for structure studio settings."
-    //
-    // Everything above configures the BUSINESS; this configures the person looking at the
-    // screen, which is why it has no SETTINGS_TAB_AREA entry -- there is no area that could
-    // sensibly withhold someone's own default view from them, and a sales rep who cannot see
-    // Structures still gets to choose how their own Pipeline tab opens.
-    ["myview", "My View", "How the portal opens for you — your settings, not the business's"],
-  ]
-  // Per-area sub-tabs (migration 100). Owners, admins and operators are never filtered —
-  // an owner shut out of their own Settings by a permission bug is the failure this feature
-  // must not have. For everyone else each card appears only if they can read its area, which
-  // is what makes granting one person Structures actually produce a usable Settings page
-  // instead of an empty shell. `access` is null until the status call lands, and a sub-tab
-  // the server refuses is still refused — this only decides what is worth showing.
-  .filter(([id]) => {
-    if (isAdmin || !access) return true;
-    const area = SETTINGS_TAB_AREA[id];
-    return area ? ssCanRead(access, area) : true;
-  });
+  const TABS = ssSettingsTabs({ isOwner, isAdmin, access });
+  // Company's six tabs are valid settings slugs too — the clamp below has to know them or
+  // /portal/settings/branding, a link people hold, would fall back to Structures.
+  const hubs = ssSettingsHubs({ isOwner, isAdmin, access, schedUnlocked });
   // An unknown slug in the URL falls back to the first tab rather than rendering nothing.
   // `|| TABS[0][0]` only catches null/empty — a truthy-but-unknown slug (a typo, or a bookmark to
   // a renamed sub-tab like /portal/settings/color) survived as-is, and since every content branch
@@ -2870,38 +3517,23 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
   // Clamp the slug itself so the fallback is real, and so Dashboard's URL-normalise effect (which
   // compares p.sub against this value) rewrites the bad slug out of the address bar too.
   const rawSub = (onSub ? subProp : subState) || TABS[0][0];
-  const sub = TABS.some((t) => t[0] === rawSub) ? rawSub : TABS[0][0];
-  const active = TABS.find((t) => t[0] === sub) || TABS[0];
+  const knownSub = (x) => TABS.some((t) => t[0] === x) || Object.values(hubs).some((ts) => ts.some((t) => t[0] === x));
+  const sub = knownSub(rawSub) ? rawSub : TABS[0][0];
   return (
     <div>
-      {/* Banner — everything below it is Settings */}
-      <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", borderRadius: 14, padding: "20px 22px", color: "#FFF", marginBottom: 4 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <div style={{ width: 44, height: 44, borderRadius: 11, background: "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.28)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          </div>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1.15 }}>Settings</div>
-            <div style={{ fontSize: 12.5, color: "#D6E4F0", marginTop: 2 }}>Everything that configures your business — structures, options, colors, branding &amp; estimate details, your CRM connection, and billing.</div>
-          </div>
-        </div>
-      </div>
-      {/* Sub-navigation — underline tabs on the white area (navigation feel, not buttons) */}
-      <div style={{ display: "flex", gap: 2, flexWrap: "wrap", borderBottom: "2px solid #E2E8F0", marginBottom: 14 }}>
-        {TABS.map(([id, label]) => (
-          <button key={id} type="button" onClick={() => setSub(id)}
-            style={{
-              background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
-              padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
-              color: sub === id ? ACCENT : "#64748B",
-              borderBottom: sub === id ? `2px solid ${ACCENT}` : "2px solid transparent",
-              marginBottom: -2,
-            }}>
-            {label}
-          </button>
-        ))}
-      </div>
-      <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
+      {/* NO banner and NO tab strip here any more (2026-09-11). The fourteen sub-pages ARE
+          the left rail now, and the topbar names the one you are on — so this component is
+          purely the body of the selected sub-page.
+
+          Three things used to say "Settings" on this screen at once: the topbar, a gradient
+          banner repeating it word for word, and a caption line under the tabs. The rail
+          replaced the tabs, the topbar absorbed the caption, and the banner had nothing left
+          to add.
+
+          The `active` tuple this component used to hold went with the caption. The topbar
+          derives its own from the SAME list and the SAME clamp — see settingsTabs/settingsSub
+          in 12-shell.jsx, mirrored deliberately so the rail and the body can never disagree
+          about which sub-page is open. */}
       {/* Real-Time Pricing renders UNDER the pricing card (Carolyn 2026-08-27: "will you
           build another block down here … underneath here that has the real time pricing in
           it"). The component gates itself on rtpUnlocked — not-entitled renders a compact
@@ -2910,35 +3542,30 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         <PricingCsv viewingLabel={viewingLabel} onGoToOptions={() => setSub("options")} />
         <RealTimePricing viewingLabel={viewingLabel} clientId={clientId} unlocked={rtpUnlocked} canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />
       </>)}
-      {sub === "options" && (<>
-        <OptionsGroup title="Building" hint="Structural upgrades to the building itself">
-          <WallHeights viewingLabel={viewingLabel} clientId={clientId} />
-        </OptionsGroup>
-        <OptionsGroup title="Exterior" hint="Anything that goes on the outside of the building">
-          <DoorsView viewingLabel={viewingLabel} clientId={clientId} />
-          <WindowsView viewingLabel={viewingLabel} clientId={clientId} />
-          <VentsView viewingLabel={viewingLabel} clientId={clientId} />
-          <RampsView viewingLabel={viewingLabel} clientId={clientId} />
-          {/* Cladding is the outside of the building by definition, so it belongs to this
-              group's own hint. It sits last because it is the one card here that is not a
-              catalog of things a customer places on the plan. */}
-          <CladdingView viewingLabel={viewingLabel} clientId={clientId} />
-        </OptionsGroup>
-        <OptionsGroup title="Interior" hint="Anything that goes on the inside">
-          <LayoutPricing viewingLabel={viewingLabel} clientId={clientId} />
-          <Electrical viewingLabel={viewingLabel} clientId={clientId} />
-          <Insulation viewingLabel={viewingLabel} clientId={clientId} />
-        </OptionsGroup>
-      </>)}
-      {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
+      {hubs.options.some((t) => t[0] === sub) && (
+        <OptionsShell sub={sub} onSub={setSub} tabs={hubs.options} clientId={clientId}
+          viewingLabel={viewingLabel} />
+      )}
+      {hubs.colors.some((t) => t[0] === sub) && (
+        <ColorsShell sub={sub} onSub={setSub} tabs={hubs.colors} viewingLabel={viewingLabel} />
+      )}
       {/* 3D Style Calibration used to sit at the top of the Designer TAB. It is setup, not
           design work, so it lives here now; the tab itself no longer receives setup3d. */}
       {sub === "designer" && <DesignerSettings clientId={clientId} setup3d={setup3d} />}
-      {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
-      {/* Same component, different section. SettingsView's form state covers every field
-          whichever section renders and its save is global, so the two tabs cannot save
-          half a form between them — see the note at the top of SettingsView. */}
-      {sub === "company" && <SettingsView section="company" />}
+      {/* COMPANY is a hub with its own top navigation — six sub-pages behind one rail item.
+          Every one of them is still a real /portal/settings/<slug>, so the bookmarks and the
+          Client Setup links that point at branding and team are untouched. */}
+      {hubs.company.some((t) => t[0] === sub) && (
+        <CompanyShell sub={sub} onSub={setSub} tabs={hubs.company} clientId={clientId}
+          viewingLabel={viewingLabel}
+          /* Location tax rates and the Tax tab's codes are settings_crm — the area that owns the
+             company rate — not the team/branding areas Locations rides on. Same unclamped reading as ssCompanyTabs: an
+             owner/admin, or a null map (a platform operator in view-as, whose rights come
+             from app_operators), sees and edits; everyone else by their own map. The server
+             refuses regardless, and a refusal shows its own sentence. */
+          canReadTax={isAdmin || !access || ssCanRead(access, "settings_crm")}
+          canEditTax={isAdmin || !access || ssCanWrite(access, "settings_crm")} />
+      )}
       {sub === "connection" && <SettingsView section="connection" />}
       {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one
           open, and /portal/settings/quickbooks is a link people actually have. */}
@@ -2952,12 +3579,11 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           rather than vanishing — a rep should be able to see that texting is coming. */}
       {sub === "sms" && <SmsMessagingView clientId={clientId} viewingLabel={viewingLabel}
         canEdit={isAdmin || ssCanWrite(access, "settings_billing")} />}
-      {sub === "commissions" && <CommissionStructure clientId={clientId} />}
-      {/* Drivers & territories feed the Delivery Schedule — same entitlement gate as the
-          schedule tabs (operator, or the tenant's schedule_builds subscription). */}
-      {sub === "team" && (<><LocationsCard />{schedUnlocked && <DriversTerritoriesCard />}<CommissionTeam viewingLabel={viewingLabel} /></>)}
-      {sub === "billing" && <BillingView viewingLabel={viewingLabel} />}
-      {sub === "myview" && <MyViewSettings prefs={prefs} onSaved={onPrefsSaved} />}
+      {hubs.billing.some((t) => t[0] === sub) && (
+        <BillingShell sub={sub} onSub={setSub} tabs={hubs.billing} viewingLabel={viewingLabel} />
+      )}
+      {sub === "myprofile" && <MyProfileSettings prefs={prefs} onSaved={onPrefsSaved}
+        profile={profile} email={profileEmail} onProfileSaved={onProfileSaved} />}
     </div>
   );
 }

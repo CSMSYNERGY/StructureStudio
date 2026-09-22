@@ -5,6 +5,7 @@ import { isInternalTenant, loginTenant } from "../_shared/internalTenant.ts";
 import { canEdit as accCanEdit, effectiveAccess, type Level } from "../_shared/access.ts";
 import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
 import { FEATURE_KEYS } from "../_shared/featureCheck.ts";
+import { buildOverlayItems, columnIdMap, overlaySlugs } from "../_shared/pmOverlay.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
 // project management — bugs, feature requests, roadmap — replacing Monday.com.
@@ -642,8 +643,60 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (itemsRes.error) throw itemsRes.error;
         if (opsRes.error) throw opsRes.error;
         if (viewsRes.error) throw viewsRes.error;
+        // ── THE WORKING BOARD ────────────────────────────────────────────────────────────
+        // Carolyn, 2026-09-08 48:49: "I don't want to do our things in bugs feature request
+        // or roadmap. I think we need another table for that", and 48:00: "I'm tired of
+        // seeing completed in here."
+        //
+        // A board opts in through its OWN settings — { "overlay_from": ["bugs", "features"] }
+        // — and then also shows every un-finished item from those boards. NOTHING MOVES, and
+        // that is the requirement rather than a shortcut: a finished item has to drop off this
+        // table while staying on the board the client filed it on, never deleted and never
+        // archived. move_items refuses cross-board moves for the same reason.
+        //
+        // ⚠️ NO LONGER INERT — this comment said "no board sets overlay_from" and stopped being
+        // true the moment one did (the "working" board, 2026-09-09). An ordinary board still
+        // takes the early return and answers exactly what it answered before, and THAT half is
+        // worth keeping; but do not read the old sentence as a safety argument for a change.
+        //
+        // ⚠️ Foreign rows keep their REAL id and board_id, and a write from here must carry
+        // `fromBoardId` so update_item can translate the column ids the BROWSER rendered onto
+        // the board the row lives on. This comment used to argue no translation was needed —
+        // update_item resolves columns from the item's own board_id — which is true and beside
+        // the point, and it shipped every overlay edit as a silent no-op. The remapping is for
+        // cannot mis-key a write. Why remapping is needed at all: every board seeds its own
+        // column UUIDs, so Bugs' "Status" and this board's "Status" are different ids for the
+        // same meaning. See _shared/pmOverlay.ts.
+        const ovSlugs = overlaySlugs(board);
+        let outItems = itemsRes.data || [];
+        let outGroups = groupsRes.data || [];
+        if (ovSlugs.length) {
+          const { data: srcBoards } = await admin.from("pm_boards")
+            .select("id, slug, name").in("slug", ovSlugs).is("archived_at", null);
+          const sources = [];
+          for (const sbd of (srcBoards || [])) {
+            const [sCols, sItems] = await Promise.all([
+              boardColumns(sbd.id),
+              admin.from("pm_items").select("*").eq("board_id", sbd.id).is("archived_at", null)
+                .order("position").limit(2000),
+            ]);
+            if (sItems.error) throw sItems.error;
+            sources.push({ board: sbd, columns: sCols, items: sItems.data || [] });
+          }
+          const foreign = buildOverlayItems({ destColumns: columns, sources });
+          // One synthetic group per source board, so the table has somewhere to put them. The
+          // "overlay:" prefix cannot collide with a real pm_groups uuid, and dropping an item
+          // onto one is refused anyway because no such group row exists.
+          outGroups = outGroups.concat(sources.map((s, i) => ({
+            id: "overlay:" + s.board.slug, board_id: boardId,
+            name: "From " + s.board.name, color: "#94A3B8",
+            position: 1000000 + i, overlay: true,
+          })));
+          outItems = outItems.concat(foreign.map((f) => ({ ...f, group_id: "overlay:" + f.home_board_slug })));
+        }
+
         return json({
-          board, columns, groups: groupsRes.data, items: itemsRes.data,
+          board, columns, groups: outGroups, items: outItems,
           people: opsRes.data, views: viewsRes.data, canWrite,
         });
       }
@@ -974,7 +1027,47 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         }
         let newValues: Record<string, unknown> | null = null;
         if (payload.values !== undefined) {
-          const clean = sanitizeValues(columns, payload.values, opIds);
+          // ⚠️ A CROSS-BOARD EDIT ARRIVES KEYED BY THE BOARD THE USER IS LOOKING AT, NOT THE
+          // BOARD THE ITEM LIVES ON. An overlay board shows foreign rows, and the browser
+          // sends the column ids IT rendered. Every board seeds its own column UUIDs, so
+          // without the remap below not one key matches, sanitizeValues returns {}, the row is
+          // written back unchanged and this returns 200. The cell then shows the new value
+          // because the client patched optimistically — a silent no-op that looks like a save.
+          //
+          // That is the exact failure this whole change set exists to remove, so it does not
+          // get to fail quietly: anything that cannot be carried across is a 400 naming the
+          // column, never a drop.
+          let incoming = (payload.values || {}) as Record<string, unknown>;
+          const fromBoardId = str(payload.fromBoardId, 40);
+          const crossBoard = !!fromBoardId && fromBoardId !== item.board_id;
+          if (crossBoard) {
+            const srcColumns = await boardColumns(fromBoardId);
+            const map = columnIdMap(srcColumns, columns);
+            const remapped: Record<string, unknown> = {};
+            const unmapped: string[] = [];
+            for (const [k, v] of Object.entries(incoming)) {
+              const dest = map.get(k);
+              // deno-lint-ignore no-explicit-any
+              if (!dest) { unmapped.push(((srcColumns as any[]).find((c) => c.id === k)?.name) || k); continue; }
+              remapped[dest] = v;
+            }
+            if (unmapped.length) {
+              return json({ error: `"${unmapped.join('", "')}" does not exist on the board this item lives on. Open the item there to change it.` }, 400);
+            }
+            incoming = remapped;
+          }
+          const clean = sanitizeValues(columns, incoming, opIds);
+          if (crossBoard) {
+            // sanitizeValues drops a value its column does not recognise — a status label or a
+            // dropdown option belonging to the board being VIEWED rather than the board the
+            // item lives on. Column names match across boards; the ids inside them do not.
+            const lost = Object.keys(incoming).filter((k) => !(k in clean));
+            if (lost.length) {
+              // deno-lint-ignore no-explicit-any
+              const names = lost.map((k) => ((columns as any[]).find((c) => c.id === k)?.name) || k);
+              return json({ error: `That choice does not exist on the board this item lives on (${names.join(", ")}). Open the item there to change it.` }, 400);
+            }
+          }
           newValues = { ...item.values, ...clean };
           patch.values = newValues;
         }
@@ -1042,6 +1135,18 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
       case "archive_items": {
         const ids = (Array.isArray(payload.ids) ? payload.ids : []).map((x: unknown) => str(x, 40)).filter(Boolean);
         if (!ids.length) return json({ error: "No items given." }, 400);
+        // ⚠️ AN OVERLAY ROW IS SOMEBODY ELSE'S CARD. Archiving from the working board would
+        // hide it on the board its reporter is watching, and Carolyn's rule for these rows is
+        // that they are never deleted and never archived — the whole reason the overlay reads
+        // across instead of moving anything. The client sends the board it is looking at.
+        const fromBoardId = str(payload.fromBoardId, 40);
+        if (fromBoardId) {
+          const { data: foreign } = await admin.from("pm_items").select("id, name, board_id")
+            .in("id", ids).neq("board_id", fromBoardId);
+          if (foreign && foreign.length) {
+            return json({ error: `"${foreign[0].name}" lives on another board. Archive it there — it stays visible to whoever reported it.` }, 400);
+          }
+        }
         const { error } = await admin.from("pm_items")
           .update({ archived_at: new Date().toISOString() }).in("id", ids);
         if (error) throw error;

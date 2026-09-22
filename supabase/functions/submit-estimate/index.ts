@@ -11,13 +11,28 @@ import { changeOrderEmail, estimateEmail } from "../_shared/emailTemplates.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
+import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
+import { sendTenantSms } from "../_shared/smsSend.ts";
 import { deHtml, designTotalCents, round2, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
-import { bosBasisOf, bosQtyFor, bosCharges } from "../_shared/buildOnSite.ts";
+import { bosBasisOf, bosQtyFor, bosCharges, bosAmountFor } from "../_shared/buildOnSite.ts";
+import { FOUNDATION_LABEL, isFoundationId, foundationQtyFor, foundationDesc } from "../_shared/foundation.ts";
+import { quoteDelivery, type DeliveryQuote } from "../_shared/deliveryQuote.ts";
+import { hasSubject } from "../_shared/jwtSubject.ts";
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
+import { cladLineName } from "../_shared/claddingLineName.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
-import { resolveRate, taxOn } from "../_shared/salesTax.ts";
+import { resolveRate } from "../_shared/salesTax.ts";
+import {
+  agreedTax, carriedTax, carryDecision, chooseDefaultRate, homeLotApplies, stampTax, TAX_LOCATION_COLUMNS,
+  taxLocationFrom, type CarryDecision, type DefaultRate, type TaxLocation,
+} from "../_shared/taxChain.ts";
 import { chargeTaxCalculation, taxLookupIdem } from "../_shared/taxMeter.ts";
+// draft → sent is this function's job since migration 241; save_design no longer promotes.
+import { promoteIssuedDesign } from "../_shared/designPromotion.ts";
+// The rule this function's SS persist and portal-settings' tax re-stamp both follow (2026-09-17).
+import { quotePdfStale, SUBMIT_RACE_REFUSAL, submitPersistMiss } from "../_shared/quoteWriteRace.ts";
+import { isAgreedDesign } from "../_shared/locationTax.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -108,17 +123,7 @@ const escHtml = (v: unknown): string =>
 // SUPABASE_ANON_KEY: that env value and the literal baked into the browser bundle ship through
 // different pipelines, and the day they drift a compare would invert in silence (the reasoning
 // _shared/resolveTenant.ts records for its own classifier).
-const hasSubject = (token: string): boolean => {
-  try {
-    const part = token.split(".")[1];
-    if (!part) return false;
-    const b = part.replace(/-/g, "+").replace(/_/g, "/");
-    const claims = JSON.parse(atob(b + "=".repeat((4 - (b.length % 4)) % 4))) as Record<string, unknown>;
-    return typeof claims?.sub === "string" && (claims.sub as string).length > 0;
-  } catch {
-    return false;
-  }
-};
+// hasSubject() now lives in _shared/jwtSubject.ts (lifted 2026-09-14 so delivery-quote shares it).
 
 // PER-TENANT SUBMIT CAP (2026-09-06). This endpoint is reachable with the public anon key, and
 // one call spends the tenant's money: several CRM API calls, a branded email to whatever
@@ -139,6 +144,10 @@ const RATE_MAX_PER_TENANT = 20;   // generous: a real public designer sees singl
 // per window instead of one per request. app_errors has NO fingerprint dedupe in this project,
 // so self-limiting here is the only thing stopping our own log becoming the amplification.
 const RATE_LOG_CEILING = RATE_MAX_PER_TENANT + 2;
+
+// How long the SS quote path waits on the quote-created text before answering without it (expo
+// plan 3.7). Twilio normally answers in well under a second; this only bounds a carrier stall.
+const QUOTE_TEXT_TIMEOUT_MS = 8_000;
 
 Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -266,7 +275,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     .from("designs")
     // accepted_snapshot (153) is the change-order baseline. It MUST be selected here: this
     // handler overwrites estimate_lines below, so estimate_lines cannot be that baseline.
-    .select("client_id, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number, accepted_at, estimate_lines, accepted_snapshot")
+    // status (241, 2026-09-15): save_design no longer promotes, so a first submit arrives as a
+    // draft and the ISSUED steps below mark it sent. Read here only to skip that write for a
+    // design already past draft; the write itself re-checks draft in its WHERE.
+    // updated_at (2026-09-17) is the SS persist's compare-and-swap token (see "PERSIST" in 9-ALT).
+    .select("client_id, status, updated_at, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number, accepted_at, estimate_lines, accepted_snapshot")
     .eq("short_code", designId)
     .single();
   if (designErr || !existingDesign) {
@@ -316,6 +329,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // rep's debug channel and not something an anonymous shopper should read back. It costs at
   // most one auth round trip, and only for a request that actually presents a user token.
   let staffCaller = false;
+  // The signed-in rep, when there is one — kept for the delivery origin (233, origin_mode = rep
+  // measures from THIS person's home lot). Resolved inside the same auth round trip below.
+  let callerUserId: string | null = null;
   // MAY THIS PERSON AMEND A SIGNED ORDER? Separate from staffCaller on purpose: pricing a
   // quote and re-opening an agreement the customer already committed to are different acts,
   // and Carolyn granted them separately ("Change Orders is the only feature they shouldn't
@@ -335,6 +351,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const { data: userData } = await supabase.auth.getUser(token);
       const userId = userData?.user?.id;
       if (userId) {
+        callerUserId = userId;
         const [memRes, opRes] = await Promise.all([
           // limit(1), not maybeSingle(): a duplicate client_users row must not lock a rep out
           // of their own tenant (the reasoning _shared/resolveTenant.ts records for its read).
@@ -473,6 +490,49 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     }).catch(() => {});
   }
 
+  // 2e. AUTOMATIC DELIVERY (233–236). Carolyn 2026-09-14: a builder sets delivery rules and
+  // says whether the fee "automatically add[s] based on their rules.. or not". A rep-typed fee
+  // (allowedDeliveryFee, staff-gated above) WINS — the rep looked at the suggestion and chose —
+  // otherwise, with automation on, the fee is worked out here from the customer's address by
+  // the same quoteDelivery the designer preview used, off the same whole-mile cache, so what the
+  // customer saw on screen is what goes on the paper.
+  //
+  // Two kinds of "can't price", handled differently on purpose:
+  //   MISCONFIGURATION (rules half-filled, no origin address, no Google key) → REFUSE, naming the
+  //   setting. The ss_tax_rate posture (158): the builder believes delivery is being added, and
+  //   issuing every quote silently without it is the outcome worth refusing over.
+  //   THIS ADDRESS (beyond the last band, no route, Google down) → ISSUE WITHOUT the line and
+  //   say so (deliveryUnpriced in the response, `delivery` in the snapshot). Carolyn defined
+  //   "beyond the last band" as left for the rep; a transient outage blocking every quote for
+  //   every automated tenant would be worse than one quote missing a rep-editable line; and
+  //   the designer already showed the customer the same "to be confirmed" state.
+  // Placed with the other refusals, before the contact upsert, so a refusal leaves nothing behind.
+  const manualDelivery = allowedDeliveryFee > 0;
+  let autoDelivery: DeliveryQuote | null = null;
+  if (!manualDelivery) {
+    const dq = await quoteDelivery(supabase, { clientId, address: addressFrom(contact || {}), repUserId: callerUserId });
+    if (dq.configured && dq.automate) {
+      if (dq.reason === "rule_incomplete" || dq.reason === "no_origin" || dq.reason === "distance_not_configured") {
+        const why = dq.reason === "rule_incomplete" ? "the fee rule is missing a number"
+          : dq.reason === "no_origin" ? "no origin address is on file"
+          : "distance lookups aren't configured";
+        return json({ error: `Delivery is set to be added automatically for ${businessName}, but it can't be priced yet — ${why}. (For the business: Settings → Options → Delivery.)` }, 400);
+      }
+      autoDelivery = dq;
+    }
+  }
+  const deliveryUnpriced = autoDelivery && !autoDelivery.autoPriced
+    ? { reason: autoDelivery.reason, miles: autoDelivery.miles, originName: autoDelivery.originName }
+    : null;
+  if (deliveryUnpriced) {
+    logEdgeError({
+      fn: "submit-estimate", req, clientId, code: "delivery_unpriced",
+      message: `Automatic delivery could not price this address (${deliveryUnpriced.reason}); the estimate was issued without a delivery line.`,
+      context: { designId: String(designId), ...deliveryUnpriced },
+      severity: "info",
+    }).catch(() => {});
+  }
+
   // 2b. Address handling. The React form collects street/city/state/zip optionally
   // (only name/email/phone are required). If the customer filled in any address
   // field, push the whole address through to GHL on both the contact upsert and
@@ -519,12 +579,27 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // reason it exists): this response is read by an anonymous caller, and the CRM's own
       // body carries the tenant's location id and account shape. Triage still gets every
       // byte, just not through the shopper's browser.
+      //
+      // A 401/403 is the CRM refusing the tenant's SAVED CREDENTIAL (invalid, rotated or out of
+      // scope). Retrying cannot fix that until the business re-saves it, so it is a REFUSAL, not
+      // a fault: a 400 filed as info, in words that never suggest trying again and name neither
+      // the CRM vendor nor the credential. It returns before any opportunity, estimate, quote
+      // number or promotion exists, which is what lets the designer keep the draft on a 4xx, so
+      // ONLY this pre-issue step may answer that way. Every other status stays the 502 fault.
+      // Keep this block plain JS: _test_stubs/ghlAuthRefusal_test.ts lifts it and runs it.
+      const credentialRefused = r.status === 401 || r.status === 403;
       const body = await r.text();
       await logEdgeError({
         fn: "submit-estimate", req, clientId, code: `ghl_contact_upsert_${r.status}`,
         message: `GHL contact upsert failed (${r.status}): ${body.slice(0, 2000)}`,
         context: { designId: String(designId) },
+        severity: credentialRefused ? "info" : "error",
       });
+      if (credentialRefused) {
+        return json({
+          error: `${businessName} can't send quotes online right now. Your design is saved, so please contact them directly. (For the business: re-check your CRM connection under Settings → CRM Connection.)`,
+        }, 400);
+      }
       return json({ error: "We couldn't save your details with this business's CRM just now. Please try again in a moment." }, 502);
     }
     const d = await r.json();
@@ -930,6 +1005,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // blocks down insisting the two "must agree to the penny". Seven live styles are affected
   // (six at 6.4–7 ft, one at 7 ft), all of them over-billed. Carolyn's call was to fix both
   // at once rather than let cladding inherit the same bug.
+  // Percentage-of-everything lines, resolved in step 7a once every other line exists. Declared
+  // HERE, above the FIRST thing that registers into it (the build-on-site fee, then cladding,
+  // then the layout add-ons), because `const` has no hoisting — a declaration below the first
+  // use is a TDZ ReferenceError at runtime, on the one code path that would only fire for a
+  // builder who chose that method.
+  // deno-lint-ignore no-explicit-any
+  const deferredPctLines: { item: any; rate: number }[] = [];
+
   let resolvedWallHeightFt = styleBaseWallHeightFt;
   const wallHeightDeltaIn = Number(selections.wallHeightDeltaIn) || 0;
   if (wallHeightDeltaIn > 0) {
@@ -983,21 +1066,29 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // not a constraint. The building is still built on site; there is simply no line.
     {
       const bosRate = Number(wh.bos_fee_rate) || 0;
-      // Same vocabulary as layout_item_pricing, so all three already have geometry here.
+      // ALL SEVEN pricing methods (228), the same vocabulary layout items and cladding price by.
+      // The wall area is the one the increase itself just produced — resolvedWallHeightFt was
+      // raised a few lines up — so "per sq ft of wall" charges for the taller wall, exactly as
+      // cladding's cladWallArea does. MIRRORS the designer's build-on-site rows; keep both.
       const bosBasis = bosBasisOf(wh.bos_fee_basis);
-      const bosQty = bosQtyFor(bosBasis, buildingArea, buildingPerimeter);
-      const bosDesc = bosBasis === "sqft_building"
-        ? `${buildingArea} sq ft at $${bosRate.toFixed(2)} per sq ft`
-        : bosBasis === "perimeter_building"
-        ? `${buildingPerimeter} ft of perimeter at $${bosRate.toFixed(2)} per foot`
+      const bosWallArea = Math.round(buildingPerimeter * resolvedWallHeightFt);
+      const bosQty = bosQtyFor(bosBasis, buildingArea, buildingPerimeter, bosWallArea);
+      const bosAmount = bosAmountFor(bosBasis, bosRate, buildingPrice);
+      const bosDesc =
+        bosBasis === "sqft_building"      ? `${buildingArea} sq ft at $${bosRate.toFixed(2)} per sq ft`
+        : bosBasis === "sqft_option"      ? `${bosWallArea} sq ft of wall at $${bosRate.toFixed(2)} per sq ft`
+        : bosBasis === "perimeter_building" ? `${buildingPerimeter} ft of perimeter at $${bosRate.toFixed(2)} per foot`
+        : bosBasis === "lineal_ft"        ? `${buildingPerimeter} ft of wall at $${bosRate.toFixed(2)} per foot`
+        : bosBasis === "pct_building_price" ? `${bosRate}% of the building price`
+        : bosBasis === "pct_estimate_total" ? `${bosRate}% of the rest of this quote`
         : "Crew and equipment to build on your site";
       if (bosCharges(wh.build_on_site, wh.bos_fee_rate, bosQty)) {
-        targetItems.push(tagLine({
+        const bosLine = tagLine({
           // Named for what it IS, not for what triggered it: the customer is buying an
           // on-site build, and the wall height is why. The line above already says the height.
           name: "Built On Site",
           qty: bosQty,
-          amount: bosRate,
+          amount: bosAmount,
           priceId: "",
           productId: "",
           attachments: [],
@@ -1007,17 +1098,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // Taxability is INHERITED from the increase that caused it rather than given its own
           // column. They are one decision on one row, and a builder who marks taller walls
           // non-taxable has already said what they think about this charge.
-        }, { kind: "build_on_site", nonTaxable: wh.taxable === false }));
+        }, { kind: "build_on_site", nonTaxable: wh.taxable === false });
+        targetItems.push(bosLine);
+        if (bosBasis === "pct_estimate_total") deferredPctLines.push({ item: bosLine, rate: bosRate });
       }
     }
   }
-
-  // Percentage-of-everything lines, resolved in step 7a once every other line exists. Declared
-  // HERE rather than beside the layout add-ons that also use it, because cladding registers into
-  // it and `const` has no hoisting — a declaration below the first use is a TDZ ReferenceError
-  // at runtime, on the one code path that would only fire for a builder who chose that method.
-  // deno-lint-ignore no-explicit-any
-  const deferredPctLines: { item: any; rate: number }[] = [];
 
   // ── Cladding (207) ──────────────────────────────────────────────────────────────────────
   // The third SELECTION charge, and it copies the wall-height shape exactly: nothing is on the
@@ -1068,9 +1154,17 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         : /* each / pct_* */               { qty: 1,                 unit: "" };
       // The tenant's own name for it, falling back to the built-in — the customer must read the
       // same words on the estimate that they read on the designer.
-      const cladName = (sc.label_override || "").trim()
-        || (String((selections as Record<string, unknown>).cladding ?? "").trim())
-        || claddingId;
+      // ...except on a SIGNED order whose cladding is unchanged, which keeps the name the customer
+      // agreed to: a cladding line's name is its change-order identity, so relabelling a built-in
+      // (Metal -> AG Panel, 2026-09-15) must not raise a change order nobody made. The id decides,
+      // so a real swap still reads as one. See _shared/claddingLineName.ts.
+      const cladName = cladLineName({
+        override: sc.label_override,
+        browserLabel: (selections as Record<string, unknown>).cladding,
+        claddingId,
+        accepted: !!(existingDesign.accepted_at || existingDesign.accepted_snapshot),
+        agreed: agreedBaseline(existingDesign),
+      });
       if (cladShape.qty > 0) {
         // pct_building_price resolves here (the base price is already known). pct_estimate_total
         // CANNOT: it is a share of every OTHER line, so it goes out at 0 and joins the existing
@@ -1162,6 +1256,57 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         type: "one_time",
         description: `${sqft} sq ft at $${rate.toFixed(2)} per sq ft`,
       }, { kind: "insulation", nonTaxable: off.taxable === false }));
+    }
+  }
+
+  // ── Foundation (237) ───────────────────────────────────────────────────────────────────
+  // Site work the customer ticked in the designer: gravel pad, fence removal, piers, concrete
+  // slab — each priced by any of the seven methods, three of which take a quantity the customer
+  // entered (_shared/foundation.ts is the one rule for defaults and limits; the designer mirrors
+  // it). The cladding posture line for line: the rate is RE-READ, never trusted from the body;
+  // an item that isn't offered is a hard 400; a rate of 0 is included and produces no line.
+  // internal_only is NOT checked here — visibility only; a rep-selected item still prices.
+  // Not staff-gated: these are positive charges, so a shopper inflating a count only pays more.
+  {
+    // deno-lint-ignore no-explicit-any
+    const fdSel: any[] = Array.isArray((selections as any)?.foundation) ? (selections as any).foundation : [];
+    if (fdSel.length) {
+      const fdRes = await supabase.from("foundation_items")
+        .select("item_id, label_override, rate, basis, taxable, active")
+        .eq("client_id", clientId);
+      if (fdRes.error) return json({ error: "Could not read your foundation rates just now. Try resubmitting in a moment." }, 400);
+      const fdRows = (fdRes.data ?? []) as { item_id: string; label_override: string | null; rate: number | null; basis: string | null; taxable: boolean | null; active: boolean }[];
+      const seenFd = new Set<string>();
+      for (const raw of fdSel) {
+        const id = String(raw?.id ?? "").trim();
+        if (!isFoundationId(id) || seenFd.has(id)) continue;
+        seenFd.add(id);
+        const row = fdRows.find((r) => r.item_id === id);
+        const label = (row?.label_override || "").trim() || FOUNDATION_LABEL[id];
+        if (!row || !row.active || row.rate == null) {
+          return json({ error: `${label} isn't offered by ${businessName}. Set it in the portal under Settings → Options → Foundation, then resubmit.` }, 400);
+        }
+        const rate = Number(row.rate) || 0;
+        if (rate <= 0) continue;   // included at no charge: no line, not a $0 line
+        const basis = bosBasisOf(row.basis);
+        const { qty, error: qtyErr } = foundationQtyFor(basis, raw?.qty, { area: buildingArea, perimeter: buildingPerimeter });
+        if (qtyErr) return json({ error: `${label}: ${qtyErr}.` }, 400);
+        if (qty <= 0) continue;
+        const amount = bosAmountFor(basis, rate, buildingPrice);
+        const line = tagLine({
+          name: label,
+          qty,
+          amount,
+          priceId: "",
+          productId: "",
+          attachments: [],
+          currency: "USD",
+          type: "one_time",
+          description: foundationDesc(basis, qty, rate),
+        }, { kind: "foundation", nonTaxable: row.taxable === false });
+        targetItems.push(line);
+        if (basis === "pct_estimate_total") deferredPctLines.push({ item: line, rate });
+      }
     }
   }
 
@@ -2044,8 +2189,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // Category IDs and Names" support doc. Amount is the designer's optional delivery-fee field —
   // via allowedDeliveryFee, which step 2c zeroes for callers who aren't verified tenant staff
   // (audit 2026-08-20); omitted entirely when 0/blank.
-  const deliveryAmt = allowedDeliveryFee;
-  if (deliveryAmt > 0) {
+  // Since 233 the amount is EITHER the rep's figure OR the automatic one from step 2e. An
+  // automatic fee is pushed even at $0 (free within the radius): the customer was told delivery
+  // is free, and a line that says so is the proof. The description carries the miles and the
+  // origin, which is what reaches the PDF and the books.
+  const deliveryAmt = manualDelivery ? allowedDeliveryFee : (autoDelivery && autoDelivery.autoPriced ? (Number(autoDelivery.amount) || 0) : 0);
+  const pushDelivery = manualDelivery || !!(autoDelivery && autoDelivery.autoPriced);
+  if (pushDelivery) {
     targetItems.push(tagLine({
       name: "Delivery",
       qty: 1,
@@ -2055,7 +2205,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       attachments: [],
       currency: "USD",
       type: "one_time",
-      description: "Delivery fee (non-taxable)",
+      description: manualDelivery
+        ? (ssTaxDelivery ? "Delivery fee" : "Delivery fee (non-taxable)")
+        : autoDelivery!.desc,
       automaticTaxCategoryId: "6852749d6e0bd3b3466d14b6",   // GHL "Non-Taxable Product" (NT)
     }, { kind: "delivery", nonTaxable: !ssTaxDelivery }));
   }
@@ -2323,6 +2475,19 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     version: 1,
     styleId: styleRowId,
     discount: totalDiscount > 0 ? totalDiscount : 0,
+    // How the delivery line was arrived at (233): a rep's figure, the automatic rule (with the
+    // miles and origin it used), or an automatic rule that could not price this address —
+    // in which case there is no delivery line and the rep is expected to add one.
+    ...(manualDelivery
+      ? { delivery: { source: "manual", amount: allowedDeliveryFee } }
+      : autoDelivery
+        ? { delivery: {
+            source: autoDelivery.autoPriced ? "auto" : "unpriced",
+            amount: autoDelivery.autoPriced ? (Number(autoDelivery.amount) || 0) : null,
+            miles: autoDelivery.miles, originName: autoDelivery.originName,
+            originMode: autoDelivery.originMode, ruleType: autoDelivery.ruleType,
+            reason: autoDelivery.reason, resolvedAt: new Date().toISOString() } }
+        : {}),
     // Per-discount taxability, SS mode only (migration 148). `discount` above stays the single
     // clamped number every existing reader expects; this is the breakdown the two-pool totals
     // block is built from. Rows are UNCLAMPED — subtotalsFromSnapshot clamps each pool at >= 0
@@ -2395,47 +2560,153 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       }, 400);
     }
 
-    // ── Sales tax (migration 148) ───────────────────────────────────────────────────────
+    // ── Sales tax (migration 148; the rate chain, 2026-09-17) ───────────────────────────
     //
-    // Resolved HERE, before the document is built and before the change-order delta below, so
-    // both the PDF and `totalBefore`/`totalAfter` see the same tax-inclusive figures.
+    // Decided HERE, before the document is built and before the change-order delta below, so
+    // both the PDF and `totalBefore`/`totalAfter` see the same tax-inclusive figures. Stamped
+    // further down, after the amendment gate; everything between here and there only reads.
     //
-    // A RESUBMIT RE-RESOLVES. That is the live-until-signed rule (Carolyn 2026-08-27): a quote
-    // is a live offer, so each time it is issued it is priced at today's rate for today's
-    // address. What freezes is the acceptance — customer-accept writes the rate it signed
-    // under into design_acceptances, because a later resubmit overwrites this snapshot.
+    // NOTHING ON THIS PATH CALLS AVALARA (2026-09-16). A lookup is billed per request and this
+    // endpoint runs on every submit and resubmit, from anyone holding the designer link. A
+    // verified rate is bought only deliberately, by staff, through portal-settings' verify
+    // action. A submit stamps the chain in _shared/taxChain.ts instead:
+    //   0. a SIGNED order (the amendment path) carries the tax the customer agreed to — rate,
+    //      label, basis, location and all — with only the amount and pools recomputed for the
+    //      new lines (agreedTax). A lot deleted or re-rated since the signature, or a staff
+    //      member's address edit, must not put a tax-rate line on the change order; the rate on
+    //      a signed order changes only by a deliberate feature;
+    //   1. a verified rate already on this quote, carried over. A shopper's resubmit always
+    //      carries it: they send the delivery address, so an address change they control must
+    //      not discard a rate the builder paid for. A staff resubmit carries it while the
+    //      delivery state and ZIP are unchanged, and otherwise falls through to 2-4 with
+    //      "address changed — re-verify";
+    //   2. the rate of this quote's sales location (designs.sales_location_id, migration 245);
+    //   3. a staff member issuing a quote for the FIRST time (no quote number before this
+    //      submit) that has no location: their home lot's rate (migration 234), and that lot is
+    //      recorded as the quote's location after the persist below. Never on a resubmit: an
+    //      issued quote with no location may be one staff deliberately cleared, and the home lot
+    //      would put it straight back (homeLotApplies);
+    //   4. the company rate (client_settings.ss_tax_rate);
+    //   5. refuse.
+    // A RESUBMIT RE-STAMPS through that chain — still the live-until-signed rule: a quote is a
+    // live offer, priced at today's default for its location. What freezes is the acceptance:
+    // customer-accept writes the rate it signed under into design_acceptances, because a later
+    // resubmit overwrites this snapshot.
     //
-    // The tenant has a rate because portal-settings refuses to turn invoice_in_ghl off without
-    // one. Reaching here with NULL means the row was edited around the portal, and quoting an
-    // untaxed bill is the one outcome worth refusing over — the same posture the missing quote
-    // number takes immediately above.
-    if (ssTaxRate == null) {
-      return json({
-        error: "This account issues its own paperwork but has no sales tax rate set. Add one in Settings → CRM Connection → Quotes & Invoices (enter 0% if you don't collect sales tax).",
-      }, 400);
-    }
+    // The home lot is never consulted on a signed order. Whoever amends it did not necessarily
+    // sell it, and their lot's rate would re-price the customer's tax in the change order.
     const taxAddr = addressFrom(contact);
-    const resolved = await resolveRate(taxAddr, ssTaxRate);
-    {
-      const pools = subtotalsFromSnapshot(estimateLines)!;
-      const amount = taxOn(pools.taxableBase, resolved.rate);
-      // Stamped onto the object that is about to be persisted AND handed to the PDF builder, so
-      // the stored figure and the printed one are the same object, not two computations.
-      (estimateLines as Record<string, unknown>).tax = {
-        rate: resolved.rate,
-        amount,
-        label: ssTaxLabel,
-        taxableSubtotal: pools.taxable,
-        nonTaxableSubtotal: pools.nonTaxable,
-        taxableBase: pools.taxableBase,
-        nonTaxableNet: pools.nonTaxableNet,
-        source: resolved.source,
-        jurisdiction: resolved.jurisdiction,
-        address: { state: taxAddr.state, zip: taxAddr.zip },
-        resolvedAt: new Date().toISOString(),
-        ...(resolved.reason ? { reason: resolved.reason } : {}),
-      };
+    const taxPools = subtotalsFromSnapshot(estimateLines)!;
+    // deno-lint-ignore no-explicit-any
+    const storedTax: Record<string, any> | null = (existingDesign.estimate_lines as any)?.tax ?? null;
+    const signedTax = agreedTax(existingDesign);
+    const taxCarry: CarryDecision = signedTax ? { carry: true } : carryDecision({ staffCaller, storedTax, address: taxAddr });
+    let taxDefault: DefaultRate | null = null;
+    if (!taxCarry.carry) {
+      let salesLocationId: string | null = null;
+      let location: TaxLocation | null = null;
+      let homeLot: TaxLocation | null = null;
+      try {
+        const { data: dRow, error: dErr } = await supabase.from("designs")
+          .select("sales_location_id").eq("client_id", clientId).eq("short_code", designId).maybeSingle();
+        if (dErr) throw dErr;
+        salesLocationId = dRow?.sales_location_id ? String(dRow.sales_location_id) : null;
+        let lotId = salesLocationId;
+        const fromHome = homeLotApplies({
+          salesLocationId: lotId, staffCaller, callerUserId,
+          firstIssue: !existingDesign.ss_quote_number, signed: !!existingDesign.accepted_at,
+        });
+        if (fromHome) {
+          // limit(1), not maybeSingle(): the same duplicate-row tolerance as the staff check above.
+          const { data: cu, error: cuErr } = await supabase.from("client_users")
+            .select("location_id").eq("client_id", clientId).eq("user_id", callerUserId).limit(1);
+          if (cuErr) throw cuErr;
+          lotId = cu?.[0]?.location_id ? String(cu[0].location_id) : null;
+        }
+        if (lotId) {
+          const { data: lot, error: lotErr } = await supabase.from("builder_locations")
+            .select(TAX_LOCATION_COLUMNS).eq("client_id", clientId).eq("id", lotId).maybeSingle();
+          if (lotErr) throw lotErr;
+          if (fromHome) homeLot = taxLocationFrom(lot, clientId);
+          else location = taxLocationFrom(lot, clientId);
+        }
+      } catch (e) {
+        // REFUSE, do not fall to the company rate. A quote that names a location with its own
+        // rate would be emailed at a total the builder did not set, and the next resubmit
+        // would quietly change it. Nothing about the quote has been written yet; a first issue
+        // loses its allocated number, as it does on every refusal after the allocation above.
+        // This is also what a deploy ahead of migration 245 looks like.
+        await logEdgeError({
+          fn: "submit-estimate", req, clientId, code: "tax_location_read_failed",
+          message: `sales location read failed: ${(e as { message?: string })?.message ?? String(e)}`,
+          context: { designId: String(designId) },
+        });
+        return json({ error: "We couldn't work out the sales tax for this quote just now. Please try again in a moment." }, 502);
+      }
+      taxDefault = chooseDefaultRate({ salesLocationId, location, homeLot, companyRate: ssTaxRate, companyLabel: ssTaxLabel });
+      // No link has a rate. portal-settings refuses to turn invoice_in_ghl off without a company
+      // rate, so reaching here means the row was edited around the portal, and quoting an
+      // untaxed bill is the one outcome worth refusing over — the same posture the missing
+      // quote number takes immediately above. The company rate still lives on that card.
+      if (!taxDefault) {
+        return json({
+          error: "This account issues its own paperwork but has no sales tax rate set. Add one in Settings → CRM Connection → Quotes & Invoices (enter 0% if you don't collect sales tax).",
+          reason: "no_tax_rate",
+        }, 400);
+      }
     }
+    // ── MAY THIS ORDER BE AMENDED, AND BY THIS PERSON? (2026-09-07; moved up 2026-09-15) ────
+    // Only a design the customer already signed can be an amendment. BEFORE the first write,
+    // which is the whole point: the design's priced revision lands in the change-order block
+    // below and the guard trigger would refuse the change order a moment later — leaving the
+    // design revised, no change order recorded, and the customer's quote email already out.
+    // Refusing first leaves nothing half-done.
+    //
+    // MOVED UP (2026-09-15): same inputs, same answers, earlier. It used to sit inside the
+    // change-order block, after the sales-tax lookup and the quote PDF, so a REFUSED amendment
+    // had already run a possibly metered Avalara lookup and upserted a revised document over
+    // floor-plans/<client>/<code>-quote.pdf, the signed customer's own quote, for a change
+    // nobody was allowed to make. The gate reads designs.accepted_at, client_settings,
+    // change_orders, orders and order_unlocks, and mayAmendCaller is settled at the auth step;
+    // the tax lookup, the meter and the PDF upload that used to run first write none of those.
+    //
+    // Both answers come from the same places the rest of the system asks: the gate
+    // function migration 210 installed (which the change_orders trigger also calls, so a
+    // refusal here and a refusal there can never disagree), and the one permission model.
+    if (existingDesign.accepted_at) {
+      const { data: gate } = await supabase.rpc("order_amendment_gate", {
+        p_client_id: clientId, p_short_code: designId,
+      });
+      if (gate && (gate as Record<string, unknown>).open !== true) {
+        return json({
+          error: String((gate as Record<string, unknown>).reason ??
+            "This order is signed. Ask an admin or crew leader to unlock it before changing it."),
+          reason: "locked",
+        }, 409);
+      }
+      if (!mayAmendCaller) {
+        return json({
+          error: "This order is signed, so changing it raises a change order — and your account isn't set up to do that. Ask an owner or admin to turn on Change Orders for you in Settings → Team.",
+          reason: "not_permitted",
+        }, 403);
+      }
+    }
+
+    // allowLookup stays FALSE: this call can only hand back the default chosen above, with
+    // source "fallback" and reason "not requested". Do not flip it — see the meter below. A
+    // carried rate makes no call at all (resolved is null).
+    const resolved = taxCarry.carry
+      ? null
+      : await resolveRate(taxAddr, taxDefault!.rate, { allowLookup: false });
+    // THE STAMP IS UNCONDITIONAL — one assignment, both arms produce a tax object. Every SS
+    // snapshot must carry `tax`: without it totalFromSnapshot falls into its pre-tax legacy
+    // branch, and changeOrderDiff reads the missing object as tax dropping to $0.00, raising a
+    // spurious change order the customer would be asked to approve.
+    // Stamped onto the object that is about to be persisted AND handed to the PDF builder, so
+    // the stored figure and the printed one are the same object, not two computations.
+    (estimateLines as Record<string, unknown>).tax = resolved
+      ? stampTax({ pools: taxPools, resolved, choice: taxDefault!, address: taxAddr, reason: taxCarry.carry ? null : taxCarry.reason })
+      : carriedTax((signedTax ?? storedTax)!, taxPools);
 
     // WHAT THE CUSTOMER OWES, TAX INCLUDED (audit 2026-09-06). `oppValue` is the pre-tax
     // subtotal — it is computed back in step 7b for the CRM opportunity, before the tax stamp
@@ -2449,15 +2720,18 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // over-discount differently from the pooled one, so `oppValue` stays correct there.
     const ssTotal = totalFromSnapshot(estimateLines) ?? oppValue;
 
-    // METERED (migration 179) — and ONLY a real Avalara answer costs anything. A `fallback`
-    // resolve never left the building: it means Avalara is unconfigured, the address had no
-    // state/postcode, or the lookup failed, and billing a tenant for our own outage is the
-    // one outcome worth being careful about. Inert until `tax_lookup` is armed.
+    // METERED (migration 179) — WIRED, AND UNREACHABLE ON THIS PATH (2026-09-17). Only a real
+    // Avalara answer may cost anything, and resolveRate above is called with allowLookup false,
+    // so `resolved.source` is never "avalara" here. A rate CARRIED from an earlier verification
+    // leaves `resolved` null: the builder was charged when it was verified, and a resubmit
+    // makes no call to charge for. NO AUTOMATIC PATH MAY SPEND — do not flip allowLookup to
+    // make this block live; the deliberate lookup (verify_tax) keys its own charge on its
+    // ledger row. Inert anyway until `tax_lookup` is armed.
     //
     // Deliberately AFTER the stamp and deliberately unable to fail the submit: the tax is
     // already on the snapshot and the customer is waiting on their quote. Losing a charge
     // costs cents; losing the quote costs the builder a sale.
-    if (resolved.source === "avalara") {
+    if (resolved?.source === "avalara") {
       const meter = await chargeTaxCalculation(supabase, {
         clientId,
         kind: "tax_lookup",
@@ -2484,45 +2758,54 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const view3dImg = tenantStorageUrl(view3dImageUrl);
     const skippedSheets: string[] = [];
 
-    let quotePdfUrl: string | null = null;
-    try {
-      const pdfBytes = await buildQuotePdf({
-        business: {
-          name: businessName,
-          phone: businessPhone || null,
-          website: businessWebsite || null,
-          address: businessAddress,
-        },
-        estimateNumber: ssQuoteNumber,
-        dateIso: today,
-        lines: estimateLines.lines.map((l) => ({ ...l, desc: deHtml(l.desc) })),
-        discount: estimateLines.discount,
-        // The two-pool totals block and the per-discount rows (migration 148). Both read the
-        // object just stamped above, so the printed figures ARE the persisted ones.
-        tax: (estimateLines as Record<string, any>).tax,
-        discountRows: (estimateLines as Record<string, any>).discounts?.rows ?? null,
-        quoteTerms: quoteTerms || null,
-        planPdfUrl: planUrl,
-        onSheetSkipped: (r) => skippedSheets.push(r),
-      });
-      // Service-role upload, so the bucket's anon path-shape policy ({clientId}/SS-….pdf) does
-      // not apply — same reasoning as the formal estimate PDF's `-estimate.pdf` sibling.
-      // upsert: one quote document per design, replaced on every resubmit.
-      const pdfPath = `${clientId}/${designId}-quote.pdf`;
-      const up = await supabase.storage.from("floor-plans")
-        .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
-      if (up.error) {
-        console.warn("SS quote PDF upload failed:", up.error.message);
-      } else {
+    // THE QUOTE PDF, built from a snapshot and uploaded to its fixed path. Declared here, CALLED
+    // BELOW THE PERSIST (review, 2026-09-17): the document is uploaded only after the write it
+    // prints, never before. See "PERSIST" below for why the order is the fix.
+    // deno-lint-ignore no-explicit-any
+    const writeQuotePdf = async (snap: any): Promise<string | null> => {
+      // Which sheets THIS document is missing: a rebuild reports its own, not the first build's too.
+      skippedSheets.length = 0;
+      try {
+        const pdfBytes = await buildQuotePdf({
+          business: {
+            name: businessName,
+            phone: businessPhone || null,
+            website: businessWebsite || null,
+            address: businessAddress,
+          },
+          estimateNumber: ssQuoteNumber,
+          dateIso: today,
+          // deno-lint-ignore no-explicit-any
+          lines: (Array.isArray(snap?.lines) ? snap.lines : []).map((l: any) => ({ ...l, desc: deHtml(l.desc) })),
+          discount: snap?.discount,
+          // The two-pool totals block and the per-discount rows (migration 148). Both read the
+          // snapshot handed in, which is the one persisted, so the printed figures ARE the stored ones.
+          tax: snap?.tax,
+          discountRows: snap?.discounts?.rows ?? null,
+          quoteTerms: quoteTerms || null,
+          planPdfUrl: planUrl,
+          onSheetSkipped: (r) => skippedSheets.push(r),
+        });
+        // Service-role upload, so the bucket's anon path-shape policy ({clientId}/SS-….pdf) does
+        // not apply — same reasoning as the formal estimate PDF's `-estimate.pdf` sibling.
+        // upsert: one quote document per design, replaced on every resubmit.
+        const pdfPath = `${clientId}/${designId}-quote.pdf`;
+        const up = await supabase.storage.from("floor-plans")
+          .upload(pdfPath, pdfBytes, FIXED_PATH_PDF_UPLOAD);
+        if (up.error) {
+          console.warn("SS quote PDF upload failed:", up.error.message);
+          return null;
+        }
         const { data: pub } = supabase.storage.from("floor-plans").getPublicUrl(pdfPath);
-        quotePdfUrl = pub?.publicUrl || null;
+        return pub?.publicUrl || null;
+      } catch (e) {
+        // Unlike the plan sheets (which degrade inside buildQuotePdf), a failure HERE means there
+        // is no document at all. Still not fatal to the submission: the design, the contact and
+        // the opportunity are real and the rep can resubmit. Reported honestly below.
+        console.warn("SS quote PDF generation failed:", (e as Error).message);
+        return null;
       }
-    } catch (e) {
-      // Unlike the plan sheets (which degrade inside buildQuotePdf), a failure HERE means there
-      // is no document at all. Still not fatal to the submission: the design, the contact and
-      // the opportunity are real and the rep can resubmit. Reported honestly below.
-      console.warn("SS quote PDF generation failed:", (e as Error).message);
-    }
+    };
 
     // ── THE CHANGE ORDER (migration 126). A resubmit AFTER the customer signed is a change
     // to an agreed order, and it needs their acknowledgment — e-signature or the rep's
@@ -2577,33 +2860,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // Only on the post-acceptance path, because that is the only place a CO can be raised,
       // and it is a re-write of the same value the persist below sends — idempotent, so a
       // failure here changes nothing that the persist below does not already report durably.
-      // ── MAY THIS ORDER BE AMENDED, AND BY THIS PERSON? (2026-09-07) ─────────────────
-      // BEFORE the first write, which is the whole point of putting it here. The design's
-      // priced revision lands two lines down and the guard trigger would refuse the change
-      // order a moment later — leaving the design revised, no change order recorded, and
-      // the customer's quote email already out. Refusing first leaves nothing half-done.
-      //
-      // Both answers come from the same places the rest of the system asks: the gate
-      // function migration 210 installed (which the change_orders trigger also calls, so a
-      // refusal here and a refusal there can never disagree), and the one permission model.
-      {
-        const { data: gate } = await supabase.rpc("order_amendment_gate", {
-          p_client_id: clientId, p_short_code: designId,
-        });
-        if (gate && (gate as Record<string, unknown>).open !== true) {
-          return json({
-            error: String((gate as Record<string, unknown>).reason ??
-              "This order is signed. Ask an admin or crew leader to unlock it before changing it."),
-            reason: "locked",
-          }, 409);
-        }
-        if (!mayAmendCaller) {
-          return json({
-            error: "This order is signed, so changing it raises a change order — and your account isn't set up to do that. Ask an owner or admin to turn on Change Orders for you in Settings → Team.",
-            reason: "not_permitted",
-          }, 403);
-        }
-      }
+      // The amendment gate that has to refuse BEFORE this write now runs further up, ahead of
+      // the tax lookup and the quote PDF (moved 2026-09-15; see "MAY THIS ORDER BE AMENDED").
 
       const { error: preCoErr } = await supabase.from("designs")
         .update({ estimate_lines: estimateLines, total_cents: designTotalCents(estimateLines), updated_at: new Date().toISOString() })
@@ -2716,6 +2974,161 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       }
     }
 
+    // ── ISSUED: draft → sent (migration 241, 2026-09-15) ────────────────────────────────────
+    // Every refusal on this path is behind us but the persist's race refusals below, and the quote
+    // number and lines exist (the document is built after the persist, 2026-09-17), so this is
+    // where the design becomes a sent quote: BEFORE the email, so a customer never
+    // holds a quote whose design still reads draft (customer-quotes hides drafts and offers
+    // Accept only on a sent one). save_design used to promote on the browser's save, before
+    // any of the refusals above had run, and a refused Get Quote stayed 'sent'. Not earlier
+    // than here either: a throw between the number and this line leaves an honest draft.
+    // The number and lines ride in the same guarded write, so a failed persist below cannot
+    // leave a sent quote without them; the persist still writes both, unchanged. A no-op for
+    // resubmits, accepted designs and change orders (already past draft).
+    {
+      const promoted = await promoteIssuedDesign(supabase, {
+        clientId,
+        designId: String(designId),
+        currentStatus: existingDesign.status,
+        fields: { ss_quote_number: ssQuoteNumber, estimate_lines: estimateLines, total_cents: designTotalCents(estimateLines) },
+      });
+      if (promoted.error) {
+        // A FAULT, not a refusal: the quote is numbered and about to be emailed while its design
+        // reads draft, invisible on the customer's quotes page. Never fails the submit.
+        await logEdgeError({
+          fn: "submit-estimate", req, clientId, code: "design_promote_failed",
+          message: `draft -> sent failed for an issued SS quote: ${promoted.error}`,
+          context: { designId: String(designId), issuedBy: "structurestudio", ssQuoteNumber },
+        });
+      }
+    }
+
+    // ── PERSIST, BEFORE THE DOCUMENT AND THE EMAIL (review, 2026-09-17) ─────────────────────
+    //
+    // The lines, the total, the number and the ids reach the row FIRST, as a compare-and-swap,
+    // and only then is the PDF uploaded and the customer emailed. This used to run last and
+    // unguarded, after both. A portal re-stamp of this quote's tax (the Verify button, a
+    // sales-location change) that landed while this submit was running was then overwritten by
+    // the older tax, a verified rate the builder paid for dropped with nobody told. And because
+    // both writers upload the PDF to the same path, whichever upload landed last decided what the
+    // document printed, so the quote page and the acceptance could freeze one total while the PDF
+    // printed another.
+    //
+    // The rule both writers follow now, and why it is enough, is in _shared/quoteWriteRace.ts: a
+    // guarded write, then the upload, then a re-read that rebuilds the document from the stored
+    // lines when they moved. The guard swaps on the updated_at step 2 read. On a miss,
+    // submitPersistMiss decides from a fresh read:
+    //   retaxed: another writer re-priced the tax after step 2. Refuse, BEFORE anything is
+    //     uploaded or emailed. The re-stamp, its document and its email stand together, and the
+    //     next submit starts from the new tax (a verified rate carries, taxChain.ts);
+    //   accepted: the customer agreed after step 2. This submit priced a quote, not an amendment,
+    //     and must not overwrite a signed order's lines. Refuse; the next submit raises the change
+    //     order;
+    //   retry: the tax is the one step 2 read, or this submit's own draft promote wrote it. An
+    //     unrelated write moved updated_at. Swap against the new value, a bounded number of times;
+    //   gone, or retries spent: the failed-persist story below (logged, a warning, not fatal).
+    // Only a quote nobody has agreed to is guarded: a re-stamp refuses an agreed one outright, so
+    // the signed-order path (the change order above) keeps its unguarded persist.
+    //
+    // There is no GHL estimate id or number to write, and the two GHL ids that DO exist are written
+    // exactly as the GHL path does. ss_quote_sent_at and the document link are the email's and the
+    // upload's to record, so they are stamped after both, below.
+    let persistErr: { message: string } | null = null;
+    // estimate_lines as the database stored this write, for the document check below.
+    let persistedLines: unknown = null;
+    const guardPersist = !isAgreedDesign(existingDesign);
+    {
+      // Four, not three: a first issue always spends one, because its own draft promote above
+      // moved updated_at after step 2 read it.
+      const PERSIST_ATTEMPTS = 4;
+      let casUpdatedAt: string | null = typeof existingDesign.updated_at === "string" ? existingDesign.updated_at : null;
+      for (let attempt = 1; attempt <= PERSIST_ATTEMPTS; attempt++) {
+        let write = supabase
+          .from("designs")
+          .update({
+            ghl_contact_id: contactId,
+            ghl_opportunity_id: opportunityId || existingDesign.ghl_opportunity_id || null,
+            estimate_lines: estimateLines,
+            // The pipeline card’s dollar value (206). Same arithmetic as orders.total_cents.
+            total_cents: designTotalCents(estimateLines),
+            ss_quote_number: ssQuoteNumber,
+            ...(planImg ? { plan_image_url: planImg } : {}),
+            ...(view3dImg ? { view3d_image_url: view3dImg } : {}),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("short_code", designId);
+        if (guardPersist) write = casUpdatedAt ? write.eq("updated_at", casUpdatedAt) : write.is("updated_at", null);
+        const { data: wrote, error: writeErr } = await write.select("estimate_lines");
+        if (writeErr) {
+          persistErr = writeErr;
+          break;
+        }
+        if (Array.isArray(wrote) && wrote.length === 1) {
+          persistedLines = wrote[0].estimate_lines;
+          break;
+        }
+        // The unguarded write never reported a row it did not find, and still does not.
+        if (!guardPersist) break;
+
+        const { data: now, error: nowErr } = await supabase.from("designs")
+          .select("estimate_lines, accepted_at, status, updated_at")
+          .eq("client_id", clientId).eq("short_code", designId).maybeSingle();
+        const miss = nowErr
+          ? null
+          : submitPersistMiss({ readTax: storedTax, stampedTax: (estimateLines as Record<string, unknown>).tax, now });
+        if (miss?.kind === "retry" && attempt < PERSIST_ATTEMPTS) {
+          casUpdatedAt = miss.updatedAt;
+          continue;
+        }
+        if (miss?.kind === "retaxed" || miss?.kind === "accepted") return json(SUBMIT_RACE_REFUSAL[miss.kind], 409);
+        persistErr = {
+          message: nowErr ? `re-read failed: ${nowErr.message}` : miss?.kind === "gone" ? "the design is gone" : "the design kept changing",
+        };
+        break;
+      }
+    }
+    // A failed persist is worth surfacing: the number has been consumed and the customer is about
+    // to be sent the document, so silence here would leave nothing to reconcile against.
+    // Durable log + a warning in the response, not just the console — the runtime console
+    // stream is unreliable on this project (see CLAUDE.md), and a silent ok:true leaves the
+    // allocated quote number diverged from what the row stores.
+    if (persistErr) {
+      console.warn("SS quote persist failed:", persistErr.message);
+      logEdgeError({
+        fn: "submit-estimate",
+        req,
+        clientId,
+        code: "ss_quote_persist_failed",
+        message: `SS quote persist failed: ${persistErr.message}`,
+        context: { designId: String(designId), ssQuoteNumber },
+      }).catch(() => {});
+    }
+
+    // ── THE DOCUMENT, AFTER THE WRITE IT PRINTS (2026-09-17) ────────────────────────────────
+    // Built from the lines just persisted. Then, on a quote nobody has agreed to, the check that
+    // makes the order above enough: re-read the stored lines, and when another writer moved them
+    // after this persist (a re-stamp whose own document may have uploaded BEFORE this one), print
+    // the stored lines instead. Two rebuilds at most. The quote email names the total the
+    // document prints, so the two never disagree.
+    let quotePdfUrl = await writeQuotePdf(estimateLines);
+    let printedTotal = ssTotal;
+    if (guardPersist && quotePdfUrl && persistedLines) {
+      let printed: unknown = persistedLines;
+      for (let pass = 1; pass <= 2; pass++) {
+        const { data: after, error: afterErr } = await supabase.from("designs").select("estimate_lines")
+          .eq("client_id", clientId).eq("short_code", designId).maybeSingle();
+        if (afterErr || !after || !quotePdfStale(printed, after.estimate_lines)) break;
+        const rebuilt = await writeQuotePdf(after.estimate_lines);
+        if (!rebuilt) {
+          // Whichever upload landed last stands, and it may not match the row. Link nothing.
+          quotePdfUrl = null;
+          break;
+        }
+        printed = after.estimate_lines;
+        printedTotal = totalFromSnapshot(after.estimate_lines) ?? printedTotal;
+      }
+    }
+
     // The email. sendTenantEmail owns the beta redirect, the dark-mode guards and the
     // email_sends ledger, and never throws.
     //
@@ -2768,8 +3181,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           phone: businessPhone || null,
           website: businessWebsite || null,
           estimateNumber: ssQuoteNumber,
-          // Tax-inclusive, matching the quote PDF's Total row and the customer portal.
-          total: ssTotal,
+          // Tax-inclusive, matching the quote PDF's Total row and the customer portal: the total
+          // of the lines the document prints (the document check above).
+          total: printedTotal,
           styleLabel,
           sizeLabel: size,
           estimateUrl: myQuotesUrl(clientId, req),
@@ -2792,48 +3206,122 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       emailReason = "no recipient";
     }
 
-    // Persist. ss_quote_sent_at is stamped ONLY when the customer was actually emailed, so
-    // "numbered but never sent" stays visible and recoverable — the same distinction
-    // invoice_sends draws between 'created' and 'sent'. There is no GHL estimate id or number
-    // to write, and the two GHL ids that DO exist are written exactly as the GHL path does.
-    const { error: persistErr } = await supabase
-      .from("designs")
-      .update({
-        ghl_contact_id: contactId,
-        ghl_opportunity_id: opportunityId || existingDesign.ghl_opportunity_id || null,
-        estimate_lines: estimateLines,
-        // The pipeline card’s dollar value (206). Same arithmetic as orders.total_cents.
-        total_cents: designTotalCents(estimateLines),
-        ss_quote_number: ssQuoteNumber,
+    // What the upload and the email decided. ss_quote_sent_at is stamped ONLY when the customer was
+    // actually emailed, so "numbered but never sent" stays visible and recoverable — the same
+    // distinction invoice_sends draws between 'created' and 'sent'. No money rides in this write:
+    // the persist above carried it, so nothing here can race a re-stamp's total.
+    {
+      const stamp: Record<string, unknown> = {
         ...(quotePdfUrl ? { ss_quote_pdf_url: quotePdfUrl } : {}),
-        ...(planImg ? { plan_image_url: planImg } : {}),
-        ...(view3dImg ? { view3d_image_url: view3dImg } : {}),
         // ss_quote_sent_at means the QUOTE email landed; a change-order email is a
         // different document and must not masquerade as the quote having been sent.
         ...(emailed && !changeOrder ? { ss_quote_sent_at: new Date().toISOString() } : {}),
-        updated_at: new Date().toISOString(),
-      })
-      .eq("short_code", designId);
-    // A failed persist is worth surfacing: the number has been consumed and the customer may
-    // already hold the document, so silence here would leave nothing to reconcile against.
-    // Durable log + a warning in the response, not just the console — the runtime console
-    // stream is unreliable on this project (see CLAUDE.md), and a silent ok:true leaves the
-    // allocated quote number diverged from what the row stores.
-    if (persistErr) {
-      console.warn("SS quote persist failed:", persistErr.message);
-      logEdgeError({
-        fn: "submit-estimate",
-        req,
-        clientId,
-        code: "ss_quote_persist_failed",
-        message: `SS quote persist failed after issue/email: ${persistErr.message}`,
-        context: { designId: String(designId), ssQuoteNumber, emailed },
-      }).catch(() => {});
+      };
+      if (Object.keys(stamp).length) {
+        const { error: stampErr } = await supabase.from("designs").update(stamp).eq("short_code", designId);
+        if (stampErr) {
+          logEdgeError({
+            fn: "submit-estimate", req, clientId, code: "ss_quote_stamp_failed",
+            message: `SS quote sent/document stamp failed: ${stampErr.message}`,
+            context: { designId: String(designId), ssQuoteNumber, emailed },
+          }).catch(() => {});
+        }
+      }
+    }
+
+    // ── THE HOME LOT BECOMES THE QUOTE'S LOCATION (tax chain link 3, 2026-09-17) ───────────
+    // Set only when this quote was just priced at the issuing staff member's home lot. Recorded
+    // so every later resubmit — a shopper's included, who has no home lot — lands on the same
+    // rate instead of dropping to the company rate. Guarded on the column still being empty: a
+    // location staff chose in the meantime is theirs and is not overwritten. A separate write,
+    // after everything else, so a refused or failed submit records nothing. A failure is
+    // logged, not fatal: the quote is issued and stamped either way.
+    if (taxDefault?.recordLocationId) {
+      const { error: locErr } = await supabase.from("designs")
+        .update({ sales_location_id: taxDefault.recordLocationId })
+        .eq("client_id", clientId).eq("short_code", designId).is("sales_location_id", null);
+      if (locErr) {
+        logEdgeError({
+          fn: "submit-estimate", req, clientId, code: "sales_location_record_failed",
+          message: `recording the home lot as the sales location failed: ${locErr.message}`,
+          context: { designId: String(designId) },
+        }).catch(() => {});
+      }
+    }
+
+    // ── THE QUOTE-CREATED TEXT (expo plan 3.7; Ahsan 2026-09-15, decision 4) ────────────────
+    // "Quote-created login text only when the builder can text (approved number + customer
+    // consent); otherwise email only." A shopper at the expo gets their quote by email AND a text
+    // with the link, so they can open it on the phone in their hand.
+    //
+    // WHEN: the FIRST issue of this quote only. A resubmit (the quote already had a number), a
+    // change order and a draft amendment never text — each would be the second "your quote is
+    // ready" for the same building. Placed AFTER the persist, so nothing about the quote itself can
+    // wait on a carrier.
+    //
+    // ⚠️ NEVER WHILE THE TENANT IS IN BETA MODE. Their email goes to their own test inbox (header,
+    // rule 1); there is no test PHONE, so texting would put a verification submit carrying a real
+    // lead's details on that lead's phone — exactly the 2026-08-07 incident, by text.
+    //
+    // HOW: sendTenantSms owns every rule that decides whether a text may go — the tenant's texting
+    // is active and its number registered, the customer has a recorded consent grant and has not
+    // said STOP, and quiet hours (NOT bypassed: this is automation, not a human replying). It never
+    // throws, and each refusal comes back as a reason. The email above is the fallback for all of
+    // them; nothing here can fail the submit.
+    //
+    // A carrier that has not answered in QUOTE_TEXT_TIMEOUT_MS does not hold the customer's quote
+    // screen: the response says "timeout", and the send is handed to EdgeRuntime.waitUntil so its
+    // sms_messages ledger row still settles. The ledger, not this flag, is the record of what went.
+    //
+    // The link is today's customer page (my-quotes, focused on this quote). It moves to the
+    // designer's own account panel with the other customer links, after the 2026-09-21 promotion.
+    let quoteTexted = false;
+    let quoteTextReason: string | null = null;
+    const textTo = String(contact?.phone ?? "").trim();
+    if (existingDesign.ss_quote_number || existingDesign.accepted_at || changeOrder) {
+      quoteTextReason = "not_first_issue";
+    } else if (redirectToTestInbox) {
+      quoteTextReason = "test_mode";
+    } else if (!textTo) {
+      quoteTextReason = "no_phone";
+    } else {
+      const link = `${myQuotesUrl(clientId, req)}&q=${encodeURIComponent(String(designId))}`;
+      // The registered business name, as text_sign_link uses it — never the tenant slug the email
+      // falls back to, which is not a name a customer would recognise as the sender.
+      const who = String(settings.business_name || "").trim();
+      const body = `${who ? who + ": " : ""}your quote ${ssQuoteNumber} is ready. `
+        + `View and accept it here: ${link} Reply STOP to opt out.`;
+      const secret = Deno.env.get("SMS_INBOUND_SECRET") ?? "";
+      const statusCallback = secret
+        ? `${supabaseUrl}/functions/v1/sms-status?key=${encodeURIComponent(secret)}`
+        : null;
+      const send = sendTenantSms(supabase, clientId, {
+        toPhone: textTo,
+        body,
+        shortCode: String(designId),
+        sentBy: null,
+        statusCallback,
+        bypassQuietHours: false,
+      });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const outcome = await Promise.race([
+        send,
+        new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), QUOTE_TEXT_TIMEOUT_MS); }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
+      if (outcome === null) {
+        quoteTextReason = "timeout";
+        try { (globalThis as any).EdgeRuntime?.waitUntil?.(send); } catch { /* the ledger settles or it doesn't */ }
+      } else {
+        quoteTexted = outcome.sent;
+        if (!outcome.sent) quoteTextReason = outcome.reason || "failed";
+      }
     }
 
     return json({
       ok: true,
       issuedBy: "structurestudio",
+      ...(deliveryUnpriced ? { deliveryUnpriced } : {}),
       ...(persistErr
         ? { warning: "The quote was issued, but saving it to the design failed — the stored record may be out of date. The error was logged for support." }
         : {}),
@@ -2847,6 +3335,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       quotePdfUrl,
       quoteEmailed: emailed,
       quoteEmailReason: emailReason,
+      // The quote-created text (above). quoteTextReason is null when it went, else one of:
+      //   not_first_issue | test_mode | no_phone | timeout          (decided here)
+      //   not_active | no_consent | opted_out | quiet_hours |
+      //   bad_number | damaged_number | failed                     (sendTenantSms's refusals)
+      // The portal success screen shows "Texted a login link to …" / "Not texted — …"; the public
+      // designer ignores both. not_first_issue is not news to anyone and should render nothing.
+      quoteTexted,
+      quoteTextReason,
       // Which sheets the document is missing, and why — the answer to "the customer says the
       // 3D page isn't there".
       sheetsSkipped: skippedSheets,
@@ -2965,6 +3461,44 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     estimateNumber = String(d?.estimateNumber ?? d?.estimate?.estimateNumber ?? d?.invoiceNumber ?? uniqueSequence);
   } catch (e) {
     return json({ error: `Estimate ${existingEstimateId ? "update" : "create"} error: ${(e as Error).message}` }, 502);
+  }
+
+  // ── ISSUED: draft → sent (migration 241, 2026-09-15) ──────────────────────────────────────
+  // The estimate now exists in the CRM, so the design is a sent quote: written BEFORE the send
+  // below, so an emailed estimate is never attached to a draft. save_design used to promote on
+  // the browser's save, before any refusal above had run, and a refused Get Quote stayed 'sent'.
+  // The id and number ride in the same guarded write: in CRM mode they are the only proof of
+  // issue (ss_quote_number is always null here), and 241 extends 240's contact lock to hold on
+  // ghl_estimate_id, so a design whose estimate went out stays locked to its phone and email
+  // even if this write fails and step 11 is what stores the id. Step 11 still writes both,
+  // unchanged. A no-op for a resubmit (already past draft).
+  //
+  // NO ID, NO PROMOTE (review 2026-09-15). A create that answered 2xx without an `_id` leaves
+  // estimateId null on a first issue; step 10 then sends nothing ("no estimateId after
+  // create/update"), so marking it sent would be exactly the unissued 'sent' this write exists to
+  // rule out. The design stays an honest draft and the CRM's odd answer is logged as a fault.
+  if (!estimateId) {
+    await logEdgeError({
+      fn: "submit-estimate", req, clientId, code: "ghl_estimate_no_id",
+      message: `GHL estimate ${existingEstimateId ? "update" : "create"} answered ok without an estimate id: the design was not marked sent and no email was sent`,
+      context: { designId: String(designId), estimateNumber, recreatedFromStale },
+    });
+  } else {
+    const promoted = await promoteIssuedDesign(supabase, {
+      clientId,
+      designId: String(designId),
+      currentStatus: existingDesign.status,
+      fields: { ghl_estimate_id: estimateId, ghl_estimate_number: estimateNumber },
+    });
+    if (promoted.error) {
+      // A FAULT, not a refusal: the estimate exists and is about to be emailed while its design
+      // reads draft, invisible on the customer's quotes page. Never fails the submit.
+      await logEdgeError({
+        fn: "submit-estimate", req, clientId, code: "design_promote_failed",
+        message: `draft -> sent failed for an issued CRM estimate: ${promoted.error}`,
+        context: { designId: String(designId), issuedBy: "crm", estimateId, estimateNumber },
+      });
+    }
   }
 
   // 10. Send (re-emails on update, per requirements). Routed per the header: tenants with
@@ -3220,6 +3754,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
 
   return json({
     ok: true,
+    ...(deliveryUnpriced ? { deliveryUnpriced } : {}),
     ...(persistErr
       ? { warning: "The estimate was created and sent, but saving its reference to the design failed — resubmitting may create a duplicate estimate. The error was logged for support." }
       : {}),

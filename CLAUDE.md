@@ -53,6 +53,8 @@ Any non-trivial edit must be mirrored in both files or the browser deliverable w
 
 **Dependency boot guard (v2 since 2026-08-13).** Each of the three pages ends its body with a plain `<script data-ss-app="…">` block whose body must stay **byte-identical** across all three — preflight enforces that, since the app sources are not twinned. If any of the three library globals is absent it sets `window.__ssBootBlocked` (every compiled artifact checks that flag as its first statement and no-ops — the type-flip neutralise of the babel era cannot stop a parsed classic script), renders plain HTML naming the missing library with a Reload button, adds `<meta name="robots" content="noindex">`, and reports `source:"boot"` / `code:"boot_deps_missing"` to `app_errors`. It also registers a **DOMContentLoaded sentinel check**: deferred scripts finish before DOMContentLoaded, so a page with neither `window.__ssAppBooted` (set by every app source's last statement) nor the blocked flag means the page's own app artifact never ran — 404, or HTML served at 200 by the `/portal/*` splat — and that reports `boot_app_missing` with the same screen; the babel world could not even see that class. It must stay **plain JS at the end of the body**: it may depend on nothing, it runs during parsing (before any deferred artifact executes, so the flag always wins the race), and the parser-blocking `/vendor/` tags have all resolved by then. ⚠️ A `boot_deps_missing`/`boot_app_missing` row means **our** deploy or routing is wrong — treat it as urgent.
 
+**One self-heal retry, shared (2026-09-17).** `boot_app_missing` (since 39e84b5) and, now, the designer's `boot_component_missing` both go through the guard's `ssRetryOnce()` first: re-fetch every bundle with `cache:"reload"`, then reload once, painting nothing and logging nothing. Only when that is spent does the screen appear, and the component row now carries the same measurements as the app row (`scripts`, `error`, `failedToLoad`, `retried`) instead of nulls. The latch is `sessionStorage.ss_boot_retry`. **Invariants:** only a boot that WORKED clears it (`__ssAppBooted` and not `__ssBootBlocked`; the DOMContentLoaded handler returns without touching it whenever `__ssBootBlocked` is set, and `ssRetryOnce` sets that flag before reloading), and no retry happens unless the latch reads back as set. Break either one and a file that never loads becomes an endless reload loop. The old guard did loop when storage dropped writes: 345 reloads in 30 s. `boot_deps_missing` gets no retry. Proof, no network needed: `node tests/harness/bootGuard.mjs` (it serves the checkout itself, stubs Supabase, and counts navigations and `log_error` bodies for every failure mode on all three pages).
+
 ## Compiled artifacts (2026-08-13) — how the pages load code now
 
 **In-browser Babel was removed from the pages.** Visitors used to download a 2.85MB compiler and pay 1.5–4s of main-thread JSX compilation on EVERY page load; the pages now ship **committed, pre-compiled classic scripts**. What changed and what didn't:
@@ -110,7 +112,7 @@ Edge functions (sources mirrored in `supabase/functions/`, deployed via Supabase
 - `admin-save-settings` — operator bootstrap tool behind the shared `ADMIN_PASSWORD` secret (used by the designer's `?admin=1` panel).
 - `portal-feedback` — bug / feature-request intake from the portal. Same JWT→`client_users` auth as `portal-settings`; tenant and submitter are resolved server-side and never read from the body. Records the row in `feedback_submissions` FIRST, then creates the Monday item, so a Monday outage can't lose a submission (the failure lands in `monday_error` and `action:"retry_push"` re-attempts). Also serves `action:"refresh"` — an on-demand pull of status + `/client` updates, the safety net for a missed webhook.
 - `feedback-monday-webhook` — the return leg (`verify_jwt=false`; Monday can't send a Supabase JWT). Subscribed to `change_column_value` + `create_update` on both boards. Auth is a shared secret in the URL (`?key=` ⇄ `FEEDBACK_SYNC_SECRET`) compared in constant time, because Monday does **not** sign board-level webhooks created via the API. **Rotating the secret means re-creating all four webhooks.**
-- `portal-billing` — the platform billing endpoint (per-feature subscriptions via Deposyt/NMI) **and** the server-side source of truth for the billing gate's entitlement. Entitlement is computed here, never in the browser, because `client_settings` (which holds `billing_exempt`) is service-role only — a tenant can neither read the flag nor self-grant. It fails **open**: if the entitlement call errors the portal does not lock, so a transient blip can never paywall a paying customer. The initial `subscribe` writes the `billing_subscriptions` row itself; the webhook below owns every state change after that. **`price_visible = false` genuinely hides the number since 2026-08-07** (audit finding): migration `102` revoked the browser's direct `billing_plans` read (it had `using (true)` + `grant select to authenticated`, so any tenant could query unpublished `price_cents` off the table — the leak 055 documented and only half-closed), and the `status` action now returns `price_cents`/`charge_cents` as **null** when the flag is off. Both halves are load-bearing: the projection alone leaves the table readable, the revoke alone leaves the API serving the number. `subscribe` re-reads prices server-side, so redaction can't affect a charge. Verified: a direct anon/authenticated table read returns `permission denied`, and the Billing tab shows "Pricing announced at launch" with `null` on the wire.
+- `portal-billing` — the platform billing endpoint (per-feature subscriptions via Deposyt/NMI) **and** the server-side source of truth for the billing gate's entitlement. Entitlement is computed here, never in the browser, because `client_settings` (which holds `billing_exempt`) is service-role only — a tenant can neither read the flag nor self-grant. **Any operator may READ `status`** (resolveTenant's `requireBilling` refuses writes only, since 2026-09-15 — before that, a support operator's or a no-`can_bill` operator's view-as entitlement read 403'd and every paid add-on showed as unbought); the commercial half of the answer (`plans`, `hasCard`, wallet) is withheld from operators without `can_bill` by the `mine` filter. It fails **open**: if the entitlement call errors the portal does not lock, so a transient blip can never paywall a paying customer. The initial `subscribe` writes the `billing_subscriptions` row itself; the webhook below owns every state change after that. **`price_visible = false` genuinely hides the number since 2026-08-07** (audit finding): migration `102` revoked the browser's direct `billing_plans` read (it had `using (true)` + `grant select to authenticated`, so any tenant could query unpublished `price_cents` off the table — the leak 055 documented and only half-closed), and the `status` action now returns `price_cents`/`charge_cents` as **null** when the flag is off. Both halves are load-bearing: the projection alone leaves the table readable, the revoke alone leaves the API serving the number. `subscribe` re-reads prices server-side, so redaction can't affect a charge. Verified: a direct anon/authenticated table read returns `permission denied`, and the Billing tab shows "Pricing announced at launch" with `null` on the wire.
 - `billing-webhook` — Deposyt/NMI subscription-lifecycle events → `billing_subscriptions`, the mirror the Billing tab and the gate read (never the gateway live). **`verify_jwt` MUST stay `false`.** Deposyt cannot send a Supabase JWT, so with verification on, the gateway 401s every delivery *before the function runs*: the HMAC is never checked, `billing_webhook_events` stays empty, and even `withErrorLog` records nothing — the failure is completely invisible from inside the database, which is exactly how it went unnoticed. That silently broke the whole billing lifecycle (renewal failures and cancellations never arriving, so a lapsed tenant would keep full access forever) until 2026-07-28. Auth is HMAC-SHA256 over `` `${nonce}.${rawBody}` ``, **hex**, from the `Webhook-Signature: t=<nonce>,s=<hex>` header — NMI's documented format, verified against docs.nmi.com and unit-checked against a PHP-equivalent signature. Rotating `DEPOSYT_WEBHOOK_SIGNING_KEY` needs a **redeploy** to take effect, since the module reads it at cold start.
 - `portal-commissions` — commission team, rates, and payouts (Settings → Commissions/Team). Same JWT→`client_users` auth; `commission_members` is service-role only so every rate/grant read goes through here, and it distinguishes owner from admin (grants are owner-only). ⛔ **It REFUSES a `targetClientId` with a 403 — operators cannot act on a builder's commissions** (Carolyn 2026-08-07: "Operators should not be able to change commissions in builders pages"). This pairs with its deliberate absence from portal.html's `SS_TENANT_SCOPED_FNS` allow-list: adding it there would inject the override and break every operator call loudly rather than quietly widening access. Do not "complete" the list, and do not soften the 403 to a silent ignore — a body field honoured for some callers and dropped for others is how a refactor opens a cross-tenant hole. Before 2026-08-07 the only enforcement was the UI hiding the tabs in view-as, which is a courtesy, not a control.
 
@@ -120,7 +122,9 @@ Edge functions (sources mirrored in `supabase/functions/`, deployed via Supabase
 
 **`app_errors` severity — triage the FAULTS, not the refusals (since 2026-08-28, migration 141).** Rows are `error` or `info`, and the split is deliberate: a **4xx from an edge function is the server REFUSING a request** ("send the invoice first", "that width isn't valid") and lands as `info`; **faults** — 5xx, network failures, uncaught exceptions — stay `error`. A handful of refusals must answer 5xx (a disabled feature is a 503, and no 4xx says "this tenant hasn't switched that on"); those mark themselves at the return site with the `x-ss-refusal: 1` header, which `withErrorLog` reads — nothing guesses from the status. **So triage `where severity = 'error'`.** Before this, a 68-row queue contained zero open defects and was almost entirely the product working correctly, which is how a queue stops being read.
 
-⚠️ **Refusals are DEMOTED, NOT DROPPED, and the difference matters — do not "clean up" the info rows.** A refusal that fires *constantly* is a bug wearing a refusal's clothes. `Driver not found.` read exactly like a validation message and was really the portal posting `driver_profiles.user_id` where the server matches on `.id`: driver reassignment failed **100% of the time for twelve days**, and it was caught only by reading these rows. Repetition is the tell, so check it periodically — `select message, count(*) from app_errors where severity = 'info' group by 1 having count(*) > 20 order by 2 desc;` — and treat anything high as a defect until proven otherwise. `log_error`'s `p_severity` whitelists `error|warn|info` and falls back to **`error`** on anything unrecognised, so a typo can never silently demote a real fault.
+⚠️ **Refusals are DEMOTED, NOT DROPPED, and the difference matters — do not "clean up" the info rows.** A refusal that fires *constantly* is a bug wearing a refusal's clothes. `Driver not found.` read exactly like a validation message and was really the portal posting `driver_profiles.user_id` where the server matches on `.id`: driver reassignment failed **100% of the time for twelve days**, and it was caught only by reading these rows. Repetition is the tell, so check it periodically — `select message, count(*) from app_errors where severity = 'info' and context->>'_demoted' is null group by 1 having count(*) > 20 order by 2 desc;` — and treat anything high as a defect until proven otherwise. (The `_demoted` exclusion is for the dev-origin rows below: they are not refusals, and one burst of them would trip the threshold on its own.) `log_error`'s `p_severity` whitelists `error|warn|info` and falls back to **`error`** on anything unrecognised, so a typo can never silently demote a real fault.
+
+⚠️ **Pages that are not on a real host also land as `info` (since migration 243), MARKED `context->>'_demoted' = 'non_production_url'`.** `log_error` now reads `p_url`. If it is not http(s) (`data:`, `file:`, `blob:`, `about:`), or its host is loopback (`localhost`, `127.x.x.x`, `[::1]`), the row is demoted to `info` and marked, and it is still written with its full context. Why: every page logs to the one shared project with the anon key, and the function used to accept any origin. A desktop app previewing `portal.html` as a `data:` page (where `/vendor/` cannot load, so `boot_deps_missing`) and dev harnesses on loopback ports kept filing `error` rows: 276 were resolved by hand, and one was mis-resolved as a real asset-load failure. **So a local check of the boot guard or of logging now shows up under `severity = 'info'` with `_demoted` set. That is logging working, not logging broken.** Real pages are always https on a public host and keep their severity. Edge functions insert into `app_errors` directly and never pass through `log_error`. An e2e run against beta is https, so 243 does NOT cover it: `tests/e2e/helpers.mjs` answers `log_error` locally for every page the suite opens (specs import `test` from there), attaches the bodies to the report, and fails the test when a `boot_*` code is attempted. New specs use that `test`; a `browser.newContext()` / `browser.newPage()` needs `guardLogError(context)`. Never recreate `log_error` with DROP or an extra parameter (141's header says why).
 
 Note also that Supabase's **runtime `console.log` stream is not reliably queryable** on this project (`get_logs edge-function-runtime` returns only Boot/Shutdown for long stretches), while `app_errors` is dependable. When instrumenting an edge function to diagnose something, write the findings to `app_errors` rather than the console — and keep to shapes and booleans, never signature values, keys, request bodies, or customer data.
 
@@ -424,11 +428,14 @@ Rules that are easy to break and expensive to get wrong:
    is explicit rather than expressed in `GATES`. The width rules have NO override anywhere:
    a building wider than the driver's `max_width_ft`, or a wide load (>8'6") assigned to a
    driver whose `wide_load_capable` is off. Keep it that way.
-5. **Gate:** the three tabs + the drivers card key on `schedUnlocked` = operator OR
-   `entitlement.features.schedule_builds`. **PAY-ONLY (Carolyn 2026-08-04): "No one gets
+5. **Gate:** the three tabs + the drivers card key on `schedUnlocked` =
+   `featureOn("schedule_builds")` — the viewed tenant's entitlement in view-as, your own
+   otherwise; no operator blanket since 2026-09-15. **PAY-ONLY (Carolyn 2026-08-04): "No one gets
    grandfathered into this."** portal-billing's `PAID_ONLY_FEATURES` set excludes
-   `schedule_builds` from the exempt/transition blankets — a real subscription is the only
-   tenant path in; do not "fix" that back to the blanket. The plans' `availability` flip
+   `schedule_builds` from the transition blanket — for a **customer**, a real subscription is
+   the only path in; do not "fix" that back to the blanket. ⚠️ **Since 2026-09-21 (migration
+   228) a NON-BILLABLE account (`billing_exempt`) does get it**, along with every other paid
+   feature — that flag is now an entitlement grant, not just a billing posture. The plans' `availability` flip
    (coming_soon → available) **has been thrown** — migration `094_scheduler_available`, live
    and verified 2026-08-07 at $195/mo · $1,950/yr with `price_visible = true`. The second
    launch switch, the hand-authored What's New entry, is still pending.
@@ -501,12 +508,39 @@ Each entry in `options[]` may optionally declare `buildingStyles: ["Urban", "Nor
 gate — no Simple Layout, no portal. Individual paid features are gated separately and all the
 same way, modelled on scheduling:
 
-- `featureOn(key)` in `portal.html` is the ONLY reader of `entitlement.features`. It is
-  `isOperator || (!viewing && !!entitlement && !!entitlement.features[key])` — operators are
-  never gated (the entitlement loaded in the portal is the OPERATOR's, not the viewed
-  tenant's), and a null entitlement means *still loading*, never *off*, or every page load
-  would flash an upgrade card at a paying customer. `schedUnlocked` is now just
-  `featureOn("schedule_builds")`.
+- `featureOn(key)` in `portal/12-shell.jsx` is the ONLY reader of `entitlement.features`. In
+  view-as it reads the **VIEWED tenant's** entitlement (`viewedCtx.entitlement`, fetched for
+  every operator since 2026-09-15); on your own portal it reads your own. **There is no
+  operator exemption any more** — Carolyn 2026-09-15: "that account should show for me exactly
+  as it shows for that user … if there are parts of the software they haven't paid for … it
+  shouldn't be accessible to me either." The same goes for `view3dUnlocked` (the 3D grant) and
+  `gateLocked` (the base billing lock), all of which read one `gateEnt`. A null `viewedCtx`
+  means *still loading* and reads as on; a loaded one with no entitlement reads as off. The
+  server matches: `portal-settings` no longer carries `entitlementExempt`, so an operator's
+  RTP / CRM / QuickBooks actions on an unpaid tenant 403 like the builder's would. Comp the
+  feature (`client_feature_grants`) or have the tenant subscribe — do not put the blanket back.
+  `_test_stubs/operatorMirror_test.ts` pins all of this against the shipped source.
+
+- **The SUPPORT half of the mirror (`app_operators.support_only`, migration 176).** A support
+  operator wears the VIEWED tenant's OWNER access map, minus Billing. Three things stopped that
+  map reaching the screen and all were fixed 2026-09-15: `settingsAccess` passed **null** in
+  view-as, and `ssSettingsTabs` short-circuits on a null map, so Billing/Wallet/SMS were offered
+  to the one account clamped out of them; the three schedule boards took the same null map and
+  rendered read-only though the server would have allowed the writes; and `isAdmin={canAdmin}`
+  hid send-invoice / delete-design / the built-before-delivered override. `canAdmin` answers
+  **"unclamp every tab"** and must stay false for support — `mirrorAccess` and `mirrorAdmin`
+  answer **"what would the owner see?"** and are what content surfaces now take. Both are
+  identical to the old expressions for everyone who is not a support operator.
+- ⚠️ **`sb.functions.invoke` RESOLVES `{data, error}` — a 403 or 5xx never reaches a `catch`.**
+  The view-as context fetch stored that as "this tenant has no access map and no entitlement"
+  and never revisited it, so one bad answer stripped every paid feature for the session and
+  dropped a support operator back onto the OPERATOR'S OWN map — the god view. It now retries
+  twice, logs `viewed_ctx_unreadable`, and leaves the state null (still-loading) rather than
+  recording a non-answer. Do not reintroduce a `(res.data && res.data.x) || null` there.
+- ⚠️ **Nobody holds `support_only` today** (both operator rows are platform accounts), so every
+  support behaviour above is dormant and cannot be verified by clicking. Flag a test account
+  before trusting any of it in front of a customer.
+  `schedUnlocked` is just `featureOn("schedule_builds")`.
 - The nav tab **stays visible and clickable**. Clicking renders `<ComingSoon>` with a `cta`
   that deep-links to `navigate("settings", "billing")` — the **billing sub-tab** specifically,
   because `navigate("settings")` alone lands on the Structures catalog editor. The real
@@ -518,21 +552,26 @@ same way, modelled on scheduling:
 - ⚠️ **QuickBooks is mounted TWICE** — the top-level tab and Settings → QuickBooks. Both are
   gated; gating only the tab leaves `/portal/settings/quickbooks` open, and that is a link
   people have.
-- **PAY-ONLY set** (`portal-billing`'s `PAID_ONLY_FEATURES`): `schedule_builds` and, since
-  2026-08-08, `quickbooks_sync`. Everything else is granted free to `exempt` and free-period
-  tenants by the blanket, so a gate on a non-pay-only feature is decorative — every tenant
-  predating the billing gate is exempt. QuickBooks had been **sold but never enforced** since
+- **PAY-ONLY set** (`portal-billing`'s `PAID_ONLY_FEATURES`): `schedule_builds`, `quickbooks_sync`
+  (2026-08-08), `on_demand_pricing` (2026-08-28) and `crm` (2026-08-29). Everything else is
+  granted free to free-period tenants by the transition blanket, so a gate on a non-pay-only
+  feature is weak on its own. ⚠️ **`billing_exempt` is NOT one of those blankets any more** —
+  since 2026-09-21 (migration 228) it short-circuits ahead of this set and confers everything,
+  including free metered AI. That was made safe by a fact about the data, not the code: the
+  only exempt tenants left are demo/test/internal ones. **Re-check that before relying on it**
+  (the query is in migration 228). QuickBooks had been **sold but never enforced** since
   migration 092: the tab checked `canAdmin` only, so any admin used it free and buying it
   changed nothing. Before flipping it, exactly one tenant had a live QuickBooks connection
   (`structure-studio`, CSM Synergy's own), so no builder lost a working integration.
 - **Rent to Own and Reports are part of Base** (Carolyn 2026-08-08) — deliberately NO
   `billing_plans` rows and no `featureOn` branch. Do not "tidy up" by inventing plans for them.
 
-**The billing gate (live 2026-07-28).** A new tenant with no active *required* subscription (Simple Layout) lands on Billing instead of a working portal. Nav stays fully visible with padlocks — they can see the whole product, and clicking anything lands on the gate, which embeds the plan picker for an owner/admin so paying happens where it's explained. A **failed** payment gets a 7-day grace period (warning banner + countdown, access continues) rather than locking a paying customer out over an expired card; a **cancellation** locks immediately. The customer-facing designer link is deliberately **never** gated — a tenant's own shoppers must not see a billing wall.
+**The billing gate (live 2026-07-28).** A new tenant with no active *required* subscription (Simple Layout) lands on Billing instead of a working portal. Nav stays fully visible with padlocks — they can see the whole product, and clicking anything lands on the gate, which embeds the plan picker for an owner/admin so paying happens where it's explained. **An operator viewing a locked tenant sees the same gate (2026-09-15)** — only the Accounts / Admin / Projects consoles stay open, so they can switch away; `gateLockedFor` in the shell exempts exactly those three nav items. A **failed** payment gets a 7-day grace period (warning banner + countdown, access continues) rather than locking a paying customer out over an expired card; a **cancellation** locks immediately. The customer-facing designer link is deliberately **never** gated — a tenant's own shoppers must not see a billing wall.
 
 Two things that are easy to get wrong:
-- **Existing tenants were grandfathered.** Every tenant that predates the gate was set `client_settings.billing_exempt = true` before it shipped, so the gate only ever applies to accounts created afterwards. Do not "clean up" those flags — flipping one to `false` on a tenant with no subscription locks a live customer out of their account instantly.
-- **Internal accounts use the checkbox, not the flag.** The admin console's New client form has **Non-billable — CSM Synergy internal / demo / testing**, off by default, which has `admin-catalog` create the `client_settings` row with `billing_exempt = true`. Use it for demos and test tenants instead of hand-editing the database.
+- **Existing tenants were grandfathered.** Every tenant that predates the gate was set `client_settings.billing_exempt = true` before it shipped, so the gate only ever applies to accounts created afterwards. Those flags have since been cleared as those builders started paying — as of 2026-09-21 only demo/test/internal accounts still carry one. Do not "clean up" what is left — flipping one to `false` on a tenant with no subscription locks that account out instantly, and now also strips five paid features.
+- ⚠️ **`billing_exempt` means FULL ACCESS, not just "don't charge them" (2026-09-21, migration 228).** Ticking **Non-billable** hands the account every paid feature — Scheduling, QuickBooks Sync, Real-Time Pricing, the CRM, 3D — plus free metered AI generations, worth about $755/mo. It is for our own, demo and test accounts. To let a real builder keep working without paying yet, use **Free until** instead: that keeps the base product open and deliberately does **not** include the add-ons.
+- **Internal accounts use the checkbox, not the flag.** The admin console's New client form has **Non-billable — CSM Synergy internal / demo / testing**, off by default, which has `admin-catalog` create the `client_settings` row with `billing_exempt = true`. Use it for demos and test tenants instead of hand-editing the database. `internal_account` (migration 169) is a separate column with no UI; it confers nothing extra now beyond permitting a sending domain on one of our own apexes.
 
 ## Architectural concepts
 
@@ -574,7 +613,7 @@ The edge function returns GHL ids (`contactId`, `estimateId`, `estimateNumber`, 
 
 ### Draft designs (migration 063)
 
-The PUBLIC designer silently saves a browsing lead's in-progress design as a `designs` row with `status='draft'` the moment they open quote Details — the same trigger as the capture-lead call, in `saveDraftSilently` next to `captureLeadSilently`. No PDF is rendered (`image_url` null), no URL rewrite, nothing visible to the visitor. The draft's short code lands in `currentDesignIdRef`, so a later real submit **reuses the same row** and `save_design` promotes it to `'sent'`.
+The PUBLIC designer silently saves a browsing lead's in-progress design as a `designs` row with `status='draft'` the moment they open quote Details — the same trigger as the capture-lead call, in `saveDraftSilently` next to `captureLeadSilently`. No PDF is rendered (`image_url` null), no URL rewrite, nothing visible to the visitor. The draft's short code lands in `currentDesignIdRef`, so a later real submit **reuses the same row**. Since migration 241 (2026-09-15) **no `save_design` call moves status, for any caller**: new rows are born `'draft'`, and `submit-estimate` promotes a draft to `'sent'` (`_shared/designPromotion.ts`, guarded on `status='draft'` inside the UPDATE) at the moment the CRM estimate or quote number exists, before any customer email. A refused, thrown or abandoned Get Quote therefore leaves an honest draft. **Do not put promotion back into `save_design`**: before 241 it promoted on the browser's save, ahead of every refusal in `submit-estimate`, so a refused quote stayed `'sent'` with nothing issued — listed on the customer's quotes page and held by 240's contact lock.
 
 Rules that keep this safe — do not loosen them:
 

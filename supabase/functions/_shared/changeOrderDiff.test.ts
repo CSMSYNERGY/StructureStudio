@@ -85,4 +85,29 @@ Deno.test("tax appearing for the first time is reported rather than sliding in s
   has("names it", text, "Sales tax rate: 0% → 7.25%");
 });
 
+Deno.test("the rate chain's bookkeeping keys never raise a change order on their own", () => {
+  // 2026-09-17: every re-stamp gains basis / locationId / locationName / verifiedAt, and every
+  // snapshot already on a signed order predates them. The first resubmit after that ships must
+  // not ask a customer to approve a "change" that is nothing but new bookkeeping — only `rate`
+  // and `amount` are money. Also covered: a different label, source, reason, jurisdiction,
+  // address and resolvedAt at the same rate and amount.
+  const legacy = snap(0.0725, 812);
+  const restamped = {
+    ...legacy,
+    tax: {
+      ...legacy.tax, source: "fallback", label: "County tax", reason: "not requested", jurisdiction: null,
+      address: { state: "GA", zip: "31201" }, resolvedAt: "2026-09-17T08:00:00Z",
+      basis: "location", locationId: "3f0c2b1e-8a4d-4c2e-9b7a-1d2e3f4a5b6c", locationName: "Main lot", verifiedAt: null,
+    },
+  };
+  check("legacy → chain stamp at the same money is not a change", changeOrderDescription(legacy, restamped) === null,
+    `got ${JSON.stringify(changeOrderDescription(legacy, restamped))}`);
+  const otherLot = { ...restamped, tax: { ...restamped.tax, basis: "company", locationId: null, locationName: null } };
+  check("a different basis and location at the same money is not a change", changeOrderDescription(restamped, otherLot) === null,
+    `got ${JSON.stringify(changeOrderDescription(restamped, otherLot))}`);
+  // And the control: the same bookkeeping move WITH a rate move is still named.
+  const moved = { ...otherLot, tax: { ...otherLot.tax, rate: 0.0825, amount: 924 } };
+  has("a real rate move is still reported", changeOrderDescription(restamped, moved), "County tax rate: 7.25% → 8.25%");
+});
+
 if (failures) throw new Error(`${failures} failed`);

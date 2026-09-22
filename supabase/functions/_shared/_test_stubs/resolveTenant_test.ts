@@ -354,6 +354,60 @@ Deno.test("support operator is refused requireBilling even holding can_bill", as
   assertEquals((r as any).body.error, "This operator account cannot change billing.");
 });
 
+// ── requireBilling refuses WRITES only (2026-09-15) ───────────────────────────
+// portal-billing's `status` is a read (GATES: "open") and the one call view-as makes to learn
+// what the viewed tenant is entitled to. The capability check used to cover it too, so a
+// support operator — and any operator without can_bill — got a 403 on that read, the browser
+// stored "no entitlement", and every paid add-on showed as unbought whatever the builder held.
+// Both halves matter: the read must pass, and the writes must still refuse.
+const BILLING_FN_GATES = {
+  status: "open" as const,
+  subscribe: { area: "settings_billing", level: "edit" as const },
+};
+
+Deno.test("a support operator may READ billing status, and still may not subscribe", async () => {
+  signedIn();
+  const read = await resolveTenant(
+    req({ action: "status", targetClientId: "victim" }),
+    makeAdmin({ client_users: TEAM, app_operators: SUPPORT, client_configs: ["victim"], tenant_owner: TENANT_OWNER }),
+    { gates: BILLING_FN_GATES, readActions: READS, requireBilling: true },
+  );
+  assertEquals(read.ok, true);
+  assertEquals((read as any).ctx.operator.supportOnly, true);
+
+  signedIn();
+  const write = await resolveTenant(
+    req({ action: "subscribe", targetClientId: "victim" }),
+    makeAdmin({ client_users: TEAM, app_operators: SUPPORT, client_configs: ["victim"], tenant_owner: TENANT_OWNER }),
+    { gates: BILLING_FN_GATES, readActions: READS, requireBilling: true },
+  );
+  assertEquals(write.ok, false);
+  assertEquals((write as any).status, 403);
+  assertEquals((write as any).body.error, "This operator account cannot change billing.");
+});
+
+Deno.test("a platform operator WITHOUT can_bill may read billing status, and still may not subscribe", async () => {
+  const NO_BILL = { ...PLATFORM, can_bill: false };
+  signedIn();
+  const read = await resolveTenant(
+    req({ action: "status", targetClientId: "victim" }),
+    makeAdmin({ client_users: TEAM, app_operators: NO_BILL, client_configs: ["victim"], tenant_owner: TENANT_OWNER }),
+    { gates: BILLING_FN_GATES, readActions: READS, requireBilling: true },
+  );
+  assertEquals(read.ok, true);
+  assertEquals((read as any).ctx.operator.canBill, false);
+
+  signedIn();
+  const write = await resolveTenant(
+    req({ action: "subscribe", targetClientId: "victim" }),
+    makeAdmin({ client_users: TEAM, app_operators: NO_BILL, client_configs: ["victim"], tenant_owner: TENANT_OWNER }),
+    { gates: BILLING_FN_GATES, readActions: READS, requireBilling: true },
+  );
+  assertEquals(write.ok, false);
+  assertEquals((write as any).status, 403);
+  assertEquals((write as any).body.error, "This operator account cannot change billing.");
+});
+
 Deno.test("a tenant with NO owner row falls back to the admin preset, not to nothing", async () => {
   // Created but never invited, or the owner removed. "No access" would make support useless on
   // exactly the accounts most likely to need it.

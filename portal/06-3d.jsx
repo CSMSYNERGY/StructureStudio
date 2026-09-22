@@ -484,8 +484,17 @@ function DesignerTab({ clientId, onSaved, openDesign = null, setup3d = null, vie
       ? <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>The designer failed to load — refresh the page. (structure-studio.component.js must be served alongside portal.html.)</div>
       : <DesignerLoading />;
   }
+  // Capped at 1728 and centred (Carolyn 2026-09-17: on her 32" screen the designer "stretches
+  // forever" and the images just get bigger). This REPLACES the 2026-09-14 call for full width
+  // on this same wrapper - that was asked for on a normal monitor, where the gutters read as
+  // waste; on an ultrawide the same rule is what makes the page unusable. 1728 is a 27"-class
+  // frame, and below it NOTHING changes, so every laptop keeps today's layout exactly.
+  // index.html caps #root to the same number for the public page.
+  // maxWidth + margin only, deliberately: no transform, filter, opacity, contain, will-change
+  // or z-index here. Any of those would make this a stacking context on an ancestor of the
+  // plan <svg>, which rises to z-index 901 over the pick-to-remove scrim (see SSD_CSS).
   return (
-    <div style={{ maxWidth: 1080, margin: "0 auto", width: "100%" }}>
+    <div style={{ maxWidth: 1728, margin: "0 auto", width: "100%" }}>
       {/* onOpenOrder/canPushInvoice power Push to Invoice on the success screen. The host
           owns both on purpose: only the shell knows this user's Orders access, and only it
           can navigate without unmounting the designer (which would discard the design). */}

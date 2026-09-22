@@ -393,9 +393,12 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     const outcome = data && data.issuedBy === "structurestudio"
       ? `${est} is awaiting the customer's signature`
       : `${est} is now Invoiced`;
+    // `note` rides beside either outcome: the invoice-time tax check (Avalara stage) informs, it
+    // never decides, so it is not folded into the ok/err sentence.
+    const note = ssTaxCheckNote(data && data.taxCheck);
     setInvMsg(data && data.sent === false
-      ? { err: `Invoice ${(data && data.invoiceNumber) || ""} is created and ${outcome}, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print the invoice PDF or copy the customer link.` }
-      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — ${outcome}.` });
+      ? { err: `Invoice ${(data && data.invoiceNumber) || ""} is created and ${outcome}, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print the invoice PDF or copy the customer link.`, note }
+      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — ${outcome}.`, note });
     load();
   };
 
@@ -403,15 +406,19 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // places — this table, the order detail, and the designer success screen).
   const [resendBusyKey, setResendBusyKey] = useState(null);
   const [copiedKey, setCopiedKey] = useState(null);
-  const myQuotesLink = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}`;
   const copyCustomerLink = (code) => {
+    // The designer's account panel focused on THIS quote (plan 3.8, 2026-09-15), not the bare
+    // /my-quotes list it used to be: the customer logs in and lands on the card with Review &
+    // Accept. `quotes` even for an invoiced row — the designer moves to whichever tab the card
+    // lives on. /my-quotes stays up, so links already sent keep working.
+    const link = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&account=quotes&q=${encodeURIComponent(code)}`;
     const done = () => { setCopiedKey(code); setTimeout(() => setCopiedKey((k) => (k === code ? null : k)), 2000); };
     // A rejected writeText is NOT a copy: the API exists but can still refuse (permissions
     // policy, unfocused tab), and `.then(done, done)` used to flash "Copied ✓" over a
     // clipboard that still held something else — the rep then pastes the wrong thing to a
     // customer. On rejection, fall back to the same manual prompt no-clipboard browsers get.
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(myQuotesLink).then(done, () => window.prompt("Copy the customer link:", myQuotesLink));
-    else window.prompt("Copy the customer link:", myQuotesLink);
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, () => window.prompt("Copy the customer link:", link));
+    else window.prompt("Copy the customer link:", link);
   };
   const resendQuoteEmail = async (r) => {
     setResendBusyKey(r.short_code); setInvMsg(null);
@@ -522,7 +529,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       )}
       {rows && rows.length > 0 && <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter} />}
       {delMsg && <div style={delMsg.err ? S.err : S.okMsg}>{delMsg.err || delMsg.ok}</div>}
-      {invMsg && <div style={invMsg.err ? S.err : S.okMsg}>{invMsg.err || invMsg.ok}</div>}
+      {invMsg && (invMsg.err || invMsg.ok) && <div style={invMsg.err ? S.err : S.okMsg}>{invMsg.err || invMsg.ok}</div>}
+      {invMsg && invMsg.note && <div style={SS_TAX_NOTE_STYLE}>{invMsg.note}</div>}
       {error && <div style={S.err}>{error}</div>}
       {/* Grey blocks in the real column shape, not the word "Loading" on an empty card —
           see SkelRows. Carolyn, 2026-08-26, on watching a list arrive: "so let's do that." */}
@@ -751,7 +759,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                           r.ss_quote_number && {
                             key: "copy", keepOpen: true,
                             label: copiedKey === r.short_code ? "Copied ✓" : "Copy link",
-                            title: "Copy the customer quote-page link (they sign in with their phone)",
+                            title: "Copy the customer's link to this quote (they log in with a code to accept it)",
                             onClick: () => copyCustomerLink(r.short_code),
                           },
                           // These two report through the invMsg banner above the table, which is
@@ -858,7 +866,7 @@ function diffVersionSelections(va, vb) {
   // selections.cladding holds the designer's stable id; show the label the customer
   // picked (mirrors D3_CLADDING in structure-studio.component.js). Unknown ids pass
   // through raw — a cryptic diff beats a silent one.
-  const CLADDING_LABELS = { lap: "Lap Siding", panel: "Panel Siding", agpanel: "Metal", batten: "Board & Batten" };
+  const CLADDING_LABELS = { lap: "Lap Siding", panel: "Panel Siding", agpanel: "AG Panel", batten: "Board & Batten" };
   const KEYS = [["style", "style"], ["size", "size"], ["roofType", "roof type"], ["roofColor", "roof color"], ["cladding", "cladding"]];
   const parts = [];
   const push = (lbl, av, bv) => { if (av !== bv && (av || bv)) parts.push(`${lbl}: ${av || "—"} → ${bv || "—"}`); };
@@ -1362,6 +1370,26 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
 // planned|out|delivered CHECK on delivery_loads.
 const CRM_LOAD_LABEL = { planned: "Planned", out: "Out for delivery", delivered: "Delivered" };
 
+// THE DEAL ON SCREEN, whichever kind of record is showing it: the design record itself, or the
+// deal PICKED on a contact. Null on a contact with nothing picked.
+//
+// Gate on this rather than on `kind === "design"` whenever a thing belongs to one deal. The two
+// tests look interchangeable and are not: `kind` asks which URL you arrived by, this asks which
+// building you are looking at. Gating on `kind` is what forced a trip to the deal's own record to
+// see anything deal-shaped, which is the behaviour Ahsan removed on 2026-09-20 — he wants the
+// contact page to be the whole story.
+function crmContextDesign(c) {
+  return (c.kind === "design" ? c.record : (c.designs || []).find((x) => x.short_code === c.selectedCode)) || null;
+}
+
+// The deal on screen, when it is a StructureStudio-issued quote. A quote number and no CRM
+// estimate is the same test the Pipeline's send-invoice confirm uses for "StructureStudio issues
+// this paperwork".
+function crmSsQuoteDesign(c) {
+  const d = crmContextDesign(c);
+  return d && d.ss_quote_number && !d.ghl_estimate_number ? d : null;
+}
+
 const CRM_SECTIONS = [
   { key: "summary", title: "Summary", when: () => true },
   { key: "details", title: "Details", when: () => true },
@@ -1375,6 +1403,10 @@ const CRM_SECTIONS = [
   // order is the same one row and would just repeat the stage bar above it.
   { key: "orders", title: "Orders", when: (c) => c.kind === "contact" },
   { key: "person", title: "Person", when: (c) => c.kind === "design" },
+  // SALES TAX (Avalara stage, 2026-09-17). The deal on screen — the record itself, or the one
+  // picked on a contact — and only a StructureStudio-issued quote: a CRM-mode tenant's CRM
+  // figures tax on its own estimate, so there is nothing here for them to see or change.
+  { key: "tax", title: "Sales tax", when: (c) => !!crmSsQuoteDesign(c) },
   // BUILD, DELIVERY, REPAIRS. Carolyn, 2026-08-28 @37:48: "whether you're in a contact or
   // whether you're in a deal, it doesn't matter, you want to be able to see the contact
   // details, the deals, the orders, the build schedule, the delivery schedule ... Repairs
@@ -1541,7 +1573,10 @@ const CRM_TABS = [
   // A quote PDF is not something you DO. So the list moved into the History feed under the
   // Documents chip, which now carries the files themselves (crmFeed emits `quote_pdf` and
   // `floor_plan` with a url) instead of only the events describing them.
-  { key: "invoice", label: "Invoice", when: (c) => c.kind === "design", enabled: (c) => c.isAdmin && normStatus(c.record && c.record.status) === "accepted" },
+  // Follows THE DEAL, not the record kind — so it is here on a contact the moment one is picked,
+  // and the contact page no longer has to hand you off to the deal's own record to reach it.
+  { key: "invoice", label: "Invoice", when: (c) => !!crmContextDesign(c),
+    enabled: (c) => { const d = crmContextDesign(c); return c.isAdmin && normStatus(d && d.status) === "accepted"; } },
 ];
 
 // History chips. `types` is the SAME vocabulary the server emits (see _shared/crmFeed.ts's
@@ -1563,7 +1598,10 @@ const CRM_CHIPS = [
   // apart. Mirrors CRM_FEED_TYPES.document; keep the two identical.
   { key: "documents", label: "Files", types: ["change_order", "invoice_created", "invoice_sent", "quote_pdf", "floor_plan", "customer_file"] },
   { key: "deals", label: "Deals", types: ["design_created", "design_version", "accepted", "quote_opened"], when: (c) => c.kind === "contact" },
-  { key: "invoices", label: "Invoices", types: ["invoice_created", "invoice_sent"], when: (c) => c.kind === "design" },
+  // No `when`: on a deal this is that deal's invoices, on a contact it is every invoice the
+  // contact has. Both are worth having, and gating it on the record kind was the other half of
+  // what made the deal's own record a place you had to go.
+  { key: "invoices", label: "Invoices", types: ["invoice_created", "invoice_sent"] },
   // Everything that happened, not three types two of which were never emitted — see the
   // CRM_FEED_TYPES.changelog comment in _shared/crmFeed.ts for why this read 0 on Carolyn's
   // screen. Keep the two lists identical.
@@ -1736,6 +1774,11 @@ const CRM_RAIL_TONES = {
   delivery: { on: "#15803D", past: "#DCFCE7" },  // green -- the ladder ends in "Delivered"
 };
 const CRM_RAIL_IDLE = { bg: "#F1F5F9", fg: "#94A3B8" };
+// The chevron's notch, in ONE place. CrmChevronRail draws the real rail and
+// CrmRecordSkeleton draws its grey stand-in, and a skeleton whose geometry has drifted from
+// the thing it stands in for is worse than no skeleton: the page visibly re-cuts itself the
+// moment the data lands, which is the jump every skeleton here exists to prevent.
+const CRM_CHEVRON_CLIP = "polygon(0 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 0 100%, 8px 50%)";
 
 // ⚠️ idx === null is NOT STARTED, which is not stage zero -- every chevron stays idle
 // rather than filling the first one, because filling it would claim the building is in it.
@@ -1761,7 +1804,7 @@ function CrmChevronRail({ stages, idx = null, tone, title = null }) {
             flex: "1 1 90px", padding: "5px 10px", fontSize: 11, fontWeight: 700, textAlign: "center",
             background: idx == null ? CRM_RAIL_IDLE.bg : i < idx ? t.past : i === idx ? t.on : CRM_RAIL_IDLE.bg,
             color: idx == null ? CRM_RAIL_IDLE.fg : i === idx ? "#FFF" : i < idx ? t.on : CRM_RAIL_IDLE.fg,
-            clipPath: "polygon(0 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 0 100%, 8px 50%)",
+            clipPath: CRM_CHEVRON_CLIP,
           }}>
           {s.name}
         </div>
@@ -1807,6 +1850,463 @@ function CrmStageBar({ status }) {
   );
 }
 
+// ─── Sales tax on a StructureStudio quote (Avalara stage, 2026-09-17) ───────────────────────
+// Which link of the rate chain priced a quote, in words: a lookup somebody verified, the quote's
+// sales location, or the company rate. `basis` arrived with the location rates; a stamp from
+// before it has only `source`, and a pre-basis "fallback" was always the company rate.
+// "Verified for …", never "exact": the lookup is Avalara's rate for the delivery address, and
+// it knows nothing about origin sourcing across a state line.
+function ssTaxBasisText(tax) {
+  if (!tax || typeof tax !== "object") return null;
+  const basis = tax.basis || (tax.source === "avalara" ? "avalara" : tax.source === "fallback" ? "company" : null);
+  if (basis === "avalara") {
+    const where = String(tax.jurisdiction || "").trim();
+    const when = tax.verifiedAt || tax.resolvedAt;
+    return `Verified for ${where || "the delivery address"}${when ? ` on ${fmtDate(when)}` : ""}`;
+  }
+  if (basis === "location") return `${String(tax.locationName || "").trim() || "Sales location"} rate`;
+  if (basis === "company") return "Company rate";
+  return null;
+}
+// Cents as dollars, for the tax card. Its own copy on purpose: `money` and `ssUsd` live in
+// 04-orders.jsx, and this file's rule is that part 02 does not lean on a later part's consts
+// (see CRM_LOAD_LABEL above).
+function ssTaxMoney(cents) {
+  if (cents == null || !Number.isFinite(Number(cents))) return "—";
+  return "$" + (Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+// A stored fraction as a percentage for display: 0.0725 -> "7.25%". Rounded to four places so
+// 0.07125 never prints as 7.124999999%.
+function ssTaxPct(rate) {
+  const n = Number(rate);
+  if (rate == null || !Number.isFinite(n)) return "";
+  return `${Math.round(n * 1000000) / 10000}%`;
+}
+
+// send_invoice's tax check, as a sentence — or null when there is nothing to say. INFORMATIONAL
+// ONLY, and the copy says so: the check never changes an invoice (the customer agreed to a total)
+// and never blocks one, so it must not read as a failure of the send it rode along with.
+// "matched" and "skipped" say nothing; an older function sends no taxCheck at all.
+const SS_TAX_FAILURE_TEXT = {
+  credentials_rejected: "the tax service didn't accept our sign-in",
+  subscription: "address lookups aren't part of the tax service plan",
+  rate_limited: "the tax service is busy",
+  timeout: "the tax service didn't answer in time",
+  network: "the tax service couldn't be reached",
+  malformed: "the tax service's answer couldn't be read",
+  bad_address: "the delivery address wasn't recognised",
+  no_address: "there is no delivery address on file",
+  daily_cap: "today's lookup limit has been reached",
+  not_configured: "address lookups aren't set up",
+  ledger_unavailable: "the lookup couldn't be recorded, so none was made",
+  // Our own per-minute cap. The claim only applies it to a Verify press, so an invoice check
+  // should never carry it; worded anyway, because the server's failure type includes it.
+  minute_cap: "too many lookups were made in the last minute",
+};
+// Informational, so neither the red of a failure nor the amber of a warning: the Locations tab's
+// blue "what this does" banner.
+const SS_TAX_NOTE_STYLE = { background: "#EFF6FF", border: "1px solid #BFDBFE", color: "#1E3A8A", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5, marginBottom: 12 };
+function ssTaxCheckNote(taxCheck) {
+  if (!taxCheck || typeof taxCheck !== "object") return null;
+  if (taxCheck.status === "differs") {
+    const where = String(taxCheck.jurisdiction || "").trim();
+    const verified = taxCheck.verifiedRatePct != null ? `${taxCheck.verifiedRatePct}%` : "a different rate";
+    const agreed = taxCheck.agreedRatePct != null ? ` of ${taxCheck.agreedRatePct}%` : "";
+    return `Tax check: Avalara's rate for the delivery address${where ? ` (${where})` : ""} is ${verified}. The invoice keeps the rate the customer agreed to${agreed} — nothing on it was changed.`;
+  }
+  if (taxCheck.status === "failed") {
+    const why = SS_TAX_FAILURE_TEXT[taxCheck.failure];
+    return `Tax check: the rate for the delivery address couldn't be verified${why ? ` — ${why}` : ""}. The invoice keeps the rate the customer agreed to; nothing on it was changed.`;
+  }
+  return null;
+}
+
+// A portal-settings answer reduced to what the tax controls act on: the data on success, or the
+// refusal's code, its sentence and the body's extra fields (quoteNumber, totalCents, …). The
+// invoke wrapper keeps the server's sentence but not those fields, and a 403's message has
+// "ask an owner or admin" appended — wrong advice for "lookups aren't switched on" — so the body
+// is read again here, the way fnError does.
+async function ssTaxOutcome(res) {
+  const data = res && res.data;
+  const error = res && res.error;
+  if (!error && data && !data.error) return { data };
+  let body = data && data.error ? data : null;
+  if (!body && error && error.context && typeof error.context.json === "function") {
+    try { body = await (typeof error.context.clone === "function" ? error.context.clone() : error.context).json(); }
+    catch (_e) { body = null; }
+  }
+  return {
+    reason: (body && body.reason) || (error && error.ssReason) || null,
+    body: body || {},
+    message: (body && body.error) || (error && error.message) || "That didn't work — try again.",
+  };
+}
+
+// THE SALES TAX CARD on a deal. The product owner's ask: "if they don't know, they just click a
+// button in the estimate and it creates the taxes for them." It shows the tax line the quote
+// carries and which rate priced it, lets whoever may edit the design move it to another sales
+// location, and offers the one deliberate, billed lookup — only when the account's lookups are
+// switched on and the reader may edit CRM Connection settings, the area that owns the company
+// rate.
+//
+// ⚠️ IT READS THE DESIGN ITSELF, which the record page above it deliberately never does. The
+// estimate snapshot and `sales_location_id` are not in crm_record's projection, and the API
+// publishes the stored location through the RLS'd `designs` select (migration 244). That read
+// returns NOTHING in operator view-as — designs RLS is current_client_id() — so view-as reads
+// through `orders_designs` instead, where the server resolves the tenant, and the stored location
+// is then only known when the tax stamp names it.
+//
+// ⚠️ NOTHING HERE PRICES ANYTHING. Every figure on screen after a change is the one the server
+// returned, and the lookup's cost is never stated as a number: the price is the server's to say.
+function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, totalCentsHint = null, canEditDesign = false, canVerify = false, canReadTaxSettings = false, onChanged = null }) {
+  const [row, setRow] = useState(null);         // the design | { err } | null while loading
+  const [locKnown, setLocKnown] = useState(true); // is row.sales_location_id the stored value?
+  const [locs, setLocs] = useState(null);       // active sales locations, or null when unreadable
+  const [taxCfg, setTaxCfg] = useState(null);   // tax_settings answer, or null (not asked / unavailable)
+  const [busy, setBusy] = useState(null);       // "location" | "verify" | null
+  const [msg, setMsg] = useState(null);         // { ok } | { err }
+  // Latest load wins: a slower first answer must not paint over a later one.
+  const loadSeq = useRef(0);
+  // Read at load time rather than a dependency: the record reloads after every change made
+  // here, and a new hint is no reason to read the design a second time.
+  const totalHint = useRef(totalCentsHint);
+  totalHint.current = totalCentsHint;
+
+  const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    const cols = "short_code, status, accepted_at, total_cents, estimate_lines, ss_quote_number, ss_quote_sent_at, ghl_estimate_number, contact";
+    const readDesign = async () => {
+      if (!viewingLabel) {
+        const direct = (withLoc) => {
+          let q = sb.from("designs").select(withLoc ? `${cols}, sales_location_id` : cols).eq("short_code", shortCode);
+          if (clientId) q = q.eq("client_id", clientId);
+          return q.maybeSingle();
+        };
+        let r = await direct(true);
+        // Before migration 244 the column does not exist and PostgREST refuses the whole select.
+        // The tax line still has something true to say without it.
+        if (r.error && /sales_location_id/.test(String(r.error.message || ""))) r = await direct(false);
+        if (r.error) return { err: r.error.message || "Couldn't load this quote's tax." };
+        if (!r.data) return { err: "Not shown for your role." };
+        return { row: r.data, known: Object.prototype.hasOwnProperty.call(r.data, "sales_location_id") };
+      }
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "orders_designs", shortCodes: [shortCode], detail: true } });
+      if (error || !data || data.error) return { err: (data && data.error) || (error && error.message) || "Couldn't load this quote's tax." };
+      const d = (data.designs || [])[0];
+      if (!d) return { err: "Not shown for your role." };
+      // No total_cents in that projection; crm_record's own read of the same row carries it.
+      return { row: { ...d, total_cents: d.total_cents != null ? d.total_cents : totalHint.current }, known: Object.prototype.hasOwnProperty.call(d, "sales_location_id") };
+    };
+    const [design, locRes, cfgRes] = await Promise.all([
+      readDesign(),
+      sb.functions.invoke("portal-settings", { body: { action: "list_locations" } }),
+      canReadTaxSettings ? sb.functions.invoke("portal-settings", { body: { action: "tax_settings" } }) : Promise.resolve(null),
+    ]);
+    if (seq !== loadSeq.current) return;
+    if (design.err) { setRow({ err: design.err }); return; }
+    setRow(design.row);
+    setLocKnown(design.known);
+    const cfg = cfgRes && !cfgRes.error && cfgRes.data && !cfgRes.data.error ? cfgRes.data : null;
+    setTaxCfg(cfg);
+    // list_locations is readable on inventory or branding; tax_settings on settings_crm. Either
+    // list will do for the picker — and a reader who can see neither gets the name as text.
+    if (locRes && !locRes.error && locRes.data && Array.isArray(locRes.data.locations)) {
+      setLocs(locRes.data.locations.map((l) => ({ id: l.id, name: l.name, taxRatePct: l.taxRatePct != null ? l.taxRatePct : null })));
+    } else if (cfg && Array.isArray(cfg.locations)) {
+      setLocs(cfg.locations.filter((l) => l.active !== false).map((l) => ({ id: l.id, name: l.name, taxRatePct: l.taxRatePct != null ? l.taxRatePct : null })));
+    } else setLocs(null);
+  }, [clientId, shortCode, viewingLabel, canReadTaxSettings]);
+  useEffect(() => { load(); }, [load]);
+
+  // The server's answer IS the new state — the tax it stamped and the total it wrote.
+  const applyTax = (data, extra = {}) => {
+    setRow((r) => (!r || r.err) ? r : {
+      ...r, ...extra,
+      estimate_lines: data.tax ? { ...(r.estimate_lines || {}), tax: data.tax } : r.estimate_lines,
+      total_cents: data.totalCents != null ? data.totalCents : r.total_cents,
+    });
+  };
+
+  if (row === null) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Loading…</div>;
+  if (row.err) return <div style={{ fontSize: 12, color: "#94A3B8" }}>{row.err}</div>;
+
+  const snap = row.estimate_lines || null;
+  const tax = snap && snap.tax ? snap.tax : null;
+  const basisText = ssTaxBasisText(tax);
+  const quoteNo = row.ss_quote_number || "this quote";
+  // Signed means the tax is the customer's agreement now. Both server actions refuse
+  // (accepted / ordered); not offering them is the courtesy half. The status arm is the server's
+  // own agreed test (sync-design-status can re-project a status with accepted_at still null). An
+  // acceptance row or an order the designs read cannot see is caught by the refusal instead, which
+  // reloads the card.
+  const locked = !!row.accepted_at || ["accepted", "invoiced", "delivered"].includes(String(row.status || ""));
+  const curLocId = locKnown
+    ? (row.sales_location_id || null)
+    : (tax && tax.basis === "location" && tax.locationId ? tax.locationId : null);
+  const locUnknown = !locKnown && !curLocId;
+  const curLoc = curLocId && locs ? locs.find((l) => l.id === curLocId) : null;
+  // A stored id missing from the ACTIVE list is a location someone has since retired — but only
+  // when there is a list to be missing from. Without one this reader simply cannot see the lots.
+  const curLocName = curLoc ? curLoc.name
+    : (curLocId && tax && tax.locationId === curLocId && tax.locationName) ? tax.locationName
+    : curLocId ? (locs ? "A location that is no longer active" : "A sales location") : null;
+  const c = row.contact || {};
+  const deliveryAddr = [c.street, [c.city, c.state].filter(Boolean).join(", ") + (c.zip ? ` ${c.zip}` : "")]
+    .filter((s) => s && String(s).trim()).join(", ");
+  // configured === false (no platform credentials) refuses every lookup, so a billed button there
+  // could only fail.
+  const showVerify = !locked && !!tax && canVerify && !!taxCfg && taxCfg.lookupEnabled === true && taxCfg.configured !== false;
+  // The row this card shows is out of date: the customer agreed, an order exists, or something
+  // else wrote the quote first. The server's sentence says which; the card re-reads the design.
+  const staleRefusal = (reason) => reason === "accepted" || reason === "ordered" || reason === "changed";
+  // After a re-price the server emails the quote again only when the customer already holds it
+  // and its total moved, so no resendReason means nothing needed sending. A reason is the
+  // server's own whole sentence: the customer hasn't been sent the new total, and what to do
+  // about it. It is shown as written — the server knows whether it was the PDF, a missing email
+  // address or a failed send, and a customer who got the quote by text or on paper may only
+  // hear the new total from the rep. `resent` means it went out by email, the only re-send there is.
+  const notResentText = (d) => { const why = String(d.resendReason || "").trim(); return why ? ` ${why}` : ""; };
+  const resentText = (d) => d.resent ? " The updated quote was emailed to the customer." : notResentText(d);
+
+  const changeLocation = async (value) => {
+    if (value === "__current") return;
+    const locationId = value || null;
+    if (!locUnknown && locationId === curLocId) return;
+    setBusy("location"); setMsg(null);
+    let confirmResend = false;
+    // At most two calls: the plain one, and — when the customer already has the quote (emailed,
+    // texted or printed: the server decides) and the total would move — the one the builder
+    // confirmed.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const out = await ssTaxOutcome(await sb.functions.invoke("portal-settings", {
+        body: { action: "set_design_sales_location", shortCode, locationId, ...(confirmResend ? { confirmResend: true } : {}) },
+      }));
+      if (out.data) {
+        const d = out.data;
+        applyTax(d, { sales_location_id: d.salesLocationId !== undefined ? d.salesLocationId : locationId });
+        setLocKnown(true);
+        const name = locationId ? ((locs || []).find((l) => l.id === locationId) || {}).name : null;
+        setMsg({ ok: `${name ? `Sales location set to ${name}` : "Sales location cleared"}${d.totalCents != null ? ` — quote total ${ssTaxMoney(d.totalCents)}` : ""}.${resentText(d)}` });
+        if (onChanged) onChanged();
+        break;
+      }
+      if (out.reason === "quote_sent" && !confirmResend) {
+        const b = out.body;
+        // "Already has", never "was emailed": the server asks for a quote handed over by text or
+        // on paper too. And no promise of a re-send — whether one goes out is only known after
+        // the change, and the success message reports it.
+        const moves = b.totalCents != null && b.newTotalCents != null
+          ? `its total will change from ${ssTaxMoney(b.totalCents)} to ${ssTaxMoney(b.newTotalCents)}`
+          : "its total will change";
+        const qn = b.quoteNumber || row.ss_quote_number;
+        if (!window.confirm(`The customer already has ${qn ? `quote ${qn}` : "this quote"}. If you change the sales location, ${moves}.\n\nChange it anyway?`)) break;
+        confirmResend = true;
+        continue;
+      }
+      setMsg({ err: out.message });
+      if (staleRefusal(out.reason)) load();
+      break;
+    }
+    setBusy(null);
+  };
+
+  const verify = async () => {
+    if (!window.confirm(`Verify the sales tax on ${quoteNo} for the delivery address${deliveryAddr ? ` (${deliveryAddr})` : ""}?\n\nAvalara bills each verification. If the verified rate is different, the quote's tax and total change to it.`)) return;
+    setBusy("verify"); setMsg(null);
+    const flags = {};
+    // The server asks for each confirmation in turn — view-as first, then a quote the customer
+    // already has — so this is at most three calls, and every refusal after a confirmation is a
+    // real one whose sentence is shown. The per-minute limit (rate_limited) and the daily cap
+    // are among those: nothing was looked up, and pressing again at once would only repeat them.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const out = await ssTaxOutcome(await sb.functions.invoke("portal-settings", {
+        body: { action: "verify_tax", shortCode, ...flags },
+      }));
+      if (out.data) {
+        const d = out.data;
+        applyTax(d);
+        const t = d.tax || {};
+        const moved = d.previousTotalCents != null && d.totalCents != null && d.previousTotalCents !== d.totalCents;
+        setMsg({ ok: `Verified: ${ssTaxPct(t.rate) || "the rate"} for ${String(t.jurisdiction || "").trim() || "the delivery address"}.`
+          + (moved ? ` The quote total changed from ${ssTaxMoney(d.previousTotalCents)} to ${ssTaxMoney(d.totalCents)}.` : " The quote total didn't change.")
+          + resentText(d) });
+        if (onChanged) onChanged();
+        break;
+      }
+      if (out.reason === "confirm_operator" && !flags.confirmVerify) {
+        if (!window.confirm(`You are doing this AS ${viewingLabel || "this builder"}.\n\nThis runs a billed Avalara lookup on their customer's quote. Verify anyway?`)) break;
+        flags.confirmVerify = true;
+        continue;
+      }
+      if (out.reason === "quote_sent" && !flags.confirmResend) {
+        const b = out.body;
+        // Asked before the lookup, so the new total isn't known yet: the total will change if the
+        // verified rate differs. Same rules as the location confirm — "already has", no promised
+        // re-send.
+        const qn = b.quoteNumber || row.ss_quote_number;
+        if (!window.confirm(`The customer already has ${qn ? `quote ${qn}` : "this quote"}${b.totalCents != null ? ` at ${ssTaxMoney(b.totalCents)}` : ""}. If the verified tax rate is different, its total will change.\n\nVerify anyway?`)) break;
+        flags.confirmResend = true;
+        continue;
+      }
+      // Every other refusal — switched off, no address, today's limit, a failed lookup — is a
+      // sentence the server wrote, and on every one of them the quote is unchanged.
+      setMsg({ err: out.message });
+      if (staleRefusal(out.reason)) load();
+      break;
+    }
+    setBusy(null);
+  };
+
+  const selStyle = { ...S.input, padding: "5px 8px", fontSize: 12.5 };
+  return (
+    <div data-quote-sales-tax={shortCode}>
+      {tax ? (
+        <>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13, color: "#1E293B" }}>
+            <span>{String(tax.label || "").trim() || "Sales tax"}{ssTaxPct(tax.rate) ? ` (${ssTaxPct(tax.rate)})` : ""}</span>
+            <strong style={{ fontVariantNumeric: "tabular-nums" }}>{ssTaxMoney(Math.round(Number(tax.amount) * 100))}</strong>
+          </div>
+          {basisText && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>{basisText}</div>}
+          {/* A staff resubmit to a different state or ZIP gives up a verified rate (the carry-over
+              rule). The stamp says so in `reason`; the reader should know a verify would help. */}
+          {tax.basis !== "avalara" && /address changed/i.test(String(tax.reason || "")) && (
+            <div style={{ fontSize: 11.5, color: "#B45309", marginTop: 3 }}>The delivery address changed after the rate was verified, so this quote is back on the default rate.</div>
+          )}
+        </>
+      ) : (
+        <div style={{ fontSize: 12.5, color: "#64748B" }}>No sales tax on this quote.</div>
+      )}
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13, color: "#475569", marginTop: 6, paddingTop: 6, borderTop: "1px solid #F1F5F9" }}>
+        <span>Quote total</span><strong style={{ color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssTaxMoney(row.total_cents)}</strong>
+      </div>
+
+      <div style={{ marginTop: 10 }}>
+        <span style={S.lbl}>Sales location</span>
+        {canEditDesign && !locked && locs ? (
+          <select value={locUnknown ? "__current" : (curLocId || "")} disabled={!!busy}
+            onChange={(e) => changeLocation(e.target.value)} style={selStyle}>
+            {locUnknown && <option value="__current">Current location (not shown in this view)</option>}
+            <option value="">None — company rate</option>
+            {curLocId && !curLoc && <option value={curLocId}>{curLocName}</option>}
+            {locs.map((l) => (
+              <option key={l.id} value={l.id}>{l.name}{l.taxRatePct != null ? ` · ${Math.round(Number(l.taxRatePct) * 10000) / 10000}%` : ""}</option>
+            ))}
+          </select>
+        ) : (
+          <div style={{ fontSize: 13, color: "#1E293B" }}>{locUnknown ? "—" : (curLocName || "None")}</div>
+        )}
+        {busy === "location" && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4 }}>Updating the quote…</div>}
+      </div>
+
+      {locked && (
+        <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 8, lineHeight: 1.5 }}>
+          Accepted — this quote keeps the tax the customer agreed to.
+        </div>
+      )}
+
+      {showVerify && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "#92400E", lineHeight: 1.5, marginBottom: 8 }}>
+            <strong>Avalara bills each verification.</strong> It checks the rate for the customer's
+            delivery address{deliveryAddr ? ` (${deliveryAddr})` : ""} — make sure the address is right first.
+          </div>
+          <button type="button" disabled={!!busy} onClick={verify}
+            style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FDE68A", padding: "7px 12px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}>
+            {busy === "verify" ? "Verifying…" : "Verify tax for the delivery address"}
+          </button>
+        </div>
+      )}
+
+      {msg && <div style={{ ...(msg.err ? S.err : S.okMsg), marginTop: 9, marginBottom: 0, padding: "8px 11px", fontSize: 12.5 }}>{msg.err || msg.ok}</div>}
+    </div>
+  );
+}
+
+// ─── The record page's skeleton ───
+// Ahsan, 2026-09-20, opening a contact and a deal: "it takes too much time to open this …
+// add the skeleton card in here also." Until now this page was the one screen still sitting
+// on the word "Loading…" over a single empty card — the exact thing Carolyn complained about
+// on 2026-08-26 ("the page opens and there's nothing there") and that SkelBar/SkelRows were
+// built to answer everywhere else.
+//
+// ⚠️ IT DRAWS ONLY WHAT BOTH RECORDS ARE CERTAIN TO HAVE. Six CRM_SECTIONS carry
+// `when: () => true` (Summary, Details, Build schedule, Delivery schedule, Repairs,
+// Overview) and the tabbed card on the right is unconditional, so those two columns are
+// real. Deals/Orders (contact only), Person (design only) and Sales tax (needs an SS quote
+// number) are NOT claimed — a skeleton that overstates the answer is the thing skeletons
+// exist to avoid, and this page's shape varies more by kind than any other.
+//
+// ⚠️ THE CHEVRON RAIL IS DRAWN FOR A DESIGN ONLY. CrmStageBar renders unconditionally on a
+// deal, so a rail is certain there. On a CONTACT the rails appear only once a deal has been
+// picked, and nothing is picked on first paint (Carolyn 2026-09-02: "you have to have one of
+// these selected for anything to show up here") — so drawing one would promise a ladder that
+// never arrives. Blocks, not an idle CrmChevronRail: an idle rail carries the real stage
+// names and the words "Not started", which is a claim about this deal, not a placeholder.
+//
+// BACK IS THE REAL BUTTON. It is the one control that works before any data lands, and
+// somebody who clicked the wrong row should not have to wait out the load to leave. It is
+// also why this takes onBack rather than rendering a grey block in its place.
+//
+// No hooks here, deliberately — CrmRecord's own hook block carries three warnings about
+// what a hook near an early return does to this page, and a stateless skeleton cannot be
+// dragged into that.
+function CrmRecordSkeleton({ kind, onBack }) {
+  const card = { ...S.card, marginBottom: 10 };
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <button style={{ ...S.btn("#FFF", ACCENT), border: "1px solid #E2E8F0" }} onClick={onBack}>Back</button>
+        <SkelBar w={210} h={17} />
+      </div>
+      {kind === "design" && (
+        <div style={{ display: "flex", gap: 2, flexWrap: "wrap", marginBottom: 12 }}>
+          {CRM_STAGES.map((s, i) => (
+            <SkelBar key={i} h={23} style={{ flex: "1 1 90px", borderRadius: 0, clipPath: CRM_CHEVRON_CLIP }} />
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
+        {/* The section cards, same flex basis and same caps as the real column, so the page
+            does not re-flow into two columns when the data lands. Faded down the stack for
+            the reason SkelRows fades its rows: the eye reads it as "more below" rather than
+            as five equal pending things it has to keep track of. */}
+        <div style={{ flex: "1 1 260px", minWidth: 240, maxWidth: 360 }}>
+          {[0, 1, 2, 3, 4].map((i) => (
+            <div key={i} style={{ ...card, opacity: 1 - i * 0.13 }}>
+              <SkelBar w={74} h={8} style={{ marginBottom: 11 }} />
+              <SkelBar w="88%" style={{ marginBottom: 7 }} />
+              <SkelBar w="64%" />
+            </div>
+          ))}
+        </div>
+        <div style={{ flex: "3 1 420px", minWidth: 320 }}>
+          <div style={S.card}>
+            {/* The action bar. Six blocks because every record has at least that many tabs
+                after CRM_TABS' `when` filters run, and the widths vary the way real labels
+                do — a row of identical blocks reads as a loading bar, not as tabs. */}
+            <div style={{ display: "flex", gap: 3, flexWrap: "wrap", borderBottom: "1px solid #E2E8F0", paddingBottom: 7, marginBottom: 9 }}>
+              {[38, 56, 44, 34, 62, 48].map((w, i) => <SkelBar key={i} w={w} h={20} style={{ borderRadius: 6 }} />)}
+            </div>
+            <SkelBar w={54} h={9} style={{ marginBottom: 9 }} />
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 9 }}>
+              {[58, 46, 52, 40].map((w, i) => <SkelBar key={i} w={w} h={17} style={{ borderRadius: 999 }} />)}
+            </div>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <div key={i} style={{ display: "flex", gap: 9, padding: "7px 0", borderTop: "1px solid #F1F5F9", opacity: 1 - i * 0.13 }}>
+                <SkelBar w={8} h={8} style={{ borderRadius: 99, marginTop: 5, flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <SkelBar w="46%" h={9} style={{ marginBottom: 6 }} />
+                  <SkelBar w="78%" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // The record page. One component, two contexts, driven entirely by the registries above.
 //
 // ⚠️ IT MAKES EXACTLY ONE FETCH, and never a direct sb.from(). designs/payments RLS is
@@ -1814,7 +2314,10 @@ function CrmStageBar({ status }) {
 // which is precisely why DesignsTable and LeadsTable take a fetchDesigns prop wired to
 // operator-portal. Going through portal-settings means resolveTenant handles
 // targetClientId and app_operators for free, and there is no second code path to keep true.
-function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = false, crmUnlocked = true, initialDeal = null, onSeeBilling = null, onBack, onNavigate, onOpenDesign , onOpenOrder = null }) {
+// (The Sales tax card it renders is the one exception, and carries its own reasons and its own
+// view-as path — see QuoteSalesTaxCard.)
+function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = false, crmUnlocked = true, initialDeal = null, onSeeBilling = null, onBack, onNavigate, onOpenDesign , onOpenOrder = null,
+  clientId = null, viewingLabel = null, canEditDesigns = false, canReadTaxSettings = false, canVerifyTax = false }) {
   // THE SUBSCRIPTION IS AN EDIT GATE, NOT A TAB GATE, and it has to be applied here rather
   // than tab by tab. Every WRITE this page makes is a `crm_*` action — crm_save_note,
   // crm_save_activity, crm_complete_activity, crm_send_email, crm_send_sms, crm_save_contact,
@@ -1897,6 +2400,54 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   }, [kind, recordId]);
   useEffect(() => { load(); }, [load]);
 
+  // THE EXPANDED DEAL on a contact record — a short_code, or null for none. Carolyn,
+  // 2026-09-07 36:50: "I would like to be able to click this here and see those custom fields
+  // like when he's in here and he's talking with the customer", and at 37:20 the one she
+  // actually needed: "The main and only thing right now is the expected close date."
+  //
+  // ⚠️ THERE ARE NO CUSTOM FIELDS IN THIS PRODUCT. Nothing defines one, stores one or renders
+  // one. `expected_close_date` is a plain column on `designs` (migration 206) and everything
+  // else she named is already inside `selections`. So this is a fixed panel over fields that
+  // exist, NOT a field builder — building one on the strength of the words "custom fields"
+  // would be a multi-day feature nobody asked for.
+  //
+  // ⚠️ THESE HOOKS SIT ABOVE THE EARLY RETURNS, like every other hook here. CrmRecord returns
+  // early on `!data`, so a hook declared beside the deals renderer would be absent on the
+  // first render and present on the second — React #310, and the record page goes white the
+  // moment its data arrives. That has shipped more than once (13ca37e, app_errors bb53f026).
+  //
+  // They are BELOW `load` on purpose: saveDealClose closes over it, and `const` does not
+  // hoist, so declaring them above would be a TDZ throw rather than a subtle bug.
+  const [dealOpen, setDealOpen] = useState(null);
+  const [dealBusy, setDealBusy] = useState(false);
+
+  // Optimistic, and deliberately the SAME action the Pipeline board's saveCloseDate calls:
+  // one write path means the board and the contact record cannot disagree about what a close
+  // date is. `designs` has no tenant UPDATE policy (154/193 are SELECT-only), so the edge
+  // function is not a convenience here — it is the only way in.
+  const saveDealClose = useCallback(async (shortCode, value) => {
+    const iso = value || null;
+    setDealBusy(true);
+    setData((d) => (!d ? d : { ...d, designs: (d.designs || []).map((x) => (x.short_code === shortCode ? { ...x, expected_close_date: iso } : x)) }));
+    try {
+      const { data: r, error: e } = await sb.functions.invoke("portal-settings", {
+        body: { action: "set_expected_close", shortCode, expectedCloseDate: iso },
+      });
+      if (e) throw new Error(await fnError(e));
+      if (r && r.error) throw new Error(r.error);
+      setOpErr(null);
+    } catch (e2) {
+      // Reload rather than repaint from a remembered value: this panel is one of two screens
+      // writing the same column, so the server's answer is the only one worth trusting.
+      await load();
+      // Keyed by short_code: a bare where:"deals" showed the failure under EVERY expanded
+      // deal, including ones the reader never touched.
+      setOpErr({ where: "deals", code: shortCode, msg: e2.message || "That close date did not save." });
+    } finally {
+      setDealBusy(false);
+    }
+  }, [load]);
+
   if (err) {
     return (
       <div style={S.card}>
@@ -1906,7 +2457,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       </div>
     );
   }
-  if (!data) return <div style={S.card}>Loading…</div>;
+  if (!data) return <CrmRecordSkeleton kind={kind} onBack={onBack} />;
 
   const record = kind === "design" ? (data.designs || [])[0] : data.contact;
 
@@ -2288,30 +2839,80 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
           )}
           {/* ⚠️ TWO SIBLING BUTTONS, NEVER NESTED — the Person card carries the same shape
               and the same warning: a button inside a button is invalid HTML and React will
-              not render it. THE ROW SELECTS; THE ARROW LEAVES. This does convert a list that
-              used to navigate on click into one that selects, which is a real change for
-              anyone who learned the old behaviour — the › keeps the destination one click
-              away. The glyph is there because colour alone is not a state indicator. */}
+              not render it. THE ROW SELECTS; THE CHEVRON EXPANDS. Both stay on this page.
+              The ● / ○ glyph is there because colour alone is not a state indicator.
+
+              ⚠️ THERE IS DELIBERATELY NO "open this deal's own record" ARROW. Ahsan, 2026-09-20:
+              "remove this own record arrow in there i want every thing in the contact page."
+              A third › used to sit here and navigate away. Do not add it back to solve a
+              "you can't get to X from a contact" report — that is the report saying X is still
+              gated on `kind === "design"` when it should be gated on `crmContextDesign(c)`.
+              Fix the gate; the arrow was the workaround, not the feature. The design record
+              itself still exists and the Pipeline still opens it directly — it is only no
+              longer somewhere a contact has to send you. */}
           {(data.designs || []).map((d) => {
             const sel = activeCode === d.short_code;
+            // `!!d.short_code` because dealOpen starts null: without it a row whose code is
+            // missing matches, renders EXPANDED on arrival, and its arrow cannot close it —
+            // clicking sets dealOpen back to null, which still matches.
+            const open = !!d.short_code && dealOpen === d.short_code;
+            const s = d.selections || {};
+            const pc = s.paint_colors || s.paintColors || {};
+            const colour = [pc.body, pc.trim].filter(Boolean).join(" / ") || s.paint || "—";
+            const fieldRow = (label, node) => (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
+                <div style={{ width: 96, flexShrink: 0, fontSize: 10.5, fontWeight: 800, letterSpacing: ".04em", textTransform: "uppercase", color: "#94A3B8" }}>{label}</div>
+                <div style={{ minWidth: 0, fontSize: 12.5, color: "#334155" }}>{node}</div>
+              </div>
+            );
             return (
-              <div key={d.short_code}
-                style={{ display: "flex", alignItems: "stretch", gap: 0, background: sel ? "#EEF2FF" : "#F8FAFC",
-                  border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderRadius: 6, marginBottom: 5, overflow: "hidden" }}>
-                <button onClick={() => setSelCode(sel ? null : d.short_code)} aria-pressed={sel}
-                  title={sel ? "Showing this deal — click to clear" : "Show this deal's stages, build and delivery"}
-                  style={{ flex: 1, minWidth: 0, textAlign: "left", background: "transparent", border: "none",
-                    padding: "7px 9px", cursor: "pointer" }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
-                    <span style={{ color: sel ? ACCENT : "#CBD5E1", marginRight: 6 }}>{sel ? "●" : "○"}</span>
-                    {[(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") || d.short_code}
+              <div key={d.short_code} style={{ marginBottom: 5 }}>
+                <div style={{ display: "flex", alignItems: "stretch", gap: 0, background: sel ? "#EEF2FF" : "#F8FAFC",
+                  border: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
+                  borderRadius: open ? "6px 6px 0 0" : 6, overflow: "hidden" }}>
+                  <button onClick={() => setSelCode(sel ? null : d.short_code)} aria-pressed={sel}
+                    title={sel ? "Showing this deal — click to clear" : "Show this deal's stages, build and delivery"}
+                    style={{ flex: 1, minWidth: 0, textAlign: "left", background: "transparent", border: "none",
+                      padding: "7px 9px", cursor: "pointer" }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
+                      <span style={{ color: sel ? ACCENT : "#CBD5E1", marginRight: 6 }}>{sel ? "●" : "○"}</span>
+                      {[s.style, s.size].filter(Boolean).join(" ") || d.short_code}
+                    </div>
+                    <div style={{ fontSize: 11, color: "#64748B", marginLeft: 18 }}>{fmtDate(d.created_at)}</div>
+                  </button>
+                  {/* ⚠️ A THIRD SIBLING, never a child of the row button. Same rule the two
+                      buttons beside it already carry: a <button> inside a <button> is invalid
+                      HTML and React will not render it, so an "expand" chevron nested in the
+                      row is the one obvious way to build this and it does not work. */}
+                  <button onClick={() => setDealOpen(open ? null : d.short_code)} aria-expanded={open}
+                    title={open ? "Hide this deal's details" : "Show this deal's details"}
+                    style={{ background: "transparent", border: "none", borderLeft: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
+                      padding: "0 9px", fontSize: 12, color: "#94A3B8", cursor: "pointer" }}>{open ? "▾" : "▸"}</button>
+                </div>
+                {open && (
+                  <div style={{ border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderTop: "none",
+                    borderRadius: "0 0 6px 6px", background: "#FFF", padding: "7px 10px 9px" }}>
+                    {fieldRow("Expected close", canEdit ? (
+                      <input type="date" value={String(d.expected_close_date || "").slice(0, 10)} disabled={dealBusy}
+                        onChange={(e) => saveDealClose(d.short_code, e.target.value)}
+                        style={{ ...S.input, padding: "4px 7px", fontSize: 12.5, width: 158 }} />
+                    ) : (d.expected_close_date ? fmtDate(d.expected_close_date) : "—"))}
+                    {fieldRow("Style", s.style || "—")}
+                    {fieldRow("Size", s.size || "—")}
+                    {fieldRow("Total", d.total_cents != null ? fmtMoneyWhole(d.total_cents) : "—")}
+                    {fieldRow("Colour", colour)}
+                    {/* The SAME in-portal handler the record header uses. Deliberately NOT a
+                        link to the public ?id= page: signed-in staff browsing there fire
+                        capture-lead and draft saves and corrupt the very activity this record
+                        reports on. openInDesigner also clamps on the designer area, so a Crew
+                        Leader gets a refusal instead of a button that silently does nothing. */}
+                    {onOpenDesign && (
+                      <button style={{ ...S.btn(), marginTop: 7, padding: "5px 10px", fontSize: 12 }}
+                        onClick={() => onOpenDesign(d.short_code)}>Open in designer</button>
+                    )}
+                    {opErr && opErr.where === "deals" && opErr.code === d.short_code && <div style={{ ...S.err, marginTop: 7 }}>{opErr.msg}</div>}
                   </div>
-                  <div style={{ fontSize: 11, color: "#64748B", marginLeft: 18 }}>{fmtDate(d.created_at)}</div>
-                </button>
-                <button onClick={() => onNavigate("design", d.short_code)}
-                  title="Open this deal's own record"
-                  style={{ background: "transparent", border: "none", borderLeft: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
-                    padding: "0 10px", fontSize: 15, color: "#94A3B8", cursor: "pointer" }}>›</button>
+                )}
               </div>
             );
           })}
@@ -2593,6 +3194,18 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             </div>
           )}
         </div>
+      );
+    }
+    if (key === "tax") {
+      const d = crmSsQuoteDesign(ctx);
+      if (!d) return null;
+      // Keyed by the deal, so picking another deal on a contact starts a fresh read rather than
+      // showing the last one's tax under the new one's name.
+      return (
+        <QuoteSalesTaxCard key={d.short_code} clientId={clientId} shortCode={d.short_code}
+          viewingLabel={viewingLabel} totalCentsHint={d.total_cents != null ? d.total_cents : null}
+          canEditDesign={canEditDesigns} canVerify={canVerifyTax} canReadTaxSettings={canReadTaxSettings}
+          onChanged={load} />
       );
     }
     if (key === "overview") {
@@ -2926,7 +3539,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 and the schedule already are — a second invoice button on a second screen is
                 how two sources of truth for money get built. So this routes rather than
                 duplicates, and says plainly what the customer still has to do. */}
-            {tab === "invoice" && kind === "design" && (
+            {tab === "invoice" && (kind === "design" ? record : activeDeal) && (
               <div style={{ marginBottom: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 13px" }}>
                 <div style={{ fontSize: 12.5, color: "#475569" }}>
                   This quote is accepted, so it can be invoiced. Invoicing happens on the order — with the

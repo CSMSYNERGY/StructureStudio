@@ -688,7 +688,7 @@ function AdmClientPicker({ clients, current, onPick, onClose }) {
               <div style={{ fontSize: 11.5, color: "#94A3B8" }}>{c.client_id}</div>
             </div>
             {c.client_id === current && <AdmChip tone="on">Current</AdmChip>}
-            {c.billingExempt ? <AdmChip tone="good" title="Not billed">Comped</AdmChip>
+            {c.billingExempt ? <AdmChip tone="good" title="Not billed — full access to every feature">Comped</AdmChip>
               : c.discountPercent > 0 ? <AdmChip tone="on" title="Account discount">−{c.discountPercent}%</AdmChip> : null}
           </button>
         ))}
@@ -1064,7 +1064,7 @@ const ADM_TABS = [
   ["styles",  "Styles & Sizes", "Building styles this builder offers, and the sizes under each",  "client"],
   ["items",   "Items",          "Which placeable layout items this builder gets",                 "client"],
   ["pricing", "Pricing",        "Bulk price and inclusion import/export by CSV",                 "client"],
-  ["master",  "Master Catalog", "The global layout-item palette every builder draws from",        "global"],
+  ["master",  "Master Catalog", "The global layout-item palette and Avalara tax code list every builder draws from", "global"],
 ];
 
 function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
@@ -1251,6 +1251,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
       )}
       {sub === "billing" && <AdmBilling />}
       {sub === "master" && <AdmMaster master={master} masterErr={masterErr} />}
+      {sub === "master" && <AdmTaxCodes />}
 
       {needsClient && !sel && clients && (
         <div style={S.card}>
@@ -1439,7 +1440,7 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
               <div style={{ fontSize: 11.5, color: "#94A3B8" }}>{c.client_id}</div>
             </div>
             {c.client_id === sel && <AdmChip tone="on">Selected</AdmChip>}
-            {c.billingExempt ? <AdmChip tone="good" title="Not billed">Comped</AdmChip>
+            {c.billingExempt ? <AdmChip tone="good" title="Not billed — full access to every feature">Comped</AdmChip>
               : c.discountPercent > 0 ? <AdmChip tone="on" title="Account discount">−{c.discountPercent}%</AdmChip> : null}
             {can3D && (() => {
               const on = has3D(c);
@@ -1503,7 +1504,7 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
           <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #F1F5F9" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
               <input type="checkbox" checked={exempt} onChange={(e) => setExempt(e.target.checked)} />
-              <span>Non-billable — CSM Synergy's own, demo or testing account (skips the billing gate)</span>
+              <span>Non-billable — CSM Synergy's own, demo or testing account (full access to every feature, never charged)</span>
             </label>
             <div style={{ marginTop: 10, maxWidth: 220, opacity: exempt ? 0.5 : 1, pointerEvents: exempt ? "none" : "auto" }}>
               <label style={S.lbl}>Account discount %</label>
@@ -1564,6 +1565,77 @@ function AdmMaster({ master, masterErr }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ── Avalara tax codes (global) ───────────────────────────────────────────────
+// The platform catalog every builder's Settings → Company → Tax picker searches (migration 246).
+// Builders never call Avalara: an operator fills the stored copy from here, on purpose, through
+// admin-catalog's avalara_sync_tax_codes. The row first shows what the copy holds
+// (avalara_tax_codes_status, a read of the table only), so a sync is pressed because the list
+// needs one rather than to find out what is in it.
+//
+// The sync needs can_write — a read-only operator gets the server's own sentence — and makes up to
+// ten authenticated Avalara requests. It never deletes a code, and it marks the codes Avalara
+// stopped listing inactive only after reading the whole list. A sync that stopped short still
+// answers ok, with a `warning` sentence; that is shown as the warning it is, because an ok alone
+// would read as a finished sync. Its messages stay on this card, beside the button, rather than in
+// the console's banner at the top of the page.
+function AdmTaxCodes() {
+  const [status, setStatus] = useState(null);   // { count, activeCount, syncedAt } | { err } | null while loading
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);   // { ok } | { warning } | { err }
+  const load = useCallback(async () => {
+    try {
+      const s = await adminApi("avalara_tax_codes_status");
+      setStatus({ count: Number(s.count || 0), activeCount: Number(s.activeCount || 0), syncedAt: s.syncedAt || null });
+    } catch (e) {
+      setStatus({ err: e.message || "Couldn't read the tax code list." });
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const n = (x) => Number(x || 0).toLocaleString("en-US");
+  const sync = async () => {
+    if (!window.confirm("Sync the tax code list from Avalara?\n\nThis makes up to 10 requests to Avalara with the platform's credentials and updates the list every builder picks their tax codes from. No code is deleted. Codes Avalara no longer lists are marked inactive, and only when the whole list was read.")) return;
+    setBusy(true); setResult(null);
+    try {
+      const r = await adminApi("avalara_sync_tax_codes");
+      // A partial sync's warning already says what stopped it, how many codes were saved and that
+      // none were marked inactive; a "Synced" line beside it would contradict it.
+      setResult(r.warning
+        ? { warning: r.warning }
+        : { ok: `Synced — ${n(r.upserted)} codes saved from ${n(r.pages)} ${r.pages === 1 ? "request" : "requests"}, ${n(r.deactivated)} marked inactive${r.skipped ? `, ${n(r.skipped)} unreadable entries skipped` : ""}.` });
+    } catch (e) {
+      setResult({ err: e.message || "The sync failed." });
+    }
+    setBusy(false);
+    load();
+  };
+  const when = (iso) => new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+  return (
+    <div style={S.card}>
+      <CardHead title="Avalara tax codes" count={status && !status.err ? n(status.count) : null}
+        desc="The list every builder's Settings → Company → Tax picker searches. Builders never call Avalara: a sync here reads Avalara's full list and stores it."
+        right={
+          /* Disabled only while a sync runs, and the label says so. */
+          <button type="button" onClick={sync} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.7 : 1 }}>
+            {busy ? "Syncing…" : "Sync from Avalara"}
+          </button>
+        } />
+      {!status && <SkelBar w={300} h={12} />}
+      {status && status.err && <div style={{ fontSize: 13, color: "#B91C1C" }}>{status.err}</div>}
+      {status && !status.err && (
+        <div style={{ fontSize: 13, color: "#334155" }}>
+          {n(status.count)} codes ({n(status.activeCount)} active) ·{" "}
+          {status.syncedAt ? `last synced ${when(status.syncedAt)}` : "never synced, so builders can pick only the starter codes"}
+        </div>
+      )}
+      {result && result.ok && <div style={{ ...S.okMsg, marginTop: 12, marginBottom: 0 }}>{result.ok}</div>}
+      {result && result.warning && (
+        <div style={{ ...S.err, background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", marginTop: 12, marginBottom: 0 }}>{result.warning}</div>
+      )}
+      {result && result.err && <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>{result.err}</div>}
     </div>
   );
 }
@@ -1694,6 +1766,21 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
     const n = Math.round(Number(pct));
     if (!Number.isFinite(n) || n < 0 || n > 100) { onFlash({ err: "Discount must be a whole number from 0 to 100." }); return; }
     if (n > 0 && !exempt && !allFeat && picked.length === 0) { onFlash({ err: "Choose which features the discount applies to, or select “Every feature”." }); return; }
+    // Ticking this box is no longer just "stop charging them" — since 2026-09-21 it hands the
+    // account every paid feature and free AI generations (migration 228). One mis-click on a
+    // real builder gives away about $755/mo, so the grant is spelled out before it is saved.
+    // Only on the transition OFF→ON: re-saving a discount on an already-comped demo account
+    // must not nag.
+    const turningOn = exempt && !(clientRow && clientRow.billingExempt);
+    if (turningOn && !window.confirm(
+      `Make ${label} non-billable?
+
+`
+      + `This switches on Scheduling, QuickBooks Sync, Real-Time Pricing, the CRM and 3D free `
+      + `(about $755/mo), and makes AI generations free.
+
+`
+      + `Use it for our own, demo and test accounts only.`)) return;
     setBillBusy(true);
     try {
       const r = await adminApi("set_billing", { clientId, billingExempt: exempt, discountPercent: n, discountFeatures: allFeat ? [] : picked, exemptUntil: until });
@@ -1796,19 +1883,32 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
       </div>
 
       <div style={S.card}>
-        <CardHead title="Billing posture" desc="An attribute of the account, not of a purchase — it follows them onto every feature they add later." />
-        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
-          <input type="checkbox" checked={exempt} onChange={(e) => setExempt(e.target.checked)} />
-          <span>Non-billable — skips the billing gate entirely</span>
+        <CardHead title="Billing posture" desc="How this account is billed. Both settings belong to the ACCOUNT, not to a purchase." />
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
+          <input type="checkbox" checked={exempt} onChange={(e) => setExempt(e.target.checked)} style={{ marginTop: 3 }} />
+          <span>
+            Non-billable — full access to every feature, and never charged
+            <span style={{ display: "block", fontSize: 12, color: "#64748B", marginTop: 2, fontWeight: 400 }}>
+              More than skipping the billing gate: it switches on Scheduling, QuickBooks Sync, Real-Time Pricing,
+              the CRM and 3D with no subscription, and makes AI generations free. For CSM Synergy's own, demo and
+              test accounts only.
+            </span>
+          </span>
         </label>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 12 }}>
           <div style={{ width: 180, opacity: exempt ? 0.5 : 1, pointerEvents: exempt ? "none" : "auto" }}>
             <label style={S.lbl}>Account discount %</label>
             <input value={pct} onChange={(e) => setPct(e.target.value)} inputMode="numeric" style={S.input} />
+            <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4, lineHeight: 1.4 }}>
+              Follows them onto every feature they add later.
+            </div>
           </div>
           <div style={{ width: 200 }}>
             <label style={S.lbl}>Free until (optional)</label>
             <input type="date" value={until} onChange={(e) => setUntil(e.target.value)} style={S.input} />
+            <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4, lineHeight: 1.4 }}>
+              Keeps them working until this date. Does not include the paid add-ons.
+            </div>
           </div>
         </div>
         {!exempt && Number(pct) > 0 && (
@@ -1888,10 +1988,14 @@ function AdmStyles({ clientId, label, cat, setCat, onFlash, act }) {
   const sizes = (cat && cat.buildingSizes) || [];
   const ALLOWED = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 
-  const pickImg = (file) => {
+  const pickImg = async (file) => {
     if (!file) { setImg(null); return; }
     if (ALLOWED.indexOf(file.type) === -1) { onFlash({ err: "Use a JPG, PNG, WEBP or GIF image." }); setFileKey((k) => k + 1); return; }
-    if (file.size > 3000000) { onFlash({ err: "Image too large — 3 MB maximum." }); setFileKey((k) => k + 1); return; }
+    // Shrink oversized photos rather than refusing them — see onStyleImg in 03-catalog.jsx for
+    // the reasoning. ssFitImageForUpload lives in 06-3d.jsx; every portal part is concatenated
+    // into one script, so it is in scope here.
+    file = await ssFitImageForUpload(file);
+    if (file.size > 3000000) { onFlash({ err: "That image couldn't be resized small enough — try a JPG or PNG." }); setFileKey((k) => k + 1); return; }
     const r = new FileReader();
     r.onerror = () => onFlash({ err: "Could not read that image." });
     r.onload = () => setImg({ base64: r.result, contentType: file.type || "image/jpeg" });

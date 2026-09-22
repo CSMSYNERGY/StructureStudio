@@ -3,21 +3,33 @@
 //
 // Exists because the Real-Time Pricing actions in portal-settings must refuse a direct
 // POST from a tenant who never bought on_demand_pricing — featureOn() in the browser is
-// presentation, not enforcement. This mirrors portal-billing's featureState rules for the
-// PAY-ONLY branch exactly (a subscription is the ONLY way in — no exempt/transition
-// blankets, no operator grants), because a pay-only feature is precisely the case where a
+// presentation, not enforcement. For a CUSTOMER this mirrors portal-billing's featureState
+// rules for the PAY-ONLY branch exactly (a subscription is the only way in — no transition
+// blanket, no operator grants), because a pay-only feature is precisely the case where a
 // lite check that "just looks for an active row" would diverge from the UI: past_due
 // tenants inside the 7-day grace and cancelled tenants inside their prepaid period would
 // see an unlocked screen whose every button 403s.
 //
-// Kept deliberately small: state rules only. portal-billing remains the authority for the
-// full entitlement map (exempt / transition / grantable branches); if you need one of
-// those semantics, extend THAT, not this.
+// ⚠️ TWO ACCOUNT FLAGS SHORT-CIRCUIT ALL OF THAT, and both must stay in step with
+// portal-billing or you get that same 403 screen in the other direction:
+//   internal_account  — CSM Synergy's own tenant (migration 169).
+//   billing_exempt    — an operator has marked the account NON-BILLABLE. Widened to confer
+//                       every feature on 2026-09-21 (migration 228); before that it stopped
+//                       at the base gate and this module ignored it entirely.
+// `billing_exempt_until` (the dated free period) deliberately confers nothing here and
+// never has — it means "hasn't started paying yet", not "comped".
+//
+// Kept deliberately small: state rules plus those two flags. portal-billing remains the
+// authority for the full entitlement map (transition / grantable branches and the gate
+// state); if you need one of THOSE semantics, extend that file, not this one.
 //
 // ⚠️ Duplication ledger — change these together:
 //   GRACE_DAYS          also in portal-billing/index.ts (const GRACE_DAYS = 7)
 //   BUNDLE_FEATURES     also in portal-billing/index.ts (const BUNDLE_FEATURES = …)
 //   PAID_ONLY_FEATURES  also in portal-billing/index.ts (its own PAID_ONLY_FEATURES set)
+//   billing_exempt      also in portal-billing/index.ts (the `(internal || exempt)` head of
+//                       the features map) — and in _shared/taxMeter.ts, which exempts
+//                       non-billable accounts from metered AI charges
 // portal-billing predates this module and keeps its local copies; both files point here.
 //
 // ⚠️ This module is bundled PER FUNCTION. Its importers must be redeployed together, or
@@ -76,7 +88,8 @@ export async function hasPaidFeature(
   clientId: string,
   feature: string,
 ): Promise<boolean> {
-  // INTERNAL ACCOUNT (migration 169) short-circuits before anything else. This is the server
+  // INTERNAL ACCOUNT (migration 169) and NON-BILLABLE (billing_exempt, widened 2026-09-21 —
+  // migration 228) short-circuit before anything else. This is the server
   // mirror of portal-billing's `internal` branch, and the two must agree: a UI that shows the
   // tab while every action 403s is worse than no access at all. Read first and cheaply — one
   // indexed lookup on a table this function would not otherwise touch, paid only on the paths
@@ -85,9 +98,9 @@ export async function hasPaidFeature(
   // Fails CLOSED like the rest of this module: a read error throws to the caller's 5xx rather
   // than being swallowed into "not internal, carry on", because silently downgrading our own
   // account to a customer is how this bug happened the first time.
-  const csRes = await admin.from("client_settings").select("internal_account").eq("client_id", clientId).maybeSingle();
+  const csRes = await admin.from("client_settings").select("internal_account, billing_exempt").eq("client_id", clientId).maybeSingle();
   if (csRes.error) throw new Error(`client_settings read failed: ${csRes.error.message}`);
-  if (csRes.data?.internal_account) return true;
+  if (csRes.data?.internal_account || csRes.data?.billing_exempt) return true;
 
   const confer = conferringFeatures(feature);
   const plansRes = await admin.from("billing_plans")
@@ -161,11 +174,12 @@ export async function usableFeatureSet(
   const out = new Set<string>();
   if (!want.length) return out;
 
-  // Our own account gets everything, ahead of every other rule — the same short-circuit
-  // hasPaidFeature opens with, and for the same reason (migration 169).
-  const csRes = await admin.from("client_settings").select("internal_account").eq("client_id", clientId).maybeSingle();
+  // Our own account, and any account marked non-billable, get everything ahead of every
+  // other rule — the same short-circuit hasPaidFeature opens with, and for the same reasons
+  // (migrations 169 and 228).
+  const csRes = await admin.from("client_settings").select("internal_account, billing_exempt").eq("client_id", clientId).maybeSingle();
   if (csRes.error) throw new Error(`client_settings read failed: ${csRes.error.message}`);
-  if (csRes.data?.internal_account) return new Set(want);
+  if (csRes.data?.internal_account || csRes.data?.billing_exempt) return new Set(want);
 
   // Every plan that could confer any wanted feature — the feature itself plus any bundle
   // containing it. `operator_grantable` rides along for the grant arm below.

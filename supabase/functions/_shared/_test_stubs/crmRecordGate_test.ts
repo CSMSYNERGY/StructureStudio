@@ -38,6 +38,29 @@ for (const name of ["CRM_LOCKED_HINT", "CRM_TABS", "crmUnlocked"]) {
   assert(BLOCK.includes(name), `extracted block is missing ${name}`);
 }
 
+// A SECOND SLICE, and it has to be a slice rather than a stand-in.
+//
+// `crmContextDesign` resolves "the deal on screen" — the record itself on a design, the picked
+// deal on a contact — and it is what the Invoice tab now gates on instead of `kind === "design"`.
+// It is declared ABOVE the CRM_TABS block because CRM_SECTIONS shares it, so the block below
+// lifts a `when` that calls a free variable and every tab throws ReferenceError. Injecting a
+// hand-written copy the way `normStatus` is injected would work and would be wrong: normStatus
+// is a trivial lowercase this file does not test, whereas a second implementation of the DEAL
+// RESOLVER could drift from the shipped one silently, which is the exact class of bug this file
+// exists to catch.
+const H_START = "function crmContextDesign(";
+const H_END = "function crmSsQuoteDesign(";
+const hi = SRC.indexOf(H_START);
+const hj = SRC.indexOf(H_END, hi);
+if (hi < 0 || hj < 0) {
+  throw new Error(
+    "crmRecordGate_test: could not find crmContextDesign in portal/02-sales.jsx " +
+      `(start=${hi}, end=${hj}). The anchors moved — re-point them rather than deleting this.`,
+  );
+}
+const HELPER = SRC.slice(hi, hj);
+assert(HELPER.includes("selectedCode"), "the sliced resolver should read selectedCode");
+
 type Ctx = Record<string, unknown>;
 type Tab = {
   key: string;
@@ -51,7 +74,7 @@ type Tab = {
 // sliced in: Invoice is send_invoice, NOT a crm_ action, and this test asserts it stays live.
 const factory = new Function(
   "normStatus",
-  `${BLOCK}; return { CRM_TABS, CRM_LOCKED_HINT, CRM_PICK_HINT };`,
+  `${HELPER}\n${BLOCK}; return { CRM_TABS, CRM_LOCKED_HINT, CRM_PICK_HINT };`,
 );
 const { CRM_TABS, CRM_LOCKED_HINT, CRM_PICK_HINT } = factory(
   (s: string) => String(s || "").toLowerCase(),

@@ -723,6 +723,10 @@ function run(files) {
   // checkContactRowScope() — this is the guard for the write half of contacts:'own'.
   errors.push(...checkContactRowScope(files));
 
+  // Every Settings sub-page must have a route in the smoke suite. An untested one fails
+  // SILENTLY — the clamp lands people on Structures. See checkSettingsRouteCoverage().
+  errors.push(...checkSettingsRouteCoverage(files));
+
   // Cache-buster lockstep between the two hosts of the shared component artifact. Busters
   // are CONTENT HASHES now, rewritten by `npm run compile`; whether each hash matches its
   // artifact's real bytes is the compile drift gate's job (it recompiles and compares) —
@@ -1689,6 +1693,71 @@ function denoTest() {
   return { errors, skipped: false, count: total, groups: groups.length };
 }
 
+/**
+ * Every Settings sub-page must appear in tests/e2e/portal-routes.spec.mjs.
+ *
+ * WHY THIS EXISTS. An unknown settings sub does not 404 — the clamp in ssSettingsTabs sends it
+ * to the FIRST tab. So a hub that loses its render branch does not throw and does not blank:
+ * it quietly lands people on Structures, which looks like a mis-click and gets reported by
+ * nobody. The route suite is the only thing that would catch that, and it can only catch the
+ * routes it lists.
+ *
+ * It went stale exactly that way on 2026-09-11: Settings grew from fourteen tabs on one shell
+ * to a rail plus four hubs (Company, Colors, Billing, Options) owning 28 slugs, and the spec
+ * still listed the original fourteen — so half the surface was untested while the suite went
+ * on passing green. Hence a gate rather than a note.
+ *
+ * Deliberately NOT checked: that a listed route PASSES. That needs a login token and the live
+ * site (see playwright.config.mjs), so it cannot run in a push gate. This asserts only that
+ * nobody can add a settings page without adding it to the suite.
+ */
+function checkSettingsRouteCoverage(files, inject = null) {
+  const errors = [];
+  const CORE = "portal/01-core.jsx";
+  const SPEC = "tests/e2e/portal-routes.spec.mjs";
+  const core = (inject && inject.core) ?? files[CORE] ?? readIfExists(CORE);
+  const spec = (inject && inject.spec) ?? files[SPEC] ?? readIfExists(SPEC);
+  if (!core || !spec) {
+    errors.push(`${!core ? CORE : SPEC}: missing — the settings route-coverage check has no `
+      + "subject and is silently inert; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+
+  // The five functions that between them define every settings slug. Anchored on the
+  // declaration, so a rename surfaces here rather than quietly shrinking the slug set.
+  const TAB_FNS = ["ssSettingsTabs", "ssCompanyTabs", "ssColorTabs", "ssBillingTabs", "ssOptionTabs"];
+  const slugs = new Set();
+  for (const name of TAB_FNS) {
+    const at = core.indexOf(`function ${name}(`);
+    if (at < 0) {
+      errors.push(`${CORE}: ${name}() is gone or renamed — the settings route-coverage check `
+        + "cannot see the slugs it guards; re-anchor it in scripts/preflight.mjs");
+      continue;
+    }
+    // The function ends at the first line that is a lone closing brace in column 0.
+    const rest = core.slice(at);
+    const endRel = rest.search(/^\}/m);
+    const bodyText = endRel > 0 ? rest.slice(0, endRel) : rest;
+    for (const m of bodyText.matchAll(/\["([a-z][a-z0-9-]*)",\s*"/g)) slugs.add(m[1]);
+  }
+  if (errors.length) return errors;
+  if (slugs.size < 20) {
+    errors.push(`${CORE}: only ${slugs.size} settings slugs found where 28+ were expected — the `
+      + "tuple shape changed and this check has gone blind; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+
+  const covered = new Set([...spec.matchAll(/"\/portal\/settings\/([a-z][a-z0-9-]*)"/g)].map((m) => m[1]));
+  const missing = [...slugs].filter((s) => !covered.has(s)).sort();
+  if (missing.length) {
+    errors.push(`${SPEC}: ${missing.length} Settings slug(s) have no route in the smoke suite — `
+      + missing.map((s) => `"/portal/settings/${s}"`).join(", ")
+      + ". An unknown sub CLAMPS to the first tab rather than erroring, so an untested settings "
+      + "page fails silently by landing people on Structures. Add them to ROUTES.");
+  }
+  return errors;
+}
+
 if (process.argv.includes("--self-test")) {
   // The gate must FAIL on the exact incident that motivated it: commit a763b3b shipped
   // `RANK[st]` after the RANK definition was removed. Reconstruct that state by reverting
@@ -2584,6 +2653,46 @@ if (process.argv.includes("--self-test")) {
     + "missing from SQL, on a level-vocabulary mismatch, on a job title missing from either "
     + "SQL copy, is not fooled by a header comment naming the tables, and refuses to run "
     + "blind on a renamed AREAS or TITLES export");
+
+  // ── Settings route coverage ──
+  // Five directions, because a coverage gate that silently passes is worse than no gate: it
+  // is the reason the route spec sat half-stale through a whole refactor while going green.
+  const srcCore = readIfExists("portal/01-core.jsx");
+  const srcSpec = readIfExists("tests/e2e/portal-routes.spec.mjs");
+  if (!srcCore || !srcSpec) {
+    console.error("self-test FAILED: the settings route-coverage fixtures are missing");
+    process.exit(1);
+  }
+  if (checkSettingsRouteCoverage({}, { core: srcCore, spec: srcSpec }).length) {
+    console.error("self-test FAILED: every settings slug should be routed today, but the rule "
+      + "reported errors on the real files");
+    process.exit(1);
+  }
+  if (!checkSettingsRouteCoverage({}, { core: srcCore, spec: srcSpec.replace('"/portal/settings/cladding",', "") })
+        .some((e) => /cladding/.test(e))) {
+    console.error("self-test FAILED: a settings slug missing from the smoke suite did not fire");
+    process.exit(1);
+  }
+  if (!checkSettingsRouteCoverage({}, { core: srcCore.replace("function ssOptionTabs(", "function ssOptionTabsOLD(") })
+        .some((e) => /gone or renamed/.test(e))) {
+    console.error("self-test FAILED: a renamed tab function reported clean instead of blind");
+    process.exit(1);
+  }
+  if (!checkSettingsRouteCoverage({}, { core: srcCore.replace(/\["([a-z][a-z0-9-]*)",\s*"/g, '[{id:"$1"}, "'), spec: srcSpec })
+        .some((e) => /gone blind|only \d+ settings slugs/.test(e))) {
+    console.error("self-test FAILED: a changed tuple shape reported clean instead of blind");
+    process.exit(1);
+  }
+  // "" and not null: the reader is `(inject && inject.spec) ?? files[F] ?? readIfExists(F)`,
+  // and ?? only falls through on null/undefined — so null would quietly read the REAL file and
+  // this direction would prove nothing. An empty string survives the ?? and is still falsy.
+  if (!checkSettingsRouteCoverage({}, { core: srcCore, spec: "" }).some((e) => /silently inert/.test(e))) {
+    console.error("self-test FAILED: a missing route spec reported clean instead of inert");
+    process.exit(1);
+  }
+  console.log("self-test passed: every Settings slug has a smoke route today, the rule fires on "
+    + "one that does not, and it refuses to run blind on a renamed tab function, a changed "
+    + "tuple shape, or a missing spec");
 
   process.exit(0);
 }

@@ -1,8 +1,9 @@
 // Every portal route renders for a signed-in test owner: no "Loading..." stall, no white
 // screen, no console errors we own. Gated routes may show their upgrade card - that is a
 // render, not a failure. Needs PW_MAGIC_TOKEN (see playwright.config.mjs).
-import { test, expect } from "@playwright/test";
-import { loginWithMagicToken, watchConsole } from "./helpers.mjs";
+import { expect } from "@playwright/test";
+// `test` comes from helpers: it answers log_error locally for every page and fails on a boot_* call.
+import { test, guardLogError, loginWithMagicToken, watchConsole } from "./helpers.mjs";
 
 const ROUTES = [
   "/portal/designer", "/portal/contacts", "/portal/designs", "/portal/designs/list", "/portal/designs/pipeline",
@@ -14,21 +15,51 @@ const ROUTES = [
   // SS_TAB_ALIASES. If someone deletes the alias, these five turn red rather than a builder
   // finding a dead link.
   "/portal/releases", "/portal/releases/mine", "/portal/releases/setup",
-  "/portal/settings/structures", "/portal/settings/options", "/portal/settings/colors", "/portal/settings/designer",
-  "/portal/settings/branding", "/portal/settings/connection", "/portal/settings/quickbooks", "/portal/settings/email",
-  "/portal/settings/sms", "/portal/settings/commissions", "/portal/settings/team", "/portal/settings/billing", "/portal/settings/myview",
+  // ── Settings: every sub-page, because they are HUBS now (2026-09-11) ─────────────────
+  // Settings used to be fourteen tabs on one shell. It is a rail plus four hubs — Company,
+  // Colors, Billing and Options — each of which owns several slugs that are still flat
+  // /portal/settings/<slug> URLs. An unknown sub does not 404, it CLAMPS to the first tab, so
+  // a hub that lost its render branch would land people on Structures rather than erroring.
+  // That is invisible from the outside and exactly what this list is for: EVERY slug, or the
+  // suite stops proving anything about the ones it skips.
+  "/portal/settings/structures", "/portal/settings/designer", "/portal/settings/connection",
+  "/portal/settings/quickbooks", "/portal/settings/email", "/portal/settings/sms",
+  // Company hub
+  "/portal/settings/company", "/portal/settings/branding", "/portal/settings/team",
+  "/portal/settings/commissions", "/portal/settings/locations", "/portal/settings/crews",
+  "/portal/settings/drivers", "/portal/settings/tax",
+  // Colors hub
+  "/portal/settings/colors", "/portal/settings/shingles", "/portal/settings/metal",
+  // Billing hub
+  "/portal/settings/billing", "/portal/settings/wallet",
+  // Options hub — nine catalog editors, one tab each
+  "/portal/settings/options", "/portal/settings/doors", "/portal/settings/windows",
+  "/portal/settings/vents", "/portal/settings/ramps", "/portal/settings/cladding",
+  "/portal/settings/interior", "/portal/settings/electrical", "/portal/settings/insulation",
+  "/portal/settings/delivery", "/portal/settings/foundation",
+  // Your own settings
+  "/portal/settings/myprofile",
+  // LEGACY, kept for the same reason as /portal/releases above: "myview" was renamed to
+  // "myprofile" on 2026-09-11 and only keeps working through SS_SETTINGS_SUB_ALIASES. Delete
+  // the alias and this turns red instead of a builder's bookmark quietly landing on Structures.
+  "/portal/settings/myview",
   "/portal/settings/not-a-real-slug",
 ];
 
 test.describe("portal routes", () => {
   test.describe.configure({ mode: "serial" });
-  let page, errors;
+  let page, errors, logs;
 
-  test.beforeAll(async ({ browser }) => {
+  // browser.newPage() makes its own context, which the fixture's log_error guard never sees, so
+  // it is guarded here and checked after every test (a boot_* call fails the test it happened in).
+  test.beforeAll(async ({ browser }, testInfo) => {
     page = await browser.newPage();
+    logs = await guardLogError(page.context());
     errors = watchConsole(page);
     await loginWithMagicToken(page);
+    await logs.finish(testInfo);
   });
+  test.afterEach(async ({}, testInfo) => { await logs.finish(testInfo); });
   test.afterAll(async () => { await page.close(); });
 
   for (const route of ROUTES) {

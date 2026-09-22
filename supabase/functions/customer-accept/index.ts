@@ -2,19 +2,29 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
-import { phoneKey } from "../_shared/phoneKey.ts";
+import { acceptanceIdentityColumns, loadAddressStanding, ownsDesign } from "../_shared/customerIdentity.ts";
 import { amountOwed, orderCentsAfterAck, orderCentsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
-import { acceptanceEmail } from "../_shared/emailTemplates.ts";
+import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
+import { acceptanceEmail, invoiceRequestEmail } from "../_shared/emailTemplates.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
+import { rsSendEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
+import { portalOrderUrl } from "../_shared/customerPortalUrl.ts";
+import { consentSentence, consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
+// The accept race (2026-09-17): the total the customer SAW, checked against the one about to freeze.
+import { checkExpectedTotal, promoteMiss } from "../_shared/acceptTotal.ts";
 
 // customer-accept: every write a CUSTOMER can perform on their own paperwork (migration 124).
 //
 // customer-quotes is documented read-only and stays that way — accepting and signing are the
 // only writes a customer can perform, so they get their own function with their own narrow
 // contract. Identity comes entirely from the customer_sessions token (phone OTP, migration
-// 108); a write only ever attaches to a design whose contact phone matches the session phone.
+// 108; emailed code, migration 230); a write only ever attaches to a design whose contact
+// phone matches the session's verified phone or whose contact email matches its verified
+// email (_shared/customerIdentity.ts ownsDesign — never one resolved to the other, and never by
+// an address this tenant has filed beside more than one phone: loadAddressStanding). Every
+// design_acceptances row records BOTH verified columns, each null when not proven.
 //
 // THE LADDER (Carolyn 2026-08-25 — "I want them to accept the quote to let us know, then I
 // will [invoice]... I honestly want them to sign the invoice"):
@@ -36,11 +46,21 @@ import { sendTenantEmail } from "../_shared/emailSend.ts";
 // ORDER OF WRITES — accept_quote (each step's failure story):
 //   1. insert design_acceptances — THE record, and the concurrency claim (unique index:
 //      one 'quote' acceptance per design). Everything after is presentation.
-//   2. upload the drawn signature PNG — failure logs; the typed-name/consent/IP row stands.
-//      Skipped entirely for a click, which has no image to store.
-//   3. promote the design (status 'sent' -> 'accepted', accepted_at once) + ensure the
+//   2. promote the design (status 'sent' -> 'accepted', accepted_at once) + ensure the
 //      orders row — failure logs loudly; sync-design-status cannot repair this in SS mode,
-//      so the error is surfaced in the response for support.
+//      so the error is surfaced in the response for support. The promote is a
+//      compare-and-swap against the design as this handler read it (the lines step 1
+//      froze): a quote whose total moved since WITHDRAWS the step-1 row and refuses 409 repriced (the accept race,
+//      _shared/acceptTotal.ts promoteMiss). That withdrawal is the one delete this flow
+//      makes. It happens before anything else refers to the row, and before the customer
+//      has been told anything was recorded.
+//   3. upload the drawn signature PNG — failure logs; the typed-name/consent/IP row stands.
+//      Skipped entirely for a click, which has no image to store. After the promote since
+//      2026-09-17, so a withdrawn acceptance never leaves an image behind and the storage
+//      round trip no longer sits inside the race window.
+//   3b. raise the INVOICE REQUEST (migration 229) and email the builder's owners + admins —
+//      best-effort from end to end: a failure logs and the accept still answers ok. The
+//      request is a draft; nothing is numbered or sent until the builder approves it.
 //   4. countersign the quote PDF — ONLY for a real signature. A clicked acceptance gets no
 //      certificate page, because the certificate now belongs to the invoice.
 //   5. email the confirmation — sendTenantEmail never throws; dark tenants just skip.
@@ -76,25 +96,13 @@ function dbFail(req: Request, clientId: string | null, where: string, err: any) 
   return json({ error: "Something went wrong on our side. Please try again in a moment." }, 500);
 }
 
-/** The exact sentence the customer agrees to — composed HERE, not trusted from the browser,
- *  so the stored consent_text is always the sentence this build showed (approved wording,
- *  Carolyn 2026-08-23). my-quotes.html renders the same composition client-side. */
-export function consentSentence(quoteNumber: string, totalDisplay: string | null): string {
-  return `I agree that my electronic signature is as binding as a handwritten one, and I accept quote ${quoteNumber}${totalDisplay ? ` for ${totalDisplay}` : ""}.`;
-}
-
-/** Accepting a quote is not signing for it. The sentence says what the customer is actually
- *  agreeing to — that they want to go ahead, and that the binding document arrives next —
- *  so nobody can later claim a click was presented to them as a signature. */
-export function consentSentenceClick(quoteNumber: string, totalDisplay: string | null): string {
-  return `I accept quote ${quoteNumber}${totalDisplay ? ` for ${totalDisplay}` : ""} and understand that my builder will send me an invoice to sign.`;
-}
-
-/** The invoice is the binding document now, so this is the sentence that carries the weight
- *  the quote's used to. Same "as binding as handwritten" language, pointed at the invoice. */
-export function consentSentenceInvoice(invoiceNumber: string, totalDisplay: string | null): string {
-  return `I agree that my electronic signature is as binding as a handwritten one, and I accept invoice ${invoiceNumber}${totalDisplay ? ` for ${totalDisplay}` : ""}.`;
-}
+// The exact sentence the customer agrees to is composed on the SERVER, never trusted from the
+// browser, so the stored consent_text is always the sentence this build showed. The three
+// compositions and their money formatter moved to _shared/consentSentences.ts (2026-09-15):
+// customer-quotes now sends the same sentence down with each quote for the designer's account
+// panel to print, and two functions composing it must share one copy. Re-exported so anything
+// that reached for them here still finds them. Behaviour is unchanged.
+export { consentSentence, consentSentenceClick, consentSentenceInvoice };
 
 // taxFreeze moved to _shared/estimateLines.ts (2026-09-02) — push_to_invoice freezes the same
 // four columns for a rep-attested acceptance, and these are what a disputed change order turns
@@ -111,15 +119,183 @@ function orderMoney(snap: any): Record<string, unknown> {
   return { total_cents: m.totalCents, pretax_subtotal_cents: m.pretaxCents, tax_cents: m.taxCents };
 }
 
-const fmtMoney = (n: number): string => {
-  const v = Math.round(n * 100) / 100;
-  const [int, frac] = Math.abs(v).toFixed(2).split(".");
-  return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
+// fmtMoney moved to _shared/consentSentences.ts (2026-09-15) with the sentences it formats.
+
+// ── The invoice request (migration 229) ──────────────────────────────────────────────────────
+// Ahsan, 2026-09-15 (expo plan, decision 1): "Accept → auto-DRAFT invoice, builder approves
+// with one click. No invoice number, QuickBooks push or inventory claim until the builder
+// approves." So accepting a quote records the INTENT here, and approving in the portal is
+// send_invoice exactly as it is today — which marks this row approved when it issues.
+//
+// Decision 8: the "Invoice to approve" email goes to OWNERS AND ADMINS, at most five. There is
+// no business_email column, and tenant mail is dark for every builder still on CRM email, so
+// the addresses come from client_users → auth (operator-portal's list_users pattern) and it
+// goes out from the PLATFORM sender, the way a login code does. Not ledgered in email_sends:
+// that table is the tenant's correspondence with their customers, and this is ours with them.
+
+/** Same address and domain customer-auth sends login codes from (see PLATFORM_LOGIN_FROM
+ *  there for why it is a constant and not an import from emailSend.ts). */
+const PLATFORM_NOTIFY_FROM = "StructureStudio <no-reply@mail.structurestudiosuite.com>";
+/** Owners first, then admins — never more copies of one notice than this. */
+const MAX_INVOICE_REQUEST_RECIPIENTS = 5;
+/** The customer is waiting on the accept response; the builder's notice must not hold it.
+ *  Past this the request still stands (the Orders tab shows it) and notify_error says why. */
+const INVOICE_REQUEST_NOTIFY_MS = 8_000;
+
+/** PostgREST's two spellings of "no such table" — tolerated so this function can deploy
+ *  before migration 229 is applied (the same pair portal-settings tolerates for change_orders). */
+// deno-lint-ignore no-explicit-any
+function isMissingTable(err: any): boolean {
+  const code = String(err?.code ?? "");
+  return code === "42P01" || code === "PGRST205" || /does not exist|schema cache/i.test(String(err?.message ?? ""));
+}
+
+type InvoiceRequestArgs = {
+  clientId: string;
+  shortCode: string;
+  acceptanceId: string;
+  acceptedAtIso: string;
+  quoteNumber: string;
+  businessName: string;
+  customerName: string | null;
+  styleLabel: string | null;
+  sizeLabel: string | null;
+  total: number | null;
 };
+
+/**
+ * Raise the request, stamp the design, email the builder. True when THIS call raised it.
+ *
+ * Never throws on a database refusal — every step logs and carries on or stops quietly, because
+ * the customer's acceptance is already recorded and nothing here may turn it into an error.
+ */
+// deno-lint-ignore no-explicit-any
+async function raiseInvoiceRequest(admin: any, req: Request, a: InvoiceRequestArgs): Promise<boolean> {
+  const log = (code: string, message: string) =>
+    logEdgeError({ fn: "customer-accept", req, clientId: a.clientId, code, message, context: { quoteRef: a.shortCode } }).catch(() => {});
+
+  // An invoice already out answers the request before it is asked: a rep who pushed to
+  // invoice from the designer, or a builder who invoiced a GHL-era acceptance. Created or sent
+  // only — a 'failed' or 'claimed' row issued nothing, so the builder still has to act.
+  const { data: issued, error: issuedErr } = await admin.from("invoice_sends")
+    .select("status").eq("client_id", a.clientId).eq("short_code", a.shortCode)
+    .in("status", ["created", "sent"]).limit(1);
+  if (issuedErr) { log("invoice_request_check", `invoice check failed: ${issuedErr.message}`); return false; }
+  if ((issued ?? []).length > 0) return false;
+
+  // The PK is the claim: a second accept of the same design (a double tap already returned
+  // 'already' above, but a backfilled row can exist) inserts nothing and emails nobody twice.
+  const { error: insErr } = await admin.from("invoice_requests").insert({
+    client_id: a.clientId,
+    short_code: a.shortCode,
+    status: "pending",
+    source: "customer_accept",
+    acceptance_id: a.acceptanceId,
+    requested_at: a.acceptedAtIso,
+  });
+  if (insErr) {
+    if (String(insErr.code) === "23505") return false;
+    log(isMissingTable(insErr) ? "invoice_request_table_missing" : "invoice_request_insert", `invoice request not recorded: ${insErr.message}`);
+    return false;
+  }
+
+  // The Orders tab reads `designs`, not the request table (service-role only) — this is the
+  // column that turns the order's chip into "Invoice to approve".
+  const { error: stampErr } = await admin.from("designs")
+    .update({ ss_invoice_requested_at: a.acceptedAtIso })
+    .eq("client_id", a.clientId).eq("short_code", a.shortCode).is("ss_invoice_requested_at", null);
+  if (stampErr) log("invoice_request_stamp", `ss_invoice_requested_at not stamped: ${stampErr.message}`);
+
+  let outcome: { sent: number; error: string | null };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    outcome = await Promise.race([
+      notifyInvoiceRequest(admin, req, a),
+      new Promise<{ sent: number; error: string }>((resolve) => {
+        timer = setTimeout(() => resolve({ sent: 0, error: "timed out waiting for the email provider" }), INVOICE_REQUEST_NOTIFY_MS);
+      }),
+    ]);
+  } catch (_) {
+    // No detail: a provider error can echo a recipient address (see notifyInvoiceRequest).
+    outcome = { sent: 0, error: "notify failed unexpectedly" };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+
+  const patch = outcome.sent > 0
+    ? { notified_at: new Date().toISOString(), notify_error: outcome.error }
+    : { notify_error: outcome.error ?? "not sent" };
+  const { error: nErr } = await admin.from("invoice_requests").update(patch)
+    .eq("client_id", a.clientId).eq("short_code", a.shortCode);
+  if (nErr) log("invoice_request_notify_stamp", `notify outcome not recorded: ${nErr.message}`);
+  if (outcome.sent === 0) log("invoice_request_notify", `builder not emailed about an invoice to approve: ${outcome.error ?? "not sent"}`);
+  return true;
+}
+
+/** Email the owners and admins. Returns how many copies went out and, if any did not, why —
+ *  in words that never carry an address (Resend's errors can echo the recipient). */
+// deno-lint-ignore no-explicit-any
+async function notifyInvoiceRequest(admin: any, req: Request, a: InvoiceRequestArgs): Promise<{ sent: number; error: string | null }> {
+  if (!resendConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") {
+    return { sent: 0, error: "platform email is not configured" };
+  }
+  const { data: users, error: uErr } = await admin.from("client_users")
+    .select("user_id, role, created_at")
+    .eq("client_id", a.clientId).in("role", ["owner", "admin"])
+    .order("created_at", { ascending: true });
+  if (uErr) return { sent: 0, error: `could not read the team: ${String(uErr.message ?? "").slice(0, 200)}` };
+  // Owners before admins, oldest first within each (Array.prototype.sort is stable). A few more
+  // lookups than the cap, so a user with no confirmed address does not cost a slot.
+  // deno-lint-ignore no-explicit-any
+  const ordered = (users ?? []).slice().sort((x: any, y: any) => (x.role === "owner" ? 0 : 1) - (y.role === "owner" ? 0 : 1));
+  const emails = await Promise.all(
+    // deno-lint-ignore no-explicit-any
+    ordered.slice(0, MAX_INVOICE_REQUEST_RECIPIENTS * 2).map(async (u: any) => {
+      try {
+        const { data } = await admin.auth.admin.getUserById(u.user_id);
+        return String(data?.user?.email ?? "").trim().toLowerCase();
+      } catch {
+        return ""; // a missing auth user must not stop the others
+      }
+    }),
+  );
+  const to = [...new Set(emails.filter((e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)))].slice(0, MAX_INVOICE_REQUEST_RECIPIENTS);
+  if (!to.length) return { sent: 0, error: "no owner or admin email on file" };
+
+  const { data: ord } = await admin.from("orders").select("id")
+    .eq("client_id", a.clientId).eq("short_code", a.shortCode).maybeSingle();
+  const content = invoiceRequestEmail({
+    businessName: a.businessName,
+    quoteNumber: a.quoteNumber,
+    customerName: a.customerName,
+    styleLabel: a.styleLabel,
+    sizeLabel: a.sizeLabel,
+    total: a.total,
+    acceptedAtIso: a.acceptedAtIso,
+    reviewUrl: portalOrderUrl(ord?.id ?? null, req),
+  });
+  // One message per person, not one message to all of them: a bounced address fails alone,
+  // and nobody's address is shown to anybody else.
+  const results = await Promise.allSettled(to.map((addr) => rsSendEmail({
+    from: PLATFORM_NOTIFY_FROM,
+    to: addr,
+    subject: content.subject,
+    html: content.html,
+    text: content.text,
+    tags: [{ name: "kind", value: "invoice_request" }, { name: "client_id", value: a.clientId }],
+  })));
+  const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+  if (!failed.length) return { sent: to.length, error: null };
+  const why = [...new Set(failed.map((r) =>
+    r.reason instanceof ResendApiError ? `resend ${r.reason.status}/${r.reason.name_ || "unknown"}` : "send failed"))];
+  return { sent: to.length - failed.length, error: `${failed.length} of ${to.length} not sent: ${why.join(", ")}` };
+}
 
 // phoneKey moved to _shared/phoneKey.ts (174) — customer-pay needs the same comparison, and
 // three private copies of the check that decides whether a stranger can read, sign or PAY
-// someone else's invoice is how one of them drifts. Behaviour is unchanged.
+// someone else's invoice is how one of them drifts. Behaviour is unchanged. The whole
+// ownership compare followed it to _shared/customerIdentity.ts (2026-09-15, migration 230),
+// when a session could first be keyed on a verified email instead of a phone.
 
 const MAX_SIGNATURE_BYTES = 300 * 1024;
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47];
@@ -203,14 +379,15 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     const notYoursCo = json({ error: "That change order wasn't found on your account." }, 404);
     if (!co) return notYoursCo;
 
-    // The signature only attaches to a change on a design this verified phone owns.
+    // The signature only attaches to a change on a design this verified customer owns.
     const { data: coDesign, error: coDesignErr } = await admin.from("designs")
       .select("short_code, contact, ss_quote_number, estimate_lines, accepted_snapshot")
       .eq("client_id", identity.clientId).eq("short_code", co.short_code).maybeSingle();
     if (coDesignErr) return dbFail(req, identity.clientId, "load the quote", coDesignErr);
     if (!coDesign) return notYoursCo;
-    const coPhone = phoneKey(coDesign?.contact?.phone);
-    if (!coPhone || coPhone !== phoneKey(identity.phoneDigits)) return notYoursCo;
+    const coAddr = await loadAddressStanding(admin, identity.clientId, identity);
+    if (!coAddr.standing) return dbFail(req, identity.clientId, "load the quote", coAddr.error);
+    if (!ownsDesign(identity, coDesign?.contact, coAddr.standing)) return notYoursCo;
 
     if (co.status === "acknowledged") return json({ ok: true, already: true });
     if (co.status === "void") return json({ error: "This change was withdrawn by your builder — nothing to sign." }, 409);
@@ -307,7 +484,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       signer_name: signerName,
       typed_signature: typedSignature,
       consent_text: coConsent,
-      phone_digits: identity.phoneDigits,
+      ...acceptanceIdentityColumns(identity),
       session_seen_name: identity.name,
       ip,
       user_agent: userAgent,
@@ -415,8 +592,9 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     if (dErr) return dbFail(req, identity.clientId, "load the invoice", dErr);
     const notYours = json({ error: "That invoice wasn't found on your account." }, 404);
     if (!d) return notYours;
-    const dPhone = phoneKey(d?.contact?.phone);
-    if (!dPhone || dPhone !== phoneKey(identity.phoneDigits)) return notYours;
+    const addr = await loadAddressStanding(admin, identity.clientId, identity);
+    if (!addr.standing) return dbFail(req, identity.clientId, "load the invoice", addr.error);
+    if (!ownsDesign(identity, d?.contact, addr.standing)) return notYours;
 
     const { data: settings, error: sErr } = await admin
       .from("client_settings")
@@ -519,7 +697,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       signer_name: signerName,
       typed_signature: typedSignature,
       consent_text: consentText,
-      phone_digits: identity.phoneDigits,
+      ...acceptanceIdentityColumns(identity),
       session_seen_name: identity.name,
       ip,
       user_agent: userAgent,
@@ -570,6 +748,13 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     }
 
     // ── 4. Countersign the INVOICE PDF (best-effort) ───────────────────────────────────
+    // BEST-EFFORT, BUT NEVER SILENT. Every branch below leaves the signature recorded in
+    // design_acceptances while the document the customer downloads carries no certificate,
+    // and the only difference between the causes is which one fired. This used to land in
+    // console.warn alone, and Supabase's runtime console stream is not reliably queryable
+    // on this project — so a customer reporting "my signature isn't on the PDF" produced
+    // no app_errors row at all and nothing could say why. `signedPdf` is reported to the
+    // caller, so these rows are the server-side half of the same answer.
     let signedPdf = false;
     const prefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${identity.clientId}/`;
     const invPdfUrl = String(inv.invoice_pdf_url || "");
@@ -593,13 +778,40 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
           });
           const storagePath = invPdfUrl.slice(`${supabaseUrl}/storage/v1/object/public/floor-plans/`.length);
           const up = await admin.storage.from("floor-plans")
-            .upload(storagePath, countersigned, { contentType: "application/pdf", upsert: true });
+            .upload(storagePath, countersigned, FIXED_PATH_PDF_UPLOAD);
           signedPdf = !up.error;
-          if (up.error) console.warn("countersigned invoice upload failed:", up.error.message);
+          if (up.error) {
+            logEdgeError({
+              fn: "customer-accept", req, clientId: identity.clientId, code: "invoice_countersign_upload_failed",
+              message: `countersigned invoice upload failed: ${up.error.message}`,
+              context: { code, acceptanceId, storagePath },
+            }).catch(() => {});
+          }
+        } else {
+          logEdgeError({
+            fn: "customer-accept", req, clientId: identity.clientId, code: "invoice_countersign_fetch_failed",
+            message: `countersign source invoice PDF fetch returned ${res.status}`,
+            context: { code, acceptanceId, status: res.status },
+          }).catch(() => {});
         }
       } catch (e) {
-        console.warn("invoice countersign failed:", (e as Error).message);
+        logEdgeError({
+          fn: "customer-accept", req, clientId: identity.clientId, code: "invoice_countersign_failed",
+          message: `invoice countersign failed: ${(e as Error).message}`,
+          context: { code, acceptanceId },
+        }).catch(() => {});
       }
+    } else {
+      // The prefix guard exists so this function never fetches a URL outside our own
+      // storage under THIS tenant's prefix — but an invoice issued elsewhere (or a row
+      // with no PDF at all) then skipped countersigning with no signal whatsoever.
+      // Recorded so the skip is distinguishable from an embed that failed.
+      logEdgeError({
+        fn: "customer-accept", req, clientId: identity.clientId, code: "invoice_countersign_skipped",
+        message: "invoice PDF is not under this tenant's floor-plans prefix — certificate not embedded",
+        context: { code, acceptanceId, hasPdfUrl: invPdfUrl.length > 0 },
+        severity: "info",
+      }).catch(() => {});
     }
 
     // ── 5. Confirmation email ──────────────────────────────────────────────────────────
@@ -642,11 +854,12 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   const quoteRef = typeof body?.quoteRef === "string" ? body.quoteRef.trim() : "";
   if (!/^[A-Za-z0-9_-]{4,32}$/.test(quoteRef)) return json({ error: "Invalid quote reference." }, 400);
 
-  // ── The design, owned by this verified phone ────────────────────────────────────────
+  // ── The design, owned by this verified customer (phone or email) ────────────────────
   const { data: design, error: designErr } = await admin
     .from("designs")
-    // selections + paint_colors ride along only for the accepted_snapshot stamp below (153).
-    .select("short_code, status, contact, ss_quote_number, ss_quote_pdf_url, estimate_lines, selections, paint_colors, accepted_at, inventory_unit_id")
+    // selections + paint_colors ride along only for the accepted_snapshot stamp below (153);
+    // updated_at only for the promote's compare-and-swap (the accept race).
+    .select("short_code, status, contact, ss_quote_number, ss_quote_pdf_url, estimate_lines, selections, paint_colors, accepted_at, inventory_unit_id, updated_at")
     .eq("client_id", identity.clientId)
     .eq("short_code", quoteRef)
     .maybeSingle();
@@ -655,8 +868,9 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   // learns nothing about which short codes exist.
   const notYours = json({ error: "That quote wasn't found on your account." }, 404);
   if (!design) return notYours;
-  const designPhone = phoneKey(design?.contact?.phone);
-  if (!designPhone || designPhone !== phoneKey(identity.phoneDigits)) return notYours;
+  const addr = await loadAddressStanding(admin, identity.clientId, identity);
+  if (!addr.standing) return dbFail(req, identity.clientId, "load the quote", addr.error);
+  if (!ownsDesign(identity, design?.contact, addr.standing)) return notYours;
 
   // ── SS mode only ─────────────────────────────────────────────────────────────────────
   const { data: settings, error: settingsErr } = await admin
@@ -681,6 +895,17 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
 
   // ── Evidence snapshot inputs ─────────────────────────────────────────────────────────
   const total = totalFromSnapshot(design.estimate_lines);
+  // THE ACCEPT RACE (2026-09-17). A rep can re-price an unsigned quote from the portal, so the
+  // total read here may not be the one on the customer's screen. When the page says what it
+  // rendered (expectedTotalCents) and that is not this total, refuse BEFORE anything is
+  // recorded and hand back the current figure: the customer reloads and signs what they see.
+  // Absent means today's behaviour exactly — production's frontend never sends it.
+  // This only catches a re-price that landed BEFORE the read above; one that lands after it is
+  // caught by the promote's compare-and-swap in step 2.
+  {
+    const expected = checkExpectedTotal(body?.expectedTotalCents, total);
+    if (!expected.ok) return json(expected.body, expected.status);
+  }
   const totalDisplay = total == null ? null : fmtMoney(total);
   // A click and a signature agree to DIFFERENT sentences, and the stored text is the
   // evidence — so it is chosen by what the customer actually did, never by a request field.
@@ -720,7 +945,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     signer_name: signerName,
     typed_signature: typedSignature,
     consent_text: consentText,
-    phone_digits: identity.phoneDigits,
+    ...acceptanceIdentityColumns(identity),
     session_seen_name: identity.name,
     ip,
     user_agent: userAgent,
@@ -733,20 +958,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     return dbFail(req, identity.clientId, "record the signature", insErr);
   }
 
-  // ── 2. The drawn image (best-effort; the row's typed fields are already evidence) ────
-  let signaturePath: string | null = null;
-  if (signaturePng) {
-    const path = `${identity.clientId}/${quoteRef}/${acceptanceId}.png`;
-    const up = await admin.storage.from("signatures").upload(path, signaturePng, { contentType: "image/png" });
-    if (up.error) {
-      logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `signature upload failed: ${up.error.message}`, context: { path } }).catch(() => {});
-    } else {
-      signaturePath = path;
-      await admin.from("design_acceptances").update({ signature_image_path: path }).eq("id", acceptanceId);
-    }
-  }
-
-  // ── 3. Promote the design + ensure the order row ─────────────────────────────────────
+  // ── 2. Promote the design + ensure the order row ─────────────────────────────────────
   // status only ever climbs 'sent' -> 'accepted' here; anything else keeps its status and
   // just gains the timestamp. sync-design-status's SS fence (deployed with this slice)
   // preserves whatever is written here.
@@ -770,11 +982,62 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       },
     };
     if (status === "sent" || status === "") patch.status = "accepted";
-    const { error: updErr } = await admin.from("designs").update(patch)
-      .eq("client_id", identity.clientId).eq("short_code", quoteRef);
-    if (updErr) {
+    // THE ACCEPT RACE, SECOND HALF (review, 2026-09-17). The expectedTotalCents check compared
+    // against this handler's READ. A rep's re-price (Verify, a sales-location change) can land
+    // after that read and before this write; restampQuoteTax sees accepted_at still null and no
+    // order, writes new lines, and emails this customer the new total. An unguarded promote would
+    // then freeze the OLD lines as the agreement and fill the order from them. So the promote is
+    // a compare-and-swap on the updated_at we read (designs_set_updated_at bumps it on every
+    // update) with accepted_at still null, the same guard restampQuoteTax writes with, and
+    // whichever of the two lands second matches no row. On a miss, promoteMiss reads why:
+    //   repriced: withdraw the acceptance recorded in step 1 and refuse with the current total.
+    //     Always, not only when the page sent a total: the customer's page is showing the old
+    //     one either way, and every frontend prints the refusal's sentence. The withdrawal
+    //     happens before anything refers to the row (the image, the invoice request and the
+    //     emails all come later), and without it the quote_once index would answer the
+    //     customer's retry with "already accepted" for a design that never was.
+    //   retry: the TOTAL is still the one accepted (whole cents, totalFromSnapshot, the
+    //     function `total` above was frozen with). An unrelated write moved updated_at, or a
+    //     re-stamp changed words but not money. Swap against the new value, a bounded number
+    //     of times. Deciding "repriced" on any change to the lines refused customers over
+    //     re-stamps that moved nothing they pay (review, 2026-09-17).
+    //   stop, or retries spent: today's promote-failure story below, logged loudly.
+    const PROMOTE_ATTEMPTS = 3;
+    let casUpdatedAt: string | null = typeof design.updated_at === "string" ? design.updated_at : null;
+    for (let attempt = 1; attempt <= PROMOTE_ATTEMPTS; attempt++) {
+      let promote = admin.from("designs").update(patch)
+        .eq("client_id", identity.clientId).eq("short_code", quoteRef).is("accepted_at", null);
+      promote = casUpdatedAt ? promote.eq("updated_at", casUpdatedAt) : promote.is("updated_at", null);
+      const { data: promoted, error: updErr } = await promote.select("short_code");
+      if (updErr) {
+        promoteWarning = "recorded, but the status update needs attention";
+        logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `design promote failed: ${updErr.message}`, context: { quoteRef } }).catch(() => {});
+        break;
+      }
+      if (Array.isArray(promoted) && promoted.length === 1) break;
+
+      const { data: now, error: nowErr } = await admin.from("designs")
+        .select("estimate_lines, accepted_at, updated_at")
+        .eq("client_id", identity.clientId).eq("short_code", quoteRef).maybeSingle();
+      const miss = nowErr ? null : promoteMiss(design.estimate_lines, now);
+      if (miss?.kind === "repriced") {
+        const { error: withdrawErr } = await admin.from("design_acceptances").delete()
+          .eq("id", acceptanceId).eq("client_id", identity.clientId);
+        if (withdrawErr) {
+          // The row stands for a quote that no longer exists, and the customer's retry will be
+          // told "already accepted". Support has to remove it by hand; this is the only trace.
+          logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: "accept_withdraw_failed", message: `repriced quote: acceptance withdraw failed: ${withdrawErr.message}`, context: { quoteRef, acceptanceId } }).catch(() => {});
+        }
+        return json(miss.body, miss.status);
+      }
+      if (miss?.kind === "retry" && attempt < PROMOTE_ATTEMPTS) {
+        casUpdatedAt = miss.updatedAt;
+        continue;
+      }
       promoteWarning = "recorded, but the status update needs attention";
-      logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `design promote failed: ${updErr.message}`, context: { quoteRef } }).catch(() => {});
+      const why = nowErr ? `re-read failed: ${nowErr.message}` : miss?.kind === "stop" ? miss.why : "the design kept changing";
+      logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `design promote did not land: ${why}`, context: { quoteRef, attempt } }).catch(() => {});
+      break;
     }
     // The designs_ensure_order trigger fires on the status change where it exists, but the
     // flow must not depend on an out-of-band trigger (its CREATE lives on wip/orders) —
@@ -799,6 +1062,40 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
         logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `order total fill failed: ${totErr.message}`, context: { quoteRef } }).catch(() => {});
       }
     }
+  }
+
+  // ── 3. The drawn image (best-effort; the row's typed fields are already evidence) ────
+  let signaturePath: string | null = null;
+  if (signaturePng) {
+    const path = `${identity.clientId}/${quoteRef}/${acceptanceId}.png`;
+    const up = await admin.storage.from("signatures").upload(path, signaturePng, { contentType: "image/png" });
+    if (up.error) {
+      logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `signature upload failed: ${up.error.message}`, context: { path } }).catch(() => {});
+    } else {
+      signaturePath = path;
+      await admin.from("design_acceptances").update({ signature_image_path: path }).eq("id", acceptanceId);
+    }
+  }
+
+  // ── 3b. The invoice request (migration 229) — best-effort, never fails the accept ────
+  // The consent sentence the customer just agreed to ("Your invoice will follow") stays true:
+  // it follows once the builder approves. See raiseInvoiceRequest above.
+  let invoiceRequested = false;
+  try {
+    invoiceRequested = await raiseInvoiceRequest(admin, req, {
+      clientId: identity.clientId,
+      shortCode: quoteRef,
+      acceptanceId,
+      acceptedAtIso,
+      quoteNumber: String(design.ss_quote_number),
+      businessName: settings.business_name || identity.clientId,
+      customerName: String(design?.contact?.name ?? "").trim() || null,
+      styleLabel: typeof design?.selections?.style === "string" ? design.selections.style : null,
+      sizeLabel: typeof design?.selections?.size === "string" ? design.selections.size : null,
+      total,
+    });
+  } catch (e) {
+    logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: "invoice_request_failed", message: `invoice request threw: ${(e as Error)?.name ?? "error"}`, context: { quoteRef } }).catch(() => {});
   }
 
   // ── 4. Countersign the PDF (best-effort) ─────────────────────────────────────────────
@@ -829,13 +1126,40 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
         });
         const storagePath = quotePdfUrl.slice(`${supabaseUrl}/storage/v1/object/public/floor-plans/`.length);
         const up = await admin.storage.from("floor-plans")
-          .upload(storagePath, countersigned, { contentType: "application/pdf", upsert: true });
+          .upload(storagePath, countersigned, FIXED_PATH_PDF_UPLOAD);
         signedPdf = !up.error;
-        if (up.error) console.warn("countersigned PDF upload failed:", up.error.message);
+        if (up.error) {
+          logEdgeError({
+            fn: "customer-accept", req, clientId: identity.clientId, code: "quote_countersign_upload_failed",
+            message: `countersigned quote upload failed: ${up.error.message}`,
+            context: { quoteRef, acceptanceId, storagePath },
+          }).catch(() => {});
+        }
+      } else {
+        logEdgeError({
+          fn: "customer-accept", req, clientId: identity.clientId, code: "quote_countersign_fetch_failed",
+          message: `countersign source quote PDF fetch returned ${res.status}`,
+          context: { quoteRef, acceptanceId, status: res.status },
+        }).catch(() => {});
       }
     } catch (e) {
-      console.warn("countersign failed:", (e as Error).message);
+      logEdgeError({
+        fn: "customer-accept", req, clientId: identity.clientId, code: "quote_countersign_failed",
+        message: `quote countersign failed: ${(e as Error).message}`,
+        context: { quoteRef, acceptanceId },
+      }).catch(() => {});
     }
+  } else if (method !== "click") {
+    // A click is SUPPOSED to skip — see the header — so only a real signature that still
+    // got no certificate is worth a row. The prefix guard refuses any PDF outside this
+    // tenant's own floor-plans path, which is correct and also completely silent: an
+    // externally-issued quote simply never gets its certificate and nothing says so.
+    logEdgeError({
+      fn: "customer-accept", req, clientId: identity.clientId, code: "quote_countersign_skipped",
+      message: "quote PDF is not under this tenant's floor-plans prefix — certificate not embedded",
+      context: { quoteRef, acceptanceId, hasPdfUrl: quotePdfUrl.length > 0 },
+      severity: "info",
+    }).catch(() => {});
   }
 
   // ── 5. Confirmation email (never throws; dark tenants skip inside) ──────────────────
@@ -871,6 +1195,9 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     signedPdf,
     signaturePath: signaturePath ? true : method === "typed",
     mode: method === "click" ? "click" : "signature",
+    // Whether this accept raised the builder's "Invoice to approve" (migration 229). False is
+    // not an error: an invoice may already be out, or the request may already exist.
+    invoiceRequested,
     ...(promoteWarning ? { warning: promoteWarning } : {}),
   });
 }));

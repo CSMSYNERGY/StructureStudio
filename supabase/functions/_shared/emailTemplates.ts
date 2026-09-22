@@ -1,6 +1,8 @@
 // Subject/html/text builders for the tenant-branded emails on the Postmark send path:
 // the estimate email (submit-estimate), the invoice email (portal-settings), and the
-// Settings -> Email test send.
+// Settings -> Email test send. Plus one email that goes the OTHER way — to the builder, not
+// their customer: the "Invoice to approve" notice customer-accept sends when a customer
+// accepts a quote (migration 229). See invoiceRequestEmail for how it differs.
 //
 // WHITE-LABEL IS THE CONTRACT. The recipient is the TENANT's customer, so the only
 // identity allowed anywhere in these emails -- header, footer, copy, alt text,
@@ -52,8 +54,10 @@ export interface EstimateEmailInput {
   quoteTerms?: string | null;
   /** Which word the document goes by. StructureStudio-issued paperwork says "quote"
    *  (Carolyn's terminology, migration 121+); the GHL path keeps "estimate" so existing
-   *  tenants' emails don't change under them. Also flips the CTA to "View & Sign Your
-   *  Quote" — the SS-mode CTA leads to the customer portal where the signature lives. */
+   *  tenants' emails don't change under them. "quote" also flips the CTA to "View & Accept
+   *  Your Quote" and leaves the total OUT of the email (Carolyn, 2026-09-14 — see
+   *  estimateEmail). The signature moved to the invoice on 2026-08-26, so the quote CTA no
+   *  longer says "Sign". */
   docWord?: "estimate" | "quote";
 }
 
@@ -123,6 +127,22 @@ export interface InvoiceEmailInput {
 export interface TestEmailInput {
   businessName: string;
   fromAddress: string;
+}
+
+export interface InvoiceRequestEmailInput {
+  /** The builder's OWN business name. The reader is the builder, so their name heads it. */
+  businessName: string;
+  quoteNumber: string | number;
+  /** The name on the design's contact. Optional — a design can arrive without one. */
+  customerName?: string | null;
+  styleLabel?: string | null;
+  sizeLabel?: string | null;
+  /** What the customer accepted. Pre-formatted string or a number to format here. */
+  total?: string | number | null;
+  /** ISO timestamp of the acceptance; rendered as a plain date. */
+  acceptedAtIso: string;
+  /** The order in the portal (/portal/orders/o-<id>), where "Approve & send invoice" lives. */
+  reviewUrl: string;
 }
 
 /**
@@ -301,12 +321,24 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
     .filter(Boolean)
     .join(" - ");
 
+  // ⚠️ NO TOTAL ON A QUOTE EMAIL (Carolyn, 2026-09-14 — she highlighted "Quote total" in the
+  // Gmail preview of a real quote and asked for it removed). The figure belongs on the quote
+  // itself — the PDF and the page the button opens — where the line items and tax that
+  // explain it sit beside it, not bare in an inbox. It leaves ALL THREE places at once: the
+  // detail row, the plain-text line and the preheader (the preview line she was looking at).
+  // The CRM-mode ESTIMATE email keeps its total: those tenants' emails don't change under them.
+  // `money` stays in the token map below, so a builder's saved wording using {total} still
+  // fills — that is their own choice of words, and a literal "{total}" would read as our bug.
+  const showTotal = word !== "quote";
+
   const rows = [detailRow(`${Word} #`, esc(num))];
   if (building) rows.push(detailRow("Building", esc(building)));
-  rows.push(detailRow(`${Word} total`, esc(money)));
+  if (showTotal) rows.push(detailRow(`${Word} total`, esc(money)));
 
+  // The quote CTA said "Sign" until 2026-09-15. The signature moved to the INVOICE on
+  // 2026-08-26 (migration 136); what the quote page asks for now is a click to accept.
   const cta = input.estimateUrl
-    ? ctaButton(input.estimateUrl, word === "quote" ? "View & Sign Your Quote" : "View & Accept Your Estimate")
+    ? ctaButton(input.estimateUrl, word === "quote" ? "View & Accept Your Quote" : "View & Accept Your Estimate")
     : "";
   const pdfLink = input.pdfUrl
     ? `<p style="margin:18px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.pdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your floor plan (PDF)</a></p>`
@@ -346,9 +378,10 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
     `${Word} #: ${num}`,
   ];
   if (building) text.push(`Building: ${building}`);
-  text.push(`${Word} total: ${money}`, "");
+  if (showTotal) text.push(`${Word} total: ${money}`);
+  text.push("");
   if (input.estimateUrl) {
-    text.push(word === "quote" ? `View & sign your quote: ${input.estimateUrl}` : `View & accept your estimate: ${input.estimateUrl}`);
+    text.push(word === "quote" ? `View & accept your quote: ${input.estimateUrl}` : `View & accept your estimate: ${input.estimateUrl}`);
   }
   if (input.pdfUrl) text.push(`Floor plan (PDF): ${input.pdfUrl}`);
   if (input.formalPdfUrl) text.push(`${Word} (PDF): ${input.formalPdfUrl}`);
@@ -362,7 +395,8 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
       phone: input.phone,
       website: input.website,
       quoteTerms: input.quoteTerms,
-      preheader: `Your ${word} from ${name} is ready - ${money}.`,
+      // The inbox preview line — the one place a quote total would still show without the row.
+      preheader: showTotal ? `Your ${word} from ${name} is ready - ${money}.` : `Your ${word} from ${name} is ready.`,
       bodyHtml,
     }),
     text: text.join("\n") + "\n",
@@ -562,6 +596,69 @@ export function invoiceEmail(input: InvoiceEmailInput): EmailContent {
       website: input.website,
       quoteTerms: input.quoteTerms,
       preheader: toSign ? `Your invoice from ${name} - ${money}. Sign to confirm.` : `Your invoice from ${name} - ${money}.`,
+      bodyHtml,
+    }),
+    text: text.join("\n") + "\n",
+  };
+}
+
+/**
+ * "Invoice to approve" — to the BUILDER's owners and admins when a customer accepts a quote
+ * (migration 229; Ahsan's decision, 2026-09-15: accept raises a DRAFT invoice and the builder
+ * approves it with one click).
+ *
+ * The one email in this file whose reader is not the tenant's customer. customer-accept sends
+ * it from the platform sender, the way a login code goes out, because it must reach a builder
+ * who has never set up their own email domain — which today is every builder. So the
+ * white-label contract above does not bind it, and it could not keep it anyway: the button
+ * has to open OUR portal. Its WORDING still names nothing of ours (the test pins the copy
+ * with the link stripped), so a builder who forwards it forwards a link and nothing else.
+ *
+ * ⚠️ IT MUST NOT READ AS THOUGH AN INVOICE EXISTS. Nothing has been numbered, built, pushed to
+ * QuickBooks or sent when this goes out — approving in the portal is what does all of that.
+ * So there is no invoice number, no "amount due", and the copy says plainly that the customer
+ * has not been sent anything yet. The figure shown is the QUOTE total they accepted.
+ */
+export function invoiceRequestEmail(input: InvoiceRequestEmailInput): EmailContent {
+  const name = oneLine(input.businessName);
+  const num = oneLine(input.quoteNumber);
+  const customer = oneLine(input.customerName ?? "");
+  const who = customer || "Your customer";
+  const money = input.total == null || input.total === "" ? "" : formatMoney(input.total);
+  const building = [input.styleLabel, input.sizeLabel]
+    .map((v) => oneLine(v ?? ""))
+    .filter(Boolean)
+    .join(" - ");
+  const d = new Date(input.acceptedAtIso);
+  const when = isNaN(d.getTime()) ? oneLine(input.acceptedAtIso) : d.toISOString().slice(0, 10);
+
+  const rows = [detailRow("Quote #", esc(num))];
+  if (customer) rows.push(detailRow("Customer", esc(customer)));
+  if (building) rows.push(detailRow("Building", esc(building)));
+  if (money) rows.push(detailRow("Quote total", esc(money)));
+  rows.push(detailRow("Accepted", esc(when)));
+
+  const leadText = `${who} accepted quote ${num}. The invoice is waiting for your approval — nothing has been sent to the customer yet.`;
+  const nextText = "Approving issues the invoice with your next invoice number and emails it to the customer to sign.";
+
+  const bodyHtml = `<p style="margin:0 0 12px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">${esc(leadText)}</p>
+            <p style="margin:0 0 16px 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;">${esc(nextText)}</p>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;">
+              ${rows.join("\n")}
+            </table>
+            ${ctaButton(input.reviewUrl, "Review & send invoice")}`;
+
+  const text: string[] = [name, "", leadText, nextText, "", `Quote #: ${num}`];
+  if (customer) text.push(`Customer: ${customer}`);
+  if (building) text.push(`Building: ${building}`);
+  if (money) text.push(`Quote total: ${money}`);
+  text.push(`Accepted: ${when}`, "", `Review & send invoice: ${input.reviewUrl}`);
+
+  return {
+    subject: `Invoice to approve: quote ${num} was accepted`,
+    html: htmlShell({
+      businessName: name,
+      preheader: `${who} accepted quote ${num}. Approve the invoice when you're ready.`,
       bodyHtml,
     }),
     text: text.join("\n") + "\n",

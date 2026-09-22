@@ -757,7 +757,8 @@ function MySubmissions({ refreshKey }) {
 // operator accounts carry a client_users row for structure-studio, which has its own
 // 19-step list). portal-setup is in SS_TENANT_SCOPED_FNS, so it answers for the VIEWED
 // tenant; it is also where the gating verdict is computed, because entitlement is a
-// server-side question and featureOn() in the browser is never true for an operator.
+// server-side question — and since 2026-09-15 featureOn() in the browser mirrors the viewed
+// tenant for every operator, so the two now agree instead of the server correcting a blanket.
 //
 // `items` and `counts` are owned by ReleasesView above (one fetch feeds both the tab badge
 // and this list, so they cannot disagree). A `locked` row is a paid add-on this builder has
@@ -1676,8 +1677,15 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
     // An invoice that is signed and unpaid is the customer's too, but for money.
     // Lumping them together hides which follow-up is actually owed.
     if ((r.d && r.d.status) === "accepted") {
-      return (r.d && r.d.ss_invoice_sent_at)
-        ? { key: "invoiceout", label: "Awaiting signature", bg: "#FEF9C3", fg: "#854D0E" }
+      if (r.d && r.d.ss_invoice_sent_at) return { key: "invoiceout", label: "Awaiting signature", bg: "#FEF9C3", fg: "#854D0E" };
+      // "Invoice to approve" (migration 229; Ahsan 2026-09-15: "Accept → auto-DRAFT invoice,
+      // builder approves with one click"). The CUSTOMER accepted in their account and asked for
+      // the invoice; nothing is numbered, emailed or pushed until the builder approves. Same move
+      // as "Needs invoice" — issue it — but somebody is now waiting on it, so it gets its own
+      // name. portal-settings "Not now" clears the stamp, which drops the order back to
+      // "Needs invoice". A server from before 229 never sends the column: this branch sleeps.
+      return (r.d && r.d.ss_invoice_requested_at)
+        ? { key: "invoicereq", label: "Invoice to approve", bg: "#EDE9FE", fg: "#5B21B6" }
         : { key: "needsinvoice", label: "Needs invoice", bg: "#FEF3C7", fg: "#92400E" };
     }
     return { key: "awaiting", label: "Awaiting payment", bg: "#FFE4E6", fg: "#9F1239" };
@@ -1724,6 +1732,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
   // Voided rows are fetched (they stay visible in the history) but must not be counted.
   const payCount = all.reduce((s, r) => s + r.pays.filter((p) => !p.voided_at).length, 0);
   const needsInvoice = all.filter((r) => stateOf(r).key === "needsinvoice").length;
+  const invoiceReq = all.filter((r) => stateOf(r).key === "invoicereq").length;
   const invoiceOut = all.filter((r) => stateOf(r).key === "invoiceout").length;
   const awaitingCount = all.filter((r) => stateOf(r).key === "awaiting").length;
   const needsTotal = all.filter((r) => r.o.total_cents == null).length;
@@ -1790,6 +1799,9 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
             {tile("Open balance", money(openBalance), `across ${withTotal.filter((r) => balOf(r) > 0).length} open orders`, "#F59E0B")}
             {refundsOwed > 0 && tile("Refunds owed", money(refundsOwed), `${refundCount} order${refundCount === 1 ? "" : "s"} paid above the total`, "#9A3412")}
             {tile("Collected", money(collected), `${payCount} payment${payCount === 1 ? "" : "s"} recorded`, "#16A34A")}
+            {/* Only while one is waiting, like "Awaiting signature": a permanent "0 to approve"
+                tile is noise on every tenant that has never had a customer accept online. */}
+            {invoiceReq > 0 && tile("Invoice to approve", String(invoiceReq), "customer accepted — approve to issue", "#6D28D9")}
             {tile("Needs invoice", String(needsInvoice), needsInvoice ? "accepted, not billed yet" : "all billed", "#92400E")}
             {invoiceOut > 0 && tile("Awaiting signature", String(invoiceOut), "invoice sent, not signed", "#CA8A04")}
             {tile("Awaiting payment", String(awaitingCount), "signed, nothing collected", "#9F1239")}
@@ -1814,6 +1826,9 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
               seconds teaches people it is broken. */}
           {chip("all", "All")}
           {moneyReady && (<>
+            {/* Kept while it is the active filter even at zero: "Not now" on the last one
+                would otherwise hide the chip that explains why the table just emptied. */}
+            {(invoiceReq > 0 || filter === "invoicereq") && chip("invoicereq", "Invoice to approve")}
             {chip("needsinvoice", "Needs invoice")}
             {invoiceOut > 0 && chip("invoiceout", "Awaiting signature")}
             {chip("awaiting", "Awaiting payment")}{chip("partial", "Partially paid")}{chip("paid", "Paid in full")}
@@ -2330,6 +2345,23 @@ const ssUsd = (n) => {
   const [int, frac] = Math.abs(v).toFixed(2).split(".");
   return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
 };
+// The tax a customer agreed to, from an acceptance row's frozen columns (migration 158):
+// "incl. $912.38 sales tax · 7.25% · Bibb County, GA · verified". Null when the row carries no
+// tax — every CRM-mode acceptance, and every one from before tax shipped — so "was not taxed"
+// never renders as "$0.00 tax". `tax_source` has only two values: "avalara" is a rate verified
+// for the delivery address; "fallback" is one of the builder's own rates (a location's or the
+// company's — the row does not record which, so this does not guess).
+function ssSignedTaxText(a) {
+  if (!a || a.tax_amount == null || !isFinite(Number(a.tax_amount))) return null;
+  const parts = [`incl. ${ssUsd(Number(a.tax_amount))} sales tax`];
+  const rate = Number(a.tax_rate);
+  if (a.tax_rate != null && isFinite(rate)) parts.push(`${Math.round(rate * 1000000) / 10000}%`);
+  const where = String(a.tax_jurisdiction || "").trim();
+  if (where) parts.push(where);
+  if (a.tax_source === "avalara") parts.push("verified");
+  else if (a.tax_source === "fallback") parts.push("your rate");
+  return parts.join(" · ");
+}
 // The built-in cladding names — the FALLBACK, not the authority. Since 207 the offered set and
 // the customer-facing name are per tenant, per style (style_cladding), and order_paperwork
 // carries this design's own list; this is what an account with no rows yet falls back to.
@@ -2338,7 +2370,7 @@ const ssUsd = (n) => {
 // validated against the matching server list and `next.cladding` defaults to the design's
 // CURRENT value — so a design saved as Board & Batten made every attribute change on its order
 // fail with "That cladding isn't offered", including a pure roof-colour edit. All four now.
-const SS_CLADDING_NAMES = { lap: "Lap Siding", panel: "Panel Siding", batten: "Board & Batten", agpanel: "Metal" };
+const SS_CLADDING_NAMES = { lap: "Lap Siding", panel: "Panel Siding", batten: "Board & Batten", agpanel: "AG Panel" };
 const SS_CLADDING_ORDER = ["panel", "lap", "batten", "agpanel"];
 // `offered` is order_paperwork's list: [{ id, label }] with label = the tenant's override or
 // null. An empty/absent list means "this tenant has not configured cladding", which reads as
@@ -2631,7 +2663,7 @@ function PreflightSheet({ feeCents, feeLabel, taxable, onCancel, onGo, busy }) {
   );
 }
 
-function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null, onRetry = null, coOn = false, coApproveOn = false }) {
+function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null, onRetry = null, coOn = false, coApproveOn = false, invoiceRequestedAt = null }) {
   const [draft, setDraft] = useState(null);      // null = viewing; else the six attrs
   const [preview, setPreview] = useState(null);  // dryRun result { totalBefore, totalAfter, description }
   const [previewErr, setPreviewErr] = useState(null);
@@ -2871,6 +2903,40 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   const dirty = !!draft && JSON.stringify(draft) !== JSON.stringify(cur);
   const anyBusy = busy || busyExt;
 
+  // ONE send handler for "Create & send invoice" and "Approve & send invoice" (migration 229).
+  // Approving a customer's invoice request has no action of its own on purpose: it IS
+  // send_invoice, which marks the request approved when it records the invoice. A second call
+  // shape would be a second thing to keep in step with the claim ladder, the numbering and QBO.
+  const createAndSendInvoice = async () => {
+    const totalTxt = o.total_cents != null ? money(o.total_cents) : ssUsd(totals.total);
+    if (!window.confirm(`Create invoice for ${design.ss_quote_number} (${totalTxt}) and email it to the customer?\n\nThe invoice gets its own number and PDF. The customer signs the invoice — the order is marked Invoiced once they do.`)) return;
+    setBusy(true); onMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code } });
+    setBusy(false);
+    if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
+    // The invoice-time tax check is a NOTE beside the outcome, never the outcome: it cannot change
+    // the invoice (the customer agreed to that total) and cannot block it (ssTaxCheckNote).
+    const note = ssTaxCheckNote(data && data.taxCheck);
+    onMsg(data && data.sent === false
+      ? { err: `Invoice ${data.invoiceNumber || ""} created, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — they can't sign it until they get it. Print it or copy the customer link.`, note }
+      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — awaiting the customer's signature.`, note });
+    onChanged();
+  };
+  // "Not now" (portal-settings dismiss_invoice_request). Issues, numbers and emails nothing;
+  // the order stays accepted and drops back to "Needs invoice", so issuing later is still the
+  // one button. fnError, not error.message: the refusals here are sentences worth reading
+  // ("That invoice has already been issued."), and invoke hides a non-2xx body behind a
+  // generic message.
+  const dismissInvoiceRequest = async () => {
+    setBusy(true); onMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "dismiss_invoice_request", shortCode: o.short_code } });
+    setBusy(false);
+    if (error) { onMsg({ err: await fnError(error) }); onChanged(); return; }
+    if (data && data.error) { onMsg({ err: data.error }); return; }
+    onMsg({ ok: `Set aside — ${design.ss_quote_number || "this order"} is back under Needs invoice. Create the invoice whenever you're ready.` });
+    onChanged();
+  };
+
   // The amendment trail: accepted total + acknowledged CO snapshots — never re-summed line
   // items, so double-counting is structurally impossible.
   //
@@ -2887,6 +2953,8 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
         ? `Authorised by ${acceptance.recorded_by_name || "your team"} · ${fmtDate(acceptance.accepted_at)}`
         : `Accepted ${fmtDate(acceptance.accepted_at)}`,
       amountText: ssUsd(running), tone: "base",
+      // The tax INSIDE that accepted total, from the columns frozen with it — not the snapshot.
+      sub: ssSignedTaxText(acceptance),
     });
     // ⚠️ EACH CHANGE'S OWN DELTA, NOT A CHAIN THROUGH `total_after_cents` (2026-09-07).
     // That column is "the whole order after this change" as computed FROM THE DESIGN'S LINES
@@ -3096,7 +3164,13 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
         )}
         {totals.tax != null && (
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 13, padding: "2px 0", color: "#64748B" }}>
-            <span>{totals.taxLabel}</span><span style={{ minWidth: 92, textAlign: "right", color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssUsd(totals.tax)}</span>
+            {/* Which rate priced it (Avalara stage): verified for the delivery address, the sales
+                location's rate, or the company rate. Screen only — the PDF prints the label. */}
+            <span style={{ textAlign: "right" }}>
+              {totals.taxLabel}
+              {ssTaxBasisText(snap.tax) && <span style={{ display: "block", fontSize: 11, color: "#94A3B8" }}>{ssTaxBasisText(snap.tax)}</span>}
+            </span>
+            <span style={{ minWidth: 92, textAlign: "right", color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssUsd(totals.tax)}</span>
           </div>
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 16, fontWeight: 800, padding: "5px 0 2px", color: "#1E293B" }}>
@@ -3111,7 +3185,8 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                 fontWeight: t.tone === "final" ? 800 : 500,
                 borderTop: t.tone === "final" ? "1px solid #E2E8F0" : "none",
                 marginTop: t.tone === "final" ? 3 : 0, paddingTop: t.tone === "final" ? 4 : 2 }}>
-                <span>{t.label}</span><span style={{ fontVariantNumeric: "tabular-nums" }}>{t.amountText}</span>
+                <span>{t.label}{t.sub && <span style={{ display: "block", fontSize: 11, color: "#94A3B8", fontWeight: 500 }}>{t.sub}</span>}</span>
+                <span style={{ fontVariantNumeric: "tabular-nums" }}>{t.amountText}</span>
               </div>
             ))}
           </div>
@@ -3168,13 +3243,15 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                         : await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code } });
                       setBusy(false);
                       if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
+                      // Same informational tax note as the first send, if this answer carries one.
+                      const note = ssTaxCheckNote(data && data.taxCheck);
                       onMsg(data && data.sent === false
                         ? (regen
                           // The document IS rebuilt — say so, or a builder reads a send
                           // failure as "nothing happened" and clicks again forever.
-                          ? { ok: `Invoice ${data.invoiceNumber || ""} rebuilt with the current totals. Not emailed${data.sendReason ? ` — ${data.sendReason}` : ""}; print it or copy the customer link.` }
-                          : { err: `Invoice ${data.invoiceNumber || ""} is ready but the customer was NOT emailed${data.emailReason || data.sendReason ? ` (${data.emailReason || data.sendReason})` : ""} — print it or copy the customer link.` })
-                        : { ok: `Invoice ${(data && data.invoiceNumber) || ""} ${regen ? "rebuilt and " : ""}sent again — still awaiting their signature.` });
+                          ? { ok: `Invoice ${data.invoiceNumber || ""} rebuilt with the current totals. Not emailed${data.sendReason ? ` — ${data.sendReason}` : ""}; print it or copy the customer link.`, note }
+                          : { err: `Invoice ${data.invoiceNumber || ""} is ready but the customer was NOT emailed${data.emailReason || data.sendReason ? ` (${data.emailReason || data.sendReason})` : ""} — print it or copy the customer link.`, note })
+                        : { ok: `Invoice ${(data && data.invoiceNumber) || ""} ${regen ? "rebuilt and " : ""}sent again — still awaiting their signature.`, note });
                       onChanged();
                     }}
                     style={{ ...S.btn(regen ? "#B45309" : "#0F172A", "#FFF"), padding: "8px 14px", fontSize: 12.5, opacity: anyBusy ? 0.6 : 1 }}>
@@ -3192,20 +3269,29 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
           ? <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
               <b style={{ color: "#B45309" }}>Ready to invoice once CO-{anyPendingCo.co_no} is acknowledged</b> — the customer signs it from their quote page, or record their verbal OK below.
             </div>
+          : invoiceRequestedAt
+          /* INVOICE TO APPROVE (migration 229; Ahsan 2026-09-15). The customer accepted from
+             their account, which raised a DRAFT invoice: no number, no PDF, no QuickBooks push
+             and no inventory claim until this click. Below the change-order branch on purpose —
+             a pending change order still blocks issuing, and send_invoice would 409 anyway. */
+          ? <div data-invoice-request="pending" style={{ background: "#F5F3FF", border: "1px solid #DDD6FE", borderRadius: 8, padding: "10px 13px", marginTop: 12, fontSize: 12.5, color: "#4C1D95" }}>
+              <b>Invoice to approve</b>
+              <div style={{ marginTop: 3, color: "#5B21B6" }}>
+                Customer accepted {fmtDate(design.accepted_at || invoiceRequestedAt)}. Approve to issue the invoice (it takes the next number).
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9, flexWrap: "wrap" }}>
+                <button type="button" disabled={anyBusy} onClick={createAndSendInvoice}
+                  style={{ ...S.btn("#059669", "#FFF"), padding: "9px 18px", fontSize: 13, opacity: anyBusy ? 0.6 : 1 }}>
+                  {busy ? "Working…" : "Approve & send invoice"}
+                </button>
+                <button type="button" disabled={anyBusy} onClick={dismissInvoiceRequest}
+                  style={{ ...S.btn("#FFF", "#5B21B6"), border: "1px solid #DDD6FE", padding: "9px 14px", fontSize: 13, opacity: anyBusy ? 0.6 : 1 }}>
+                  Not now
+                </button>
+              </div>
+            </div>
           : <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
-              <button type="button" disabled={anyBusy}
-                onClick={async () => {
-                  const totalTxt = o.total_cents != null ? money(o.total_cents) : ssUsd(totals.total);
-                  if (!window.confirm(`Create invoice for ${design.ss_quote_number} (${totalTxt}) and email it to the customer?\n\nThe invoice gets its own number and PDF. The customer signs the invoice — the order is marked Invoiced once they do.`)) return;
-                  setBusy(true); onMsg(null);
-                  const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code } });
-                  setBusy(false);
-                  if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
-                  onMsg(data && data.sent === false
-                    ? { err: `Invoice ${data.invoiceNumber || ""} created, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — they can't sign it until they get it. Print it or copy the customer link.` }
-                    : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — awaiting the customer's signature.` });
-                  onChanged();
-                }}
+              <button type="button" disabled={anyBusy} onClick={createAndSendInvoice}
                 style={{ ...S.btn("#059669", "#FFF"), padding: "9px 18px", fontSize: 13, opacity: anyBusy ? 0.6 : 1 }}>
                 {busy ? "Working…" : "Create & send invoice"}
               </button>
@@ -3252,7 +3338,11 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
         )}
         <button type="button"
           onClick={(e) => {
-            const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}`;
+            // The designer's own account panel, focused on THIS order (plan 3.8, Carolyn
+            // 2026-09-14: accept and sign live in the designer now). Invoices once the invoice
+            // is out, Quotes before. The designer switches to whichever tab the card actually
+            // lives on, so a stale guess still lands. /my-quotes stays up for older links.
+            const link = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&account=${ssInvoicePdf ? "invoices" : "quotes"}&q=${encodeURIComponent(o.short_code)}`;
             const btn = e.currentTarget;
             const done = () => { btn.textContent = "Copied ✓"; setTimeout(() => { btn.textContent = "Copy customer link"; }, 2000); };
             if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
@@ -3293,15 +3383,17 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
  *
  * The link is built HERE, in the browser, from the origin the operator is already on:
  * a link generated on beta must stay on beta, and that is exactly what window.origin
- * gives without a round trip. `?q=` is the deep link my-quotes.html reads — it points at
- * one invoice, and grants nothing on its own: the customer still signs in with their
- * texted code, and customer-quotes only ever returns designs matching that verified
- * phone. Opening someone else's link on your own number shows you your own quotes.
+ * gives without a round trip. `?account=invoices&q=` is the designer's deep link (plan 3.8,
+ * 2026-09-15; it was /my-quotes?q= before the account panel moved into the designer) — it
+ * points at one invoice and opens its Sign panel, and grants nothing on its own: the customer
+ * still logs in with the code we send them, and customer-quotes only ever returns designs
+ * matching that verified phone or email. Opening someone else's link on your own number shows
+ * you your own quotes. The URL stays well inside the QR's 213-byte version-10 capacity.
  */
 function SignOnPhoneModal({ clientId, shortCode, design, invoice, msg, setMsg, onClose }) {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}&q=${encodeURIComponent(shortCode)}`;
+  const link = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&account=invoices&q=${encodeURIComponent(shortCode)}`;
   const phone = (design && design.contact && design.contact.phone) || "";
 
   // The matrix is derived once per link, not per render — it is ~200 lines of bit work.
@@ -3578,8 +3670,11 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         // `revision` since migration 213: an amended order is signed AGAIN, so there is now
         // more than one subject='invoice' row and the highest revision is the one that
         // governs. Without the column the reader below picks whichever row came back first.
+        // tax_rate / tax_amount / tax_jurisdiction / tax_source (migration 158) are the tax as the
+        // customer agreed to it, frozen on the evidence row. The design's snapshot is the tax NOW,
+        // and a change order or a re-stamp moves it — so "what they signed for" is read from here.
         sb.from("design_acceptances")
-          .select("subject, revision, signer_name, accepted_at, total, method, recorded_by_name")
+          .select("subject, revision, signer_name, accepted_at, total, method, recorded_by_name, tax_rate, tax_amount, tax_jurisdiction, tax_source")
           .eq("client_id", clientId).eq("short_code", o.short_code),
         sb.from("change_orders")
           .select("id, co_no, source, status, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, raised_under, acknowledged_at")
@@ -3737,6 +3832,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         style={{ background: "none", border: "none", color: ACCENT, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: 0, marginBottom: 12 }}>← All orders</button>
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {msg && msg.note && <div style={SS_TAX_NOTE_STYLE}>{msg.note}</div>}
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.5fr) minmax(0,1fr)", gap: 14, alignItems: "start" }} className="ss-order-grid">
         <div>
@@ -3745,6 +3841,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                lines with live roof/cladding/paint dropdowns, the amendment trail, and the
                action row. It replaces the old thin header card for SS orders. */
             <OrderDocumentCard clientId={clientId} o={o} st={st} doc={ssDoc} coOn={coOn} coApproveOn={coApproveOn}
+              invoiceRequestedAt={(d && d.ss_invoice_requested_at) || null}
               busyExt={busy} onMsg={setMsg} onChanged={changedAll} onOpenDesign={onOpenDesign}
               onPreview={(url, title) => setPdfView({ url, title })}
               onRetry={() => { setSsDoc(null); setSsReload((k) => k + 1); }} />
@@ -4058,6 +4155,14 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               {ssAcceptance && ssAcceptance.method === "rep"
                 ? kv("Invoice authorised", `${fmtDate(ssAcceptance.accepted_at)} · by ${ssAcceptance.recorded_by_name || "your team"}`)
                 : kv("Accepted", ssAcceptance ? fmtDate(ssAcceptance.accepted_at) : "not yet")}
+              {/* The tax they agreed to, off the frozen evidence columns. The signed invoice
+                  governs once there is one (the highest revision, as above); before that, the
+                  quote acceptance. Absent when neither row carries tax. */}
+              {(() => {
+                const gov = ssInvoiceAcceptance && ssInvoiceAcceptance.tax_amount != null ? ssInvoiceAcceptance : ssAcceptance;
+                const txt = ssSignedTaxText(gov);
+                return txt ? kv(gov === ssInvoiceAcceptance ? "Tax signed" : "Tax accepted", txt.replace(/^incl\. /, "")) : null;
+              })()}
               {kv("Change orders", (() => {
                 const cs = (ssDoc && ssDoc.cos) || [];
                 const acked = cs.filter((c) => c.status === "acknowledged").length;

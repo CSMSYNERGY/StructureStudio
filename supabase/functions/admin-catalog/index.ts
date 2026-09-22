@@ -2,9 +2,12 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { checkAdminPassword } from "../_shared/adminGate.ts";
 import { checkAdminAuth } from "../_shared/adminAuth.ts";
-import { withErrorLog } from "../_shared/logError.ts";
+import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 import { paidThroughOf } from "../_shared/billingPeriods.ts";
+import { pingAvalara } from "../_shared/salesTax.ts";
+import { finishLookup, insertLookup, PING_CLIENT_ID, pingResponse } from "../_shared/taxLookups.ts";
+import { syncTaxCodes } from "../_shared/taxCodeSync.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -227,7 +230,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
   // break-glass console out of every write while telling it the account is read-only.
   const READ_ONLY_ACTIONS = new Set([
     "list_clients", "get_master", "get_client_catalog", "get_email_sender",
-    "get_billing_overview", "get_payments",
+    "get_billing_overview", "get_payments", "avalara_tax_codes_status",
   ]);
   if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
     if (!identity.canWrite) {
@@ -395,6 +398,24 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const items = await sb.from("layout_item_types").select("*").order("sort_order").order("item_key");
         if (items.error) throw items.error;
         return json({ ok: true, layoutItemTypes: items.data });
+      }
+      // The Admin console's "Avalara tax codes" row (Master Catalog tab): how many codes the
+      // platform catalog holds, how many are active, and when a sync last wrote it — so an
+      // operator can see whether a sync is needed before pressing one. A read of the stored copy
+      // only; it never calls Avalara, which is why it can sit on READ_ONLY_ACTIONS while
+      // avalara_sync_tax_codes cannot. Same count and syncedAt readings as portal-settings'
+      // tax_codes_get `catalog`, so the operator and a builder's Tax tab report the same list.
+      case "avalara_tax_codes_status": {
+        const [all, active, last] = await Promise.all([
+          sb.from("avalara_tax_codes").select("code", { count: "exact", head: true }),
+          sb.from("avalara_tax_codes").select("code", { count: "exact", head: true }).eq("is_active", true),
+          sb.from("avalara_tax_codes").select("synced_at").not("synced_at", "is", null)
+            .order("synced_at", { ascending: false }).limit(1).maybeSingle(),
+        ]);
+        if (all.error) throw all.error;
+        if (active.error) throw active.error;
+        if (last.error) throw last.error;
+        return json({ ok: true, count: all.count ?? 0, activeCount: active.count ?? 0, syncedAt: last.data?.synced_at ?? null });
       }
       case "get_client_catalog": {
         const clientId = reqStr(p.clientId, "clientId");
@@ -858,6 +879,63 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         return json({ ok: true, account: acct.data ?? null, transactions: txs.data ?? [], reconcile: recon.data ?? null });
       }
 
+      // ── Avalara credential check (2026-09-17) ─────────────────────────────────────
+      // Do the platform's Avalara credentials work? GET /api/v2/utilities/ping, run on purpose by
+      // an operator. Deliberately NOT in READ_ONLY_ACTIONS: whether Avalara bills a ping is not
+      // documented, so it is treated as a counted call. It needs can_write, and it writes a
+      // ledger row like every other lookup.
+      //
+      // Recorded in tax_lookups as kind 'ping' under PING_CLIENT_ID, not under a tenant: it
+      // checks our credentials, not a builder's (see that constant for the choice), and the
+      // daily cap does not count pings. The row goes in BEFORE the request, and a row that
+      // cannot be written refuses the ping: a call nothing recorded is the one the ledger is
+      // for. With no credentials configured, no request is made and the row closes as
+      // not_configured.
+      //
+      // The answer names the account id and the user behind the key. None of that leaves this
+      // case: pingAvalara whitelists four fields, and pingResponse whitelists them again.
+      case "avalara_ping": {
+        const lookupId = await insertLookup(sb, {
+          clientId: PING_CLIENT_ID,
+          kind: "ping",
+          actorUserId: identity.via === "operator" ? identity.userId : null,
+          operator: true,
+        });
+        if (!lookupId) {
+          return json({ error: "Couldn't record the ping in the tax lookup ledger, so it wasn't sent. Try again in a minute." }, 503);
+        }
+        const ping = await pingAvalara();
+        if (!(await finishLookup(sb, lookupId, ping))) {
+          // Best-effort: the request already happened. The row stays in flight; pings are not
+          // capped, so it blocks nothing, but it should not be invisible either.
+          logEdgeError({
+            fn: "admin-catalog", req, clientId: null, code: "tax_lookup_unclosed",
+            message: "avalara_ping: the ledger row could not be closed",
+            context: { lookupId },
+          }).catch(() => {});
+        }
+        return json(pingResponse(ping));
+      }
+
+      // ── Avalara tax code sync (migration 246, 2026-09-17) ─────────────────────────────────
+      // Fill the platform catalog (avalara_tax_codes) that every builder's Tax tab searches, from
+      // Avalara's ListTaxCodes. Pressed on purpose by an operator; nothing automatic calls it.
+      // Like avalara_ping, deliberately NOT in READ_ONLY_ACTIONS: it writes the catalog and makes
+      // up to ten authenticated Avalara requests, so it needs can_write. It is not a rate lookup
+      // and never touches a tenant's tax_lookup_enabled switch or the lookup ledger's cap. The
+      // paging, the write rules (refused credentials write nothing, a partial sync deactivates
+      // nothing) and the operator's sentences are in _shared/taxCodeSync.ts. The answer is counts,
+      // plus stoppedBy and a warning sentence when the sync stopped short (still ok: what it read
+      // was saved) — no credentials, no account ids, no Avalara body.
+      case "avalara_sync_tax_codes": {
+        const out = await syncTaxCodes(sb);
+        if (!out.ok) {
+          const { status, ok: _ok, ...body } = out;
+          return json(body, status);
+        }
+        return json(out);
+      }
+
       case "set_feature_grants": {
         // EARLY ACCESS: switch a feature on for ONE builder before it goes on sale.
         // Carolyn 2026-08-18 — "I would like to be able to see the 3D as I'm in beta, but not
@@ -993,10 +1071,21 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         //   2. Clearing billing_exempt on a tenant with no active subscription LOCKS them
         //      out immediately — the gate has nothing to let them in on. Order matters:
         //      set the discount first, let them subscribe, then remove the exemption.
+        //      ⚠️ Since 2026-09-21 (migration 228) that is worse than it was: billing_exempt
+        //      confers EVERY feature, so clearing it takes away Scheduling, QuickBooks Sync,
+        //      Real-Time Pricing, the CRM and 3D as well as the base gate. The response note
+        //      below now says so; it used to talk about discounts only.
         const clientId = reqStr(p.clientId, "clientId");
         const { data: exists } = await sb.from("client_configs")
           .select("client_id").eq("client_id", clientId).maybeSingle();
         if (!exists) throw new Error(`Unknown builder: ${clientId}`);
+
+        // Prior posture, read BEFORE the upsert, so the note below can talk about what
+        // actually CHANGED. The card sends billingExempt on every save, so "false" on its
+        // own says nothing — an account that was already billable is not being locked out.
+        const { data: priorCs } = await sb.from("client_settings")
+          .select("billing_exempt").eq("client_id", clientId).maybeSingle();
+        const wasExempt = Boolean(priorCs?.billing_exempt);
 
         const patch: Record<string, unknown> = { client_id: clientId, updated_at: new Date().toISOString() };
         if (p.billingExempt !== undefined) patch.billing_exempt = p.billingExempt === true;
@@ -1032,12 +1121,22 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Warn the operator when the change cannot take effect on its own.
         const { data: live } = await sb.from("billing_subscriptions")
           .select("id").eq("client_id", clientId).neq("status", "cancelled").limit(1);
+        // Clearing the comp flag is the destructive direction, so it speaks first: it is
+        // the one change here that can take a working portal away from someone.
+        const clearedExempt = wasExempt && p.billingExempt === false;
+        const hasLive = Boolean(live && live.length);
+        const note = clearedExempt && !hasLive
+          ? "Saved — but this tenant is now BILLABLE with no active subscription, so they are locked out of the portal as of right now, and Scheduling, QuickBooks Sync, Real-Time Pricing, the CRM and 3D are switched off. Tick Non-billable again, or give them a Free until date, until they subscribe."
+          : clearedExempt
+          ? "Saved. Non-billable is off, so this tenant now keeps only what their subscription covers — Scheduling, QuickBooks Sync, Real-Time Pricing, the CRM and 3D are switched off unless they are paying for them."
+          : hasLive
+          ? "Saved. This tenant already has a live subscription — the gateway holds its amount, so a discount change applies only to features they subscribe to from now on."
+          : "Saved.";
         return json({
           ok: true,
-          hasLiveSubscription: Boolean(live && live.length),
-          note: live && live.length
-            ? "Saved. This tenant already has a live subscription — the gateway holds its amount, so a discount change applies only to features they subscribe to from now on."
-            : "Saved.",
+          hasLiveSubscription: hasLive,
+          clearedExempt,
+          note,
         });
       }
       // ── card payments: the per-tenant merchant of record (migration 174) ──────────
@@ -1317,6 +1416,16 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           if (error) throw new Error(`${table}: ${error.message}`);
           deleted[table] = count ?? 0;
         };
+        // tax_code_assignments (migration 246) goes FIRST, ahead of the order below. Its rows have
+        // no foreign key to anything wiped here (target_key is text, shared by style ids and
+        // heading keys), so none cascade; and the HEADING rows — delivery, doors, services — pass
+        // tax_codes_get's visibility filter for any tenant, because the heading keys are the same
+        // everywhere. Left behind, a recreated slug's Tax tab would show the deleted company's
+        // codes as its own saved choices, and a save that kept them would stamp them as theirs.
+        // First, because it is the one table here that can be missing: admin-catalog deployed
+        // before 246 is applied refuses the delete on this line, before anything is gone, instead
+        // of half-deleting the tenant and throwing further down.
+        await wipe("tax_code_assignments");
         // Catalog/design rows first, config last. Order respects FKs
         // (layout_item_pricing & building_sizes → building_styles; inclusions → sizes).
         await wipe("designs");

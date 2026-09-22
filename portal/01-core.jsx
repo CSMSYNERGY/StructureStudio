@@ -536,6 +536,14 @@ const TAB_META = {
 // static server ignores _redirects, so deep links only work on beta/production — locally
 // the app still runs, it just always boots at /portal.html.
 const SS_TAB_ALIASES = { leads: "contacts", releases: "support" };
+// The same idea one level down, for SETTINGS sub-tabs that get renamed. Kept separate from
+// SS_TAB_ALIASES and applied only on the settings page, because a sub slug means nothing on
+// its own — the same word under another page is another page's business.
+//
+// Why it is worth the four lines: an unknown sub does not 404, it CLAMPS to the first tab. So
+// a renamed slug does not announce itself, it silently lands the reader on Structures, which
+// is the one failure mode nobody reports because it looks like they mis-clicked.
+const SS_SETTINGS_SUB_ALIASES = { myview: "myprofile" };
 function ssParsePath() {
   const parts = String(window.location.pathname || "").split("/").filter(Boolean);
   // ["portal"] | ["portal","settings"] | ["portal","settings","colors"]
@@ -552,7 +560,9 @@ function ssParsePath() {
   // land silently on Pipeline and a record link would lose its `sub` entirely. The shell's
   // existing replaceState then rewrites the address bar to the new path, with no history entry.
   const page = parts[1] || null;
-  return { page: (page && SS_TAB_ALIASES[page]) || page, sub: parts[2] || null };
+  const resolved = (page && SS_TAB_ALIASES[page]) || page;
+  const sub = parts[2] || null;
+  return { page: resolved, sub: (resolved === "settings" && sub && SS_SETTINGS_SUB_ALIASES[sub]) || sub };
 }
 
 // Is this deployment a beta/preview surface? Decides whether the "Coming Soon" sidebar
@@ -592,6 +602,16 @@ function ssPagePath(page, sub) {
   const base = "/portal" + (page ? "/" + page : "") + (page && sub ? "/" + sub : "");
   return base + (window.location.search || "");
 }
+
+// Popout mode: a dedicated small window showing ONLY the Projects boards (?popout=1).
+// Read ONCE at boot on purpose: ssPagePath above carries the whole search string through
+// every navigation, so the flag rides along without the router knowing it exists; nothing
+// rewrites search outside the auth-link landings, which never carry it.
+const SS_POPOUT = (() => {
+  try { return new URLSearchParams(window.location.search).get("popout") === "1"; }
+  catch (_e) { return false; }
+})();
+if (SS_POPOUT) { try { document.title = "Projects — Structure Studio"; } catch (_e) {} }
 
 // Non-admins are confined to the Designs + Leads lists, the Support tab (product news, the
 // setup checklist and their own submissions), and the coming-soon teaser tabs (previews, no
@@ -635,6 +655,25 @@ const SETTINGS_TAB_AREA = {
   designer: "settings_structures",
   options: "settings_options",
   colors: "settings_options",
+  // The two tabs Colors was split into on 2026-09-11. Same catalog, same area — a split of
+  // one screen into three, not a new permission surface.
+  shingles: "settings_options",
+  metal: "settings_options",
+  // The eight tabs Options was split into on 2026-09-11 (`options` itself is above). Same area
+  // as the page they came from — nine cards that were already on one screen, now one per tab.
+  doors: "settings_options",
+  windows: "settings_options",
+  vents: "settings_options",
+  ramps: "settings_options",
+  cladding: "settings_options",
+  interior: "settings_options",
+  electrical: "settings_options",
+  insulation: "settings_options",
+  delivery: "settings_options",
+  foundation: "settings_options",
+  // The wallet half of Billing (2026-09-11). Same area as the subscription half — it is the
+  // same money and the same page, split in two for room, not a new permission surface.
+  wallet: "settings_billing",
   branding: "settings_branding",
   // Company (2026-09-04) is the Business Details card lifted out of Branding into its own
   // sub-tab. It writes the SAME client_settings.business_* columns through the SAME global
@@ -643,7 +682,20 @@ const SETTINGS_TAB_AREA = {
   // new row in _shared/access.ts AND its hand-maintained SQL twin `area_level_for()`, for a
   // split that grants nothing new.
   company: "settings_branding",
+  // The three tabs Company absorbed from Team on 2026-09-11. They keep settings_team, which
+  // is the area that guarded them when they were cards INSIDE the Team page — so this is a
+  // relocation in the UI and not a change of access. Crews and Drivers are additionally
+  // entitlement-gated on scheduling, in ssCompanyTabs, exactly as they were.
+  locations: "settings_team",
+  crews: "settings_team",
+  drivers: "settings_team",
   connection: "settings_crm",
+  // Company → Tax (2026-09-17): which Avalara tax code each building style and option heading
+  // falls under. settings_crm because tax_codes_get / _search / _save are gated there, beside
+  // the company rate and the location rates — a tab on any other area would show someone a
+  // mapping the server refuses to read, and a new area would mean a row in _shared/access.ts
+  // and its SQL twin area_level_for() for a screen that grants nothing new.
+  tax: "settings_crm",
   quickbooks: "settings_quickbooks",
   email: "settings_email",
   // Texting registers the BUSINESS's legal identity with the carriers and spends real money,
@@ -688,6 +740,264 @@ function ssCanWrite(access, area) {
   if (!access) return false;
   const v = access[area];
   return v === "edit" || (v === "own" && OWN_WRITE_AREAS.has(area));
+}
+
+// ── The Settings sub-pages ───────────────────────────────────────────────────────────────
+// ONE list, read by TWO renderers: the Settings sidebar in 12-shell.jsx and SettingsShell's
+// own body dispatch in 08-integrations.jsx. It lived inside SettingsShell until the sidebar
+// existed; the moment a second reader appeared, two independently-derived lists became the
+// way an owner gets Commissions in the rail and not in the body. Lifted here rather than
+// exported from 08-, because this is where SETTINGS_TAB_AREA, SETTINGS_AREAS and ssCanRead
+// already live — the whole settings-permission story in one place.
+//
+// Each entry is [id, label, description, group]. `group` may be NULL: a heading renders only
+// where the group CHANGES to a non-null value, so the leading run has no heading over it at
+// all. Carolyn 2026-09-11: Structures / Options / Colors / Designer "aren't grouped … they
+// have their own nav on the side" — they are top-level items, like Designer and Contacts are
+// in the workspace rail. One ordering model and no second sort: the array order IS the rail.
+function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}) {
+  return [
+    ["structures", "Structures", "Building styles, sizes, and base prices", null],
+    ["options", "Options", "Add-on items and rates", null],
+    ["colors", "Colors", "Paint, shingle, and metal palettes", null],
+    ["designer", "Designer", "How your styles look in the designer — including their 3D shape", null],
+    // COMPANY is a HUB, not a page (Carolyn 2026-09-11). Branding and Team used to be rail
+    // items of their own; they are top tabs inside Company now, along with Locations, Crews
+    // and Drivers — see ssCompanyTabs below, which is the list that renders in there. So this
+    // one rail entry stands for six sub-pages, and it sits in the leading ungrouped run
+    // rather than under a "Business" heading, because a heading over a single item is noise.
+    // ⚠️ Gated as a HUB — visible if ANY of its six tabs is readable — and NOT by
+    // SETTINGS_TAB_AREA.company, which is settings_branding. Team used to be its own rail
+    // item on settings_team; folding it in here under the branding area alone would have left
+    // someone granted only Team with no way to reach it: the rail would show them My Profile and
+    // nothing else, while /portal/settings/team still rendered perfectly for anyone who
+    // happened to have the link. Same rule the Settings tab itself uses in the workspace rail.
+    // settings_crm joined on 2026-09-17 with the Tax tab, for the same reason: someone granted
+    // CRM Connection but neither Branding nor Team would otherwise have a Tax tab they may read
+    // and no rail item that leads to it.
+    ...((isAdmin || !access || ssCanRead(access, "settings_branding") || ssCanRead(access, "settings_team")
+      || ssCanRead(access, "settings_crm"))
+      ? [["company", "Company", "Your business details, branding, team, locations, crews, drivers and tax codes", null]] : []),
+    // BILLING is a hub too (Carolyn 2026-09-11: "create a new nav called billing then I want
+    // to move the subscriptions and the wallet in there"). Subscription and Wallet are its
+    // tabs — see ssBillingTabs.
+    //
+    // Directly under Company, and ungrouped, at her request on the same day ("move billing up
+    // under company and remove the connections heading"). The "Billing" group heading went
+    // when the hub took the name: a heading over a hub of the same name said the word twice,
+    // and Commissions leaving for Company had already left it standing over a single item.
+    ["billing", "Billing", "Your subscription, and the wallet that pays for usage", null],
+    // NO "Connections" HEADING any more (Carolyn 2026-09-11: "remove the connections
+    // heading"). These four read as what they are without one, and with Billing lifted up to
+    // Company the rail is mostly one flat list now — which is the shape she has been steering
+    // it towards since she said the catalog four "aren't grouped ... they have their own nav
+    // on the side". Only My Profile still carries a heading, because it is the one item on this
+    // rail that configures the PERSON rather than the business.
+    ["connection", "CRM Connection", "CRM credentials and pipeline mapping", null],
+    ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings", null],
+    // "Email Settings", not "Email Sending" (Carolyn 2026-09-11). The slug stays `email` —
+    // it was already the generic word, so no link moved.
+    ["email", "Email Settings", "Send estimates and invoices from your own email domain", null],
+    ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business", null],
+    // ⚠️ The SLUG STAYS `billing`. Only the LABEL changed, to "Subscription" (Carolyn
+    // 2026-09-11) — the group above it is called Billing, and Billing > Billing reads as a
+    // mistake. Roughly eight callers do navigate("settings", "billing") — the transition and
+    // grace banners, the CRM and scheduling upsells, QuickBooksLocked, the Orders page, and
+    // RealTimePricing's onSeeBilling — plus /portal/settings/billing is a link people hold
+    // and SETTINGS_TAB_AREA keys on it. Renaming the id would break every one of them
+    // silently, since an unknown slug clamps to the first tab rather than erroring.
+    // MY VIEW is deliberately last and deliberately ungated. Ahsan, 2026-08-28 @42:28:
+    // "all of these settings for contact cards, the pipeline cards, and the default one, I
+    // think should add, in settings, add another tab ... for structure studio settings."
+    //
+    // Everything above configures the BUSINESS; this configures the person looking at the
+    // screen, which is why it has no SETTINGS_TAB_AREA entry -- there is no area that could
+    // sensibly withhold someone's own default view from them, and a sales rep who cannot see
+    // Structures still gets to choose how their own Pipeline tab opens.
+    // Renamed from "My View" / `myview` on 2026-09-11 (Carolyn: "my view should be called my
+    // profile in the nav tab and the url"). The old slug still resolves — see
+    // SS_SETTINGS_SUB_ALIASES.
+    ["myprofile", "My Profile", "How the portal opens for you — your settings, not the business's", "You"],
+  ]
+  // Per-area sub-tabs (migration 100). Owners, admins and operators are never filtered —
+  // an owner shut out of their own Settings by a permission bug is the failure this feature
+  // must not have. For everyone else each card appears only if they can read its area, which
+  // is what makes granting one person Structures actually produce a usable Settings page
+  // instead of an empty shell. `access` is null until the status call lands, and a sub-tab
+  // the server refuses is still refused — this only decides what is worth showing.
+  .filter(([id]) => {
+    if (isAdmin || !access) return true;
+    // COMPANY gated itself above, as a hub over six areas. It must be exempt here or this
+    // line silently undoes that: SETTINGS_TAB_AREA.company is settings_branding, so a
+    // settings_team holder had the entry added by the spread and taken straight back out —
+    // rail showed My Profile alone, and Team was unreachable for the one person it was granted to.
+    if (id === "company") return true;
+    const area = SETTINGS_TAB_AREA[id];
+    return area ? ssCanRead(access, area) : true;
+  });
+}
+
+// ── Inside Company ───────────────────────────────────────────────────────────────────────
+// Company's own TOP navigation (Carolyn 2026-09-11, reworking the rail she had just seen:
+// "I didn't mean to move ALL of them in their own navs ... I want to create some top
+// navigation inside company"). Her order, verbatim: Business Details, Branding, Team,
+// Locations, Crews, Drivers.
+//
+// ⚠️ THESE ARE REAL SETTINGS SLUGS, not a nested route. /portal/settings/branding and
+// /portal/settings/team are links people hold — the Client Setup checklist points at them —
+// and ssParsePath only reads two path segments anyway, so nesting them would have meant both
+// a router change and a pile of dead bookmarks. They stay flat: the RAIL draws one item
+// (Company) and highlights it for any of these, while this list draws the tabs inside.
+//
+// `company` is in both lists on purpose — it is the rail's label ("Company") and this list's
+// first tab ("Business Details"), which is the page it has always been.
+//
+// Locations, Crews and Drivers were all INSIDE the old Team page and all keep its area, so
+// nobody's access changes shape: a person who could reach Team can reach exactly the same
+// three cards, now as tabs. Crews and Drivers additionally keep their scheduling entitlement
+// gate — they were behind `schedUnlocked` in Team and they are behind it here.
+function ssCompanyTabs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false } = {}) {
+  return [
+    ["company", "Business Details", "Your legal business details, address, and the terms printed on estimates"],
+    ["branding", "Branding", "Your customer link's look & feel, and what customers see priced"],
+    ["team", "Team", "People, access, and commission rates"],
+    // COMMISSIONS joined Company on 2026-09-11 (Carolyn: "commissions also needs to go to
+    // company"), and sits next to Team because that is what it is about — Team is "people,
+    // access, and commission RATES" and this is the structure those rates pay out under.
+    // Still owner-only, the gate it carried as a rail item: portal-commissions refuses an
+    // operator outright and grants are owner-only, so this is not merely a UI courtesy.
+    ...(isOwner ? [["commissions", "Commissions", "How reps earn — structure, earned-on date, and payout schedule"]] : []),
+    ["locations", "Locations", "Your sales lots, and the serial numbers your buildings are given"],
+    ...(schedUnlocked ? [["crews", "Crews", "Who builds — each crew gets its own Build Schedule calendar"]] : []),
+    ...(schedUnlocked ? [["drivers", "Drivers", "Who delivers, what they can haul, and the territories they cover"]] : []),
+    // TAX (Ahsan 2026-09-17, from the owner's 2026-09-14 ask that every product, installation
+    // and delivery carry an Avalara tax code the builder picks). Last, so the order Carolyn
+    // gave for the tabs above is untouched. Gated on settings_crm through SETTINGS_TAB_AREA
+    // like every tab here; the hub gate in ssSettingsTabs admits that area for it.
+    ["tax", "Tax", "Which Avalara tax code each building, option and service falls under"],
+  ].filter(([id]) => {
+    if (isAdmin || !access) return true;
+    const area = SETTINGS_TAB_AREA[id];
+    return area ? ssCanRead(access, area) : true;
+  });
+}
+
+// ── Inside Colors ────────────────────────────────────────────────────────────────────────
+// Carolyn 2026-09-11: "in colors I want to split out the paint, shingles and metal colors to
+// their own tab/nav". Same shape as Company — one rail item, a top nav inside.
+//
+// `colors` stays the first tab so /portal/settings/colors, the link that exists today, lands
+// on Paint, which is the section it always opened on. No per-tab gating: all three are the
+// same catalog under settings_options, which is the area that already guarded the rail item.
+//
+// ⚠️ These three tabs share ONE component instance and one unsaved-edit buffer — see the
+// `section` prop on ColorsView. Do not render them as three separate mounts.
+function ssColorTabs() {
+  return [
+    ["colors", "Paint", "Siding, trim and door colors your customers pick from"],
+    ["shingles", "Shingles", "Roof colors for a shingle roof"],
+    ["metal", "Metal", "Roof colors for a metal roof"],
+  ];
+}
+
+// ── Inside Billing ───────────────────────────────────────────────────────────────────────
+// Two tabs, deliberately separate rather than one long page: the wallet is about to grow a
+// charge LEDGER ("we are prepping for logging every charge for the wallet"), which is a table
+// that will fill a screen on its own, and it has nothing to do with which plans are on.
+//
+// `billing` stays the first tab, so /portal/settings/billing — the slug roughly eight CTAs
+// deep-link to, and the one the billing gate sends people at — still lands on Subscription,
+// exactly the page it has always opened. The wallet card moved off that page, but it was
+// never what those links were pointing at.
+function ssBillingTabs() {
+  return [
+    ["billing", "Subscription", "Your plan, payment method, and invoices"],
+    ["wallet", "Wallet", "Prepaid credit for usage — top-ups, auto top-up, and what has been charged"],
+  ];
+}
+
+// ── Inside Options ───────────────────────────────────────────────────────────────────────
+// Nine catalog editors that used to stack down one scrolling column, banded into three colour
+// groups by OptionsGroup. Carolyn 2026-09-11: "I want to have each segment on their own tab,
+// but I want above that sort of a header of building, exterior and interior" — and, shown two
+// mockups, chose the one where every segment is a tab in ONE row, clustered under its group
+// label, rather than making the group a second click.
+//
+// The 4th element is the GROUP, the same shape the rail's own list uses, so SubTabs can share
+// the rail's clustering loop instead of growing a second one. A null group means no label.
+//
+// ⚠️ `options` STAYS THE FIRST TAB and stays the Wall heights card. It is the rail's slug, it
+// is in bookmarks, and it is where PricingCsv's "go to Options" button points — so the page
+// still opens on exactly the card it opened on before. Carolyn picked that default over Doors
+// so the tabs read in the same order the page used to.
+//
+// All nine are settings_options, the area that already guarded the page: a split of one screen
+// into nine, not a new permission surface.
+function ssOptionTabs() {
+  return [
+    ["options", "Wall heights", "Taller walls, priced per building style", "Building"],
+    ["doors", "Doors", "The doors a customer can place, and what each one adds", "Exterior"],
+    ["windows", "Windows", "The windows a customer can place, and what each one adds", "Exterior"],
+    ["vents", "Vents", "Gable and ridge venting, and what each one adds", "Exterior"],
+    ["ramps", "Ramps", "Ramps a customer can add to a door", "Exterior"],
+    // Cladding is the outside of the building by definition. It sits last in this group
+    // because it is the one card here that is not a catalog of things a customer places on
+    // the plan — it is what the walls are made of.
+    ["cladding", "Cladding", "Which sidings you offer on each style, and how each is priced", "Exterior"],
+    ["interior", "Interior items", "Lofts, workbenches, shelving — anything placed inside", "Interior"],
+    ["electrical", "Electrical", "Outlets, switches, lights and panels, and what each adds", "Interior"],
+    ["insulation", "Insulation", "Insulation options and how they are priced", "Interior"],
+    // SERVICES (Carolyn 2026-09-14, "because we are incorporating tax codes"): things the
+    // builder DOES rather than sells — delivery to the site, and the site work before the
+    // building arrives. A contiguous run, because the run IS the heading.
+    ["delivery", "Delivery", "How delivery is priced from your lot to the customer", "Services"],
+    ["foundation", "Foundation", "Gravel pads, fence removal, piers and slabs", "Services"],
+  ];
+}
+
+// The settings pages that are HUBS: one rail item each, several tabs inside, every tab a
+// real /portal/settings/<slug>. Both the rail (for the highlight) and SettingsShell (for the
+// clamp) need to know the whole set, and a hub that only one of them knew about would either
+// light nothing in the rail or fall back to Structures on a valid URL.
+function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false } = {}) {
+  return {
+    company: ssCompanyTabs({ isOwner, isAdmin, access, schedUnlocked }),
+    colors: ssColorTabs(),
+    billing: ssBillingTabs(),
+    options: ssOptionTabs(),
+  };
+}
+
+// Which top-level pages show the SETTINGS rail instead of the workspace one. Accounts and
+// Admin are in that rail now (Carolyn 2026-09-11), so the rail has to stay up while you are
+// on them or clicking one would throw you back to the nav you just left.
+//
+// PROJECTS IS DELIBERATELY ABSENT. It appears in BOTH rails — Carolyn asked for that — but it
+// is day-to-day internal work (the bug board, the roadmap), not configuration, so landing on
+// it returns you to the workspace rail. The rule is "the rail follows the page", with no
+// exceptions: a page that kept whichever rail you arrived from would need a second piece of
+// state that a deep link could not reconstruct.
+const SS_SETTINGS_CONTEXT = ["settings", "accounts", "admin"];
+
+// ── Nav links are REAL links ─────────────────────────────────────────────────────────────
+// Carolyn 2026-09-11: "on any and all of the nav buttons I want to be able to right click and
+// open in a new tab or click the wheel of the mouse to open in a new tab."
+//
+// So every nav item is an <a href> whose left click is intercepted into same-document
+// navigation, and whose every OTHER click is left to the browser. This guard is what makes
+// that split: bail out for a middle click, any modifier, or an already-handled event, and the
+// anchor behaves like the plain link it is.
+//
+// ⚠️ The href only opens correctly where `_redirects` is in force — `/portal/* /portal.html
+// 200` is what makes /portal/settings/colors a real address. A plain static server ignores
+// that file, so a middle click 404s LOCALLY while left click still works. Beta and production
+// are the places to test this.
+function ssNavClick(fn) {
+  return (e) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    fn();
+  };
 }
 
 // ── ROW SCOPE: which ROWS, not which TABS ────────────────────────────────────────────────
@@ -903,9 +1213,20 @@ const ssWhenMatch = (cond, p, iso, todayIso) => {
   }
 };
 
+// ⚠️ A BARE yyyy-mm-dd IS A CALENDAR DAY, NOT AN INSTANT, and `new Date("2026-11-20")` is
+// specified to parse it as UTC midnight. Formatted in the viewer's own zone that is the DAY
+// BEFORE for everyone west of UTC — which is Carolyn and every builder on this product. A
+// close date of Nov 20 read "Nov 19, 2026" on both the pipeline card and the contact record.
+//
+// A value carrying a time or a zone IS a real instant and must still be converted to local
+// time, so only the bare form is re-anchored to local midnight.
+function ssDateObj(iso) {
+  const m = typeof iso === "string" && iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date(iso);
+}
 function fmtDate(iso) {
   if (!iso) return "—";
-  try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
+  try { return ssDateObj(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
   catch { return iso; }
 }
 // "Sep 2, 26" — the pipeline card's date, where three of them share one 240px column and
@@ -920,7 +1241,7 @@ function fmtDate(iso) {
 // a record showing "Sep 2, 2026" is the kind of drift nobody files a bug about.
 function fmtDateShort(iso) {
   if (!iso) return "—";
-  try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "2-digit" }); }
+  try { return ssDateObj(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "2-digit" }); }
   catch { return iso; }
 }
 // A whole-dollar figure for the pipeline card. Cents are dropped on purpose — the card answers
@@ -1170,9 +1491,10 @@ function SsLock({ size = 13, color = "#94A3B8", title = "Locked" }) {
 // ─── Designs table ───
 // Fulfillment status (read-only badge). Value is a GHL-derived projection cached on
 // designs.status and refreshed by the sync-design-status edge function on load —
-// EXCEPT 'draft' (migration 063): a browsing lead's silently-saved design, written by
-// save_design alone. It has no GHL estimate, so the sync skips it; a real submit is
-// what promotes it to 'sent'.
+// EXCEPT 'draft' (migration 063): a design nothing has been issued for yet. It has no GHL
+// estimate, so the sync skips it. Since migration 241 (2026-09-15) save_design never
+// promotes: submit-estimate marks it 'sent' once the estimate or quote is actually issued,
+// so a refused Get Quote stays a draft instead of listing a quote nobody received.
 const STATUS_LABELS = { draft: "Draft", sent: "Sent", accepted: "Accepted", invoiced: "Invoiced", delivered: "Delivered" };
 const STATUS_COLORS = {
   draft:     { bg: "#F1F5F9", fg: "#475569" },

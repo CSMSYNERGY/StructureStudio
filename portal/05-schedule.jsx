@@ -1290,7 +1290,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           })}
           {activeCrews.length === 0 && (
             <span style={{ fontSize: 11.5, fontWeight: 700, color: "#B45309" }}>
-              No crews yet — add them in Settings → Team.
+              No crews yet — add them under Settings → Company → Crews.
             </span>
           )}
           {view !== "calendar" && (<>
@@ -3017,7 +3017,7 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
               <option value="">— Pick later —</option>
               {drivers.filter((p) => p.is_driver && p.active).map((p) => <option key={p.id} value={p.id}>{driverLabel(p)}</option>)}
             </select>
-            {drivers.filter((p) => p.is_driver).length === 0 && <div style={{ fontSize: 10.5, color: "#B45309", fontWeight: 700, marginTop: 3 }}>No drivers set up yet — add trucks in Settings → Team.</div>}
+            {drivers.filter((p) => p.is_driver).length === 0 && <div style={{ fontSize: 10.5, color: "#B45309", fontWeight: 700, marginTop: 3 }}>No drivers set up yet — add them under Settings → Company → Drivers.</div>}
           </div>
           <div><span style={lbl}>Date</span><input type="date" style={inp} value={newLoad.loadDate} onChange={(e) => setNewLoad({ ...newLoad, loadDate: e.target.value })} /></div>
           <div style={{ flex: 1, minWidth: 160 }}><span style={lbl}>Route</span><input style={inp} value={newLoad.routeLabel} onChange={(e) => setNewLoad({ ...newLoad, routeLabel: e.target.value })} placeholder='e.g. "Shop → Sedalia → Warrensburg · Hwy 50 W"' /></div>
@@ -3591,7 +3591,15 @@ function SchedLoadHeaderEditor({ l, drivers, nameOf, busy, onSave, onCancel }) {
 // and covers one or more TERRITORIES: broad corridors described in words ("Hwy 50 west of
 // Linn to Kansas City, north to the Iowa line"), never city lists. driver_profiles is
 // service-role only, so everything goes through portal-schedule (admin-gated server-side).
-function DriversTerritoriesCard() {
+// SPLIT INTO TWO TABS on 2026-09-11 (Carolyn): Company -> Crews and Company -> Drivers.
+// ONE component still, with a `section` prop, rather than two — the same shape SettingsView
+// uses for branding/company. Every piece of state here is shared (crews, drivers, territories
+// and the team roster all arrive in ONE list_drivers call, and the driver rows reference the
+// territory rows), so splitting the component would mean two components making the same call
+// and a driver edit not seeing a territory added seconds earlier in the other tab.
+function DriversTerritoriesCard({ section = "all" }) {
+  const showCrews = section === "all" || section === "crews";
+  const showDrivers = section === "all" || section === "drivers";
   const [data, setData] = useState(null);      // { team, drivers, territories, crews }
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -3700,17 +3708,19 @@ function DriversTerritoriesCard() {
 
   return (
     <div style={S.card}>
-      <CardHead title="Crews, drivers & territories" count={null}
+      <CardHead title={showCrews && showDrivers ? "Crews, drivers & territories" : (showCrews ? "Build crews" : "Drivers & territories")} count={null}
         right={<button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>} />
       <p style={{ fontSize: 12, color: "#64748B", fontWeight: 600, lineHeight: 1.5, margin: "0 0 12px" }}>
-        <strong>Crews</strong> are who builds — the Build Schedule calendar flips between them.
-        <strong> Drivers</strong> power the Delivery Schedule: deck length sets what fits on their loads, max width caps what they can haul, territories route the right deliveries to them.
+        {showCrews && <><strong>Crews</strong> are who builds — the Build Schedule calendar flips between them.</>}
+        {showCrews && showDrivers && " "}
+        {showDrivers && <><strong>Drivers</strong> power the Delivery Schedule: deck length sets what fits on their loads, max width caps what they can haul, territories route the right deliveries to them.</>}
       </p>
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {data === null && <p style={{ fontSize: 13, color: "#64748B", padding: 8 }}>Loading…</p>}
 
       {data && (<>
+        {showCrews && (<>
         {/* ── Build crews (094) — one line each; Edit expands in place ── */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "2px 0 8px" }}>
           <span style={{ ...S.lbl, marginBottom: 0 }}>Build crews</span>
@@ -3762,6 +3772,8 @@ function DriversTerritoriesCard() {
           </div>
         )}
 
+        </>)}
+        {showDrivers && (<>
         {/* ── Territories ── */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "2px 0 8px" }}>
           <span style={{ ...S.lbl, marginBottom: 0 }}>Delivery territories</span>
@@ -3912,33 +3924,81 @@ function DriversTerritoriesCard() {
             ))}
           </div>
         )}
+        </>)}
       </>)}
     </div>
   );
 }
 
-// ─── Sales locations + building serial numbers (Settings → Team) ───
-// Locations are where inventory buildings sit on display; the serial block sets the ONE
-// shared per-builder sequence (inventory now, orders when Build Scheduling ships).
-function LocationsCard() {
+// ─── Sales locations (Settings → Company → Locations) ───
+// Where inventory buildings sit on display. The building-serial block used to sit at the
+// bottom of this card; it moved to Company → Business Details on 2026-09-11 (Carolyn: "move
+// building serial numbers to business details") — a shop-wide counter belongs with the
+// business, not with the lots. It is SerialNumbersCard, directly below.
+//
+// SALES TAX PER LOCATION (migration 244). A lot can carry the builder's local rate, and a quote
+// whose sales location has one charges it instead of the company rate. Three choices here are
+// deliberate:
+//   • The tax half reads and saves under settings_crm — the area that owns the company rate —
+//     while this TAB shows on settings_team and its lots save under settings_branding. So it is
+//     its own read (`tax_settings`) and its own save (`save_location_tax`), and CompanyShell
+//     passes what the caller may do. Someone who may edit a lot's address but not its tax
+//     never sees a rate box that could only 403.
+//   • Hidden for a CRM-mode tenant (`ssMode` false). Their CRM figures tax on its own
+//     documents, so a rate here would be a number nothing reads — a builder types it, believes
+//     it, and every quote keeps charging whatever the CRM says. Hidden means NO sales-tax text
+//     at all, a failed read included: this card cannot know the mode until tax_settings
+//     answers, so a failure shows its sentence only once an earlier answer in this mount has
+//     said SS mode, and a function older than this page shows nothing (ssTaxReadUnavailable
+//     in 03-catalog.jsx).
+//   • "Your local rate", never "the correct rate". It is the number the builder typed. Only a
+//     verified lookup is checked against a delivery address, and that lives on the quote.
+function LocationsCard({ canReadTax = false, canEditTax = false }) {
   const [locs, setLocs] = useState(null);        // null = loading
-  const [nextSerial, setNextSerial] = useState("");
   const [form, setForm] = useState(null);        // { id?, name, street, city, state, zip } | null
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  const [tax, setTax] = useState(null);          // tax_settings answer | { err, unavailable } | null (not asked, or loading)
+  const [taxForm, setTaxForm] = useState(null);  // { id, name, rate, label } while one location's rate is open
+  const [taxBusy, setTaxBusy] = useState(null);  // id of the location whose rate is saving
+  const [taxMsg, setTaxMsg] = useState(null);    // { id, ok } | { id, err } — rendered on that location's row
+  // Latest load wins. `canReadTax` can flip once the access map lands, and a slower first
+  // answer arriving after the second would put a stale refusal (or a stale rate) back.
+  const loadSeq = useRef(0);
+  // Has a tax_settings answer in this mount said SS mode? The only thing that lets a failed
+  // re-read show its sentence — see the CRM-mode note above the component.
+  const taxSeenSs = useRef(false);
   const load = useCallback(async () => {
-    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "list_locations" } });
-    if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Could not load locations." }); setLocs([]); return; }
-    setLocs(data.locations || []);
-    setNextSerial(data.nextSerial == null ? "" : String(data.nextSerial));
-  }, []);
+    const seq = ++loadSeq.current;
+    const [res, taxRes] = await Promise.all([
+      sb.functions.invoke("portal-settings", { body: { action: "list_locations" } }),
+      canReadTax ? sb.functions.invoke("portal-settings", { body: { action: "tax_settings" } }) : Promise.resolve(null),
+    ]);
+    if (seq !== loadSeq.current) return;
+    const { data, error } = res;
+    if (error || !data || data.error) { setMsg({ err: (data && data.error) || (error && error.message) || "Could not load locations." }); setLocs([]); }
+    else setLocs(data.locations || []);
+    if (!taxRes) { setTax(null); return; }
+    // The invoke wrapper has already swapped a refusal's generic "non-2xx" for the server's
+    // own sentence, so error.message is what the server said.
+    if (taxRes.error || !taxRes.data || taxRes.data.error) {
+      setTax({
+        err: (taxRes.data && taxRes.data.error) || (taxRes.error && taxRes.error.message) || "Couldn't load your sales tax rates.",
+        unavailable: ssTaxReadUnavailable(taxRes.error),
+      });
+    } else {
+      if (taxRes.data.ssMode === true) taxSeenSs.current = true;
+      setTax(taxRes.data);
+    }
+  }, [canReadTax]);
   useEffect(() => { load(); }, [load]);
   const saveLoc = async () => {
     if (!form || !String(form.name || "").trim()) { setMsg({ err: "Give the location a name." }); return; }
     setBusy(true); setMsg(null);
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_location", ...form } });
     setBusy(false);
-    if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Save failed." }); return; }
+    // error.message too: on a refusal `data` is null and the server's sentence is on the error.
+    if (error || !data || data.error) { setMsg({ err: (data && data.error) || (error && error.message) || "Save failed." }); return; }
     setForm(null); setMsg({ ok: "Location saved." }); load();
   };
   const delLoc = async (l) => {
@@ -3946,28 +4006,87 @@ function LocationsCard() {
     setBusy(true); setMsg(null);
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "delete_location", id: l.id } });
     setBusy(false);
-    if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Delete failed." }); return; }
+    if (error || !data || data.error) { setMsg({ err: (data && data.error) || (error && error.message) || "Delete failed." }); return; }
     load();
   };
-  const saveSerial = async () => {
-    setBusy(true); setMsg(null);
-    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_serial_start", nextSerial: Number(nextSerial) } });
-    setBusy(false);
-    if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Save failed." }); return; }
-    setMsg({ ok: `Next building will be #${data.nextSerial}.` });
+  // Percent in, percent out — the server converts to the stored fraction and back, the same
+  // contract as the company rate. Rounded for display only, so 7.25 never reads 7.249999.
+  const pctText = (v) => String(Math.round(Number(v) * 10000) / 10000);
+  // Blank is a real answer ("no local rate — use the company rate") and goes as "", which the
+  // server stores as null. `clear` is the Remove button on a location that has lost its address.
+  const saveTax = async (target, clear = false) => {
+    if (!target) return;
+    const raw = clear ? "" : String(target.rate == null ? "" : target.rate).trim();
+    if (raw) {
+      const n = Number(raw);
+      // A courtesy check so a typo is caught at the box; the server's range check is the one
+      // that counts, and its sentence is what shows if the two ever disagree.
+      if (!Number.isFinite(n) || n < 0 || n > 25) {
+        setTaxMsg({ id: target.id, err: "Enter the rate as a percentage between 0 and 25 — for example 7.25." });
+        return;
+      }
+    }
+    setTaxBusy(target.id); setTaxMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: {
+      action: "save_location_tax", locationId: target.id,
+      taxRatePct: raw ? Number(raw) : "",
+      taxLabel: clear ? null : (String(target.label || "").trim() || null),
+    } });
+    setTaxBusy(null);
+    if (error || !data || data.error) {
+      setTaxMsg({ id: target.id, err: (data && data.error) || (error && error.message) || "Couldn't save that tax rate." });
+      return;
+    }
+    const saved = data.location || null;
+    if (saved) {
+      setTax((t) => (t && !t.err)
+        ? { ...t, locations: (t.locations || []).some((x) => x.id === saved.id)
+          ? t.locations.map((x) => (x.id === saved.id ? saved : x))
+          : [...(t.locations || []), saved] }
+        : t);
+    } else load();
+    setTaxForm(null);
+    const rate = saved ? saved.taxRatePct : (raw ? Number(raw) : null);
+    setTaxMsg({ id: target.id, ok: rate != null
+      ? `Saved — your local rate for ${target.name} is ${pctText(rate)}%.`
+      : `Removed — ${target.name} has no local rate, so its quotes use your company rate.` });
   };
   const F = form || {};
+  // CRM-mode tenants never see the tax half at all — see the note above the component.
+  const showTax = !!(tax && !tax.err && tax.ssMode === true);
+  const taxById = {};
+  if (showTax) for (const t of tax.locations || []) taxById[t.id] = t;
+  // list_locations carries the same three fields for a settings_crm reader, so a location
+  // tax_settings did not return (added between the two reads) still gets its line.
+  const taxOf = (l) => taxById[l.id] || (typeof l.taxReady === "boolean" ? l : null);
+  const linkBtn = { background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700 };
   return (
     <div style={S.card}>
       <div style={S.h2}>Sales Locations</div>
       <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
         The lots where your buildings sit on display. Every inventory building is tracked to one of these.
+        {showTax && <>
+          {" "}A location can also carry your local sales tax rate: a quote made for that location charges it
+          instead of your company rate{tax.companyRatePct != null ? ` (${pctText(tax.companyRatePct)}%)` : ""}.
+          {/* Said up front rather than left to a missing button: a reader who can see the
+              rates but not change them should know who can, not wonder where the control went. */}
+          {!canEditTax && " Only someone who can edit CRM Connection settings can change these rates."}
+        </>}
       </div>
       {msg && msg.ok && <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", color: "#15803D", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 600, marginBottom: 10 }}>{msg.ok}</div>}
       {msg && msg.err && <div style={{ ...S.err, marginBottom: 10 }}>{msg.err}</div>}
+      {/* The tax read failing must not take the lots with it — they came from their own call.
+          Shown only where this mount has already seen an SS-mode answer, and never for an
+          answer that means "no tax section here" — see the note above the component. */}
+      {canReadTax && tax && tax.err && !tax.unavailable && taxSeenSs.current && (
+        <div style={{ fontSize: 12, color: "#B45309", fontWeight: 600, marginBottom: 10 }}>Sales tax rates couldn't load: {tax.err}</div>
+      )}
       {locs === null && <p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p>}
       {locs && locs.length === 0 && <p style={{ fontSize: 13, color: "#64748B" }}>No locations yet — add your first lot below.</p>}
-      {(locs || []).map((l) => (
+      {(locs || []).map((l) => {
+        const t = showTax ? taxOf(l) : null;
+        const editingTax = !!(taxForm && taxForm.id === l.id);
+        return (
         <div key={l.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 2px", borderBottom: "1px solid #F1F5F9", fontSize: 13, flexWrap: "wrap" }}>
           <strong style={{ minWidth: 140 }}>{l.name}</strong>
           <span style={{ color: "#64748B", flex: 1, minWidth: 200 }}>{[l.street, l.city, l.state, l.zip].filter(Boolean).join(", ") || "No address"}</span>
@@ -3976,8 +4095,61 @@ function LocationsCard() {
             style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: ACCENT, fontWeight: 700 }}>Edit</button>
           <button type="button" onClick={() => delLoc(l)} disabled={busy}
             style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", color: "#94A3B8", fontWeight: 700 }}>Remove</button>
+          {/* ── Sales tax line. `taxReady` is the server's answer to "does this lot have a state
+                 it recognises and a ZIP" — a rate on a lot with no usable address is refused
+                 (reason location_address), so the Set button is not offered there at all and
+                 the sentence says what to fix instead. A rate saved before the address was
+                 removed can still be taken off. ── */}
+          {t && (
+            <div style={{ flexBasis: "100%", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12.5 }}>
+              <span style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8" }}>Sales tax</span>
+              {t.taxRatePct != null ? (
+                <span style={{ color: "#1E293B" }}>
+                  <strong>{pctText(t.taxRatePct)}%</strong>
+                  <span style={{ color: "#64748B" }}> your local rate{t.taxLabel ? ` · shows as “${t.taxLabel}”` : ""}</span>
+                </span>
+              ) : (
+                <span style={{ color: "#64748B" }}>No local rate — quotes for this location use your company rate</span>
+              )}
+              {!t.taxReady && <span style={{ color: "#B45309", fontWeight: 600 }}>Add the state and ZIP to set a tax rate</span>}
+              {canEditTax && t.taxReady && !editingTax && (
+                <button type="button" disabled={!!taxBusy} style={linkBtn}
+                  onClick={() => { setTaxMsg(null); setTaxForm({ id: l.id, name: l.name, rate: t.taxRatePct == null ? "" : pctText(t.taxRatePct), label: t.taxLabel || "" }); }}>
+                  {t.taxRatePct != null ? "Change rate" : "Set a local rate"}
+                </button>
+              )}
+              {canEditTax && !t.taxReady && t.taxRatePct != null && (
+                <button type="button" disabled={!!taxBusy} style={{ ...linkBtn, color: "#94A3B8" }}
+                  onClick={() => saveTax({ id: l.id, name: l.name }, true)}>
+                  {taxBusy === l.id ? "Removing…" : "Remove rate"}
+                </button>
+              )}
+            </div>
+          )}
+          {t && editingTax && (
+            <div style={{ flexBasis: "100%", background: "#F8FAFC", border: "1px dashed #CBD5E1", borderRadius: 10, padding: "11px 12px" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 10, maxWidth: 480 }}>
+                <div><span style={S.lbl}>Local tax rate (%)</span>
+                  <input style={S.input} value={taxForm.rate} inputMode="decimal" placeholder="e.g. 7.25"
+                    onChange={(e) => { const v = e.target.value; setTaxForm((f) => ({ ...f, rate: v })); }} />
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Leave blank to use your company rate. Enter 0 if you don't collect tax here.</div></div>
+                <div><span style={S.lbl}>Tax label (optional)</span>
+                  <input style={S.input} value={taxForm.label} maxLength={40} placeholder={tax.companyLabel || "Sales tax"}
+                    onChange={(e) => { const v = e.target.value; setTaxForm((f) => ({ ...f, label: v })); }} />
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How the tax line reads on this location's quotes. Blank uses your company label.</div></div>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button type="button" onClick={() => saveTax(taxForm)} disabled={!!taxBusy} style={S.btn(ACCENT, "#FFF")}>{taxBusy ? "Saving…" : "Save rate"}</button>
+                <button type="button" onClick={() => setTaxForm(null)} disabled={!!taxBusy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+              </div>
+            </div>
+          )}
+          {taxMsg && taxMsg.id === l.id && (
+            <div style={{ ...(taxMsg.err ? S.err : S.okMsg), flexBasis: "100%", marginBottom: 0, padding: "8px 12px" }}>{taxMsg.err || taxMsg.ok}</div>
+          )}
         </div>
-      ))}
+        );
+      })}
       {form ? (
         <div style={{ background: "#F8FAFC", border: "1px dashed #CBD5E1", borderRadius: 10, padding: "13px 14px", marginTop: 12 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 10 }}>
@@ -3997,7 +4169,49 @@ function LocationsCard() {
           <button type="button" onClick={() => setForm({ name: "", street: "", city: "", state: "", zip: "" })} style={S.btn(ACCENT, "#FFF")}>+ Add location</button>
         </div>
       )}
-      <div style={{ borderTop: "1px solid #EDF1F6", margin: "18px 0 14px" }}></div>
+      {/* Says what these locations DO, not what they will one day do. The previous copy
+          promised "assigning team members to locations arrives with Build & Delivery
+          Scheduling" — scheduling shipped 2026-08-04 and renders on this very tab, while
+          member↔location assignment was never built, so the banner read as a delivered
+          feature the owner could not find. */}
+      <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", color: "#1E3A8A", borderRadius: 10, padding: "10px 14px", fontSize: 12.5, fontWeight: 600, marginTop: 14, lineHeight: 1.5 }}>
+        📍 Locations are where your buildings live: each inventory building sits at one, and
+        the Delivery Schedule uses it as the pickup point when that building sells.
+      </div>
+    </div>
+  );
+}
+
+// ─── Building serial numbers (Settings → Company → Business Details) ───
+// ONE shared per-builder sequence: every inventory building and every customer order that
+// reaches the build board takes the next number, in creation order.
+//
+// Reads the number from `list_locations`, which returns it alongside the lots — that action is
+// named for its main payload, not its only one, and a second endpoint for one integer was not
+// worth it. That shared read is also why this card and LocationsCard can be on different tabs
+// without either knowing about the other.
+function SerialNumbersCard() {
+  const [nextSerial, setNextSerial] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    sb.functions.invoke("portal-settings", { body: { action: "list_locations" } }).then(({ data, error }) => {
+      if (!alive) return;
+      if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Could not load the serial number." }); return; }
+      setNextSerial(data.nextSerial == null ? "" : String(data.nextSerial));
+    });
+    return () => { alive = false; };
+  }, []);
+  const saveSerial = async () => {
+    setBusy(true); setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_serial_start", nextSerial: Number(nextSerial) } });
+    setBusy(false);
+    if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Save failed." }); return; }
+    setMsg({ ok: `Next building will be #${data.nextSerial}.` });
+  };
+  return (
+    <div style={S.card}>
       <div style={S.h2}>Building Serial Numbers</div>
       <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
         Every inventory building — and every customer order that reaches your build board — takes
@@ -4016,15 +4230,8 @@ function LocationsCard() {
           It advances on its own and can never go backwards past a used number.
         </span>
       </div>
-      {/* Says what these locations DO, not what they will one day do. The previous copy
-          promised "assigning team members to locations arrives with Build & Delivery
-          Scheduling" — scheduling shipped 2026-08-04 and renders on this very tab, while
-          member↔location assignment was never built, so the banner read as a delivered
-          feature the owner could not find. */}
-      <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", color: "#1E3A8A", borderRadius: 10, padding: "10px 14px", fontSize: 12.5, fontWeight: 600, marginTop: 14, lineHeight: 1.5 }}>
-        📍 Locations are where your buildings live: each inventory building sits at one, and
-        the Delivery Schedule uses it as the pickup point when that building sells.
-      </div>
+      {msg && msg.ok && <div style={{ ...S.okMsg, marginTop: 12 }}>{msg.ok}</div>}
+      {msg && msg.err && <div style={{ ...S.err, marginTop: 12 }}>{msg.err}</div>}
     </div>
   );
 }

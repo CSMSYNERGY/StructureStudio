@@ -220,6 +220,7 @@ class Attr {
   getY(i: number): number { return this.rows[i][1]; }
   getZ(i: number): number { return this.rows[i][2]; }
   setXY(i: number, x: number, y: number): void { this.rows[i][0] = x; this.rows[i][1] = y; }
+  setZ(i: number, z: number): void { this.rows[i][2] = z; }
 }
 
 type Group = { start: number; count: number; materialIndex: number };
@@ -277,25 +278,33 @@ const GABLE_MAT = { tag: "gableMat" };
 
 type Mesh = { geometry: unknown; material: unknown };
 
+// capOut0 / capOutL / shedBandExtended / moveCapsFlush are the flush-cap bindings (2026-09-14):
+// the block stretches the tall band's ends out to the moved cap planes, flags that it did, and then
+// calls the cap move. The flag is handed back as the return value so a test can read it.
 const runRepaint = new Function(
   "roofCfg", "S", "L", "uAxisIsX", "gableGeom", "rg", "THREE", "wallMat", "gableMat",
-  REPAINT_CMP,
+  "capOut0", "capOutL", "shedBandExtended", "moveCapsFlush",
+  REPAINT_CMP + "\nreturn shedBandExtended;",
 ) as (
   roofCfg: unknown, S: number, L: number, uAxisIsX: boolean, gableGeom: Geom,
   rg: { add: (m: Mesh) => void }, THREE: { Mesh: new (g: unknown, m: unknown) => Mesh },
   wallMat: unknown, gableMat: unknown,
-) => void;
+  capOut0: number, capOutL: number, shedBandExtended: boolean, moveCapsFlush: () => void,
+) => boolean;
 
 /** Run the SHIPPED block over a stub geometry and report what it did. */
-function repaint(cfg: unknown, S: number, L: number, uAxisIsX: boolean, g: Geom) {
+/** Run the SHIPPED block over a stub geometry and report what it did. capOut 0 = caps not moved. */
+function repaint(cfg: unknown, S: number, L: number, uAxisIsX: boolean, g: Geom, capOut0 = 0, capOutL = 0) {
   const added: Mesh[] = [];
   const THREE = {
     Mesh: class implements Mesh {
       constructor(readonly geometry: unknown, readonly material: unknown) {}
     },
   };
-  runRepaint(cfg, S, L, uAxisIsX, g, { add: (m: Mesh) => added.push(m) }, THREE, WALL_MAT, GABLE_MAT);
-  return { groups: g.groups.map((x) => ({ ...x })), mesh: added[0], added };
+  let capMoves = 0;
+  const bandExtended = runRepaint(cfg, S, L, uAxisIsX, g, { add: (m: Mesh) => added.push(m) }, THREE, WALL_MAT, GABLE_MAT,
+    capOut0, capOutL, false, () => { capMoves++; });
+  return { groups: g.groups.map((x) => ({ ...x })), mesh: added[0], added, bandExtended, capMoves };
 }
 
 /** A shed cap geometry built from the REAL profile, so no number below is hand-copied. */
@@ -530,4 +539,55 @@ Deno.test("⚠️ THREE_VERSION is still the release the group ordering was veri
     assert(m, `${name}: THREE_VERSION declaration not found`);
     assertEquals(m![1], PIN, `${name}: three.js was bumped — re-verify the ExtrudeGeometry group order`);
   }
+});
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// PART 4 — flush caps (2026-09-14): the band follows the caps, or the caps stay put.
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+Deno.test("flush caps: the tall band's ends move out WITH the caps, so the tall corners stay closed", () => {
+  // Review wf_a6073b91-18a (upheld 2/2): moving only the caps opened a 0.15 ft slot at both tall-wall
+  // corners, between the cap's edge and the band's end. The band's own triangles must reach the
+  // moved cap planes, their UVs must follow in the wall's absolute frame, and nothing else may move.
+  for (const [w, l] of [[12, 16], [16, 12]]) {
+    const f = shedFixture(w, l);
+    const pos = f.g.attributes.position;
+    const band = bandVertices(f.capCount, f.g, f.S);
+    assert(band.length > 0, `${w}x${l}: fixture has no band`);
+    const bandZ = band.map((i) => pos.getZ(i));
+    const others: number[] = [];
+    for (let i = 0; i < pos.count; i++) if (!band.includes(i)) others.push(i);
+    const othersZ = others.map((i) => pos.getZ(i));
+
+    const r = repaint(SHED, f.S, f.L, f.uAxisIsX, f.g, 0.15, 0.15);
+    assertEquals(r.bandExtended, true, `${w}x${l}: the pass must report the band extended`);
+    assertEquals(r.capMoves, 1, `${w}x${l}: the cap move runs exactly once`);
+    band.forEach((i, k) => {
+      const z0 = bandZ[k];
+      const want = Math.abs(z0) < 1e-6 ? -0.15 : (Math.abs(z0 - f.L) < 1e-6 ? f.L + 0.15 : z0);
+      assertEquals(pos.getZ(i), want, `${w}x${l}: band vertex ${i} z`);
+      assertEquals(f.g.attributes.uv.getX(i), f.uAxisIsX ? want : f.L - want, `${w}x${l}: band vertex ${i} u`);
+    });
+    others.forEach((i, k) => assertEquals(pos.getZ(i), othersZ[k], `${w}x${l}: vertex ${i} is not the band and must not move`));
+  }
+});
+
+Deno.test("flush caps: with the caps NOT moved, the band's geometry is exactly what it was", () => {
+  const f = shedFixture(12, 16);
+  const pos = f.g.attributes.position;
+  const before = Array.from({ length: pos.count }, (_, i) => pos.getZ(i));
+  const r = repaint(SHED, f.S, f.L, f.uAxisIsX, f.g);
+  assertEquals(r.bandExtended, true, "the band was still found and repainted");
+  assertEquals(Array.from({ length: pos.count }, (_, i) => pos.getZ(i)), before, "no z may change at capOut 0");
+});
+
+Deno.test("flush caps: a band that cannot be identified is reported NOT extended, so a shed keeps its old cap plane", () => {
+  // moveCapsFlush refuses a shed unless this flag is true. A geometry with no tall-plane triangles (a
+  // gable's, under a shed-typed style) must leave it false, or the caps would move with no band to
+  // meet them and the slot would come back.
+  const GABLE = { type: "gable", pitch: 0.4 };
+  const { S, L, uAxisIsX, tallNeg } = d3RoofAxes(GABLE, 12, 16);
+  const { dedup } = d3RoofProfile(GABLE, S, H, tallNeg);
+  const { g } = extrudeStub(dedup, L);
+  const r = repaint(SHED, S, L, uAxisIsX, g, 0.15, 0.15);
+  assertEquals(r.bandExtended, false);
 });

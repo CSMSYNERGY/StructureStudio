@@ -182,7 +182,7 @@ function SmsErrorList({ errors }) {
  *  gate nothing here: they add a line to the confirmation on the paid press. Advice, bought with
  *  three seconds, not a gate.
  *
- *  The three-way verdict cell is lifted from the Email Sending DNS table, where an advisory row
+ *  The three-way verdict cell is lifted from the Email Settings DNS table, where an advisory row
  *  already had to be visibly different from a failing one. */
 const SMS_CHECK_MARK = {
   pass: { glyph: "✓", color: "#16A34A", title: "Looks right" },
@@ -343,13 +343,13 @@ function SmsCopyForm({ copy, setCopy, readOnly, optInUrl }) {
         or number in an example — write <code>[Name]</code> instead.
       </p>
       <SmsField label="In a sentence, what will you text customers about?">
-        <input style={SMS_INPUT} value={copy.description} disabled={readOnly}
+        <textarea style={SMS_TEXTAREA} rows={4} value={copy.description} disabled={readOnly}
           placeholder="Quote follow-ups, delivery times and build updates for customers who asked us for a quote."
           onChange={(e) => setCopy({ ...copy, description: e.target.value })} />
       </SmsField>
       <SmsField label="How do people agree to be texted?"
         hint="Describe where they tick the box. The carriers will look for it on your website, so it has to match what is actually there.">
-        <input style={SMS_INPUT} value={copy.messageFlow} disabled={readOnly}
+        <textarea style={SMS_TEXTAREA} rows={4} value={copy.messageFlow} disabled={readOnly}
           placeholder="Customers tick a box giving us permission to text them when they request a quote on our website."
           onChange={(e) => setCopy({ ...copy, messageFlow: e.target.value })} />
       </SmsField>
@@ -457,6 +457,18 @@ function SmsField({ label, hint, children, wide }) {
 const SMS_INPUT = {
   width: "100%", padding: "9px 11px", border: "1px solid #CBD5E1", borderRadius: 8,
   fontSize: 13, fontFamily: "inherit", boxSizing: "border-box", background: "#fff",
+};
+
+/** Same box, given room to breathe. The consent answer is a PARAGRAPH — it has to name who is
+ *  texting, what about, that frequency varies, that rates may apply, how to stop, and (since
+ *  30924) carry the public opt-in page address, which the “Add this link” button appends to
+ *  the end. In a one-line input every one of those sentences scrolls out of sight as it is
+ *  typed, and the appended link lands where the builder cannot see it.
+ *  The description answer uses it too (2026-09-16): its label says "in a sentence", but what
+ *  the carriers accept names the sender, who is texted, what about and how they agreed, which
+ *  is three or four sentences that a one-line input cut off mid-word. */
+const SMS_TEXTAREA = {
+  ...SMS_INPUT, minHeight: 92, lineHeight: 1.5, resize: "vertical", display: "block",
 };
 
 function SmsMessagingView({ clientId, viewingLabel, canEdit }) {

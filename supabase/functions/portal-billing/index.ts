@@ -99,8 +99,11 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
   // Auth + tenant resolution, shared with portal-settings / sync-design-status.
-  // requireBilling: an operator additionally needs the can_bill capability here, because
-  // every non-read action on this function moves real money against the tenant's card.
+  // requireBilling: an operator additionally needs the can_bill capability for every WRITE
+  // here, because every non-read action on this function moves real money against the
+  // tenant's card. `status` (GATES: "open") is a read and any operator may make it — it is
+  // how view-as learns what the viewed tenant is entitled to (2026-09-15); the commercial
+  // half of its answer is filtered below by `mine`.
   const admin = createClient(supabaseUrl, serviceKey);
   const r = await resolveTenant(req, admin, {
     gates: GATES,
@@ -326,7 +329,33 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   };
 
   const requiredFeatures = [...new Set(plans.filter((p) => p.required).map((p) => p.feature))];
-  // PAID-ONLY features: the exempt/transition blankets deliberately do NOT cover these.
+  // PAID-ONLY features: for a CUSTOMER, a real subscription is the only way in. The
+  // transition blanket (`billing_exempt_until`) still does not cover these.
+  //
+  // ⚠️ CHANGED 2026-09-21 — `billing_exempt` NOW DOES. Carolyn: "In Structure Studio when
+  // [Non-billable] is selected the account should have full access to everything." The
+  // `(internal || exempt)` head of the features map below short-circuits ahead of this set,
+  // so a non-billable account gets all four of these plus 3D. Migration 228 carries the
+  // full reasoning; 169_internal_account.sql's "why a new flag rather than widening
+  // billing_exempt" block is AMENDED by it and must be read together with it.
+  //
+  // WHAT MADE THAT SAFE, AND IT IS A FACT ABOUT THE DATA, NOT ABOUT THIS CODE. The
+  // original objection — "every tenant predating the billing gate is exempt, so the
+  // blanket would hand every paid feature to everyone" — was true when it was written and
+  // is no longer true. Verified live 2026-09-21: the only `billing_exempt` tenants are
+  // demo-sheds, pw-demo-barns, structure-studio, support-demo, test and testtttttt — all
+  // internal/demo/test, none holding a subscription — while every real builder
+  // (junior-barns, yoder-barns, preferred-structures) is billing_exempt = false with live
+  // subscriptions. The grandfathering flags were cleaned up as those builders started
+  // paying, which is what dissolved the objection.
+  //
+  // THE STANDING CONSEQUENCE: `billing_exempt` is no longer a billing posture, it is an
+  // ENTITLEMENT GRANT. Setting it on a real builder hands them ~$755/mo of features and
+  // free AI generations. The decisions recorded below are still the rule for customers;
+  // they are enforced now by nobody ticking that box on one, and by the confirm dialog in
+  // portal/07-admin.jsx. If the exempt list ever grows a paying builder again, this head
+  // has to be revisited — re-run the check in migration 228 before assuming otherwise.
+  //
   // Carolyn 2026-08-04: "No one gets grandfathered into this" — the scheduling suite
   // (Build Schedule + Delivery Schedule + Repairs + drivers/territories) is available
   // ONLY with a real subscription, for every tenant: grandfathered, internal, and
@@ -389,20 +418,26 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
 
   const features: Record<string, boolean> = {};
   for (const p of plans) {
-    features[p.feature] = internal
-      // Our own account: everything, unconditionally, ahead of every other rule.
+    features[p.feature] = (internal || exempt)
+      // Our own account, or one an operator has marked NON-BILLABLE: everything,
+      // unconditionally, ahead of every other rule. `exempt` joined `internal` here on
+      // 2026-09-21 — see the block above PAID_ONLY_FEATURES for why that became safe.
+      // One head covers pay-only AND grantable in a single move, which is what "full
+      // access to everything" requires: relaxing only the pay-only branch would still
+      // have left 3D dark.
       ? true
       : PAID_ONLY_FEATURES.has(p.feature)
-      // Pay-only: a real subscription is the ONLY way in, for everyone.
+      // Pay-only: for a CUSTOMER, a real subscription is the only way in.
       ? Boolean(featureState.get(p.feature)?.usable)
       : grantable.has(p.feature)
         // GRANTABLE: the grant, or a real subscription — and deliberately NOT the
-        // exempt/inTransition blankets. That omission is the whole design. Every tenant
-        // predating the billing gate is `exempt`, so leaving the blanket here would hand
-        // 3D to all of them the moment this shipped, which is the opposite of "not all
-        // clients need to see it" and would make the gate decorative.
+        // inTransition blanket. A dated free period is "you haven't started paying yet",
+        // not a comp, so it must not hand out 3D.
         ? (granted.has(p.feature) || Boolean(featureState.get(p.feature)?.usable))
-        : (exempt || inTransition || Boolean(featureState.get(p.feature)?.usable));
+        // `exempt` is NOT in this tail any more: the head short-circuits it. Leaving it
+        // here would be unreachable code that teaches the next reader the opposite of
+        // the rule above. `inTransition` stands alone, and keeps its narrower meaning.
+        : (inTransition || Boolean(featureState.get(p.feature)?.usable));
   }
 
   let entState = "active";
@@ -473,7 +508,19 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // say "switched on for you by Structure Studio" instead of implying they bought it.
     // Filtered through `grantable` so a stale row for a feature that has since been made
     // non-grantable never shows up as an entitlement the tenant supposedly holds.
-    granted: [...granted].filter((f) => grantable.has(f)),
+    // A non-billable or internal account is ALSO shown its grantable features as comps.
+    // `features` above already reads true for them, but the browser resolves 3D off THIS
+    // array (12-shell.jsx view3dUnlocked), so a comped account absent here would get full
+    // access to everything except the one tab it is most often comped for. Still filtered
+    // through `grantable`, so this can never claim a purchase, and skipped where a real
+    // subscription already confers the feature — a paying tenant must never be told their
+    // purchase was a comp.
+    granted: [...new Set([
+      ...[...granted].filter((f) => grantable.has(f)),
+      ...((internal || exempt)
+        ? [...grantable].filter((f) => !featureState.get(f)?.usable)
+        : []),
+    ])],
   };
 
   if (action === "status") {
@@ -509,7 +556,11 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // the portal, and withholding it would lock the product instead of the tab. Nobody but
     // an owner gets the commercial detail: what this business pays, what discount it has,
     // whether a card is on file, or the checkout keys to put a new one there.
-    const mine = canRead("settings_billing");
+    // An operator without can_bill can READ status since 2026-09-15 (resolveTenant refuses
+    // them writes only). Their area map is the owner's, so canRead alone would say yes;
+    // the can_bill axis is checked here explicitly so the money fields stay with people
+    // who may act on them. Support operators already resolve settings_billing to "none".
+    const mine = canRead("settings_billing") && !(operator && !operator.canBill);
 
     // WALLET. Behind the same field filter as the rest of the commercial detail: a
     // balance is what this business has paid for, so it belongs with `discount` and
@@ -538,6 +589,11 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
           if (t.kind === "adjustment") return t.memo ? `Adjustment — ${t.memo}` : "Adjustment";
           if (t.kind === "refund") return "Refund";
           if (t.meter_kind === "video_3d_generation") return "3D generation from a video";
+          // The two sales-tax meters (179). Only reachable since migration 244 taught
+          // wallet_credit to record meter_kind — before it every direct-post debit landed with
+          // a null kind and read "Usage", which is exactly the row a builder cannot explain.
+          if (t.meter_kind === "tax_lookup") return "Tax verification";
+          if (t.meter_kind === "tax_invoice") return "Invoice tax check";
           return "Usage";
         };
         wallet = {

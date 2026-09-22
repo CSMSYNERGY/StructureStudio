@@ -9,8 +9,9 @@
 // and `setup_*` actions hard operator-only. Tenants have no read path to any pm_* table —
 // everything a client may see is COPIED into feedback_submissions/feedback_comments by the
 // server, never read from here.
-// The floating PMQuickAdd button in 12-shell is gated the same way (it was the last thing
-// left on the old isOperator gate until 2026-09-07).
+// (The floating "＋ Board item" quick-add that once lived in 12-shell was REMOVED on
+// 2026-09-13 — Carolyn: "We can do it in the board itself and the button takes space on the
+// screen." Items are added on the board: the per-bucket row or ＋ Add item above the headers.)
 //
 // Boards, groups and columns are user-defined (Carolyn's "Monday but better"): the table
 // itself is the generic engine in 09-table-engine.jsx; this file owns data loading, the
@@ -41,11 +42,42 @@ const PM_CTL_SEL = { border: "none", outline: "none", background: "none", fontSi
   color: "#1E293B", fontFamily: "inherit", cursor: "pointer", maxWidth: 170 };
 const PM_VIEW_CHIP = { border: "1px solid #CBD5E1", borderRadius: 999, background: "#FFF", color: "#334155",
   padding: "5px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" };
-function PMCtl({ label, children }) {
+// Popover under a toolbar pill (Columns, Views, the date filter). One shape, so the three
+// open the same way and the toolbar stays a single 32px row no matter what is inside them.
+const PM_POP = { position: "absolute", top: "110%", left: 0, zIndex: 60, background: "#FFF", border: "1px solid #CBD5E1",
+  borderRadius: 10, boxShadow: "0 12px 30px rgba(15,23,42,.18)", padding: 8, minWidth: 200, display: "flex", flexDirection: "column", gap: 2 };
+const PM_POP_ROW = (on) => ({ background: on ? "#EEF2FF" : "none", border: "none", textAlign: "left", cursor: "pointer", fontFamily: "inherit",
+  fontSize: 12.5, fontWeight: 700, color: on ? ACCENT : "#334155", padding: "6px 10px", borderRadius: 7, whiteSpace: "nowrap" });
+const PM_POP_LBL = { display: "flex", flexDirection: "column", gap: 3, fontSize: 10.5, fontWeight: 800, color: "#94A3B8", letterSpacing: 0.4, textTransform: "uppercase" };
+const PM_POP_SEL = { ...PM_CTL_SEL, border: "1px solid #CBD5E1", borderRadius: 7, padding: "5px 8px", maxWidth: "none", fontSize: 12.5, textTransform: "none", letterSpacing: 0 };
+// The pill's small uppercase prefix ("VIEW", "DUE") — the label sits INSIDE the control so
+// every pill shares one height and baseline (PMPickPill uses it for the facets and Group by).
+const PM_PILL_TAG = { fontSize: 10.5, fontWeight: 800, color: "#94A3B8", letterSpacing: 0.4 };
+
+// A single-choice pill: TAG + the current value + ▾, opening the choices in a popover.
+// It replaced a native <select> inside the pill (Carolyn 2026-09-12: "the boxes to select
+// are much wider than they need to be") — a native select is always as wide as its WIDEST
+// option, so "STATUS All" was the width of "Awaiting review" plus a chevron, and six of
+// those pushed the row into a scrollbar. This pill is the width of the text it shows.
+function PMPickPill({ tag, options, value, onPick, open, onToggle, allLabel }) {
+  const cur = options.find((o) => o.key === value);
+  const on = cur != null;
   return (
-    <span style={{ ...PM_CTL, padding: "0 8px", gap: 5 }}>
-      {label && <span style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</span>}
-      {children}
+    <span style={{ position: "relative", display: "inline-flex", flex: "0 0 auto" }}>
+      <button type="button" onClick={onToggle}
+        style={{ ...PM_CTL, padding: "0 10px", cursor: "pointer", fontWeight: 700, fontFamily: "inherit", gap: 6,
+          color: on ? ACCENT : "#334155", borderColor: on ? ACCENT : "#CBD5E1" }}>
+        <span style={PM_PILL_TAG}>{String(tag).toUpperCase()}</span>
+        {cur ? cur.label : allLabel} ▾
+      </button>
+      {open && (
+        <div style={PM_POP}>
+          {allLabel != null && <button type="button" onClick={() => onPick(null)} style={PM_POP_ROW(!on)}>{allLabel}</button>}
+          {options.map((o) => (
+            <button key={o.key} type="button" onClick={() => onPick(o.key)} style={PM_POP_ROW(o.key === value)}>{o.label}</button>
+          ))}
+        </div>
+      )}
     </span>
   );
 }
@@ -240,7 +272,20 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
   const [err, setErr] = useState("");
   const [name, setName] = useState(item.name);
   const [compose, setCompose] = useState("");
-  const [toClient, setToClient] = useState(false);
+  // A REPLY ON A CLIENT-REPORTED CARD DEFAULTS TO VISIBLE. It used to default to false
+  // unconditionally, which is the bug: a card filed from a builder's portal and a card an
+  // operator typed themselves behaved identically, so every reply on somebody's own bug
+  // report landed INTERNAL unless the operator remembered the tick box each time. The builder
+  // watching their submission saw silence and concluded nothing was happening.
+  //
+  // `feedback_submission_id` is the only structural difference between the two kinds of card,
+  // and it was already read three times right here — to enable the checkbox, to colour its
+  // label, and to show the CLIENT tag. It just never reached the default.
+  //
+  // ⚠️ This cannot leak on an internal card: the checkbox is disabled without that id, and
+  // add_update refuses clientVisible on an item that has none (portal-projects 400). The
+  // default is a convenience on top of a server rule, not a substitute for one.
+  const [toClient, setToClient] = useState(Boolean(item && item.feedback_submission_id));
   const [busy, setBusy] = useState(false);
   const [files, setFiles] = useState([]);          // staged for the next post
   const [viewing, setViewing] = useState(null);    // attachment opened in the popup
@@ -267,7 +312,9 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
       // Files attach to the update that was just created, so a failed upload leaves the
       // note itself intact and says which file did not make it.
       for (const f of files) await pmUploadTo(item.id, d.update.id, f);
-      setCompose(""); setToClient(false); setFiles([]);
+      // Back to the card's own default, NOT to false — resetting to false after each post
+      // re-creates the original bug one reply later, which is exactly how it would come back.
+      setCompose(""); setToClient(Boolean(item && item.feedback_submission_id)); setFiles([]);
       if (fileRef.current) fileRef.current.value = "";
       loadDetail();
     } catch (e) { setErr(e.message); loadDetail(); }
@@ -616,6 +663,27 @@ function PMLabelEditor({ col, run }) {
                 onChange={(e) => commit(patch(i, { client_status: e.target.value || undefined }))}>
                 <option value="">nothing changes</option>
                 {Object.entries(PM_CLIENT_STATUS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </label>
+          )}
+          {/* WHAT THIS LABEL MEANS TO US, as opposed to what the client is told above.
+              `kind` has been in the seed data and on the server whitelist since 144, and
+              until now NOTHING could set it and nothing read it -- so every label created
+              through this editor since then is untagged. It is the only machine-readable
+              answer to "is this item finished", and a working view that has to guess from
+              label TEXT is the Monday rename lesson waiting to happen again.
+              Blank is deliberate and is not "in progress": an untagged label makes no claim,
+              which is the honest state for the ones nobody has classified yet. */}
+          {isStatus && (
+            <label style={{ fontSize: 11, color: "#64748B", fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
+              means →
+              <select style={{ ...S.input, width: 118, padding: "3px 6px", fontSize: 11.5, fontStyle: l.kind ? "normal" : "italic" }}
+                value={l.kind || ""}
+                onChange={(e) => commit(patch(i, { kind: e.target.value || undefined }))}>
+                <option value="">unclassified</option>
+                <option value="working">being worked on</option>
+                <option value="stuck">stuck</option>
+                <option value="done">finished</option>
               </select>
             </label>
           )}
@@ -1161,6 +1229,13 @@ function ProjectsTab({ sub, onSub }) {
   const [canWrite, setCanWrite] = useState(false);
   const [data, setData] = useState(null);          // { board, columns, groups, items, operators }
   const [err, setErr] = useState("");
+  // A short "Added X to <group>" after a create. It matters because the toolbar's ＋ Add item
+  // files into the intake group, and a live search or facet can hide the new row — the
+  // message says where it went so a vanished item isn't read as a failed one.
+  const [ok, setOk] = useState("");
+  const okTimer = useRef(null);
+  const flashOk = (m) => { setOk(m); clearTimeout(okTimer.current); okTimer.current = setTimeout(() => setOk(""), 3500); };
+  const [topAdd, setTopAdd] = useState(null);      // null = button shown; string = inline name input open
   const [loading, setLoading] = useState(false);
   const [q, setQ] = useState("");
   const [facets, setFacets] = useState({});        // colId -> value key
@@ -1170,6 +1245,9 @@ function ProjectsTab({ sub, onSub }) {
   const [whenColId, setWhenColId] = useState(null);
   const [view, setView] = useState({ sortKey: "name", sortDir: "asc", groupBy: "groups", hiddenCols: [] });
   const [colsOpen, setColsOpen] = useState(false);
+  const [viewsOpen, setViewsOpen] = useState(false);  // saved-views popover
+  const [dateOpen, setDateOpen] = useState(false);    // WHEN date-filter popover
+  const [pickOpen, setPickOpen] = useState(null);     // id of the open facet / Group-by pill
   const [savedViews, setSavedViews] = useState([]);
   const [openItemId, setOpenItemId] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1230,23 +1308,76 @@ function ProjectsTab({ sub, onSub }) {
     pmCall(body).catch((e) => { setErr(e.message); reload(); });
   };
 
+  // ⚠️ WHICH BOARD THE USER IS LOOKING AT, which on an overlay board is NOT the board the row
+  // lives on. The cell ids rendered here belong to THIS board; the server needs to know that to
+  // translate them onto the row's own board. Omit it and every edit to a pulled-in row is
+  // silently discarded while the screen shows the new value.
+  const fromBoardId = data && data.board && data.board.id;
   const onCellCommit = (item, col, value) => callOrReload(
-    { action: "update_item", id: item.id, values: { [col.id]: value } },
+    { action: "update_item", id: item.id, fromBoardId, values: { [col.id]: value } },
     () => mutateItem(item.id, { values: { ...(item.values || {}), [col.id]: value }, updated_at: new Date().toISOString() }),
   );
   const onRename = (item, name) => callOrReload(
-    { action: "update_item", id: item.id, name },
+    { action: "update_item", id: item.id, fromBoardId, name },
     () => mutateItem(item.id, { name }),
   );
-  const onArchive = (item) => callOrReload(
-    { action: "archive_items", ids: [item.id] },
-    () => setData((d) => d && ({ ...d, items: d.items.filter((it) => it.id !== item.id) })),
-  );
-  const onAddItem = (group, name) => {
-    if (view.groupBy !== "groups") return;
-    pmCall({ action: "create_item", boardId: data.board.id, groupId: group.key, name })
-      .then((d) => setData((cur) => cur && ({ ...cur, items: [...cur.items, d.item] })))
+  const onArchive = (item) => {
+    // Refuse here as well as on the server. The server is the control; this is so the answer
+    // arrives before the row vanishes optimistically and has to be put back.
+    if (item && item.overlay) {
+      setErr(`"${item.name}" lives on ${item.home_board_name || "another board"}. Archive it there — it stays visible to whoever reported it.`);
+      return;
+    }
+    callOrReload(
+      { action: "archive_items", ids: [item.id], fromBoardId },
+      () => setData((d) => d && ({ ...d, items: d.items.filter((it) => it.id !== item.id) })),
+    );
+  };
+  // Where a new item lands follows how the board is arranged (Carolyn 2026-09-12: "we need
+  // that feature available regardless of the filtered view"):
+  //   native groups        → the group whose row was clicked (its pm_groups id);
+  //   grouped by a column  → NO group id, so the server files it into the board's INTAKE
+  //                          group (migration 152) — and the bucket's VALUE rides along, so
+  //                          the row appears under the bucket the user was looking at rather
+  //                          than in "No status";
+  //   the "__none" bucket  → intake, no value, in either mode.
+  // create_item's defaultValues fills gaps only, so a sent value is never overwritten. The
+  // old `if (view.groupBy !== "groups") return;` here was the second of two gates that made
+  // adding impossible under any column grouping (the first was the add row not rendering).
+  const addItem = (name, group, extraValues) => {
+    const body = { action: "create_item", boardId: data.board.id, name };
+    const values = { ...(extraValues || {}) };
+    if (group && group.key !== "__none") {
+      if (view.groupBy === "groups") body.groupId = group.key;
+      else {
+        const col = data.columns.find((c) => c.id === view.groupBy);
+        const t = col && pmType(col);
+        if (t && t.valueForBucket) values[col.id] = t.valueForBucket(group.key, col);
+      }
+    }
+    if (Object.keys(values).length) body.values = values;
+    return pmCall(body)
+      .then((d) => {
+        setData((cur) => cur && ({ ...cur, items: [...cur.items, d.item] }));
+        const g = (data.groups || []).find((x) => x.id === d.item.group_id);
+        flashOk(`Added “${name}” to ${g ? g.name : "the board"}.`);
+      })
       .catch((e) => { setErr(e.message); reload(); });
+  };
+  const onAddItem = (group, name) => addItem(name, group);
+  // The toolbar button has no bucket. So that the new row is not hidden by whatever is
+  // filtering the board, every active facet whose column can express a value (status,
+  // dropdown, people) is applied to the item — it lands where you're looking.
+  const onAddTop = (name) => {
+    const values = {};
+    Object.keys(facets).forEach((cid) => {
+      const v = facets[cid];
+      if (v == null || v === "") return;
+      const col = data.columns.find((c) => c.id === cid);
+      const t = col && pmType(col);
+      if (t && t.valueForBucket) values[cid] = t.valueForBucket(v, col);
+    });
+    return addItem(name, null, values);
   };
   const onDropToGroup = (item, g) => {
     if (view.groupBy === "groups") {
@@ -1388,8 +1519,13 @@ function ProjectsTab({ sub, onSub }) {
   const pill = (on) => ({ border: "1px solid", borderColor: on ? ACCENT : "#CBD5E1", background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155", borderRadius: 999, padding: "6px 15px", fontSize: 13, fontWeight: 700, cursor: "pointer" });
 
   return (
-    <div>
-      <div style={S.card}>
+    /* Fills the viewport-height shell (.ss-projects-active, portal.html) as a flex column so
+       the board tabs, views, toolbar and status tiles stay put and ONLY the table scrolls —
+       the same shape the Designer tab uses, for the same reason: a page that also scrolls
+       double-scrolls under the sticky topbar. Carolyn 2026-09-12: "the entire page below the
+       headers should scroll on its own … seamless, not clunky or iframed". */
+    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+      <div style={{ ...S.card, flex: 1, minHeight: 0, display: "flex", flexDirection: "column", marginBottom: 0 }}>
         {/* Boards are real TABS (Carolyn 2026-08-27): the active one joins the panel
             below it rather than floating as a pill, so the board you are in reads as the
             page you are on. The strip's bottom border IS the top edge of the content. */}
@@ -1445,9 +1581,25 @@ function ProjectsTab({ sub, onSub }) {
             <button type="button" onClick={() => setSettingsOpen(true)}
               style={{ background: "none", border: "none", padding: "9px 4px 9px 12px", fontSize: 12, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>⚙ Board settings</button>
           )}
+          {!SS_POPOUT && (
+            <button type="button" title="Open Projects in its own window"
+              onClick={() => {
+                const slug = setupMode ? "setup" : (activeBoard ? activeBoard.slug : "");
+                // Fresh URL, nothing carried from this window's search: ?view= must NOT ride
+                // into the popout — Projects is the operator's own console, and a popout
+                // booted with ?view= would re-enter view-as and flip supportView.
+                window.open("/portal/projects" + (slug ? "/" + slug : "") + "?popout=1",
+                  "ss_projects_popout", "popup=yes,width=1100,height=800,noopener");
+              }}
+              style={{ background: "none", border: "none", padding: "9px 8px", fontSize: 13, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>↗</button>
+          )}
         </div>
         {err && <div style={S.err}>{err}</div>}
-        {setupMode && <PMSetupAdmin canWrite={canWrite} />}
+        {ok && <div style={S.okMsg}>{ok}</div>}
+        {/* The card is a fixed-height flex column on this tab (.ss-projects-active), so
+            anything that is not the table has to sit in a child that can scroll itself, or the
+            shell clips it. */}
+        {setupMode && <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}><PMSetupAdmin canWrite={canWrite} /></div>}
         {!setupMode && !boards && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading boards…</div>}
         {/* The board body has its own wait: the first open after new roadmap entries also
             runs the sync, and a silent blank panel reads as a broken screen. */}
@@ -1455,45 +1607,47 @@ function ProjectsTab({ sub, onSub }) {
 
         {!setupMode && data && (
           <>
-            {/* Saved views sit ABOVE the filters they restore, so the row reads
-                "which view am I in" then "how is it filtered". */}
+            {/* ONE ROW, and it stays one row (Carolyn 2026-09-12: "condense the top… fit the
+                filter options into one single row"). What used to wrap — a separate saved-views
+                chip row, and a WHEN date filter that inlined up to four controls — is now a
+                popover pill each, so nothing here is taller than 32px, and every pill is only
+                as wide as the value it shows (see PMPickPill). No sideways scroll ("Seriously?
+                a scroll bar?" — same day): if a window is too narrow the row wraps, which costs
+                one 32px line of table and nothing else. The add button is NOT here any more —
+                it sits above the table headers. */}
             <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
-              <span style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4, marginRight: 2 }}>Views</span>
-              <button type="button" onClick={resetToDefault}
-                style={{ ...PM_VIEW_CHIP, background: !viewDirty && !activeView ? ACCENT : "#FFF", color: !viewDirty && !activeView ? "#FFF" : "#334155", borderColor: !viewDirty && !activeView ? ACCENT : "#CBD5E1" }}>
-                All items
-              </button>
-              {savedViews.map((v) => {
-                const on = activeView === v.id;
-                return (
-                  <span key={v.id} style={{ ...PM_VIEW_CHIP, padding: 0, borderColor: on ? ACCENT : "#CBD5E1", background: on ? ACCENT : "#FFF", display: "inline-flex", alignItems: "center", overflow: "hidden" }}>
-                    <button type="button" onClick={() => applyView(v)}
-                      title={v.created_by_email ? `${v.name} — saved by ${String(v.created_by_email).split("@")[0]}` : v.name}
-                      style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: on ? "#FFF" : "#334155", padding: "5px 4px 5px 12px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {v.name}
-                    </button>
-                    <button type="button" title={`Delete the "${v.name}" view`}
-                      onClick={() => { if (window.confirm(`Delete the saved view "${v.name}" for everyone? (Only the view — no items are touched.)`)) deleteView(v); }}
-                      style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, color: on ? "rgba(255,255,255,.75)" : "#94A3B8", padding: "5px 9px 5px 4px" }}>✕</button>
-                  </span>
-                );
-              })}
-              {/* Only offered when there is something to save, and never a duplicate of
-                  the view you are already looking at. */}
-              {viewDirty && !activeView && (
-                <button type="button" onClick={saveCurrentView}
-                  style={{ ...PM_VIEW_CHIP, borderStyle: "dashed", color: ACCENT, fontWeight: 700 }}>＋ Save this view</button>
-              )}
-            </div>
+              <span style={{ position: "relative", display: "inline-flex", flex: "0 0 auto" }}>
+                <button type="button" title="Saved views"
+                  onClick={() => { setViewsOpen((o) => !o); setDateOpen(false); setColsOpen(false); setPickOpen(null); }}
+                  style={{ ...PM_CTL, padding: "0 10px", cursor: "pointer", fontWeight: 700, fontFamily: "inherit", gap: 6,
+                    color: activeView || viewDirty ? ACCENT : "#334155", borderColor: activeView ? ACCENT : "#CBD5E1" }}>
+                  <span style={PM_PILL_TAG}>VIEW</span>
+                  {activeView ? ((savedViews.find((v) => v.id === activeView) || {}).name || "Saved view") : "All items"}{viewDirty && !activeView ? " •" : ""} ▾
+                </button>
+                {viewsOpen && (
+                  <div style={PM_POP}>
+                    <button type="button" onClick={() => { resetToDefault(); setViewsOpen(false); }} style={PM_POP_ROW(!viewDirty && !activeView)}>All items</button>
+                    {savedViews.map((v) => (
+                      <span key={v.id} style={{ display: "flex", alignItems: "center" }}>
+                        <button type="button" onClick={() => { applyView(v); setViewsOpen(false); }}
+                          title={v.created_by_email ? `${v.name} — saved by ${String(v.created_by_email).split("@")[0]}` : v.name}
+                          style={{ ...PM_POP_ROW(activeView === v.id), flex: 1 }}>{v.name}</button>
+                        <button type="button" title={`Delete the "${v.name}" view`}
+                          onClick={() => { if (window.confirm(`Delete the saved view "${v.name}" for everyone? (Only the view — no items are touched.)`)) deleteView(v); }}
+                          style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, color: "#94A3B8", padding: "4px 8px" }}>✕</button>
+                      </span>
+                    ))}
+                    {/* Only offered when there is something to save, and never a duplicate of
+                        the view you are already looking at. */}
+                    {viewDirty && !activeView && (
+                      <button type="button" onClick={() => { saveCurrentView(); setViewsOpen(false); }}
+                        style={{ ...PM_POP_ROW(false), color: ACCENT, borderTop: "1px solid #F1F5F9", borderRadius: 0, marginTop: 4, paddingTop: 8 }}>＋ Save this view</button>
+                    )}
+                  </div>
+                )}
+              </span>
 
-            {/* ONE neat row of same-height controls (Carolyn 2026-08-27). The shared
-                FacetSelect stacks an uppercase label ABOVE its select, which put three
-                controls at a different height and baseline from the rest of the row —
-                so the filters are built here from PMCtl instead. (It also passed "all"
-                as the all-value while the filter treats "" as all, so choosing All
-                after a filter emptied the board.) */}
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
-              <span style={{ ...PM_CTL, padding: "0 10px", gap: 6, minWidth: 190 }}>
+              <span style={{ ...PM_CTL, padding: "0 10px", gap: 6, flex: "1 1 120px", minWidth: 100, maxWidth: 320 }}>
                 <span style={{ color: "#94A3B8" }}>⌕</span>
                 <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search items…"
                   style={{ border: "none", outline: "none", background: "none", fontSize: 12.5, fontWeight: 600, color: "#1E293B", flex: 1, minWidth: 0, fontFamily: "inherit", height: "100%" }} />
@@ -1502,57 +1656,83 @@ function ProjectsTab({ sub, onSub }) {
               </span>
 
               {facetCols.map((c) => (
-                <PMCtl key={c.id} label={c.name}>
-                  <select value={facets[c.id] || ""} onChange={(e) => setFacets((f) => ({ ...f, [c.id]: e.target.value || null }))}
-                    style={PM_CTL_SEL}>
-                    <option value="">All</option>
-                    {(pmType(c).groupsFor(c, ctx) || []).map((g) => <option key={g.key} value={g.key}>{g.label}</option>)}
-                  </select>
-                </PMCtl>
+                <PMPickPill key={c.id} tag={c.name} allLabel="All"
+                  options={(pmType(c).groupsFor(c, ctx) || []).map((g) => ({ key: g.key, label: g.label }))}
+                  value={facets[c.id] || null}
+                  onPick={(k) => { setFacets((f) => ({ ...f, [c.id]: k })); setPickOpen(null); }}
+                  open={pickOpen === c.id}
+                  onToggle={() => { setPickOpen((o) => (o === c.id ? null : c.id)); setViewsOpen(false); setDateOpen(false); setColsOpen(false); }} />
               ))}
 
-              {dateCols.length > 0 && (
-                <PMCtl label={dateCols.length > 1 ? null : dateCols[0].name}>
-                  {dateCols.length > 1 && (
-                    <select value={whenColId || ""} onChange={(e) => setWhenColId(e.target.value || null)} style={PM_CTL_SEL}>
-                      {dateCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                    </select>
-                  )}
-                  <select value={whenCond} onChange={(e) => setWhenCond(e.target.value)} style={PM_CTL_SEL}>
-                    {SS_WHEN.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
-                  </select>
-                  {SS_WHEN_PARAM[whenCond] === "date" && <input type="date" value={whenA} onChange={(e) => setWhenA(e.target.value)} style={PM_CTL_SEL} />}
-                  {SS_WHEN_PARAM[whenCond] === "date2" && (<>
-                    <input type="date" value={whenA} onChange={(e) => setWhenA(e.target.value)} style={PM_CTL_SEL} />
-                    <span style={{ color: "#94A3B8" }}>–</span>
-                    <input type="date" value={whenB} onChange={(e) => setWhenB(e.target.value)} style={PM_CTL_SEL} />
-                  </>)}
-                  {SS_WHEN_PARAM[whenCond] === "month" && <input type="month" value={whenMonth} onChange={(e) => setWhenMonth(e.target.value)} style={PM_CTL_SEL} />}
-                  {SS_WHEN_PARAM[whenCond] === "count" && (<>
-                    <input type="number" min="1" value={whenN} onChange={(e) => setWhenN(e.target.value)} style={{ ...PM_CTL_SEL, width: 52 }} />
-                    <select value={whenUnit} onChange={(e) => setWhenUnit(e.target.value)} style={PM_CTL_SEL}>
-                      <option value="days">days</option><option value="weeks">weeks</option><option value="months">months</option>
-                    </select>
-                  </>)}
-                </PMCtl>
-              )}
+              {/* The WHEN filter as one pill. Its column select, condition select and one or
+                  two parameter inputs used to sit inline and were the single biggest reason
+                  the row wrapped; the pill now reads the current condition and opens them. */}
+              {dateCols.length > 0 && (() => {
+                const dc = (dateCols.length > 1 ? dateCols.find((c) => c.id === whenColId) : null) || dateCols[0];
+                const condLabel = (SS_WHEN.find(([k]) => k === whenCond) || [])[1] || "";
+                const on = whenCond !== "any";
+                return (
+                  <span style={{ position: "relative", display: "inline-flex", flex: "0 0 auto" }}>
+                    <button type="button" title="Filter by date"
+                      onClick={() => { setDateOpen((o) => !o); setViewsOpen(false); setColsOpen(false); setPickOpen(null); }}
+                      style={{ ...PM_CTL, padding: "0 10px", cursor: "pointer", fontWeight: 700, fontFamily: "inherit", gap: 6,
+                        color: on ? ACCENT : "#334155", borderColor: on ? ACCENT : "#CBD5E1" }}>
+                      <span style={PM_PILL_TAG}>{String(dc.name || "Date").toUpperCase()}</span>
+                      {on ? condLabel : "Any time"} ▾
+                    </button>
+                    {dateOpen && (
+                      <div style={{ ...PM_POP, gap: 8, minWidth: 240 }}>
+                        {dateCols.length > 1 && (
+                          <label style={PM_POP_LBL}>Column
+                            <select value={whenColId || ""} onChange={(e) => setWhenColId(e.target.value || null)} style={PM_POP_SEL}>
+                              {dateCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </select>
+                          </label>
+                        )}
+                        <label style={PM_POP_LBL}>When
+                          <select value={whenCond} onChange={(e) => setWhenCond(e.target.value)} style={PM_POP_SEL}>
+                            {SS_WHEN.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                          </select>
+                        </label>
+                        {SS_WHEN_PARAM[whenCond] === "date" && <input type="date" value={whenA} onChange={(e) => setWhenA(e.target.value)} style={PM_POP_SEL} />}
+                        {SS_WHEN_PARAM[whenCond] === "date2" && (<>
+                          <input type="date" value={whenA} onChange={(e) => setWhenA(e.target.value)} style={PM_POP_SEL} />
+                          <input type="date" value={whenB} onChange={(e) => setWhenB(e.target.value)} style={PM_POP_SEL} />
+                        </>)}
+                        {SS_WHEN_PARAM[whenCond] === "month" && <input type="month" value={whenMonth} onChange={(e) => setWhenMonth(e.target.value)} style={PM_POP_SEL} />}
+                        {SS_WHEN_PARAM[whenCond] === "count" && (
+                          <span style={{ display: "flex", gap: 6 }}>
+                            <input type="number" min="1" value={whenN} onChange={(e) => setWhenN(e.target.value)} style={{ ...PM_POP_SEL, width: 64 }} />
+                            <select value={whenUnit} onChange={(e) => setWhenUnit(e.target.value)} style={{ ...PM_POP_SEL, flex: 1 }}>
+                              <option value="days">days</option><option value="weeks">weeks</option><option value="months">months</option>
+                            </select>
+                          </span>
+                        )}
+                        <button type="button" onClick={() => setDateOpen(false)} style={{ ...PM_POP_ROW(false), textAlign: "center", background: "#F1F5F9" }}>Done</button>
+                      </div>
+                    )}
+                  </span>
+                );
+              })()}
 
-              <PMCtl label="Group by">
-                <select value={view.groupBy} onChange={(e) => setViewPart({ groupBy: e.target.value })} style={PM_CTL_SEL}>
-                  <option value="groups">Groups</option>
-                  {groupables.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-              </PMCtl>
+              {/* "Groups" (the board's own) is a real choice here, not an "All" reset, so it is
+                  passed as an option and the pill never shows the accent for it. */}
+              <PMPickPill tag="Group by"
+                options={[{ key: "groups", label: "Groups" }, ...groupables.map((c) => ({ key: c.id, label: c.name }))]}
+                value={view.groupBy}
+                onPick={(k) => { setViewPart({ groupBy: k || "groups" }); setPickOpen(null); }}
+                open={pickOpen === "__groupBy"}
+                onToggle={() => { setPickOpen((o) => (o === "__groupBy" ? null : "__groupBy")); setViewsOpen(false); setDateOpen(false); setColsOpen(false); }} />
 
-              <span style={{ position: "relative", display: "inline-flex" }}>
-                <button type="button" onClick={() => setColsOpen((o) => !o)}
-                  style={{ ...PM_CTL, padding: "0 12px", cursor: "pointer", fontWeight: 700, color: "#334155", fontFamily: "inherit" }}>
+              <span style={{ position: "relative", display: "inline-flex", flex: "0 0 auto" }}>
+                <button type="button" onClick={() => { setColsOpen((o) => !o); setViewsOpen(false); setDateOpen(false); setPickOpen(null); }}
+                  style={{ ...PM_CTL, padding: "0 10px", cursor: "pointer", fontWeight: 700, color: "#334155", fontFamily: "inherit" }}>
                   Columns ▾
                 </button>
                 {colsOpen && (
-                  <div style={{ position: "absolute", top: "110%", left: 0, zIndex: 60, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 10, boxShadow: "0 12px 30px rgba(20,24,40,.15)", padding: "8px 12px", minWidth: 170 }}>
+                  <div style={PM_POP}>
                     {data.columns.map((c) => (
-                      <label key={c.id} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, fontWeight: 600, padding: "3px 0", cursor: "pointer" }}>
+                      <label key={c.id} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, fontWeight: 600, padding: "3px 4px", cursor: "pointer", whiteSpace: "nowrap" }}>
                         <input type="checkbox" checked={!view.hiddenCols.includes(c.id)}
                           onChange={(e) => setViewPart({ hiddenCols: e.target.checked ? view.hiddenCols.filter((x) => x !== c.id) : [...view.hiddenCols, c.id] })} />
                         {c.name}
@@ -1562,18 +1742,102 @@ function ProjectsTab({ sub, onSub }) {
                 )}
               </span>
 
-              <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "#64748B", fontWeight: 600, whiteSpace: "nowrap" }}>
-                Showing {filtered.length} of {data.items.length}
-                {filtersOn && (
+              <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "#64748B", fontWeight: 600, whiteSpace: "nowrap", flex: "0 0 auto", paddingLeft: 4 }}>
+                {/* "N of M" only while something is filtering — unfiltered it is the same
+                    number twice, and those ~90px are what decide whether the row fits a
+                    laptop with three facet columns. */}
+                {filtersOn && (<>
+                  <span title={`Showing ${filtered.length} of ${data.items.length} items`}>{filtered.length} of {data.items.length}</span>
                   <button type="button" style={{ background: "none", border: "none", color: "#DC2626", fontWeight: 700, fontSize: 12, cursor: "pointer", padding: 0, fontFamily: "inherit" }}
                     onClick={clearFilters}>
                     Clear filters
                   </button>
-                )}
+                </>)}
                 <button type="button" title="Refresh" style={{ background: "none", border: "none", color: "#64748B", fontWeight: 700, fontSize: 14, cursor: "pointer", padding: 0, opacity: loading ? 0.4 : 1 }}
                   disabled={loading} onClick={reload}>↻</button>
               </span>
             </div>
+
+            {/* WHAT IS IN FLIGHT, directly above the table — and, at its far right, the add
+                button (Carolyn 2026-09-12: "move the add item down to the far right just above
+                the table headers"). Carolyn, 2026-09-08 48:00: "I also want to take it and add
+                where a dashboard that shows us. Basically, I'm tired of seeing completed in here."
+                COUNTS ARE OVER ALL LOADED ROWS, never the filtered subset — the rule
+                StatusChips already follows, and the reason is that a tile whose number changes
+                the moment you click it cannot be used to navigate. Clicking one sets the
+                ordinary status facet, so this is a shortcut into the filters that already
+                exist rather than a second filtering model living beside them.
+                Finished labels are omitted: they are precisely what she does not want to see,
+                and `kind` is the only machine-readable way to know which those are.
+                The tiles are single-line pills now (label · count) so this row is 28px; the
+                two-line 45px tile was the last thing standing between the toolbar and the
+                headers, and the whole point of the row above is that the top stays short. */}
+            {(() => {
+              const st = (data.columns || []).find((c) => c.type === "status");
+              const all = data.items || [];
+              const tiles = [];
+              const tile = (key, label, n, color, active, onClick) => (
+                <button key={key} type="button" onClick={onClick}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 28, background: active ? "#EEF2FF" : "#FFF",
+                    border: "1px solid " + (active ? ACCENT : "#E2E8F0"), borderRadius: 999, padding: "0 11px", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+                  <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: ".05em", textTransform: "uppercase", color: color || "#94A3B8" }}>{label}</span>
+                  <span style={{ fontSize: 13, fontWeight: 800, color: "#1E293B" }}>{n}</span>
+                </button>
+              );
+              if (st) {
+                const labels = (st.settings && st.settings.labels) || [];
+                const doneIds = new Set(labels.filter((l) => l && l.kind === "done").map((l) => l.id));
+                const count = new Map();
+                for (const it of all) {
+                  const v = (it.values || {})[st.id];
+                  if (typeof v === "string") count.set(v, (count.get(v) || 0) + 1);
+                }
+                const dCols = (data.columns || []).filter((c) => c.type === "date");
+                const dateCol = dCols.find((c) => /^\s*(due|target|deadline)\s*$/i.test(c.name || ""))
+                  || dCols.find((c) => !/^\s*created\s*$/i.test(c.name || ""))
+                  || null;
+                const today = new Date().toISOString().slice(0, 10);
+                const overdue = !dateCol ? 0 : all.filter((it) => {
+                  const vals = it.values || {};
+                  const d = vals[dateCol.id];
+                  const sv = vals[st.id];
+                  return typeof d === "string" && d && d < today && !(typeof sv === "string" && doneIds.has(sv));
+                }).length;
+                labels.filter((l) => l && !doneIds.has(l.id) && (count.get(l.id) || 0) > 0).forEach((l) =>
+                  tiles.push(tile(l.id, l.label, count.get(l.id) || 0, l.color, facets[st.id] === l.id,
+                    () => setFacets((f) => ({ ...f, [st.id]: f[st.id] === l.id ? null : l.id })))));
+                if (overdue > 0) tiles.push(tile("__overdue", "Overdue", overdue, "#DC2626", false, () => {
+                  setWhenColId(dateCol.id); setWhenCond("before");
+                  setWhenA(new Date().toISOString().slice(0, 10));
+                }));
+              }
+              if (!tiles.length && !canWrite) return null;
+              return (
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", margin: "0 0 8px" }}>
+                  {tiles}
+                  {/* Always-available add, regardless of grouping or filters. Same inline name
+                      input as the group rows; files into the intake group and inherits any
+                      active facet values so it doesn't vanish behind the filter. */}
+                  {canWrite && (
+                    <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center" }}>
+                      {topAdd == null ? (
+                        <button type="button" onClick={() => setTopAdd("")}
+                          style={{ ...S.btn(ACCENT, "#FFF"), height: 30, padding: "0 14px", fontSize: 12.5, fontFamily: "inherit" }}>＋ Add item</button>
+                      ) : (
+                        <input autoFocus value={topAdd} placeholder="Item name — Enter to add, Esc to cancel"
+                          onChange={(e) => setTopAdd(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && topAdd.trim()) { onAddTop(topAdd.trim()); setTopAdd(null); }
+                            if (e.key === "Escape") setTopAdd(null);
+                          }}
+                          onBlur={() => setTopAdd(null)}
+                          style={{ ...PM_CTL, height: 30, padding: "0 10px", width: 300, fontWeight: 600, color: "#1E293B", outline: "none", fontFamily: "inherit" }} />
+                      )}
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
 
             <PMTable
               columns={data.columns} rows={filtered} boardGroups={data.groups} ctx={ctx}
@@ -1605,267 +1869,6 @@ function ProjectsTab({ sub, onSub }) {
         <PMBoardSettings board={data.board} columns={data.columns} groups={data.groups}
           onClose={() => setSettingsOpen(false)} onChanged={reload}
           onArchivedBoard={() => loadBoards().then((bs) => { if (bs && bs.length) onSub(bs[0].slug); })} />
-      )}
-    </div>
-  );
-}
-
-
-// The five cells worth filling in at the moment you file something. Found on the chosen
-// board BY NAME + TYPE, so a board that doesn't carry one (roadmap has no App) simply shows
-// fewer fields and nothing is hard-coded. Everything else on the board — Client, Created —
-// is either derived or set server-side, and stays out of the form.
-const qaCol = (cols, name, type) => (cols || []).find((c) => c.name === name && c.type === type) || null;
-const qaStatusCol = (cols) => (cols || []).find((c) => c.type === "status") || null;
-
-// What a fresh form starts as. Carolyn 2026-09-07: "it did not automatically select the
-// app. This needs to happen." Mirrors the server's own defaults (portal-projects
-// `defaultValues`) so the form shows you exactly what you would get by saying nothing —
-// matched by LABEL, never by option id, because those stay editable in Board settings.
-function qaDefaults(cols) {
-  const out = {};
-  const app = qaCol(cols, "App", "dropdown");
-  if (app) {
-    const o = (app.settings?.options || []).find((x) => x.label === "Structure Studio");
-    if (o) out[app.id] = [o.id];
-  }
-  const st = qaStatusCol(cols);
-  if (st) {
-    const labels = st.settings?.labels || [];
-    const l = labels.find((x) => x.intake === true) || labels[0];
-    if (l) out[st.id] = l.id;
-  }
-  return out;   // Priority, Due and Assignee deliberately start empty.
-}
-
-// The quick-add form's middle band. Each control renders only if the chosen board actually
-// has that column, and writes the shape `sanitizeValues` expects: dropdown → [optionId],
-// status → labelId, date → "YYYY-MM-DD", people → [pm_people.id].
-function PMQuickAddFields({ cols, people, vals, setVal }) {
-  const app = qaCol(cols, "App", "dropdown");
-  const pri = qaCol(cols, "Priority", "dropdown");
-  const st = qaStatusCol(cols);
-  const due = qaCol(cols, "Due", "date");
-  const who = qaCol(cols, "Assignee", "people");
-  if (!app && !pri && !st && !due && !who) return null;
-
-  const sel = { ...S.input, marginBottom: 0, padding: "5px 7px", fontSize: 12.5 };
-  const cell = (label, control) => (
-    <div>
-      <span style={{ ...S.lbl, fontSize: 10.5 }}>{label}</span>
-      {control}
-    </div>
-  );
-  // A dropdown's stored value is an ARRAY even when the column is single-select.
-  const one = (v) => (Array.isArray(v) ? v[0] : v) || "";
-
-  return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
-      {app && cell("App", (
-        <select style={sel} value={one(vals[app.id])} onChange={(e) => setVal(app.id, e.target.value ? [e.target.value] : null)}>
-          {(app.settings?.options || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
-        </select>
-      ))}
-      {pri && cell("Priority", (
-        <select style={sel} value={one(vals[pri.id])} onChange={(e) => setVal(pri.id, e.target.value ? [e.target.value] : null)}>
-          <option value="">—</option>
-          {(pri.settings?.options || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
-        </select>
-      ))}
-      {st && cell("Status", (
-        <select style={sel} value={vals[st.id] || ""} onChange={(e) => setVal(st.id, e.target.value || null)}>
-          {(st.settings?.labels || []).map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
-        </select>
-      ))}
-      {due && cell("Due", (
-        <input type="date" style={sel} value={vals[due.id] || ""}
-          onChange={(e) => setVal(due.id, e.target.value || null)} />
-      ))}
-      {who && (
-        <div style={{ gridColumn: "1 / -1" }}>
-          {cell("Assignee", (
-            // One person from the form; the cell on the board takes several. Starts blank
-            // by Carolyn's call — nothing lands on someone who isn't expecting it.
-            <select style={sel} value={one(vals[who.id])} onChange={(e) => setVal(who.id, e.target.value ? [e.target.value] : [])}>
-              <option value="">Unassigned</option>
-              {(people || []).map((p) => <option key={p.id} value={p.id}>{pmPersonName(p)}</option>)}
-            </select>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Quick-add: file a board item from ANYWHERE in the portal ─────────────────
-// Carolyn 2026-08-29: "I need a way to add items to the boards from inside SS."
-// The board's own ＋ Add item only exists on the Projects tab; the moment you actually
-// NOTICE something is while using the rest of the product — often while viewing a
-// builder's account. This is a floating operator-only button (it deliberately stays
-// visible in view-as, unlike the tenant Feedback bubble, because internal items carry
-// no tenant attribution to get wrong). The item lands in the chosen board's INTAKE
-// group server-side, and the note — pre-filled with where you were standing — becomes
-// the thread's first internal update.
-function PMQuickAdd({ viewingClientId }) {
-  const [open, setOpen] = useState(false);
-  const [boards, setBoards] = useState(null);
-  const [cols, setCols] = useState({});     // boardId -> columns[], from list_boards
-  const [people, setPeople] = useState([]); // the pm_people roster, active only
-  const [vals, setVals] = useState({});     // colId -> value, in sanitizeValues' shapes
-  const [boardId, setBoardId] = useState("");
-  const [title, setTitle] = useState("");
-  const [note, setNote] = useState("");
-  const [files, setFiles] = useState([]);   // staged; uploaded AFTER the item exists
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [done, setDone] = useState(null);   // { name, attached } for the flash
-
-  // Screenshots live in the clipboard (Win+Shift+S), so pasting anywhere on the card
-  // stages the image — same as picking it with the button.
-  const stage = (list) => {
-    const add = [...(list || [])].filter((f) => f && f.size);
-    if (add.length) setFiles((cur) => [...cur, ...add].slice(0, 10));
-  };
-  const onPaste = (e) => {
-    const imgs = [...(e.clipboardData?.files || [])];
-    if (imgs.length) { e.preventDefault(); stage(imgs); }
-  };
-
-  const openIt = () => {
-    setOpen(true); setDone(null); setErr("");
-    // Where the operator was standing when they hit ＋ — half of most bug reports.
-    const where = window.location.pathname.replace(/^\/portal(\.html)?\/?/, "/") || "/";
-    setNote("Filed from " + where + (viewingClientId ? " while viewing " + viewingClientId : "") + " — ");
-    if (!boards) {
-      pmCall({ action: "list_boards" }).then((d) => {
-        const list = d.boards || [];
-        setBoards(list);
-        setCols(d.columns || {});
-        setPeople(d.people || []);
-        // Bugs is where a spotted problem goes 9 times in 10 — preselect it.
-        const bugs = list.find((b) => b.slug === "bugs");
-        const pick = boardId || (bugs ? bugs.id : (list[0] || {}).id || "");
-        setBoardId(pick);
-        setVals(qaDefaults((d.columns || {})[pick]));
-      }).catch((e) => setErr(e.message));
-    } else {
-      // Boards are cached from the first open; the FORM still starts clean each time.
-      // (Within one visit "Add another" keeps your choices — filing three FramedUp bugs
-      // in a row shouldn't reset the App three times.)
-      setVals(qaDefaults(cols[boardId]));
-    }
-  };
-
-  const pickBoard = (id) => { setBoardId(id); setVals(qaDefaults(cols[id])); };
-  const setVal = (colId, v) => setVals((cur) => ({ ...cur, [colId]: v }));
-
-  const file = async () => {
-    const name = title.trim();
-    if (!name || !boardId || busy) return;
-    setBusy(true); setErr("");
-    try {
-      // No groupId on purpose: the server lands it in the board's intake group. A note
-      // that is ONLY the prefill (ends with the em-dash) is dropped — nothing was said —
-      // UNLESS files are staged: attachments hang off an update, so one is created
-      // anyway, and the where-you-were prefill is worth keeping alongside a screenshot.
-      const body = { action: "create_item", boardId, name };
-      // App / Priority / Status / Due / Assignee, keyed by column id. The server
-      // re-validates every one against the board's real columns and fills in anything
-      // left blank that shouldn't be — so sending nothing here is still a valid item.
-      if (Object.keys(vals).length) body.values = vals;
-      const n = note.trim();
-      if ((n && !/—\s*$/.test(n)) || files.length) body.note = n || "Screenshot attached.";
-      const d = await pmCall(body);
-      // The item + note stand even if an upload fails — the PMItemPanel contract: a bad
-      // file loses only itself, and the error names it.
-      let attached = 0;
-      for (const f of files) {
-        try { await pmUploadTo(d.item.id, d.update.id, f); attached++; }
-        catch (e) { setErr(e.message); }
-      }
-      setDone({ name, attached }); setTitle(""); setFiles([]);
-    } catch (e) { setErr(e.message); }
-    setBusy(false);
-  };
-
-  if (!open) {
-    return (
-      <button onClick={openIt} aria-label="Add a board item" title="Add an item to a Projects board"
-        style={{
-          position: "fixed", right: 20, bottom: 72, zIndex: 900,
-          background: "#1E293B", color: "#FFF", border: "none", borderRadius: 999,
-          padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer",
-          boxShadow: "0 4px 14px rgba(0,0,0,0.25)", fontFamily: "inherit",
-        }}>
-        ＋ Board item
-      </button>
-    );
-  }
-
-  return (
-    <div onPaste={onPaste} style={{
-      position: "fixed", right: 20, bottom: 72, zIndex: 950, width: 360, maxWidth: "calc(100vw - 40px)",
-      background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 14, padding: 16,
-      boxShadow: "0 10px 34px rgba(15,23,42,0.28)",
-    }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-        <span style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>Add a board item</span>
-        <button type="button" onClick={() => setOpen(false)} aria-label="Close"
-          style={{ marginLeft: "auto", background: "none", border: "none", fontSize: 16, color: "#94A3B8", cursor: "pointer", padding: 2, lineHeight: 1 }}>✕</button>
-      </div>
-
-      {done ? (
-        <div>
-          <div style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", color: "#047857", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}>
-            "{done.name}" is on the board, in its incoming group{done.attached ? ` — ${done.attached} screenshot${done.attached === 1 ? "" : "s"} attached` : ""}.
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" onClick={() => setDone(null)}
-              style={{ ...S.btn(ACCENT, "#FFF"), padding: "7px 14px", fontSize: 12.5 }}>Add another</button>
-            <button type="button" onClick={() => setOpen(false)}
-              style={{ ...S.btn("#F1F5F9", "#334155"), padding: "7px 14px", fontSize: 12.5 }}>Done</button>
-          </div>
-        </div>
-      ) : (
-        <div>
-          {err && <div style={{ ...S.err, marginBottom: 8 }}>{err}</div>}
-          <span style={S.lbl}>Board</span>
-          <select style={{ ...S.input, marginBottom: 8 }} value={boardId} onChange={(e) => pickBoard(e.target.value)}>
-            {boards === null && <option value="">Loading boards…</option>}
-            {(boards || []).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-          </select>
-          <span style={S.lbl}>What is it?</span>
-          <input autoFocus style={{ ...S.input, marginBottom: 8 }} value={title} maxLength={200}
-            placeholder="Short title — like a board item name"
-            onChange={(e) => setTitle(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") file(); if (e.key === "Escape") setOpen(false); }} />
-          <PMQuickAddFields cols={cols[boardId]} people={people} vals={vals} setVal={setVal} />
-          <span style={S.lbl}>Details (optional — becomes the first note)</span>
-          <textarea rows={3} style={{ ...S.input, resize: "vertical", fontWeight: 500, marginBottom: 8 }}
-            value={note} onChange={(e) => setNote(e.target.value)} />
-          {/* Staged screenshots — uploaded once the item exists. Paste works anywhere on
-              this card (Win+Shift+S → Ctrl+V), the button is the fallback. */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
-            {files.map((f, i) => (
-              <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 700, color: "#334155", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 999, padding: "3px 9px", maxWidth: 200 }}>
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🖼 {f.name}</span>
-                <button type="button" aria-label={"Remove " + f.name}
-                  onClick={() => setFiles((cur) => cur.filter((_, j) => j !== i))}
-                  style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", padding: 0, fontSize: 12, lineHeight: 1 }}>✕</button>
-              </span>
-            ))}
-            <label style={{ fontSize: 12, fontWeight: 700, color: "#1B7895", cursor: "pointer" }}>
-              📎 Attach screenshot
-              <input type="file" multiple accept="image/*,video/*,.pdf" style={{ display: "none" }}
-                onChange={(e) => { stage(e.target.files); e.target.value = ""; }} />
-            </label>
-            <span style={{ fontSize: 11, color: "#94A3B8" }}>or paste one here</span>
-          </div>
-          <button type="button" onClick={file} disabled={busy || !title.trim() || !boardId}
-            style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", opacity: busy || !title.trim() || !boardId ? 0.6 : 1 }}>
-            {busy ? "Adding…" : "Add to board"}
-          </button>
-        </div>
       )}
     </div>
   );

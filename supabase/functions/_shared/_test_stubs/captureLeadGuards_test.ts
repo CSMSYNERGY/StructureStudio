@@ -173,3 +173,18 @@ Deno.test("a consent grant is looked up before it is inserted", () => {
   assert(lookup < insert, "the prior-grant lookup must run before the insert");
   assert(SRC.includes("if (!priorGrant)"), "the insert must be conditional on there being no prior grant");
 });
+
+// ── 4. An email conflict is filed as info, under its original message ────────────────────
+Deno.test("email_conflict is a handled condition: still filed, as info, message unchanged", () => {
+  // The guard handles it (the email stays on the lead and is kept out of the GHL upsert), so it
+  // is not a fault. The row stays, and its message must not change: the repeated-info check that
+  // makes a burst visible groups by message, and a reworded one would restart the count.
+  const k = at('code: "email_conflict"');
+  const call = SRC.slice(SRC.lastIndexOf("logEdgeError({", k), SRC.indexOf("});", k));
+  assert(/severity:\s*"info"/.test(call), "the email_conflict row must pass severity \"info\"");
+  assert(
+    call.includes('"captured email already belongs to a different contact in this tenant — " +') &&
+      call.includes('"kept on the lead, not used as a CRM match key"'),
+    "the email_conflict message text must stay as it was",
+  );
+});

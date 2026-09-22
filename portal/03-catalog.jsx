@@ -1,4 +1,24 @@
 // ─── Settings (via portal-settings edge function; API key is write-only) ───
+
+// Is a failed `tax_settings` read a "no tax section here" rather than a fault to show?
+// These answers qualify, and each renders NOTHING (the sales-tax UI on CRM Connection and
+// on Company → Locations reads this):
+//   • A portal-settings OLDER than this page. The frontend deploys itself on push and edge
+//     functions deploy separately, so for a while the page can be ahead of the function.
+//     An old function has no GATES line for the action, and resolveTenant fails closed with
+//     403 `Unrecognised action`; one with the gate but not the branch falls to the
+//     dispatcher's 400 `Unknown action`. Either way that window must look like "no tax UI
+//     yet", not a broken screen — on every tenant, CRM-mode ones included.
+//   • Any other 403 — the caller cannot read settings_crm. The browser's access map keeps
+//     most of them from asking; this covers the ones it cannot see (view-as, a stale map).
+// Keyed on the status the invoke wrapper records (`ssStatus`), plus the dispatcher's own
+// sentence for the 400, since that branch carries no `reason` code.
+function ssTaxReadUnavailable(err) {
+  if (!err) return false;
+  if (err.ssStatus === 403) return true;
+  return err.ssStatus === 400 && /^Unknown action\b/i.test(String(err.message || ""));
+}
+
 function SettingsView({ section }) {
   // Which settings cards to render: "connection" (GHL creds + pipeline mapping)
   // or "branding" (customer-link look & feel + business details + pricing
@@ -42,6 +62,9 @@ function SettingsView({ section }) {
     coFeeLabel: "Change order fee", coUnlockHours: "72",
     // designer branding (client_configs — drives the public ?client= link)
     brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
+    // Building styles per row on the designer (migration 232). A STRING like every other form
+    // field here; "8" is the designer's own default, so a tenant who never chose reads as 8.
+    brandStylesPerRow: "8",
   });
   const set = (k) => (e) => {
     const v = e && e.target ? (e.target.type === "checkbox" ? e.target.checked : e.target.value) : e;
@@ -67,15 +90,24 @@ function SettingsView({ section }) {
   // rid of one: a logo could be replaced forever but never removed. An explicit empty
   // `logoUrl` is the server's own clear path (see its `else if ("logoUrl" in payload)`).
   const [clearLogo, setClearLogo] = useState(false);
+  // Styles per row AS STORED: "5".."8", or null = never chosen (the card shows that as 8).
+  // Review 2026-09-15: Save Branding used to send stylesPerRow on EVERY save, so a tenant who
+  // only swapped their logo got styles_per_row = 8 written — erasing "never chosen", changing
+  // their get_config payload (232 emits the key only when the column is set) and pinning them
+  // at 8 if the default ever moves. Same idea as the logo: the key is sent only when the owner
+  // actually picked a different number, and save_branding leaves the column alone otherwise.
+  const [brandSprStored, setBrandSprStored] = useState(null);
   const saveBranding = async () => {
     setBrandBusy(true); setBrandMsg(null);
     const body = { action: "save_branding", companyName: form.brandName, tagline: form.brandTagline,
       accentColor: form.brandAccent, headerBg: form.brandHeaderBg };
+    if (form.brandStylesPerRow !== (brandSprStored || "8")) body.stylesPerRow = Number(form.brandStylesPerRow);
     if (logoDataUrl) { body.logoBase64 = logoDataUrl; body.logoContentType = logoCt; }
     else if (clearLogo) { body.logoUrl = ""; }
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
     setBrandBusy(false);
     if (err || (data && data.error)) { setBrandMsg({ err: (data && data.error) || err.message }); return; }
+    if ("stylesPerRow" in body) setBrandSprStored(String(body.stylesPerRow));
     setBrandMsg({ ok: clearLogo && !logoDataUrl ? "Branding saved — your logo was removed, so the designer shows your company initials." : "Branding saved — your designer link now reflects it." });
     if (data.logoUrl) setCurrentLogo(data.logoUrl);
     if (clearLogo && !logoDataUrl) setCurrentLogo(null);
@@ -118,6 +150,7 @@ function SettingsView({ section }) {
       const a = data.businessAddress || {};
       const b = data.branding || {};
       setCurrentLogo(b.logoUrl || null);
+      setBrandSprStored(b.stylesPerRow ? String(b.stylesPerRow) : null);
       setForm({
         ghlPipelineId: data.ghlPipelineId || "",
         ghlStageSendQuoteId: data.ghlStageSendQuoteId || "",
@@ -148,8 +181,12 @@ function SettingsView({ section }) {
         coFeeTaxable: data.coFeeTaxable !== false,
         coFeeLabel: data.coFeeLabel || "Change order fee",
         coUnlockHours: data.coUnlockHours == null ? "72" : String(data.coUnlockHours),
+        // Customer login code (migration 231). `status` sends 'sms' | 'email'; a function from
+        // before 231 sends nothing, which means text — the same thing the server defaults to.
+        customerLoginDefault: data.customerLoginDefault === "email" ? "email" : "sms",
         brandName: b.companyName || "", brandTagline: b.tagline || "",
         brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
+        brandStylesPerRow: b.stylesPerRow ? String(b.stylesPerRow) : "8",
       });
     })();
   }, []);
@@ -204,6 +241,49 @@ function SettingsView({ section }) {
   // which is exactly when they need the numbering fields in front of them.
   const ssMode = !mayGhlInvoice || !form.invoiceInGhl;
 
+  // SALES TAX SUMMARY — read-only, under the company rate (Avalara plan, 2026-09-17). Which rate
+  // a quote charges is no longer just the box on this card: a sales location's own rate beats
+  // it, and a rate verified for the delivery address beats both. Whether verified lookups are
+  // on is an operator switch (`client_settings.tax_lookup_enabled`), so a builder can only see
+  // it here, never flip it. No price is shown — the meters are off, and a price read follows
+  // the catalog redaction precedent when it is needed.
+  //
+  // Asked only on the CRM Connection screen, and only when the SAVED row is SS mode —
+  // `status.invoiceInGhl === false`, the same test submit-estimate makes
+  // (`invoice_in_ghl !== false` is the CRM path). NOT `ssMode` above: that one is true for a
+  // grandfathered tenant without the capability whose row still says CRM, so their
+  // numbering fields show — but every quote they issue still goes through the CRM. A
+  // CRM-mode tenant sees no sales-tax box and makes no tax call at all. Re-asked when
+  // `status` is re-read after a save, so the box appears the moment a save flips the row to
+  // SS mode and the location count stays current.
+  // ⚠️ These hooks sit ABOVE the skeleton's early return below — a hook added under it
+  // white-screens the page with React #310 the first time status lands.
+  const [taxInfo, setTaxInfo] = useState(null);   // tax_settings answer | { err, unavailable } | null
+  const savedSsMode = Boolean(status && status.invoiceInGhl === false);
+  const wantTaxInfo = savedSsMode && show("connection");
+  useEffect(() => {
+    // Cleared when the row leaves SS mode, so switching back never flashes the old answer.
+    if (!wantTaxInfo) { setTaxInfo(null); return; }
+    let alive = true;
+    sb.functions.invoke("portal-settings", { body: { action: "tax_settings" } }).then(({ data, error: err }) => {
+      if (!alive) return;
+      if (err || !data || data.error) {
+        setTaxInfo({
+          err: (data && data.error) || (err && err.message) || "Couldn't check your sales tax settings.",
+          unavailable: ssTaxReadUnavailable(err),
+        });
+        return;
+      }
+      setTaxInfo(data);
+    });
+    return () => { alive = false; };
+  }, [wantTaxInfo, status]);
+  // Rendered only on an answer: the server saying SS mode, or a real failure for a tenant
+  // whose saved row is SS mode. Nothing while it loads, nothing when the server says CRM
+  // mode, and nothing when the function is older than this page (ssTaxReadUnavailable).
+  const showTaxBox = ssMode && wantTaxInfo && !!taxInfo
+    && (taxInfo.err ? !taxInfo.unavailable : taxInfo.ssMode === true);
+
   // Who issues quotes and invoices (migration 121). Its own save, not the page-wide one:
   // the three fields are presence-based on the server, so sending only these leaves every
   // other setting untouched — and this card lives in the CRM section while the page Save
@@ -240,6 +320,29 @@ function SettingsView({ section }) {
   // Changing a signed order (migrations 209-216). Its own save, like the invoicing card
   // above and for the same reason: the fields are presence-based on the server, so sending
   // only these leaves every other setting untouched.
+  // "Customer login code: Text / Email" (migration 231; plan 3.6, Ahsan 2026-09-15). Saves the
+  // moment it is picked, through `save` with ONE key: the server writes customer_login_default
+  // only when the key is present, so nothing else on the page is touched — the same
+  // presence-based pattern as the two cards around it. A refused save puts the old choice back.
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginMsg, setLoginMsg] = useState(null);   // { ok } | { err }
+  const saveLoginDefault = async (next) => {
+    const prev = form.customerLoginDefault === "email" ? "email" : "sms";
+    if (next === prev || loginBusy) return;
+    setLoginMsg(null); setLoginBusy(true);
+    setForm((p) => ({ ...p, customerLoginDefault: next }));
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "save", customerLoginDefault: next } });
+    setLoginBusy(false);
+    if (err || (data && data.error)) {
+      setForm((p) => ({ ...p, customerLoginDefault: prev }));
+      setLoginMsg({ err: (data && data.error) || (err ? await fnError(err) : "Couldn't save that.") });
+      return;
+    }
+    setLoginMsg({ ok: next === "email"
+      ? "Saved — customers are offered an emailed code first."
+      : "Saved — customers are offered a texted code first." });
+  };
+
   const [coBusy, setCoBusy] = useState(false);
   const [coMsg, setCoMsg] = useState(null);   // { ok } | { err }
   const saveChangeOrders = async () => {
@@ -471,15 +574,23 @@ function SettingsView({ section }) {
           </div>
         )}
         {/* Sales tax (migration 158). SS mode only: in CRM mode GHL computes tax on its
-            own documents. The rate here is the FALLBACK — each quote's tax is looked up
-            from its delivery address (Avalara), and this is what gets charged when that
-            lookup can't resolve, which is why the server refuses to flip SS mode on
-            while it is blank: 0 is a real answer, "unanswered" is not. */}
+            own documents. The rate here is the COMPANY rate, and it is the last rung a quote
+            can land on: a rate verified for the delivery address wins, then the quote's
+            sales location's own rate (migration 244), then this. Nothing looks an address up
+            on its own — a verified rate only exists where someone asked for one. That is why
+            the server refuses to flip SS mode on while this is blank: with no location rate
+            either, a quote would have nothing to charge. 0 is a real answer, "unanswered" is
+            not.
+
+            The help text used to say tax was "figured from each quote's delivery address" and
+            this rate charged "when that lookup can't resolve". Neither was true once lookups
+            stopped running on every submit, and a builder reading it would believe every
+            quote was being checked. */}
         {ssMode && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
             <div><span style={S.lbl}>Sales tax rate (%)</span>
               <input style={S.input} value={form.ssTaxRate} onChange={set("ssTaxRate")} placeholder="e.g. 7.25" inputMode="decimal" />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Tax is figured from each quote's delivery address — this rate is charged when that lookup can't resolve. Enter 0 if you don't collect sales tax.</div></div>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Used on every quote unless the quote's sales location has its own rate, or someone verifies the rate for its delivery address. Enter 0 if you don't collect sales tax.</div></div>
             <div><span style={S.lbl}>Tax label on documents</span>
               <input style={S.input} value={form.ssTaxLabel} onChange={set("ssTaxLabel")} placeholder="Sales tax" maxLength={40} />
               <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How the tax line reads on quotes and invoices.</div>
@@ -487,6 +598,37 @@ function SettingsView({ section }) {
                 <input type="checkbox" checked={form.ssTaxDelivery} onChange={set("ssTaxDelivery")} />
                 Charge tax on delivery
               </label></div>
+          </div>
+        )}
+        {/* Read-only: where else a quote's rate can come from, and whether verified lookups
+            are on for this account. See the note on `taxInfo` above. "Verified against the
+            delivery address", never "exact" — the lookup is an approximate rate for general
+            goods, and the copy must not promise more than that. */}
+        {showTaxBox && (
+          <div style={{ marginTop: 12, maxWidth: 620, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 13px", fontSize: 12.5, color: "#475569", lineHeight: 1.55 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#64748B", marginBottom: 4 }}>Sales tax</div>
+            {taxInfo.err && <div style={{ color: "#B45309", fontWeight: 600 }}>{taxInfo.err}</div>}
+            {!taxInfo.err && (() => {
+              const withRate = (taxInfo.locations || []).filter((l) => l.active !== false && l.taxRatePct != null).length;
+              return (<>
+                <div>
+                  <b>Local rates:</b>{" "}
+                  {withRate > 0
+                    ? <>{withRate} of your sales locations {withRate === 1 ? "has its" : "have their"} own rate, used on quotes for {withRate === 1 ? "that location" : "those locations"}. Set them in Company → Locations.</>
+                    : <>none yet. A sales location can carry your local rate — set one in Company → Locations.</>}
+                </div>
+                <div style={{ marginTop: 4 }}>
+                  <b>Verified lookups:</b>{" "}
+                  {!taxInfo.lookupEnabled
+                    ? <>off for your account. CSM Synergy switches these on; until then your quotes use your company and local rates.</>
+                    : taxInfo.configured === false
+                      ? <>on for your account, but the lookup service isn't connected right now — quotes use your company and local rates until it is.</>
+                      : <>on for your account. A quote's rate can be verified against its delivery address before your customer signs.
+                          {/* usage24h is null when the lookup ledger can't be counted: unknown, not zero. */}
+                          {taxInfo.dailyCap != null && typeof taxInfo.usage24h === "number" && <> {taxInfo.usage24h} of {taxInfo.dailyCap} used in the last 24 hours.</>}</>}
+                </div>
+              </>);
+            })()}
           </div>
         )}
         {ssMode && (!String(form.ssQuoteNext).trim() || !String(form.ssInvoiceNext).trim() || !String(form.ssTaxRate).trim()) && (
@@ -497,7 +639,7 @@ function SettingsView({ section }) {
               !String(form.ssInvoiceNext).trim() && "a starting invoice number",
               !String(form.ssTaxRate).trim() && "your sales tax rate (0 counts)",
             ].filter(Boolean).join(", ").replace(/, ([^,]*)$/, " and $1")}.
-            Numbering that restarted at 1 would clash with the paperwork you already have out, and without a tax rate there is nothing to charge when an address lookup fails.
+            Numbering that restarted at 1 would clash with the paperwork you already have out, and without a company tax rate a quote whose sales location has no rate of its own has nothing to charge.
           </div>
         )}
         {ssMode && status && status.emailReady === false && (
@@ -508,7 +650,7 @@ function SettingsView({ section }) {
              happens (a working send under our name) rather than a failure that no longer
              occurs. Do not restore the old wording without closing that opening too. */
           <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
-            Heads up: your own sending domain isn't verified yet (Settings → Email), so quotes
+            Heads up: your own sending domain isn't verified yet (Settings → Email Settings), so quotes
             and invoices go out from our address on your behalf, with your business name as the
             sender. Verify your domain to send from your own address instead.
           </div>
@@ -606,6 +748,40 @@ function SettingsView({ section }) {
         </div>
       )}
 
+      {/* CUSTOMER LOGIN CODE (migration 231; plan 3.6, Ahsan 2026-09-15: "Text AND email login
+          codes before the expo"). The designer's Log in sheet offers Text | Email; this picks
+          which one comes FIRST. customer-auth login_options only ever treats it as a preference
+          among the channels the platform can actually deliver, so choosing Email before email
+          codes are switched on changes nothing a customer sees — the copy says so rather than
+          promising a route. Every tenant, CRM or not: the login is ours either way. */}
+      <div style={S.card}>
+        <div style={S.h2}>Customer login code</div>
+        <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 10, lineHeight: 1.5 }}>
+          How your customers get the 6-digit code that logs them in to see, accept and sign their quotes
+          and invoices. This is the option they're offered first — they can still pick the other one.
+        </p>
+        <div role="group" aria-label="Customer login code" data-ss-login-default={form.customerLoginDefault === "email" ? "email" : "sms"}
+          style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden" }}>
+          {[["sms", "Text"], ["email", "Email"]].map(([v, label]) => {
+            const on = (form.customerLoginDefault === "email" ? "email" : "sms") === v;
+            return (
+              <button key={v} type="button" aria-pressed={on} disabled={loginBusy} onClick={() => saveLoginDefault(v)}
+                style={{ background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155", border: "none", borderLeft: v === "email" ? "1px solid #E2E8F0" : "none", padding: "7px 18px", fontSize: 13, fontWeight: 700, cursor: loginBusy ? "default" : "pointer", fontFamily: "inherit", opacity: loginBusy ? 0.7 : 1 }}>
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
+          If emailed codes aren't available on your account yet, customers get a text either way.
+        </div>
+        {loginMsg && (
+          <div style={{ marginTop: 10, background: loginMsg.err ? "#FEF2F2" : "#ECFDF5", border: `1px solid ${loginMsg.err ? "#FECACA" : "#A7F3D0"}`, color: loginMsg.err ? "#B91C1C" : "#065F46", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
+            {loginMsg.err || loginMsg.ok}
+          </div>
+        )}
+      </div>
+
       {status && status.configured && (
         <div style={S.card}>
           <div style={S.h2}>Pipeline &amp; Stages</div>
@@ -678,6 +854,27 @@ function SettingsView({ section }) {
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input type="color" value={form.brandHeaderBg} onChange={set("brandHeaderBg")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
               <input style={{ ...S.input, flex: 1 }} value={form.brandHeaderBg} onChange={set("brandHeaderBg")} onKeyDown={brandKeyDown} /></div></div>
+          {/* BUILDING STYLES PER ROW (Carolyn 2026-09-14 @7:10, migration 232). A ninth style
+              wrapped to a second row of her style bar; the bar now scrolls instead, and this is
+              how many photos sit side by side before it does. Four buttons, not a number box:
+              only 5-8 are valid, and a picker that cannot hold a wrong value needs no error.
+              type="button" is load-bearing — this card lives inside the page-wide <form>, and a
+              default-type button would submit it. Staged like the logo: Save Branding sends it. */}
+          <div><span id="ss-brand-spr" style={S.lbl}>Building styles per row</span>
+            <div role="group" aria-labelledby="ss-brand-spr" data-ss-styles-per-row={form.brandStylesPerRow} style={{ display: "flex", gap: 6 }}>
+              {["5", "6", "7", "8"].map((n) => {
+                const on = form.brandStylesPerRow === n;
+                return (
+                  <button key={n} type="button" aria-pressed={on} onClick={() => setForm((p) => ({ ...p, brandStylesPerRow: n }))}
+                    style={{ flex: 1, height: 34, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700, borderRadius: 6,
+                      border: on ? "1px solid " + ACCENT : "1px solid #CBD5E1", background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#475569" }}>
+                    {n}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How many style photos sit side by side on your designer. Extra styles scroll.</div>
+          </div>
         </div>
         <div style={{ marginBottom: 12 }}>
           <span style={S.lbl}>Logo</span>
@@ -968,7 +1165,20 @@ const TOPUP_PRESETS = [10000, 25000, 50000];
 // from the gateway with the PUBLIC tokenization key) — card data never touches the
 // portal or Supabase; a returning tenant's card on file (gateway vault) is reused
 // so the lightbox only shows the first time.
-function BillingView({ viewingLabel = null }) {
+// SPLIT INTO TWO TABS on 2026-09-11 (Carolyn: "create a new nav called billing then I want to
+// move the subscriptions and the wallet in there, as we are prepping for logging every charge
+// for the wallet" / "I want the subscriptions on their own tab and wallet on another").
+//
+// ⚠️ ONE component, one mount, one `data` read — BillingShell passes `section` to a SINGLE
+// <BillingView>. portal-billing's `status` is the only backend leg here and it carries the
+// plans, the live subscriptions, the discount AND the wallet in one response, so two mounts
+// would mean two identical calls and a tab switch that re-fetched for nothing.
+//
+// The founding-price banner and the "checkout isn't switched on yet" notices ride with
+// SUBSCRIPTION: both are about the plan grid directly beneath them.
+function BillingView({ viewingLabel = null, section = "all" }) {
+  const showWallet = section === "all" || section === "wallet";
+  const showSub = section === "all" || section === "subscription";
   const [data, setData] = useState(null);   // status response; null = loading
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);   // subscribe/cancel in flight
@@ -1005,6 +1215,13 @@ function BillingView({ viewingLabel = null }) {
   const liveSubs = subs.filter((s) => s.status !== "cancelled");
   const liveFeatures = {}; liveSubs.forEach((s) => { const p = planById[s.plan_id]; if (p) liveFeatures[p.feature] = s; });
   const baseLive = !!liveFeatures["simple_layout"];
+  // NON-BILLABLE ACCOUNT. Since 2026-09-21 the operator's Non-billable flag confers every
+  // feature (migration 228), but the tiles below are built from liveFeatures — REAL
+  // subscription rows — so without this a comped account sees a full price list with working
+  // Subscribe buttons for things it already has, and can put a real charge through for them.
+  // Deliberately keyed on entitlement.exempt rather than on `features`: this asks "is this
+  // account billable", which is a different question from "may it use X".
+  const comped = !!(data && data.entitlement && data.entitlement.exempt);
 
   // The Structure Studio Suite bundles everything except Self Serve Displays. When it's chosen
   // (in the cart) or already live, its member features are covered — shown "Included" and not
@@ -1060,7 +1277,7 @@ function BillingView({ viewingLabel = null }) {
   const creditCents = Math.min(cartCredit, grossDueCents);
   const dueTodayCents = grossDueCents - creditCents;
   const creditSources = cart.flatMap(([f]) => (upgradeCredits[f] && upgradeCredits[f].sources) || []);
-  const selectable = features.some((f) => f.availability === "available" && !liveFeatures[f.feature]);
+  const selectable = !comped && features.some((f) => f.availability === "available" && !liveFeatures[f.feature]);
 
   // ── Wallet top-up (migration 164) ──────────────────────────────────────────────────
   // Bounds come from the server so the floor and cap live in one place
@@ -1202,7 +1419,7 @@ This charges the card they have on file.`)) { setBusy(false); return; }
   });
 
   const toggleFeature = (f) => {
-    if (f.availability !== "available" || liveFeatures[f.feature] || busy) return;
+    if (comped || f.availability !== "available" || liveFeatures[f.feature] || busy) return;
     if (memberCovered(f.feature)) return;                      // covered by the Suite — not separately selectable
     // Only block REMOVING the required base (it's in `sel` and the click would delete it);
     // re-adding must always work. Blocking both directions stranded the cart: selecting the
@@ -1226,7 +1443,7 @@ This charges the card they have on file.`)) { setBusy(false); return; }
     });
   };
   const setInterval_ = (f, iv) => {
-    if (f.availability !== "available" || liveFeatures[f.feature] || busy || memberCovered(f.feature)) return;
+    if (comped || f.availability !== "available" || liveFeatures[f.feature] || busy || memberCovered(f.feature)) return;
     setSel((p) => ({ ...p, [f.feature]: iv }));
   };
 
@@ -1341,7 +1558,23 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
 
+      {showSub && (<>
+      {/* COMPED ACCOUNT. Replaces the scarcity pitch rather than sitting beside it — an
+          account that pays nothing has no rate to lock in, and "only the first 15 builders"
+          over a price list they cannot buy from reads as a bug. */}
+      {comped && (
+        <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 10, padding: "12px 16px", marginBottom: 14, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 20, lineHeight: 1 }}>✓</span>
+          <div>
+            <div style={{ fontSize: 14.5, fontWeight: 800, color: "#166534", letterSpacing: "-0.01em" }}>Your account is comped</div>
+            <div style={{ fontSize: 12.5, color: "#15803D", marginTop: 1 }}>
+              Every feature is switched on for you by Structure Studio, and there's nothing to pay. The prices below are for reference only.
+            </div>
+          </div>
+        </div>
+      )}
       {/* Founding-price banner — scarcity marker above all the pricing. */}
+      {!comped && (
       <div style={{ background: "linear-gradient(90deg, #3D3672 0%, #1B7895 100%)", color: "#FFF", borderRadius: 10, padding: "12px 16px", marginBottom: 14, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <span style={{ fontSize: 20, lineHeight: 1 }}>⭐</span>
         <div>
@@ -1349,6 +1582,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
           <div style={{ fontSize: 12.5, color: "#DCE7F0", marginTop: 1 }}>Only for the first 15 builders — lock in this rate on the features you select while founding pricing is open.</div>
         </div>
       </div>
+      )}
 
       {data && data.configured === false && plans.length > 0 && (
         <div style={{ background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 8, padding: "10px 14px", color: "#3D3672", fontSize: 13, fontWeight: 600, marginBottom: 12 }}>
@@ -1364,6 +1598,8 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
         </div>
       )}
 
+      </>)}
+      {showWallet && (<>
       {/* WALLET — prepaid credit for metered usage. Carolyn, 2026-08-24: "like GHL has a
           wallet on there ... put it in the billing, in the billing portion. A wallet for
           usage cases."
@@ -1379,19 +1615,33 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       {data && data.wallet && (() => {
         const w = data.wallet;
         const avail = (w.balanceCents || 0) - (w.heldCents || 0);
-        const video = (w.meters || []).find((m) => m.kind === "video_3d_generation") || null;
-        const price = video && video.priceCents ? video.priceCents : 0;
-        const left = price > 0 ? Math.floor(Math.max(0, avail) / price) : null;
-        // Green at a generation or more in hand, amber below one, red at nothing. The same
-        // three-state read as SUB_BADGE, so the tab has one visual language.
+        // EVERY meter the server sends, in its own sort order. This used to look up
+        // video_3d_generation by name and ignore the rest, so the texting meters — live and
+        // priced — never appeared, and the card said "nothing is metered" while they were
+        // drawing on this balance. The server already sends only ACTIVE meters and authors
+        // their labels, so the card renders the list and maps no `kind` to English itself.
+        // A meter whose price is redacted (`visible` off) arrives with priceCents null: it is
+        // listed by name and no figure is invented for it.
+        const meters = (w.meters || []).filter((m) => m && m.kind);
+        const priced = meters.filter((m) => typeof m.priceCents === "number" && m.priceCents > 0);
+        const cheapest = priced.length ? Math.min(...priced.map((m) => m.priceCents)) : 0;
+        // A balance CAN go below zero: some usage posts after the fact rather than holding its
+        // price first, because refusing it would block a document a customer is waiting on.
+        // This card used to clamp that to $0.00, which told a builder whose next text or 3D
+        // generation was about to be refused that they simply had nothing in the wallet.
+        const signed$ = (c) => (c < 0 ? "−" + fmt$(-c) : fmt$(c));
+        // Green when the cheapest priced use is covered, amber below it, red at nothing, and
+        // red with its own word below zero. The same read as SUB_BADGE, so the tab has one
+        // visual language. No priced meter at all reads as Ready, as it always did.
         const tone = w.exempt ? { bg: "#ECFDF5", bd: "#A7F3D0", fg: "#065F46", t: "Non-billable" }
-          : left === null || left >= 1 ? { bg: "#ECFDF5", bd: "#A7F3D0", fg: "#065F46", t: "Ready" }
+          : avail < 0 ? { bg: "#FEF2F2", bd: "#FECACA", fg: "#991B1B", t: "Below zero" }
+          : cheapest === 0 || avail >= cheapest ? { bg: "#ECFDF5", bd: "#A7F3D0", fg: "#065F46", t: "Ready" }
           : avail > 0 ? { bg: "#FFFBEB", bd: "#FDE68A", fg: "#92400E", t: "Low balance" }
           : { bg: "#FEF2F2", bd: "#FECACA", fg: "#991B1B", t: "Empty" };
-        const stat = (label, value) => (
+        const stat = (label, value, color = "#1E293B") => (
           <div style={{ minWidth: 120 }}>
             <div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8" }}>{label}</div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: "#1E293B", marginTop: 3 }}>{value}</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color, marginTop: 3 }}>{value}</div>
           </div>
         );
         return (
@@ -1401,18 +1651,40 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
               <span style={{ background: tone.bg, border: `1px solid ${tone.bd}`, color: tone.fg, borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 800 }}>{tone.t}</span>
             </div>
             <div style={{ display: "flex", gap: 26, flexWrap: "wrap", marginBottom: 14 }}>
-              {stat("Balance", fmt$(Math.max(0, avail)))}
-              {left !== null && stat("3D generations left", left)}
+              {stat("Balance", signed$(avail), avail < 0 ? "#991B1B" : "#1E293B")}
               {(w.heldCents || 0) > 0 && stat("Reserved", fmt$(w.heldCents))}
             </div>
-            {video && video.priceCents ? (
-              <p style={{ fontSize: 13, color: "#475569", marginTop: 0 }}>
-                <strong>{fmt$(video.priceCents)}</strong> per {video.unitLabel} — {video.label}.
-                Text messages and email will draw on the same wallet as they arrive.
-              </p>
+            {!w.exempt && avail < 0 && (
+              <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#991B1B", fontSize: 12.5, fontWeight: 600, marginBottom: 12, lineHeight: 1.5 }}>
+                Your wallet is {fmt$(-avail)} below zero. Add funds to bring it back up — anything that takes its
+                price from the wallet up front is declined until your balance covers it.
+              </div>
+            )}
+            {meters.length > 0 ? (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 6 }}>What draws on it</div>
+                {meters.map((m) => {
+                  const hasPrice = typeof m.priceCents === "number";
+                  // How many the balance pays for — the "what's left" half of the Framed-UP shape,
+                  // for every priced meter rather than only 3D. Not shown on a non-billable
+                  // wallet, where nothing is charged and the count would mean nothing.
+                  const covers = !w.exempt && hasPrice && m.priceCents > 0 ? Math.floor(Math.max(0, avail) / m.priceCents) : null;
+                  return (
+                    <div key={m.kind} style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", padding: "5px 0", borderTop: "1px solid #F1F5F9", fontSize: 13 }}>
+                      <span style={{ color: "#334155", fontWeight: 600 }}>{m.label || m.kind}</span>
+                      {hasPrice && (
+                        <span style={{ color: "#475569", whiteSpace: "nowrap" }}>
+                          {m.priceCents === 0 ? "No charge" : <><strong>{fmt$(m.priceCents)}</strong>{m.unitLabel ? ` / ${m.unitLabel}` : ""}</>}
+                          {covers !== null && <span style={{ color: "#94A3B8" }}> · balance covers {covers}</span>}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             ) : (
               <p style={{ fontSize: 13, color: "#64748B", marginTop: 0 }}>
-                Nothing is metered on your account yet. When 3D generation and texting switch on, they draw from here.
+                Nothing is metered on your account yet. Anything that switches on later draws from here.
               </p>
             )}
             {/* ADD FUNDS — real since migration 164. The note that used to sit here read
@@ -1524,6 +1796,8 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
         );
       })()}
 
+      </>)}
+      {showSub && (<>
       {/* At-a-glance subscription summary — total spend, status, and next renewal, above the
           per-feature detail. Derived from the same live subscriptions; no extra backend call. */}
       {data && liveSubs.length > 0 && (() => {
@@ -1595,17 +1869,21 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
             {features.filter((f) => !liveFeatures[f.feature]).map((f) => {
               const soon = f.availability !== "available";
               const covered = memberCovered(f.feature);
-              const veiled = soon || covered;   // shows an overlay + dims + blocks interaction
+              // A comped account is veiled the same way a Suite member is: every tile carries
+              // the overlay, nothing is clickable, and the price stays legible underneath. The
+              // existing mechanic already does exactly that, so this is one more reason to
+              // veil rather than a second, parallel way of dimming a card.
+              const veiled = soon || covered || comped;   // shows an overlay + dims + blocks interaction
               const iv = sel[f.feature];
               const on = !!iv;
               const shown = f.plans[iv || "annual"];
               const lockedBase = f.required && !baseLive;
               return (
-                <div key={f.feature} onClick={covered ? undefined : () => toggleFeature(f)}
+                <div key={f.feature} onClick={(covered || comped) ? undefined : () => toggleFeature(f)}
                   style={{ position: "relative", border: on ? `2px solid ${ACCENT}` : "1px solid #E2E8F0", borderRadius: 10, padding: on ? 15 : 16, cursor: veiled ? "default" : "pointer", overflow: "hidden" }}>
                   {veiled && (
                     <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2, pointerEvents: "none" }}>
-                      <span style={{ transform: "rotate(-12deg)", background: covered ? "#EDE9FE" : "#FEF3C7", color: covered ? "#5B21B6" : "#B45309", border: `1px solid ${covered ? "#C4B5FD" : "#FDE68A"}`, borderRadius: 8, padding: "6px 16px", fontSize: 13, fontWeight: 800, letterSpacing: 1.5, textTransform: "uppercase", whiteSpace: "nowrap" }}>{covered ? "Included in the Suite" : (f.feature === "self_serve_displays" ? "Coming 2027" : "Coming soon")}</span>
+                      <span style={{ transform: "rotate(-12deg)", background: comped ? "#DCFCE7" : covered ? "#EDE9FE" : "#FEF3C7", color: comped ? "#166534" : covered ? "#5B21B6" : "#B45309", border: `1px solid ${comped ? "#BBF7D0" : covered ? "#C4B5FD" : "#FDE68A"}`, borderRadius: 8, padding: "6px 16px", fontSize: 13, fontWeight: 800, letterSpacing: 1.5, textTransform: "uppercase", whiteSpace: "nowrap" }}>{comped ? "Included" : covered ? "Included in the Suite" : (f.feature === "self_serve_displays" ? "Coming 2027" : "Coming soon")}</span>
                     </div>
                   )}
                   <div style={{ opacity: veiled ? 0.45 : 1 }}>
@@ -1767,6 +2045,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
           Sign up for Synergy CRM →
         </a>
       </div>
+      </>)}
     </div>
   );
 }
@@ -1841,10 +2120,19 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const optionCols = () => optionSections().flatMap((s) => s.cols);
 
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-  const onStyleImg = (file) => {
+  const onStyleImg = async (file) => {
     if (!file) { setStyleImg(null); return; }
     if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setStyleFileKey((k) => k + 1); return; }
-    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setStyleFileKey((k) => k + 1); return; }
+    // A photo straight off a phone is 4-12MB, so "too large" was refusing the normal case and
+    // asking a builder to go find image-editing software before they could add a style. Shrink it
+    // instead — ssFitImageForUpload (06-3d.jsx) is the same helper the fixture and colour uploads
+    // have used since 2026-08: longest edge 1600px, flattened onto white, JPEG quality stepped
+    // 0.9/0.8/0.7 until it fits, and the ORIGINAL handed back untouched if it is already small
+    // enough. It re-encodes to image/jpeg, so file.type stays correct for the upload below.
+    // The check that follows is no longer the common path: it only fires when the file could not
+    // be decoded and re-encoded at all, which is a broken image rather than a big one.
+    file = await ssFitImageForUpload(file);
+    if (file.size > 3_000_000) { setMsg({ err: "That image couldn't be resized small enough — try a JPG or PNG." }); setStyleFileKey((k) => k + 1); return; }
     const r = new FileReader();
     r.onerror = () => setMsg({ err: "Could not read that image." });
     r.onload = () => setStyleImg({ base64: r.result, contentType: file.type || "image/jpeg", name: file.name });
@@ -1912,10 +2200,12 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     setStyleBusy(false);
   };
   const openEdit = (s) => { setEditStyle(s); setEditName(s.label || ""); setEditCode(s.code || ""); setEditImg(null); setEditFileKey((k) => k + 1); };
-  const onEditImg = (file) => {
+  const onEditImg = async (file) => {
     if (!file) { setEditImg(null); return; }
     if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setEditFileKey((k) => k + 1); return; }
-    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setEditFileKey((k) => k + 1); return; }
+    // Shrink oversized photos rather than refusing them — see onStyleImg for why.
+    file = await ssFitImageForUpload(file);
+    if (file.size > 3_000_000) { setMsg({ err: "That image couldn't be resized small enough — try a JPG or PNG." }); setEditFileKey((k) => k + 1); return; }
     const r = new FileReader();
     r.onerror = () => setMsg({ err: "Could not read that image." });
     r.onload = () => setEditImg({ base64: r.result, contentType: file.type || "image/jpeg" });
@@ -2980,6 +3270,18 @@ const LP_METHODS = [
   { value: "pct_building_price", label: "pct building price" },
   { value: "pct_estimate_total", label: "pct estimate total" },
 ];
+// The build-on-site fee's basis, shown inline on the row (Carolyn 2026-09-14). The same seven
+// methods as LP_METHODS, with "each" spelled the way she reads it: "All these but each is
+// flat rate." Values must match the style_wall_heights check constraint (228).
+const WH_BOS_BASES = [
+  ["each", "flat rate"],
+  ["lineal_ft", "lineal ft"],
+  ["sqft_option", "sqft option"],
+  ["sqft_building", "sqft building"],
+  ["perimeter_building", "perimeter building"],
+  ["pct_building_price", "pct building price"],
+  ["pct_estimate_total", "pct estimate total"],
+];
 // -- Wall Height Upgrades (172) ----------------------------------------------------------
 // One card, one section per building style -- the ColorsView pattern, and for the reason
 // Carolyn liked it there: a builder reads down their own styles rather than across a matrix.
@@ -3355,6 +3657,367 @@ function Insulation({ viewingLabel = null, clientId = null }) {
   );
 }
 
+// ── Foundation (237) ──────────────────────────────────────────────────────────────────────
+// Site work done before the building arrives (Carolyn 2026-09-14: "gravel pad, Fence removal,
+// piers, and concrete slab. ALL of these should have multiple ways of charging for them").
+// A FIXED four rows with a label override — the cladding shape — per TENANT, not per style.
+const SS_FOUNDATION_ROWS = [
+  { id: "gravel_pad",    label: "Gravel pad",    basis: "sqft_option" },
+  { id: "fence_removal", label: "Fence removal", basis: "lineal_ft" },
+  { id: "piers",         label: "Piers",         basis: "each" },
+  { id: "concrete_slab", label: "Concrete slab", basis: "sqft_option" },
+];
+// The seven shared methods. `each` is labelled each here, NOT "flat rate" as on the wall-height
+// fee: piers are "each" and DO take a count the customer enters (starting at 1).
+const SS_FOUNDATION_BASES = [
+  ["each", "each"],
+  ["lineal_ft", "lineal ft"],
+  ["sqft_option", "sqft option"],
+  ["sqft_building", "sqft building"],
+  ["perimeter_building", "perimeter building"],
+  ["pct_building_price", "pct building price"],
+  ["pct_estimate_total", "pct estimate total"],
+];
+
+function Foundation({ viewingLabel = null, clientId = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [cat, setCat] = useState(null);
+  const [rows, setRows] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const load = async () => {
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data);
+    const saved = {};
+    (data.foundation || []).forEach((r) => { saved[r.item_id] = r; });
+    const m = {};
+    SS_FOUNDATION_ROWS.forEach((d) => {
+      const r = saved[d.id];
+      m[d.id] = {
+        labelOverride: r && r.label_override ? String(r.label_override) : "",
+        rate: r && r.rate != null ? String(r.rate) : "",
+        basis: (r && r.basis) || d.basis,
+        taxable: !r || r.taxable !== false,
+        active: !r || r.active !== false,
+        internalOnly: !!r && r.internal_only === true,
+      };
+    });
+    setRows(m);
+  };
+  useEffect(() => { load(); }, []);
+  const rowOf = (id) => rows[id] || { labelOverride: "", rate: "", basis: "each", taxable: true, active: true, internalOnly: false };
+  const setRow = (id, field, val) => setRows((p) => ({ ...p, [id]: { ...rowOf(id), [field]: val } }));
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const out = SS_FOUNDATION_ROWS.map((d) => {
+        const r = rowOf(d.id);
+        return { itemId: d.id, labelOverride: r.labelOverride, rate: String(r.rate ?? "").trim(), basis: r.basis, taxable: r.taxable, active: r.active, internalOnly: r.internalOnly };
+      });
+      // Refuse, never coerce — a silently-zeroed rate would pour a slab for free.
+      const bad = out.filter((r) => r.rate !== "" && (!Number.isFinite(Number(r.rate)) || Number(r.rate) < 0));
+      if (bad.length) throw new Error("Nothing was saved \u2014 fix these rate(s) first: " + bad.map((r) => r.itemId.replace("_", " ")).join(", ") + ".");
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_foundation", rows: out }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: "Saved " + (data.saved || 0) + " item(s)" + (skipped.length ? ", " + skipped.length + " skipped" : "") + ".", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Foundation</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 8px", maxWidth: 680 }}>
+        Site work you do before the building arrives. <b>Leave a rate blank and that item isn&rsquo;t
+        offered</b>; 0 means it is included; anything else is a charge, worked out by the method you pick.
+        Each one the customer chooses lands as its own line on the quote.
+      </p>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
+        <b>each</b> = rate &times; a count the customer enters (piers, starting at 1); <b>lineal ft</b> = rate &times; the
+        feet they enter (fence); <b>sqft option</b> = rate &times; the square feet they enter, pre-filled with the
+        building&rsquo;s footprint (pad, slab); <b>sqft building</b> = rate &times; (width &times; depth);
+        <b> perimeter building</b> = rate &times; 2 &times; (width + depth); <b>pct building price</b> = (rate &divide; 100)
+        &times; base building price; <b>pct estimate total</b> = (rate &divide; 100) &times; subtotal of all other lines, resolved last.
+      </p>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" \u00b7 ")}</div>}</div>}
+      {!cat ? <SkelBar /> : (
+        <>
+          <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 900 }}>
+            <thead><tr>
+              <th style={S.th}>Item</th>
+              <th style={S.th} title="How it reads on the designer and the quote. Blank keeps the built-in name.">Shown as</th>
+              <th style={S.th} title="Which of the seven methods prices it. Three of them ask the customer for a number.">How it&rsquo;s priced</th>
+              <th style={S.th} title="Dollars, or a percent for the two pct methods. Blank = not offered; 0 = included.">Rate</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Untick to park this item without losing its rate. Customers never see it while unticked.">Offer</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page. A rep-selected item still prices normally.">Internal only</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this service.">Taxable</th>
+            </tr></thead>
+            <tbody>
+              {SS_FOUNDATION_ROWS.map((d) => {
+                const r = rowOf(d.id);
+                return (
+                  <tr key={d.id}>
+                    <td style={{ ...S.td, fontWeight: 700, whiteSpace: "nowrap" }}>{d.label}</td>
+                    <td style={S.td}><input type="text" value={r.labelOverride} placeholder={d.label} maxLength={60}
+                      onChange={(e) => setRow(d.id, "labelOverride", e.target.value)} style={{ ...S.input, width: 170 }} /></td>
+                    <td style={S.td}>
+                      <select value={r.basis} onChange={(e) => setRow(d.id, "basis", e.target.value)} style={{ ...S.input, width: 190 }}>
+                        {SS_FOUNDATION_BASES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                      </select>
+                    </td>
+                    <td style={S.td}><input type="number" min="0" step="0.01" value={r.rate} placeholder="not offered"
+                      onChange={(e) => setRow(d.id, "rate", e.target.value)} style={{ ...S.input, width: 120 }} /></td>
+                    <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.active} onChange={(e) => setRow(d.id, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                    <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.internalOnly} onChange={(e) => setRow(d.id, "internalOnly", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                    <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => setRow(d.id, "taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          </div>
+          <div style={{ marginTop: 14 }}>
+            <button onClick={save} disabled={busy} style={S.btn(DOOR_MINT, "#0F4C46")}>{busy ? "Saving\u2026" : "Save foundation"}</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Delivery (233–236) ────────────────────────────────────────────────────────────────────
+// Carolyn 2026-09-14: "the option for them to setup their delivery fees and the option for them
+// to set it up for the fees to be charged based on the miles from either the main builder
+// address or any location address. They should specify whether they want the delivery fee to
+// automatically add based on their rules.. or not automate it." Four rule shapes, three origins,
+// one switch. Miles are driving miles from Google, whole and rounded up; the "Test an address"
+// box at the bottom prices an address exactly as the customer designer and the estimate will.
+const SS_DELIVERY_RULES = [
+  ["flat", "One flat fee", "The same delivery fee on every job."],
+  ["base_plus", "Base fee + per mile", "A call-out fee plus a rate for every mile from your origin."],
+  ["free_radius", "Free within a radius, then per mile", "No charge up to N miles; beyond that, a rate per mile."],
+  ["bands", "Mileage bands", "A flat fee for each range of miles — 0–25, 26–50, and so on."],
+];
+const SS_DELIVERY_ORIGINS = [
+  ["business", "Our business address", "From the address under Settings → Company."],
+  ["nearest", "The nearest of our locations", "Whichever of your business address and Locations is closest to the customer."],
+  ["rep", "The rep's home lot", "The location set for whoever is quoting (Settings → Company → Team). The customer designer, which has no rep, uses the nearest location."],
+];
+
+function DeliveryView({ viewingLabel = null, clientId = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [data, setData] = useState(null);
+  const [f, setF] = useState({ automate: false, originMode: "business", ruleType: "flat", flatFee: "", baseFee: "", perMile: "", freeMiles: "", perMileCounts: "beyond", bands: [], ssTaxDelivery: false });
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [test, setTest] = useState({ street: "", city: "", state: "", zip: "" });
+  const [testRes, setTestRes] = useState(null);
+  const [testing, setTesting] = useState(false);
+  const set = (k) => (e) => setF((p) => ({ ...p, [k]: e && e.target ? (e.target.type === "checkbox" ? e.target.checked : e.target.value) : e }));
+
+  const load = async () => {
+    const { data: d, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "delivery_settings" }) });
+    if (error || (d && d.error)) { setMsg({ err: (error && error.message) || d.error }); return; }
+    setData(d);
+    const s = d.settings || null;
+    const num = (v) => (v == null ? "" : String(v));
+    setF({
+      automate: !!(s && s.automate),
+      originMode: (s && s.origin_mode) || "business",
+      ruleType: (s && s.rule_type) || "flat",
+      flatFee: num(s && s.flat_fee), baseFee: num(s && s.base_fee), perMile: num(s && s.per_mile), freeMiles: num(s && s.free_miles),
+      perMileCounts: (s && s.per_mile_counts) || "beyond",
+      bands: Array.isArray(s && s.bands) ? s.bands.map((b) => ({ minMiles: num(b.minMiles), maxMiles: num(b.maxMiles), fee: num(b.fee) })) : [],
+      ssTaxDelivery: d.ssTaxDelivery === true,
+    });
+  };
+  useEffect(() => { load(); }, []);
+
+  // Bands: min follows the previous band's max + 1, so the builder only ever types the top of
+  // each range and a fee — contiguity is by construction here and checked again on the server.
+  const bandsFixed = (list) => {
+    let next = 0;
+    return list.map((b) => { const out = { ...b, minMiles: String(next) }; const mx = Number(b.maxMiles); if (Number.isFinite(mx)) next = Math.floor(mx) + 1; return out; });
+  };
+  const setBand = (i, k, v) => setF((p) => ({ ...p, bands: bandsFixed(p.bands.map((b, j) => (j === i ? { ...b, [k]: v } : b))) }));
+  const addBand = () => setF((p) => ({ ...p, bands: bandsFixed([...p.bands, { minMiles: "", maxMiles: "", fee: "" }]) }));
+  const delBand = (i) => setF((p) => ({ ...p, bands: bandsFixed(p.bands.filter((_, j) => j !== i)) }));
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const body = scoped({
+        action: "save_delivery_settings",
+        automate: f.automate, originMode: f.originMode, ruleType: f.ruleType,
+        flatFee: f.flatFee, baseFee: f.baseFee, perMile: f.perMile, freeMiles: f.freeMiles, perMileCounts: f.perMileCounts,
+        bands: f.bands.map((b) => ({ minMiles: b.minMiles, maxMiles: b.maxMiles, fee: b.fee })),
+        ssTaxDelivery: f.ssTaxDelivery,
+      });
+      const { data: d, error } = await sb.functions.invoke("portal-settings", { body });
+      if (error || (d && d.error)) throw new Error((error && error.message) || d.error);
+      await load();
+      setMsg({ ok: "Delivery settings saved." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const runTest = async () => {
+    setTesting(true); setTestRes(null);
+    try {
+      const { data: d, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "delivery_test_address", address: test }) });
+      if (error || (d && d.error)) throw new Error((error && error.message) || d.error);
+      setTestRes(d.quote);
+    } catch (e) { setTestRes({ error: e.message }); }
+    setTesting(false);
+  };
+
+  const addrLine = (a) => a ? [a.street || a.addressLine1, a.city, a.state, a.zip || a.postalCode].filter(Boolean).join(", ") : "";
+  const money = (v) => "$" + (Number(v) || 0).toFixed(2);
+  const numBox = (k, ph, w = 110) => <input type="number" min="0" step="0.01" value={f[k]} placeholder={ph} onChange={set(k)} style={{ ...S.input, width: w }} />;
+  const needsMiles = f.ruleType !== "flat";
+  const reasonText = (r) => ({
+    beyond_last_band: "beyond your last mileage band — left for the rep",
+    no_distance: "no driving distance could be found",
+    no_route: "no driving route could be found",
+    rule_incomplete: "the rule above is missing a number",
+    no_origin: "no origin has a full address",
+    distance_not_configured: "distance lookups aren't configured on this server",
+    not_configured: "no delivery rules saved yet",
+  })[r] || r;
+
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Delivery</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
+        How delivery is charged. Pick where it is measured from and how the fee is worked out, then
+        choose whether it is <b>added automatically</b> — the customer sees it in the designer as soon as
+        they enter their address, and it lands on the quote — or left for the rep, who sees the figure
+        these rules suggest and decides. Miles are <b>driving miles</b>, rounded up to the next whole mile.
+      </p>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {!data ? <SkelBar /> : (
+        <>
+          {!data.distanceConfigured && (
+            <div style={{ ...S.err, background: "#FFFBEB", color: "#92400E", border: "1px solid #FDE68A" }}>
+              Distance lookups aren&rsquo;t configured on this server yet, so only a flat fee can run automatically.
+              Mileage rules can still be saved; ask CSM Synergy to add the Google key.
+            </div>
+          )}
+
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 16, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+            <input type="checkbox" checked={f.automate} onChange={set("automate")} style={{ width: 17, height: 17, cursor: "pointer", accentColor: DOOR_MINT }} />
+            Add the delivery fee automatically
+            <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; off means the rep types it, with this figure suggested</span>
+          </label>
+
+          <div style={{ ...S.lbl, marginBottom: 6 }}>Measured from</div>
+          <div style={{ display: "grid", gap: 6, marginBottom: 6, maxWidth: 680 }}>
+            {SS_DELIVERY_ORIGINS.map(([v, l, hint]) => (
+              <label key={v} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, cursor: "pointer" }}>
+                <input type="radio" name="ss-dlv-origin" checked={f.originMode === v} onChange={() => setF((p) => ({ ...p, originMode: v }))} style={{ marginTop: 2, accentColor: DOOR_MINT }} />
+                <span><b style={{ color: "#1E293B" }}>{l}</b> <span style={{ color: "#64748B" }}>&mdash; {hint}</span></span>
+              </label>
+            ))}
+          </div>
+          <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 16, maxWidth: 680 }}>
+            On file: <b>{addrLine(data.businessAddress) || "no business address yet"}</b>
+            {(data.locations || []).length > 0 && <> &middot; locations: {data.locations.map((l) => l.name + (l.city ? " (" + l.city + ")" : "")).join(", ")}</>}
+            {" "}&middot; <a href="/portal/settings/company" style={{ color: "#1B7895" }}>Company</a> &middot; <a href="/portal/settings/locations" style={{ color: "#1B7895" }}>Locations</a>
+          </div>
+
+          <div style={{ ...S.lbl, marginBottom: 6 }}>How the fee is worked out</div>
+          <div style={{ display: "grid", gap: 6, marginBottom: 10, maxWidth: 680 }}>
+            {SS_DELIVERY_RULES.map(([v, l, hint]) => (
+              <label key={v} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, cursor: "pointer" }}>
+                <input type="radio" name="ss-dlv-rule" checked={f.ruleType === v} onChange={() => setF((p) => ({ ...p, ruleType: v }))} style={{ marginTop: 2, accentColor: DOOR_MINT }} />
+                <span><b style={{ color: "#1E293B" }}>{l}</b> <span style={{ color: "#64748B" }}>&mdash; {hint}</span></span>
+              </label>
+            ))}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end", marginBottom: 16, padding: "10px 12px", background: "#F8FAFC", borderRadius: 8, maxWidth: 680 }}>
+            {f.ruleType === "flat" && <div><span style={S.lbl}>Delivery fee ($)</span>{numBox("flatFee", "0.00")}</div>}
+            {f.ruleType === "base_plus" && (<>
+              <div><span style={S.lbl}>Base fee ($)</span>{numBox("baseFee", "0.00")}</div>
+              <div><span style={S.lbl}>Per mile ($)</span>{numBox("perMile", "0.00")}</div>
+            </>)}
+            {f.ruleType === "free_radius" && (<>
+              <div><span style={S.lbl}>Free within (miles)</span>{numBox("freeMiles", "25")}</div>
+              <div><span style={S.lbl}>Then per mile ($)</span>{numBox("perMile", "0.00")}</div>
+              <div><span style={S.lbl}>Per-mile rate counts</span>
+                <select value={f.perMileCounts} onChange={set("perMileCounts")} style={{ ...S.input, width: 220 }}>
+                  <option value="beyond">only the miles beyond the radius</option>
+                  <option value="all">every mile from the origin</option>
+                </select></div>
+            </>)}
+            {f.ruleType === "bands" && (
+              <div style={{ width: "100%" }}>
+                <table style={{ borderCollapse: "collapse" }}>
+                  <thead><tr><th style={S.th}>From (mi)</th><th style={S.th}>To (mi)</th><th style={S.th}>Fee ($)</th><th style={S.th}></th></tr></thead>
+                  <tbody>
+                    {f.bands.map((b, i) => (
+                      <tr key={i}>
+                        <td style={S.td}><input type="number" value={b.minMiles} readOnly style={{ ...S.input, width: 80, background: "#F1F5F9" }} /></td>
+                        <td style={S.td}><input type="number" min="0" step="1" value={b.maxMiles} onChange={(e) => setBand(i, "maxMiles", e.target.value)} style={{ ...S.input, width: 80 }} /></td>
+                        <td style={S.td}><input type="number" min="0" step="0.01" value={b.fee} onChange={(e) => setBand(i, "fee", e.target.value)} style={{ ...S.input, width: 100 }} /></td>
+                        <td style={S.td}><button onClick={() => delBand(i)} title="Remove" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800 }}>&#x2715;</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <button onClick={addBand} style={{ background: "transparent", border: "none", color: "#1B7895", fontWeight: 700, fontSize: 13, cursor: "pointer", padding: "8px 0 0" }}>+ Add band</button>
+                <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4 }}>Ranges follow on from each other automatically. An address beyond the last band is not priced automatically &mdash; it is left for the rep.</div>
+              </div>
+            )}
+          </div>
+
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 16, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+            <input type="checkbox" checked={f.ssTaxDelivery} onChange={set("ssTaxDelivery")} style={{ width: 17, height: 17, cursor: "pointer", accentColor: DOOR_MINT }} />
+            Taxable
+            {/* The twin of "Charge tax on delivery" on CRM Connection → Quotes & Invoices (both write
+                ss_tax_delivery). It used to point at Company → Business details, which has no such switch. */}
+            <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; charge sales tax on the delivery line (the same switch as CRM Connection &rarr; Quotes &amp; Invoices)</span>
+          </label>
+
+          <div>
+            <button onClick={save} disabled={busy} style={S.btn(DOOR_MINT, "#0F4C46")}>{busy ? "Saving\u2026" : "Save delivery"}</button>
+          </div>
+
+          <div style={{ marginTop: 22, paddingTop: 14, borderTop: "1px solid #E2E8F0", maxWidth: 680 }}>
+            <div style={{ ...S.lbl, marginBottom: 6 }}>Test an address</div>
+            <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 8 }}>Prices an address against the rules <b>as saved</b> &mdash; save first. This is exactly what the customer will see and be charged.</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
+              <div style={{ flex: "2 1 200px" }}><span style={S.lbl}>Street</span><input value={test.street} onChange={(e) => setTest((p) => ({ ...p, street: e.target.value }))} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} /></div>
+              <div style={{ flex: "1 1 120px" }}><span style={S.lbl}>City</span><input value={test.city} onChange={(e) => setTest((p) => ({ ...p, city: e.target.value }))} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} /></div>
+              <div style={{ flex: "0 1 90px" }}><span style={S.lbl}>State</span><input value={test.state} onChange={(e) => setTest((p) => ({ ...p, state: e.target.value }))} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} /></div>
+              <div style={{ flex: "0 1 90px" }}><span style={S.lbl}>Zip</span><input value={test.zip} onChange={(e) => setTest((p) => ({ ...p, zip: e.target.value.replace(/\D/g, "").slice(0, 5) }))} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} /></div>
+              <button onClick={runTest} disabled={testing || !test.city || !test.state || !test.zip} style={S.btn("#F1F5F9", "#334155")}>{testing ? "Checking\u2026" : "Check"}</button>
+            </div>
+            {testRes && (
+              <div style={{ marginTop: 10, fontSize: 12.5, color: "#1E293B" }}>
+                {testRes.error ? <span style={{ color: "#DC2626" }}>{testRes.error}</span>
+                  : testRes.autoPriced
+                    ? <><b>{money(testRes.amount)}</b> &mdash; {testRes.desc}{needsMiles && testRes.miles != null ? "" : ""}</>
+                    : <>Not priced automatically &mdash; {reasonText(testRes.reason)}{testRes.miles != null ? " (" + testRes.miles + " mi" + (testRes.originName ? " from " + testRes.originName : "") + ")" : ""}.</>}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function WallHeights({ viewingLabel = null, clientId = null }) {
   // Operator view-as: state the effective tenant explicitly, same as every sibling card here.
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
@@ -3469,32 +4132,59 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
   const renderSection = (st) => {
     const rows = byStyle[st.id] || [];
     const widths = widthsOf(st.id);
+    // Local overrides for this table only (Carolyn 2026-09-12). S.th is nowrap, so the two narrow
+    // columns collided ("INTERNAL ONLYBUILT ON SITE") — those two wrap onto two lines and every
+    // header sits on the bottom so the baselines agree. S.td is top-aligned, which parked the
+    // checkboxes above the taller inputs — the main row is middle-aligned. The number inputs keep
+    // S.input's width:100% so they fit their column instead of crossing into the widths.
+    const thB = { ...S.th, verticalAlign: "bottom" };
+    const thC = { ...thB, textAlign: "center" };
+    const thWrap = { ...thC, whiteSpace: "normal", lineHeight: 1.2 };
+    const tdMid = { ...S.td, verticalAlign: "middle" };
     return (
       <div key={st.id} style={{ ...S.card, marginBottom: 12 }}>
-        <div style={S.h2}>{st.label}</div>
+        {/* The style's STANDARD wall height, right behind its name (Carolyn 2026-09-12). Read
+            from the same catalog payload the 3D calibration writes (building_styles.d3), so it
+            is always what the designer will actually draw. 8 ft is the designer's own fallback
+            for an uncalibrated style (`|| 8` in structure-studio.component.js), so an unset
+            style says so instead of showing a number as if someone had chosen it. */}
+        <div style={{ ...S.h2, display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+          <span>{st.label}</span>
+          {(() => {
+            const h = st.d3 && Number(st.d3.wallHeightFt);
+            const calibrated = Number.isFinite(h) && h > 0;
+            return (
+              <span title={calibrated ? "Standard wall height, from 3D Style Calibration" : "No wall height calibrated yet — the designer assumes 8 ft. Set it under Settings → Designer → 3D Style Calibration."}
+                style={{ fontSize: 12, fontWeight: 600, color: calibrated ? "#1B7895" : "#94A3B8" }}>
+                standard wall {calibrated ? h : 8} ft{calibrated ? "" : " (not set — using the default)"}
+              </span>
+            );
+          })()}
+        </div>
         {rows.length === 0 ? (
           <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 10px" }}>
             No taller-wall option offered on this style — customers see no wall-height choice.
           </p>
         ) : (
-          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 760, tableLayout: "fixed" }}>
-            <colgroup><col style={{ width: "13%" }} /><col style={{ width: "14%" }} /><col style={{ width: "24%" }} /><col style={{ width: "11%" }} /><col style={{ width: "12%" }} /><col style={{ width: "10%" }} /><col style={{ width: "9%" }} /><col style={{ width: "7%" }} /></colgroup>
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 980, tableLayout: "fixed" }}>
+            <colgroup><col style={{ width: "10%" }} /><col style={{ width: "10%" }} /><col style={{ width: "19%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "26%" }} /><col style={{ width: "4%" }} /></colgroup>
             <thead><tr>
-              <th style={S.th} title="How much taller than this style's standard wall, in whole inches.">Increase (in)</th>
-              <th style={S.th} title="Charged per lineal foot of the building's perimeter. Leave blank to keep the row without offering it yet.">$ / lineal ft</th>
-              <th style={S.th} title="Which building widths this increase is offered on. Taller walls raise the haul height, and a wider building already has a taller roof — so a narrow building can take more. A width added to this style later arrives unticked, never offered by default.">Offered on widths</th>
-              <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page. A rep-selected increase still prices normally.">Internal only</th>
-              <th style={{ ...S.th, textAlign: "center" }} title="Walls this tall can't go under a bridge, so a building with this increase is assembled on the customer's site instead of hauled. Tick it to set the upcharge for sending a crew out.">Built on site</th>
-              <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this upgrade.">Taxable</th>
-              <th style={{ ...S.th, textAlign: "center" }}>Active</th>
-              <th style={S.th}></th>
+              <th style={thB} title="How much taller than this style's standard wall, in whole inches.">Increase (in)</th>
+              <th style={thB} title="Charged per lineal foot of the building's perimeter. Leave blank to keep the row without offering it yet.">$ / lineal ft</th>
+              <th style={thB} title="Which building widths this increase is offered on. Taller walls raise the haul height, and a wider building already has a taller roof — so a narrow building can take more. A width added to this style later arrives unticked, never offered by default.">Offered on widths</th>
+              <th style={thWrap} title="Available in the rep designer only — hidden from the customer-facing page. A rep-selected increase still prices normally.">Internal only</th>
+              <th style={thWrap} title="Walls this tall can't go under a bridge, so a building with this increase is assembled on the customer's site instead of hauled. Tick it to set the upcharge for sending a crew out.">Built on site</th>
+              <th style={thC} title="Untick if you don't charge sales tax on this upgrade.">Taxable</th>
+              <th style={thC}>Active</th>
+              <th style={thB} title="The upcharge for sending a crew out, on rows ticked Built on site. Amount, then how it is charged — flat rate is one fee for the job; the rest use the same methods as layout items. Leave the amount blank if you don't charge extra: the building is still marked built on site.">On-site fee</th>
+              <th style={thB}></th>
             </tr></thead>
             <tbody>
               {rows.map((r, i) => [
                 <tr key={(r.id || ("new-" + i)) + "-main"}>
-                  <td style={S.td}><input type="number" min="1" max="48" step="1" value={r.deltaIn} onChange={(e) => setRow(st.id, i, "deltaIn", e.target.value)} style={{ ...S.input, width: 96 }} /></td>
-                  <td style={S.td}><input type="number" min="0" step="0.01" value={r.ratePerLf} placeholder="not offered" onChange={(e) => setRow(st.id, i, "ratePerLf", e.target.value)} style={{ ...S.input, width: 110 }} /></td>
-                  <td style={S.td}>
+                  <td style={tdMid}><input type="number" min="1" max="48" step="1" value={r.deltaIn} onChange={(e) => setRow(st.id, i, "deltaIn", e.target.value)} style={S.input} /></td>
+                  <td style={tdMid}><input type="number" min="0" step="0.01" value={r.ratePerLf} placeholder="not offered" onChange={(e) => setRow(st.id, i, "ratePerLf", e.target.value)} style={S.input} /></td>
+                  <td style={tdMid}>
                     {widths.length === 0 ? <span style={{ color: "#94A3B8", fontSize: 12 }}>no sizes yet</span> : (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                         {widths.map((w) => {
@@ -3509,31 +4199,30 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
                       </div>
                     )}
                   </td>
-                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={!!r.internalOnly} onChange={(e) => setRow(st.id, i, "internalOnly", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
-                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={!!r.buildOnSite} onChange={(e) => setRow(st.id, i, "buildOnSite", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
-                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
-                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.active} onChange={(e) => setRow(st.id, i, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
-                  <td style={{ ...S.td, textAlign: "right" }}><button onClick={() => delRow(st.id, i)} title="Remove" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800 }}>✕</button></td>
-                </tr>,
-                r.buildOnSite ? (
-                  <tr key={(r.id || ("new-" + i)) + "-bos"}>
-                    <td colSpan={8} style={{ ...S.td, background: "#F8FAFC" }}>
-                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12.5 }}>
-                        <span style={{ fontWeight: 700, color: "#0F766E" }}>Built on site — upcharge</span>
-                        <select value={r.bosFeeBasis || "each"} onChange={(e) => setRow(st.id, i, "bosFeeBasis", e.target.value)} style={{ ...S.input, width: 190 }}>
-                          <option value="each">Flat fee for the job</option>
-                          <option value="sqft_building">Per sq ft of floor</option>
-                          <option value="perimeter_building">Per lineal ft of perimeter</option>
+                  <td style={{ ...tdMid, textAlign: "center" }}><input type="checkbox" checked={!!r.internalOnly} onChange={(e) => setRow(st.id, i, "internalOnly", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...tdMid, textAlign: "center" }}><input type="checkbox" checked={!!r.buildOnSite} onChange={(e) => setRow(st.id, i, "buildOnSite", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...tdMid, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...tdMid, textAlign: "center" }}><input type="checkbox" checked={r.active} onChange={(e) => setRow(st.id, i, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  {/* The build-on-site fee lives ON the row, to the right of Active (Carolyn
+                      2026-09-14: "instead of having it drop down, lets have it appear on the
+                      right side of the active button"). It used to be a band under the row,
+                      which pushed everything below it down the moment the box was ticked. A
+                      row that is not built on site shows a dash, so the table never jumps. */}
+                  <td style={tdMid}>
+                    {r.buildOnSite ? (
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 5, whiteSpace: "nowrap" }}>
+                        <span style={{ color: "#94A3B8", fontSize: 12.5 }}>$</span>
+                        <input type="number" min="0" step="0.01" value={r.bosFeeRate} placeholder="none"
+                          title="Leave blank if you don't charge extra — the building is still marked built on site."
+                          onChange={(e) => setRow(st.id, i, "bosFeeRate", e.target.value)} style={{ ...S.input, width: 78 }} />
+                        <select value={r.bosFeeBasis || "each"} onChange={(e) => setRow(st.id, i, "bosFeeBasis", e.target.value)} style={{ ...S.input, width: 132, fontSize: 12 }}>
+                          {WH_BOS_BASES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                         </select>
-                        <input type="number" min="0" step="0.01" value={r.bosFeeRate} placeholder="no upcharge"
-                          onChange={(e) => setRow(st.id, i, "bosFeeRate", e.target.value)} style={{ ...S.input, width: 130 }} />
-                        <span style={{ color: "#64748B" }}>
-                          Leave blank if you don’t charge extra — the building is still marked built on site.
-                        </span>
-                      </div>
-                    </td>
-                  </tr>
-                ) : null,
+                      </span>
+                    ) : <span style={{ color: "#CBD5E1" }}>—</span>}
+                  </td>
+                  <td style={{ ...tdMid, textAlign: "right" }}><button onClick={() => delRow(st.id, i)} title="Remove" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800 }}>✕</button></td>
+                </tr>,
               ])}
             </tbody>
           </table>
@@ -3549,8 +4238,15 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
   return (
     <div style={S.card}>
       <div style={S.h2}>Wall Height Upgrades</div>
-      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 660 }}>
-        Taller walls, offered per building style — hauling limits differ per building, so each
+      {/* Full width, no maxWidth (Carolyn 2026-09-12: "the description/instructions should run
+          across the entire page"). It opens by saying where the STANDARD height lives, because
+          this card only ever sets the INCREASES on top of it — the base is a 3D calibration
+          value, and that was not obvious from here. */}
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", lineHeight: 1.55 }}>
+        Each style's <b>standard wall height</b> is set in the 3D designer: go to <b>Settings → Designer → 3D Style Calibration</b>,
+        pick the style, and set its wall height there — that number shows beside each style below. This card adds the
+        <b> taller-wall increases</b> a customer can choose on top of it.
+        Increases are offered per building style — hauling limits differ per building, so each
         style carries its own list. The customer picks <b>one</b> increase for the whole building
         and it is charged <b>per lineal foot of the building's perimeter</b>: a 12&times;24 has 72
         lineal feet, so +6 in at $2.00/ft adds $144.00. Leave a rate blank to keep a row without
@@ -3584,7 +4280,8 @@ const SS_CLADDING_ROWS = [
   { id: "panel", label: "Panel Siding" },
   { id: "lap", label: "Lap Siding" },
   { id: "batten", label: "Board & Batten" },
-  { id: "agpanel", label: "Metal" },
+  // The profile name, not "Metal" (Carolyn 09-11: "they can type in here metal").
+  { id: "agpanel", label: "AG Panel" },
 ];
 // The product's SHARED pricing vocabulary, all seven of it (Carolyn 2026-09-07: "add all these
 // as options for the pricing"). Same names and same meanings as the Options header, which is
@@ -3869,7 +4566,9 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
   const onRowImg = async (itemKey, file) => {
     if (!file) return;
     if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setImgFileKey((k) => k + 1); return; }
-    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setImgFileKey((k) => k + 1); return; }
+    // Shrink oversized photos rather than refusing them — see onStyleImg for why.
+    file = await ssFitImageForUpload(file);
+    if (file.size > 3_000_000) { setMsg({ err: "That image couldn't be resized small enough — try a JPG or PNG." }); setImgFileKey((k) => k + 1); return; }
     setImgBusyKey(itemKey); setMsg(null);
     try {
       const base64 = await new Promise((res, rej) => {
@@ -5361,7 +6060,17 @@ function WindowsView({ viewingLabel = null, clientId = null }) {
   );
 }
 
-function ColorsView({ viewingLabel = null }) {
+// SPLIT INTO THREE TABS on 2026-09-11 (Carolyn: "in colors I want to split out the paint,
+// shingles and metal colors to their own tab/nav"). `section` chooses which card renders.
+//
+// ⚠️ ONE component, one mount, one `rows` buffer — ColorsShell passes `section` to a SINGLE
+// <ColorsView> rather than rendering three of them behind {sub === ...} branches, and that is
+// load-bearing. `rows` is ONE flat list across all three categories and `save` submits the
+// whole list, so three mounts would remount on every tab switch: edits made in Paint would be
+// silently thrown away by a click on Shingles, and the Save button in each card — which
+// already saves all three categories — would submit a list that had just been re-fetched.
+// Keep the element in one stable position so React preserves this state.
+function ColorsView({ viewingLabel = null, section = "all" }) {
   const [cat, setCat] = useState(null);
   // One flat list across all categories; a row's category is set by its flags:
   // paint = siding/trim (and not shingle/metal), shingle = shingle, metal = metal.
@@ -5657,9 +6366,9 @@ Anything not shown here will be removed from their account.`)) return;
         </div>
       ) : (
         <>
-          {renderSection("paint", "Paint colors", paintDesc, true)}
-          {renderSection("shingle", "Shingle colors", shingleDesc, false)}
-          {renderSection("metal", "Metal colors", metalDesc, false)}
+          {(section === "all" || section === "paint") && renderSection("paint", "Paint colors", paintDesc, true)}
+          {(section === "all" || section === "shingle") && renderSection("shingle", "Shingle colors", shingleDesc, false)}
+          {(section === "all" || section === "metal") && renderSection("metal", "Metal colors", metalDesc, false)}
           {msg && msg.skipped && msg.skipped.length > 0 && (
             <div style={{ ...S.card, marginTop: 0, fontSize: 13 }}>
               <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} color(s) skipped:</div>
