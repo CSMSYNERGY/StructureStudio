@@ -748,6 +748,13 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     }
 
     // ── 4. Countersign the INVOICE PDF (best-effort) ───────────────────────────────────
+    // BEST-EFFORT, BUT NEVER SILENT. Every branch below leaves the signature recorded in
+    // design_acceptances while the document the customer downloads carries no certificate,
+    // and the only difference between the causes is which one fired. This used to land in
+    // console.warn alone, and Supabase's runtime console stream is not reliably queryable
+    // on this project — so a customer reporting "my signature isn't on the PDF" produced
+    // no app_errors row at all and nothing could say why. `signedPdf` is reported to the
+    // caller, so these rows are the server-side half of the same answer.
     let signedPdf = false;
     const prefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${identity.clientId}/`;
     const invPdfUrl = String(inv.invoice_pdf_url || "");
@@ -773,11 +780,38 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
           const up = await admin.storage.from("floor-plans")
             .upload(storagePath, countersigned, FIXED_PATH_PDF_UPLOAD);
           signedPdf = !up.error;
-          if (up.error) console.warn("countersigned invoice upload failed:", up.error.message);
+          if (up.error) {
+            logEdgeError({
+              fn: "customer-accept", req, clientId: identity.clientId, code: "invoice_countersign_upload_failed",
+              message: `countersigned invoice upload failed: ${up.error.message}`,
+              context: { code, acceptanceId, storagePath },
+            }).catch(() => {});
+          }
+        } else {
+          logEdgeError({
+            fn: "customer-accept", req, clientId: identity.clientId, code: "invoice_countersign_fetch_failed",
+            message: `countersign source invoice PDF fetch returned ${res.status}`,
+            context: { code, acceptanceId, status: res.status },
+          }).catch(() => {});
         }
       } catch (e) {
-        console.warn("invoice countersign failed:", (e as Error).message);
+        logEdgeError({
+          fn: "customer-accept", req, clientId: identity.clientId, code: "invoice_countersign_failed",
+          message: `invoice countersign failed: ${(e as Error).message}`,
+          context: { code, acceptanceId },
+        }).catch(() => {});
       }
+    } else {
+      // The prefix guard exists so this function never fetches a URL outside our own
+      // storage under THIS tenant's prefix — but an invoice issued elsewhere (or a row
+      // with no PDF at all) then skipped countersigning with no signal whatsoever.
+      // Recorded so the skip is distinguishable from an embed that failed.
+      logEdgeError({
+        fn: "customer-accept", req, clientId: identity.clientId, code: "invoice_countersign_skipped",
+        message: "invoice PDF is not under this tenant's floor-plans prefix — certificate not embedded",
+        context: { code, acceptanceId, hasPdfUrl: invPdfUrl.length > 0 },
+        severity: "info",
+      }).catch(() => {});
     }
 
     // ── 5. Confirmation email ──────────────────────────────────────────────────────────
@@ -1094,11 +1128,38 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
         const up = await admin.storage.from("floor-plans")
           .upload(storagePath, countersigned, FIXED_PATH_PDF_UPLOAD);
         signedPdf = !up.error;
-        if (up.error) console.warn("countersigned PDF upload failed:", up.error.message);
+        if (up.error) {
+          logEdgeError({
+            fn: "customer-accept", req, clientId: identity.clientId, code: "quote_countersign_upload_failed",
+            message: `countersigned quote upload failed: ${up.error.message}`,
+            context: { quoteRef, acceptanceId, storagePath },
+          }).catch(() => {});
+        }
+      } else {
+        logEdgeError({
+          fn: "customer-accept", req, clientId: identity.clientId, code: "quote_countersign_fetch_failed",
+          message: `countersign source quote PDF fetch returned ${res.status}`,
+          context: { quoteRef, acceptanceId, status: res.status },
+        }).catch(() => {});
       }
     } catch (e) {
-      console.warn("countersign failed:", (e as Error).message);
+      logEdgeError({
+        fn: "customer-accept", req, clientId: identity.clientId, code: "quote_countersign_failed",
+        message: `quote countersign failed: ${(e as Error).message}`,
+        context: { quoteRef, acceptanceId },
+      }).catch(() => {});
     }
+  } else if (method !== "click") {
+    // A click is SUPPOSED to skip — see the header — so only a real signature that still
+    // got no certificate is worth a row. The prefix guard refuses any PDF outside this
+    // tenant's own floor-plans path, which is correct and also completely silent: an
+    // externally-issued quote simply never gets its certificate and nothing says so.
+    logEdgeError({
+      fn: "customer-accept", req, clientId: identity.clientId, code: "quote_countersign_skipped",
+      message: "quote PDF is not under this tenant's floor-plans prefix — certificate not embedded",
+      context: { quoteRef, acceptanceId, hasPdfUrl: quotePdfUrl.length > 0 },
+      severity: "info",
+    }).catch(() => {});
   }
 
   // ── 5. Confirmation email (never throws; dark tenants skip inside) ──────────────────

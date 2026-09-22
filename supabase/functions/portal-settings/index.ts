@@ -3855,6 +3855,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return failed;
     }
 
+    // ── HOW THE OVERHANG IS FRAMED: NOT ASKED FOR, AND NOT WRITTEN DOWN EITHER ─────────
+    // Neither prompt mentions overhangStyle, and that is the point rather than an oversight.
+    // The walk-around camera never leaves the ground (VIDEO_SHAPE_PROMPT says so in its own
+    // second numbered point), so the roof is only ever a silhouette — and a notched tail is an
+    // UNDERSIDE distinction, the one thing that viewpoint cannot show. Ask for it and the model
+    // answers anyway, from nothing.
+    //
+    // A first cut derived it from the overhang HERE and set it on the sanitised spec. That is
+    // deleted: the overhang the model DID read off the silhouette is already stored, and
+    // d3OverhangStyle derives the framing from it in the renderer every time it draws. Writing
+    // the derived answer into the draft would freeze it, after which a builder correcting the
+    // overhang in the calibration panel would no longer re-frame the eave.
+
     // ── CAPTURE ────────────────────────────────────────────────────────────────────
     // Token usage was previously PARSED AND DISCARDED. Storing it is what makes "do tell
     // me how much it does use" (Carolyn, 2026-08-24) answerable from one query instead of
@@ -9576,7 +9589,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     let pdfUrl = inv.invoice_pdf_url as string | null;
     try {
-      const pdfBytes = await buildQuotePdf({
+      let pdfBytes = await buildQuotePdf({
         docKind: "invoice",
         business: {
           name: String(csRes.data?.business_name ?? "").trim() || clientId,
@@ -9595,6 +9608,77 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         quoteTerms: csRes.data?.quote_terms ?? null,
         planPdfUrl: planUrl,
       });
+
+      // ── RE-APPEND THE ACCEPTANCE CERTIFICATE ───────────────────────────────────────
+      // This upload overwrites the SAME storage path customer-accept countersigned, so
+      // without this the first reissue after a signature silently replaces the signed
+      // invoice with an unsigned one — and a change order is the ordinary trigger, since
+      // the CO ack path never rebuilds the document itself and this action is the remedy
+      // it points at. The quote twin (regenerateQuotePdf) has always done this; the
+      // invoice is the document customers actually sign, so it matters more here.
+      // Migration 213 writes one design_acceptances row per revision with subject='invoice'
+      // and revision=co_no, so the newest revision is the one the rebuilt figures reflect —
+      // but the certificate must be the newest acceptance that CARRIES A CUSTOMER SIGNATURE,
+      // which is not the same row. `attest_change_order` writes one of those per-revision
+      // rows with method='rep': the BUILDER's record of a verbal approval, whose own consent
+      // sentence ends "not the customer's signature". Taking the newest revision outright
+      // lets a rep-attested change order out-rank a drawn signature, and the reissue then
+      // appends nothing and overwrites the countersigned PDF with an unsigned one — the exact
+      // loss this block exists to prevent, one change order later. So the METHOD IS FILTERED
+      // IN THE QUERY, and the newest row that survives that filter is the one stamped.
+      const { data: acc } = await admin.from("design_acceptances")
+        .select("method, signer_name, typed_signature, signature_image_path, accepted_at, ip, consent_text, total")
+        .eq("client_id", clientId).eq("short_code", shortCode).eq("subject", "invoice")
+        .in("method", ["drawn", "typed"])
+        .order("revision", { ascending: false }).limit(1).maybeSingle();
+      // Only a real signature earns a certificate page — the same rule the quote path
+      // states: a page asserting a typed signature over an empty name claims more than
+      // the customer did. The query already filters on it; this restates the rule where the
+      // certificate is actually built, so changing one of the two cannot quietly stamp a
+      // page for a method nobody signed with.
+      if (acc && (acc.method === "drawn" || acc.method === "typed")) {
+        let signaturePng: Uint8Array | null = null;
+        if (acc.signature_image_path) {
+          // storage.download() RESOLVES with { data: null, error } for a missing or denied
+          // object — it does NOT throw — so the failure is only visible on dl.error. That is
+          // the convention the repo already follows (portal-feedback/index.ts). The catch is
+          // kept for a genuine throw (network/abort); on its own it was dead code.
+          // A failed embed must NOT be silent: with no PNG the certificate falls through to
+          // acceptancePdf's italic branch and prints the customer's NAME under "Signed by
+          // hand on the customer quote page", which claims more than the record holds. The
+          // rebuild still ships — the facts-and-consent page beats an unsigned document —
+          // but it leaves a row saying which failure this was.
+          let failure = "";
+          try {
+            const dl = await admin.storage.from("signatures").download(String(acc.signature_image_path));
+            if (dl.data) signaturePng = new Uint8Array(await dl.data.arrayBuffer());
+            else failure = dl.error?.message || "download returned no data and no error";
+          } catch (e) {
+            failure = String(e);
+          }
+          if (failure) {
+            logEdgeError({
+              fn: "portal-settings", req, clientId, code: "invoice_signature_png_unreadable",
+              message: `reissue_invoice: signature image download failed: ${failure}`,
+              context: { shortCode, path: String(acc.signature_image_path) },
+            }).catch(() => {});
+          }
+        }
+        pdfBytes = await appendAcceptancePage(pdfBytes, {
+          businessName: csRes.data?.business_name ?? null,
+          quoteNumber: String(inv.invoice_number),
+          total: acc.total == null ? null : Number(acc.total),
+          signerName: String(acc.signer_name ?? ""),
+          method: acc.method === "drawn" ? "drawn" : "typed",
+          signaturePng,
+          typedSignature: acc.typed_signature ?? null,
+          acceptedAtIso: String(acc.accepted_at ?? ""),
+          ip: acc.ip == null ? null : String(acc.ip),
+          consentText: String(acc.consent_text ?? ""),
+          docLabel: "Invoice",
+        });
+      }
+
       const pdfPath = `${clientId}/${shortCode}-invoice.pdf`;
       const up = await admin.storage.from("floor-plans")
         .upload(pdfPath, pdfBytes, FIXED_PATH_PDF_UPLOAD);

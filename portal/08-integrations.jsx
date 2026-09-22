@@ -3159,6 +3159,10 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
   const linkBtn = { background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, color: ACCENT, fontWeight: 700 };
   const chipStyle = { background: "#EEF2FF", color: "#3D3672", borderRadius: 12, fontSize: 11.5, fontWeight: 700, padding: "3px 9px" };
   const checkRow = { display: "flex", alignItems: "flex-start", gap: 7, fontSize: 12.5, fontWeight: 600, color: "#1E293B", marginTop: 6, cursor: "pointer", lineHeight: 1.35 };
+  // Something another row already covers reads dimmed — the greyed convention the Projects
+  // screen uses. It is NOT disabled: under ONE CODE PER THING, ticking it MOVES the target to
+  // this row, and that is the only one-click way to re-assign one. Colour and title only.
+  const checkRowTaken = { ...checkRow, color: "#94A3B8" };
   const warn = !!d && (d.ssMode !== true || d.lookupEnabled !== true);
   // What a row covers, as chips. A whole group collapses to one chip, so a Products row reads
   // "All buildings (9) · Exterior (all 5)" rather than twenty names.
@@ -3270,7 +3274,8 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
                         const mine = r.targets.indexOf(t.id) !== -1;
                         const other = mine ? null : rows.find((o) => o.rid !== r.rid && o.targets.indexOf(t.id) !== -1);
                         return (
-                          <label key={t.id} style={checkRow}>
+                          <label key={t.id} style={other ? checkRowTaken : checkRow}
+                            title={other ? `Currently under ${other.code || "a row with no code yet"}. Ticking this moves it here.` : undefined}>
                             <input type="checkbox" checked={mine} onChange={(e) => toggleTargets(r.rid, [t.id], e.target.checked)} />
                             <span>
                               {t.label}

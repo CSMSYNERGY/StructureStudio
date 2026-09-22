@@ -191,6 +191,32 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // Not in the numeric loop above: `clamped()` destructures CLAMPS[key] and would
   // throw on a key with no entry.
   if (rawRoof.eave === "open" || rawRoof.eave === "fascia") roof.eave = rawRoof.eave;
+  // HOW the overhang is framed, which is a different question from how far it projects.
+  // "extended" carries the whole rafter out past the wall, so the full tail — and the fascia
+  // hung on it — keeps dropping as it projects; "notched" cuts the tail back on its underside,
+  // leaving the deck on one straight plane with a level soffit stepping the underside back.
+  // Carolyn drew both off paused walk-around frames (2026-09-18) and a four-inch tail really is
+  // just extended, so both are offered rather than one replacing the other.
+  //
+  // ABSENT is deliberate and means "derive it from the overhang size, AT RENDER TIME" —
+  // d3OverhangStyle in both designer twins, at half a foot. Exactly the `eave` posture: every
+  // row that predates this field keeps its exact render, and the deep-equal on `roof` in
+  // styleD3.test.ts keeps passing.
+  //
+  // ⚠️ NOTHING ANYWHERE WRITES THE DERIVED VALUE DOWN, and that is load-bearing rather than
+  // tidiness: not this sanitiser, not d3ResolveStyleSpec, not the AI draft above, not the AR
+  // scan. The moment a derived value is stored, raising the style's overhang stops re-framing
+  // its eave and the field silently stops following the number it is documented to follow.
+  // Only a builder's explicit pick in the calibration panel ever stores the key. (A first cut
+  // derived it in d3ResolveStyleSpec, which is the layer the panel posts straight back — so it
+  // froze into every tenant's column on the first save.)
+  //
+  // Not in the numeric loop above: `clamped()` destructures CLAMPS[key] and would throw on a
+  // key with no entry. ⚠️ And a key missing from THIS rebuild is dropped without a word, which
+  // looks to a builder exactly like "the save didn't work".
+  if (rawRoof.overhangStyle === "notched" || rawRoof.overhangStyle === "extended") {
+    roof.overhangStyle = rawRoof.overhangStyle;
+  }
   // A trim band across both gable ends at the top of the wall. A BOOLEAN, handled here like
   // porchTruss rather than in the numeric loop, because clamped() destructures CLAMPS[key] and
   // throws on a key with no entry. Only a real boolean is stored, and false IS stored.
