@@ -115,7 +115,10 @@ Deno.test("content surfaces get the mirrored access map, so the builder's own ru
 Deno.test("owner-level row actions follow the owner, not the tab clamp", () => {
   assert(SHELL.includes("const mirrorAdmin = supportView ? true : canAdmin;"));
   // canAdmin must still be the thing ssClampTab is given, or the narrowed map governs nothing.
-  assert(/ssClampTab\(tab, isOperator, canAdmin, myAccess, supportView/.test(SHELL),
+  // Its 5th argument is consolesBarred since 2026-09-23 (supportView OR a support account on
+  // its own portal — see supportConsoles_test); that is read only by the admin/projects
+  // branches, so the access-map half pinned here is unaffected.
+  assert(/ssClampTab\(tab, isOperator, canAdmin, myAccess, consolesBarred/.test(SHELL),
     "ssClampTab must keep receiving canAdmin, never mirrorAdmin");
   assert(!/isAdmin=\{canAdmin\}/.test(SHELL), "a row-action surface still keys on canAdmin");
 });

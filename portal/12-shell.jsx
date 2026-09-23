@@ -767,10 +767,38 @@ function Dashboard({ session }) {
   // asset cannot be deployed atomically. Same non-answer posture as its sibling above — a
   // failed call keeps the last known value rather than reading as `false`, because false
   // here means "full operator rights", which is the wrong way to fail.
-  const [isSupportOp, setIsSupportOp] = useState(false);
+  //
+  // ⚠️ THREE STATES, NOT TWO (2026-09-23): null = still asking, and it is not "no". It decides
+  // more than view-as now. A support account is also kept out of the ADMIN console on its OWN
+  // portal, where supportView is false by design (see the note on it below). That gate opens
+  // only on a real `false`. With a false start it would be open before this rpc answers: a
+  // reload or a deep link on /portal/admin would mount AdminShell the moment is_operator
+  // answered, and its first get_master + list_clients would come back as the two "Operator
+  // access required." 403s that app_errors caught on 09-16 (beta and production) and 09-18.
+  // (Those came from the old `!supportView` gate, which never closed on the own portal at
+  // all.) Every truthy read of this (supportView, the clamp arguments) treats null as "not
+  // support", the same as the old false start did.
+  const [isSupportOp, setIsSupportOp] = useState(null);
+  // Both attempts failed and isSupportOp is still null. Admin stays shut (unknown is never
+  // "not support") but says so; Projects opens anyway, because team members never needed this
+  // rpc before and portal-projects refuses a support operator on its own.
+  const [supportCheckGaveUp, setSupportCheckGaveUp] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    sb.rpc("is_support_operator").then(({ data, error }) => { if (!cancelled && !error) setIsSupportOp(!!data); }).catch(() => {});
+    setSupportCheckGaveUp(false);
+    // One retry after a failed call: while this is null the Admin console stays shut, so a
+    // single network blip would otherwise cost a platform operator Admin until the next token.
+    const failed = (retry) => {
+      if (cancelled) return;
+      if (retry) setTimeout(() => { if (!cancelled) ask(false); }, 1500);
+      else setSupportCheckGaveUp(true);
+    };
+    const ask = (retry) => sb.rpc("is_support_operator").then(({ data, error }) => {
+      if (cancelled) return;
+      if (!error) { setIsSupportOp(!!data); setSupportCheckGaveUp(false); }
+      else failed(retry);
+    }).catch(() => failed(retry));
+    ask(true);
     return () => { cancelled = true; };
     // Token-keyed, exactly as is_operator above — see the note there.
   }, [session.access_token]);
@@ -811,6 +839,25 @@ function Dashboard({ session }) {
   // a normal user of the CSM Synergy tenant, and narrowing there would lock them out of
   // their own account.
   const supportView = !!viewing && isSupportOp;
+  // ⛔ BUT OUR TWO CONSOLES ARE NOT PART OF "THEIR OWN ACCOUNT", and supportView cannot say
+  // so, because it is false on the support account's own portal on purpose (above). This is
+  // the separate question for Admin and Projects: "is this a support account, wherever it is
+  // standing?" The server already refuses both consoles to a support operator everywhere
+  // (_shared/adminAuth.ts, portal-projects). Widening supportView instead would also narrow
+  // myAccess and mirrorAdmin on the support account's own tenant, which is the lockout the
+  // note above warns about. This is the route clamp for both consoles; what is drawn and
+  // mounted is decided by `isSupportOp === false` (Admin) and projectsOpen (Projects) below.
+  // Projects is also closed at its source by migration 250 (can_open_projects answers false
+  // for a support operator). Truthy only on a real answer: null (still asking) does not bar
+  // the route, and the mounts wait instead, so unknown never draws a console either.
+  const consolesBarred = supportView || isSupportOp === true;
+  // Projects on the client, independently of migration 250: drawn and mounted only once the
+  // rpc has said "not support". With 250 applied canProjects is already false for a support
+  // account; without it (or while it is being rolled out) this is what keeps a cold load of
+  // /portal/projects from mounting ProjectsTab and firing a list_boards that can only 403.
+  // If the rpc gave up, Projects opens (see supportCheckGaveUp): the server still refuses a
+  // support operator, and a CSM team member must not lose the board to a network blip.
+  const projectsOpen = canProjects && !supportView && (isSupportOp === false || (isSupportOp === null && supportCheckGaveUp));
   // TWO HALVES OF THE MIRROR, and they have different audiences (Carolyn 2026-09-15: "that
   // account should show for me exactly as it shows for that user … if there are parts of the
   // software they haven't paid for … it shouldn't be accessible to me either").
@@ -915,8 +962,11 @@ function Dashboard({ session }) {
   // ⚠️ canProjects belongs in BOTH clamps or a typed /portal/projects gets rewritten away
   // under a team member while the page itself renders correctly — the exact silent,
   // operator-tabs-only failure the placement comment above this block was written about.
+  // The same goes for consolesBarred: ssClampTab reads its 5th argument ONLY in the admin and
+  // projects branches, so passing it here refuses those two routes to a support account on
+  // its own portal and changes nothing else. `canAdminForUrl` above keeps plain supportView.
   const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
-    (tenant && tenant !== "none") ? tenant.access : null, supportView, canProjects);
+    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects);
   useEffect(() => {
     // Popout windows never normalise the URL: a resolved refusal (canProjects false, or a
     // hand-typed non-projects path) would replaceState to the fallback tab, and that URL
@@ -925,7 +975,10 @@ function Dashboard({ session }) {
     if (SS_POPOUT) return;
     if (!tenant || tenant === "none") return;          // nothing routable yet
     const p = ssParsePath();
-    const gatesResolved = (isOperator || canAdminForUrl || entitlement !== null) && canProjects !== null;
+    // isSupportOp sits beside canProjects because it feeds the same clamp (consolesBarred): a
+    // boot intent is not judged refused until every input to that clamp has answered. It can
+    // only delay a rewrite, never cause one, since null never bars a route.
+    const gatesResolved = (isOperator || canAdminForUrl || entitlement !== null) && canProjects !== null && isSupportOp !== null;
     if (wanted.current && wanted.current !== resolvedTab && !gatesResolved) return;
     if (wanted.current) wanted.current = null;
     // If the clamp REFUSED the tab, the sub segment belonged to the refused page and must
@@ -943,8 +996,9 @@ function Dashboard({ session }) {
     // refused deep link whose CLAMP RESULT does not move when can_open_projects answers —
     // a non-admin on /portal/admin, where projects is not what is being refused — never
     // re-runs this effect: `wanted.current` stays set, the replaceState never happens, and
-    // the address bar keeps a path that bounces again on every reload.
-  }, [resolvedTab, tab, sub, isOperator, canAdminForUrl, entitlement, tenant, canProjects]);
+    // the address bar keeps a path that bounces again on every reload. isSupportOp is listed
+    // for the same reason: gatesResolved reads it too.
+  }, [resolvedTab, tab, sub, isOperator, canAdminForUrl, entitlement, tenant, canProjects, isSupportOp]);
   const viewingFetch = useCallback(async () => {
     const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId } });
     if (error) {
@@ -1782,7 +1836,7 @@ function Dashboard({ session }) {
   // Popout window (?popout=1): the Projects boards only, no shell chrome. No nav renders
   // here and nothing inside ProjectsTab navigates to another tab, so no other page is
   // reachable — which is why ssClampTab needs no popout branch. Gated on the SAME two doors
-  // as the normal mount below (canProjects && !supportView); canProjects three-states:
+  // as the normal mount below (projectsOpen); canProjects and isSupportOp three-state:
   // null = the can_open_projects RPC is still in flight -> neutral wait, never the fallback
   // tab; false -> a plain refusal, still chromeless. The wrapper reproduces the
   // .ss-projects-active geometry (viewport-height flex column, portal.html) because
@@ -1793,9 +1847,9 @@ function Dashboard({ session }) {
     );
     return (
       <div style={{ height: "100vh", boxSizing: "border-box", display: "flex", flexDirection: "column", padding: "14px 16px" }}>
-        {canProjects === null
+        {canProjects === null || (isSupportOp === null && !supportCheckGaveUp)
           ? popMsg("Loading…")
-          : (canProjects && !supportView)
+          : projectsOpen
             ? <ProjectsTab sub={tab === "projects" ? sub : null} onSub={(x) => navigate("projects", x)} />
             : popMsg("You don't have access to Projects.")}
       </div>
@@ -1868,7 +1922,10 @@ function Dashboard({ session }) {
   // the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
   // that array is the role escape hatch and would hand the operator console to every team
   // member. Content renders are ALSO gated (and the server re-checks regardless).
-  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, supportView, canProjects);
+  // consolesBarred, not supportView, for the same reason as resolvedTab's clamp above. The
+  // other ssClampTab calls ask about designer/orders tabs, never read that argument, and keep
+  // plain supportView.
+  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects);
   // Remember the last WORKSPACE page, for Back to Workspace. Assigned during render, not in
   // an effect, and deliberately: it must already be correct on the very first render in which
   // the Settings rail appears, and an effect runs after that render has painted. Idempotent
@@ -2244,7 +2301,7 @@ function Dashboard({ session }) {
             asked for by name: it is the internal bug board and roadmap, work you do between
             other work, so it stays here AND appears there as a shortcut.
             Gating is untouched — the same three expressions, in both places. */}
-        {canProjects && !supportView && (<>
+        {projectsOpen && (<>
         {/* Labelled for whoever is reading it: a CSM team member with Projects and nothing
             else is not an "Operator", and calling the group that would tell them they hold
             access to every builder's account, which they do not. */}
@@ -2296,13 +2353,18 @@ function Dashboard({ session }) {
               before — Accounts is the switcher and support needs it (it is how they reach the
               next builder), while Admin holds delete_client and Projects is our bug board, so
               a support account standing in a builder's shoes gets neither. ssClampTab refuses
-              those routes independently; this only decides what is drawn. */}
-          {(isOperator || (canProjects && !supportView)) && (<>
+              those routes independently; this only decides what is drawn.
+              Admin waits for a real "not support" (isSupportOp === false), which also covers
+              view-as, and is not drawn on a support account's OWN portal either: supportView
+              is false there, so `!supportView` used to draw a console whose every action
+              403s. Projects is drawn on projectsOpen (a real "not support", or the rpc gave
+              up), and migration 250 also makes canProjects false for a support account. */}
+          {(isOperator || projectsOpen) && (<>
             <div className="ss-navlabel">{isOperator ? "Operator" : "Internal"}</div>
             <nav className="ss-nav">
               {isOperator && navItem("accounts", "Accounts")}
-              {isOperator && !supportView && navItem("admin", "Admin")}
-              {canProjects && !supportView && navItem("projects", "Projects")}
+              {isOperator && isSupportOp === false && navItem("admin", "Admin")}
+              {projectsOpen && navItem("projects", "Projects")}
             </nav>
           </>)}
           <div className="ss-spacer"></div>
@@ -2770,8 +2832,20 @@ function Dashboard({ session }) {
                 report, a half-filled billing or link-owner form, a chosen style image — is
                 all local, and unmount-on-tab-switch would silently bin it.
                 Deliberately NOT behind `!gateLocked`: an operator whose OWN tenant is
-                billing-locked must still be able to run the console. */}
-            {adminOpened && isOperator && !supportView && (
+                billing-locked must still be able to run the console.
+                ⚠️ `isSupportOp === false`, not `!supportView` and not `!isSupportOp`. The
+                console fires get_master + list_clients on mount, and adminAuth refuses both to
+                a support operator. `!supportView` let it mount on the support account's own
+                portal; `!isSupportOp` would let it mount while the rpc is still out, which is
+                what a reload on /portal/admin does. Once false, a later failed call keeps
+                false (see the rpc's note), so a blip never unmounts the staged work this
+                comment is about. */}
+            {activeTab === "admin" && isOperator && isSupportOp === null && (
+              <div style={{ padding: 60, textAlign: "center", color: "#64748B", fontSize: 14 }}>
+                {supportCheckGaveUp ? "Couldn't confirm your access. Reload the page to try again." : "Checking access…"}
+              </div>
+            )}
+            {adminOpened && isOperator && isSupportOp === false && (
               <div style={{ display: activeTab === "admin" ? "block" : "none" }}>
                 <AdminShell onOpenAccount={openAccount}
                   sub={activeTab === "admin" ? sub : null} onSub={(x) => navigate("admin", x)} />
@@ -2781,8 +2855,11 @@ function Dashboard({ session }) {
                 accounts/admin; ssClampTab bounces everyone else. Deliberately NOT behind
                 `!gateLocked` — like the Admin console, an operator whose OWN tenant is
                 billing-locked must still reach the internal boards. */}
-            {activeTab === "projects" && canProjects && !supportView && (
+            {activeTab === "projects" && projectsOpen && (
               <ProjectsTab sub={sub} onSub={(x) => navigate("projects", x)} />
+            )}
+            {activeTab === "projects" && !projectsOpen && canProjects && !supportView && isSupportOp === null && (
+              <div style={{ padding: 60, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading…</div>
             )}
             {!gateLocked && activeTab === "support" && (
               <ReleasesView submissionsKey={feedbackKey}

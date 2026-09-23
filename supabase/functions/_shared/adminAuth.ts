@@ -97,7 +97,12 @@ export async function checkAdminAuth(
       //
       // ENFORCED HERE RATHER THAN IN THE BROWSER, and that distinction is the whole point.
       // 12-shell hides the Admin tab and ssClampTab refuses the route for a support account,
-      // but this repo has written the lesson down more than once: the UI hiding a tab is a
+      // but until 2026-09-23 it did so only inside view-as (`!supportView`, which is false on
+      // the support account's OWN portal). There the console was drawn and mounted, and its
+      // get_master + list_clients landed here as this 403 (app_errors, 2026-09-16 on beta and
+      // production, and 09-18). The shell now waits for is_support_operator to answer a real
+      // false before it draws or mounts the console. That miss is the lesson this repo has
+      // written down more than once: the UI hiding a tab is a
       // COURTESY, NOT A CONTROL (portal-commissions' 403 carries the same note). The function
       // is directly callable with nothing but a session, so the refusal has to live at the
       // gate. Audited like the non-operator case below, because a support account reaching

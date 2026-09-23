@@ -357,11 +357,17 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   //
   // Migration 176's note further down this file already claimed "the Admin + Projects
   // consoles refused". Half of that was true: adminAuth.ts really does deny the Admin
-  // console outright. Projects was only ever HIDDEN — ssClampTab drops the tab and
-  // 12-shell.jsx will not route to it — and a hidden tab is a courtesy, not a control.
-  // Anyone holding the session could POST here directly and read every builder's setup
-  // state. Zero support operators exist today, so nothing has leaked; the moment the
-  // first one is flagged it would, which is why this lands before that switch is used.
+  // console outright. Projects was only ever HIDDEN, and a hidden tab is a courtesy, not a
+  // control. Anyone holding the session could POST here directly and read every builder's
+  // setup state. No support operator existed when this refusal landed, so nothing leaked.
+  //
+  // It was not even reliably hidden. The shell hid it only inside view-as (`!supportView`),
+  // and can_open_projects() answered true for ANY app_operators row. So on a support
+  // account's own portal the tab was drawn and routable, and its list_boards landed here as
+  // this 403 (app_errors, 2026-09-16 and 09-18). Migration 250 makes that rpc answer false
+  // for a support_only row, the same answer this door gives, so the browser now agrees. The
+  // refusal stays regardless: two support operators exist now, and the rpc is still only
+  // what the browser draws from.
   if (op && op.support_only) {
     return json({ error: "Support accounts can't open Projects — that console is for platform operators." }, 403);
   }

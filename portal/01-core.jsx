@@ -1110,6 +1110,9 @@ function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canP
   // delete_client lives, and Projects is our internal bug board), and someone standing in a
   // builder's shoes has no business in either. Splitting the old single line is the whole
   // difference; `supportView` defaults false so every existing caller is unchanged.
+  // The shell's two ROUTE clamps pass `consolesBarred` here rather than plain supportView:
+  // it is also true for a support account on its OWN portal (2026-09-23). That is safe only
+  // because this argument is read by the admin and projects branches and nowhere else.
   if (tab === "accounts") return isOperator ? tab : ssFallbackTab(access);
   if (tab === "admin") return (isOperator && !supportView) ? tab : ssFallbackTab(access);
   // Projects splits off from Admin here. The two used to share a line because both meant
