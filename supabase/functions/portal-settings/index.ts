@@ -3753,6 +3753,48 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // stalls mid-body is a timeout, not an "unparseable" spec.
     const aiSource = combined ? "combined" : fromVideo ? "video" : "photos";
     const t0 = Date.now();
+
+    // ── WHAT THE DRAFT CALL USED, on every exit that reached the model (251, 2026-09-23) ──────
+    // Until now a draft's tokens were stored only through wallet_capture, and the meter is
+    // inactive for every tenant, so no successful draft's usage or latency had ever been kept.
+    // One 09-21 press was cut off at max_tokens after 103 s, and without these two columns there
+    // is no telling whether the other eleven finished at 3,000 tokens or at 7,900.
+    //
+    // ⚠️ ITS OWN UPDATE, never a key on the 226 `recorded` write below. PostgREST refuses the
+    // WHOLE statement when one key names a column it cannot find (PGRST204), so a deploy landing
+    // before 251 would otherwise lose drafted/observed/frames on every generation too.
+    //
+    // BEST-EFFORT, and it cannot reject: diagnostics must never fail or change what the builder
+    // gets back. Called WITHOUT await where it starts, so the round trip overlaps the hold
+    // release, the log row and the rest of the handler; each exit awaits it just before its
+    // `return`, because a task still running after the response is not guaranteed to finish
+    // (EdgeRuntime.waitUntil is unused here — see the auto-recharge note above). `draft_ms` is
+    // read when it is CALLED, which is the moment the reply (or the abort) arrived.
+    //
+    // aiDraftUsageWiring_test lifts the body below and RUNS it, so keep it plain JavaScript:
+    // the only type annotation is on this first line, which the test uses as its anchor.
+    const recordDraftUsage = async (tokens: Record<string, unknown> | null) => {
+      if (!ledgerRow?.id) return;
+      try {
+        const { error } = await admin.from("ai_style_calls")
+          .update({ draft_tokens: tokens, draft_ms: Date.now() - t0 }).eq("id", ledgerRow.id);
+        if (error) {
+          await logEdgeError({
+            fn: "portal-settings", req, clientId, code: "ai_style_draft_usage_log_failed",
+            message: `Could not record the draft call's usage; migration 251 may not be applied: ${error.message}`,
+          });
+        }
+      } catch (e) {
+        // Never the builder's problem, but never silent either: a throw here (a refactor's
+        // TypeError, say) would stop usage recording with nothing to show for it, which is the
+        // blind spot this write exists to close. logEdgeError itself never rejects.
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_style_draft_usage_log_failed",
+          message: `Draft-usage write threw: ${String(e instanceof Error ? e.message : e)}`,
+        });
+      }
+    };
+
     const aiSignal = AbortSignal.timeout(110_000);
     let res: Response;
     let replyBody = "";
@@ -3790,6 +3832,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       });
       replyBody = await res.text();
     } catch (e) {
+      // No reply to describe on any of these three exits, so draft_tokens stays null; draft_ms
+      // still says how long the press waited before it gave up.
+      const usageLogged = recordDraftUsage(null);
       if (aiSignal.aborted) {
         // Ours, not the network's: the signal fired. Release first, then file one coded row
         // and mark the response so withErrorLog does not add a generic copy of it.
@@ -3801,13 +3846,17 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         });
         const timedOut = json({ error: "The AI took too long to answer - please try again." }, 504);
         filedAtReturnSite.add(timedOut);
+        await usageLogged;
         return timedOut;
       }
       await releaseHold("fetch failed");            // never reached Anthropic, or dropped mid-reply
+      await usageLogged;
       return json({ error: `Could not reach the AI service: ${e instanceof Error ? e.message : String(e)}` }, 502);
     }
     if (!res.ok) {
+      const usageLogged = recordDraftUsage(null);
       await releaseHold(`upstream ${res.status}`);  // our 429/500 is not the builder's fault
+      await usageLogged;
       return json({ error: `AI service returned ${res.status}: ${replyBody.slice(0, 300)}` }, 502);
     }
     let data: any = null;
@@ -3818,10 +3867,26 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // SHAPES ONLY in the failure rows below: no reply text, no image URLs. Enough for the next
     // failure to name its own cause (thinking used the budget, a refusal, a prose reply) and
     // for elapsedMs to show how close real calls come to the timeout.
+    // `textChars` is the answer's LENGTH, never its text: outputTokens counts thinking and the
+    // answer together, and this is what tells "thinking used the budget" from "the JSON did".
     const replyShape = {
       stopReason: reply.stopReason, blockTypes: reply.blockTypes, outputTokens: reply.outputTokens,
-      elapsedMs: Date.now() - t0, source: aiSource, frames: photoUrls.length,
+      textChars: text.length, elapsedMs: Date.now() - t0, source: aiSource, frames: photoUrls.length,
     };
+    // ── DRAFT USAGE: started here, awaited at each of the three returns below ─────────────
+    // Every outcome that got a reply passes through this line — refused, truncated, unparseable
+    // and drafted alike — so the column's distribution is the whole population, not the failures.
+    // Counts come off `usage` and are null where it did not say; nothing here carries model text.
+    const draftUsage = data?.usage ?? {};
+    const draftUsageLogged = recordDraftUsage({
+      input: Number.isFinite(draftUsage.input_tokens) ? draftUsage.input_tokens : null,
+      output: Number.isFinite(draftUsage.output_tokens) ? draftUsage.output_tokens : null,
+      cache_read: Number.isFinite(draftUsage.cache_read_input_tokens) ? draftUsage.cache_read_input_tokens : null,
+      cache_creation: Number.isFinite(draftUsage.cache_creation_input_tokens) ? draftUsage.cache_creation_input_tokens : null,
+      stopReason: reply.stopReason,
+      textChars: text.length,
+      blockTypes: reply.blockTypes,
+    });
     if (reply.stopReason === "refusal") {
       await releaseHold("model refused");
       const category = typeof data?.stop_details?.category === "string" ? String(data.stop_details.category).slice(0, 60) : null;
@@ -3832,6 +3897,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       });
       const refused = json({ error: "The AI declined to read these images. Try a different set, or set the shape by hand." }, 502);
       filedAtReturnSite.add(refused);
+      await draftUsageLogged;
       return refused;
     }
     // The builder's numbers go over the model's INSIDE parseModelSpec, between the inches fold
@@ -3852,6 +3918,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       });
       const failed = json({ error: truncated ? "The AI ran out of room before finishing - please try again." : drafted.error }, 502);
       filedAtReturnSite.add(failed);
+      await draftUsageLogged;
       return failed;
     }
 
@@ -4008,6 +4075,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // which of the images it just sent goes with which view, and the token for the follow-up
     // request. Both are null on a photos generation and both are simply ignored by a browser
     // that has never heard of them, which is every production browser.
+    //
+    // The draft-usage write started beside replyShape and has had the whole capture and ledger
+    // write to finish; this is the last point it can be waited on before the response goes.
+    await draftUsageLogged;
     return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, dropped: droppedCount, observed: observedNotes, balanceCents, dims, frameMap, checkId });
   }
 
