@@ -2570,7 +2570,10 @@ function Dashboard({ session }) {
                     : `Your account moves to a paid plan${transDateLabel ? ` on ${transDateLabel}` : ""} — ${transDaysLeft} day${transDaysLeft === 1 ? "" : "s"} left.`}
                   {rate && rate.discountPercent > 0 && (rate.monthlyCents != null || rate.annualCents != null) && (
                     <span style={{ fontWeight: 600 }}>
-                      {" "}Your rate: {[rate.monthlyCents != null ? `${fmtRate(rate.monthlyCents)}/mo` : null,
+                      {/* While founding pricing is yearly-only (FOUNDING_ANNUAL_ONLY, 03-catalog)
+                          a /mo figure here would offer the one choice the Billing tab won't take.
+                          Monthly is still the fallback if a tenant somehow has no yearly rate. */}
+                      {" "}Your rate: {[(rate.monthlyCents != null && !(FOUNDING_ANNUAL_ONLY && rate.annualCents != null)) ? `${fmtRate(rate.monthlyCents)}/mo` : null,
                                        rate.annualCents != null ? `${fmtRate(rate.annualCents)}/yr` : null]
                         .filter(Boolean).join(" or ")} — {rate.discountPercent}% off for life.
                     </span>

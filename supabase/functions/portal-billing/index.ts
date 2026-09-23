@@ -674,6 +674,19 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     const paymentToken = String(payload?.paymentToken || "").trim();
     if (planIds.length === 0) return json({ error: "Select at least one feature." }, 400);
 
+    // ── Our own account never buys (2026-09-24) ─────────────────────────────────────
+    // An internal account already has every feature (see `internal` above), so a purchase buys
+    // nothing — and since 2026-09-24 its Billing tab deliberately shows the same selectable price
+    // list a prospect sees, because it is the account sales demos run from. It also has a real
+    // card on file, which an owner is charged against with no confirm step. The browser stops
+    // that press (03-catalog demoView); this is the backstop, placed ahead of the card vault and
+    // every gateway call. Keyed on `internal`, NOT `exempt`: set_billing's onboarding order
+    // ("set the discount first, let them subscribe, then remove the exemption") needs a comped
+    // customer to be able to subscribe.
+    if (internal) {
+      return json({ error: "This is CSM Synergy's own account. Nothing can be bought on it." }, 409);
+    }
+
     // ── Operator refusals ────────────────────────────────────────────────────────
     // A paymentToken is a Collect.js token minted in the CARDHOLDER'S browser. In
     // operator mode that browser belongs to CSM Synergy staff, so an operator-supplied
