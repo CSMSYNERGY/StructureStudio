@@ -68,6 +68,22 @@ class BillingRefusal extends Error {
   }
 }
 
+/** advanceOne's row write failed. Already logged at severity 'error' (code
+ *  sms_registration_update_failed) by the time it is thrown, so the catches that see it do
+ *  not log it again — the lazy sweep's would file it as info, which is the wrong queue for a
+ *  constraint violation. */
+class RegistrationWriteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RegistrationWriteError";
+  }
+}
+
+// 502s whose app_errors row advanceOne already wrote (sms_registration_update_failed), so
+// withErrorLog's `alreadyFiled` skips its generic '502' copy of the same failure. A WeakSet, so
+// an answered response is not held onto. Same pattern as portal-settings.
+const filedAtReturnSite = new WeakSet<Response>();
+
 // ⚠️ WITHOUT THESE THE WHOLE FEATURE IS DEAD IN A BROWSER, and silently. This function was
 // the ONLY portal-* function that never declared them, so every call from the portal — the
 // preflight included — was blocked by CORS and the Text Messaging panel rendered an empty
@@ -403,12 +419,16 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
               reg = await advanceOne(admin, clientId, locked, {}, Deno.env.get("TWILIO_PRIMARY_PROFILE_SID") ?? "", note, null);
             } catch (e) {
               // A sweep failure must never break the page it was riding on. The builder
-              // still gets their status; the next look tries again.
-              await logEdgeError({
-                fn: "portal-sms", clientId, code: "sms_sweep_failed",
-                message: `lazy sweep failed: ${(e as Error).message}`,
-                severity: "info",
-              }).catch(() => {});
+              // still gets their status; the next look tries again. A failed row write was
+              // already logged as an error inside advanceOne; filing it again here as info
+              // would only put a second, milder copy of it in the queue.
+              if (!(e instanceof RegistrationWriteError)) {
+                await logEdgeError({
+                  fn: "portal-sms", clientId, code: "sms_sweep_failed",
+                  message: `lazy sweep failed: ${(e as Error).message}`,
+                  severity: "info",
+                }).catch(() => {});
+              }
               reg = await load();
             } finally {
               await admin.from("sms_registrations")
@@ -1029,6 +1049,13 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
     // A billing refusal is the product declining with a price attached, not a fault. It keeps
     // its own status and its own sentence rather than being flattened into the 502 below.
     if (e instanceof BillingRefusal) return json(e.body, e.status);
+    // A failed row write inside advanceOne was logged there, as an error with its own code.
+    // It still gets the generic 502 below; it just is not filed twice.
+    if (e instanceof RegistrationWriteError) {
+      const failed = json({ error: "The carrier registration could not be updated just now. Support has been notified." }, 502);
+      filedAtReturnSite.add(failed);
+      return failed;
+    }
     const err = e as TrustHubError;
     // Twilio's body can echo the EIN and the representative's mobile. It goes to app_errors,
     // never to the browser.
@@ -1064,7 +1091,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
     }
     return json({ error: "The carrier registration could not be updated just now. Support has been notified." }, 502);
   }
-}));
+}, { alreadyFiled: (res) => filedAtReturnSite.has(res) }));
 
 /**
  * ONE STAGE PER CALL. Each branch performs a single step and returns; the builder's poll or
@@ -1084,9 +1111,31 @@ async function advanceOne(
   // which is nobody pressing anything; that path never reaches a charging state anyway.
   userId: string | null,
 ): Promise<any> {
+  // ⚠️ A FAILED WRITE THROWS; IT NEVER RETURNS THE OLD ROW. This used to ignore the update's
+  // error and hand back a fresh read of the unchanged row, so a refused write looked like a
+  // stage that simply had not moved. That is how campaign_approved broke
+  // sms_registrations_poll_chk on 2026-09-22 with nothing in app_errors.
+  //
+  // Throwing, not returning stale, is deliberate. set() also persists the builder's copy just
+  // BEFORE createCampaign (billed: the vetting fee) and updateCampaign, and the Messaging
+  // Service SID just before the campaign is built on it. If the database is refusing writes,
+  // the SID-recording set() after that remote call would almost certainly be refused too,
+  // leaving a paid campaign we have no record of. Stopping at the first failed write means
+  // no Twilio call follows it. The throw reaches the handler's generic 502 (or the sweep's
+  // catch), both of which skip their own log for this class.
   const set = async (patch: Record<string, unknown>) => {
-    await admin.from("sms_registrations")
+    const { error } = await admin.from("sms_registrations")
       .update({ ...patch, updated_at: new Date().toISOString() }).eq("client_id", clientId);
+    if (error) {
+      await logEdgeError({
+        fn: "portal-sms", clientId, code: "sms_registration_update_failed",
+        message: `sms_registrations update from ${reg.status} failed: ${error.message}`,
+        severity: "error",
+        // KEYS, not values: a patch can carry the builder's copy and Twilio's error texts.
+        context: { from_status: reg.status, patch_keys: Object.keys(patch), pg_code: error.code ?? null },
+      }).catch(() => {});
+      throw new RegistrationWriteError(`sms_registrations update from ${reg.status} failed: ${error.message}`);
+    }
     const { data } = await admin.from("sms_registrations").select("*").eq("client_id", clientId).maybeSingle();
     return data;
   };

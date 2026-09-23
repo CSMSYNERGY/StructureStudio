@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { timingSafeEqual } from "../_shared/emailInbound.ts";
 import { normalizeBrandStatus, normalizeCampaignStatus } from "../_shared/twilioTrustHub.ts";
+import { campaignVerdictPredatesResubmit, eventOccurrenceKey, eventOccurrenceStamp } from "../_shared/twilioEventKey.ts";
 
 // Twilio Event Streams sink for A2P compliance events.
 //
@@ -107,11 +108,23 @@ Deno.serve(withErrorLog("twilio-events", async (req: Request) => {
 
 // deno-lint-ignore no-explicit-any
 async function processEvents(admin: any, events: any[]): Promise<void> {
-  let handled = 0;
+  // Three different reasons an event ends without acting, each reported under its own code at
+  // the end of the batch. They used to share ONE "no recognised A2P fields" row, which was
+  // wrong for two of them and hid the dedupe collision below for most of a month.
+  const duplicates: Record<string, unknown>[] = [];
+  const noTenant: Record<string, unknown>[] = [];
+  const stale: Record<string, unknown>[] = [];
+  const unhandledTypes: string[] = [];
   for (const ev of events) {
     const eventId = String(ev?.id ?? "");
     const type = String(ev?.type ?? "");
     const d = (ev?.data ?? {}) as Record<string, any>;
+    // ⚠️ Twilio's OWN connectivity test carries no A2P fields and matches no tenant by design,
+    // and someone will press that button many times while wiring a sink. Reporting it would
+    // turn a healthy setup step into a repeating info row — and a repeating info row is the
+    // signal this project uses to find real bugs, so polluting it has a cost beyond noise.
+    const isTest = type.endsWith(".test-event");
+    let handled = false;
 
     // ── Resolve the tenant ────────────────────────────────────────────────────────────
     // ⚠️ NEVER on the campaign SID. The event payload's `campaignsid` is a CM… SID, a
@@ -133,16 +146,54 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
     }
 
     // ── Record first, act second ──────────────────────────────────────────────────────
-    // The CloudEvents id is the idempotency key. A 23505 on redelivery is a SUCCESS — the
-    // event is already recorded — so it must not look like a failure or provoke a retry.
+    // The idempotency key is the CloudEvents id PLUS the payload's occurrence stamp. The id
+    // alone is fixed per (campaign, event type), so after in-place campaign edits every verdict
+    // but the first collided and was dropped — see _shared/twilioEventKey.ts. A 23505 now means
+    // the same payload really was delivered twice, which is still a SUCCESS (the event is
+    // already recorded) and must not look like a failure or provoke a retry.
+    const key = eventOccurrenceKey(eventId, d);
     const { error: insErr } = await admin.from("sms_registration_events").insert({
       client_id: reg?.client_id ?? null,
-      event_id: eventId || null,
+      event_id: key,
       event_type: type,
       detail: d,
     });
-    if (insErr && String((insErr as { code?: string }).code) === "23505") continue; // already seen
-    if (!reg) continue;
+    if (insErr && String((insErr as { code?: string }).code) === "23505") {
+      // Skipped, but never silently: a collision that was not really a redelivery is exactly
+      // how the per-type id went unnoticed. Both stamps side by side tell the two apart.
+      if (!isTest) {
+        const { data: prior } = await admin.from("sms_registration_events")
+          .select("created_at, detail").eq("event_id", key).maybeSingle();
+        duplicates.push({
+          id: eventId, key, type,
+          stamp: eventOccurrenceStamp(d) || null,
+          prior_stamp: prior ? eventOccurrenceStamp(prior.detail) || null : null,
+          first_recorded_at: prior?.created_at ?? null,
+        });
+      }
+      continue;
+    }
+    if (insErr) {
+      // Any other failure means the event was NOT recorded. Act on it anyway (Twilio will not
+      // send it again, and the row is the thing the builder is waiting on), but say so: "record
+      // first" silently not happening is how the last two SMS bugs stayed invisible.
+      await logEdgeError({
+        fn: "twilio-events",
+        clientId: reg?.client_id ?? null,
+        code: "twilio_event_record_failed",
+        message: `sms_registration_events insert for ${type} failed: ${insErr.message}`,
+        severity: "error",
+        context: { event_id: eventId, event_type: type, pg_code: (insErr as { code?: string }).code ?? null },
+      }).catch(() => {});
+    }
+    if (!reg) {
+      // Recorded above with client_id null. SID prefixes only: enough to find the brand in
+      // the Twilio console, not a copy of the payload.
+      if (!isTest) {
+        noTenant.push({ type, brand: brandSid.slice(0, 8) || null, service: serviceSid.slice(0, 8) || null });
+      }
+      continue;
+    }
 
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
 
@@ -171,7 +222,7 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
         patch.needs_attention = true;
         patch.attention_note = "The carriers refused to register this number. It may need to be released and replaced.";
       }
-      handled++;
+      handled = true;
     }
 
     // ── Brand and campaign: a faster echo of what the poller would find ──────────────
@@ -194,13 +245,21 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
           ? "The carriers suspended this brand. Only Twilio support can lift it."
           : "The carriers rejected this registration.";
       }
-      handled++;
+      handled = true;
     }
     const identityRaw = String(d.identitystatus ?? d.identityStatus ?? "");
     if (identityRaw) patch.brand_identity_status = identityRaw.toUpperCase();
 
     const campaignRaw = String(d.campaignregistrationstatus ?? d.campaignStatus ?? "");
-    if (campaignRaw) {
+    // A verdict about an EARLIER submission (a replay, or one that arrives after the builder
+    // resubmitted) must not touch the row; see _shared/twilioEventKey.ts. Recorded above, and
+    // reported below so a flood of them is still visible.
+    const staleVerdict = !!campaignRaw && campaignVerdictPredatesResubmit(d, reg.campaign_copy_updated_at);
+    if (staleVerdict) {
+      stale.push({ id: eventId, type, stamp: eventOccurrenceStamp(d) || null, copy_updated_at: reg.campaign_copy_updated_at ?? null });
+      handled = true;
+    }
+    if (campaignRaw && !staleVerdict) {
       const s = normalizeCampaignStatus(campaignRaw);
       // ⚠️ A DECIDED CAMPAIGN NEVER GOES BACK TO PENDING. Twilio delivers these events out of
       // order — on 2026-09-02 the failure landed at 18:01:12.969 and the SUBMITTED event that
@@ -227,7 +286,7 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
         patch.needs_attention = true;
         patch.attention_note = "The carriers turned down the way this campaign describes its texting. Fix the wording and send it again — resending costs nothing.";
       }
-      handled++;
+      handled = true;
     }
     // ⚠️ THE ONE THING THE BUILDER ACTUALLY NEEDS, AND IT USED TO BE THROWN AWAY. Twilio names
     // the failing fields (30908 PRIVACY_POLICY_URL, 30882 TERMS_AND_CONDITIONS_URL, …) right
@@ -235,30 +294,73 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
     // the rejection card rendered "They told us why. Fix what they named" over an empty list.
     // Two campaigns were refused for the same two fields without that ever reaching a screen.
     const campErrs = d.campaignregistrationerrors ?? d.campaignRegistrationErrors ?? null;
-    if (Array.isArray(campErrs)) patch.last_errors = campErrs;
+    if (Array.isArray(campErrs) && !staleVerdict) patch.last_errors = campErrs;
     // The CM… campaign SID, kept in its own column so it can never be confused with the QE…
     const cm = String(d.campaignsid ?? d.campaignSid ?? "");
-    if (cm) patch.campaign_cm_sid = cm;
+    // Not from a stale verdict: a replay about a campaign retry_campaign has since deleted
+    // would put the old CM SID back.
+    if (cm && !staleVerdict) patch.campaign_cm_sid = cm;
 
     if (Object.keys(patch).length > 1) {
-      await admin.from("sms_registrations").update(patch).eq("client_id", reg.client_id);
+      // ⚠️ READ THE ERROR. This result was ignored, so when the first campaign-approved event
+      // arrived (structure-studio, 2026-09-22) and the write broke sms_registrations_poll_chk,
+      // the whole patch vanished — campaign_status with it — and nothing but a Postgres log
+      // line said so. The event row above is already stored, so this is the only trace.
+      // Twilio has had its 200 long ago; this runs under waitUntil and cannot change it.
+      const { error: updErr } = await admin.from("sms_registrations").update(patch).eq("client_id", reg.client_id);
+      if (updErr) {
+        await logEdgeError({
+          fn: "twilio-events",
+          clientId: reg.client_id,
+          code: "sms_registration_update_failed",
+          message: `sms_registrations update for ${type} failed: ${updErr.message}`,
+          severity: "error",
+          // KEYS, not values: the patch can carry Twilio's error texts and attention notes.
+          context: { event_id: eventId, event_type: type, from_status: reg.status, patch_keys: Object.keys(patch), pg_code: updErr.code ?? null },
+        }).catch(() => {});
+      }
     }
+    if (!handled && !isTest) unhandledTypes.push(type);
   }
 
-  // ⚠️ Twilio's OWN connectivity test carries no A2P fields by design, and someone will press
-  // that button many times while wiring a sink. Logging it as "unhandled" would turn a
-  // healthy setup step into a repeating info row — and a repeating info row is the signal this
-  // project uses to find real bugs, so polluting it has a cost beyond noise.
-  const onlyTestEvents = events.every((e) => String(e?.type ?? "").endsWith(".test-event"));
-  if (!handled && events.length && !onlyTestEvents) {
-    // Not an error — Twilio adds event types, and an unrecognised one is recorded above and
-    // deliberately ignored. Logged as info so a flood of them is still visible.
+  // All three are info, not errors: each is the code declining correctly. They stay visible
+  // so a flood of any one of them is still noticed.
+  if (duplicates.length) {
+    await logEdgeError({
+      fn: "twilio-events",
+      code: "twilio_event_duplicate",
+      message: `${duplicates.length} event(s) were already recorded under the same key and were skipped.`,
+      severity: "info",
+      context: { events: duplicates.slice(0, 5) },
+    }).catch(() => {});
+  }
+  if (stale.length) {
+    await logEdgeError({
+      fn: "twilio-events",
+      code: "twilio_event_stale_verdict",
+      message: `${stale.length} campaign verdict(s) predate the last resubmit and were not applied.`,
+      severity: "info",
+      context: { events: stale.slice(0, 5) },
+    }).catch(() => {});
+  }
+  if (noTenant.length) {
+    await logEdgeError({
+      fn: "twilio-events",
+      code: "twilio_event_no_tenant",
+      message: `${noTenant.length} event(s) matched no SMS registration. Recorded, not acted on.`,
+      severity: "info",
+      context: { events: noTenant.slice(0, 5) },
+    }).catch(() => {});
+  }
+  if (unhandledTypes.length) {
+    // Matched a tenant and was new, but no branch above understood it. Twilio adds event
+    // types, and an unrecognised one is recorded above and deliberately ignored.
     await logEdgeError({
       fn: "twilio-events",
       code: "twilio_event_unhandled",
-      message: `Received ${events.length} event(s) with no recognised A2P fields.`,
+      message: `Received ${unhandledTypes.length} event(s) with no recognised A2P fields.`,
       severity: "info",
-      context: { types: events.map((e) => String(e?.type ?? "")).slice(0, 5) },
+      context: { types: unhandledTypes.slice(0, 5) },
     }).catch(() => {});
   }
 }
