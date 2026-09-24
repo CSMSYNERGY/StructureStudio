@@ -281,20 +281,23 @@ type Mesh = { geometry: unknown; material: unknown };
 // capOut0 / capOutL / shedBandExtended / moveCapsFlush are the flush-cap bindings (2026-09-14):
 // the block stretches the tall band's ends out to the moved cap planes, flags that it did, and then
 // calls the cap move. The flag is handed back as the return value so a test can read it.
+// tallNeg (2026-09-24) is d3RoofAxes' own: the block finds the band at u = -S/2 when it is true
+// (every building outside the new frame) and at +S/2 when roof.highSide puts the high end there.
 const runRepaint = new Function(
   "roofCfg", "S", "L", "uAxisIsX", "gableGeom", "rg", "THREE", "wallMat", "gableMat",
-  "capOut0", "capOutL", "shedBandExtended", "moveCapsFlush",
+  "capOut0", "capOutL", "shedBandExtended", "moveCapsFlush", "tallNeg",
   REPAINT_CMP + "\nreturn shedBandExtended;",
 ) as (
   roofCfg: unknown, S: number, L: number, uAxisIsX: boolean, gableGeom: Geom,
   rg: { add: (m: Mesh) => void }, THREE: { Mesh: new (g: unknown, m: unknown) => Mesh },
   wallMat: unknown, gableMat: unknown,
   capOut0: number, capOutL: number, shedBandExtended: boolean, moveCapsFlush: () => void,
+  tallNeg: boolean,
 ) => boolean;
 
 /** Run the SHIPPED block over a stub geometry and report what it did. */
 /** Run the SHIPPED block over a stub geometry and report what it did. capOut 0 = caps not moved. */
-function repaint(cfg: unknown, S: number, L: number, uAxisIsX: boolean, g: Geom, capOut0 = 0, capOutL = 0) {
+function repaint(cfg: unknown, S: number, L: number, uAxisIsX: boolean, g: Geom, capOut0 = 0, capOutL = 0, tallNeg = true) {
   const added: Mesh[] = [];
   const THREE = {
     Mesh: class implements Mesh {
@@ -303,7 +306,7 @@ function repaint(cfg: unknown, S: number, L: number, uAxisIsX: boolean, g: Geom,
   };
   let capMoves = 0;
   const bandExtended = runRepaint(cfg, S, L, uAxisIsX, g, { add: (m: Mesh) => added.push(m) }, THREE, WALL_MAT, GABLE_MAT,
-    capOut0, capOutL, false, () => { capMoves++; });
+    capOut0, capOutL, false, () => { capMoves++; }, tallNeg);
   return { groups: g.groups.map((x) => ({ ...x })), mesh: added[0], added, bandExtended, capMoves };
 }
 
@@ -590,4 +593,74 @@ Deno.test("flush caps: a band that cannot be identified is reported NOT extended
   const { g } = extrudeStub(dedup, L);
   const r = repaint(SHED, S, L, uAxisIsX, g, 0.15, 0.15);
   assertEquals(r.bandExtended, false);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// PART 4 — the NEW FRAME (2026-09-24): roof.highSide and roof.front name the orientation.
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+Deno.test("roof.highSide names the shed's high wall; the size's first number stays the front", () => {
+  // [highSide, uAxisIsX, tallNeg]: front/back put the slope across the depth (profile spans L,
+  // u = world z, -u north); left/right across W (u = world x, -u west).
+  const want: Array<[string, boolean, boolean]> = [["front", false, false], ["back", false, true], ["left", true, true], ["right", true, false]];
+  for (const [hs, ux, tn] of want) {
+    for (const [w, l] of [[16, 10], [10, 16]]) {
+      const ax = d3RoofAxes({ ...SHED, highSide: hs }, w, l);
+      assertEquals([ax.uAxisIsX, ax.tallNeg], [ux, tn], `${hs} on ${w}x${l}`);
+      assertEquals([ax.S, ax.L], ux ? [w, l] : [l, w], `${hs} on ${w}x${l}: span and length`);
+    }
+  }
+});
+
+Deno.test("a value the sanitizer would drop is absent: today's axes, byte for byte", () => {
+  for (const [w, l] of [[16, 10], [12, 16]]) {
+    assertEquals(d3RoofAxes({ ...SHED, highSide: "up" }, w, l), d3RoofAxes(SHED, w, l));
+    assertEquals(d3RoofAxes({ ...SHED, front: "gable" }, w, l), d3RoofAxes(SHED, w, l), "front means nothing on a shed");
+    const G = { type: "gable", pitch: 0.4 };
+    assertEquals(d3RoofAxes({ ...G, highSide: "front" }, w, l), d3RoofAxes(G, w, l), "highSide means nothing on a gable");
+  }
+});
+
+Deno.test("roof.front picks the gable's axes whatever the footprint's shape", () => {
+  for (const type of ["gable", "gambrel"]) {
+    for (const [w, l] of [[28, 20], [20, 28]]) {
+      const g = d3RoofAxes({ type, front: "gable" }, w, l);
+      assertEquals([g.uAxisIsX, g.S, g.L], [true, w, l], `${type} front gable ${w}x${l}: ridge runs front to back`);
+      const e = d3RoofAxes({ type, front: "eave" }, w, l);
+      assertEquals([e.uAxisIsX, e.S, e.L], [false, l, w], `${type} front eave ${w}x${l}: ridge runs along the front`);
+    }
+  }
+});
+
+Deno.test("the repaint finds a HIGH SIDE at +S/2 and maps it in phase with the south wall", () => {
+  const cfg = { ...SHED, highSide: "front" };
+  const { uAxisIsX, S, L, tallNeg } = d3RoofAxes(cfg, 16, 10);
+  assertEquals([uAxisIsX, tallNeg], [false, false]);
+  const { dedup } = d3RoofProfile(cfg, S, H, tallNeg);
+  const vertical = edgesOf(dedup).filter(([a, b]) => Math.abs(a[0] - b[0]) < 1e-9);
+  assertEquals(vertical.length, 1);
+  assertEquals(vertical[0][0][0], S / 2, "the tall edge is at +S/2: the south wall");
+  const { g, capCount, sideCount } = extrudeStub(dedup, L);
+  const r = repaint(cfg, S, L, uAxisIsX, g, 0, 0, tallNeg);
+  const tri = perTriangle(r.groups, capCount + sideCount);
+  const sideMats = tri.slice(capCount / 3);
+  assertEquals(sideMats.filter((m) => m === 0).length, 2, "the two triangles of the vertical face");
+  const pos = g.attributes.position, uv = g.attributes.uv;
+  const us: number[] = [], vs: number[] = [];
+  for (let t = 0; t < sideMats.length; t++) {
+    const i = capCount + t * 3;
+    const inPlane = [0, 1, 2].every((j) => Math.abs(pos.getX(i + j) - S / 2) < 1e-4);
+    assertEquals(sideMats[t] === 0, inPlane, `side triangle ${t} painted against its plane`);
+    if (inPlane) for (const j of [0, 1, 2]) { us.push(uv.getX(i + j)); vs.push(uv.getY(i + j)); }
+  }
+  // South runs west -> east like north, so the band reads u = L - local z over the full 0..L.
+  assertEquals([Math.min(...us), Math.max(...us)], [0, L]);
+  assertEquals([Math.min(...vs), Math.max(...vs)], [H, H + S * 0.5]);
+  assertEquals(r.bandExtended, true);
+  // And the SAME geometry run with the old fixed plane finds nothing to paint: the reason the
+  // block had to read tallNeg.
+  const again = extrudeStub(dedup, L);
+  const before = snapshot(again.g);
+  repaint(cfg, S, L, uAxisIsX, again.g, 0, 0, true);
+  assertEquals(snapshot(again.g), before);
 });
