@@ -200,8 +200,22 @@ Deno.test("the base walks the same fallback chain the spec resolver walks", () =
 });
 
 Deno.test("the clamp matches styleD3's column range, so the 3D cannot leave it", () => {
-  assertEquals(d3WallHeightFromDelta(14, 12), 14, "clamped at the top");
+  // The top is 20 since 2026-09-24 (was 14), in lock-step with styleD3's WALL_HEIGHT_MAX_FT and
+  // submit-estimate's upgrade clamp: a 14 ft wall with +12in is a real 15 ft wall now.
+  assertEquals(d3WallHeightFromDelta(14, 12), 15, "the old top is no longer a ceiling");
+  assertEquals(d3WallHeightFromDelta(20, 12), 20, "clamped at the top");
   assertEquals(d3WallHeightFromDelta(4, 0), 5, "clamped at the bottom");
+});
+
+Deno.test("the server's upgrade clamp is the designer's, number for number", () => {
+  // submit-estimate is a 2,200-line handler with no harness (see the header), so its clamp is
+  // pinned by SHAPE: the one line that turns base + increase into feet must use the same 5..20
+  // the footer above does, or the preview renders a wall the estimate never priced.
+  const SERVER = Deno.readTextFileSync(new URL("../../submit-estimate/index.ts", import.meta.url));
+  const line = SERVER.split("\n").find((l) => l.includes("resolvedWallHeightFt = Math.max(")) ?? "";
+  assert(line.includes("Math.max(5, Math.min(20, "), `submit-estimate clamps to 5..20: ${line.trim()}`);
+  const STYLED3 = Deno.readTextFileSync(new URL("../styleD3.ts", import.meta.url));
+  assert(/export const WALL_HEIGHT_MAX_FT = 20;/.test(STYLED3), "and styleD3's column clamp says the same");
 });
 
 Deno.test("an increase that does not FIT the width prices nothing, and is not offered", () => {

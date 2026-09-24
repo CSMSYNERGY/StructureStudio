@@ -1036,7 +1036,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       return json({ error: `A ${wallHeightDeltaIn}" wall-height increase isn't available on a ${buildingWidthFt} ft wide "${styleLabel}" — taller walls are limited by width for hauling. Choose standard height or a narrower building.` }, 400);
     }
     const whRate = Number(wh.rate_per_lf) || 0;
-    resolvedWallHeightFt = Math.max(5, Math.min(14, resolvedWallHeightFt + wallHeightDeltaIn / 12));
+    // 5..20 ft (5..14 until 2026-09-24): styleD3's WALL_HEIGHT_MAX_FT, written as a literal so this
+    // function does not start bundling styleD3.ts. ⚠️ LOCK-STEP with d3WallHeightFromDelta in both
+    // designer twins — the preview and this line must price the same wall — and wallHeight_test.
+    resolvedWallHeightFt = Math.max(5, Math.min(20, resolvedWallHeightFt + wallHeightDeltaIn / 12));
     targetItems.push(tagLine({
       name: `Taller Walls (+${wallHeightDeltaIn} in)`,
       qty: buildingPerimeter,

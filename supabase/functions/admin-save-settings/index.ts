@@ -2,7 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { checkAdminAuth } from "../_shared/adminAuth.ts";
 import { withErrorLog } from "../_shared/logError.ts";
-import { sanitizeD3Spec, sanitizePhotoUrls } from "../_shared/styleD3.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, WALK_FRAME_MAX } from "../_shared/styleD3.ts";
 
 // Operator (super-admin) bootstrap tool, used by the designer's ?admin=1 panel.
 // Gated by the shared ADMIN_PASSWORD edge-function secret. Owners use the
@@ -106,7 +106,8 @@ Deno.serve(withErrorLog("admin-save-settings", async (req: Request) => {
     // so it cannot know whether a style has a walk-around - and an unconditional write from here
     // would mean an operator tuning a pitch silently erased the builder's video.
     const hasVideoFrames = Array.isArray(d3VideoFrames);
-    const videoFrames = sanitizePhotoUrls(d3VideoFrames, 8);
+    // WALK_FRAME_MAX (12 since 2026-09-24, was 8): the same cap portal-settings' twin writes with.
+    const videoFrames = sanitizePhotoUrls(d3VideoFrames, WALK_FRAME_MAX);
 
     // Honour the phone-scan LOCK, exactly as portal-settings' builder-facing twin does
     // (same message, same 409). "locked" means the spec was tuned against a real scanned

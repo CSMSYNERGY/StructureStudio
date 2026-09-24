@@ -96,11 +96,17 @@ Deno.test("wallHeightFt clamps a near-miss and drops a wrong-unit answer", () =>
   // In range: untouched.
   assertEquals(wh(7), 7, "a plausible height passes through");
   assertEquals(wh(5), 5, "the low bound is inclusive");
-  assertEquals(wh(14), 14, "the high bound is inclusive");
+  // The top rose from 14 to 20 on 2026-09-24: a two-storey centre section or a tall cabin front
+  // is a real wall, and a builder who measured 16 was being drawn at 14.
+  assertEquals(wh(14), 14, "the old top is an ordinary height now");
+  assertEquals(wh(16), 16, "a measured 16 is drawn at 16, no longer at 14");
+  assertEquals(wh(20), 20, "the high bound is inclusive");
   // Near-miss: pulled to the bound. Before 2026-08-25 these were DROPPED, which left the
   // style default (often 8) standing -- further from the truth than the bound.
   assertEquals(wh(4.5), 5, "a low near-miss clamps up rather than vanishing");
-  assertEquals(wh(16), 14, "a high near-miss clamps down rather than vanishing");
+  // Above 20 the accept band and the clamp now coincide, so there is no high near-miss left to
+  // pull down: 20.5 is past what anyone measures in feet and is dropped with the wrong units.
+  assertEquals(wh(20.5), undefined, "past the top is dropped, not clamped");
   // Wrong unit or nonsense: dropped, so the builder's own value survives. Clamping 96 in
   // would draw a two-storey wall on a garden shed and look like the model read it that way.
   assertEquals(wh(96), undefined, "inches are not feet");
@@ -1172,16 +1178,21 @@ Deno.test("the dims prompt states all three numbers as facts and calls them the 
     ["videoShapePrompt", videoShapePrompt(DIMS)],
     ["combinedShapePrompt", combinedShapePrompt(8, 4, DIMS)],
   ] as const) {
-    assert(p.includes("16 ft wide across the gable end"), `${name} states the width`);
-    assert(p.includes("24 ft long down the side"), `${name} states the length`);
-    assert(p.includes("wall is 9 ft high at the eave"), `${name} states the wall height`);
+    // IN THE v2 FRAME (2026-09-24): the width is the FRONT wall's, not "across the gable end" —
+    // a cabin whose porch runs along its long side has its front on an eave wall — and the wall
+    // is the outside walls at the eave, which on a one-slope roof is the LOW side.
+    assert(p.includes("The FRONT wall (the side with the porch or main door) is 16 ft long"), `${name} states the width as the front wall`);
+    assert(p.includes("24 ft deep front to back"), `${name} states the length as the depth`);
+    assert(p.includes("outside walls are 9 ft tall at the eave"), `${name} states the wall height`);
+    assert(p.includes("on a one-slope roof, the LOW side"), `${name} says which wall of a shed that is`);
+    assert(!p.includes("across the gable end"), `${name}: the old gable-end frame is gone from the ruler`);
     assert(p.includes("facts, not estimates"), `${name} says they are not to be second-guessed`);
     assert(p.includes("they are your ruler"), `${name} names them as the scale`);
     assert(p.includes("never against a scale of your own"), `${name} forbids substituting one`);
   }
   // Trailing zeros off: "9" and not "9.0". A model reconciling "9.00 ft" against a frame is being
   // handed false precision it did not ask for.
-  assert(videoShapePrompt({ widthFt: 12, lengthFt: 16.5, wallHeightFt: 8 }).includes("16.5 ft long"), "a real fraction survives");
+  assert(videoShapePrompt({ widthFt: 12, lengthFt: 16.5, wallHeightFt: 8 }).includes("16.5 ft deep"), "a real fraction survives");
   assert(!videoShapePrompt(DIMS).includes("16.0 ft"), "a whole number reads as a whole number");
 });
 
@@ -1358,17 +1369,24 @@ Deno.test("⚠️ the builder's 9 beats the model's 7, which is the whole point"
   assert(silent.ok && silent.d3.wallHeightFt === 9, "the expected silent reply still gets the wall");
 });
 
-Deno.test("a dims wall height outside 5-14 hits the EXISTING clamp, not a second one", () => {
-  // One clamp, not two. `sanitizeD3Spec` has drawn walls at 5..14 since before any of this, and
-  // writing the builder's number in BEFORE it is what keeps that the only place the bound lives.
+Deno.test("a dims wall height outside 5-20 hits the EXISTING clamp, not a second one", () => {
+  // One clamp, not two. `sanitizeD3Spec` has drawn walls at 5..14 since before any of this (5..20
+  // since 2026-09-24), and writing the builder's number in BEFORE it is what keeps that the only
+  // place the bound lives.
   const tall = parseModelSpec(`{"roof":{"type":"gable","pitch":0.4},"colors":{}}`, { widthFt: 16, lengthFt: 24, wallHeightFt: 16 });
-  assert(tall.ok && tall.d3.wallHeightFt === 14, "16 is drawn at 14");
+  assert(tall.ok && tall.d3.wallHeightFt === 16, "16 is drawn at 16 since the top rose to 20");
+  const top = parseModelSpec(`{"roof":{"type":"gable","pitch":0.4},"colors":{}}`, { widthFt: 16, lengthFt: 24, wallHeightFt: 20 });
+  assert(top.ok && top.d3.wallHeightFt === 20, "and 20, the top of parseKnownDims's band, is drawn as typed");
   const short = parseModelSpec(`{"roof":{"type":"gable","pitch":0.4},"colors":{}}`, { widthFt: 16, lengthFt: 24, wallHeightFt: 4 });
   assert(short.ok && short.d3.wallHeightFt === 5, "4 is drawn at 5");
   // And the builder is TOLD, because a silent clamp on a number they measured is the worst kind:
   // they typed it, the preview disagrees, and nothing on screen connects the two.
-  assert(knownDimsNote({ widthFt: 16, lengthFt: 24, wallHeightFt: 16 })!.includes("drawn at 14"), "the note names what was drawn");
-  assert(knownDimsNote({ widthFt: 16, lengthFt: 24, wallHeightFt: 16 })!.includes("you gave 16 ft"), "and what was typed");
+  const note = knownDimsNote({ widthFt: 16, lengthFt: 24, wallHeightFt: 4 })!;
+  assert(note.includes("drawn at 5"), "the note names what was drawn");
+  assert(note.includes("you gave 4 ft"), "and what was typed");
+  assert(note.includes("between 5 and 20 ft"), "and the range it states is the clamp's own");
+  assertEquals(knownDimsNote({ widthFt: 16, lengthFt: 24, wallHeightFt: 16 }), null, "a 16 is inside the band now, so silent");
+  assertEquals(knownDimsNote({ widthFt: 16, lengthFt: 24, wallHeightFt: 20 }), null, "and so is the top");
   assertEquals(knownDimsNote(DIMS), null, "a wall inside the band is silent");
   assertEquals(knownDimsNote(null), null, "and no dims at all is silent");
   assertEquals(knownDimsNote(undefined), null);
@@ -1414,6 +1432,464 @@ Deno.test("nothing dims brought in survives sanitizeD3Spec except the wall heigh
   }
   assertEquals(r.d3.wallHeightFt, 9, "the wall height is the one thing that stays, because d3 already has that key");
   assertEquals(Object.keys(r.d3.roof).sort(), ["overhang", "pitch", "type"], "and the roof carries only roof keys");
+});
+
+// ═══ VIDEO → EXACT 3D, v2 (2026-09-24) ════════════════════════════════════════════════════════
+// Two real buildings the base vocabulary could not describe: FARMSTAND, a one-slope cabin whose
+// tall FRONT is a long eave wall carrying a porch whose roof meets it two feet under the eave; and
+// TRI HOME, a raised-centre house with an ENCLOSED wing down each side. What is pinned below:
+//
+//   * the legacy no-dims prompt is byte-for-byte what production has run (by hash, not identity);
+//   * every new key round-trips, clamps, is dropped when invalid, and is NEVER emitted by default;
+//   * the v2 prompt (every request with dims) asks for each of them in the terms the renderer
+//     reads, keeps what the base already got right, and forces the wings answer like the porch's;
+//   * observed.wings is checked against the drafted wings, and only on the v2 path.
+//
+// Imported here rather than in the block at the top: the names are this section's alone, and
+// the top block is where the other sections' imports change.
+import {
+  D3_ROOF_FRONTS, D3_SHED_HIGH_SIDES, D3_WING_SIDES, WALK_FRAME_MAX, WALL_HEIGHT_MAX_FT,
+  OBSERVED_WING_KINDS, draftWingKind, wingsAgreementWarning, knownDimsParagraph,
+} from "./styleD3.ts";
+
+// SHA-256 of VIDEO_SHAPE_PROMPT as shipped on 2026-09-19 (origin/main 72d88bd), line endings
+// normalised so a Windows checkout with autocrlf hashes the same bytes a Linux one does.
+const LEGACY_VIDEO_PROMPT_SHA256 = "004c9bf7aac722f44b7b81fe3e40d37e6daac595613237603be112188958496e";
+const LEGACY_VIDEO_PROMPT_LENGTH = 15051;
+const sha256 = async (s: string) =>
+  Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s))))
+    .map((b) => b.toString(16).padStart(2, "0")).join("");
+
+Deno.test("⛔ the no-dims prompt is BYTE-FOR-BYTE the one production has run since 09-19", async () => {
+  // "videoShapePrompt(null) IS the constant" proves identity, and identity passes just as well on
+  // an edited base: the constant is derived from the function. This pins the BYTES. A request with
+  // no dims — production's legacy path — must keep getting exactly this string; all new vocabulary
+  // lives in the v2 prompt that dims select.
+  const legacy = VIDEO_SHAPE_PROMPT.replace(/\r\n/g, "\n");
+  assertEquals(legacy.length, LEGACY_VIDEO_PROMPT_LENGTH, "the legacy prompt's length");
+  assertEquals(await sha256(legacy), LEGACY_VIDEO_PROMPT_SHA256, "the legacy prompt's bytes");
+  assert(videoShapePrompt(null) === VIDEO_SHAPE_PROMPT, "and the no-dims call still returns that very string");
+  // None of the v2 vocabulary leaks into it.
+  for (const k of ['"front": "gable"', '"highSide"', '"wingSide"', '"porchAttachFt"', '"corner": "#', '"fascia": "#', '"wings"', "SUNLIT"]) {
+    assert(!VIDEO_SHAPE_PROMPT.includes(k), `the legacy prompt must not mention ${k}`);
+  }
+  // And the legacy prompt still says what it always said about colour, word for word.
+  assert(VIDEO_SHAPE_PROMPT.includes("do not spend effort on them"), "the legacy prompt is untouched");
+});
+
+// The v2 prompts, both ways a request can reach one.
+const V2 = [
+  ["videoShapePrompt(dims)", videoShapePrompt(DIMS)],
+  ["combinedShapePrompt(dims)", combinedShapePrompt(8, 4, DIMS)],
+] as const;
+
+Deno.test("v2 defines the FRONT once, and every direction is read from it", () => {
+  for (const [name, p] of V2) {
+    assert(p.includes("THE FRONT, which every front, back, left and right in this reply is read from"), `${name}: the FRONT paragraph`);
+    assert(p.includes("the one carrying the porch, or the main door when there is no porch"), `${name}: porch first, then door`);
+    assert(p.includes("never assume the front is the shorter wall"), `${name}: the old portrait assumption is ruled out`);
+    // Azimuth 0 and the frame map's "front" are the FRONT wall now, not "the gable end the door is on".
+    assert(p.includes("0 is square in front of the FRONT wall"), `${name}: azimuth 0 is the FRONT`);
+    assert(!p.includes("the gable end the door is on"), `${name}: the gable-end datum is gone`);
+    assert(p.includes("the same way leanToSide, wingSide and dormerOffsetU are read"), `${name}: one handedness`);
+  }
+});
+
+Deno.test("v2 asks for roof.front and roof.highSide as REQUIRED decisions, in the renderer's words", () => {
+  for (const [name, p] of V2) {
+    assert(p.includes('"front": "gable" | "eave"'), `${name}: the front schema line`);
+    assert(p.includes('"highSide": "front" | "back" | "left" | "right"'), `${name}: the highSide schema line`);
+    for (const v of D3_ROOF_FRONTS) assert(p.includes(`"${v}"`), `${name} names front "${v}"`);
+    for (const v of D3_SHED_HIGH_SIDES) assert(p.includes(`"${v}"`), `${name} names highSide "${v}"`);
+    assert(p.includes("ROOF DIRECTION, REQUIRED on a two-slope or gambrel roof"), `${name}: front is required on a ridge`);
+    assert(p.includes("the ridge runs straight away from you, front to back"), `${name}: what "gable" looks like`);
+    assert(p.includes("the ridge runs side to side, parallel to the front wall"), `${name}: what "eave" looks like`);
+    // The shed high side: the tallest wall, the roof falls away from it, named against the front.
+    assert(p.includes("SHED HIGH SIDE, REQUIRED on a one-slope roof"), `${name}: highSide is required on a shed`);
+    assert(p.includes("The high wall is the tallest wall of the building"), `${name}: the high wall is the tallest`);
+    assert(p.includes("falls away from it to the low wall opposite"), `${name}: the roof falls away from it`);
+    assert(p.includes("Name it relative to the FRONT"), `${name}: named against the front`);
+    assert(p.includes("the front wall itself is the tall one"), `${name}: the Farmstand case is named`);
+    // And the shed's pitch has a reading that does not need a gable end, with a worked example.
+    assert(p.includes("A shed has no gable end"), `${name}: shed pitch has its own reading`);
+    assert(p.includes("(9.3 - 7) / 10 = 0.23"), `${name}: and a worked example that is itself right`);
+  }
+  assertEquals(Math.round(((9.3 - 7) / 10) * 100) / 100, 0.23, "the worked shed example's arithmetic");
+});
+
+Deno.test("v2 puts the porch on the FRONT wall whichever kind it is, with its attach height and width", () => {
+  for (const [name, p] of V2) {
+    assert(p.includes("PORCH ON THE FRONT WALL"), `${name}: the porch paragraph`);
+    assert(p.includes("a gable end, or a long eave wall"), `${name}: either kind of wall`);
+    assert(p.includes("porchEnd is \"front\" for every porch"), `${name}: porchEnd follows from the definition`);
+    assert(p.includes('"porchAttachFt"') && p.includes('"porchWidthFt"'), `${name}: both new porch keys are in the schema`);
+    assert(p.includes("PORCH ROOF HEIGHT, porchAttachFt"), `${name}: how to measure the attach height`);
+    assert(p.includes("the door is 6 ft 8 in tall"), `${name}: against a real door`);
+    assert(p.includes("count the siding courses or battens"), `${name}: or against the cladding`);
+    assert(p.includes("Leave it out only when the porch roof starts just under the top of a wall whose top is the known wall height"), `${name}: absent is today's attach`);
+    // "Just under the top of the wall" is measured from the KNOWN wall when absent, so on a
+    // taller wall — a shed's high front, a raised centre — the number has to be given.
+    assert(p.includes("Give it whenever the wall behind the porch is taller than that — the high wall of a shed, or the centre section"), `${name}: a tall porch wall always gets a number`);
+    assert(p.includes("PORCH WIDTH, porchWidthFt"), `${name}: the width paragraph`);
+    assert(p.includes("ONLY when it is clearly narrower than the wall"), `${name}: only a narrower porch`);
+    assert(p.includes("a porch in front of the centre section alone"), `${name}: the Tri Home case is named`);
+    // What the base already got right about telling the two porch kinds apart survives.
+    assert(p.includes("its own separate roof"), `${name}: the separate roof`);
+    assert(p.includes("the porch ceiling is nearly level"), `${name}: the level porch ceiling`);
+    assert(p.includes("sticks out PAST the front of the building"), `${name}: seen from the side`);
+    assert(p.includes("leave porchDepthFt and porchTruss out"), `${name}: one kind or the other`);
+    assert(p.includes("standing BACK from the edge of the roof"), `${name}: the recessed porch's own tell`);
+    assert(p.includes('"porch": "projecting" | "recessed" | "none"'), `${name}: the porch decision`);
+    assert(p.includes("PORCH DECISION, REQUIRED:"), `${name}: still required`);
+    assert(p.includes("Naming a porch obliges you to give its field"), `${name}: word tied to number`);
+    assert(!p.includes("porchRoofPitch"), `${name}: the renderer still picks the porch pitch`);
+  }
+});
+
+Deno.test("v2 tells ENCLOSED wings from an OPEN lean-to, and forces the wings answer like the porch's", () => {
+  for (const [name, p] of V2) {
+    for (const k of ['"wingSide"', '"wingWidthFt"', '"wingPitch"', '"centerEaveFt"']) {
+      assert(p.includes(k), `${name}: the schema asks for ${k}`);
+    }
+    for (const v of D3_WING_SIDES) assert(p.includes(`"${v}"`), `${name} names wingSide "${v}"`);
+    assert(p.includes("SIDE WINGS, on a monitor or raised-centre building"), `${name}: the wings paragraph`);
+    assert(p.includes("lower ENCLOSED rooms"), `${name}: wings are enclosed`);
+    assert(p.includes("A lean-to is OPEN underneath"), `${name}: a lean-to is open`);
+    assert(p.includes("is a SIDE WING, below, however much its roof looks like a lean-to's"), `${name}: the lean-to paragraph points at wings`);
+    assert(p.includes("the FRONT wall's length includes them"), `${name}: wings are inside the measured size`);
+    assert(p.includes("measured against the known wall height, which is the height of the wings' outer walls"), `${name}: centre eave against the ruler`);
+    // The decision, with the same two escapes closed as the porch's.
+    assert(p.includes('"wings": "both" | "one" | "none"'), `${name}: observed carries the wings answer`);
+    assert(p.includes("WINGS DECISION, REQUIRED:"), `${name}: the answer is required`);
+    for (const kind of OBSERVED_WING_KINDS) assert(p.includes(`"${kind}"`), `${name} names "${kind}"`);
+    assert(p.includes('Answer it even when the answer is "none", and answer it even when you are unsure'), `${name}: both escapes closed`);
+    assert(p.includes('"both" or "one" obliges you to give wingSide and wingWidthFt'), `${name}: word tied to number`);
+    // A covered area at the front is a porch, never a lean-to, on either kind of front wall.
+    assert(p.includes("A covered area in front of the FRONT wall is a PORCH, never a lean-to"), `${name}: porch vs lean-to`);
+  }
+});
+
+Deno.test("v2 says colours MATTER, read off the sunlit face, with corner, fascia and porch wood", () => {
+  for (const [name, p] of V2) {
+    assert(!p.includes("do not spend effort"), `${name}: the "colours do not matter" sentence is gone`);
+    assert(!p.includes("settings the customer picks later"), `${name}: and so is its reason`);
+    assert(p.includes("its shape first, then its colours. Both matter."), `${name}: colours are part of the job`);
+    assert(p.includes("the SUNLIT side, never the side in shadow"), `${name}: read the sunlit face`);
+    assert(p.includes('"corner": "#rrggbb"') && p.includes('"fascia": "#rrggbb"'), `${name}: corner and fascia are asked for`);
+    assert(p.includes("Give corner and fascia ONLY when they differ from trim"), `${name}: absent means trim`);
+    assert(p.includes("the corners painted the body colour and the fascia matching the roof"), `${name}: the Farmstand case is named`);
+    // The porch's lumber, now that colour is part of the match (the legacy prompt still never asks).
+    assert(p.includes('"wood": "#rrggbb"') && p.includes("only when there is a porch"), `${name}: porch wood, only with a porch`);
+    assert(!p.includes("plateBand"), `${name}: the band is still the builder's setting`);
+  }
+});
+
+Deno.test("v2 keeps the reply short, because thinking and the answer share one budget", () => {
+  for (const [name, p] of V2) {
+    assert(p.includes("Keep every observed string to one short phrase, under 20 words"), `${name}: observed stays short`);
+    assert(p.includes("a reply that runs out before its end is lost whole"), `${name}: and why`);
+  }
+});
+
+Deno.test("v2 keeps everything the base already read correctly", () => {
+  for (const [name, p] of V2) {
+    // Overhang in inches, the flush case, and the anti-midpoint closing.
+    for (const s of ["in INCHES", "0 is a real answer", "the wall running straight up into the roof edge", "no shadow under it",
+                     "as common as one with a deep eave", "2 inches and 16 inches are both common answers",
+                     "say so in observed and OMIT the key", "leaves the builder's existing setting alone",
+                     "Do not fill a field with the middle of its stated range",
+                     // Gambrel shape, eave finish, vent, material, truss, dormer, foundation, neighbours.
+                     "STEEP lower slope", "SHALLOW upper slope", "GAMBREL NUMBERS", "EAVE FINISH", "GABLE VENT:",
+                     "ROOF MATERIAL:", "PORCH TRUSS:", "porchTruss false", "DORMER:", "FOUNDATION:", "Ignore every OTHER building",
+                     "FRAME MAP:", "Number the images in the order you were given them, starting at 1",
+                     "never one of the builder's own photographs", "LEFT OUT", "AZIMUTH:", "0, 45, 90, 135, 180, 225, 270 or 315",
+                     "How to read it:", "KNOWN DIMENSIONS, MEASURED BY THE BUILDER."]) {
+      assert(p.includes(s), `${name} keeps: ${s}`);
+    }
+    assert(!p.includes("wallHeightFt"), `${name}: a known wall is never asked for`);
+    assert(p.includes("It is the LOW wall on a one-slope roof"), `${name}: and it says which wall the known one is`);
+  }
+  // The decisions are the one exception to "omit when unsure", and the closing says so.
+  assert(videoShapePrompt(DIMS).includes("The exceptions are the decisions marked REQUIRED above"), "the closing names the exception");
+});
+
+Deno.test("v2 asks the frame map for SIX views, including the back and the far side", () => {
+  // The self-check compares a render with a frame of the same view, and it can only do that for a
+  // view the first pass named. Wings on BOTH sides and a porch on the front need the back and the
+  // far side seen, so the first pass names them. parseFrameMap keeps whichever of these
+  // FRAME_MAP_VIEWPOINTS lists, so an unlisted one costs a few tokens and changes nothing.
+  for (const [name, p] of V2) {
+    for (const k of [...FRAME_MAP_VIEWPOINTS, "back", "otherSide"]) {
+      assert(p.includes(`"${k}": { "frame":`), `${name}: the frame map names the ${k} view`);
+    }
+    assert(p.includes("each of the six views"), `${name}: and says there are six`);
+  }
+});
+
+Deno.test("⚠️ every roof key the v2 schema asks for survives the sanitiser", () => {
+  // The sanitiser is a whitelist rebuild. A key the prompt asks for and the sanitiser does not
+  // know is paid for, answered, and dropped without a word — the "the save did not work" defect
+  // the sanitiser's own header warns about. So the schema is READ here, key by key, and each one
+  // is put through parseModelSpec on the roof type that can carry it.
+  const p = videoShapePrompt(DIMS);
+  const at = p.indexOf('"roof": {');
+  const block = p.slice(at, p.indexOf("\n  },", at));
+  const asked = [...block.matchAll(/^ {4}"(\w+)":/gm)].map((m) => m[1]);
+  const SAMPLE: Record<string, unknown> = {
+    type: "gable", front: "eave", highSide: "front", pitch: 0.4, ridgeOffset: 0.1, overhangIn: 6,
+    kneeU: 0.75, kneeRise: 0.72, ridgeRise: 1.03, eave: "open", tailSpacingIn: 24,
+    leanToWidthFt: 8, leanToDropFt: 1.5, leanToSide: "left",
+    wingSide: "both", wingWidthFt: 6, wingPitch: 0.25, centerEaveFt: 15,
+    dormerWidthFt: 4, dormerRiseFt: 2, dormerOffsetU: 0.5,
+    porchDepthFt: 6, porchEnd: "front", porchTruss: true, porchOutFt: 6, porchAttachFt: 8, porchWidthFt: 10,
+  };
+  assertEquals([...asked].sort(), Object.keys(SAMPLE).sort(), "this test covers exactly the keys the schema asks for");
+  for (const k of asked) {
+    const roof: Record<string, unknown> = { type: k === "highSide" ? "shed" : "gable", [k]: SAMPLE[k] };
+    if (k === "porchAttachFt" || k === "porchWidthFt") roof.porchOutFt = 6;   // projecting porch only
+    const r = parseModelSpec(JSON.stringify({ roof }), DIMS);
+    assert(r.ok, `a reply carrying ${k} parses`);
+    const stored = k === "overhangIn" ? "overhang" : k;                     // inches fold to feet
+    assert(r.ok && stored in r.d3.roof, `${k}, asked for by the prompt, reaches the spec`);
+  }
+});
+
+Deno.test("the v2 ruler is in the new frame, and sits after the first blank line", () => {
+  const para = knownDimsParagraph({ widthFt: 16, lengthFt: 10, wallHeightFt: 7 });
+  assert(para.startsWith("KNOWN DIMENSIONS, MEASURED BY THE BUILDER."), "the heading the splice tests look for");
+  assert(para.includes("The FRONT wall (the side with the porch or main door) is 16 ft long"), "W is the front wall");
+  assert(para.includes("10 ft deep front to back"), "L is the depth");
+  assert(para.includes("7 ft tall at the eave (on a one-slope roof, the LOW side; with side wings, the wings' outer walls)"), "H is the low / outer wall");
+  const p = videoShapePrompt({ widthFt: 16, lengthFt: 10, wallHeightFt: 7 });
+  const firstBreak = p.indexOf("\n\n");
+  assert(p.slice(firstBreak + 2).startsWith(para), "the ruler is the second paragraph, where combinedShapePrompt keeps it");
+  // The combined prompt with dims is the v2 body under the two-source opening, not the base's.
+  const c = combinedShapePrompt(8, 4, DIMS);
+  assert(c.startsWith("These images are all of ONE portable building"), "the combined opening still leads");
+  assert(c.endsWith(videoShapePrompt(DIMS).slice(videoShapePrompt(DIMS).indexOf("\n\n"))), "and the rest is the v2 body, whole");
+});
+
+// ── the sanitiser: every v2 key ─────────────────────────────────────────────────────────────
+const roofOf = (roof: Record<string, unknown>, extra: Record<string, unknown> = {}) => {
+  const r = sanitizeD3Spec({ roof, ...extra });
+  assert(r.ok, `a spec with a valid roof type is accepted: ${JSON.stringify(roof)}`);
+  return r.ok ? r.d3.roof : {};
+};
+
+Deno.test("roof.front round-trips on a gable and a gambrel, is dropped on a shed, and junk never persists", () => {
+  for (const type of ["gable", "gambrel"]) {
+    for (const v of D3_ROOF_FRONTS) assertEquals(roofOf({ type, front: v }).front, v, `${type} keeps front "${v}"`);
+  }
+  // A shed has no ridge, so there is no gable end or eave wall to be the front. Stored, it would
+  // turn the building sideways the moment someone switched the roof to a gable.
+  for (const v of D3_ROOF_FRONTS) assert(!("front" in roofOf({ type: "shed", front: v })), `a shed drops front "${v}"`);
+  for (const junk of ["side", "Gable", "", 1, true, null, { v: "gable" }]) {
+    assert(!("front" in roofOf({ type: "gable", front: junk })), `${JSON.stringify(junk)} is dropped`);
+  }
+  assert(!("front" in roofOf({ type: "gable", pitch: 0.4 })), "absent stays absent: the old frame");
+});
+
+Deno.test("roof.highSide round-trips its four walls on a shed, and nowhere else", () => {
+  for (const v of D3_SHED_HIGH_SIDES) assertEquals(roofOf({ type: "shed", highSide: v }).highSide, v, `shed keeps highSide "${v}"`);
+  for (const type of ["gable", "gambrel"]) {
+    assert(!("highSide" in roofOf({ type, highSide: "front" })), `a ${type} has no high side`);
+  }
+  for (const junk of ["north", "FRONT", "", 0, false, null]) {
+    assert(!("highSide" in roofOf({ type: "shed", highSide: junk })), `${JSON.stringify(junk)} is dropped`);
+  }
+  assert(!("highSide" in roofOf({ type: "shed", pitch: 0.25 })), "absent stays absent: today's fixed high end");
+});
+
+Deno.test("porchAttachFt and porchWidthFt clamp, read numeric strings, and exist only with a projecting porch", () => {
+  const on = (extra: Record<string, unknown>) => roofOf({ type: "shed", pitch: 0.23, porchOutFt: 4, ...extra });
+  assertEquals(on({ porchAttachFt: 7.3 }).porchAttachFt, 7.3, "a real attach height passes through");
+  assertEquals(on({ porchAttachFt: 3 }).porchAttachFt, 6, "under a door's height clamps up to 6");
+  assertEquals(on({ porchAttachFt: 40 }).porchAttachFt, 24, "over the tallest centre clamps to 24");
+  assertEquals(on({ porchAttachFt: "8.5" }).porchAttachFt, 8.5, "a numeric string reads as its number");
+  assert(!("porchAttachFt" in on({ porchAttachFt: "high" })), "a word is dropped");
+  assertEquals(on({ porchWidthFt: 8 }).porchWidthFt, 8, "a real width passes through");
+  assertEquals(on({ porchWidthFt: 1 }).porchWidthFt, 4, "a sliver clamps up to 4");
+  assertEquals(on({ porchWidthFt: 99 }).porchWidthFt, 60, "past any wall clamps to 60");
+  // THE VALIDITY RULE: without a projecting porch they describe a roof that does not exist.
+  for (const porchOutFt of [undefined, 0, 0.5]) {
+    const r = roofOf({ type: "gable", pitch: 0.4, porchOutFt, porchAttachFt: 8, porchWidthFt: 10 });
+    assert(!("porchAttachFt" in r) && !("porchWidthFt" in r), `porchOutFt ${porchOutFt} drops both`);
+  }
+  const recessed = roofOf({ type: "gable", pitch: 0.4, porchDepthFt: 6, porchAttachFt: 8, porchWidthFt: 10 });
+  assert(!("porchAttachFt" in recessed) && !("porchWidthFt" in recessed), "a recessed porch has no roof of its own to move");
+  assertEquals(recessed.porchDepthFt, 6, "and the recessed porch itself is untouched");
+  const r = roofOf({ type: "gable", pitch: 0.4, porchOutFt: 0.6, porchAttachFt: 8 });
+  assertEquals(r.porchAttachFt, 8, "just past the 0.5 off switch is a porch, so they stay");
+});
+
+Deno.test("the wing keys round-trip and clamp on a ridge, and go as a set on a shed", () => {
+  const w = roofOf({ type: "gable", pitch: 0.47, wingSide: "both", wingWidthFt: 7, wingPitch: 0.25, centerEaveFt: 16 });
+  assertEquals([w.wingSide, w.wingWidthFt, w.wingPitch, w.centerEaveFt], ["both", 7, 0.25, 16], "all four survive");
+  for (const v of D3_WING_SIDES) assertEquals(roofOf({ type: "gambrel", wingSide: v }).wingSide, v, `wingSide "${v}"`);
+  // Clamped, never refused — the same posture as every other number here.
+  const c = roofOf({ type: "gable", wingWidthFt: 30, wingPitch: 4, centerEaveFt: 40 });
+  assertEquals([c.wingWidthFt, c.wingPitch, c.centerEaveFt], [16, 1.5, 26], "each clamps to its top");
+  const lo = roofOf({ type: "gable", wingWidthFt: -2, wingPitch: -1, centerEaveFt: 2 });
+  assertEquals([lo.wingWidthFt, lo.wingPitch, lo.centerEaveFt], [0, 0, 6], "and to its bottom");
+  // 0 is the off switch, and the side is remembered through it, exactly like leanToSide.
+  const off = roofOf({ type: "gable", wingSide: "left", wingWidthFt: 0 });
+  assertEquals([off.wingSide, off.wingWidthFt], ["left", 0], "an off wing keeps its side");
+  // A shed has no ridge to stand wings either side of: the whole set goes, numbers included.
+  const shed = roofOf({ type: "shed", pitch: 0.25, wingSide: "both", wingWidthFt: 6, wingPitch: 0.3, centerEaveFt: 14 });
+  for (const k of ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt"]) assert(!(k in shed), `a shed drops ${k}`);
+  assertEquals(shed.pitch, 0.25, "and keeps its own roof");
+  for (const junk of ["sides", "Both", "", 2, null]) {
+    assert(!("wingSide" in roofOf({ type: "gable", wingSide: junk })), `${JSON.stringify(junk)} is dropped`);
+  }
+});
+
+Deno.test("colors.corner and colors.fascia keep a hex, drop anything else, and are never defaulted", () => {
+  const c = (colors: Record<string, unknown>) => {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, colors });
+    assert(r.ok, "colours never fail the spec");
+    return r.ok ? r.d3.colors : {};
+  };
+  assertEquals(c({ corner: "#4a3b30", fascia: "#2B2F33" }), { corner: "#4a3b30", fascia: "#2B2F33" });
+  for (const junk of ["brown", "url(x)", 12, "#12", null]) {
+    const out = c({ trim: "#ffffff", corner: junk, fascia: junk });
+    assert(!("corner" in out) && !("fascia" in out), `${JSON.stringify(junk)} must not persist`);
+    assertEquals(out.trim, "#ffffff", "the other colours ride along");
+  }
+  // Absent means trim, in the renderer. Writing trim in here would pin every column to today's trim.
+  const absent = c({ trim: "#ffffff" });
+  assertEquals(Object.keys(absent), ["trim"], "no corner or fascia is ever invented");
+});
+
+Deno.test("⚠️ NEVER EMIT A DEFAULT: a spec that names none of the v2 keys comes back exactly as before", () => {
+  // The whole back-compat claim for this change. Every stored style and every legacy reply must
+  // sanitise to the same JSON, key for key and in the same order, as it did before 2026-09-24.
+  const legacy = {
+    roof: { type: "gambrel", kneeU: 0.72, kneeRise: 0.72, ridgeRise: 1.0, overhang: 0.15, porchOutFt: 6.5,
+            porchEnd: "front", plateBand: true, eave: "fascia" },
+    siding: "panel",
+    colors: { body: "#EEEBE0", trim: "#686C70", roof: "#5F6266", wood: "#C4965A" },
+    wallHeightFt: 9, roofMaterial: "metal", foundation: "skids",
+  };
+  const r = sanitizeD3Spec(legacy);
+  assert(r.ok, "the legacy spec parses");
+  if (!r.ok) return;
+  assertEquals(JSON.stringify(r.d3), JSON.stringify({
+    roof: { type: "gambrel", overhang: 0.15, kneeU: 0.72, kneeRise: 0.72, ridgeRise: 1, porchOutFt: 6.5,
+            porchEnd: "front", eave: "fascia", plateBand: true },
+    siding: "panel",
+    colors: { body: "#EEEBE0", trim: "#686C70", roof: "#5F6266", wood: "#C4965A" },
+    wallHeightFt: 9, roofMaterial: "metal", foundation: "skids",
+  }), "byte-identical JSON, key order included");
+  for (const type of ["shed", "gable", "gambrel"]) {
+    const bare = roofOf({ type });
+    assertEquals(Object.keys(bare), ["type"], `a bare ${type} gains nothing`);
+  }
+});
+
+Deno.test("a FARMSTAND-shaped v2 reply keeps every key it is allowed and loses the ones a shed cannot have", () => {
+  // Shaped like the reply the v2 prompt asks for on a one-slope cabin with a tall porch front.
+  const reply = JSON.stringify({
+    roof: { type: "shed", highSide: "front", front: "eave", pitch: 0.23, overhangIn: 12, eave: "open", tailSpacingIn: 24,
+            porchOutFt: 4, porchEnd: "front", porchAttachFt: 7.3, wingSide: "both", wingWidthFt: 4 },
+    foundation: "skids", roofMaterial: "metal",
+    colors: { body: "#4a3b30", trim: "#ffffff", roof: "#2b2f33", corner: "#4a3b30", fascia: "#2b2f33", wood: "#8f5a3a" },
+    observed: { roofNote: "One slope falling from the tall porch front.", porch: "projecting", wings: "none", confidence: "high" },
+    frameMap: { front: { frame: 1, azimuthDeg: 0 }, back: { frame: 7, azimuthDeg: 180 } },
+  });
+  const r = parseModelSpec(reply, { widthFt: 16, lengthFt: 10, wallHeightFt: 7 });
+  assert(r.ok, "the reply parses");
+  if (!r.ok) return;
+  assertEquals(r.d3.roof.highSide, "front", "the tall front survives");
+  assertEquals(r.d3.roof.porchAttachFt, 7.3, "and the porch's attach height");
+  assertEquals(r.d3.roof.overhang, 1, "12 inches folded to a foot");
+  for (const k of ["front", "wingSide", "wingWidthFt"]) assert(!(k in r.d3.roof), `a shed drops ${k}`);
+  assertEquals(r.d3.colors.corner, "#4a3b30", "corner survives");
+  assertEquals(r.d3.colors.fascia, "#2b2f33", "fascia survives");
+  assertEquals(r.d3.wallHeightFt, 7, "the builder's low wall");
+  assert(!JSON.stringify(r.d3).includes("observed") && !JSON.stringify(r.d3).includes("frameMap"), "notes and map stay out");
+  // And the same reply's notes agree with its roof, so no warning is raised on either question.
+  const notes = parseObservedNotes(reply);
+  assertEquals(notes?.wings, "none");
+  assertEquals(wingsAgreementWarning(r.d3.roof, notes), null, "no wings drawn, none reported");
+  assertEquals(porchAgreementWarning(r.d3.roof, notes), null, "a projecting porch drawn and reported");
+});
+
+Deno.test("a TRI HOME-shaped v2 reply keeps the centre, both wings and the centre-only porch", () => {
+  const reply = JSON.stringify({
+    roof: { type: "gable", front: "gable", pitch: 0.47, overhangIn: 12, eave: "fascia",
+            wingSide: "both", wingWidthFt: 7, wingPitch: 0.25, centerEaveFt: 16,
+            porchOutFt: 6, porchEnd: "front", porchAttachFt: 10.5, highSide: "front" },
+    colors: { body: "#454b52", trim: "#2a2e33", roof: "#2e3238", wood: "#a96c3e" },
+    observed: { porch: "projecting", wings: "both" },
+  });
+  const r = parseModelSpec(reply, { widthFt: 28, lengthFt: 20, wallHeightFt: 8 });
+  assert(r.ok, "the reply parses");
+  if (!r.ok) return;
+  const roof = r.d3.roof;
+  assertEquals([roof.front, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt], ["gable", "both", 7, 0.25, 16]);
+  assertEquals(roof.porchAttachFt, 10.5, "the porch meets the centre at the wing-roof height");
+  assert(!("porchWidthFt" in roof), "a porch across the whole centre section gives no width");
+  assert(!("highSide" in roof), "a gable has no high side");
+  assertEquals(r.d3.wallHeightFt, 8, "the wings' outer walls are the builder's wall");
+  assertEquals(wingsAgreementWarning(roof, parseObservedNotes(reply)), null, "both drawn, both reported");
+});
+
+// ── observed.wings and its agreement check ──────────────────────────────────────────────────
+Deno.test("observed.wings survives as one of three words and nothing else", () => {
+  assertEquals(parseObservedNotes(`{"observed":{"wings":"both"}}`)!.wings, "both");
+  assertEquals(parseObservedNotes(`{"observed":{"wings":"One"}}`)!.wings, "one", "case is not a different answer");
+  const prose = parseObservedNotes(`{"observed":{"wings":"a wing on each side","porch":"none"}}`)!;
+  assert(!("wings" in prose), "a sentence is not an answer");
+  assertEquals(prose.porch, "none", "and the rest of the block still survives");
+  assertEquals(parseObservedNotes(`{"observed":{"wings":"left"}}`), null, "a side is not a headcount");
+  const r = parseModelSpec(`{"roof":{"type":"gable","pitch":0.4},"observed":{"wings":"both"}}`);
+  assert(r.ok && !("wings" in (r.d3 as Record<string, unknown>)) && !("wings" in r.d3.roof), "never reaches the spec");
+});
+
+Deno.test("draftWingKind reads the draft the way the renderer draws it", () => {
+  assertEquals(draftWingKind({ type: "gable", wingSide: "both", wingWidthFt: 6 }), "both");
+  for (const side of ["left", "right", "front", "back"]) {
+    assertEquals(draftWingKind({ type: "gambrel", wingSide: side, wingWidthFt: 6 }), "one", side);
+  }
+  assertEquals(draftWingKind({ type: "gable", wingWidthFt: 6 }), "both", "a width with no side is the monitor form");
+  assertEquals(draftWingKind({ type: "gable", wingSide: "both", wingWidthFt: 0 }), "none", "0 is off");
+  assertEquals(draftWingKind({ type: "gable", wingSide: "both" }), "none", "a side with no width is not a wing");
+  assertEquals(draftWingKind({ type: "shed", wingSide: "both", wingWidthFt: 6 }), "none", "a shed cannot have wings");
+  assertEquals(draftWingKind(null), "none");
+});
+
+Deno.test("wingsAgreementWarning: silent on agreement, two different sentences for the two failures", () => {
+  const WINGS = { type: "gable", pitch: 0.47, wingSide: "both", wingWidthFt: 7 };
+  assertEquals(wingsAgreementWarning(WINGS, { wings: "both" }), null);
+  assertEquals(wingsAgreementWarning({ type: "gable", wingSide: "left", wingWidthFt: 5 }, { wings: "one" }), null);
+  assertEquals(wingsAgreementWarning({ type: "gable", pitch: 0.4 }, { wings: "none" }), null);
+  // The Tri Home failure: the notes saw wings, the roof drew a box.
+  const box = wingsAgreementWarning({ type: "gable", pitch: 0.47 }, { wings: "both" });
+  assert(box && box.includes("enclosed lower wings along both sides") && box.includes("no side wings"), "names both halves");
+  assert(box!.includes("only the building settles which"), "and neither is believed over the other");
+  assert(!box!.includes("wingWidthFt"), "in the builder's words, not the schema's");
+  const kind = wingsAgreementWarning(WINGS, { wings: "one" });
+  assert(kind && kind.includes("along one side") && kind.includes("along both sides"), "one against both names both");
+  // No answer is a different sentence from a contradiction.
+  const silent = wingsAgreementWarning(WINGS, { porch: "none" });
+  assert(silent && silent.includes("never said whether this building has enclosed wings"), "names the missing answer");
+  assert(!silent!.includes("One of those is wrong"), "and is not a contradiction");
+  assertEquals(wingsAgreementWarning(WINGS, null), silent, "no notes at all read the same way");
+  assertEquals(wingsAgreementWarning(WINGS, { wings: "several" } as never), silent, "an unreadable answer is no answer");
+  // It composes with the porch and gambrel warnings, none eating another.
+  const pw = porchAgreementWarning({ type: "gable" }, { porch: "projecting" })!;
+  const flagged = flagObservedNotes({ wings: "both", porch: "projecting", roofNote: "Raised centre." }, pw, box)!;
+  assert(flagged.roofNote!.startsWith(pw) && flagged.roofNote!.includes(box!), "both warnings ride along");
+  assert(flagged.roofNote!.endsWith("The model's own reading: Raised centre."), "and the model's note after them");
+  assertEquals(flagged.confidence, "low");
+});
+
+// ── the caps that moved ────────────────────────────────────────────────────────────────────
+Deno.test("a walk-around keeps twelve frames now, and the hard ceiling still holds", () => {
+  assertEquals(WALK_FRAME_MAX, 12, "the video cap and the stored-frames cap");
+  assertEquals(sanitizePhotoUrls(urls(15), WALK_FRAME_MAX).length, 12, "twelve frames survive, not eight");
+  assertEquals(sanitizePhotoUrls(urls(9), WALK_FRAME_MAX).length, 9, "a shorter walk is not padded");
+  assertEquals(WALL_HEIGHT_MAX_FT, 20, "the wall clamp's top, which the designer twins mirror");
 });
 
 
@@ -2215,19 +2691,21 @@ Deno.test("⚠️ every field the prompt names is on the allow-list, and nothing
 });
 
 Deno.test("⚠️ the prompt states the wall the RENDER was drawn at, not the one that was typed", () => {
-  // parseKnownDims accepts 3..20 and sanitizeD3Spec clamps to the 5..14 the renderer can draw,
-  // so a measured 16 is DRAWN at 14. The prompt then tells the model "every render you are
-  // shown was drawn at exactly these dimensions" and step 1 converts a fraction of that wall
-  // into feet — so stating the 16 makes every length it reads off a render long by 16/14, in
-  // the same direction, on the one field this pass exists to fix.
-  const typed: KnownDims = { widthFt: 30, lengthFt: 40, wallHeightFt: 16 };
+  // parseKnownDims accepts 3..20 and sanitizeD3Spec clamps to the 5..20 the renderer can draw
+  // (5..14 until 2026-09-24, when a measured 16 was DRAWN at 14; since the top rose to 20 only a
+  // wall under 5 ft still clamps, so the fixture is a measured 4 drawn at 5). The prompt then
+  // tells the model "every render you are shown was drawn at exactly these dimensions" and step 1
+  // converts a fraction of that wall into feet — so stating the typed wall makes every length it
+  // reads off a render wrong by typed/drawn, in the same direction, on the one field this pass
+  // exists to fix.
+  const typed: KnownDims = { widthFt: 30, lengthFt: 40, wallHeightFt: 4 };
   const drawn = cleanSpec(applyKnownDims({ ...DRAFT }, typed));
-  assertEquals(drawn.wallHeightFt, 14, "the fixture really is clamped");
+  assertEquals(drawn.wallHeightFt, 5, "the fixture really is clamped");
   const p = selfCheckPrompt({ dims: typed, draft: drawn, viewpoints: SELF_CHECK_VIEWPOINTS });
-  assert(p.includes("wall height at the eave: 14 ft"), "the wall as DRAWN");
-  assert(!p.includes("16 ft"), "and the typed 16 appears nowhere");
-  assert(p.includes("on a 14 ft wall is about"), "step 1 converts against the drawn wall");
-  assert(p.includes("   14/20 ft"), "and the arithmetic it hands the model uses the drawn wall too");
+  assert(p.includes("wall height at the eave: 5 ft"), "the wall as DRAWN");
+  assert(!/\b4 ft/.test(p), "and the typed 4 appears nowhere");
+  assert(p.includes("on a 5 ft wall is about"), "step 1 converts against the drawn wall");
+  assert(p.includes("   5/20 ft"), "and the arithmetic it hands the model uses the drawn wall too");
   // Width and length never clamp, so they are stated exactly as typed.
   assert(p.includes("building size: 30 ft wide by 40 ft long"), "the size is untouched");
   // The unclamped case is unchanged, which is every ordinary building.
