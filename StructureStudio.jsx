@@ -1203,6 +1203,8 @@ function ssPorchTrussWall(roofCfg, bldgW, bldgH) {
   const cfg = roofCfg || {};
   if (!cfg.porchTruss || (cfg.type || "gable") !== "gable") return null;
   if (d3ProjectingPorch(cfg, bldgW, bldgH)) return null;
+  // Wings (d3Massing) switch the recessed porch off in the renderer, and its truss with it.
+  if (d3Massing(cfg, bldgW, bldgH, D3.WALL_H).wings.length) return null;
   const ax = d3RoofAxes(cfg, bldgW, bldgH);
   const depth = Math.max(0, Math.min(Number(cfg.porchDepthFt) || 0, (ax.uAxisIsX ? bldgH : bldgW) - 4));
   if (!(depth > 0.5)) return null;
@@ -1242,10 +1244,15 @@ function d3ProjectingPorch(roofCfg, bldgW, bldgH) {
 // profile's u shifted by half the span: world x on north/south, world z on west/east.
 function ssGableVentFit(roofCfg, bldgW, bldgH, wall, wallHeightFt, it, alongFt, riseFt) {
   if (ssGableEndWalls(roofCfg, bldgW, bldgH).indexOf(wall) < 0) return null;
-  const H = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
+  const Hw = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
   const ax = d3RoofAxes(roofCfg, bldgW, bldgH);
   const S = ax.S;
-  const dedup = d3RoofProfile(roofCfg, S, H, ax.tallNeg).dedup;
+  // WINGS (d3Massing): the gable is the CENTRE's, standing on the centre wall at Hc and shifted by
+  // uc across the end. Every number below is measured in that gable, and `u` is handed back in the
+  // building's own frame. Without wings H is the wall, uc is 0 and nothing moves.
+  const mass = d3Massing(roofCfg, bldgW, bldgH, Hw);
+  const H = mass.Hc, uc = mass.uc;
+  const dedup = d3RoofProfile(roofCfg, mass.Sc, H, ax.tallNeg).dedup;
   const wIn = Number(it && it.widthIn), hIn = Number(it && it.heightIn);
   const w = Number(it && it.widthFt) > 0 ? Number(it.widthFt) : (wIn > 0 ? wIn / 12 : 1);
   const h = hIn > 0 ? hIn / 12 : 1;
@@ -1275,8 +1282,8 @@ function ssGableVentFit(roofCfg, bldgW, bldgH, wall, wallHeightFt, it, alongFt, 
   const mid = d3ProfSpanAt(dedup, H + rise + h / 2);
   const centre = mid ? (mid[0] + mid[1]) / 2 : 0;       // under the ridge, even a skewed one
   const a0 = alongFt != null ? Number(alongFt) : NaN;
-  const u = Math.max(rg[0], Math.min(Number.isFinite(a0) ? a0 - S / 2 : centre, rg[1]));
-  return { alongFt: u + S / 2, riseFt: rise, u, y0: H + rise, y1: H + rise + h, w, h, F };
+  const u = Math.max(rg[0], Math.min(Number.isFinite(a0) ? a0 - S / 2 - uc : centre, rg[1]));
+  return { alongFt: u + uc + S / 2, riseFt: rise, u: u + uc, y0: H + rise, y1: H + rise + h, w, h, F };
 }
 // The patch that puts a vent snapped at `sn` into the gable above its wall: the fit's along
 // written back into x or y, plus the zone and rise. Null when that wall has no room for it.
@@ -2011,7 +2018,7 @@ function ssAllowedOrigin(origin) {
 // style's own standard; a legacy absolute pick (the 3D footer, which predates 172) still works
 // on a style that offers no increases. The two are mutually exclusive — picking one clears the
 // other — so "last thing the customer touched" always wins instead of one silently shadowing
-// the other. Clamped to the same 5-14 ft band _shared/styleD3.ts enforces server-side.
+// the other. Clamped to the same 5-20 ft band _shared/styleD3.ts enforces server-side.
 // The style's STANDARD wall height, before any customer increase — the fallback chain the spec
 // resolver already walked, lifted out because the 3D footer needs the SAME number to turn a
 // delta back into the absolute height the engine renders at. Two copies would drift.
@@ -2022,8 +2029,10 @@ function d3BaseWallHeightFt(C, styleCfg) {
 // Delta inches -> absolute feet, clamped to the range styleD3.ts enforces on the column. ONE
 // clamp: the footer and the spec resolver must agree to the inch, or the 3D renders a height
 // the estimate did not price.
+// 5-20 ft since 2026-09-24 (was 5-14): a two-storey wall is a real building now (the raised centre
+// of a monitor, a tall eave wall), and the renderer, the cameras and the column all take it.
 function d3WallHeightFromDelta(baseFt, deltaIn) {
-  return Math.max(5, Math.min(14, (Number(baseFt) || 8) + (Number(deltaIn) || 0) / 12));
+  return Math.max(5, Math.min(20, (Number(baseFt) || 8) + (Number(deltaIn) || 0) / 12));
 }
 // The wall height anything priced BY WALL AREA must use — cladding and insulation both.
 //
@@ -4550,6 +4559,174 @@ function d3ProfSpanAt(dedup, y) {
   }
   return hi > lo ? [lo, hi] : null;
 }
+// ── WINGS: THE RAISED-CENTRE ("MONITOR") MASSING (roof.wingSide / wingWidthFt, 2026-09-24) ──
+// A two-storey centre under the style's own gable or gambrel, with an ENCLOSED single-storey wing
+// down one or both eave sides, each under its own single-slope roof falling AWAY from the centre,
+// and the centre's side walls carried on up above the wing roofs (the clerestory band). The Tri
+// Home walk-around is the building this was written for.
+//
+// INSIDE THE FOOTPRINT, never added to it: the size label is the whole building and the wings are
+// carved out of it, so the plan, the quote and the outer walls stay exactly what is being sold.
+// Everything below is in the roof profile's own frame (d3RoofAxes): u across the span, -u = west
+// (uAxisIsX) or north. A wing runs the full length L along an EAVE side; a side that is a gable end
+// is dropped and reported in `dropped`, never drawn somewhere else.
+//
+//   S, L     the full span and the extrusion length, from d3RoofAxes
+//   Sc, uc   the centre section's span and where its middle sits in u (S - wL - wR, (wL - wR)/2)
+//   Hc       the centre's eave: centerEaveFt, else the wing roof's top + 3 ft; never under that top
+//            + 1 ft, and raised further when the centre's own eave finish would otherwise land on
+//            the wing roof under it (hcRaised says so)
+//   wings    [{ side -1|1, wall, w, pitch, u1 = the outer wall line, u0 = the centre wall line,
+//            ye = H at the outer wall, ya = H + w * pitch where the wing roof meets the centre }]
+//   prof     the centre's roof profile, in the centre's own u (add uc for the building's)
+//
+// ONE function, read by the renderer, the per-wall tops, the vent fit, the porch span and every
+// camera, for the reason d3RoofAxes is one function. With no wing keys it returns the plain
+// building (Sc = S, uc = 0, Hc = H, no wings), and every caller then builds what it always did.
+function d3Massing(roofCfg, W, L, H) {
+  const cfg = roofCfg || {};
+  const ax = d3RoofAxes(cfg, W, L);
+  const Hn = Number(H) > 0 ? Number(H) : 8;
+  const out = { uAxisIsX: ax.uAxisIsX, S: ax.S, L: ax.L, tallNeg: ax.tallNeg, H: Hn, Sc: ax.S, uc: 0, Hc: Hn, ya: Hn, wings: [], dropped: [], hcRaised: false, prof: null };
+  const type = cfg.type || "gable";
+  const want = Math.min(16, Number(cfg.wingWidthFt) || 0);
+  if ((type === "gable" || type === "gambrel") && want > 0.5) {
+    const negWall = ax.uAxisIsX ? "west" : "north", posWall = ax.uAxisIsX ? "east" : "south";
+    const named = { left: "west", right: "east", front: "south", back: "north" };
+    const asked = (cfg.wingSide || "both") === "both" ? [negWall, posWall] : (named[cfg.wingSide] ? [named[cfg.wingSide]] : []);
+    const walls = asked.filter((w) => w === negWall || w === posWall);
+    out.dropped = asked.filter((w) => walls.indexOf(w) < 0);
+    // The centre keeps at least 4 ft: a wider ask shrinks the wings, both alike.
+    const w = walls.length ? Math.min(want, (ax.S - 4) / walls.length) : 0;
+    const rawP = cfg.wingPitch != null ? Number(cfg.wingPitch) : 0.25;
+    const pitch = isFinite(rawP) ? Math.max(0, Math.min(1.5, rawP)) : 0.25;
+    if (w > 0.5) {
+      walls.forEach((wall) => {
+        const s = wall === negWall ? -1 : 1;
+        out.wings.push({ side: s, wall, w, pitch, u1: s * ax.S / 2, u0: s * (ax.S / 2 - w), ye: Hn, ya: Hn + w * pitch });
+      });
+      const wL = out.wings.some((g) => g.side < 0) ? w : 0, wR = out.wings.some((g) => g.side > 0) ? w : 0;
+      out.Sc = ax.S - wL - wR;
+      out.uc = (wL - wR) / 2;
+      out.ya = Hn + w * pitch;
+      // The centre's eave overhangs the wing roof, falling at its own eave slope while the wing roof
+      // falls at the wing pitch, and its fascia or tails hang up to 0.3 ft under the deck. It has to
+      // clear the wing slab's top (ROOF_T above the line) by 0.1 ft all the way out to the overhang.
+      const c = d3RoofProfile(cfg, out.Sc, 0, ax.tallNeg).dedup;
+      const n = c.length;
+      const slopeAt = (a, b) => (Math.abs(b[0] - a[0]) > 1e-9 ? Math.abs((b[1] - a[1]) / (b[0] - a[0])) : 0);
+      const eaveSlope = n > 1 ? Math.max(slopeAt(c[0], c[1]), slopeAt(c[n - 2], c[n - 1])) : 0;
+      const ovRaw = cfg.overhang != null ? Number(cfg.overhang) : D3.OVERHANG;
+      const ov = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
+      const minHc = out.ya + Math.max(1.0, D3.ROOF_T + 0.43 + Math.max(0, eaveSlope - pitch) * ov);
+      const rawHc = Number(cfg.centerEaveFt);
+      const wantHc = isFinite(rawHc) && rawHc > 0 ? rawHc : out.ya + 3;
+      out.Hc = Math.max(wantHc, minHc);
+      out.hcRaised = out.Hc > wantHc + 1e-9;
+    }
+  }
+  out.prof = d3RoofProfile(cfg, out.Sc, out.Hc, ax.tallNeg).dedup;
+  return out;
+}
+// The top of the massing's outline at the building's own u: the centre's roof over the centre, the
+// wing roof's line over a wing. Null-safe on u outside the span (the nearest end's answer).
+function d3MassingTopAt(m, u) {
+  for (let i = 0; i < m.wings.length; i++) {
+    const g = m.wings[i];
+    if ((u - g.u0) * g.side > 0) return g.ye + Math.min(g.w, Math.abs(u - g.u1)) * g.pitch;
+  }
+  return d3MakeProfYAt(m.prof, m.Hc)(u - m.uc);
+}
+// PER-WALL TOPS: how tall wall `wall` stands along its length, as [[a0, a1, top], ...] in the PLAN's
+// along-frame (feet from its west or north end), or null when it is one height, H, end to end —
+// which is every wall of every building without wings, so none of them changes.
+//   · a wing's outer eave wall is H, like any eave wall (null)
+//   · the eave side WITHOUT a wing, when the other side has one, is the centre's own wall: Hc
+//   · a gable end steps: H under each wing, Hc across the centre. The centre piece reaches the
+//     clerestory's OUTER face, so it closes the corner the way a wall box does at the footprint.
+function d3WallTops(roofCfg, W, L, H, wall) {
+  const m = d3Massing(roofCfg, W, L, H);
+  if (!m.wings.length) return null;
+  const ends = m.uAxisIsX ? ["north", "south"] : ["west", "east"];
+  if (ends.indexOf(wall) < 0) {
+    const s = wall === (m.uAxisIsX ? "west" : "north") ? -1 : 1;
+    return m.wings.some((g) => g.side === s) ? null : [[0, m.L, m.Hc]];
+  }
+  const T = D3.WALL_T, half = m.S / 2;
+  const gL = m.wings.find((g) => g.side < 0), gR = m.wings.find((g) => g.side > 0);
+  const c0 = gL ? gL.u0 - T / 2 + half : 0;
+  const c1 = gR ? gR.u0 + T / 2 + half : m.S;
+  const out = [];
+  if (gL) out.push([0, c0, m.H]);
+  out.push([c0, c1, m.Hc]);
+  if (gR) out.push([c1, m.S, m.H]);
+  return out;
+}
+// The LOWEST top over [a0, a1] of `wall`: what an opening spanning that run may reach, less the
+// header. H when the wall is one height, so a building without wings answers exactly as before.
+function d3WallTopFt(roofCfg, W, L, H, wall, a0, a1) {
+  const tops = d3WallTops(roofCfg, W, L, H, wall);
+  if (!tops) return H;
+  let t = Infinity;
+  tops.forEach((p) => { if (p[1] > a0 + 1e-6 && p[0] < a1 - 1e-6) t = Math.min(t, p[2]); });
+  if (!isFinite(t)) tops.forEach((p) => { if (p[0] <= a0 + 1e-6 && a0 <= p[1] + 1e-6) t = Math.min(t, p[2]); });
+  return isFinite(t) ? t : H;
+}
+// The local CEILING over a floor point (world feet): the centre's plate under the centre, the outer
+// plate everywhere else. A ceiling light or fan hangs from it.
+function d3CeilingFt(roofCfg, W, L, H, x, z) {
+  const m = d3Massing(roofCfg, W, L, H);
+  if (!m.wings.length) return H;
+  const u = m.uAxisIsX ? x : z;
+  return Math.abs(u - m.uc) <= m.Sc / 2 + 1e-6 ? m.Hc : H;
+}
+// ⚠️ MERGE HOOK FOR THE PROJECTING PORCH (2026-09-24). With wings a porch on a gable end stands in
+// front of the CENTRE only: this returns that span, where its middle sits in profile u, and the
+// centre wall's top — or null when the style has no wings. d3PorchSpan (the porch-width branch)
+// must return { span, centerU } from here when it answers non-null and no porchWidthFt narrows it.
+function d3PorchSpanWings(roofCfg, W, L, H) {
+  const m = d3Massing(roofCfg, W, L, H);
+  return m.wings.length ? { span: m.Sc, centerU: m.uc, wallTopFt: m.Hc } : null;
+}
+// The model's real top, in feet off the floor: the ridge of the centre when there are wings, the
+// roof's own peak otherwise.
+function d3ModelTopFt(spec, W, L) {
+  const roof = (spec && spec.roof) || {};
+  const m = d3Massing(roof, W, L, Number(spec && spec.wallHeightFt) || D3.WALL_H);
+  let top = m.Hc;
+  m.prof.forEach((p) => { if (p[1] > top) top = p[1]; });
+  return top;
+}
+// THE HEIGHT THE ORBIT CAMERAS FRAME FOR, in place of the fixed D3.WALL_H the viewer, the docked
+// panel and the quote shot have always used (R = half the footprint + this, aim at 0.45 of it).
+// It IS D3.WALL_H — every number those cameras produce unchanged — whenever that old framing
+// already holds the whole building, and grows only when the top would leave the 34° frame: a
+// raised centre on a small footprint, a 20 ft wall. Conservative on purpose (the top is tested at
+// the footprint's nearest AND farthest reach — below the eye it is the far end that rises toward
+// the frame's edge), so a building it passes is in frame. Of the shapes that stored styles can
+// have, only a 14 ft wall under a 12:12 or gambrel roof on a 12 ft or smaller footprint moves, and
+// those were the ones the old frame clipped at the far ridge.
+function d3FrameHeightFt(spec, W, L) {
+  const w = Number(W), l = Number(L);
+  if (!spec || !(w > 0) || !(l > 0)) return D3.WALL_H;
+  // The profile's peak plus what is built on it (slab, ridge cap), out to the overhang past the ends.
+  const top = d3ModelTopFt(spec, w, l) + 0.4;
+  const ovRaw = Number(spec.roof && spec.roof.overhang);
+  const ov = isFinite(ovRaw) && ovRaw > 0 ? ovRaw : D3.OVERHANG;
+  const M = Math.max(w, l) * 0.5;
+  const half = (17 * Math.PI) / 180;
+  const fits = (fH) => {
+    const dist = (M + fH) * 3.66, eyeY = dist * 0.5, near = Math.max(0.5, dist - M - ov);
+    const axis = Math.atan2(eyeY - fH * 0.45, dist);
+    const up = Math.max(Math.atan2(top - eyeY, near), Math.atan2(top - eyeY, dist + M + ov));
+    return axis + up <= half && axis - Math.atan2(eyeY, near) >= -half;
+  };
+  if (fits(D3.WALL_H)) return D3.WALL_H;
+  let lo = D3.WALL_H, hi = Math.max(2 * D3.WALL_H, 2 * top);
+  for (let i = 0; i < 20 && !fits(hi); i++) hi *= 1.5;
+  for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (fits(mid)) hi = mid; else lo = mid; }
+  return hi;
+}
 // Everything about a transom dormer that depends on the roof it sits on.
 //
 // ⚠️ ONE COPY, deliberately, and it is why this is module scope rather than inline in the
@@ -4887,6 +5064,9 @@ function d3PorchReadout(spec, sizeLabel) {
 // three-quarter shot, where dimension lines are unreadable, and it is a shared WebGL
 // context that should not grow overlay complexity.
 function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
+  // WINGS (d3Massing, 2026-09-24): a raised centre draws the stepped end the 3D builds instead.
+  const winged = d3WingsElevation(spec, sizeLabel, focusKey);
+  if (winged) return winged;
   const roof = (spec && spec.roof) || {};
   const m = /^(\d+(?:\.\d+)?)\s*[xX\u00d7]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
   const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
@@ -5014,6 +5194,78 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
           {label(X(0) - 20, (Y(H) + Y(rY)) / 2, d3FtIn(rY - H), "ridge up", "ridgeRise", "end")}
         </g>
       )}
+    </svg>
+  );
+}
+// THE END ELEVATION WITH WINGS (2026-09-24), or null when the style has none: the stepped outline
+// the 3D builds, read off d3Massing — the lower storey across the whole span, the centre's walls
+// up to its eave, each wing's single-slope roof from its outer eave to the centre wall, and the
+// centre's own roof over them — dimensioned in feet like the plain drawing beside it. A plain
+// function returning JSX (no hooks), so D3ElevationSVG can hand over with one early return.
+function d3WingsElevation(spec, sizeLabel, focusKey) {
+  const roof = (spec && spec.roof) || {};
+  const mm = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
+  const w = mm ? parseFloat(mm[1]) : 12, d = mm ? parseFloat(mm[2]) : 16;
+  const H = (spec && spec.wallHeightFt) || 8;
+  const m = d3Massing(roof, w, d, H);
+  if (!m.wings.length) return null;
+  const OV = roof.overhang != null ? Number(roof.overhang) || 0 : D3.OVERHANG;
+  const S = m.S, s2 = S / 2;
+  const cp = m.prof.map((p) => [p[0] + m.uc, p[1]]);
+  let peak = m.Hc;
+  cp.forEach((p) => { if (p[1] > peak) peak = p[1]; });
+  // Wider on the right than the plain drawing: two heights are dimensioned there, not one.
+  const VW = 360, VH = 210, PL = 54, PR = 78, PT = 14, PB = 34;
+  const innerW = VW - PL - PR, innerH = VH - PT - PB;
+  const sc = Math.min(innerW / Math.max(S + OV * 2, 1), innerH / Math.max(peak, 1));
+  const X = (u) => PL + innerW / 2 + u * sc;
+  const Y = (y) => PT + innerH - y * sc;
+  const HL = "#B45309", DIM = "#A16207", INK = "#78350F";
+  const on = (k) => focusKey === k;
+  const dimStroke = (k) => ({ stroke: on(k) ? HL : DIM, strokeWidth: on(k) ? 2 : 1 });
+  const label = (x, y, main, sub, k, anchor) => (
+    <g>
+      <text x={x} y={y} textAnchor={anchor || "middle"} style={{ fontSize: 10, fontWeight: 800, fill: on(k) ? HL : INK }}>{main}</text>
+      {sub ? <text x={x} y={y + 9} textAnchor={anchor || "middle"} style={{ fontSize: 8, fill: DIM }}>{sub}</text> : null}
+    </g>
+  );
+  // The centre's roof, out past each eave by the overhang as the renderer extends it.
+  const ext = (far, near) => {
+    const dx = near[0] - far[0], dy = near[1] - far[1];
+    if (Math.abs(dx) < 1e-6) return near;
+    const k = OV / Math.abs(dx);
+    return [near[0] + dx * k, near[1] + dy * k];
+  };
+  const centreRoof = [ext(cp[1], cp[0])].concat(cp, [ext(cp[cp.length - 2], cp[cp.length - 1])]);
+  const pts = (arr) => arr.map((p) => X(p[0]) + "," + Y(p[1])).join(" ");
+  const cL = cp[0][0], cR = cp[cp.length - 1][0];
+  const g0 = m.wings[0];
+  return (
+    <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: "auto", background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 8 }}>
+      <line x1={PL - 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(0)} stroke="#D6D3D1" strokeWidth="1" />
+      {/* the lower storey across the whole span, and the centre's walls up to its eave */}
+      <rect x={X(-s2)} y={Y(H)} width={S * sc} height={H * sc} fill="#FEF3C7" stroke={INK} strokeWidth="1.2" />
+      <rect x={X(cL)} y={Y(m.Hc)} width={(cR - cL) * sc} height={(m.Hc - H) * sc} fill="#FEF3C7" stroke={INK} strokeWidth="1.2" />
+      {/* each wing's roof: from its outer eave (out past the wall by the overhang) up to the centre wall */}
+      {m.wings.map((g) => (
+        <polyline key={"wing" + g.side} points={pts([[g.u1 + g.side * OV, g.ye - OV * g.pitch], [g.u1, g.ye], [g.u0, g.ya]])}
+          fill="none" stroke={on("wingPitch") || on("wingWidthFt") ? HL : INK} strokeWidth="2" strokeLinejoin="round" />
+      ))}
+      <polyline points={pts(centreRoof)} fill="none" stroke={INK} strokeWidth="2" strokeLinejoin="round" />
+
+      {/* WALL HEIGHT (the outer walls), left */}
+      <line x1={PL - 22} y1={Y(0)} x2={PL - 22} y2={Y(H)} {...dimStroke("wallHeightFt")} />
+      {label(PL - 26, (Y(0) + Y(H)) / 2, d3FtIn(H), "wall", "wallHeightFt", "end")}
+      {/* THE CENTRE'S EAVE and the PEAK, right */}
+      <line x1={VW - PR + 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(m.Hc)} {...dimStroke("centerEaveFt")} />
+      {label(VW - PR + 14, (Y(H) + Y(m.Hc)) / 2, d3FtIn(m.Hc), m.hcRaised ? "centre, raised" : "centre eave", "centerEaveFt", "start")}
+      <line x1={VW - 8} y1={Y(0)} x2={VW - 8} y2={Y(peak)} stroke={DIM} strokeWidth="1" />
+      {label(VW - 12, Y(peak) + 10, d3FtIn(peak), "peak", null, "end")}
+      {/* SPAN and the first wing's WIDTH, bottom */}
+      <line x1={X(-s2)} y1={Y(0) + 16} x2={X(s2)} y2={Y(0) + 16} stroke={DIM} strokeWidth="1" />
+      {label((X(-s2) + X(s2)) / 2, Y(0) + 29, d3FtIn(S), "span", null)}
+      <line x1={X(g0.u1)} y1={Y(0) + 6} x2={X(g0.u0)} y2={Y(0) + 6} {...dimStroke("wingWidthFt")} />
+      {label((X(g0.u1) + X(g0.u0)) / 2, Y(g0.ye) + 12, d3FtIn(g0.w), `wing, ${Math.round(g0.pitch * 12)}:12`, "wingWidthFt")}
     </svg>
   );
 }
@@ -6089,7 +6341,12 @@ function buildShed3DModel(THREE, p) {
   // A projecting porch wins over a recessed one. The sanitizer never stores both; raw data holding
   // both draws the projecting porch and no set-back, and ssPorchTrussWall drops the truss to match.
   const porchDepth = porchOut ? 0 : Math.max(0, Math.min(Number(roofCfg.porchDepthFt) || 0, porchRun - 4));
-  const porchOn = porchDepth > 0.5;
+  // WINGS (d3Massing, 2026-09-24): the raised centre and its enclosed side wings, read once here
+  // because the walls, the roof and the corner boards all build from it. With wings the recessed
+  // porch is off — its posts and header would stand under a cap that is no longer at the wall's
+  // top — and ssPorchTrussWall says the same for the truss.
+  const mass = d3Massing(roofCfg, bldgW, bldgH, H);
+  const porchOn = porchDepth > 0.5 && !mass.wings.length;
   // "FRONT" IS SOUTH for a gable or gambrel roof on a portrait footprint (2026-09-14) — the
   // footprints whose gable ends are north/south. A shed roof swaps the axes in d3RoofAxes, so it
   // takes the landscape branch below whatever its shape; that is unchanged. It was north, which put the porch on
@@ -6130,6 +6387,36 @@ function buildShed3DModel(THREE, p) {
     west:  { len: bldgH - pN - pS, O: [-bldgW / 2 + pW, -bldgH / 2 + pN], U: [0, 1], N: [-1, 0], a0Ft: pN },
     east:  { len: bldgH - pN - pS, O: [bldgW / 2 - pE, -bldgH / 2 + pN],  U: [0, 1], N: [1, 0],  a0Ft: pN },
   };
+  // ── PER-WALL TOPS AND THE CLERESTORY (wings, 2026-09-24) ──
+  // A wall with `tops` ([[a0, a1, top]] in its own frame, from d3WallTops) is built to its LOCAL
+  // top: a gable end steps up across the centre, the centre's own eave wall stands at Hc. A wall
+  // without them is H end to end, which is every wall of a building without wings.
+  // CLERESTORY holds the centre's side walls above each wing roof — from just under the wing slab
+  // up to Hc, clad like any wall and ghosted with them — built by the same buildOneWall with no
+  // items, and never pickable (no `wall` name: nothing can be placed on them).
+  if (mass.wings.length) {
+    Object.keys(WALLS).forEach((n) => {
+      const t = d3WallTops(roofCfg, bldgW, bldgH, H, n);
+      if (t) WALLS[n].tops = t.map((p) => [p[0] - (WALLS[n].a0Ft || 0), p[1] - (WALLS[n].a0Ft || 0), p[2]]);
+    });
+  }
+  const CLERESTORY = {};
+  mass.wings.forEach((g) => {
+    const u0 = g.u0, bot = Math.max(H, g.ya - (T / 2) * g.pitch - 0.3);
+    CLERESTORY[g.side < 0 ? "clerestoryNeg" : "clerestoryPos"] = mass.uAxisIsX
+      ? { len: mass.L, O: [u0, -mass.L / 2], U: [0, 1], N: [g.side, 0], a0Ft: 0, bot, tops: [[0, mass.L, mass.Hc]], clerestory: g.side }
+      : { len: mass.L, O: [-mass.L / 2, u0], U: [1, 0], N: [0, g.side], a0Ft: 0, bot, tops: [[0, mass.L, mass.Hc]], clerestory: g.side };
+  });
+  // The pieces of wall `wf`'s top over [a0, a1], clipped to it, and the lowest of them.
+  const topsOf = (wf, a0, a1) => {
+    if (!wf.tops) return [[a0, a1, H]];
+    const out = [];
+    wf.tops.forEach((p) => { const lo = Math.max(a0, p[0]), hi = Math.min(a1, p[1]); if (hi > lo + 1e-6) out.push([lo, hi, p[2]]); });
+    // A single point (an electrical device) takes the piece it stands in.
+    if (!out.length) wf.tops.forEach((p) => { if (p[0] <= a0 + 1e-6 && a0 <= p[1] + 1e-6) out.push([a0, a1, p[2]]); });
+    return out.length ? out : [[a0, a1, H]];
+  };
+  const topOver = (wf, a0, a1) => topsOf(wf, a0, a1).reduce((m, p) => Math.min(m, p[2]), Infinity);
   // ── Vents placed IN THE GABLE (ventZone, 2026-09-15 — see ssVentSpan) ──
   // Resolved here, above both builders that need the answer: buildOneWall must NOT cut a hole in
   // the wall for one, and the roof builder draws it on the end cap. It is the SAME ssGableVentFit
@@ -6370,9 +6657,13 @@ function buildShed3DModel(THREE, p) {
   // Everything is clamped to leave a header strip under the plate: the customer
   // can pick 6 ft walls in this very modal, and an unclamped 6'8" door would
   // push its casing into the roof and silently skip the header segment.
-  const openingSpan = (it) => {
+  // `Ht` is the wall's LOCAL top over the opening (topOver; wings, 2026-09-24): H on every wall of a
+  // building without wings, Hc across a raised centre, so an upper-floor window stays under its own
+  // plate and a door on a wing's end wall stays under the wing's.
+  const openingSpan = (it, Ht) => {
     const inchesFt = (v) => (Number(v) > 0 ? Number(v) / 12 : null);
-    const maxTop = H - 0.2;
+    const Hl = Ht != null ? Ht : H;
+    const maxTop = Hl - 0.2;
     // A vent hangs just under the plate, and how high is NOT a customer choice: the catalog row
     // has no sill column at all (portal-settings forces the whole swing/operation/trim/sill group
     // off for a non-door, non-window category), so there is nothing to read and nothing to slide.
@@ -6384,7 +6675,7 @@ function buildShed3DModel(THREE, p) {
     // already reaches 0.17 ft above the opening.
     // Only a gable vent that no longer fits its gable reaches here (buildOneWall skips the ones the
     // roof draws), so its zone is dropped: it is cut into the wall at today's under-plate spot.
-    if (isVentItem(it)) return ssVentSpan(it.ventZone === "gable" ? { ...it, ventZone: null } : it, H);
+    if (isVentItem(it)) return ssVentSpan(it.ventZone === "gable" ? { ...it, ventZone: null } : it, Hl);
     if (it.type === "window") {
       const wh = Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.WINDOW_H, maxTop - 0.35);
       let s0 = it.sillFt != null ? it.sillFt : D3.WINDOW_SILL;
@@ -6565,7 +6856,9 @@ function buildShed3DModel(THREE, p) {
   // the returned model) — same code as the full build, so a partial rebuild's
   // output is identical to a full one by construction.
   const buildOneWall = (wname, itemsNow) => {
-    const wf = WALLS[wname];
+    // A clerestory wall (wings) is built here too, with no items: it has no plan wall of its own.
+    const wf = WALLS[wname] || CLERESTORY[wname];
+    const yB = wf.bot || 0;
     const ops = itemsNow
       // A vent the roof draws in the gable is not an opening in this wall (gableVentFitOf).
       .filter((it) => { const c = itemTypes[it.type]; return c && c.wallOnly && it.wall === wname && !gableVentFitOf(it); })
@@ -6581,7 +6874,7 @@ function buildShed3DModel(THREE, p) {
         // move the plan does not show, and it is the known cost of a 3D-only porch — the
         // same limit the dormer and the lean-to carry.
         const a = Math.max(w / 2, Math.min(along, wf.len - w / 2));
-        const span = openingSpan(it);
+        const span = openingSpan(it, topOver(wf, a - w / 2, a + w / 2));
         return { it, a, a0: a - w / 2, a1: a + w / 2, y0: span[0], y1: span[1] };
       })
       .sort((q, r) => q.a0 - r.a0);
@@ -6605,15 +6898,23 @@ function buildShed3DModel(THREE, p) {
     // tagged with the wall name so the 3D palette can place new items by
     // clicking a wall.
     const wg = new THREE.Group();
-    wg.userData = { wall: wname };
+    wg.userData = wf.clerestory ? { clerestory: wf.clerestory } : { wall: wname };
+    // UP TO THE LOCAL TOP (topsOf, wings): one box to the lowest top across the run, then one box
+    // per piece that stands higher, so no seam runs down the wall under the step. Without `tops`
+    // that is exactly the one box to H this has always built.
+    const upTo = (a0, a1, y0) => {
+      const ps = topsOf(wf, a0, a1), mn = ps.reduce((m, p) => Math.min(m, p[2]), Infinity);
+      if (mn - 0.01 > y0) wg.add(wallBox(wallMat, wf, a0, a1, y0, mn));
+      ps.forEach((p) => { const b = Math.max(mn, y0); if (p[2] > b + 0.01) wg.add(wallBox(wallMat, wf, p[0], p[1], b, p[2])); });
+    };
     let cursor = 0;
     ranges.forEach((rg) => {
-      if (rg.a0 > cursor + 0.01) wg.add(wallBox(wallMat, wf, cursor, rg.a0, 0, H));
+      if (rg.a0 > cursor + 0.01) upTo(cursor, rg.a0, yB);
       if (rg.y0 > 0.01) wg.add(wallBox(wallMat, wf, rg.a0, rg.a1, 0, rg.y0));
-      if (rg.y1 < H - 0.01) wg.add(wallBox(wallMat, wf, rg.a0, rg.a1, rg.y1, H));
+      upTo(rg.a0, rg.a1, rg.y1);
       cursor = rg.a1;
     });
-    if (cursor < wf.len - 0.01) wg.add(wallBox(wallMat, wf, cursor, wf.len, 0, H));
+    if (cursor < wf.len - 0.01) upTo(cursor, wf.len, yB);
     // Cladding relief on the exterior of the full-height segments (strips break at
     // openings, like real cladding). Real geometry on top of the texture, so the material
     // still reads at a grazing angle where a flat map flattens out.
@@ -6625,8 +6926,11 @@ function buildShed3DModel(THREE, p) {
     if (clad.relief) {
       // yLo/yHi bound the strip VERTICALLY. They default to the whole wall, and are passed
       // explicitly for the sill and header panels around an opening — see the loop below.
-      const relief = (b0, b1, yLo, yHi) => {
-        const lo = yLo || 0, hi = yHi != null ? yHi : H;
+      // Ht is the wall's top over [b0, b1] (H without wings); m0/m1 how far a batten keeps off each
+      // end (0.2 at a wall end or an opening, less at a step in the top); lapLo, when set, is where
+      // lap courses start instead of lo, so a course is not lost where a taller piece continues.
+      const reliefIn = (b0, b1, yLo, yHi, Ht, m0, m1, lapLo) => {
+        const lo = yLo != null ? yLo : yB, hi = yHi != null ? yHi : Ht;
         if (b1 - b0 < 0.3 || hi - lo < 0.25) return;
         if (clad.relief === "batten" || clad.relief === "rib") {
           const bs = clad.stepFt;
@@ -6636,7 +6940,7 @@ function buildShed3DModel(THREE, p) {
           // `a` steps through MULTIPLES OF bs measured from the wall origin, never from b0,
           // so every span lands on the same global phase. That is what lets the battens over
           // a window line up with the ones beside it instead of starting a new rhythm.
-          for (let a = Math.ceil((b0 + 0.2) / bs) * bs; a < b1 - 0.2; a += bs) {
+          for (let a = Math.ceil((b0 + m0) / bs) * bs; a < b1 - m1; a += bs) {
             wg.add(wallBox(reliefMat, wf, a - halfW, a + halfW, lo, hi, CLAD_RELIEF_OUT, depth));
           }
         } else {
@@ -6650,11 +6954,25 @@ function buildShed3DModel(THREE, p) {
           // the BAND filters it, rather than restarting the courses inside the band. A lap
           // course that restarted above a window would step out of line with the wall beside
           // it, which is the exact fault this block exists to avoid.
-          for (let y = clad.stepFt; y < H - 0.15; y += clad.stepFt) {
-            if (y < lo + 0.04 || y > hi - 0.04) continue;
+          const cLo = lapLo != null ? lapLo : lo;
+          for (let y = clad.stepFt; y < Ht - 0.15; y += clad.stepFt) {
+            if (y < cLo + 0.04 || y > hi - 0.04) continue;
             wg.add(wallBox(wallMat, wf, s0, s1, y - 0.04, y + 0.04, CLAD_RELIEF_OUT, 0.1));
           }
         }
+      };
+      // Over the whole run to its LOWEST top, then over each piece that stands higher (wings): the
+      // battens carry on up in the same phase, and a lap course stops at the step, where the
+      // clerestory's corner board stands. Without `tops` this is the single call it always was.
+      const relief = (b0, b1, yLo, yHi) => {
+        const ps = topsOf(wf, b0, b1), mn = ps.reduce((m, p) => Math.min(m, p[2]), Infinity);
+        reliefIn(b0, b1, yLo, yHi != null ? Math.min(yHi, mn) : mn, mn, 0.2, 0.2);
+        const hw = (clad.relief === "rib" ? 0.05 : 0.07) + 0.01;
+        ps.forEach((p) => {
+          if (!(p[2] > mn + 0.01)) return;
+          const lo2 = Math.max(yLo != null ? yLo : yB, mn), hi2 = yHi != null ? Math.min(yHi, p[2]) : p[2];
+          if (hi2 > lo2) reliefIn(p[0], p[1], lo2, hi2, p[2], p[0] > b0 + 1e-6 ? hw : 0.2, p[1] < b1 - 1e-6 ? hw : 0.2, lo2 > mn + 1e-6 ? lo2 : mn - 0.19);
+        });
       };
       // ⚠️ CLADDING DOES NOT STOP AT A WINDOW — IT STOPS AT THE HOLE.
       //
@@ -6675,7 +6993,8 @@ function buildShed3DModel(THREE, p) {
       ranges.forEach((rg) => {
         if (rg.a0 > bc + 0.01) relief(bc, rg.a0);
         if (rg.y0 > 0.01) relief(rg.a0, rg.a1, 0, rg.y0);          // under the sill
-        if (rg.y1 < H - 0.01) relief(rg.a0, rg.a1, rg.y1, H);      // over the head
+        // over the head, to the wall's own top there (H without wings)
+        if (rg.y1 < topsOf(wf, rg.a0, rg.a1).reduce((m, p) => Math.max(m, p[2]), -Infinity) - 0.01) relief(rg.a0, rg.a1, rg.y1);
         bc = rg.a1;
       });
       if (bc < wf.len - 0.01) relief(bc, wf.len);
@@ -6877,6 +7196,8 @@ function buildShed3DModel(THREE, p) {
     wallsGroup.add(built.wg);
     built.ogs.forEach((og) => openingsGroup.add(og));
   });
+  // The clerestory walls (wings): in wallsGroup, so "look inside" ghosts them with the rest.
+  Object.keys(CLERESTORY).forEach((n) => wallsGroup.add(buildOneWall(n, []).wg));
 
   // ── Roof (plan §4.2): a solid extruded profile in body color (its caps ARE
   // the gable/gambrel end walls) with roof-colored overhanging slope slabs on
@@ -6907,9 +7228,14 @@ function buildShed3DModel(THREE, p) {
   // ⚠️ GEOMETRY, NOT THE DOOR. `frontWall` used to decide the ridge axis here, which is why
   // moving a door rotated the roof. It now reaches only the ground labels and builtFrontWall.
   // See d3RoofAxes for the rule and the reason.
-  const { uAxisIsX, S, L, tallNeg } = d3RoofAxes(roofCfg, bldgW, bldgH);
+  // ⚠️ WITH WINGS THIS WHOLE ROOF IS THE CENTRE'S (d3Massing, 2026-09-24): S is the centre's span
+  // Sc and Hr its eave Hc, and rg is shifted by uc when it is placed at the bottom, so the style's
+  // roof, its vents, strips, dormer and projecting porch all land on the raised centre. Without
+  // wings S is the span, Hr is H and uc is 0 — the same numbers this read from d3RoofAxes.
+  const { uAxisIsX, L, tallNeg } = mass;
+  const S = mass.Sc, Hr = mass.Hc;
   // One profile builder, shared with the calibration panel's elevation drawing.
-  const _rp = d3RoofProfile(roofCfg, S, H, tallNeg);
+  const _rp = d3RoofProfile(roofCfg, S, Hr, tallNeg);
   const prof = _rp.prof;      // profile polygon points [u, y], eave→ridge→eave
   const slopes = _rp.slopes;  // top edges [[A,B], …] that get roof slabs
   const dedup = _rp.dedup;
@@ -6947,7 +7273,8 @@ function buildShed3DModel(THREE, p) {
   {
     const guv = gableGeom.attributes.uv;
     if (guv) {
-      for (let i = 0; i < guv.count; i++) guv.setX(i, guv.getX(i) + S / 2);
+      // From the wall ORIGIN: the building's half-span plus the centre's offset (0 without wings).
+      for (let i = 0; i < guv.count; i++) guv.setX(i, guv.getX(i) + (mass.S / 2 + mass.uc));
       guv.needsUpdate = true;
     }
   }
@@ -7072,7 +7399,7 @@ function buildShed3DModel(THREE, p) {
 
   // Lifted to module scope so the calibration panel's dormer readout walks the SAME profile
   // this renderer does — see d3MakeProfYAt.
-  const profYAt = d3MakeProfYAt(dedup, H);
+  const profYAt = d3MakeProfYAt(dedup, Hr);
 
   // ── THE GABLE END'S DEPTH LADDER (2026-09-15) ──────────────────────────────────────────
   // Carolyn, 2026-09-14, drawing on the porch gable of her Cabin (12x32, king-post truss): the
@@ -7125,7 +7452,7 @@ function buildShed3DModel(THREE, p) {
     if (!(gv && gv.widthFrac > 0)) return null;
     let peak = -Infinity;
     dedup.forEach((pt) => { if (pt[1] > peak) peak = pt[1]; });
-    if (!(peak > H + 0.9)) return null;
+    if (!(peak > Hr + 0.9)) return null;
     // Horizontal extent of the gable polygon at height y — module scope since 2026-09-15
     // (d3ProfSpanAt), because a placed gable vent is fitted to the same triangle in 2D.
     const profSpanAt = (y) => d3ProfSpanAt(dedup, y);
@@ -7148,14 +7475,14 @@ function buildShed3DModel(THREE, p) {
     const VENT_SILL = roofCfg.plateBand === true ? Math.max(VENT_SILL0, SS_PLATE_BAND_TOP + 0.1 + F) : VENT_SILL0;
     let vW = S * Math.min(0.6, Math.max(0.05, gv.widthFrac));
     let vH = vW / 2;                                     // 2:1 wide-to-tall, as measured
-    let vCy = H + VENT_SILL + vH / 2;
+    let vCy = Hr + VENT_SILL + vH / 2;
     // Shrink to fit. The TOP corners are the tight point, and the passes converge because
     // a narrower vent is also shorter and therefore has more room above it.
     for (let k = 0; k < 3; k++) {
       const sp = profSpanAt(vCy + vH / 2);
       const avail = sp ? (sp[1] - sp[0]) - 0.5 : 0;      // keep 3 in clear of each rake
       if (vW <= avail) break;
-      vW = Math.max(0, avail); vH = vW / 2; vCy = H + VENT_SILL + vH / 2;
+      vW = Math.max(0, avail); vH = vW / 2; vCy = Hr + VENT_SILL + vH / 2;
     }
     const spC = profSpanAt(vCy);
     const vCu = spC ? (spC[0] + spC[1]) / 2 : 0;         // centred even on a skewed ridge
@@ -7193,7 +7520,7 @@ function buildShed3DModel(THREE, p) {
   if (leanW > 0.5) {
     const drop = Math.min(roofCfg.leanToDropFt != null ? roofCfg.leanToDropFt : 1, H - 1.5);
     const dir = roofCfg.leanToSide === "left" ? -1 : 1;   // which eave it hangs off
-    const u0 = dir * (S / 2), u1 = u0 + dir * leanW;
+    const u0 = dir * (mass.S / 2) - mass.uc, u1 = u0 + dir * leanW;   // the OUTER eave wall, wings or not
     const y0 = H, y1 = H - drop;
     const du = u1 - u0, dy = y1 - y0;
     const slen = Math.sqrt(du * du + dy * dy) || 1;
@@ -7641,14 +7968,16 @@ function buildShed3DModel(THREE, p) {
     // a strip, where both edges read lower than the middle. So every profile vertex falling
     // within the strip is sampled too, and the minimum wins. The strip then always stops ON
     // or just under the roof line — never through it — at every u, on every roof type.
-    for (let k = 1; k * bs < S; k++) {
-      const u = k * bs - S / 2;
+    // Stepped from the WALL ORIGIN across the whole end (mass.S), in the centre's own u (less uc):
+    // only the strips over the centre's gable reach above its plate. Without wings, S and 0.
+    for (let k = 1; k * bs < mass.S; k++) {
+      const u = k * bs - mass.S / 2 - mass.uc;
       let yTop = Math.min(profYAt(u - halfW), profYAt(u), profYAt(u + halfW));
       for (let i = 0; i < dedup.length; i++) {
         const vx = dedup[i][0];
         if (vx > u - halfW && vx < u + halfW) yTop = Math.min(yTop, profYAt(vx));
       }
-      if (yTop <= H + 0.05) continue;            // below the plate: the wall already has it
+      if (yTop <= Hr + 0.05) continue;           // below the plate: the wall already has it
       // Depth: capStripOut, beside the ladder above the lean-to — the rake clamp and the flush rule
       // are written there, because the vent frame and the porch truss now read the same number.
       // STOP AT THE VENT, like a wall batten stops at a window. A strip crossing the vent's frame
@@ -7656,7 +7985,7 @@ function buildShed3DModel(THREE, p) {
       // Every vent on the cap cuts the strip it crosses, one after another, so two vents stacked
       // on one strip leave three runs. With one vent this is exactly the old two-run split.
       const spansFor = (rects) => {
-        let spans = [[H, yTop]];
+        let spans = [[Hr, yTop]];
         (rects || []).forEach((r) => {
           if (!(u + halfW > r.u0 && u - halfW < r.u1)) return;
           const cut = [];
@@ -7733,7 +8062,61 @@ function buildShed3DModel(THREE, p) {
   const jointPartnerAt = (pt, self) => slopes.find((o) => o !== self
     && ((Math.abs(o[0][0] - pt[0]) < 1e-6 && Math.abs(o[0][1] - pt[1]) < 1e-6)
      || (Math.abs(o[1][0] - pt[0]) < 1e-6 && Math.abs(o[1][1] - pt[1]) < 1e-6))) || null;
-  slopes.forEach((sl) => {
+  // ── WINGS (d3Massing, 2026-09-24): each wing's body and its roof line ──────────────────────────
+  // Built in rg's local frame like everything else here, so a wing's u is the building's less uc.
+  // A wing is a solid prism under its roof — its CAPS are the wing's gable-end triangles, clad and
+  // flush with the wall below exactly as the centre's are — from the outer wall's top (H) rising
+  // to the clerestory's outer face, where a roof-coloured flashing strip covers the joint. Its
+  // slope joins the loop below (wingSlopes, never `slopes`: jointPartnerAt must not see it) for
+  // the same slab, eave finish and rake boards the main roof gets, with the inner end stopped at
+  // the clerestory face and no ridge cap. Every mesh is tagged userData.ssWing (the side, -1 or 1),
+  // and the projecting porch's clearance scan measures a wing by what hangs over the porch.
+  const wingSlopes = [];
+  mass.wings.forEach((g) => {
+    // `face` is the clerestory's OUTER face, the wing's side of the centre wall line.
+    const s = g.side, lu1 = g.u1 - mass.uc, face = g.u0 + s * (T / 2) - mass.uc;
+    const yFace = H + (g.w - T / 2) * g.pitch;
+    if (yFace - H > 0.02) {
+      const sh = new THREE.Shape();
+      sh.moveTo(lu1, H); sh.lineTo(face, H); sh.lineTo(face, yFace); sh.lineTo(lu1, H);
+      const wgeo = new THREE.ExtrudeGeometry(sh, { depth: L, bevelEnabled: false });
+      const wuv = wgeo.attributes.uv;
+      if (wuv) { for (let i = 0; i < wuv.count; i++) wuv.setX(i, wuv.getX(i) + (mass.S / 2 + mass.uc)); wuv.needsUpdate = true; }
+      // The caps flush with the wall face, as moveCapsFlush does for the centre's.
+      const wpos = wgeo.attributes.position, wcap = wgeo.groups && wgeo.groups.length === 2 ? wgeo.groups[0] : null;
+      if (wcap) {
+        for (let i = wcap.start; i < wcap.start + wcap.count; i++) {
+          const z = wpos.getZ(i);
+          if (Math.abs(z) < 1e-6) wpos.setZ(i, -capOut0);
+          else if (Math.abs(z - L) < 1e-6) wpos.setZ(i, L + capOutL);
+        }
+        wpos.needsUpdate = true;
+        wgeo.computeBoundingBox(); wgeo.computeBoundingSphere();
+      }
+      const body = new THREE.Mesh(wgeo, wcap ? [wallMat, gableMat] : gableMat);
+      body.userData.ssWing = s;
+      rg.add(body);
+    }
+    // The flashing where the wing roof meets the clerestory, from the slab's top up 0.3 ft, standing
+    // just clear of the clerestory's own relief and between its corner boards.
+    const slabTop = yFace + (D3.ROOF_T + 0.02) * Math.sqrt(1 + g.pitch * g.pitch);
+    const fT = Math.max(0.03, cladReach - T / 2 + 0.02), fLen = L - 2 * trimFace;
+    if (fLen > 0.5) {
+      const fl = box(roofMat, fT, 0.38, fLen);
+      d3RoofSlabUVs(fl);
+      fl.position.set(face + s * fT / 2, slabTop + 0.14, L / 2);
+      fl.userData.ssWing = s;
+      rg.add(fl);
+    }
+    const outer = [lu1, H], inner = [face, yFace];
+    const sl = s < 0 ? [outer, inner] : [inner, outer];   // left to right, so the slab's normal points up
+    sl.wing = s;
+    sl.wingIn = inner;
+    sl.wingInExt = (D3.ROOF_T + 0.02) * g.pitch + 0.005;  // the slab's top edge reaches the face
+    wingSlopes.push(sl);
+  });
+  slopes.concat(wingSlopes).forEach((sl) => {
+    const nWing0 = rg.children.length;
     const A = sl[0], B = sl[1];
     const du = B[0] - A[0], dy = B[1] - A[1];
     const slen = Math.sqrt(du * du + dy * dy);
@@ -7758,7 +8141,7 @@ function buildShed3DModel(THREE, p) {
     const t = D3.ROOF_T / 2 + 0.02;
     const jointExt = (P, dirInX, dirInY) => {
       const o = jointPartnerAt(P, sl);
-      if (!o) return OV;                     // free edge: the real eave overhang
+      if (!o) return sl.wingIn === P ? sl.wingInExt : OV;   // free edge: the real eave overhang (a wing's inner end stops at the wall)
       const odu = o[1][0] - o[0][0], ody = o[1][1] - o[0][1];
       const olen = Math.sqrt(odu * odu + ody * ody) || 1;
       const onx = -ody / olen, ony = odu / olen;
@@ -7784,7 +8167,7 @@ function buildShed3DModel(THREE, p) {
     // detached at some angles. Only slopes that reach the wall plate get one
     // (a gambrel's upper legs do not).
     const lowEnd = A[1] <= B[1] ? A : B;
-    if (lowEnd[1] <= H + 0.01) {
+    if (lowEnd[1] <= Hr + 0.01) {
       const towardLow = lowEnd === A ? -1 : 1;
       // The eave end ON the slope line. Every eave detail registers against this point:
       // at a free edge jointExt returns OV, so the slab's end face is the plane through
@@ -7913,6 +8296,8 @@ function buildShed3DModel(THREE, p) {
       );
       rg.add(rake);
     });
+    // A wing's slab, eave finish and rakes carry its side, for the porch scan and the harness.
+    if (sl.wing) for (let k = nWing0; k < rg.children.length; k++) rg.children[k].userData.ssWing = sl.wing;
   });
   // ── PROJECTING PORCH (roof.porchOutFt, 2026-09-17) ──────────────────────────────────────────
   // A deck, posts and a low roof of its own IN FRONT of one gable end, as on the Barnstead
@@ -7952,7 +8337,7 @@ function buildShed3DModel(THREE, p) {
     // "short" warning and a plate band grown into a tall dark slab. Only the lean-to's inner strip is
     // over the porch, so a lean-to member counts by the lowest point of its triangles clipped to the
     // porch's footprint. The main roof keeps its box: there it costs 0 to 0.31 ft, measured.
-    const g0 = d3PorchGeom(S, H, D, trimFace, Infinity);
+    const g0 = d3PorchGeom(S, Hr, D, trimFace, Infinity);
     const reach = g0.side + g0.sizes.SIDE_OV;
     const zFace = atZero ? -(g0.dWall + 0.005) : L + g0.dWall + 0.005;
     const overPorch = [(v) => v.x + reach, (v) => reach - v.x, (v) => (atZero ? zFace - v.z : v.z - zFace)];
@@ -7983,9 +8368,11 @@ function buildShed3DModel(THREE, p) {
       bb.setFromObject(o);                                     // also brings o.matrixWorld up to date
       const past = atZero ? -bb.min.z : bb.max.z - L;
       if (past <= g0.dWall + 0.005 || bb.max.x < -reach || bb.min.x > reach) return;
-      capY = Math.min(capY, (o.userData && o.userData.ssLeanTo ? lowestOverPorch(o) : bb.min.y) - 0.03);
+      // A wing (userData.ssWing, 2026-09-24) is measured the lean-to's way: only its inner strip is over
+      // a centre porch, and its box's lowest corner is the wing's OUTER eave, feet away to the side.
+      capY = Math.min(capY, (o.userData && (o.userData.ssLeanTo || o.userData.ssWing) ? lowestOverPorch(o) : bb.min.y) - 0.03);
     });
-    const geom = d3PorchGeom(S, H, D, trimFace, capY);
+    const geom = d3PorchGeom(S, Hr, D, trimFace, capY);
     const { POST, HDR_H, HDR_D, RAF_W, RAF_D, PR_T, SHEATH, SIDE_OV, CHEEK_T, FAS_T } = geom.sizes;
     const { pitch, yHigh, side, dWall, dPost, dEnd } = geom;
     const ang = Math.atan(pitch), cosA = Math.cos(ang), sinA = Math.sin(ang);
@@ -8143,9 +8530,9 @@ function buildShed3DModel(THREE, p) {
     [[0, -1, capOut0], [L, 1, capOutL]].forEach(([z0, s, co]) => {
       if (capPorchEnd === z0) return;
       const back = Math.min(co, T / 2) - 0.01, face = Math.max(trimFace, capReliefFace(co)) + 0.03;
-      const drop = porchGeom && porchCapZ === z0 ? Math.max(0, H - 0.2 - porchGeom.yHigh) : 0;
+      const drop = porchGeom && porchCapZ === z0 ? Math.max(0, Hr - 0.2 - porchGeom.yHigh) : 0;
       const band = box(trimMat, S + 2 * (trimFace + 0.01), 0.3 + drop, face - back);
-      band.position.set(0, H + SS_PLATE_BAND_TOP - 0.15 - drop / 2, z0 + s * (back + face) / 2);
+      band.position.set(0, Hr + SS_PLATE_BAND_TOP - 0.15 - drop / 2, z0 + s * (back + face) / 2);
       band.userData.ssPorch = "band";
       rg.add(band);
     });
@@ -8221,15 +8608,62 @@ function buildShed3DModel(THREE, p) {
   placedGableVents.forEach((v) => {
     const vg = new THREE.Group();
     vg.userData = { itemId: v.it.id, wallItem: true, wall: v.it.wall, gable: true };
-    if (uAxisIsX) { vg.position.z = -L / 2; }
-    else { vg.rotation.y = -Math.PI / 2; vg.position.x = L / 2; }
+    if (uAxisIsX) { vg.position.z = -L / 2; vg.position.x = mass.uc; }
+    else { vg.rotation.y = -Math.PI / 2; vg.position.x = L / 2; vg.position.z = mass.uc; }
     const f = v.fit;
-    drawCapVent(vg, v.atZero ? END0 : ENDL, f.u, (f.y0 + f.y1) / 2, f.w, f.h, f.F, v.it.colorHex ? mat(v.it.colorHex) : trimMat, louverMat(f.h));
+    drawCapVent(vg, v.atZero ? END0 : ENDL, f.u - mass.uc, (f.y0 + f.y1) / 2, f.w, f.h, f.F, v.it.colorHex ? mat(v.it.colorHex) : trimMat, louverMat(f.h));
     openingsGroup.add(vg);
   });
   addCapReliefStrips(capVentRects0, capVentRectsL);
-  if (uAxisIsX) { rg.position.z = -L / 2; }
-  else { rg.rotation.y = -Math.PI / 2; rg.position.x = L / 2; }
+  // The WINGS' gable triangles carry the proud relief too (wings, 2026-09-24): stepped from the wall
+  // origin like the centre's and the wall's below, each stopped on the wing roof's line at its
+  // lower edge, and none straddling the step where the centre wall begins.
+  if (capHasStrips) {
+    mass.wings.forEach((g) => {
+      const s = g.side, bs = clad.stepFt, halfW = clad.relief === "rib" ? 0.05 : 0.07;
+      const reliefMat = clad.reliefTrim ? battenMat : wallMat;
+      const face = g.u0 + s * (T / 2);
+      const lo = Math.min(g.u1, face) + halfW + 0.01, hi = Math.max(g.u1, face) - halfW - 0.01;
+      for (let k = 1; k * bs < mass.S; k++) {
+        const u = k * bs - mass.S / 2;
+        if (u < lo || u > hi) continue;
+        const yTop = H + Math.abs(u + s * halfW - g.u1) * g.pitch;
+        if (yTop <= H + 0.05) continue;
+        [-capStripOut(capOut0), L + capStripOut(capOutL)].forEach((z) => {
+          const st = box(reliefMat, halfW * 2, yTop - H, capStripDepth);
+          st.position.set(u - mass.uc, (H + yTop) / 2, z);
+          st.userData.ssWing = s;
+          rg.add(st);
+        });
+      }
+    });
+  }
+  // LAP courses carry on across a wing's triangle too, at the wall's own depth and in step with the
+  // wall below and the centre wall beside it, each cut short under the wing roof: the courses on
+  // the centre's wall would otherwise end in mid-air at the step, their cut ends catching the light.
+  // Only on a flush cap (the wall's face), which is where the wall's courses stand.
+  if (clad.relief === "lap" && capOut0 >= T / 2 - 1e-6 && capOutL >= T / 2 - 1e-6) {
+    mass.wings.forEach((g) => {
+      const s = g.side, face = g.u0 + s * (T / 2);
+      if (!(g.pitch > 1e-3)) return;
+      for (let y = clad.stepFt; y < H + (g.w - T / 2) * g.pitch - 0.05; y += clad.stepFt) {
+        if (y < H - 0.15) continue;   // the wall's own courses run to H - 0.15
+        // Where the wing roof's line clears the course's top by a hair, out to the clerestory's face.
+        const uIn = g.u1 - s * Math.max(trimFace, (y + 0.06 - H) / g.pitch);
+        if ((face - uIn) * -s < 0.1) continue;
+        const a = Math.min(uIn, face), b = Math.max(uIn, face);
+        [-CLAD_RELIEF_OUT, L + CLAD_RELIEF_OUT].forEach((z) => {
+          const st = box(wallMat, b - a, 0.08, 0.1);
+          st.position.set((a + b) / 2 - mass.uc, y, z);
+          st.userData.ssWing = s;
+          rg.add(st);
+        });
+      }
+    });
+  }
+  // + uc: with wings rg holds the CENTRE, whose middle sits uc across the span (0 without wings).
+  if (uAxisIsX) { rg.position.z = -L / 2; rg.position.x = mass.uc; }
+  else { rg.rotation.y = -Math.PI / 2; rg.position.x = L / 2; rg.position.z = mass.uc; }
   roofGroup.add(rg);
   // The projecting porch's deck joins root with rg's transform, so look-inside keeps it like the floor.
   if (porchDeckGroup) {
@@ -8242,11 +8676,30 @@ function buildShed3DModel(THREE, p) {
   // cladding's proudest surface or the siding renders through it — the 2026-08-27 lap bug,
   // where this face sat at 0.22 against strips reaching 0.23. On panel this is the old
   // T/2 + 0.07 exactly.
+  // Each stands as tall as the wall it closes (wings, 2026-09-24): H at a wing's outer corner, Hc on
+  // the side of a raised centre that has no wing. H on every corner of a building without wings.
   [[-bldgW / 2, -bldgH / 2], [bldgW / 2, -bldgH / 2], [-bldgW / 2, bldgH / 2], [bldgW / 2, bldgH / 2]].forEach((c) => {
     const half = Math.max(T / 2 + 0.07, trimFace);
-    const post = box(trimMat, half * 2, H, half * 2);
-    post.position.set(c[0], H / 2, c[1]);
+    const cs = Math.sign(uAxisIsX ? c[0] : c[1]);
+    const cH = !mass.wings.length || mass.wings.some((g) => g.side === cs) ? H : mass.Hc;
+    const post = box(trimMat, half * 2, cH, half * 2);
+    post.position.set(c[0], cH / 2, c[1]);
     roofGroup.add(post);
+  });
+  // THE CLERESTORY'S CORNERS: a board at each end of every centre side wall above a wing, from its
+  // foot in the wing roof up to the centre's eave, over the joint where the clerestory meets the
+  // centre's gable wall (and where the two walls' boxes share a plane, so nothing flickers there).
+  mass.wings.forEach((g) => {
+    const half = Math.max(T / 2 + 0.07, trimFace);
+    const yFoot = H + Math.max(0, g.w - half) * g.pitch + D3.ROOF_T * 0.5;
+    const hPost = mass.Hc - yFoot;
+    if (!(hPost > 0.3)) return;
+    [-L / 2, L / 2].forEach((e) => {
+      const post = box(trimMat, half * 2, hPost, half * 2);
+      post.position.set(uAxisIsX ? g.u0 : e, yFoot + hPost / 2, uAxisIsX ? e : g.u0);
+      post.userData.ssWing = g.side;
+      roofGroup.add(post);
+    });
   });
 
   // ── Interior + attached items (plan §4.3, §4.5, §4.6) ──
@@ -8294,9 +8747,11 @@ function buildShed3DModel(THREE, p) {
       // The same plan-frame -> wall-frame shift and porch clamp buildOneWall gives an opening.
       const alongRaw = (wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale) - (wf.a0Ft || 0);
       const along = Math.max(0.3, Math.min(alongRaw, wf.len - 0.3));
+      // The wall's own top where the device hangs (wings: Hc across a raised centre; H otherwise).
+      const wTop = topOver(wf, along, along);
       g.rotation.y = Math.atan2(wf.N[0], wf.N[1]);   // local +z -> exterior, local x -> along
       g.position.set(wf.O[0] + wf.U[0] * along, 0, wf.O[1] + wf.U[1] * along);
-      const exterior = /flood|exterior|outdoor/i.test(name) || (hFt != null && hFt >= H - 0.25);
+      const exterior = /flood|exterior|outdoor/i.test(name) || (hFt != null && hFt >= wTop - 0.25);
       if (exterior) {
         // Profile u is the along-wall world coordinate on a gable end: world x when the ridge
         // runs along z (north/south are the ends), world z otherwise (see the cap UV comment).
@@ -8309,8 +8764,9 @@ function buildShed3DModel(THREE, p) {
         // slope loop actually built: 0.45 under it leaves the tipped head's top ~0.24 ft clear,
         // and never higher than H - 0.75. The harness asserts that gap against the fascia it
         // measures in the scene.
-        const EAVE_CAP = Math.min(H - 0.75, eaveHangY - 0.45);
-        let top = gableEnd ? Math.max(EAVE_CAP, profYAt(u) - 0.5) : EAVE_CAP;
+        // On a wall standing above H (a raised centre's own wall) it hangs under that wall's top instead.
+        const EAVE_CAP = wTop > H + 0.01 ? wTop - 0.75 : Math.min(H - 0.75, eaveHangY - 0.45);
+        let top = gableEnd ? Math.max(EAVE_CAP, (mass.wings.length ? d3MassingTopAt(mass, u) : profYAt(u)) - 0.5) : EAVE_CAP;
         // On a projecting porch's wall it hangs under the porch ceiling, the way it hangs under an
         // eave: rising into the gable would put it behind the porch roof.
         if (porchGeom && it.wall === porchOut.wall) top = Math.min(top, porchGeom.ceilWall - 0.45);
@@ -8336,7 +8792,7 @@ function buildShed3DModel(THREE, p) {
         const pd = breaker ? 0.25 : 0.04;
         // Kept on the wall whatever the stored height says: the centre may not put the plate
         // through the floor or above the plate line.
-        const y = Math.max(ph / 2 + 0.05, Math.min(hFt != null ? hFt : 1.5, H - ph / 2 - 0.05));
+        const y = Math.max(ph / 2 + 0.05, Math.min(hFt != null ? hFt : 1.5, wTop - ph / 2 - 0.05));
         const zBack = -(T / 2);                        // the interior face
         const plate = add(g, box(mat(breaker ? "#9CA3AF" : "#F1F0EA", breaker ? { roughness: 0.5, metalness: 0.4 } : { roughness: 0.55 }), pw, ph, pd));
         plate.position.set(0, y, zBack - pd / 2);
@@ -8350,11 +8806,13 @@ function buildShed3DModel(THREE, p) {
       }
     } else {
       g.position.set(ftX(it.x), 0, ftZ(it.y));
+      // The LOCAL ceiling (wings: the centre's plate under the raised centre, H under a wing).
+      const cH = d3CeilingFt(roofCfg, bldgW, bldgH, H, g.position.x, g.position.z);
       if (/fan/i.test(name)) {
-        const Y = H - 0.6;
+        const Y = cH - 0.6;
         const hubMat = mat("#374151", { roughness: 0.5, metalness: 0.3 });
         const rod = add(g, cyl(hubMat, 0.03, 0.6));
-        rod.position.y = H - 0.3;
+        rod.position.y = cH - 0.3;
         const hub = add(g, cyl(hubMat, 0.2, 0.22));
         hub.position.y = Y;
         const bladeMat = mat("#8B6B4A", { roughness: 0.8 });
@@ -8368,7 +8826,7 @@ function buildShed3DModel(THREE, p) {
       } else {
         const lit = /light|lamp|led|bulb/i.test(name) || !name;
         const disc = add(g, cyl(lit ? glow() : mat("#F1F0EA"), 0.45, 0.08));
-        disc.position.y = H - 0.06;
+        disc.position.y = cH - 0.06;
       }
     }
     interiorGroup.add(g);
@@ -8617,6 +9075,9 @@ function buildShed3DModel(THREE, p) {
   // Read by tests/harness/porchProbe.mjs.
   const model = { root, envGroup, wallMat, trimMat, battenMat, gableMat, roofGroup, openingsGroup, wallsGroup, interiorGroup, builtFrontWall: frontWall,
     porch: porchGeom ? { ...porchGeom, D: porchOut.D, wall: porchOut.wall } : null };
+  // The massing this was built from (d3Massing: centre span, offset, eave, wings), for
+  // tests/harness/wings.mjs; nothing in the app reads it.
+  model.massing = mass;
   model.rebuildWalls = (names, itemsNow) => {
     names.forEach((wname) => {
       if (!WALLS[wname]) return;
@@ -8796,14 +9257,17 @@ async function d3OffscreenShots(p, opts) {
 function d3DefaultShotCamera(p) {
   const fw = p.frontWall || "south";
   const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw] || [0.35, 1];
-  const R = Math.max(p.bldgW, p.bldgH) * 0.5 + D3.WALL_H;
+  // D3.WALL_H unless the building would leave the frame (d3FrameHeightFt: a raised centre, a 20 ft
+  // wall), so every quote already in the field keeps exactly this shot.
+  const frameH = d3FrameHeightFt(p.style3d, p.bldgW, p.bldgH);
+  const R = Math.max(p.bldgW, p.bldgH) * 0.5 + frameH;
   const dist = R * 3.66;
   const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
   const camX = (OUT[0] / outLen) * dist, camZ = (OUT[1] / outLen) * dist;
   return [{
     fov: 34, far: dist * 10,
     eye: [camX, dist * 0.5, camZ],
-    at: [0, D3.WALL_H * 0.45, 0],
+    at: [0, frameH * 0.45, 0],
     sun: [camX * 0.8, dist * 0.9, camZ * 0.8],
   }];
 }
@@ -8965,7 +9429,10 @@ function ssSelfCheckCameras(p, frameMap) {
   // gable and every gambrel the sanitiser will pass. Over-estimating costs a little air above
   // the ridge; under-estimating crops the peak, which is one of the four things the builder is
   // being asked to judge.
-  const peak = H + d3RoofAxes(roof, W, L).S * 0.62;
+  let peak = H + d3RoofAxes(roof, W, L).S * 0.62;
+  // A RAISED CENTRE (wings, d3Massing) stands above its outer walls by more than that allows for:
+  // frame its real ridge too, with the same half-foot of air. Unchanged without wings.
+  if (d3Massing(roof, W, L, H).wings.length) peak = Math.max(peak, d3ModelTopFt(spec, W, L) + 0.5);
   const out = [];
   for (let i = 0; i < SS_SELFCHECK_VIEWS.length; i++) {
     const view = SS_SELFCHECK_VIEWS[i];
@@ -9246,7 +9713,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // nudged sideways for a three-quarter view; the sun follows the camera side.
       const fw = frontWall || "south";
       const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw] || [0.35, 1];
-      const R = Math.max(bldgW, bldgH) * 0.5 + D3.WALL_H;
+      // frameH is D3.WALL_H — the framing this has always had — unless the building would leave the
+      // frame (d3FrameHeightFt): a raised centre, a 20 ft wall. The target below reads it too.
+      const frameH = d3FrameHeightFt(spec, bldgW, bldgH);
+      const R = Math.max(bldgW, bldgH) * 0.5 + frameH;
       // 34° lens (was 45°): the long-lens architectural look — less perspective
       // distortion on the box, matching how buildings are photographed. dist
       // carries the tan(22.5°)/tan(17°) ≈ 1.355 factor so framing is unchanged,
@@ -9567,15 +10037,27 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         const along = ((it.wall === "north" || it.wall === "south") ? it.x - mgX : it.y - mgY) / scale;
         return ssGableVentFit(spec.roof || D3_DEFAULT_ROOF, bldgW, bldgH, it.wall, spec.wallHeightFt || D3.WALL_H, it, along, it.ventRiseFt);
       };
+      // The wall's LOCAL top over an item (d3WallTopFt, wings 2026-09-24) — what the renderer's
+      // openingSpan clamps it under: Hc across a raised centre, H on a wing's end wall. On every wall
+      // of a building without wings it is the plate height, as before.
+      const wallTop3 = (it) => {
+        const Hn = spec.wallHeightFt || D3.WALL_H;
+        if (!it || !it.wall) return Hn;
+        const w = it.widthFt || (itemTypes[it.type] || {}).width || 0;
+        const ns = it.wall === "north" || it.wall === "south";
+        const len = ns ? bldgW : bldgH;
+        const a = Math.max(w / 2, Math.min((ns ? it.x - mgX : it.y - mgY) / scale, len - w / 2));
+        return d3WallTopFt(spec.roof || D3_DEFAULT_ROOF, bldgW, bldgH, Hn, it.wall, a - w / 2, a + w / 2);
+      };
       const openSpanOf = (it) => {
         const inchesFt = (v) => (Number(v) > 0 ? Number(v) / 12 : null);
-        const maxTop = (spec.wallHeightFt || D3.WALL_H) - 0.2;
+        const maxTop = wallTop3(it) - 0.2;
         // A VENT HAD NO BRANCH HERE, so it fell into the window's (it is a type:"window" item) and
         // its highlight and live dimensions sat at a window's 3'6" sill while the hole was cut
         // under the plate. Now the renderer's own two answers: the gable fit, else ssVentSpan.
         if (isVentItem(it)) {
           const gf = gableFit3(it);
-          return gf ? [gf.y0, gf.y1] : ssVentSpan({ ...it, ventZone: null }, spec.wallHeightFt || D3.WALL_H);
+          return gf ? [gf.y0, gf.y1] : ssVentSpan({ ...it, ventZone: null }, wallTop3(it));
         }
         if (it.type === "window") {
           const wh = Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.WINDOW_H, maxTop - 0.35);
@@ -10259,7 +10741,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               // y = 0 is the interior floor (which is what Carolyn specified — "off the
               // floor, not off the ground"), and the header keeps its 0.2 ft.
               const wh = sp[1] - sp[0];
-              const maxTop = (spec.wallHeightFt || D3.WALL_H) - 0.2;
+              const maxTop = wallTop3({ ...it, ...sn }) - 0.2;   // the wall's own top where it lands (wings)
               const want = Math.max(0, Math.min(Math.round((p.y - wh / 2) * 4) / 4, Math.max(0, maxTop - wh)));
               const moved = sn.x !== it.x || sn.y !== it.y || sn.wall !== it.wall;
               if (moved || want !== it.sillFt) {
@@ -10491,7 +10973,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       };
 
       const controls = new OrbitControls(camera, canvasRef.current);
-      controls.target.set(0, D3.WALL_H * 0.45, 0);
+      controls.target.set(0, frameH * 0.45, 0);
       controls.maxPolarAngle = Math.PI * 0.495; // never below the ground plane
       controls.minDistance = R * 1.1;
       controls.maxDistance = dist * 2.5;
@@ -11157,7 +11639,9 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       // because there the wall height is the number being typed: framed for 8ft, a 16ft
       // wall puts the ridge outside the frustum, and this panel has no pan to recover it.
       const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw0] || [0.35, 1];
-      const fitH = (p) => Math.max(D3.WALL_H, Number(p.fitHeightFt) || 0);
+      // ...and never less than d3FrameHeightFt, which is D3.WALL_H unless the building would leave the
+      // frame (a raised centre, a 20 ft wall), so the designer's dock keeps its numbers too.
+      const fitH = (p) => Math.max(D3.WALL_H, Number(p.fitHeightFt) || 0, d3FrameHeightFt(p.style3d, p.bldgW, p.bldgH));
       const frameFor = (p) => { const r = Math.max(p.bldgW, p.bldgH) * 0.5 + fitH(p); return { R: r, dist: r * 3.66 }; };
       const f0 = frameFor(p0);
       const R = f0.R, dist = f0.dist;
@@ -11389,8 +11873,9 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
     const e = engineRef.current;
     if (!e) return;
     // Framing first: applyFull queues the rAF that actually paints, so this costs no
-    // frame. Guarded on fitHeightFt so a caller that never passes one is untouched.
-    if (fitHeightFt) e.applyFraming();
+    // frame. Guarded on fitHeightFt so a caller that never passes one is untouched — unless the
+    // building would leave the old frame (d3FrameHeightFt: a raised centre, a 20 ft wall).
+    if (fitHeightFt || d3FrameHeightFt(style3d, bldgW, bldgH) > D3.WALL_H) e.applyFraming();
     e.applyFull();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geomSig]);

@@ -200,7 +200,9 @@ Deno.test("the base walks the same fallback chain the spec resolver walks", () =
 });
 
 Deno.test("the clamp matches styleD3's column range, so the 3D cannot leave it", () => {
-  assertEquals(d3WallHeightFromDelta(14, 12), 14, "clamped at the top");
+  // 5-20 since 2026-09-24 (was 5-14): a two-storey wall is a real building now.
+  assertEquals(d3WallHeightFromDelta(20, 12), 20, "clamped at the top");
+  assertEquals(d3WallHeightFromDelta(14, 12), 15, "a wall past the old 14 ft top is inside the band");
   assertEquals(d3WallHeightFromDelta(4, 0), 5, "clamped at the bottom");
 });
 
