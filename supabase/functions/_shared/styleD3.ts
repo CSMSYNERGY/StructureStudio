@@ -2714,6 +2714,27 @@ export function selfCheckPairLabel(viewpoint: FrameMapViewpoint, mode: SelfCheck
   return `VIEWPOINT "${viewpoint}" - ${words}. The builder's own frame comes first, then our render of your draft from the same angle.`;
 }
 
+// ── WHICH MODEL READS THE FRAMES (2026-09-24) ────────────────────────────────────────────────
+// The v2 path (the new designer, frame "front") runs Opus; the legacy path keeps Sonnet, byte for
+// byte, so production's older designer sees no change in its requests or its timing.
+//
+// MEASURED, not assumed. The same 12 walk-around frames and the same v2 prompts, three runs per
+// building, scored against tape-and-batten truth: Sonnet's first pass got the shed's high side
+// right 2/3, the porch kind 1/3 and the raised centre's wings 2/3, and its self-check approved a
+// roof sloping the wrong way; Opus's first pass passed 6/6 (five at 100%) and its check corrected
+// every one of Sonnet's wrong drafts in one round. The 2026-09 note that "a bigger model would not
+// help" was about fields the old vocabulary could express; the discrete massing reads added since
+// (which wall is high, both wings, porch in front of the wall) are where the model is the limit.
+//
+// A refusal is handled exactly as before on both paths (ai_spec_refused / the check's refused
+// verdict): the hold is released and the builder is told plainly.
+export const AI_MODEL_LEGACY = "claude-sonnet-5";
+export const AI_MODEL_V2 = "claude-opus-5";
+// The model field of a request body for one path: spread into the body, never mutated.
+export function aiModelFields(v2: boolean): Record<string, unknown> {
+  return { model: v2 ? AI_MODEL_V2 : AI_MODEL_LEGACY };
+}
+
 // ── THE WHOLE REQUEST, IN ONE PURE FUNCTION (fix, 2026-09-24) ────────────────────────────────
 // The prompt, the labelled pairs, the model, the budget and the abort -- everything the check
 // sends -- built here rather than inline in portal-settings, so "an older designer's check is
@@ -2744,7 +2765,7 @@ export function selfCheckRequest(opts: {
   return {
     abortMs: budget.abortMs,
     body: {
-      model: "claude-sonnet-5",
+      ...aiModelFields(opts.mode !== "legacy"),
       max_tokens: budget.maxTokens,
       thinking: { type: "adaptive" },
       output_config: { effort: "medium" },

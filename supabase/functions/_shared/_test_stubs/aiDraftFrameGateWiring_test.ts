@@ -102,3 +102,12 @@ Deno.test("the new portal shell sends frame \"front\" on every draft, the lean r
   }
   assertEquals(sent[1].lean, true, "and the retry is still lean");
 });
+
+// 5. The MODEL follows the same gate (2026-09-24): the draft call's body spreads
+//    aiModelFields(v2Prompt) — Opus for the new designer, Sonnet for every legacy request — and
+//    names no model of its own, so the legacy draft is the request it always was.
+Deno.test("the draft call takes its model from aiModelFields(v2Prompt) and names none itself", () => {
+  const call = lift(PORTAL, 'res = await fetch("https://api.anthropic.com/v1/messages", {', "replyBody = await res.text();", "the draft model call");
+  assert(call.includes("...aiModelFields(v2Prompt),"), "the draft body spreads aiModelFields(v2Prompt)");
+  assert(!/model:\s*"claude-/.test(call), "no hard-coded model id in the draft call");
+});

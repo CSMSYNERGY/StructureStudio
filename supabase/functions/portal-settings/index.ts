@@ -83,6 +83,7 @@ import { parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfChec
 // The check's rollout gate and its one request builder, and the draft's frame-key check (fix,
 // 2026-09-24): the check is gated on `frame` like the draft, and a legacy request is d3ab404's.
 import { selfCheckMode, selfCheckRequest, frameKeyWarning } from "../_shared/styleD3.ts";
+import { aiModelFields } from "../_shared/styleD3.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
@@ -3852,10 +3853,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     try {
       res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
+        // v2 (the new designer) runs Opus; legacy keeps Sonnet — see aiModelFields in
+        // styleD3.ts for the measurement behind the switch.
         headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
         signal: aiSignal,
         body: JSON.stringify({
-          model: "claude-sonnet-5",
+          ...aiModelFields(v2Prompt),
           // Thinking and the answer share this. The video prompt's `observed` block rides on
           // top of the spec. A truncated reply is unparseable, not partially useful.
           max_tokens: 12000,

@@ -3647,7 +3647,7 @@ Deno.test("v2 check: wings the frames show and the render lacks are ADDED in one
 // the wing keys into a style that designer's renderer cannot draw. The v2 check's own budget moves
 // to 8000 tokens and 90 s.
 import {
-  legacySelfCheckPrompt, selfCheckMode, selfCheckRequest, SELF_CHECK_BUDGET,
+  legacySelfCheckPrompt, selfCheckMode, selfCheckRequest, SELF_CHECK_BUDGET, aiModelFields,
   SELF_CHECK_LEGACY_ALLOW, SELF_CHECK_LEGACY_MAX_FIELDS, SELF_CHECK_LEGACY_MAX_RENDERS,
   SELF_CHECK_LEGACY_TOTAL_RENDER_BYTES, SELF_CHECK_LEGACY_VIEWPOINTS,
 } from "./styleD3.ts";
@@ -3793,7 +3793,12 @@ Deno.test("selfCheckRequest: the v2 check gets 8000 tokens and 90 s, and its own
   const req = selfCheckRequest({ mode: "v2", dims: CHECK_DIMS, draft: CLEAN, pairs, round: 1, earlier: ["roof.overhang"] });
   assertEquals(req.abortMs, 90_000);
   const body = req.body as { model: string; max_tokens: number; thinking: unknown; output_config: unknown; messages: { role: string; content: { type: string; text?: string; source?: Record<string, string> }[] }[] };
-  assertEquals([body.model, body.max_tokens], ["claude-sonnet-5", 8000]);
+  // Opus on the v2 path (measured 2026-09-24, see aiModelFields); the legacy body keeps Sonnet and
+  // is pinned byte for byte by its hash test.
+  assertEquals([body.model, body.max_tokens], ["claude-opus-5", 8000]);
+  assertEquals(aiModelFields(true), { model: "claude-opus-5" });
+  assertEquals(aiModelFields(false), { model: "claude-sonnet-5" });
+  assertEquals(Object.keys(body).includes("fallbacks"), false, "no extra request fields beyond the model");
   assertEquals(body.thinking, { type: "adaptive" });
   assertEquals(body.output_config, { effort: "medium" });
   const content = body.messages[0].content;
