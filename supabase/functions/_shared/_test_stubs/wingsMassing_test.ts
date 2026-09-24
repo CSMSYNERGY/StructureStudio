@@ -34,6 +34,8 @@ function lift(src: string, file: string, start: string, end: string): string {
 
 const REGIONS: Array<[string, string]> = [
   ["const D3 = {", "// The casing reveal every opening"],
+  // The casing reveal, which d3DormerWindowFit fits a dormer window inside.
+  ["const D3_CASE_F =", "// Built-in 3D appearance per building style"],
   // d3RoofAxes, d3RoofProfile, d3MakeProfYAt, d3ProfSpanAt, and the whole wings block.
   ["function d3RoofAxes(", "function d3FtIn("],
   // ssGableEndWalls, ssPorchTrussWall, d3ProjectingPorch, ssGableVentFit and the vent constants.
@@ -51,7 +53,8 @@ Deno.test("every lifted wings region is byte-identical in the two twins", () => 
 type Any = any;
 const F = new Function(
   `const isVentItem = (it) => !!(it && it.isVent);\n${blocks.map((b) => b.cmp).join("\n")}; return { D3, d3RoofAxes, d3Massing, d3MassingTopAt, d3WallTops, d3WallTopFt, d3CeilingFt, ` +
-    `d3PorchSpanWings, d3PorchSpan, d3PorchWallTopFt, d3ModelTopFt, d3FrameHeightFt, d3DefaultShotCamera, ssSelfCheckCameras, ssGableVentFit, SS_SHOT };`,
+    `d3PorchSpanWings, d3PorchSpan, d3PorchWallTopFt, d3ModelTopFt, d3FrameHeightFt, d3DefaultShotCamera, ssSelfCheckCameras, ssGableVentFit, SS_SHOT, ` +
+    `d3DormerFaceFt, d3DormerReadout, d3TransomDormerGeom, d3MakeProfYAt, d3RoofProfile, d3DormerWindowFit };`,
 )() as Record<string, Any>;
 
 // The Tri Home, as the task drew it: 24 wide across the gable end, 28 deep, 9 ft outer walls, 8 ft
@@ -328,4 +331,27 @@ Deno.test("the self-check's wide views hold the centre's ridge, at every azimuth
       }
     }
   }
+});
+
+// ── THE DORMER IS ON THE CENTRE (2026-09-24 review) ──────────────────────────────────────────────
+// With wings the renderer builds a transom dormer on the centre's roof, span Sc at eave Hc. The face
+// the viewer offers a dormer window on, and the estimate prices it by, has to be that one: measured
+// across the full span it was 2.50 ft against the 3D's 1.31, and a 30x36 in window that cannot be
+// drawn was offered and priced.
+Deno.test("⚠️ with wings the dormer face is measured on the centre, the roof the renderer builds it on", () => {
+  const roof = { type: "gable", front: "gable", pitch: 0.67, overhang: 1, wingSide: "both", wingWidthFt: 8, centerEaveFt: 15, dormerType: "transom", dormerWidthFt: 6, dormerRiseFt: 2.5 };
+  const spec = { roof, wallHeightFt: 9 };
+  const m = F.d3Massing(roof, 28, 20, 9);
+  const built = F.d3TransomDormerGeom(roof, m.Sc, F.d3MakeProfYAt(F.d3RoofProfile(roof, m.Sc, m.Hc, m.tallNeg).dedup, m.Hc));
+  assertAlmostEquals(F.d3DormerFaceFt(spec, 28, 20), built.face, 1e-12);
+  assertAlmostEquals(built.face, 1.31, 0.01);
+  assertAlmostEquals(F.d3DormerReadout(spec, "28x20").maxFace, built.maxFace, 1e-12);
+  // So a 30x36 in window the face cannot hold is neither offered nor priced.
+  assertEquals(F.d3DormerWindowFit({ widthIn: 30, heightIn: 36 }, 6, F.d3DormerFaceFt(spec, 28, 20), 0), null);
+  // Without wings, the full span at the wall height, exactly as before.
+  const plain = { ...roof, wingSide: undefined, wingWidthFt: undefined, centerEaveFt: undefined };
+  const S = F.d3RoofAxes(plain, 28, 20).S;
+  const before = F.d3TransomDormerGeom(plain, S, F.d3MakeProfYAt(F.d3RoofProfile(plain, S, 9, true).dedup, 9));
+  assertEquals(F.d3DormerFaceFt({ roof: plain, wallHeightFt: 9 }, 28, 20), before.face);
+  assertEquals(F.d3DormerReadout({ roof: plain, wallHeightFt: 9 }, "28x20"), before);
 });

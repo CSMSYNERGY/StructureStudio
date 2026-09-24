@@ -4897,13 +4897,22 @@ function d3TransomDormerGeom(roofCfg, S, profYAt) {
 //
 // Sibling of d3DormerReadout, which takes a size LABEL because the calibration panel has no live
 // footprint to read; this one takes the real feet the customer is buying.
+//
+// WITH WINGS THE DORMER IS ON THE CENTRE (2026-09-24 review): the renderer builds it on the centre's
+// roof, span Sc at eave Hc (d3Massing), so the face is measured there too. Measured across the full
+// span, a Tri Home-sized building's face came out 2.50 ft where the 3D's is 1.31, and a 30x36 in
+// window was offered and PRICED on a dormer that could not draw it. d3DormerRoof is that one profile,
+// for both functions; without wings it is exactly the span and wall the two always used.
+function d3DormerRoof(roof, wFt, dFt, H) {
+  const m = d3Massing(roof, wFt, dFt, H);
+  return { S: m.Sc, profYAt: d3MakeProfYAt(m.prof, m.Hc) };
+}
 function d3DormerFaceFt(spec, wFt, dFt) {
   const roof = (spec && spec.roof) || {};
   if (roof.type === "shed" || !((roof.dormerWidthFt || 0) > 0.5)) return 0;
   if (roof.dormerType !== "transom") return Math.max(0.3, roof.dormerRiseFt != null ? roof.dormerRiseFt : 2.5);
-  const S = d3RoofAxes(roof, Number(wFt) || 12, Number(dFt) || 16).S;
-  const H = (spec && spec.wallHeightFt) || 8;
-  return d3TransomDormerGeom(roof, S, d3MakeProfYAt(d3RoofProfile(roof, S, H, true).dedup, H)).face;
+  const r = d3DormerRoof(roof, Number(wFt) || 12, Number(dFt) || 16, (spec && spec.wallHeightFt) || 8);
+  return d3TransomDormerGeom(roof, r.S, r.profYAt).face;
 }
 
 // WHERE THE CUSTOMER'S CHOSEN WINDOW SITS ON A DORMER FACE, and whether it fits there at all.
@@ -4966,9 +4975,8 @@ function d3DormerReadout(spec, sizeLabel) {
   if (roof.type === "shed" || roof.dormerType !== "transom" || !((roof.dormerWidthFt || 0) > 0.5)) return null;
   const m = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
   const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
-  const S = d3RoofAxes(roof, w, d).S;
-  const H = (spec && spec.wallHeightFt) || 8;
-  return d3TransomDormerGeom(roof, S, d3MakeProfYAt(d3RoofProfile(roof, S, H, true).dedup, H));
+  const r = d3DormerRoof(roof, w, d, (spec && spec.wallHeightFt) || 8);
+  return d3TransomDormerGeom(roof, r.S, r.profYAt);
 }
 
 // Feet as a builder writes them: 4' 7" rather than 0.55 x half-span. This is the whole
