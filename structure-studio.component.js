@@ -1210,6 +1210,9 @@ function ssPorchTrussWall(roofCfg, bldgW, bldgH) {
   const depth = Math.max(0, Math.min(Number(cfg.porchDepthFt) || 0, (ax.uAxisIsX ? bldgH : bldgW) - 4));
   if (!(depth > 0.5)) return null;
   const front = (cfg.porchEnd || "front") !== "back";
+  // THE NEW FRAME: the porch is on the FRONT (south) or back (north) wall whatever that wall is.
+  // The truss stands in a gable, so on a building whose front is an EAVE wall there is none.
+  if (d3NewFrame(cfg)) return ax.uAxisIsX ? (front ? "south" : "north") : null;
   return ax.uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
 }
 // The PROJECTING porch (roof.porchOutFt, 2026-09-17), or null: a deck, posts and a low roof of its
@@ -1226,8 +1229,35 @@ function d3ProjectingPorch(roofCfg, bldgW, bldgH) {
   const D = Math.max(0, Math.min(12, Number(cfg.porchOutFt) || 0));
   if (!(D > 0.5)) return null;
   const front = (cfg.porchEnd || "front") !== "back";
-  const wall = d3RoofAxes(cfg, bldgW, bldgH).uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
+  // THE NEW FRAME (d3NewFrame): "front" is the SOUTH wall and "back" the north, whether that wall
+  // is a gable end or an eave wall; d3PorchSpan says which it is. Outside it, today's rule.
+  const wall = d3NewFrame(cfg) ? (front ? "south" : "north")
+    : d3RoofAxes(cfg, bldgW, bldgH).uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
   return { D, wall };
+}
+// WHERE ALONG ITS WALL THE PROJECTING PORCH STANDS, or null with no projecting porch:
+//   onCap    the porch wall is a cap end of the roof extrusion (a gable end, or a shed's sloped
+//            end wall), which is the only kind there was before the new frame. False = an EAVE
+//            wall, where the porch runs along the ridge instead of across the profile.
+//   full     the whole wall it can take: the profile span S on a cap end, the extrusion length L
+//            on an eave wall.
+//   span     the porch's own width: roof.porchWidthFt (4..60, the sanitizer's range) clamped to
+//            the wall, else the whole wall -- which is today's porch exactly.
+//   centerU  where its middle sits, in feet from the middle of the wall along the porch's own
+//            across axis (profile u on a cap end). 0 for now; the wings work moves it onto the
+//            centre section.
+// One function, read by the renderer and the panel readout, so the drawn porch and the numbers
+// beside the input are the same porch (d3PorchGeom's rule).
+function d3PorchSpan(roofCfg, bldgW, bldgH) {
+  const porch = d3ProjectingPorch(roofCfg, bldgW, bldgH);
+  if (!porch) return null;
+  const ax = d3RoofAxes(roofCfg, bldgW, bldgH);
+  const ns = porch.wall === "south" || porch.wall === "north";
+  const onCap = ax.uAxisIsX === ns;
+  const full = onCap ? ax.S : ax.L;
+  const want = Number(roofCfg && roofCfg.porchWidthFt);
+  const span = want > 0 ? Math.max(Math.min(4, full), Math.min(full, want)) : full;
+  return { span, centerU: 0, onCap, full };
 }
 // Where a vent sits in the gable above `wall`, or NULL when it cannot.
 //
@@ -4466,9 +4496,26 @@ function d3NormalizeRoofProfile(v) {
 // and before this existed the two disagreed the moment a door was placed.
 function d3RoofAxes(roofCfg, wFt, lFt) {
   const wideIsZ = lFt >= wFt;               // portrait footprint: the length runs north<->south
+  const isShed = (roofCfg && roofCfg.type) === "shed";
+  // THE NEW FRAME (2026-09-24, see d3NewFrame): the style NAMES its orientation instead of the
+  // footprint's shape picking one. FRONT is the south wall, W along x. A gable or gambrel says
+  // whether that wall is a gable end ("gable": the profile spans W, the ridge runs north-south)
+  // or an eave wall ("eave": the profile spans L, the ridge runs east-west). A shed says which
+  // wall is the HIGH one: front/back put the slope across the depth, left/right across W, and
+  // tallNeg says which end of the profile is up (-u is west when uAxisIsX, north otherwise).
+  const hs = d3HighSide(roofCfg), fr = d3FrontKind(roofCfg);
+  if (hs || fr) {
+    const ux = hs ? (hs === "left" || hs === "right") : fr === "gable";
+    return {
+      uAxisIsX: ux,
+      S: ux ? wFt : lFt,
+      L: ux ? lFt : wFt,
+      tallNeg: hs ? (hs === "back" || hs === "left") : true,
+    };
+  }
   // For gable/gambrel the ridge is perpendicular to the span; for the shed the SLOPE runs
   // the long way, so the axes swap. Unchanged from the pre-fix door-less default.
-  const uAxisIsX = (roofCfg && roofCfg.type) === "shed" ? !wideIsZ : wideIsZ;
+  const uAxisIsX = isShed ? !wideIsZ : wideIsZ;
   return {
     uAxisIsX,
     S: uAxisIsX ? wFt : lFt,   // profile span
@@ -4477,9 +4524,54 @@ function d3RoofAxes(roofCfg, wFt, lFt) {
     // is a fixed convention rather than a derivation -- and it is the end BOTH branches of
     // the old door-less fallback already produced, so no door-less design moves. A real
     // per-style control belongs in the d3.roof spec, and would need a styleD3.ts whitelist
-    // entry or it is silently dropped on save.
+    // entry or it is silently dropped on save. (It is one now: roof.highSide, above.)
     tallNeg: true,
   };
+}
+// ── THE NEW FRAME OF REFERENCE (2026-09-24) ─────────────────────────────────────────────────
+// FRONT is the wall you walk up to: the one with the porch, or the main door. The size label WxL
+// is the FRONT wall's length by the depth, and the front is the SOUTH wall (+z), W along x. Left
+// and right are as seen standing in front: west and east.
+//
+// The frame is ON when the style carries roof.front (gable/gambrel) or roof.highSide (shed), and
+// only then. With neither, every rule below falls through to the one it replaced -- the
+// portrait/landscape axes, porchEnd's south/west ends, tallNeg true -- so no stored style moves.
+// The keys are read by VALUE and by ROOF TYPE, the sanitizer's own validity rules: roof.front
+// means nothing on a shed and roof.highSide nothing on anything else, so a key the sanitizer would
+// have dropped counts as absent here too and cannot flip the frame on its own.
+//
+// Module scope, between d3RoofAxes and d3RoofProfile on purpose: every test that lifts the region
+// starting at "function d3RoofAxes(" gets these with it.
+function d3FrontKind(roofCfg) {
+  const v = roofCfg && roofCfg.front;
+  return (v === "gable" || v === "eave") && roofCfg.type !== "shed" ? v : null;
+}
+function d3HighSide(roofCfg) {
+  const v = roofCfg && roofCfg.highSide;
+  return (v === "front" || v === "back" || v === "left" || v === "right") && roofCfg.type === "shed" ? v : null;
+}
+function d3NewFrame(roofCfg) {
+  return !!(d3FrontKind(roofCfg) || d3HighSide(roofCfg));
+}
+// The world wall that is the shed's HIGH eave wall, or null: a shed's two eave walls are the ones
+// at the ends of its profile (u = +-S/2), and tallNeg says which of the two is up. Null on every
+// other roof, and on a shed outside the new frame, where the band above the plate stays a band
+// (the byte-for-byte rule) rather than becoming a wall of its own.
+function d3ShedHighWall(roofCfg, wFt, lFt) {
+  if ((roofCfg && roofCfg.type) !== "shed" || !d3HighSide(roofCfg)) return null;
+  const ax = d3RoofAxes(roofCfg, wFt, lFt);
+  return ax.uAxisIsX ? (ax.tallNeg ? "west" : "east") : (ax.tallNeg ? "north" : "south");
+}
+// How tall ONE wall stands, floor to its top, for a style at a footprint: H, except the shed's
+// high eave wall in the new frame, which is a real wall up to the high eave (H + span x pitch)
+// instead of a wall to H with a band of roof prism above it. `setBack` true = a recessed porch has
+// moved that wall in, under the roof; it then stops at H and the prism's own face closes the
+// opening above it. The wings work extends this with per-run tops; the 3D wall, its corner boards
+// and the panel's porch readout all read it, so they cannot disagree about a wall's height.
+function d3WallTopFt(roofCfg, wFt, lFt, H, wall, setBack) {
+  if (setBack || wall !== d3ShedHighWall(roofCfg, wFt, lFt)) return H;
+  const ax = d3RoofAxes(roofCfg, wFt, lFt);
+  return H + ax.S * ((roofCfg && roofCfg.pitch) || 0.25);
 }
 
 // The roof's cross-section: a polyline of [u, y] points running eave -> ridge -> eave,
@@ -4821,7 +4913,11 @@ function d3EaveFinishDrop(roofCfg, ny) {
 //     8 ft gets 2, 10-17 ft get 3, 18-24 ft get 4.
 //   · hNeeded is the wall height at which the 2:12 roof clears 6'8" when nothing on the main roof
 //     pushes it down: what the panel suggests when a wall is too short.
-function d3PorchGeom(S, H, D, trimFace, capY) {
+//   · attachFt (roof.porchAttachFt, 2026-09-24): floor to the TOP of the porch roof where it meets
+//     the wall, when the style says so -- a porch roof a few feet under the eave with siding
+//     showing between. It replaces H - 0.2 and is still held under capY. Absent = today.
+//     S is the porch's own width (d3PorchSpan), which is the whole span unless porchWidthFt says.
+function d3PorchGeom(S, H, D, trimFace, capY, attachFt) {
   // Member sizes in feet: 6x6 posts, a doubled 2x8 header, 2x6 rafters, the roof sheet, the
   // ceiling boards, the roof's overhang past the posts and past each side, the sided cheek and
   // the board over the rafter tails.
@@ -4836,7 +4932,7 @@ function d3PorchGeom(S, H, D, trimFace, capY) {
   const dEnd = D + OVP;                                     // the porch roof's front edge
   const side = S / 2 + trimFace;                            // outer post faces, flush with the corner boards
   const run = Math.max(0.1, dPost - HDR_D / 2 - dWall);     // wall face to the header's inner face
-  const yHigh = Math.min(H - 0.2, capY);
+  const yHigh = Math.min(attachFt > 0 ? attachFt : H - 0.2, capY);
   const stack = (p) => (PR_T + SHEATH) * Math.sqrt(1 + p * p);   // roof sheet + ceiling, measured plumb
   const clearAt = (p) => yHigh - p * run - stack(p) - HDR_H;
   let pitch = WANT;
@@ -4867,9 +4963,17 @@ function d3PorchReadout(spec, sizeLabel) {
   const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
   const porch = d3ProjectingPorch(roof, w, d);
   if (!porch) return null;
-  const S = d3RoofAxes(roof, w, d).S;
+  // The porch's own width and the height of the wall it stands on (a shed's high eave wall in the
+  // new frame is taller than H), exactly as buildShed3DModel reads them. Outside the new frame and
+  // without porchWidthFt / porchAttachFt these are S, H and H - 0.2: today's readout.
+  const S = d3PorchSpan(roof, w, d).span;
   const H = (spec && spec.wallHeightFt) || D3.WALL_H;
-  return { ...d3PorchGeom(S, H, porch.D, D3.WALL_T / 2 + 0.03, Infinity), D: porch.D, wall: porch.wall, S, H };
+  const top = d3WallTopFt(roof, w, d, H, porch.wall, false);
+  const attachFt = Number(roof.porchAttachFt) || 0;
+  const g = d3PorchGeom(S, top, porch.D, D3.WALL_T / 2 + 0.03, Infinity, attachFt);
+  // With porchAttachFt set it is the ATTACH height, not the wall, that decides the headroom, so the
+  // panel's suggestion is where to hang the porch roof: hNeeded is a wall top, 0.2 above that.
+  return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2 };
 }
 
 // A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
@@ -4896,8 +5000,12 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
   // Shares d3RoofAxes with buildShed3DModel -- the SAME rule, always, doors or not. Until
   // 2026-09-01 this drawing used pure geometry while the 3D used the door, so the two
   // silently disagreed the moment a customer placed one. tallNeg is true, so the shed's
-  // high end is always on the left here.
-  const S = d3RoofAxes(roof, w, d).S;
+  // high end is always on the left here -- outside the NEW FRAME (d3NewFrame). In it the drawing
+  // takes the axes' own tallNeg, so a shed's high side lands where roof.highSide put it, and it
+  // names the two ends (front/back or left/right) under the span.
+  const ax = d3RoofAxes(roof, w, d);
+  const S = ax.S;
+  const NEW_FRAME = d3NewFrame(roof);
   const H = (spec && spec.wallHeightFt) || 8;
   const OV = roof.overhang != null ? roof.overhang : 0.6;
   // THE DRAWING LEARNS THE EAVE FINISH TOO -- from d3EaveFinishDrop, the same function the 3D
@@ -4909,9 +5017,18 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
   // open tails in the 3D. The notch is a FASCIA-eave distinction and stops at that gate.
   const EAVE_OPEN = roof.eave === "open";
   const OV_NOTCHED = !EAVE_OPEN && d3OverhangStyle(roof) === "notched";
-  const dedup = d3RoofProfile(roof, S, H, true).dedup;
+  const dedup = d3RoofProfile(roof, S, H, NEW_FRAME ? ax.tallNeg : true).dedup;
   let peak = H;
   dedup.forEach((p) => { if (p[1] > peak) peak = p[1]; });
+  // THE SHED'S HIGH EAVE, in the new frame only: the 3D runs the slab OV past the high wall and
+  // finishes it (buildShed3DModel's high-eave branch), so the drawing extends the slope past its
+  // high point the same horizontal OV and hangs the same finish. Null everywhere else, which is
+  // exactly the drawing this was before.
+  const HIGH_EAVE = (NEW_FRAME && roof.type === "shed" && dedup.length === 3) ? (() => {
+    const hi = dedup[1], lo = ax.tallNeg ? dedup[2] : dedup[0];
+    const dx = hi[0] - lo[0], dy = hi[1] - lo[1], k = OV / (Math.abs(dx) || 1);
+    return { hi, ext: [hi[0] + dx * k, hi[1] + dy * k], ny: Math.abs(dx) / (Math.hypot(dx, dy) || 1) };
+  })() : null;
 
   const VW = 360, VH = 210, PL = 54, PR = 54, PT = 14, PB = 34;
   const innerW = VW - PL - PR, innerH = VH - PT - PB;
@@ -4989,6 +5106,30 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
           </g>
         );
       })}
+
+      {/* THE SHED'S HIGH EAVE (new frame only): the slope carried OV past the high wall, then the
+          3D's finish -- open tails at the same drop the low eave's take, or a fascia down to a
+          LEVEL soffit at the top of the high wall, boxed back to it. */}
+      {HIGH_EAVE && (
+        <g>
+          <line x1={X(HIGH_EAVE.hi[0])} y1={Y(HIGH_EAVE.hi[1])} x2={X(HIGH_EAVE.ext[0])} y2={Y(HIGH_EAVE.ext[1])} stroke={INK} strokeWidth="2" />
+          {EAVE_OPEN
+            ? <line x1={X(HIGH_EAVE.ext[0])} y1={Y(HIGH_EAVE.ext[1])} x2={X(HIGH_EAVE.ext[0])} y2={Y(HIGH_EAVE.ext[1] - d3EaveFinishDrop(roof, HIGH_EAVE.ny))} stroke={INK} strokeWidth="1.4" />
+            : (
+              <g>
+                <line x1={X(HIGH_EAVE.ext[0])} y1={Y(HIGH_EAVE.ext[1])} x2={X(HIGH_EAVE.ext[0])} y2={Y(HIGH_EAVE.hi[1] - D3_EAVE.SOFFIT_T)} stroke={INK} strokeWidth="1.4" />
+                <line x1={X(HIGH_EAVE.ext[0])} y1={Y(HIGH_EAVE.hi[1] - D3_EAVE.SOFFIT_T)} x2={X(HIGH_EAVE.hi[0])} y2={Y(HIGH_EAVE.hi[1] - D3_EAVE.SOFFIT_T)} stroke={INK} strokeWidth="1" />
+              </g>
+            )}
+        </g>
+      )}
+      {/* WHICH END IS WHICH, new frame only: -u is north (back) or west (left). */}
+      {NEW_FRAME && (
+        <g>
+          <text x={X(-s2)} y={Y(0) + 12} textAnchor="start" style={{ fontSize: 8, fill: DIM }}>{ax.uAxisIsX ? "left" : "back"}</text>
+          <text x={X(s2)} y={Y(0) + 12} textAnchor="end" style={{ fontSize: 8, fill: DIM }}>{ax.uAxisIsX ? "right" : "front"}</text>
+        </g>
+      )}
 
       {/* OVERHANG, at the left eave */}
       <line x1={X(eaveL[0])} y1={Y(eaveL[1]) - 9} x2={X(-s2)} y2={Y(eaveL[1]) - 9} {...dimStroke("overhang")} />
@@ -5890,6 +6031,18 @@ function d3TimedBuild(fn) {
 // one of them was adjusted. 'rollup' is the odd one and is drawn by rollUpCurtain instead — it
 // has no stiles, no hinges and no latch, so it is not a plank leaf with a different field.
 const D3_DOOR_STYLES = { plank: true, zbrace: true, xbrace: true, rollup: true };
+// WHICH LIVE COLOUR A TRIM KEY FOLLOWS (colors.corner / colors.fascia, 2026-09-24).
+// Absent means the trim colour, exactly today. A hex equal to the style's own body, trim or roof
+// colour means THAT role -- Farmstand's corner boards are its body brown and its fascia is its roof
+// colour -- so a customer who paints the body or picks a trim swatch moves the boards with it, the
+// way the building would be painted. Any other hex is a fixed colour of its own.
+function d3TrimKeyRole(colors, key) {
+  const c = colors || {};
+  const v = typeof c[key] === "string" ? c[key].trim().toLowerCase() : "";
+  if (!/^#[0-9a-f]{6}$/.test(v)) return "trim";
+  const same = (k) => typeof c[k] === "string" && c[k].trim().toLowerCase() === v;
+  return same("body") ? "body" : same("trim") ? "trim" : same("roof") ? "roof" : "fixed";
+}
 function buildShed3DModel(THREE, p) {
   const { bldgW, bldgH, items, itemTypes, bodyColor, trimColor, frontWall, scale, mgX, mgY } = p;
   // Wall height: config-driven when the tenant sets it (per-style wallHeightFt
@@ -5911,6 +6064,19 @@ function buildShed3DModel(THREE, p) {
   // ghost every opening casing, which is a visible change nobody asked for.
   const battenMat = mat(trimColor);
   const roofMat = mat(p.roofColor || D3_COLORS.roof);
+  // CORNER BOARDS AND FASCIA TAKE THEIR OWN COLOURS (colors.corner / colors.fascia, 2026-09-24).
+  // Farmstand's corners are its body brown and its fascia and rakes its roof charcoal; only the
+  // window casings are white. Both are PLAIN materials, never wallMat or roofMat: the boxes keep
+  // 0..1 UVs, so the cladding's world-feet texture would streak down a corner board, and the roof's
+  // rib texture and sky belong on the roof. Absent = the trim colour, as a material of its own so the
+  // live recolour can move it with the trim (d3TrimKeyRole); the look is today's to the pixel.
+  const trimKeyColor = (key) => {
+    const role = d3TrimKeyRole(p.styleSpec && p.styleSpec.colors, key);
+    return role === "body" ? bodyColor : role === "roof" ? (p.roofColor || D3_COLORS.roof)
+      : role === "fixed" ? p.styleSpec.colors[key].trim() : trimColor;
+  };
+  const cornerMat = mat(trimKeyColor("corner"));
+  const fasciaMat = mat(trimKeyColor("fascia"));
   // Catalog fixture photos. Resolved LIVE from the catalog by fixtureItemId
   // rather than stamped on the item at placement (unlike price/name, which must
   // not move under a saved quote): re-uploading a better photo improves designs
@@ -5986,6 +6152,10 @@ function buildShed3DModel(THREE, p) {
   // a projecting porch (d3ProjectingPorch, 2026-09-17) moves the label on its wall out past the deck.
   const roofCfg = (p.styleSpec && p.styleSpec.roof) || D3_DEFAULT_ROOF;
   const porchOut = d3ProjectingPorch(roofCfg, bldgW, bldgH);
+  // THE NEW FRAME (d3NewFrame, 2026-09-24): the style names its front (roof.front) or its shed high
+  // side (roof.highSide). Every branch it opens below is guarded by this, so with neither key the
+  // model is built by exactly the code it always was.
+  const NEW_FRAME = d3NewFrame(roofCfg);
 
   // Environment: grass field to the horizon + on-ground dimension labels
   // (SmartBuild-style landscape; the "Landscape" toggle hides this group).
@@ -6088,7 +6258,9 @@ function buildShed3DModel(THREE, p) {
   // Depth is clamped to leave four feet of building behind it. Deeper than that is a carport,
   // and a wall clamped to zero length is a crash rather than a shape.
   const porchAxes = d3RoofAxes(roofCfg, bldgW, bldgH);
-  const porchRun = porchAxes.uAxisIsX ? bldgH : bldgW;        // the run a porch eats into
+  // THE NEW FRAME puts a porch on the front (south) or back (north) wall whatever that wall is, so
+  // the run it eats into is the depth; outside it, the gable end's rule below.
+  const porchRun = (NEW_FRAME || porchAxes.uAxisIsX) ? bldgH : bldgW;        // the run a porch eats into
   // A projecting porch wins over a recessed one. The sanitizer never stores both; raw data holding
   // both draws the projecting porch and no set-back, and ssPorchTrussWall drops the truss to match.
   const porchDepth = porchOut ? 0 : Math.max(0, Math.min(Number(roofCfg.porchDepthFt) || 0, porchRun - 4));
@@ -6114,10 +6286,15 @@ function buildShed3DModel(THREE, p) {
   // carried a porch when this changed (checked across every tenant), so nothing stored moved.
   const porchFront = (roofCfg.porchEnd || "front") !== "back";
   const porchWall = !porchOn ? null
-    : porchAxes.uAxisIsX ? (porchFront ? "south" : "north") : (porchFront ? "west" : "east");
+    : (NEW_FRAME || porchAxes.uAxisIsX) ? (porchFront ? "south" : "north") : (porchFront ? "west" : "east");
   // The name the recessed-porch block below resolves its local end from. Derived from the WALL
   // now rather than from porchEnd, so the set-back and the posts can never pick different ends.
   const porchAtNeg = porchWall === "north" || porchWall === "west";
+  // IN THE NEW FRAME the front can be an EAVE wall (roof.front "eave", a shed's front/back high
+  // side). A porch recessed into an eave wall sets that wall back under the roof exactly like one
+  // at a gable end -- the WALLS table below is the same arithmetic -- but the cap ends do not move
+  // and the posts stand along the eave line instead of across a cap (the recessed-porch block).
+  const porchOnEave = porchOn && NEW_FRAME && !porchAxes.uAxisIsX;
   // How far each wall's ORIGIN travels, and how much length it loses. Every one of these is
   // zero without a porch, so a style that has never had one builds byte-for-byte what it did.
   const pN = porchWall === "north" ? porchDepth : 0;
@@ -6133,6 +6310,13 @@ function buildShed3DModel(THREE, p) {
     west:  { len: bldgH - pN - pS, O: [-bldgW / 2 + pW, -bldgH / 2 + pN], U: [0, 1], N: [-1, 0], a0Ft: pN },
     east:  { len: bldgH - pN - pS, O: [bldgW / 2 - pE, -bldgH / 2 + pN],  U: [0, 1], N: [1, 0],  a0Ft: pN },
   };
+  // EACH WALL'S OWN TOP (d3WallTopFt, 2026-09-24). H for every wall of every building, except a
+  // shed's HIGH eave wall in the new frame: that is a real clad wall up to the high eave -- battens
+  // in phase to its top, no seam at H (openings still clamp under H, where the plan puts them) -- where it used to be a
+  // wall to H with the roof prism's vertical side standing in as the rest. The prism's side is still
+  // there, inside this wall's box at the wall's mid-plane, and so hidden. A wall a recessed porch
+  // has set back stops at H under the roof, and that side closes the opening over it.
+  Object.keys(WALLS).forEach((w) => { WALLS[w].top = d3WallTopFt(roofCfg, bldgW, bldgH, H, w, porchWall === w); });
   // ── Vents placed IN THE GABLE (ventZone, 2026-09-15 — see ssVentSpan) ──
   // Resolved here, above both builders that need the answer: buildOneWall must NOT cut a hole in
   // the wall for one, and the roof builder draws it on the end cap. It is the SAME ssGableVentFit
@@ -6609,14 +6793,17 @@ function buildShed3DModel(THREE, p) {
     // clicking a wall.
     const wg = new THREE.Group();
     wg.userData = { wall: wname };
+    // This wall's own top (the WALLS table's `top`, d3WallTopFt): H on every wall but a new-frame
+    // shed's high eave wall. Openings still clamp under H (openingSpan), where the plan puts them.
+    const WT = wf.top != null ? wf.top : H;
     let cursor = 0;
     ranges.forEach((rg) => {
-      if (rg.a0 > cursor + 0.01) wg.add(wallBox(wallMat, wf, cursor, rg.a0, 0, H));
+      if (rg.a0 > cursor + 0.01) wg.add(wallBox(wallMat, wf, cursor, rg.a0, 0, WT));
       if (rg.y0 > 0.01) wg.add(wallBox(wallMat, wf, rg.a0, rg.a1, 0, rg.y0));
-      if (rg.y1 < H - 0.01) wg.add(wallBox(wallMat, wf, rg.a0, rg.a1, rg.y1, H));
+      if (rg.y1 < WT - 0.01) wg.add(wallBox(wallMat, wf, rg.a0, rg.a1, rg.y1, WT));
       cursor = rg.a1;
     });
-    if (cursor < wf.len - 0.01) wg.add(wallBox(wallMat, wf, cursor, wf.len, 0, H));
+    if (cursor < wf.len - 0.01) wg.add(wallBox(wallMat, wf, cursor, wf.len, 0, WT));
     // Cladding relief on the exterior of the full-height segments (strips break at
     // openings, like real cladding). Real geometry on top of the texture, so the material
     // still reads at a grazing angle where a flat map flattens out.
@@ -6629,7 +6816,7 @@ function buildShed3DModel(THREE, p) {
       // yLo/yHi bound the strip VERTICALLY. They default to the whole wall, and are passed
       // explicitly for the sill and header panels around an opening — see the loop below.
       const relief = (b0, b1, yLo, yHi) => {
-        const lo = yLo || 0, hi = yHi != null ? yHi : H;
+        const lo = yLo || 0, hi = yHi != null ? yHi : WT;
         if (b1 - b0 < 0.3 || hi - lo < 0.25) return;
         if (clad.relief === "batten" || clad.relief === "rib") {
           const bs = clad.stepFt;
@@ -6653,7 +6840,7 @@ function buildShed3DModel(THREE, p) {
           // the BAND filters it, rather than restarting the courses inside the band. A lap
           // course that restarted above a window would step out of line with the wall beside
           // it, which is the exact fault this block exists to avoid.
-          for (let y = clad.stepFt; y < H - 0.15; y += clad.stepFt) {
+          for (let y = clad.stepFt; y < WT - 0.15; y += clad.stepFt) {
             if (y < lo + 0.04 || y > hi - 0.04) continue;
             wg.add(wallBox(wallMat, wf, s0, s1, y - 0.04, y + 0.04, CLAD_RELIEF_OUT, 0.1));
           }
@@ -6678,7 +6865,7 @@ function buildShed3DModel(THREE, p) {
       ranges.forEach((rg) => {
         if (rg.a0 > bc + 0.01) relief(bc, rg.a0);
         if (rg.y0 > 0.01) relief(rg.a0, rg.a1, 0, rg.y0);          // under the sill
-        if (rg.y1 < H - 0.01) relief(rg.a0, rg.a1, rg.y1, H);      // over the head
+        if (rg.y1 < WT - 0.01) relief(rg.a0, rg.a1, rg.y1, WT);    // over the head
         bc = rg.a1;
       });
       if (bc < wf.len - 0.01) relief(bc, wf.len);
@@ -6969,7 +7156,8 @@ function buildShed3DModel(THREE, p) {
   //    so there is no face to meet, and the truss is placed proud of the cap as it stands.
   //  * A shallow overhang: the rake board's inner face sits at OV - 0.1 from the cap plane, so the
   //    cap moves out only as far as that allows and can never stand in front of its own trim.
-  const capPorchEnd = porchOn ? ((uAxisIsX ? porchAtNeg : !porchAtNeg) ? 0 : L) : null;
+  // A porch recessed into an EAVE wall (new frame) leaves both caps over walls: neither is a porch end.
+  const capPorchEnd = (porchOn && !porchOnEave) ? ((uAxisIsX ? porchAtNeg : !porchAtNeg) ? 0 : L) : null;
   const capFlush = Math.max(0, Math.min(T / 2, OV - 0.1));
   const capOut0 = capPorchEnd === 0 ? 0 : capFlush;
   const capOutL = capPorchEnd === L ? 0 : capFlush;
@@ -7023,11 +7211,20 @@ function buildShed3DModel(THREE, p) {
   // are built only on the two CAP faces, so this band gets the texture but not the 3D ribs.
   // The texture is what reads as "the siding stops"; the strips are a separate pass and
   // adding them here without seeing it would be guessing at a second thing.
+  //
+  // IN THE NEW FRAME the high side is whichever end roof.highSide names (tallNeg false puts it at
+  // u = +S/2: the south or east wall), so the plane is read off tallNeg rather than fixed at -S/2.
+  // Outside it tallNeg is always true and the test is the one it always was. The UV mapping above
+  // holds for the other end as well: the east wall runs north->south like the west one, and the
+  // south wall west->east like the north one. Over a new-frame high wall this band sits inside the
+  // wall's own box (buildOneWall draws that wall to its top), and shows only where a recessed porch
+  // has set the wall back.
   if ((roofCfg && roofCfg.type) === "shed" && gableGeom.groups && gableGeom.groups.length === 2) {
     const gpos = gableGeom.attributes.position, guv2 = gableGeom.attributes.uv;
     const caps = gableGeom.groups[0], sides = gableGeom.groups[1];
     if (gpos && guv2 && caps && sides) {
-      const inTallPlane = (i) => Math.abs(gpos.getX(i) + S / 2) < 1e-4;
+      const tallU = tallNeg ? -S / 2 : S / 2;
+      const inTallPlane = (i) => Math.abs(gpos.getX(i) - tallU) < 1e-4;
       // Non-indexed geometry: walk the side range three vertices at a time.
       const triTall = [];
       for (let t = 0; t < sides.count; t += 3) {
@@ -7117,7 +7314,7 @@ function buildShed3DModel(THREE, p) {
   // Decided HERE, not inside the porch block, because the two need each other: the vent's sill
   // has to clear the truss's brace feet, and the truss has to stand in front of the vent's frame.
   // The same test the porch block used to apply inline.
-  const porchTrussOn = porchOn && !!roofCfg.porchTruss && (roofCfg.type || "gable") === "gable";
+  const porchTrussOn = porchOn && !porchOnEave && !!roofCfg.porchTruss && (roofCfg.type || "gable") === "gable";
   const TRUSS_FOOT = H + 0.2;                    // brace feet, sitting on the header beside the king post
 
   // ── The style's louvered gable vent: laid out once, drawn on both ends further down ────────
@@ -7244,7 +7441,29 @@ function buildShed3DModel(THREE, p) {
   // Two posts, never three. The lean-to adds a middle one past 12 ft because it is a carport
   // and nobody walks through the centre of it; a porch has a door behind it, and a post in the
   // doorway is a defect rather than support.
-  if (porchOn) {
+  // ON AN EAVE WALL (new frame, roof.front "eave" or a shed's front/back side): the wall has set
+  // back under the roof exactly as it does at a gable end, so what stands in the opening is the same
+  // posts and header, along the eave line instead of across a cap. Posts every 10 ft or less: an
+  // eave porch is the building's whole length, and two posts 24 ft apart hold nothing up. Over the
+  // header the roof prism's own face closes the opening -- the shed's tall band, clad, or the gable
+  // prism's underside -- because the wall behind it stops at H (d3WallTopFt's setBack).
+  if (porchOnEave) {
+    const uIn = (porchWall === "south" ? 1 : -1) * (S / 2 - 0.21);   // south is +u here (u = world z)
+    const POST = 0.32, INSET = 0.4;
+    const bays = Math.max(1, Math.ceil(L / 10 - 1e-6));
+    const za = INSET + POST / 2, zb = L - INSET - POST / 2;
+    for (let i = 0; i <= bays; i++) {
+      const post = box(trimMat, POST, H, POST);
+      post.position.set(uIn, H / 2, za + ((zb - za) * i) / bays);
+      post.userData.ssRecessedEave = "post";
+      rg.add(post);
+    }
+    const ehdr = box(trimMat, 0.4, 0.5, L);
+    ehdr.position.set(uIn, H - 0.25, L / 2);
+    ehdr.userData.ssRecessedEave = "header";
+    rg.add(ehdr);
+  }
+  if (porchOn && !porchOnEave) {
     // local z = 0 is world -Z for a portrait footprint but world +X for a landscape one,
     // because rg turns a quarter circle in the second case. So the end is resolved through the
     // SAME uAxisIsX the wall set-back used, not assumed.
@@ -7817,7 +8036,7 @@ function buildShed3DModel(THREE, p) {
         const finishY = eaveY - d3EaveFinishDrop(roofCfg, ny); // the lowest the eave finishes
         const fasTop = edgeY + 0.06;                           // just under the deck's top face
         const fasH = OV_NOTCHED ? Math.max(0.08, fasTop - finishY) : D3_EAVE.FASCIA_H;
-        const fascia = box(trimMat, D3_EAVE.FASCIA_T, fasH, L + OV * 2);
+        const fascia = box(fasciaMat, D3_EAVE.FASCIA_T, fasH, L + OV * 2);
         fascia.position.set(edgeU, OV_NOTCHED ? fasTop - fasH / 2 : edgeY - 0.14, L / 2);
         rg.add(fascia);
         eaveHangY = Math.min(eaveHangY, OV_NOTCHED ? finishY : edgeY - 0.14 - 0.2);   // the board's bottom edge
@@ -7829,7 +8048,7 @@ function buildShed3DModel(THREE, p) {
           const wallU = lowEnd[0];
           const soffitW = Math.abs(edgeU - wallU);
           if (soffitW > 0.06) {
-            const soffit = box(trimMat, soffitW, D3_EAVE.SOFFIT_T, L + OV * 2);
+            const soffit = box(fasciaMat, soffitW, D3_EAVE.SOFFIT_T, L + OV * 2);
             soffit.position.set((wallU + edgeU) / 2, deckBotY - D3_EAVE.SOFFIT_T / 2, L / 2);
             rg.add(soffit);
           }
@@ -7879,6 +8098,59 @@ function buildShed3DModel(THREE, p) {
         if (flyOut > 0.15) { addTail(-flyOut); addTail(L + flyOut); }
       }
     }
+    // ── THE SHED'S HIGH EAVE (new frame, 2026-09-24) ──
+    // The slab has always run OV past the high wall (jointExt: a free edge), and that edge had no
+    // finish at all -- a raw slab end over a band of prism. On Farmstand it is the most visible edge
+    // of the building: the dark boxed eave right over the porch. So in the new frame it gets the
+    // finish roof.eave asks for, on the same members the low eave uses:
+    //   open    the same rafter tails at the same measured drop, running up to the slab's end
+    //   fascia  a plumb board at the slab's end, from just under the deck's top face down to a
+    //           LEVEL soffit that boxes back to the high wall at its top. Level, whatever the
+    //           framing choice: the deck RISES away from this wall, so a soffit hung off the deck's
+    //           outer edge the way the low eave's is would pass up through the roof at the wall.
+    // Outside the new frame the high edge is exactly what it was.
+    const highEave = A[1] >= B[1] ? A : B;
+    if (NEW_FRAME && roofCfg.type === "shed" && highEave[1] > H + 0.01 && !jointPartnerAt(highEave, sl)) {
+      const towardHigh = highEave === A ? -1 : 1;
+      const hiU = highEave[0] + towardHigh * ux * OV;       // the slab's end, on the slope line
+      const hiY = highEave[1] + towardHigh * uy * OV;
+      const wallTopY = highEave[1];                         // the high wall's top (d3WallTopFt)
+      if (!EAVE_OPEN) {
+        const edgeU = hiU + nx * (D3.ROOF_T / 2 + 0.02);
+        const edgeY = hiY + ny * (D3.ROOF_T / 2 + 0.02);
+        const sofBot = wallTopY - 0.005 - D3_EAVE.SOFFIT_T;
+        const fasTop = edgeY + 0.06;                        // just under the deck's top face
+        const fasH = Math.max(0.08, fasTop - sofBot);
+        const hfas = box(fasciaMat, D3_EAVE.FASCIA_T, fasH, L + OV * 2);
+        hfas.position.set(edgeU, fasTop - fasH / 2, L / 2);
+        hfas.userData.ssHighEave = "fascia";
+        rg.add(hfas);
+        const sofIn = highEave[0], sofOut = edgeU - towardHigh * D3_EAVE.FASCIA_T / 2;
+        if (Math.abs(sofOut - sofIn) > 0.06) {
+          const hsof = box(fasciaMat, Math.abs(sofOut - sofIn), D3_EAVE.SOFFIT_T, L + OV * 2);
+          hsof.position.set((sofIn + sofOut) / 2, sofBot + D3_EAVE.SOFFIT_T / 2, L / 2);
+          hsof.userData.ssHighEave = "soffit";
+          rg.add(hsof);
+        }
+      } else {
+        const TAIL_W = D3_EAVE.TAIL_W, TAIL_H = D3_EAVE.TAIL_H;
+        const tailN = 0.02 - D3_EAVE.TAIL_DROP + TAIL_H / 2;
+        const tailLen = OV + 0.5;
+        const tailU = hiU - towardHigh * ux * (tailLen / 2) + nx * tailN;
+        const tailY = hiY - towardHigh * uy * (tailLen / 2) + ny * tailN;
+        const addHiTail = (z) => {
+          const tl = box(tailMat(), tailLen, TAIL_H, TAIL_W);
+          tl.rotation.z = Math.atan2(dy, du);
+          tl.position.set(tailU, tailY, z);
+          tl.userData.ssHighEave = "tail";
+          rg.add(tl);
+        };
+        const tailStep = L / Math.max(1, Math.round(L / Math.max(0.5, (roofCfg.tailSpacingIn || 24) / 12)));
+        for (let z = 0; z <= L + 1e-6; z += tailStep) addHiTail(Math.min(z, L));
+        const flyOut = Math.min(OV - 0.1, 10 / 12);
+        if (flyOut > 0.15) { addHiTail(-flyOut); addHiTail(L + flyOut); }
+      }
+    }
     // Ridge cap: one angled board LYING ON each slope that reaches the peak
     // (both halves of a gable, the upper legs of a gambrel) — a flat box can
     // never seat on the V of two pitches, which is why the first cut floated.
@@ -7907,7 +8179,7 @@ function buildShed3DModel(THREE, p) {
     // crossed 0.6 ft past the ridge at every gable end -- the exact crossed-blades look
     // the miter had just removed, reintroduced in trim color (audit 2026-08-19).
     [-OV + 0.05, L + OV - 0.05].forEach((z) => {
-      const rake = box(trimMat, slen + extA + extB, 0.32, 0.1);
+      const rake = box(fasciaMat, slen + extA + extB, 0.32, 0.1);
       rake.rotation.z = Math.atan2(dy, du);
       rake.position.set(
         (A[0] + B[0]) / 2 + ux * shift + nx * (D3.ROOF_T / 2 - 0.08),
@@ -7955,10 +8227,28 @@ function buildShed3DModel(THREE, p) {
     // "short" warning and a plate band grown into a tall dark slab. Only the lean-to's inner strip is
     // over the porch, so a lean-to member counts by the lowest point of its triangles clipped to the
     // porch's footprint. The main roof keeps its box: there it costs 0 to 0.31 ft, measured.
-    const g0 = d3PorchGeom(S, H, D, trimFace, Infinity);
+    //
+    // ── ON AN EAVE WALL (new frame, 2026-09-24) ── Farmstand's porch runs the length of its high
+    // front wall, under the high eave: the same porch, turned a quarter so its along-wall axis runs
+    // down the ridge (local z) and its depth out across the profile (u), standing on the wall at
+    // u = eaveS x S/2. Its width is d3PorchSpan's (the whole wall, or roof.porchWidthFt), and it
+    // meets the wall at roof.porchAttachFt when the style says so, else just under THAT wall's top
+    // (WALLS[].top: the high wall's, on a shed). Everything the main roof hangs out over the porch
+    // on that side -- the eave finish, open tails, a rake -- is measured by what is really over the
+    // porch: every member's triangles clipped to the porch's footprint past the wall face, the
+    // lean-to's rule, because the box of a sloped slab or rake over an eave is its far low corner.
+    const PSPAN = d3PorchSpan(roofCfg, bldgW, bldgH);
+    const onCap = PSPAN.onCap, span = PSPAN.span;
+    const eaveS = porchOut.wall === "south" || porchOut.wall === "east" ? 1 : -1;
+    const zMid = L / 2 + PSPAN.centerU;                        // the porch's middle along the ridge (eave wall)
+    const topH = WALLS[porchOut.wall].top != null ? WALLS[porchOut.wall].top : H;
+    const attachFt = Number(roofCfg.porchAttachFt) || 0;
+    const g0 = d3PorchGeom(span, topH, D, trimFace, Infinity, attachFt);
     const reach = g0.side + g0.sizes.SIDE_OV;
     const zFace = atZero ? -(g0.dWall + 0.005) : L + g0.dWall + 0.005;
-    const overPorch = [(v) => v.x + reach, (v) => reach - v.x, (v) => (atZero ? zFace - v.z : v.z - zFace)];
+    const overPorch = onCap
+      ? [(v) => v.x + reach, (v) => reach - v.x, (v) => (atZero ? zFace - v.z : v.z - zFace)]
+      : [(v) => v.z - (zMid - reach), (v) => (zMid + reach) - v.z, (v) => eaveS * v.x - (S / 2 + g0.dWall + 0.005)];
     const lowestOverPorch = (o) => {
       const pos = o.geometry.attributes.position, idx = o.geometry.index;
       const n = idx ? idx.count : pos.count;
@@ -7984,11 +8274,20 @@ function buildShed3DModel(THREE, p) {
     rg.children.forEach((o) => {
       if (!o.isMesh || (o.userData && o.userData.ssPorch)) return;
       bb.setFromObject(o);                                     // also brings o.matrixWorld up to date
+      if (!onCap) {
+        if (eaveS * (eaveS > 0 ? bb.max.x : bb.min.x) <= S / 2 + g0.dWall + 0.005) return;
+        capY = Math.min(capY, lowestOverPorch(o) - 0.03);
+        return;
+      }
       const past = atZero ? -bb.min.z : bb.max.z - L;
       if (past <= g0.dWall + 0.005 || bb.max.x < -reach || bb.min.x > reach) return;
-      capY = Math.min(capY, (o.userData && o.userData.ssLeanTo ? lowestOverPorch(o) : bb.min.y) - 0.03);
+      // A porch the style has SIZED (porchWidthFt) or HUNG (porchAttachFt) is measured by what is
+      // really over it, like the lean-to: a rake's box is its eave corner, which a narrow porch in the
+      // middle of a wide gable never reaches, and which would hold a porch the style hangs up in the
+      // gable down at the plate. Without either key, the box, as it always was.
+      capY = Math.min(capY, ((o.userData && o.userData.ssLeanTo) || attachFt > 0 || Number(roofCfg.porchWidthFt) > 0 ? lowestOverPorch(o) : bb.min.y) - 0.03);
     });
-    const geom = d3PorchGeom(S, H, D, trimFace, capY);
+    const geom = d3PorchGeom(span, topH, D, trimFace, capY, attachFt);
     const { POST, HDR_H, HDR_D, RAF_W, RAF_D, PR_T, SHEATH, SIDE_OV, CHEEK_T, FAS_T } = geom.sizes;
     const { pitch, yHigh, side, dWall, dPost, dEnd } = geom;
     const ang = Math.atan(pitch), cosA = Math.cos(ang), sinA = Math.sin(ang);
@@ -8074,7 +8373,7 @@ function buildShed3DModel(THREE, p) {
         pg.add(part(fill, "cornerFill"));
       }
       // The rake trim along the porch roof's side edge.
-      pg.add(part(onSlope(trimMat, dWall, dEnd, s * (side + SIDE_OV - 0.04), 0.08, 0.28, -0.06), "rake"));
+      pg.add(part(onSlope(fasciaMat, dWall, dEnd, s * (side + SIDE_OV - 0.04), 0.08, 0.28, -0.06), "rake"));
     }
     // The board and the dark trim face in front of it, both the roof's full width, which closes the
     // corners past the cheeks and rake trims.
@@ -8090,13 +8389,15 @@ function buildShed3DModel(THREE, p) {
     pg.add(part(board, "board"));
     const FASCIA_WOOD = 0.15, dripTop = yTop(dEnd) + 0.02;
     const dripH = Math.max(0.16, dripTop - (boardBot + FASCIA_WOOD));
-    const drip = box(trimMat, 2 * (side + SIDE_OV), dripH, 0.05);
+    const drip = box(fasciaMat, 2 * (side + SIDE_OV), dripH, 0.05);
     drip.position.set(0, dripTop - dripH / 2, dEnd + 0.025);
     pg.add(part(drip, "drip"));
     // The ledger on the wall under the rafters: 0.04 ft proud of any casing (casings face at
     // trimFace), its ends buried in the corner boards.
     const LED_H = 0.3, ledFace = trimFace + 0.04;
-    const ledger = box(trimMat, S, LED_H + RAF_D, ledFace);
+    // In the new frame it is porch framing, stained like the rafters it carries (Farmstand's ledger is
+    // wood; a trim-white board there read as a stripe across the wall). Outside it, trim as it was.
+    const ledger = box(NEW_FRAME ? woodMat : trimMat, span, LED_H + RAF_D, ledFace);
     ledger.position.set(0, geom.ceilWall + RAF_D - (LED_H + RAF_D) / 2, ledFace / 2);
     pg.add(part(ledger, "ledger"));
     // DECK at floor level: boards parallel to the wall with 0.03 ft gaps, a rim on the three open
@@ -8121,13 +8422,17 @@ function buildShed3DModel(THREE, p) {
     const under = box(mat("#3B3024", { roughness: 1 }), 2 * side - 2 * RIM_T, 0.02, D - dWall - RIM_T);
     under.position.set(0, -DECK_T - 0.06, (dWall + D - RIM_T) / 2);
     deck.add(part(under, "deckVoid"));
-    [pg, deck].forEach((grp) => { grp.position.z = atZero ? 0 : L; grp.rotation.y = atZero ? Math.PI : 0; });
+    // A cap end: out along local z from z = 0 or L, centred on the profile (centerU across it). An
+    // eave wall: out along u from u = eaveS x S/2, a quarter turn so the porch's across axis runs
+    // down the ridge, centred at zMid.
+    if (onCap) [pg, deck].forEach((grp) => { grp.position.z = atZero ? 0 : L; grp.rotation.y = atZero ? Math.PI : 0; if (PSPAN.centerU) grp.position.x = PSPAN.centerU; });
+    else [pg, deck].forEach((grp) => { grp.position.set(eaveS * S / 2, 0, zMid); grp.rotation.y = eaveS * Math.PI / 2; });
     pg.userData.ssPorch = "roof";
     rg.add(pg);
     porchDeckGroup = new THREE.Group();
     porchDeckGroup.userData.ssPorch = "deck";
     porchDeckGroup.add(deck);
-    porchCapZ = atZero ? 0 : L;
+    porchCapZ = onCap ? (atZero ? 0 : L) : null;
     return geom;
   })();
   // ── PLATE BAND (roof.plateBand, 2026-09-17) ──
@@ -8146,7 +8451,9 @@ function buildShed3DModel(THREE, p) {
     [[0, -1, capOut0], [L, 1, capOutL]].forEach(([z0, s, co]) => {
       if (capPorchEnd === z0) return;
       const back = Math.min(co, T / 2) - 0.01, face = Math.max(trimFace, capReliefFace(co)) + 0.03;
-      const drop = porchGeom && porchCapZ === z0 ? Math.max(0, H - 0.2 - porchGeom.yHigh) : 0;
+      // ...unless the style sets where the porch roof meets the wall (roof.porchAttachFt): the siding
+      // showing between the two is then the point, not a gap.
+      const drop = porchGeom && porchCapZ === z0 && !(Number(roofCfg.porchAttachFt) > 0) ? Math.max(0, H - 0.2 - porchGeom.yHigh) : 0;
       const band = box(trimMat, S + 2 * (trimFace + 0.01), 0.3 + drop, face - back);
       band.position.set(0, H + SS_PLATE_BAND_TOP - 0.15 - drop / 2, z0 + s * (back + face) / 2);
       band.userData.ssPorch = "band";
@@ -8245,10 +8552,21 @@ function buildShed3DModel(THREE, p) {
   // cladding's proudest surface or the siding renders through it — the 2026-08-27 lap bug,
   // where this face sat at 0.22 against strips reaching 0.23. On panel this is the old
   // T/2 + 0.07 exactly.
+  // cornerMat since 2026-09-24 (colors.corner, else the trim colour). Each board runs to the top
+  // of the taller of the two walls it closes (WALLS[].top): H everywhere but at a new-frame shed's
+  // high wall, where it runs up the tall corner to just under the roof line at its inner face, so it
+  // covers the corner notch the whole way without poking up through the slab on a steep pitch.
   [[-bldgW / 2, -bldgH / 2], [bldgW / 2, -bldgH / 2], [-bldgW / 2, bldgH / 2], [bldgW / 2, bldgH / 2]].forEach((c) => {
     const half = Math.max(T / 2 + 0.07, trimFace);
-    const post = box(trimMat, half * 2, H, half * 2);
-    post.position.set(c[0], H / 2, c[1]);
+    let cTop = H;
+    const wTop = Math.max(WALLS[c[1] < 0 ? "north" : "south"].top, WALLS[c[0] < 0 ? "west" : "east"].top);
+    if (wTop > H + 1e-9) {
+      const uc = uAxisIsX ? c[0] : c[1];
+      cTop = Math.max(H, Math.min(wTop, profYAt(uc - Math.sign(uc) * half)));
+    }
+    const post = box(cornerMat, half * 2, cTop, half * 2);
+    post.position.set(c[0], cTop / 2, c[1]);
+    if (cTop !== H) post.userData.ssCorner = "tall";
     roofGroup.add(post);
   });
 
@@ -8617,9 +8935,18 @@ function buildShed3DModel(THREE, p) {
   // identical roof and could one day be narrowed to the label group alone.
   const sharedMats = new Set([wallMat, trimMat, battenMat]);
   // porch: the projecting porch's numbers as built (d3PorchGeom plus its depth and wall), or null.
-  // Read by tests/harness/porchProbe.mjs.
+  // Read by tests/harness/porchProbe.mjs. In the new frame it also carries d3PorchSpan's width and
+  // whether it stands on a cap end or an eave wall, and `frame` names the roof's axes and each
+  // wall's top (tests/harness/newFrame.mjs); outside it both are exactly what they were.
+  // cornerMat / fasciaMat and the colour role each follows (d3TrimKeyRole) are for setLiveColors.
   const model = { root, envGroup, wallMat, trimMat, battenMat, gableMat, roofGroup, openingsGroup, wallsGroup, interiorGroup, builtFrontWall: frontWall,
-    porch: porchGeom ? { ...porchGeom, D: porchOut.D, wall: porchOut.wall } : null };
+    cornerMat, fasciaMat,
+    cornerRole: d3TrimKeyRole(p.styleSpec && p.styleSpec.colors, "corner"),
+    fasciaRole: d3TrimKeyRole(p.styleSpec && p.styleSpec.colors, "fascia"),
+    porch: porchGeom ? { ...porchGeom, D: porchOut.D, wall: porchOut.wall, ...(NEW_FRAME ? { span: d3PorchSpan(roofCfg, bldgW, bldgH).span, onCap: d3PorchSpan(roofCfg, bldgW, bldgH).onCap } : {}) } : null };
+  if (NEW_FRAME) {
+    model.frame = { uAxisIsX, S, L, tallNeg, tops: Object.fromEntries(Object.keys(WALLS).map((w) => [w, WALLS[w].top])), porchWall };
+  }
   model.rebuildWalls = (names, itemsNow) => {
     names.forEach((wname) => {
       if (!WALLS[wname]) return;
@@ -8909,6 +9236,9 @@ function ssAzimuthDir(deg) {
 // d3ProjectingPorch's own wall arithmetic with the depth test taken out, because the anchor
 // exists whether or not the porch does.
 function d3FrontGableWall(roofCfg, bldgW, bldgH) {
+  // THE NEW FRAME (d3NewFrame): azimuth 0 is the FRONT, and the front is the south wall, whatever
+  // kind of wall it is and wherever porchEnd put a porch. The prompt's FRONT is the same wall.
+  if (d3NewFrame(roofCfg)) return "south";
   const front = ((roofCfg && roofCfg.porchEnd) || "front") !== "back";
   return d3RoofAxes(roofCfg, bldgW, bldgH).uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
 }
@@ -9736,6 +10066,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         // write too -- otherwise picking a trim swatch recolours everything except the one
         // detail that makes board & batten legible.
         if (e.model.battenMat) e.model.battenMat.color.set(liveTrimCss);
+        // Corner boards and fascia (colors.corner / colors.fascia) follow whichever colour their key
+        // names (d3TrimKeyRole): the trim when absent, the body when it is the body's colour. A roof
+        // role or a fixed colour stays put here -- neither is a paint swatch.
+        [[e.model.cornerMat, e.model.cornerRole], [e.model.fasciaMat, e.model.fasciaRole]].forEach(([m, role]) => {
+          if (!m) return;
+          if (role === "body") m.color.set(liveBodyCss);
+          else if (role === "trim" || role == null) m.color.set(liveTrimCss);
+        });
         render();
       };
       // ── 3D placement pipeline (every item class, §10.4) ──

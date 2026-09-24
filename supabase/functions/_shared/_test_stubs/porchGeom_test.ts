@@ -49,7 +49,7 @@ Deno.test("every lifted porch region is byte-identical in the two twins", () => 
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
-const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, ssPorchTrussWall, d3RoofAxes };`)() as Record<string, Any>;
+const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3NewFrame };`)() as Record<string, Any>;
 
 const PANEL_TRIM = 0.18;   // trimFace on panel cladding: T/2 + 0.03
 
@@ -163,4 +163,81 @@ Deno.test("d3PorchReadout reads a size label the way the dormer readout does", (
   // No projecting porch, no readout.
   assertEquals(F.d3PorchReadout({ roof: { type: "gable", porchDepthFt: 6 } }, "12x16"), null);
   assertEquals(F.d3PorchReadout(null, "12x16"), null);
+});
+
+// ── THE NEW FRAME (roof.front / roof.highSide, 2026-09-24) ──────────────────────────────────────
+// FRONT is the south wall. With a frame key on the style, porchEnd "front"/"back" name the south and
+// north walls whatever kind of wall they are; without one, every answer above stands.
+const FARM = { type: "shed", highSide: "front", pitch: 0.3, overhang: 1, porchOutFt: 5, porchEnd: "front" };
+
+Deno.test("new frame: the porch takes the front (south) or back (north) wall, gable end or eave", () => {
+  assertEquals(F.d3ProjectingPorch(FARM, 16, 10), { D: 5, wall: "south" });
+  assertEquals(F.d3ProjectingPorch({ ...FARM, porchEnd: "back" }, 16, 10).wall, "north");
+  for (const hs of ["front", "back", "left", "right"]) {
+    assertEquals(F.d3ProjectingPorch({ ...FARM, highSide: hs }, 10, 16).wall, "south", `highSide ${hs}`);
+  }
+  for (const front of ["gable", "eave"]) {
+    for (const [w, l] of [[28, 20], [12, 32]]) {
+      assertEquals(F.d3ProjectingPorch({ type: "gable", front, porchOutFt: 6 }, w, l).wall, "south", `${front} ${w}x${l}`);
+    }
+  }
+  // Without a key, today's rule: a landscape gable's porch is on its WEST gable end.
+  assertEquals(F.d3ProjectingPorch({ type: "gable", porchOutFt: 6 }, 32, 12).wall, "west");
+});
+
+Deno.test("d3PorchSpan: a cap end spans S, an eave wall L, porchWidthFt narrows it; absent is today", () => {
+  // Farmstand: the south wall is an EAVE wall (the slope runs front to back), 16 ft long.
+  assertEquals(F.d3PorchSpan(FARM, 16, 10), { span: 16, centerU: 0, onCap: false, full: 16 });
+  assertEquals(F.d3PorchSpan({ ...FARM, porchWidthFt: 10 }, 16, 10).span, 10);
+  assertEquals(F.d3PorchSpan({ ...FARM, porchWidthFt: 40 }, 16, 10).span, 16, "never wider than its wall");
+  assertEquals(F.d3PorchSpan({ ...FARM, porchWidthFt: 2 }, 16, 10).span, 4, "the sanitizer's floor");
+  // highSide left: the slope runs across W, so the south wall is a sloped cap end.
+  assertEquals(F.d3PorchSpan({ ...FARM, highSide: "left" }, 16, 10).onCap, true);
+  // A gable-front 28x20: the porch on the gable end spans the profile, 28.
+  assertEquals(F.d3PorchSpan({ type: "gable", front: "gable", porchOutFt: 6, porchWidthFt: 12 }, 28, 20), { span: 12, centerU: 0, onCap: true, full: 28 });
+  assertEquals(F.d3PorchSpan({ type: "gable", front: "eave", porchOutFt: 6 }, 28, 20), { span: 28, centerU: 0, onCap: false, full: 28 });
+  // No key: the gable end, S, exactly the span the renderer always passed d3PorchGeom.
+  for (const [w, l] of [[12, 32], [32, 12], [16, 24]]) {
+    const cfg = { type: "gambrel", porchOutFt: 6 };
+    assertEquals(F.d3PorchSpan(cfg, w, l).span, F.d3RoofAxes(cfg, w, l).S);
+    assertEquals(F.d3PorchSpan(cfg, w, l).onCap, true);
+  }
+  assertEquals(F.d3PorchSpan({ type: "gable" }, 12, 16), null);
+});
+
+Deno.test("porchAttachFt replaces H - 0.2 and is still held under capY; absent is today", () => {
+  assertAlmostEquals(F.d3PorchGeom(16, 10, 5, PANEL_TRIM, Infinity, 8).yHigh, 8, 1e-12);
+  assertAlmostEquals(F.d3PorchGeom(16, 10, 5, PANEL_TRIM, 7.5, 8).yHigh, 7.5, 1e-12);
+  assertEquals(F.d3PorchGeom(16, 9, 6.5, PANEL_TRIM, Infinity, 0), F.d3PorchGeom(16, 9, 6.5, PANEL_TRIM, Infinity));
+  assertEquals(F.d3PorchGeom(16, 9, 6.5, PANEL_TRIM, Infinity, undefined), F.d3PorchGeom(16, 9, 6.5, PANEL_TRIM, Infinity));
+});
+
+Deno.test("d3WallTopFt: only a new-frame shed's HIGH wall stands above H", () => {
+  const tops = (cfg: Any, w: number, l: number) => ["north", "south", "west", "east"].map((wall) => F.d3WallTopFt(cfg, w, l, 7, wall, false));
+  assertEquals(tops(FARM, 16, 10), [7, 10, 7, 7]);
+  assertEquals(tops({ ...FARM, highSide: "back" }, 16, 10), [10, 7, 7, 7]);
+  assertEquals(tops({ ...FARM, highSide: "left" }, 16, 10), [7, 7, 7 + 16 * 0.3, 7]);
+  assertEquals(tops({ ...FARM, highSide: "right" }, 16, 10), [7, 7, 7, 7 + 16 * 0.3]);
+  // Set back by a recessed porch, it stops at H under the roof.
+  assertEquals(F.d3WallTopFt(FARM, 16, 10, 7, "south", true), 7);
+  // No key: every wall is H, on every roof.
+  for (const cfg of [{ type: "shed", pitch: 0.3 }, { type: "gable", front: "eave" }, { type: "gable" }]) {
+    assertEquals(tops(cfg, 16, 10), [7, 7, 7, 7], JSON.stringify(cfg));
+  }
+});
+
+Deno.test("the truss stands in a gable: none on an eave-wall front, the south gable on a gable front", () => {
+  assertEquals(F.ssPorchTrussWall({ type: "gable", front: "eave", porchTruss: true, porchDepthFt: 4 }, 24, 12), null);
+  assertEquals(F.ssPorchTrussWall({ type: "gable", front: "gable", porchTruss: true, porchDepthFt: 4 }, 24, 12), "south");
+  assertEquals(F.ssPorchTrussWall({ type: "gable", front: "gable", porchTruss: true, porchDepthFt: 4, porchEnd: "back" }, 24, 12), "north");
+});
+
+Deno.test("d3PorchReadout reads the high wall and the attach height the renderer builds with", () => {
+  const r = F.d3PorchReadout({ roof: { ...FARM, porchAttachFt: 8 }, wallHeightFt: 7 }, "16x10");
+  assertEquals([r.wall, r.S, r.H, r.wallTop, r.attachFt], ["south", 16, 7, 10, 8]);
+  assertAlmostEquals(r.yHigh, 8, 1e-12);
+  assertAlmostEquals(r.attachNeeded, r.hNeeded - 0.2, 1e-12);
+  // No attach: just under the HIGH wall's top, not under H.
+  assertAlmostEquals(F.d3PorchReadout({ roof: FARM, wallHeightFt: 7 }, "16x10").yHigh, 9.8, 1e-12);
+  assertEquals(F.d3PorchReadout({ roof: { ...FARM, porchWidthFt: 10 }, wallHeightFt: 7 }, "16x10").S, 10);
 });
