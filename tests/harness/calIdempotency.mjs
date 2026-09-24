@@ -20,6 +20,12 @@
 //      REFUSE that generation outright once the meter is armed, which is the opposite failure
 //      and costs the builder just as much
 //   6. no press ever leaves the key out, and zero page errors
+//   7. ⚠️ A `retryable` REPLY IS RESENT ONCE, BY ITSELF, IN THE SAME PRESS (2026-09-24). A draft
+//      cut off at max_tokens comes back `retryable: true` with the hold already released, and the
+//      panel sends it again with `lean: true` under the SAME key -- two calls on the wire, one
+//      press, no second press asked of the builder. Never a third call, never on any other
+//      failure (1-6 above are all non-retryable, and every one of them is exactly one call), and
+//      a press that fails lean as well leaves the key pending for the builder's own retry.
 //
 // Stubbed at the NETWORK layer, like dev/verify-cal3d.mjs: no account, no login, no writes, and
 // the artifacts under test are the compiled bundles the browser really loads. A change that was
@@ -73,8 +79,11 @@ const CONFIG = {
 };
 
 // Every calibrate_style_ai body the page sent, and the switch that decides what it gets back.
+//   fail       a 503 with no `retryable`: the old timeout shape, which the builder retries
+//   retryable  every call answers 502 { retryable: true }: cut off, hold released
+//   retryOnce  the first call of a press is retryable, the lean one succeeds
 const generateCalls = [];
-const stub = { fail: false };
+const stub = { fail: false, retryable: false, retryOnce: false };
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 
@@ -136,6 +145,13 @@ async function main() {
         // for — the server answered, the hold was released, and the builder has every reason to
         // press again.
         if (stub.fail) return json(route, { error: "The model took too long - try again." }, 503);
+        // THE SERVER'S OWN SHAPE for a reply it could not finish (contract §3): the hold is
+        // released, the sentence is for a person, and `retryable` is for this panel.
+        const cutOff = { error: "The AI ran out of room before finishing - please try again.", code: "ai_spec_truncated", retryable: true };
+        if (stub.retryable) return json(route, cutOff, 502);
+        if (stub.retryOnce && !body.lean) return json(route, cutOff, 502);
+        // Slow enough that the progress card's "reading it again" line can be caught in flight.
+        if (stub.retryOnce && body.lean) await new Promise((res) => setTimeout(res, 1500));
         return json(route, {
           ok: true,
           d3: { roof: { type: "gambrel", pitch: 0.5, overhang: 0.8 }, wallHeightFt: 7.5, siding: null, colors: { body: "#00ff00" } },
@@ -244,6 +260,61 @@ async function main() {
   r.ok("A PENDING KEY DOES NOT CROSS TO ANOTHER STYLE",
     Boolean(a6) && UUID_RE.test(a6.idempotencyKey || "") && a6.idempotencyKey !== (a5 && a5.idempotencyKey),
     `barn ${(a5 && a5.idempotencyKey) || "-"} vs shed ${(a6 && a6.idempotencyKey) || "-"}`);
+
+  // ── 7: a `retryable` reply is resent once, lean, by itself ────────────────────────────
+  // One press, and the calls it put on the wire -- waited out to the button coming back, so a
+  // press that retried and one that did not are measured the same way. `saw` is whatever the
+  // progress card said about reading it again while the press was running.
+  const pressRetry = async (label, want) => {
+    const n = generateCalls.length;
+    await gen.first().click();
+    let saw = "";
+    for (let i = 0; i < 400; i++) {
+      const st = await page.evaluate(() => {
+        const card = document.querySelector('[data-ssc-card="progress"]');
+        const b = Array.from(document.querySelectorAll("button")).find((x) => /Generate the 3D model|Working/.test(x.textContent || ""));
+        return { card: card ? card.textContent : "", idle: Boolean(b) && !b.disabled && /Generate the 3D model/.test(b.textContent || "") };
+      });
+      if (/ran out of room before it finished/.test(st.card)) saw = st.card;
+      if (st.idle && generateCalls.length > n) break;
+      await page.waitForTimeout(50);
+    }
+    await page.waitForTimeout(300);
+    const calls = generateCalls.slice(n);
+    r.ok(`${label}: one press sent exactly ${want} call${want === 1 ? "" : "s"}`, calls.length === want, `${calls.length} calls`);
+    return { calls, saw };
+  };
+  stub.fail = false; stub.retryOnce = true;
+  const pending = a6 && a6.idempotencyKey;
+  const t1 = await pressRetry("press 7 (cut off, then the lean retry lands)", 2);
+  r.ok("⚠️ THE FIRST CALL WAS AN ORDINARY ONE", Boolean(t1.calls[0]) && !("lean" in t1.calls[0]), JSON.stringify(t1.calls[0] && { lean: t1.calls[0].lean }));
+  r.ok("⚠️ AND THE AUTOMATIC SECOND ONE ASKED FOR A LEAN ANSWER", Boolean(t1.calls[1]) && t1.calls[1].lean === true, JSON.stringify(t1.calls[1] && { lean: t1.calls[1].lean }));
+  r.ok("⚠️ UNDER THE SAME KEY — one intent, one charge",
+    t1.calls.length === 2 && t1.calls[0].idempotencyKey === t1.calls[1].idempotencyKey,
+    t1.calls.map((c) => c.idempotencyKey).join(" then "));
+  r.ok("and that key is the one this style's failed press left pending", Boolean(pending) && t1.calls[0] && t1.calls[0].idempotencyKey === pending, `${pending} vs ${t1.calls[0] && t1.calls[0].idempotencyKey}`);
+  r.ok("the same views and the same measurements went both times",
+    t1.calls.length === 2 && JSON.stringify(t1.calls[0].photoUrls) === JSON.stringify(t1.calls[1].photoUrls) && JSON.stringify(t1.calls[0].dims) === JSON.stringify(t1.calls[1].dims));
+  r.ok("the progress card said it was reading again, and that it is one generation",
+    /ran out of room before it finished/.test(t1.saw) && /still one generation/.test(t1.saw), t1.saw.slice(0, 120));
+  await page.waitForFunction(() => /Read \d+ view/.test(document.body.innerText), null, { timeout: 20000 }).catch(() => {});
+  r.ok("⚠️ AND THE DRAFT LANDED, with no second press from the builder", /Read \d+ view/.test(await page.evaluate(() => document.body.innerText)));
+
+  // A reply that is cut off TWICE: one automatic retry, never a third call, and the key stays
+  // pending for the builder's own retry of the same intent.
+  stub.retryOnce = false; stub.retryable = true;
+  const t2 = await pressRetry("press 8 (cut off, and cut off again)", 2);
+  r.ok("⚠️ NEVER A SECOND AUTOMATIC RETRY", t2.calls.length === 2 && !("lean" in t2.calls[0]) && t2.calls[1].lean === true,
+    t2.calls.map((c) => String(c.lean)).join(", "));
+  r.ok("a fresh intent after the landed draft minted its own key, used for both calls",
+    t2.calls.length === 2 && UUID_RE.test(t2.calls[0].idempotencyKey || "") && t2.calls[0].idempotencyKey === t2.calls[1].idempotencyKey && t2.calls[0].idempotencyKey !== pending);
+  const failText = await page.evaluate(() => document.body.innerText);
+  r.ok("the builder is told in the server's own words", /ran out of room before finishing/.test(failText));
+  const t3 = await pressRetry("press 9 (the builder's own retry)", 2);
+  r.ok("⚠️ THE BUILDER'S OWN RETRY IS STILL THE SAME INTENT — same key",
+    t3.calls.length === 2 && t2.calls[0] && t3.calls[0].idempotencyKey === t2.calls[0].idempotencyKey,
+    `${t2.calls[0] && t2.calls[0].idempotencyKey} then ${t3.calls[0] && t3.calls[0].idempotencyKey}`);
+  stub.retryable = false;
 
   // ── 6: nothing slipped through without one ───────────────────────────────────────────────
   const missing = generateCalls.filter((c) => !c.idempotencyKey).length;

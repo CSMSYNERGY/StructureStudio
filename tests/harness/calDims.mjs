@@ -27,6 +27,11 @@
 //   9. clearing the wall height NEVER erases the style's stored wall — the sanitiser DROPS a
 //      wall outside 3..20 instead of clamping it, so a 0 on the wire is an erasure, not a clamp
 //  10. zero page errors, and no generation ever leaves without dims
+//  11. THE NEW FRAME OF REFERENCE, IN WORDS (2026-09-24): width is the FRONT wall (the side with
+//      the porch or main door), length runs front to back, and the wall height is the outside
+//      walls at the eave -- the LOW side on a single slope. A front longer than the building is
+//      deep is a real building now (Farmstand), so the width/length note explains rather than
+//      telling a builder to swap two correct numbers. And the wall band tops out at 20, not 14
 //
 // Stubbed at the NETWORK layer, like calIdempotency.mjs: no account, no login, no writes, and the
 // artifacts under test are the compiled bundles the browser really loads. A change that was never
@@ -254,6 +259,25 @@ async function main() {
   r.ok("and so does length", (await lengthIn.inputValue()) === "24", await lengthIn.inputValue());
   r.ok("the wall height pre-fills from the style's saved spec", (await wallIn.inputValue()) === "7", await wallIn.inputValue());
 
+  // ── 11: what each number IS, in the frame the generator now reads them in ─────────────────
+  // The server tells the model "the FRONT wall is W ft long, L ft deep front to back, and the
+  // outside walls are H ft tall at the eave (on a one-slope roof, the LOW side)". A card that
+  // still said "width is the gable end" would be asking for a different number from the one the
+  // prompt states as fact.
+  const dimLabels = await page.evaluate(() => Array.from(document.querySelectorAll('[data-ssc-card="dims"] label'))
+    .map((l) => (l.firstChild && l.firstChild.textContent ? l.firstChild.textContent : l.textContent || "").trim()));
+  r.ok("⚠️ WIDTH IS THE FRONT WALL, the side with the porch or main door",
+    /^Width \(ft\) — the FRONT wall \(the side with the porch or main door\)/.test(dimLabels[0] || ""), dimLabels[0]);
+  r.ok("length runs front to back", /^Length \(ft\) — front to back/.test(dimLabels[1] || ""), dimLabels[1]);
+  r.ok("the wall height is the outside walls at the eave, the LOW side on a single slope",
+    /^Wall height at the eave \(ft\) — the outside walls \(single-slope roof: the LOW side\)/.test(dimLabels[2] || ""), dimLabels[2]);
+  const cardText = await page.evaluate(() => (document.querySelector('[data-ssc-card="dims"]') || {}).innerText || "");
+  r.ok("and the card no longer calls the width the gable end", !/gable end/i.test(cardText), (cardText.match(/[^\n]*gable end[^\n]*/i) || ["-"])[0].slice(0, 100));
+  r.ok("it says what to do with wings: measure the whole thing", /wings included/.test(cardText));
+  // ⚠️ AND THE LABEL NEVER STARTS "Wall height (ft)". tests/harness/porchPanel.mjs reaches the
+  // field further down by /^Wall height \(ft\)/, and this harness reaches it by has-text.
+  r.ok("the card's wall label cannot be mistaken for the field further down", !/^Wall height \(ft\)/.test(dimLabels[2] || ""));
+
   await shotCard("01-required-wall-unconfirmed");
   r.ok("PRE-FILLED NUMBERS KEEP GENERATE LOCKED", (await genEnabled()) === false);
   // ⚠️ ALL THREE, NOT JUST THE WALL. Width and length are seeded from the median row of this
@@ -329,6 +353,12 @@ async function main() {
   const warned = await page.evaluate(() => document.body.innerText);
   await shotCard("03-warned-not-refused");
   r.ok("a length shorter than the width is called out", /length is shorter than the width/i.test(warned));
+  // ⚠️ AND IT NO LONGER SAYS THEY ARE WRONG. Width is the FRONT wall now, so a 12 wide, 10 deep
+  // building is a real building whose door is on a long side. The note says what the numbers
+  // mean and names the one real mistake; it does not tell the builder to swap them.
+  r.ok("⚠️ the note explains the front, it does not call the numbers backwards",
+    /so the front is the long side/.test(warned) && /if the door is on a short end/.test(warned) && !/GABLE END/.test(warned),
+    (warned.match(/[^\n]*length is shorter than the width[^\n]*/i) || ["-"])[0].slice(0, 160));
   r.ok("AND IT DOES NOT REFUSE — the button is still live", (await genEnabled()) === true, await whyLine());
   const a6 = await press("press 6 (warned but allowed)");
   r.ok("the warned set still reaches the server", Boolean(a6) && a6.dims.widthFt === 12 && a6.dims.lengthFt === 10, JSON.stringify(a6 && a6.dims));
@@ -440,6 +470,13 @@ async function main() {
     (await page.evaluate(() => (document.querySelector('[data-ssc-card="dims"]') || {}).innerText || "")).slice(0, 80));
   await shotCard("05-wall-out-of-band");
   r.ok("nothing was generated while it was refused", generateCalls.length === nGen, `${generateCalls.length - nGen} calls`);
+  // THE TOP OF THE BAND IS 20 (contract §1: every 14-clamp moved to 20 in lock-step). A two-storey
+  // middle section with 16 ft walls is an ordinary building now, and the card must not refuse it.
+  await setDim(wallIn, 20);
+  r.ok("⚠️ a 20 ft wall is inside the band — no refusal, Generate live",
+    (await genEnabled()) === true && !/does not look right/.test(await whyLine()), (await whyLine()).slice(0, 120));
+  await setDim(wallIn, 20.5);
+  r.ok("and 20.5 is outside it, named in the server's own words", /between 3 and 20/.test(await whyLine()), (await whyLine()).slice(0, 120));
   await setDim(wallIn, 9);
   r.ok("a storable number clears the refusal", (await genEnabled()) === true, await whyLine());
   const a8 = await press("press 8 (after an out-of-band wall)");

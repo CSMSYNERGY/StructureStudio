@@ -23,6 +23,16 @@
 //       building the RENDERS were drawn at rather than against whatever the preview is showing
 //    8. 375 px: no horizontal overflow, and no image squeezed into half a phone
 //    9. zero page errors throughout
+//   10. ⚠️ MORE THAN ONE ROUND (2026-09-24). A round that corrects something re-renders the
+//       CORRECTED building and asks again, sending `round` 0, 1, 2 -- the server's own 0-based
+//       claim counter (round k claims k -> k+1; absent is 0, which is what an older designer
+//       sends). Round 1 corrects, round 2 matches: exactly two requests, rounds 0 and 1, the
+//       second one's renders are of the corrected building and are the pictures left on screen,
+//       and the progress card says which round it is on. Three corrections stop at three rounds
+//       with one merged list; a correction that undoes the last one stops the loop (oscillation);
+//       a later round that fails keeps the earlier round's corrections
+//   11. the six viewpoints: `back` and `otherSide` get renders and pairs, in order, and six
+//       renders stay inside the server's raised total
 //
 // Stubbed at the NETWORK layer, like calDims.mjs: no account, no login, no writes, and the
 // artifacts under test are the compiled bundles the browser really loads. A change that was
@@ -105,6 +115,13 @@ let draftOverhang = 1.0;
 // which is the state the warning banner exists for and the one where it had no way out.
 let draftFrameMap = FRAME_MAP;
 let draftObserved = { roofNote: "Gambrel, read from the ground.", porch: "projecting", confidence: "medium" };
+// THE ROUNDS. `checkReply` / `checkStatus` answer round 0 (or a request with no round); a later
+// round answers "matches" unless `checkPlan` says otherwise -- a list of { status, body } by
+// round, the last entry repeating. `checkDelayMs` slows every check so the progress card can be
+// read between them.
+let checkPlan = null;
+let checkDelayMs = 0;
+const MATCHES = { ok: true, verdict: "matches", d3: null, changed: [], checked: {}, note: "", renders: 3, ms: 700 };
 
 // How many pixels differ between two JPEG data URLs, as a fraction. Decoded with the same
 // browser that drew them — there is no image decoder in node here, and shipping one to count
@@ -199,7 +216,14 @@ async function main() {
       }
       if (a === "calibrate_style_check") {
         checkCalls.push(body);
+        if (checkDelayMs) await new Promise((res) => setTimeout(res, checkDelayMs));
         if (checkAbort) return route.abort();
+        const round = Number.isInteger(body.round) ? body.round : 0;
+        if (checkPlan) {
+          const step = checkPlan[Math.min(round, checkPlan.length - 1)];
+          return json(route, step.body, step.status || 200);
+        }
+        if (round > 0) return json(route, MATCHES);
         return json(route, checkReply, checkStatus);
       }
       if (a === "save_style_d3") return json(route, { ok: true });
@@ -284,7 +308,8 @@ async function main() {
     card.includes("you are charged $20 once, however much we have to fix"), card.slice(-90));
   r.ok("with all four steps named, including the two that are new",
     card.includes("Checking our 3D against your video") && card.includes("Correcting anything that doesn't line up"));
-  r.ok("and an honest wait, not a spinner", card.includes("Usually about a minute"));
+  // "one to three minutes" since the rounds (2026-09-24): a minute was one draft and one check.
+  r.ok("and an honest wait, not a spinner", card.includes("Usually one to three minutes"));
   // A SECOND PRESS CANNOT HAPPEN WHILE THIS IS RUNNING, and it is the DOM that says so rather
   // than a guard inside the handler. Asserted by reading `disabled` rather than by clicking:
   // Playwright's click waits for a disabled button to come back and then presses it, which
@@ -305,6 +330,8 @@ async function main() {
   r.ok("the paid call went out exactly once for that press", genCalls.length === 1, String(genCalls.length));
   r.ok("⚠️ THE FREE CHECK IS CALLED, with the ledger row the generation named",
     Boolean(a1.check) && a1.check.checkId === CHECK_ID, a1.check ? a1.check.checkId : "no call");
+  r.ok("⚠️ AND IT IS ROUND 0 — the server's own counter, 0-based", Boolean(a1.check) && a1.check.round === 0, JSON.stringify(a1.check && a1.check.round));
+  r.ok("a check that MATCHES is not asked again", checkCalls.length === 1, String(checkCalls.length));
   r.ok("and it re-sends THE EXACT ARRAY the generation was given, uncompacted",
     Boolean(a1.check) && JSON.stringify(a1.check.photoUrls) === JSON.stringify(a1.gen.photoUrls),
     a1.check ? String((a1.check.photoUrls || []).length) : "-");
@@ -430,8 +457,13 @@ async function main() {
     changed: [{ field: "roof.overhang", from: 1, to: 0.15, why: "The roof edge sits flush with the wall in your close-up." }],
     checked: { overhang: "changed", porch: "ok" }, note: "", renders: 3, ms: 2400,
   };
+  const nBefore3 = checkCalls.length;
   const a3 = await press();
-  r.ok("the check ran again on the new generation", checkCalls.length === 3, String(checkCalls.length));
+  // TWO REQUESTS NOW: round 0 corrected the overhang, so round 1 looked at the corrected
+  // building (and the stub's round 1 matches). Before the rounds this was one.
+  r.ok("the check ran again on the new generation, and looked twice",
+    checkCalls.length - nBefore3 === 2 && checkCalls[nBefore3].round === 0 && checkCalls[nBefore3 + 1].round === 1,
+    checkCalls.slice(nBefore3).map((c) => c.round).join(","));
   const merged = await page.evaluate(() => {
     const box = Array.from(document.querySelectorAll("input")).find((i) => /Overhang/.test((i.closest("label") || {}).textContent || ""));
     return box ? box.value : null;
@@ -439,7 +471,9 @@ async function main() {
   r.ok("⚠️ THE CORRECTION REACHED THE SPEC — the overhang field shows what the check said",
     merged !== null && Math.abs(parseFloat(merged) - 0.15) < 0.001, String(merged));
   const porch = await page.evaluate(() => {
-    const sel = Array.from(document.querySelectorAll("select")).find((s) => /porch/i.test((s.closest("label") || {}).textContent || ""));
+    // The porch-KIND select, found by the option only it has (porchPanel.mjs's locator). Since
+    // 2026-09-24 "Front wall (porch or door side)" is also a select whose label says porch.
+    const sel = Array.from(document.querySelectorAll("select")).find((s) => s.querySelector('option[value="projecting"]'));
     return sel ? sel.value : null;
   });
   r.ok("⚠️ AND IT DID NOT RESURRECT THE PORCH THE DRAFT REPLACED",
@@ -607,10 +641,34 @@ async function main() {
   const dBarn = await pixelDelta(page, pairReset, pairBeforeFix);
   r.ok("⚠️ AND THE ROTATE CONTROL DRAWS THE CORRECTED BUILDING, not the replaced one",
     dShed < 0.01 && dBarn > 0.01, `${(dShed * 100).toFixed(2)}% from the shed, ${(dBarn * 100).toFixed(2)}% from the barn roof`);
+  // ── THE 2026-09-24 ROOF CHOICES IN THE SAME PANEL ─────────────────────────────────────
+  // The roof is a one-slant now (the tile above), so the panel asks which wall is the high one,
+  // in four tiles. Picking one writes roof.highSide -- the field grid's select reads it back --
+  // and the "What we drew" line says it in words.
+  const roofTiles = () => page.evaluate(() => Array.from(document.querySelectorAll('[data-ssc-question="roof"] button'))
+    .map((b) => b.innerText.split("\n")[0].trim()));
+  const shedTiles = await roofTiles();
+  r.ok("⚠️ A ONE-SLANT ROOF IS ASKED WHICH WALL IS HIGH, in four tiles",
+    ["The front", "The back", "Left side", "Right side"].every((t) => shedTiles.includes(t)), shedTiles.join(" | "));
+  r.ok("and is offered no wings, which a one-slant roof cannot have", !shedTiles.includes("Both sides"));
+  await page.locator('[data-ssc-question="roof"]').getByRole("button", { name: /^The front/ }).click();
+  await page.waitForTimeout(300);
+  const hsSelect = await page.evaluate(() => {
+    const l = Array.from(document.querySelectorAll("label")).find((x) => /^High side \(single slant\)/.test(x.textContent || ""));
+    const sel = l ? l.querySelector("select") : null;
+    return sel ? sel.value : null;
+  });
+  r.ok("the tile writes roof.highSide, which the field grid reads back", hsSelect === "front", String(hsSelect));
+  r.ok("and What we drew says it in words", /The high side is the front\./.test(await spanLine()), await spanLine());
   // Back to the barn roof, so the slider assertions below are about the panel they were written
   // for. The re-shoot rides along with it.
   await page.locator('[data-ssc-question="roof"]').getByRole("button", { name: /Barn roof/ }).click();
   await page.waitForTimeout(SS_RESHOOT_SETTLE);
+  const barnTiles = await roofTiles();
+  r.ok("⚠️ BACK ON A BARN ROOF: the front-wall choice and the wings, and no high side",
+    ["A gable end", "A long side", "None", "Both sides"].every((t) => barnTiles.includes(t)) && !barnTiles.includes("The back"),
+    barnTiles.join(" | "));
+  r.ok("and the high side a barn roof cannot have came off it", !/The high side is/.test(await spanLine()), await spanLine());
 
   // Dragging the sliders must not be able to build the roof the warning refuses. The unit
   // test proves that over the whole grid; this proves the slider is wired to the function.
@@ -638,6 +696,11 @@ async function main() {
   r.ok("⚠️ AND ALL FOUR ARE NAMED UNDER SAVE",
     /You marked the roof, porch, wall height and colour as wrong/.test(await saveWhy()), await saveWhy());
   r.ok("in amber", (await saveWhyColour()) === AMBER_TEXT, await saveWhyColour());
+  // The last "No" was the colours, so that is the panel open now: corner boards and fascia are
+  // in it, because the check never corrects a colour and this is the only way to fix one.
+  const colourFix = await page.evaluate(() => (document.querySelector('[data-ssc-question="colours"]') || {}).innerText || "");
+  r.ok("the colour controls carry corner boards and fascia, blank = the trim",
+    /Corner boards/.test(colourFix) && /Fascia and rake boards/.test(colourFix), colourFix.replace(/\s+/g, " ").slice(0, 160));
   r.ok("with Save still live, because a builder must always be able to save", (await saveEnabled()) === true);
   await page.locator('[data-ssc-card="compare"]').screenshot({ path: join(shots, "05-four-nos.png") });
 
@@ -703,7 +766,7 @@ async function main() {
     cardAfter.nodes > cardBefore.nodes && cardAfter.inputs > 0,
     `${cardBefore.nodes} -> ${cardAfter.nodes} nodes, ${cardAfter.inputs} input(s) in the banner`);
   r.ok("and the control it opened is the wall height, in the builder's words",
-    /Floor to the top of the side wall/.test(cardAfter.alertText), cardAfter.alertText.slice(-90));
+    /Floor to the top of the outside wall at the eave/.test(cardAfter.alertText), cardAfter.alertText.slice(-90));
   await page.locator('[data-ssc-card="compare"] [role="alert"]').getByRole("button", { name: /Hide the wall height controls/ }).click();
   await page.waitForTimeout(200);
   r.ok("and it closes again", (await page.evaluate(() => {
@@ -939,6 +1002,162 @@ async function main() {
 
   await page.setViewportSize({ width: 1500, height: 1100 });
   await page.waitForTimeout(400);
+
+  // ── 10: MORE THAN ONE ROUND ─────────────────────────────────────────────────────────────
+  // What one press sends when the check corrects something: the corrected building, rendered
+  // again, asked about again. Each helper reads the whole round list for one press.
+  const draftAt = (over) => { const d = draftSpec({ wallHeightFt: 9 }, 1.0); return { ...d, roof: { ...d.roof, ...over } }; };
+  const fixed = (d3, changed, note = "") => ({ status: 200, body: { ok: true, verdict: "corrections", d3, changed, checked: {}, note, renders: 3, ms: 1500 } });
+  const fieldValue = (re) => page.evaluate((src) => {
+    const rx = new RegExp(src);
+    const box = Array.from(document.querySelectorAll("input")).find((i) => rx.test((i.closest("label") || {}).textContent || ""));
+    return box ? box.value : null;
+  }, re.source);
+  const verdictLine = async () => ((await text()).match(/We checked our own 3D[^\n]*/) || [""])[0];
+  const pairShot = (vp) => page.evaluate((v) => {
+    const el = document.querySelector(`[data-ssc-pair="${v}"]`);
+    const img = el ? el.querySelectorAll("img")[1] : null;
+    return img ? img.getAttribute("src") : "";
+  }, vp);
+
+  // A. Round 1 corrects, round 2 matches. Slowed, so the card can be read between them.
+  checkPlan = [
+    fixed(draftAt({ overhang: 0.15 }), [{ field: "roof.overhang", from: 1, to: 0.15, why: "flush in your close-up" }]),
+    { status: 200, body: MATCHES },
+  ];
+  checkDelayMs = 1200;
+  const nA = checkCalls.length;
+  await gen.first().click();
+  const roundsSeen = new Set();
+  let sawBusy = false;
+  let roundShot = false;
+  for (let i = 0; i < 600; i++) {
+    const st = await page.evaluate(() => {
+      const card = document.querySelector('[data-ssc-card="progress"]');
+      const b = Array.from(document.querySelectorAll("button")).find((x) => /Generate the 3D model|Working/.test(x.textContent || ""));
+      return { card: card ? card.textContent : "", idle: Boolean(b) && !b.disabled && /Generate the 3D model/.test(b.textContent || "") };
+    });
+    for (const m of st.card.matchAll(/Checking its work — round (\d) of (\d)/g)) roundsSeen.add(`${m[1]} of ${m[2]}`);
+    if (!roundShot && /round 2 of 3/.test(st.card)) {
+      roundShot = true;
+      await page.locator('[data-ssc-card="progress"]').screenshot({ path: join(shots, "06-progress-round-2.png") }).catch(() => {});
+    }
+    if (!st.idle) sawBusy = true;
+    else if (sawBusy) break;
+    await page.waitForTimeout(40);
+  }
+  await page.waitForFunction(() => Boolean(document.querySelector('[data-ssc-card="compare"]')), null, { timeout: 60000 });
+  await page.waitForTimeout(400);
+  checkDelayMs = 0;
+  const callsA = checkCalls.slice(nA);
+  r.ok("⚠️ ROUND 1 CORRECTS, ROUND 2 MATCHES: EXACTLY TWO CHECK REQUESTS", callsA.length === 2, `${callsA.length} requests`);
+  r.ok("⚠️ numbered 0 and 1 on the wire, the server's own counter", callsA.map((c) => c.round).join(",") === "0,1",
+    callsA.map((c) => c.round).join(","));
+  r.ok("both against the same ledger row and the exact array the generation read",
+    callsA.length === 2 && callsA.every((c) => c.checkId === CHECK_ID) && JSON.stringify(callsA[0].photoUrls) === JSON.stringify(callsA[1].photoUrls));
+  r.ok("⚠️ THE PROGRESS CARD SAID WHICH ROUND IT WAS ON", roundsSeen.has("1 of 3") && roundsSeen.has("2 of 3"),
+    Array.from(roundsSeen).join(" | ") || "none seen");
+  const eave0 = callsA[0] && callsA[0].renders.find((x) => x.viewpoint === "eaveCorner");
+  const eave1 = callsA[1] && callsA[1].renders.find((x) => x.viewpoint === "eaveCorner");
+  const dRound = (eave0 && eave1) ? await pixelDelta(page, eave0.base64, eave1.base64) : 0;
+  r.ok("⚠️ ROUND 2 WAS SHOWN THE CORRECTED BUILDING, not the draft again", dRound > 0.01, `${(dRound * 100).toFixed(2)}% of the eave close-up moved`);
+  r.ok("⚠️ AND THOSE ARE THE PICTURES LEFT ON SCREEN — the builder judges what they will save",
+    callsA.length === 2 && (await Promise.all(callsA[1].renders.map(async (x) => (await pairShot(x.viewpoint)) === x.base64))).every(Boolean));
+  r.ok("the cumulative spec reached the panel", Math.abs(parseFloat(await fieldValue(/^Overhang \(ft\)/)) - 0.15) < 0.001, String(await fieldValue(/^Overhang \(ft\)/)));
+  r.ok("the card says it looked twice and names the one correction", /2 times and corrected 1 thing/.test(await verdictLine()), await verdictLine());
+
+  // B. Three corrections in a row: the loop stops at three rounds, with ONE merged list.
+  const b1 = draftAt({ overhang: 0.15 });
+  const b2 = draftAt({ overhang: 0.15, ridgeRise: 0.9 });
+  const b3 = draftAt({ overhang: 0.15, ridgeRise: 0.9, kneeRise: 0.65 });
+  checkPlan = [
+    fixed(b1, [{ field: "roof.overhang", from: 1, to: 0.15, why: "flush" }]),
+    fixed(b2, [{ field: "roof.ridgeRise", from: 1, to: 0.9, why: "the peak is lower" }]),
+    fixed(b3, [{ field: "roof.kneeRise", from: 0.72, to: 0.65, why: "the bend is shallower" }]),
+  ];
+  const nB = checkCalls.length;
+  await press();
+  const callsB = checkCalls.slice(nB);
+  r.ok("⚠️ THREE CORRECTIONS STOP AT THREE ROUNDS — never a fourth", callsB.map((c) => c.round).join(",") === "0,1,2",
+    callsB.map((c) => c.round).join(","));
+  r.ok("every round's correction reached the spec, merged onto the pre-generation spec",
+    Math.abs(parseFloat(await fieldValue(/^Overhang \(ft\)/)) - 0.15) < 0.001
+      && Math.abs(parseFloat(await fieldValue(/^Ridge rise/)) - 0.9) < 0.001
+      && Math.abs(parseFloat(await fieldValue(/^Knee rise/)) - 0.65) < 0.001,
+    [await fieldValue(/^Overhang \(ft\)/), await fieldValue(/^Ridge rise/), await fieldValue(/^Knee rise/)].join(" / "));
+  r.ok("⚠️ AND THE PORCH THE DRAFT REPLACED STAYED GONE through three merges",
+    (await page.evaluate(() => {
+      const sel = Array.from(document.querySelectorAll("select")).find((x) => /porch/i.test((x.closest("label") || {}).textContent || "") && x.querySelector('option[value="projecting"]'));
+      return sel ? sel.value : null;
+    })) === "projecting");
+  const listB = await page.evaluate(() => { const ul = document.querySelector('[data-ssc-card="compare"] ul'); return ul ? ul.innerText : ""; });
+  r.ok("one list of three lines, one per field", listB.split("\n").filter(Boolean).length === 3 && /12 in\s*→\s*2 in/.test(listB),
+    listB.split("\n").join(" | ").slice(0, 200));
+  r.ok("and the card says three looks, three corrections", /3 times and corrected 3 things/.test(await verdictLine()), await verdictLine());
+  await page.locator('[data-ssc-card="compare"]').screenshot({ path: join(shots, "07-three-rounds.png") });
+
+  // C. OSCILLATION: round 2 puts back what round 1 changed. The building it produces has already
+  // been checked, so the loop stops rather than asking a third time about the draft.
+  checkPlan = [
+    fixed(draftAt({ overhang: 0.15 }), [{ field: "roof.overhang", from: 1, to: 0.15, why: "flush" }]),
+    fixed(draftAt({ overhang: 1.0 }), [{ field: "roof.overhang", from: 0.15, to: 1, why: "it does stick out after all" }]),
+    fixed(draftAt({ overhang: 0.15 }), [{ field: "roof.overhang", from: 1, to: 0.15, why: "flush again" }]),
+  ];
+  const nC = checkCalls.length;
+  await press();
+  const callsC = checkCalls.slice(nC);
+  r.ok("⚠️ A CORRECTION BACK TO A BUILDING ALREADY CHECKED STOPS THE LOOP", callsC.map((c) => c.round).join(",") === "0,1",
+    callsC.map((c) => c.round).join(","));
+  r.ok("the spec is where the last round left it", Math.abs(parseFloat(await fieldValue(/^Overhang \(ft\)/)) - 1.0) < 0.001, String(await fieldValue(/^Overhang \(ft\)/)));
+  r.ok("and the card says the corrections cancelled out, with no list of non-changes",
+    /cancelled each other out/.test(await verdictLine()) && !(await page.evaluate(() => Boolean(document.querySelector('[data-ssc-card="compare"] ul')))),
+    await verdictLine());
+
+  // D. AN OLDER SERVER, which knows one round: round 1 is refused (409). Round 0's correction is
+  // the builder's and must survive; the card reports the correction, not a failed check.
+  checkPlan = [
+    fixed(draftAt({ overhang: 0.15 }), [{ field: "roof.overhang", from: 1, to: 0.15, why: "flush" }]),
+    { status: 409, body: { error: "That generation has already been checked, or it is too old to check now.", code: "check_unavailable" } },
+  ];
+  const nD = checkCalls.length;
+  await press();
+  const callsD = checkCalls.slice(nD);
+  r.ok("a second round was asked for", callsD.map((c) => c.round).join(",") === "0,1", callsD.map((c) => c.round).join(","));
+  r.ok("⚠️ A LATER ROUND THAT FAILS NEVER COSTS AN EARLIER ONE",
+    Math.abs(parseFloat(await fieldValue(/^Overhang \(ft\)/)) - 0.15) < 0.001 && /corrected 1 thing/.test(await verdictLine()),
+    `${await fieldValue(/^Overhang \(ft\)/)} · ${await verdictLine()}`);
+  r.ok("and it is not reported as a check that could not run", !(await text()).includes("We couldn't run our own check this time"));
+  checkPlan = null;
+
+  // ── 11: the six viewpoints ──────────────────────────────────────────────────────────────
+  // `back` and `otherSide` (2026-09-24): wide views, aimed at the angle the model gave THEIR
+  // frame, appended after the original four so every pairing that worked keeps its place.
+  const SIX = {
+    front: { frame: 1, azimuthDeg: 0 }, side: { frame: 3, azimuthDeg: 90 }, eaveCorner: { frame: 4, azimuthDeg: 270 },
+    corner: { frame: 2, azimuthDeg: 315 }, back: { frame: 5, azimuthDeg: 180 }, otherSide: { frame: 7, azimuthDeg: 270 },
+  };
+  draftFrameMap = SIX;
+  checkReply = MATCHES;
+  const six = await press();
+  const sixR = (six.check && six.check.renders) || [];
+  r.ok("⚠️ SIX LABELLED VIEWPOINTS, SIX RENDERS, in the order the pairs are shown",
+    sixR.map((x) => x.viewpoint).join(",") === "front,side,eaveCorner,corner,back,otherSide", sixR.map((x) => x.viewpoint).join(","));
+  r.ok("each naming the frame the model labelled", sixR.length === 6 && sixR.every((x) => x.frame === SIX[x.viewpoint].frame));
+  const sixPairs = await page.evaluate(() => Array.from(document.querySelectorAll("[data-ssc-pair]")).map((el) => ({
+    vp: el.getAttribute("data-ssc-pair"), head: (el.textContent || "").slice(0, 60),
+  })));
+  r.ok("the back and the other side are pairs on screen, in words a builder owns",
+    sixPairs.map((x) => x.vp).join(",") === "front,side,eaveCorner,corner,back,otherSide"
+      && /The back/.test((sixPairs[4] || {}).head || "") && /The other side/.test((sixPairs[5] || {}).head || ""),
+    sixPairs.map((x) => x.head.slice(0, 22)).join(" | "));
+  const d0 = sixR.find((x) => x.viewpoint === "front"), d4 = sixR.find((x) => x.viewpoint === "back");
+  const dBack = (d0 && d4) ? await pixelDelta(page, d0.base64, d4.base64) : 0;
+  r.ok("the back is a different picture from the front, not a copy of it", dBack > 0.02, `${(dBack * 100).toFixed(2)}%`);
+  const sixBytes = sixR.map((x) => Math.round(((x.base64 || "").length * 3) / 4 / 1000));
+  r.ok("each of the six inside the 400 KB cap", sixBytes.every((b) => b < 400), sixBytes.join(", ") + " KB");
+  // The server's total rises in proportion to the views (contract §3): 1.2 MB for four is 1.8 MB for six.
+  r.ok("and the six inside the raised 1.8 MB total", sixBytes.reduce((a, b) => a + b, 0) < 1800, sixBytes.reduce((a, b) => a + b, 0) + " KB");
+  draftFrameMap = FRAME_MAP;
 
   // ── THE CAPTION'S NUMBER IS STEP 1'S NUMBERING, EVEN WHEN THE LAP IS STRIDED ─────────
   // `pair.frame` is a 1-based index into the array THIS REQUEST WAS SENT, and calGenerateSet

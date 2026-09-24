@@ -8870,9 +8870,19 @@ const SS_EAVE_FRAME_WALLS = 1.27;
 // own frame of the same wall and they are going to be asked whether the two match. The
 // design's own camera sat at 48.6, half a right angle away, for no measurable gain.
 const SS_EAVE_YAW_DEG = 30;
-// The four the first pass labels, and the same list the server's SELF_CHECK_VIEWPOINTS holds.
-// Order matters: it is the order the pairs are shown in and the order the request is built in.
-const SS_SELFCHECK_VIEWS = ["front", "side", "eaveCorner", "corner"];
+// The viewpoints the first pass labels, and the same list the server's SELF_CHECK_VIEWPOINTS
+// holds. Order matters: it is the order the pairs are shown in and the order the request is
+// built in.
+//
+// `back` and `otherSide` JOINED ON 2026-09-24, appended so every pairing that already worked
+// keeps its place. Four views saw one end and one long side, so the far side and the back were
+// never compared -- and those are exactly where the wings on the other side, a porch on the back
+// wall and a shed's LOW wall are. They are wide views like `front` and `side`: `back` is the
+// frame the model labels square to the back wall (about front + 180), `otherSide` the one square
+// to the far side (about side + 180). Like every other camera here they are aimed at the
+// azimuth the MODEL gave that frame; nothing below derives one view's angle from another's,
+// because a lap's real angles are not a uniform orbit (see ssSelfCheckCameras).
+const SS_SELFCHECK_VIEWS = ["front", "side", "eaveCorner", "corner", "back", "otherSide"];
 
 // ⚠️ WHERE AZIMUTH 0 POINTS, and this is the one number that has to agree with the prompt or
 // every pair is mirrored. The prompt says: "0 is square in front of the gable end the door is
@@ -8988,7 +8998,8 @@ function ssSelfCheckCameras(p, frameMap) {
   return out;
 }
 
-// The three wide views: where a person filming would have stood, at the angle they stood at.
+// The wide views (every one but the eave close-up): where a person filming would have stood,
+// at the angle they stood at.
 function ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view) {
   const lookY = peak * 0.45;
   const dist = ssFitDistance({ depthHalf, crossHalf, peak, eyeY, lookY, fovDeg: SS_SHOT.FOV });
@@ -14202,12 +14213,23 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
 // The probe pass that measures change also gets sharpness for free — it has already
 // decoded those frames — so each chosen viewpoint can be nudged to whichever of its
 // neighbours is least motion-blurred without spending another seek.
-// ⚠️ KEEP THIS AT 8 OR BELOW (2026-09-16). A walk-around generated with no photos goes to
-// calibrate_style_ai as source "video" (onDraftFromCombined in portal/12-shell.jsx), and that
-// source's server cap is 8: sanitizePhotoUrls would drop any frame past it. Raising this means
-// raising that cap in portal-settings first, or the extra frames are cut and only `dropped` says so.
-const SS_VID_FRAMES = 8;          // four elevations + four corners, whatever the pacing
-const SS_VID_PROBE_MAX = 36;      // seeks are ~50-100ms; this bounds the probe at ~3s
+// ⚠️ NEVER ABOVE THE SERVER'S `video` CAP. A walk-around generated with no photos goes to
+// calibrate_style_ai as source "video" (onDraftFromCombined in portal/12-shell.jsx), and
+// sanitizePhotoUrls drops any frame past that source's cap -- only `dropped` would say so.
+//
+// 8 → 12 (2026-09-24), shipped WITH the server's cap going 8 → 12. Eight was four elevations and
+// four corners on a perfectly paced lap, and no lap is: on the 151.6 s Tri Home clip eight
+// picks average 19 s apart, and a building with wings on BOTH sides is judged on the far side
+// as much as the near one (the self-check now renders it: see "otherSide" in
+// SS_SELFCHECK_VIEWS). Twelve is three per side, the shape Carolyn described
+// for photos on 09-04, and it is still the combined ceiling (CAL_PHOTO_MAX), so a walk-around
+// on its own fills one generation exactly.
+const SS_VID_FRAMES = 12;         // three views per side, whatever the pacing
+// 36 → 54 with it, which keeps the probes per pick where they were (4.5): with 36 probes a
+// 150 s lap is sampled every 4.2 s and twelve picks land three probes apart, so the sharpness
+// nudge and the de-duplication below start eating picks. Seeks are ~50-100 ms, so this bounds
+// the probe at ~3-5 s; a clip under 45 s never reaches it (1.2 probes a second).
+const SS_VID_PROBE_MAX = 54;
 const SS_VID_LONG_EDGE = 1280;    // ~1200 image tokens per frame, ~200KB of JPEG
 const SS_VID_QUALITY = 0.8;
 
@@ -14220,7 +14242,7 @@ const SS_VID_QUALITY = 0.8;
 // photo-arrival repaint, which is a direct render() for this reason.)
 //
 // So the barrier races the callback against a timer and takes whichever lands first, and
-// it is only asked for on the eight CAPTURE seeks. The probe pass skips it: a probe frame
+// it is only asked for on the twelve CAPTURE seeks. The probe pass skips it: a probe frame
 // one behind shifts the change curve imperceptibly, and paying a throttled timer on all
 // thirty-odd of them is what made the background case pathological.
 function ssSettleFrame(v) {
@@ -14404,25 +14426,41 @@ const CAL_OVERHANG_CHIPS = [[null, "Read it from the video"], [0, "Flush"], [2, 
 // 16px, and every other field on this panel spreads S.sel's inline fontSize 13. An inline style
 // beats a class, so these three inputs deliberately drop it and take their size from here.
 const SSC_CAL_CSS = ".ssc-dim-in{font-size:13px}@media (pointer:coarse){.ssc-dim-in{font-size:16px}}";
-// ─── THE FREE SECOND PASS, AS THE BUILDER EXPERIENCES IT (2026-09-19) ─────────────────────
+// ─── THE FREE SECOND PASS, AS THE BUILDER EXPERIENCES IT (2026-09-19; rounds 2026-09-24) ───
 // One press is one hold is one charge. The clocks below are the whole of the wait a builder
 // can be asked to sit through, and they are deliberately not the same as the server's.
 //
-//   call 1   the draft        server-side AbortSignal.timeout(110_000), and NO client abort.
+//   call 1   the draft        server-side abort at SS_DRAFT_SERVER_MS, and NO client abort.
 //                             Abandoning a call that has already taken the hold is the one
-//                             thing that would turn a slow generation into a lost $20.
+//                             thing that would turn a slow generation into a lost $20. A reply
+//                             the server marks `retryable` (cut off at max_tokens, or timed
+//                             out: the hold is already released) is sent ONCE more, lean,
+//                             under the same key, inside the same press -- see calGenerate.
 //   render   SS_RENDER_MS     wall clock in this browser. Over it, the check is skipped and
 //                             the builder keeps the draft. WebGL cannot be interrupted, so
 //                             the loser of the race still runs to its own dispose.
 //   call 2   the check        server aborts at 45 s; this aborts at SS_CHECK_MS, far enough
 //                             above it that a server that answered in time is still heard.
+//   rounds   SS_CHECK_ROUNDS  the check runs again on renders of the CORRECTED building,
+//                             up to three times per generation (ssCheckNext says when not).
 //
-// 110 + 5 + 60 is 175 s, so there is no path past the three minutes the design budgeted and
-// no watchdog that could throw away a paid draft to enforce one.
+// ⚠️ THE BUDGET MOVED, AND ON PURPOSE. One round was 110 + 5 + 60 = 175 s, inside the three
+// minutes the 09-19 design budgeted. A draft now has 125 s (max_tokens 8000 → 12000 after the
+// Tri Home press died at the old ceiling), and a single check round cannot fix what a single
+// check round has already mis-fixed -- so the first round always runs (125 + 5 + 60 = 190 s)
+// and a LATER round starts only while a whole round still fits inside SS_FLOW_MAX_MS of the
+// press. The one path past five minutes is a draft the server asked us to retry (two drafts),
+// and ssCheckNext gives that path no second round. Still no watchdog that could throw away a
+// paid draft to enforce any of it.
 const SS_RENDER_MS = 5000;
 const SS_CHECK_MS = 60000;
-// When the progress card stops saying "usually about a minute" and says so.
-const SS_SLOW_MS = 90000;
+// After SS_RENDER_MS on purpose: selfCheckPanel_test lifts this block from that line.
+const SS_DRAFT_SERVER_MS = 125000;
+const SS_CHECK_ROUNDS = 3;
+const SS_FLOW_MAX_MS = 300000;
+// When the progress card stops saying "usually one to three minutes" and says so. Moved with
+// the rounds: at 90 s it fired on an ordinary press that was merely on its second check.
+const SS_SLOW_MS = 180000;
 // How far one arrow key turns a compare render. 15° is small enough to land on a frame's own
 // angle and big enough that a builder is not pressing it forty times.
 const SS_SPIN_STEP_DEG = 15;
@@ -14437,19 +14475,63 @@ const SS_RESHOOT_MS = 400;
 const SS_CHECKS = [
   ["roof", "Is the roof the same shape?", "Barn roof with a bend in it, two straight slopes, or one slant."],
   ["porch", "Is the porch right?", "In front of the building or cut into it, at the right end, about the right depth."],
-  ["walls", "Are the walls the right height?", "Compare the side wall next to the door with your picture."],
+  ["walls", "Are the walls the right height?", "Compare an outside wall at the eave with your picture. On a one-slant roof, the low side."],
   ["colours", "Are the colours close?", "Walls, trim and roof. Customers repaint it anyway, so close is fine."],
 ];
 // What each fix panel is called in a sentence. The banner's button names the one it arms, and
 // three of these four can be raised by a machine warning.
 const SS_FIX_WORDS = { roof: "roof", porch: "porch", walls: "wall height", colours: "colour" };
 // What each viewpoint is, in words a builder owns. "eaveCorner" is our name for it.
+// "front" is the wall with the porch or the main door (the 09-24 frame of reference), which on
+// every older style is also the gable end with the door, so one sentence serves both. The two
+// sides are "one" and "the other" rather than long and short: in the new frame the front can be
+// the long wall, and a caption that called a 10 ft end "the long side" would be wrong on screen.
 const SS_VIEW_WORDS = {
-  front: "The end with the door",
-  side: "The long side",
+  front: "The front, with the door or porch",
+  side: "One side",
   eaveCorner: "Close up on the roof edge",
   corner: "From the corner",
+  back: "The back",
+  otherSide: "The other side",
 };
+
+// ─── MORE THAN ONE ROUND (2026-09-24) ─────────────────────────────────────────────────────
+// Whether the check goes round again after the round that just answered: the reason it stops,
+// or null to go again. Pure, so selfCheckPanel_test can walk every branch; calRunSelfCheck is
+// the only caller.
+//   out        the round's answer, { verdict, d3, changed }
+//   round      the round that just ran, 0-based: the server's own counter, which claims round
+//              k by moving it to k + 1, so a repeat of one round is refused rather than re-run
+//   seen       ssShotSig of every building already sent to the check in this press
+//   nextSig    ssShotSig of the building the correction produced
+//   elapsedMs  since the press
+// Stops on anything but a correction (matches, skipped, failed, rejected_too_many), on a
+// "correction" that moved nothing, after SS_CHECK_ROUNDS, on a building already checked -- the
+// oscillation case, where round 3 would re-judge round 1's building and undo round 2 -- and when
+// a whole round no longer fits inside SS_FLOW_MAX_MS of the press.
+function ssCheckNext(out, round, seen, nextSig, elapsedMs) {
+  const verdict = out && out.verdict;
+  if (verdict !== "corrections") return verdict || "failed";
+  if (!out.d3 || !Array.isArray(out.changed) || !out.changed.length) return "unchanged";
+  if (round + 1 >= SS_CHECK_ROUNDS) return "rounds";
+  if ((seen || []).indexOf(nextSig) >= 0) return "repeat";
+  if (!(elapsedMs + SS_RENDER_MS + SS_CHECK_MS <= SS_FLOW_MAX_MS)) return "time";
+  return null;
+}
+// ONE LIST, HOWEVER MANY ROUNDS RAN. Each round's `changed` is relative to the building that
+// round judged, so the same field can move twice (a pitch 0.42 → 0.3, then 0.3 → 0.25). The
+// builder is shown one line per field, from what the draft had to what it ended as, with the
+// latest reason; a field that went round and came back where it started is no line at all.
+function ssMergeChanges(prev, next) {
+  const out = (prev || []).slice();
+  for (const ch of next || []) {
+    if (!ch || !ch.field) continue;
+    const i = out.findIndex((x) => x.field === ch.field);
+    if (i < 0) out.push(ch);
+    else out[i] = { ...out[i], to: ch.to, why: ch.why || out[i].why };
+  }
+  return out.filter((x) => JSON.stringify(x.from ?? null) !== JSON.stringify(x.to ?? null));
+}
 
 // ⚠️ THE BUILDER NEVER SEES kneeU AS A NUMBER, here or anywhere. The CLAMPS comment records
 // that a model reads it from the eave by default and the renderer reads it from the centreline,
@@ -14537,6 +14619,42 @@ function ssRoofInFeet(roof, spanFt) {
   return `The peak is ${ssFtInWords(s2 * (Number(cfg.pitch) || 0.5))} above the wall.`;
 }
 
+// The rest of "What we drew" (2026-09-24): the parts of a building one roof sentence cannot
+// carry -- which wall is the front or the high one, the lower wings, and where the porch is and
+// how it meets the wall. Each of these is a key the generator can now set, and a builder
+// comparing our 3D with their own frames has to be told it in words before they can say it is
+// wrong. Only what the spec SAYS: an absent key is never described as its default, because
+// "the front is a gable end" on a style that never said so would be a claim we did not make.
+function ssDrewWords(spec) {
+  const roof = (spec && spec.roof) || {};
+  const type = roof.type || "gable";
+  const out = [];
+  const walls = { front: "the front", back: "the back", left: "the left side", right: "the right side" };
+  if (type === "shed" && walls[roof.highSide]) out.push(`The high side is ${walls[roof.highSide]}.`);
+  if (type !== "shed" && roof.front === "gable") out.push("The front is a gable end, under the roof triangle.");
+  if (type !== "shed" && roof.front === "eave") out.push("The front is a long side, under the roof edge.");
+  const wing = Number(roof.wingWidthFt) || 0;
+  if (type !== "shed" && wing > 0) {
+    const where = ({ both: "each side", left: "the left side", right: "the right side", front: "the front", back: "the back" })[roof.wingSide] || "the side";
+    const centre = Number(roof.centerEaveFt) > 0 ? `, and the middle section's walls rise to ${ssFtInWords(Number(roof.centerEaveFt))}` : "";
+    out.push(`A lower wing ${ssFtInWords(wing)} wide runs along ${where} under its own roof${centre}.`);
+  }
+  // "wall" in the new frame, where the front can be a long side; "end" on every older style,
+  // where the porch was only ever on a gable end and the panel has always called it that.
+  const face = (roof.front != null || roof.highSide != null) ? "wall" : "end";
+  const end = roof.porchEnd === "back" ? "back" : "front";
+  const outFt = Number(roof.porchOutFt) || 0;
+  const inFt = Number(roof.porchDepthFt) || 0;
+  if (outFt > 0.5) {
+    const width = Number(roof.porchWidthFt) > 0 ? `, ${ssFtInWords(Number(roof.porchWidthFt))} wide` : "";
+    const attach = Number(roof.porchAttachFt) > 0 ? `, and its roof meets the wall ${ssFtInWords(Number(roof.porchAttachFt))} up` : "";
+    out.push(`The porch stands ${ssFtInWords(outFt)} out from the ${end} ${face}${width}${attach}.`);
+  } else if (inFt > 0.5) {
+    out.push(`The porch is cut ${ssFtInWords(inFt)} into the ${end} ${face}.`);
+  }
+  return out.join(" ");
+}
+
 // One line of the "What the check changed" list, in the words the fix panels use. The numbers
 // are re-expressed for the same reason the fix panel is: 1.0 ft against 0.15 ft reads as a
 // rounding, and 12 in against 2 in is obviously wrong at a glance. Same number, same clamp,
@@ -14566,6 +14684,16 @@ const SS_CHANGE_WORDS = {
   "roof.dormerWidthFt": ["How wide the dormer is", (v) => ssFtInWords(Number(v))],
   "roof.dormerRiseFt": ["How tall the dormer is", (v) => ssFtInWords(Number(v))],
   "roof.dormerOffsetU": ["Where the dormer sits along the roof", null],
+  // THE 2026-09-24 KEYS, in the words the panel's own controls use for them. The server's
+  // allow-list gains every one, and selfCheckPanel_test fails on any it has no words for.
+  "roof.front": ["What the front wall is", (v) => (String(v) === "eave" ? "a long side, under the roof edge" : String(v) === "gable" ? "a gable end, under the roof triangle" : String(v))],
+  "roof.highSide": ["Which wall is the high one", (v) => ({ front: "the front", back: "the back", left: "the left side", right: "the right side" })[String(v)] || String(v)],
+  "roof.porchAttachFt": ["Where the porch roof meets the wall", (v) => `${ssFtInWords(Number(v))} up`],
+  "roof.porchWidthFt": ["How wide the porch is", (v) => ssFtInWords(Number(v))],
+  "roof.wingSide": ["Which sides have a lower wing", (v) => ({ both: "both sides", left: "the left side", right: "the right side", front: "the front", back: "the back" })[String(v)] || String(v)],
+  "roof.wingWidthFt": ["How wide each lower wing is", (v) => (Number(v) > 0 ? ssFtInWords(Number(v)) : "no wings")],
+  "roof.wingPitch": ["How steep the wing roofs are", (v) => `${Math.round(Number(v) * 12)} in 12`],
+  "roof.centerEaveFt": ["How tall the middle section's walls are", (v) => ssFtInWords(Number(v))],
   gableVent: ["The vent in the gable", (v) => (v && v.widthFrac > 0 ? "there" : "not there")],
   foundation: ["What it sits on", (v) => (String(v) === "skids" ? "runners" : "a slab")],
   roofMaterial: ["What the roof is made of", (v) => String(v)],
@@ -16041,6 +16169,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   //   verdict  what the SERVER said: matches | corrections | rejected_too_many | skipped | failed
   //   pairs    [{ viewpoint, frame, azimuthDeg, frameUrl, shotUrl }] — one per viewpoint the
   //            first pass labelled, which is the only honest source of a pairing there is
+  //   round    1-based, the check round running now (progress card); rounds = how many ran,
+  //            stop = why the loop ended (ssCheckNext); retry = the draft is on its one
+  //            automatic lean retry (2026-09-24)
   //
   // `adminCalAnswers` is the four questions, and they are the ONLY thing standing between a
   // draft and Save. "unsure" counts as answered on purpose: forcing a builder to click Yes when
@@ -18422,6 +18553,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     delete roof.porchOutFt;
     if (kind === "recessed") roof.porchDepthFt = d;
     if (kind === "projecting") { roof.porchOutFt = d; delete roof.porchTruss; }
+    // Where a projecting porch's roof meets the wall, and how wide it is, belong to a projecting
+    // porch only (2026-09-24): the sanitiser keeps them only while porchOutFt is over 0.5, so on
+    // any other kind they would draw in the preview and vanish on Save.
+    else { delete roof.porchAttachFt; delete roof.porchWidthFt; }
     return { ...p, spec: { ...p.spec, roof } };
   });
   // roof.plateBand: checked writes true, unchecked DELETES the key. Writing false would park
@@ -18440,6 +18575,59 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     else delete colors.wood;
     return { ...p, spec: { ...p.spec, colors } };
   });
+  // ─── THE 2026-09-24 KEYS: the panel's controls for them ──────────────────────────────────
+  // Every one is OPTIONAL and every one means something by being absent (the old frame of
+  // reference, a porch roof just under the eave, a porch the width of its wall, no wings, the
+  // trim colour), so a control that is cleared DELETES its key rather than storing "" or 0. The
+  // sanitiser never emits a default, and neither does this panel: an untouched style saves
+  // byte-for-byte what it loaded.
+  const calSetRoofOpt = (key, v) => setAdminCal((p) => {
+    const roof = { ...p.spec.roof };
+    if (v === "" || v === null || v === undefined) delete roof[key];
+    else roof[key] = v;
+    return { ...p, spec: { ...p.spec, roof } };
+  });
+  // colors.corner / colors.fascia. Blank is "same as trim", which is what absent draws.
+  const calSetOptColor = (k, v) => setAdminCal((p) => {
+    const colors = { ...p.spec.colors };
+    if (String(v || "").trim()) colors[k] = v;
+    else delete colors[k];
+    return { ...p, spec: { ...p.spec, colors } };
+  });
+  // THE ROOF TYPE, WITH THE KEYS ONLY THE OTHER KIND OF ROOF CAN HAVE TAKEN OFF IT. The sanitiser
+  // drops roof.front and the wings on a shed and roof.highSide on anything else, so leaving them
+  // on would make the preview draw a building that Save cannot store -- and "the new frame is
+  // active" is decided by whether either frame key is PRESENT, so a stale one would turn the
+  // preview's porch and front round while the saved style turned it back.
+  const CAL_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt"];
+  const calSetRoofType = (type) => setAdminCal((p) => {
+    const roof = { ...p.spec.roof, type };
+    if (type === "shed") { delete roof.front; for (const k of CAL_WING_KEYS) delete roof[k]; }
+    else delete roof.highSide;
+    return { ...p, spec: { ...p.spec, roof } };
+  });
+  // The wings on and off. Off deletes all four keys: a builder who says "no wings" has said
+  // nothing about their pitch. On with no width starts at 4 ft, the calSetPorch rule -- a switch
+  // never leaves an empty field behind it.
+  const calSetWings = (side) => setAdminCal((p) => {
+    const roof = { ...p.spec.roof };
+    if (!side) { for (const k of CAL_WING_KEYS) delete roof[k]; }
+    else { roof.wingSide = side; if (!((Number(roof.wingWidthFt) || 0) > 0)) roof.wingWidthFt = 4; }
+    return { ...p, spec: { ...p.spec, roof } };
+  });
+  // An OPTIONAL number: calNumProps, plus a blank that clears, plus the sanitiser's own band so
+  // the preview never draws a number Save would clamp. `write(null)` is the clear.
+  const calOptNumProps = (key, current, band, write) => {
+    const base = calNumProps(key, current === null || current === undefined ? "" : current,
+      (n) => write(Math.max(band[0], Math.min(band[1], n))));
+    return {
+      ...base,
+      onChange: (e) => {
+        if (e.target.value === "") { setCalDraft(""); write(null); return; }
+        base.onChange(e);
+      },
+    };
+  };
   // Grow and shrink the set. Carolyn 2026-09-04 @16:30: "they may just add more, but they may
   // also just remove one." Both are simple now that no position carries a meaning: append, and
   // splice. The old calRemovePhoto had to BLANK the first four in place rather than splice them,
@@ -18485,11 +18673,36 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // porchOutFt under a redraft that reported a recessed porch, so the preview went on drawing the
   // projecting one and Save dropped the new depth without a word. Projecting is checked first, the
   // sanitizer's order. A draft that reports neither keeps the stored porch, as it always has.
+  //
+  // THE 2026-09-24 KEYS, BY THE SAME RULE: whatever the draft is the authority on, it is the only
+  // source of. Every new key rides the spread; what changes is what gets cleared.
+  //   porchAttachFt / porchWidthFt  describe ONE projecting porch. A draft that reports a porch
+  //       brings its own or none, so a stored attach height never lands on a porch it was not
+  //       measured on -- and a recessed porch has neither (the sanitiser keeps them only while
+  //       porchOutFt is over 0.5).
+  //   wings  a shape draft always decides them (observed.wings is a required answer), so a draft
+  //       that reports a roof and no wings means NO wings, not "keep the stored ones". Otherwise a
+  //       redraft of a plain gable would go on drawing the last draft's wings.
+  //   roof.front / roof.highSide  the frame of reference the draft's own frame labels were
+  //       measured in. A stored one under a draft that did not use it would turn the building a
+  //       quarter turn away from the angles the self-check is about to render at.
   const calDraftRoof = (stored, drafted) => {
     const dr = drafted || {};
     const roof = { ...stored, ...dr };
-    if ((dr.porchOutFt || 0) > 0.5) { delete roof.porchDepthFt; delete roof.porchTruss; }
-    else if ((dr.porchDepthFt || 0) > 0.5) delete roof.porchOutFt;
+    if ((dr.porchOutFt || 0) > 0.5) {
+      delete roof.porchDepthFt; delete roof.porchTruss;
+      if (!("porchAttachFt" in dr)) delete roof.porchAttachFt;
+      if (!("porchWidthFt" in dr)) delete roof.porchWidthFt;
+    } else if ((dr.porchDepthFt || 0) > 0.5) {
+      delete roof.porchOutFt; delete roof.porchAttachFt; delete roof.porchWidthFt;
+    }
+    if (dr.type) {
+      if (!((Number(dr.wingWidthFt) || 0) > 0)) {
+        for (const k of CAL_WING_KEYS) delete roof[k];
+      }
+      if (!("front" in dr)) delete roof.front;
+      if (!("highSide" in dr)) delete roof.highSide;
+    }
     return roof;
   };
 
@@ -18777,8 +18990,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       calDimWarnings.push(`This style has no ${calDimW} ft wide size in your catalog. That is fine — we read the building you filmed, not the price list — but check the width and the length are the right way round.`);
     }
     // The commonest way to hand the model a building turned ninety degrees.
+    //
+    // ⚠️ REWORDED, NOT DELETED, WHEN WIDTH STOPPED MEANING THE GABLE END (2026-09-24). Width is now
+    // the FRONT wall -- the one with the porch or the main door -- so a front longer than the
+    // building is deep is a real building (Farmstand is 16 wide and 10 deep), and the old
+    // sentence told that builder to swap two correct numbers. What is still worth saying is what
+    // the numbers MEAN, so the one real mistake left (a door on a short end, typed as the width
+    // of the long side) is caught by the person who can see the building.
     if (calDimInBand("widthFt", calDimW) && calDimInBand("lengthFt", calDimL) && calDimL < calDimW) {
-      calDimWarnings.push("The length is shorter than the width. Width is the GABLE END — the short end, the one with the roof triangle and usually the door — so these may be the wrong way round.");
+      calDimWarnings.push("The length is shorter than the width, so the front is the long side. That is right when the porch or main door is on a long wall; if the door is on a short end, these two are the wrong way round.");
     }
     // Metres typed into a feet box: 16 ft is 4.9 m, so a metres width beside a feet wall height
     // reads as a very tall, very narrow shed. Deliberately NOT half the width, which the brief
@@ -18893,10 +19113,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   //
   // TWELVE IS A HARD CEILING, not a preference: sanitizePhotoUrls ends
   // `.slice(0, Math.min(12, …))`, so a thirteenth view is dropped by the server whatever the
-  // caller asks for. A lap is eight frames, so a walk-around on its own, or with up to four
-  // photos, fits with nothing held back. Past that the WALK gives ground before the builder's
-  // own photos do — a staged photo was aimed at something, a frame is one of eight views of
-  // one lap — but never below CAL_VIDEO_MIN, because four frames is what covers four sides.
+  // caller asks for. A lap is twelve frames since 2026-09-24 (it was eight), so a walk-around on
+  // its own fills the set exactly, and every photo beside it costs one frame. The WALK gives
+  // ground before the builder's own photos do — a staged photo was aimed at something, a frame
+  // is one of twelve views of one lap — but never below CAL_VIDEO_MIN, because four frames is
+  // what covers four sides. The stride below keeps what is kept spread round the whole lap.
   //
   // Frames go FIRST and their count is sent with them: VIDEO_SHAPE_PROMPT opens by telling the
   // model the images are "in walk order, so consecutive frames are adjacent viewpoints", which
@@ -18967,7 +19188,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   //   2. this browser renders that draft from those angles, off screen
   //   3. a FREE second call is handed each render beside the builder's own frame of the same
   //      view, and asked one narrow question: where does our draft not match their building?
-  //   4. whatever it corrects is merged ONCE onto the spec as it stood before step 1
+  //   4. whatever it corrects is merged onto the spec as it stood before step 1 -- never onto
+  //      another merge -- and, since 2026-09-24, steps 2-4 repeat on the corrected building
+  //      for up to SS_CHECK_ROUNDS rounds (calRunSelfCheck, ssCheckNext)
   //
   // ⚠️ NOTHING IN STEPS 2-4 CAN COST THE BUILDER THEIR DRAFT. They have already been charged
   // and they are already holding it. So there is no throw on this path: no renders, no
@@ -19006,7 +19229,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // happened, so the two agreed -- but a caller that awaited anything first would have captured
   // the run of whatever style was open by then and every `mine()` below would answer about the
   // wrong building. The default keeps the hand-fix caller working unchanged.
-  const calRunSelfCheck = async (res, urls, draftSpec, dims, run = calRunRef.current) => {
+  //
+  // ⚠️ UP TO SS_CHECK_ROUNDS ROUNDS (2026-09-24). One round could only ever fix what it saw in
+  // the DRAFT's renders, and on 09-21 the one round that turned Farmstand's gable into a shed
+  // left the porch recessed with no chance to look at the shed it had just made. So a round that
+  // corrects something re-renders the CORRECTED building and asks again, with `round` counting
+  // 0, 1, 2 -- the server's own claim counter (round k claims k → k+1; a request without it is
+  // round 0, which is exactly what an older host sends). Each answer's `d3` is the server's
+  // CUMULATIVE spec, so it is merged onto calPreGenRef exactly as the single round was, never
+  // onto the last merge. ssCheckNext decides when to stop. `t0` is the press, for its clock.
+  //
+  // A LATER ROUND CAN NEVER COST AN EARLIER ONE. A failure, a 409 from an older server that
+  // knows only one round, or a refusal on round 2 leaves round 1's corrections standing and
+  // the verdict says what the rounds that worked did.
+  const calRunSelfCheck = async (res, urls, draftSpec, dims, run = calRunRef.current, t0 = Date.now()) => {
     const mine = () => calRunRef.current === run;
     const settle = (patch) => { if (mine()) setAdminCalCheck((p) => ({ ...(p || {}), step: "done", ...patch })); };
     // NO LABELS, NO CHECK, and no fallback either. A uniform orbit is off by a mean of 37
@@ -19035,55 +19271,94 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       settle({ verdict: "skipped", reason: shots && shots.length ? "one_view" : "no_render", pairs });
       return;
     }
-    if (mine()) setAdminCalCheck((p) => ({ ...(p || {}), step: "check" }));
-    let out = null;
-    try {
-      out = await setup3d.onSelfCheck({
-        styleValue: adminCal.styleValue, checkId: res.checkId,
-        // THE EXACT ARRAY THE GENERATION WAS SENT, in that order and uncompacted. The frame
-        // indices only mean anything against it, and closing a gap would shift every index
-        // after it — a render aimed at image 6 paired with image 7 looks exactly like a right
-        // answer. The server trusts nothing in it but the positions.
-        photoUrls: urls,
-        renders: shots.map((s) => ({ viewpoint: s.viewpoint, frame: s.frame, base64: s.url })),
-      });
-    } catch (e) {
-      out = { verdict: "failed", reason: "unreachable", note: e && e.message, changed: [], d3: null };
-    }
-    if (!mine()) return;
-    const changed = (out && Array.isArray(out.changed)) ? out.changed : [];
-    // ⚠️ THE FINAL SPEC ONTO THE PRE-GENERATION SPEC, ONCE. Not onto the merged draft — see
-    // calPreGenRef. `d3` is non-null only on verdict "corrections", which is also the only
-    // verdict where anything actually moved.
-    if (out && out.d3 && changed.length) {
-      setAdminCal((p) => ({ ...p, spec: calShapeMerged(calPreGenRef.current || p.spec, out.d3) }));
+    // Every building this press has sent to the check, by signature: the oscillation guard.
+    const seen = [ssShotSig(params.style3d)];
+    let sent = shots;
+    let first = null;        // round 0's answer, which is the verdict when no round moved anything
+    let changed = [];        // one list across every round (ssMergeChanges)
+    let moved = false;
+    let note = "";
+    let ms = 0;
+    let rounds = 0;
+    let renders = shots.length;
+    let stop = null;
+    for (let round = 0; round < SS_CHECK_ROUNDS; round++) {
+      if (mine()) setAdminCalCheck((p) => ({ ...(p || {}), step: "check", round: round + 1 }));
+      let out = null;
+      try {
+        out = await setup3d.onSelfCheck({
+          styleValue: adminCal.styleValue, checkId: res.checkId,
+          // THE EXACT ARRAY THE GENERATION WAS SENT, in that order and uncompacted. The frame
+          // indices only mean anything against it, and closing a gap would shift every index
+          // after it — a render aimed at image 6 paired with image 7 looks exactly like a right
+          // answer. The server trusts nothing in it but the positions.
+          photoUrls: urls,
+          renders: sent.map((s) => ({ viewpoint: s.viewpoint, frame: s.frame, base64: s.url })),
+          round,
+        });
+      } catch (e) {
+        out = { verdict: "failed", reason: "unreachable", note: e && e.message, changed: [], d3: null };
+      }
+      if (!mine()) return;
+      rounds = round + 1;
+      if (!first) first = out || { verdict: "failed" };
+      ms += Number(out && out.ms) || 0;
+      if (out && out.renders) renders = out.renders;
+      const roundChanged = (out && Array.isArray(out.changed)) ? out.changed : [];
+      let nextSig = null;
+      // `d3` is non-null only on verdict "corrections", which is also the only verdict where
+      // anything actually moved.
+      if (out && out.verdict === "corrections" && out.d3 && roundChanged.length) {
+        // ⚠️ THE CUMULATIVE SPEC ONTO THE PRE-GENERATION SPEC, every round. Not onto the merged
+        // draft, and not onto the last round's merge — see calPreGenRef.
+        const after = calShapeMerged(calPreGenRef.current || draftSpec, out.d3);
+        nextSig = ssShotSig(after);
+        const prevShot = calShotRef.current;
+        // CLAIMED BEFORE THE SPEC MOVES. The hand-edit re-shoot effect keys on this signature,
+        // and without the claim it would start a SECOND render of the same building 400 ms into
+        // this one -- another WebGL context, and two writers racing for the same pairs.
+        if (prevShot && nextSig !== prevShot.sig) calShotRef.current = { ...prevShot, sig: nextSig };
+        setAdminCal((p) => ({ ...p, spec: calShapeMerged(calPreGenRef.current || p.spec, out.d3) }));
+        moved = true;
+        changed = ssMergeChanges(changed, roundChanged);
+        if (out.note) note = out.note;
+        // The pairs are pictures of the building BEFORE this correction, so they are taken again
+        // -- the builder must judge what they are going to save, and the next round needs them
+        // as its renders. One model build, and none at all when the correction produced a
+        // building the pairs already show.
+        if (!prevShot || nextSig !== prevShot.sig) {
+          const p2 = calShotParams(after, dims);
+          const reshot = await calShootWithin(p2, res.frameMap);
+          if (!mine()) return;
+          // No new pictures: the pairs stay the ones they are, so the claim goes back to the
+          // building they actually show, and there is nothing to send a next round.
+          if (!reshot || !reshot.length) { calShotRef.current = prevShot; stop = "no_render"; break; }
+          calShotRef.current = { params: p2, frameMap: res.frameMap, sig: nextSig };
+          setAdminCalCheck((p) => ({
+            ...(p || {}),
+            pairs: (p && p.pairs ? p.pairs : []).map((pair) => {
+              const s = reshot.find((x) => x.viewpoint === pair.viewpoint);
+              return s ? { ...pair, shotUrl: s.url } : pair;
+            }),
+          }));
+          sent = reshot;
+        }
+      }
+      stop = ssCheckNext(out, round, seen, nextSig, Date.now() - t0);
+      if (stop) break;
+      if (sent.length < 2) { stop = "one_view"; break; }
+      seen.push(nextSig);
     }
     settle({
-      verdict: (out && out.verdict) || "failed",
-      reason: (out && out.reason) || null,
-      note: (out && out.note) || "",
-      changed, pairs,
-      renders: (out && out.renders) || shots.length,
-      ms: (out && out.ms) || 0,
+      // What the ROUNDS did, not what the last one said: a round 2 that failed or said
+      // "matches" does not undo round 1's corrections, and the list says every one of them.
+      verdict: moved ? "corrections" : ((first && first.verdict) || "failed"),
+      reason: moved ? null : ((first && first.reason) || null),
+      note: moved ? note : ((first && first.note) || ""),
+      changed,
+      renders, ms, rounds, stop,
       corrected: changed.length > 0,
     });
-    // The pairs were taken of the DRAFT. If the check moved something, they are now pictures
-    // of a building the builder is not going to save, so they are taken again — one model
-    // build, and only on the one path where it is wrong to skip it.
-    if (out && out.d3 && changed.length) {
-      const after = calShapeMerged(calPreGenRef.current || draftSpec, out.d3);
-      const p2 = calShotParams(after, dims);
-      const reshot = await calShootWithin(p2, res.frameMap);
-      if (!mine() || !reshot) return;
-      calShotRef.current = { params: p2, frameMap: res.frameMap, sig: ssShotSig(p2.style3d) };
-      setAdminCalCheck((p) => ({
-        ...(p || {}),
-        pairs: (p && p.pairs ? p.pairs : []).map((pair) => {
-          const s = reshot.find((x) => x.viewpoint === pair.viewpoint);
-          return s ? { ...pair, shotUrl: s.url } : pair;
-        }),
-      }));
-    }
   };
 
   // Turn one compare render by hand. The escape hatch for a pairing the labels got wrong: a
@@ -19229,8 +19504,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       ? calIdemRef.current.key
       : crypto.randomUUID();
     calIdemRef.current = { styleValue: adminCal.styleValue, key: idem };
+    // The press, for the self-check rounds' clock (ssCheckNext). The same instant as `at` above.
+    const t0 = Date.now();
     try {
-      const res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount, idem, dims);
+      // ⚠️ ONE AUTOMATIC RETRY, AND ONLY WHEN THE SERVER ASKS FOR IT (2026-09-24). A draft cut off
+      // at max_tokens, or one that ran past the server's own abort, comes back `retryable: true`
+      // with the hold ALREADY RELEASED -- the money is back and the key is free again (migration
+      // 248). Before this the builder was shown "The AI ran out of room" and had to press again,
+      // which is the one thing a self-serve flow must not ask of them. So it is sent once more
+      // from here, `lean` (the server answers with less thinking), under the SAME key and inside
+      // the same press: one intent, at most one hold at a time, one charge. Never a second
+      // retry, and never on any other failure -- a refusal, a 402 or a 409 is not the model
+      // running out of room, and resending it would only repeat it.
+      let res;
+      try {
+        res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount, idem, dims);
+      } catch (e1) {
+        if (!(e1 && e1.ssRetryable) || !mine()) throw e1;
+        setAdminCalCheck((p) => (p ? { ...p, retry: true } : p));
+        res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount, idem, dims, { lean: true });
+      }
       // A DRAFT LANDED, so this intent is finished and the money for it is spent. The next press
       // is a different generation and has to mint its own key - reusing this one would refuse it.
       calIdemRef.current = null;
@@ -19297,7 +19590,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // It cannot throw — see calRunSelfCheck's header — so the draft above is already safe
       // whatever happens inside it, and this needs no try of its own.
       if (setup3d.onSelfCheck) {
-        await calRunSelfCheck(res, urls, calShapeMerged(calPreGenRef.current || adminCal.spec, draftD3), dims, run);
+        await calRunSelfCheck(res, urls, calShapeMerged(calPreGenRef.current || adminCal.spec, draftD3), dims, run, t0);
       } else {
         // An older host with no check capability. The draft is exactly what it always was.
         setAdminCalCheck((p) => ({ ...(p || {}), step: "done", verdict: "skipped", reason: "unsupported", pairs: [] }));
@@ -19679,6 +19972,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calReadoutW = (calShotRef.current && calShotRef.current.params && Number(calShotRef.current.params.bldgW))
     || (calDimInBand("widthFt", calDimW) ? calDimW : 0)
     || bldgW;
+  const calReadoutL = (calShotRef.current && calShotRef.current.params && Number(calShotRef.current.params.bldgH))
+    || (calDimInBand("lengthFt", calDimL) ? calDimL : 0)
+    || bldgH;
+  // THE SPAN THE ROOF IS ACTUALLY DRAWN ACROSS, which is not always the width (2026-09-24). A
+  // shed whose high side is the front slopes front to back, across the DEPTH: Farmstand's
+  // 16 ft front and 10 ft depth at 0.23 is a 2 ft 4 in rise, and measured across the width the
+  // line said 3 ft 8 in. Read through d3RoofAxes, the same function the renderer builds the
+  // roof with, so the sentence and the 3D cannot disagree about which way the roof runs.
+  const calReadoutSpan = (adminCal && adminCal.spec && calReadoutL > 0)
+    ? (d3RoofAxes(adminCal.spec.roof, calReadoutW, calReadoutL).S || calReadoutW)
+    : calReadoutW;
   const calChecksAnswered = SS_CHECKS.filter(([k]) => adminCalAnswers[k]).length;
   // ⚠️ THE ONE SLICE EACH QUESTION IS ABOUT, so a "No" can be told from a "No, fixed". Cheap
   // and exact: every fix panel writes adminCal.spec, so comparing the slice at answer time
@@ -19688,8 +19992,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calQuestionSig = (key) => {
     const spec = (adminCal && adminCal.spec) || {};
     const roof = spec.roof || {};
-    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand]);
-    if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss]);
+    // The 2026-09-24 keys are in the slice of the question whose panel sets them: which way the
+    // building faces and the wings are the ROOF's shape, the attach height and width the PORCH's.
+    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt]);
+    if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt]);
     if (key === "walls") return String(spec.wallHeightFt);
     return JSON.stringify([spec.colors, spec.roofMaterial]);
   };
@@ -19792,10 +20098,48 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       return (
         <div style={{ display: "grid", gap: 8 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))", gap: 6 }}>
-            {calFixTile(roof.type === "gambrel", "Barn roof", "bends partway down", () => calSetRoof({ type: "gambrel" }), "ssc-rt-gambrel")}
-            {calFixTile(roof.type === "gable" || !roof.type, "Two slopes", "straight to the peak", () => calSetRoof({ type: "gable" }), "ssc-rt-gable")}
-            {calFixTile(roof.type === "shed", "One slant", "high side to low", () => calSetRoof({ type: "shed" }), "ssc-rt-shed")}
+            {calFixTile(roof.type === "gambrel", "Barn roof", "bends partway down", () => calSetRoofType("gambrel"), "ssc-rt-gambrel")}
+            {calFixTile(roof.type === "gable" || !roof.type, "Two slopes", "straight to the peak", () => calSetRoofType("gable"), "ssc-rt-gable")}
+            {calFixTile(roof.type === "shed", "One slant", "high side to low", () => calSetRoofType("shed"), "ssc-rt-shed")}
           </div>
+          {/* WHICH WAY IT FACES, AND THE WINGS (2026-09-24). The two things a roof's shape can be
+              right about and still draw as the wrong building: a one-slant roof high on the wrong
+              wall, a gable turned a quarter round, a raised middle with no wings beside it. Tiles
+              and plain words like the three above; the field grid below has the same keys. */}
+          {roof.type === "shed" ? (
+            <div style={{ display: "grid", gap: 4 }}>
+              <span style={calFixLabel}>Which wall is the high one</span>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(110px, 100%), 1fr))", gap: 6 }}>
+                {[["front", "The front", "the porch or door side"], ["back", "The back", "behind it"], ["left", "Left side", "facing the front"], ["right", "Right side", "facing the front"]].map(([v, lbl, sub]) =>
+                  calFixTile(roof.highSide === v, lbl, sub, () => calSetRoofOpt("highSide", v), "ssc-hs-" + v))}
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: "grid", gap: 4 }}>
+              <span style={calFixLabel}>The front wall is</span>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))", gap: 6 }}>
+                {calFixTile(roof.front === "gable", "A gable end", "the roof triangle faces you", () => calSetRoofOpt("front", "gable"), "ssc-fr-gable")}
+                {calFixTile(roof.front === "eave", "A long side", "the roof edge faces you", () => calSetRoofOpt("front", "eave"), "ssc-fr-eave")}
+              </div>
+            </div>
+          )}
+          {roof.type !== "shed" && (
+            <div style={{ display: "grid", gap: 4 }}>
+              <span style={calFixLabel}>Lower wings — enclosed rooms under their own lower roof</span>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(110px, 100%), 1fr))", gap: 6 }}>
+                {[["", "None", "one roof over it all"], ["both", "Both sides", "a taller middle"], ["left", "Left side", "facing the front"], ["right", "Right side", "facing the front"]].map(([v, lbl, sub]) =>
+                  calFixTile(v ? ((Number(roof.wingWidthFt) || 0) > 0 && roof.wingSide === v) : !((Number(roof.wingWidthFt) || 0) > 0), lbl, sub, () => calSetWings(v || null), "ssc-wg-" + (v || "none")))}
+              </div>
+              {(Number(roof.wingWidthFt) || 0) > 0 && (
+                <label style={calFixLabel}>How wide each wing is (ft)
+                  <input className="ssc-dim-in" type="number" step="0.5" min="1" max="16" inputMode="decimal"
+                    value={String(Number(roof.wingWidthFt) || 0)}
+                    onChange={(e) => { const n = parseFloat(e.target.value); if (isFinite(n) && n > 0) calSetRoofOpt("wingWidthFt", Math.min(16, n)); }}
+                    style={{ ...S.sel, fontSize: undefined, width: 100, display: "block" }} />
+                </label>
+              )}
+            </div>
+          )}
           {roof.type === "gambrel" ? (
             <div style={{ display: "grid", gap: 6 }}>
               {/* TWO SLIDERS, AND THE THIRD NUMBER IS DERIVED so the pair cannot produce a
@@ -19813,7 +20157,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   style={{ width: "100%", display: "block" }} />
                 <span style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#94A3B8", fontWeight: 600 }}><span>shallow</span><span>steep</span></span>
               </label>
-              <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>{ssRoofInFeet(roof, calReadoutW)}</div>
+              <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>{ssRoofInFeet(roof, calReadoutSpan)}</div>
             </div>
           ) : (
             /* "{n} in 12", because that is what a framing square is marked in and what a
@@ -19878,6 +20222,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 style={{ ...S.sel, fontSize: undefined, width: 100, display: "block" }} />
             </label>
           )}
+          {/* WHERE ITS ROOF MEETS THE WALL, AND HOW WIDE IT IS (2026-09-24), projecting only. Blank
+              is the renderer's own answer and is stored as nothing. */}
+          {kind === "projecting" && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))", gap: 6 }}>
+              <label style={calFixLabel}>Its roof meets the wall at (ft up)
+                <input className="ssc-dim-in" type="number" step="0.25" min="6" max="24" inputMode="decimal" placeholder="just under the eave"
+                  {...calOptNumProps("ssc-fix-porchAttachFt", roof.porchAttachFt, [6, 24], (n) => calSetRoofOpt("porchAttachFt", n))}
+                  style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
+              </label>
+              <label style={calFixLabel}>How wide it is (ft)
+                <input className="ssc-dim-in" type="number" step="0.5" min="4" max="60" inputMode="decimal" placeholder="the whole wall"
+                  {...calOptNumProps("ssc-fix-porchWidthFt", roof.porchWidthFt, [4, 60], (n) => calSetRoofOpt("porchWidthFt", n))}
+                  style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
+              </label>
+            </div>
+          )}
           {kind !== "none" && (
             /* "The end you filmed first" rather than "the front gable end": one of those is a
                fact the builder possesses and the other needs d3RoofAxes read first. */
@@ -19912,7 +20272,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               style={{ ...S.sel, fontSize: undefined, width: 100, display: "block" }} />
           </label>
           <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
-            Floor to the top of the side wall, not to the peak. <b>This is the number you gave us in step 2</b> — changing it here changes it there, because it is one measurement with two boxes.
+            Floor to the top of the outside wall at the eave, not to the peak — on a one-slant roof, the low side. <b>This is the number you gave us in step 2</b> — changing it here changes it there, because it is one measurement with two boxes.
           </div>
         </div>
       );
@@ -19926,6 +20286,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <input type="text" placeholder="#hex or blank" value={adminCal.spec.colors[k] || ""} onChange={(e) => calSetColor(k, e.target.value)}
                   style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #CBD5E1", background: adminCal.spec.colors[k] || "#EEE", flexShrink: 0 }} />
+              </div>
+            </label>
+          ))}
+          {/* Corner boards and fascia (2026-09-24): blank is the trim colour, which is what absent
+              draws. The check never corrects a colour, so this is the only way to fix one. */}
+          {[["corner", "Corner boards"], ["fascia", "Fascia and rake boards"]].map(([k, lbl]) => (
+            <label key={"ssc-col-" + k} style={calFixLabel}>{lbl}
+              <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                <input type="text" placeholder="blank = same as trim" value={adminCal.spec.colors[k] || ""} onChange={(e) => calSetOptColor(k, e.target.value)}
+                  style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #CBD5E1", background: adminCal.spec.colors[k] || adminCal.spec.colors.trim || "#EEE", flexShrink: 0 }} />
               </div>
             </label>
           ))}
@@ -21337,7 +21708,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   A video shows us the <b>shape</b>. It cannot show us the <b>size</b> — there is nothing in the frame to
                   measure against, so we would be guessing, and a guess here bends every other number. Type the three
                   measurements off the building you filmed and they become the ruler everything else is read against.
-                  {" "}<b>Width is the gable end</b> — the short end with the roof triangle.
+                  {" "}<b>Width is the FRONT wall</b> — the side with the porch, or the main door if there is no porch — and
+                  <b> length runs front to back</b>. On a building with lower wings, measure the whole thing, wings included.
                   {adminCal && !calOwnSizes(adminCal.styleValue).length
                     ? <><br /><b>This style has no sizes set up yet</b>, so there is nothing to start you off — type the size of the building you filmed.</>
                     : null}
@@ -21350,7 +21722,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       model as measurements the builder took. Grey on white read as a finished
                       answer, and one tap on the wall height turned the badge green over all
                       three. The seed stays; the tick waits. */}
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Width (ft) — the gable end
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Width (ft) — the FRONT wall (the side with the porch or main door)
                     {/* fontSize dropped from S.sel on purpose: an inline size beats the class, and
                         the class is what carries the 16px that stops iOS zooming on every tap. */}
                     <input className="ssc-dim-in" type="number" step="0.5" min="4" inputMode="decimal" placeholder="e.g. 12"
@@ -21362,7 +21734,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       </span>
                     )}
                   </label>
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Length (ft) — down the side
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Length (ft) — front to back
                     <input className="ssc-dim-in" type="number" step="0.5" min="4" inputMode="decimal" placeholder="e.g. 24"
                       {...calDimProps("lengthFt", adminCalDims.lengthFt)}
                       style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: (calLengthNeedsLook || !calDimInBand("lengthFt", calDimL)) ? "#F59E0B" : "#CBD5E1", background: calLengthNeedsLook ? "#FFFBEB" : "#FFF" }} />
@@ -21379,7 +21751,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       tests/harness/porchPanel.mjs, which reaches the field below by
                       /^Wall height \(ft\)/. Putting the qualifier before the unit is clearer
                       anyway -- the eave is where a builder has to hold the tape. */}
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height at the eave (ft)
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height at the eave (ft) — the outside walls (single-slope roof: the LOW side)
                     <input className="ssc-dim-in" type="number" step="0.5" min="3" inputMode="decimal" placeholder="e.g. 9"
                       {...calDimProps("wallHeightFt", calDimH)}
                       style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: (calWallNeedsLook || !calDimInBand("wallHeightFt", calDimH)) ? "#F59E0B" : "#CBD5E1", background: (calWallNeedsLook || calWallBad != null) ? "#FFFBEB" : "#FFF" }} />
@@ -21619,7 +21991,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           {[
                             ["draft", `Looking at your ${adminCalCheck.views || 0} views`, `Looked at your ${adminCalCheck.views || 0} views`],
                             ["draft", "Drawing a first 3D from what they show", "Drew a first 3D from what they show"],
-                            ["check", "Checking our 3D against your video, side by side", "Checked our 3D against your video"],
+                            /* THE ROUND IS SAID OUT LOUD once a check is running (2026-09-24). Up to
+                               SS_CHECK_ROUNDS of them, each a render and a check, so without it the
+                               card sits on one line for two minutes and reads as stuck. */
+                            ["check", adminCalCheck.round
+                              ? `Checking its work — round ${adminCalCheck.round} of ${SS_CHECK_ROUNDS}`
+                              : "Checking our 3D against your video, side by side", "Checked our 3D against your video"],
                             ["done", "Correcting anything that doesn't line up", "Correcting anything that doesn't line up"],
                           ].map(([owns, doing, done], i) => {
                             const order = ["draft", "render", "check", "done"];
@@ -21634,10 +22011,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                             );
                           })}
                         </ol>
+                        {/* THE AUTOMATIC SECOND READ, said while it happens. Without this line the
+                            first step simply takes twice as long and nothing says why; with it, the
+                            builder knows the first read was thrown away and that it cost nothing. */}
+                        {adminCalCheck.retry && adminCalCheck.step === "draft" && (
+                          <div style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", fontWeight: 700, lineHeight: 1.5 }}>
+                            The first read ran out of room before it finished, so we are reading your views again with a shorter answer. It is still one generation.
+                          </div>
+                        )}
                         <div style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", lineHeight: 1.5 }}>
                           {adminCalSlow
                             ? "Still going. Big videos take longer — don't close the page."
-                            : "Usually about a minute. You can leave this page open and come back."}
+                            : "Usually one to three minutes. You can leave this page open and come back."}
                         </div>
                         {/* THE MONEY LINE. Under a rule, on every render of this card. */}
                         <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #DDD6FE", fontSize: 11, color: "#4C1D95", fontWeight: 700, lineHeight: 1.5 }}>
@@ -21764,7 +22149,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       builder has their draft and has been charged once either way. */}
                   <div style={{ marginTop: 8, fontSize: 11.5, lineHeight: 1.5, fontWeight: 600, color: adminCalCheck.verdict === "matches" ? "#047857" : adminCalCheck.verdict === "corrections" ? "#5B21B6" : "#B45309" }}>
                     {adminCalCheck.verdict === "matches" && <>✓ Checked against your video — the draft already matches. Look at it yourself anyway; you are the one who has seen the building.</>}
-                    {adminCalCheck.verdict === "corrections" && <>We checked our own 3D against your video and corrected {adminCalCheck.changed.length} thing{adminCalCheck.changed.length === 1 ? "" : "s"}:</>}
+                    {/* HOW MANY ROUNDS, when there was more than one: "corrected 3 things" after
+                        two looks is a different claim from after one, and the list below is the
+                        net of all of them (ssMergeChanges). */}
+                    {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length > 0 && <>We checked our own 3D against your video{(adminCalCheck.rounds || 1) > 1 ? ` ${adminCalCheck.rounds} times` : ""} and corrected {adminCalCheck.changed.length} thing{adminCalCheck.changed.length === 1 ? "" : "s"}:</>}
+                    {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length === 0 && <>We checked our own 3D against your video{(adminCalCheck.rounds || 1) > 1 ? ` ${adminCalCheck.rounds} times` : ""}, and its corrections cancelled each other out, so what you see is the first read. Look at it carefully against your pictures.</>}
                     {adminCalCheck.verdict === "rejected_too_many" && <>Our check thought too much of the draft was wrong to patch safely, so it changed nothing. Go through the four questions below carefully.</>}
                     {(adminCalCheck.verdict === "skipped" || adminCalCheck.verdict === "failed") && <>We couldn't run our own check this time, so what you see is the first read. Look at it carefully against your pictures before you save. You were charged once, as usual.</>}
                   </div>
@@ -21947,7 +22336,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       are true at once, so the number stays a ratio on the wire and becomes
                       feet here. */}
                   <div style={{ marginTop: 10, fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
-                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutW)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the side walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)}.
+                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec)}
                   </div>
                   {/* ── THE FOUR QUESTIONS ───────────────────────────────────────────────
                       ONLY WHERE THERE IS SOMETHING TO ANSWER THEM AGAINST, which is the same
@@ -22138,7 +22527,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof type
-                  <select value={adminCal.spec.roof.type} onChange={(e) => calSetRoof({ type: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                  <select value={adminCal.spec.roof.type} onChange={(e) => calSetRoofType(e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
                     {/* "Single slant" is what ShedPro and Carolyn both call a shed roof.
                         The value stays "shed" -- this is a label, not a new roof type. */}
                     <option value="gable">Gable (two slopes)</option>
@@ -22146,6 +22535,32 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <option value="gambrel">Gambrel (barn)</option>
                   </select>
                 </label>
+                {/* WHICH WAY THE BUILDING FACES (2026-09-24). The FRONT is the wall with the porch,
+                    or the main door when there is no porch, and it is the wall the size's first
+                    number measures. "Not set" is a real answer and it is where every older style
+                    sits: the roof then runs the way it always has (the ridge along the longer
+                    side), and picking it deletes the key rather than storing a default. One
+                    select or the other, never both: the sanitiser keeps roof.front on a gable or
+                    gambrel only and roof.highSide on a shed only. */}
+                {adminCal.spec.roof.type === "shed" ? (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>High side (single slant)
+                    <select value={adminCal.spec.roof.highSide || ""} onChange={(e) => calSetRoofOpt("highSide", e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                      <option value="">Not set (the long way, as before)</option>
+                      <option value="front">Front (falls front to back)</option>
+                      <option value="back">Back (falls back to front)</option>
+                      <option value="left">Left side</option>
+                      <option value="right">Right side</option>
+                    </select>
+                  </label>
+                ) : (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Front wall (porch or door side)
+                    <select value={adminCal.spec.roof.front || ""} onChange={(e) => calSetRoofOpt("front", e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                      <option value="">Not set (ridge the long way, as before)</option>
+                      <option value="gable">Gable end (the roof triangle faces you)</option>
+                      <option value="eave">Long side (the roof edge faces you)</option>
+                    </select>
+                  </label>
+                )}
                 {/* ROOF MATERIAL HAD NO CONTROL AT ALL until 2026-08-28. It could only ever
                     be photo-derived by the AI drafter or inferred from whatever the CUSTOMER
                     later picked -- so a builder who sells metal roofs had no way to say so,
@@ -22325,6 +22740,66 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     </select>
                   </label>
                 )}
+                {/* LOWER WINGS (2026-09-24), the Tri Home's shape: ENCLOSED single-storey rooms along
+                    the eave sides, INSIDE the footprint, each under its own roof falling away from
+                    a taller middle section. Not a lean-to, which is open on posts and sits outside.
+                    Gable and gambrel only (the sanitiser drops them on a shed). Width 0 or blank is
+                    off and deletes every wing key, like the lean-to's 0. */}
+                {adminCal.spec.roof.type !== "shed" && (() => {
+                  const roof = adminCal.spec.roof;
+                  const on = (Number(roof.wingWidthFt) || 0) > 0;
+                  // WHICH SIDES CAN TAKE A WING ON THIS ROOF, from d3RoofAxes like the renderer: the
+                  // walls parallel to the ridge. A side that is not one of them is not drawn, and the
+                  // contract is that the panel says so rather than letting it vanish.
+                  const eaveSides = d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? ["left", "right"] : ["front", "back"];
+                  const lost = on && roof.wingSide && roof.wingSide !== "both" && eaveSides.indexOf(roof.wingSide) < 0;
+                  const hint = { fontSize: 10, fontWeight: 700, marginTop: 3, color: "#A16207" };
+                  return (
+                    <>
+                      <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Lower wings, each (ft wide, 0 = none)
+                        <input type="number" step="0.5" min="0" max="16" placeholder="0"
+                          {...calOptNumProps("wingWidthFt", roof.wingWidthFt, [0, 16], (n) => (n > 0 ? calSetRoofOpt("wingWidthFt", n) : calSetWings(null)))}
+                          style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                        <div style={hint}>Enclosed rooms under their own lower roof, inside the size. A lean-to is the open one on posts.</div>
+                      </label>
+                      {on && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wing side
+                          <select value={roof.wingSide || ""} onChange={(e) => calSetRoofOpt("wingSide", e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                            <option value="">Choose…</option>
+                            <option value="both">Both sides</option>
+                            <option value="left">Left side</option>
+                            <option value="right">Right side</option>
+                            <option value="front">Front</option>
+                            <option value="back">Back</option>
+                          </select>
+                          <div style={{ ...hint, color: (lost || !roof.wingSide) ? "#B45309" : "#A16207" }}>
+                            {!roof.wingSide
+                              ? "Pick the side the wing is on."
+                              : lost
+                                ? `On this roof a wing can only run along the ${eaveSides[0] === "left" ? "left or right side" : "front or back"} — the walls under the roof edge — so a wing on the ${roof.wingSide === "left" || roof.wingSide === "right" ? roof.wingSide + " side" : roof.wingSide} is not drawn.`
+                                : "Runs the full depth, along the wall under the roof edge."}
+                          </div>
+                        </label>
+                      )}
+                      {on && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wing roof pitch (rise in 12)
+                          <input type="number" step="0.5" min="0" max="18" placeholder="blank = 3"
+                            {...calOptNumProps("wingPitch", roof.wingPitch == null ? null : Math.round(Number(roof.wingPitch) * 1200) / 100, [0, 18], (n) => calSetRoofOpt("wingPitch", n == null ? null : n / 12))}
+                            style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                          <div style={hint}>Falls away from the middle, down to the outside wall.</div>
+                        </label>
+                      )}
+                      {on && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Middle section's wall height (ft)
+                          <input type="number" step="0.5" min="6" max="26" placeholder="blank = 3 ft over the wings"
+                            {...calOptNumProps("centerEaveFt", roof.centerEaveFt, [6, 26], (n) => calSetRoofOpt("centerEaveFt", n))}
+                            style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                          <div style={hint}>Floor to the top of the tall middle walls, where its own roof starts.</div>
+                        </label>
+                      )}
+                    </>
+                  );
+                })()}
                 {adminCal.spec.roof.type !== "shed" && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer width (ft, 0 = none)
                     <input type="number" step="0.5" min="0" {...calNumProps("dormerWidthFt", adminCal.spec.roof.dormerWidthFt != null ? adminCal.spec.roof.dormerWidthFt : 0, (n) => calSetRoof({ dormerWidthFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
@@ -22425,10 +22900,35 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       )}
                       {kind !== "none" && (
                         <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch end
+                          {/* THE SAME KEY, TWO MEANINGS, and the label follows the one in force. In the
+                              2026-09-24 frame (roof.front or roof.highSide set) "front" is the FRONT
+                              WALL, gable end or not; on every older style it is the front gable end. */}
                           <select value={roof.porchEnd === "back" ? "back" : "front"} onChange={(e) => calSetRoof({ porchEnd: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
-                            <option value="front">Front gable end</option>
-                            <option value="back">Back gable end</option>
+                            <option value="front">{(roof.front != null || roof.highSide != null) ? "Front wall" : "Front gable end"}</option>
+                            <option value="back">{(roof.front != null || roof.highSide != null) ? "Back wall" : "Back gable end"}</option>
                           </select>
+                        </label>
+                      )}
+                      {/* WHERE THE PORCH ROOF MEETS THE WALL, AND HOW WIDE THE PORCH IS (2026-09-24).
+                          Projecting only, the sanitiser's own rule. Farmstand's porch roof meets
+                          its front wall about 2 ft below the eave, with a band of siding between;
+                          Tri Home's porch stands in front of the middle section only. Blank is the
+                          renderer's own answer -- just under the top of the wall, the whole wall
+                          (or the middle section's, with wings) -- and it is stored as nothing. */}
+                      {kind === "projecting" && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch roof meets the wall at (ft up)
+                          <input type="number" step="0.25" min="6" max="24" placeholder="blank = just under the eave"
+                            {...calOptNumProps("porchAttachFt", roof.porchAttachFt, [6, 24], (n) => calSetRoofOpt("porchAttachFt", n))}
+                            style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                          <div style={hint}>Floor to the top of the porch roof, where it meets the wall.</div>
+                        </label>
+                      )}
+                      {kind === "projecting" && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch width (ft)
+                          <input type="number" step="0.5" min="4" max="60" placeholder="blank = the whole wall"
+                            {...calOptNumProps("porchWidthFt", roof.porchWidthFt, [4, 60], (n) => calSetRoofOpt("porchWidthFt", n))}
+                            style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                          <div style={hint}>Along its wall, centred on it.</div>
                         </label>
                       )}
                       {/* Gable only: the renderer draws the truss on a gable roof and nowhere else,
@@ -22518,6 +23018,32 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     )}
                   </label>
                 );})}
+                {/* CORNER BOARDS AND FASCIA, APART FROM THE TRIM (2026-09-24). Both used to be the
+                    trim colour, full stop, so a building like Farmstand -- white window casings,
+                    brown corner boards, dark fascia -- could only be drawn with white corners and a
+                    white roof edge. Blank is "same as trim", which is exactly what absent draws,
+                    and it is stored as nothing (calSetOptColor). The two buttons are the answers a
+                    builder actually gives: corners in the wall colour, fascia in the roof colour. */}
+                {[["corner", "Corner boards", "body", "Same as walls"], ["fascia", "Fascia and rake boards", "roof", "Same as roof"]].map(([k, lbl, from, fromLbl]) => {
+                  const colors = adminCal.spec.colors || {};
+                  const own = colors[k] || "";
+                  return (
+                    <label key={"cal-opt-col-" + k} style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>{lbl}
+                      <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                        <input type="text" placeholder="blank = same as trim" value={own} onChange={(e) => calSetOptColor(k, e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                        <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #FCD34D", background: own || colors.trim || "#EEE", flexShrink: 0 }} />
+                      </div>
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
+                        <button type="button" onClick={() => calSetOptColor(k, "")} aria-pressed={!own}
+                          style={{ ...S.btn(!own ? "#92400E" : "#FFF", !own ? "#FFF" : "#92400E"), border: "1px solid #FCD34D", fontSize: 10.5, padding: "2px 6px", fontWeight: 600 }}>Same as trim</button>
+                        {colors[from] && (
+                          <button type="button" onClick={() => calSetOptColor(k, colors[from])} aria-pressed={Boolean(own) && own === colors[from]}
+                            style={{ ...S.btn(own && own === colors[from] ? "#92400E" : "#FFF", own && own === colors[from] ? "#FFF" : "#92400E"), border: "1px solid #FCD34D", fontSize: 10.5, padding: "2px 6px", fontWeight: 600 }}>{fromLbl}</button>
+                        )}
+                      </div>
+                    </label>
+                  );
+                })}
               </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 {/* The sample building the preview renders on. calibrationOnly ONLY, for the
