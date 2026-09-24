@@ -5098,9 +5098,11 @@ function d3EaveFinishDrop(roofCfg, ny) {
 //   H         the wall height
 //   D         the projection, from d3ProjectingPorch
 //   trimFace  the cladding's proudest face: the posts' outer faces stand flush with the corner boards
-//   capY      the highest the porch roof may meet the wall. The renderer measures it off the main
-//             roof it has already built (a rake or fascia on a deep overhang, open-eave tails);
-//             the readout has no roof to measure and passes Infinity, so its yHigh is "at most".
+//   capY      the highest the porch roof may meet the wall: d3PorchCapFt's ceiling (the building's
+//             outline in the wall's own plane, and the eave hanging over an eave-wall porch), and
+//             in the renderer also whatever it measures off the main roof it has already built (a
+//             rake or fascia past a gable wall, open-eave fly rafters, a lean-to). The readout has
+//             only d3PorchCapFt, and says "at most" where the renderer can measure more.
 //
 // Frame: d = feet OUT from the gable wall's mid-plane (the footprint line), y = up from the floor.
 //   · The high edge sits at H - 0.2, just under a plate band (SS_PLATE_BAND_TOP - 0.3), and
@@ -5154,8 +5156,88 @@ function d3PorchGeom(S, H, D, trimFace, capY, attachFt) {
     sizes,
   };
 }
+// THE CEILING THE BUILDING ITSELF PUTS OVER A PROJECTING PORCH'S ROOF (2026-09-24 review), in feet off
+// the floor, or Infinity with no projecting porch. ONE function, read by buildShed3DModel and by the
+// panel's readout, so a porch the style hangs high (porchAttachFt) is held down the same way in both.
+//
+// The renderer's own clearance scan only sees members that reach PAST the wall's face, so on a flush
+// roof (overhang 0) nothing held the porch roof at all: an attach height above the wall top floated it
+// over the eave, or ran it into the main roof on a shed's low wall. And the readout, with no roof to
+// measure, was feet off on every eave-wall porch and under every pair of wings. Two parts:
+//   · THE WALL'S OWN OUTLINE across the porch sheet's width (its posts' outer faces plus the sheet's
+//     side overhang), less the 0.2 ft of "just under the top of the wall": on an eave wall that wall's
+//     top; on a cap end the massing's outline (d3MassingTopAt) -- the gable, a shed's slope, and with
+//     wings the wing roofs a centre porch's sheet reaches under. Straight between its corners, so its
+//     lowest point over the width is at an end or a corner, read exactly there; where two corners
+//     share a u (a wing roof meeting the centre wall) the lower one is the outline.
+//   · ON AN EAVE WALL, THE EAVE OVER IT, less the scan's 0.03: the eave finish's lowest point out at
+//     the overhang (d3EaveFinishDrop: fascia, soffit or open tails), and the rake board's bottom corner
+//     when the porch runs out to a gable end; on a new-frame shed's HIGH wall, the level soffit, or
+//     the open tails where they cross the wall face. A lower bound of what the scan measures, so the
+//     renderer and the readout take the same number.
+// With no porchAttachFt and no porchWidthFt this is exactly H - 0.2 on every stored style, whose
+// porch spans the whole gable end, so none of them moves (d3PorchGeom already sits there).
+function d3PorchCapFt(roofCfg, W, L, H, trimFace) {
+  const cfg = roofCfg || {};
+  const porch = d3ProjectingPorch(cfg, W, L);
+  if (!porch) return Infinity;
+  const P = d3PorchSpan(cfg, W, L);
+  const m = d3Massing(cfg, W, L, H);
+  const top = d3PorchWallTopFt(cfg, W, L, H);
+  const reach = P.span / 2 + trimFace + 0.08;          // d3PorchGeom's side + sizes.SIDE_OV
+  if (P.onCap) {
+    const corners = m.prof.map((c) => [c[0] + m.uc, c[1]]);
+    m.wings.forEach((g) => { corners.push([g.u1, g.ye], [g.u0, g.ya]); });
+    const outline = (u) => {
+      const at = corners.filter((c) => Math.abs(c[0] - u) < 1e-9);
+      return at.length ? Math.min(...at.map((c) => c[1])) : d3MassingTopAt(m, u);
+    };
+    const lo = Math.max(-m.S / 2, P.centerU - reach), hi = Math.min(m.S / 2, P.centerU + reach);
+    let y = Math.min(outline(lo), outline(hi));
+    corners.forEach((c) => { if (c[0] > lo + 1e-9 && c[0] < hi - 1e-9) y = Math.min(y, outline(c[0])); });
+    return y - 0.2;
+  }
+  const cap = top - 0.2;
+  const ovRaw = cfg.overhang != null ? Number(cfg.overhang) : D3.OVERHANG;
+  const OV = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
+  // The scan's wall face (d3PorchGeom's dWall + 0.005), less a hundredth: a member whose outermost
+  // point might pass it counts, so this never sits above what the scan measures.
+  const face = D3.WALL_T / 2 + 0.005 - 0.01;
+  const s = porch.wall === "south" || porch.wall === "east" ? 1 : -1;
+  if (porch.wall === d3ShedHighWall(cfg, W, L)) {
+    const k = cfg.pitch || 0.25, ny = 1 / Math.sqrt(1 + k * k);
+    if (cfg.eave === "open") {
+      // Tails rise outward from the wall: lowest where they cross its face, if they reach it at all.
+      if (OV * ny + 0.3 * k * ny <= face) return cap;
+      return Math.min(cap, top + k * (face + 0.01) - (D3_EAVE.TAIL_DROP - D3_EAVE.DECK_N) / ny - 0.03);
+    }
+    return Math.min(cap, top - 0.005 - D3_EAVE.SOFFIT_T - 0.03);
+  }
+  // The slope that ends at this wall: a wing's, or the centre's own end leg.
+  let k = 0;
+  const wing = m.wings.find((g) => g.side === s);
+  if (wing) k = wing.pitch;
+  else {
+    const pr = s > 0 ? m.prof.slice().reverse() : m.prof;
+    for (let i = 1; i < pr.length; i++) {
+      const du = Math.abs(pr[i][0] - pr[0][0]);
+      if (du > 1e-9) { k = Math.abs(pr[i][1] - pr[0][1]) / du; break; }
+    }
+  }
+  const ny = 1 / Math.sqrt(1 + k * k);
+  // Nothing of the eave reaches past the wall face (a flush roof): the outline above is all there is.
+  if (OV * ny + 0.12 * k * ny + D3_EAVE.FASCIA_T / 2 <= face) return cap;
+  const eaveY = top - OV * k * ny;                       // the slope line OV out along the slope
+  let drop = d3EaveFinishDrop(cfg, ny);
+  // The rake board's bottom corner at the eave, when the porch runs out to a gable end.
+  if (reach > m.L / 2 + OV - 0.1) drop = Math.max(drop, (0.16 - (D3.ROOF_T / 2 - 0.08)) * ny);
+  return Math.min(cap, eaveY - drop - 0.03);
+}
 // The projecting porch for a SPEC and a size LABEL, for the calibration panel: the size parsed the
-// way d3DormerReadout parses it, then d3PorchGeom with no main roof to measure (capY Infinity).
+// way d3DormerReadout parses it, then d3PorchGeom under d3PorchCapFt, the ceiling the renderer holds
+// it under too. `atMost` says the renderer may still build it lower: on a gable end whose roof reaches
+// past the wall (a rake or eave board, a lean-to), which only the renderer can measure, and on an
+// eave wall a lean-to hangs off.
 // Null when the style has no projecting porch. trimFace is the panel cladding's; it moves only
 // `side` and the rafter count, and none of what the panel prints (clearance, pitch, posts, where
 // the porch roof meets the wall) reads either.
@@ -5172,10 +5254,14 @@ function d3PorchReadout(spec, sizeLabel) {
   const H = (spec && spec.wallHeightFt) || D3.WALL_H;
   const top = d3PorchWallTopFt(roof, w, d, H);
   const attachFt = Number(roof.porchAttachFt) || 0;
-  const g = d3PorchGeom(S, top, porch.D, D3.WALL_T / 2 + 0.03, Infinity, attachFt);
+  const trimFace = D3.WALL_T / 2 + 0.03;
+  const g = d3PorchGeom(S, top, porch.D, trimFace, d3PorchCapFt(roof, w, d, H, trimFace), attachFt);
+  const ovRaw = roof.overhang != null ? Number(roof.overhang) : D3.OVERHANG;
+  const onCap = d3PorchSpan(roof, w, d).onCap;
+  const atMost = onCap ? (isFinite(ovRaw) ? ovRaw : D3.OVERHANG) > D3.WALL_T / 2 + 0.005 : (Number(roof.leanToWidthFt) || 0) > 0.5;
   // With porchAttachFt set it is the ATTACH height, not the wall, that decides the headroom, so the
   // panel's suggestion is where to hang the porch roof: hNeeded is a wall top, 0.2 above that.
-  return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2 };
+  return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2, atMost };
 }
 
 // A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
@@ -8726,7 +8812,10 @@ function buildShed3DModel(THREE, p) {
       // a centre porch, and its box's lowest corner is the wing's OUTER eave, feet away to the side.
       capY = Math.min(capY, ((o.userData && (o.userData.ssLeanTo || o.userData.ssWing)) || attachFt > 0 || Number(roofCfg.porchWidthFt) > 0 ? lowestOverPorch(o) : bb.min.y) - 0.03);
     });
-    const geom = d3PorchGeom(span, topH, D, trimFace, capY, attachFt);
+    // And under the ceiling the building itself sets (d3PorchCapFt, which the panel's readout reads
+    // too): the outline in the wall's own plane, which nothing above measures on a flush roof, and on
+    // an eave wall the eave over it. On every stored style that is H - 0.2, where the porch already is.
+    const geom = d3PorchGeom(span, topH, D, trimFace, Math.min(capY, d3PorchCapFt(roofCfg, bldgW, bldgH, H, trimFace)), attachFt);
     const { POST, HDR_H, HDR_D, RAF_W, RAF_D, PR_T, SHEATH, SIDE_OV, CHEEK_T, FAS_T } = geom.sizes;
     const { pitch, yHigh, side, dWall, dPost, dEnd } = geom;
     const ang = Math.atan(pitch), cosA = Math.cos(ang), sinA = Math.sin(ang);
@@ -23885,11 +23974,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   const kind = calPorchKind(roof);
                   const key = kind === "projecting" ? "porchOutFt" : "porchDepthFt";
                   const hint = { fontSize: 10, fontWeight: 700, marginTop: 3, color: "#A16207" };
-                  // WHAT THE PROJECTING PORCH WILL BUILD at the preview size, from d3PorchGeom, the
-                  // function the renderer builds it with. The panel has no main roof to measure, so
-                  // the height where the porch roof meets the wall is the most it can be. Amber when
-                  // the wall is too short for a 2:12 porch roof over 6'8" posts. It warns and nothing
-                  // is refused: the porch is still drawn.
+                  // WHAT THE PROJECTING PORCH WILL BUILD at the preview size, from d3PorchGeom under
+                  // d3PorchCapFt, the function and the ceiling the renderer builds it with. Where the
+                  // main roof reaches out over a gable-end porch (a rake or eave board past the wall,
+                  // a lean-to) only the renderer can measure it, and the line says the porch roof can
+                  // sit a little lower (pr.atMost). Amber when the wall is too short for a 2:12 porch
+                  // roof over 6'8" posts. It warns and nothing is refused: the porch is still drawn.
                   const pr = kind === "projecting" ? d3PorchReadout(adminCal.spec, sel.size) : null;
                   const warn = !!(pr && (pr.short || pr.pitchClamped));
                   // A RECESSED porch is not drawn on a building with lower wings (the renderer turns
@@ -23929,7 +24019,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                                   // headroom, so the suggestion is where to hang the porch roof.
                                   ? `Hung at ${d3FtIn(pr.attachFt)}, the porch roof leaves ${d3FtIn(pr.postH)} under the beam. About ${d3FtIn(pr.attachNeeded)} up gives a door's height at 2:12`
                                   : `Walls this short leave ${d3FtIn(pr.postH)} under the porch beam. About ${d3FtIn(pr.hNeeded)} walls give a door's height at 2:12`)
-                                : `Posts ${d3FtIn(pr.postH)} clear, porch roof meets the wall at ${d3FtIn(pr.yHigh)} on ${sel.size || "this size"}`}
+                                : `Posts ${d3FtIn(pr.postH)} clear, porch roof meets the wall at ${d3FtIn(pr.yHigh)} on ${sel.size || "this size"}${pr.atMost ? ", or a little lower where the main roof's edge reaches over the porch" : ""}`}
                             </div>
                           )}
                         </label>

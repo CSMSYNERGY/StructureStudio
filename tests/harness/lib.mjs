@@ -15,7 +15,7 @@
 // non-local request is aborted. capture-lead, save_design, submit-estimate and log_error would
 // otherwise write rows into the one database beta AND production share.
 import { chromium } from "@playwright/test";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bypassGate, showOptTab, revealTool } from "../e2e/helpers.mjs";
@@ -234,4 +234,28 @@ export function shotsDir(sub) {
   const dir = process.env.SS_SHOTS || join(tmpdir(), "ss-harness", sub);
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+// THE DESIGNER'S PURE PORCH FUNCTIONS (2026-09-24), lifted out of the component twin by the anchors
+// porchGeom_test lifts them by, so a scene-graph harness can hold the panel's readout
+// (d3PorchReadout) and the building's own ceiling over a porch (d3PorchCapFt) against what the
+// COMPILED bundle really built. The twin is the source the bundle is compiled from, and porchGeom_test
+// pins the two twins byte-identical in these regions.
+export function purePorch() {
+  const src = readFileSync(new URL("../../structure-studio.component.js", import.meta.url), "utf8");
+  const lift = (a, b) => {
+    const i = src.indexOf(a), j = i < 0 ? -1 : src.indexOf(b, i);
+    if (i < 0 || j < 0) throw new Error(`purePorch: the anchors ${a} .. ${b} moved; re-point them`);
+    return src.slice(i, j);
+  };
+  const regions = [
+    ["const D3 = {", "// The casing reveal every opening"],
+    ["function d3RoofAxes(", "function d3FtIn("],
+    ["function ssPorchTrussWall(", "// Where a vent sits in the gable above"],
+    ["function d3DefaultOverhangStyle(", "// ── THE PROJECTING PORCH'S NUMBERS"],
+    ["function d3PorchGeom(", "function d3PorchReadout("],
+    ["function d3PorchReadout(", "// A dimensioned end-elevation of the style"],
+  ];
+  const body = regions.map(([a, b]) => lift(a, b)).join("\n");
+  return new Function(`${body}; return { d3PorchReadout, d3PorchCapFt, d3PorchGeom, d3PorchSpan };`)();
 }

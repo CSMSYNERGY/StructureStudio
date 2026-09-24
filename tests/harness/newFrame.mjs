@@ -23,14 +23,21 @@
 //      the eave line; no truss
 //   8. a projecting porch on a gable end honours porchWidthFt and porchAttachFt, even up in the gable
 //   9. the old frame (no key) is untouched: a shed keeps its west porch and has no model.frame
-//  10. zero page errors
+//  10. the building's own ceiling over a porch (d3PorchCapFt, 2026-09-24 review): on a FLUSH roof an
+//      attach height above the wall is held under the wall's outline (it floated over the eave, and
+//      ran into the main roof on a shed's low wall); every porch sits at or under that ceiling, and
+//      the panel's readout (d3PorchReadout) says what was built -- exactly, or "at most" where the
+//      main roof reaches out over a gable-end porch
+//  11. zero page errors
 //
 //   python -m http.server 8125 --bind 127.0.0.1                  (repo root)
 //   node tests/harness/newFrame.mjs                              (SS_SHOTS=<dir> for the PNGs)
 //   SS_CASES=A,E node tests/harness/newFrame.mjs                 (a subset)
 //
 // Exit 0 = every assertion held.
-import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir } from "./lib.mjs";
+import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, purePorch } from "./lib.mjs";
+
+const PURE = purePorch();
 
 const CLADS = ["panel", "lap", "batten", "agpanel"].map((id) => ({ id, rate: 0, basis: "sqft_option", label: null, charged: false }));
 // Farmstand, as the video shows it: brown body and corners, white casings, charcoal fascia and roof.
@@ -65,6 +72,18 @@ const CASES = [
   // rakes at the eave corners, 8 ft to either side, do not hold it down at the plate.
   { id: "K2", label: "Frame Gable Porch High", size: "28x20", H: 10, ux: true, porch: { wall: "south", onCap: true, span: 12, attach: 11.5 }, colors: PLAIN,
     d3: { roof: { type: "gable", front: "gable", pitch: 0.47, overhang: 1, porchOutFt: 6, porchWidthFt: 12, porchAttachFt: 11.5 }, siding: "batten", colors: PLAIN, wallHeightFt: 10 } },
+  // A FLUSH roof (overhang 0) with the porch roof asked for ABOVE the wall: nothing reaches past the
+  // wall's face for the clearance scan to see, so it used to float 2 ft over the eaves across the whole
+  // gable end. Held just under the wall's corners now (d3PorchCapFt), 10 - 0.2.
+  { id: "L", label: "Frame Flush Gable Porch", size: "28x20", H: 10, ux: true, porch: { wall: "south", onCap: true, span: 28, capped: 9.8 }, colors: PLAIN,
+    d3: { roof: { type: "gable", front: "gable", pitch: 0.5, overhang: 0, porchOutFt: 6, porchAttachFt: 12 }, siding: "panel", colors: PLAIN, wallHeightFt: 10 } },
+  // The same on a shed's LOW wall: attach 8.5 on a 7 ft wall ran into the main roof slab.
+  { id: "M", label: "Frame Flush Low Porch", size: "16x10", H: 7, ux: false, tallNeg: false, porch: { wall: "north", onCap: false, span: 16, capped: 6.8 }, colors: PLAIN,
+    d3: { roof: { type: "shed", highSide: "front", pitch: 0.3, overhang: 0, eave: "fascia", porchOutFt: 5, porchEnd: "back", porchAttachFt: 8.5 }, siding: "panel", colors: PLAIN, wallHeightFt: 7 } },
+  // An EAVE-WALL front under a deep overhang: the porch roof hangs under the eave finish (7.27), and
+  // the panel said 7' 10" before the readout learned that ceiling.
+  { id: "N", label: "Frame Eave Porch", size: "24x14", H: 8, ux: false, porch: { wall: "south", onCap: false, span: 24 }, colors: PLAIN,
+    d3: { roof: { type: "gable", front: "eave", pitch: 0.5, overhang: 1.5, porchOutFt: 6 }, siding: "panel", colors: PLAIN, wallHeightFt: 8 } },
   // The control: no key, so today's rule -- a portrait shed's slope runs the long way and its porch
   // takes the WEST short wall (the old Farmstand, 10x16), with no frame.
   { id: "O", label: "Frame Old Shed", size: "10x16", H: 7, old: true, colors: PLAIN,
@@ -356,6 +375,16 @@ async function runCase(ctx, c, ok, dir) {
       if (P && m.porchRoof) {
         if (c.porch.attach != null) ok(`${id}: the porch roof meets the wall at porchAttachFt ${c.porch.attach}`, near(P.yHigh, c.porch.attach, 1e-9) && near(m.porchRoof.top, c.porch.attach, 0.03), `yHigh ${f3(P.yHigh)} sheet top ${f3(m.porchRoof.top)}`);
         if (c.porch.underLowEave) ok(`${id}: on the LOW wall the porch roof tucks under the low eave`, P.yHigh < H - 0.2 + 1e-9, f3(P.yHigh));
+        if (c.porch.capped != null) ok(`${id}: a flush roof holds the porch roof under the wall's own outline, at ${c.porch.capped}, not at porchAttachFt ${c.d3.roof.porchAttachFt}`, near(P.yHigh, c.porch.capped, 1e-9) && m.porchRoof.top < c.porch.capped + 0.03, `yHigh ${f3(P.yHigh)} sheet top ${f3(m.porchRoof.top)}`);
+        // THE CEILING AND THE READOUT (d3PorchCapFt, d3PorchReadout from the twin): the porch never
+        // sits above the ceiling the building sets over it, measured with the renderer's own trim; and
+        // the panel's line is what was built, to a fiftieth of a foot (the panel reads it with panel
+        // cladding's trim), or, where it says "at most", never below what was built.
+        const trimR = P.side - P.span / 2;
+        const capR = PURE.d3PorchCapFt(c.d3.roof, W, L, H, trimR);
+        ok(`${id}: the porch roof is at or under the building's own ceiling over it (${f3(capR)})`, P.yHigh <= capR + 1e-9, `yHigh ${f3(P.yHigh)}`);
+        const RD = PURE.d3PorchReadout(c.d3, c.size);
+        ok(`${id}: the panel's porch readout says what was built (${f3(RD.yHigh)}${RD.atMost ? ", at most" : ""})`, RD.atMost ? P.yHigh <= RD.yHigh + 0.02 : Math.abs(P.yHigh - RD.yHigh) < 0.02, `built ${f3(P.yHigh)}`);
         const spanAcross = (a) => a[1] - a[0];
         const posts = m.posts || [];
         const ext = posts.length ? [Math.min(...posts.map((q) => q.across[0])), Math.max(...posts.map((q) => q.across[1]))] : [0, 0];
