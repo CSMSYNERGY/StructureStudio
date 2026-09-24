@@ -1544,7 +1544,11 @@ const V2 = [
 Deno.test("v2 defines the FRONT once, and every direction is read from it", () => {
   for (const [name, p] of V2) {
     assert(p.includes("THE FRONT, which every front, back, left and right in this reply is read from"), `${name}: the FRONT paragraph`);
-    assert(p.includes("the one carrying the porch, or the main door when there is no porch"), `${name}: porch first, then door`);
+    // A ROOFED porch (fix 2026-09-24): the Tri Home has an open deck and stair at its back door,
+    // and "the one carrying the porch" could pick that wall and flip every direction.
+    assert(p.includes("the one carrying a ROOFED porch, or the main door when there is no porch"), `${name}: porch first, then door`);
+    assert(p.includes("An open deck, a stair or a ramp with no roof of its own over it does not decide the front"),
+      `${name}: an uncovered deck is not a porch`);
     assert(p.includes("never assume the front is the shorter wall"), `${name}: the old portrait assumption is ruled out`);
     // Azimuth 0 and the frame map's "front" are the FRONT wall now, not "the gable end the door is on".
     assert(p.includes("0 is square in front of the FRONT wall"), `${name}: azimuth 0 is the FRONT`);
@@ -1570,9 +1574,13 @@ Deno.test("v2 asks for roof.front and roof.highSide as REQUIRED decisions, in th
     assert(p.includes("the front wall itself is the tall one"), `${name}: the Farmstand case is named`);
     // And the shed's pitch has a reading that does not need a gable end, with a worked example.
     assert(p.includes("A shed has no gable end"), `${name}: shed pitch has its own reading`);
-    assert(p.includes("(9.3 - 7) / 10 = 0.23"), `${name}: and a worked example that is itself right`);
+    // GENERIC NUMBERS (fix 2026-09-24): the old example was the Farmstand's own first reading
+    // (9.3 over 7 on a 10 ft depth), which anchored every 10 ft shed and let an evaluation on that
+    // building pass by copying.
+    assert(p.includes("(10 - 8) / 12 = 0.17"), `${name}: and a worked example that is itself right`);
+    assert(!p.includes("9.3"), `${name}: none of the test building's own numbers`);
   }
-  assertEquals(Math.round(((9.3 - 7) / 10) * 100) / 100, 0.23, "the worked shed example's arithmetic");
+  assertEquals(Math.round(((10 - 8) / 12) * 100) / 100, 0.17, "the worked shed example's arithmetic");
 });
 
 Deno.test("v2 puts the porch on the FRONT wall whichever kind it is, with its attach height and width", () => {
@@ -1589,8 +1597,16 @@ Deno.test("v2 puts the porch on the FRONT wall whichever kind it is, with its at
     // taller wall — a shed's high front, a raised centre — the number has to be given.
     assert(p.includes("Give it whenever the wall behind the porch is taller than that — the high wall of a shed, or the centre section"), `${name}: a tall porch wall always gets a number`);
     assert(p.includes("PORCH WIDTH, porchWidthFt"), `${name}: the width paragraph`);
-    assert(p.includes("ONLY when it is clearly narrower than the wall"), `${name}: only a narrower porch`);
-    assert(p.includes("a porch in front of the centre section alone"), `${name}: the Tri Home case is named`);
+    // ONE RULE (fix 2026-09-24). The old paragraph both asked for a width on "a porch in front of
+    // the centre section alone" and told the model to leave it out when it "spans the whole
+    // centre section" -- the Tri Home is both. The stretch it is measured against is now named:
+    // the whole front, or the centre section on a winged building, where it is drawn centred.
+    assert(p.includes("give it only when the porch is clearly narrower than the stretch of wall it could cover"), `${name}: only a narrower porch`);
+    assert(p.includes("the CENTRE section alone on a building with side wings"), `${name}: the stretch, with wings`);
+    assert(p.includes("runs exactly from one wing to the other, because that is what is drawn without it"), `${name}: wing to wing is absent`);
+    assert(p.includes("it is drawn centred on that stretch"), `${name}: where it is drawn`);
+    assert(p.includes("or than the centre section on a building with side wings: its width"), `${name}: and the schema says the same`);
+    assert(!p.includes("it spans the whole centre section between them"), `${name}: the contradiction is gone`);
     // What the base already got right about telling the two porch kinds apart survives.
     assert(p.includes("its own separate roof"), `${name}: the separate roof`);
     assert(p.includes("the porch ceiling is nearly level"), `${name}: the level porch ceiling`);
@@ -1627,15 +1643,24 @@ Deno.test("v2 tells ENCLOSED wings from an OPEN lean-to, and forces the wings an
   }
 });
 
-Deno.test("v2 says colours MATTER, read off the sunlit face, with corner, fascia and porch wood", () => {
+Deno.test("v2 says colours MATTER, read as the paint looks in even daylight, with corner, fascia and porch wood", () => {
   for (const [name, p] of V2) {
     assert(!p.includes("do not spend effort"), `${name}: the "colours do not matter" sentence is gone`);
     assert(!p.includes("settings the customer picks later"), `${name}: and so is its reason`);
     assert(p.includes("its shape first, then its colours. Both matter."), `${name}: colours are part of the job`);
-    assert(p.includes("the SUNLIT side, never the side in shadow"), `${name}: read the sunlit face`);
+    // NOT "the SUNLIT side" (fix 2026-09-24): hard sun bleaches dark paint, and the Tri Home's
+    // charcoal reads #8e9596 on its sunlit wall against #5a6166 in even light. The renderer then
+    // lights the albedo again, so a sunlit reading draws paler still.
+    assert(!p.includes("SUNLIT"), `${name}: the sunlit-face rule is gone`);
+    assert(p.includes("as the paint looks in EVEN daylight"), `${name}: even daylight`);
+    assert(p.includes("not the side in shadow") && p.includes("not a face in hard sun, glare or a reflection of the sky"), `${name}: neither extreme`);
+    assert(p.includes("dark paint stays dark"), `${name}: dark stays dark`);
+    assert(p.includes("(the boards framing them, not shutters)"), `${name}: shutters are not trim`);
     assert(p.includes('"corner": "#rrggbb"') && p.includes('"fascia": "#rrggbb"'), `${name}: corner and fascia are asked for`);
-    assert(p.includes("Give corner and fascia ONLY when they differ from trim"), `${name}: absent means trim`);
-    assert(p.includes("the corners painted the body colour and the fascia matching the roof"), `${name}: the Farmstand case is named`);
+    assert(p.includes("give corner and fascia ONLY when they differ from trim"), `${name}: absent means trim`);
+    // A generic example, not a description of either test building.
+    assert(p.includes("for example corners in the body colour and a fascia in the roof colour"), `${name}: the pattern, as an example`);
+    assert(!p.includes("while only the window casings are white"), `${name}: not the Farmstand's own paint job`);
     // The porch's lumber, now that colour is part of the match (the legacy prompt still never asks).
     assert(p.includes('"wood": "#rrggbb"') && p.includes("only when there is a porch"), `${name}: porch wood, only with a porch`);
     assert(!p.includes("plateBand"), `${name}: the band is still the builder's setting`);
@@ -3324,4 +3349,78 @@ Deno.test("⚠️ v2 prompt: a later round is told it is one, and which fields c
   const p0 = selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
   const note = p1.slice(p1.indexOf("\n\nTHIS IS CHECK ROUND"), p1.indexOf("\n\nTHE IMAGES."));
   assertEquals(p1.replace(note, ""), p0, "the round note is the ONLY difference");
+});
+
+// ═══ WHAT THE PROXY RUNS TAUGHT THE FIRST PASS (fix, 2026-09-24) ═══════════════════════════════
+// Three runs per building on the app's own twelve frames. The Farmstand's high side came back
+// front, back and left (one run read the porch roof as the main roof); the Tri Home came back with
+// ONE wing in two runs; one run called a posted, decked porch recessed; one read the porch rafters
+// as the main eave. The prompt now teaches a procedure for each, and none of its examples is either
+// test building's own answer.
+Deno.test("⚠️ v2 first pass: the shed's high side is read by a PROCEDURE, off the MAIN roof", () => {
+  // Farmstand, three runs: front, back, left. One run read the porch's own lower roof as the main
+  // roof. The procedure: find the main roof by its highest edge; read the TALL vertical edge of the
+  // two walls whose top slopes; name it against the front.
+  for (const [name, p] of V2) {
+    const at = (s: string) => { const k = p.indexOf(s); assert(k > 0, `${name} has "${s}"`); return k; };
+    const steps = [at("1. Find the MAIN roof: the highest roof edge on the building."),
+                   at("2. Find the two walls whose top edge SLOPES under the main roof"),
+                   at("3. Name it relative to the FRONT.")];
+    assertEquals(steps, [...steps].sort((a, b) => a - b), `${name}: three steps, in order`);
+    assert(p.includes("A porch's own lower roof, hung on a wall below the main roof's edge, is NOT the main roof."), `${name}: not the porch roof`);
+    assert(p.includes("Each of those walls is a trapezoid: one of its two vertical edges is plainly taller than the other, and the TALL vertical edge stands at the high wall."), `${name}: the trapezoid`);
+    assert(p.includes("along the MAIN roof's edge and never a porch roof's"), `${name}: the pitch too`);
+    assert(!p.includes("the usual cabin or farm stand"), `${name}: no test-building cue`);
+  }
+});
+
+Deno.test("⚠️ v2 first pass: wings are looked for on BOTH sides, and \"one\" needs a named frame", () => {
+  for (const [name, p] of V2) {
+    assert(p.includes("LOOK AT BOTH SIDES before you answer: the frames square to each side wall, and the back view"), `${name}: both sides`);
+    assert(p.includes("A raised centre with a wing on only one side is uncommon"), `${name}: one wing is uncommon`);
+    assert(p.includes('answer "one" only when a frame shows the other side\'s wall running straight up to the centre section\'s eave'), `${name}: "one" needs evidence`);
+    assert(p.includes("name that frame in observed.roofNote"), `${name}: and names it`);
+    assert(p.includes("read from the frame where the wing roof is seen edge-on (square to the front for wings along the sides, square to a side for wings along the front and back)"),
+      `${name}: the wing pitch from the right frame`);
+  }
+});
+
+Deno.test("v2 first pass: a posted, decked porch is projecting; the eave finish is the MAIN roof's", () => {
+  for (const [name, p] of V2) {
+    assert(p.includes("is PROJECTING, never recessed, however low its roof and however open its sides"), `${name}: projecting, never recessed`);
+    assert(p.includes("recessed means the WALL itself stands back under the main roof"), `${name}: what recessed means`);
+    assert(p.includes("Judge it on the MAIN roof's own eaves"), `${name}: the main roof's eave`);
+    assert(p.includes("the porch's rafters are not the main roof's eave finish"), `${name}: not the porch rafters`);
+  }
+});
+
+Deno.test("v2 first pass: lean-to only where it can be drawn; vent and ridge offset against the centre with wings", () => {
+  for (const [name, p] of V2) {
+    assert(p.includes("give the lean-to keys only on a two-slope building whose front is a gable end, or on a shed whose high side is left or right"),
+      `${name}: the lean-to is only asked where the renderer hangs it on a side wall`);
+    assert(p.includes("say in observed.roofNote which wall the lean-to is on"), `${name}: and noted otherwise`);
+    assert(p.includes("as a fraction of the width of the gable wall it sits in, not of the triangle; on a building with side wings that is the CENTRE section's width"),
+      `${name}: the vent against its own gable`);
+    assert(p.includes("as a fraction of the FULL width under that roof (the whole building's, or the centre section's on a building with side wings)"),
+      `${name}: the ridge offset against the width under that roof`);
+    assert(p.includes("Settle each REQUIRED decision once, from the frames named for it, and do not re-measure a number you have already given."),
+      `${name}: the reply budget is spent once`);
+  }
+});
+
+Deno.test("⚠️ v2 first pass: no test building's own answer is left in it, and the subject is not always a barn", () => {
+  for (const [name, p] of V2) {
+    for (const cue of ["9.3", "farm stand", "sign on it", "at about the height of the wing roofs", "only the window casings are white"]) {
+      assert(!p.includes(cue), `${name}: "${cue}" is one of the two test buildings, not a rule`);
+    }
+  }
+  assert(videoShapePrompt(DIMS, true).startsWith("These images are frames from ONE continuous walk-around video of ONE portable building (a shed, barn, cabin or small house)."),
+    "the v2 walk's subject");
+  assert(combinedShapePrompt(8, 4, DIMS, true).startsWith("These images are all of ONE portable building (a shed, barn, cabin or small house), from two sources."),
+    "and the v2 combined opening");
+  // The legacy openings stay as they were (their bytes are pinned by hash above).
+  assert(combinedShapePrompt(8, 4, DIMS).startsWith("These images are all of ONE portable building (a shed or barn), from two sources."), "legacy combined");
+  assert(combinedShapePrompt(8, 4).startsWith("These images are all of ONE portable building (a shed or barn), from two sources."), "and no dims");
+  assert(combinedShapePrompt(8, 4, null, true).startsWith("These images are all of ONE portable building (a shed or barn), from two sources."),
+    "v2 without dims is the legacy body, so the legacy opening");
 });
