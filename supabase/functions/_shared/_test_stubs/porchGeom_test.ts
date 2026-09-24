@@ -49,7 +49,7 @@ Deno.test("every lifted porch region is byte-identical in the two twins", () => 
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
-const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3NewFrame };`)() as Record<string, Any>;
+const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3WallTops, d3PorchWallTopFt, d3NewFrame };`)() as Record<string, Any>;
 
 const PANEL_TRIM = 0.18;   // trimFace on panel cladding: T/2 + 0.03
 
@@ -213,13 +213,18 @@ Deno.test("porchAttachFt replaces H - 0.2 and is still held under capY; absent i
 });
 
 Deno.test("d3WallTopFt: only a new-frame shed's HIGH wall stands above H", () => {
-  const tops = (cfg: Any, w: number, l: number) => ["north", "south", "west", "east"].map((wall) => F.d3WallTopFt(cfg, w, l, 7, wall, false));
+  // No run = the wall's tallest top; a run = the lowest over it. One run on a shed, so both agree.
+  const tops = (cfg: Any, w: number, l: number) => ["north", "south", "west", "east"].map((wall) => F.d3WallTopFt(cfg, w, l, 7, wall));
+  const mids = (cfg: Any, w: number, l: number) => ["north", "south", "west", "east"].map((wall) => F.d3WallTopFt(cfg, w, l, 7, wall, 1, 3));
   assertEquals(tops(FARM, 16, 10), [7, 10, 7, 7]);
   assertEquals(tops({ ...FARM, highSide: "back" }, 16, 10), [10, 7, 7, 7]);
   assertEquals(tops({ ...FARM, highSide: "left" }, 16, 10), [7, 7, 7 + 16 * 0.3, 7]);
   assertEquals(tops({ ...FARM, highSide: "right" }, 16, 10), [7, 7, 7, 7 + 16 * 0.3]);
+  assertEquals(mids(FARM, 16, 10), [7, 10, 7, 7]);
+  assertEquals(F.d3WallTops(FARM, 16, 10, 7, "south"), [[0, 16, 10]], "one run, the whole front wall");
   // Set back by a recessed porch, it stops at H under the roof.
-  assertEquals(F.d3WallTopFt(FARM, 16, 10, 7, "south", true), 7);
+  assertEquals(F.d3WallTopFt(FARM, 16, 10, 7, "south", null, null, true), 7);
+  assertEquals(F.d3WallTops(FARM, 16, 10, 7, "south", true), null);
   // No key: every wall is H, on every roof.
   for (const cfg of [{ type: "shed", pitch: 0.3 }, { type: "gable", front: "eave" }, { type: "gable" }]) {
     assertEquals(tops(cfg, 16, 10), [7, 7, 7, 7], JSON.stringify(cfg));
