@@ -111,6 +111,17 @@ const CLAMPS: Record<string, [number, number]> = {
   // Floor to the top of the CENTRE section's walls, where its own roof starts. Absent with wings
   // is the renderer's "wing roof top + 3 ft". 26 clears a two-storey centre over a 20 ft wall.
   centerEaveFt: [6, 26],
+  // ── THE PORCH'S OWN FRAMING (2026-09-25) ── Projecting porch only, like porchAttachFt, and
+  // absent is today's porch exactly.
+  // How many posts stand along the porch's front edge, the two corner posts included. Absent is
+  // the renderer's rule (one every 8.5 ft or less). A WHOLE number: the sanitiser rounds it after
+  // clamping. 2 is the two corners; 8 is past any porch a portable building carries.
+  porchPosts: [2, 8],
+  // The porch roof's own rise over run. Absent is the renderer's solver (2:12, lowered only to keep
+  // a door's height under the header). Given, it is still lowered where the wall is too short for
+  // it, and the panel says so. 0.05 is the solver's own floor; 0.5 (6:12) is steeper than any
+  // porch roof hung under a main roof's eave.
+  porchPitch: [0.05, 0.5],
 };
 
 // Which eave the lean-to hangs off. Not a clamp, so it is checked separately.
@@ -151,6 +162,10 @@ export const D3_SHED_HIGH_SIDES = ["front", "back", "left", "right"] as const;
 export const D3_WING_SIDES = ["both", "left", "right", "front", "back"] as const;
 // The keys that only mean something with a ridge. Dropped as a set on a shed.
 const D3_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt"] as const;
+// roof.porchSteps (2026-09-25): where a set of steps leaves the projecting porch's deck, along its
+// FRONT edge, as seen standing in front of the porch facing it (left is the viewer's left, the
+// frame every left/right here is read in). Absent = no steps, which is every porch before today.
+export const D3_PORCH_STEPS = ["left", "center", "right"] as const;
 
 const num = (v: unknown): number | null => {
   const n = typeof v === "string" ? Number(v) : v;
@@ -196,10 +211,14 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
                    "leanToWidthFt", "leanToDropFt", "dormerWidthFt", "dormerRiseFt", "dormerOffsetU",
                    "porchDepthFt", "porchOutFt",
                    // v2 (2026-09-24). APPENDED, so every existing spec keeps its key order.
-                   "porchAttachFt", "porchWidthFt", "wingWidthFt", "wingPitch", "centerEaveFt"]) {
+                   "porchAttachFt", "porchWidthFt", "wingWidthFt", "wingPitch", "centerEaveFt",
+                   // 2026-09-25, appended for the same reason.
+                   "porchPosts", "porchPitch"]) {
     const v = clamped(k, rawRoof[k]);
     if (v !== null) roof[k] = v;
   }
+  // A post count is a count. Rounded AFTER the clamp, so it stays inside 2..8 either way.
+  if (typeof roof.porchPosts === "number") roof.porchPosts = Math.round(roof.porchPosts);
   // Which eave the lean-to hangs off. Only meaningful when leanToWidthFt > 0; stored
   // regardless so toggling the width back up remembers the side.
   if ((D3_LEANTO_SIDES as readonly string[]).includes(String(rawRoof.leanToSide))) {
@@ -291,6 +310,9 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     // and a renderer that one day reads them there would be reading a leftover.
     delete roof.porchAttachFt;
     delete roof.porchWidthFt;
+    // The porch's posts and its roof's pitch (2026-09-25) are that roof's too.
+    delete roof.porchPosts;
+    delete roof.porchPitch;
   }
 
   // ── v2 ENUMS AND THE ROOF-TYPE RULES (2026-09-24) ──────────────────────────────────────────
@@ -313,6 +335,13 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // after the numeric loop, which is where the numbers were written.
   if (type === "shed") {
     for (const k of D3_WING_KEYS) delete roof[k];
+  }
+  // Where the porch's steps leave its deck (2026-09-25). The enum posture above, and the porch
+  // rule porchAttachFt follows: steps come off a PROJECTING porch's deck, so without one they
+  // describe nothing and are dropped rather than stored for later.
+  if ((D3_PORCH_STEPS as readonly string[]).includes(String(rawRoof.porchSteps))
+      && typeof roof.porchOutFt === "number" && roof.porchOutFt > 0.5) {
+    roof.porchSteps = String(rawRoof.porchSteps);
   }
 
   // Anything that is not a renderable cladding means "unset", which the renderer
@@ -671,7 +700,10 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence). K
     "porchTruss": <true only if decorative timber beams fill the gable ABOVE the porch opening>,
     "porchOutFt": <only if a porch STANDS OUT in front of the FRONT wall under its own lower roof: how many feet its deck and posts project past that wall>,
     "porchAttachFt": <projecting porch only: feet from the floor to the TOP of the porch roof where it meets the wall>,
-    "porchWidthFt": <projecting porch only, and only when it is narrower than its wall, or than the centre section on a building with side wings: its width along the wall, in feet>
+    "porchWidthFt": <projecting porch only, and only when it is narrower than its wall, or than the centre section on a building with side wings: its width along the wall, in feet>,
+    "porchPosts": <projecting porch only: how many posts stand along the porch's front edge, the corner posts included>,
+    "porchPitch": <projecting porch only: the porch roof's own rise over run>,
+    "porchSteps": "left" | "center" | "right"
   },
   "gableVent": { "widthFrac": <vent width as a fraction of the width of the gable wall it sits in, e.g. 0.25 for a 2 ft vent on an 8 ft wall> },
   "foundation": "skids" | "slab",
@@ -742,6 +774,12 @@ PROJECTING PORCH: a porch built IN FRONT of the front wall instead of cut into i
 PORCH ROOF HEIGHT, porchAttachFt: where the projecting porch's roof meets the wall, as the height in feet from the floor to the TOP of the porch roof at that wall. Leave it out only when the porch roof starts just under the top of a wall whose top is the known wall height, which is the usual build on a gable end. Give it whenever the wall behind the porch is taller than that — the high wall of a shed, or the centre section of a building with side wings — and whenever a band of wall shows between the porch roof and the main roof's edge above it. Measure it on the wall itself, with a ruler you can trust: the door is 6 ft 8 in tall, so a porch roof meeting the wall about a foot above the top of the door is at about 7.7 ft; or count the siding courses or battens up the wall against the known wall height. On a building with side wings, measure it on the centre section's wall the same way.
 
 PORCH WIDTH, porchWidthFt: give it only when the porch is clearly narrower than the stretch of wall it could cover. That stretch is the whole front wall on an ordinary building, and the CENTRE section alone on a building with side wings. Leave it out when the porch runs the whole front wall, which is the common case, and leave it out when a porch on a winged building runs exactly from one wing to the other, because that is what is drawn without it. Give it when the porch covers only part of that stretch, measured against the front wall's known length; it is drawn centred on that stretch.
+
+PORCH POSTS, porchPosts: count the posts standing along the porch's FRONT edge, the edge farthest from the wall, from the frame most square-on to the front, and include the posts at both corners. A porch with a post at each corner and one in the middle is 3. Count posts only, never the wall's corner boards or a handrail's newel. Leave it out when no frame shows the whole front edge.
+
+PORCH ROOF PITCH, porchPitch: the porch roof's OWN slope as rise over run, never the main roof's. Read it from a side frame, where the porch roof's edge is seen square-on: it runs from where the roof meets the wall down to its front edge, so compare how far it drops with how far it runs out from the wall. A porch roof that drops 1 ft over 5 ft of run is 0.2. Leave it out when no frame shows that edge square-on.
+
+PORCH STEPS, porchSteps: where a set of steps leaves the porch's deck along its FRONT edge, as seen standing in front of the porch facing it: "left", "center" or "right", with left and right read the same way as everywhere else in this reply. Leave it out when the porch has no steps, and when its steps leave the deck from one of its sides rather than its front edge.
 
 PORCH DECISION, REQUIRED: observed.porch must carry one of exactly three answers on EVERY building — "projecting" for a porch standing out in front of the front wall under its own lower roof, "recessed" for one cut into the building under the main roof, "none" for a building with no porch. Answer it even when the answer is "none", and answer it even when you are unsure; say the doubt in observed.roofNote instead of leaving the key out. Naming a porch obliges you to give its field: "projecting" means porchOutFt, "recessed" means porchDepthFt and porchEnd. Do not report a porch here and leave its number out of the roof.
 
@@ -1617,6 +1655,9 @@ export const SELF_CHECK_ALLOW = [
   "roof.front", "roof.highSide",
   "roof.porchAttachFt", "roof.porchWidthFt",
   "roof.wingSide", "roof.wingWidthFt", "roof.wingPitch", "roof.centerEaveFt",
+  // The porch's own framing (2026-09-25): its posts, its roof's pitch, and where its steps leave
+  // the deck. Projecting porch only, which sanitizeD3Spec holds them to on the way out.
+  "roof.porchPosts", "roof.porchPitch", "roof.porchSteps",
 ] as const;
 
 // `massing` (v2) is the answer to the new first step: which way the building faces, which wall
@@ -1797,6 +1838,14 @@ export function selfCheckPrompt(opts: {
   // nothing on screen, is reported to the builder as one, and counts against "it matches".
   const porchEndNow = roof.porchEnd === "back" ? '"back"' : `"front"${roof.porchEnd === undefined ? " (not set, which means the front)" : ""}`;
   const attachNow = num(roof.porchAttachFt) === null ? "not set, which draws it just under the top of the wall" : feet("porchAttachFt");
+  // The porch's own framing (2026-09-25), each said as what absent DRAWS, for the reason above.
+  const postsNow = num(roof.porchPosts) === null
+    ? "not set, which draws a post at each corner and one every 8.5 ft or less between them"
+    : String(num(roof.porchPosts));
+  const porchPitchNow = num(roof.porchPitch) === null
+    ? "not set, which draws a 2 in 12 porch roof, lower where the wall is too short for it"
+    : String(num(roof.porchPitch));
+  const stepsNow = typeof roof.porchSteps === "string" ? said("porchSteps") : "not set, which draws no steps";
   const hasWings = (num(roof.wingWidthFt) ?? 0) > 0;
   // The centre's default is only a thing the renderer DRAWS when there are wings to stand it on.
   const centreNow = num(roof.centerEaveFt) !== null
@@ -1973,7 +2022,7 @@ ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave
    this wrong is the single most visible error on the whole building, so check it even when
    the two pictures look broadly alike. If you change the kind, give the new key and leave
    the other one out entirely.
-   Then, where both show a porch, WHERE IT IS AND HOW BIG:
+   Then, where both show a porch, WHERE IT IS, HOW BIG AND HOW IT IS BUILT:
      * roof.porchEnd, currently ${porchEndNow}: always "front" on this building, because the
        porch is what defines the front. If the render's porch is on a different wall from the
        frame's, the fault is roof.front or roof.highSide (step 1): correct that instead. The
@@ -1986,6 +2035,15 @@ ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave
        the porch runs along its wall. "not set" means the whole wall, or the centre section
        when there are wings. Correct it only where the frame shows plain wall beyond the
        porch's ends.
+     * roof.porchPosts, projecting porches only, currently ${postsNow}: how many posts stand
+       along the porch's front edge, the corner posts included. Count them in the front
+       viewpoint, in the frame and in the render, and correct it only where the counts differ.
+     * roof.porchPitch, projecting porches only, currently ${porchPitchNow}: the porch
+       roof's own rise over run, from a side viewpoint where its edge is seen square-on. Correct
+       it only where the porch roof plainly falls more steeply, or less, than the render's.
+     * roof.porchSteps, projecting porches only, currently ${stepsNow}: where steps leave the
+       porch's front edge, "left", "center" or "right" as seen standing in front of it. Give it
+       where the frame shows steps the render lacks, or shows them at a different place.
 
 4. THE WALL, AS DRAWN (not the number). You cannot change wallHeightFt - it is measured. But
    if the render's walls look plainly shorter or taller than the frame's at the same angle
