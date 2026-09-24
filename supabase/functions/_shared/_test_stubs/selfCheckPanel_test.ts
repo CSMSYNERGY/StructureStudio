@@ -52,7 +52,8 @@ Deno.test("every lifted compare-step region is byte-identical in the two twins",
 type Any = any;
 const F = new Function(
   `${blocks.map((b) => b.cmp).join("\n")}; return { SS_CHECKS, SS_VIEW_WORDS, SS_SPIN_STEP_DEG, SS_RENDER_MS, SS_CHECK_MS, ` +
-    `SS_GAMBREL_BEND_DEG, ssGambrelFromSliders, ssGambrelSliders, ssRoofInFeet, ssChangeLine, SS_CHANGE_WORDS };`,
+    `SS_GAMBREL_BEND_DEG, ssGambrelFromSliders, ssGambrelSliders, ssRoofInFeet, ssChangeLine, SS_CHANGE_WORDS, ` +
+    `SS_DRAFT_SERVER_MS, SS_CHECK_ROUNDS, SS_FLOW_MAX_MS, SS_SLOW_MS, ssCheckNext, ssMergeChanges, ssDrewWords, ssShotSig };`,
 )() as Record<string, Any>;
 
 // ── The sliders cannot build the roof the warning was written for ─────────────────────────
@@ -207,19 +208,161 @@ Deno.test("the four questions are the measured failure list, in order", () => {
   }
 });
 
-Deno.test("the clocks leave no path past the three minutes the design budgeted", () => {
-  // call 1 is bounded at 110 s by the server and is deliberately NOT aborted here: abandoning
-  // a call that has already taken the hold is how a slow generation becomes a lost $20.
-  assert(110000 + F.SS_RENDER_MS + F.SS_CHECK_MS <= 180000,
-    `110000 + ${F.SS_RENDER_MS} + ${F.SS_CHECK_MS} is over the 180 s budget`);
+Deno.test("⚠️ the clocks: the first round always fits, and no LATER round runs past five minutes", () => {
+  // THE BUDGET MOVED ON 2026-09-24, deliberately. This test used to pin 110 + 5 + 60 <= 180 s:
+  // one round inside three minutes. The draft now has 125 s (max_tokens 8000 -> 12000) and the
+  // check runs up to three rounds, so the rule is restated rather than loosened: the FIRST
+  // round always fits inside SS_FLOW_MAX_MS, and a later round only starts while a whole round
+  // still fits. call 1 is still deliberately NOT aborted here: abandoning a call that has
+  // already taken the hold is how a slow generation becomes a lost $20.
+  assertEquals(F.SS_CHECK_ROUNDS, 3);
+  assert(F.SS_DRAFT_SERVER_MS + F.SS_RENDER_MS + F.SS_CHECK_MS <= F.SS_FLOW_MAX_MS,
+    `${F.SS_DRAFT_SERVER_MS} + ${F.SS_RENDER_MS} + ${F.SS_CHECK_MS} is over ${F.SS_FLOW_MAX_MS}`);
+  assert(F.SS_FLOW_MAX_MS <= 300000, "five minutes is the ceiling this was designed to");
+  // The worst ordinary press: the slowest draft, then every round at its own ceiling, each one
+  // started only when ssCheckNext allows it.
+  const worst = (draftMs: number) => {
+    let t = draftMs + F.SS_RENDER_MS + F.SS_CHECK_MS;
+    let rounds = 1;
+    for (let round = 0; ; round++) {
+      const next = F.ssCheckNext({ verdict: "corrections", d3: {}, changed: [{ field: "roof.pitch" }] }, round, [], "b" + round, t);
+      if (next) return { t, rounds, stop: next };
+      t += F.SS_RENDER_MS + F.SS_CHECK_MS;
+      rounds++;
+    }
+  };
+  const one = worst(F.SS_DRAFT_SERVER_MS);
+  assert(one.t <= F.SS_FLOW_MAX_MS, `the worst ordinary press ends at ${one.t}`);
+  assert(one.rounds >= 2, `a slow press still gets a second look (${one.rounds} rounds, stopped on ${one.stop})`);
+  // THE RETRY PATH: two drafts at the ceiling. It is the one path past five minutes, and it
+  // takes no second round -- which is what keeps it to one check's worth past the ceiling.
+  const retried = worst(2 * F.SS_DRAFT_SERVER_MS);
+  assertEquals(retried.rounds, 1);
+  assertEquals(retried.stop, "time");
   // And the check's client abort has to sit ABOVE the server's own 45 s, or a server that
   // answered in time would never be heard.
   assert(F.SS_CHECK_MS > 45000, String(F.SS_CHECK_MS));
+  // "Still going" must not fire on an ordinary press that is merely on its second round.
+  assert(F.SS_SLOW_MS > F.SS_DRAFT_SERVER_MS + F.SS_RENDER_MS + 30000, String(F.SS_SLOW_MS));
+});
+
+// ── More than one round ───────────────────────────────────────────────────────────────────
+
+const CORR = (changed: unknown[] = [{ field: "roof.pitch", from: 0.42, to: 0.3, why: "" }]) =>
+  ({ verdict: "corrections", d3: { roof: { type: "shed" } }, changed });
+
+Deno.test("⚠️ the loop stops on every verdict that is not a correction, naming it", () => {
+  for (const v of ["matches", "skipped", "failed", "rejected_too_many"]) {
+    assertEquals(F.ssCheckNext({ verdict: v, d3: null, changed: [] }, 0, [], "x", 1000), v);
+  }
+  // No answer at all is a failure, never a reason to go round again.
+  assertEquals(F.ssCheckNext(null, 0, [], "x", 1000), "failed");
+  assertEquals(F.ssCheckNext({}, 0, [], "x", 1000), "failed");
+});
+
+Deno.test("a 'correction' that moved nothing is not a reason to look again", () => {
+  assertEquals(F.ssCheckNext({ verdict: "corrections", d3: null, changed: [{ field: "roof.pitch" }] }, 0, [], "x", 1000), "unchanged");
+  assertEquals(F.ssCheckNext(CORR([]), 0, [], "x", 1000), "unchanged");
+  assertEquals(F.ssCheckNext({ verdict: "corrections", d3: {}, changed: "roof.pitch" }, 0, [], "x", 1000), "unchanged");
+});
+
+Deno.test("⚠️ at most three rounds, 0-based like the server's own counter", () => {
+  assertEquals(F.ssCheckNext(CORR(), 0, ["a"], "b", 1000), null);
+  assertEquals(F.ssCheckNext(CORR(), 1, ["a", "b"], "c", 1000), null);
+  assertEquals(F.ssCheckNext(CORR(), 2, ["a", "b", "c"], "d", 1000), "rounds");
+});
+
+Deno.test("⚠️ OSCILLATION STOPS THE LOOP: a building already checked is never checked again", () => {
+  // Round 2 turning round 1's building back into the draft would have round 3 re-judge the
+  // draft and undo round 2, forever. The signature is ssShotSig's, the same one the compare
+  // pairs are keyed on, so "the same building" means the same thing in both places.
+  const draft = F.ssShotSig({ roof: { type: "gable", pitch: 0.42 }, wallHeightFt: 7 });
+  const shed = F.ssShotSig({ roof: { type: "shed", pitch: 0.3 }, wallHeightFt: 7 });
+  assertEquals(F.ssCheckNext(CORR(), 1, [draft, shed], draft, 1000), "repeat");
+  // And a correction that reproduces the building it just judged is the same case.
+  assertEquals(F.ssCheckNext(CORR(), 0, [draft], draft, 1000), "repeat");
+  assertEquals(F.ssCheckNext(CORR(), 0, [draft], shed, 1000), null);
+});
+
+Deno.test("a later round only starts while a whole round still fits", () => {
+  const room = F.SS_FLOW_MAX_MS - F.SS_RENDER_MS - F.SS_CHECK_MS;
+  assertEquals(F.ssCheckNext(CORR(), 0, [], "b", room), null);
+  assertEquals(F.ssCheckNext(CORR(), 0, [], "b", room + 1), "time");
+  assertEquals(F.ssCheckNext(CORR(), 0, [], "b", NaN), "time");
+});
+
+Deno.test("one list however many rounds ran: first `from`, last `to`, latest reason", () => {
+  const r1 = [
+    { field: "roof.type", from: "gable", to: "shed", why: "one plane" },
+    { field: "roof.pitch", from: 0.42, to: 0.3, why: "shallower" },
+  ];
+  const r2 = [
+    { field: "roof.pitch", from: 0.3, to: 0.25, why: "shallower still" },
+    { field: "roof.highSide", from: null, to: "front", why: "the porch wall is the tall one" },
+  ];
+  const merged = F.ssMergeChanges(F.ssMergeChanges([], r1), r2);
+  assertEquals(merged.map((c: Any) => c.field), ["roof.type", "roof.pitch", "roof.highSide"]);
+  assertEquals(merged[1], { field: "roof.pitch", from: 0.42, to: 0.25, why: "shallower still" });
+  // A field that went round and came back where it started is no line at all.
+  const back = F.ssMergeChanges(r1, [{ field: "roof.pitch", from: 0.3, to: 0.42, why: "" }]);
+  assertEquals(back.map((c: Any) => c.field), ["roof.type"]);
+  // Junk in a round's list is skipped, never a bullet with no label.
+  assertEquals(F.ssMergeChanges([], [null, {}, { field: "" }]), []);
 });
 
 Deno.test("every viewpoint the server knows has a name the builder can read", () => {
-  for (const v of ["front", "side", "eaveCorner", "corner"]) {
+  for (const v of ["front", "side", "eaveCorner", "corner", "back", "otherSide"]) {
     assert(typeof F.SS_VIEW_WORDS[v] === "string" && F.SS_VIEW_WORDS[v].length > 3, v);
     assert(F.SS_VIEW_WORDS[v] !== v, `${v} is shown to a builder as its own key`);
   }
+});
+
+// ── The 2026-09-24 keys, in words ─────────────────────────────────────────────────────────
+
+Deno.test("⚠️ every new roof key the check may correct has words, ahead of the allow-list", () => {
+  // The allow-list test above only sees the keys the server's SELF_CHECK_ALLOW holds on THIS
+  // branch. The contract adds these eight; the words exist before the list does, so the merge
+  // cannot put a raw key in front of a builder in the gap between the two.
+  const keys = ["roof.front", "roof.highSide", "roof.porchAttachFt", "roof.porchWidthFt",
+    "roof.wingSide", "roof.wingWidthFt", "roof.wingPitch", "roof.centerEaveFt"];
+  for (const k of keys) {
+    assert(k in F.SS_CHANGE_WORDS, `${k} has no words`);
+    const line = F.ssChangeLine({ field: k, from: null, to: null, why: "" });
+    assert(line.label !== k && !/[a-z][A-Z]/.test(line.label), `${k} is shown as ${line.label}`);
+  }
+  assertEquals(F.ssChangeLine({ field: "roof.highSide", from: "left", to: "front", why: "" }).text, "the left side → the front");
+  assertEquals(F.ssChangeLine({ field: "roof.front", from: "gable", to: "eave", why: "" }).text,
+    "a gable end, under the roof triangle → a long side, under the roof edge");
+  assertEquals(F.ssChangeLine({ field: "roof.porchAttachFt", from: 9, to: 7.5, why: "" }).text, "9 ft up → 7 ft 6 in up");
+  assertEquals(F.ssChangeLine({ field: "roof.wingPitch", from: 0.25, to: 0.5, why: "" }).text, "3 in 12 → 6 in 12");
+  assertEquals(F.ssChangeLine({ field: "roof.wingWidthFt", from: null, to: 5, why: "" }).text, "not set → 5 ft");
+  assertEquals(F.ssChangeLine({ field: "roof.wingSide", from: "left", to: "both", why: "" }).text, "the left side → both sides");
+});
+
+Deno.test("'What we drew' names the high side, the front, the wings and the porch wall", () => {
+  // Farmstand: a one-slant roof high at the front, a porch on that wall meeting it low.
+  const farm = F.ssDrewWords({ roof: { type: "shed", highSide: "front", porchOutFt: 4, porchEnd: "front", porchAttachFt: 7.5, porchWidthFt: 16 } });
+  assertStringIncludes(farm, "The high side is the front.");
+  assertStringIncludes(farm, "The porch stands 4 ft out from the front wall, 16 ft wide, and its roof meets the wall 7 ft 6 in up.");
+  // Tri Home: gable end to the front, wings on both sides, a tall middle.
+  const tri = F.ssDrewWords({ roof: { type: "gable", front: "gable", wingSide: "both", wingWidthFt: 8, centerEaveFt: 16, porchOutFt: 6 } });
+  assertStringIncludes(tri, "The front is a gable end");
+  assertStringIncludes(tri, "A lower wing 8 ft wide runs along each side under its own roof, and the middle section's walls rise to 16 ft.");
+  assertStringIncludes(tri, "out from the front wall");
+  // No ratio reaches the line, ever.
+  assert(!/0\.\d/.test(farm + tri), farm + tri);
+});
+
+Deno.test("⚠️ 'What we drew' never describes a key the spec does not have", () => {
+  // An older style says nothing about which way it faces, and saying "the front is a gable end"
+  // for it would be a claim we did not make. Its porch is still on an END, in its own words.
+  assertEquals(F.ssDrewWords({ roof: { type: "gable", pitch: 0.5 } }), "");
+  assertEquals(F.ssDrewWords(null), "");
+  assertEquals(F.ssDrewWords({ roof: { type: "gambrel", porchDepthFt: 5 } }), "The porch is cut 5 ft into the front end.");
+  // A shed never has a "front is a gable end", and a highSide on a gable is not described.
+  assertEquals(F.ssDrewWords({ roof: { type: "shed", front: "gable" } }), "");
+  assertEquals(F.ssDrewWords({ roof: { type: "gable", highSide: "front" } }), "");
+  // Wings are off at zero, and a shed never has them.
+  assertEquals(F.ssDrewWords({ roof: { type: "gable", wingSide: "both", wingWidthFt: 0 } }), "");
+  assertEquals(F.ssDrewWords({ roof: { type: "shed", wingSide: "both", wingWidthFt: 6 } }), "");
 });

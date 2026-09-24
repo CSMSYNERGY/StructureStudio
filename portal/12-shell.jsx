@@ -1651,10 +1651,16 @@ function Dashboard({ session }) {
        the ground — the single most important fact about this input. WHICH one depends on the
        set (2026-09-16, when photos became optional). With photos beside the walk it goes as
        source "combined": combinedShapePrompt, cap 12, Carolyn's own "three from each side".
-       A walk with NO photos goes as source "video": VIDEO_SHAPE_PROMPT, cap 8. That second
-       path relies on SS_VID_FRAMES staying at 8 or below, or the server drops the extra
-       frames and only `dropped` says so. */
-    onDraftFromCombined: async (photoUrls, styleValue, videoCount, idempotencyKey, dims) => {
+       A walk with NO photos goes as source "video": VIDEO_SHAPE_PROMPT, cap 12 since 2026-09-24
+       (it was 8). That second path relies on SS_VID_FRAMES never exceeding the server's cap, or
+       the server drops the extra frames and only `dropped` says so.
+
+       `opts.lean` (2026-09-24) is the designer's ONE automatic retry of a draft the server
+       marked `retryable` -- cut off at max_tokens, or past its own abort, with the hold already
+       released. It rides the SAME idempotencyKey, and the server answers it with less thinking.
+       The flag is read off the refusal's body here, because only this function can see it:
+       supabase-js leaves a non-2xx body unread on `error.context`. */
+    onDraftFromCombined: async (photoUrls, styleValue, videoCount, idempotencyKey, dims, opts) => {
       // videoCount says how many of the LEADING urls are walk-around frames, so the server can
       // hand the model a prompt that describes the set it is actually being given rather than
       // asserting the whole array is one continuous lap.
@@ -1669,7 +1675,7 @@ function Dashboard({ session }) {
       // (combinedShapePrompt) opens "from two sources", which is false with no photos beside
       // the walk. VIDEO_SHAPE_PROMPT says exactly what such a set is (every image a frame of one
       // lap, in walk order), the ledger row reads "video", and the charge is the same hold
-      // either way. Its server cap is 8, which is SS_VID_FRAMES, so a whole lap fits. No
+      // either way. Its server cap is SS_VID_FRAMES (12 since 2026-09-24), so a whole lap fits. No
       // function deploy is needed for any of this: the "video" source has been live since the
       // walk-around first shipped in August.
       const source = frames >= urls.length ? "video" : "combined";
@@ -1693,9 +1699,26 @@ function Dashboard({ session }) {
       if (!d || !(Number(d.widthFt) > 0) || !(Number(d.lengthFt) > 0) || !(Number(d.wallHeightFt) > 0)) {
         throw new Error("Type the building's width, length and wall height before generating — the video cannot show us how big it is.");
       }
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined, dims: d } });
-      if (error) throw new Error(error.message || "Generating failed");
-      if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Generating failed");
+      const body = { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined, dims: d };
+      if (opts && opts.lean) body.lean = true;
+      const { data, error } = await sb.functions.invoke("portal-settings", { body });
+      // `ssRetryable` IS THE SERVER'S WORD, NEVER A GUESS FROM THE STATUS. A 502 is also a model
+      // refusal or an unreachable AI service, and resending those is a second identical failure
+      // on the builder's clock. Only a body saying `retryable: true` earns the one lean retry.
+      if (error) {
+        const err = new Error(error.message || "Generating failed");
+        try {
+          const ctx = error.context;
+          const said = ctx && typeof ctx.clone === "function" ? await ctx.clone().json() : null;
+          if (said && said.retryable === true) err.ssRetryable = true;
+        } catch (_e) { /* no body, or not JSON: not retryable */ }
+        throw err;
+      }
+      if (!data || !data.ok || !data.d3) {
+        const err = new Error((data && data.error) || "Generating failed");
+        if (data && data.retryable === true) err.ssRetryable = true;
+        throw err;
+      }
       // `dims` ECHOED BACK AS THE SERVER USED THEM, not as they were sent. The designer says so
       // in the success line, which is the only thing that proves the numbers reached the model
       // rather than merely sitting in a form. An older function echoes nothing and the clause
@@ -1727,10 +1750,17 @@ function Dashboard({ session }) {
        THE CLIENT ABORT IS REAL, unlike the generation's. The server gives up at 45 s; 60 here
        is far enough above that a server which answered in time is still heard, and it bounds
        the wait at something a person will sit through. Abandoning THIS call costs nothing,
-       which is exactly what separates it from the one above. */
-    onSelfCheck: async ({ styleValue, checkId, photoUrls, renders }) => {
+       which is exactly what separates it from the one above.
+
+       `round` (2026-09-24) is which check of this generation this is, 0-based: the server claims
+       round k by moving the row's counter from k to k + 1, at most three times, so a repeat of
+       one round is a 409 rather than a second free look. Absent is round 0 to the server, which
+       is what an older designer sends; a non-integer is not sent at all. */
+    onSelfCheck: async ({ styleValue, checkId, photoUrls, renders, round }) => {
+      const body = { action: "calibrate_style_check", styleValue, checkId, photoUrls, renders };
+      if (Number.isInteger(round) && round >= 0) body.round = round;
       const { data, error } = await sb.functions.invoke("portal-settings", {
-        body: { action: "calibrate_style_check", styleValue, checkId, photoUrls, renders },
+        body,
         signal: AbortSignal.timeout(60000),
       });
       // A 4xx carries a body, and the body is what says WHY. supabase-js hands back a

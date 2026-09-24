@@ -3157,6 +3157,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // authenticated refetch lands - silently wiped a walk-around already on file. Only a caller
     // that actually sent an array gets to touch it; everyone else leaves it as they found it.
     const hasVideoFrames = Array.isArray(payload.d3VideoFrames);
+    // WALK_FRAME_MAX (12 since 2026-09-24), in step with the designer's SS_VID_FRAMES. The STORED lap has to hold
+    // every frame a generation can be sent: the self-check pairs only frames found in the
+    // style's own stored media (selfCheckPairs), so a lap cut to 8 here drops frames 9-12 from
+    // every check -- and a reload would hand Generate eight views of a twelve-view lap.
     const videoFrames = sanitizePhotoUrls(payload.d3VideoFrames, WALK_FRAME_MAX);
     const found = await findStyleFor3D(styleValue, styleId);
     if (found.err) return found.err;
