@@ -8414,6 +8414,17 @@ function buildShed3DModel(THREE, p) {
   // fixed "under the plate" cap vanished behind the fascia, whose drop grows with pitch and
   // overhang. One number from the geometry that was actually built, not a second copy of it.
   let eaveHangY = H;
+  // THE SAME, PER EAVE WALL (2026-09-24 review): a raised centre's own eave wall stands above H, and
+  // eaveHangY above is the LOWEST eave of all -- a wing's -- which says nothing about the centre's
+  // eave 6 ft higher. So each finish is also noted against the wall it overhangs ("north" ...), and
+  // a lamp on a wall above H reads its own. A slope end's local u says which wall: with the centre
+  // shifted by uc, u + uc is the building's u, -u = west (uAxisIsX) or north.
+  const eaveHangBy = {};
+  const noteEaveHang = (uLocal, y) => {
+    const ub = uLocal + mass.uc;
+    const wall = mass.uAxisIsX ? (ub < 0 ? "west" : "east") : (ub < 0 ? "north" : "south");
+    eaveHangBy[wall] = Math.min(eaveHangBy[wall] != null ? eaveHangBy[wall] : Infinity, y);
+  };
   // A slope's endpoint is an INTERIOR JOINT when another slope shares it: a gable ridge,
   // or a gambrel knee. Everything else is a free edge that should really overhang.
   const jointPartnerAt = (pt, self) => slopes.find((o) => o !== self
@@ -8558,6 +8569,7 @@ function buildShed3DModel(THREE, p) {
         fascia.position.set(edgeU, OV_NOTCHED ? fasTop - fasH / 2 : edgeY - 0.14, L / 2);
         rg.add(fascia);
         eaveHangY = Math.min(eaveHangY, OV_NOTCHED ? finishY : edgeY - 0.14 - 0.2);   // the board's bottom edge
+        noteEaveHang(lowEnd[0], OV_NOTCHED ? finishY : edgeY - 0.14 - 0.2);
         if (OV_NOTCHED) {
           // The level soffit, hung DIRECTLY on the deck's underside -- that IS the cut-back. It
           // runs level from the fascia toward the wall and, because the deck rises away from the
@@ -8593,6 +8605,7 @@ function buildShed3DModel(THREE, p) {
         // between tail and deck.
         const tailN = 0.02 - TAIL_DROP + TAIL_H / 2;
         eaveHangY = Math.min(eaveHangY, eaveY - d3EaveFinishDrop(roofCfg, ny));   // tails' outboard bottom
+        noteEaveHang(lowEnd[0], eaveY - d3EaveFinishDrop(roofCfg, ny));
         const tailLen = OV + 0.5;             // outboard face flush with the slab end,
                                               // inboard end buried behind the wall
         const tailU = eaveU - towardLow * ux * (tailLen / 2) + nx * tailN;
@@ -8637,6 +8650,7 @@ function buildShed3DModel(THREE, p) {
         const edgeU = hiU + nx * (D3.ROOF_T / 2 + 0.02);
         const edgeY = hiY + ny * (D3.ROOF_T / 2 + 0.02);
         const sofBot = wallTopY - 0.005 - D3_EAVE.SOFFIT_T;
+        noteEaveHang(highEave[0], sofBot);
         const fasTop = edgeY + 0.06;                        // just under the deck's top face
         const fasH = Math.max(0.08, fasTop - sofBot);
         const hfas = box(fasciaMat, D3_EAVE.FASCIA_T, fasH, L + OV * 2);
@@ -8654,6 +8668,8 @@ function buildShed3DModel(THREE, p) {
         const TAIL_W = D3_EAVE.TAIL_W, TAIL_H = D3_EAVE.TAIL_H;
         const tailN = 0.02 - D3_EAVE.TAIL_DROP + TAIL_H / 2;
         const tailLen = OV + 0.5;
+        // The tails' bottom edge where it crosses the wall line; it rises outward from there.
+        noteEaveHang(highEave[0], wallTopY + (0.02 - D3_EAVE.TAIL_DROP) / Math.max(1e-6, ny));
         const tailU = hiU - towardHigh * ux * (tailLen / 2) + nx * tailN;
         const tailY = hiY - towardHigh * uy * (tailLen / 2) + ny * tailN;
         const addHiTail = (z) => {
@@ -9242,8 +9258,11 @@ function buildShed3DModel(THREE, p) {
         // slope loop actually built: 0.45 under it leaves the tipped head's top ~0.24 ft clear,
         // and never higher than H - 0.75. The harness asserts that gap against the fascia it
         // measures in the scene.
-        // On a wall standing above H (a raised centre's own wall) it hangs under that wall's top instead.
-        const EAVE_CAP = wTop > H + 0.01 ? wTop - 0.75 : Math.min(H - 0.75, eaveHangY - 0.45);
+        // On a wall standing above H (a raised centre's own wall, a shed's high wall) it hangs under that
+        // wall's top instead, and under THAT wall's own eave finish when one overhangs it (eaveHangBy):
+        // the centre's fascia and soffit hang below its wall top, and a lamp at wTop - 0.75 sat in them.
+        const ownHang = eaveHangBy[it.wall] != null ? eaveHangBy[it.wall] - 0.45 : Infinity;
+        const EAVE_CAP = wTop > H + 0.01 ? Math.min(wTop - 0.75, ownHang) : Math.min(H - 0.75, eaveHangY - 0.45);
         let top = gableEnd ? Math.max(EAVE_CAP, (mass.wings.length ? d3MassingTopAt(mass, u) : profYAt(u)) - 0.5) : EAVE_CAP;
         // On a projecting porch's wall it hangs under the porch ceiling, the way it hangs under an
         // eave: rising into the gable would put it behind the porch roof.
