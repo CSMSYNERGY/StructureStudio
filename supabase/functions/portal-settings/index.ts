@@ -74,7 +74,7 @@ import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, pars
 import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
 // The v2 generator's two additions (2026-09-24), on their own line so the long list above can move
 // without this one: the walk-around frame cap every frame path shares, and the wings check.
-import { WALK_FRAME_MAX, wingsAgreementWarning } from "../_shared/styleD3.ts";
+import { WALK_FRAME_MAX, wingsAgreementWarning, wantsV2Prompt } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
@@ -3521,6 +3521,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // reports what was USED, so a photos-source caller that sent dims is told plainly that they
     // were not.
     const dims = shapeFirst ? dimsRead.dims : null;
+    // ── THE ROLLOUT GATE (2026-09-24, see wantsV2Prompt) ──────────────────────────────────────
+    // Production's older browser bundle calls this same function and already sends dims, typed
+    // against a card that says the width is "across the gable end". The v2 prompt reads them in
+    // the NEW frame (the FRONT wall), so it goes ONLY to a request that says `frame: "front"` —
+    // the new designer's — and has dims. Every other request takes exactly the prompt it took
+    // before v2 existed, dims ruler and all, and none of v2's checks (the wings agreement below).
+    const v2Prompt = wantsV2Prompt(payload.frame, dims);
     // ⚠️ TRUNCATION IS THE FAILURE MODE THAT LOOKS LIKE A BAD MODEL. sanitizePhotoUrls slices
     // SILENTLY, so an over-cap request returns HTTP 200, a full-price ledger row, and a spec
     // drafted from part of the set — and the builder concludes the AI reads sheds badly. The
@@ -3852,7 +3859,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               // videoShapePrompt(null) IS the old VIDEO_SHAPE_PROMPT constant and a two-argument
               // combinedShapePrompt is byte-identical to what shipped, so a request without dims
               // sends exactly the string it sent before this line changed.
-              { type: "text", text: combined ? combinedShapePrompt(videoCount, photoUrls.length - videoCount, dims) : (fromVideo ? videoShapePrompt(dims) : SPEC_PROMPT) },
+              // v2Prompt (the rollout gate): the v2 prompt only for the new designer's frame.
+              { type: "text", text: combined ? combinedShapePrompt(videoCount, photoUrls.length - videoCount, dims, v2Prompt) : (fromVideo ? videoShapePrompt(dims, v2Prompt) : SPEC_PROMPT) },
             ],
           }],
         }),
@@ -3905,6 +3913,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       textChars: text.length, elapsedMs: Date.now() - t0, source: aiSource, frames: photoUrls.length,
       // Whether this was the lean automatic retry — so a truncated retry is a query, not a guess.
       lean,
+      // Which prompt the rollout gate chose: v2 (the new designer's frame) or the legacy one.
+      v2: v2Prompt,
     };
     // ── DRAFT USAGE: started here, awaited at each of the three returns below ─────────────
     // Every outcome that got a reply passes through this line — refused, truncated, unparseable
@@ -4026,13 +4036,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // height the BUILDER typed had to be clamped to what the renderer can draw — the one way
     // their own measurement can still lose, and the one the preview cannot explain by itself.
     //
-    // The WINGS check joins them on 2026-09-24, for v2 generations ONLY — the ones with `dims`,
-    // because only the v2 prompt asks observed.wings. On the legacy no-dims path the question was
-    // never put, so the check would say "the reading never said" on every generation and turn
-    // every draft amber. Same posture as the porch check otherwise: flagged, never repaired.
+    // The WINGS check joins them on 2026-09-24, for v2 generations ONLY — the ones the rollout
+    // gate sent the v2 prompt (v2Prompt: frame "front" and dims), because only that prompt asks
+    // observed.wings. On every legacy path the question was never put, so the check would say "the
+    // reading never said" on every generation and turn every draft amber. Same posture as the
+    // porch check otherwise: flagged, never repaired.
     const observedRead = shapeFirst ? parseObservedNotes(text) : null;
     const observedNotes = shapeFirst
-      ? flagObservedNotes(observedRead, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead), dims ? wingsAgreementWarning(drafted.d3.roof, observedRead) : null, knownDimsNote(dims))
+      ? flagObservedNotes(observedRead, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead), v2Prompt ? wingsAgreementWarning(drafted.d3.roof, observedRead) : null, knownDimsNote(dims))
       : null;
 
     // ── WHICH FRAME GOES WITH WHICH VIEW (2026-09-19) ────────────────────────────

@@ -1699,7 +1699,12 @@ function Dashboard({ session }) {
       if (!d || !(Number(d.widthFt) > 0) || !(Number(d.lengthFt) > 0) || !(Number(d.wallHeightFt) > 0)) {
         throw new Error("Type the building's width, length and wall height before generating — the video cannot show us how big it is.");
       }
-      const body = { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined, dims: d };
+      // `frame: "front"` (2026-09-24) is the ROLLOUT GATE's key: it says these dims were typed
+      // against the new dimensions card — the width is the FRONT wall's (the side with the porch or
+      // main door), the length the depth front to back — so the server may read them with the v2
+      // prompt. Production's older bundle never sends it and keeps the legacy prompt, whose ruler
+      // says "across the gable end", the frame ITS card asked in. Sent on the lean retry too.
+      const body = { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined, dims: d, frame: "front" };
       if (opts && opts.lean) body.lean = true;
       const { data, error } = await sb.functions.invoke("portal-settings", { body });
       // `ssRetryable` IS THE SERVER'S WORD, NEVER A GUESS FROM THE STATUS. A 502 is also a model

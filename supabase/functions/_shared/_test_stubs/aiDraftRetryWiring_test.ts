@@ -16,8 +16,9 @@
 //   4. A walk-around's frames are capped at WALK_FRAME_MAX (12) EVERYWHERE they are read or kept —
 //      the generation and both save paths — because the self-check pairs a frame with a render
 //      only if the style stores that frame. One leftover `8` would quietly drop four views.
-//   5. The wings agreement check runs only on a v2 (dims) generation: the legacy prompt never asks
-//      observed.wings, so ungated it would turn every legacy draft amber.
+//   5. The wings agreement check runs only on a v2 generation — since the rollout gate, one whose
+//      request says frame "front" and sends dims (aiDraftFrameGateWiring_test): the legacy prompts
+//      never ask observed.wings, so ungated it would turn every legacy draft amber.
 //
 // HOW: the same idiom as aiDraftUsageWiring_test — lift the shipped text between stable anchors.
 // The two reply statements are RUN against a stand-in `json`, so what is asserted is what the
@@ -97,10 +98,10 @@ Deno.test("every walk-around frame path takes WALK_FRAME_MAX, and no 8 is left b
   }
 });
 
-Deno.test("the wings check is composed only on a v2 (dims) generation, beside the other three", () => {
+Deno.test("the wings check is composed only on a v2 generation, beside the other three", () => {
   const call = DRAFT.split("\n").find((l) => l.includes("flagObservedNotes(observedRead,")) ?? "";
   assert(call.includes("gambrelRoofWarning(drafted.d3.roof)"), "the gambrel check stays");
   assert(call.includes("porchAgreementWarning(drafted.d3.roof, observedRead)"), "the porch check stays");
-  assert(call.includes("dims ? wingsAgreementWarning(drafted.d3.roof, observedRead) : null"), "the wings check, gated on dims");
+  assert(call.includes("v2Prompt ? wingsAgreementWarning(drafted.d3.roof, observedRead) : null"), "the wings check, gated on the v2 prompt");
   assert(call.includes("knownDimsNote(dims)"), "the clamp note stays");
 });

@@ -1180,8 +1180,8 @@ Deno.test("a two-argument combinedShapePrompt is byte-identical to what shipped"
 
 Deno.test("the dims prompt states all three numbers as facts and calls them the ruler", () => {
   for (const [name, p] of [
-    ["videoShapePrompt", videoShapePrompt(DIMS)],
-    ["combinedShapePrompt", combinedShapePrompt(8, 4, DIMS)],
+    ["videoShapePrompt", videoShapePrompt(DIMS, true)],
+    ["combinedShapePrompt", combinedShapePrompt(8, 4, DIMS, true)],
   ] as const) {
     // IN THE v2 FRAME (2026-09-24): the width is the FRONT wall's, not "across the gable end" —
     // a cabin whose porch runs along its long side has its front on an eave wall — and the wall
@@ -1197,8 +1197,8 @@ Deno.test("the dims prompt states all three numbers as facts and calls them the 
   }
   // Trailing zeros off: "9" and not "9.0". A model reconciling "9.00 ft" against a frame is being
   // handed false precision it did not ask for.
-  assert(videoShapePrompt({ widthFt: 12, lengthFt: 16.5, wallHeightFt: 8 }).includes("16.5 ft deep"), "a real fraction survives");
-  assert(!videoShapePrompt(DIMS).includes("16.0 ft"), "a whole number reads as a whole number");
+  assert(videoShapePrompt({ widthFt: 12, lengthFt: 16.5, wallHeightFt: 8 }, true).includes("16.5 ft deep"), "a real fraction survives");
+  assert(!videoShapePrompt(DIMS, true).includes("16.0 ft"), "a whole number reads as a whole number");
 });
 
 Deno.test("⚠️ the splice does not eat the known-dimensions paragraph", () => {
@@ -1207,7 +1207,7 @@ Deno.test("⚠️ the splice does not eat the known-dimensions paragraph", () =>
   // line; a ruler written ABOVE that line would vanish on every combined generation, and the
   // prompt that went out would still read perfectly well and still return a parseable spec.
   // The only symptom would be a wall height nobody could explain.
-  const p = combinedShapePrompt(8, 4, DIMS);
+  const p = combinedShapePrompt(8, 4, DIMS, true);
   assert(p.includes("KNOWN DIMENSIONS, MEASURED BY THE BUILDER."), "the ruler survives the splice");
   assert(p.startsWith("These images are all of ONE portable building"), "and the combined opening still leads");
   assert(p.indexOf("KNOWN DIMENSIONS") > p.indexOf("The FIRST 8 images are frames"), "the ruler sits inside the inherited body");
@@ -1219,8 +1219,8 @@ Deno.test("⚠️ the dims prompt does not ask for a wall height it already know
   // no-op — a reword of the schema line or of the WALL HEIGHT paragraph would do it — the model
   // would be told the wall is 9 ft in one paragraph and asked to guess it in the next.
   for (const [name, p] of [
-    ["videoShapePrompt", videoShapePrompt(DIMS)],
-    ["combinedShapePrompt", combinedShapePrompt(8, 4, DIMS)],
+    ["videoShapePrompt", videoShapePrompt(DIMS, true)],
+    ["combinedShapePrompt", combinedShapePrompt(8, 4, DIMS, true)],
   ] as const) {
     assert(!p.includes("wallHeightFt"), `${name}: the key is gone from the schema entirely`);
     assert(!p.includes("typically 6-10"), `${name}: and so is the range that invited a midpoint`);
@@ -1241,7 +1241,7 @@ Deno.test("the gambrel ratios are word-for-word the same with dims as without", 
   // asked for. Deliberately NOT folded into the existing "every prompt says kneeU is measured
   // from the CENTRELINE" loop: that loop guards a real shipped defect and is not the place to
   // hang a fourth prompt off.
-  const withDims = videoShapePrompt(DIMS), without = VIDEO_SHAPE_PROMPT;
+  const withDims = videoShapePrompt(DIMS, true), without = VIDEO_SHAPE_PROMPT;
   for (const marker of ['"kneeU"', '"kneeRise"', '"ridgeRise"', "GAMBREL NUMBERS", "CENTRELINE", "0.7-0.85"]) {
     assert(withDims.includes(marker), `the dims prompt still carries ${marker}`);
   }
@@ -1446,7 +1446,8 @@ Deno.test("nothing dims brought in survives sanitizeD3Spec except the wall heigh
 //
 //   * the legacy no-dims prompt is byte-for-byte what production has run (by hash, not identity);
 //   * every new key round-trips, clamps, is dropped when invalid, and is NEVER emitted by default;
-//   * the v2 prompt (every request with dims) asks for each of them in the terms the renderer
+//   * the v2 prompt (every request with dims AND frame "front", the rollout gate) asks for each of
+//     them in the terms the renderer
 //     reads, keeps what the base already got right, and forces the wings answer like the porch's;
 //   * observed.wings is checked against the drafted wings, and only on the v2 path.
 //
@@ -1455,6 +1456,7 @@ Deno.test("nothing dims brought in survives sanitizeD3Spec except the wall heigh
 import {
   D3_ROOF_FRONTS, D3_SHED_HIGH_SIDES, D3_WING_SIDES, WALK_FRAME_MAX, WALL_HEIGHT_MAX_FT,
   OBSERVED_WING_KINDS, draftWingKind, wingsAgreementWarning, knownDimsParagraph,
+  wantsV2Prompt, PROMPT_FRAME_FRONT,
 } from "./styleD3.ts";
 
 // SHA-256 of VIDEO_SHAPE_PROMPT as shipped on 2026-09-19 (origin/main 72d88bd), line endings
@@ -1469,7 +1471,7 @@ Deno.test("⛔ the no-dims prompt is BYTE-FOR-BYTE the one production has run si
   // "videoShapePrompt(null) IS the constant" proves identity, and identity passes just as well on
   // an edited base: the constant is derived from the function. This pins the BYTES. A request with
   // no dims — production's legacy path — must keep getting exactly this string; all new vocabulary
-  // lives in the v2 prompt that dims select.
+  // lives in the v2 prompt that the rollout gate selects (dims AND frame "front").
   const legacy = VIDEO_SHAPE_PROMPT.replace(/\r\n/g, "\n");
   assertEquals(legacy.length, LEGACY_VIDEO_PROMPT_LENGTH, "the legacy prompt's length");
   assertEquals(await sha256(legacy), LEGACY_VIDEO_PROMPT_SHA256, "the legacy prompt's bytes");
@@ -1482,10 +1484,61 @@ Deno.test("⛔ the no-dims prompt is BYTE-FOR-BYTE the one production has run si
   assert(VIDEO_SHAPE_PROMPT.includes("do not spend effort on them"), "the legacy prompt is untouched");
 });
 
+// ─── THE ROLLOUT GATE: v2 only for frame "front" with dims ────────────────────────────────────
+// SHA-256 of what videoShapePrompt(DIMS) and combinedShapePrompt(8, 4, DIMS) returned at d3ab404
+// (the legacy dims prompt: the base with the old-frame ruler and the wall height cut out), line
+// endings normalised. Production's older bundle sends dims and no frame, and must keep getting it.
+const LEGACY_DIMS_VIDEO_SHA256 = "8c62e47f987dc37e513d5ba29516623205590534bdd51b4d294cc1bf9b18de9b";
+const LEGACY_DIMS_VIDEO_LENGTH = 15493;
+const LEGACY_DIMS_COMBINED_SHA256 = "26cda3bdba3f468c55e71f1770a3c4d088789a85b4cc0ed313aaa2590d55c73f";
+const LEGACY_DIMS_COMBINED_LENGTH = 15787;
+
+Deno.test("⛔ the gate: only a request that says frame \"front\" AND sends dims gets the v2 prompt", () => {
+  assertEquals(PROMPT_FRAME_FRONT, "front");
+  assertEquals(wantsV2Prompt("front", DIMS), true, "the new designer");
+  assertEquals(wantsV2Prompt(undefined, DIMS), false, "production's older bundle: dims, no frame");
+  assertEquals(wantsV2Prompt(null, DIMS), false);
+  for (const junk of ["FRONT", "gable", "back", true, 1, {}, ["front"]]) {
+    assertEquals(wantsV2Prompt(junk, DIMS), false, `frame ${JSON.stringify(junk)} is not "front"`);
+  }
+  assertEquals(wantsV2Prompt("front", null), false, "no dims, no v2: the v2 ruler has nothing to say");
+  assertEquals(wantsV2Prompt("front", undefined), false);
+  // With no dims the flag cannot matter: the legacy base, the very same string.
+  assert(videoShapePrompt(null, true) === VIDEO_SHAPE_PROMPT, "no dims is the legacy base even with v2 asked");
+  assertEquals(combinedShapePrompt(8, 4, null, true), combinedShapePrompt(8, 4), "and so is a combined set");
+  // Omitting the flag is the legacy path, and so is false.
+  assertEquals(videoShapePrompt(DIMS), videoShapePrompt(DIMS, false));
+  assertEquals(combinedShapePrompt(8, 4, DIMS), combinedShapePrompt(8, 4, DIMS, false));
+  assert(videoShapePrompt(DIMS) !== videoShapePrompt(DIMS, true), "and the two paths really differ");
+});
+
+Deno.test("⛔ the legacy DIMS prompt (no frame) is BYTE-FOR-BYTE the one shipped at d3ab404", async () => {
+  const video = videoShapePrompt(DIMS).replace(/\r\n/g, "\n");
+  assertEquals(video.length, LEGACY_DIMS_VIDEO_LENGTH, "the legacy dims prompt's length");
+  assertEquals(await sha256(video), LEGACY_DIMS_VIDEO_SHA256, "the legacy dims prompt's bytes");
+  const combined = combinedShapePrompt(8, 4, DIMS).replace(/\r\n/g, "\n");
+  assertEquals(combined.length, LEGACY_DIMS_COMBINED_LENGTH, "the legacy combined dims prompt's length");
+  assertEquals(await sha256(combined), LEGACY_DIMS_COMBINED_SHA256, "the legacy combined dims prompt's bytes");
+  for (const [name, p] of [["videoShapePrompt", videoShapePrompt(DIMS)], ["combinedShapePrompt", combinedShapePrompt(8, 4, DIMS)]] as const) {
+    // The ruler in the frame the OLD dimensions card asked in.
+    assert(p.includes("16 ft wide across the gable end"), `${name} states the width the old way`);
+    assert(p.includes("24 ft long down the side"), `${name} states the length the old way`);
+    assert(p.includes("wall is 9 ft high at the eave"), `${name} states the wall height the old way`);
+    // Both replacements still bite: a known wall is never also asked for.
+    assert(!p.includes("wallHeightFt"), `${name}: the key is gone from the schema`);
+    assert(!p.includes("WALL HEIGHT: the wall at the eave, not at the peak."), `${name}: the estimate paragraph is replaced`);
+    assert(p.includes("Do not estimate it, do not report it"), `${name}: by a refusal to estimate`);
+    // And none of v2's vocabulary or its checks' questions.
+    for (const k of ["The FRONT wall (the side with the porch or main door)", '"highSide"', '"wingSide"', '"wings"', "SUNLIT"]) {
+      assert(!p.includes(k), `${name}: the legacy dims prompt must not mention ${k}`);
+    }
+  }
+});
+
 // The v2 prompts, both ways a request can reach one.
 const V2 = [
-  ["videoShapePrompt(dims)", videoShapePrompt(DIMS)],
-  ["combinedShapePrompt(dims)", combinedShapePrompt(8, 4, DIMS)],
+  ["videoShapePrompt(dims)", videoShapePrompt(DIMS, true)],
+  ["combinedShapePrompt(dims)", combinedShapePrompt(8, 4, DIMS, true)],
 ] as const;
 
 Deno.test("v2 defines the FRONT once, and every direction is read from it", () => {
@@ -1615,7 +1668,7 @@ Deno.test("v2 keeps everything the base already read correctly", () => {
     assert(p.includes("It is the LOW wall on a one-slope roof"), `${name}: and it says which wall the known one is`);
   }
   // The decisions are the one exception to "omit when unsure", and the closing says so.
-  assert(videoShapePrompt(DIMS).includes("The exceptions are the decisions marked REQUIRED above"), "the closing names the exception");
+  assert(videoShapePrompt(DIMS, true).includes("The exceptions are the decisions marked REQUIRED above"), "the closing names the exception");
 });
 
 Deno.test("v2 asks the frame map for SIX views, including the back and the far side", () => {
@@ -1636,7 +1689,7 @@ Deno.test("⚠️ every roof key the v2 schema asks for survives the sanitiser",
   // know is paid for, answered, and dropped without a word — the "the save did not work" defect
   // the sanitiser's own header warns about. So the schema is READ here, key by key, and each one
   // is put through parseModelSpec on the roof type that can carry it.
-  const p = videoShapePrompt(DIMS);
+  const p = videoShapePrompt(DIMS, true);
   const at = p.indexOf('"roof": {');
   const block = p.slice(at, p.indexOf("\n  },", at));
   const asked = [...block.matchAll(/^ {4}"(\w+)":/gm)].map((m) => m[1]);
@@ -1665,13 +1718,13 @@ Deno.test("the v2 ruler is in the new frame, and sits after the first blank line
   assert(para.includes("The FRONT wall (the side with the porch or main door) is 16 ft long"), "W is the front wall");
   assert(para.includes("10 ft deep front to back"), "L is the depth");
   assert(para.includes("7 ft tall at the eave (on a one-slope roof, the LOW side; with side wings, the wings' outer walls)"), "H is the low / outer wall");
-  const p = videoShapePrompt({ widthFt: 16, lengthFt: 10, wallHeightFt: 7 });
+  const p = videoShapePrompt({ widthFt: 16, lengthFt: 10, wallHeightFt: 7 }, true);
   const firstBreak = p.indexOf("\n\n");
   assert(p.slice(firstBreak + 2).startsWith(para), "the ruler is the second paragraph, where combinedShapePrompt keeps it");
   // The combined prompt with dims is the v2 body under the two-source opening, not the base's.
-  const c = combinedShapePrompt(8, 4, DIMS);
+  const c = combinedShapePrompt(8, 4, DIMS, true);
   assert(c.startsWith("These images are all of ONE portable building"), "the combined opening still leads");
-  assert(c.endsWith(videoShapePrompt(DIMS).slice(videoShapePrompt(DIMS).indexOf("\n\n"))), "and the rest is the v2 body, whole");
+  assert(c.endsWith(videoShapePrompt(DIMS, true).slice(videoShapePrompt(DIMS, true).indexOf("\n\n"))), "and the rest is the v2 body, whole");
 });
 
 // ── the sanitiser: every v2 key ─────────────────────────────────────────────────────────────
@@ -1916,8 +1969,8 @@ Deno.test("both shape-first prompts ask which image goes with which view; the ph
   for (const [name, p, views] of [
     ["videoShapePrompt", VIDEO_SHAPE_PROMPT, LEGACY_VIEWS],
     ["combinedShapePrompt", combinedShapePrompt(8, 4), LEGACY_VIEWS],
-    ["videoShapePrompt(dims)", videoShapePrompt(DIMS), FRAME_MAP_VIEWPOINTS],
-    ["combinedShapePrompt(dims)", combinedShapePrompt(8, 4, DIMS), FRAME_MAP_VIEWPOINTS],
+    ["videoShapePrompt(dims)", videoShapePrompt(DIMS, true), FRAME_MAP_VIEWPOINTS],
+    ["combinedShapePrompt(dims)", combinedShapePrompt(8, 4, DIMS, true), FRAME_MAP_VIEWPOINTS],
   ] as const) {
     assert(p.includes('"frameMap"'), `${name}: the schema carries a frameMap`);
     assert(p.includes("FRAME MAP:"), `${name}: and a paragraph saying how to fill it`);

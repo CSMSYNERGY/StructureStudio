@@ -502,11 +502,12 @@ Colors are the dominant UNPAINTED material colors. Estimate conservatively and u
 // `VIDEO_SHAPE_PROMPT` is literally `videoShapePrompt(null)` — see that function's header for
 // why the no-dims prompt has to remain the same string object it always was.
 //
-// ⛔ FROZEN SINCE 2026-09-24. This is now ONLY the prompt a request WITHOUT the builder's
-// measurements gets, and styleD3.test.ts pins its bytes by hash. Every word the generator learns
-// from here on goes into VIDEO_SHAPE_V2 below, which is what every request WITH dims gets — and
-// the current designer always sends them. Editing this string changes production's legacy path
-// and nothing else, so there is no reason left to.
+// ⛔ FROZEN SINCE 2026-09-24. This is now ONLY the prompt of the LEGACY paths — a request without
+// the builder's measurements, and (with the old ruler spliced in, legacyDimsPrompt) one with dims
+// but without `frame: "front"` — and styleD3.test.ts pins both by hash. Every word the generator
+// learns from here on goes into VIDEO_SHAPE_V2 below, which is what the rollout gate
+// (wantsV2Prompt) sends the new designer, whose every request carries dims and the frame. Editing
+// this string changes production's legacy paths and nothing else, so there is no reason left to.
 const VIDEO_SHAPE_BASE = `These images are frames from ONE continuous walk-around video of ONE portable building (a shed or barn). They are in walk order, so consecutive frames are adjacent viewpoints of the same building.
 
 Your job is the SHAPE of that building. Its size, its colours and its materials are settings the customer picks later — do not spend effort on them.
@@ -866,11 +867,12 @@ const dimFt = (n: number): string => String(Math.round(n * 100) / 100);
 // blank line and keeps the rest, so a preamble placed above it would be eaten on every combined
 // generation — silently, with a prompt that still reads perfectly well. A test pins it.
 //
-// WITH DIMS, THE v2 PROMPT (2026-09-24). Until today this branch took the base and cut the wall
-// height out of it by replacing two exact strings. The v2 prompt is WRITTEN without them — it has
-// no `wallHeightFt` schema line and its WALL HEIGHT paragraph already says the wall is known — so
-// there is nothing left to replace, and the old failure (a reworded line turning the replacement
-// into a no-op) cannot happen. The tests still assert the dims prompt never names `wallHeightFt`.
+// WITH DIMS AND `v2` (the rollout gate below), THE v2 PROMPT (2026-09-24). The legacy dims path
+// (legacyDimsPrompt) takes the base and cuts the wall height out of it by replacing two exact
+// strings. The v2 prompt is WRITTEN without them — it has no `wallHeightFt` schema line and its
+// WALL HEIGHT paragraph already says the wall is known — so there is nothing left to replace, and
+// the old failure (a reworded line turning the replacement into a no-op) cannot happen there. The
+// tests still assert neither dims prompt names `wallHeightFt`.
 //
 // THE RULER IS IN THE NEW FRAME: W is the FRONT wall (the side with the porch or main door), L the
 // depth front to back, and the wall height is the OUTSIDE walls at the eave — on a one-slope roof
@@ -880,8 +882,44 @@ export function knownDimsParagraph(dims: KnownDims): string {
   return `KNOWN DIMENSIONS, MEASURED BY THE BUILDER. The FRONT wall (the side with the porch or main door) is ${dimFt(dims.widthFt)} ft long, the building is ${dimFt(dims.lengthFt)} ft deep front to back, and its outside walls are ${dimFt(dims.wallHeightFt)} ft tall at the eave (on a one-slope roof, the LOW side; with side wings, the wings' outer walls). Those three are facts, not estimates, and they are your ruler: read every proportion you report against them and never against a scale of your own. Where one of them already answers a question, do not re-estimate it from a door, a person or a typical building.`;
 }
 
-export function videoShapePrompt(dims?: KnownDims | null): string {
+// ─── THE ROLLOUT GATE (2026-09-24) ───────────────────────────────────────────────────────────
+// Beta and production share ONE set of edge functions, and production runs an OLDER browser
+// bundle that already sends dims — read in the OLD frame: its dimensions card says the width is
+// "across the gable end". Handing that bundle the v2 prompt would state a builder's numbers in a
+// frame they were not typed in. So v2 is chosen by the REQUEST, not by the deploy: only a caller
+// that says `frame: "front"` (the new designer, whose dimensions card asks for the FRONT wall) AND
+// sends dims gets it. Every other request keeps exactly the path it had before this change —
+// the legacy prompt with no dims, and with dims the legacy prompt with the old ruler spliced in
+// (legacyDimsPrompt below, frozen and pinned by hash).
+export const PROMPT_FRAME_FRONT = "front";
+export function wantsV2Prompt(frame: unknown, dims: KnownDims | null | undefined): boolean {
+  return frame === PROMPT_FRAME_FRONT && !!dims;
+}
+
+// THE LEGACY RULER, EXACTLY AS IT SHIPPED ON 2026-09-19 (d3ab404), for callers the gate keeps on
+// the old path. Frozen: the ruler speaks the old frame ("wide across the gable end") because that
+// is the frame the old dimensions card asked in, and the wall height is cut out of the legacy
+// schema by replacing two exact strings. styleD3.test.ts pins the output by SHA-256 and asserts
+// neither replacement has become a no-op, which is the one failure here invisible from outside.
+const WALL_HEIGHT_SCHEMA_LINE = `  "wallHeightFt": <wall height at the eave, typically 6-10; a door is about 6 ft 8 in, use it for scale>,\n`;
+const WALL_HEIGHT_PARAGRAPH = `WALL HEIGHT: the wall at the eave, not at the peak.`;
+function legacyDimsPrompt(dims: KnownDims): string {
+  const known = `KNOWN DIMENSIONS, MEASURED BY THE BUILDER. This building is ${dimFt(dims.widthFt)} ft wide across the gable end, ${dimFt(dims.lengthFt)} ft long down the side, and its wall is ${dimFt(dims.wallHeightFt)} ft high at the eave. Those three are facts, not estimates, and they are your ruler: read every proportion you report against them and never against a scale of your own. Where one of them already answers a question, do not re-estimate it from a door, a person or a typical building.`;
+  const cut = VIDEO_SHAPE_BASE.indexOf("\n\n");
+  if (cut < 0) return VIDEO_SHAPE_BASE;
+  const withKnown = `${VIDEO_SHAPE_BASE.slice(0, cut)}\n\n${known}${VIDEO_SHAPE_BASE.slice(cut)}`;
+  return withKnown
+    .replace(WALL_HEIGHT_SCHEMA_LINE, "")
+    .replace(
+      WALL_HEIGHT_PARAGRAPH,
+      "WALL HEIGHT: already known — the builder measured it and it is stated above. Do not estimate it, do not report it, and do not bend the other numbers to fit some other wall height.",
+    );
+}
+
+// `v2` is wantsV2Prompt's answer for the request. With no dims it cannot matter: the legacy base.
+export function videoShapePrompt(dims?: KnownDims | null, v2 = false): string {
   if (!dims) return VIDEO_SHAPE_BASE;
+  if (!v2) return legacyDimsPrompt(dims);
   const cut = VIDEO_SHAPE_V2.indexOf("\n\n");
   // Defensive only: v2 opens with a paragraph and a blank line, and a test pins it. If that ever
   // stopped being true, the ruler would have nowhere safe to go, and a v2 prompt whose WALL HEIGHT
@@ -968,10 +1006,10 @@ export function knownDimsNote(dims?: KnownDims | null): string | null {
 // the part of the body that starts there, so the ruler survives the splice for free and there is
 // no second copy of it to write. A TWO-ARGUMENT CALL IS BYTE-IDENTICAL TO TODAY, which is what
 // lets this deploy while production's browser bundle has never heard of dims.
-export function combinedShapePrompt(videoCount: number, photoCount: number, dims?: KnownDims | null): string {
+export function combinedShapePrompt(videoCount: number, photoCount: number, dims?: KnownDims | null, v2 = false): string {
   const v = Math.max(0, Math.floor(videoCount || 0));
   const p = Math.max(0, Math.floor(photoCount || 0));
-  const base = videoShapePrompt(dims);
+  const base = videoShapePrompt(dims, v2);
   if (!v) return base;
   const cut = base.indexOf("\n\n");
   if (cut < 0) return base;
