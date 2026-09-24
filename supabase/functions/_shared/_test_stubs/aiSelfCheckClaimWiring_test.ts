@@ -139,8 +139,10 @@ assert(!preClaimCode.includes("self_check_round"),
 // positions and the render bytes. A `payload.draft` or `payload.d3` here would be the free,
 // caller-controlled vision call the whole design exists to prevent — and a later round is the
 // obvious place for one to creep in ("the browser already has the corrected spec").
+// `frame` (fix, 2026-09-24) is the check's rollout gate -- it picks WHICH check runs (the v2 one or
+// d3ab404's, see aiSelfCheckGateWiring_test) and reaches the model as nothing at all.
 const readsOffPayload = [...new Set([...ACTION.matchAll(/payload\.([A-Za-z_]+)/g)].map((m) => m[1]))].sort();
-assertEquals(readsOffPayload, ["checkId", "photoUrls", "renders", "round", "styleValue"],
+assertEquals(readsOffPayload, ["checkId", "frame", "photoUrls", "renders", "round", "styleValue"],
   "the check reads nothing else off the request");
 assert(ACTION.includes("sanitizeD3Spec(claimed.self_check_after ?? claimed.drafted)"),
   "a round judges the spec the ROW holds: the previous round's result, else the draft");

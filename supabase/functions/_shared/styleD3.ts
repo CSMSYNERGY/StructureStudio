@@ -617,7 +617,17 @@ Where the frames genuinely do not settle something, say so in observed and OMIT 
 // `roof.highSide`, the two keys that switch the renderer into that frame, as REQUIRED decisions;
 // the porch on the front wall whichever kind of wall it is, with its attach height and width;
 // SIDE WINGS against the lean-to, with their own REQUIRED decision beside the porch's; and colours
-// read off the SUNLIT face, including corner, fascia and porch wood.
+// as the paint looks in even daylight, including corner, fascia and porch wood.
+//
+// THE FIRST PROXY RUNS (2026-09-24, three per building on the app's own twelve frames) failed in
+// four places, and the paragraphs below now teach a PROCEDURE for each rather than a definition:
+// the shed's high side came back front, back and left for one cabin (one run read the porch's own
+// lower roof as the main roof), so SHED HIGH SIDE reads the tall edge of the sloping end walls off
+// the MAIN roof; the raised-centre house came back with ONE wing in two runs of three although
+// the rear frames show both, so the WINGS DECISION looks at both sides and says "one" only on a
+// named frame; one run called a posted, decked porch "recessed"; and one read the porch rafters
+// as the main eave's finish. The worked examples use generic numbers, never the two test
+// buildings' own, so an evaluation on those two measures reading rather than copying.
 //
 // THE REPLY IS KEPT SHORT ON PURPOSE. Thinking and the answer share one max_tokens, and a reply
 // cut off anywhere loses the spec, the notes and the frame map together (one JSON object). Every
@@ -628,18 +638,18 @@ Where the frames genuinely do not settle something, say so in observed and OMIT 
 // gambrel ratios measurably work — see the test); `wallHeightFt` appears nowhere in here; and
 // the opening paragraph ends at the first blank line, because videoShapePrompt inserts the ruler
 // there and combinedShapePrompt replaces everything above it.
-const VIDEO_SHAPE_V2 = `These images are frames from ONE continuous walk-around video of ONE portable building (a shed or barn). They are in walk order, so consecutive frames are adjacent viewpoints of the same building.
+const VIDEO_SHAPE_V2 = `These images are frames from ONE continuous walk-around video of ONE portable building (a shed, barn, cabin or small house). They are in walk order, so consecutive frames are adjacent viewpoints of the same building.
 
 Your job is to describe this building exactly enough that a 3D model drawn from your answer looks like the video: its shape first, then its colours. Both matter. The builder is about to see your drawing beside these frames, and anything you got wrong is something they must find and fix by hand.
 
-Return ONLY a JSON object with this exact shape (no prose, no markdown fence). Keep every observed string to one short phrase, under 20 words: your reasoning and this reply share one length limit, and a reply that runs out before its end is lost whole.
+Return ONLY a JSON object with this exact shape (no prose, no markdown fence). Keep every observed string to one short phrase, under 20 words: your reasoning and this reply share one length limit, and a reply that runs out before its end is lost whole. Settle each REQUIRED decision once, from the frames named for it, and do not re-measure a number you have already given.
 {
   "roof": {
     "type": "shed" | "gable" | "gambrel",
     "front": "gable" | "eave",
     "highSide": "front" | "back" | "left" | "right",
     "pitch": <rise over run of one slope, e.g. 0.42 for 5:12>,
-    "ridgeOffset": <-0.35..0.35, gable only: how far the ridge sits off the centreline toward one eave for a saltbox look, as a fraction of the building's FULL width, not of the half-span; 0 if centred>,
+    "ridgeOffset": <-0.35..0.35, gable only: how far the ridge sits off the centreline toward one eave for a saltbox look, as a fraction of the FULL width under that roof (the whole building's, or the centre section's on a building with side wings), not of the half-span; 0 if centred>,
     "overhangIn": <inches the roof projects past the wall, 0 to 36; 0 means a flush eave>,
     "kneeU": <gambrel only, 0..1: how far the knee (where the steep lower slope meets the shallow upper one) sits out from the CENTRELINE under the ridge, as a fraction of the half-span -- NOT measured in from the eave. 1 would put the knee directly above the wall; a typical barn knee sits near the wall, about 0.7-0.85>,
     "kneeRise": <gambrel only, 0..1: height of the knee above the TOP OF THE WALL, as a fraction of the half-span>,
@@ -661,9 +671,9 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence). K
     "porchTruss": <true only if decorative timber beams fill the gable ABOVE the porch opening>,
     "porchOutFt": <only if a porch STANDS OUT in front of the FRONT wall under its own lower roof: how many feet its deck and posts project past that wall>,
     "porchAttachFt": <projecting porch only: feet from the floor to the TOP of the porch roof where it meets the wall>,
-    "porchWidthFt": <projecting porch only, and only when it is narrower than its wall: its width along the wall, in feet>
+    "porchWidthFt": <projecting porch only, and only when it is narrower than its wall, or than the centre section on a building with side wings: its width along the wall, in feet>
   },
-  "gableVent": { "widthFrac": <vent width as a fraction of the wall width, e.g. 0.25 for a 2 ft vent on an 8 ft wall> },
+  "gableVent": { "widthFrac": <vent width as a fraction of the width of the gable wall it sits in, e.g. 0.25 for a 2 ft vent on an 8 ft wall> },
   "foundation": "skids" | "slab",
   "roofMaterial": "shingle" | "metal",
   "colors": { "body": "#rrggbb", "trim": "#rrggbb", "roof": "#rrggbb", "corner": "#rrggbb", "fascia": "#rrggbb", "wood": "#rrggbb" },
@@ -689,15 +699,19 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence). K
 
 How to read it:
 
-THE FRONT, which every front, back, left and right in this reply is read from. The FRONT is the wall you would walk up to: the one carrying the porch, or the main door when there is no porch. Left and right are as seen standing outside in front of it, facing it. The FRONT can be a gable end (the wall with the roof's triangle above it) or a long eave wall (the wall the roof edge runs level along). Both are common, so read it off the frames and never assume the front is the shorter wall.
+THE FRONT, which every front, back, left and right in this reply is read from. The FRONT is the wall you would walk up to: the one carrying a ROOFED porch, or the main door when there is no porch. An open deck, a stair or a ramp with no roof of its own over it does not decide the front. Left and right are as seen standing outside in front of it, facing it. The FRONT can be a gable end (the wall with the roof's triangle above it) or a long eave wall (the wall the roof edge runs level along). Both are common, so read it off the frames and never assume the front is the shorter wall.
 
 ROOF TYPE, from the silhouette at a corner: one slope = "shed"; two slopes meeting at a ridge = "gable"; four slopes with a break partway down each side = "gambrel". A real gambrel is a barn roof: a STEEP lower slope from the wall up to the knee, then a SHALLOW upper slope from the knee to the ridge. If the roof is actually a HIP (slopes on all four sides, no vertical gable triangle) or FLAT, none of the three fit — return the closest, "gable" for a hip and "shed" for a flat, and say plainly in observed.roofNote that it is really a hip or flat and the shape will not match.
 
 ROOF DIRECTION, REQUIRED on a two-slope or gambrel roof: roof.front says which kind of wall the FRONT is. "gable" when the front wall is a gable end: from the front you see the roof's triangle (or the barn's five-sided outline) and the ridge runs straight away from you, front to back. "eave" when the front wall is a long wall with the roof edge running level along its top: from the front you look up at a roof slope and the ridge runs side to side, parallel to the front wall. Settle it from the frame square to the front: a peak above the front wall is "gable", a level roof edge along it is "eave". Give it on every two-slope or gambrel building, even when the door is off to one side, and leave it out on a shed.
 
-SHED HIGH SIDE, REQUIRED on a one-slope roof: roof.highSide says which wall is the HIGH one. The high wall is the tallest wall of the building: the roof starts along its top and falls away from it to the low wall opposite. Name it relative to the FRONT. "front" when the front wall itself is the tall one and the roof falls away from you toward the back — the usual cabin or farm stand, whose tall front carries the porch and the windows. "back" when the roof rises away from you and the back wall is the tallest. "left" or "right" when the slope runs across the front, so the front wall's top edge climbs diagonally toward that side. Check it from a frame square to a side wall, where the roof's top edge runs diagonally between the two: the end that stands higher is the high side. Leave it out on anything that is not a shed.
+SHED HIGH SIDE, REQUIRED on a one-slope roof: roof.highSide says which wall is the HIGH one. The high wall is the tallest wall of the building: the MAIN roof starts along its top and falls away from it to the low wall opposite. Settle it in three steps, from the walls themselves:
+1. Find the MAIN roof: the highest roof edge on the building. A porch's own lower roof, hung on a wall below the main roof's edge, is NOT the main roof. Never read the slope, or the high side, off a porch roof.
+2. Find the two walls whose top edge SLOPES under the main roof, and the frames most square-on to each of them. Each of those walls is a trapezoid: one of its two vertical edges is plainly taller than the other, and the TALL vertical edge stands at the high wall. Read both if you can; they must agree.
+3. Name it relative to the FRONT. "front" when the tall edges stand at the front: the front wall itself is the tall one, and the roof falls away from you toward the back. "back" when they stand at the far end: the roof rises away from you and the back wall is the tallest. "left" or "right" when the two sloping walls are the front and the back themselves: the front wall's top edge climbs toward that side.
+Leave it out on anything that is not a shed.
 
-PITCH: find a frame looking straight at a gable end and read the slope of the roof edge against the sky, comparing its rise to its horizontal run. A roof that rises half as much as it runs is 0.5. Do not guess from a corner view, where perspective flattens it. A shed has no gable end: read its one slope from a frame square to one of the two walls whose top edge runs diagonally, or work it out from the walls, as the high wall's height minus the low wall's, divided by the distance between them. A 10 ft deep shed whose front wall stands 9.3 ft and whose back wall stands 7 ft is (9.3 - 7) / 10 = 0.23.
+PITCH: find a frame looking straight at a gable end and read the slope of the roof edge against the sky, comparing its rise to its horizontal run. A roof that rises half as much as it runs is 0.5. Do not guess from a corner view, where perspective flattens it. A shed has no gable end: read its one slope from a frame square to one of the two walls whose top edge runs diagonally, along the MAIN roof's edge and never a porch roof's, or work it out from the walls, as the high wall's height minus the low wall's, divided by the distance between them. A 12 ft deep shed whose high wall stands 10 ft and whose low wall stands 8 ft is (10 - 8) / 12 = 0.17.
 
 GAMBREL NUMBERS, only for a gambrel, from that same frame straight at a gable end. Measure all three from the CENTRELINE under the ridge and the TOP OF THE WALL, and divide each by the distance from the centreline to the wall: kneeU is how far the knee sits out from the centreline, kneeRise is how high the knee sits above the wall, ridgeRise is how high the ridge sits above the wall. Example: a 12 ft wide barn with its knee 1.5 ft in from each wall and 4.3 ft above it, and the ridge 6.2 ft above the wall, is kneeU 0.75, kneeRise 0.72, ridgeRise 1.03. Check before you answer: kneeRise / (1 - kneeU) is the steepness of the lower slope and (ridgeRise - kneeRise) / kneeU is the upper; the lower must come out clearly larger, or you measured from the wrong point.
 
@@ -705,35 +719,35 @@ OVERHANG: how far the roof edge stands out past the wall below it, in INCHES, ju
 
 WALL HEIGHT: already known — the builder measured it and it is stated above. Do not estimate it, do not report it, and do not bend the other numbers to fit some other wall height. It is the LOW wall on a one-slope roof, and the wings' outer walls on a building with side wings; every taller wall is yours to give, through the pitch or centerEaveFt, measured against it.
 
-EAVE FINISH, from a frame looking along an eave wall at the underside of the roof edge. There are two possibilities and they look nothing alike once you know to look: a continuous painted board running the whole length, level and unbroken, is "fascia"; a repeating row of raw unpainted wood blocks projecting below the roof with gaps of open air between them is "open" — exposed rafter tails, which give the bottom of the roof a sawtooth outline rather than a straight line. If it is "open", count the blocks along a run you can measure against the wall and give the spacing in inches — 24 is the common one, 16 the next. If you cannot see under the eave in any frame, omit both keys rather than guessing; omitting them means the fascia we already draw. On a shed, the high eave is usually the one whose underside you can see best.
+EAVE FINISH, from a frame looking along an eave wall at the underside of the roof edge. There are two possibilities and they look nothing alike once you know to look: a continuous painted board running the whole length, level and unbroken, is "fascia"; a repeating row of raw unpainted wood blocks projecting below the roof with gaps of open air between them is "open" — exposed rafter tails, which give the bottom of the roof a sawtooth outline rather than a straight line. If it is "open", count the blocks along a run you can measure against the wall and give the spacing in inches — 24 is the common one, 16 the next. If you cannot see under the eave in any frame, omit both keys rather than guessing; omitting them means the fascia we already draw. On a shed, the high eave is usually the one whose underside you can see best. Judge it on the MAIN roof's own eaves: a porch roof often shows exposed rafters under it while the main roof above it has a plain fascia board, and the porch's rafters are not the main roof's eave finish.
 
-GABLE VENT: a louvered opening set in the gable triangle, above the top of the wall. Give its width as a fraction of the WALL's width, not of the triangle. Omit the whole gableVent object if the gable ends carry no vent — that is common and is not a failure to see one.
+GABLE VENT: a louvered opening set in the gable triangle, above the top of the wall. Give its width as a fraction of the width of the gable wall it sits in, not of the triangle; on a building with side wings that is the CENTRE section's width, not the whole front. Omit the whole gableVent object if the gable ends carry no vent — that is common and is not a failure to see one.
 
 ROOF MATERIAL: asphalt shingles are laid in overlapping courses, so the slope carries a horizontal line every few inches and the surface looks granular. Metal is long continuous panels running UP the slope with raised ribs a foot or so apart, and it catches light in hard streaks rather than evenly. Judge it from the frame where the roof fills most of the picture; on an overcast day the giveaway is the direction of the lines — across the slope means shingle, up it means metal.
 
-LEAN-TO: an OPEN roofed section running along one side wall, its outer edge carried on posts rather than a wall — an equipment bay, or a carport down the side. Only report one if the posts are actually there; a deep eave overhang is not a lean-to. Give how far it projects from the wall in feet, how far its outer edge drops below the main eave, and which side it is on as seen standing in front of the FRONT wall. ⚠️ A lean-to is OPEN underneath and stands OUTSIDE the walls. A covered area in front of the FRONT wall is a PORCH, never a lean-to, whether the front is a gable end or an eave wall; it has its own fields below, and reporting it as a lean-to draws a lump on the wrong side of the wrong wall. And a lower section with WALLS of its own — siding, windows, closed in — is a SIDE WING, below, however much its roof looks like a lean-to's.
+LEAN-TO: an OPEN roofed section running along one side wall, its outer edge carried on posts rather than a wall — an equipment bay, or a carport down the side. Only report one if the posts are actually there; a deep eave overhang is not a lean-to. Give how far it projects from the wall in feet, how far its outer edge drops below the main eave, and which side it is on as seen standing in front of the FRONT wall. ⚠️ A lean-to is OPEN underneath and stands OUTSIDE the walls. A covered area in front of the FRONT wall is a PORCH, never a lean-to, whether the front is a gable end or an eave wall; it has its own fields below, and reporting it as a lean-to draws a lump on the wrong side of the wrong wall. And a lower section with WALLS of its own — siding, windows, closed in — is a SIDE WING, below, however much its roof looks like a lean-to's. A lean-to can only be drawn along a wall the main roof's edge runs level along: give the lean-to keys only on a two-slope building whose front is a gable end, or on a shed whose high side is left or right. On any other building leave all three lean-to keys out and say in observed.roofNote which wall the lean-to is on.
 
-SIDE WINGS, on a monitor or raised-centre building: a taller CENTRE section with its own roof, flanked along its sides by lower ENCLOSED rooms. Each wing is a real room — walls with siding and often windows, closed in from the front of the building to the back — under its own one-slope roof that falls AWAY from the centre to a lower outer wall. Above the wing roofs the centre section's own side walls carry on up, as a band of siding or a row of small windows, to the centre roof's eave. The wings are inside the size the builder measured: the FRONT wall's length includes them. Give wingSide, which sides carry a wing: "both", or "left" or "right" for one (on a building whose front is an eave wall, wings along the front and back walls are "front" or "back"). Give wingWidthFt, each wing's width from its outer wall in to the centre section's wall, measured against the front wall's known length, which the centre and the wings make up between them. Give wingPitch, the wing roof's rise over run, read from the frame square to the front where the wing roof is seen edge-on: the height where it meets the centre wall, minus the outer wall's height, divided by wingWidthFt. Give centerEaveFt, from the floor to the top of the centre section's walls where its own roof starts, measured against the known wall height, which is the height of the wings' outer walls. Report the centre section's own roof — its type, pitch and front — exactly as you would a building's. Omit all four wing keys on an ordinary building.
+SIDE WINGS, on a monitor or raised-centre building: a taller CENTRE section with its own roof, flanked along its sides by lower ENCLOSED rooms. Each wing is a real room — walls with siding and often windows, closed in from the front of the building to the back — under its own one-slope roof that falls AWAY from the centre to a lower outer wall. Above the wing roofs the centre section's own side walls carry on up, as a band of siding or a row of small windows, to the centre roof's eave. The wings are inside the size the builder measured: the FRONT wall's length includes them. Give wingSide, which sides carry a wing: "both", or "left" or "right" for one (on a building whose front is an eave wall, wings along the front and back walls are "front" or "back"). Give wingWidthFt, each wing's width from its outer wall in to the centre section's wall, measured against the front wall's known length, which the centre and the wings make up between them. Give wingPitch, the wing roof's rise over run, read from the frame where the wing roof is seen edge-on (square to the front for wings along the sides, square to a side for wings along the front and back): the height where it meets the centre wall, minus the outer wall's height, divided by wingWidthFt. Give centerEaveFt, from the floor to the top of the centre section's walls where its own roof starts, measured against the known wall height, which is the height of the wings' outer walls. Report the centre section's own roof — its type, pitch and front — exactly as you would a building's. Omit all four wing keys on an ordinary building.
 
-WINGS DECISION, REQUIRED: observed.wings must carry one of exactly three answers on EVERY building — "both" for enclosed wings along both sides of a taller centre section, "one" for a single enclosed wing, "none" for a building with no side wings, which is the common case. An open lean-to on posts is "none" here. Answer it even when the answer is "none", and answer it even when you are unsure; say the doubt in observed.roofNote instead of leaving the key out. "both" or "one" obliges you to give wingSide and wingWidthFt.
+WINGS DECISION, REQUIRED: observed.wings must carry one of exactly three answers on EVERY building — "both" for enclosed wings along both sides of a taller centre section, "one" for a single enclosed wing, "none" for a building with no side wings, which is the common case. An open lean-to on posts is "none" here. LOOK AT BOTH SIDES before you answer: the frames square to each side wall, and the back view, where the far wing often shows best. A raised centre with a wing on only one side is uncommon, so answer "one" only when a frame shows the other side's wall running straight up to the centre section's eave with no lower roof against it, and name that frame in observed.roofNote. Answer it even when the answer is "none", and answer it even when you are unsure; say the doubt in observed.roofNote instead of leaving the key out. "both" or "one" obliges you to give wingSide and wingWidthFt.
 
-PORCH ON THE FRONT WALL: a porch decides which wall is the FRONT, so porchEnd is "front" for every porch, and the front wall can be either kind — a gable end, or a long eave wall. A cabin or farm stand with its porch across its long, tall front is the ordinary case of the second, and everything below applies to both.
+PORCH ON THE FRONT WALL: a porch decides which wall is the FRONT, so porchEnd is "front" for every porch, and the front wall can be either kind — a gable end, or a long eave wall. A cabin with a porch across its long front is an ordinary case of the second, and everything below applies to both.
 
 PORCH TRUSS: with a porch, look at the TRIANGLE of gable wall directly above the porch opening. If heavy timber beams are fixed across it in a decorative pattern — typically an upright post running from the horizontal header up to the peak, with two diagonal braces angling up to meet it, so the triangle reads as a timber frame rather than as flat siding — set porchTruss true. It is usually raw or stained wood against a painted gable, so it stands out clearly. A plain gable above the porch, even one with a vent in it, is porchTruss false.
 
-PORCH: a covered area recessed INTO the front of the building. The main roof does not change at all: it simply carries on over the porch, and the outer corners are held up by posts instead of walls, on a gable front usually with a decorative timber truss filling the gable above them. Look for the wall with the door standing BACK from the edge of the roof rather than flush with it, so the front of the building is open air under the same roof for the first few feet. Give porchDepthFt as how far the porch eats INTO the building's depth — a 12x24 with an 8 ft porch is still a 12x24, with 16 ft of enclosed room and 8 ft of porch. Typical depths are 4 to 8 feet. If instead the front wall runs full height with the door in it, and the porch stands in front of that wall under a separate lower roof, it is a PROJECTING PORCH, below, and porchDepthFt stays out. Omit both keys if the building has no porch.
+PORCH: a covered area recessed INTO the front of the building. The main roof does not change at all: it simply carries on over the porch, and the outer corners are held up by posts instead of walls, on a gable front usually with a decorative timber truss filling the gable above them. Look for the wall with the door standing BACK from the edge of the roof rather than flush with it, so the front of the building is open air under the same roof for the first few feet. Give porchDepthFt as how far the porch eats INTO the building's depth — a 12x24 with an 8 ft porch is still a 12x24, with 16 ft of enclosed room and 8 ft of porch. Typical depths are 4 to 8 feet. If instead the front wall runs full height with the door in it, and the porch stands in front of that wall under a separate lower roof, it is a PROJECTING PORCH, below, and porchDepthFt stays out. A deck with posts along its outer edge, standing in front of a wall that runs full height with the door in it, is PROJECTING, never recessed, however low its roof and however open its sides: recessed means the WALL itself stands back under the main roof. Omit both keys if the building has no porch.
 
 PROJECTING PORCH: a porch built IN FRONT of the front wall instead of cut into it. The wall runs full height behind it, with the door in it, and the main roof stops at that wall exactly as it would with no porch. In front of the wall stands a deck at floor level with posts along its outer edge, covered by its own separate roof: a low, nearly flat slope that starts on the wall and falls away over the posts. From the front you see TWO roof edges, the main roof's and the porch's lower one below it. Three things settle it from the ground, and all three survive a walk-around: the wall runs UNBROKEN from the floor up behind the porch roof, with nothing cut out of it; the porch ceiling is nearly level while the main roof above it is a separate plane; and from the side the porch sticks out PAST the front of the building instead of sitting inside it. Give porchOutFt as how far the posts stand out from the wall, in feet, typically 4 to 8; a porch never changes the building's size. A porch is one kind or the other: if you give porchOutFt, leave porchDepthFt and porchTruss out.
 
-PORCH ROOF HEIGHT, porchAttachFt: where the projecting porch's roof meets the wall, as the height in feet from the floor to the TOP of the porch roof at that wall. Leave it out only when the porch roof starts just under the top of a wall whose top is the known wall height, which is the usual build on a gable end. Give it whenever the wall behind the porch is taller than that — the high wall of a shed, or the centre section of a building with side wings — and whenever a band of wall shows between the porch roof and the main roof's edge above it, often with a sign on it, or windows. Measure it on the wall itself, with a ruler you can trust: the door is 6 ft 8 in tall, so a porch roof meeting the wall about a foot above the top of the door is at about 7.7 ft; or count the siding courses or battens up the wall against the known wall height. On a building with side wings, a porch in front of the centre section usually meets it at about the height of the wing roofs.
+PORCH ROOF HEIGHT, porchAttachFt: where the projecting porch's roof meets the wall, as the height in feet from the floor to the TOP of the porch roof at that wall. Leave it out only when the porch roof starts just under the top of a wall whose top is the known wall height, which is the usual build on a gable end. Give it whenever the wall behind the porch is taller than that — the high wall of a shed, or the centre section of a building with side wings — and whenever a band of wall shows between the porch roof and the main roof's edge above it. Measure it on the wall itself, with a ruler you can trust: the door is 6 ft 8 in tall, so a porch roof meeting the wall about a foot above the top of the door is at about 7.7 ft; or count the siding courses or battens up the wall against the known wall height. On a building with side wings, measure it on the centre section's wall the same way.
 
-PORCH WIDTH, porchWidthFt: the porch's width along its wall, in feet, ONLY when it is clearly narrower than the wall — a porch in front of the centre section alone, or one across half the front. Measure it against the front wall's known length; it is drawn centred on the wall. Leave it out when the porch runs the full width of the wall, which is the common case, and on a building with side wings when it spans the whole centre section between them.
+PORCH WIDTH, porchWidthFt: give it only when the porch is clearly narrower than the stretch of wall it could cover. That stretch is the whole front wall on an ordinary building, and the CENTRE section alone on a building with side wings. Leave it out when the porch runs the whole front wall, which is the common case, and leave it out when a porch on a winged building runs exactly from one wing to the other, because that is what is drawn without it. Give it when the porch covers only part of that stretch, measured against the front wall's known length; it is drawn centred on that stretch.
 
 PORCH DECISION, REQUIRED: observed.porch must carry one of exactly three answers on EVERY building — "projecting" for a porch standing out in front of the front wall under its own lower roof, "recessed" for one cut into the building under the main roof, "none" for a building with no porch. Answer it even when the answer is "none", and answer it even when you are unsure; say the doubt in observed.roofNote instead of leaving the key out. Naming a porch obliges you to give its field: "projecting" means porchOutFt, "recessed" means porchDepthFt and porchEnd. Do not report a porch here and leave its number out of the roof.
 
 DORMER: a small roofed box sitting ON one of the main roof slopes, breaking its line. Give its width, how far it stands above the slope, and how far ACROSS the roof it sits -- measured sideways from the ridge line toward one eave, as a fraction of the half-span, negative for the left side and positive for the right as seen standing in front of the FRONT wall. When the front is an eave wall the two slopes face front and back instead: negative for the back slope, positive for the front one. Omit all three keys if the roof is unbroken, which is the common case.
 
-COLOURS matter here: the builder compares your drawing with these frames. Read every colour from a face of the building in full, even daylight — the SUNLIT side, never the side in shadow, which reads darker and bluer than the paint is, and not a face washed out by glare. body is the main wall colour; trim is the window and door casings; roof is the roofing. corner is the vertical boards at the building's corners, and fascia is the boards along the roof edges — along the eaves, up the rakes, and round the porch roof. Give corner and fascia ONLY when they differ from trim, and leave each out when it matches; they often differ, with the corners painted the body colour and the fascia matching the roof while only the window casings are white. wood is the natural or stained lumber of a porch — posts, deck and rafters — and only when there is a porch. Give each as the #rrggbb you see, not the name of a paint.
+COLOURS matter here: the builder compares your drawing with these frames. Give each colour as the paint looks in EVEN daylight: not the side in shadow, which reads darker and bluer than the paint is, and not a face in hard sun, glare or a reflection of the sky, which reads paler. When those are the only faces you have, the paint lies between them, and dark paint stays dark: never report a dark wall's sun-bleached reading as its colour. body is the main wall colour; trim is the window and door casings (the boards framing them, not shutters); roof is the roofing. corner is the vertical boards at the building's corners, and fascia is the boards along the roof edges — along the eaves, up the rakes, and round the porch roof. Look at those two on their own rather than assuming they match the casings: give corner and fascia ONLY when they differ from trim, and leave each out when it matches. They often differ, for example corners in the body colour and a fascia in the roof colour. wood is the natural or stained lumber of a porch — posts, deck and rafters — and only when there is a porch. Give each as the #rrggbb you see, not the name of a paint.
 
 FOUNDATION: look at the very bottom of the building. "skids" means it is raised on runners, with a visible shadow gap underneath and often blocks or shims between the runners and the ground — the normal look for a building that gets delivered on a trailer. "slab" means the walls meet the ground with no gap. Omit if the bottom is never visible.
 
@@ -1019,7 +1033,11 @@ export function combinedShapePrompt(videoCount: number, photoCount: number, dims
   const tail = p
     ? ` The REMAINING ${p} ${shots} the builder took deliberately, standing back from one side at a time. They are sharper and better framed than the video frames, so prefer them wherever the two disagree - but they are NOT part of the walk and are not in walk order.`
     : "";
-  return `These images are all of ONE portable building (a shed or barn), from two sources.\n\nThe FIRST ${v} ${frames} cut out of one continuous walk-around video, in walk order, so consecutive frames are adjacent viewpoints.${tail}${rest}`;
+  // The v2 body names its subject more widely (a raised-centre HOUSE is one of the two buildings
+  // it was built for, and "a shed or barn" primes barn answers for it), so its combined opening
+  // does too. Only where the v2 body is what follows: the legacy opening is pinned by hash.
+  const subject = v2 && dims ? "a shed, barn, cabin or small house" : "a shed or barn";
+  return `These images are all of ONE portable building (${subject}), from two sources.\n\nThe FIRST ${v} ${frames} cut out of one continuous walk-around video, in walk order, so consecutive frames are adjacent viewpoints.${tail}${rest}`;
 }
 
 // ─── overhangIn: the prompt asks in inches, the renderer stores feet (2026-09-19) ─────────
@@ -1363,9 +1381,10 @@ export function porchAgreementWarning(
 // a plain box, the exact result this vocabulary exists to end. Same two sentences (no answer /
 // a contradiction), same FLAG-NEVER-REPAIR posture, same place in `roofNote`.
 //
-// ⚠️ CALL IT ONLY FOR A v2 GENERATION (one with dims). The legacy prompt never asks the question,
-// so on that path "the reading never said" would fire on every single generation and force every
-// draft to low confidence. portal-settings gates the call on `dims` for exactly that reason.
+// ⚠️ CALL IT ONLY FOR A v2 GENERATION (the rollout gate's v2Prompt: frame "front" AND dims). The
+// legacy prompts never ask the question, so on those paths "the reading never said" would fire on
+// every single generation and force every draft to low confidence. portal-settings gates the call
+// on v2Prompt for exactly that reason.
 //
 // What the DRAFT says, read the way the renderer draws it: a wing exists only when wingWidthFt is
 // above zero on a gable or gambrel (the sanitiser drops wing keys on a shed, and this reads the
@@ -1398,6 +1417,31 @@ export function wingsAgreementWarning(
   }
   if (said === drafted) return null;
   return `Check the side wings before saving: the video reading says this building has ${WINGS_IN_WORDS[said as WingKind]}, but it has been drawn with ${WINGS_IN_WORDS[drafted]}. One of those is wrong and only the building settles which — compare the sides of the building with the preview, then set the wings below to match.`;
+}
+
+// ─── the front nobody named (fix, 2026-09-24) ─────────────────────────────────────────────
+// The v2 prompt marks roof.front (gable, gambrel) and roof.highSide (shed) REQUIRED, and nothing
+// enforced it. A draft without them renders in the OLD frame -- the ridge, or the shed's slope,
+// along the footprint's longer walls, and a porch on the old gable end -- and the designer drops
+// any stored front when a draft omits it. On a building whose front is its long wall that is the
+// building turned round, with nothing on screen saying why. The lean retry, at effort "low", is
+// the reply most likely to drop the key.
+//
+// So it is flagged in `roofNote` like the porch and the wings (FLAG, NEVER REPAIR: which way the
+// building faces is exactly what the server cannot guess), and flagObservedNotes drops the
+// confidence to low. ⚠️ v2 ONLY: the legacy prompts never ask for either key, so on those paths
+// this would fire on every draft. portal-settings gates it on v2Prompt, beside the wings check.
+// Read the way the sanitiser keeps them: front only on a two-slope roof, highSide only on a shed.
+export function frameKeyWarning(roof: Record<string, unknown> | null | undefined): string | null {
+  if (!roof) return null;
+  const type = roof.type;
+  if ((type === "gable" || type === "gambrel") && !(D3_ROOF_FRONTS as readonly string[]).includes(String(roof.front))) {
+    return "Check which way the building faces before saving: the video reading did not say whether the front wall is a gable end or a long side, so the roof has been drawn the old way, with its ridge along the longer walls. Compare the preview with the video, then set Front wall below.";
+  }
+  if (type === "shed" && !(D3_SHED_HIGH_SIDES as readonly string[]).includes(String(roof.highSide))) {
+    return "Check which wall is the high one before saving: the video reading did not say which wall of this single-slope roof is the tall one, so it has been drawn the old way, sloping along the longer walls. Compare the preview with the video, then set High side below.";
+  }
+  return null;
 }
 
 // Puts a roof warning where the builder already looks: `roofNote` in the "What the model saw"
@@ -1516,7 +1560,12 @@ export const SELF_CHECK_MAX_ROUNDS = 3;
 // single-use check it has always had (round 0 also requires `self_check_at` to be null, so its
 // second request is still a 409). A round past the limit is refused the same way a spent claim
 // is, with the same 409 code, so a browser needs only one rule for "stop asking".
-export function parseSelfCheckRound(raw: unknown):
+//
+// `max` (fix, 2026-09-24) is the caller's mode's limit: SELF_CHECK_MAX_ROUNDS for the v2 check,
+// and 1 for the LEGACY check (selfCheckMode), which is d3ab404's single-use check -- an older
+// designer never sends `round`, and a request without frame "front" that asks for a round past 0
+// is asking for something that check never had. Same 409 and code as a spent claim.
+export function parseSelfCheckRound(raw: unknown, max: number = SELF_CHECK_MAX_ROUNDS):
   | { ok: true; round: number }
   | { ok: false; status: 400 | 409; error: string; code?: string } {
   if (raw === undefined || raw === null) return { ok: true, round: 0 };
@@ -1525,10 +1574,12 @@ export function parseSelfCheckRound(raw: unknown):
   if (n === null || !Number.isInteger(n) || n < 0) {
     return { ok: false, status: 400, error: "round must be a whole number, starting at 0." };
   }
-  if (n >= SELF_CHECK_MAX_ROUNDS) {
+  if (n >= max) {
     return {
       ok: false, status: 409, code: "check_unavailable",
-      error: `That generation has already had all ${SELF_CHECK_MAX_ROUNDS} of its checks.`,
+      error: max === 1
+        ? "That generation has already had its check."
+        : `That generation has already had all ${max} of its checks.`,
     };
   }
   return { ok: true, round: n };
@@ -1573,6 +1624,86 @@ export const SELF_CHECK_ALLOW = [
 const SELF_CHECK_CHECKED_KEYS = ["overhang", "porch", "roofProfile", "eave", "massing"] as const;
 const SELF_CHECK_CHECKED_WORDS = ["ok", "changed", "unclear"] as const;
 
+// ── THE ROLLOUT GATE, FOR THE CHECK TOO (fix, 2026-09-24) ─────────────────────────────────────
+// The draft has been gated since v2 (wantsV2Prompt): only a request that says `frame: "front"`
+// gets the v2 prompt. The CHECK was not, and production's older designer -- which sends no frame
+// and no round -- was being handed the whole v2 check: a new-frame ruler ("the FRONT wall is W ft
+// long") over dims its card typed "across the gable end", a massing step that asks for roof.front
+// and the wings, and a 30-path allow-list that let those keys into a spec the old renderer cannot
+// draw and the old panel can neither show nor clear. Saved, they would switch on the day the new
+// renderer is promoted: a style turned 90 degrees, or grown a raised centre, that no builder saw.
+//
+// So the check is gated exactly like the draft, ON THE REQUEST: the new designer sends
+// `frame: "front"` on every check (12-shell onSelfCheck) and gets "v2". Everything else gets
+// "legacy", which is d3ab404's check VERBATIM -- the frozen prompt (legacySelfCheckPrompt, pinned
+// by SHA-256), its 22-path allow-list, six fields, the four viewpoints in their old words, four
+// renders and 1.2 MB, the old `checked` keys, and its 4000-token / 45 s budget. Only the claim is
+// shared: round 0 of the multi-round claim IS d3ab404's single-use claim, and a legacy request
+// cannot ask for a later round (parseSelfCheckRound's `max`).
+export type SelfCheckMode = "v2" | "legacy";
+export function selfCheckMode(frame: unknown): SelfCheckMode {
+  return frame === PROMPT_FRAME_FRONT ? "v2" : "legacy";
+}
+
+// ⛔ FROZEN at d3ab404, every one of them. styleD3.test.ts pins each against the value it had.
+export const SELF_CHECK_LEGACY_VIEWPOINTS: readonly FrameMapViewpoint[] = ["front", "side", "eaveCorner", "corner"];
+const SELF_CHECK_LEGACY_VIEW_WORDS: Record<string, string> = {
+  front: "head-on at the end the door is on",
+  side: "square to a long wall",
+  eaveCorner: "the close-up of the roof edge against the sky",
+  corner: "a three-quarter view",
+};
+export const SELF_CHECK_LEGACY_MAX_RENDERS = 4;
+export const SELF_CHECK_LEGACY_TOTAL_RENDER_BYTES = 1_200_000;
+export const SELF_CHECK_LEGACY_MAX_FIELDS = 6;
+export const SELF_CHECK_LEGACY_ALLOW = [
+  "roof.type", "roof.pitch", "roof.ridgeOffset", "roof.overhang",
+  "roof.kneeU", "roof.kneeRise", "roof.ridgeRise",
+  "roof.eave", "roof.tailSpacingIn",
+  "roof.porchOutFt", "roof.porchDepthFt", "roof.porchEnd", "roof.porchTruss",
+  "roof.leanToWidthFt", "roof.leanToDropFt", "roof.leanToSide",
+  "roof.dormerWidthFt", "roof.dormerRiseFt", "roof.dormerOffsetU",
+  "gableVent", "foundation", "roofMaterial",
+] as const;
+const SELF_CHECK_LEGACY_CHECKED_KEYS = ["overhang", "porch", "roofProfile", "eave"] as const;
+
+// The rules each mode's gates run on, in one place so no gate can read one mode's list and
+// another gate the other's.
+type SelfCheckRules = {
+  viewpoints: readonly FrameMapViewpoint[];
+  maxRenders: number;
+  totalRenderBytes: number;
+  maxFields: number;
+  allow: readonly string[];
+  checkedKeys: readonly string[];
+};
+function selfCheckRules(mode: SelfCheckMode): SelfCheckRules {
+  return mode === "legacy"
+    ? {
+      viewpoints: SELF_CHECK_LEGACY_VIEWPOINTS, maxRenders: SELF_CHECK_LEGACY_MAX_RENDERS,
+      totalRenderBytes: SELF_CHECK_LEGACY_TOTAL_RENDER_BYTES, maxFields: SELF_CHECK_LEGACY_MAX_FIELDS,
+      allow: SELF_CHECK_LEGACY_ALLOW, checkedKeys: SELF_CHECK_LEGACY_CHECKED_KEYS,
+    }
+    : {
+      viewpoints: SELF_CHECK_VIEWPOINTS, maxRenders: SELF_CHECK_MAX_RENDERS,
+      totalRenderBytes: SELF_CHECK_TOTAL_RENDER_BYTES, maxFields: SELF_CHECK_MAX_FIELDS,
+      allow: SELF_CHECK_ALLOW, checkedKeys: SELF_CHECK_CHECKED_KEYS,
+    };
+}
+
+// THE CALL'S BUDGET, per mode. Legacy is d3ab404's 4000 tokens and 45 s. v2 is 8000 and 90 s
+// (fix, 2026-09-24): the v2 check carries up to six frame+render pairs (twelve images, six fetched
+// by URL) and a longer prompt with the massing step, and at the ~78 tokens/s measured on 09-21,
+// 45 s is ~3,500 tokens including the time to the first one. A timeout ENDS the rounds, so the
+// massing corrections v2 depends on (round 0 turning the building, round 1 refining widths) were
+// the ones cut off. 90 s + the handler's own overhead stays well inside the gateway's 150 s, and
+// nothing about money rides on this call. ⚠️ The browser's own abort on this call has to sit above
+// 90 s (the designer's SS_CHECK_MS and 12-shell's onSelfCheck signal), or it cuts the server off.
+export const SELF_CHECK_BUDGET: Record<SelfCheckMode, { maxTokens: number; abortMs: number }> = {
+  legacy: { maxTokens: 4000, abortMs: 45_000 },
+  v2: { maxTokens: 8000, abortMs: 90_000 },
+};
+
 export type SelfCheckChange = { field: string; from: unknown; to: unknown; why: string };
 export type SelfCheckChecked = Partial<Record<typeof SELF_CHECK_CHECKED_KEYS[number], string>>;
 export type SelfCheckRead = {
@@ -1602,6 +1733,13 @@ export type SelfCheckRead = {
 // measured on a building drawn the wrong way round is measured on the wrong wall. The
 // "it matches" discipline is unchanged and still stated three times, and the new step ends,
 // like the profile step, by telling the model to leave all of it alone when the outlines agree.
+//
+// ROOF TYPE FIRST, INSIDE THE MASSING (fix, 2026-09-24). A front-high shed drafted as a gable has a
+// valid-looking answer to "is the front a gable end or an eave wall?" -- a level edge runs along
+// it -- so with the type left to a last "only if plainly wrong" step the massing passed and the
+// shed's highSide, dropped by the sanitiser on a gable, never landed. The type is now the first
+// question, and changing it brings its frame key in the same answer. This is the v2 check ONLY:
+// production's older designer gets legacySelfCheckPrompt, below, frozen at d3ab404.
 export function selfCheckPrompt(opts: {
   dims: KnownDims;
   draft: D3Spec;
@@ -1659,7 +1797,63 @@ export function selfCheckPrompt(opts: {
   // nothing on screen, is reported to the builder as one, and counts against "it matches".
   const porchEndNow = roof.porchEnd === "back" ? '"back"' : `"front"${roof.porchEnd === undefined ? " (not set, which means the front)" : ""}`;
   const attachNow = num(roof.porchAttachFt) === null ? "not set, which draws it just under the top of the wall" : feet("porchAttachFt");
-  const centreNow = num(roof.centerEaveFt) === null ? "not set, which draws it 3 ft above the top of the wing roofs" : feet("centerEaveFt");
+  const hasWings = (num(roof.wingWidthFt) ?? 0) > 0;
+  // The centre's default is only a thing the renderer DRAWS when there are wings to stand it on.
+  const centreNow = num(roof.centerEaveFt) !== null
+    ? feet("centerEaveFt")
+    : hasWings ? "not set, which draws it 3 ft above the top of the wing roofs" : "not set";
+  // ⚠️ AND THE TWO FRAME KEYS (fix, 2026-09-24). A draft without roof.front / roof.highSide is
+  // drawn in the OLD frame (d3RoofAxes' portrait/landscape rule): a two-slope roof's ridge along
+  // the footprint's longer walls, with a porch on the gable end at the WEST (left) when the front
+  // is the longer wall; a shed sloping along the longer walls, tall at the west (left) when the
+  // front is longer and at the north (back) otherwise. A bare "not set" read to the model as
+  // "nothing drawn yet", so on a long-fronted building it compared a front that was the short
+  // end, found the same KIND of wall, and passed it. Saying what the render actually shows is
+  // what lets it see the building is turned round -- and the fix is always to give the key.
+  // Said only for the key the draft's OWN roof type carries; the other one is a plain "not set",
+  // because it draws nothing on this roof.
+  const W = dims.widthFt, D = dims.lengthFt;
+  const wideFront = W > D;
+  const twoSlope = roof.type === "gable" || roof.type === "gambrel";
+  const frontNow = typeof roof.front === "string"
+    ? said("front")
+    : !twoSlope ? "not set"
+    : `not set, which draws the roof by the old rule: the ridge runs along the building's longer walls, so ${wideFront
+      ? `the ${dimFt(W)} ft front is drawn as a long eave wall and a porch is put on the ${dimFt(D)} ft LEFT end instead`
+      : "the front is drawn as a gable end"}. If it is not set, ALWAYS give it`;
+  const highNow = typeof roof.highSide === "string"
+    ? said("highSide")
+    : roof.type !== "shed" ? "not set"
+    : `not set, which draws it by the old rule: the roof slopes along the building's longer walls, tall at the ${wideFront ? "LEFT" : "BACK"} wall. If it is not set, ALWAYS give it`;
+  // Same KIND of wall is not enough: the old frame's front on a long-fronted gable is a gable end,
+  // just the wrong (short) one. The width is what tells them apart.
+  const frontWidth = twoSlope && W !== D
+    ? ` AND the same wall: the FRONT is the ${dimFt(W)} ft wall, so if the render's front is plainly the ${dimFt(D)} ft wall instead, roof.front is wrong or missing - fix that before anything else`
+    : "";
+  // THE WALL UNDER EACH EAVE (fix, 2026-09-24). The overhang is read as a fraction of the wall
+  // under the eave in view, and the first pass steers the close-up to a shed's HIGH eave, which
+  // stands a whole rise above the known (low) wall; the same goes for a centre section's eave
+  // over wings. Stated per eave, only where the draft has one, so a fraction read off a 9.5 ft
+  // wall is not multiplied by 7. Figures are the draft's own, drawn the way the renderer draws
+  // them (the old frame's shed slopes along the longer walls).
+  const wallN = num(draft.wallHeightFt) ?? dims.wallHeightFt;
+  const eaveWalls: string[] = [];
+  const about = (n: number) => dimFt(Math.round(n * 10) / 10);   // "about", so a tenth of a foot
+  const pitchN = num(roof.pitch);
+  if (roof.type === "shed" && pitchN !== null && pitchN > 0) {
+    const hs = roof.highSide;
+    const run = hs === "front" || hs === "back" ? D : hs === "left" || hs === "right" ? W : Math.max(W, D);
+    eaveWalls.push(`about ${about(wallN + run * pitchN)} ft for this shed's HIGH eave`);
+  }
+  if (hasWings) {
+    const ya = wallN + (num(roof.wingWidthFt) ?? 0) * (num(roof.wingPitch) ?? 0.25);
+    const c = num(roof.centerEaveFt);
+    eaveWalls.push(`about ${about(c !== null ? Math.max(c, ya + 1) : ya + 3)} ft for the centre section's eave`);
+  }
+  const eaveRuler = eaveWalls.length
+    ? `
+   Measure against the wall directly under THAT eave: ${wall} ft for ${roof.type === "shed" ? "the LOW eave" : "a wing's outer eave"}; ${eaveWalls.join("; ")}.`
+    : "";
   // ── THE ROUND (v2) ──
   // A later round judges renders of the spec the round before it PRODUCED, and says so. Without
   // this the model reads "YOUR DRAFT" as its own first answer and a correction an earlier round
@@ -1697,8 +1891,9 @@ them or argue with them:
 Use them as your ruler. Every render you are shown was drawn at exactly these dimensions, so
 anything in a render can be measured against a wall you know the height of.
 
-THE FRONT is the wall with the porch on it, or the main door when there is no porch. Left and
-right are as seen standing in front of it, facing the building.
+THE FRONT is the wall with the roofed porch on it, or the main door when there is no porch (an
+open deck or stair does not count). Left and right are as seen standing in front of it, facing
+the building.
 
 YOUR DRAFT, as rendered:
 ${JSON.stringify(draft, null, 2)}${roundNote}
@@ -1717,24 +1912,36 @@ CHECK EXACTLY THESE, IN THIS ORDER. For each one, say whether it matches or give
 correction. These first four are the ones this pass gets wrong most often, so spend your
 effort here.
 
-1. THE MASSING: which way the building faces, and what blocks it is made of. Check the
-   OUTLINE before anything else - a building drawn the wrong way round makes every other
-   comparison meaningless. The back and otherSide viewpoints, where you have them, are there
-   for this: a far wing or a tall back wall can only be seen from there.
-     * Two-slope roofs (gable, gambrel) - roof.front, currently ${said("front")}. Is the front
+1. THE MASSING: what kind of roof it is, which way the building faces, and what blocks it
+   is made of. Check the OUTLINE before anything else - a building drawn the wrong way round
+   makes every other comparison meaningless. The back and otherSide viewpoints, where you
+   have them, are there for this: a far wing or a tall back wall can only be seen from there.
+     * roof.type FIRST, currently ${said("type")}. One slope ("shed"), two slopes meeting at a
+       ridge ("gable"), or a barn's two-pitch slopes ("gambrel")? Read it from the side and
+       back views. A wrong type makes every other answer here meaningless: correct it HERE,
+       and give roof.highSide (shed) or roof.front (gable, gambrel) in the same answer.
+     * Two-slope roofs (gable, gambrel) - roof.front, currently ${frontNow}. Is the front
        wall a GABLE END - it rises to a triangle under the peak and the ridge runs away from
        you ("gable") - or an EAVE WALL - a level roof edge runs along its top and the ridge
-       runs across in front of you ("eave")? The render's front must be the same kind.
-     * One-slope roofs (shed) - roof.highSide, currently ${said("highSide")}. Which wall is
-       the TALL one in the frames: "front", "back", "left" or "right"? The same wall must be
-       the tall one in the render. A porch, when there is one, is usually on the tall wall.
+       runs across in front of you ("eave")? The render's front must be the same kind${frontWidth}.
+     * One-slope roofs (shed) - roof.highSide, currently ${highNow}. Which wall is
+       the TALL one in the frames: "front", "back", "left" or "right"? Judge it by the MAIN
+       roof, never by a porch's own lower roof: on the two walls whose top edge slopes, the
+       taller vertical edge stands at the high wall. The same wall must be the tall one in
+       the render.
      * Wings - currently ${wingsNow}. A wing is an ENCLOSED lower room, with walls and often
        windows, running the full depth along a side the main roof slopes down to, under its
        own lower one-slope roof that falls away from the centre; the taller centre section's
        walls rise above it to their own eave. A roof carried on OPEN posts is a lean-to, not
        a wing - if the draft drew a lean-to where the frames show a wing, set
        roof.leanToWidthFt to 0 and give the wing. Do the frames show wings, and on both sides
-       or one (roof.wingSide: "both", or "left", "right", "front" or "back")? Does the render?
+       or one (roof.wingSide: "both", or "left", "right", "front" or "back")? Look at BOTH
+       sides before you answer: a raised centre with a wing on one side only is uncommon.
+       Does the render? If the frames show wings and the render has none, ADD them in ONE
+       answer: roof.wingSide; roof.wingWidthFt (each wing's width, from its outer wall in to
+       the centre section's wall); roof.wingPitch (the wing roof's rise over that width); and
+       roof.centerEaveFt (feet from the floor to the top of the centre walls) - all measured
+       against the ${wall} ft outer walls.
        Where both show wings, compare each wing's width against the ruler (roof.wingWidthFt;
        0 removes the wings), the slope of the wing roofs (roof.wingPitch, rise over run), and
        the CENTRE section's eave (roof.centerEaveFt, currently ${centreNow}: feet
@@ -1753,7 +1960,7 @@ ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave
    twentieth of the wall's height on a ${wall} ft wall is about
    ${wall}/20 ft. Buildings with a tight, trimmed eave are common and read as
    almost no projection at all - values near 0.15 ft are real. Do not settle on 1.0 ft
-   because it is typical; report what this eave actually does.`}
+   because it is typical; report what this eave actually does.${eaveRuler}`}
 
 3. THE PORCH, AND WHICH KIND (roof.porchOutFt / roof.porchDepthFt). There are two kinds and
    they are not interchangeable:
@@ -1767,7 +1974,10 @@ ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave
    the two pictures look broadly alike. If you change the kind, give the new key and leave
    the other one out entirely.
    Then, where both show a porch, WHERE IT IS AND HOW BIG:
-     * roof.porchEnd, currently ${porchEndNow}: the wall it stands on, "front" or "back".
+     * roof.porchEnd, currently ${porchEndNow}: always "front" on this building, because the
+       porch is what defines the front. If the render's porch is on a different wall from the
+       frame's, the fault is roof.front or roof.highSide (step 1): correct that instead. The
+       only correction roof.porchEnd itself can take is to "front".
      * roof.porchAttachFt, projecting porches only, currently ${attachNow}: feet
        from the floor to the TOP of the porch roof where it meets the wall. Look at what shows
        between the porch roof and the top of that wall: a band of siding in the frame and none
@@ -1789,8 +1999,7 @@ THEN THESE, only if the pictures disagree:
    same outline, leave all of these alone.
 6. roof.eave - "open" (a sawtooth row of rafter tails with gaps of sky between them) or
    "fascia" (one unbroken board). Only from a viewpoint that actually shows under the eave.
-7. roof.type, roofMaterial, foundation, gableVent - only if plainly wrong. If you change
-   roof.type, give roof.front (two slopes) or roof.highSide (one slope) with it.
+7. roofMaterial, foundation, gableVent - only if plainly wrong. (roof.type is step 1's.)
 
 RETURN ONLY this JSON object, no prose and no markdown fence:
 {
@@ -1822,6 +2031,151 @@ RULES FOR THE ANSWER:
     left alone and marked unclear, not corrected to a typical value.`;
 }
 
+// ── THE LEGACY CHECK PROMPT: d3ab404's selfCheckPrompt, VERBATIM (fix, 2026-09-24) ──────────
+// ⛔ FROZEN. What every check request WITHOUT frame "front" gets (selfCheckMode "legacy") --
+// production's older designer, whose dimensions card typed W "across the gable end" and whose
+// renderer and panel know none of the v2 keys. Lifted character for character from the function
+// as it shipped at d3ab404 (only its name and the names of the frozen constants it reads were
+// changed), and styleD3.test.ts pins its output by SHA-256 against what d3ab404 produced for the
+// same inputs. Every word the check learns goes into selfCheckPrompt above; editing this one
+// changes production's older designer and nothing else, so there is no reason left to. (Its
+// inner comments are d3ab404's too, clamp numbers included.)
+export function legacySelfCheckPrompt(opts: {
+  dims: KnownDims;
+  draft: D3Spec;
+  viewpoints: readonly FrameMapViewpoint[];
+}): string {
+  const { dims, draft } = opts;
+  const views = SELF_CHECK_LEGACY_VIEWPOINTS.filter((v) => opts.viewpoints.includes(v));
+  const overhang = num((draft.roof ?? {})["overhang"]);
+  const eave = overhang === null ? "not set" : `${dimFt(overhang)} ft`;
+  // ⚠️ THE WALL THE RENDER WAS DRAWN AT, NOT THE ONE THAT WAS TYPED. parseKnownDims accepts a
+  // measured wall of 3..20 ft and sanitizeD3Spec then CLAMPS it to the 5..14 the renderer can
+  // draw, so a builder who measured 16 has a draft -- and therefore a set of renders -- with a
+  // 14 ft wall in them. Stating the 16 here would tell the model that "every render you are
+  // shown was drawn at exactly these dimensions" over pictures of a wall an eighth shorter,
+  // and step 1 turns a fraction of that wall into feet: every length it read off a render
+  // would be long by the same ratio, in the same direction, on roof.overhang -- the field this
+  // whole pass exists to fix. Step 3 is worse still, because it asks whether the gambrel rises
+  // are absorbing a wall difference, and the clamp is exactly such a difference.
+  //
+  // Width and length never clamp -- they are the ruler for this reading and are never stored --
+  // so they stay as typed. The builder is told about the clamp separately, by knownDimsNote.
+  const wall = dimFt(num(draft.wallHeightFt) ?? dims.wallHeightFt);
+  // ⚠️ AND THE EAVE, WHERE THE BUILDER MEASURED IT. `overhangIn` is an optional chip on the
+  // dimensions card: null means "read it off the video", and a number means they went and
+  // looked. applyKnownDims has already written it into the draft, so asking the model to
+  // re-measure it from a photograph is asking it to overwrite a tape measure with a guess --
+  // on the one field this prompt spends its first and longest step on, and with nothing on the
+  // panel reconciling the two afterwards (the chip goes on reading "16 in" while the spec says
+  // 2, and pressing the chip again does nothing). applySelfCheck drops roof.overhang from the
+  // allow-list for the same generation, so a correction would be thrown away in any case; this
+  // is what stops the model spending its effort on a field that cannot land.
+  const measuredEave = dims.overhangIn === undefined || dims.overhangIn === null ? null : dims.overhangIn;
+  const present = views.length
+    ? views.map((v) => `${v} (${SELF_CHECK_LEGACY_VIEW_WORDS[v]})`).join(", ")
+    : "none";
+  return `You drafted a 3D spec for a portable building from a walk-around video. We rendered your
+draft and are showing you the result beside the builder's own frames. Your job now is
+narrow: find the places where YOUR DRAFT does not match THEIR BUILDING, and correct only
+those.
+
+This is a check, not a second draft. Most fields will already be right. "It matches" is a
+correct and expected answer, and it is the answer we expect most often. Do not change a
+field to show you are working - a wrong correction is worse than no correction, because it
+overwrites a number that was already good.
+
+THE BUILDER HAS MEASURED THESE. They are facts, not your estimates, and you must not change
+them or argue with them:
+  building size: ${dimFt(dims.widthFt)} ft wide by ${dimFt(dims.lengthFt)} ft long
+  wall height at the eave: ${wall} ft${measuredEave === null ? "" : `
+  eave overhang: ${dimFt(measuredEave)} in past the wall`}
+Use them as your ruler. Every render you are shown was drawn at exactly these dimensions, so
+anything in a render can be measured against a wall you know the height of.
+
+YOUR DRAFT, as rendered:
+${JSON.stringify(draft, null, 2)}
+
+THE IMAGES. Each viewpoint gives you two images in a row: first the builder's own frame,
+then our render of your draft from the same angle. Compare them as SHAPES. Ignore the
+background, the grass, the sky, the lighting, the sharpness, the neighbouring buildings, and
+any door, window or vent - the render deliberately does not draw the openings, and their
+absence is not a mistake to report.
+
+THE VIEWPOINTS IN THIS REQUEST, in the order they appear below: ${present}. Those are the only
+ones here. Where a step below names a viewpoint you were not given, answer it from what you do
+have or mark it unclear - never read one view as though it were another.
+
+CHECK EXACTLY THESE, IN THIS ORDER. For each one, say whether it matches or give a
+correction. These first three are the ones this pass gets wrong most often, so spend your
+effort here.
+
+${measuredEave !== null ? `1. THE EAVE OVERHANG (roof.overhang, currently ${eave}). THE BUILDER MEASURED THIS ONE TOO
+   and it is already in the draft. It is not yours to change: a correction to roof.overhang
+   will be thrown away. Mark "overhang" as "ok" and spend the effort on the porch below.` : `1. THE EAVE OVERHANG (roof.overhang, currently ${eave}). Look at the close-up
+   viewpoint, where the roof edge is seen in profile against the sky with the wall below it.
+   Measure how far the roof stands out past the wall as a FRACTION OF THE WALL HEIGHT you
+   were given, in the frame and in the render, and convert: a roof that projects a
+   twentieth of the wall's height on a ${wall} ft wall is about
+   ${wall}/20 ft. Buildings with a tight, trimmed eave are common and read as
+   almost no projection at all - values near 0.15 ft are real. Do not settle on 1.0 ft
+   because it is typical; report what this eave actually does.`}
+
+2. THE PORCH, AND WHICH KIND (roof.porchOutFt / roof.porchDepthFt). There are two kinds and
+   they are not interchangeable:
+     * RECESSED (porchDepthFt): the end wall is set BACK into the building, the main roof
+       carries straight over the gap, and nothing sticks out past the end of the roof.
+     * PROJECTING (porchOutFt): the end wall runs full height with the door in it, and a
+       deck with posts and its OWN lower roof stands OUT in front of that wall.
+   The side viewpoint settles it: if the porch roof sticks out past the end of the building,
+   it is projecting. If the end of the building is one flat plane, it is recessed. Getting
+   this wrong is the single most visible error on the whole building, so check it even when
+   the two pictures look broadly alike. If you change the kind, give the new key and leave
+   the other one out entirely.
+
+3. THE WALL, AS DRAWN (not the number). You cannot change wallHeightFt - it is measured. But
+   if the render's walls look plainly shorter or taller than the frame's at the same angle
+   while the roof matches, something else is absorbing the difference: say so in \`note\` and
+   check whether the gambrel rises below are carrying it.
+
+THEN THESE, only if the pictures disagree:
+4. ROOF PROFILE. For a gambrel: kneeU, kneeRise, ridgeRise, measured from the CENTRELINE and
+   the TOP OF THE WALL, each divided by the half-span. For a gable or shed: pitch. Check the
+   silhouette at the head-on viewpoint. If the render's roof and the frame's roof trace the
+   same outline, leave all of these alone.
+5. roof.eave - "open" (a sawtooth row of rafter tails with gaps of sky between them) or
+   "fascia" (one unbroken board). Only from a viewpoint that actually shows under the eave.
+6. roof.type, roofMaterial, foundation, gableVent - only if plainly wrong.
+
+RETURN ONLY this JSON object, no prose and no markdown fence:
+{
+  "verdict": "matches" | "corrections",
+  "corrections": { ... only the fields you are changing, in the same shape as the draft ... },
+  "changed": [
+    { "field": "roof.overhang", "from": 1.0, "to": 0.2,
+      "why": "<one sentence naming what in which image made you change it>" }
+  ],
+  "checked": {
+    "overhang": "ok" | "changed" | "unclear",
+    "porch": "ok" | "changed" | "unclear",
+    "roofProfile": "ok" | "changed" | "unclear",
+    "eave": "ok" | "changed" | "unclear"
+  },
+  "note": "<one sentence for the builder, or an empty string>"
+}
+
+RULES FOR THE ANSWER:
+  * If nothing needs changing, return "verdict": "matches" with "corrections": {} and
+    "changed": []. That is a complete, correct answer. Stop there.
+  * Every field in "corrections" must also appear in "changed". Anything not in both is
+    ignored.
+  * Never return wallHeightFt, sizeFt, colors or siding${measuredEave === null ? "" : " or roof.overhang"}. They are not yours to change here.
+  * Change at most ${SELF_CHECK_LEGACY_MAX_FIELDS} fields. If you believe more than ${SELF_CHECK_LEGACY_MAX_FIELDS} are wrong, the draft is
+    not worth patching: return the ${SELF_CHECK_LEGACY_MAX_FIELDS} that matter most and say so in "note".
+  * "unclear" is better than a guess. A field the frames genuinely do not settle should be
+    left alone and marked unclear, not corrected to a typical value.`;
+}
+
 // ── READING THE REPLY ─────────────────────────────────────────────────────────────────────
 // Tolerant of wrapping, strict about vocabulary, and NEVER invents a change. Returns null when
 // the reply carries none of the four keys this prompt asks for, which the caller records as a
@@ -1831,7 +2185,9 @@ RULES FOR THE ANSWER:
 // one stray brace, and reading that as a clean pass would inflate the single statistic this
 // whole feature is judged on — how often the check leaves an already-good draft alone.
 // "matches" has to be something the model SAID.
-export function parseSelfCheck(text: string): SelfCheckRead | null {
+// `mode` (fix, 2026-09-24): the legacy check keeps d3ab404's four `checked` keys, so an older
+// designer is handed exactly what it always was.
+export function parseSelfCheck(text: string, mode: SelfCheckMode = "v2"): SelfCheckRead | null {
   const m = String(text || "").match(/\{[\s\S]*\}/);
   if (!m) return null;
   // deno-lint-ignore no-explicit-any
@@ -1862,9 +2218,11 @@ export function parseSelfCheck(text: string): SelfCheckRead | null {
   const checked: SelfCheckChecked = {};
   if (parsed.checked && typeof parsed.checked === "object" && !Array.isArray(parsed.checked)) {
     const src = parsed.checked as Record<string, unknown>;
-    for (const k of SELF_CHECK_CHECKED_KEYS) {
+    for (const k of selfCheckRules(mode).checkedKeys) {
       const v = src[k];
-      if (typeof v === "string" && (SELF_CHECK_CHECKED_WORDS as readonly string[]).includes(v)) checked[k] = v;
+      if (typeof v === "string" && (SELF_CHECK_CHECKED_WORDS as readonly string[]).includes(v)) {
+        checked[k as keyof SelfCheckChecked] = v;
+      }
     }
   }
 
@@ -1897,7 +2255,11 @@ export function parseSelfCheck(text: string): SelfCheckRead | null {
 // reason -- a field the builder measured is not the check's to re-measure from a photograph.
 // Absent (every existing caller, and production's older bundle, which sends no dims at all)
 // means the list is unchanged.
-export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: KnownDims | null):
+//
+// `mode` (fix, 2026-09-24) picks the allow-list and the cap: "legacy" is d3ab404's gate exactly
+// (22 paths, six fields, and no v2 consequence report), so no v2 key can land from a check an
+// older designer ran. Absent is "v2", which is every call this file's tests already make.
+export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: KnownDims | null, mode: SelfCheckMode = "v2"):
   | { ok: false; error: string }
   | {
     ok: true;
@@ -1915,16 +2277,17 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
 
   // Deduplicated, in the order the model listed them. A model naming the same field twice is
   // asking for one change, not two, and must not be pushed over the cap by its own repetition.
+  const rules = selfCheckRules(mode);
   const declared: string[] = [];
   for (const c of read.changed) if (!declared.includes(c.field)) declared.push(c.field);
-  if (declared.length > SELF_CHECK_MAX_FIELDS) {
+  if (declared.length > rules.maxFields) {
     return { ok: true, verdict: "rejected_too_many", d3: base.d3, changed: [], dropped: declared.slice() };
   }
 
   const measuredEave = !!dims && dims.overhangIn !== undefined && dims.overhangIn !== null;
   const allow = measuredEave
-    ? (SELF_CHECK_ALLOW as readonly string[]).filter((f) => f !== "roof.overhang")
-    : (SELF_CHECK_ALLOW as readonly string[]);
+    ? rules.allow.filter((f) => f !== "roof.overhang")
+    : rules.allow;
   const dropped: string[] = [];
   // The value the model wants at each allowed path. Read out of `corrections`, never out of the
   // `to` in `changed`: that one is prose about the change, and the prompt says a field has to be
@@ -2063,7 +2426,9 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   // recessed porch takes the attach height and width. Same rule as the exclusion: the list has
   // to be true line by line AND complete, so every allow-listed path that moved is on it. These
   // carry no `why` -- nobody asked for them; they are what the asked-for change cost.
-  for (const field of SELF_CHECK_ALLOW as readonly string[]) {
+  // v2 only: d3ab404 had no such pass, and the legacy check is d3ab404's (none of its 22 paths
+  // can be taken by a validity rule the porch exclusion does not already report).
+  for (const field of (mode === "v2" ? SELF_CHECK_ALLOW : []) as readonly string[]) {
     if (applied.some((c) => c.field === field)) continue;
     const before = readSpecPath(base.d3, field);
     const after = readSpecPath(finalSpec.d3, field);
@@ -2183,11 +2548,14 @@ export type SelfCheckRender = { viewpoint: FrameMapViewpoint; frame: number; bas
 const JPEG_DATA_PREFIX = /^data:image\/jpe?g;base64,/i;
 const ANY_DATA_PREFIX = /^data:/i;
 
-export function parseSelfCheckRenders(raw: unknown, frameCount: number):
+// `mode` (fix, 2026-09-24): the legacy check takes d3ab404's four viewpoints, four renders and
+// 1.2 MB, refused in d3ab404's words; absent is "v2".
+export function parseSelfCheckRenders(raw: unknown, frameCount: number, mode: SelfCheckMode = "v2"):
   { ok: true; renders: SelfCheckRender[] } | { ok: false; error: string } {
+  const rules = selfCheckRules(mode);
   if (!Array.isArray(raw) || raw.length === 0) return { ok: false, error: "The check needs at least one render." };
-  if (raw.length > SELF_CHECK_MAX_RENDERS) {
-    return { ok: false, error: `A check compares at most ${SELF_CHECK_MAX_RENDERS} views, and ${raw.length} were sent.` };
+  if (raw.length > rules.maxRenders) {
+    return { ok: false, error: `A check compares at most ${rules.maxRenders} views, and ${raw.length} were sent.` };
   }
   const bound = Math.floor(num(frameCount) ?? 0);
   const renders: SelfCheckRender[] = [];
@@ -2199,7 +2567,7 @@ export function parseSelfCheckRenders(raw: unknown, frameCount: number):
     }
     const e = entry as Record<string, unknown>;
     const viewpoint = String(e.viewpoint ?? "");
-    if (!(SELF_CHECK_VIEWPOINTS as readonly string[]).includes(viewpoint)) {
+    if (!(rules.viewpoints as readonly string[]).includes(viewpoint)) {
       return { ok: false, error: `"${viewpoint.slice(0, 40)}" is not a viewpoint this check knows.` };
     }
     // One render per viewpoint. Two renders labelled `side` would put two pictures of the same
@@ -2237,8 +2605,8 @@ export function parseSelfCheckRenders(raw: unknown, frameCount: number):
       return { ok: false, error: `The ${viewpoint} render is not a JPEG.` };
     }
     total += bytes.length;
-    if (total > SELF_CHECK_TOTAL_RENDER_BYTES) {
-      return { ok: false, error: `Those renders come to more than the ${Math.round(SELF_CHECK_TOTAL_RENDER_BYTES / 1000)} KB a check allows.` };
+    if (total > rules.totalRenderBytes) {
+      return { ok: false, error: `Those renders come to more than the ${Math.round(rules.totalRenderBytes / 1000)} KB a check allows.` };
     }
     renders.push({ viewpoint: viewpoint as FrameMapViewpoint, frame, base64: b64, bytes: bytes.length });
   }
@@ -2280,6 +2648,49 @@ export function selfCheckPairs(
 
 // The one line each pair is introduced with, so the model is never guessing which of two
 // adjacent images is the photograph and which is ours.
-export function selfCheckPairLabel(viewpoint: FrameMapViewpoint): string {
-  return `VIEWPOINT "${viewpoint}" - ${SELF_CHECK_VIEW_WORDS[viewpoint]}. The builder's own frame comes first, then our render of your draft from the same angle.`;
+// The legacy check labels its pairs in d3ab404's words ("the end the door is on", "a long wall").
+export function selfCheckPairLabel(viewpoint: FrameMapViewpoint, mode: SelfCheckMode = "v2"): string {
+  const words = mode === "legacy"
+    ? (SELF_CHECK_LEGACY_VIEW_WORDS[viewpoint] ?? SELF_CHECK_VIEW_WORDS[viewpoint])
+    : SELF_CHECK_VIEW_WORDS[viewpoint];
+  return `VIEWPOINT "${viewpoint}" - ${words}. The builder's own frame comes first, then our render of your draft from the same angle.`;
+}
+
+// ── THE WHOLE REQUEST, IN ONE PURE FUNCTION (fix, 2026-09-24) ────────────────────────────────
+// The prompt, the labelled pairs, the model, the budget and the abort -- everything the check
+// sends -- built here rather than inline in portal-settings, so "an older designer's check is
+// d3ab404's check" is a test on the BYTES of the request (styleD3.test.ts hashes the legacy body
+// against what d3ab404's handler built for the same row) rather than a claim about a handler.
+// The caller only adds the headers and the signal, and reads `abortMs` for the latter.
+export type SelfCheckPair = { viewpoint: FrameMapViewpoint; frameUrl: string; base64: string };
+export function selfCheckRequest(opts: {
+  mode: SelfCheckMode;
+  dims: KnownDims;
+  draft: D3Spec;
+  pairs: readonly SelfCheckPair[];
+  // v2 only, and read off the ledger row by the caller (see selfCheckPrompt).
+  round?: number;
+  earlier?: readonly string[];
+}): { abortMs: number; body: Record<string, unknown> } {
+  const viewpoints = opts.pairs.map((p) => p.viewpoint);
+  const text = opts.mode === "legacy"
+    ? legacySelfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints })
+    : selfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints, round: opts.round, earlier: opts.earlier });
+  const content: unknown[] = [{ type: "text", text }];
+  for (const p of opts.pairs) {
+    content.push({ type: "text", text: selfCheckPairLabel(p.viewpoint, opts.mode) });
+    content.push({ type: "image", source: { type: "url", url: p.frameUrl } });
+    content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: p.base64 } });
+  }
+  const budget = SELF_CHECK_BUDGET[opts.mode];
+  return {
+    abortMs: budget.abortMs,
+    body: {
+      model: "claude-sonnet-5",
+      max_tokens: budget.maxTokens,
+      thinking: { type: "adaptive" },
+      output_config: { effort: "medium" },
+      messages: [{ role: "user", content }],
+    },
+  };
 }

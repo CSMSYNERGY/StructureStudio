@@ -1760,9 +1760,15 @@ function Dashboard({ session }) {
        `round` (2026-09-24) is which check of this generation this is, 0-based: the server claims
        round k by moving the row's counter from k to k + 1, at most three times, so a repeat of
        one round is a 409 rather than a second free look. Absent is round 0 to the server, which
-       is what an older designer sends; a non-integer is not sent at all. */
+       is what an older designer sends; a non-integer is not sent at all.
+
+       `frame: "front"` (2026-09-24) is the CHECK's rollout gate, the same key the draft sends: it
+       says this designer reads the check in the FRONT-wall frame, so the server may run the v2
+       check (its massing step, the new roof keys, six views, three rounds). Without it the server
+       runs the check production's older designer has always had, word for word. Sent on every
+       round. */
     onSelfCheck: async ({ styleValue, checkId, photoUrls, renders, round }) => {
-      const body = { action: "calibrate_style_check", styleValue, checkId, photoUrls, renders };
+      const body = { action: "calibrate_style_check", styleValue, checkId, photoUrls, renders, frame: "front" };
       if (Number.isInteger(round) && round >= 0) body.round = round;
       const { data, error } = await sb.functions.invoke("portal-settings", {
         body,
