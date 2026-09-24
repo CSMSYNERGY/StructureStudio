@@ -233,15 +233,24 @@ Deno.test("⚠️ the clocks: the first round always fits, and no LATER round ru
   };
   const one = worst(F.SS_DRAFT_SERVER_MS);
   assert(one.t <= F.SS_FLOW_MAX_MS, `the worst ordinary press ends at ${one.t}`);
-  assert(one.rounds >= 2, `a slow press still gets a second look (${one.rounds} rounds, stopped on ${one.stop})`);
+  // 2026-09-24: the check's abort went 60 → 100 s with the server's v2 check going 45 → 90 s, so
+  // a draft that used its whole 125 s no longer leaves room for a second round at the ceiling
+  // timings (230 + 105 > 300). That is the budget working, not a regression: a later round only
+  // starts when it can finish inside five minutes. A draft that answers in a minute still gets
+  // a second look even when every check runs to its abort.
+  assertEquals(one.rounds, 1);
+  assertEquals(one.stop, "time");
+  const minute = worst(60000);
+  assert(minute.t <= F.SS_FLOW_MAX_MS, `a one-minute draft's press ends at ${minute.t}`);
+  assert(minute.rounds >= 2, `a one-minute draft still gets a second look (${minute.rounds} rounds, stopped on ${minute.stop})`);
   // THE RETRY PATH: two drafts at the ceiling. It is the one path past five minutes, and it
   // takes no second round -- which is what keeps it to one check's worth past the ceiling.
   const retried = worst(2 * F.SS_DRAFT_SERVER_MS);
   assertEquals(retried.rounds, 1);
   assertEquals(retried.stop, "time");
-  // And the check's client abort has to sit ABOVE the server's own 45 s, or a server that
-  // answered in time would never be heard.
-  assert(F.SS_CHECK_MS > 45000, String(F.SS_CHECK_MS));
+  // And the check's client abort has to sit ABOVE the server's own 90 s for the v2 check, with
+  // room for the reply to travel, or a server that answered in time would never be heard.
+  assert(F.SS_CHECK_MS >= 90000 + 10000, String(F.SS_CHECK_MS));
   // "Still going" must not fire on an ordinary press that is merely on its second round.
   assert(F.SS_SLOW_MS > F.SS_DRAFT_SERVER_MS + F.SS_RENDER_MS + 30000, String(F.SS_SLOW_MS));
 });

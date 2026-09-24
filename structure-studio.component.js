@@ -15461,21 +15461,27 @@ const SSC_CAL_CSS = ".ssc-dim-in{font-size:13px}@media (pointer:coarse){.ssc-dim
 //   render   SS_RENDER_MS     wall clock in this browser. Over it, the check is skipped and
 //                             the builder keeps the draft. WebGL cannot be interrupted, so
 //                             the loser of the race still runs to its own dispose.
-//   call 2   the check        server aborts at 45 s; this aborts at SS_CHECK_MS, far enough
-//                             above it that a server that answered in time is still heard.
+//   call 2   the check        the server gives the v2 check 90 s (it was 45 s, and the v2
+//                             prompt with up to twelve frames and six renders ran out of it);
+//                             the browser aborts at SS_CHECK_MS, far enough above that a
+//                             server that answered in time is still heard. ⚠️ The abort itself
+//                             is the host's (onSelfCheck in portal/12-shell.jsx) and must
+//                             equal this number: this one only budgets the press with it.
 //   rounds   SS_CHECK_ROUNDS  the check runs again on renders of the CORRECTED building,
 //                             up to three times per generation (ssCheckNext says when not).
 //
 // ⚠️ THE BUDGET MOVED, AND ON PURPOSE. One round was 110 + 5 + 60 = 175 s, inside the three
 // minutes the 09-19 design budgeted. A draft now has 125 s (max_tokens 8000 → 12000 after the
-// Tri Home press died at the old ceiling), and a single check round cannot fix what a single
-// check round has already mis-fixed -- so the first round always runs (125 + 5 + 60 = 190 s)
-// and a LATER round starts only while a whole round still fits inside SS_FLOW_MAX_MS of the
-// press. The one path past five minutes is a draft the server asked us to retry (two drafts),
-// and ssCheckNext gives that path no second round. Still no watchdog that could throw away a
-// paid draft to enforce any of it.
+// Tri Home press died at the old ceiling), the check 100 s, and a single check round cannot fix
+// what a single check round has already mis-fixed -- so the first round always runs
+// (125 + 5 + 100 = 230 s) and a LATER round starts only while a whole round (5 + 100 s) still
+// fits inside SS_FLOW_MAX_MS of the press: after a draft at its ceiling there is no second
+// round, after a one-minute draft there is one. A check that answers in its usual half-minute
+// leaves room for all three. The one path past five minutes is a draft the server asked us to
+// retry (two drafts), and ssCheckNext gives that path no second round. Still no watchdog that
+// could throw away a paid draft to enforce any of it.
 const SS_RENDER_MS = 5000;
-const SS_CHECK_MS = 60000;
+const SS_CHECK_MS = 100000;
 // After SS_RENDER_MS on purpose: selfCheckPanel_test lifts this block from that line.
 const SS_DRAFT_SERVER_MS = 125000;
 const SS_CHECK_ROUNDS = 3;
