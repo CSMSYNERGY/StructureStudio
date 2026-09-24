@@ -2023,7 +2023,7 @@ function d3BaseWallHeightFt(C, styleCfg) {
 // clamp: the footer and the spec resolver must agree to the inch, or the 3D renders a height
 // the estimate did not price.
 function d3WallHeightFromDelta(baseFt, deltaIn) {
-  return Math.max(5, Math.min(14, (Number(baseFt) || 8) + (Number(deltaIn) || 0) / 12));
+  return Math.max(5, Math.min(20, (Number(baseFt) || 8) + (Number(deltaIn) || 0) / 12));
 }
 // The wall height anything priced BY WALL AREA must use — cladding and insulation both.
 //
