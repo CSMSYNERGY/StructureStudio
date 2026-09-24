@@ -15724,21 +15724,27 @@ function ssShotSig(spec) {
 // ratios measurably work (0.78 / 0.70 / 1.00 against a truth of 0.72 / 0.72 / 1.00, in 3 of 3
 // runs); a builder cannot check a ratio against a building. Both are true at once, so the
 // number stays a ratio on the wire and becomes feet on the screen.
-function ssRoofInFeet(roof, spanFt) {
+//
+// `centre` (2026-09-24 review): the style has lower wings, so the roof this describes is the
+// middle section's, spanFt is ITS span (d3Massing's Sc, not the building's width) and the
+// heights are above ITS walls. Measured across the full width, a raised centre's 4 ft roof was
+// described as 9 ft 5 in, and the builder is asked to check this sentence against the video.
+function ssRoofInFeet(roof, spanFt, centre) {
   const s2 = Math.max(0.5, Number(spanFt) || 0) / 2;
   const cfg = roof || {};
+  const wall = centre ? "the middle section's walls" : "the wall";
   if (cfg.type === "gambrel") {
     const kneeU = Number(cfg.kneeU) || 0.55;
     const kneeRise = Number(cfg.kneeRise) || 0.55;
     const ridgeRise = Number(cfg.ridgeRise) || 0.8;
     // "back from the wall", not "in from the wall": ssFtInWords already ends in "in" on most
     // values, and "2 ft 3 in in from the wall" is what that reads as on a screen.
-    return `The bend sits ${ssFtInWords(s2 * (1 - kneeU))} back from the wall and ${ssFtInWords(s2 * kneeRise)} above it; the peak is ${ssFtInWords(s2 * ridgeRise)} above the wall.`;
+    return `The bend sits ${ssFtInWords(s2 * (1 - kneeU))} back from ${wall} and ${ssFtInWords(s2 * kneeRise)} above ${centre ? "them" : "it"}; the peak is ${ssFtInWords(s2 * ridgeRise)} above ${wall}.`;
   }
   if (cfg.type === "shed") {
     return `The high side stands ${ssFtInWords(spanFt * (Number(cfg.pitch) || 0.25))} above the low side.`;
   }
-  return `The peak is ${ssFtInWords(s2 * (Number(cfg.pitch) || 0.5))} above the wall.`;
+  return `The peak is ${ssFtInWords(s2 * (Number(cfg.pitch) || 0.5))} above ${wall}.`;
 }
 
 // The rest of "What we drew" (2026-09-24): the parts of a building one roof sentence cannot
@@ -21102,8 +21108,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // 16 ft front and 10 ft depth at 0.23 is a 2 ft 4 in rise, and measured across the width the
   // line said 3 ft 8 in. Read through d3RoofAxes, the same function the renderer builds the
   // roof with, so the sentence and the 3D cannot disagree about which way the roof runs.
-  const calReadoutSpan = (adminCal && adminCal.spec && calReadoutL > 0)
-    ? (d3RoofAxes(adminCal.spec.roof, calReadoutW, calReadoutL).S || calReadoutW)
+  // WITH WINGS (d3Massing) the roof those sentences describe is the middle section's: its span
+  // Sc, above its own walls (ssRoofInFeet's `centre`), exactly as the renderer builds it.
+  const calReadoutMass = (adminCal && adminCal.spec && calReadoutL > 0)
+    ? d3Massing(adminCal.spec.roof, calReadoutW, calReadoutL, Number(adminCal.spec.wallHeightFt) || D3.WALL_H)
+    : null;
+  const calReadoutCentre = !!(calReadoutMass && calReadoutMass.wings.length);
+  const calReadoutSpan = calReadoutMass
+    ? ((calReadoutCentre ? calReadoutMass.Sc : d3RoofAxes(adminCal.spec.roof, calReadoutW, calReadoutL).S) || calReadoutW)
     : calReadoutW;
   const calChecksAnswered = SS_CHECKS.filter(([k]) => adminCalAnswers[k]).length;
   // ⚠️ THE ONE SLICE EACH QUESTION IS ABOUT, so a "No" can be told from a "No, fixed". Cheap
@@ -21279,7 +21291,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   style={{ width: "100%", display: "block" }} />
                 <span style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#94A3B8", fontWeight: 600 }}><span>shallow</span><span>steep</span></span>
               </label>
-              <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>{ssRoofInFeet(roof, calReadoutSpan)}</div>
+              <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>{ssRoofInFeet(roof, calReadoutSpan, calReadoutCentre)}</div>
             </div>
           ) : (
             /* "{n} in 12", because that is what a framing square is marked in and what a
@@ -23458,7 +23470,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       are true at once, so the number stays a ratio on the wire and becomes
                       feet here. */}
                   <div style={{ marginTop: 10, fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
-                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec)}
+                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec)}
                   </div>
                   {/* ── THE FOUR QUESTIONS ───────────────────────────────────────────────
                       ONLY WHERE THERE IS SOMETHING TO ANSWER THEM AGAINST, which is the same

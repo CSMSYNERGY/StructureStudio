@@ -150,6 +150,19 @@ Deno.test("a gable and a shed each get their own sentence, and neither borrows t
   assert(F.ssRoofInFeet(null, 16).length > 0);
 });
 
+Deno.test("with wings the roof sentence is the middle section's roof, above the middle section's walls", () => {
+  // A raised centre 12 ft across under 0.67: its peak is 4 ft above ITS walls. Measured across the
+  // whole 28 ft it read 9 ft 5 in "above the wall", and the builder checks this line against the video.
+  const centre = F.ssRoofInFeet({ type: "gable", pitch: 0.67, wingSide: "both", wingWidthFt: 8 }, 12, true);
+  assertEquals(centre, "The peak is 4 ft above the middle section's walls.");
+  const gambrel = F.ssRoofInFeet({ type: "gambrel", kneeU: 0.72, kneeRise: 0.72, ridgeRise: 1.0 }, 16, true);
+  assertStringIncludes(gambrel, "back from the middle section's walls");
+  assertStringIncludes(gambrel, "above them; the peak is 8 ft above the middle section's walls.");
+  // Without wings, the sentence it always was.
+  assertEquals(F.ssRoofInFeet({ type: "gable", pitch: 0.5 }, 16), "The peak is 4 ft above the wall.");
+  assertEquals(F.ssRoofInFeet({ type: "gable", pitch: 0.5 }, 16, false), F.ssRoofInFeet({ type: "gable", pitch: 0.5 }, 16));
+});
+
 // ── The change list is written in the same words the panel uses ───────────────────────────
 
 Deno.test("⚠️ every field the SERVER may correct has words the builder can read", () => {
