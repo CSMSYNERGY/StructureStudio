@@ -116,6 +116,8 @@ export function porchKind(roof) {
 // Scoring a photo run through the shape merge would credit it with a roofMaterial and a
 // foundation the photo path never applies, and would drop the siding the photo path is the
 // only one that DOES apply. Same reply, two different buildings on screen.
+// The wing keys calDraftRoof clears as one set (the browser's CAL_WING_KEYS).
+const WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt"];
 export function mergeDraft(prior, draft, source = "video") {
   const p = prior || {}, d = draft || {};
   const dr = d.roof || {};
@@ -135,9 +137,26 @@ export function mergeDraft(prior, draft, source = "video") {
     };
   }
 
+  // calDraftRoof's clearing rules, 2026-09-24 keys included: whatever the draft is the authority
+  // on, it is the only source of. A reported porch brings its own attach height and width or
+  // none; a recessed porch has neither. A draft that reports a roof type decides the wings (no
+  // wingWidthFt over 0 = no wings) and the frame (roof.front / roof.highSide), so a stored one
+  // cannot turn the scored building a quarter turn away from what the draft measured.
   const roof = { ...(p.roof || {}), ...dr };
-  if ((dr.porchOutFt || 0) > 0.5) { delete roof.porchDepthFt; delete roof.porchTruss; }
-  else if ((dr.porchDepthFt || 0) > 0.5) delete roof.porchOutFt;
+  if ((dr.porchOutFt || 0) > 0.5) {
+    delete roof.porchDepthFt; delete roof.porchTruss;
+    if (!("porchAttachFt" in dr)) delete roof.porchAttachFt;
+    if (!("porchWidthFt" in dr)) delete roof.porchWidthFt;
+  } else if ((dr.porchDepthFt || 0) > 0.5) {
+    delete roof.porchOutFt; delete roof.porchAttachFt; delete roof.porchWidthFt;
+  }
+  if (dr.type) {
+    if (!((Number(dr.wingWidthFt) || 0) > 0)) {
+      for (const k of WING_KEYS) delete roof[k];
+    }
+    if (!("front" in dr)) delete roof.front;
+    if (!("highSide" in dr)) delete roof.highSide;
+  }
   return {
     roof,
     colors: { ...(p.colors || {}), ...(d.colors || {}) },

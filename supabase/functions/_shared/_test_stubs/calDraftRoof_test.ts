@@ -105,6 +105,28 @@ Deno.test("the frame of reference comes from the draft or not at all", () => {
   assert(!has(calDraftRoof({ type: "shed", highSide: "front" }, { type: "gable", front: "eave" }), "highSide"));
 });
 
+Deno.test("dev/score.mjs's mergeDraft clears exactly what calDraftRoof clears", async () => {
+  // The scorer re-implements the browser's merge so it can run anywhere; a scorer that keeps a
+  // key the browser drops scores a building nobody sees. Same cases, same roof, key for key.
+  const { mergeDraft } = await import("../../../../dev/score.mjs");
+  const cases: Array<[Any, Any]> = [
+    [{ type: "gable", porchDepthFt: 5, porchTruss: true }, { type: "gable", porchOutFt: 6 }],
+    [{ type: "shed", porchOutFt: 4, porchAttachFt: 7.5, porchWidthFt: 16 }, { type: "shed", porchOutFt: 5 }],
+    [{ type: "shed", porchOutFt: 4, porchAttachFt: 7.5, porchWidthFt: 16 }, { type: "shed", porchOutFt: 5, porchAttachFt: 8 }],
+    [{ type: "shed", porchOutFt: 4, porchAttachFt: 7.5, porchWidthFt: 16 }, { type: "shed", porchDepthFt: 4 }],
+    [{ type: "shed", porchOutFt: 4, porchAttachFt: 7.5, porchWidthFt: 16 }, { type: "shed" }],
+    [{ type: "gable", wingSide: "both", wingWidthFt: 8, wingPitch: 0.25, centerEaveFt: 16 }, { type: "gable", pitch: 0.5 }],
+    [{ type: "gable", wingSide: "both", wingWidthFt: 8, centerEaveFt: 16 }, { type: "gable", wingSide: "left", wingWidthFt: 6 }],
+    [{ type: "gable", front: "eave" }, { type: "gable" }],
+    [{ type: "shed", highSide: "front" }, { type: "gable", front: "eave" }],
+    [{ type: "gable", front: "eave", wingSide: "both", wingWidthFt: 8 }, { pitch: 0.4 }],
+  ];
+  for (const [stored, drafted] of cases) {
+    const scored = mergeDraft({ roof: stored }, { roof: drafted }, "video").roof;
+    assertEquals(scored, calDraftRoof(stored, drafted), `${JSON.stringify(stored)} <- ${JSON.stringify(drafted)}`);
+  }
+});
+
 Deno.test("⚠️ a draft with no roof type is not a shape read, and clears nothing", () => {
   // The self-check's `d3` and the photo path both carry a type; anything that does not is not an
   // authority on the building's massing, so the stored keys stand.

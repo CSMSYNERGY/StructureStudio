@@ -23642,7 +23642,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           </select>
                           <div style={{ ...hint, color: (lost || !roof.wingSide) ? "#B45309" : "#A16207" }}>
                             {!roof.wingSide
-                              ? "Pick the side the wing is on."
+                              ? "Not chosen yet, so it is drawn on both sides. Pick the side the wing is on."
                               : lost
                                 ? `On this roof a wing can only run along the ${eaveSides[0] === "left" ? "left or right side" : "front or back"} — the walls under the roof edge — so a wing on the ${roof.wingSide === "left" || roof.wingSide === "right" ? roof.wingSide + " side" : roof.wingSide} is not drawn.`
                                 : "Runs the full depth, along the wall under the roof edge."}
@@ -23735,6 +23735,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   // is refused: the porch is still drawn.
                   const pr = kind === "projecting" ? d3PorchReadout(adminCal.spec, sel.size) : null;
                   const warn = !!(pr && (pr.short || pr.pitchClamped));
+                  // A RECESSED porch is not drawn on a building with lower wings (the renderer turns
+                  // it off: its header would stand under a cap that is no longer at the wall's top),
+                  // and the contract is that the panel says so rather than letting it vanish. Read
+                  // off d3Massing, the renderer's own answer, so "wings" means wings that draw.
+                  const recessedLost = kind === "recessed" && d3Massing(roof, bldgW, bldgH, adminCal.spec.wallHeightFt || D3.WALL_H).wings.length > 0;
                   return (
                     <>
                       <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch
@@ -23751,8 +23756,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                               half-typed 0.75 would flip the kind and unmount this field mid-keystroke. */}
                           <input type="number" step="0.5" min="0" {...calNumProps(key, roof[key], (n) => { if (n > 0.5) calSetPorch(kind, n); })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                           {kind === "recessed" ? (
-                            <div style={hint}>
-                              Comes out of the building, not off it {String.fromCharCode(0x2014)} the roof and the footprint do not move.
+                            <div style={{ ...hint, color: recessedLost ? "#B45309" : "#A16207" }}>
+                              {recessedLost
+                                ? "Not drawn with lower wings: a recessed porch needs the main roof's edge over it. Use a projecting porch in front of the middle section."
+                                : `Comes out of the building, not off it ${String.fromCharCode(0x2014)} the roof and the footprint do not move.`}
                             </div>
                           ) : (
                             <div style={hint}>Stands in front of the building. The size and the price do not change.</div>
@@ -23760,7 +23767,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           {pr && (
                             <div style={{ ...hint, color: warn ? "#B45309" : "#A16207" }}>
                               {warn
-                                ? `Walls this short leave ${d3FtIn(pr.postH)} under the porch beam. About ${d3FtIn(pr.hNeeded)} walls give a door's height at 2:12`
+                                ? (pr.attachFt != null
+                                  // With the attach height set it is THAT, not the wall, that decides the
+                                  // headroom, so the suggestion is where to hang the porch roof.
+                                  ? `Hung at ${d3FtIn(pr.attachFt)}, the porch roof leaves ${d3FtIn(pr.postH)} under the beam. About ${d3FtIn(pr.attachNeeded)} up gives a door's height at 2:12`
+                                  : `Walls this short leave ${d3FtIn(pr.postH)} under the porch beam. About ${d3FtIn(pr.hNeeded)} walls give a door's height at 2:12`)
                                 : `Posts ${d3FtIn(pr.postH)} clear, porch roof meets the wall at ${d3FtIn(pr.yHigh)} on ${sel.size || "this size"}`}
                             </div>
                           )}

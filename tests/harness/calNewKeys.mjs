@@ -14,14 +14,15 @@
 //   1. a style opened and saved untouched sends back exactly the roof and colours it stored
 //   2. a single slant offers "High side" and not "Front wall"; front saves highSide "front", and
 //      "Not set" deletes it
-//   3. a projecting porch offers attach height and width; typed numbers save, an out-of-band one
-//      saves clamped to the sanitiser's band, a cleared box deletes the key, and switching the
-//      porch to recessed deletes both
+//   3. a projecting porch offers attach height and width; typed numbers save, and a porch hung too
+//      low says where to hang it (not what wall to build); an out-of-band one saves clamped to the
+//      sanitiser's band, a cleared box deletes the key, and switching the porch to recessed deletes both
 //   4. corner and fascia: "Same as walls" / "Same as roof" store that hex, "Same as trim" deletes
 //   5. switching to a gable drops highSide and offers "Front wall"; "Long side" saves front "eave"
-//   6. wings: a width with no side says so; "Both sides" saves width and side and NOTHING else
-//      (no pitch, no centre eave until typed); pitch is typed in 12ths; a side the roof cannot
-//      take a wing on is named as not drawn; width 0 deletes every wing key
+//   6. wings: a width with no side says so (and that blank draws both); "Both sides" saves width
+//      and side and NOTHING else (no pitch, no centre eave until typed); pitch is typed in 12ths;
+//      a recessed porch beside wings is named as not drawn; a side the roof cannot take a wing on
+//      is named as not drawn; width 0 deletes every wing key
 //   7. switching back to a single slant drops front and every wing key
 //   8. zero page errors
 //
@@ -143,6 +144,11 @@ export async function main() {
     await typeNumber(page, width, 16);
     d3 = await save(page, calls);
     ok("save: porchAttachFt 7.5 and porchWidthFt 16", d3.roof.porchAttachFt === 7.5 && d3.roof.porchWidthFt === 16, JSON.stringify(d3.roof));
+    // Hung at 7.5 ft the porch roof leaves under 6'8" of headroom: the amber hint names the ATTACH
+    // height to raise it to, not a wall height (the high front wall is already 12.5 ft here).
+    const depthHint = (await field(page, /^Depth \(ft\)/).innerText()).replace(/\s+/g, " ");
+    ok("⚠️ with the attach height set, the short-porch hint suggests where to HANG it, not a wall height",
+      /Hung at 7' 6"/.test(depthHint) && /up gives a door's height/.test(depthHint) && !/walls give/.test(depthHint), depthHint.slice(0, 200));
     await typeNumber(page, attach, 30);
     d3 = await save(page, calls);
     ok("an attach height past the band saves at its top (24), what the sanitiser would store", d3.roof.porchAttachFt === 24, String(d3.roof.porchAttachFt));
@@ -208,8 +214,8 @@ export async function main() {
     ok("a gable offers lower wings, off", (await wingW.count()) === 1 && (await field(page, /^Wing side/).count()) === 0);
     await typeNumber(page, wingW, 8);
     const wingSide = field(page, /^Wing side/);
-    ok("a width with no side asks for the side, in amber",
-      (await wingSide.count()) === 1 && /Pick the side the wing is on/.test(await wingSide.innerText()));
+    ok("a width with no side asks for the side, in amber, and says blank draws both",
+      (await wingSide.count()) === 1 && /Pick the side the wing is on/.test(await wingSide.innerText()) && /drawn on both sides/.test(await wingSide.innerText()));
     await wingSide.locator("select").selectOption("both");
     await settle(page);
     d3 = await save(page, calls);
@@ -220,6 +226,13 @@ export async function main() {
     d3 = await save(page, calls);
     ok("save: the pitch typed in 12ths is stored as the rise/run (3 in 12 = 0.25)", d3.roof.wingPitch === 0.25, String(d3.roof.wingPitch));
     ok("save: centerEaveFt 16", d3.roof.centerEaveFt === 16, String(d3.roof.centerEaveFt));
+    // A recessed porch is not drawn with wings; the panel says so where its depth is typed.
+    await porchSelect(page).selectOption("recessed");
+    await settle(page);
+    const recHint = (await field(page, /^Depth \(ft\)/).innerText()).replace(/\s+/g, " ");
+    ok("⚠️ WINGS AND A RECESSED PORCH: the panel says the porch is not drawn", /Not drawn with lower wings/.test(recHint), recHint.slice(0, 200));
+    await porchSelect(page).selectOption("none");
+    await settle(page);
     await wingW.locator("xpath=../..").screenshot({ path: join(shots, "01-wings-row.png") });
     await field(page, "Front wall (porch or door side)").locator("xpath=..").screenshot({ path: join(shots, "02-roof-row.png") });
     await wingSide.locator("select").selectOption("front");
