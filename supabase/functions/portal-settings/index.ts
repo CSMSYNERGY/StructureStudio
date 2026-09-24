@@ -78,6 +78,8 @@ import { WALK_FRAME_MAX, wingsAgreementWarning } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
+// The multi-round self-check (v2), on its own line so the generation's import above stays untouched.
+import { parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfCheckChangedFields, SELF_CHECK_MAX_ROUNDS } from "../_shared/styleD3.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
@@ -4147,6 +4149,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // own stored URLs. Handing the browser those inputs would turn one $20 generation into a free
   // vision call on any twelve images on the internet with caller-written text spliced into the
   // prompt — `sanitizePhotoUrls` accepts any https URL and is not bucket-scoped.
+  //
+  // ── UP TO THREE ROUNDS (v2, 2026-09-24; migration 252) ──────────────────────────────────
+  // The browser can now re-render the corrected spec and ask again, up to SELF_CHECK_MAX_ROUNDS
+  // times per generation. Every rail above still holds, per round:
+  //   * ONE CLAIM PER ROUND, and the claim is still one conditional UPDATE with `returning`: a
+  //     compare-and-swap on `self_check_round` (k -> k+1). Round 0 ALSO requires `self_check_at`
+  //     to be null, which is today's single-use claim verbatim — a request with no `round` is
+  //     round 0, so production's older browser gets exactly the one check it always had, and
+  //     its second request is still a 409.
+  //   * A LATER ROUND ONLY AFTER CORRECTIONS. Round k > 0 is claimable only while the row's
+  //     verdict says the round before it applied corrections, and its claim clears the verdict
+  //     until it records its own. So the server stops on matches / failed / skipped / rejected
+  //     whatever a browser does, and two rounds can never be in flight at once.
+  //   * THE ROW, NEVER THE CALLER. Round k > 0 judges `self_check_after ?? drafted` read off the
+  //     claimed row, and states the ruler from the row's `dims`, exactly as round 0 does.
+  //   * The 15-minute window, the tenant and style filters, the kill switch, the render caps and
+  //     the frame whitelist are unchanged, and no round touches money.
   if (action === "calibrate_style_check") {
     const t0 = Date.now();
     const styleValue = String(payload.styleValue ?? "").trim();
@@ -4158,6 +4177,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(checkId)) {
       return json({ error: "checkId is required." }, 400);
     }
+    // WHICH ROUND. Absent is round 0. A round past the limit is refused here, before anything
+    // touches the database, with the same 409 code a spent claim gets — one rule for a browser.
+    const roundRead = parseSelfCheckRound(payload.round);
+    if (!roundRead.ok) {
+      return json({ error: roundRead.error, ...(roundRead.code ? { code: roundRead.code } : {}) }, roundRead.status);
+    }
+    const round = roundRead.round;
     const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
     if (!apiKey) return json({ error: "AI drafting isn't configured yet (ANTHROPIC_API_KEY is unset)." }, 500);
 
@@ -4166,7 +4192,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // panel can render as one quiet line. A 4xx here would make the panel show a failed
     // generation, which is the one thing that never happened.
     const skipped = (reason: string, note: string) =>
-      json({ ok: true, verdict: "skipped", reason, note, changed: [], checked: {}, d3: null, renders: 0 });
+      json({ ok: true, verdict: "skipped", reason, note, changed: [], checked: {}, d3: null, renders: 0, round, roundsLeft: 0 });
 
     // BEST-EFFORT, like the 226 write above and for the same reason: the builder has already
     // been charged and already holds their draft, and a diagnostics failure must never be the
@@ -4184,13 +4210,45 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
     };
 
+    // ── EACH ROUND'S LINE IN THE HISTORY (v2, migration 252) ──────────────────────────────
+    // `self_check_rounds` is an array with one entry per round, {round, verdict, changed, ms,
+    // tokens, renders}, so "what did round 2 do?" survives round 3 overwriting the scalar
+    // columns. ITS OWN UPDATE, like 251's usage write, so a fault here can never take the
+    // verdict write (which is what unlocks the next round) down with it; best-effort, with one
+    // coded row. GUARDED ON THE ROUND COUNTER: it lands only while the row is still at this
+    // round's claim, so a late write can never overwrite a later round's history.
+    //
+    // Read-modify-write is safe here and only here because rounds are serialised: the next
+    // round cannot be claimed until this round's verdict is written, and this is written first.
+    // `roundsBefore` is the array as the claim's RETURNING saw it.
+    let roundsBefore: unknown = null;
+    // deno-lint-ignore no-explicit-any
+    const appendRound = async (entry: Record<string, any>) => {
+      const prior = Array.isArray(roundsBefore) ? roundsBefore : [];
+      const { error } = await admin.from("ai_style_calls")
+        .update({ self_check_rounds: [...prior, { round, ...entry }].slice(-SELF_CHECK_MAX_ROUNDS) })
+        .eq("id", checkId).eq("client_id", clientId).eq("self_check_round", round + 1);
+      if (error) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_selfcheck_rounds_log_failed",
+          message: `Could not record self-check round ${round + 1} in self_check_rounds: ${error.message}`,
+          context: { checkId, round },
+        });
+      }
+    };
+
     // THE CHECK FAILED AND THE GENERATION DID NOT. Every one of these paths ends with the
     // builder holding the first draft, told that the CHECK could not run — never that their
     // $20 generation failed. One coded row each, so "how often does the second call time out?"
     // is a query rather than a feeling, and the claim stays spent, which is what stops a failing
-    // check becoming a retry loop against our own API key.
+    // check becoming a retry loop against our own API key. A failed round also ENDS the rounds:
+    // its verdict is not "corrections", so the next round's claim finds no row.
     const failedCheck = async (code: string, message: string, context: Record<string, unknown>) => {
       await logEdgeError({ fn: "portal-settings", req, clientId, code, message, context });
+      await appendRound({
+        verdict: "failed", changed: [], ms: Date.now() - t0,
+        tokens: context.tokens ?? null, renders: Number(context.renders ?? 0),
+      });
       await recordSelfCheck(checkId, {
         self_check_verdict: "failed",
         self_check_renders: Number(context.renders ?? 0),
@@ -4201,6 +4259,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         ok: true, verdict: "failed", reason: code, changed: [], checked: {}, d3: null,
         renders: Number(context.renders ?? 0),
         note: "We couldn't finish checking the draft against your video - review it yourself before saving.",
+        round, roundsLeft: 0,
       });
     };
 
@@ -4275,28 +4334,47 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // caller pairing one generation's draft with another style's frames — both its own, so not
     // a breach, but a comparison of two different buildings presented as one.
     const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-    const { data: claimed, error: claimErr } = await admin.from("ai_style_calls")
-      .update({ self_check_at: new Date().toISOString() })
+    // A COMPARE-AND-SWAP ON THE ROUND (v2). `self_check_round` counts the rounds claimed, so
+    // round k is claimable only while it is exactly k, and claiming it makes it k+1 — two
+    // requests for one round cannot both get a row back, and no round can ever run twice.
+    //   * Round 0 is ALSO `self_check_at is null`, today's single-use guard verbatim. That is
+    //     not redundant: a row checked by the pre-252 code has its round still at 0 (the
+    //     default), and without this filter it would be checkable a second time.
+    //   * Round k > 0 is ALSO `self_check_verdict = 'corrections'`, and its claim clears the
+    //     verdict until the round records its own. So a round runs only after the one before
+    //     it FINISHED and CHANGED something: matches, failed, skipped and rejected all end the
+    //     rounds here on the server, and a second round cannot start while one is in flight.
+    // `self_check_at` keeps 247's meaning, when the check was first claimed; only round 0
+    // writes it.
+    let claim = admin.from("ai_style_calls")
+      .update(round === 0
+        ? { self_check_at: new Date().toISOString(), self_check_round: 1 }
+        : { self_check_round: round + 1, self_check_verdict: null })
       .eq("id", checkId).eq("client_id", clientId).eq("style_key", styleValue)
-      .is("self_check_at", null).gt("called_at", since)
-      .select("drafted, dims").maybeSingle();
+      .eq("self_check_round", round).gt("called_at", since);
+    claim = round === 0
+      ? claim.is("self_check_at", null)
+      : claim.eq("self_check_verdict", "corrections");
+    const { data: claimed, error: claimErr } = await claim
+      .select("drafted, dims, self_check_after, self_check_changed, self_check_rounds").maybeSingle();
     if (claimErr) {
-      // A transient database fault: a dropped connection, a statement timeout, a permission
-      // change. NOT the 247 tell, despite what this comment used to say — the kill-switch read
-      // above names a column 247 adds and runs first, so an unapplied migration never reaches
-      // this statement. The paid path says it too, earlier and on every generation, in
-      // `ai_style_dims_write_failed`. Either way the failure is safe: without the column this
-      // action cannot run at all, which is why nothing below needs its own missing-column
-      // guard.
+      // A database fault: a dropped connection, a statement timeout, a permission change — OR
+      // MIGRATION 252 NOT APPLIED. This is the first statement in the action to name a 252
+      // column (`self_check_round`), so a deploy-before-252 is refused HERE, on every check, and
+      // this row names it. (247 is still told by the kill-switch read above, which runs first.)
+      // Either way the failure is safe: the action cannot run unclaimed, which is why nothing
+      // below needs its own missing-column guard.
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: "ai_selfcheck_claim_failed",
-        message: `Could not claim the check for this generation: ${claimErr.message}`,
+        message: `Could not claim the check for this generation (if every check says this, migration 252 may not be applied): ${claimErr.message}`,
       });
       return skipped("unavailable", "The check could not run just now - review the draft yourself.");
     }
     if (!claimed) {
       return json({
-        error: "That generation has already been checked, or it is too old to check now.",
+        error: round === 0
+          ? "That generation has already been checked, or it is too old to check now."
+          : "That round of the check has already run, the round before it changed nothing, or the generation is too old to check now.",
         code: "check_unavailable",
       }, 409);
     }
@@ -4311,13 +4389,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // The claim has already been spent by the time we get here, and that is correct: a row with
     // no dims will never grow any, so leaving it claimable would only invite the same refusal
     // again. `self_check_verdict = 'skipped'` in the table means exactly this and nothing else.
+    //
+    // v2: THE SPEC A ROUND JUDGES IS THE ONE THE ROW HOLDS. Round 0 judges `drafted`, as it
+    // always has (a round-0 row has no `self_check_after`). Round k > 0 judges what the round
+    // before it produced, `self_check_after`, falling back to `drafted` where that round's net
+    // effect was nothing. Never anything the browser sent: the renders it sent are of the spec
+    // it holds, and this is what they are compared against. `drafted` is read either way, as
+    // the fixed point every round's net change is measured from.
+    roundsBefore = claimed.self_check_rounds ?? null;
     const rowDims = parseKnownDims(claimed.dims);
     const dims = rowDims.ok ? rowDims.dims : null;
-    const draftRead = sanitizeD3Spec(claimed.drafted);
-    if (!dims || !draftRead.ok) {
+    const draftRead = sanitizeD3Spec(claimed.self_check_after ?? claimed.drafted);
+    const firstRead = round === 0 ? draftRead : sanitizeD3Spec(claimed.drafted);
+    if (!dims || !draftRead.ok || !firstRead.ok) {
+      const bad = !draftRead.ok ? draftRead : !firstRead.ok ? firstRead : null;
       const why = !dims
         ? "the generation recorded no measurements"
-        : `the recorded draft could not be read back (${draftRead.ok ? "" : draftRead.error})`;
+        : `the recorded draft could not be read back (${bad && !bad.ok ? bad.error : ""})`;
       // TWO SEVERITIES, because these are two different events wearing one code. A row with no
       // dims is the product correctly declining — `info`, the same posture every other refusal
       // takes, and it must never sit in the fault queue. A row whose `drafted` will not go back
@@ -4326,8 +4414,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         fn: "portal-settings", req, clientId, code: "ai_selfcheck_row_unusable",
         severity: dims ? "error" : "info",
         message: `Self-check skipped: ${why}.`,
-        context: { checkId, hasDims: !!dims, hasDraft: draftRead.ok },
+        context: { checkId, round, hasDims: !!dims, hasDraft: draftRead.ok && firstRead.ok },
       });
+      await appendRound({ verdict: "skipped", changed: [], ms: Date.now() - t0, tokens: null, renders: 0 });
       await recordSelfCheck(checkId, { self_check_verdict: "skipped", self_check_renders: 0, self_check_ms: Date.now() - t0 });
       return skipped("row_unusable", "The check could not run on this generation - review the draft yourself.");
     }
@@ -4340,13 +4429,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // their draft, so a slow check is worth abandoning, and 110 + 5 + 110 is not a wait anyone
     // should be asked to sit through.
     //
-    // max_tokens 4000 rather than call 1's 8000. The answer is bounded at six fields by the
+    // max_tokens 4000 rather than call 1's 8000. The answer is bounded at eight fields by the
     // prompt and again by the cap, so the room is all for thinking — and the ceiling that
     // actually bites here is the clock, which more thinking only brings nearer. If
     // `self_check_tokens` ever shows replies stopping at max_tokens, this is the number to move.
     const content: unknown[] = [{
       type: "text",
-      text: selfCheckPrompt({ dims, draft: draftRead.d3, viewpoints: pairs.map((p) => p.viewpoint) }),
+      // A later round is told it is one, and which fields the rounds before it changed —
+      // allow-listed NAMES off the row's own self_check_changed, never the model's prose.
+      text: selfCheckPrompt({
+        dims, draft: draftRead.d3, viewpoints: pairs.map((p) => p.viewpoint),
+        round, earlier: selfCheckChangedFields(claimed.self_check_changed),
+      }),
     }];
     for (const p of pairs) {
       content.push({ type: "text", text: selfCheckPairLabel(p.viewpoint) });
@@ -4407,7 +4501,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     // ── THE GATES ────────────────────────────────────────────────────────────────────────
-    // Allow-list, six-field cap, both-lists, the porch exclusion and sanitizeD3Spec, all inside
+    // Allow-list, eight-field cap, both-lists, the porch exclusion and sanitizeD3Spec, all inside
     // applySelfCheck so they are testable without a network. `drafted` is NOT touched by any of
     // it: the first pass stays on the row or "did the check help?" stops being answerable.
     // `dims` rides along so a builder who MEASURED the eave keeps it: roof.overhang comes off
@@ -4430,31 +4524,67 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     const elapsedMs = Date.now() - t0;
+    // THE NET EFFECT, AGAINST THE FIRST DRAFT (v2). `applied.changed` is this round only, with
+    // `from` read off the spec this round judged. `total` runs every line from `drafted` to
+    // the final spec, so `self_check_changed` stays "what the check changed" however many rounds
+    // it took. On round 0 the two are the same list, and round 0 writes `applied.changed` itself
+    // so the check an older browser runs records exactly what it always did. `reverted` is the
+    // fields this round put straight back where the draft had them: a flip-flop.
+    const total = round === 0
+      ? applied.changed
+      : selfCheckTotalChanges(firstRead.d3, applied.d3, claimed.self_check_changed, applied.changed);
+    const reverted = selfCheckReverted(total, applied.changed);
+    // History FIRST, then the verdict: the verdict write is what makes the next round
+    // claimable, so writing it last is what keeps the read-modify-write in appendRound serial.
+    await appendRound({ verdict: applied.verdict, changed: applied.changed, ms: elapsedMs, tokens, renders: pairs.length });
     // `self_check_after` is written ONLY when something actually moved. A null there means the
     // draft stands, so diffing `drafted` against it stays the one query that answers what the
-    // check changes across every tenant, with no rows that differ from `drafted` by nothing.
+    // check changes across every tenant, with no rows that differ from `drafted` by nothing —
+    // which is also why a later round that moves everything BACK writes null rather than a copy
+    // of `drafted`. The scalar columns (verdict, tokens, renders, ms) describe the LATEST round;
+    // `self_check_after` and `self_check_changed` the whole check; every round is in
+    // `self_check_rounds`.
     await recordSelfCheck(checkId, {
       self_check_verdict: applied.verdict,
-      self_check_changed: applied.changed,
+      self_check_changed: total,
       self_check_tokens: tokens,
       self_check_renders: pairs.length,
       self_check_ms: elapsedMs,
-      ...(applied.verdict === "corrections" ? { self_check_after: applied.d3 } : {}),
+      ...(applied.verdict === "corrections" ? { self_check_after: total.length ? applied.d3 : null } : {}),
     });
 
     // The raw `corrections` object is deliberately NOT echoed. `d3` is the merged spec after all
     // three gates and `changed` is what actually moved, with `from` and `to` read off the two
     // specs rather than off the model's own account of them — a browser handed the raw object
     // would have its own fourth chance to apply something the gates just refused.
+    //
+    // v2 FIELDS, all additive (an older browser reads none of them):
+    //   d3           round 0: exactly as before, the corrected spec only when something moved.
+    //                Round k > 0: ALWAYS the cumulative spec (the draft plus every round that
+    //                applied), because a later round can move a field BACK, and "null, keep what
+    //                you have" would then leave the browser on a spec the row no longer holds.
+    //   changedTotal every change against the FIRST draft, for "What the check changed".
+    //   reverted     fields this round moved back to the draft's value: the flip-flop to stop on.
+    //   round        which round this answered (0-based).
+    //   roundsLeft   how many more rounds are worth asking for: 0 unless this round applied
+    //                corrections without undoing an earlier one, and never past the limit. The
+    //                server's own hard stops are the claim above, whatever this says.
+    const roundsLeft = applied.verdict === "corrections" && !reverted.length
+      ? Math.max(0, SELF_CHECK_MAX_ROUNDS - (round + 1))
+      : 0;
     return json({
       ok: true,
       verdict: applied.verdict,
-      d3: applied.verdict === "corrections" ? applied.d3 : null,
+      d3: round === 0 ? (applied.verdict === "corrections" ? applied.d3 : null) : applied.d3,
       changed: applied.changed,
+      changedTotal: total,
+      reverted,
       checked: read.checked,
       note: read.note,
       renders: pairs.length,
       ms: elapsedMs,
+      round,
+      roundsLeft,
     });
   }
 
