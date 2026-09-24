@@ -15095,16 +15095,29 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
 // privacy nicety — a 190MB phone video cannot go through an edge function, and the
 // existing photo path already accepts exactly this kind of JPEG.
 //
-// The hard part is WHICH frames. Sampling at equal time intervals looks obvious and is
-// wrong: people pause at the corners (where two faces and the roof rake are visible at
-// once — the most shape-informative viewpoint there is) and hurry along the flat sides, so
-// equal-time sampling spends its budget wherever the operator dawdled and can miss a whole
-// elevation. Sampling at equal CUMULATIVE VISUAL CHANGE self-corrects: standing still
-// accumulates nothing and costs nothing.
+// The hard part is WHICH frames. Until 2026-09-24 they were picked at equal CUMULATIVE VISUAL
+// CHANGE, on the theory that standing still costs nothing and hurrying along a side costs its
+// share. Measured on four real laps, that theory has a hole exactly where it hurts: nothing in a
+// walk-around changes faster than a CLOSE-UP. Walk up to a porch and the near wall races across
+// the frame, so change-weighted sampling spent four of twelve picks on the approach to one
+// porch (two of them of a door and a window box) and two more standing under another porch
+// roof, while whole elevations got one frame or none. A vision model cannot read a roof shape
+// from a post and a soffit.
 //
-// The probe pass that measures change also gets sharpness for free — it has already
-// decoded those frames — so each chosen viewpoint can be nudged to whichever of its
-// neighbours is least motion-blurred without spending another seek.
+// So the picks now follow TIME around the lap, which is what an orbit actually advances with,
+// and every probe is first asked whether it shows the building WHOLE (ssProbeLook, read off the
+// same 32x18 probe the change was always measured on, so it costs no extra seek):
+//   · the sky across the top of the frame: a building that fits has sky over its whole
+//     roofline; a close-up has wall, soffit or porch ceiling touching the top edge
+//   · the largest flat patch that is not sky: a near wall fills the frame with one surface
+//   · a sustained spike in frame-to-frame change: parallax from walking close past something
+// Each probe is good, fair (usable when nothing better covers that stretch) or bad, and a small
+// dynamic programme (ssOrbitPicks) chooses the twelve that sit closest to evenly spaced along the
+// lap while paying a price for every fair or bad frame and for motion blur. Time spent in
+// close-ups counts for less of the lap: walking into a porch and back out barely changes the
+// viewpoint. Every rule degrades to plain equal time: an overcast sky switches the sky test off,
+// a tripod clip has no spikes, and a clip where every probe is bad still gets evenly spaced
+// frames rather than none.
 // ⚠️ NEVER ABOVE THE SERVER'S `video` CAP. A walk-around generated with no photos goes to
 // calibrate_style_ai as source "video" (onDraftFromCombined in portal/12-shell.jsx), and
 // sanitizePhotoUrls drops any frame past that source's cap -- only `dropped` would say so.
@@ -15118,9 +15131,9 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
 // on its own fills one generation exactly.
 const SS_VID_FRAMES = 12;         // three views per side, whatever the pacing
 // 36 → 54 with it, which keeps the probes per pick where they were (4.5): with 36 probes a
-// 150 s lap is sampled every 4.2 s and twelve picks land three probes apart, so the sharpness
-// nudge and the de-duplication below start eating picks. Seeks are ~50-100 ms, so this bounds
-// the probe at ~3-5 s; a clip under 45 s never reaches it (1.2 probes a second).
+// 150 s lap is sampled every 4.2 s and twelve picks land three probes apart, leaving the chooser
+// no room to step round a bad frame. Seeks are ~50-100 ms, so this bounds the probe at ~3-5 s;
+// a clip under 45 s never reaches it (1.2 probes a second).
 const SS_VID_PROBE_MAX = 54;
 const SS_VID_LONG_EDGE = 1280;    // ~1200 image tokens per frame, ~200KB of JPEG
 const SS_VID_QUALITY = 0.8;
@@ -15190,6 +15203,150 @@ function ssLumaSharpness(luma, w, h) {
   return s / (w * h);
 }
 
+// A sky pixel in a probe: plainly blue (a clear sky is a DEEP blue at the top of a phone frame,
+// luma 60-90, so brightness alone misses it), bluish haze round the sun, or blown-out glare.
+// White and grey walls are warm or neutral and stay out; an overcast sky stays out too, and
+// ssOrbitPicks notices when that has happened to the whole clip and stops asking.
+function ssSkyPixel(r, g, b) {
+  const l = 0.299 * r + 0.587 * g + 0.114 * b;
+  return (b >= 90 && b > r + 35 && b > g + 15) || (l > 200 && b > r + 10 && b >= g) || l > 235;
+}
+
+// WHAT ONE PROBE SHOWS, from its RGBA pixels (w x h) and their luma:
+//   touch  the share of columns whose TOP pixel is not sky: the building (or a porch ceiling, a
+//          post, a wall) running off the top of the frame
+//   head   the third-lowest count of sky rows down from the top, across the columns: how far
+//          the highest part of the roofline sits below the frame's top edge (the third, so one
+//          post or a lens flare cannot decide it)
+//   flat   the largest 4-connected patch of non-sky pixels whose neighbours step by 8 luma or
+//          less, as a share of the frame: a near wall or ceiling is one smooth surface, while a
+//          building seen whole sits among gravel, grass and background that break it up
+//   cut    the building in the middle of the frame runs off its left or right edge. Its top is
+//          the highest roofline in the middle half of the frame; walking out from there, a
+//          building seen whole drops back below halfway to the background skyline (the sky's
+//          deepest reach, taken at the 85th percentile) before the edge, and one seen from too
+//          close never does. Only asked when the roof stands at least 3 probe rows above that
+//          skyline, so a long low roof seen side-on is not called cut for being flat.
+function ssProbeLook(px, w, h, luma) {
+  const n = w * h;
+  const sky = new Uint8Array(n);
+  for (let q = 0; q < n; q++) sky[q] = ssSkyPixel(px[4 * q], px[4 * q + 1], px[4 * q + 2]) ? 1 : 0;
+  const runs = [];
+  for (let x = 0; x < w; x++) {
+    let r = 0;
+    while (r < h && sky[r * w + x]) r++;
+    runs.push(r);
+  }
+  const sorted = runs.slice().sort((a, b) => a - b);
+  let flat = 0;
+  const seen = new Uint8Array(n);
+  const stack = [];
+  for (let s = 0; s < n; s++) {
+    if (seen[s] || sky[s]) continue;
+    let size = 0;
+    seen[s] = 1;
+    stack.push(s);
+    while (stack.length) {
+      const c = stack.pop();
+      size++;
+      const x = c % w, y = (c - x) / w;
+      const next = [x > 0 ? c - 1 : -1, x + 1 < w ? c + 1 : -1, y > 0 ? c - w : -1, y + 1 < h ? c + w : -1];
+      for (const k of next) {
+        if (k < 0 || seen[k] || sky[k] || Math.abs(luma[k] - luma[c]) > 8) continue;
+        seen[k] = 1;
+        stack.push(k);
+      }
+    }
+    if (size > flat) flat = size;
+  }
+  const c0 = Math.floor(w / 4), c1 = Math.ceil((3 * w) / 4);
+  let xm = c0;
+  for (let x = c0; x < c1; x++) if (runs[x] < runs[xm]) xm = x;
+  const top = runs[xm], deep = sorted[Math.floor(0.85 * (w - 1))];
+  let cut = false;
+  if (deep - top >= 3) {
+    const mid = (top + deep) / 2;
+    let a = xm, b = xm;
+    while (a > 0 && runs[a - 1] <= mid) a--;
+    while (b < w - 1 && runs[b + 1] <= mid) b++;
+    cut = a === 0 || b === w - 1;
+  }
+  return {
+    touch: runs.filter((r) => r === 0).length / w,
+    head: sorted[Math.min(2, sorted.length - 1)],
+    flat: flat / n,
+    cut,
+  };
+}
+
+// WHICH PROBES BECOME THE FRAMES: indices into `probes` ({ t, change, sharp, touch, head, flat, cut },
+// in walk order), at most K of them, in walk order. Pure, like ssProbeClasses, so
+// orbitFramePicks_test can run both.
+//
+// ssProbeClasses: each probe is 2 good, 1 fair or 0 bad:
+//   · sky, only when at least a quarter of the clip shows sky across the top at all (an overcast
+//     or indoor clip has no usable sky and is judged on the other two alone): bad when over a
+//     quarter of the top edge is not sky or the roofline reaches the top, fair when over an
+//     eighth of it is, the roofline is one probe row under the top, or the building is `cut`
+//   · flat: bad over 35 % of the frame, fair over 20 %
+//   · change: a SUSTAINED spike (this step over 1.6 x the clip's median and the next over 1.3 x)
+//     makes a probe fair at best: parallax from walking close past the building
+// The lap is measured in time, each probe's stretch counted at 1 when good, 0.6 when fair and
+// 0.25 when bad. The K picks are the ones whose places along that lap are closest to evenly
+// spaced (the squared error of every gap against lap / K, the lap's two ends included) plus 0, 1
+// or 4 for a good, fair or bad pick and up to 0.3 for motion blur against its four neighbours.
+// An exact dynamic programme: K x N^2 steps, about 35 000 at 54 probes.
+function ssProbeClasses(probes) {
+  const N = probes.length;
+  const median = (a) => { const s = a.slice().sort((x, y) => x - y); return s.length ? s[s.length >> 1] : 0; };
+  const skyOk = probes.filter((p) => p.touch <= 0.25).length >= 0.25 * N;
+  const mc = median(probes.slice(1).map((p) => p.change));
+  return probes.map((p, i) => {
+    let c = 2;
+    if (skyOk) c = (p.touch > 0.25 || p.head === 0) ? 0 : (p.touch <= 0.12 && p.head >= 2 && !p.cut) ? 2 : 1;
+    if (p.flat > 0.35) c = 0;
+    else if (p.flat > 0.2) c = Math.min(c, 1);
+    if (mc > 0 && i > 0 && p.change > 1.6 * mc && (i + 1 >= N || probes[i + 1].change > 1.3 * mc)) c = Math.min(c, 1);
+    return c;
+  });
+}
+function ssOrbitPicks(probes, K) {
+  const N = probes.length;
+  if (N <= K) return probes.map((_, i) => i);
+  const q = ssProbeClasses(probes);
+  const WEIGHT = [0.25, 0.6, 1], COST = [4, 1, 0];
+  const P = [Math.max(0, probes[0].t) * WEIGHT[q[0]]];
+  for (let i = 1; i < N; i++) P.push(P[i - 1] + Math.max(0, probes[i].t - probes[i - 1].t) * (WEIGHT[q[i - 1]] + WEIGHT[q[i]]) / 2);
+  const lap = P[N - 1] + (Math.max(0, probes[N - 1].t - probes[N - 2].t) / 2) * WEIGHT[q[N - 1]];
+  const ideal = lap / K;
+  const gap = (x) => { const e = ideal > 0 ? (x - ideal) / ideal : 0; return e * e; };
+  const own = probes.map((p, i) => {
+    let m = 0;
+    for (let j = Math.max(0, i - 2); j <= Math.min(N - 1, i + 2); j++) m = Math.max(m, probes[j].sharp);
+    return COST[q[i]] + (m > 0 ? 0.3 * (1 - p.sharp / m) : 0);
+  });
+  // best[k][i]: the cheapest way to put pick k (0-based) on probe i; from[k][i]: where pick k-1 is.
+  const best = [], from = [];
+  for (let k = 0; k < K; k++) { best.push(new Array(N).fill(Infinity)); from.push(new Array(N).fill(-1)); }
+  for (let i = 0; i < N; i++) best[0][i] = own[i] + gap(P[i] + ideal / 2);
+  for (let k = 1; k < K; k++) {
+    for (let i = k; i < N; i++) {
+      for (let j = k - 1; j < i; j++) {
+        const c = best[k - 1][j] + own[i] + gap(P[i] - P[j]);
+        if (c < best[k][i]) { best[k][i] = c; from[k][i] = j; }
+      }
+    }
+  }
+  let last = K - 1, lastCost = Infinity;
+  for (let i = K - 1; i < N; i++) {
+    const c = best[K - 1][i] + gap(lap - P[i] + ideal / 2);
+    if (c < lastCost) { lastCost = c; last = i; }
+  }
+  const picks = [];
+  for (let k = K - 1, i = last; k >= 0; k--) { picks.unshift(i); i = from[k][i]; }
+  return picks;
+}
+
 async function ssExtractOrbitFrames(file, onStep) {
   const url = URL.createObjectURL(file);
   const v = document.createElement("video");
@@ -15231,42 +15388,12 @@ async function ssExtractOrbitFrames(file, onStep) {
       const d = pctx.getImageData(0, 0, pw, ph).data;
       const luma = new Float32Array(pw * ph);
       for (let p = 0, q = 0; p < d.length; p += 4, q++) luma[q] = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
-      probes.push({ t, change: ssLumaDelta(prev, luma), sharp: ssLumaSharpness(luma, pw, ph) });
+      probes.push({ t, change: ssLumaDelta(prev, luma), sharp: ssLumaSharpness(luma, pw, ph), ...ssProbeLook(d, pw, ph, luma) });
       prev = luma;
     }
 
-    // ── choose viewpoints at equal cumulative change ──────────────────────────────
-    const cum = [];
-    let run = 0;
-    for (const p of probes) { run += p.change; cum.push(run); }
-    const total = run;
-    let picks;
-    if (total < 1e-3) {
-      // Nothing moved: a tripod shot, or a probe that read the same frame every time.
-      // Equal time is the only meaningful fallback, and it is what the caller expects.
-      picks = Array.from({ length: SS_VID_FRAMES }, (_, k) => Math.min(probes.length - 1, Math.round(((k + 0.5) / SS_VID_FRAMES) * (probes.length - 1))));
-    } else {
-      picks = [];
-      let at = 0;
-      for (let k = 0; k < SS_VID_FRAMES; k++) {
-        const want = ((k + 0.5) / SS_VID_FRAMES) * total;
-        while (at < cum.length - 1 && cum[at] < want) at++;
-        picks.push(at);
-      }
-    }
-    // Nudge each pick to the sharpest of itself and its immediate neighbours. Free: those
-    // frames were already decoded during the probe.
-    picks = picks.map((i) => {
-      let best = i;
-      for (const j of [i - 1, i + 1]) {
-        if (j >= 0 && j < probes.length && probes[j].sharp > probes[best].sharp) best = j;
-      }
-      return best;
-    });
-    // De-duplicate while keeping walk order — two targets can land on one probe when the
-    // operator swung round a corner fast.
-    const seen = new Set();
-    picks = picks.filter((i) => (seen.has(i) ? false : (seen.add(i), true)));
+    // ── whole-building viewpoints, evenly round the lap (ssOrbitPicks) ──────────────
+    const picks = ssOrbitPicks(probes, SS_VID_FRAMES);
 
     // ── capture at full resolution ────────────────────────────────────────────────
     const scale = Math.min(1, SS_VID_LONG_EDGE / Math.max(v.videoWidth, v.videoHeight));
