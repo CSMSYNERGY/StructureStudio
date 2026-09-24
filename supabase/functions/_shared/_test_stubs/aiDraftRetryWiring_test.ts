@@ -5,7 +5,9 @@
 //
 //   1. max_tokens 8000 → 12000 and the abort 110 s → 125 s. One 09-21 generation in twelve was cut
 //      off at 8000, and the v2 prompt asks for more. The abort stays under the gateway's 150 s so
-//      the hold is still released and the failure still named.
+//      the hold is still released and the failure still named. Since the fix of the same day the
+//      125 s is measured from the REQUEST (floor 60 s), because the inline auto top-up can spend
+//      30 s before the model call and the gateway's clock started with the request.
 //   2. A cut-off or timed-out reply now answers `retryable: true`. The new browser retries ONCE on
 //      that field, with `lean: true` under the same idempotency key — the failed attempt released
 //      its hold, and 248 made a released key reusable. An UNPARSEABLE reply is deliberately NOT
@@ -51,13 +53,36 @@ const json = (body: Record<string, unknown>, status = 200): Reply => ({ body, st
 Deno.test("the draft call has the v2 budget: 12000 tokens, a 125 s abort, effort low only when lean", () => {
   assert(DRAFT.includes("max_tokens: 12000,"), "max_tokens is 12000");
   assert(!DRAFT.includes("max_tokens: 8000"), "and the old 8000 is gone");
-  assert(DRAFT.includes("const aiSignal = AbortSignal.timeout(125_000);"), "the abort is 125 s, still under the gateway's 150");
+  assert(DRAFT.includes("const aiSignal = AbortSignal.timeout(draftAbortMs);"), "the abort is the request-measured budget below");
   assert(DRAFT.includes('output_config: { effort: lean ? "low" : "medium" },'), "lean thinks less; everyone else as before");
   // Only a real boolean: "true", 1 and an absent key all leave an older browser on "medium".
   const decl = DRAFT.split("\n").find((l) => l.includes("const lean =")) ?? "";
   assertEquals(decl.trim(), "const lean = payload.lean === true;");
   const lean = (payload: Record<string, unknown>) => new Function("payload", `${decl}; return lean;`)(payload);
   assertEquals([lean({ lean: true }), lean({ lean: "true" }), lean({ lean: 1 }), lean({})], [true, false, false, false]);
+});
+
+Deno.test("⚠️ the 125 s abort runs from the REQUEST, so a slow top-up cannot push a captured draft past 150 s", () => {
+  // money-rails (low), 2026-09-24: the abort used to start after the wallet hold AND the inline
+  // auto top-up (nmiPost's 30 s timeout). A 20 s top-up plus a 120 s reply crossed the gateway's
+  // 150 s: the builder got a bare 504 with no `retryable`, while the function captured the $20.
+  const start = PORTAL.indexOf("const requestStartMs = Date.now();");
+  assert(start > 0 && start < PORTAL.indexOf('if (req.method === "OPTIONS")'), "the clock starts on the handler's first line");
+  const decl = DRAFT.split("\n").find((l) => l.includes("const draftAbortMs =")) ?? "";
+  assertEquals(decl.trim(), "const draftAbortMs = Math.max(60_000, 125_000 - (t0 - requestStartMs));");
+  assert(DRAFT.indexOf("const draftAbortMs =") > DRAFT.indexOf("autoTopupDecision("), "measured after the top-up has run");
+  assert(DRAFT.indexOf("const draftAbortMs =") < DRAFT.indexOf("const aiSignal ="), "and before the call it bounds");
+  const budget = (spentMs: number) => new Function("t0", "requestStartMs", `${decl}; return draftAbortMs;`)(1_000_000 + spentMs, 1_000_000) as number;
+  assertEquals(budget(0), 125_000, "no top-up: the whole 125 s, as before");
+  assertEquals(budget(2_500), 122_500, "an ordinary press loses only its own set-up time");
+  assertEquals(budget(32_000), 93_000, "a 30 s top-up comes out of the model's share");
+  assertEquals(budget(90_000), 60_000, "never under 60 s");
+  // THE BOUND: every press whose pre-call work fits the top-up's 30 s (+ 5 s of set-up) has its
+  // model abort by 125 s after the request, which leaves the release, the log row and the reply
+  // well inside the gateway's 150.
+  for (let spent = 0; spent <= 35_000; spent += 500) assert(spent + budget(spent) <= 125_000, `spent ${spent} ms`);
+  // The timeout row says which clock fired.
+  assert(DRAFT.includes("requestMs: Date.now() - requestStartMs, abortMs: draftAbortMs"), "the row carries both clocks");
 });
 
 Deno.test("a cut-off reply is retryable; an unparseable one is not", () => {

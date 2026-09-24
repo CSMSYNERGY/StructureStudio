@@ -841,6 +841,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
 }
 
 Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
+  // When this request reached the function. The gateway's 150 s idle timeout runs from the
+  // request, not from any one call inside it, so a budget that must end before it is measured
+  // from here (calibrate_style_ai's model abort).
+  const requestStartMs = Date.now();
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -3783,6 +3787,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // say so. The same signal covers the body read, which is why the body is read inside this
     // try: a reply that stalls mid-body is a timeout, not an "unparseable" spec.
     //
+    // ⚠️ 125 s FROM THE REQUEST, not from here (fix, 2026-09-24). The auto top-up above runs
+    // inline and can spend up to nmiPost's 30 s before this line, so a clock started here let a
+    // slow top-up plus a slow reply cross the gateway's 150 s: the builder got a bare 504 (no
+    // `retryable`, so no lean retry) while this function went on to CAPTURE the $20 for a draft
+    // nobody would see. `draftAbortMs` is what is left of 125 s since the request arrived
+    // (requestStartMs, the handler's first line), never under 60 s: a floor that still ends by
+    // ~125 s + the top-up's worst case well inside 150, and that never cuts an ordinary reply
+    // short because a top-up happened to run first.
+    //
     // `lean: true` is the new browser's ONE automatic retry after a `retryable` failure (a cut-off
     // or timed-out reply): same press, same idempotency key — the failed attempt released its hold,
     // and a released key is reusable (248) — at effort "low", which thinks less and so fits. Only a
@@ -3790,6 +3803,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const lean = payload.lean === true;
     const aiSource = combined ? "combined" : fromVideo ? "video" : "photos";
     const t0 = Date.now();
+    const draftAbortMs = Math.max(60_000, 125_000 - (t0 - requestStartMs));
 
     // ── WHAT THE DRAFT CALL USED, on every exit that reached the model (251, 2026-09-23) ──────
     // Until now a draft's tokens were stored only through wallet_capture, and the meter is
@@ -3832,7 +3846,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
     };
 
-    const aiSignal = AbortSignal.timeout(125_000);
+    const aiSignal = AbortSignal.timeout(draftAbortMs);
     let res: Response;
     let replyBody = "";
     try {
@@ -3880,7 +3894,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         await logEdgeError({
           fn: "portal-settings", req, clientId, code: "ai_call_timeout",
           message: "The AI model did not answer within the time limit.",
-          context: { elapsedMs: Date.now() - t0, source: aiSource, frames: photoUrls.length, lean },
+          context: { elapsedMs: Date.now() - t0, requestMs: Date.now() - requestStartMs, abortMs: draftAbortMs, source: aiSource, frames: photoUrls.length, lean },
         });
         // `retryable: true` (2026-09-24) is the machine-readable half of "please try again": the
         // hold is released, so the same press may go again under the same key, and the new
