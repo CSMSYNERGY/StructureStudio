@@ -17,7 +17,10 @@
 //   5. both / left / right put the wings where they say; wingWidthFt 0 builds EXACTLY the building
 //      without wing keys (a scene-graph digest, mesh for mesh)
 //   6. a centre porch: the clearance scan sees the wing roofs — its roof meets the centre wall just
-//      under the wing roof's top, not at the wing's outer eave — and it spans the centre only
+//      under the wing roof's top, not at the wing's outer eave — and it spans the centre only; in
+//      the new frame (roof.front "gable", the Tri Home at 28x20) the ridge runs front to back, the
+//      porch stands on the SOUTH wall centred on the centre, 12 ft or porchWidthFt 16, roof and deck
+//      measured where they really stand
 //   7. doors and windows clamp to the LOCAL top: a 12 ft door on a wing's outer wall stops under H;
 //      on the centre it stands to 12 ft; a window sat at 12 ft keeps its sill in the centre and is
 //      pulled down under H on a wing's end wall
@@ -52,6 +55,15 @@ const CASES = [
   // A raised centre on a small footprint: the viewer's opening frame must hold all of it.
   { id: "tall", label: "Harness Tall Monitor", size: "12x14", H: 12, frame: true,
     d3: { roof: { type: "gable", pitch: 0.6, overhang: 0.5, wingSide: "both", wingWidthFt: 3, wingPitch: 0.3, centerEaveFt: 21 }, siding: "batten", colors: COLORS, wallHeightFt: 12, roofMaterial: "metal" } },
+  // THE TRI HOME IN THE NEW FRAME (the merge of the two renderer branches, 2026-09-24): the front is
+  // the centre's gable end (roof.front "gable"), so on a 28x20 the ridge runs along z, front to back,
+  // and the wings are west and east. The projecting porch stands on the SOUTH wall in front of the
+  // centre only (12 ft), its roof under the wing roofs; with porchWidthFt 16 it is 16 ft wide, still
+  // centred on the centre section.
+  { id: "trihome", label: "Harness Tri Home Front", size: "28x20", H: 9, porch: true, porchSpan: 12,
+    d3: { roof: { type: "gable", front: "gable", pitch: 0.67, overhang: 1, eave: "fascia", wingSide: "both", wingWidthFt: 8, wingPitch: 0.2, centerEaveFt: 15, porchOutFt: 6, porchEnd: "front" }, siding: "batten", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
+  { id: "trihome16", label: "Harness Tri Home Wide Porch", size: "28x20", H: 9, porch: true, porchSpan: 16,
+    d3: { roof: { type: "gable", front: "gable", pitch: 0.67, overhang: 1, eave: "fascia", wingSide: "both", wingWidthFt: 8, wingPitch: 0.2, centerEaveFt: 15, porchOutFt: 6, porchEnd: "front", porchWidthFt: 16 }, siding: "batten", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
   // Off by width: must be the plain building, mesh for mesh.
   { id: "off", label: "Harness Tri Off", size: "24x28", H: 9, digestOf: "plain",
     d3: { roof: { ...PLAIN, wingSide: "both", wingWidthFt: 0, wingPitch: 0.25, centerEaveFt: 17 }, siding: "batten", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
@@ -221,6 +233,19 @@ async function measure(page, W, L) {
     M.roofGroup.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssWing && q.geometry.type === "ExtrudeGeometry") { const b = bbOf(q); out.wingPrisms.push({ side: q.userData.ssWing, minY: b.mn[1], maxY: b.mx[1] }); } });
     // Openings, by the item they belong to.
     out.openings = M.openingsGroup.children.filter((g) => g.userData && g.userData.itemId != null).map((g) => { const b = bbOf(g); return { id: g.userData.itemId, wall: g.userData.wall, minY: b.mn[1], maxY: b.mx[1] }; });
+    // The projecting porch's roof members and its deck, where they really stand in the world.
+    const porchBox = (grp) => {
+      const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+      grp.traverse((q) => {
+        if (!q.isMesh || !q.userData || !q.userData.ssPorchPart) return;
+        const b = bbOf(q);
+        for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], b.mn[k]); mx[k] = Math.max(mx[k], b.mx[k]); }
+      });
+      return Number.isFinite(mn[0]) ? { mn, mx } : null;
+    };
+    out.porchRoof = porchBox(M.roofGroup);
+    const deckGrp = M.root.children.find((g) => g.userData && g.userData.ssPorch === "deck");
+    out.porchDeck = deckGrp ? porchBox(deckGrp) : null;
     // The viewer's OPENING camera (nothing has moved it yet): every vertex of the roof and the walls
     // projects inside the frame. Not the ground or the sky.
     let worst = 0, worstAt = null, top = -Infinity;
@@ -307,7 +332,8 @@ async function runCase(ctx, c, ok, shots, digests) {
     const pitch = c.d3.roof.pitch != null ? c.d3.roof.pitch : null;
     console.log(`   ${tag}: S ${ms.S} Sc ${f3(ms.Sc)} uc ${f3(ms.uc)} Hc ${f3(ms.Hc)} ya ${f3(ms.ya)} wings ${ms.wings.map((g) => g.wall).join("+")}`);
     if (c.frame) ok(`${tag}: the viewer opens with the whole raised building in frame (NDC ${f3(m.frame.worst)})`, m.frame.worst <= 1, JSON.stringify(m.frame));
-    const want = { both: ["west", "east"], left: ["west"], right: ["east"], gambrel: ["west", "east"], tall: ["west", "east"] }[c.id];
+    const want = { both: ["west", "east"], left: ["west"], right: ["east"], gambrel: ["west", "east"], tall: ["west", "east"], trihome: ["west", "east"], trihome16: ["west", "east"] }[c.id];
+    if (c.id.startsWith("trihome")) ok(`${tag}: the front is the centre's gable end, so the ridge runs front to back (along z)`, ms.uAxisIsX === true && ms.S === W && ms.L === L, `uAxisIsX ${ms.uAxisIsX} S ${ms.S} L ${ms.L}`);
     ok(`${tag}: the wings are on ${want.join(" and ")}`, JSON.stringify(ms.wings.map((g) => g.wall)) === JSON.stringify(want), JSON.stringify(ms.wings.map((g) => g.wall)));
     // 1. walls
     for (const g of ms.wings) ok(`${tag}: the ${g.wall} wing's outer wall tops out at H (${H})`, Math.abs(m.walls[g.wall].maxY - H) < 0.01, f3(m.walls[g.wall].maxY));
@@ -344,8 +370,19 @@ async function runCase(ctx, c, ok, shots, digests) {
       ok(`${tag}: a centre porch was built`, !!P, JSON.stringify(P && { yHigh: P.yHigh }));
       if (P) {
         console.log(`   ${tag}: porch yHigh ${f3(P.yHigh)} postH ${f3(P.postH)} side ${f3(P.side)} (ya ${f3(ya)}, H ${H})`);
-        ok(`${tag}: the porch roof meets the centre wall just under the wing roof, not at the wing's outer eave`, P.yHigh < ya && P.yHigh > ya - 0.6 && P.yHigh > H, `yHigh ${f3(P.yHigh)} ya ${f3(ya)}`);
-        ok(`${tag}: the porch spans the centre only`, P.side < ms.Sc / 2 + 0.5, `side ${f3(P.side)} Sc/2 ${f3(ms.Sc / 2)}`);
+        if (!c.porchSpan || c.porchSpan <= ms.Sc + 1e-6) {
+          ok(`${tag}: the porch roof meets the centre wall just under the wing roof, not at the wing's outer eave`, P.yHigh < ya && P.yHigh > ya - 0.6 && P.yHigh > H, `yHigh ${f3(P.yHigh)} ya ${f3(ya)}`);
+          ok(`${tag}: the porch spans the centre only`, P.side < ms.Sc / 2 + 0.5, `side ${f3(P.side)} Sc/2 ${f3(ms.Sc / 2)}`);
+        } else {
+          ok(`${tag}: a porch wider than the centre still meets the wall under the wing roofs`, P.yHigh < ya && P.yHigh > H, `yHigh ${f3(P.yHigh)} ya ${f3(ya)}`);
+        }
+        if (c.porchSpan) {
+          ok(`${tag}: the porch is ${c.porchSpan} ft wide (d3PorchSpan), on the south wall`, Math.abs(P.span - c.porchSpan) < 1e-6 && P.wall === "south" && P.onCap === true, JSON.stringify({ span: P.span, wall: P.wall, onCap: P.onCap, centerU: P.centerU }));
+          const R = m.porchRoof, D = m.porchDeck;
+          ok(`${tag}: its roof stands out from the SOUTH wall, centred on the centre section`, R && R.mn[2] > L / 2 - 0.2 && Math.abs((R.mn[0] + R.mx[0]) / 2 - ms.uc) < 0.05 && Math.abs((R.mx[0] - R.mn[0]) - (c.porchSpan + 2 * (P.side - c.porchSpan / 2) + 2 * P.sizes.SIDE_OV)) < 0.2, JSON.stringify(R));
+          ok(`${tag}: ...and its roof's top is under the wing roofs' top (ya ${f3(ya)})`, R && R.mx[1] < ya, R && f3(R.mx[1]));
+          ok(`${tag}: its deck is on the ground in front of the south wall, as wide as the porch`, D && D.mn[2] > L / 2 - 0.2 && Math.abs(D.mx[1]) < 0.05 && Math.abs((D.mx[0] - D.mn[0]) - 2 * P.side) < 0.05 && Math.abs((D.mn[0] + D.mx[0]) / 2 - ms.uc) < 0.05, JSON.stringify(D));
+        }
       }
     }
     if (shots) {
