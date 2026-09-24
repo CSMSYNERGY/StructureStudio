@@ -233,6 +233,10 @@ async function main() {
   const a1 = await press("press 1 (fails)");
   r.ok("the press sends an idempotencyKey", Boolean(a1 && a1.idempotencyKey), a1 ? String(a1.idempotencyKey) : "no call");
   r.ok("and it is a UUID", UUID_RE.test((a1 && a1.idempotencyKey) || ""), (a1 && a1.idempotencyKey) || "-");
+  // THE ROLLOUT GATE (2026-09-24): the new portal says its dims are in the FRONT-wall frame, which
+  // is the only thing that earns the v2 prompt server-side. Production's older bundle never sends it.
+  r.ok("⚠️ the draft request says frame \"front\" beside its dims (the v2 prompt's gate)",
+    Boolean(a1) && a1.frame === "front" && Boolean(a1.dims), JSON.stringify(a1 && { frame: a1.frame, dims: a1.dims }));
 
   const a2 = await press("press 2 (retry, fails)");
   r.ok("A RETRY OF THAT PRESS REUSES ITS KEY", Boolean(a2) && a2.idempotencyKey === (a1 && a1.idempotencyKey),
@@ -295,6 +299,7 @@ async function main() {
   r.ok("and that key is the one this style's failed press left pending", Boolean(pending) && t1.calls[0] && t1.calls[0].idempotencyKey === pending, `${pending} vs ${t1.calls[0] && t1.calls[0].idempotencyKey}`);
   r.ok("the same views and the same measurements went both times",
     t1.calls.length === 2 && JSON.stringify(t1.calls[0].photoUrls) === JSON.stringify(t1.calls[1].photoUrls) && JSON.stringify(t1.calls[0].dims) === JSON.stringify(t1.calls[1].dims));
+  r.ok("...and the lean retry still says frame \"front\"", t1.calls.length === 2 && t1.calls.every((c) => c.frame === "front"), t1.calls.map((c) => c.frame).join(","));
   r.ok("the progress card said it was reading again, and that it is one generation",
     /ran out of room before it finished/.test(t1.saw) && /still one generation/.test(t1.saw), t1.saw.slice(0, 120));
   await page.waitForFunction(() => /Read \d+ view/.test(document.body.innerText), null, { timeout: 20000 }).catch(() => {});
