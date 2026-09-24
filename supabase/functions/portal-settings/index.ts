@@ -72,6 +72,9 @@ import {
 } from "../_shared/attributeLines.ts";
 import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, parseFrameMap, gambrelRoofWarning, porchAgreementWarning, knownDimsNote, flagObservedNotes, parseKnownDims, SPEC_PROMPT, videoShapePrompt, combinedShapePrompt, parseSelfCheckRenders, selfCheckPairs, selfCheckPairLabel, selfCheckPrompt, parseSelfCheck, applySelfCheck } from "../_shared/styleD3.ts";
 import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
+// The v2 generator's two additions (2026-09-24), on their own line so the long list above can move
+// without this one: the walk-around frame cap every frame path shares, and the wings check.
+import { WALK_FRAME_MAX, wingsAgreementWarning } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
@@ -3142,7 +3145,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // They are a SEPARATE column because the two are answers to different questions: "what has
     // this builder photographed" and "has this style got a walk-around at all". Mixed into one
     // array, as they were until today, the second question has no answer after a reload - so the
-    // Generate gate would demand a video the builder had already filmed. Cap 8: SS_VID_FRAMES.
+    // Generate gate would demand a video the builder had already filmed. Cap: WALK_FRAME_MAX (12
+    // since 2026-09-24, was 8) — SS_VID_FRAMES, and the self-check only pairs frames stored here.
     //
     // ⚠️ ABSENCE IS NOT EMPTINESS, and this column is the first one here where the difference
     // bites. sanitizePhotoUrls answers [] for undefined exactly as it does for [], so writing it
@@ -3151,7 +3155,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // authenticated refetch lands - silently wiped a walk-around already on file. Only a caller
     // that actually sent an array gets to touch it; everyone else leaves it as they found it.
     const hasVideoFrames = Array.isArray(payload.d3VideoFrames);
-    const videoFrames = sanitizePhotoUrls(payload.d3VideoFrames, 8);
+    const videoFrames = sanitizePhotoUrls(payload.d3VideoFrames, WALK_FRAME_MAX);
     const found = await findStyleFor3D(styleValue, styleId);
     if (found.err) return found.err;
     if (found.style!.model_status === "locked") return json({ error: LOCKED_MSG }, 409);
@@ -3245,7 +3249,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // only knows about photos must not blank the frames.
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (Array.isArray(payload.d3Photos)) patch.d3_photos = sanitizePhotoUrls(payload.d3Photos, 12);
-    if (Array.isArray(payload.d3VideoFrames)) patch.d3_video_frames = sanitizePhotoUrls(payload.d3VideoFrames, 8);
+    if (Array.isArray(payload.d3VideoFrames)) patch.d3_video_frames = sanitizePhotoUrls(payload.d3VideoFrames, WALK_FRAME_MAX);
     if (Object.keys(patch).length === 1) return json({ ok: true, skipped: true });
     // The same version guard as save_style_d3, over only the columns this call writes.
     const decision = guardDecision({
@@ -3483,10 +3487,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     //
     // TWELVE is Carolyn's own number, 09-04 @13:53: "three from the back, three from this
     // side, one three from this side, and three from this side."
+    //
+    // A walk alone takes WALK_FRAME_MAX since 2026-09-24 (12, was 8): the self-check now compares
+    // the back and the far side too, and a lap of eight saw each side once. Combined stays 12 in
+    // TOTAL, frames and photos together. Each frame is image tokens, so this is also a cost change.
     const fromVideo = payload.source === "video";
     const combined = payload.source === "combined";
     const shapeFirst = fromVideo || combined;
-    const photoUrls = sanitizePhotoUrls(payload.photoUrls, combined ? 12 : fromVideo ? 8 : 4);
+    const photoUrls = sanitizePhotoUrls(payload.photoUrls, combined ? 12 : fromVideo ? WALK_FRAME_MAX : 4);
     // How many of the leading URLs are walk-around frames. Clamped to what actually survived the
     // sanitiser: a caller claiming ten frames out of a set the cap cut to eight would otherwise
     // have the prompt describe two photographs that are not there.
@@ -3742,15 +3750,28 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // ── THE MODEL CALL: bounded in tokens AND in time (2026-09-17) ──────────────────────
     // The model thinks adaptively, and max_tokens caps thinking and the answer TOGETHER. The
     // old 700/900 left a few hundred tokens beyond the JSON, so a reply that thought first
-    // could run out before writing it. 8000 gives the thinking room; effort "medium" keeps
+    // could run out before writing it. 8000 gave the thinking room; effort "medium" keeps
     // its depth (and latency) in check without switching it off, which the gambrel knee
     // arithmetic in the shape prompt benefits from.
     //
+    // 12000 SINCE 2026-09-24. One 09-21 generation in twelve was cut at 8000 after 103 s, and the
+    // v2 prompt asks for more (the front, the shed's high side, wings, the porch's height and
+    // width, three more colours, six frame-map views) out of more frames. At the ~78 tokens/s
+    // measured that day, 12000 is ~154 s — past the abort below. That is deliberate: the abort is
+    // the real bound on a runaway reply, and it is a clean, released, RETRYABLE failure; the
+    // budget only has to stop being the thing a normal long reply trips over.
+    //
     // The timeout is the other half. Supabase's gateway answers 504 on its own at 150 s of
     // silence, and that 504 is invisible to withErrorLog and leaves the wallet hold open until
-    // the stale sweep. 110 s leaves room to release the hold and say so. The same signal
-    // covers the body read, which is why the body is read inside this try: a reply that
-    // stalls mid-body is a timeout, not an "unparseable" spec.
+    // the stale sweep. 125 s (110 s until 2026-09-24) still leaves room to release the hold and
+    // say so. The same signal covers the body read, which is why the body is read inside this
+    // try: a reply that stalls mid-body is a timeout, not an "unparseable" spec.
+    //
+    // `lean: true` is the new browser's ONE automatic retry after a `retryable` failure (a cut-off
+    // or timed-out reply): same press, same idempotency key — the failed attempt released its hold,
+    // and a released key is reusable (248) — at effort "low", which thinks less and so fits. Only a
+    // real `true` counts; an older browser never sends it and keeps effort "medium".
+    const lean = payload.lean === true;
     const aiSource = combined ? "combined" : fromVideo ? "video" : "photos";
     const t0 = Date.now();
 
@@ -3795,7 +3816,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
     };
 
-    const aiSignal = AbortSignal.timeout(110_000);
+    const aiSignal = AbortSignal.timeout(125_000);
     let res: Response;
     let replyBody = "";
     try {
@@ -3807,9 +3828,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           model: "claude-sonnet-5",
           // Thinking and the answer share this. The video prompt's `observed` block rides on
           // top of the spec. A truncated reply is unparseable, not partially useful.
-          max_tokens: 8000,
+          max_tokens: 12000,
           thinking: { type: "adaptive" },
-          output_config: { effort: "medium" },
+          output_config: { effort: lean ? "low" : "medium" },
           messages: [{
             role: "user",
             content: [
@@ -3842,9 +3863,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         await logEdgeError({
           fn: "portal-settings", req, clientId, code: "ai_call_timeout",
           message: "The AI model did not answer within the time limit.",
-          context: { elapsedMs: Date.now() - t0, source: aiSource, frames: photoUrls.length },
+          context: { elapsedMs: Date.now() - t0, source: aiSource, frames: photoUrls.length, lean },
         });
-        const timedOut = json({ error: "The AI took too long to answer - please try again." }, 504);
+        // `retryable: true` (2026-09-24) is the machine-readable half of "please try again": the
+        // hold is released, so the same press may go again under the same key, and the new
+        // browser does exactly that ONCE, with `lean: true`. An older browser ignores the field and
+        // shows the sentence, exactly as before.
+        const timedOut = json({ error: "The AI took too long to answer - please try again.", retryable: true }, 504);
         filedAtReturnSite.add(timedOut);
         await usageLogged;
         return timedOut;
@@ -3872,6 +3897,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const replyShape = {
       stopReason: reply.stopReason, blockTypes: reply.blockTypes, outputTokens: reply.outputTokens,
       textChars: text.length, elapsedMs: Date.now() - t0, source: aiSource, frames: photoUrls.length,
+      // Whether this was the lean automatic retry — so a truncated retry is a query, not a guess.
+      lean,
     };
     // ── DRAFT USAGE: started here, awaited at each of the three returns below ─────────────
     // Every outcome that got a reply passes through this line — refused, truncated, unparseable
@@ -3916,7 +3943,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         message: truncated ? `Model reply was cut off at max_tokens: ${drafted.error}` : `Model reply did not parse: ${drafted.error}`,
         context: replyShape,
       });
-      const failed = json({ error: truncated ? "The AI ran out of room before finishing - please try again." : drafted.error }, 502);
+      // A cut-off reply is `retryable` (2026-09-24), like the timeout above: the hold is released
+      // and a lean retry thinks less, so it usually fits. An UNPARSEABLE reply is not marked: the
+      // same prompt on the same frames tends to fail the same way, and an automatic retry of it
+      // would spend a second model call on a known failure.
+      const failed = json(truncated
+        ? { error: "The AI ran out of room before finishing - please try again.", retryable: true }
+        : { error: drafted.error }, 502);
       filedAtReturnSite.add(failed);
       await draftUsageLogged;
       return failed;
@@ -3986,9 +4019,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // knownDimsNote joins them on the same day as dims themselves. It is silent unless a wall
     // height the BUILDER typed had to be clamped to what the renderer can draw — the one way
     // their own measurement can still lose, and the one the preview cannot explain by itself.
+    //
+    // The WINGS check joins them on 2026-09-24, for v2 generations ONLY — the ones with `dims`,
+    // because only the v2 prompt asks observed.wings. On the legacy no-dims path the question was
+    // never put, so the check would say "the reading never said" on every generation and turn
+    // every draft amber. Same posture as the porch check otherwise: flagged, never repaired.
     const observedRead = shapeFirst ? parseObservedNotes(text) : null;
     const observedNotes = shapeFirst
-      ? flagObservedNotes(observedRead, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead), knownDimsNote(dims))
+      ? flagObservedNotes(observedRead, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead), dims ? wingsAgreementWarning(drafted.d3.roof, observedRead) : null, knownDimsNote(dims))
       : null;
 
     // ── WHICH FRAME GOES WITH WHICH VIEW (2026-09-19) ────────────────────────────

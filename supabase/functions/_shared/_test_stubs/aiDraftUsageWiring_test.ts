@@ -42,7 +42,9 @@ function lift(start: string, end: string, what: string): { i: number; j: number;
 
 // The helper. Its signature is the only typed line and is the anchor, so the body is plain JS.
 const SIG = "    const recordDraftUsage = async (tokens: Record<string, unknown> | null) => {";
-const HELPER = lift(SIG, "\n    };\n\n    const aiSignal = AbortSignal.timeout(110_000);", "the recordDraftUsage helper");
+// The end anchor stops at the call, not at its number: the abort moved from 110 s to 125 s on
+// 2026-09-24, and a timeout is not what this test is about.
+const HELPER = lift(SIG, "\n    };\n\n    const aiSignal = AbortSignal.timeout(", "the recordDraftUsage helper");
 // The reply-site block that builds the shape and starts the write.
 const SITE_START = "    const draftUsage = data?.usage ?? {};";
 const SITE = lift(SITE_START, '    if (reply.stopReason === "refusal") {', "the draft-usage reply-site block");
