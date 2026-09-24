@@ -138,17 +138,18 @@ export function mergeDraft(prior, draft, source = "video") {
   }
 
   // calDraftRoof's clearing rules, 2026-09-24 keys included: whatever the draft is the authority
-  // on, it is the only source of. A reported porch brings its own attach height and width or
-  // none; a recessed porch has neither. A draft that reports a roof type decides the wings (no
+  // on, it is the only source of. A reported porch brings its own attach height and width (and,
+  // 2026-09-25, its posts, roof pitch and steps) or none; a recessed porch has none of them. A draft that reports a roof type decides the wings (no
   // wingWidthFt over 0 = no wings) and the frame (roof.front / roof.highSide), so a stored one
   // cannot turn the scored building a quarter turn away from what the draft measured.
   const roof = { ...(p.roof || {}), ...dr };
+  const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"];
   if ((dr.porchOutFt || 0) > 0.5) {
     delete roof.porchDepthFt; delete roof.porchTruss;
-    if (!("porchAttachFt" in dr)) delete roof.porchAttachFt;
-    if (!("porchWidthFt" in dr)) delete roof.porchWidthFt;
+    for (const k of own) if (!(k in dr)) delete roof[k];
   } else if ((dr.porchDepthFt || 0) > 0.5) {
-    delete roof.porchOutFt; delete roof.porchAttachFt; delete roof.porchWidthFt;
+    delete roof.porchOutFt;
+    for (const k of own) delete roof[k];
   }
   if (dr.type) {
     if (!((Number(dr.wingWidthFt) || 0) > 0)) {

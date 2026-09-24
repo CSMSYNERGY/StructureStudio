@@ -5129,7 +5129,19 @@ function d3EaveFinishDrop(roofCfg, ny) {
 //     the wall, when the style says so -- a porch roof a few feet under the eave with siding
 //     showing between. It replaces H - 0.2 and is still held under capY. Absent = today.
 //     S is the porch's own width (d3PorchSpan), which is the whole span unless porchWidthFt says.
-function d3PorchGeom(S, H, D, trimFace, capY, attachFt) {
+//   · framing (d3PorchFraming, 2026-09-25): the style's own post count and porch-roof pitch, each
+//     null when the style does not say, which is today's porch exactly.
+//       posts  that many posts, evenly spaced corner to corner, in place of the 8.5 ft rule -- but
+//              never so many that two would stand closer than a post's width apart (a 4 ft porch
+//              takes at most 5). `posts` is what is BUILT.
+//       pitch  asked for in place of 2:12, and still LOWERED, only as far as it must be, where it
+//              would leave less than 6'8" under the header: solved exactly here, because a given
+//              pitch runs up to 0.5, past where stack() may be read at 0.15. pitchClamped then
+//              says it was lowered, `short` says 0.05 was not enough, and hNeeded is the wall at
+//              which THAT pitch clears. pitchWant is added only when the style gives a pitch, so
+//              a porch without one returns exactly the keys it always did.
+function d3PorchGeom(S, H, D, trimFace, capY, attachFt, framing) {
+  const fr = framing || {};
   // Member sizes in feet: 6x6 posts, a doubled 2x8 header, 2x6 rafters, the roof sheet, the
   // ceiling boards, the roof's overhang past the posts and past each side, the sided cheek and
   // the board over the rafter tails.
@@ -5138,7 +5150,8 @@ function d3PorchGeom(S, H, D, trimFace, capY, attachFt) {
     OVP: 0.3, SIDE_OV: 0.08, CHEEK_T: 0.1, FAS_T: 0.1,
   };
   const { POST, HDR_H, HDR_D, RAF_D, PR_T, SHEATH, OVP } = sizes;
-  const MIN_CLEAR = 6.67, WANT = 2 / 12, POST_SPAN = 8.5, RAF_OC = 2;
+  const MIN_CLEAR = 6.67, POST_SPAN = 8.5, RAF_OC = 2;
+  const WANT = fr.pitch > 0 ? fr.pitch : 2 / 12;
   const dWall = D3.WALL_T / 2;                              // the gable wall's outer face
   const dPost = D - POST / 2;                               // post centres: outer faces on the deck edge
   const dEnd = D + OVP;                                     // the porch roof's front edge
@@ -5148,11 +5161,25 @@ function d3PorchGeom(S, H, D, trimFace, capY, attachFt) {
   const stack = (p) => (PR_T + SHEATH) * Math.sqrt(1 + p * p);   // roof sheet + ceiling, measured plumb
   const clearAt = (p) => yHigh - p * run - stack(p) - HDR_H;
   let pitch = WANT;
-  // stack() barely moves over the pitches this solves for (0.160 to 0.162), so it is read at 0.15.
-  if (clearAt(pitch) < MIN_CLEAR) pitch = Math.max(0.05, Math.min(pitch, (yHigh - stack(0.15) - HDR_H - MIN_CLEAR) / run));
+  if (clearAt(pitch) < MIN_CLEAR) {
+    if (fr.pitch > 0) {
+      // The steepest pitch at or under the style's that still clears: clearAt falls as the pitch
+      // rises, so bisect between the floor and the ask.
+      if (clearAt(0.05) < MIN_CLEAR) pitch = 0.05;
+      else {
+        let lo = 0.05, hi = WANT;
+        for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (clearAt(mid) >= MIN_CLEAR) lo = mid; else hi = mid; }
+        pitch = lo;
+      }
+    } else {
+      // stack() barely moves over the pitches this solves for (0.160 to 0.162), so it is read at 0.15.
+      pitch = Math.max(0.05, Math.min(pitch, (yHigh - stack(0.15) - HDR_H - MIN_CLEAR) / run));
+    }
+  }
   const hdrTop = yHigh - pitch * run - stack(pitch);
   const postH = Math.max(1, hdrTop - HDR_H);
-  const bays = Math.max(1, Math.ceil(S / POST_SPAN - 1e-6));
+  const postsMax = Math.max(2, 1 + Math.floor((2 * side - POST) / (2 * POST) + 1e-9));
+  const bays = fr.posts >= 2 ? Math.min(Math.round(fr.posts), postsMax) - 1 : Math.max(1, Math.ceil(S / POST_SPAN - 1e-6));
   return {
     pitch, pitchClamped: pitch < WANT - 1e-9, yHigh, postH, hdrTop,
     ceilWall: yHigh - (PR_T + SHEATH + RAF_D) * Math.sqrt(1 + pitch * pitch),   // rafter bottoms at the wall
@@ -5162,7 +5189,53 @@ function d3PorchGeom(S, H, D, trimFace, capY, attachFt) {
     short: postH < 6.66,
     hNeeded: MIN_CLEAR + HDR_H + stack(WANT) + WANT * run + 0.2,
     sizes,
+    ...(fr.pitch > 0 ? { pitchWant: WANT } : {}),
   };
+}
+// THE PORCH'S OWN FRAMING, AS THE STYLE GIVES IT (roof.porchPosts / porchPitch / porchSteps,
+// 2026-09-25), read once for the renderer and the panel's readout alike. Each is null when the
+// style does not say, and null is today's porch: the 8.5 ft post rule, the 2:12 solver, no steps.
+// Held to the sanitiser's bands here too, so raw data outside them draws what Save would store.
+const D3_PORCH_STEP_SIDES = ["left", "center", "right"];
+function d3PorchFraming(roofCfg) {
+  const cfg = roofCfg || {};
+  const n = Math.round(Number(cfg.porchPosts));
+  const k = Number(cfg.porchPitch);
+  return {
+    posts: isFinite(n) && n >= 2 ? Math.min(8, n) : null,
+    pitch: isFinite(k) && k > 0 ? Math.max(0.05, Math.min(0.5, k)) : null,
+    steps: D3_PORCH_STEP_SIDES.indexOf(cfg.porchSteps) >= 0 ? cfg.porchSteps : null,
+  };
+}
+// THE PORCH'S STEPS (roof.porchSteps, 2026-09-25), in the porch's own frame, or null without them:
+// x across the porch from its middle, POSITIVE to the right of someone standing in front of the
+// porch facing it (the frame the porch groups are built in: its z runs out toward that person, so
+// their right is +x whichever wall the porch is on); d out from the wall's mid-plane.
+//   where   left / center / right along the deck's FRONT edge (d = D, the posts' outer faces).
+//           Left and right are centred in the outermost bay on that side, between two posts; with
+//           a single bay they stand against that corner post instead. Center is the porch's
+//           middle, which is the middle bay's when there is one; with an even number of bays a
+//           post stands there, at the top of the steps, because posts are a rule (as in front of
+//           a door).
+//   w       3.5 ft, or the clear gap between two posts where that is narrower.
+//   count   ceil(deck height above grade / 7.5 in), at least 1: the number of STEPS (treads). The
+//           climb from grade to the deck is count + 1 risers, each h / (count + 1), so no riser
+//           tops 7.5 in. The deck is the floor (y 0) and grade is -D3.FLOOR_T, so today's porch
+//           gets one step, 2.1 in up, then 2.1 in onto the deck.
+//   tread   11 in deep, the treads running out from the deck's edge.
+function d3PorchStepsGeom(g, D, where) {
+  if (!g || D3_PORCH_STEP_SIDES.indexOf(where) < 0) return null;
+  const POST = g.sizes.POST;
+  const h = D3.FLOOR_T;                                     // deck top (the floor, y 0) above grade
+  const count = Math.max(1, Math.ceil(h / 0.625 - 1e-9));
+  const rise = h / (count + 1);
+  const tread = 11 / 12;
+  const outer = g.side - POST / 2;                          // the corner posts' centres
+  const pitchX = (2 * outer) / g.bays;                      // post centre to post centre
+  const w = Math.min(3.5, pitchX - POST);
+  const s = where === "left" ? -1 : 1;
+  const x = where === "center" ? 0 : g.bays > 1 ? s * (outer - pitchX / 2) : s * (g.side - POST - w / 2);
+  return { where, x, w, count, rise, tread, d0: D, grade: -h };
 }
 // THE CEILING THE BUILDING ITSELF PUTS OVER A PROJECTING PORCH'S ROOF (2026-09-24 review), in feet off
 // the floor, or Infinity with no projecting porch. ONE function, read by buildShed3DModel and by the
@@ -5263,13 +5336,17 @@ function d3PorchReadout(spec, sizeLabel) {
   const top = d3PorchWallTopFt(roof, w, d, H);
   const attachFt = Number(roof.porchAttachFt) || 0;
   const trimFace = D3.WALL_T / 2 + 0.03;
-  const g = d3PorchGeom(S, top, porch.D, trimFace, d3PorchCapFt(roof, w, d, H, trimFace), attachFt);
+  // The style's post count, porch-roof pitch and steps (2026-09-25), exactly as the renderer reads
+  // them, so `posts` and `pitch` below are the ones built.
+  const framing = d3PorchFraming(roof);
+  const g = d3PorchGeom(S, top, porch.D, trimFace, d3PorchCapFt(roof, w, d, H, trimFace), attachFt, framing);
   const ovRaw = roof.overhang != null ? Number(roof.overhang) : D3.OVERHANG;
   const onCap = d3PorchSpan(roof, w, d).onCap;
   const atMost = onCap ? (isFinite(ovRaw) ? ovRaw : D3.OVERHANG) > D3.WALL_T / 2 + 0.005 : (Number(roof.leanToWidthFt) || 0) > 0.5;
   // With porchAttachFt set it is the ATTACH height, not the wall, that decides the headroom, so the
   // panel's suggestion is where to hang the porch roof: hNeeded is a wall top, 0.2 above that.
-  return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2, atMost };
+  return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2, atMost,
+    framing, steps: d3PorchStepsGeom(g, porch.D, framing.steps) };
 }
 
 // A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
@@ -8790,7 +8867,10 @@ function buildShed3DModel(THREE, p) {
     const uOut = mass.S / 2 - eaveS * mass.uc;                 // the outer eave wall's line, in rg's u
     const topH = d3PorchWallTopFt(roofCfg, bldgW, bldgH, H);
     const attachFt = Number(roofCfg.porchAttachFt) || 0;
-    const g0 = d3PorchGeom(span, topH, D, trimFace, Infinity, attachFt);
+    // The style's post count, porch-roof pitch and steps (d3PorchFraming, 2026-09-25): all null on
+    // every style that does not give them, which builds today's porch exactly.
+    const framing = d3PorchFraming(roofCfg);
+    const g0 = d3PorchGeom(span, topH, D, trimFace, Infinity, attachFt, framing);
     const reach = g0.side + g0.sizes.SIDE_OV;
     const zFace = atZero ? -(g0.dWall + 0.005) : L + g0.dWall + 0.005;
     const overPorch = onCap
@@ -8839,7 +8919,7 @@ function buildShed3DModel(THREE, p) {
     // And under the ceiling the building itself sets (d3PorchCapFt, which the panel's readout reads
     // too): the outline in the wall's own plane, which nothing above measures on a flush roof, and on
     // an eave wall the eave over it. On every stored style that is H - 0.2, where the porch already is.
-    const geom = d3PorchGeom(span, topH, D, trimFace, Math.min(capY, d3PorchCapFt(roofCfg, bldgW, bldgH, H, trimFace)), attachFt);
+    const geom = d3PorchGeom(span, topH, D, trimFace, Math.min(capY, d3PorchCapFt(roofCfg, bldgW, bldgH, H, trimFace)), attachFt, framing);
     const { POST, HDR_H, HDR_D, RAF_W, RAF_D, PR_T, SHEATH, SIDE_OV, CHEEK_T, FAS_T } = geom.sizes;
     const { pitch, yHigh, side, dWall, dPost, dEnd } = geom;
     const ang = Math.atan(pitch), cosA = Math.cos(ang), sinA = Math.sin(ang);
@@ -8886,7 +8966,7 @@ function buildShed3DModel(THREE, p) {
     pg.add(part(hdr, "header"));
     // Posts, evenly spaced, the outer two flush with the corner boards. A centre post may stand in
     // front of a door: posts are a rule, not item-aware, because items move in scoped rebuilds that
-    // never rebuild the roof.
+    // never rebuild the roof. How many is geom.bays + 1: the 8.5 ft rule, or roof.porchPosts.
     for (let i = 0; i <= geom.bays; i++) {
       const post = box(woodMat, POST, geom.postH, POST);
       post.position.set(-(side - POST / 2) + (i * 2 * (side - POST / 2)) / geom.bays, geom.postH / 2, dPost);
@@ -8976,6 +9056,53 @@ function buildShed3DModel(THREE, p) {
     const under = box(mat("#3B3024", { roughness: 1 }), 2 * side - 2 * RIM_T, 0.02, D - dWall - RIM_T);
     under.position.set(0, -DECK_T - 0.06, (dWall + D - RIM_T) / 2);
     deck.add(part(under, "deckVoid"));
+    // STEPS (roof.porchSteps, 2026-09-25): off the deck's FRONT edge, standing on the grass, every
+    // number d3PorchStepsGeom's. Lumber like the deck: a tread per step, a closed riser under each,
+    // and a stringer either side cut to the steps' outline. Their own group in the deck group, so
+    // they sit with the floor (look-inside keeps them) and turn with the porch onto its wall;
+    // tagged ssPorchPart "steps" with the side in ssPorchSteps, so anything that places things
+    // against the deck's edge (the harness, a ramp on that wall) can find them. Nothing is built
+    // without the key, so every porch before it is unchanged.
+    const stepsGeom = d3PorchStepsGeom(geom, D, framing.steps);
+    if (stepsGeom) {
+      const { x: sx, w: sw, count, rise, tread, d0, grade } = stepsGeom;
+      const TREAD_T = Math.min(0.09, rise * 0.6), STR_T = 0.125, RISER_T = 0.06, NOSE = 0.03, EPS = 0.005;
+      const topOf = (k) => grade + (count + 1 - k) * rise;          // k = 1 is the step next to the deck
+      const frontOf = (k) => d0 + EPS + k * tread;                  // its front edge, out from the wall
+      const st = new THREE.Group();
+      st.userData.ssPorchPart = "steps";
+      st.userData.ssPorchSteps = stepsGeom.where;
+      for (let k = 1; k <= count; k++) {
+        const t = box(woodMat, sw, TREAD_T, tread);
+        t.position.set(sx, topOf(k) - TREAD_T / 2, frontOf(k) - tread / 2);
+        st.add(part(t, "stepTread"));
+        const rh = topOf(k) - TREAD_T - grade;
+        if (rh > 0.005) {
+          const r = box(woodMat, sw - 2 * STR_T - 0.02, rh, RISER_T);
+          r.position.set(sx, grade + rh / 2, frontOf(k) - NOSE - RISER_T / 2);
+          st.add(part(r, "stepRiser"));
+        }
+      }
+      // The stringer's outline, shape x = d and y = up: along the grass to the bottom step's riser,
+      // then up and back under each tread in turn to the deck's edge.
+      const sh = new THREE.Shape();
+      sh.moveTo(d0 + EPS, grade);
+      sh.lineTo(frontOf(count) - NOSE, grade);
+      for (let k = count; k >= 1; k--) {
+        sh.lineTo(frontOf(k) - NOSE, topOf(k) - TREAD_T);
+        sh.lineTo(k > 1 ? frontOf(k - 1) - NOSE : d0 + EPS, topOf(k) - TREAD_T);
+      }
+      const sg = new THREE.ExtrudeGeometry(sh, { depth: STR_T, bevelEnabled: false });
+      for (const s of [-1, 1]) {
+        const str = new THREE.Mesh(s > 0 ? sg : sg.clone(), woodMat);
+        str.rotation.y = -Math.PI / 2;                    // shape x -> d, extrusion -> -x
+        // Outer faces 0.01 inside the treads' ends, so the two never share a plane.
+        str.position.x = s > 0 ? sx + sw / 2 - 0.01 : sx - sw / 2 + 0.01 + STR_T;
+        st.add(part(str, "stringer"));
+      }
+      deck.add(st);
+      geom.steps = stepsGeom;
+    }
     // A cap end: out along local z from z = 0 or L, centred at cxU across it (centerU in rg's u). An
     // eave wall: out along u from the outer wall at u = eaveS x uOut, a quarter turn so the porch's
     // across axis runs down the ridge, centred at zMid.
@@ -15796,6 +15923,13 @@ function ssDrewWords(spec) {
     const width = Number(roof.porchWidthFt) > 0 ? `, ${ssFtInWords(Number(roof.porchWidthFt))} wide` : "";
     const attach = Number(roof.porchAttachFt) > 0 ? `, and its roof meets the wall ${ssFtInWords(Number(roof.porchAttachFt))} up` : "";
     out.push(`The porch stands ${ssFtInWords(outFt)} out from the ${end} ${face}${width}${attach}.`);
+    // Its own framing (2026-09-25), only where the style gives it: absent is the renderer's rule.
+    const built = [];
+    if (Number(roof.porchPosts) >= 2) built.push(`${Math.round(Number(roof.porchPosts))} posts`);
+    if (Number(roof.porchPitch) > 0) built.push(`a roof sloping ${Math.round(Number(roof.porchPitch) * 120) / 10} in 12`);
+    const stepsAt = ({ left: "on the left", center: "in the middle", right: "on the right" })[roof.porchSteps];
+    if (stepsAt) built.push(`steps ${stepsAt}`);
+    if (built.length) out.push(`It has ${built.length > 1 ? built.slice(0, -1).join(", ") + " and " + built[built.length - 1] : built[0]}.`);
   } else if (inFt > 0.5) {
     out.push(`The porch is cut ${ssFtInWords(inFt)} into the ${end} ${face}.`);
   }
@@ -15841,6 +15975,10 @@ const SS_CHANGE_WORDS = {
   "roof.wingWidthFt": ["How wide each lower wing is", (v) => (Number(v) > 0 ? ssFtInWords(Number(v)) : "no wings")],
   "roof.wingPitch": ["How steep the wing roofs are", (v) => `${Math.round(Number(v) * 12)} in 12`],
   "roof.centerEaveFt": ["How tall the middle section's walls are", (v) => ssFtInWords(Number(v))],
+  // The porch's own framing (2026-09-25), in the words the porch controls use.
+  "roof.porchPosts": ["How many posts the porch has", (v) => `${Math.round(Number(v))} posts`],
+  "roof.porchPitch": ["How steep the porch roof is", (v) => `${Math.round(Number(v) * 120) / 10} in 12`],
+  "roof.porchSteps": ["Where the porch steps are", (v) => ({ left: "on the left", center: "in the middle", right: "on the right" })[String(v)] || String(v)],
   gableVent: ["The vent in the gable", (v) => (v && v.widthFrac > 0 ? "there" : "not there")],
   foundation: ["What it sits on", (v) => (String(v) === "skids" ? "runners" : "a slab")],
   roofMaterial: ["What the roof is made of", (v) => String(v)],
@@ -19684,6 +19822,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // is read first here too, and the select shows what the preview draws.
   const calPorchKind = (roof) => (((roof && roof.porchOutFt) || 0) > 0.5 ? "projecting"
     : ((roof && roof.porchDepthFt) || 0) > 0.5 ? "recessed" : "none");
+  // What only a PROJECTING porch has: where its roof meets the wall, its width, its posts, its
+  // roof pitch and its steps. The sanitiser keeps each only while porchOutFt is over 0.5.
+  const CAL_PORCH_OWN_KEYS = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"];
   // Switches the kind, or sets the depth of the one that is on. The other kind's key is DELETED, not
   // written as 0, so a row carries only the porch it has:
   //   none        deletes both depths. porchEnd stays, so a porch turned back on keeps its end.
@@ -19702,8 +19843,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (kind === "projecting") { roof.porchOutFt = d; delete roof.porchTruss; }
     // Where a projecting porch's roof meets the wall, and how wide it is, belong to a projecting
     // porch only (2026-09-24): the sanitiser keeps them only while porchOutFt is over 0.5, so on
-    // any other kind they would draw in the preview and vanish on Save.
-    else { delete roof.porchAttachFt; delete roof.porchWidthFt; }
+    // any other kind they would draw in the preview and vanish on Save. Its posts, its roof's pitch
+    // and its steps (2026-09-25) are the projecting porch's too.
+    else { for (const k of CAL_PORCH_OWN_KEYS) delete roof[k]; }
     return { ...p, spec: { ...p.spec, roof } };
   });
   // roof.plateBand: checked writes true, unchecked DELETES the key. Writing false would park
@@ -19826,7 +19968,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   //   porchAttachFt / porchWidthFt  describe ONE projecting porch. A draft that reports a porch
   //       brings its own or none, so a stored attach height never lands on a porch it was not
   //       measured on -- and a recessed porch has neither (the sanitiser keeps them only while
-  //       porchOutFt is over 0.5).
+  //       porchOutFt is over 0.5). porchPosts / porchPitch / porchSteps (2026-09-25) are that
+  //       porch's own framing and follow the same rule.
   //   wings  a shape draft always decides them (observed.wings is a required answer), so a draft
   //       that reports a roof and no wings means NO wings, not "keep the stored ones". Otherwise a
   //       redraft of a plain gable would go on drawing the last draft's wings.
@@ -19836,12 +19979,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calDraftRoof = (stored, drafted) => {
     const dr = drafted || {};
     const roof = { ...stored, ...dr };
+    const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"];
     if ((dr.porchOutFt || 0) > 0.5) {
       delete roof.porchDepthFt; delete roof.porchTruss;
-      if (!("porchAttachFt" in dr)) delete roof.porchAttachFt;
-      if (!("porchWidthFt" in dr)) delete roof.porchWidthFt;
+      for (const k of own) if (!(k in dr)) delete roof[k];
     } else if ((dr.porchDepthFt || 0) > 0.5) {
-      delete roof.porchOutFt; delete roof.porchAttachFt; delete roof.porchWidthFt;
+      delete roof.porchOutFt;
+      for (const k of own) delete roof[k];
     }
     if (dr.type) {
       if (!((Number(dr.wingWidthFt) || 0) > 0)) {
@@ -21148,7 +21292,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // The 2026-09-24 keys are in the slice of the question whose panel sets them: which way the
     // building faces and the wings are the ROOF's shape, the attach height and width the PORCH's.
     if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt]);
-    if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt]);
+    if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps]);
     if (key === "walls") return String(spec.wallHeightFt);
     return JSON.stringify([spec.colors, spec.roofMaterial]);
   };
@@ -21388,6 +21532,27 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <input className="ssc-dim-in" type="number" step="0.5" min="4" max="60" inputMode="decimal" placeholder="the whole wall"
                   {...calOptNumProps("ssc-fix-porchWidthFt", roof.porchWidthFt, [4, 60], (n) => calSetRoofOpt("porchWidthFt", n))}
                   style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
+              </label>
+              {/* ITS POSTS, ITS ROOF'S SLOPE AND ITS STEPS (2026-09-25). Blank is the renderer's own
+                  answer (a post every 8.5 ft, a 2 in 12 roof, no steps) and is stored as nothing. */}
+              <label style={calFixLabel}>Posts along its front
+                <input className="ssc-dim-in" type="number" step="1" min="2" max="8" inputMode="numeric" placeholder="one every 8.5 ft"
+                  {...calOptNumProps("ssc-fix-porchPosts", roof.porchPosts, [2, 8], (n) => calSetRoofOpt("porchPosts", n == null ? null : Math.round(n)))}
+                  style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
+              </label>
+              <label style={calFixLabel}>Its roof's slope (in 12)
+                <input className="ssc-dim-in" type="number" step="0.25" min="0.6" max="6" inputMode="decimal" placeholder="2 in 12"
+                  {...calOptNumProps("ssc-fix-porchPitch", roof.porchPitch == null ? null : Math.round(Number(roof.porchPitch) * 1200) / 100, [0.6, 6], (n) => calSetRoofOpt("porchPitch", n == null ? null : n / 12))}
+                  style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
+              </label>
+              <label style={calFixLabel}>Steps off its front
+                <select value={roof.porchSteps || ""} onChange={(e) => calSetRoofOpt("porchSteps", e.target.value)}
+                  style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }}>
+                  <option value="">No steps</option>
+                  <option value="left">On the left</option>
+                  <option value="center">In the middle</option>
+                  <option value="right">On the right</option>
+                </select>
               </label>
             </div>
           )}
@@ -24050,17 +24215,30 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           ) : (
                             <div style={hint}>Stands in front of the building. The size and the price do not change.</div>
                           )}
-                          {pr && (
-                            <div style={{ ...hint, color: warn ? "#B45309" : "#A16207" }}>
-                              {warn
-                                ? (pr.attachFt != null
-                                  // With the attach height set it is THAT, not the wall, that decides the
-                                  // headroom, so the suggestion is where to hang the porch roof.
-                                  ? `Hung at ${d3FtIn(pr.attachFt)}, the porch roof leaves ${d3FtIn(pr.postH)} under the beam. About ${d3FtIn(pr.attachNeeded)} up gives a door's height at 2:12`
-                                  : `Walls this short leave ${d3FtIn(pr.postH)} under the porch beam. About ${d3FtIn(pr.hNeeded)} walls give a door's height at 2:12`)
-                                : `Posts ${d3FtIn(pr.postH)} clear, porch roof meets the wall at ${d3FtIn(pr.yHigh)} on ${sel.size || "this size"}${pr.atMost ? ", or a little lower where the main roof's edge reaches over the porch" : ""}`}
-                            </div>
-                          )}
+                          {pr && (() => {
+                            // THE PORCH'S OWN FRAMING (2026-09-25). Where the style gives a pitch, the
+                            // suggestions are for THAT pitch, not 2:12, and a pitch the renderer had to
+                            // lower to keep a door's height under the beam says so on its own line.
+                            // Where it gives a post count or a pitch, the line ends with what is built.
+                            // Without either, every word is what it always was.
+                            const in12 = (p) => `${Math.round(p * 12 * 10) / 10}:12`;
+                            const want = in12(pr.pitchWant || 2 / 12);
+                            const lowered = pr.pitchWant && pr.pitchClamped && !pr.short;
+                            const built = (pr.framing.posts || pr.framing.pitch) ? `. ${pr.posts} posts, porch roof ${in12(pr.pitch)}` : "";
+                            return (
+                              <div style={{ ...hint, color: warn ? "#B45309" : "#A16207" }}>
+                                {warn
+                                  ? (lowered
+                                    ? `Porch roof lowered to ${in12(pr.pitch)} from ${want}, to keep ${d3FtIn(pr.postH)} under the beam. ${pr.posts} posts`
+                                    : pr.attachFt != null
+                                    // With the attach height set it is THAT, not the wall, that decides the
+                                    // headroom, so the suggestion is where to hang the porch roof.
+                                    ? `Hung at ${d3FtIn(pr.attachFt)}, the porch roof leaves ${d3FtIn(pr.postH)} under the beam. About ${d3FtIn(pr.attachNeeded)} up gives a door's height at ${want}`
+                                    : `Walls this short leave ${d3FtIn(pr.postH)} under the porch beam. About ${d3FtIn(pr.hNeeded)} walls give a door's height at ${want}`)
+                                  : `Posts ${d3FtIn(pr.postH)} clear, porch roof meets the wall at ${d3FtIn(pr.yHigh)} on ${sel.size || "this size"}${pr.atMost ? ", or a little lower where the main roof's edge reaches over the porch" : ""}${built}`}
+                              </div>
+                            );
+                          })()}
                         </label>
                       )}
                       {kind !== "none" && (
@@ -24094,6 +24272,38 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                             {...calOptNumProps("porchWidthFt", roof.porchWidthFt, [4, 60], (n) => calSetRoofOpt("porchWidthFt", n))}
                             style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                           <div style={hint}>Along its wall, centred on it.</div>
+                        </label>
+                      )}
+                      {/* THE PORCH'S OWN FRAMING (2026-09-25), projecting only like the two above: how
+                          many posts stand along its front edge (corners included), its roof's own
+                          slope, and where steps leave its deck. Blank is the renderer's own answer --
+                          a post every 8.5 ft or less, a 2 in 12 roof lowered only to keep a door's
+                          height under the beam, no steps -- and is stored as nothing. */}
+                      {kind === "projecting" && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch posts
+                          <input type="number" step="1" min="2" max="8" placeholder="blank = one every 8.5 ft"
+                            {...calOptNumProps("porchPosts", roof.porchPosts, [2, 8], (n) => calSetRoofOpt("porchPosts", n == null ? null : Math.round(n)))}
+                            style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                          <div style={hint}>Along its front edge, the corner posts included, evenly spaced.</div>
+                        </label>
+                      )}
+                      {kind === "projecting" && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch roof pitch (in 12)
+                          <input type="number" step="0.25" min="0.6" max="6" placeholder="blank = 2 in 12"
+                            {...calOptNumProps("porchPitch", roof.porchPitch == null ? null : Math.round(Number(roof.porchPitch) * 1200) / 100, [0.6, 6], (n) => calSetRoofOpt("porchPitch", n == null ? null : n / 12))}
+                            style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                          <div style={hint}>Lowered only where a door's height would not fit under the beam.</div>
+                        </label>
+                      )}
+                      {kind === "projecting" && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch steps
+                          <select value={roof.porchSteps || ""} onChange={(e) => calSetRoofOpt("porchSteps", e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                            <option value="">None</option>
+                            <option value="left">Left</option>
+                            <option value="center">Center</option>
+                            <option value="right">Right</option>
+                          </select>
+                          <div style={hint}>Off the deck's front edge, as seen standing in front of the porch.</div>
                         </label>
                       )}
                       {/* Gable only: the renderer draws the truss on a gable roof and nowhere else,

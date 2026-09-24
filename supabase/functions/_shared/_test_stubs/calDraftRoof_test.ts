@@ -81,6 +81,21 @@ Deno.test("⚠️ a stored porch attach height never lands on a porch it was not
   assertEquals([quiet.porchOutFt, quiet.porchAttachFt, quiet.porchWidthFt], [4, 7.5, 16]);
 });
 
+Deno.test("⚠️ the porch's posts, roof pitch and steps follow the attach height's rule (2026-09-25)", () => {
+  const stored = { type: "shed", porchOutFt: 4, porchPosts: 4, porchPitch: 0.25, porchSteps: "left" };
+  // A redraft reporting a projecting porch brings its own framing or none.
+  const fresh = calDraftRoof(stored, { type: "shed", porchOutFt: 5 });
+  for (const k of ["porchPosts", "porchPitch", "porchSteps"]) assert(!has(fresh, k), `${k} survived: ${JSON.stringify(fresh)}`);
+  const own = calDraftRoof(stored, { type: "shed", porchOutFt: 5, porchPosts: 3, porchSteps: "right" });
+  assertEquals([own.porchPosts, own.porchSteps, has(own, "porchPitch")], [3, "right", false]);
+  // The porch stops projecting: none of it is left behind.
+  const recessed = calDraftRoof(stored, { type: "shed", porchDepthFt: 4 });
+  for (const k of ["porchPosts", "porchPitch", "porchSteps", "porchOutFt"]) assert(!has(recessed, k), `${k} survived: ${JSON.stringify(recessed)}`);
+  // A draft silent about the porch keeps all of it.
+  const quiet = calDraftRoof(stored, { type: "shed" });
+  assertEquals([quiet.porchPosts, quiet.porchPitch, quiet.porchSteps], [4, 0.25, "left"]);
+});
+
 Deno.test("⚠️ A REDRAFT THAT REPORTS NO WINGS CLEARS THE STORED ONES", () => {
   const stored = { type: "gable", wingSide: "both", wingWidthFt: 8, wingPitch: 0.25, centerEaveFt: 16 };
   const plain = calDraftRoof(stored, { type: "gable", pitch: 0.5 });
@@ -115,6 +130,9 @@ Deno.test("dev/score.mjs's mergeDraft clears exactly what calDraftRoof clears", 
     [{ type: "shed", porchOutFt: 4, porchAttachFt: 7.5, porchWidthFt: 16 }, { type: "shed", porchOutFt: 5, porchAttachFt: 8 }],
     [{ type: "shed", porchOutFt: 4, porchAttachFt: 7.5, porchWidthFt: 16 }, { type: "shed", porchDepthFt: 4 }],
     [{ type: "shed", porchOutFt: 4, porchAttachFt: 7.5, porchWidthFt: 16 }, { type: "shed" }],
+    [{ type: "shed", porchOutFt: 4, porchPosts: 4, porchPitch: 0.25, porchSteps: "left" }, { type: "shed", porchOutFt: 5, porchPosts: 3 }],
+    [{ type: "shed", porchOutFt: 4, porchPosts: 4, porchPitch: 0.25, porchSteps: "left" }, { type: "shed", porchDepthFt: 4 }],
+    [{ type: "shed", porchOutFt: 4, porchPosts: 4, porchPitch: 0.25, porchSteps: "left" }, { type: "shed" }],
     [{ type: "gable", wingSide: "both", wingWidthFt: 8, wingPitch: 0.25, centerEaveFt: 16 }, { type: "gable", pitch: 0.5 }],
     [{ type: "gable", wingSide: "both", wingWidthFt: 8, centerEaveFt: 16 }, { type: "gable", wingSide: "left", wingWidthFt: 6 }],
     [{ type: "gable", front: "eave" }, { type: "gable" }],

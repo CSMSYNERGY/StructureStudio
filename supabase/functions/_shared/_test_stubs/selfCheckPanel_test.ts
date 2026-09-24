@@ -361,6 +361,21 @@ Deno.test("⚠️ every new roof key the check may correct has words, ahead of t
   assertEquals(F.ssChangeLine({ field: "roof.wingSide", from: "left", to: "both", why: "" }).text, "the left side → both sides");
 });
 
+Deno.test("the porch's posts, pitch and steps (2026-09-25) read in the porch controls' words", () => {
+  assertEquals(F.ssChangeLine({ field: "roof.porchPosts", from: 3, to: 4, why: "" }).text, "3 posts → 4 posts");
+  assertEquals(F.ssChangeLine({ field: "roof.porchPitch", from: null, to: 0.25, why: "" }).text, "not set → 3 in 12");
+  assertEquals(F.ssChangeLine({ field: "roof.porchSteps", from: "left", to: "center", why: "" }).text, "on the left → in the middle");
+  for (const k of ["roof.porchPosts", "roof.porchPitch", "roof.porchSteps"]) {
+    const line = F.ssChangeLine({ field: k, from: null, to: null, why: "" });
+    assert(line.label !== k && !/[a-z][A-Z]/.test(line.label), `${k} is shown as ${line.label}`);
+  }
+  // 'What we drew' says them only where the style gives them.
+  const farm = F.ssDrewWords({ roof: { type: "shed", highSide: "front", porchOutFt: 4, porchPosts: 3, porchPitch: 0.2, porchSteps: "right" } });
+  assertStringIncludes(farm, "It has 3 posts, a roof sloping 2.4 in 12 and steps on the right.");
+  assertStringIncludes(F.ssDrewWords({ roof: { type: "shed", porchOutFt: 4, porchSteps: "center" } }), "It has steps in the middle.");
+  assert(!/It has/.test(F.ssDrewWords({ roof: { type: "shed", highSide: "front", porchOutFt: 4 } })), "nothing said where nothing is given");
+});
+
 Deno.test("'What we drew' names the high side, the front, the wings and the porch wall", () => {
   // Farmstand: a one-slant roof high at the front, a porch on that wall meeting it low.
   const farm = F.ssDrewWords({ roof: { type: "shed", highSide: "front", porchOutFt: 4, porchEnd: "front", porchAttachFt: 7.5, porchWidthFt: 16 } });

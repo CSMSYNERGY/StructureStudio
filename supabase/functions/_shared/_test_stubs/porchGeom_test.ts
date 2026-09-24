@@ -53,7 +53,7 @@ Deno.test("every lifted porch region is byte-identical in the two twins", () => 
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
-const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, d3PorchCapFt, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3WallTops, d3PorchWallTopFt, d3NewFrame, d3Massing, d3EaveFinishDrop };`)() as Record<string, Any>;
+const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, d3PorchCapFt, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3WallTops, d3PorchWallTopFt, d3NewFrame, d3Massing, d3EaveFinishDrop, d3PorchFraming, d3PorchStepsGeom };`)() as Record<string, Any>;
 
 const PANEL_TRIM = 0.18;   // trimFace on panel cladding: T/2 + 0.03
 
@@ -327,4 +327,107 @@ Deno.test("with wings a centre porch hangs under the wing roofs its sheet reache
   // A gable-end porch whose roof reaches out past the wall: the renderer measures that, the panel says "at most".
   assertEquals(r.atMost, true);
   assertEquals(F.d3PorchReadout({ roof: { ...roof, overhang: 0 }, wallHeightFt: 9 }, "28x20").atMost, false);
+});
+
+// ── THE PORCH'S OWN FRAMING (roof.porchPosts / porchPitch / porchSteps, 2026-09-25) ────────────────
+// Each is null when the style does not say, and null builds today's porch exactly: the same numbers,
+// and the same KEYS (model.porch is d3PorchGeom's object, and the legacy snapshot hashes it).
+
+Deno.test("d3PorchFraming reads the three keys inside the sanitiser's bands, and null where absent", () => {
+  assertEquals(F.d3PorchFraming({}), { posts: null, pitch: null, steps: null });
+  assertEquals(F.d3PorchFraming(null), { posts: null, pitch: null, steps: null });
+  assertEquals(F.d3PorchFraming({ porchPosts: 4, porchPitch: 0.25, porchSteps: "left" }), { posts: 4, pitch: 0.25, steps: "left" });
+  assertEquals(F.d3PorchFraming({ porchPosts: 3.6, porchPitch: 0.9, porchSteps: "middle" }), { posts: 4, pitch: 0.5, steps: null });
+  assertEquals(F.d3PorchFraming({ porchPosts: 1, porchPitch: 0.01 }), { posts: null, pitch: 0.05, steps: null });
+  assertEquals(F.d3PorchFraming({ porchPosts: 40, porchPitch: "junk", porchSteps: "center" }), { posts: 8, pitch: null, steps: "center" });
+});
+
+Deno.test("⚠️ no framing is today's porch: the same numbers AND the same keys", () => {
+  for (const [S, H, D] of [[16, 9, 6.5], [16, 8, 6.5], [16, 7, 6.5], [10, 9.8, 4], [24, 12, 8]]) {
+    const today = F.d3PorchGeom(S, H, D, PANEL_TRIM, Infinity, 0);
+    for (const fr of [undefined, null, {}, F.d3PorchFraming({})]) {
+      const g = F.d3PorchGeom(S, H, D, PANEL_TRIM, Infinity, 0, fr);
+      assertEquals(JSON.stringify(g), JSON.stringify(today), `${S}x${H}x${D} ${JSON.stringify(fr)}`);
+    }
+    assert(!("pitchWant" in today), "no pitchWant key without a pitch");
+  }
+});
+
+Deno.test("porchPosts: that many posts, evenly spaced, but never closer than a post's width apart", () => {
+  const g = F.d3PorchGeom(16, 9, 4, PANEL_TRIM, Infinity, 0, { posts: 4 });
+  assertEquals([g.posts, g.bays], [4, 3]);
+  assertEquals(F.d3PorchGeom(16, 9, 4, PANEL_TRIM, Infinity, 0, { posts: 2 }).posts, 2, "two corners on a 16 ft porch");
+  assertEquals(F.d3PorchGeom(16, 9, 4, PANEL_TRIM, Infinity, 0, { posts: 8 }).posts, 8);
+  // A 4 ft porch holds at most 5: the gap between two posts stays a post's width.
+  const narrow = F.d3PorchGeom(4, 9, 4, PANEL_TRIM, Infinity, 0, { posts: 8 });
+  assertEquals(narrow.posts, 5);
+  const gap = (2 * (narrow.side - narrow.sizes.POST / 2)) / narrow.bays - narrow.sizes.POST;
+  assert(gap >= narrow.sizes.POST - 1e-9, `gap ${gap}`);
+  // The post count moves nothing else.
+  const a = F.d3PorchGeom(16, 9, 4, PANEL_TRIM, Infinity, 0), b = F.d3PorchGeom(16, 9, 4, PANEL_TRIM, Infinity, 0, { posts: 6 });
+  for (const k of ["pitch", "yHigh", "postH", "hdrTop", "ceilWall", "nRaf", "side", "dPost", "dEnd"]) assertEquals(b[k], a[k], k);
+});
+
+Deno.test("porchPitch: asked for, kept where it clears 6'8\", lowered only as far as it must be", () => {
+  // Plenty of wall: the style's pitch, exactly, and not flagged.
+  const tall = F.d3PorchGeom(16, 12, 4, PANEL_TRIM, Infinity, 10, { pitch: 0.25 });
+  assertEquals([tall.pitch, tall.pitchClamped, tall.short, tall.pitchWant], [0.25, false, false, 0.25]);
+  // The roof's top plane falls by exactly the pitch from the wall to the header.
+  const run = tall.dPost - tall.sizes.HDR_D / 2 - tall.dWall;
+  const stack = (tall.sizes.PR_T + tall.sizes.SHEATH) * Math.sqrt(1 + 0.25 * 0.25);
+  assertAlmostEquals(tall.hdrTop, 10 - 0.25 * run - stack, 1e-12);
+  // Attach 8 on a tall front: 0.25 would leave under 6'8", so it is lowered to the pitch that leaves
+  // exactly 6'8" (6.67) under the header, flagged, and not short.
+  const low = F.d3PorchGeom(16, 10, 4, PANEL_TRIM, Infinity, 8, { pitch: 0.25 });
+  assert(low.pitch < 0.25 && low.pitch > 0.05, String(low.pitch));
+  assertEquals([low.pitchClamped, low.short, low.pitchWant], [true, false, 0.25]);
+  assertAlmostEquals(low.postH, 6.67, 1e-9);
+  // A pitch no wall can carry is floored at 0.05 and the porch is short, as today.
+  assertEquals(F.d3PorchGeom(16, 7, 6.5, PANEL_TRIM, Infinity, 0, { pitch: 0.3 }).pitch, 0.05);
+  assertEquals(F.d3PorchGeom(16, 7, 6.5, PANEL_TRIM, Infinity, 0, { pitch: 0.3 }).short, true);
+  // A flatter pitch than 2:12 on a wall that clears 2:12 stays as flat as asked.
+  assertEquals(F.d3PorchGeom(16, 9, 6.5, PANEL_TRIM, Infinity, 0, { pitch: 0.1 }).pitch, 0.1);
+  // hNeeded is the wall at which THAT pitch clears.
+  const want = F.d3PorchGeom(16, 7, 6.5, PANEL_TRIM, Infinity, 0, { pitch: 0.3 });
+  const at = F.d3PorchGeom(16, want.hNeeded + 1e-6, 6.5, PANEL_TRIM, Infinity, 0, { pitch: 0.3 });
+  assertEquals([at.pitch, at.pitchClamped], [0.3, false]);
+});
+
+Deno.test("d3PorchStepsGeom: in the outer bay on its side, or the middle, off the deck's front edge, on the grass", () => {
+  const g4 = F.d3PorchGeom(16, 10, 4, PANEL_TRIM, Infinity, 8, { posts: 4 });
+  assertEquals(F.d3PorchStepsGeom(g4, 4, null), null);
+  assertEquals(F.d3PorchStepsGeom(g4, 4, "front"), null);
+  const outer = g4.side - g4.sizes.POST / 2, bay = (2 * outer) / 3;
+  const L = F.d3PorchStepsGeom(g4, 4, "left"), C = F.d3PorchStepsGeom(g4, 4, "center"), R = F.d3PorchStepsGeom(g4, 4, "right");
+  assertAlmostEquals(L.x, -(outer - bay / 2), 1e-12);
+  assertAlmostEquals(R.x, outer - bay / 2, 1e-12);
+  assertEquals(C.x, 0);
+  assertEquals([L.w, L.count, L.d0, L.grade], [3.5, 1, 4, -0.35]);
+  assertAlmostEquals(L.rise, 0.175, 1e-12);
+  assertAlmostEquals(L.tread, 11 / 12, 1e-12);
+  assert(L.rise <= 7.5 / 12, "no riser tops 7.5 in");
+  // Narrow bays: the steps take the gap between two posts.
+  const g8 = F.d3PorchGeom(16, 10, 4, PANEL_TRIM, Infinity, 8, { posts: 8 });
+  const s8 = F.d3PorchStepsGeom(g8, 4, "left");
+  assertAlmostEquals(s8.w, (2 * (g8.side - g8.sizes.POST / 2)) / 7 - g8.sizes.POST, 1e-12);
+  // One bay: against that corner post.
+  const g2 = F.d3PorchGeom(8, 9, 4, PANEL_TRIM, Infinity, 0, { posts: 2 });
+  const l2 = F.d3PorchStepsGeom(g2, 4, "left"), r2 = F.d3PorchStepsGeom(g2, 4, "right");
+  assertAlmostEquals(l2.x - l2.w / 2, -(g2.side - g2.sizes.POST), 1e-12);
+  assertAlmostEquals(r2.x + r2.w / 2, g2.side - g2.sizes.POST, 1e-12);
+});
+
+Deno.test("d3PorchReadout reports the posts, pitch and steps that are built", () => {
+  const roof = { type: "shed", highSide: "front", pitch: 0.22, overhang: 0.8, porchOutFt: 4, porchAttachFt: 8, porchPosts: 4, porchPitch: 0.25, porchSteps: "left" };
+  const r = F.d3PorchReadout({ roof, wallHeightFt: 7.3 }, "16x10");
+  assertEquals([r.posts, r.framing.posts, r.framing.pitch, r.framing.steps], [4, 4, 0.25, "left"]);
+  assert(r.steps && r.steps.where === "left" && r.steps.x < 0, JSON.stringify(r.steps));
+  // Hung at 8 ft, 0.25 would leave under 6'8": the readout says the pitch it had to build.
+  assert(r.pitch < 0.25 && r.pitchClamped && !r.short, `${r.pitch} ${r.pitchClamped} ${r.short}`);
+  // The same as the renderer's function, called the way the renderer calls it.
+  const g = F.d3PorchGeom(16, r.wallTop, 4, PANEL_TRIM, F.d3PorchCapFt(roof, 16, 10, 7.3, PANEL_TRIM), 8, F.d3PorchFraming(roof));
+  assertEquals([g.posts, g.pitch], [r.posts, r.pitch]);
+  // Absent: no steps, the rule's posts, the solver's pitch.
+  const plain = F.d3PorchReadout({ roof: { type: "gambrel", porchOutFt: 6.5 }, wallHeightFt: 9 }, "16x24");
+  assertEquals([plain.steps, plain.posts, plain.framing.posts], [null, 3, null]);
 });
