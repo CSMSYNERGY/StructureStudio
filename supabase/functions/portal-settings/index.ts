@@ -80,6 +80,8 @@ import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
 // The multi-round self-check (v2), on its own line so the generation's import above stays untouched.
 import { parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfCheckChangedFields, SELF_CHECK_MAX_ROUNDS } from "../_shared/styleD3.ts";
+// The draft's frame-key check (fix, 2026-09-24): a v2 draft that names no front / high side.
+import { frameKeyWarning } from "../_shared/styleD3.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
@@ -4041,9 +4043,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // observed.wings. On every legacy path the question was never put, so the check would say "the
     // reading never said" on every generation and turn every draft amber. Same posture as the
     // porch check otherwise: flagged, never repaired.
+    //
+    // THE FRAME-KEY CHECK leads them (fix, 2026-09-24), v2 ONLY for the same reason: the v2 prompt
+    // makes roof.front (gable, gambrel) and roof.highSide (shed) REQUIRED, and a draft without
+    // them is drawn in the old frame -- on a long-fronted building, turned round -- so it is the
+    // first thing the builder is sent to look at, and the draft comes back low-confidence.
     const observedRead = shapeFirst ? parseObservedNotes(text) : null;
     const observedNotes = shapeFirst
-      ? flagObservedNotes(observedRead, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead), v2Prompt ? wingsAgreementWarning(drafted.d3.roof, observedRead) : null, knownDimsNote(dims))
+      ? flagObservedNotes(observedRead, v2Prompt ? frameKeyWarning(drafted.d3.roof) : null, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead), v2Prompt ? wingsAgreementWarning(drafted.d3.roof, observedRead) : null, knownDimsNote(dims))
       : null;
 
     // ── WHICH FRAME GOES WITH WHICH VIEW (2026-09-19) ────────────────────────────

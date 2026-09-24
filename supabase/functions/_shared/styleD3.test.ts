@@ -2954,8 +2954,8 @@ Deno.test("v2: the two new views are described to the model in words, like the o
   assert(selfCheckPairLabel("otherSide").includes("The builder's own frame comes first"), "that says which image is which");
   // The FRONT is the v2 front: the porch or the main door, not "the end the door is on".
   assert(p.includes("front (head-on at the front, the wall with the porch or the main door)"), "front in the v2 frame");
-  assert(p.includes("THE FRONT is the wall with the porch on it, or the main door when there is no porch."),
-    "and the frame of reference is said once, before any step uses it");
+  assert(p.includes("THE FRONT is the wall with the roofed porch on it, or the main door when there is no porch (an\nopen deck or stair does not count)."),
+    "and the frame of reference is said once, before any step uses it, the same way the first pass says it");
 });
 
 Deno.test("v2: parseSelfCheckRound — absent is round 0, and there are three rounds", () => {
@@ -3254,8 +3254,17 @@ Deno.test("⚠️ v2 prompt: the massing is checked FIRST, and the old steps fol
     return k;
   };
   const order = ["1. THE MASSING", "2. THE EAVE OVERHANG", "3. THE PORCH, AND WHICH KIND", "4. THE WALL, AS DRAWN",
-                 "5. ROOF PROFILE", "6. roof.eave", "7. roof.type"].map(at);
+                 "5. ROOF PROFILE", "6. roof.eave", "7. roofMaterial"].map(at);
   assertEquals(order, [...order].sort((a, b) => a - b), "in that order");
+  // roof.type is the FIRST question of the first step (fix 2026-09-24): a front-high shed drafted
+  // as a gable has a valid-looking answer to "is the front a gable end or an eave wall?", so the
+  // type has to be settled before the frame keys are, and not under "only if plainly wrong".
+  assert(at("* roof.type FIRST, currently") > at("1. THE MASSING"), "the type is in step 1");
+  assert(at("* roof.type FIRST, currently") < at("roof.front, currently"), "before the front");
+  assert(at("* roof.type FIRST, currently") < at("roof.highSide, currently"), "and before the high side");
+  assert(p.includes("correct it HERE,\n       and give roof.highSide (shed) or roof.front (gable, gambrel) in the same answer"),
+    "and a type change brings its frame key with it");
+  assert(!p.slice(at("7. roofMaterial")).includes("roof.type,"), "step 7 no longer offers the type");
   assert(p.includes("These first four are the ones"), "and the lead-in counts four");
   // The massing step ends by giving the model permission to change nothing, like the profile step.
   assert(p.includes("If the render and the frames trace the same outline from every viewpoint you have, leave\n   all of these alone."),
@@ -3297,10 +3306,16 @@ Deno.test("⚠️ v2 prompt: where an absent key DRAWS a default, the prompt say
   assert(p.includes('roof.porchEnd, currently "front" (not set, which means the front)'), "porchEnd");
   assert(p.includes("roof.porchAttachFt, projecting porches only, currently not set, which draws it just under the top of the wall"),
     "porchAttachFt");
-  assert(p.includes("roof.centerEaveFt, currently not set, which draws it 3 ft above the top of the wing roofs"), "centerEaveFt");
+  // The centre's default is only something the renderer DRAWS when there are wings (fix
+  // 2026-09-24); on a plain building it is just "not set".
+  assert(p.includes("roof.centerEaveFt, currently not set: feet"), "centerEaveFt, no wings");
+  assert(!p.includes("3 ft above the top of the wing roofs"), "no wing default on a wingless draft");
+  const wingedNoCentre = cleanSpec({ ...WINGED, roof: { ...WINGED.roof, centerEaveFt: undefined } });
+  assert(selfCheckPrompt({ dims: CHECK_DIMS, draft: wingedNoCentre, viewpoints: SELF_CHECK_VIEWPOINTS })
+    .includes("roof.centerEaveFt, currently not set, which draws it 3 ft above the top of the wing roofs"), "centerEaveFt, with wings");
   const front = selfCheckPrompt({ dims: CHECK_DIMS, draft: cleanSpec({ ...DRAFT, roof: { ...DRAFT.roof, porchEnd: "front" } }),
     viewpoints: SELF_CHECK_VIEWPOINTS });
-  assert(front.includes('roof.porchEnd, currently "front": the wall'), "a stored front is just the front");
+  assert(front.includes('roof.porchEnd, currently "front": always "front"'), "a stored front is just the front");
 });
 
 Deno.test("v2 prompt: the ruler is stated in the v2 frame — the FRONT wall and the depth behind it", () => {
@@ -3423,4 +3438,91 @@ Deno.test("⚠️ v2 first pass: no test building's own answer is left in it, an
   assert(combinedShapePrompt(8, 4).startsWith("These images are all of ONE portable building (a shed or barn), from two sources."), "and no dims");
   assert(combinedShapePrompt(8, 4, null, true).startsWith("These images are all of ONE portable building (a shed or barn), from two sources."),
     "v2 without dims is the legacy body, so the legacy opening");
+});
+
+// ═══ THE FRONT NOBODY NAMED, AND THE v2 CHECK'S PROMPT (fix, 2026-09-24) ═══════════════════════
+// A v2 draft that names no front / high side is FLAGGED (frameKeyWarning), and the v2 check is told
+// what an absent one draws, checks the roof type first, adds wings in one answer, keeps the porch on
+// the front, and measures each eave against the wall under it.
+import { frameKeyWarning } from "./styleD3.ts";
+
+// ── the front nobody named ────────────────────────────────────────────────────────────────
+Deno.test("frameKeyWarning: a v2 draft with no front (two slopes) or no high side (shed) is flagged", () => {
+  for (const type of ["gable", "gambrel"]) {
+    const w = frameKeyWarning({ type, pitch: 0.5 });
+    assert(w !== null && w.startsWith("Check which way the building faces before saving"), `${type} with no front`);
+    assert(w!.includes("set Front wall below"), "and it names the control, in the panel's words");
+    for (const front of D3_ROOF_FRONTS) assertEquals(frameKeyWarning({ type, front }), null, `${type} with front "${front}"`);
+    assertEquals(frameKeyWarning({ type, highSide: "front" })?.startsWith("Check which way"), true, "a high side on a ridge is not a front");
+  }
+  const s = frameKeyWarning({ type: "shed", pitch: 0.2 });
+  assert(s !== null && s.startsWith("Check which wall is the high one before saving"), "a shed with no high side");
+  assert(s!.includes("set High side below"), "and the control");
+  for (const hs of D3_SHED_HIGH_SIDES) assertEquals(frameKeyWarning({ type: "shed", highSide: hs }), null, `shed high "${hs}"`);
+  assert(frameKeyWarning({ type: "shed", front: "gable" }) !== null, "a front on a shed is not a high side");
+  assertEquals(frameKeyWarning(null), null);
+  assertEquals(frameKeyWarning({ type: "gable", front: "sideways" })?.startsWith("Check which way"), true, "junk is absent");
+  // Composed like the porch and wings checks: first in roofNote, and the draft goes amber.
+  const flagged = flagObservedNotes({ roofNote: "Gable, ridge front to back.", confidence: "high" }, frameKeyWarning({ type: "gable" }));
+  assertEquals(flagged?.confidence, "low", "a draft that did not say which way it faces is low confidence");
+  assert(flagged?.roofNote?.startsWith("Check which way the building faces") && flagged.roofNote.endsWith("The model's own reading: Gable, ridge front to back."),
+    "the warning leads, the model's sentence follows");
+});
+
+// ── the v2 check prompt: what the proxy runs and the review asked of it ───────────────────
+Deno.test("⚠️ v2 check: an ABSENT front or high side is said as what it DRAWS, and must be given", () => {
+  // A long-fronted gable (37 x 22) with no roof.front is drawn the old way: ridge along the long
+  // walls, porch on the short LEFT end. "not set" alone let the check pass it.
+  const tri = cleanSpec({ roof: { type: "gable", pitch: 0.41, porchOutFt: 7, wingSide: "both", wingWidthFt: 11.5 }, siding: "batten", colors: {}, wallHeightFt: 8 });
+  const wide = selfCheckPrompt({ dims: { widthFt: 37, lengthFt: 22, wallHeightFt: 8 }, draft: tri, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(wide.includes("roof.front, currently not set, which draws the roof by the old rule: the ridge runs along the building's longer walls, so the 37 ft front is drawn as a long eave wall and a porch is put on the 22 ft LEFT end instead. If it is not set, ALWAYS give it."),
+    "what the old frame draws on a long front");
+  assert(wide.includes("The render's front must be the same kind AND the same wall: the FRONT is the 37 ft wall, so if the render's front is plainly the 22 ft wall instead, roof.front is wrong or missing - fix that before anything else."),
+    "and the width test that tells two gable ends apart");
+  assert(wide.includes("roof.highSide, currently not set. Which wall"), "the shed's key on a gable is a plain not set");
+  // A deep gable is drawn front-gabled the old way.
+  const deep = selfCheckPrompt({ dims: CHECK_DIMS, draft: cleanSpec({ ...DRAFT, roof: { type: "gable", pitch: 0.5 } }), viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(deep.includes("so the front is drawn as a gable end. If it is not set, ALWAYS give it."), "a deep building");
+  // A shed: tall at the LEFT on a long front, at the BACK on a deep one.
+  const shed = cleanSpec({ roof: { type: "shed", pitch: 0.22, porchOutFt: 4 }, siding: "batten", colors: {}, wallHeightFt: 7 });
+  const farm = selfCheckPrompt({ dims: { widthFt: 16, lengthFt: 10, wallHeightFt: 7 }, draft: shed, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(farm.includes("roof.highSide, currently not set, which draws it by the old rule: the roof slopes along the building's longer walls, tall at the LEFT wall. If it is not set, ALWAYS give it."), "a long-fronted shed");
+  assert(farm.includes("roof.front, currently not set. Is the front"), "the two-slope key on a shed is a plain not set");
+  assert(!farm.includes("AND the same wall"), "and the gable width test is not asked of a shed");
+  const deepShed = selfCheckPrompt({ dims: { widthFt: 10, lengthFt: 16, wallHeightFt: 7 }, draft: shed, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(deepShed.includes("tall at the BACK wall"), "a deep shed");
+  // A set key is just its value.
+  assert(selfCheckPrompt({ dims: CHECK_DIMS, draft: SHED_BACK_HIGH, viewpoints: SELF_CHECK_VIEWPOINTS }).includes('roof.highSide, currently "back". Which wall'), "a set high side");
+  // The high side is judged off the MAIN roof, never a porch's.
+  assert(farm.includes("Judge it by the MAIN\n       roof, never by a porch's own lower roof"), "the proxy runs' porch-roof confusion");
+});
+
+Deno.test("v2 check: the overhang is measured against the wall under THAT eave", () => {
+  // A shed's high eave stands a whole rise above the known low wall; the Farmstand's is ~9.5 ft
+  // on a 7 ft ruler, so a fraction read there and multiplied by 7 came out a quarter short.
+  const shed = cleanSpec({ roof: { type: "shed", pitch: 0.25, highSide: "front", overhang: 0.8 }, siding: "batten", colors: {}, wallHeightFt: 8 });
+  const p = selfCheckPrompt({ dims: { widthFt: 16, lengthFt: 12, wallHeightFt: 8 }, draft: shed, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(p.includes("Measure against the wall directly under THAT eave: 8 ft for the LOW eave; about 11 ft for this shed's HIGH eave."),
+    "8 + 12 x 0.25: the rise runs front to back");
+  const side = cleanSpec({ roof: { ...shed.roof, highSide: "left" }, siding: "batten", colors: {}, wallHeightFt: 8 });
+  assert(selfCheckPrompt({ dims: { widthFt: 16, lengthFt: 12, wallHeightFt: 8 }, draft: side, viewpoints: SELF_CHECK_VIEWPOINTS })
+    .includes("about 12 ft for this shed's HIGH eave"), "8 + 16 x 0.25: the rise runs across the front");
+  // A raised centre: the wings' outer eave is the ruler, the centre's stands above it.
+  const w = selfCheckPrompt({ dims: CHECK_DIMS, draft: WINGED, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(w.includes("Measure against the wall directly under THAT eave: 9 ft for a wing's outer eave; about 16 ft for the centre section's eave."), "the centre's own eave");
+  // A plain gable has one eave height and is told nothing new.
+  assert(!selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS }).includes("THAT eave"), "nothing added on a plain building");
+  // A builder-measured eave is not re-measured at all, so no ruler either.
+  assert(!selfCheckPrompt({ dims: { ...CHECK_DIMS, overhangIn: 6 }, draft: WINGED, viewpoints: SELF_CHECK_VIEWPOINTS }).includes("THAT eave"),
+    "and none where the eave was measured");
+});
+
+Deno.test("v2 check: wings the frames show and the render lacks are ADDED in one answer; porchEnd is always front", () => {
+  const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(p.includes("If the frames show wings and the render has none, ADD them in ONE\n       answer: roof.wingSide; roof.wingWidthFt"), "all four keys at once");
+  assert(p.includes("roof.centerEaveFt (feet from the floor to the top of the centre walls) - all measured\n       against the 9 ft outer walls."), "against the ruler");
+  assert(p.includes("Look at BOTH\n       sides before you answer: a raised centre with a wing on one side only is uncommon."), "both sides");
+  assert(p.includes('roof.porchEnd, currently "front" (not set, which means the front): always "front" on this building'), "the porch defines the front");
+  assert(p.includes("the fault is roof.front or roof.highSide (step 1): correct that instead"), "a porch on the wrong wall is a frame fault");
+  assert(!p.includes('"front" or "back".\n'), "the back wall is no longer offered");
 });

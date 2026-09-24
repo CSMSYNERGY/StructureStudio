@@ -70,6 +70,12 @@ Deno.test("the wings agreement check is composed only on the v2 path", () => {
   assert(call.includes("v2Prompt ? wingsAgreementWarning(drafted.d3.roof, observedRead) : null"), "gated on the v2 prompt, not merely on dims");
   assert(!call.includes("dims ? wingsAgreementWarning"), "the old dims-only gate is gone");
   assert(call.includes("knownDimsNote(dims)"), "the clamp note is for every dims request, as before");
+  // The frame-key check (fix 2026-09-24): a v2 draft that names no roof.front / roof.highSide is
+  // drawn the old way round, so it is flagged FIRST -- and only on the v2 path, whose prompt is the
+  // only one that asks for either key.
+  assert(call.includes("flagObservedNotes(observedRead, v2Prompt ? frameKeyWarning(drafted.d3.roof) : null, gambrelRoofWarning("),
+    "the frame-key check leads, gated on the v2 prompt");
+  assertEquals(call.split("frameKeyWarning(").length - 1, 1, "and it is composed once");
 });
 
 Deno.test("the new portal shell sends frame \"front\" on every draft, the lean retry included", async () => {

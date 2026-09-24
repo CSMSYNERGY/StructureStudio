@@ -1381,9 +1381,10 @@ export function porchAgreementWarning(
 // a plain box, the exact result this vocabulary exists to end. Same two sentences (no answer /
 // a contradiction), same FLAG-NEVER-REPAIR posture, same place in `roofNote`.
 //
-// ⚠️ CALL IT ONLY FOR A v2 GENERATION (one with dims). The legacy prompt never asks the question,
-// so on that path "the reading never said" would fire on every single generation and force every
-// draft to low confidence. portal-settings gates the call on `dims` for exactly that reason.
+// ⚠️ CALL IT ONLY FOR A v2 GENERATION (the rollout gate's v2Prompt: frame "front" AND dims). The
+// legacy prompts never ask the question, so on those paths "the reading never said" would fire on
+// every single generation and force every draft to low confidence. portal-settings gates the call
+// on v2Prompt for exactly that reason.
 //
 // What the DRAFT says, read the way the renderer draws it: a wing exists only when wingWidthFt is
 // above zero on a gable or gambrel (the sanitiser drops wing keys on a shed, and this reads the
@@ -1416,6 +1417,31 @@ export function wingsAgreementWarning(
   }
   if (said === drafted) return null;
   return `Check the side wings before saving: the video reading says this building has ${WINGS_IN_WORDS[said as WingKind]}, but it has been drawn with ${WINGS_IN_WORDS[drafted]}. One of those is wrong and only the building settles which — compare the sides of the building with the preview, then set the wings below to match.`;
+}
+
+// ─── the front nobody named (fix, 2026-09-24) ─────────────────────────────────────────────
+// The v2 prompt marks roof.front (gable, gambrel) and roof.highSide (shed) REQUIRED, and nothing
+// enforced it. A draft without them renders in the OLD frame -- the ridge, or the shed's slope,
+// along the footprint's longer walls, and a porch on the old gable end -- and the designer drops
+// any stored front when a draft omits it. On a building whose front is its long wall that is the
+// building turned round, with nothing on screen saying why. The lean retry, at effort "low", is
+// the reply most likely to drop the key.
+//
+// So it is flagged in `roofNote` like the porch and the wings (FLAG, NEVER REPAIR: which way the
+// building faces is exactly what the server cannot guess), and flagObservedNotes drops the
+// confidence to low. ⚠️ v2 ONLY: the legacy prompts never ask for either key, so on those paths
+// this would fire on every draft. portal-settings gates it on v2Prompt, beside the wings check.
+// Read the way the sanitiser keeps them: front only on a two-slope roof, highSide only on a shed.
+export function frameKeyWarning(roof: Record<string, unknown> | null | undefined): string | null {
+  if (!roof) return null;
+  const type = roof.type;
+  if ((type === "gable" || type === "gambrel") && !(D3_ROOF_FRONTS as readonly string[]).includes(String(roof.front))) {
+    return "Check which way the building faces before saving: the video reading did not say whether the front wall is a gable end or a long side, so the roof has been drawn the old way, with its ridge along the longer walls. Compare the preview with the video, then set Front wall below.";
+  }
+  if (type === "shed" && !(D3_SHED_HIGH_SIDES as readonly string[]).includes(String(roof.highSide))) {
+    return "Check which wall is the high one before saving: the video reading did not say which wall of this single-slope roof is the tall one, so it has been drawn the old way, sloping along the longer walls. Compare the preview with the video, then set High side below.";
+  }
+  return null;
 }
 
 // Puts a roof warning where the builder already looks: `roofNote` in the "What the model saw"
@@ -1677,7 +1703,63 @@ export function selfCheckPrompt(opts: {
   // nothing on screen, is reported to the builder as one, and counts against "it matches".
   const porchEndNow = roof.porchEnd === "back" ? '"back"' : `"front"${roof.porchEnd === undefined ? " (not set, which means the front)" : ""}`;
   const attachNow = num(roof.porchAttachFt) === null ? "not set, which draws it just under the top of the wall" : feet("porchAttachFt");
-  const centreNow = num(roof.centerEaveFt) === null ? "not set, which draws it 3 ft above the top of the wing roofs" : feet("centerEaveFt");
+  const hasWings = (num(roof.wingWidthFt) ?? 0) > 0;
+  // The centre's default is only a thing the renderer DRAWS when there are wings to stand it on.
+  const centreNow = num(roof.centerEaveFt) !== null
+    ? feet("centerEaveFt")
+    : hasWings ? "not set, which draws it 3 ft above the top of the wing roofs" : "not set";
+  // ⚠️ AND THE TWO FRAME KEYS (fix, 2026-09-24). A draft without roof.front / roof.highSide is
+  // drawn in the OLD frame (d3RoofAxes' portrait/landscape rule): a two-slope roof's ridge along
+  // the footprint's longer walls, with a porch on the gable end at the WEST (left) when the front
+  // is the longer wall; a shed sloping along the longer walls, tall at the west (left) when the
+  // front is longer and at the north (back) otherwise. A bare "not set" read to the model as
+  // "nothing drawn yet", so on a long-fronted building it compared a front that was the short
+  // end, found the same KIND of wall, and passed it. Saying what the render actually shows is
+  // what lets it see the building is turned round -- and the fix is always to give the key.
+  // Said only for the key the draft's OWN roof type carries; the other one is a plain "not set",
+  // because it draws nothing on this roof.
+  const W = dims.widthFt, D = dims.lengthFt;
+  const wideFront = W > D;
+  const twoSlope = roof.type === "gable" || roof.type === "gambrel";
+  const frontNow = typeof roof.front === "string"
+    ? said("front")
+    : !twoSlope ? "not set"
+    : `not set, which draws the roof by the old rule: the ridge runs along the building's longer walls, so ${wideFront
+      ? `the ${dimFt(W)} ft front is drawn as a long eave wall and a porch is put on the ${dimFt(D)} ft LEFT end instead`
+      : "the front is drawn as a gable end"}. If it is not set, ALWAYS give it`;
+  const highNow = typeof roof.highSide === "string"
+    ? said("highSide")
+    : roof.type !== "shed" ? "not set"
+    : `not set, which draws it by the old rule: the roof slopes along the building's longer walls, tall at the ${wideFront ? "LEFT" : "BACK"} wall. If it is not set, ALWAYS give it`;
+  // Same KIND of wall is not enough: the old frame's front on a long-fronted gable is a gable end,
+  // just the wrong (short) one. The width is what tells them apart.
+  const frontWidth = twoSlope && W !== D
+    ? ` AND the same wall: the FRONT is the ${dimFt(W)} ft wall, so if the render's front is plainly the ${dimFt(D)} ft wall instead, roof.front is wrong or missing - fix that before anything else`
+    : "";
+  // THE WALL UNDER EACH EAVE (fix, 2026-09-24). The overhang is read as a fraction of the wall
+  // under the eave in view, and the first pass steers the close-up to a shed's HIGH eave, which
+  // stands a whole rise above the known (low) wall; the same goes for a centre section's eave
+  // over wings. Stated per eave, only where the draft has one, so a fraction read off a 9.5 ft
+  // wall is not multiplied by 7. Figures are the draft's own, drawn the way the renderer draws
+  // them (the old frame's shed slopes along the longer walls).
+  const wallN = num(draft.wallHeightFt) ?? dims.wallHeightFt;
+  const eaveWalls: string[] = [];
+  const about = (n: number) => dimFt(Math.round(n * 10) / 10);   // "about", so a tenth of a foot
+  const pitchN = num(roof.pitch);
+  if (roof.type === "shed" && pitchN !== null && pitchN > 0) {
+    const hs = roof.highSide;
+    const run = hs === "front" || hs === "back" ? D : hs === "left" || hs === "right" ? W : Math.max(W, D);
+    eaveWalls.push(`about ${about(wallN + run * pitchN)} ft for this shed's HIGH eave`);
+  }
+  if (hasWings) {
+    const ya = wallN + (num(roof.wingWidthFt) ?? 0) * (num(roof.wingPitch) ?? 0.25);
+    const c = num(roof.centerEaveFt);
+    eaveWalls.push(`about ${about(c !== null ? Math.max(c, ya + 1) : ya + 3)} ft for the centre section's eave`);
+  }
+  const eaveRuler = eaveWalls.length
+    ? `
+   Measure against the wall directly under THAT eave: ${wall} ft for ${roof.type === "shed" ? "the LOW eave" : "a wing's outer eave"}; ${eaveWalls.join("; ")}.`
+    : "";
   // ── THE ROUND (v2) ──
   // A later round judges renders of the spec the round before it PRODUCED, and says so. Without
   // this the model reads "YOUR DRAFT" as its own first answer and a correction an earlier round
@@ -1715,8 +1797,9 @@ them or argue with them:
 Use them as your ruler. Every render you are shown was drawn at exactly these dimensions, so
 anything in a render can be measured against a wall you know the height of.
 
-THE FRONT is the wall with the porch on it, or the main door when there is no porch. Left and
-right are as seen standing in front of it, facing the building.
+THE FRONT is the wall with the roofed porch on it, or the main door when there is no porch (an
+open deck or stair does not count). Left and right are as seen standing in front of it, facing
+the building.
 
 YOUR DRAFT, as rendered:
 ${JSON.stringify(draft, null, 2)}${roundNote}
@@ -1735,24 +1818,36 @@ CHECK EXACTLY THESE, IN THIS ORDER. For each one, say whether it matches or give
 correction. These first four are the ones this pass gets wrong most often, so spend your
 effort here.
 
-1. THE MASSING: which way the building faces, and what blocks it is made of. Check the
-   OUTLINE before anything else - a building drawn the wrong way round makes every other
-   comparison meaningless. The back and otherSide viewpoints, where you have them, are there
-   for this: a far wing or a tall back wall can only be seen from there.
-     * Two-slope roofs (gable, gambrel) - roof.front, currently ${said("front")}. Is the front
+1. THE MASSING: what kind of roof it is, which way the building faces, and what blocks it
+   is made of. Check the OUTLINE before anything else - a building drawn the wrong way round
+   makes every other comparison meaningless. The back and otherSide viewpoints, where you
+   have them, are there for this: a far wing or a tall back wall can only be seen from there.
+     * roof.type FIRST, currently ${said("type")}. One slope ("shed"), two slopes meeting at a
+       ridge ("gable"), or a barn's two-pitch slopes ("gambrel")? Read it from the side and
+       back views. A wrong type makes every other answer here meaningless: correct it HERE,
+       and give roof.highSide (shed) or roof.front (gable, gambrel) in the same answer.
+     * Two-slope roofs (gable, gambrel) - roof.front, currently ${frontNow}. Is the front
        wall a GABLE END - it rises to a triangle under the peak and the ridge runs away from
        you ("gable") - or an EAVE WALL - a level roof edge runs along its top and the ridge
-       runs across in front of you ("eave")? The render's front must be the same kind.
-     * One-slope roofs (shed) - roof.highSide, currently ${said("highSide")}. Which wall is
-       the TALL one in the frames: "front", "back", "left" or "right"? The same wall must be
-       the tall one in the render. A porch, when there is one, is usually on the tall wall.
+       runs across in front of you ("eave")? The render's front must be the same kind${frontWidth}.
+     * One-slope roofs (shed) - roof.highSide, currently ${highNow}. Which wall is
+       the TALL one in the frames: "front", "back", "left" or "right"? Judge it by the MAIN
+       roof, never by a porch's own lower roof: on the two walls whose top edge slopes, the
+       taller vertical edge stands at the high wall. The same wall must be the tall one in
+       the render.
      * Wings - currently ${wingsNow}. A wing is an ENCLOSED lower room, with walls and often
        windows, running the full depth along a side the main roof slopes down to, under its
        own lower one-slope roof that falls away from the centre; the taller centre section's
        walls rise above it to their own eave. A roof carried on OPEN posts is a lean-to, not
        a wing - if the draft drew a lean-to where the frames show a wing, set
        roof.leanToWidthFt to 0 and give the wing. Do the frames show wings, and on both sides
-       or one (roof.wingSide: "both", or "left", "right", "front" or "back")? Does the render?
+       or one (roof.wingSide: "both", or "left", "right", "front" or "back")? Look at BOTH
+       sides before you answer: a raised centre with a wing on one side only is uncommon.
+       Does the render? If the frames show wings and the render has none, ADD them in ONE
+       answer: roof.wingSide; roof.wingWidthFt (each wing's width, from its outer wall in to
+       the centre section's wall); roof.wingPitch (the wing roof's rise over that width); and
+       roof.centerEaveFt (feet from the floor to the top of the centre walls) - all measured
+       against the ${wall} ft outer walls.
        Where both show wings, compare each wing's width against the ruler (roof.wingWidthFt;
        0 removes the wings), the slope of the wing roofs (roof.wingPitch, rise over run), and
        the CENTRE section's eave (roof.centerEaveFt, currently ${centreNow}: feet
@@ -1771,7 +1866,7 @@ ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave
    twentieth of the wall's height on a ${wall} ft wall is about
    ${wall}/20 ft. Buildings with a tight, trimmed eave are common and read as
    almost no projection at all - values near 0.15 ft are real. Do not settle on 1.0 ft
-   because it is typical; report what this eave actually does.`}
+   because it is typical; report what this eave actually does.${eaveRuler}`}
 
 3. THE PORCH, AND WHICH KIND (roof.porchOutFt / roof.porchDepthFt). There are two kinds and
    they are not interchangeable:
@@ -1785,7 +1880,10 @@ ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave
    the two pictures look broadly alike. If you change the kind, give the new key and leave
    the other one out entirely.
    Then, where both show a porch, WHERE IT IS AND HOW BIG:
-     * roof.porchEnd, currently ${porchEndNow}: the wall it stands on, "front" or "back".
+     * roof.porchEnd, currently ${porchEndNow}: always "front" on this building, because the
+       porch is what defines the front. If the render's porch is on a different wall from the
+       frame's, the fault is roof.front or roof.highSide (step 1): correct that instead. The
+       only correction roof.porchEnd itself can take is to "front".
      * roof.porchAttachFt, projecting porches only, currently ${attachNow}: feet
        from the floor to the TOP of the porch roof where it meets the wall. Look at what shows
        between the porch roof and the top of that wall: a band of siding in the frame and none
@@ -1807,8 +1905,7 @@ THEN THESE, only if the pictures disagree:
    same outline, leave all of these alone.
 6. roof.eave - "open" (a sawtooth row of rafter tails with gaps of sky between them) or
    "fascia" (one unbroken board). Only from a viewpoint that actually shows under the eave.
-7. roof.type, roofMaterial, foundation, gableVent - only if plainly wrong. If you change
-   roof.type, give roof.front (two slopes) or roof.highSide (one slope) with it.
+7. roofMaterial, foundation, gableVent - only if plainly wrong. (roof.type is step 1's.)
 
 RETURN ONLY this JSON object, no prose and no markdown fence:
 {
