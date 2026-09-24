@@ -3526,3 +3526,173 @@ Deno.test("v2 check: wings the frames show and the render lacks are ADDED in one
   assert(p.includes("the fault is roof.front or roof.highSide (step 1): correct that instead"), "a porch on the wrong wall is a frame fault");
   assert(!p.includes('"front" or "back".\n'), "the back wall is no longer offered");
 });
+
+// ═══ THE CHECK'S ROLLOUT GATE (fix, 2026-09-24) ══════════════════════════════════════════════
+// Both reviews called it HIGH: the v2 self-check reached production's older designer too. A check
+// request without frame "front" now gets d3ab404's check BYTE FOR BYTE: the prompt (hashed against
+// what d3ab404's own function returned for the same inputs), the whole request body, the 22-path
+// allow-list, the six-field cap, the four viewpoints in their old words, the render caps, the
+// `checked` keys and the budget. Without the gate the v2 check could save roof.front, highSide and
+// the wing keys into a style that designer's renderer cannot draw. The v2 check's own budget moves
+// to 8000 tokens and 90 s.
+import {
+  legacySelfCheckPrompt, selfCheckMode, selfCheckRequest, SELF_CHECK_BUDGET,
+  SELF_CHECK_LEGACY_ALLOW, SELF_CHECK_LEGACY_MAX_FIELDS, SELF_CHECK_LEGACY_MAX_RENDERS,
+  SELF_CHECK_LEGACY_TOTAL_RENDER_BYTES, SELF_CHECK_LEGACY_VIEWPOINTS,
+} from "./styleD3.ts";
+
+// SHA-256 and length of what d3ab404's selfCheckPrompt (and its handler's request body) produced
+// for CLEAN under CHECK_DIMS with the four views, line endings normalised. Computed by importing
+// d3ab404's styleD3.ts beside this one and running both over 278 input combinations (prompts,
+// labels, renders, replies, merges and bodies): every one identical.
+const LEGACY_CHECK_PROMPT_SHA256 = "db7d86e5dc1cdfd35624a04dbe98959edf7cb279b5b4771e9830bb04ad048cf4";
+const LEGACY_CHECK_PROMPT_LENGTH = 6010;
+const LEGACY_CHECK_MEASURED_SHA256 = "057a83b45e271f54e48a37279438652db43d038480c9ae06761f76d0cd95ea3a";
+const LEGACY_CHECK_MEASURED_LENGTH = 5711;
+const LEGACY_CHECK_BODY_SHA256 = "77e17f88da6cb2e97873c0e6f5b454dceb9b791a9b46a1e133ae29e51d52861f";
+const LEGACY_CHECK_BODY_LENGTH = 7735;
+const FOUR = ["front", "side", "eaveCorner", "corner"] as const;
+const PAIRS4 = [
+  { viewpoint: "front" as const, frameUrl: "https://bucket.test/f1.jpg", base64: "AAAA" },
+  { viewpoint: "side" as const, frameUrl: "https://bucket.test/f3.jpg", base64: "BBBB" },
+  { viewpoint: "eaveCorner" as const, frameUrl: "https://bucket.test/f5.jpg", base64: "CCCC" },
+  { viewpoint: "corner" as const, frameUrl: "https://bucket.test/f7.jpg", base64: "DDDD" },
+];
+const lf = (s: string) => s.replace(/\r\n/g, "\n");
+
+Deno.test("⛔ an older designer's check PROMPT is BYTE-FOR-BYTE the one d3ab404 sent", async () => {
+  const plain = lf(legacySelfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: FOUR }));
+  assertEquals(plain.length, LEGACY_CHECK_PROMPT_LENGTH, "the legacy check prompt's length");
+  assertEquals(await sha256(plain), LEGACY_CHECK_PROMPT_SHA256, "the legacy check prompt's bytes");
+  const measured = lf(legacySelfCheckPrompt({ dims: { ...CHECK_DIMS, overhangIn: 6 }, draft: CLEAN, viewpoints: FOUR }));
+  assertEquals(measured.length, LEGACY_CHECK_MEASURED_LENGTH, "with a measured eave, its length");
+  assertEquals(await sha256(measured), LEGACY_CHECK_MEASURED_SHA256, "and its bytes");
+  // The old frame and the old steps, and none of v2's.
+  assert(plain.includes("building size: 16 ft wide by 24 ft long\n"), "the ruler as the old card typed it");
+  assert(plain.includes("head-on at the end the door is on"), "the old view words");
+  assert(plain.includes("1. THE EAVE OVERHANG") && plain.includes("6. roof.type, roofMaterial, foundation, gableVent"), "the old six steps");
+  assert(plain.includes("Change at most 6 fields."), "the old cap");
+  for (const k of ["roof.front", "roof.highSide", "wingSide", "wingWidthFt", "centerEaveFt", "THE MASSING", "porchAttachFt", "porchWidthFt", "FRONT wall", '"massing"']) {
+    assert(!plain.includes(k), `the legacy check never mentions ${k}`);
+  }
+  // A v2 view handed to it is not a view it knows, exactly as at d3ab404.
+  assertEquals(lf(legacySelfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: [...FOUR, "back", "otherSide"] })), plain);
+});
+
+Deno.test("⛔ ...and the whole REQUEST BODY an older designer's check sends is d3ab404's", async () => {
+  const req = selfCheckRequest({ mode: "legacy", dims: CHECK_DIMS, draft: CLEAN, pairs: PAIRS4, round: 0, earlier: ["roof.front"] });
+  // JSON escapes the CRLF a Windows checkout puts in the template; a deploy has LF.
+  const body = JSON.stringify(req.body).replace(/\\r\\n/g, "\\n");
+  assertEquals(body.length, LEGACY_CHECK_BODY_LENGTH, "the body's length");
+  assertEquals(await sha256(body), LEGACY_CHECK_BODY_SHA256, "the body's bytes: model, 4000 tokens, prompt, labels, images");
+  assertEquals(req.abortMs, 45_000, "and d3ab404's 45 s abort");
+  assertEquals((req.body as { max_tokens: number }).max_tokens, 4000);
+  assertEquals(SELF_CHECK_BUDGET.legacy, { maxTokens: 4000, abortMs: 45_000 });
+});
+
+Deno.test("⛔ the legacy check's RULES are d3ab404's: 22 paths, six fields, four views, four renders, 1.2 MB", () => {
+  assertEquals([...SELF_CHECK_LEGACY_ALLOW], [
+    "roof.type", "roof.pitch", "roof.ridgeOffset", "roof.overhang",
+    "roof.kneeU", "roof.kneeRise", "roof.ridgeRise",
+    "roof.eave", "roof.tailSpacingIn",
+    "roof.porchOutFt", "roof.porchDepthFt", "roof.porchEnd", "roof.porchTruss",
+    "roof.leanToWidthFt", "roof.leanToDropFt", "roof.leanToSide",
+    "roof.dormerWidthFt", "roof.dormerRiseFt", "roof.dormerOffsetU",
+    "gableVent", "foundation", "roofMaterial",
+  ]);
+  for (const f of SELF_CHECK_LEGACY_ALLOW) assert((SELF_CHECK_ALLOW as readonly string[]).includes(f), `${f} is on both lists`);
+  assertEquals(SELF_CHECK_LEGACY_MAX_FIELDS, 6);
+  assertEquals(SELF_CHECK_LEGACY_MAX_RENDERS, 4);
+  assertEquals(SELF_CHECK_LEGACY_TOTAL_RENDER_BYTES, 1_200_000);
+  assertEquals([...SELF_CHECK_LEGACY_VIEWPOINTS], [...FOUR]);
+  for (const v of FOUR) {
+    assert(selfCheckPairLabel(v, "legacy").startsWith(`VIEWPOINT "${v}" - `), `${v} is labelled`);
+  }
+  assertEquals(selfCheckPairLabel("front", "legacy"),
+    'VIEWPOINT "front" - head-on at the end the door is on. The builder\'s own frame comes first, then our render of your draft from the same angle.');
+  assertEquals(selfCheckPairLabel("side", "legacy"),
+    'VIEWPOINT "side" - square to a long wall. The builder\'s own frame comes first, then our render of your draft from the same angle.');
+  assertEquals(selfCheckPairLabel("side"), selfCheckPairLabel("side", "v2"), "absent is v2");
+});
+
+Deno.test("selfCheckMode: only frame \"front\" gets the v2 check", () => {
+  assertEquals(selfCheckMode("front"), "v2", "the new designer");
+  for (const junk of [undefined, null, "", "FRONT", "gable", true, 1, {}, ["front"]]) {
+    assertEquals(selfCheckMode(junk), "legacy", `frame ${JSON.stringify(junk)} is the older designer's check`);
+  }
+});
+
+Deno.test("⚠️ the legacy check refuses the v2 views and a fifth render, in d3ab404's words", () => {
+  const five = parseSelfCheckRenders(["front", "side", "eaveCorner", "corner", "back"].map((v, i) => render(v, i + 1)), 8, "legacy");
+  assertEquals(five, { ok: false, error: "A check compares at most 4 views, and 5 were sent." });
+  assertEquals(parseSelfCheckRenders([render("back", 1)], 8, "legacy"), { ok: false, error: '"back" is not a viewpoint this check knows.' });
+  assertEquals(parseSelfCheckRenders([render("otherSide", 1)], 8, "legacy"), { ok: false, error: '"otherSide" is not a viewpoint this check knows.' });
+  const big = FOUR.map((v, i) => render(v, i + 1, jpegB64(390_000)));
+  assertEquals(parseSelfCheckRenders(big, 8, "legacy"), { ok: false, error: "Those renders come to more than the 1200 KB a check allows." });
+  assert(parseSelfCheckRenders(big, 8, "v2").ok, "the same four fit v2's 1.8 MB");
+  assert(parseSelfCheckRenders(FOUR.map((v, i) => render(v, i + 1)), 8, "legacy").ok, "and four ordinary renders pass");
+});
+
+Deno.test("⚠️ THE PRODUCTION CASE: a check an older designer runs can never land a v2 key", () => {
+  // The review's own reproduction: a legacy gable with an 8 ft lean-to, and a reply that turns it
+  // eave-on, removes the lean-to and gives it wings. At HEAD before this fix all four applied; at
+  // d3ab404 the three v2 fields were dropped. The legacy check is d3ab404's again.
+  const draft = cleanSpec({ roof: { type: "gable", pitch: 0.5, overhang: 1, leanToWidthFt: 8, leanToSide: "left" }, siding: "lap", colors: {}, wallHeightFt: 9 });
+  const read = readOf({
+    verdict: "corrections",
+    corrections: { roof: { front: "eave", leanToWidthFt: 0, wingSide: "both", wingWidthFt: 6 } },
+    changed: [change("roof.front"), change("roof.leanToWidthFt"), change("roof.wingSide"), change("roof.wingWidthFt")],
+    checked: {}, note: "",
+  });
+  const legacy = applySelfCheck(draft, read, CHECK_DIMS, "legacy");
+  assert(legacy.ok, "the merge is buildable");
+  if (!legacy.ok) return;
+  assertEquals(legacy.changed.map((c) => c.field), ["roof.leanToWidthFt"], "only a d3ab404 path moved");
+  assertEquals(legacy.dropped.sort(), ["roof.front", "roof.wingSide", "roof.wingWidthFt"], "and the v2 keys were dropped");
+  for (const k of ["front", "wingSide", "wingWidthFt"]) assert(!(k in legacy.d3.roof), `no ${k} in the spec`);
+  const v2 = applySelfCheck(draft, read, CHECK_DIMS, "v2");
+  assert(v2.ok && v2.changed.length === 4, "the same reply is four changes on the v2 check, which asked for them");
+  // The cap: seven declared fields is a re-draft to the legacy check and within v2's eight.
+  const seven = readOf({
+    verdict: "corrections",
+    corrections: { roof: { pitch: 0.6, overhang: 0.5, eave: "open", porchOutFt: 4, porchEnd: "front", ridgeOffset: 0.1 }, foundation: "slab" },
+    changed: ["roof.pitch", "roof.overhang", "roof.eave", "roof.porchOutFt", "roof.porchEnd", "roof.ridgeOffset", "foundation"].map((f) => change(f)),
+    checked: {}, note: "",
+  });
+  assertEquals((applySelfCheck(draft, seven, CHECK_DIMS, "legacy") as { verdict: string }).verdict, "rejected_too_many", "six is the legacy cap");
+  assertEquals((applySelfCheck(draft, seven, CHECK_DIMS, "v2") as { verdict: string }).verdict, "corrections", "eight is v2's");
+  // And the legacy reading keeps d3ab404's `checked` keys: an older panel is handed what it always was.
+  const text = checkReply({ verdict: "matches", corrections: {}, changed: [], checked: { massing: "changed", overhang: "ok" } });
+  assertEquals(parseSelfCheck(text, "legacy")?.checked, { overhang: "ok" }, "no massing for the old panel");
+  assertEquals(parseSelfCheck(text)?.checked, { overhang: "ok", massing: "changed" }, "absent is v2");
+});
+
+Deno.test("parseSelfCheckRound: a legacy check has ONE round, d3ab404's", () => {
+  assertEquals(parseSelfCheckRound(undefined, 1), { ok: true, round: 0 }, "what an older designer sends");
+  assertEquals(parseSelfCheckRound(0, 1), { ok: true, round: 0 });
+  const r = parseSelfCheckRound(1, 1);
+  assert(!r.ok && r.status === 409 && r.code === "check_unavailable", "no round 1 without frame \"front\"");
+  if (!r.ok) assertEquals(r.error, "That generation has already had its check.");
+  assertEquals(parseSelfCheckRound(2), { ok: true, round: 2 }, "absent max is v2's three");
+});
+
+Deno.test("selfCheckRequest: the v2 check gets 8000 tokens and 90 s, and its own prompt and words", () => {
+  assertEquals(SELF_CHECK_BUDGET.v2, { maxTokens: 8000, abortMs: 90_000 });
+  const pairs = [...PAIRS4, { viewpoint: "back" as const, frameUrl: "https://bucket.test/f9.jpg", base64: "EEEE" }];
+  const req = selfCheckRequest({ mode: "v2", dims: CHECK_DIMS, draft: CLEAN, pairs, round: 1, earlier: ["roof.overhang"] });
+  assertEquals(req.abortMs, 90_000);
+  const body = req.body as { model: string; max_tokens: number; thinking: unknown; output_config: unknown; messages: { role: string; content: { type: string; text?: string; source?: Record<string, string> }[] }[] };
+  assertEquals([body.model, body.max_tokens], ["claude-sonnet-5", 8000]);
+  assertEquals(body.thinking, { type: "adaptive" });
+  assertEquals(body.output_config, { effort: "medium" });
+  const content = body.messages[0].content;
+  assertEquals(content[0].text, selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: pairs.map((p) => p.viewpoint), round: 1, earlier: ["roof.overhang"] }),
+    "the v2 prompt, with the round note");
+  // Label, the builder's frame by URL, then our render as base64 -- per pair, in order.
+  assertEquals(content.length, 1 + 3 * pairs.length);
+  pairs.forEach((p, i) => {
+    assertEquals(content[1 + 3 * i].text, selfCheckPairLabel(p.viewpoint, "v2"));
+    assertEquals(content[2 + 3 * i].source, { type: "url", url: p.frameUrl });
+    assertEquals(content[3 + 3 * i].source, { type: "base64", media_type: "image/jpeg", data: p.base64 });
+  });
+});

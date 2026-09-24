@@ -70,7 +70,7 @@ import {
   norm as attrNorm,
   resolveBuildingContext,
 } from "../_shared/attributeLines.ts";
-import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, parseFrameMap, gambrelRoofWarning, porchAgreementWarning, knownDimsNote, flagObservedNotes, parseKnownDims, SPEC_PROMPT, videoShapePrompt, combinedShapePrompt, parseSelfCheckRenders, selfCheckPairs, selfCheckPairLabel, selfCheckPrompt, parseSelfCheck, applySelfCheck } from "../_shared/styleD3.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, parseFrameMap, gambrelRoofWarning, porchAgreementWarning, knownDimsNote, flagObservedNotes, parseKnownDims, SPEC_PROMPT, videoShapePrompt, combinedShapePrompt, parseSelfCheckRenders, selfCheckPairs, parseSelfCheck, applySelfCheck } from "../_shared/styleD3.ts";
 import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
 // The v2 generator's two additions (2026-09-24), on their own line so the long list above can move
 // without this one: the walk-around frame cap every frame path shares, and the wings check.
@@ -80,8 +80,9 @@ import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
 // The multi-round self-check (v2), on its own line so the generation's import above stays untouched.
 import { parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfCheckChangedFields, SELF_CHECK_MAX_ROUNDS } from "../_shared/styleD3.ts";
-// The draft's frame-key check (fix, 2026-09-24): a v2 draft that names no front / high side.
-import { frameKeyWarning } from "../_shared/styleD3.ts";
+// The check's rollout gate and its one request builder, and the draft's frame-key check (fix,
+// 2026-09-24): the check is gated on `frame` like the draft, and a legacy request is d3ab404's.
+import { selfCheckMode, selfCheckRequest, frameKeyWarning } from "../_shared/styleD3.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
@@ -4199,9 +4200,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(checkId)) {
       return json({ error: "checkId is required." }, 400);
     }
+    // ── THE ROLLOUT GATE, FOR THE CHECK TOO (fix, 2026-09-24; see selfCheckMode) ─────────────
+    // The new designer sends `frame: "front"` on every check, exactly as on every draft, and only
+    // that request gets the v2 check. Every other request -- production's older designer, which
+    // sends neither `frame` nor `round` -- gets d3ab404's check byte for byte: its prompt, its
+    // 22-path allow-list and six-field cap, its four viewpoints and render caps, its budget, and
+    // its response shape. Until this line the v2 check (new-frame ruler, massing step, 30 paths)
+    // reached that designer too, and could save roof.front, highSide and the wing keys into a
+    // style its renderer cannot draw and its panel cannot clear. Decided before anything else,
+    // because the round limit and the render caps below both depend on it.
+    const checkMode = selfCheckMode(payload.frame);
+    const v2Check = checkMode === "v2";
     // WHICH ROUND. Absent is round 0. A round past the limit is refused here, before anything
     // touches the database, with the same 409 code a spent claim gets — one rule for a browser.
-    const roundRead = parseSelfCheckRound(payload.round);
+    // A legacy check has ONE round: d3ab404's single-use check.
+    const roundRead = parseSelfCheckRound(payload.round, v2Check ? SELF_CHECK_MAX_ROUNDS : 1);
     if (!roundRead.ok) {
       return json({ error: roundRead.error, ...(roundRead.code ? { code: roundRead.code } : {}) }, roundRead.status);
     }
@@ -4213,8 +4226,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // they lose is a free second opinion, so every one of these answers 200 with a verdict the
     // panel can render as one quiet line. A 4xx here would make the panel show a failed
     // generation, which is the one thing that never happened.
+    // The round fields are v2's; a legacy answer is d3ab404's, key for key.
     const skipped = (reason: string, note: string) =>
-      json({ ok: true, verdict: "skipped", reason, note, changed: [], checked: {}, d3: null, renders: 0, round, roundsLeft: 0 });
+      json({ ok: true, verdict: "skipped", reason, note, changed: [], checked: {}, d3: null, renders: 0, ...(v2Check ? { round, roundsLeft: 0 } : {}) });
 
     // BEST-EFFORT, like the 226 write above and for the same reason: the builder has already
     // been charged and already holds their draft, and a diagnostics failure must never be the
@@ -4281,7 +4295,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         ok: true, verdict: "failed", reason: code, changed: [], checked: {}, d3: null,
         renders: Number(context.renders ?? 0),
         note: "We couldn't finish checking the draft against your video - review it yourself before saving.",
-        round, roundsLeft: 0,
+        ...(v2Check ? { round, roundsLeft: 0 } : {}),
       });
     };
 
@@ -4301,7 +4315,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the browser half of this feature, and burning the tenant's one check on it would hide the
     // fault behind a 409 the next time anyone looked. Nothing here reaches the model, so a
     // caller that keeps sending bad renders keeps getting 400s and spends nothing.
-    const rendersRead = parseSelfCheckRenders(payload.renders, sentUrls.length);
+    // The mode's caps: four renders and 1.2 MB for a legacy check, six and 1.8 MB for v2.
+    const rendersRead = parseSelfCheckRenders(payload.renders, sentUrls.length, checkMode);
     if (!rendersRead.ok) return json({ error: rendersRead.error }, 400);
 
     // ── THE KILL SWITCH, before the claim ────────────────────────────────────────────────
@@ -4445,31 +4460,25 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     // ── THE SECOND CALL ──────────────────────────────────────────────────────────────────
     // The builder's frame first and our render second, one pair per viewpoint, with a line
-    // naming which is which. Reality before our attempt at it.
+    // naming which is which. Reality before our attempt at it. The whole request -- prompt,
+    // pairs, model, max_tokens and abort -- is built by selfCheckRequest, so what each mode
+    // sends is pinned on its bytes in styleD3.test.ts.
     //
-    // 45 s, not the 110 s call 1 gets, and the difference is the point: the builder already has
-    // their draft, so a slow check is worth abandoning, and 110 + 5 + 110 is not a wait anyone
-    // should be asked to sit through.
+    // THE BUDGET (SELF_CHECK_BUDGET). LEGACY: d3ab404's 45 s and 4000 tokens, well under call 1's
+    // 125 s -- the builder already has their draft, so a slow check is worth abandoning. v2
+    // (fix, 2026-09-24): 90 s and 8000 tokens. The v2 check reads up to twelve images against a
+    // longer prompt, and at ~78 tokens/s 45 s bought ~3,500 tokens; a timeout ends the rounds,
+    // which cut off exactly the massing corrections v2 exists for. The answer is still bounded at
+    // eight fields, so the room is for thinking. ⚠️ The browser's own abort on this call must sit
+    // above 90 s. If `self_check_tokens` shows replies stopping at max_tokens, move the budget.
     //
-    // max_tokens 4000 rather than call 1's 8000. The answer is bounded at eight fields by the
-    // prompt and again by the cap, so the room is all for thinking — and the ceiling that
-    // actually bites here is the clock, which more thinking only brings nearer. If
-    // `self_check_tokens` ever shows replies stopping at max_tokens, this is the number to move.
-    const content: unknown[] = [{
-      type: "text",
-      // A later round is told it is one, and which fields the rounds before it changed —
-      // allow-listed NAMES off the row's own self_check_changed, never the model's prose.
-      text: selfCheckPrompt({
-        dims, draft: draftRead.d3, viewpoints: pairs.map((p) => p.viewpoint),
-        round, earlier: selfCheckChangedFields(claimed.self_check_changed),
-      }),
-    }];
-    for (const p of pairs) {
-      content.push({ type: "text", text: selfCheckPairLabel(p.viewpoint) });
-      content.push({ type: "image", source: { type: "url", url: p.frameUrl } });
-      content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: p.base64 } });
-    }
-    const checkSignal = AbortSignal.timeout(45_000);
+    // A later round is told it is one, and which fields the rounds before it changed —
+    // allow-listed NAMES off the row's own self_check_changed, never the model's prose.
+    const plan = selfCheckRequest({
+      mode: checkMode, dims, draft: draftRead.d3, pairs,
+      round, earlier: selfCheckChangedFields(claimed.self_check_changed),
+    });
+    const checkSignal = AbortSignal.timeout(plan.abortMs);
     let checkRes: Response;
     let checkBody = "";
     try {
@@ -4477,20 +4486,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         method: "POST",
         headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
         signal: checkSignal,
-        body: JSON.stringify({
-          model: "claude-sonnet-5",
-          max_tokens: 4000,
-          thinking: { type: "adaptive" },
-          output_config: { effort: "medium" },
-          messages: [{ role: "user", content }],
-        }),
+        body: JSON.stringify(plan.body),
       });
       checkBody = await checkRes.text();
     } catch (e) {
       return await failedCheck(
         checkSignal.aborted ? "ai_selfcheck_timeout" : "ai_selfcheck_unreachable",
         checkSignal.aborted
-          ? "The self-check did not answer within 45 seconds."
+          ? `The self-check did not answer within ${plan.abortMs / 1000} seconds.`
           : `Could not reach the AI service for the self-check: ${e instanceof Error ? e.message : String(e)}`,
         { elapsedMs: Date.now() - t0, renders: pairs.length },
       );
@@ -4511,7 +4514,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         elapsedMs: Date.now() - t0, renders: pairs.length, tokens,
       });
     }
-    const read = parseSelfCheck(checkReply.text);
+    const read = parseSelfCheck(checkReply.text, checkMode);
     if (!read) {
       return await failedCheck(
         checkReply.stopReason === "max_tokens" ? "ai_selfcheck_truncated" : "ai_selfcheck_unparseable",
@@ -4523,13 +4526,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     // ── THE GATES ────────────────────────────────────────────────────────────────────────
-    // Allow-list, eight-field cap, both-lists, the porch exclusion and sanitizeD3Spec, all inside
-    // applySelfCheck so they are testable without a network. `drafted` is NOT touched by any of
-    // it: the first pass stays on the row or "did the check help?" stops being answerable.
+    // Allow-list, field cap, both-lists, the porch exclusion and sanitizeD3Spec, all inside
+    // applySelfCheck so they are testable without a network. The MODE picks the list and the
+    // cap: d3ab404's 22 paths and six fields for a legacy check, 30 and eight for v2. `drafted`
+    // is NOT touched by any of it: the first pass stays on the row or "did the check help?"
+    // stops being answerable.
     // `dims` rides along so a builder who MEASURED the eave keeps it: roof.overhang comes off
     // the allow-list for that generation, the same way wallHeightFt and sizeFt are permanently
     // off it. selfCheckPrompt stops asking for it in the same breath.
-    const applied = applySelfCheck(draftRead.d3, read, dims);
+    const applied = applySelfCheck(draftRead.d3, read, dims, checkMode);
     if (!applied.ok) {
       return await failedCheck("ai_selfcheck_merge_failed", applied.error, { elapsedMs: Date.now() - t0, renders: pairs.length, tokens });
     }
@@ -4579,6 +4584,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // three gates and `changed` is what actually moved, with `from` and `to` read off the two
     // specs rather than off the model's own account of them — a browser handed the raw object
     // would have its own fourth chance to apply something the gates just refused.
+    //
+    // A LEGACY check answers exactly as d3ab404 did, key for key (it is always round 0, where
+    // `total` IS `applied.changed`): an older designer reads what it always read.
+    if (!v2Check) {
+      return json({
+        ok: true,
+        verdict: applied.verdict,
+        d3: applied.verdict === "corrections" ? applied.d3 : null,
+        changed: applied.changed,
+        checked: read.checked,
+        note: read.note,
+        renders: pairs.length,
+        ms: elapsedMs,
+      });
+    }
     //
     // v2 FIELDS, all additive (an older browser reads none of them):
     //   d3           round 0: exactly as before, the corrected spec only when something moved.

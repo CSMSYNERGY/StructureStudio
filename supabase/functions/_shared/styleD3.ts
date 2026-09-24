@@ -1560,7 +1560,12 @@ export const SELF_CHECK_MAX_ROUNDS = 3;
 // single-use check it has always had (round 0 also requires `self_check_at` to be null, so its
 // second request is still a 409). A round past the limit is refused the same way a spent claim
 // is, with the same 409 code, so a browser needs only one rule for "stop asking".
-export function parseSelfCheckRound(raw: unknown):
+//
+// `max` (fix, 2026-09-24) is the caller's mode's limit: SELF_CHECK_MAX_ROUNDS for the v2 check,
+// and 1 for the LEGACY check (selfCheckMode), which is d3ab404's single-use check -- an older
+// designer never sends `round`, and a request without frame "front" that asks for a round past 0
+// is asking for something that check never had. Same 409 and code as a spent claim.
+export function parseSelfCheckRound(raw: unknown, max: number = SELF_CHECK_MAX_ROUNDS):
   | { ok: true; round: number }
   | { ok: false; status: 400 | 409; error: string; code?: string } {
   if (raw === undefined || raw === null) return { ok: true, round: 0 };
@@ -1569,10 +1574,12 @@ export function parseSelfCheckRound(raw: unknown):
   if (n === null || !Number.isInteger(n) || n < 0) {
     return { ok: false, status: 400, error: "round must be a whole number, starting at 0." };
   }
-  if (n >= SELF_CHECK_MAX_ROUNDS) {
+  if (n >= max) {
     return {
       ok: false, status: 409, code: "check_unavailable",
-      error: `That generation has already had all ${SELF_CHECK_MAX_ROUNDS} of its checks.`,
+      error: max === 1
+        ? "That generation has already had its check."
+        : `That generation has already had all ${max} of its checks.`,
     };
   }
   return { ok: true, round: n };
@@ -1617,6 +1624,86 @@ export const SELF_CHECK_ALLOW = [
 const SELF_CHECK_CHECKED_KEYS = ["overhang", "porch", "roofProfile", "eave", "massing"] as const;
 const SELF_CHECK_CHECKED_WORDS = ["ok", "changed", "unclear"] as const;
 
+// ── THE ROLLOUT GATE, FOR THE CHECK TOO (fix, 2026-09-24) ─────────────────────────────────────
+// The draft has been gated since v2 (wantsV2Prompt): only a request that says `frame: "front"`
+// gets the v2 prompt. The CHECK was not, and production's older designer -- which sends no frame
+// and no round -- was being handed the whole v2 check: a new-frame ruler ("the FRONT wall is W ft
+// long") over dims its card typed "across the gable end", a massing step that asks for roof.front
+// and the wings, and a 30-path allow-list that let those keys into a spec the old renderer cannot
+// draw and the old panel can neither show nor clear. Saved, they would switch on the day the new
+// renderer is promoted: a style turned 90 degrees, or grown a raised centre, that no builder saw.
+//
+// So the check is gated exactly like the draft, ON THE REQUEST: the new designer sends
+// `frame: "front"` on every check (12-shell onSelfCheck) and gets "v2". Everything else gets
+// "legacy", which is d3ab404's check VERBATIM -- the frozen prompt (legacySelfCheckPrompt, pinned
+// by SHA-256), its 22-path allow-list, six fields, the four viewpoints in their old words, four
+// renders and 1.2 MB, the old `checked` keys, and its 4000-token / 45 s budget. Only the claim is
+// shared: round 0 of the multi-round claim IS d3ab404's single-use claim, and a legacy request
+// cannot ask for a later round (parseSelfCheckRound's `max`).
+export type SelfCheckMode = "v2" | "legacy";
+export function selfCheckMode(frame: unknown): SelfCheckMode {
+  return frame === PROMPT_FRAME_FRONT ? "v2" : "legacy";
+}
+
+// ⛔ FROZEN at d3ab404, every one of them. styleD3.test.ts pins each against the value it had.
+export const SELF_CHECK_LEGACY_VIEWPOINTS: readonly FrameMapViewpoint[] = ["front", "side", "eaveCorner", "corner"];
+const SELF_CHECK_LEGACY_VIEW_WORDS: Record<string, string> = {
+  front: "head-on at the end the door is on",
+  side: "square to a long wall",
+  eaveCorner: "the close-up of the roof edge against the sky",
+  corner: "a three-quarter view",
+};
+export const SELF_CHECK_LEGACY_MAX_RENDERS = 4;
+export const SELF_CHECK_LEGACY_TOTAL_RENDER_BYTES = 1_200_000;
+export const SELF_CHECK_LEGACY_MAX_FIELDS = 6;
+export const SELF_CHECK_LEGACY_ALLOW = [
+  "roof.type", "roof.pitch", "roof.ridgeOffset", "roof.overhang",
+  "roof.kneeU", "roof.kneeRise", "roof.ridgeRise",
+  "roof.eave", "roof.tailSpacingIn",
+  "roof.porchOutFt", "roof.porchDepthFt", "roof.porchEnd", "roof.porchTruss",
+  "roof.leanToWidthFt", "roof.leanToDropFt", "roof.leanToSide",
+  "roof.dormerWidthFt", "roof.dormerRiseFt", "roof.dormerOffsetU",
+  "gableVent", "foundation", "roofMaterial",
+] as const;
+const SELF_CHECK_LEGACY_CHECKED_KEYS = ["overhang", "porch", "roofProfile", "eave"] as const;
+
+// The rules each mode's gates run on, in one place so no gate can read one mode's list and
+// another gate the other's.
+type SelfCheckRules = {
+  viewpoints: readonly FrameMapViewpoint[];
+  maxRenders: number;
+  totalRenderBytes: number;
+  maxFields: number;
+  allow: readonly string[];
+  checkedKeys: readonly string[];
+};
+function selfCheckRules(mode: SelfCheckMode): SelfCheckRules {
+  return mode === "legacy"
+    ? {
+      viewpoints: SELF_CHECK_LEGACY_VIEWPOINTS, maxRenders: SELF_CHECK_LEGACY_MAX_RENDERS,
+      totalRenderBytes: SELF_CHECK_LEGACY_TOTAL_RENDER_BYTES, maxFields: SELF_CHECK_LEGACY_MAX_FIELDS,
+      allow: SELF_CHECK_LEGACY_ALLOW, checkedKeys: SELF_CHECK_LEGACY_CHECKED_KEYS,
+    }
+    : {
+      viewpoints: SELF_CHECK_VIEWPOINTS, maxRenders: SELF_CHECK_MAX_RENDERS,
+      totalRenderBytes: SELF_CHECK_TOTAL_RENDER_BYTES, maxFields: SELF_CHECK_MAX_FIELDS,
+      allow: SELF_CHECK_ALLOW, checkedKeys: SELF_CHECK_CHECKED_KEYS,
+    };
+}
+
+// THE CALL'S BUDGET, per mode. Legacy is d3ab404's 4000 tokens and 45 s. v2 is 8000 and 90 s
+// (fix, 2026-09-24): the v2 check carries up to six frame+render pairs (twelve images, six fetched
+// by URL) and a longer prompt with the massing step, and at the ~78 tokens/s measured on 09-21,
+// 45 s is ~3,500 tokens including the time to the first one. A timeout ENDS the rounds, so the
+// massing corrections v2 depends on (round 0 turning the building, round 1 refining widths) were
+// the ones cut off. 90 s + the handler's own overhead stays well inside the gateway's 150 s, and
+// nothing about money rides on this call. ⚠️ The browser's own abort on this call has to sit above
+// 90 s (the designer's SS_CHECK_MS and 12-shell's onSelfCheck signal), or it cuts the server off.
+export const SELF_CHECK_BUDGET: Record<SelfCheckMode, { maxTokens: number; abortMs: number }> = {
+  legacy: { maxTokens: 4000, abortMs: 45_000 },
+  v2: { maxTokens: 8000, abortMs: 90_000 },
+};
+
 export type SelfCheckChange = { field: string; from: unknown; to: unknown; why: string };
 export type SelfCheckChecked = Partial<Record<typeof SELF_CHECK_CHECKED_KEYS[number], string>>;
 export type SelfCheckRead = {
@@ -1646,6 +1733,13 @@ export type SelfCheckRead = {
 // measured on a building drawn the wrong way round is measured on the wrong wall. The
 // "it matches" discipline is unchanged and still stated three times, and the new step ends,
 // like the profile step, by telling the model to leave all of it alone when the outlines agree.
+//
+// ROOF TYPE FIRST, INSIDE THE MASSING (fix, 2026-09-24). A front-high shed drafted as a gable has a
+// valid-looking answer to "is the front a gable end or an eave wall?" -- a level edge runs along
+// it -- so with the type left to a last "only if plainly wrong" step the massing passed and the
+// shed's highSide, dropped by the sanitiser on a gable, never landed. The type is now the first
+// question, and changing it brings its frame key in the same answer. This is the v2 check ONLY:
+// production's older designer gets legacySelfCheckPrompt, below, frozen at d3ab404.
 export function selfCheckPrompt(opts: {
   dims: KnownDims;
   draft: D3Spec;
@@ -1937,6 +2031,151 @@ RULES FOR THE ANSWER:
     left alone and marked unclear, not corrected to a typical value.`;
 }
 
+// ── THE LEGACY CHECK PROMPT: d3ab404's selfCheckPrompt, VERBATIM (fix, 2026-09-24) ──────────
+// ⛔ FROZEN. What every check request WITHOUT frame "front" gets (selfCheckMode "legacy") --
+// production's older designer, whose dimensions card typed W "across the gable end" and whose
+// renderer and panel know none of the v2 keys. Lifted character for character from the function
+// as it shipped at d3ab404 (only its name and the names of the frozen constants it reads were
+// changed), and styleD3.test.ts pins its output by SHA-256 against what d3ab404 produced for the
+// same inputs. Every word the check learns goes into selfCheckPrompt above; editing this one
+// changes production's older designer and nothing else, so there is no reason left to. (Its
+// inner comments are d3ab404's too, clamp numbers included.)
+export function legacySelfCheckPrompt(opts: {
+  dims: KnownDims;
+  draft: D3Spec;
+  viewpoints: readonly FrameMapViewpoint[];
+}): string {
+  const { dims, draft } = opts;
+  const views = SELF_CHECK_LEGACY_VIEWPOINTS.filter((v) => opts.viewpoints.includes(v));
+  const overhang = num((draft.roof ?? {})["overhang"]);
+  const eave = overhang === null ? "not set" : `${dimFt(overhang)} ft`;
+  // ⚠️ THE WALL THE RENDER WAS DRAWN AT, NOT THE ONE THAT WAS TYPED. parseKnownDims accepts a
+  // measured wall of 3..20 ft and sanitizeD3Spec then CLAMPS it to the 5..14 the renderer can
+  // draw, so a builder who measured 16 has a draft -- and therefore a set of renders -- with a
+  // 14 ft wall in them. Stating the 16 here would tell the model that "every render you are
+  // shown was drawn at exactly these dimensions" over pictures of a wall an eighth shorter,
+  // and step 1 turns a fraction of that wall into feet: every length it read off a render
+  // would be long by the same ratio, in the same direction, on roof.overhang -- the field this
+  // whole pass exists to fix. Step 3 is worse still, because it asks whether the gambrel rises
+  // are absorbing a wall difference, and the clamp is exactly such a difference.
+  //
+  // Width and length never clamp -- they are the ruler for this reading and are never stored --
+  // so they stay as typed. The builder is told about the clamp separately, by knownDimsNote.
+  const wall = dimFt(num(draft.wallHeightFt) ?? dims.wallHeightFt);
+  // ⚠️ AND THE EAVE, WHERE THE BUILDER MEASURED IT. `overhangIn` is an optional chip on the
+  // dimensions card: null means "read it off the video", and a number means they went and
+  // looked. applyKnownDims has already written it into the draft, so asking the model to
+  // re-measure it from a photograph is asking it to overwrite a tape measure with a guess --
+  // on the one field this prompt spends its first and longest step on, and with nothing on the
+  // panel reconciling the two afterwards (the chip goes on reading "16 in" while the spec says
+  // 2, and pressing the chip again does nothing). applySelfCheck drops roof.overhang from the
+  // allow-list for the same generation, so a correction would be thrown away in any case; this
+  // is what stops the model spending its effort on a field that cannot land.
+  const measuredEave = dims.overhangIn === undefined || dims.overhangIn === null ? null : dims.overhangIn;
+  const present = views.length
+    ? views.map((v) => `${v} (${SELF_CHECK_LEGACY_VIEW_WORDS[v]})`).join(", ")
+    : "none";
+  return `You drafted a 3D spec for a portable building from a walk-around video. We rendered your
+draft and are showing you the result beside the builder's own frames. Your job now is
+narrow: find the places where YOUR DRAFT does not match THEIR BUILDING, and correct only
+those.
+
+This is a check, not a second draft. Most fields will already be right. "It matches" is a
+correct and expected answer, and it is the answer we expect most often. Do not change a
+field to show you are working - a wrong correction is worse than no correction, because it
+overwrites a number that was already good.
+
+THE BUILDER HAS MEASURED THESE. They are facts, not your estimates, and you must not change
+them or argue with them:
+  building size: ${dimFt(dims.widthFt)} ft wide by ${dimFt(dims.lengthFt)} ft long
+  wall height at the eave: ${wall} ft${measuredEave === null ? "" : `
+  eave overhang: ${dimFt(measuredEave)} in past the wall`}
+Use them as your ruler. Every render you are shown was drawn at exactly these dimensions, so
+anything in a render can be measured against a wall you know the height of.
+
+YOUR DRAFT, as rendered:
+${JSON.stringify(draft, null, 2)}
+
+THE IMAGES. Each viewpoint gives you two images in a row: first the builder's own frame,
+then our render of your draft from the same angle. Compare them as SHAPES. Ignore the
+background, the grass, the sky, the lighting, the sharpness, the neighbouring buildings, and
+any door, window or vent - the render deliberately does not draw the openings, and their
+absence is not a mistake to report.
+
+THE VIEWPOINTS IN THIS REQUEST, in the order they appear below: ${present}. Those are the only
+ones here. Where a step below names a viewpoint you were not given, answer it from what you do
+have or mark it unclear - never read one view as though it were another.
+
+CHECK EXACTLY THESE, IN THIS ORDER. For each one, say whether it matches or give a
+correction. These first three are the ones this pass gets wrong most often, so spend your
+effort here.
+
+${measuredEave !== null ? `1. THE EAVE OVERHANG (roof.overhang, currently ${eave}). THE BUILDER MEASURED THIS ONE TOO
+   and it is already in the draft. It is not yours to change: a correction to roof.overhang
+   will be thrown away. Mark "overhang" as "ok" and spend the effort on the porch below.` : `1. THE EAVE OVERHANG (roof.overhang, currently ${eave}). Look at the close-up
+   viewpoint, where the roof edge is seen in profile against the sky with the wall below it.
+   Measure how far the roof stands out past the wall as a FRACTION OF THE WALL HEIGHT you
+   were given, in the frame and in the render, and convert: a roof that projects a
+   twentieth of the wall's height on a ${wall} ft wall is about
+   ${wall}/20 ft. Buildings with a tight, trimmed eave are common and read as
+   almost no projection at all - values near 0.15 ft are real. Do not settle on 1.0 ft
+   because it is typical; report what this eave actually does.`}
+
+2. THE PORCH, AND WHICH KIND (roof.porchOutFt / roof.porchDepthFt). There are two kinds and
+   they are not interchangeable:
+     * RECESSED (porchDepthFt): the end wall is set BACK into the building, the main roof
+       carries straight over the gap, and nothing sticks out past the end of the roof.
+     * PROJECTING (porchOutFt): the end wall runs full height with the door in it, and a
+       deck with posts and its OWN lower roof stands OUT in front of that wall.
+   The side viewpoint settles it: if the porch roof sticks out past the end of the building,
+   it is projecting. If the end of the building is one flat plane, it is recessed. Getting
+   this wrong is the single most visible error on the whole building, so check it even when
+   the two pictures look broadly alike. If you change the kind, give the new key and leave
+   the other one out entirely.
+
+3. THE WALL, AS DRAWN (not the number). You cannot change wallHeightFt - it is measured. But
+   if the render's walls look plainly shorter or taller than the frame's at the same angle
+   while the roof matches, something else is absorbing the difference: say so in \`note\` and
+   check whether the gambrel rises below are carrying it.
+
+THEN THESE, only if the pictures disagree:
+4. ROOF PROFILE. For a gambrel: kneeU, kneeRise, ridgeRise, measured from the CENTRELINE and
+   the TOP OF THE WALL, each divided by the half-span. For a gable or shed: pitch. Check the
+   silhouette at the head-on viewpoint. If the render's roof and the frame's roof trace the
+   same outline, leave all of these alone.
+5. roof.eave - "open" (a sawtooth row of rafter tails with gaps of sky between them) or
+   "fascia" (one unbroken board). Only from a viewpoint that actually shows under the eave.
+6. roof.type, roofMaterial, foundation, gableVent - only if plainly wrong.
+
+RETURN ONLY this JSON object, no prose and no markdown fence:
+{
+  "verdict": "matches" | "corrections",
+  "corrections": { ... only the fields you are changing, in the same shape as the draft ... },
+  "changed": [
+    { "field": "roof.overhang", "from": 1.0, "to": 0.2,
+      "why": "<one sentence naming what in which image made you change it>" }
+  ],
+  "checked": {
+    "overhang": "ok" | "changed" | "unclear",
+    "porch": "ok" | "changed" | "unclear",
+    "roofProfile": "ok" | "changed" | "unclear",
+    "eave": "ok" | "changed" | "unclear"
+  },
+  "note": "<one sentence for the builder, or an empty string>"
+}
+
+RULES FOR THE ANSWER:
+  * If nothing needs changing, return "verdict": "matches" with "corrections": {} and
+    "changed": []. That is a complete, correct answer. Stop there.
+  * Every field in "corrections" must also appear in "changed". Anything not in both is
+    ignored.
+  * Never return wallHeightFt, sizeFt, colors or siding${measuredEave === null ? "" : " or roof.overhang"}. They are not yours to change here.
+  * Change at most ${SELF_CHECK_LEGACY_MAX_FIELDS} fields. If you believe more than ${SELF_CHECK_LEGACY_MAX_FIELDS} are wrong, the draft is
+    not worth patching: return the ${SELF_CHECK_LEGACY_MAX_FIELDS} that matter most and say so in "note".
+  * "unclear" is better than a guess. A field the frames genuinely do not settle should be
+    left alone and marked unclear, not corrected to a typical value.`;
+}
+
 // ── READING THE REPLY ─────────────────────────────────────────────────────────────────────
 // Tolerant of wrapping, strict about vocabulary, and NEVER invents a change. Returns null when
 // the reply carries none of the four keys this prompt asks for, which the caller records as a
@@ -1946,7 +2185,9 @@ RULES FOR THE ANSWER:
 // one stray brace, and reading that as a clean pass would inflate the single statistic this
 // whole feature is judged on — how often the check leaves an already-good draft alone.
 // "matches" has to be something the model SAID.
-export function parseSelfCheck(text: string): SelfCheckRead | null {
+// `mode` (fix, 2026-09-24): the legacy check keeps d3ab404's four `checked` keys, so an older
+// designer is handed exactly what it always was.
+export function parseSelfCheck(text: string, mode: SelfCheckMode = "v2"): SelfCheckRead | null {
   const m = String(text || "").match(/\{[\s\S]*\}/);
   if (!m) return null;
   // deno-lint-ignore no-explicit-any
@@ -1977,9 +2218,11 @@ export function parseSelfCheck(text: string): SelfCheckRead | null {
   const checked: SelfCheckChecked = {};
   if (parsed.checked && typeof parsed.checked === "object" && !Array.isArray(parsed.checked)) {
     const src = parsed.checked as Record<string, unknown>;
-    for (const k of SELF_CHECK_CHECKED_KEYS) {
+    for (const k of selfCheckRules(mode).checkedKeys) {
       const v = src[k];
-      if (typeof v === "string" && (SELF_CHECK_CHECKED_WORDS as readonly string[]).includes(v)) checked[k] = v;
+      if (typeof v === "string" && (SELF_CHECK_CHECKED_WORDS as readonly string[]).includes(v)) {
+        checked[k as keyof SelfCheckChecked] = v;
+      }
     }
   }
 
@@ -2012,7 +2255,11 @@ export function parseSelfCheck(text: string): SelfCheckRead | null {
 // reason -- a field the builder measured is not the check's to re-measure from a photograph.
 // Absent (every existing caller, and production's older bundle, which sends no dims at all)
 // means the list is unchanged.
-export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: KnownDims | null):
+//
+// `mode` (fix, 2026-09-24) picks the allow-list and the cap: "legacy" is d3ab404's gate exactly
+// (22 paths, six fields, and no v2 consequence report), so no v2 key can land from a check an
+// older designer ran. Absent is "v2", which is every call this file's tests already make.
+export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: KnownDims | null, mode: SelfCheckMode = "v2"):
   | { ok: false; error: string }
   | {
     ok: true;
@@ -2030,16 +2277,17 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
 
   // Deduplicated, in the order the model listed them. A model naming the same field twice is
   // asking for one change, not two, and must not be pushed over the cap by its own repetition.
+  const rules = selfCheckRules(mode);
   const declared: string[] = [];
   for (const c of read.changed) if (!declared.includes(c.field)) declared.push(c.field);
-  if (declared.length > SELF_CHECK_MAX_FIELDS) {
+  if (declared.length > rules.maxFields) {
     return { ok: true, verdict: "rejected_too_many", d3: base.d3, changed: [], dropped: declared.slice() };
   }
 
   const measuredEave = !!dims && dims.overhangIn !== undefined && dims.overhangIn !== null;
   const allow = measuredEave
-    ? (SELF_CHECK_ALLOW as readonly string[]).filter((f) => f !== "roof.overhang")
-    : (SELF_CHECK_ALLOW as readonly string[]);
+    ? rules.allow.filter((f) => f !== "roof.overhang")
+    : rules.allow;
   const dropped: string[] = [];
   // The value the model wants at each allowed path. Read out of `corrections`, never out of the
   // `to` in `changed`: that one is prose about the change, and the prompt says a field has to be
@@ -2178,7 +2426,9 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   // recessed porch takes the attach height and width. Same rule as the exclusion: the list has
   // to be true line by line AND complete, so every allow-listed path that moved is on it. These
   // carry no `why` -- nobody asked for them; they are what the asked-for change cost.
-  for (const field of SELF_CHECK_ALLOW as readonly string[]) {
+  // v2 only: d3ab404 had no such pass, and the legacy check is d3ab404's (none of its 22 paths
+  // can be taken by a validity rule the porch exclusion does not already report).
+  for (const field of (mode === "v2" ? SELF_CHECK_ALLOW : []) as readonly string[]) {
     if (applied.some((c) => c.field === field)) continue;
     const before = readSpecPath(base.d3, field);
     const after = readSpecPath(finalSpec.d3, field);
@@ -2298,11 +2548,14 @@ export type SelfCheckRender = { viewpoint: FrameMapViewpoint; frame: number; bas
 const JPEG_DATA_PREFIX = /^data:image\/jpe?g;base64,/i;
 const ANY_DATA_PREFIX = /^data:/i;
 
-export function parseSelfCheckRenders(raw: unknown, frameCount: number):
+// `mode` (fix, 2026-09-24): the legacy check takes d3ab404's four viewpoints, four renders and
+// 1.2 MB, refused in d3ab404's words; absent is "v2".
+export function parseSelfCheckRenders(raw: unknown, frameCount: number, mode: SelfCheckMode = "v2"):
   { ok: true; renders: SelfCheckRender[] } | { ok: false; error: string } {
+  const rules = selfCheckRules(mode);
   if (!Array.isArray(raw) || raw.length === 0) return { ok: false, error: "The check needs at least one render." };
-  if (raw.length > SELF_CHECK_MAX_RENDERS) {
-    return { ok: false, error: `A check compares at most ${SELF_CHECK_MAX_RENDERS} views, and ${raw.length} were sent.` };
+  if (raw.length > rules.maxRenders) {
+    return { ok: false, error: `A check compares at most ${rules.maxRenders} views, and ${raw.length} were sent.` };
   }
   const bound = Math.floor(num(frameCount) ?? 0);
   const renders: SelfCheckRender[] = [];
@@ -2314,7 +2567,7 @@ export function parseSelfCheckRenders(raw: unknown, frameCount: number):
     }
     const e = entry as Record<string, unknown>;
     const viewpoint = String(e.viewpoint ?? "");
-    if (!(SELF_CHECK_VIEWPOINTS as readonly string[]).includes(viewpoint)) {
+    if (!(rules.viewpoints as readonly string[]).includes(viewpoint)) {
       return { ok: false, error: `"${viewpoint.slice(0, 40)}" is not a viewpoint this check knows.` };
     }
     // One render per viewpoint. Two renders labelled `side` would put two pictures of the same
@@ -2352,8 +2605,8 @@ export function parseSelfCheckRenders(raw: unknown, frameCount: number):
       return { ok: false, error: `The ${viewpoint} render is not a JPEG.` };
     }
     total += bytes.length;
-    if (total > SELF_CHECK_TOTAL_RENDER_BYTES) {
-      return { ok: false, error: `Those renders come to more than the ${Math.round(SELF_CHECK_TOTAL_RENDER_BYTES / 1000)} KB a check allows.` };
+    if (total > rules.totalRenderBytes) {
+      return { ok: false, error: `Those renders come to more than the ${Math.round(rules.totalRenderBytes / 1000)} KB a check allows.` };
     }
     renders.push({ viewpoint: viewpoint as FrameMapViewpoint, frame, base64: b64, bytes: bytes.length });
   }
@@ -2395,6 +2648,49 @@ export function selfCheckPairs(
 
 // The one line each pair is introduced with, so the model is never guessing which of two
 // adjacent images is the photograph and which is ours.
-export function selfCheckPairLabel(viewpoint: FrameMapViewpoint): string {
-  return `VIEWPOINT "${viewpoint}" - ${SELF_CHECK_VIEW_WORDS[viewpoint]}. The builder's own frame comes first, then our render of your draft from the same angle.`;
+// The legacy check labels its pairs in d3ab404's words ("the end the door is on", "a long wall").
+export function selfCheckPairLabel(viewpoint: FrameMapViewpoint, mode: SelfCheckMode = "v2"): string {
+  const words = mode === "legacy"
+    ? (SELF_CHECK_LEGACY_VIEW_WORDS[viewpoint] ?? SELF_CHECK_VIEW_WORDS[viewpoint])
+    : SELF_CHECK_VIEW_WORDS[viewpoint];
+  return `VIEWPOINT "${viewpoint}" - ${words}. The builder's own frame comes first, then our render of your draft from the same angle.`;
+}
+
+// ── THE WHOLE REQUEST, IN ONE PURE FUNCTION (fix, 2026-09-24) ────────────────────────────────
+// The prompt, the labelled pairs, the model, the budget and the abort -- everything the check
+// sends -- built here rather than inline in portal-settings, so "an older designer's check is
+// d3ab404's check" is a test on the BYTES of the request (styleD3.test.ts hashes the legacy body
+// against what d3ab404's handler built for the same row) rather than a claim about a handler.
+// The caller only adds the headers and the signal, and reads `abortMs` for the latter.
+export type SelfCheckPair = { viewpoint: FrameMapViewpoint; frameUrl: string; base64: string };
+export function selfCheckRequest(opts: {
+  mode: SelfCheckMode;
+  dims: KnownDims;
+  draft: D3Spec;
+  pairs: readonly SelfCheckPair[];
+  // v2 only, and read off the ledger row by the caller (see selfCheckPrompt).
+  round?: number;
+  earlier?: readonly string[];
+}): { abortMs: number; body: Record<string, unknown> } {
+  const viewpoints = opts.pairs.map((p) => p.viewpoint);
+  const text = opts.mode === "legacy"
+    ? legacySelfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints })
+    : selfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints, round: opts.round, earlier: opts.earlier });
+  const content: unknown[] = [{ type: "text", text }];
+  for (const p of opts.pairs) {
+    content.push({ type: "text", text: selfCheckPairLabel(p.viewpoint, opts.mode) });
+    content.push({ type: "image", source: { type: "url", url: p.frameUrl } });
+    content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: p.base64 } });
+  }
+  const budget = SELF_CHECK_BUDGET[opts.mode];
+  return {
+    abortMs: budget.abortMs,
+    body: {
+      model: "claude-sonnet-5",
+      max_tokens: budget.maxTokens,
+      thinking: { type: "adaptive" },
+      output_config: { effort: "medium" },
+      messages: [{ role: "user", content }],
+    },
+  };
 }

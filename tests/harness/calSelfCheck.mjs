@@ -331,6 +331,10 @@ async function main() {
   r.ok("⚠️ THE FREE CHECK IS CALLED, with the ledger row the generation named",
     Boolean(a1.check) && a1.check.checkId === CHECK_ID, a1.check ? a1.check.checkId : "no call");
   r.ok("⚠️ AND IT IS ROUND 0 — the server's own counter, 0-based", Boolean(a1.check) && a1.check.round === 0, JSON.stringify(a1.check && a1.check.round));
+  // THE CHECK'S ROLLOUT GATE (fix 2026-09-24): without frame "front" the server runs the check
+  // production's older designer has always had (d3ab404's), so the new portal must say it.
+  r.ok("⚠️ AND IT SAYS frame \"front\", the key that gets it the v2 check", Boolean(a1.check) && a1.check.frame === "front",
+    JSON.stringify(a1.check && a1.check.frame));
   r.ok("a check that MATCHES is not asked again", checkCalls.length === 1, String(checkCalls.length));
   r.ok("and it re-sends THE EXACT ARRAY the generation was given, uncompacted",
     Boolean(a1.check) && JSON.stringify(a1.check.photoUrls) === JSON.stringify(a1.gen.photoUrls),
@@ -1053,6 +1057,8 @@ async function main() {
   r.ok("⚠️ ROUND 1 CORRECTS, ROUND 2 MATCHES: EXACTLY TWO CHECK REQUESTS", callsA.length === 2, `${callsA.length} requests`);
   r.ok("⚠️ numbered 0 and 1 on the wire, the server's own counter", callsA.map((c) => c.round).join(",") === "0,1",
     callsA.map((c) => c.round).join(","));
+  r.ok("and every round says frame \"front\": a later round is only the v2 check's", callsA.every((c) => c.frame === "front"),
+    callsA.map((c) => c.frame).join(","));
   r.ok("both against the same ledger row and the exact array the generation read",
     callsA.length === 2 && callsA.every((c) => c.checkId === CHECK_ID) && JSON.stringify(callsA[0].photoUrls) === JSON.stringify(callsA[1].photoUrls));
   r.ok("⚠️ THE PROGRESS CARD SAID WHICH ROUND IT WAS ON", roundsSeen.has("1 of 3") && roundsSeen.has("2 of 3"),
