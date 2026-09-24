@@ -3151,7 +3151,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // authenticated refetch lands - silently wiped a walk-around already on file. Only a caller
     // that actually sent an array gets to touch it; everyone else leaves it as they found it.
     const hasVideoFrames = Array.isArray(payload.d3VideoFrames);
-    const videoFrames = sanitizePhotoUrls(payload.d3VideoFrames, 8);
+    // 12 since 2026-09-24, in step with the designer's SS_VID_FRAMES. The STORED lap has to hold
+    // every frame a generation can be sent: the self-check pairs only frames found in the
+    // style's own stored media (selfCheckPairs), so a lap cut to 8 here drops frames 9-12 from
+    // every check -- and a reload would hand Generate eight views of a twelve-view lap.
+    const videoFrames = sanitizePhotoUrls(payload.d3VideoFrames, 12);
     const found = await findStyleFor3D(styleValue, styleId);
     if (found.err) return found.err;
     if (found.style!.model_status === "locked") return json({ error: LOCKED_MSG }, 409);
@@ -3245,7 +3249,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // only knows about photos must not blank the frames.
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (Array.isArray(payload.d3Photos)) patch.d3_photos = sanitizePhotoUrls(payload.d3Photos, 12);
-    if (Array.isArray(payload.d3VideoFrames)) patch.d3_video_frames = sanitizePhotoUrls(payload.d3VideoFrames, 8);
+    // 12, like save_style_d3 above and for its reason (2026-09-24).
+    if (Array.isArray(payload.d3VideoFrames)) patch.d3_video_frames = sanitizePhotoUrls(payload.d3VideoFrames, 12);
     if (Object.keys(patch).length === 1) return json({ ok: true, skipped: true });
     // The same version guard as save_style_d3, over only the columns this call writes.
     const decision = guardDecision({

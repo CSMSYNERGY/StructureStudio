@@ -106,7 +106,8 @@ Deno.serve(withErrorLog("admin-save-settings", async (req: Request) => {
     // so it cannot know whether a style has a walk-around - and an unconditional write from here
     // would mean an operator tuning a pitch silently erased the builder's video.
     const hasVideoFrames = Array.isArray(d3VideoFrames);
-    const videoFrames = sanitizePhotoUrls(d3VideoFrames, 8);
+    // 12 since 2026-09-24, portal-settings' save_style_d3 cap: a walk-around is twelve frames now.
+    const videoFrames = sanitizePhotoUrls(d3VideoFrames, 12);
 
     // Honour the phone-scan LOCK, exactly as portal-settings' builder-facing twin does
     // (same message, same 409). "locked" means the spec was tuned against a real scanned
