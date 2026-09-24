@@ -28,7 +28,14 @@
 //      ran into the main roof on a shed's low wall); every porch sits at or under that ceiling, and
 //      the panel's readout (d3PorchReadout) says what was built -- exactly, or "at most" where the
 //      main roof reaches out over a gable-end porch
-//  11. zero page errors
+//  11. the porch's own framing (roof.porchPosts / porchPitch / porchSteps, 2026-09-25): porchPosts
+//      builds that many posts, evenly spaced corner to corner; porchPitch is the porch roof's built
+//      slope (read off the roof sheet's own axis) unless a door's height under the header forces it
+//      lower, which is then flagged and leaves exactly 6'8"; porchSteps stands a step group at its
+//      side of the deck's FRONT edge as seen standing in front of the porch (on a back-wall porch
+//      that is the other world side), from the deck's edge out, on the grass. Without the keys there
+//      are no steps and model.porch carries none of the new fields.
+//  12. zero page errors
 //
 //   python -m http.server 8125 --bind 127.0.0.1                  (repo root)
 //   node tests/harness/newFrame.mjs                              (SS_SHOTS=<dir> for the PNGs)
@@ -84,6 +91,25 @@ const CASES = [
   // the panel said 7' 10" before the readout learned that ceiling.
   { id: "N", label: "Frame Eave Porch", size: "24x14", H: 8, ux: false, porch: { wall: "south", onCap: false, span: 24 }, colors: PLAIN,
     d3: { roof: { type: "gable", front: "eave", pitch: 0.5, overhang: 1.5, porchOutFt: 6 }, siding: "panel", colors: PLAIN, wallHeightFt: 8 } },
+  // THE PORCH'S OWN FRAMING (2026-09-25). A 16 ft eave-wall porch with four posts, a 3 in 12 roof hung
+  // high enough to keep it, and steps on the left.
+  { id: "P1", label: "Frame Porch Framing", size: "16x10", H: 7, ux: false, tallNeg: false, high: "south", porch: { wall: "south", onCap: false, span: 16, attach: 8.6 }, colors: FARM_COLORS, eave: "fascia",
+    framing: { posts: 4, pitch: 0.25, clamped: false, steps: "left" },
+    d3: { roof: { ...FARM_ROOF, porchAttachFt: 8.6, porchPosts: 4, porchPitch: 0.25, porchSteps: "left" }, siding: "batten", colors: FARM_COLORS, wallHeightFt: 7, roofMaterial: "metal" } },
+  // Hung at 8 ft the same 3 in 12 would leave under 6'8" at the header: lowered only as far as that,
+  // and flagged. Steps in the middle bay.
+  { id: "P2", label: "Frame Porch Held Pitch", size: "16x10", H: 7, ux: false, tallNeg: false, high: "south", porch: { wall: "south", onCap: false, span: 16, attach: 8 }, colors: FARM_COLORS, eave: "fascia",
+    framing: { posts: 4, pitch: 0.25, clamped: true, steps: "center" },
+    d3: { roof: { ...FARM_ROOF, porchPosts: 4, porchPitch: 0.25, porchSteps: "center" }, siding: "batten", colors: FARM_COLORS, wallHeightFt: 7, roofMaterial: "metal" } },
+  // On the BACK (north) wall the person standing in front of the porch faces south, so their right
+  // is the WEST: "right" steps stand at -x.
+  { id: "P3", label: "Frame Porch Back Steps", size: "24x14", H: 9, ux: false, porch: { wall: "north", onCap: false, span: 24 }, colors: PLAIN,
+    framing: { posts: 5, steps: "right" },
+    d3: { roof: { type: "gable", front: "eave", pitch: 0.4, overhang: 0.5, porchOutFt: 6, porchEnd: "back", porchPosts: 5, porchSteps: "right" }, siding: "panel", colors: PLAIN, wallHeightFt: 9 } },
+  // A narrow porch on a GABLE end (a cap end, turned the other way in the roof group): right is +x.
+  { id: "P4", label: "Frame Porch Gable Steps", size: "28x20", H: 10, ux: true, porch: { wall: "south", onCap: true, span: 12, attach: 9 }, colors: PLAIN,
+    framing: { posts: 3, pitch: 0.2, clamped: false, steps: "right" },
+    d3: { roof: { type: "gable", front: "gable", pitch: 0.47, overhang: 1, porchOutFt: 6, porchWidthFt: 12, porchAttachFt: 9, porchPosts: 3, porchPitch: 0.2, porchSteps: "right" }, siding: "batten", colors: PLAIN, wallHeightFt: 10 } },
   // The control: no key, so today's rule -- a portrait shed's slope runs the long way and its porch
   // takes the WEST short wall (the old Farmstand, 10x16), with no frame.
   { id: "O", label: "Frame Old Shed", size: "10x16", H: 7, old: true, colors: PLAIN,
@@ -219,12 +245,27 @@ async function measure(page, W, L) {
       const sb = bbOf(slab);
       // The sheet's top where it meets the wall: its highest vertex, all of which sit near the wall.
       out.porchRoof = { top: sb.mx[1], across: across(sb), out: outOn(sb), color: hex(slab.material) };
+      // Its BUILT slope: the sheet is a box laid along the slope, so its own x axis (the first column
+      // of its world matrix) runs down the roof. Rise over run of that axis, whatever wall it is on.
+      const e = slab.matrixWorld.elements;
+      out.porchRoof.slope = Math.abs(e[1]) / Math.hypot(e[0], e[2]);
       const posts = partsOf("post").map((q) => { const b = bbOf(q); return { across: across(b), out: outOn(b), top: b.mx[1], bottom: b.mn[1], color: hex(q.material) }; });
       out.posts = posts;
       out.porchRakes = partsOf("rake").map((q) => hex(q.material));
       out.drips = partsOf("drip").map((q) => hex(q.material));
-      const db = bbOf(decks[0]);
+      // The deck itself, without its steps (2026-09-25), which stand out past its edge.
+      const stepGroups = [];
+      decks[0].traverse((q) => { if (q.userData && q.userData.ssPorchPart === "steps") stepGroups.push(q); });
+      const deckOnly = { traverse: (fn) => decks[0].traverse((q) => { if (!stepGroups.some((g) => under(q, g))) fn(q); }) };
+      const db = bbOf(deckOnly);
       out.deck = { top: db.mx[1], out: outOn(db), across: across(db) };
+      out.postCentres = posts.map((q) => (q.across[0] + q.across[1]) / 2).sort((a, b) => a - b);
+      out.steps = stepGroups.map((g) => {
+        const b = bbOf(g);
+        const parts = {};
+        g.traverse((q) => { if (q.isMesh) parts[q.userData.ssPorchPart] = (parts[q.userData.ssPorchPart] || 0) + 1; });
+        return { where: g.userData.ssPorchSteps, across: across(b), out: [dOf({ x: b.mn[0], z: b.mn[2] }), dOf({ x: b.mx[0], z: b.mx[2] })].sort((a, c) => a - c), bottom: b.mn[1], top: b.mx[1], parts, color: hex((() => { let m = null; g.traverse((q) => { if (!m && q.isMesh) m = q.material; }); return m; })()) };
+      });
       // Tuck-under: the lowest point of any main-roof member over the porch sheet's footprint, more
       // than 0.16 ft out from the wall -- its triangles clipped to that footprint, never its box.
       let lowest = Infinity; const who = [];
@@ -397,6 +438,53 @@ async function runCase(ctx, c, ok, dir) {
         if (c.porch.wall === "south" && !c.porch.onCap && c.high === "south") {
           const fas = m.highEave.find((e) => e.kind === "fascia" || e.kind === "tail");
           ok(`${id}: the porch stands UNDER the high eave: siding shows between its roof and the eave finish`, fas && fas.mn[1] > P.yHigh + 1, fas && `eave bottom ${f3(fas.mn[1])} porch ${f3(P.yHigh)}`);
+        }
+        // ── the porch's own framing (2026-09-25) ──
+        const fr = c.framing;
+        ok(`${id}: the built slope is model.porch.pitch (${f3(P.pitch)})`, near(m.porchRoof.slope, P.pitch, 0.002), f3(m.porchRoof.slope));
+        if (!fr) {
+          ok(`${id}: no porchSteps, no steps; model.porch carries none of the new fields`, m.steps.length === 0 && !("steps" in P) && !("pitchWant" in P), `${m.steps.length} step groups, keys ${Object.keys(P).join(",")}`);
+        } else {
+          if (fr.posts != null) {
+            const cs = m.postCentres, gaps = cs.slice(1).map((v, i) => v - cs[i]);
+            ok(`${id}: porchPosts ${fr.posts}: ${fr.posts} posts built (model.porch.posts too)`, cs.length === fr.posts && P.posts === fr.posts, `${cs.length} built, model ${P.posts}`);
+            ok(`${id}: the posts stand at EVEN spacing, corner to corner`, gaps.length === fr.posts - 1 && gaps.every((g) => near(g, gaps[0], 0.005)), gaps.map(f3).join(" "));
+          }
+          if (fr.pitch != null) {
+            if (fr.clamped) {
+              ok(`${id}: porchPitch ${fr.pitch} is LOWERED, only as far as 6'8" under the header needs, and flagged`,
+                m.porchRoof.slope < fr.pitch - 0.01 && P.pitchClamped === true && P.short === false && near(P.postH, 6.67, 0.001) && P.pitchWant === fr.pitch,
+                `slope ${f3(m.porchRoof.slope)} postH ${f3(P.postH)} clamped ${P.pitchClamped} want ${P.pitchWant}`);
+            } else {
+              ok(`${id}: porchPitch ${fr.pitch}: the porch roof slopes ${fr.pitch} (+-0.01)`, near(m.porchRoof.slope, fr.pitch, 0.01) && P.pitchClamped === false && P.postH >= 6.67 - 1e-6,
+                `slope ${f3(m.porchRoof.slope)} postH ${f3(P.postH)}`);
+            }
+          }
+          if (fr.steps) {
+            const st = m.steps[0], G = P.steps;
+            ok(`${id}: one step group, "${fr.steps}", and model.porch.steps says so`, m.steps.length === 1 && st.where === fr.steps && G && G.where === fr.steps, `${m.steps.length} groups ${st && st.where}`);
+            if (st && G) {
+              // The person standing in front of the porch faces the wall: their right is +x on a south
+              // porch and -x on a north one.
+              const facing = P.wall === "south" ? 1 : P.wall === "north" ? -1 : null;
+              const mid = (st.across[0] + st.across[1]) / 2;
+              const want = facing * G.x;                        // every porch here is centred on its wall
+              ok(`${id}: the steps stand ${fr.steps === "center" ? "in the middle" : "on the " + fr.steps} as seen from in front (along ${f3(want)})`,
+                facing != null && near(mid, want, 0.02) && (fr.steps === "center" ? Math.abs(mid) < 0.02 : (fr.steps === "left" ? -1 : 1) * facing * mid > 1),
+                `centre ${f3(mid)} want ${f3(want)}`);
+              ok(`${id}: they are ${f3(G.w)} ft wide, inside the bay between two posts`, near(st.across[1] - st.across[0], G.w, 0.02) &&
+                m.postCentres.every((pc) => pc < st.across[0] - 0.2 || pc > st.across[1] + 0.2 || fr.steps === "center"),
+                `${f3(st.across[0])}..${f3(st.across[1])} posts ${m.postCentres.map(f3).join(" ")}`);
+              ok(`${id}: from the deck's front edge (D ${P.D}) out ${G.count} tread(s) of 11 in`, near(st.out[0], P.D + 0.005, 0.01) && near(st.out[1], P.D + 0.005 + G.count * 11 / 12, 0.02),
+                `${f3(st.out[0])}..${f3(st.out[1])}`);
+              ok(`${id}: standing on the grass (y ${-0.35}), under the deck top`, near(st.bottom, -0.35, 0.002) && st.top < 0 && near(st.top, -0.35 + G.count * G.rise, 0.002),
+                `bottom ${f3(st.bottom)} top ${f3(st.top)}`);
+              ok(`${id}: treads, a riser under each and two stringers, in the porch wood`, st.parts.stepTread === G.count && st.parts.stepRiser === G.count && st.parts.stringer === 2 && st.color === (c.colors.wood || "#c4965a"),
+                JSON.stringify(st.parts) + " " + st.color);
+            }
+          } else {
+            ok(`${id}: no porchSteps, no steps`, m.steps.length === 0, String(m.steps.length));
+          }
         }
       }
     }
