@@ -14566,6 +14566,16 @@ const SS_CHANGE_WORDS = {
   "roof.dormerWidthFt": ["How wide the dormer is", (v) => ssFtInWords(Number(v))],
   "roof.dormerRiseFt": ["How tall the dormer is", (v) => ssFtInWords(Number(v))],
   "roof.dormerOffsetU": ["Where the dormer sits along the roof", null],
+  // THE 2026-09-24 KEYS, in the words the panel's own controls use for them. The server's
+  // allow-list gains every one, and selfCheckPanel_test fails on any it has no words for.
+  "roof.front": ["What the front wall is", (v) => (String(v) === "eave" ? "a long side, under the roof edge" : String(v) === "gable" ? "a gable end, under the roof triangle" : String(v))],
+  "roof.highSide": ["Which wall is the high one", (v) => ({ front: "the front", back: "the back", left: "the left side", right: "the right side" })[String(v)] || String(v)],
+  "roof.porchAttachFt": ["Where the porch roof meets the wall", (v) => `${ssFtInWords(Number(v))} up`],
+  "roof.porchWidthFt": ["How wide the porch is", (v) => ssFtInWords(Number(v))],
+  "roof.wingSide": ["Which sides have a lower wing", (v) => ({ both: "both sides", left: "the left side", right: "the right side", front: "the front", back: "the back" })[String(v)] || String(v)],
+  "roof.wingWidthFt": ["How wide each lower wing is", (v) => (Number(v) > 0 ? ssFtInWords(Number(v)) : "no wings")],
+  "roof.wingPitch": ["How steep the wing roofs are", (v) => `${Math.round(Number(v) * 12)} in 12`],
+  "roof.centerEaveFt": ["How tall the middle section's walls are", (v) => ssFtInWords(Number(v))],
   gableVent: ["The vent in the gable", (v) => (v && v.widthFrac > 0 ? "there" : "not there")],
   foundation: ["What it sits on", (v) => (String(v) === "skids" ? "runners" : "a slab")],
   roofMaterial: ["What the roof is made of", (v) => String(v)],
