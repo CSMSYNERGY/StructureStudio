@@ -6606,6 +6606,15 @@ function buildShed3DModel(THREE, p) {
     if (t) WALLS[n].tops = t.map((p) => [p[0] - (WALLS[n].a0Ft || 0), p[1] - (WALLS[n].a0Ft || 0), p[2]]);
     WALLS[n].top = t ? t.reduce((m, p) => Math.max(m, p[2]), -Infinity) : H;
   });
+  // Where the centre's gable CAP ends along each gable-end wall, in that wall's own frame (wings
+  // only): buildOneWall splits the stepped wall's centre piece there, so its top edge meets the
+  // cap's bottom edge end to end (see upTo).
+  if (mass.wings.length) {
+    (mass.uAxisIsX ? ["north", "south"] : ["west", "east"]).forEach((n) => {
+      const c = mass.S / 2 + mass.uc - (WALLS[n].a0Ft || 0);
+      WALLS[n].capCuts = [c - mass.Sc / 2, c + mass.Sc / 2];
+    });
+  }
   // CLERESTORY holds the centre's side walls above each wing roof — from just under the wing slab
   // up to Hc, clad like any wall and ghosted with them — built by the same buildOneWall with no
   // items, and never pickable (no `wall` name: nothing can be placed on them).
@@ -7111,10 +7120,20 @@ function buildShed3DModel(THREE, p) {
     // UP TO THE LOCAL TOP (topsOf, wings): one box to the lowest top across the run, then one box
     // per piece that stands higher, so no seam runs down the wall under the step. Without `tops`
     // that is exactly the one box to H this has always built.
+    // A piece that stands higher is split where the gable CAP above it ends (wf.capCuts, wings):
+    // the centre piece reaches the clerestory's outer face, T/2 past each end of the cap, and a
+    // top edge whose ends are not the cap's own leaves sub-pixel cracks along the plate line
+    // between the two coplanar faces. Without capCuts (every other wall) one box, as before.
+    const cutsIn = (s0, s1) => {
+      const at = [s0];
+      (wf.capCuts || []).forEach((c) => { if (c > s0 + 0.01 && c < s1 - 0.01) at.push(c); });
+      at.push(s1);
+      return at.slice(1).map((c, i) => [at[i], c]);
+    };
     const upTo = (a0, a1, y0) => {
       const ps = topsOf(wf, a0, a1), mn = ps.reduce((m, p) => Math.min(m, p[2]), Infinity);
       if (mn - 0.01 > y0) wg.add(wallBox(wallMat, wf, a0, a1, y0, mn));
-      ps.forEach((p) => { const b = Math.max(mn, y0); if (p[2] > b + 0.01) wg.add(wallBox(wallMat, wf, p[0], p[1], b, p[2])); });
+      ps.forEach((p) => { const b = Math.max(mn, y0); if (p[2] > b + 0.01) cutsIn(p[0], p[1]).forEach(([s0, s1]) => wg.add(wallBox(wallMat, wf, s0, s1, b, p[2]))); });
     };
     let cursor = 0;
     ranges.forEach((rg) => {
@@ -8580,7 +8599,12 @@ function buildShed3DModel(THREE, p) {
     // symmetric `slen + OV*2` when the slab got its miter (052c79d), so two trim boards
     // crossed 0.6 ft past the ridge at every gable end -- the exact crossed-blades look
     // the miter had just removed, reintroduced in trim color (audit 2026-08-19).
-    [-OV + 0.05, L + OV - 0.05].forEach((z) => {
+    // In the new frame and with wings the board stands 0.01 ft proud of the slab's end: flush, its
+    // outer face and the slab's end face are one plane and trade pixels in a stipple along every
+    // rake, plain to see wherever the fascia and roof colours differ. Every other style keeps the
+    // plane it has always had (the byte-for-byte rule for stored styles).
+    const rakeProud = (NEW_FRAME || mass.wings.length) ? 0.01 : 0;
+    [-OV + 0.05 - rakeProud, L + OV - 0.05 + rakeProud].forEach((z) => {
       const rake = box(fasciaMat, slen + extA + extB, 0.32, 0.1);
       rake.rotation.z = Math.atan2(dy, du);
       rake.position.set(
@@ -8788,7 +8812,9 @@ function buildShed3DModel(THREE, p) {
         pg.add(part(fill, "cornerFill"));
       }
       // The rake trim along the porch roof's side edge.
-      pg.add(part(onSlope(fasciaMat, dWall, dEnd, s * (side + SIDE_OV - 0.04), 0.08, 0.28, -0.06), "rake"));
+      // 0.005 ft proud of the sheet's side face in the new frame and with wings, for the main rake's
+      // reason (coplanar faces stipple); every other porch keeps its plane.
+      pg.add(part(onSlope(fasciaMat, dWall, dEnd, s * (side + SIDE_OV - 0.04 + ((NEW_FRAME || mass.wings.length) ? 0.005 : 0)), 0.08, 0.28, -0.06), "rake"));
     }
     // The board and the dark trim face in front of it, both the roof's full width, which closes the
     // corners past the cheeks and rake trims.
