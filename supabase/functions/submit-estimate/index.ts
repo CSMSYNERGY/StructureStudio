@@ -1039,6 +1039,17 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // 5..20 ft (5..14 until 2026-09-24): styleD3's WALL_HEIGHT_MAX_FT, written as a literal so this
     // function does not start bundling styleD3.ts. ⚠️ LOCK-STEP with d3WallHeightFromDelta in both
     // designer twins — the preview and this line must price the same wall — and wallHeight_test.
+    //
+    // ⛔ DEPLOY THIS FUNCTION ONLY IN THE SAME WINDOW AS THE FRONTEND PROMOTION. Edge functions go
+    // live for production the moment they deploy (one Supabase project serves beta and production),
+    // and production's designer bundle still clamps d3WallHeightFromDelta at 14 until it is
+    // promoted. Deployed ahead of it, this 20 bills a taller-wall upgrade on more wall than the
+    // customer's preview priced and drew: a 12 ft base with +36" previews 72 x 14 sq ft of
+    // cladding and insulation and is billed 72 x 15. Deployed behind it, the new preview draws 15
+    // and this bills 14. Either way the preview and the estimate stop agreeing to the penny, so this
+    // file ships WITH the promotion (beside migration 252, portal-settings and admin-save-settings),
+    // never in an edge batch on its own. The 20 stays in the code on purpose: it is correct for the
+    // promoted designer, and reverting it would only move the same mismatch to the other side.
     resolvedWallHeightFt = Math.max(5, Math.min(20, resolvedWallHeightFt + wallHeightDeltaIn / 12));
     targetItems.push(tagLine({
       name: `Taller Walls (+${wallHeightDeltaIn} in)`,
