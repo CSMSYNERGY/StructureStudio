@@ -34,6 +34,10 @@ const REGIONS: Array<[string, string]> = [
   ["function d3RoofAxes(", "function d3FtIn("],
   // ssPorchTrussWall and d3ProjectingPorch.
   ["function ssPorchTrussWall(", "// Where a vent sits in the gable above"],
+  // The eave finish (d3EaveFinishDrop and the framing choice it reads), which d3PorchCapFt hangs an
+  // eave-wall porch under.
+  ["function d3DefaultOverhangStyle(", "// ── THE PROJECTING PORCH'S NUMBERS"],
+  // d3PorchGeom and d3PorchCapFt.
   ["function d3PorchGeom(", "function d3PorchReadout("],
   ["function d3PorchReadout(", "// A dimensioned end-elevation of the style"],
 ];
@@ -49,7 +53,7 @@ Deno.test("every lifted porch region is byte-identical in the two twins", () => 
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
-const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3WallTops, d3PorchWallTopFt, d3NewFrame };`)() as Record<string, Any>;
+const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, d3PorchCapFt, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3WallTops, d3PorchWallTopFt, d3NewFrame, d3Massing, d3EaveFinishDrop };`)() as Record<string, Any>;
 
 const PANEL_TRIM = 0.18;   // trimFace on panel cladding: T/2 + 0.03
 
@@ -245,4 +249,82 @@ Deno.test("d3PorchReadout reads the high wall and the attach height the renderer
   // No attach: just under the HIGH wall's top, not under H.
   assertAlmostEquals(F.d3PorchReadout({ roof: FARM, wallHeightFt: 7 }, "16x10").yHigh, 9.8, 1e-12);
   assertEquals(F.d3PorchReadout({ roof: { ...FARM, porchWidthFt: 10 }, wallHeightFt: 7 }, "16x10").S, 10);
+});
+
+// ── THE CEILING THE BUILDING PUTS OVER THE PORCH (d3PorchCapFt, 2026-09-24 review) ─────────────────
+// The renderer's clearance scan only sees members that reach past the wall's face, so on a flush roof
+// an attach height above the wall floated the porch roof over the eave; and the readout, with no roof
+// to measure, was feet off on eave-wall porches and under wings. One ceiling for both now.
+
+Deno.test("⚠️ every stored style's porch: the ceiling is exactly H - 0.2, where its porch already sits", () => {
+  const shapes: Array<[Any, number, number, number]> = [
+    [{ type: "gable", pitch: 0.4, overhang: 0.6, porchOutFt: 6 }, 16, 24, 9],
+    [{ type: "gable", pitch: 0.33, overhang: 1, eave: "open", porchOutFt: 6 }, 14, 20, 8],
+    [{ type: "gambrel", pitch: 1.2, overhang: 0.15, kneeU: 0.72, kneeRise: 0.72, ridgeRise: 1, porchOutFt: 6.5 }, 16, 24, 9],
+    [{ type: "gambrel", overhang: 0.15, porchOutFt: 6, porchEnd: "back" }, 12, 16, 7],
+    [{ type: "shed", pitch: 0.25, overhang: 0.6, porchOutFt: 6 }, 12, 20, 8],
+    [{ type: "shed", pitch: 0.23, overhang: 1, porchOutFt: 4, eave: "open" }, 10, 16, 7],
+    [{ type: "gable", pitch: 0.4, overhang: 0.5, porchOutFt: 6.5, leanToWidthFt: 8, leanToSide: "left" }, 16, 24, 9],
+    [{ type: "gable", pitch: 0.4, overhang: 0, porchOutFt: 6 }, 32, 12, 8],
+  ];
+  for (const [cfg, w, l, H] of shapes) {
+    for (const trim of [PANEL_TRIM, 0.26]) assertEquals(F.d3PorchCapFt(cfg, w, l, H, trim), H - 0.2, JSON.stringify(cfg));
+    // And so the readout says what it always said.
+    assertEquals(F.d3PorchReadout({ roof: cfg, wallHeightFt: H }, `${w}x${l}`).yHigh, H - 0.2, JSON.stringify(cfg));
+  }
+  assertEquals(F.d3PorchCapFt({ type: "gable", porchDepthFt: 6 }, 12, 16, 8, PANEL_TRIM), Infinity);
+});
+
+Deno.test("⚠️ a flush roof holds a high attach height under the wall's own outline (it floated over the eave)", () => {
+  // Gable front, overhang 0, 10 ft walls, attach 12: nothing reaches past the wall, and the porch roof
+  // hung 2 ft above the eaves across all 28 ft. Held under the wall's corners now.
+  const F28 = { type: "gable", front: "gable", pitch: 0.5, overhang: 0, porchOutFt: 6, porchAttachFt: 12 };
+  assertAlmostEquals(F.d3PorchReadout({ roof: F28, wallHeightFt: 10 }, "28x20").yHigh, 9.8, 1e-12);
+  // A narrow porch in the middle of that gable may go up into it, under the rake line over its sheet.
+  const narrow = F.d3PorchReadout({ roof: { ...F28, porchWidthFt: 8, porchAttachFt: 13 }, wallHeightFt: 10 }, "28x20");
+  assertAlmostEquals(narrow.yHigh, 13, 1e-12);
+  const high = F.d3PorchReadout({ roof: { ...F28, porchWidthFt: 8, porchAttachFt: 24 }, wallHeightFt: 10 }, "28x20");
+  assertAlmostEquals(high.yHigh, 10 + (14 - (4 + PANEL_TRIM + 0.08)) * 0.5 - 0.2, 1e-9);
+  // A shed's LOW wall with a flush roof: attach 8.5 on a 7 ft wall ran into the main roof slab.
+  const E = { type: "shed", highSide: "front", pitch: 0.3, overhang: 0, porchOutFt: 5, porchEnd: "back", porchAttachFt: 8.5 };
+  assertAlmostEquals(F.d3PorchReadout({ roof: E, wallHeightFt: 7 }, "16x10").yHigh, 6.8, 1e-12);
+});
+
+Deno.test("an eave-wall porch hangs under the eave over it, as the renderer measures it", () => {
+  // 24x14, front "eave", pitch 0.5, overhang 1.5, 8 ft walls: the panel said 7' 10" while the 3D hung
+  // the porch roof under the eave finish at 7.27.
+  const roof = { type: "gable", front: "eave", pitch: 0.5, overhang: 1.5, porchOutFt: 6 };
+  const k = 0.5, ny = 1 / Math.sqrt(1 + k * k);
+  const eaveY = 8 - 1.5 * k * ny;
+  const r = F.d3PorchReadout({ roof, wallHeightFt: 8 }, "24x14");
+  assertAlmostEquals(r.yHigh, eaveY - F.d3EaveFinishDrop(roof, ny) - 0.03, 1e-12);
+  assertAlmostEquals(r.yHigh, 7.267, 0.001);
+  assertEquals(r.atMost, false);
+  assertEquals(r.pitchClamped, true, "the porch roof is pushed to its flattest pitch, and the panel now says so");
+  // An open eave's tails hang lower than a notched soffit.
+  assert(F.d3PorchReadout({ roof: { ...roof, eave: "open" }, wallHeightFt: 8 }, "24x14").yHigh < r.yHigh);
+  // A shed's HIGH wall with open tails: under the tails where they cross the wall face.
+  const farm = { type: "shed", highSide: "front", pitch: 0.3, overhang: 1, eave: "open", porchOutFt: 5 };
+  const top = 7 + 10 * 0.3;
+  assertAlmostEquals(F.d3PorchReadout({ roof: farm, wallHeightFt: 7 }, "16x10").yHigh,
+    top + 0.3 * 0.155 - (3.5 / 12 - 0.02) * Math.sqrt(1.09) - 0.03, 1e-12);
+});
+
+Deno.test("with wings a centre porch hangs under the wing roofs its sheet reaches under", () => {
+  // 28x20 gable front, both wings 8 ft at 0.2, centre eave 15, 9 ft walls: the panel said 14' 10" with
+  // 13' 1" posts; the 3D hangs the porch roof at about 10.36, under the wing roofs.
+  const roof = { type: "gable", front: "gable", pitch: 0.67, overhang: 1, wingSide: "both", wingWidthFt: 8, wingPitch: 0.2, centerEaveFt: 15, porchOutFt: 6 };
+  const r = F.d3PorchReadout({ roof, wallHeightFt: 9 }, "28x20");
+  const edge = 6 + PANEL_TRIM + 0.08;                 // the sheet's edge, just past the centre wall line
+  assertAlmostEquals(r.yHigh, 9 + (14 - edge) * 0.2 - 0.2, 1e-9);
+  assert(r.yHigh > 10.3 && r.yHigh < 10.4, String(r.yHigh));
+  assertEquals(r.wallTop, 15);
+  // Wider than the centre: under the wing roofs further out, so lower still, and never above H.
+  const wide = F.d3PorchReadout({ roof: { ...roof, porchWidthFt: 20 }, wallHeightFt: 9 }, "28x20");
+  assertAlmostEquals(wide.yHigh, 9 + (14 - (10 + PANEL_TRIM + 0.08)) * 0.2 - 0.2, 1e-9);
+  const full = F.d3PorchReadout({ roof: { ...roof, porchWidthFt: 28, porchAttachFt: 14 }, wallHeightFt: 9 }, "28x20");
+  assertAlmostEquals(full.yHigh, 9 - 0.2, 1e-12);
+  // A gable-end porch whose roof reaches out past the wall: the renderer measures that, the panel says "at most".
+  assertEquals(r.atMost, true);
+  assertEquals(F.d3PorchReadout({ roof: { ...roof, overhang: 0 }, wallHeightFt: 9 }, "28x20").atMost, false);
 });

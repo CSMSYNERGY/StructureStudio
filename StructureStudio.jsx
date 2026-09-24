@@ -4897,13 +4897,22 @@ function d3TransomDormerGeom(roofCfg, S, profYAt) {
 //
 // Sibling of d3DormerReadout, which takes a size LABEL because the calibration panel has no live
 // footprint to read; this one takes the real feet the customer is buying.
+//
+// WITH WINGS THE DORMER IS ON THE CENTRE (2026-09-24 review): the renderer builds it on the centre's
+// roof, span Sc at eave Hc (d3Massing), so the face is measured there too. Measured across the full
+// span, a Tri Home-sized building's face came out 2.50 ft where the 3D's is 1.31, and a 30x36 in
+// window was offered and PRICED on a dormer that could not draw it. d3DormerRoof is that one profile,
+// for both functions; without wings it is exactly the span and wall the two always used.
+function d3DormerRoof(roof, wFt, dFt, H) {
+  const m = d3Massing(roof, wFt, dFt, H);
+  return { S: m.Sc, profYAt: d3MakeProfYAt(m.prof, m.Hc) };
+}
 function d3DormerFaceFt(spec, wFt, dFt) {
   const roof = (spec && spec.roof) || {};
   if (roof.type === "shed" || !((roof.dormerWidthFt || 0) > 0.5)) return 0;
   if (roof.dormerType !== "transom") return Math.max(0.3, roof.dormerRiseFt != null ? roof.dormerRiseFt : 2.5);
-  const S = d3RoofAxes(roof, Number(wFt) || 12, Number(dFt) || 16).S;
-  const H = (spec && spec.wallHeightFt) || 8;
-  return d3TransomDormerGeom(roof, S, d3MakeProfYAt(d3RoofProfile(roof, S, H, true).dedup, H)).face;
+  const r = d3DormerRoof(roof, Number(wFt) || 12, Number(dFt) || 16, (spec && spec.wallHeightFt) || 8);
+  return d3TransomDormerGeom(roof, r.S, r.profYAt).face;
 }
 
 // WHERE THE CUSTOMER'S CHOSEN WINDOW SITS ON A DORMER FACE, and whether it fits there at all.
@@ -4966,9 +4975,8 @@ function d3DormerReadout(spec, sizeLabel) {
   if (roof.type === "shed" || roof.dormerType !== "transom" || !((roof.dormerWidthFt || 0) > 0.5)) return null;
   const m = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
   const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
-  const S = d3RoofAxes(roof, w, d).S;
-  const H = (spec && spec.wallHeightFt) || 8;
-  return d3TransomDormerGeom(roof, S, d3MakeProfYAt(d3RoofProfile(roof, S, H, true).dedup, H));
+  const r = d3DormerRoof(roof, w, d, (spec && spec.wallHeightFt) || 8);
+  return d3TransomDormerGeom(roof, r.S, r.profYAt);
 }
 
 // Feet as a builder writes them: 4' 7" rather than 0.55 x half-span. This is the whole
@@ -5098,9 +5106,11 @@ function d3EaveFinishDrop(roofCfg, ny) {
 //   H         the wall height
 //   D         the projection, from d3ProjectingPorch
 //   trimFace  the cladding's proudest face: the posts' outer faces stand flush with the corner boards
-//   capY      the highest the porch roof may meet the wall. The renderer measures it off the main
-//             roof it has already built (a rake or fascia on a deep overhang, open-eave tails);
-//             the readout has no roof to measure and passes Infinity, so its yHigh is "at most".
+//   capY      the highest the porch roof may meet the wall: d3PorchCapFt's ceiling (the building's
+//             outline in the wall's own plane, and the eave hanging over an eave-wall porch), and
+//             in the renderer also whatever it measures off the main roof it has already built (a
+//             rake or fascia past a gable wall, open-eave fly rafters, a lean-to). The readout has
+//             only d3PorchCapFt, and says "at most" where the renderer can measure more.
 //
 // Frame: d = feet OUT from the gable wall's mid-plane (the footprint line), y = up from the floor.
 //   · The high edge sits at H - 0.2, just under a plate band (SS_PLATE_BAND_TOP - 0.3), and
@@ -5154,8 +5164,88 @@ function d3PorchGeom(S, H, D, trimFace, capY, attachFt) {
     sizes,
   };
 }
+// THE CEILING THE BUILDING ITSELF PUTS OVER A PROJECTING PORCH'S ROOF (2026-09-24 review), in feet off
+// the floor, or Infinity with no projecting porch. ONE function, read by buildShed3DModel and by the
+// panel's readout, so a porch the style hangs high (porchAttachFt) is held down the same way in both.
+//
+// The renderer's own clearance scan only sees members that reach PAST the wall's face, so on a flush
+// roof (overhang 0) nothing held the porch roof at all: an attach height above the wall top floated it
+// over the eave, or ran it into the main roof on a shed's low wall. And the readout, with no roof to
+// measure, was feet off on every eave-wall porch and under every pair of wings. Two parts:
+//   · THE WALL'S OWN OUTLINE across the porch sheet's width (its posts' outer faces plus the sheet's
+//     side overhang), less the 0.2 ft of "just under the top of the wall": on an eave wall that wall's
+//     top; on a cap end the massing's outline (d3MassingTopAt) -- the gable, a shed's slope, and with
+//     wings the wing roofs a centre porch's sheet reaches under. Straight between its corners, so its
+//     lowest point over the width is at an end or a corner, read exactly there; where two corners
+//     share a u (a wing roof meeting the centre wall) the lower one is the outline.
+//   · ON AN EAVE WALL, THE EAVE OVER IT, less the scan's 0.03: the eave finish's lowest point out at
+//     the overhang (d3EaveFinishDrop: fascia, soffit or open tails), and the rake board's bottom corner
+//     when the porch runs out to a gable end; on a new-frame shed's HIGH wall, the level soffit, or
+//     the open tails where they cross the wall face. A lower bound of what the scan measures, so the
+//     renderer and the readout take the same number.
+// With no porchAttachFt and no porchWidthFt this is exactly H - 0.2 on every stored style, whose
+// porch spans the whole gable end, so none of them moves (d3PorchGeom already sits there).
+function d3PorchCapFt(roofCfg, W, L, H, trimFace) {
+  const cfg = roofCfg || {};
+  const porch = d3ProjectingPorch(cfg, W, L);
+  if (!porch) return Infinity;
+  const P = d3PorchSpan(cfg, W, L);
+  const m = d3Massing(cfg, W, L, H);
+  const top = d3PorchWallTopFt(cfg, W, L, H);
+  const reach = P.span / 2 + trimFace + 0.08;          // d3PorchGeom's side + sizes.SIDE_OV
+  if (P.onCap) {
+    const corners = m.prof.map((c) => [c[0] + m.uc, c[1]]);
+    m.wings.forEach((g) => { corners.push([g.u1, g.ye], [g.u0, g.ya]); });
+    const outline = (u) => {
+      const at = corners.filter((c) => Math.abs(c[0] - u) < 1e-9);
+      return at.length ? Math.min(...at.map((c) => c[1])) : d3MassingTopAt(m, u);
+    };
+    const lo = Math.max(-m.S / 2, P.centerU - reach), hi = Math.min(m.S / 2, P.centerU + reach);
+    let y = Math.min(outline(lo), outline(hi));
+    corners.forEach((c) => { if (c[0] > lo + 1e-9 && c[0] < hi - 1e-9) y = Math.min(y, outline(c[0])); });
+    return y - 0.2;
+  }
+  const cap = top - 0.2;
+  const ovRaw = cfg.overhang != null ? Number(cfg.overhang) : D3.OVERHANG;
+  const OV = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
+  // The scan's wall face (d3PorchGeom's dWall + 0.005), less a hundredth: a member whose outermost
+  // point might pass it counts, so this never sits above what the scan measures.
+  const face = D3.WALL_T / 2 + 0.005 - 0.01;
+  const s = porch.wall === "south" || porch.wall === "east" ? 1 : -1;
+  if (porch.wall === d3ShedHighWall(cfg, W, L)) {
+    const k = cfg.pitch || 0.25, ny = 1 / Math.sqrt(1 + k * k);
+    if (cfg.eave === "open") {
+      // Tails rise outward from the wall: lowest where they cross its face, if they reach it at all.
+      if (OV * ny + 0.3 * k * ny <= face) return cap;
+      return Math.min(cap, top + k * (face + 0.01) - (D3_EAVE.TAIL_DROP - D3_EAVE.DECK_N) / ny - 0.03);
+    }
+    return Math.min(cap, top - 0.005 - D3_EAVE.SOFFIT_T - 0.03);
+  }
+  // The slope that ends at this wall: a wing's, or the centre's own end leg.
+  let k = 0;
+  const wing = m.wings.find((g) => g.side === s);
+  if (wing) k = wing.pitch;
+  else {
+    const pr = s > 0 ? m.prof.slice().reverse() : m.prof;
+    for (let i = 1; i < pr.length; i++) {
+      const du = Math.abs(pr[i][0] - pr[0][0]);
+      if (du > 1e-9) { k = Math.abs(pr[i][1] - pr[0][1]) / du; break; }
+    }
+  }
+  const ny = 1 / Math.sqrt(1 + k * k);
+  // Nothing of the eave reaches past the wall face (a flush roof): the outline above is all there is.
+  if (OV * ny + 0.12 * k * ny + D3_EAVE.FASCIA_T / 2 <= face) return cap;
+  const eaveY = top - OV * k * ny;                       // the slope line OV out along the slope
+  let drop = d3EaveFinishDrop(cfg, ny);
+  // The rake board's bottom corner at the eave, when the porch runs out to a gable end.
+  if (reach > m.L / 2 + OV - 0.1) drop = Math.max(drop, (0.16 - (D3.ROOF_T / 2 - 0.08)) * ny);
+  return Math.min(cap, eaveY - drop - 0.03);
+}
 // The projecting porch for a SPEC and a size LABEL, for the calibration panel: the size parsed the
-// way d3DormerReadout parses it, then d3PorchGeom with no main roof to measure (capY Infinity).
+// way d3DormerReadout parses it, then d3PorchGeom under d3PorchCapFt, the ceiling the renderer holds
+// it under too. `atMost` says the renderer may still build it lower: on a gable end whose roof reaches
+// past the wall (a rake or eave board, a lean-to), which only the renderer can measure, and on an
+// eave wall a lean-to hangs off.
 // Null when the style has no projecting porch. trimFace is the panel cladding's; it moves only
 // `side` and the rafter count, and none of what the panel prints (clearance, pitch, posts, where
 // the porch roof meets the wall) reads either.
@@ -5172,10 +5262,14 @@ function d3PorchReadout(spec, sizeLabel) {
   const H = (spec && spec.wallHeightFt) || D3.WALL_H;
   const top = d3PorchWallTopFt(roof, w, d, H);
   const attachFt = Number(roof.porchAttachFt) || 0;
-  const g = d3PorchGeom(S, top, porch.D, D3.WALL_T / 2 + 0.03, Infinity, attachFt);
+  const trimFace = D3.WALL_T / 2 + 0.03;
+  const g = d3PorchGeom(S, top, porch.D, trimFace, d3PorchCapFt(roof, w, d, H, trimFace), attachFt);
+  const ovRaw = roof.overhang != null ? Number(roof.overhang) : D3.OVERHANG;
+  const onCap = d3PorchSpan(roof, w, d).onCap;
+  const atMost = onCap ? (isFinite(ovRaw) ? ovRaw : D3.OVERHANG) > D3.WALL_T / 2 + 0.005 : (Number(roof.leanToWidthFt) || 0) > 0.5;
   // With porchAttachFt set it is the ATTACH height, not the wall, that decides the headroom, so the
   // panel's suggestion is where to hang the porch roof: hNeeded is a wall top, 0.2 above that.
-  return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2 };
+  return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2, atMost };
 }
 
 // A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
@@ -8317,6 +8411,17 @@ function buildShed3DModel(THREE, p) {
   // fixed "under the plate" cap vanished behind the fascia, whose drop grows with pitch and
   // overhang. One number from the geometry that was actually built, not a second copy of it.
   let eaveHangY = H;
+  // THE SAME, PER EAVE WALL (2026-09-24 review): a raised centre's own eave wall stands above H, and
+  // eaveHangY above is the LOWEST eave of all -- a wing's -- which says nothing about the centre's
+  // eave 6 ft higher. So each finish is also noted against the wall it overhangs ("north" ...), and
+  // a lamp on a wall above H reads its own. A slope end's local u says which wall: with the centre
+  // shifted by uc, u + uc is the building's u, -u = west (uAxisIsX) or north.
+  const eaveHangBy = {};
+  const noteEaveHang = (uLocal, y) => {
+    const ub = uLocal + mass.uc;
+    const wall = mass.uAxisIsX ? (ub < 0 ? "west" : "east") : (ub < 0 ? "north" : "south");
+    eaveHangBy[wall] = Math.min(eaveHangBy[wall] != null ? eaveHangBy[wall] : Infinity, y);
+  };
   // A slope's endpoint is an INTERIOR JOINT when another slope shares it: a gable ridge,
   // or a gambrel knee. Everything else is a free edge that should really overhang.
   const jointPartnerAt = (pt, self) => slopes.find((o) => o !== self
@@ -8461,6 +8566,7 @@ function buildShed3DModel(THREE, p) {
         fascia.position.set(edgeU, OV_NOTCHED ? fasTop - fasH / 2 : edgeY - 0.14, L / 2);
         rg.add(fascia);
         eaveHangY = Math.min(eaveHangY, OV_NOTCHED ? finishY : edgeY - 0.14 - 0.2);   // the board's bottom edge
+        noteEaveHang(lowEnd[0], OV_NOTCHED ? finishY : edgeY - 0.14 - 0.2);
         if (OV_NOTCHED) {
           // The level soffit, hung DIRECTLY on the deck's underside -- that IS the cut-back. It
           // runs level from the fascia toward the wall and, because the deck rises away from the
@@ -8496,6 +8602,7 @@ function buildShed3DModel(THREE, p) {
         // between tail and deck.
         const tailN = 0.02 - TAIL_DROP + TAIL_H / 2;
         eaveHangY = Math.min(eaveHangY, eaveY - d3EaveFinishDrop(roofCfg, ny));   // tails' outboard bottom
+        noteEaveHang(lowEnd[0], eaveY - d3EaveFinishDrop(roofCfg, ny));
         const tailLen = OV + 0.5;             // outboard face flush with the slab end,
                                               // inboard end buried behind the wall
         const tailU = eaveU - towardLow * ux * (tailLen / 2) + nx * tailN;
@@ -8540,6 +8647,7 @@ function buildShed3DModel(THREE, p) {
         const edgeU = hiU + nx * (D3.ROOF_T / 2 + 0.02);
         const edgeY = hiY + ny * (D3.ROOF_T / 2 + 0.02);
         const sofBot = wallTopY - 0.005 - D3_EAVE.SOFFIT_T;
+        noteEaveHang(highEave[0], sofBot);
         const fasTop = edgeY + 0.06;                        // just under the deck's top face
         const fasH = Math.max(0.08, fasTop - sofBot);
         const hfas = box(fasciaMat, D3_EAVE.FASCIA_T, fasH, L + OV * 2);
@@ -8557,6 +8665,8 @@ function buildShed3DModel(THREE, p) {
         const TAIL_W = D3_EAVE.TAIL_W, TAIL_H = D3_EAVE.TAIL_H;
         const tailN = 0.02 - D3_EAVE.TAIL_DROP + TAIL_H / 2;
         const tailLen = OV + 0.5;
+        // The tails' bottom edge where it crosses the wall line; it rises outward from there.
+        noteEaveHang(highEave[0], wallTopY + (0.02 - D3_EAVE.TAIL_DROP) / Math.max(1e-6, ny));
         const tailU = hiU - towardHigh * ux * (tailLen / 2) + nx * tailN;
         const tailY = hiY - towardHigh * uy * (tailLen / 2) + ny * tailN;
         const addHiTail = (z) => {
@@ -8726,7 +8836,10 @@ function buildShed3DModel(THREE, p) {
       // a centre porch, and its box's lowest corner is the wing's OUTER eave, feet away to the side.
       capY = Math.min(capY, ((o.userData && (o.userData.ssLeanTo || o.userData.ssWing)) || attachFt > 0 || Number(roofCfg.porchWidthFt) > 0 ? lowestOverPorch(o) : bb.min.y) - 0.03);
     });
-    const geom = d3PorchGeom(span, topH, D, trimFace, capY, attachFt);
+    // And under the ceiling the building itself sets (d3PorchCapFt, which the panel's readout reads
+    // too): the outline in the wall's own plane, which nothing above measures on a flush roof, and on
+    // an eave wall the eave over it. On every stored style that is H - 0.2, where the porch already is.
+    const geom = d3PorchGeom(span, topH, D, trimFace, Math.min(capY, d3PorchCapFt(roofCfg, bldgW, bldgH, H, trimFace)), attachFt);
     const { POST, HDR_H, HDR_D, RAF_W, RAF_D, PR_T, SHEATH, SIDE_OV, CHEEK_T, FAS_T } = geom.sizes;
     const { pitch, yHigh, side, dWall, dPost, dEnd } = geom;
     const ang = Math.atan(pitch), cosA = Math.cos(ang), sinA = Math.sin(ang);
@@ -9142,8 +9255,11 @@ function buildShed3DModel(THREE, p) {
         // slope loop actually built: 0.45 under it leaves the tipped head's top ~0.24 ft clear,
         // and never higher than H - 0.75. The harness asserts that gap against the fascia it
         // measures in the scene.
-        // On a wall standing above H (a raised centre's own wall) it hangs under that wall's top instead.
-        const EAVE_CAP = wTop > H + 0.01 ? wTop - 0.75 : Math.min(H - 0.75, eaveHangY - 0.45);
+        // On a wall standing above H (a raised centre's own wall, a shed's high wall) it hangs under that
+        // wall's top instead, and under THAT wall's own eave finish when one overhangs it (eaveHangBy):
+        // the centre's fascia and soffit hang below its wall top, and a lamp at wTop - 0.75 sat in them.
+        const ownHang = eaveHangBy[it.wall] != null ? eaveHangBy[it.wall] - 0.45 : Infinity;
+        const EAVE_CAP = wTop > H + 0.01 ? Math.min(wTop - 0.75, ownHang) : Math.min(H - 0.75, eaveHangY - 0.45);
         let top = gableEnd ? Math.max(EAVE_CAP, (mass.wings.length ? d3MassingTopAt(mass, u) : profYAt(u)) - 0.5) : EAVE_CAP;
         // On a projecting porch's wall it hangs under the porch ceiling, the way it hangs under an
         // eave: rising into the gable would put it behind the porch roof.
@@ -15095,16 +15211,29 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
 // privacy nicety — a 190MB phone video cannot go through an edge function, and the
 // existing photo path already accepts exactly this kind of JPEG.
 //
-// The hard part is WHICH frames. Sampling at equal time intervals looks obvious and is
-// wrong: people pause at the corners (where two faces and the roof rake are visible at
-// once — the most shape-informative viewpoint there is) and hurry along the flat sides, so
-// equal-time sampling spends its budget wherever the operator dawdled and can miss a whole
-// elevation. Sampling at equal CUMULATIVE VISUAL CHANGE self-corrects: standing still
-// accumulates nothing and costs nothing.
+// The hard part is WHICH frames. Until 2026-09-24 they were picked at equal CUMULATIVE VISUAL
+// CHANGE, on the theory that standing still costs nothing and hurrying along a side costs its
+// share. Measured on four real laps, that theory has a hole exactly where it hurts: nothing in a
+// walk-around changes faster than a CLOSE-UP. Walk up to a porch and the near wall races across
+// the frame, so change-weighted sampling spent four of twelve picks on the approach to one
+// porch (two of them of a door and a window box) and two more standing under another porch
+// roof, while whole elevations got one frame or none. A vision model cannot read a roof shape
+// from a post and a soffit.
 //
-// The probe pass that measures change also gets sharpness for free — it has already
-// decoded those frames — so each chosen viewpoint can be nudged to whichever of its
-// neighbours is least motion-blurred without spending another seek.
+// So the picks now follow TIME around the lap, which is what an orbit actually advances with,
+// and every probe is first asked whether it shows the building WHOLE (ssProbeLook, read off the
+// same 32x18 probe the change was always measured on, so it costs no extra seek):
+//   · the sky across the top of the frame: a building that fits has sky over its whole
+//     roofline; a close-up has wall, soffit or porch ceiling touching the top edge
+//   · the largest flat patch that is not sky: a near wall fills the frame with one surface
+//   · a sustained spike in frame-to-frame change: parallax from walking close past something
+// Each probe is good, fair (usable when nothing better covers that stretch) or bad, and a small
+// dynamic programme (ssOrbitPicks) chooses the twelve that sit closest to evenly spaced along the
+// lap while paying a price for every fair or bad frame and for motion blur. Time spent in
+// close-ups counts for less of the lap: walking into a porch and back out barely changes the
+// viewpoint. Every rule degrades to plain equal time: an overcast sky switches the sky test off,
+// a tripod clip has no spikes, and a clip where every probe is bad still gets evenly spaced
+// frames rather than none.
 // ⚠️ NEVER ABOVE THE SERVER'S `video` CAP. A walk-around generated with no photos goes to
 // calibrate_style_ai as source "video" (onDraftFromCombined in portal/12-shell.jsx), and
 // sanitizePhotoUrls drops any frame past that source's cap -- only `dropped` would say so.
@@ -15118,9 +15247,9 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
 // on its own fills one generation exactly.
 const SS_VID_FRAMES = 12;         // three views per side, whatever the pacing
 // 36 → 54 with it, which keeps the probes per pick where they were (4.5): with 36 probes a
-// 150 s lap is sampled every 4.2 s and twelve picks land three probes apart, so the sharpness
-// nudge and the de-duplication below start eating picks. Seeks are ~50-100 ms, so this bounds
-// the probe at ~3-5 s; a clip under 45 s never reaches it (1.2 probes a second).
+// 150 s lap is sampled every 4.2 s and twelve picks land three probes apart, leaving the chooser
+// no room to step round a bad frame. Seeks are ~50-100 ms, so this bounds the probe at ~3-5 s;
+// a clip under 45 s never reaches it (1.2 probes a second).
 const SS_VID_PROBE_MAX = 54;
 const SS_VID_LONG_EDGE = 1280;    // ~1200 image tokens per frame, ~200KB of JPEG
 const SS_VID_QUALITY = 0.8;
@@ -15190,6 +15319,150 @@ function ssLumaSharpness(luma, w, h) {
   return s / (w * h);
 }
 
+// A sky pixel in a probe: plainly blue (a clear sky is a DEEP blue at the top of a phone frame,
+// luma 60-90, so brightness alone misses it), bluish haze round the sun, or blown-out glare.
+// White and grey walls are warm or neutral and stay out; an overcast sky stays out too, and
+// ssOrbitPicks notices when that has happened to the whole clip and stops asking.
+function ssSkyPixel(r, g, b) {
+  const l = 0.299 * r + 0.587 * g + 0.114 * b;
+  return (b >= 90 && b > r + 35 && b > g + 15) || (l > 200 && b > r + 10 && b >= g) || l > 235;
+}
+
+// WHAT ONE PROBE SHOWS, from its RGBA pixels (w x h) and their luma:
+//   touch  the share of columns whose TOP pixel is not sky: the building (or a porch ceiling, a
+//          post, a wall) running off the top of the frame
+//   head   the third-lowest count of sky rows down from the top, across the columns: how far
+//          the highest part of the roofline sits below the frame's top edge (the third, so one
+//          post or a lens flare cannot decide it)
+//   flat   the largest 4-connected patch of non-sky pixels whose neighbours step by 8 luma or
+//          less, as a share of the frame: a near wall or ceiling is one smooth surface, while a
+//          building seen whole sits among gravel, grass and background that break it up
+//   cut    the building in the middle of the frame runs off its left or right edge. Its top is
+//          the highest roofline in the middle half of the frame; walking out from there, a
+//          building seen whole drops back below halfway to the background skyline (the sky's
+//          deepest reach, taken at the 85th percentile) before the edge, and one seen from too
+//          close never does. Only asked when the roof stands at least 3 probe rows above that
+//          skyline, so a long low roof seen side-on is not called cut for being flat.
+function ssProbeLook(px, w, h, luma) {
+  const n = w * h;
+  const sky = new Uint8Array(n);
+  for (let q = 0; q < n; q++) sky[q] = ssSkyPixel(px[4 * q], px[4 * q + 1], px[4 * q + 2]) ? 1 : 0;
+  const runs = [];
+  for (let x = 0; x < w; x++) {
+    let r = 0;
+    while (r < h && sky[r * w + x]) r++;
+    runs.push(r);
+  }
+  const sorted = runs.slice().sort((a, b) => a - b);
+  let flat = 0;
+  const seen = new Uint8Array(n);
+  const stack = [];
+  for (let s = 0; s < n; s++) {
+    if (seen[s] || sky[s]) continue;
+    let size = 0;
+    seen[s] = 1;
+    stack.push(s);
+    while (stack.length) {
+      const c = stack.pop();
+      size++;
+      const x = c % w, y = (c - x) / w;
+      const next = [x > 0 ? c - 1 : -1, x + 1 < w ? c + 1 : -1, y > 0 ? c - w : -1, y + 1 < h ? c + w : -1];
+      for (const k of next) {
+        if (k < 0 || seen[k] || sky[k] || Math.abs(luma[k] - luma[c]) > 8) continue;
+        seen[k] = 1;
+        stack.push(k);
+      }
+    }
+    if (size > flat) flat = size;
+  }
+  const c0 = Math.floor(w / 4), c1 = Math.ceil((3 * w) / 4);
+  let xm = c0;
+  for (let x = c0; x < c1; x++) if (runs[x] < runs[xm]) xm = x;
+  const top = runs[xm], deep = sorted[Math.floor(0.85 * (w - 1))];
+  let cut = false;
+  if (deep - top >= 3) {
+    const mid = (top + deep) / 2;
+    let a = xm, b = xm;
+    while (a > 0 && runs[a - 1] <= mid) a--;
+    while (b < w - 1 && runs[b + 1] <= mid) b++;
+    cut = a === 0 || b === w - 1;
+  }
+  return {
+    touch: runs.filter((r) => r === 0).length / w,
+    head: sorted[Math.min(2, sorted.length - 1)],
+    flat: flat / n,
+    cut,
+  };
+}
+
+// WHICH PROBES BECOME THE FRAMES: indices into `probes` ({ t, change, sharp, touch, head, flat, cut },
+// in walk order), at most K of them, in walk order. Pure, like ssProbeClasses, so
+// orbitFramePicks_test can run both.
+//
+// ssProbeClasses: each probe is 2 good, 1 fair or 0 bad:
+//   · sky, only when at least a quarter of the clip shows sky across the top at all (an overcast
+//     or indoor clip has no usable sky and is judged on the other two alone): bad when over a
+//     quarter of the top edge is not sky or the roofline reaches the top, fair when over an
+//     eighth of it is, the roofline is one probe row under the top, or the building is `cut`
+//   · flat: bad over 35 % of the frame, fair over 20 %
+//   · change: a SUSTAINED spike (this step over 1.6 x the clip's median and the next over 1.3 x)
+//     makes a probe fair at best: parallax from walking close past the building
+// The lap is measured in time, each probe's stretch counted at 1 when good, 0.6 when fair and
+// 0.25 when bad. The K picks are the ones whose places along that lap are closest to evenly
+// spaced (the squared error of every gap against lap / K, the lap's two ends included) plus 0, 1
+// or 4 for a good, fair or bad pick and up to 0.3 for motion blur against its four neighbours.
+// An exact dynamic programme: K x N^2 steps, about 35 000 at 54 probes.
+function ssProbeClasses(probes) {
+  const N = probes.length;
+  const median = (a) => { const s = a.slice().sort((x, y) => x - y); return s.length ? s[s.length >> 1] : 0; };
+  const skyOk = probes.filter((p) => p.touch <= 0.25).length >= 0.25 * N;
+  const mc = median(probes.slice(1).map((p) => p.change));
+  return probes.map((p, i) => {
+    let c = 2;
+    if (skyOk) c = (p.touch > 0.25 || p.head === 0) ? 0 : (p.touch <= 0.12 && p.head >= 2 && !p.cut) ? 2 : 1;
+    if (p.flat > 0.35) c = 0;
+    else if (p.flat > 0.2) c = Math.min(c, 1);
+    if (mc > 0 && i > 0 && p.change > 1.6 * mc && (i + 1 >= N || probes[i + 1].change > 1.3 * mc)) c = Math.min(c, 1);
+    return c;
+  });
+}
+function ssOrbitPicks(probes, K) {
+  const N = probes.length;
+  if (N <= K) return probes.map((_, i) => i);
+  const q = ssProbeClasses(probes);
+  const WEIGHT = [0.25, 0.6, 1], COST = [4, 1, 0];
+  const P = [Math.max(0, probes[0].t) * WEIGHT[q[0]]];
+  for (let i = 1; i < N; i++) P.push(P[i - 1] + Math.max(0, probes[i].t - probes[i - 1].t) * (WEIGHT[q[i - 1]] + WEIGHT[q[i]]) / 2);
+  const lap = P[N - 1] + (Math.max(0, probes[N - 1].t - probes[N - 2].t) / 2) * WEIGHT[q[N - 1]];
+  const ideal = lap / K;
+  const gap = (x) => { const e = ideal > 0 ? (x - ideal) / ideal : 0; return e * e; };
+  const own = probes.map((p, i) => {
+    let m = 0;
+    for (let j = Math.max(0, i - 2); j <= Math.min(N - 1, i + 2); j++) m = Math.max(m, probes[j].sharp);
+    return COST[q[i]] + (m > 0 ? 0.3 * (1 - p.sharp / m) : 0);
+  });
+  // best[k][i]: the cheapest way to put pick k (0-based) on probe i; from[k][i]: where pick k-1 is.
+  const best = [], from = [];
+  for (let k = 0; k < K; k++) { best.push(new Array(N).fill(Infinity)); from.push(new Array(N).fill(-1)); }
+  for (let i = 0; i < N; i++) best[0][i] = own[i] + gap(P[i] + ideal / 2);
+  for (let k = 1; k < K; k++) {
+    for (let i = k; i < N; i++) {
+      for (let j = k - 1; j < i; j++) {
+        const c = best[k - 1][j] + own[i] + gap(P[i] - P[j]);
+        if (c < best[k][i]) { best[k][i] = c; from[k][i] = j; }
+      }
+    }
+  }
+  let last = K - 1, lastCost = Infinity;
+  for (let i = K - 1; i < N; i++) {
+    const c = best[K - 1][i] + gap(lap - P[i] + ideal / 2);
+    if (c < lastCost) { lastCost = c; last = i; }
+  }
+  const picks = [];
+  for (let k = K - 1, i = last; k >= 0; k--) { picks.unshift(i); i = from[k][i]; }
+  return picks;
+}
+
 async function ssExtractOrbitFrames(file, onStep) {
   const url = URL.createObjectURL(file);
   const v = document.createElement("video");
@@ -15231,42 +15504,12 @@ async function ssExtractOrbitFrames(file, onStep) {
       const d = pctx.getImageData(0, 0, pw, ph).data;
       const luma = new Float32Array(pw * ph);
       for (let p = 0, q = 0; p < d.length; p += 4, q++) luma[q] = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
-      probes.push({ t, change: ssLumaDelta(prev, luma), sharp: ssLumaSharpness(luma, pw, ph) });
+      probes.push({ t, change: ssLumaDelta(prev, luma), sharp: ssLumaSharpness(luma, pw, ph), ...ssProbeLook(d, pw, ph, luma) });
       prev = luma;
     }
 
-    // ── choose viewpoints at equal cumulative change ──────────────────────────────
-    const cum = [];
-    let run = 0;
-    for (const p of probes) { run += p.change; cum.push(run); }
-    const total = run;
-    let picks;
-    if (total < 1e-3) {
-      // Nothing moved: a tripod shot, or a probe that read the same frame every time.
-      // Equal time is the only meaningful fallback, and it is what the caller expects.
-      picks = Array.from({ length: SS_VID_FRAMES }, (_, k) => Math.min(probes.length - 1, Math.round(((k + 0.5) / SS_VID_FRAMES) * (probes.length - 1))));
-    } else {
-      picks = [];
-      let at = 0;
-      for (let k = 0; k < SS_VID_FRAMES; k++) {
-        const want = ((k + 0.5) / SS_VID_FRAMES) * total;
-        while (at < cum.length - 1 && cum[at] < want) at++;
-        picks.push(at);
-      }
-    }
-    // Nudge each pick to the sharpest of itself and its immediate neighbours. Free: those
-    // frames were already decoded during the probe.
-    picks = picks.map((i) => {
-      let best = i;
-      for (const j of [i - 1, i + 1]) {
-        if (j >= 0 && j < probes.length && probes[j].sharp > probes[best].sharp) best = j;
-      }
-      return best;
-    });
-    // De-duplicate while keeping walk order — two targets can land on one probe when the
-    // operator swung round a corner fast.
-    const seen = new Set();
-    picks = picks.filter((i) => (seen.has(i) ? false : (seen.add(i), true)));
+    // ── whole-building viewpoints, evenly round the lap (ssOrbitPicks) ──────────────
+    const picks = ssOrbitPicks(probes, SS_VID_FRAMES);
 
     // ── capture at full resolution ────────────────────────────────────────────────
     const scale = Math.min(1, SS_VID_LONG_EDGE / Math.max(v.videoWidth, v.videoHeight));
@@ -15331,21 +15574,27 @@ const SSC_CAL_CSS = ".ssc-dim-in{font-size:13px}@media (pointer:coarse){.ssc-dim
 //   render   SS_RENDER_MS     wall clock in this browser. Over it, the check is skipped and
 //                             the builder keeps the draft. WebGL cannot be interrupted, so
 //                             the loser of the race still runs to its own dispose.
-//   call 2   the check        server aborts at 45 s; this aborts at SS_CHECK_MS, far enough
-//                             above it that a server that answered in time is still heard.
+//   call 2   the check        the server gives the v2 check 90 s (it was 45 s, and the v2
+//                             prompt with up to twelve frames and six renders ran out of it);
+//                             the browser aborts at SS_CHECK_MS, far enough above that a
+//                             server that answered in time is still heard. ⚠️ The abort itself
+//                             is the host's (onSelfCheck in portal/12-shell.jsx) and must
+//                             equal this number: this one only budgets the press with it.
 //   rounds   SS_CHECK_ROUNDS  the check runs again on renders of the CORRECTED building,
 //                             up to three times per generation (ssCheckNext says when not).
 //
 // ⚠️ THE BUDGET MOVED, AND ON PURPOSE. One round was 110 + 5 + 60 = 175 s, inside the three
 // minutes the 09-19 design budgeted. A draft now has 125 s (max_tokens 8000 → 12000 after the
-// Tri Home press died at the old ceiling), and a single check round cannot fix what a single
-// check round has already mis-fixed -- so the first round always runs (125 + 5 + 60 = 190 s)
-// and a LATER round starts only while a whole round still fits inside SS_FLOW_MAX_MS of the
-// press. The one path past five minutes is a draft the server asked us to retry (two drafts),
-// and ssCheckNext gives that path no second round. Still no watchdog that could throw away a
-// paid draft to enforce any of it.
+// Tri Home press died at the old ceiling), the check 100 s, and a single check round cannot fix
+// what a single check round has already mis-fixed -- so the first round always runs
+// (125 + 5 + 100 = 230 s) and a LATER round starts only while a whole round (5 + 100 s) still
+// fits inside SS_FLOW_MAX_MS of the press: after a draft at its ceiling there is no second
+// round, after a one-minute draft there is one. A check that answers in its usual half-minute
+// leaves room for all three. The one path past five minutes is a draft the server asked us to
+// retry (two drafts), and ssCheckNext gives that path no second round. Still no watchdog that
+// could throw away a paid draft to enforce any of it.
 const SS_RENDER_MS = 5000;
-const SS_CHECK_MS = 60000;
+const SS_CHECK_MS = 100000;
 // After SS_RENDER_MS on purpose: selfCheckPanel_test lifts this block from that line.
 const SS_DRAFT_SERVER_MS = 125000;
 const SS_CHECK_ROUNDS = 3;
@@ -15494,21 +15743,27 @@ function ssShotSig(spec) {
 // ratios measurably work (0.78 / 0.70 / 1.00 against a truth of 0.72 / 0.72 / 1.00, in 3 of 3
 // runs); a builder cannot check a ratio against a building. Both are true at once, so the
 // number stays a ratio on the wire and becomes feet on the screen.
-function ssRoofInFeet(roof, spanFt) {
+//
+// `centre` (2026-09-24 review): the style has lower wings, so the roof this describes is the
+// middle section's, spanFt is ITS span (d3Massing's Sc, not the building's width) and the
+// heights are above ITS walls. Measured across the full width, a raised centre's 4 ft roof was
+// described as 9 ft 5 in, and the builder is asked to check this sentence against the video.
+function ssRoofInFeet(roof, spanFt, centre) {
   const s2 = Math.max(0.5, Number(spanFt) || 0) / 2;
   const cfg = roof || {};
+  const wall = centre ? "the middle section's walls" : "the wall";
   if (cfg.type === "gambrel") {
     const kneeU = Number(cfg.kneeU) || 0.55;
     const kneeRise = Number(cfg.kneeRise) || 0.55;
     const ridgeRise = Number(cfg.ridgeRise) || 0.8;
     // "back from the wall", not "in from the wall": ssFtInWords already ends in "in" on most
     // values, and "2 ft 3 in in from the wall" is what that reads as on a screen.
-    return `The bend sits ${ssFtInWords(s2 * (1 - kneeU))} back from the wall and ${ssFtInWords(s2 * kneeRise)} above it; the peak is ${ssFtInWords(s2 * ridgeRise)} above the wall.`;
+    return `The bend sits ${ssFtInWords(s2 * (1 - kneeU))} back from ${wall} and ${ssFtInWords(s2 * kneeRise)} above ${centre ? "them" : "it"}; the peak is ${ssFtInWords(s2 * ridgeRise)} above ${wall}.`;
   }
   if (cfg.type === "shed") {
     return `The high side stands ${ssFtInWords(spanFt * (Number(cfg.pitch) || 0.25))} above the low side.`;
   }
-  return `The peak is ${ssFtInWords(s2 * (Number(cfg.pitch) || 0.5))} above the wall.`;
+  return `The peak is ${ssFtInWords(s2 * (Number(cfg.pitch) || 0.5))} above ${wall}.`;
 }
 
 // The rest of "What we drew" (2026-09-24): the parts of a building one roof sentence cannot
@@ -20872,8 +21127,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // 16 ft front and 10 ft depth at 0.23 is a 2 ft 4 in rise, and measured across the width the
   // line said 3 ft 8 in. Read through d3RoofAxes, the same function the renderer builds the
   // roof with, so the sentence and the 3D cannot disagree about which way the roof runs.
-  const calReadoutSpan = (adminCal && adminCal.spec && calReadoutL > 0)
-    ? (d3RoofAxes(adminCal.spec.roof, calReadoutW, calReadoutL).S || calReadoutW)
+  // WITH WINGS (d3Massing) the roof those sentences describe is the middle section's: its span
+  // Sc, above its own walls (ssRoofInFeet's `centre`), exactly as the renderer builds it.
+  const calReadoutMass = (adminCal && adminCal.spec && calReadoutL > 0)
+    ? d3Massing(adminCal.spec.roof, calReadoutW, calReadoutL, Number(adminCal.spec.wallHeightFt) || D3.WALL_H)
+    : null;
+  const calReadoutCentre = !!(calReadoutMass && calReadoutMass.wings.length);
+  const calReadoutSpan = calReadoutMass
+    ? ((calReadoutCentre ? calReadoutMass.Sc : d3RoofAxes(adminCal.spec.roof, calReadoutW, calReadoutL).S) || calReadoutW)
     : calReadoutW;
   const calChecksAnswered = SS_CHECKS.filter(([k]) => adminCalAnswers[k]).length;
   // ⚠️ THE ONE SLICE EACH QUESTION IS ABOUT, so a "No" can be told from a "No, fixed". Cheap
@@ -21049,7 +21310,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   style={{ width: "100%", display: "block" }} />
                 <span style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#94A3B8", fontWeight: 600 }}><span>shallow</span><span>steep</span></span>
               </label>
-              <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>{ssRoofInFeet(roof, calReadoutSpan)}</div>
+              <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>{ssRoofInFeet(roof, calReadoutSpan, calReadoutCentre)}</div>
             </div>
           ) : (
             /* "{n} in 12", because that is what a framing square is marked in and what a
@@ -23228,7 +23489,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       are true at once, so the number stays a ratio on the wire and becomes
                       feet here. */}
                   <div style={{ marginTop: 10, fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
-                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec)}
+                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec)}
                   </div>
                   {/* ── THE FOUR QUESTIONS ───────────────────────────────────────────────
                       ONLY WHERE THERE IS SOMETHING TO ANSWER THEM AGAINST, which is the same
@@ -23752,11 +24013,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   const kind = calPorchKind(roof);
                   const key = kind === "projecting" ? "porchOutFt" : "porchDepthFt";
                   const hint = { fontSize: 10, fontWeight: 700, marginTop: 3, color: "#A16207" };
-                  // WHAT THE PROJECTING PORCH WILL BUILD at the preview size, from d3PorchGeom, the
-                  // function the renderer builds it with. The panel has no main roof to measure, so
-                  // the height where the porch roof meets the wall is the most it can be. Amber when
-                  // the wall is too short for a 2:12 porch roof over 6'8" posts. It warns and nothing
-                  // is refused: the porch is still drawn.
+                  // WHAT THE PROJECTING PORCH WILL BUILD at the preview size, from d3PorchGeom under
+                  // d3PorchCapFt, the function and the ceiling the renderer builds it with. Where the
+                  // main roof reaches out over a gable-end porch (a rake or eave board past the wall,
+                  // a lean-to) only the renderer can measure it, and the line says the porch roof can
+                  // sit a little lower (pr.atMost). Amber when the wall is too short for a 2:12 porch
+                  // roof over 6'8" posts. It warns and nothing is refused: the porch is still drawn.
                   const pr = kind === "projecting" ? d3PorchReadout(adminCal.spec, sel.size) : null;
                   const warn = !!(pr && (pr.short || pr.pitchClamped));
                   // A RECESSED porch is not drawn on a building with lower wings (the renderer turns
@@ -23796,7 +24058,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                                   // headroom, so the suggestion is where to hang the porch roof.
                                   ? `Hung at ${d3FtIn(pr.attachFt)}, the porch roof leaves ${d3FtIn(pr.postH)} under the beam. About ${d3FtIn(pr.attachNeeded)} up gives a door's height at 2:12`
                                   : `Walls this short leave ${d3FtIn(pr.postH)} under the porch beam. About ${d3FtIn(pr.hNeeded)} walls give a door's height at 2:12`)
-                                : `Posts ${d3FtIn(pr.postH)} clear, porch roof meets the wall at ${d3FtIn(pr.yHigh)} on ${sel.size || "this size"}`}
+                                : `Posts ${d3FtIn(pr.postH)} clear, porch roof meets the wall at ${d3FtIn(pr.yHigh)} on ${sel.size || "this size"}${pr.atMost ? ", or a little lower where the main roof's edge reaches over the porch" : ""}`}
                             </div>
                           )}
                         </label>

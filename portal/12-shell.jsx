@@ -1752,10 +1752,12 @@ function Dashboard({ session }) {
        and the only thing that throws is a 409 on the claim — which means this generation has
        already been checked, and the caller handles it the same way.
 
-       THE CLIENT ABORT IS REAL, unlike the generation's. The server gives up at 45 s; 60 here
-       is far enough above that a server which answered in time is still heard, and it bounds
-       the wait at something a person will sit through. Abandoning THIS call costs nothing,
-       which is exactly what separates it from the one above.
+       THE CLIENT ABORT IS REAL, unlike the generation's. The server gives up at 90 s on the v2
+       check this designer asks for (45 s on the legacy one); 100 here is far enough above that a
+       server which answered in time is still heard, it matches the component's SS_CHECK_MS so
+       the five-minute press budget plans with the number actually in force, and it bounds the
+       wait at something a person will sit through. Abandoning THIS call costs nothing, which is
+       exactly what separates it from the one above.
 
        `round` (2026-09-24) is which check of this generation this is, 0-based: the server claims
        round k by moving the row's counter from k to k + 1, at most three times, so a repeat of
@@ -1772,7 +1774,7 @@ function Dashboard({ session }) {
       if (Number.isInteger(round) && round >= 0) body.round = round;
       const { data, error } = await sb.functions.invoke("portal-settings", {
         body,
-        signal: AbortSignal.timeout(60000),
+        signal: AbortSignal.timeout(100000),
       });
       // A 4xx carries a body, and the body is what says WHY. supabase-js hands back a
       // FunctionsHttpError whose response has to be read for it, so a caller that only looked

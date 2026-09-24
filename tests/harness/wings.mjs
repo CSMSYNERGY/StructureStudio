@@ -33,7 +33,9 @@
 // Exit 0 = every assertion held.
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, buildingRect, BASE } from "./lib.mjs";
+import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, buildingRect, BASE, purePorch } from "./lib.mjs";
+
+const PURE = purePorch();
 
 const CLADS = ["panel", "lap", "batten", "agpanel"].map((id) => ({ id, rate: 0, basis: "sqft_option", label: null, charged: false }));
 const COLORS = { body: "#3d4247", trim: "#2c3035", roof: "#2e3238", wood: "#a8703f" };
@@ -370,6 +372,15 @@ async function runCase(ctx, c, ok, shots, digests) {
       ok(`${tag}: a centre porch was built`, !!P, JSON.stringify(P && { yHigh: P.yHigh }));
       if (P) {
         console.log(`   ${tag}: porch yHigh ${f3(P.yHigh)} postH ${f3(P.postH)} side ${f3(P.side)} (ya ${f3(ya)}, H ${H})`);
+        // The building's own ceiling over the porch (d3PorchCapFt) and the panel's readout, from the
+        // twin (2026-09-24 review): the readout said 14' 10" here while the 3D hung the porch under
+        // the wing roofs. Read with the renderer's trim, the ceiling binds exactly; the panel's line
+        // (panel trim) is within a fiftieth of a foot, or says "at most" and is never below it.
+        const trimR = P.side - P.span / 2;
+        const capR = PURE.d3PorchCapFt(c.d3.roof, W, L, H, trimR);
+        ok(`${tag}: the porch roof is at or under the building's own ceiling over it (${f3(capR)})`, P.yHigh <= capR + 1e-9, `yHigh ${f3(P.yHigh)}`);
+        const RD = PURE.d3PorchReadout(c.d3, c.size);
+        ok(`${tag}: the panel's porch readout says what was built (${f3(RD.yHigh)}${RD.atMost ? ", at most" : ""})`, RD.atMost ? P.yHigh <= RD.yHigh + 0.02 : Math.abs(P.yHigh - RD.yHigh) < 0.02, `built ${f3(P.yHigh)}`);
         if (!c.porchSpan || c.porchSpan <= ms.Sc + 1e-6) {
           ok(`${tag}: the porch roof meets the centre wall just under the wing roof, not at the wing's outer eave`, P.yHigh < ya && P.yHigh > ya - 0.6 && P.yHigh > H, `yHigh ${f3(P.yHigh)} ya ${f3(ya)}`);
           ok(`${tag}: the porch spans the centre only`, P.side < ms.Sc / 2 + 0.5, `side ${f3(P.side)} Sc/2 ${f3(ms.Sc / 2)}`);
