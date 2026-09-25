@@ -1726,13 +1726,68 @@ function Dashboard({ session }) {
       const body = { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined, dims: d, frame: "front" };
       if (opts && opts.lean) body.lean = true;
       else body.stream = true;
+      // WHEN THIS PRESS BEGAN, recorded BEFORE it is sent: the ledger row it creates is stamped
+      // after this, so "the newest row since then" is this press's row (calibrate_style_ai_recover).
+      const since = new Date().toISOString();
+      // The success envelope, built in ONE place for both ways a draft can arrive: the answer
+      // itself, or the ledger row after a dropped stream. The designer cannot tell them apart,
+      // except by `recovered`, which only tells it why the free check has nothing to pair with.
+      const envelope = (got, extra) => ({
+        d3: got.d3, frames: got.frames || 0, dropped: got.dropped || 0,
+        observed: got.observed || null, dims: got.dims || null,
+        frameMap: got.frameMap || null, checkId: got.checkId || null,
+        ...(extra || {}),
+      });
       const { data, error } = await sb.functions.invoke("portal-settings", { body });
-      // A STREAMED ANSWER THAT BROKE OFF mid-body (the connection dropped): supabase-js hands back
-      // the JSON parser's own error, or the body read's, and neither sentence means anything to a
-      // builder. Said plainly instead, and NOT retryable: the server may have finished and charged,
-      // and the builder's own retry under the same key is what finds that out (already_charged).
-      if (error && body.stream && (error.name === "SyntaxError" || error.name === "TypeError")) {
-        throw new Error("The connection dropped before the answer arrived - please try again.");
+      // ── A STREAMED ANSWER THAT NEVER ARRIVED (2026-09-25) ──────────────────────────────────
+      // Two ways: the body broke off (the connection dropped: supabase-js hands back the JSON
+      // parser's own error, or the body read's), or the server closed it at its own deadline with
+      // `stream_deadline` while the work ran on. Either way the server may still be working, or may
+      // have finished and charged, so the builder is NOT told to try again (a retry under the same
+      // key re-runs the model or meets already_charged). The draft is picked up from its ledger
+      // row instead: calibrate_style_ai_recover every ten seconds, until it hands back the draft
+      // (returned exactly as the answer would have been), says it never will (`pending: false`: its
+      // sentence, and the designer keeps the key), or the press's own budget runs out.
+      //
+      // Only a streamed press, never the lean retry, and only with the designer's `recover` hooks:
+      // `alive()` goes false when the designer unmounts or another press takes over, which stops
+      // the polling; `until` is the press's deadline (SS_FLOW_MAX_MS from the press);
+      // `onRecovering()` switches its progress card to the pickup copy.
+      const brokeOff = Boolean(error && body.stream && (error.name === "SyntaxError" || error.name === "TypeError"));
+      const closedAtDeadline = Boolean(!error && body.stream && data && typeof data === "object" && data.code === "stream_deadline");
+      if (brokeOff || closedAtDeadline) {
+        const rec = opts && opts.recover;
+        if (!rec || typeof rec.alive !== "function") {
+          throw new Error("Your connection dropped before the draft arrived, so we could not show it. If it finished, you were charged for it once.");
+        }
+        if (typeof rec.onRecovering === "function") rec.onRecovering();
+        const every = (typeof window !== "undefined" && Number(window.__ssRecoverPollMs)) || 10000;
+        const until = Number(rec.until) || 0;
+        for (;;) {
+          const wait = Math.min(every, until - Date.now());
+          if (!(wait > 0)) break;
+          await new Promise((r) => setTimeout(r, wait));
+          if (!rec.alive()) throw new Error("Stopped picking the draft up: this press is no longer on screen.");
+          let got = null;
+          try {
+            const r = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai_recover", styleValue, since, clientNow: Date.now() } });
+            got = r && !r.error ? r.data : null;
+          } catch (_e) { got = null; }
+          if (!rec.alive()) throw new Error("Stopped picking the draft up: this press is no longer on screen.");
+          // THE DRAFT. `dropped` is not on the ledger row, so it is worked out from what was sent.
+          if (got && got.ok && got.d3) {
+            return envelope(got, {
+              dropped: Number.isInteger(got.dropped) ? got.dropped : (got.frames ? Math.max(0, urls.length - got.frames) : 0),
+              recovered: true,
+            });
+          }
+          if (got && got.pending === false) {
+            throw new Error(got.message || "We could not pick the draft up from the server. Press Generate to try again.");
+          }
+          // `pending: true`, or this poll failed on the way (the connection that dropped may still
+          // be down): ask again while the press has time.
+        }
+        throw new Error("Your connection dropped and the draft did not reach us in time. Pressing Generate again will not charge you twice for this press.");
       }
       // `ssRetryable` IS THE SERVER'S WORD, NEVER A GUESS FROM THE STATUS. A 502 is also a model
       // refusal or an unreachable AI service, and resending those is a second identical failure
@@ -1770,11 +1825,7 @@ function Dashboard({ session }) {
       // paid, which is what makes the check free and single-use. An older function sends
       // neither, and the designer treats that as "no check on this generation" rather than
       // inventing an angle to render at.
-      return {
-        d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0,
-        observed: data.observed || null, dims: data.dims || null,
-        frameMap: data.frameMap || null, checkId: data.checkId || null,
-      };
+      return envelope(data);
     },
     /* THE FREE SECOND PASS (2026-09-19). The browser renders the draft from the angles the
        first pass labelled, and asks one narrow question: where does OUR DRAFT not match THEIR

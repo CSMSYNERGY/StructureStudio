@@ -17927,6 +17927,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Which run a late answer belongs to. A builder who presses Generate again while a check is
   // still in flight must not have the old check's corrections land on the new draft.
   const calRunRef = useRef(0);
+  // WHETHER THIS PANEL IS STILL MOUNTED, for the one wait that can outlive it by minutes: picking
+  // up a streamed draft whose connection dropped (onDraftFromCombined's `recover.alive`, below in
+  // calGenerate). Set true inside the effect as well as at creation, because StrictMode runs an
+  // effect's cleanup and then the effect again on the same component.
+  const calAliveRef = useRef(true);
+  useEffect(() => { calAliveRef.current = true; return () => { calAliveRef.current = false; }; }, []);
   // ONE PRESS IS ONE HOLD IS ONE CHARGE, EVEN AFTER A TIMEOUT (2026-09-18). calibrate_style_ai
   // has always read `idempotencyKey` off the body and handed it to wallet_hold, whose
   // `wallet_tx_idem` unique index is the thing that stops a second $20 hold for one intent - and
@@ -21011,8 +21017,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // NO LABELS, NO CHECK, and no fallback either. A uniform orbit is off by a mean of 37
     // degrees on the one lap anyone has measured, so pairing a frame with a render at a
     // guessed angle would show the builder a mismatch we invented and ask them to judge it.
+    //
+    // A DRAFT PICKED UP FROM THE SERVER after its connection dropped (`res.recovered`, 2026-09-25)
+    // has no labels either: the frame map is read out of the model's reply, and the ledger row it
+    // was picked up from does not keep that. So it is skipped the same way, and says why.
     if (!res.checkId || !res.frameMap) {
-      settle({ verdict: "skipped", reason: "no_frames", pairs: [] });
+      settle(res.recovered
+        ? { verdict: "skipped", reason: "recovered", pairs: [], note: "Your connection dropped while we were drafting, so we picked the draft up from the server. The side-by-side check needs the live answer, so it did not run this time." }
+        : { verdict: "skipped", reason: "no_frames", pairs: [] });
       return;
     }
     if (mine()) setAdminCalCheck((p) => ({ ...(p || {}), step: "render" }));
@@ -21279,9 +21291,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // the same press: one intent, at most one hold at a time, one charge. Never a second
       // retry, and never on any other failure -- a refusal, a 402 or a 409 is not the model
       // running out of room, and resending it would only repeat it.
+      //
+      // ⚠️ AND ITS STREAMED ANSWER CAN DROP (2026-09-25). The press waits three to five minutes on a
+      // streamed answer, and a phone that backgrounds the tab or a network that blinks drops it while
+      // the server works on. `recover` lets the host pick the draft up from the server instead of
+      // failing (see onDraftFromCombined): it asks only while this panel is mounted and this press is
+      // still the one on screen, never past the press's own budget, and it switches the card to say
+      // so. A draft picked up that way comes back here exactly as an answer would, and everything
+      // below -- the apply, the key, the message, the check -- runs as it does for an answer.
       let res;
       try {
-        res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount, idem, dims);
+        res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount, idem, dims, {
+          recover: {
+            alive: () => calAliveRef.current && mine(),
+            until: t0 + SS_FLOW_MAX_MS,
+            onRecovering: () => { if (mine()) setAdminCalCheck((p) => (p ? { ...p, recovering: true } : p)); },
+          },
+        });
       } catch (e1) {
         if (!(e1 && e1.ssRetryable) || !mine()) throw e1;
         setAdminCalCheck((p) => (p ? { ...p, retry: true } : p));
@@ -23824,6 +23850,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         {adminCalCheck.retry && adminCalCheck.step === "draft" && (
                           <div style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", fontWeight: 700, lineHeight: 1.5 }}>
                             The first read ran out of room before it finished, so we are reading your views again with a shorter answer. It is still one generation.
+                          </div>
+                        )}
+                        {/* THE PICKUP, said while it happens (2026-09-25). The answer this press was
+                            waiting on dropped, and the draft is being read back off the server; no
+                            "try again", because pressing again is the one thing that would not help. */}
+                        {adminCalCheck.recovering && adminCalCheck.step === "draft" && (
+                          <div data-ssc-recovering="1" style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", fontWeight: 700, lineHeight: 1.5 }}>
+                            Your connection dropped — picking the draft up from the server… Keep this page open. It is still one generation.
                           </div>
                         )}
                         <div style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", lineHeight: 1.5 }}>

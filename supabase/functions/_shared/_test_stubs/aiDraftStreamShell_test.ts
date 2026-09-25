@@ -10,7 +10,12 @@
 //   2. A failure in a streamed body becomes exactly the Error a non-2xx becomes: the same sentence,
 //      the same `ssRetryable`, and nothing else, so calGenerate's one lean retry under the same key
 //      cannot tell them apart. (calIdempotency drives that retry in the compiled portal.)
-//   3. A streamed body that broke off mid-way is said plainly and not retried.
+//   3. A streamed answer that never arrived -- the body broke off, or the server closed it at its
+//      deadline with `stream_deadline` -- is NOT "try again": the shell polls
+//      calibrate_style_ai_recover (since = the press's start, recorded before it was sent) until the
+//      draft comes back, which it returns exactly as the answer would have been; until the server says
+//      it never will (its sentence, not retryable); or until the press's budget, and it stops the
+//      moment the designer goes away. Never for the lean retry, never without the designer's hooks.
 //   4. 01-core's invoke wrapper files a streamed refusal under the status it carries, so a 402 in a
 //      body stays an info row rather than a fault; and a page leave that kills a streamed BODY
 //      (TypeError / AbortError from the read) is the navigation abort, like a FunctionsFetchError.
@@ -89,19 +94,153 @@ Deno.test("a failure in a streamed body is exactly the Error a non-2xx becomes",
   }
 });
 
-Deno.test("a streamed body that broke off says so plainly, and is not retried", async () => {
-  for (const name of ["SyntaxError", "TypeError"]) {
-    const { draft } = shellWith(() => ({ data: null, error: { name, message: "Unexpected end of JSON input" } }));
-    let err: any = null;
-    try { await draft(URLS, "farm", 2, "key-1", DIMS); } catch (e) { err = e; }
-    assertEquals(err && err.message, "The connection dropped before the answer arrived - please try again.");
-    assert(!(err && err.ssRetryable), "not the automatic retry: the server may have charged");
+// ─── A streamed answer that never arrived: picked up from the server (2026-09-25) ──────────────
+// The ways a streamed press can lose its answer: the body broke off (the JSON parser's error, or the
+// body read's), or the server closed it at its own deadline with `stream_deadline`.
+const DROPS: [string, () => { data: unknown; error: unknown }][] = [
+  ["the body broke off (SyntaxError)", () => ({ data: null, error: { name: "SyntaxError", message: "Unexpected end of JSON input" } })],
+  ["the body read failed (TypeError)", () => ({ data: null, error: { name: "TypeError", message: "network error" } })],
+  ["the server's deadline (stream_deadline)", () => ({ data: { error: "The draft is taking longer than this connection can wait.", code: "stream_deadline", status: 504 }, error: null })],
+];
+const SUCCESS = { ok: true, d3: { roof: { type: "gable", pitch: 0.5 } }, frames: 2, dropped: 0, observed: { roofNote: "a gable" }, balanceCents: 6000, dims: DIMS, frameMap: { front: { frame: 1, azimuthDeg: 0 } }, checkId: "11111111-2222-4333-8444-555555555555" };
+// What calibrate_style_ai_recover answers with a draft: the success, rebuilt from the ledger row.
+const RECOVERED = { ...SUCCESS, dropped: null, balanceCents: null, frameMap: null, recovered: true };
+const PENDING = { ok: true, pending: true };
+
+// The shell with the poll a thousand times faster, and a designer's `recover` hooks.
+async function withFastPoll<T>(body: () => Promise<T>): Promise<T> {
+  const g = globalThis as any;
+  const had = "window" in g;
+  const saved = g.window;
+  g.window = { __ssRecoverPollMs: 5 };
+  try { return await body(); } finally {
+    if (had) g.window = saved;
+    else delete g.window;
   }
-  // The lean retry is not streamed, so its transport failures read as they always have.
-  const { draft } = shellWith(() => ({ data: null, error: { name: "SyntaxError", message: "Unexpected end of JSON input" } }));
-  let err: any = null;
-  try { await draft(URLS, "farm", 2, "key-1", DIMS, { lean: true }); } catch (e) { err = e; }
-  assertEquals(err && err.message, "Unexpected end of JSON input");
+}
+function recoverHooks(o: { untilMs?: number; aliveFor?: number } = {}) {
+  const hooks = { recovering: 0, checks: 0 };
+  const recover = {
+    alive: () => { hooks.checks++; return o.aliveFor === undefined || hooks.checks <= o.aliveFor; },
+    until: Date.now() + (o.untilMs ?? 5_000),
+    onRecovering: () => { hooks.recovering++; },
+  };
+  return { hooks, recover };
+}
+// A server that drops the press's answer and then answers the recover polls in turn.
+function droppingServer(drop: () => { data: unknown; error: unknown }, polls: ({ data: unknown; error: unknown } | "throw")[]) {
+  const seen: { at: number; body: Record<string, unknown> }[] = [];
+  let n = 0;
+  const { draft, sent } = shellWith((body) => {
+    seen.push({ at: Date.now(), body });
+    if (body.action === "calibrate_style_ai") return drop();
+    const next = polls[Math.min(n++, polls.length - 1)];
+    if (next === "throw") throw new TypeError("Failed to fetch");
+    return next;
+  });
+  return { draft, sent, seen };
+}
+
+Deno.test("a streamed answer that never arrived is picked up from the server, and returned exactly as the answer would have been", async () => {
+  // The envelope a normal answer becomes, for comparison.
+  const normal = await shellWith(() => ({ data: SUCCESS, error: null })).draft(URLS, "farm", 2, "key-1", DIMS);
+  for (const [what, drop] of DROPS) {
+    await withFastPoll(async () => {
+      const { hooks, recover } = recoverHooks();
+      const { draft, seen } = droppingServer(drop, [{ data: PENDING, error: null }, "throw", { data: { error: "busy" }, error: { name: "FunctionsHttpError", message: "busy" } }, { data: RECOVERED, error: null }]);
+      const got = await draft(URLS, "farm", 2, "key-1", DIMS, { recover });
+      // Exactly the normal envelope: the same draft, the same notes, measurements and check id; the
+      // frame map (not on the ledger row) is null, so the designer skips the check and says why.
+      assertEquals(got, { ...normal, frameMap: null, recovered: true }, what);
+      assertEquals(Object.keys(got), [...Object.keys(normal), "recovered"], `${what}: the same keys, in order`);
+      assertEquals(got.dropped, 0, `${what}: worked out from what was sent (2 sent, 2 read)`);
+      assertEquals(hooks.recovering, 1, `${what}: the card switched to the pickup once`);
+      // The press went out once, streamed; then it polled -- through a pending, a poll that threw and a
+      // poll the server refused -- until the draft was there, and stopped.
+      const press = seen.filter((s) => s.body.action === "calibrate_style_ai");
+      const polls = seen.filter((s) => s.body.action === "calibrate_style_ai_recover");
+      assertEquals(press.length, 1, what);
+      assertEquals(press[0].body.stream, true, what);
+      assertEquals(polls.length, 4, `${what}: until the draft, and not once more`);
+      for (const p of polls) {
+        assertEquals(Object.keys(p.body), ["action", "styleValue", "since", "clientNow"], what);
+        assertEquals(p.body.styleValue, "farm");
+        // `since` was recorded BEFORE the press was sent, so the press's own ledger row is after it.
+        assert(Date.parse(String(p.body.since)) <= press[0].at, `${what}: since is before the press went out`);
+        assert(typeof p.body.clientNow === "number", "the browser's clock, so the server can line the two up");
+      }
+    });
+  }
+});
+
+Deno.test("a server that says the draft will never come: its sentence, not retryable, and the polling stops", async () => {
+  await withFastPoll(async () => {
+    const { recover } = recoverHooks();
+    const said = "We could not pick the draft up from the server: that generation did not finish, so you are not charged for it. Press Generate to try again.";
+    const { draft, seen } = droppingServer(DROPS[0][1], [{ data: PENDING, error: null }, { data: { ok: true, pending: false, message: said }, error: null }, { data: RECOVERED, error: null }]);
+    let err: any = null;
+    try { await draft(URLS, "farm", 2, "key-1", DIMS, { recover }); } catch (e) { err = e; }
+    assertEquals(err && err.message, said);
+    assert(!(err && err.ssRetryable), "never the automatic lean retry: that would be a second model call");
+    assertEquals(seen.filter((s) => s.body.action === "calibrate_style_ai_recover").length, 2, "no poll after the answer");
+  });
+});
+
+Deno.test("the press's budget runs out: a plain sentence, no 'try again', and no poll past the deadline", async () => {
+  await withFastPoll(async () => {
+    const { recover } = recoverHooks({ untilMs: 40 });
+    const { draft, seen } = droppingServer(DROPS[2][1], [{ data: PENDING, error: null }]);
+    let err: any = null;
+    const t = Date.now();
+    try { await draft(URLS, "farm", 2, "key-1", DIMS, { recover }); } catch (e) { err = e; }
+    assert(err && /did not reach us in time/.test(err.message) && /not charge you twice/.test(err.message), err && err.message);
+    assert(!/try again/i.test(err.message), "never 'try again' for a press that may have finished");
+    assert(!(err && err.ssRetryable));
+    const polls = seen.filter((s) => s.body.action === "calibrate_style_ai_recover");
+    // The last wait is cut to end AT the deadline, so the last poll is the deadline's own (a timer can
+    // run a tick late: Windows' is ~16 ms). None is sent after it.
+    assert(polls.length >= 1 && polls.every((p) => p.at <= recover.until + 50), `polled only inside the budget: ${polls.map((p) => p.at - recover.until).join(", ")} ms`);
+    const n = polls.length;
+    await new Promise((r) => setTimeout(r, 30));
+    assertEquals(seen.filter((s) => s.body.action === "calibrate_style_ai_recover").length, n, "and none after it gave up");
+    assert(Date.now() - t < 1_000, "and gave up at the deadline, not later");
+  });
+});
+
+Deno.test("the designer goes away (or another press takes over): the polling stops at once", async () => {
+  await withFastPoll(async () => {
+    // alive() answers true for the first check only: the poll that follows it is the last.
+    const { recover } = recoverHooks({ aliveFor: 1 });
+    const { draft, seen } = droppingServer(DROPS[0][1], [{ data: PENDING, error: null }]);
+    let err: any = null;
+    try { await draft(URLS, "farm", 2, "key-1", DIMS, { recover }); } catch (e) { err = e; }
+    assert(err instanceof Error, "the press ends");
+    const polls = seen.filter((s) => s.body.action === "calibrate_style_ai_recover").length;
+    assertEquals(polls, 1, "one poll, then nothing");
+    await new Promise((r) => setTimeout(r, 30));
+    assertEquals(seen.filter((s) => s.body.action === "calibrate_style_ai_recover").length, 1, "and nothing later either");
+  });
+});
+
+Deno.test("no pickup for the lean retry, nor for a designer without the hooks; neither says 'try again' for a streamed drop", async () => {
+  await withFastPoll(async () => {
+    // The lean retry is not streamed, so its transport failures read as they always have.
+    const lean = droppingServer(DROPS[0][1], [{ data: RECOVERED, error: null }]);
+    let err: any = null;
+    try { await lean.draft(URLS, "farm", 2, "key-1", DIMS, { lean: true, recover: recoverHooks().recover }); } catch (e) { err = e; }
+    assertEquals(err && err.message, "Unexpected end of JSON input");
+    assertEquals(lean.seen.filter((s) => s.body.action === "calibrate_style_ai_recover").length, 0, "the lean retry never polls");
+    // A designer that never passes `recover` (an older one): said plainly, not polled, not retried.
+    for (const [what, drop] of DROPS) {
+      const old = droppingServer(drop, [{ data: RECOVERED, error: null }]);
+      err = null;
+      try { await old.draft(URLS, "farm", 2, "key-1", DIMS); } catch (e) { err = e; }
+      assert(err && /connection dropped before the draft arrived/.test(err.message), `${what}: ${err && err.message}`);
+      assert(!/try again/i.test(err.message), what);
+      assert(!(err && err.ssRetryable), what);
+      assertEquals(old.seen.filter((s) => s.body.action === "calibrate_style_ai_recover").length, 0, what);
+    }
+  });
 });
 
 Deno.test("01-core: a page leave that kills a streamed body mid-read is the navigation abort, not a fault", () => {
