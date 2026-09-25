@@ -1,8 +1,8 @@
 // Picking a streamed draft up after its connection dropped (2026-09-25, by key since 253): the pure
 // halves of calibrate_style_ai_recover in styleD3.ts -- draftIdemKey, pickRecoverRow,
-// draftMoneyState and recoverDraftAnswer. The handler's half -- the gate, and the filters that keep
-// every other tenant's, user's, key's and style's rows out -- is driven through the shipped
-// portal-settings handler in _test_stubs/aiDraftStreamWiring_test.ts.
+// isRecoverableDraft, draftMoneyState and recoverDraftAnswer. The handler's half -- the gate, and
+// the filters that keep every other tenant's, user's, key's and style's rows out -- is driven
+// through the shipped portal-settings handler in _test_stubs/aiDraftStreamWiring_test.ts.
 //
 // What only these can get wrong, and what is pinned here:
 //   1. The key is cut exactly one way, for the insert, the hold and the pickup alike.
@@ -20,8 +20,8 @@
 
 import {
   DRAFT_RECOVER_MAX_ROWS, DRAFT_RECOVER_PENDING_MS, DRAFT_RECOVER_SETTLE_MS, DRAFT_STREAM_DEADLINE_MS,
-  type DraftMoney, type DraftRecoverRow, draftIdemKey, draftMoneyState, parseModelSpec, pickRecoverRow,
-  recoverDraftAnswer,
+  type DraftMoney, type DraftRecoverRow, draftIdemKey, draftMoneyState, isRecoverableDraft, parseModelSpec,
+  pickRecoverRow, recoverDraftAnswer,
 } from "./styleD3.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
@@ -136,6 +136,21 @@ Deno.test("the row's frame map is read back through the parser that made it, bou
     assertEquals(mapOf({ frame_map: junk }), null, JSON.stringify(junk));
   }
   assertEquals(mapOf({ frames: null, frame_map: MAP }), null, "no bound, no map");
+});
+
+Deno.test("isRecoverableDraft: our own sanitised spec, and nothing else", () => {
+  assertEquals(isRecoverableDraft(ROW({ drafted: D3 })), true);
+  for (const drafted of [null, undefined, [1, 2], "gable", 7, true]) {
+    assertEquals(isRecoverableDraft(ROW({ drafted })), false, JSON.stringify(drafted));
+  }
+  assertEquals(isRecoverableDraft(null), false, "no row");
+  // Exactly the rows recoverDraftAnswer hands back as a draft.
+  for (const drafted of [D3, null, [1, 2], "gable", 7, true]) {
+    for (const money of [NONE, CAPTURED(200_000)]) {
+      const row = ROW({ drafted });
+      assertEquals(recoverDraftAnswer(row, money, NOW).kind === "draft", isRecoverableDraft(row), JSON.stringify([drafted, money.kind]));
+    }
+  }
 });
 
 Deno.test("a row whose draft is not a spec object is a fault, never a draft to apply", () => {

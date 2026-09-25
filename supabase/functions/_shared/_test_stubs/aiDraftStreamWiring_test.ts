@@ -22,10 +22,11 @@
 //   6. The work behind the answer is handed to EdgeRuntime.waitUntil; a watchdog closes the answer at
 //      DRAFT_STREAM_DEADLINE_MS with `stream_deadline` while the work runs on to its capture and
 //      ledger row; and a browser that goes away mid-stream changes nothing about the hold or the row.
-//   7. The press's key rides on its ledger row (253), and the frame map beside `drafted`, neither able
-//      to fail a generation. calibrate_style_ai_recover: the generation's own gate, only the caller's
-//      own rows found BY THE PRESS'S KEY (tenant, user, key, style), the success body rebuilt from the
-//      row the key drafted -- frame map and all -- and the money said from the press's own wallet rows.
+//   7. The press's key rides on its ledger row (253), and the frame map just before `drafted`, neither
+//      able to fail a generation. calibrate_style_ai_recover: the generation's own gate, only the
+//      caller's own rows found BY THE PRESS'S KEY (tenant, user, key, style), the success body rebuilt
+//      from the key's newest row -- frame map and all -- and the money said from the press's own wallet
+//      rows whenever the answer is not a recovered draft.
 //   8. The new shell's half (it asks for the stream, reads a failure in the body exactly like a
 //      non-2xx, and picks a dropped draft up) is aiDraftStreamShell_test.
 //
@@ -923,6 +924,21 @@ Deno.test("a key that owns several rows answers from the NEWEST: a failed row th
     const got = await drive(RECOVER(), { ledger, wallet: [TX({ state: "released" }), TX({ state: "held" })] });
     assertEquals(JSON.parse(got.out.text), { ok: true, pending: true });
   }
+});
+
+Deno.test("⚠️ an unreadable draft on a CHARGED press reads the wallet and says 'charged once', never 'not charged'", async () => {
+  for (const drafted of ["gable", [1, 2], 7]) {
+    const got = await drive(RECOVER(), { ledger: [ROW({ drafted })], wallet: [TX({ state: "posted", posted_at: ago(600_000) })] });
+    const body = JSON.parse(got.out.text);
+    assert(body.pending === false && body.reason === "unreadable", `${JSON.stringify(drafted)}: ${JSON.stringify(body)}`);
+    assert(/charged once/.test(body.message) && /not been charged twice/.test(body.message) && !/not charged for it/.test(body.message), body.message);
+    assertEquals(walletReads(got.trace).length, 1, `${JSON.stringify(drafted)}: the wallet was read`);
+    assertEquals(rowsOf(got.trace), [["ai_draft_recover_none", "error"]]);
+  }
+  // A readable draft is still the answer whatever the money says, and never reads the wallet.
+  const { wrote } = await live();
+  const fine = await drive(RECOVER(), { ledger: [ROW({ ...wrote })], wallet: [TX({ state: "posted", posted_at: ago(600_000) })] });
+  assertEquals([JSON.parse(fine.out.text).recovered, walletReads(fine.trace).length], [true, 0]);
 });
 
 Deno.test("⚠️ no draft: the answer about money is the press's own wallet rows, never the timing", async () => {

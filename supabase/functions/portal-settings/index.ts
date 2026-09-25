@@ -95,7 +95,7 @@ import { heartbeatJsonResponse } from "../_shared/heartbeatJson.ts";
 // Draft recovery (2026-09-25): a streamed draft whose connection dropped is read back off its ledger row,
 // found by the press's own idempotency key (253).
 import {
-  draftMoneyState, pickRecoverRow, recoverDraftAnswer, DRAFT_RECOVER_COLUMNS, DRAFT_RECOVER_MAX_ROWS,
+  draftMoneyState, isRecoverableDraft, pickRecoverRow, recoverDraftAnswer, DRAFT_RECOVER_COLUMNS, DRAFT_RECOVER_MAX_ROWS,
   DRAFT_RECOVER_MONEY_COLUMNS, type DraftMoney, type DraftRecoverMoneyRow, type DraftRecoverRow,
 } from "../_shared/styleD3.ts";
 // The press's idempotency key, cut one way for the ledger row, the wallet hold and the pickup (253).
@@ -3579,8 +3579,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // the key, the style and the shape-first sources. So an operator in view-as reads only the rows
   // they generated there, and a key from another tenant or user finds nothing.
   //
-  // No model call and no money: two reads (the wallet only when there is no draft) and one coded
-  // row per answer that ends the wait (none for `pending`).
+  // No model call and no money: two reads (the wallet only when the answer will not be a recovered
+  // draft) and one coded row per answer that ends the wait (none for `pending`).
   if (action === "calibrate_style_ai_recover") {
     // The style exactly as calibrate_style_ai writes it into `style_key`: the same String(), the
     // same 120-character cut, and no trim, or a style whose key has a trailing space finds nothing.
@@ -3608,10 +3608,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .limit(DRAFT_RECOVER_MAX_ROWS);
     if (recErr) return await unreadable("the ledger (migration 253 may not be applied)", recErr.message);
     const row = pickRecoverRow(rows as DraftRecoverRow[] | null);
-    // The money, only when there is no draft to hand back: a drafted row is the answer whatever
-    // the wallet says. The press's own debit rows under the same key (wallet_hold's p_idem).
+    // The money, whenever the answer will not be a recovered draft (isRecoverableDraft: the same
+    // test recoverDraftAnswer makes), so an unreadable draft on a charged press is said as charged.
+    // A draft to hand back is the answer whatever the wallet says. The press's own debit rows
+    // under the same key (wallet_hold's p_idem).
     let money: DraftMoney = { kind: "none" };
-    if (!row || row.drafted === null || row.drafted === undefined) {
+    if (!isRecoverableDraft(row)) {
       const { data: tx, error: txErr } = await admin.from("wallet_transactions")
         .select(DRAFT_RECOVER_MONEY_COLUMNS)
         .eq("client_id", clientId).eq("idempotency_key", idemKey).eq("actor_user_id", userId)

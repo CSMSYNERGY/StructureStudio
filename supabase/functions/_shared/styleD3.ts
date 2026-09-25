@@ -1125,6 +1125,15 @@ export function pickRecoverRow(rows: DraftRecoverRow[] | null | undefined): Draf
   return [...list].sort((a, b) => calledMsOf(b) - calledMsOf(a))[0];
 }
 
+// Whether the answer will be a recovered draft: the row's `drafted` is our own sanitised spec,
+// read back. When it is not (no row, no draft yet, or a value that is not a spec) the answer is
+// about money, so the handler reads the wallet exactly when this is false.
+export function isRecoverableDraft(row: DraftRecoverRow | null): boolean {
+  if (!row || !hasDraft(row)) return false;
+  const d3 = row.drafted;
+  return typeof d3 === "object" && !Array.isArray(d3) && sanitizeD3Spec(d3).ok;
+}
+
 // What the press's money is doing, from its own wallet rows (128: a hold is a 'held' debit, a
 // capture turns it 'posted', a release 'released'; after 248 a key can own several released rows
 // and at most one that is not). Captured beats held beats released, because one row per attempt
@@ -1209,19 +1218,13 @@ export function recoverDraftAnswer(row: DraftRecoverRow | null, money: DraftMone
   });
   const pending: DraftRecoverAnswer = { kind: "pending", body: { ok: true, pending: true } };
   if (!row) return lost("no_row");
-  if (hasDraft(row)) {
-    const d3 = row.drafted;
-    // Our own sanitised write, read back. Anything else is a fault, never a draft to apply.
-    if (typeof d3 !== "object" || Array.isArray(d3) || !sanitizeD3Spec(d3).ok) {
-      const said = lostSentence(money);
-      return lost("unreadable", { message: said.message, severity: "error" });
-    }
+  if (isRecoverableDraft(row)) {
     const dims = parseKnownDims(row.dims);
     return {
       kind: "draft", code: "ai_draft_recovered", severity: "info",
       body: {
         ok: true,
-        d3,
+        d3: row.drafted,
         frames: typeof row.frames === "number" ? row.frames : null,
         dropped: null,
         observed: row.observed ?? null,
@@ -1232,6 +1235,11 @@ export function recoverDraftAnswer(row: DraftRecoverRow | null, money: DraftMone
         recovered: true,
       },
     };
+  }
+  // A draft that is not our own sanitised write is a fault, never a draft to apply.
+  if (hasDraft(row)) {
+    const said = lostSentence(money);
+    return lost("unreadable", { message: said.message, severity: "error" });
   }
   if (money.kind === "captured") {
     // Charged, and the draft has not reached the row. A moment behind the capture on a success;
