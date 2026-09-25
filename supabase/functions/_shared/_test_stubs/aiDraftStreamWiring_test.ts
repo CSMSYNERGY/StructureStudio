@@ -92,6 +92,8 @@ type World = {
   deadlineScale?: number;       // the answer's watchdog runs this many times faster (default 100)
   ledger?: Record<string, unknown>[];   // ai_style_calls rows the recover action can read
   recoverErr?: boolean;         // the recover action's read errors
+  noIdemColumn?: boolean;       // ai_style_calls has no idem_key column (253 not applied)
+  frameMapFails?: "error" | "throw";    // the frame_map write errors, or throws
   member?: Record<string, unknown>;     // the caller's client_users row, over an owner's
 };
 type Trace = {
@@ -140,7 +142,17 @@ function answer(world: World, trace: Trace, target: string, ops: any[][]) {
       const cols = String(arg("select")).split(",").map((c) => c.trim());
       return { data: out.map((r) => Object.fromEntries(cols.map((c) => [c, r[c] ?? null]))), error: null };
     }
-    if (has("insert")) return world.ledgerFails ? { data: null, error: { message: "the ledger is gone" } } : { data: { id: LEDGER_ID }, error: null };
+    if (has("insert")) {
+      // PostgREST refuses the WHOLE insert when one key names a column it does not have (PGRST204).
+      if (world.noIdemColumn && "idem_key" in (arg("insert") ?? {})) {
+        return { data: null, error: { code: "PGRST204", message: "Could not find the 'idem_key' column of 'ai_style_calls' in the schema cache" } };
+      }
+      return world.ledgerFails ? { data: null, error: { message: "the ledger is gone" } } : { data: { id: LEDGER_ID }, error: null };
+    }
+    if (has("update") && "frame_map" in (arg("update") ?? {})) {
+      if (world.frameMapFails === "throw") throw new TypeError("the frame_map write blew up");
+      if (world.frameMapFails === "error") return { data: null, error: { code: "PGRST204", message: "Could not find the 'frame_map' column of 'ai_style_calls' in the schema cache" } };
+    }
     return { data: null, error: null };
   }
   if (target === "wallet_accounts") {
@@ -843,4 +855,80 @@ Deno.test("a ledger that cannot be read is not an answer about the draft: 503, o
   const body = JSON.parse(got.out.text);
   assert(!("pending" in body), "never pending:false for a read that failed");
   assertEquals(got.trace.rows.map((r) => r.code), ["ai_draft_recover_failed"], "the wrapper adds no copy");
+});
+
+// ─── 7b. The press's key rides on its ledger row, and the frame map beside its draft (253) ─────
+const KEY = "press-1";          // STREAMED's own idempotencyKey
+const inserts = (t: Trace) => (t.db.filter((op: any) => op[0] === "ai_style_calls" && op[1][0] === "insert") as any[]).map((op) => op[1][1]);
+const ledgerUpdates = (t: Trace) => (t.db.filter((op: any) => op[0] === "ai_style_calls" && op[1][0] === "update") as any[]).map((op) => op[1][1]);
+const holdIdem = (t: Trace) => ((t.db.find((op: any) => op[0] === "rpc:wallet_hold") ?? []) as any[])[1]?.[1]?.p_idem;
+const rowsOf = (t: Trace) => t.rows.map((r) => [r.code, r.severity]);
+
+Deno.test("the press's key rides on its ledger row: the same key wallet_hold files the hold under, and a keyless press inserts what it always did", async () => {
+  for (const payload of [STREAMED, V2] as Record<string, unknown>[]) {
+    const { trace, out } = await drive(payload, { model: THREE(GOOD()) });
+    assert(/"ok":true/.test(out.text), "a draft");
+    assertEquals(inserts(trace), [{ client_id: "harness-tenant", user_id: USER_ID, style_key: "barn", source: "video", idem_key: KEY }]);
+    assertEquals(holdIdem(trace), KEY, "the key the hold is filed under is the key on the row");
+  }
+  // One cut for both: a key past 120 characters is cut the same way on the row and on the hold.
+  const long = "k".repeat(150);
+  const cut = await drive({ ...STREAMED, idempotencyKey: long }, { model: THREE(GOOD()) });
+  assertEquals(inserts(cut.trace)[0].idem_key, "k".repeat(120));
+  assertEquals(holdIdem(cut.trace), "k".repeat(120));
+  // No key (an older caller): exactly the object the insert has always written, and no null key.
+  const keyless = await drive({ ...V2, idempotencyKey: undefined }, { model: THREE(GOOD()) });
+  assertEquals(inserts(keyless.trace), [{ client_id: "harness-tenant", user_id: USER_ID, style_key: "barn", source: "video" }]);
+  assertEquals(Object.keys(inserts(keyless.trace)[0]), ["client_id", "user_id", "style_key", "source"], "the same keys in the same order as before 253");
+  assertEquals(holdIdem(keyless.trace), null);
+});
+
+Deno.test("⚠️ a missing idem_key column never fails a generation: the insert is retried without it, with one info row", async () => {
+  for (const payload of [STREAMED, V2] as Record<string, unknown>[]) {
+    const { trace, out } = await drive(payload, { model: THREE(GOOD()), noIdemColumn: true });
+    const body = JSON.parse(out.text.trimStart());
+    assertEquals([body.ok, body.checkId], [true, LEDGER_ID], `${payload.stream ? "streamed" : "plain"}: the draft, on the row the retry wrote`);
+    assertEquals(inserts(trace), [
+      { client_id: "harness-tenant", user_id: USER_ID, style_key: "barn", source: "video", idem_key: KEY },
+      { client_id: "harness-tenant", user_id: USER_ID, style_key: "barn", source: "video" },
+    ], "tried with the key, then once without");
+    assertEquals(rowsOf(trace), [["ai_style_idem_key_write_failed", "info"]], "one info row, and nothing filed as a fault");
+    assert(/253/.test(String(trace.rows[0].message)), "naming the migration");
+    assertEquals(holdIdem(trace), KEY, "the hold still carries the key");
+    assertEquals(trace.captured.length, 1, "and the press went on to its capture");
+  }
+  // A ledger that is really down fails the retry too, and refuses exactly as before: a 503, no hold.
+  const down = await drive(V2, { ledgerFails: true });
+  assertEquals(down.out.status, 503);
+  assertEquals(inserts(down.trace).length, 2);
+  assertEquals(down.trace.db.filter((op: any) => op[0] === "rpc:wallet_hold"), [], "no money is touched");
+  // A keyless press that fails is not retried: there is no key to take out.
+  const keyless = await drive({ ...V2, idempotencyKey: undefined }, { ledgerFails: true });
+  assertEquals([keyless.out.status, inserts(keyless.trace).length, keyless.trace.rows.filter((r) => r.code === "ai_style_idem_key_write_failed").length], [503, 1, 0]);
+});
+
+Deno.test("the frame map is kept on the row AFTER the draft, and a failing map write never costs `drafted` or the answer", async () => {
+  const ok = await drive(STREAMED, { model: THREE(GOOD()) });
+  const answer = JSON.parse(ok.out.text);
+  assert(answer.frameMap && answer.frameMap.front, "the answer carries a map");
+  const ups = ledgerUpdates(ok.trace);
+  const at = (k: string) => ups.findIndex((u) => k in u);
+  assert(at("drafted") >= 0 && at("frame_map") > at("drafted"), `its own update, after drafted: ${JSON.stringify(ups.map((u) => Object.keys(u)))}`);
+  assertEquals(ups[at("frame_map")], { frame_map: answer.frameMap }, "the answer's own map, and nothing else in that write");
+  assert(!("frame_map" in ups[at("drafted")]), "never a key on the 226 write");
+  // The write fails (253 not applied) or throws: the draft is on the row and the answer is the same.
+  for (const how of ["error", "throw"] as const) {
+    const bad = await drive(STREAMED, { model: THREE(GOOD()), frameMapFails: how });
+    assertEquals(norm(JSON.parse(bad.out.text)), norm(answer), `${how}: the same answer`);
+    const bu = ledgerUpdates(bad.trace);
+    assertEquals(bu.filter((u) => "drafted" in u).length, 1, `${how}: drafted written`);
+    assertEquals(norm(bu.find((u) => "drafted" in u)), norm(ups[at("drafted")]), `${how}: the same 226 write`);
+    assertEquals(rowsOf(bad.trace), [["ai_style_frame_map_write_failed", "info"]], `${how}: one info row`);
+    assertEquals(bad.trace.captured.length, 1, `${how}: captured once`);
+  }
+  // A reply with no map writes nothing more than it did before 253.
+  const noMap: ModelPlan = { body: reply(JSON.stringify({ ...SPEC, frameMap: undefined })), delayMs: 2 };
+  const bare = await drive(STREAMED, { model: THREE(noMap) });
+  assertEquals(JSON.parse(bare.out.text).frameMap, null);
+  assertEquals(ledgerUpdates(bare.trace).filter((u) => "frame_map" in u), [], "no map, no write");
 });

@@ -1047,6 +1047,16 @@ export function wantsStreamedDraft(payload: unknown): boolean {
 // work runs on behind it. The platform's own wall clock (400 s) is the hard stop above both.
 export const DRAFT_STREAM_DEADLINE_MS = 300_000;
 
+// ─── ONE PRESS'S KEY, CUT ONE WAY (253, 2026-09-25) ──────────────────────────────────────────
+// The browser mints one idempotency key per press (calIdemRef) and sends it with the press.
+// calibrate_style_ai files the wallet hold under it (wallet_hold's p_idem) and, since 253, writes it
+// onto the press's ledger row (ai_style_calls.idem_key), and calibrate_style_ai_recover finds that
+// row and that hold by it. Three readers, so one function: a key cut two ways would find nothing.
+// Exactly the expression the hold always used: String(), the first 120 characters, empty is none.
+export function draftIdemKey(raw: unknown): string | null {
+  return String(raw ?? "").slice(0, 120) || null;
+}
+
 // ─── PICKING A STREAMED DRAFT UP AFTER THE CONNECTION DROPPED (2026-09-25) ───────────────────
 // A streamed draft runs three to five minutes, and a phone that backgrounds the tab, or a network
 // that blinks, drops the answer while the server is still working (or after it has finished and

@@ -94,6 +94,8 @@ import { wantsStreamedDraft, DRAFT_STREAM_DEADLINE_MS } from "../_shared/styleD3
 import { heartbeatJsonResponse } from "../_shared/heartbeatJson.ts";
 // Draft recovery (2026-09-25): a streamed draft whose connection dropped is read back off its ledger row.
 import { parseRecoverSince, recoverDraftAnswer, DRAFT_RECOVER_COLUMNS, type DraftRecoverRow } from "../_shared/styleD3.ts";
+// The press's idempotency key, cut one way for the ledger row, the wallet hold and the pickup (253).
+import { draftIdemKey } from "../_shared/styleD3.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
@@ -3737,7 +3739,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // drift, RLS change) still let the model call proceed -- unmetered spend on exactly the
     // path the ledger exists to meter (audit 2026-08-19). Refusing is the safe side; the
     // cap query above already failed soft for the read case.
-    const { data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert({ client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null, source: combined ? "combined" : fromVideo ? "video" : "photos" }).select("id").single();
+    //
+    // ── THE PRESS'S KEY RIDES ON ITS ROW (253, 2026-09-25) ────────────────────────────────────
+    // `idem_key` is the key wallet_hold files this press's hold under (draftIdemKey: the same
+    // String() and 120-character cut, used for both), so calibrate_style_ai_recover can find THIS
+    // press's row, and its money, after a dropped stream -- by key, never by time. Production's
+    // older shell sends a key too, so its rows simply get the column filled. A request with no key
+    // (the photos path's older callers) inserts exactly the object it always did.
+    //
+    // ⚠️ A MISSING COLUMN MUST NEVER FAIL A GENERATION. This insert IS the spend cap and a failure
+    // here is a 503, so a deploy landing before 253 would refuse every press. PostgREST refuses the
+    // whole statement when one key names a column it cannot find (PGRST204), so on ANY failure with
+    // the key in it the insert is tried once more without it -- the dims write below (247) does the
+    // same -- and one info row names the migration. A second failure is the ledger really being
+    // down, and refuses exactly as before. Without the key the row cannot be picked up after a drop
+    // (the recover action answers no_row), which is the price of a migration not applied yet.
+    const idemKey = draftIdemKey(payload.idempotencyKey);
+    const ledgerInsert: Record<string, unknown> = { client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null, source: combined ? "combined" : fromVideo ? "video" : "photos" };
+    let { data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert(idemKey ? { ...ledgerInsert, idem_key: idemKey } : ledgerInsert).select("id").single();
+    if (ledgerErr && idemKey) {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ai_style_idem_key_write_failed", severity: "info",
+        message: `Could not record the press's key on its ledger row - retrying without it; migration 253 may not be applied: ${ledgerErr.message}`,
+      });
+      ({ data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert(ledgerInsert).select("id").single());
+    }
     if (ledgerErr) return json({ error: "The AI drafting meter is unavailable right now - try again shortly." }, 503);
 
     // ── WALLET HOLD ────────────────────────────────────────────────────────────────
@@ -3770,7 +3796,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // for. One press is one hold is one charge, whichever inputs it read.
     if (shapeFirst) {
       const { data: hold, error: holdErr } = await admin
-        .rpc("wallet_hold", { p_client_id: clientId, p_kind: "video_3d_generation", p_idem: String(payload.idempotencyKey ?? "").slice(0, 120) || null, p_user: userId ?? null })
+        .rpc("wallet_hold", { p_client_id: clientId, p_kind: "video_3d_generation", p_idem: idemKey, p_user: userId ?? null })
         .maybeSingle() as { data: any; error: any };
       if (holdErr) {
         await logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_hold_failed", message: `Wallet hold failed, refusing the generation: ${holdErr.message}` });
@@ -4318,9 +4344,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       : null;
 
     // ── WHICH FRAME GOES WITH WHICH VIEW (2026-09-19) ────────────────────────────
-    // Read out of the same reply, at no extra call. Nothing here is stored and nothing reaches
-    // the spec — sanitizeD3Spec drops it — so an older browser that ignores the field behaves
-    // exactly as it does today.
+    // Read out of the same reply, at no extra call. Nothing here reaches the spec —
+    // sanitizeD3Spec drops it — so an older browser that ignores the field behaves exactly as it
+    // does today. Since 253 it is also kept on the ledger row (`frame_map`, its own write below),
+    // so a draft picked up after its connection dropped can still run the free self-check.
     //
     // ⚠️ THE BOUND IS HOW MANY WALK FRAMES WERE SENT, not how many images were. On `combined`
     // the browser says so and the trailing images are the builder's own photographs, which must
@@ -4385,6 +4412,34 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         await logEdgeError({
           fn: "portal-settings", req, clientId, code: "ai_style_result_log_failed",
           message: `Could not record the drafted spec: ${logErr.message}`,
+        });
+      }
+    }
+
+    // ── THE FRAME MAP, KEPT FOR A DRAFT PICKED UP AFTER A DROP (253, 2026-09-25) ────────────────
+    // The free self-check cannot pair a render with a frame without it, and until 253 it lived only
+    // in the answer: a streamed draft whose answer dropped came back through
+    // calibrate_style_ai_recover with no map, and the check was skipped. Now the recover action
+    // hands the row's own map back and the check runs as it does on a live answer.
+    //
+    // ⚠️ ITS OWN UPDATE, AFTER `drafted` IS WRITTEN, and nothing here can reach the write above: a
+    // column that is missing (253 not applied), a write that fails or a throw costs the MAP and
+    // never the draft, and never the builder's answer -- one info row, and the recovered draft
+    // skips the check with a note, exactly as every draft did before 253. No map (a photos draft,
+    // a reply that carried none) is no write, so those requests keep yesterday's round trips.
+    if (ledgerRow?.id && frameMap) {
+      try {
+        const { error: mapErr } = await admin.from("ai_style_calls").update({ frame_map: frameMap }).eq("id", ledgerRow.id);
+        if (mapErr) {
+          await logEdgeError({
+            fn: "portal-settings", req, clientId, code: "ai_style_frame_map_write_failed", severity: "info",
+            message: `Could not keep the frame map on the generation; migration 253 may not be applied: ${mapErr.message}`,
+          });
+        }
+      } catch (e) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_style_frame_map_write_failed", severity: "info",
+          message: `Frame-map write threw: ${String(e instanceof Error ? e.message : e)}`,
         });
       }
     }

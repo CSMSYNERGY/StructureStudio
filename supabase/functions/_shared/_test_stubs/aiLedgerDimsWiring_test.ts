@@ -33,7 +33,9 @@ const SRC = await Deno.readTextFile(
 );
 
 const START = "    if (ledgerRow?.id) {\n      const recorded = {";
-const END = "    // `frames` makes a silent truncation visible";
+// Ends where 253's frame-map write begins: that is its own update, after this one, and
+// aiDraftStreamWiring_test drives it (a failing map write never costs `drafted`).
+const END = "    // ── THE FRAME MAP, KEPT FOR A DRAFT PICKED UP AFTER A DROP";
 // A Windows checkout reads CRLF (core.autocrlf), and `new Function` does not care, but the
 // anchors have to match either way.
 const SOURCE = SRC.replace(/\r\n/g, "\n");
