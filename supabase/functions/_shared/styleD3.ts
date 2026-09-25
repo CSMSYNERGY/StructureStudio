@@ -1039,21 +1039,79 @@ export function wantsStreamedDraft(payload: unknown): boolean {
   return dims.ok && wantsV2Prompt(p.frame, dims.dims);
 }
 
-// ─── THE PLATFORM'S WALL CLOCK ───────────────────────────────────────────────────────────────
-// No edge function request outlives 400 s on the paid plan (Supabase's documented limit; a live
-// probe on 2026-09-25 ran 220 s and answered whole). Nothing here can move it: every clock below is
-// sized to stop inside it.
+// ─── THE PLATFORM'S WALL CLOCK IS A WORKER'S, NOT A REQUEST'S (fix, 2026-09-26) ──────────────
+// 400 s is how long a WORKER lives on the paid plan (Supabase's limits page), and one worker serves
+// many requests. edge-runtime's per_worker supervisor (strategy_per_worker.rs) retires a worker at
+// HALF its wall clock, 200 s, after which the pool (pool.rs) routes no new request to it, and ends it
+// at 400 s (ShutdownReason::WallClockTime) whether or not a request is still in flight. So a request
+// that lands on a worker A seconds old (0 <= A < 200) is killed 400 - A seconds after it arrived. A
+// streamed draft usually lands on a warm worker: the designer calls portal-settings just before
+// every press (style_photo_upload_url, save_style_media). The live probe of 2026-09-25 that ran
+// 220 s and answered whole ran on a fresh one.
+//
+// Until this fix every streamed clock counted from the request alone, as if the request had the
+// whole 400 s, so a press on a worker 100 s old could be killed mid-read: its body cut off after
+// the 200 had gone out, its ledger row left without draft_ms, and the pickup saying "lost" only at
+// the end of its wait. Nothing here can move the 400 s. Every streamed clock now stops inside BOTH
+// the request's own budget and its worker's life (streamedDraftBudgetMs, streamedDraftDeadlineMs).
 export const EDGE_WALL_CLOCK_MS = 400_000;
 
 // ─── HOW LONG A STREAMED ANSWER MAY STAY OPEN (2026-09-25; 360 s since the reads got 300 s) ──
-// Measured from the request's arrival (portal-settings' requestStartMs). The reads get at most
-// min(300 s, 330 s - set-up), so a set-up under 270 s leaves the model done by 330 s; the capture,
-// the ledger write and the answer normally take seconds after that, which leaves 30 s of room for a
-// slow database. Past this the answer is closed with heartbeatJson's `stream_deadline` body and the
-// work runs on behind it, with 40 s more before the wall clock (EDGE_WALL_CLOCK_MS) stops it for
-// good. It was 300 s while the reads had 230 s of 260 s; live on 2026-09-25 the reads needed more
-// (8 presses in 12 had a read cut at 230 s), and this moved with them.
+// Measured from the request's arrival (portal-settings' requestStartMs), and never later than 40 s
+// before the worker's end (streamedDraftDeadlineMs below arms the watchdog with both). The reads get
+// at most min(300 s, 330 s - set-up) and end at least 75 s before the worker does, so a set-up under
+// 270 s leaves the model done by 330 s after the request and 35 s or more before the watchdog; the
+// capture, the ledger write and the answer normally take seconds after that, which leaves 30 s of
+// room for a slow database. Past this the answer is closed with heartbeatJson's `stream_deadline`
+// body and the work runs on behind it, with 40 s more before its worker's wall clock
+// (EDGE_WALL_CLOCK_MS) stops it for good. It was 300 s while the reads had 230 s of 260 s; live on
+// 2026-09-25 the reads needed more (8 presses in 12 had a read cut at 230 s), and this moved with
+// them.
 export const DRAFT_STREAM_DEADLINE_MS = 360_000;
+
+// ─── THE STREAMED CLOCKS, FROM THE REQUEST AND FROM THE WORKER (fix, 2026-09-26) ─────────────
+// Pure, so they are tested on their own (workerClock.test.ts), and portal-settings only hands them
+// its clocks: `requestStartMs` (the handler's first line), `t0` or `now`, and `workerBornMs`, its
+// WORKER_BORN_MS, read once when the module is evaluated. That is a moment after the worker's own
+// clock started (the isolate's boot, ~2.5 s cold); the margins below are tens of seconds.
+//
+// THE READS' BUDGET, from t0 (where the model's clock starts):
+//   max(60 s, min(300 s, 330 s - set-up, the worker's end - 75 s - t0))
+// The first three terms are the rule of 2026-09-25, unchanged. The fourth ends the reads 75 s before
+// the worker does: room for the consensus, the capture, the ledger writes and the answer. On a fresh
+// worker after an ordinary set-up (under 25 s) it takes nothing away: 300 s, as before. On a warm
+// worker it cuts the reads short, and a read cut short is an abort the draft already handles (the
+// consensus goes on with the reads that finished; with none, the press answers a retryable timeout
+// and releases its hold), where a worker killed mid-read loses the whole answer.
+// The 60 s floor never beats the worker term in practice: a routed worker is under 200 s old when the
+// request arrives, so at t0 the worker term is over 125 s less the set-up, and the floor decides only
+// after a set-up over 65 s. Nothing before t0 takes that long (its slowest step, the auto top-up,
+// stops at nmiPost's 30 s).
+export const STREAMED_READS_WORKER_MARGIN_MS = 75_000;
+export function streamedDraftBudgetMs(at: { t0: number; requestStartMs: number; workerBornMs: number }): number {
+  return Math.max(60_000, Math.min(
+    300_000,
+    330_000 - (at.t0 - at.requestStartMs),
+    at.workerBornMs + EDGE_WALL_CLOCK_MS - STREAMED_READS_WORKER_MARGIN_MS - at.t0,
+  ));
+}
+
+// THE ANSWER'S WATCHDOG, from `now` (when draftAnswer arms it):
+//   min(DRAFT_STREAM_DEADLINE_MS - time since the request, the worker's end - 40 s - now)
+// and never under STREAMED_DEADLINE_FLOOR_MS. The worker term closes the answer with its whole
+// `stream_deadline` body 40 s before the worker ends, so the browser goes to the pickup instead of
+// reading a body cut off mid-space. A worker is never born after a request it serves arrived, so the
+// worker term is never the larger: on a fresh worker the two are the same 360 s, and on a warm one
+// the worker's decides. The floor is for a clock that says the worker is already past its end (a
+// routed one cannot be); a watchdog of a second still answers with a whole body.
+export const STREAMED_DEADLINE_WORKER_MARGIN_MS = 40_000;
+export const STREAMED_DEADLINE_FLOOR_MS = 1_000;
+export function streamedDraftDeadlineMs(at: { now: number; requestStartMs: number; workerBornMs: number }): number {
+  return Math.max(STREAMED_DEADLINE_FLOOR_MS, Math.min(
+    DRAFT_STREAM_DEADLINE_MS - (at.now - at.requestStartMs),
+    at.workerBornMs + EDGE_WALL_CLOCK_MS - STREAMED_DEADLINE_WORKER_MARGIN_MS - at.now,
+  ));
+}
 
 // ─── ONE PRESS'S KEY, CUT ONE WAY (253, 2026-09-25) ──────────────────────────────────────────
 // The browser mints one idempotency key per press (calIdemRef) and sends it with the press.

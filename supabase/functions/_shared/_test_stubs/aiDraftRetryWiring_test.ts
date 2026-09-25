@@ -87,11 +87,12 @@ Deno.test("⚠️ the model keeps its 125 s, and the gateway's 150 s is measured
   // press and up to 30 s after a top-up, and a 103 s legacy reply that ended inside 150 s was cut.
   const start = PORTAL.indexOf("const requestStartMs = Date.now();");
   assert(start > 0 && start < PORTAL.indexOf('if (req.method === "OPTIONS")'), "the clock starts on the handler's first line");
-  // Since 2026-09-25 the declaration has a streamed arm (aiDraftStreamWiring_test pins it). The rule
-  // every request that is NOT streamed gets is the second arm, character for character as before.
+  // Since 2026-09-25 the declaration has a streamed arm (aiDraftStreamWiring_test pins it; since
+  // 2026-09-26 it is streamedDraftBudgetMs, bounded by the worker's life too). The rule every request
+  // that is NOT streamed gets is the second arm, character for character as before.
   const decl = lift(DRAFT, "const draftAbortMs =", ";\n", "the draft budget") + ";";
   assertEquals(decl.split("\n").map((l) => l.trim()).join(" "),
-    "const draftAbortMs = streamed ? Math.max(60_000, Math.min(300_000, 330_000 - (t0 - requestStartMs))) : Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));");
+    "const draftAbortMs = streamed ? streamedDraftBudgetMs({ t0, requestStartMs, workerBornMs: WORKER_BORN_MS }) : Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));");
   assert(DRAFT.indexOf("const draftAbortMs =") > DRAFT.indexOf("autoTopupDecision("), "measured after the top-up has run");
   assert(DRAFT.indexOf("const draftAbortMs =") < DRAFT.indexOf("const aiSignal ="), "and before the call it bounds");
   const budget = (spentMs: number) => new Function("t0", "requestStartMs", "streamed", `${decl}; return draftAbortMs;`)(1_000_000 + spentMs, 1_000_000, false) as number;

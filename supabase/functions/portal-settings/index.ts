@@ -91,6 +91,8 @@ import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftC
 // The streamed draft (2026-09-25): a v2 draft answers behind a heartbeat so it can outlive the
 // gateway's 150 s of silence (see draftAnswer below).
 import { wantsStreamedDraft, DRAFT_STREAM_DEADLINE_MS } from "../_shared/styleD3.ts";
+// Its clocks, bounded by the worker's life as well as the request's (fix, 2026-09-26; see WORKER_BORN_MS).
+import { streamedDraftBudgetMs, streamedDraftDeadlineMs } from "../_shared/styleD3.ts";
 import { heartbeatJsonResponse } from "../_shared/heartbeatJson.ts";
 // Draft recovery (2026-09-25): a streamed draft whose connection dropped is read back off its ledger row,
 // found by the press's own idempotency key (253).
@@ -502,11 +504,23 @@ const filedAtReturnSite = new WeakSet<Response>();
 //
 // THE WATCHDOG (2026-09-25). supabase-js has no timeout, so a streamed draft that hangs after its
 // reads (a database call that never returns) would keep writing spaces until the platform killed the
-// worker, and the browser would read a body cut off mid-space. The answer is closed at
-// DRAFT_STREAM_DEADLINE_MS from the request's arrival instead, with heartbeatJson's `stream_deadline`
-// body (a 504, not retryable), and one coded row is filed. The work is NOT stopped: it stays
-// registered with EdgeRuntime.waitUntil, releases or captures its hold and writes its ledger row, and
-// the browser picks the draft up from that row (calibrate_style_ai_recover).
+// worker, and the browser would read a body cut off mid-space. The answer is closed instead at
+// DRAFT_STREAM_DEADLINE_MS from the request's arrival or 40 s before this worker's end, whichever
+// comes first (streamedDraftDeadlineMs; the worker's half since 2026-09-26, see WORKER_BORN_MS), with
+// heartbeatJson's `stream_deadline` body (a 504, not retryable), and one coded row is filed. The work
+// is NOT stopped: it stays registered with EdgeRuntime.waitUntil, releases or captures its hold and
+// writes its ledger row, and the browser picks the draft up from that row (calibrate_style_ai_recover).
+//
+// ── THE WORKER'S BIRTH (fix, 2026-09-26) ──────────────────────────────────────────────────────
+// Read ONCE, when the worker evaluates this module at boot. The platform's 400 s wall clock is the
+// WORKER's, not a request's: one worker serves many requests, is routed no new one after 200 s and
+// is ended at 400 s with whatever is still in flight (styleD3.ts's EDGE_WALL_CLOCK_MS has the
+// source). The warm-up ping and the designer's own calls just before every press mean a streamed
+// draft usually lands on a warm worker, so both of its streamed clocks (the reads' budget in
+// calibrate_style_ai, the answer's watchdog here) count from this as well as from the request.
+// Exported for aiDraftStreamWiring_test alone, which puts a request at a chosen age of this worker.
+export const WORKER_BORN_MS = Date.now();
+
 function draftAnswer(
   req: Request,
   payload: unknown,
@@ -519,11 +533,11 @@ function draftAnswer(
   const filed = withErrorLog("portal-settings", () => work(true), { alreadyFiled: (res) => filedAtReturnSite.has(res) });
   return heartbeatJsonResponse(() => filed(replay), {
     headers: { ...cors, "Content-Type": "application/json" },
-    deadlineMs: DRAFT_STREAM_DEADLINE_MS - (Date.now() - at.requestStartMs),
+    deadlineMs: streamedDraftDeadlineMs({ now: Date.now(), requestStartMs: at.requestStartMs, workerBornMs: WORKER_BORN_MS }),
     onDeadline: () => logEdgeError({
       fn: "portal-settings", req, clientId: at.clientId, code: "ai_draft_stream_deadline",
       message: "The streamed draft's answer reached its deadline with the work still running; it was closed with stream_deadline and the work ran on.",
-      context: { requestMs: Date.now() - at.requestStartMs, deadlineMs: DRAFT_STREAM_DEADLINE_MS },
+      context: { requestMs: Date.now() - at.requestStartMs, deadlineMs: DRAFT_STREAM_DEADLINE_MS, workerAgeMs: Date.now() - WORKER_BORN_MS },
     }),
   });
 }
@@ -4016,18 +4030,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     //
     // ⚠️ A STREAMED DRAFT HAS NO 150 s GATEWAY (2026-09-25, see draftAnswer): its answer is a 200 that
     // has been writing a space every 10 s since the request arrived. What bounds it instead is the
-    // platform's wall clock: 400 s a request on the paid plan (Supabase's docs; a live probe ran
-    // 220 s). So the model gets 300 s, or what is left of 330 s from the request after a slow
-    // set-up, and never under 60 s: the same rule as below with the gateway's 145 s replaced by
-    // 330 s. Every request that is not streamed keeps exactly the rule below.
+    // platform's wall clock, and that is the WORKER's 400 s, not the request's (fix, 2026-09-26): a
+    // worker serves requests until it is 200 s old and is ended at 400 s with whatever is in flight,
+    // so a request on a worker A seconds old has 400 - A (styleD3.ts's EDGE_WALL_CLOCK_MS). So the
+    // model gets 300 s, or what is left of 330 s from the request after a slow set-up, or what is
+    // left until 75 s before this worker's end (WORKER_BORN_MS + 400 s), whichever is least, and never
+    // under 60 s: streamedDraftBudgetMs, which has the arithmetic. On a fresh worker after an ordinary
+    // set-up that is the 300 s it was. Every request that is not streamed keeps exactly the rule below.
     //
     // 300 s OF 330 s SINCE 2026-09-25 (it was 230 s of 260 s). Live that day the three "high" reads
     // took 74-215 s, and in 8 of 12 presses one or two of them hit the 230 s abort (draft_tokens
     // `aborted: "deadline"`), which left the consensus a single read. Opus streamed ~70 output
-    // tokens/s, so a read that spends its whole 20000 needs ~286 s: 300 s lets it finish. The rest
-    // of the request still fits: the reads are done by 330 s, the answer's watchdog closes at 360 s
-    // (DRAFT_STREAM_DEADLINE_MS, 30 s for the capture and the ledger write), and the wall clock is
-    // at 400 s.
+    // tokens/s, so a read that spends its whole 20000 needs ~286 s: 300 s lets it finish on a fresh
+    // worker. The rest of the request still fits: the reads are done by 330 s from the request and
+    // 75 s before the worker's end, the answer's watchdog closes by 360 s and 40 s before the
+    // worker's end (streamedDraftDeadlineMs; 30 s or more for the capture and the ledger write), and
+    // the worker's own end comes after both.
     const lean = payload.lean === true;
     // The reads' effort, decided once: "low" on the lean retry, "high" on a streamed draft, "medium"
     // on everything else (see output_config below for why). The request carries it, and so does
@@ -4036,7 +4054,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const aiSource = combined ? "combined" : fromVideo ? "video" : "photos";
     const t0 = Date.now();
     const draftAbortMs = streamed
-      ? Math.max(60_000, Math.min(300_000, 330_000 - (t0 - requestStartMs)))
+      ? streamedDraftBudgetMs({ t0, requestStartMs, workerBornMs: WORKER_BORN_MS })
       : Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));
 
     // ── WHAT THE DRAFT CALL USED, on every exit that reached the model (251, 2026-09-23) ──────

@@ -18,10 +18,12 @@
 //      ledger row, the hold and its release on every failure, the capture, the usage write, the coded
 //      app_errors rows AND the rows the error wrapper files, which it cannot see through a 200.
 //   5. Effort "high", 20000 tokens and the 300/330 s budget only on the streamed request, and
-//      draft_tokens says which effort ran and whether it streamed.
+//      draft_tokens says which effort ran and whether it streamed. The budget also ends 75 s before
+//      the WORKER does (2026-09-26): the platform's 400 s is a worker's life, not a request's.
 //   6. The work behind the answer is handed to EdgeRuntime.waitUntil; a watchdog closes the answer at
-//      DRAFT_STREAM_DEADLINE_MS with `stream_deadline` while the work runs on to its capture and
-//      ledger row; and a browser that goes away mid-stream changes nothing about the hold or the row.
+//      DRAFT_STREAM_DEADLINE_MS, or 40 s before the worker's end if that is sooner, with
+//      `stream_deadline` while the work runs on to its capture and ledger row; and a browser that
+//      goes away mid-stream changes nothing about the hold or the row.
 //   7. The press's key rides on its ledger row (253), and the frame map just before `drafted`, neither
 //      able to fail a generation. calibrate_style_ai_recover: the generation's own gate, only the
 //      caller's own rows found BY THE PRESS'S KEY (tenant, user, key, style), the success body rebuilt
@@ -47,7 +49,7 @@ import { assert, assertEquals } from "jsr:@std/assert";
 import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
 import {
   aiDraftCostCents, DRAFT_RECOVER_PENDING_MS, DRAFT_RECOVER_SETTLE_MS, DRAFT_STREAM_DEADLINE_MS, EDGE_WALL_CLOCK_MS, parseKnownDims,
-  SELF_CHECK_CLAIM_WINDOW_MS, wantsStreamedDraft, wantsV2Prompt,
+  SELF_CHECK_CLAIM_WINDOW_MS, streamedDraftBudgetMs, streamedDraftDeadlineMs, wantsStreamedDraft, wantsV2Prompt,
 } from "../styleD3.ts";
 import { HEARTBEAT_MS, STREAM_DEADLINE_BODY } from "../heartbeatJson.ts";
 
@@ -73,10 +75,14 @@ let handler: ((req: Request) => Promise<Response>) | null = null;
   handler = h;
   return { finished: Promise.resolve() };
 };
-await import(new URL("../../portal-settings/index.ts", import.meta.url).href);
+const MODULE = await import(new URL("../../portal-settings/index.ts", import.meta.url).href);
 (Deno as any).serve = realServe;
 if (!handler) throw new Error("portal-settings did not hand Deno.serve a handler");
 const HANDLER = handler as (req: Request) => Promise<Response>;
+// When this "worker" was born: the module's own WORKER_BORN_MS, read when the import above evaluated
+// it. A world's `workerAgeMs` moves the clock so its request arrives on a worker exactly that old.
+const WORKER_BORN = (MODULE as { WORKER_BORN_MS?: unknown }).WORKER_BORN_MS;
+if (typeof WORKER_BORN !== "number" || !Number.isFinite(WORKER_BORN)) throw new Error("portal-settings exports no WORKER_BORN_MS");
 
 // ─── The world one request runs in ─────────────────────────────────────────────────────────────
 type ModelPlan = { status?: number; body?: string; delayMs?: number; hang?: boolean; throws?: string; gate?: Promise<void> };
@@ -92,6 +98,7 @@ type World = {
   model?: ModelPlan[];          // one plan per model call, in send order
   abortAfterMs?: number;        // when the draft's deadline really fires
   setupMs?: number;             // how long the set-up (the auto top-up read) seems to take
+  workerAgeMs?: number;         // the request arrives on a worker this old (default: however long ago this file imported it)
   deadlineScale?: number;       // the answer's watchdog runs this many times faster (default 100)
   ledger?: Record<string, unknown>[];   // ai_style_calls rows the recover action can read
   recoverErr?: boolean;         // the recover action's ledger read errors
@@ -227,8 +234,10 @@ async function inWorld<T>(world: World, body: (trace: Trace) => Promise<T>): Pro
   (globalThis as any).EdgeRuntime = { waitUntil: (p: Promise<unknown>) => { trace.kept.push(p); } };
   // The answer's watchdog (DRAFT_STREAM_DEADLINE_MS, minutes): a hundred times faster by default, so
   // 360 s is 3.6 s here and no fast test meets it; the watchdog's own test runs it faster still.
+  // Every timer of 100 s or more is the watchdog: on a worker 199 s old it is armed at 161 s, and
+  // nothing else on the draft's path sets one that long (the consensus grace is 60 s).
   (globalThis as any).setTimeout = (fn: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
-    if (typeof ms === "number" && ms >= 250_000) {
+    if (typeof ms === "number" && ms >= 100_000) {
       trace.deadlines.push(ms);
       return realSetTimeout(fn, Math.max(1, Math.round(ms / (world.deadlineScale ?? 100))), ...rest);
     }
@@ -242,6 +251,8 @@ async function inWorld<T>(world: World, body: (trace: Trace) => Promise<T>): Pro
   };
   stubRpc.rpc = (fn: string, args?: unknown) => chain(world, trace, `rpc:${fn}`, [["args", args]]);
   clock.offset = 0;
+  // A worker of a chosen age: the clock moved so the request arrives WORKER_BORN + workerAgeMs.
+  if (world.workerAgeMs !== undefined) clock.offset = (WORKER_BORN as number) + world.workerAgeMs - realNow();
   Date.now = () => realNow() + clock.offset;
   Object.defineProperty(AbortSignal, "timeout", {
     configurable: true, writable: true,
@@ -620,76 +631,133 @@ Deno.test("20000 tokens cannot make a streamed press cost more than its price: t
   assert(worst < 2000 / 10, `${worst} cents`);
 });
 
-Deno.test("the budget: streamed min(300 s, 330 s - set-up), never under 60 s; plain as before", async () => {
-  const cases: [Record<string, unknown>, number, number][] = [
-    [STREAMED, 0, 300_000],
-    [STREAMED, 20_000, 300_000],
-    [STREAMED, 50_000, 280_000],
-    [STREAMED, 100_000, 230_000],
-    [STREAMED, 300_000, 60_000],
-    [V2, 0, 125_000],
-    [V2, 50_000, 95_000],
-    [V2, 100_000, 60_000],
+Deno.test("the budget: streamed min(300 s, 330 s - set-up, 75 s before the worker's end), never under 60 s; plain as before", async () => {
+  // [payload, set-up, the worker's age when the request arrives, the budget]
+  const cases: [Record<string, unknown>, number, number, number][] = [
+    // A fresh worker: the rule of 2026-09-25 while the set-up is under 25 s...
+    [STREAMED, 0, 0, 300_000],
+    [STREAMED, 20_000, 0, 300_000],
+    // ...and past that the worker's end, 5 s before the request's 330 s (the worker was born first).
+    [STREAMED, 50_000, 0, 275_000],
+    [STREAMED, 100_000, 0, 225_000],
+    [STREAMED, 300_000, 0, 60_000],
+    // A warm worker: its end decides.
+    [STREAMED, 3_000, 30_000, 292_000],
+    [STREAMED, 3_000, 150_000, 172_000],
+    [STREAMED, 30_000, 199_000, 96_000],
+    // A request that does not stream keeps the gateway's rule, whatever the worker's age.
+    [V2, 0, 0, 125_000],
+    [V2, 50_000, 0, 95_000],
+    [V2, 100_000, 0, 60_000],
+    [V2, 0, 199_000, 125_000],
   ];
-  for (const [payload, setupMs, want] of cases) {
-    const { trace } = await drive(payload, { model: THREE(GOOD()), setupMs });
+  for (const [payload, setupMs, workerAgeMs, want] of cases) {
+    const { trace } = await drive(payload, { model: THREE(GOOD()), setupMs, workerAgeMs });
     assertEquals(trace.timeouts.length, 1, "one deadline for all the reads");
     const got = trace.timeouts[0];
     // The set-up is measured on the real clock too, so a few milliseconds of it are real.
-    assert(got <= want && got > want - 250, `${payload === STREAMED ? "streamed" : "plain"} after ${setupMs} ms of set-up: ${got}, want ${want}`);
+    assert(got <= want && got > want - 250, `${payload === STREAMED ? "streamed" : "plain"} after ${setupMs} ms of set-up on a worker ${workerAgeMs} ms old: ${got}, want ${want}`);
   }
-  // The formula itself, over the whole range, from the shipped declaration.
+  // WIRED: the streamed arm is the helper, handed the branch's own clocks and this worker's birth;
+  // the arm every other request gets is the gateway's rule, character for character as it was.
   const decl = lift(SOURCE, "const draftAbortMs =", ";\n", "the draft budget") + ";";
-  const budget = (streamed: boolean, spent: number) =>
-    new Function("t0", "requestStartMs", "streamed", `${decl}; return draftAbortMs;`)(1_000_000 + spent, 1_000_000, streamed) as number;
+  assertEquals(decl.split("\n").map((l) => l.trim()), [
+    "const draftAbortMs = streamed",
+    "? streamedDraftBudgetMs({ t0, requestStartMs, workerBornMs: WORKER_BORN_MS })",
+    ": Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));",
+  ]);
+  // The formula itself, over set-ups and worker ages, from the shipped declaration and helper.
+  const run = new Function("t0", "requestStartMs", "streamed", "streamedDraftBudgetMs", "WORKER_BORN_MS", `${decl}; return draftAbortMs;`);
+  const budget = (streamed: boolean, spent: number, age = 0) =>
+    run(1_000_000 + spent, 1_000_000, streamed, streamedDraftBudgetMs, 1_000_000 - age) as number;
   for (let spent = 0; spent <= 360_000; spent += 1_000) {
-    assertEquals(budget(true, spent), Math.max(60_000, Math.min(300_000, 330_000 - spent)), `streamed, ${spent}`);
-    assertEquals(budget(false, spent), Math.max(60_000, Math.min(125_000, 145_000 - spent)), `plain, ${spent}`);
-    // The whole streamed request ends by 330 s whenever the set-up left the model its floor.
-    if (spent <= 270_000) assert(spent + budget(true, spent) <= 330_000, `streamed, ${spent}: inside 330 s`);
+    for (const age of [0, 50_000, 150_000, 199_000]) {
+      assertEquals(budget(true, spent, age), Math.max(60_000, Math.min(300_000, 330_000 - spent, 325_000 - age - spent)), `streamed, ${spent}, worker ${age}`);
+      assertEquals(budget(false, spent, age), Math.max(60_000, Math.min(125_000, 145_000 - spent)), `plain, ${spent}, worker ${age}`);
+    }
+    // The whole streamed request ends by 325 s on a fresh worker whenever the set-up left the model
+    // more than its floor.
+    if (spent <= 265_000) assert(spent + budget(true, spent) <= 325_000, `streamed, ${spent}: inside 325 s`);
   }
-  // THE ANSWER'S OWN DEADLINE sits after the reads' and below the platform's wall clock: the reads
-  // end by 330 s (a set-up under 270 s), the answer closes at DRAFT_STREAM_DEADLINE_MS, which leaves
-  // 30 s for the capture and the ledger write, and the worker's 400 s is the hard stop above both.
+  // THE ANSWER'S OWN DEADLINE sits after the reads' and below the worker's wall clock: on a fresh
+  // worker the reads end by 325 s, the answer closes at DRAFT_STREAM_DEADLINE_MS, which leaves 30 s
+  // or more for the capture and the ledger write, and the worker's 400 s is the hard stop above both.
+  // The invariants below sweep every age a worker can be when a request lands on it.
   assertEquals(DRAFT_STREAM_DEADLINE_MS, 360_000);
   assert(DRAFT_STREAM_DEADLINE_MS - 330_000 >= 30_000 && DRAFT_STREAM_DEADLINE_MS < 400_000);
 });
 
-// ⚠️ THE STREAMED BUDGET'S INVARIANTS (2026-09-25, when the reads went from 230 s to 300 s), read off
-// the shipped declarations rather than restated, so a change to any one of them that breaks the
-// chain fails here. Live that day Opus streamed ~70 output tokens/s, and 8 presses in 12 had a read
-// cut at the old 230 s: the budget exists to let a whole read finish, and everything after it
-// (the capture, the ledger write, the answer) has to fit before the platform stops the worker.
-//   * the reads' latest end (the "ceiling", over every set-up the 60 s floor does not take over)
-//     is 330 s after the request;
-//   * the answer's watchdog (DRAFT_STREAM_DEADLINE_MS) closes after that, at 360 s;
-//   * and the watchdog leaves the work behind it at least 30 s before the 400 s wall clock;
-//   * a read that spends the whole of the streamed max_tokens at 70 tokens/s ends inside the reads'
-//     300 s.
+// ⚠️ THE STREAMED CLOCKS' INVARIANTS (2026-09-25, when the reads went from 230 s to 300 s; rewritten
+// 2026-09-26, when the platform's 400 s turned out to be a WORKER's life and not a request's), read off
+// the shipped declarations rather than restated, so a change to any one of them that breaks the chain
+// fails here. Live on 2026-09-25 Opus streamed ~70 output tokens/s, and 8 presses in 12 had a read cut
+// at the old 230 s: the budget exists to let a whole read finish, and everything after it (the
+// capture, the ledger write, the answer) has to fit before the platform ends the worker. A worker is
+// ended 400 s after its birth, in flight or not, and takes new requests until it is 200 s old, so a
+// request that lands on a worker A seconds old is ended 400 - A seconds after it arrived. Over every
+// such age (0-199 s) and every ordinary set-up (0-30 s; the slowest step, the auto top-up, stops at
+// 30 s):
+//   * the reads end at least 30 s before the answer's watchdog (the capture and the ledger write);
+//   * the watchdog fires at least 30 s before the worker's end, so the answer is always a whole body;
+//   * the reads never get more than 300 s, and the 60 s floor never decides;
+//   * on a fresh worker after an ordinary 3 s set-up they get all 300 s, the fast path unchanged;
+//   * the reads always end by 330 s after the request, so a healthy draft stays pending for a pickup;
+//   * a read that spends the whole of the streamed max_tokens at 70 tokens/s ends inside that 300 s.
 const MEASURED_OPUS_TOKENS_PER_S = 70;
-Deno.test("⚠️ the streamed budget's invariants: reads by 330 s < watchdog 360 s < wall clock 400 s - 30 s, and 20000 tokens at 70/s fit in 300 s", () => {
+Deno.test("⚠️ the streamed clocks' invariants, worker 0-199 s old, set-up 0-30 s: reads + 30 s <= watchdog, watchdog + 30 s <= the worker's end, reads <= 300 s", () => {
   const decl = lift(SOURCE, "const draftAbortMs =", ";\n", "the draft budget") + ";";
-  const budget = (spent: number) =>
-    new Function("t0", "requestStartMs", "streamed", `${decl}; return draftAbortMs;`)(1_000_000 + spent, 1_000_000, true) as number;
-  let ceiling = 0;
-  for (let spent = 0; spent + 60_000 <= 330_000; spent += 1_000) ceiling = Math.max(ceiling, spent + budget(spent));
-  assertEquals(ceiling, 330_000, "the streamed reads end by 330 s after the request");
-  assertEquals(budget(0), 300_000, "and get 300 s after an ordinary set-up");
-  assertEquals(EDGE_WALL_CLOCK_MS, 400_000, "the paid plan's wall clock");
-  assert(ceiling < DRAFT_STREAM_DEADLINE_MS, `reads by ${ceiling} before the watchdog at ${DRAFT_STREAM_DEADLINE_MS}`);
-  assert(DRAFT_STREAM_DEADLINE_MS < EDGE_WALL_CLOCK_MS - 30_000, `watchdog at ${DRAFT_STREAM_DEADLINE_MS}, 30 s inside the wall clock`);
-  // A healthy draft at the ceiling is still pending for a pickup, never lost as stale.
-  assert(ceiling < DRAFT_RECOVER_PENDING_MS && DRAFT_RECOVER_PENDING_MS <= EDGE_WALL_CLOCK_MS, String(DRAFT_RECOVER_PENDING_MS));
+  const runBudget = new Function("t0", "requestStartMs", "streamed", "streamedDraftBudgetMs", "WORKER_BORN_MS", `${decl}; return draftAbortMs;`);
+  const arm = lift(lift(SOURCE, "function draftAnswer(", "\n}\n", "draftAnswer"), "deadlineMs:", ",\n", "the watchdog's deadline");
+  const runDeadline = new Function("streamedDraftDeadlineMs", "Date", "at", "WORKER_BORN_MS", `return ({ ${arm} }).deadlineMs;`);
+  // Every time below is in ms from the request's arrival; the worker was born `age` before it.
+  const REQ = 1_000_000;
+  const budget = (age: number, setup: number) =>
+    runBudget(REQ + setup, REQ, true, streamedDraftBudgetMs, REQ - age) as number;
+  // draftAnswer arms the watchdog as the request is dispatched, a moment after it arrived.
+  const watchdogAt = (age: number, armedAfter: number) =>
+    armedAfter + (runDeadline(streamedDraftDeadlineMs, { now: () => REQ + armedAfter }, { requestStartMs: REQ }, REQ - age) as number);
+  assertEquals(EDGE_WALL_CLOCK_MS, 400_000, "a worker's wall clock on the paid plan");
+  let latestReads = 0;
+  for (let age = 0; age < 200_000; age += 1_000) {
+    const workerEnd = EDGE_WALL_CLOCK_MS - age;
+    for (const armedAfter of [0, 1_000]) {
+      const dog = watchdogAt(age, armedAfter);
+      assert(dog + 30_000 <= workerEnd, `worker ${age}: the watchdog at ${dog} is not 30 s before the worker's end at ${workerEnd}`);
+      for (let setup = 0; setup <= 30_000; setup += 1_000) {
+        const b = budget(age, setup);
+        const readsEnd = setup + b;
+        latestReads = Math.max(latestReads, readsEnd);
+        assert(readsEnd + 30_000 <= dog, `worker ${age}, set-up ${setup}: the reads end at ${readsEnd}, not 30 s before the watchdog at ${dog}`);
+        assert(b <= 300_000, `worker ${age}, set-up ${setup}: a budget of ${b}`);
+        assert(b > 60_000, `worker ${age}, set-up ${setup}: the 60 s floor decided`);
+      }
+    }
+  }
+  assertEquals(budget(0, 3_000), 300_000, "a fresh worker after an ordinary set-up: all 300 s, as before");
+  assert(latestReads <= 330_000, `the streamed reads end by 330 s after the request: ${latestReads}`);
+  // A healthy draft whose reads ran to the end is still pending for a pickup, never lost as stale.
+  assert(latestReads < DRAFT_RECOVER_PENDING_MS && DRAFT_RECOVER_PENDING_MS <= EDGE_WALL_CLOCK_MS, String(DRAFT_RECOVER_PENDING_MS));
   const line = SOURCE.split("\n").find((l) => l.includes("max_tokens: streamed ?")) ?? "";
   assertEquals(line.trim(), "max_tokens: streamed ? 20000 : 12000,");
   const maxTokens = new Function("streamed", `return {${line.trim()}}.max_tokens;`)(true) as number;
   const fullReadMs = (maxTokens / MEASURED_OPUS_TOKENS_PER_S) * 1000;
-  assert(fullReadMs <= budget(0), `${maxTokens} tokens at ${MEASURED_OPUS_TOKENS_PER_S}/s is ${Math.round(fullReadMs)} ms, over ${budget(0)}`);
+  assert(fullReadMs <= budget(0, 3_000), `${maxTokens} tokens at ${MEASURED_OPUS_TOKENS_PER_S}/s is ${Math.round(fullReadMs)} ms, over ${budget(0, 3_000)}`);
 });
 
 // ─── 6. The work behind the answer: waitUntil, the watchdog, a caller that goes away ───────────
+Deno.test("draftAnswer arms the watchdog from the request AND this worker's birth, read once at module scope", () => {
+  const fn = lift(SOURCE, "function draftAnswer(", "\n}\n", "draftAnswer");
+  assertEquals(fn.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("deadlineMs:")), [
+    "deadlineMs: streamedDraftDeadlineMs({ now: Date.now(), requestStartMs: at.requestStartMs, workerBornMs: WORKER_BORN_MS }),",
+  ]);
+  // One declaration, at module scope (column 0, outside every function), read when the worker
+  // evaluates the module, and a const: nothing sets it again.
+  assertEquals(SOURCE.split("\n").filter((l) => /\bWORKER_BORN_MS\s*=[^=]/.test(l)), ["export const WORKER_BORN_MS = Date.now();"]);
+  assert(SOURCE.indexOf("export const WORKER_BORN_MS = Date.now();") < SOURCE.indexOf("Deno.serve("), "declared before the handler");
+});
+
 Deno.test("a streamed draft's work is handed to EdgeRuntime.waitUntil and watched by a deadline; a plain one's is not", async () => {
-  const s = await drive(STREAMED, { model: THREE(GOOD()) });
+  const s = await drive(STREAMED, { model: THREE(GOOD()), workerAgeMs: 0 });
   assertEquals(s.trace.kept.length, 1, "the work behind the answer, once");
   assertEquals(s.trace.deadlines.length, 1, "one watchdog");
   assert(s.trace.deadlines[0] <= DRAFT_STREAM_DEADLINE_MS && s.trace.deadlines[0] > DRAFT_STREAM_DEADLINE_MS - 1_000,
@@ -698,6 +766,15 @@ Deno.test("a streamed draft's work is handed to EdgeRuntime.waitUntil and watche
   const p = await drive(V2, { model: THREE(GOOD()) });
   assertEquals(p.trace.kept.length, 0, "a plain request answers with its own Response");
   assertEquals(p.trace.deadlines, []);
+  // On a warm worker the watchdog is armed 40 s before the worker's end: 360 s less its age.
+  for (const age of [30_000, 150_000, 199_000]) {
+    const w = await drive(STREAMED, { model: THREE(GOOD()), workerAgeMs: age });
+    const want = streamedDraftDeadlineMs({ now: WORKER_BORN + age, requestStartMs: WORKER_BORN + age, workerBornMs: WORKER_BORN });
+    assertEquals(want, DRAFT_STREAM_DEADLINE_MS - age);
+    assertEquals(w.trace.deadlines.length, 1, `worker ${age}: one watchdog`);
+    assert(w.trace.deadlines[0] <= want && w.trace.deadlines[0] > want - 1_000, `worker ${age}: armed at ${w.trace.deadlines[0]}, want ${want}`);
+    assertEquals(w.trace.rows, [], `worker ${age}: a draft that answered in time files nothing`);
+  }
 });
 
 Deno.test("the watchdog: a draft still working at the deadline is answered stream_deadline, and the work runs on to its capture and its ledger row", async () => {
@@ -705,7 +782,7 @@ Deno.test("the watchdog: a draft still working at the deadline is answered strea
   const gate = new Promise<void>((r) => { open = r; });
   const plan = { ...GOOD(), gate };
   // A thousand times faster: the 360 s deadline is 360 ms here, and the reads' own abort is later.
-  await inWorld({ model: [plan, plan, plan], deadlineScale: 1_000, abortAfterMs: 5_000 }, async (trace) => {
+  await inWorld({ model: [plan, plan, plan], deadlineScale: 1_000, abortAfterMs: 5_000, workerAgeMs: 0 }, async (trace) => {
     const res = await HANDLER(request(STREAMED));
     assertEquals(res.status, 200);
     const text = await res.text();
