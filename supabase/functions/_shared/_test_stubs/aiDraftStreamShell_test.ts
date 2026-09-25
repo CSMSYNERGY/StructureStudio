@@ -14,10 +14,13 @@
 //      deadline with `stream_deadline` -- is NOT "try again": the shell asks calibrate_style_ai_recover
 //      with THE PRESS'S OWN idempotency key (never a clock), AT ONCE -- even for a drop noticed after
 //      the press's budget -- and then every ten seconds while the server says pending and the budget
-//      lasts. It returns the draft exactly as the answer would have been, frame map included, so the
-//      designer's check runs; takes the server's `pending: false` sentence (not retryable), except a
-//      `no_row` while the press is under 90 s old; and stops the moment the designer goes away.
-//      Never for the lean retry, a press with no key, or a designer without the hooks.
+//      lasts, or, after an ask that FAILED (no answer, or a non-2xx), to at least a minute from the
+//      first ask. It returns the draft exactly as the answer would have been, frame map included, so
+//      the designer's check runs; takes the server's `pending: false` sentence (not retryable), except
+//      a `no_row` while the press is under 90 s old; and stops the moment the designer goes away.
+//      Never for the lean retry, a press with no key, or a designer without the hooks. Ending with no
+//      verdict from the server files ONE client row: draft_recover_timeout (error) when the asking ran
+//      out, draft_recover_abandoned (info) when the designer went away; a verdict files none.
 //   4. 01-core's invoke wrapper files a streamed refusal under the status it carries, so a 402 in a
 //      body stays an info row rather than a fault; a page leave that kills a streamed BODY
 //      (TypeError / AbortError from the read) is the navigation abort, like a FunctionsFetchError;
@@ -47,11 +50,15 @@ function lift(src: string, start: string, end: string, what: string): string {
 const DIMS = { widthFt: 30, lengthFt: 20, wallHeightFt: 8 };
 
 const DRAFT_FN = lift(SHELL, "onDraftFromCombined: async (", "\n    /* THE FREE SECOND PASS", "onDraftFromCombined").trim().replace(/,$/, "").replace(/^onDraftFromCombined:\s*/, "");
+// The client rows the shell files through 01-core's ssLogError, kept here to be read.
+type Logged = { code: unknown; severity: unknown; context: any };
 function shellWith(answer: (body: Record<string, unknown>) => { data: unknown; error: unknown }) {
   const sent: Record<string, unknown>[] = [];
+  const logged: Logged[] = [];
   const sb = { functions: { invoke: (_n: string, o: { body: Record<string, unknown> }) => { sent.push(o.body); return Promise.resolve(answer(o.body)); } } };
-  const draft = new Function("sb", `return (${DRAFT_FN});`)(sb) as (...a: unknown[]) => Promise<any>;
-  return { draft, sent };
+  const ssLogError = (_source: unknown, _message: unknown, code: unknown, context: unknown, severity: unknown) => { logged.push({ code, severity, context }); };
+  const draft = new Function("sb", "ssLogError", `return (${DRAFT_FN});`)(sb, ssLogError) as (...a: unknown[]) => Promise<any>;
+  return { draft, sent, logged };
 }
 const URLS = ["https://example.test/f1.jpg", "https://example.test/f2.jpg"];
 
@@ -139,7 +146,7 @@ function recoverHooks(o: { untilMs?: number; aliveFor?: number } = {}) {
 function droppingServer(drop: () => { data: unknown; error: unknown }, polls: ({ data: unknown; error: unknown } | "throw")[]) {
   const seen: { at: number; body: Record<string, unknown> }[] = [];
   let n = 0;
-  const { draft, sent } = shellWith((body) => {
+  const { draft, sent, logged } = shellWith((body) => {
     seen.push({ at: Date.now(), body });
     if (body.action === "calibrate_style_ai") return drop();
     const next = polls[Math.min(n++, polls.length - 1)];
@@ -147,8 +154,10 @@ function droppingServer(drop: () => { data: unknown; error: unknown }, polls: ({
     return next;
   });
   const asks = () => seen.filter((s) => s.body.action === "calibrate_style_ai_recover");
-  return { draft, sent, seen, asks };
+  return { draft, sent, seen, asks, logged };
 }
+const rowsOf = (logged: Logged[]) => logged.map((l) => [l.code, l.severity, l.context && l.context.asks, l.context && l.context.last]);
+const UNAVAILABLE = { data: null, error: { name: "FunctionsHttpError", message: "We could not check on your draft just now." } };
 const said = async (p: Promise<unknown>) => { try { await p; } catch (e) { return e as Error & { ssRetryable?: boolean }; } throw new Error("it did not throw"); };
 
 Deno.test("a streamed answer that never arrived is picked up BY THE PRESS'S KEY, and returned exactly as the answer would have been, frame map and all", async () => {
@@ -157,7 +166,7 @@ Deno.test("a streamed answer that never arrived is picked up BY THE PRESS'S KEY,
   for (const [what, drop] of DROPS) {
     await withFastPoll(async () => {
       const { hooks, recover } = recoverHooks();
-      const { draft, seen, asks } = droppingServer(drop, [{ data: PENDING, error: null }, "throw", { data: { error: "busy" }, error: { name: "FunctionsHttpError", message: "busy" } }, { data: RECOVERED, error: null }]);
+      const { draft, seen, asks, logged } = droppingServer(drop, [{ data: PENDING, error: null }, "throw", { data: { error: "busy" }, error: { name: "FunctionsHttpError", message: "busy" } }, { data: RECOVERED, error: null }]);
       const got = await draft(URLS, "farm", 2, "key-1", DIMS, { recover });
       // Exactly the normal envelope, frame map included, so the designer's free check RUNS on it.
       assertEquals(got, { ...normal, recovered: true }, what);
@@ -171,6 +180,7 @@ Deno.test("a streamed answer that never arrived is picked up BY THE PRESS'S KEY,
       assertEquals(press.length, 1, what);
       assertEquals(press[0].body.stream, true, what);
       assertEquals(asks().length, 4, `${what}: until the draft, and not once more`);
+      assertEquals(logged, [], `${what}: a draft files no client row (the server files ai_draft_recovered)`);
       for (const p of asks()) {
         // THE KEY, and nothing about any clock: no since, no clientNow.
         assertEquals(p.body, { action: "calibrate_style_ai_recover", styleValue: "farm", idempotencyKey: "key-1" }, what);
@@ -222,6 +232,53 @@ Deno.test("⚠️ a drop noticed AFTER the press's budget still asks once -- and
   });
 });
 
+Deno.test("⚠️ a late drop whose first ask FAILS asks again (to a minute from the first ask), and the second ask's draft is applied", async () => {
+  await withFastPoll(async () => {
+    for (const [what, drop] of DROPS) {
+      for (const [how, fail] of [["the ask threw", "throw"], ["the ask got a 503", UNAVAILABLE]] as [string, "throw" | typeof UNAVAILABLE][]) {
+        // `until` is long gone, and the first ask gets no word from the server.
+        const late = { ...recoverHooks().recover, until: Date.now() - 60_000 };
+        const s = droppingServer(drop, [fail, { data: RECOVERED, error: null }]);
+        const got = await s.draft(URLS, "farm", 2, "key-1", DIMS, { recover: late });
+        assertEquals([got.recovered, got.frameMap, s.asks().length], [true, SUCCESS.frameMap, 2], `${what}, ${how}: the paid draft, on the second ask`);
+        assertEquals(s.logged, [], `${what}, ${how}: a draft files no client row`);
+      }
+      // `until` alone still bounds a server that answers: a failed ask, then `pending`, past the
+      // budget, is the end -- the minute is for asks that got no word, not for waiting on pending.
+      const late = { ...recoverHooks().recover, until: Date.now() - 60_000 };
+      const s = droppingServer(drop, ["throw", { data: PENDING, error: null }, { data: RECOVERED, error: null }]);
+      const err = await said(s.draft(URLS, "farm", 2, "key-1", DIMS, { recover: late }));
+      assert(/did not reach us in time/.test(err.message), `${what}: ${err.message}`);
+      assertEquals(s.asks().length, 2, `${what}: no third ask past the budget on a pending answer`);
+      assertEquals(rowsOf(s.logged), [["draft_recover_timeout", "error", 2, "pending"]], `${what}: one timeout row`);
+    }
+  });
+});
+
+Deno.test("asks that keep failing stop a minute after the first ask, with ONE draft_recover_timeout error row", async () => {
+  await withFastPoll(async () => {
+    const realNow = Date.now;
+    let skew = 0;
+    Date.now = () => realNow() + skew;
+    try {
+      // Every ask fails and moves the clock on 25 s: asked at 0, 25 and 50 s, and not at 75.
+      const { draft, sent, logged } = shellWith((body) => {
+        if (body.action === "calibrate_style_ai") return DROPS[0][1]();
+        skew += 25_000;
+        throw new TypeError("Failed to fetch");
+      });
+      const recover = { ...recoverHooks().recover, until: realNow() - 60_000 };
+      const err = await said(draft(URLS, "farm", 2, "key-1", DIMS, { recover }));
+      assert(/did not reach us in time/.test(err.message) && !err.ssRetryable, err.message);
+      assertEquals(sent.filter((b) => b.action === "calibrate_style_ai_recover").length, 3);
+      assertEquals(rowsOf(logged), [["draft_recover_timeout", "error", 3, "failed"]]);
+      assertEquals([logged[0].context.fn, logged[0].context.action], ["portal-settings", "calibrate_style_ai_recover"]);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+});
+
 Deno.test("no_row is waited on while the press is young (its row may not be written yet), then its sentence", async () => {
   // Young: two no_row answers, then the row lands with its draft.
   await withFastPoll(async () => {
@@ -253,18 +310,19 @@ Deno.test("a server that says the draft will never come: its sentence, not retry
   await withFastPoll(async () => {
     const { recover } = recoverHooks();
     const charged = "That generation finished and was charged once, but its draft could not be saved for pickup, so it is gone. You have not been charged twice. Reload this page before pressing Generate again; the next press will be a new charge.";
-    const { draft, asks } = droppingServer(DROPS[0][1], [{ data: PENDING, error: null }, { data: { ok: true, pending: false, reason: "charged_unsaved", message: charged }, error: null }, { data: RECOVERED, error: null }]);
+    const { draft, asks, logged } = droppingServer(DROPS[0][1], [{ data: PENDING, error: null }, { data: { ok: true, pending: false, reason: "charged_unsaved", message: charged }, error: null }, { data: RECOVERED, error: null }]);
     const err = await said(draft(URLS, "farm", 2, "key-1", DIMS, { recover }));
     assertEquals(err.message, charged);
     assert(!err.ssRetryable, "never the automatic lean retry: that would be a second model call");
     assertEquals(asks().length, 2, "no ask after the answer");
+    assertEquals(logged, [], "the server's verdict: it files its own row, the client none");
   });
 });
 
 Deno.test("the press's budget runs out: a plain sentence, no 'try again', and no ask past the deadline", async () => {
   await withFastPoll(async () => {
     const { recover } = recoverHooks({ untilMs: 40 });
-    const { draft, asks } = droppingServer(DROPS[2][1], [{ data: PENDING, error: null }]);
+    const { draft, asks, logged } = droppingServer(DROPS[2][1], [{ data: PENDING, error: null }]);
     const t = Date.now();
     const err = await said(draft(URLS, "farm", 2, "key-1", DIMS, { recover }));
     assert(/did not reach us in time/.test(err.message) && /not charge you twice/.test(err.message), err.message);
@@ -277,6 +335,8 @@ Deno.test("the press's budget runs out: a plain sentence, no 'try again', and no
     await new Promise((r) => setTimeout(r, 30));
     assertEquals(asks().length, n, "and none after it gave up");
     assert(Date.now() - t < 1_000, "and gave up at the deadline, not later");
+    // No verdict from the server: ONE client row, an error, saying how many asks and what the last said.
+    assertEquals(rowsOf(logged), [["draft_recover_timeout", "error", n, "pending"]]);
   });
 });
 
@@ -287,11 +347,13 @@ Deno.test("the designer goes away (or another press takes over): the asking stop
     const a = droppingServer(DROPS[0][1], [{ data: PENDING, error: null }]);
     assert((await said(a.draft(URLS, "farm", 2, "key-1", DIMS, { recover: once.recover }))) instanceof Error, "the press ends");
     assertEquals(a.asks().length, 1, "one ask, then nothing");
+    assertEquals(rowsOf(a.logged), [["draft_recover_abandoned", "info", 1, "pending"]], "one info row, never a timeout");
     // Already gone when the drop surfaced: no ask at all, and the card never switched.
     const never = recoverHooks({ aliveFor: 0 });
     const b = droppingServer(DROPS[0][1], [{ data: RECOVERED, error: null }]);
     await said(b.draft(URLS, "farm", 2, "key-1", DIMS, { recover: never.recover }));
     assertEquals([b.asks().length, never.hooks.recovering], [0, 0]);
+    assertEquals(rowsOf(b.logged), [["draft_recover_abandoned", "info", 0, null]]);
     await new Promise((r) => setTimeout(r, 30));
     assertEquals([a.asks().length, b.asks().length], [1, 0], "and nothing later either");
   });

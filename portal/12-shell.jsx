@@ -1752,8 +1752,10 @@ function Dashboard({ session }) {
       // ⚠️ THE FIRST ASK GOES AT ONCE, WHATEVER `until` SAYS. A phone that slept through the whole
       // press notices the drop minutes after the press's budget ran out, and its paid draft is
       // sitting on the row: it gets one ask, and the draft if it is there. `until` (the press's
-      // SS_FLOW_MAX_MS) only bounds how long this keeps asking again while the server says
-      // `pending`, every ten seconds.
+      // SS_FLOW_MAX_MS) bounds how long this keeps asking again while the server says `pending`,
+      // every ten seconds. An ask that FAILED (no answer, or a non-2xx: the connection that dropped
+      // may still be down) is no word from the server, so after one the asking goes on to at least
+      // a minute from the first ask, however late the drop was noticed.
       //
       // It ends on the draft (returned exactly as the answer would have been), on `pending: false`
       // (the server's own sentence, whose money wording comes from the wallet; the designer keeps
@@ -1764,6 +1766,10 @@ function Dashboard({ session }) {
       // `recover` hooks: `alive()` goes false when the designer unmounts or another press takes
       // over, which stops it before the next ask; `onRecovering()` switches its progress card to the
       // pickup copy.
+      //
+      // ONE CLIENT ROW when it ends with no verdict from the server: draft_recover_timeout (an
+      // error: the builder was told nothing about their draft), or draft_recover_abandoned (info:
+      // the page moved on). A verdict needs none: the server files its own.
       const brokeOff = Boolean(error && body.stream && (error.name === "SyntaxError" || error.name === "TypeError"));
       const closedAtDeadline = Boolean(!error && body.stream && data && typeof data === "object" && data.code === "stream_deadline");
       if (brokeOff || closedAtDeadline) {
@@ -1771,21 +1777,34 @@ function Dashboard({ session }) {
         if (!rec || typeof rec.alive !== "function" || !body.idempotencyKey) {
           throw new Error("Your connection dropped before the draft arrived, so we could not show it. If it finished, you were charged for it once.");
         }
-        const gone = () => new Error("Stopped picking the draft up: this press is no longer on screen.");
+        let asked = 0;
+        let got = null;
+        const filed = (code, message, severity) => {
+          try {
+            ssLogError("portal", message, code, { fn: "portal-settings", action: "calibrate_style_ai_recover", asks: asked, last: asked ? (got ? (got.reason || "pending") : "failed") : null }, severity);
+          } catch (_l) { /* a log line must never cost the press */ }
+        };
+        const gone = () => {
+          filed("draft_recover_abandoned", "Stopped picking a dropped draft up: the press is no longer on screen.", "info");
+          return new Error("Stopped picking the draft up: this press is no longer on screen.");
+        };
         if (!rec.alive()) throw gone();
         if (typeof rec.onRecovering === "function") rec.onRecovering();
         const hooks = typeof window !== "undefined" ? window : {};
         const every = Number(hooks.__ssRecoverPollMs) || 10000;
         const noRowMs = Number(hooks.__ssRecoverNoRowMs) || 90000;
         const until = Number(rec.until) || 0;
-        for (let asked = 0; ; asked++) {
+        const firstAskAt = Date.now();
+        for (;;) {
           if (asked > 0) {
-            const wait = Math.min(every, until - Date.now());
+            const end = got ? until : Math.max(until, firstAskAt + 60000);
+            const wait = Math.min(every, end - Date.now());
             if (!(wait > 0)) break;
             await new Promise((r) => setTimeout(r, wait));
             if (!rec.alive()) throw gone();
           }
-          let got = null;
+          asked++;
+          got = null;
           try {
             const r = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai_recover", styleValue, idempotencyKey: body.idempotencyKey } });
             got = r && !r.error ? r.data : null;
@@ -1805,6 +1824,7 @@ function Dashboard({ session }) {
           // `pending: true`, a young `no_row`, or this ask failed on the way (the connection that
           // dropped may still be down): ask again while the press has time.
         }
+        filed("draft_recover_timeout", "A dropped draft was not picked up before the asking ran out, with no answer from the server about it.", "error");
         throw new Error("Your connection dropped and the draft did not reach us in time. Pressing Generate again will not charge you twice for this press.");
       }
       // `ssRetryable` IS THE SERVER'S WORD, NEVER A GUESS FROM THE STATUS. A 502 is also a model
