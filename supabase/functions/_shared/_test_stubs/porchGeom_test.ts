@@ -440,3 +440,56 @@ Deno.test("d3PorchReadout reports the posts, pitch and steps that are built", ()
   const plain = F.d3PorchReadout({ roof: { type: "gambrel", porchOutFt: 6.5 }, wallHeightFt: 9 }, "16x24");
   assertEquals([plain.steps, plain.posts, plain.framing.posts], [null, 3, null]);
 });
+
+// ── CENTRE STEPS GET A BAY IN THE MIDDLE (fix, 2026-09-25) ────────────────────────────────
+// The 8.5 ft rule gives 2 bays to any porch 8.5 to 17 ft wide, which stood a post at x = 0, at the
+// top of centred steps. Without porchPosts, centre steps take one bay more where the rule's count
+// is even; a porchPosts the style gives is never second-guessed.
+Deno.test("⚠️ centre steps and no porchPosts: an odd number of bays, so no post stands on the stair", () => {
+  for (const [S, ruleBays, want] of [[8, 1, 1], [12, 2, 3], [16, 2, 3], [17, 2, 3], [20, 3, 3], [30, 4, 5]]) {
+    const plain = F.d3PorchGeom(S, 10, 6, PANEL_TRIM, Infinity, 0, { posts: null, pitch: null, steps: null });
+    assertEquals(plain.bays, ruleBays, `${S} ft: the rule`);
+    const g = F.d3PorchGeom(S, 10, 6, PANEL_TRIM, Infinity, 0, F.d3PorchFraming({ porchSteps: "center" }));
+    assertEquals([g.bays, g.posts], [want, want + 1], `${S} ft with centre steps`);
+    // No post centre falls within the steps' width.
+    const st = F.d3PorchStepsGeom(g, 6, "center");
+    const outer = g.side - g.sizes.POST / 2;
+    const posts = Array.from({ length: g.posts }, (_, k) => -outer + (2 * outer * k) / g.bays);
+    for (const x of posts) assert(Math.abs(x) >= st.w / 2 + g.sizes.POST / 2 - 1e-9, `${S} ft: a post at ${x.toFixed(2)} stands on steps ${st.w} wide`);
+    // Nothing but the post count moved.
+    for (const k of ["pitch", "yHigh", "postH", "hdrTop", "ceilWall", "nRaf", "side"]) assertEquals(g[k], plain[k], `${S} ft: ${k}`);
+  }
+  // The review's case: a 12 ft gable-end porch with centre steps and no post count.
+  const r = F.d3PorchReadout({ roof: { type: "gable", front: "gable", pitch: 0.5, porchOutFt: 6, porchSteps: "center" }, wallHeightFt: 9 }, "12x16");
+  assertEquals([r.posts, r.steps.x], [4, 0]);
+  // Left or right steps, or a post count the style gives, keep the rule's (or the style's) count.
+  assertEquals(F.d3PorchGeom(12, 10, 6, PANEL_TRIM, Infinity, 0, F.d3PorchFraming({ porchSteps: "left" })).bays, 2);
+  assertEquals(F.d3PorchGeom(12, 10, 6, PANEL_TRIM, Infinity, 0, F.d3PorchFraming({ porchSteps: "center", porchPosts: 3 })).posts, 3);
+  // And a style without steps is untouched (the "no framing is today's porch" test pins the rest).
+  assertEquals(F.d3PorchGeom(12, 10, 6, PANEL_TRIM, Infinity, 0, F.d3PorchFraming({})).posts, 3);
+});
+
+// ── THE SERVER'S porchPitchDrawable IS THIS SOLVE (fix, 2026-09-25) ─────────────────────────
+// The v2 self-check is told the porch pitch the render DRAWS where it lowers the stored one; the
+// server cannot run the renderer, so styleD3.ts mirrors the solve. With no ceiling above the attach
+// height (capY Infinity) the two must agree exactly, everywhere.
+import { porchPitchDrawable } from "../styleD3.ts";
+Deno.test("⚠️ porchPitchDrawable matches d3PorchGeom's pitch at the attach height, over the whole grid", () => {
+  let lowered = 0;
+  for (const D of [1, 2, 4, 6, 8, 12]) {
+    for (const attach of [6, 6.2, 6.8, 7.3, 8, 9, 10, 14]) {
+      for (const pitch of [0.05, 0.08, 0.1, 0.2, 0.25, 0.3, 0.42, 0.5]) {
+        const g = F.d3PorchGeom(16, 30, D, PANEL_TRIM, Infinity, attach, F.d3PorchFraming({ porchPitch: pitch }));
+        assertEquals(porchPitchDrawable({ porchOutFt: D, porchAttachFt: attach, porchPitch: pitch }), g.pitch, `D ${D} attach ${attach} pitch ${pitch}`);
+        if (g.pitchClamped) lowered++;
+      }
+    }
+  }
+  assert(lowered > 20, `the grid reaches the lowered case (${lowered})`);
+});
+
+Deno.test("the review's cabin: 3 in 12 on a 12x16 with 7 ft walls is BUILT far flatter, and the readout says so", () => {
+  const r = F.d3PorchReadout({ roof: { type: "gable", front: "gable", pitch: 0.5, porchOutFt: 6, porchPitch: 0.25 }, wallHeightFt: 7 }, "12x16");
+  assert(r.pitchClamped && r.pitch < 0.1, `built at ${r.pitch}`);
+  assertEquals(r.pitchWant, 0.25);
+});

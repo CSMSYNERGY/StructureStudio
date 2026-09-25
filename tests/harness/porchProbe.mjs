@@ -35,6 +35,9 @@
 //  14. the porch wall and the doors on it receive shadows (the porch roof shades them) and no other
 //      wall does; without a projecting porch no wall does
 //  15. zero page errors
+//  16. steps (roof.porchSteps) and a customer's ramp on the porch wall never both show where they
+//      overlap: centre steps under a ramp to a centred door are hidden (userData.ssHiddenBy "ramp"),
+//      left steps beside it stay; centre steps with no porchPosts take a middle bay (4 posts at 16 ft)
 //
 // The porch groups and bands are found by userData.ssPorch, and every member inside them by
 // userData.ssPorchPart, never by size or draw order: a 16x24's porch sheet is as big as a main roof
@@ -88,6 +91,15 @@ const CASES = [
     d3: { roof: { ...LEAN_BASE, leanToWidthFt: 8, leanToDropFt: 1.5, leanToSide: "left" }, siding: "panel", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
   { id: "J", label: "Harness Lean-To Right", size: "16x24", H: 9, posts: 3, metal: true, wood: WOOD_FALLBACK, bands: 2, sameAs: "I0",
     d3: { roof: { ...LEAN_BASE, leanToWidthFt: 10, leanToDropFt: 3, leanToSide: "right" }, siding: "panel", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
+  // STEPS AND A RAMP (2026-09-25): case A's building, its door and ramp, and porch steps. K puts the
+  // door and ramp in the MIDDLE of the porch wall (8 ft), where its centre steps stand, so the steps
+  // are hidden; L keeps them at 10.5 ft with left steps in the left bay, clear of it, and they show.
+  // K has no porchPosts, so its centre steps take a middle bay. (No "Ramp" in either label: the ramp
+  // tool is found by that word.)
+  { id: "K", label: "Harness Steps Centre", size: "16x24", H: 9, posts: 4, metal: true, wood: "#c4965a", place: true, at: 8, bands: 2, steps: "center", stepsHidden: true,
+    d3: { roof: { ...GAMBREL, porchOutFt: 6.5, porchEnd: "front", plateBand: true, porchSteps: "center" }, siding: null, colors: { ...COLORS, wood: "#C4965A" }, wallHeightFt: 9, roofMaterial: "metal", foundation: "skids" } },
+  { id: "L", label: "Harness Steps Left", size: "16x24", H: 9, posts: 3, metal: true, wood: "#c4965a", place: true, bands: 2, steps: "left", stepsHidden: false,
+    d3: { roof: { ...GAMBREL, porchOutFt: 6.5, porchEnd: "front", plateBand: true, porchSteps: "left" }, siding: null, colors: { ...COLORS, wood: "#C4965A" }, wallHeightFt: 9, roofMaterial: "metal", foundation: "skids" } },
 ];
 
 const configFor = (c) => {
@@ -164,11 +176,12 @@ async function openEditor(page) {
   await settle(page, 1500);
 }
 
-// Case A only: a door, its ramp and a flood light on the porch wall (south), placed in 2D.
-async function placeOnPorchWall(page, ok, W, L) {
+// Case A only: a door, its ramp and a flood light on the porch wall (south), placed in 2D. `at` is
+// how far along the wall the door and ramp go (10.5 ft unless the case says).
+async function placeOnPorchWall(page, ok, W, L, at = 10.5) {
   await (await revealTool(page, /^Door wall$/)).click();
   await settle(page, 300);
-  let p = await southWall(page, W, L, 10.5);
+  let p = await southWall(page, W, L, at);
   await page.mouse.click(p.x, p.y);
   await settle(page, 600);
   await page.getByText(FIXTURES.items[0].name, { exact: true }).first().click({ timeout: 10000 });
@@ -177,7 +190,7 @@ async function placeOnPorchWall(page, ok, W, L) {
   await settle(page, 600);
   await (await revealTool(page, /Ramp/)).click();
   await settle(page, 300);
-  p = await southWall(page, W, L, 10.5);
+  p = await southWall(page, W, L, at);
   await page.mouse.click(p.x, p.y);
   await settle(page, 600);
   await (await revealTool(page, /Electrical Items/)).click();
@@ -202,10 +215,10 @@ async function measure(page, W, L) {
   return page.evaluate(({ W, L }) => {
     const E = window.__ss3dEngine, M = E.model, V = E.camera.position.constructor;
     E.scene.updateMatrixWorld(true);
-    const bbOf = (o) => {
+    const bbOf = (o, skip) => {
       const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
       o.traverse((q) => {
-        if (!q.isMesh || !q.geometry) return;
+        if (!q.isMesh || !q.geometry || (skip && skip(q))) return;
         if (!q.geometry.boundingBox) q.geometry.computeBoundingBox();
         const b = q.geometry.boundingBox;
         for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
@@ -248,7 +261,16 @@ async function measure(page, W, L) {
     // Every member by its tag, never by its size: a member built the wrong size must still be found.
     const partsOf = (name) => { const a = []; pg.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssPorchPart === name) a.push(q); }); return a; };
     const boxOf = (q) => { const b = bbOf(q); return { minY: b.mn[1], maxY: b.mx[1], near: nearDist(b), out: outDist(b), across: across(b), color: hex(Array.isArray(q.material) ? q.material[0] : q.material) }; };
-    const db = bbOf(decks[0]);
+    // The deck's own box, without its steps (which run out past D by design).
+    const inSteps = (q) => { let n = q; while (n) { if (n.userData && n.userData.ssPorchPart === "steps") return true; n = n.parent; } return false; };
+    const db = bbOf(decks[0], inSteps);
+    const chainShown = (q) => { let n = q; while (n) { if (!n.visible) return false; n = n.parent; } return true; };
+    out.steps = [];
+    decks[0].traverse((q) => {
+      if (!(q.userData && q.userData.ssPorchPart === "steps")) return;
+      const b = bbOf(q);
+      out.steps.push({ where: q.userData.ssPorchSteps, visible: chainShown(q), hiddenBy: q.userData.ssHiddenBy || null, across: across(b), near: nearDist(b), out: outDist(b) });
+    });
     out.deck = { top: db.mx[1], out: outDist(db), visibleChain: true };
     const NAMES = ["slab", "ceiling", "rafter", "header", "post", "cheek", "cornerFill", "rake", "board", "drip", "ledger"];
     out.parts = Object.fromEntries(NAMES.map((n) => [n, partsOf(n).map(boxOf)]));
@@ -348,7 +370,7 @@ async function measure(page, W, L) {
       if (g.userData && g.userData.ssElec) {
         const head = g.children.find((q) => q.isMesh && q.geometry.type === "BoxGeometry" && Math.abs(q.geometry.parameters.width - 0.6) < 1e-9);
         out.floods.push({ topY: b.mx[1], headCtrY: head ? head.getWorldPosition(new V()).y : null });
-      } else out.ramps.push({ near: nearDist(b), out: outDist(b) });
+      } else out.ramps.push({ near: nearDist(b), out: outDist(b), across: across(b), tagged: !!(g.userData && g.userData.ssRamp) });
     });
     // Look inside: the roof (and the porch roof with it) hides, the deck stays.
     const chainVisible = (q) => { let n = q; while (n) { if (!n.visible) return false; n = n.parent; } return true; };
@@ -390,7 +412,7 @@ async function runCase(ctx, c, ok, shots, seen) {
     await page.waitForFunction(() => [...document.querySelectorAll("svg rect")].some((r) => r.getAttribute("stroke") === "#1E293B"), null, { timeout: 30000 });
     await pickStyle(page, c.label);
     await chooseSize(page, c.size);
-    if (c.place) await placeOnPorchWall(page, ok, W, L);
+    if (c.place) await placeOnPorchWall(page, ok, W, L, c.at);
     await openEditor(page);
     const m = await measure(page, W, L);
     const P = m.porch;
@@ -473,6 +495,36 @@ async function runCase(ctx, c, ok, shots, seen) {
         ok(`${tag}: the flood light hangs under the porch ceiling (head centre <= ceilWall - 0.45)`, m.floods.length === 1 && m.floods[0].headCtrY != null && m.floods[0].headCtrY <= P.ceilWall - 0.45 + 0.001,
           `head ${f3(m.floods[0] && m.floods[0].headCtrY)} cap ${f3(P.ceilWall - 0.45)}`);
         ok(`${tag}: ...and all of it below the ceiling`, m.floods.length === 1 && m.floods[0].topY < P.ceilWall, `top ${f3(m.floods[0] && m.floods[0].topY)} ceilWall ${f3(P.ceilWall)}`);
+      }
+      if (c.steps) {
+        const st = m.steps[0], rp = m.ramps[0];
+        ok(`${tag}: one step group, "${c.steps}"`, m.steps.length === 1 && st.where === c.steps, JSON.stringify(m.steps));
+        const overlap = !!(st && rp && rp.across[0] < st.across[1] - 0.01 && rp.across[1] > st.across[0] + 0.01 && rp.near < st.out && rp.out > st.near);
+        ok(`${tag}: the ramp ${c.stepsHidden ? "runs over" : "stands clear of"} the ${c.steps} steps`, !!rp && overlap === c.stepsHidden,
+          `ramp across ${rp && rp.across.map(f3)} out ${rp && f3(rp.near)}..${rp && f3(rp.out)}, steps across ${st && st.across.map(f3)} out ${st && f3(st.near)}..${st && f3(st.out)}`);
+        ok(`${tag}: ⚠️ STEPS AND A RAMP NEVER BOTH SHOW WHERE THEY OVERLAP`, !(overlap && st.visible), JSON.stringify({ overlap, visible: st && st.visible }));
+        ok(`${tag}: the steps are ${c.stepsHidden ? "hidden, saying the ramp did it" : "drawn"}`,
+          !!st && (c.stepsHidden ? st.visible === false && st.hiddenBy === "ramp" : st.visible === true && st.hiddenBy === null), JSON.stringify(st));
+        ok(`${tag}: the ramp is tagged for the check`, !!rp && rp.tagged === true);
+        if (c.stepsHidden) {
+          // A LIVE DRAG rebuilds the interior alone (model.rebuildInterior), never the porch: the check
+          // runs there too, so taking the ramp away brings the steps back, and putting it back hides them.
+          const items = (await readItems(page)) || [];
+          const shown = (list) => page.evaluate((list) => {
+            const M = window.__ss3dEngine.model;
+            M.rebuildInterior(list);
+            let vis = null;
+            M.root.traverse((q) => {
+              if (!(q.userData && q.userData.ssPorchPart === "steps")) return;
+              let n = q, v = true;
+              while (n) { if (!n.visible) v = false; n = n.parent; }
+              vis = v;
+            });
+            return vis;
+          }, list);
+          ok(`${tag}: a live rebuild without the ramp brings the steps back`, (await shown(items.filter((i) => i.type !== "ramp"))) === true);
+          ok(`${tag}: ...and with it, hides them again`, (await shown(items)) === false);
+        }
       }
       if (c.bandUnderEdge) ok(`${tag}: with a plate band the porch roof meets the wall at exactly H - 0.2`, Math.abs(P.yHigh - (c.H - 0.2)) < 1e-9, f3(P.yHigh));
       const porchEndBand = m.bands.filter((b) => b.porchEnd);

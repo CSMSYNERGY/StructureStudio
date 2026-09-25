@@ -5125,7 +5125,8 @@ function d3EaveFinishDrop(roofCfg, ny) {
 //     wall ledger and the header instead of sitting on it.
 //   · A post at each corner and one every 8.5 ft or less between, counted off the SPAN S. Counted
 //     off the post-to-post width it changed with the cladding, and an 8 ft porch drew 3 posts.
-//     8 ft gets 2, 10-17 ft get 3, 18-24 ft get 4.
+//     8 ft gets 2, 10-17 ft get 3, 18-24 ft get 4 -- one bay more where that count is even and the
+//     steps are "center" (fix, 2026-09-25), so no post stands at the top of centred steps.
 //   · hNeeded is the wall height at which the 2:12 roof clears 6'8" when nothing on the main roof
 //     pushes it down: what the panel suggests when a wall is too short.
 //   · attachFt (roof.porchAttachFt, 2026-09-24): floor to the TOP of the porch roof where it meets
@@ -5138,11 +5139,14 @@ function d3EaveFinishDrop(roofCfg, ny) {
 //              never so many that two would stand closer than a post's width apart (a 4 ft porch
 //              takes at most 5). `posts` is what is BUILT.
 //       pitch  asked for in place of 2:12, and still LOWERED, only as far as it must be, where it
-//              would leave less than 6'8" under the header: solved exactly here, because a given
-//              pitch runs up to 0.5, past where stack() may be read at 0.15. pitchClamped then
-//              says it was lowered, `short` says 0.05 was not enough, and hNeeded is the wall at
-//              which THAT pitch clears. pitchWant is added only when the style gives a pitch, so
-//              a porch without one returns exactly the keys it always did.
+//              would leave less than 6 ft under the header (CLEAR_FLOOR: a given pitch is the
+//              builder's measured porch; the solver's own 2:12 still aims for 6'8"): solved
+//              exactly here, because a given pitch runs up to 0.5, past where stack() may be
+//              read at 0.15. pitchClamped then says it was lowered, `short` says 0.05 was not
+//              enough, and hNeeded is the wall at which THAT pitch clears 6'8". pitchWant is
+//              added only when the style gives a pitch, so a porch without one returns exactly
+//              the keys it always did. (The server's porchPitchDrawable mirrors this solve, so
+//              the self-check is told the pitch the render shows; porchGeom_test runs both.)
 function d3PorchGeom(S, H, D, trimFace, capY, attachFt, framing) {
   const fr = framing || {};
   // Member sizes in feet: 6x6 posts, a doubled 2x8 header, 2x6 rafters, the roof sheet, the
@@ -5187,7 +5191,14 @@ function d3PorchGeom(S, H, D, trimFace, capY, attachFt, framing) {
   const hdrTop = yHigh - pitch * run - stack(pitch);
   const postH = Math.max(1, hdrTop - HDR_H);
   const postsMax = Math.max(2, 1 + Math.floor((2 * side - POST) / (2 * POST) + 1e-9));
-  const bays = fr.posts >= 2 ? Math.min(Math.round(fr.posts), postsMax) - 1 : Math.max(1, Math.ceil(S / POST_SPAN - 1e-6));
+  const ruleBays = Math.max(1, Math.ceil(S / POST_SPAN - 1e-6));
+  // CENTRE STEPS NEED A BAY IN THE MIDDLE (fix, 2026-09-25). The 8.5 ft rule gives 2 bays to any
+  // porch 8.5 to 17 ft wide, which stands a post at x = 0: at the top of centred steps, the common
+  // case of steps in front of a centred door, and not a porch anyone builds. With steps "center"
+  // and NO porchPosts the rule takes one bay more, so the middle is a bay. A porchPosts the style
+  // gives is the builder's own count and is never second-guessed.
+  const bays = fr.posts >= 2 ? Math.min(Math.round(fr.posts), postsMax) - 1
+    : fr.steps === "center" && ruleBays % 2 === 0 ? Math.min(ruleBays + 1, postsMax - 1) : ruleBays;
   return {
     pitch, pitchClamped: pitch < WANT - 1e-9, yHigh, postH, hdrTop,
     ceilWall: yHigh - (PR_T + SHEATH + RAF_D) * Math.sqrt(1 + pitch * pitch),   // rafter bottoms at the wall
@@ -5224,9 +5235,9 @@ function d3PorchFraming(roofCfg) {
 //   where   left / center / right along the deck's FRONT edge (d = D, the posts' outer faces).
 //           Left and right are centred in the outermost bay on that side, between two posts; with
 //           a single bay they stand against that corner post instead. Center is the porch's
-//           middle, which is the middle bay's when there is one; with an even number of bays a
-//           post stands there, at the top of the steps, because posts are a rule (as in front of
-//           a door).
+//           middle, which is the middle bay's when there is one. Without porchPosts the post rule
+//           takes an odd number of bays for centre steps (d3PorchGeom), so there always is; only a
+//           porchPosts the style gives can put a post there, and that is the builder's own count.
 //   w       3.5 ft, or the clear gap between two posts where that is narrower.
 //   count   ceil(deck height above grade / 7.5 in), at least 1: the number of STEPS (treads). The
 //           climb from grade to the deck is count + 1 risers, each h / (count + 1), so no riser
@@ -8832,7 +8843,8 @@ function buildShed3DModel(THREE, p) {
   // bottom instead of tucking it against it. The porch reads no items, so only the full build draws
   // it; a porch, band or wood change reaches it through the spec, which forces a full build.
   // porchCapZ: the cap end the porch stands off (local z 0 or L), for the plate band below.
-  let porchDeckGroup = null, porchCapZ = null;
+  // porchStepsGroup: the steps' group when the porch has steps, so a ramp built later can find it.
+  let porchDeckGroup = null, porchCapZ = null, porchStepsGroup = null;
   const porchGeom = (() => {
     if (!porchOut) return null;
     const D = porchOut.D;
@@ -9111,6 +9123,7 @@ function buildShed3DModel(THREE, p) {
         st.add(part(str, "stringer"));
       }
       deck.add(st);
+      porchStepsGroup = st;
       geom.steps = stepsGeom;
     }
     // A cap end: out along local z from z = 0 or L, centred at cxU across it (centerU in rg's u). An
@@ -9462,6 +9475,43 @@ function buildShed3DModel(THREE, p) {
     }
     interiorGroup.add(g);
   };
+  // ── STEPS AND A CUSTOMER'S RAMP ON THE PORCH WALL (fix, 2026-09-25) ──
+  // A ramp on the projecting porch's wall starts at the deck's edge and runs 3 ft out, which is
+  // exactly where the porch's steps stand, and neither looked for the other: a ramp to a centred
+  // door on a porch with centre steps was drawn through the treads and stringers. Where a ramp
+  // overlaps the steps, the STEPS are not drawn -- the customer placed the ramp, and it is how
+  // that doorway is reached. Read off both groups' footprints in root's frame (plan x and z), so
+  // neither frame's arithmetic is copied here, and run after EVERY interior build, full or a
+  // live drag's, so dragging the ramp away brings the steps back. The steps stay in the scene,
+  // hidden, marked userData.ssHiddenBy = "ramp" (porchProbe asserts the two never both show).
+  const planBox = (obj) => {
+    const out = { x0: Infinity, x1: -Infinity, z0: Infinity, z1: -Infinity };
+    const v = new THREE.Vector3();
+    obj.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+      const m = new THREE.Matrix4();
+      for (let n = o; n && n !== root; n = n.parent) { if (n.matrixAutoUpdate) n.updateMatrix(); m.premultiply(n.matrix); }
+      const b = o.geometry.boundingBox;
+      for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
+        v.set(x, y, z).applyMatrix4(m);
+        out.x0 = Math.min(out.x0, v.x); out.x1 = Math.max(out.x1, v.x);
+        out.z0 = Math.min(out.z0, v.z); out.z1 = Math.max(out.z1, v.z);
+      }
+    });
+    return out;
+  };
+  const porchStepsVsRamps = () => {
+    if (!porchStepsGroup || !porchOut) return;
+    const st = planBox(porchStepsGroup);
+    const hit = interiorGroup.children.some((g) => {
+      if (!(g.userData && g.userData.ssRamp === porchOut.wall)) return false;
+      const r = planBox(g);
+      return r.x0 < st.x1 - 0.01 && r.x1 > st.x0 + 0.01 && r.z0 < st.z1 - 0.01 && r.z1 > st.z0 + 0.01;
+    });
+    porchStepsGroup.visible = !hit;
+    porchStepsGroup.userData.ssHiddenBy = hit ? "ramp" : null;
+  };
   const buildInterior = (itemsNow) => itemsNow.forEach((it) => {
     const c = itemTypes[it.type];
     // Before the tool check on purpose: a device whose tool left ITEMS still draws (see above).
@@ -9634,6 +9684,7 @@ function buildShed3DModel(THREE, p) {
       const along = wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale;
       const run = 3, drop = D3.FLOOR_T;
       const g = new THREE.Group();
+      g.userData.ssRamp = it.wall;       // porchStepsVsRamps finds the ramps on the porch wall by it
       const deck = box(mat(D3_COLORS.ramp), w, 0.12, Math.sqrt(run * run + drop * drop));
       deck.rotation.x = Math.atan2(drop, run); // far end drops to grade
       deck.position.set(0, -drop / 2 + 0.06, run / 2);
@@ -9666,6 +9717,7 @@ function buildShed3DModel(THREE, p) {
     // textNote / line: 2D annotations with no 3D representation (plan §4.7).
   });
   buildInterior(items);
+  porchStepsVsRamps();
 
   root.add(wallsGroup);
   root.add(openingsGroup);
@@ -9737,6 +9789,7 @@ function buildShed3DModel(THREE, p) {
   model.rebuildInterior = (itemsNow) => {
     Array.from(interiorGroup.children).forEach((g) => { interiorGroup.remove(g); disposeSubtree(g, null); });
     buildInterior(itemsNow);
+    porchStepsVsRamps();
     setShadowFlags(interiorGroup);
   };
   return model;
@@ -15935,7 +15988,14 @@ function ssRoofInFeet(roof, spanFt, centre) {
 // comparing our 3D with their own frames has to be told it in words before they can say it is
 // wrong. Only what the spec SAYS: an absent key is never described as its default, because
 // "the front is a gable end" on a style that never said so would be a claim we did not make.
-function ssDrewWords(spec) {
+//
+// ⚠️ WHAT WAS BUILT, NOT WHAT WAS ASKED (fix, 2026-09-25). `porchBuilt` is the panel's
+// d3PorchReadout of this spec at the same size: the renderer lowers a given porchPitch where it
+// would leave under 6 ft under the beam, and holds porchPosts to what fits. A 12x16 cabin's 3 in
+// 12 porch roof on 7 ft walls is built at 0.6 in 12, and a line saying "3 in 12" beside it sent
+// the builder to check a roof that is not on screen. With the readout the posts and pitch are the
+// built ones, and a lowered pitch says so; without it (no size yet) they are the spec's.
+function ssDrewWords(spec, porchBuilt) {
   const roof = (spec && spec.roof) || {};
   const type = roof.type || "gable";
   const out = [];
@@ -15960,9 +16020,18 @@ function ssDrewWords(spec) {
     const attach = Number(roof.porchAttachFt) > 0 ? `, and its roof meets the wall ${ssFtInWords(Number(roof.porchAttachFt))} up` : "";
     out.push(`The porch stands ${ssFtInWords(outFt)} out from the ${end} ${face}${width}${attach}.`);
     // Its own framing (2026-09-25), only where the style gives it: absent is the renderer's rule.
+    const pb = porchBuilt && isFinite(Number(porchBuilt.posts)) && isFinite(Number(porchBuilt.pitch)) ? porchBuilt : null;
+    const in12 = (p) => `${Math.round(Number(p) * 120) / 10} in 12`;
     const built = [];
-    if (Number(roof.porchPosts) >= 2) built.push(`${Math.round(Number(roof.porchPosts))} posts`);
-    if (Number(roof.porchPitch) > 0) built.push(`a roof sloping ${Math.round(Number(roof.porchPitch) * 120) / 10} in 12`);
+    if (Number(roof.porchPosts) >= 2) {
+      const asked = Math.round(Number(roof.porchPosts));
+      built.push(pb && pb.posts < asked ? `${pb.posts} posts (the most that fit)` : `${pb ? pb.posts : asked} posts`);
+    }
+    if (Number(roof.porchPitch) > 0) {
+      built.push(pb && pb.pitchClamped
+        ? `a roof sloping ${in12(pb.pitch)} (lowered from ${in12(roof.porchPitch)} to leave headroom under the beam)`
+        : `a roof sloping ${in12(pb ? pb.pitch : roof.porchPitch)}`);
+    }
     const stepsAt = ({ left: "on the left", center: "in the middle", right: "on the right" })[roof.porchSteps];
     if (stepsAt) built.push(`steps ${stepsAt}`);
     if (built.length) out.push(`It has ${built.length > 1 ? built.slice(0, -1).join(", ") + " and " + built[built.length - 1] : built[0]}.`);
@@ -21315,6 +21384,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calReadoutSpan = calReadoutMass
     ? ((calReadoutCentre ? calReadoutMass.Sc : d3RoofAxes(adminCal.spec.roof, calReadoutW, calReadoutL).S) || calReadoutW)
     : calReadoutW;
+  // The porch "What we drew" describes, as BUILT at that same size (ssDrewWords): the renderer's
+  // own numbers, so a lowered porch pitch or a capped post count is said as drawn.
+  const calDrewPorch = calReadoutMass ? d3PorchReadout(adminCal.spec, `${calReadoutW}x${calReadoutL}`) : null;
   const calChecksAnswered = SS_CHECKS.filter(([k]) => adminCalAnswers[k]).length;
   // ⚠️ THE ONE SLICE EACH QUESTION IS ABOUT, so a "No" can be told from a "No, fixed". Cheap
   // and exact: every fix panel writes adminCal.spec, so comparing the slice at answer time
@@ -23699,7 +23771,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       are true at once, so the number stays a ratio on the wire and becomes
                       feet here. */}
                   <div style={{ marginTop: 10, fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
-                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec)}
+                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec, calDrewPorch)}
                   </div>
                   {/* ── THE FOUR QUESTIONS ───────────────────────────────────────────────
                       ONLY WHERE THERE IS SOMETHING TO ANSWER THEM AGAINST, which is the same
@@ -24263,13 +24335,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           {pr && (() => {
                             // THE PORCH'S OWN FRAMING (2026-09-25). Where the style gives a pitch, the
                             // suggestions are for THAT pitch, not 2:12, and a pitch the renderer had to
-                            // lower to keep a door's height under the beam says so on its own line.
-                            // Where it gives a post count or a pitch, the line ends with what is built.
-                            // Without either, every word is what it always was.
+                            // lower to keep 6 ft under the beam (a given pitch's floor; the solver's own
+                            // 2:12 aims for a door's 6'8") says so on its own line. Where it gives a post
+                            // count or a pitch, or centre steps that added a bay to the post rule, the
+                            // line ends with what is built. Without any of those, every word is what it
+                            // always was.
                             const in12 = (p) => `${Math.round(p * 12 * 10) / 10}:12`;
                             const want = in12(pr.pitchWant || 2 / 12);
                             const lowered = pr.pitchWant && pr.pitchClamped && !pr.short;
-                            const built = (pr.framing.posts || pr.framing.pitch) ? `. ${pr.posts} posts, porch roof ${in12(pr.pitch)}` : "";
+                            const built = (pr.framing.posts || pr.framing.pitch || pr.framing.steps === "center") ? `. ${pr.posts} posts, porch roof ${in12(pr.pitch)}` : "";
                             return (
                               <div style={{ ...hint, color: warn ? "#B45309" : "#A16207" }}>
                                 {warn
@@ -24323,7 +24397,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           many posts stand along its front edge (corners included), its roof's own
                           slope, and where steps leave its deck. Blank is the renderer's own answer --
                           a post every 8.5 ft or less, a 2 in 12 roof lowered only to keep a door's
-                          height under the beam, no steps -- and is stored as nothing. */}
+                          height under the beam, no steps -- and is stored as nothing. A pitch the
+                          builder gives is their measured porch, lowered only where it would leave
+                          less than 6 ft under the beam (d3PorchGeom's CLEAR_FLOOR), and its hint
+                          says 6 ft for that reason. */}
                       {kind === "projecting" && (
                         <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch posts
                           <input type="number" step="1" min="2" max="8" placeholder="blank = one every 8.5 ft"
@@ -24337,7 +24414,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           <input type="number" step="0.25" min="0.6" max="6" placeholder="blank = 2 in 12"
                             {...calOptNumProps("porchPitch", roof.porchPitch == null ? null : Math.round(Number(roof.porchPitch) * 1200) / 100, [0.6, 6], (n) => calSetRoofOpt("porchPitch", n == null ? null : n / 12))}
                             style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                          <div style={hint}>Lowered only where a door's height would not fit under the beam.</div>
+                          <div style={hint}>Lowered only where it would leave less than 6 ft under the beam.</div>
                         </label>
                       )}
                       {kind === "projecting" && (

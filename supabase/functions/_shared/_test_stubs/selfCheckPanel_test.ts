@@ -459,3 +459,19 @@ Deno.test("⚠️ every warning the server writes gets its banner, and arms the 
   assertEquals(warn("Shed roof, porch on the long wall."), { banner: null, question: null });
   assertEquals(warn(""), { banner: null, question: null });
 });
+
+Deno.test("⚠️ 'What we drew' says the porch's pitch and posts as BUILT when the panel hands it the readout", () => {
+  // Found 2026-09-25: d3PorchGeom lowers a given pitch where it would leave under 6 ft under the
+  // beam and caps the posts at what fits, and the line said the stored numbers, so the builder
+  // was asked to check "3 in 12" against a render drawn at 0.6 in 12.
+  const roof = { type: "gable", front: "gable", porchOutFt: 6, porchPitch: 0.25, porchPosts: 8 };
+  const lowered = { posts: 5, pitch: 0.05, pitchClamped: true };
+  assertStringIncludes(F.ssDrewWords({ roof }, lowered),
+    "It has 5 posts (the most that fit) and a roof sloping 0.6 in 12 (lowered from 3 in 12 to leave headroom under the beam).");
+  // Built as asked: exactly the words it always said.
+  assertEquals(F.ssDrewWords({ roof }, { posts: 8, pitch: 0.25, pitchClamped: false }), F.ssDrewWords({ roof }));
+  // Still nothing about posts or pitch the style does not give, whatever the readout holds.
+  assert(!/It has/.test(F.ssDrewWords({ roof: { type: "shed", porchOutFt: 4 } }, { posts: 3, pitch: 0.1, pitchClamped: true })));
+  // A readout without numbers (no porch at that size) is ignored rather than printed as NaN.
+  assertEquals(F.ssDrewWords({ roof }, {}), F.ssDrewWords({ roof }));
+});
