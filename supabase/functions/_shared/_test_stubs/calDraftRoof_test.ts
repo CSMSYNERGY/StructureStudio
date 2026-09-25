@@ -61,8 +61,8 @@ Deno.test("the porch-kind rule still holds, in both directions", () => {
   assert(!has(out, "porchDepthFt") && !has(out, "porchTruss"), JSON.stringify(out));
   const back = calDraftRoof({ type: "gable", porchOutFt: 6 }, { type: "gable", porchDepthFt: 4 });
   assert(!has(back, "porchOutFt"), JSON.stringify(back));
-  // A draft that reports neither keeps the stored porch, as it always has.
-  assertEquals(calDraftRoof({ type: "gable", porchOutFt: 6 }, { type: "gable" }).porchOutFt, 6);
+  // A typed draft that reports no porch means NO porch (2026-09-25): the draft replaces the roof.
+  assert(!has(calDraftRoof({ type: "gable", porchOutFt: 6 }, { type: "gable" }), "porchOutFt"));
 });
 
 Deno.test("⚠️ a stored porch attach height never lands on a porch it was not measured on", () => {
@@ -76,9 +76,9 @@ Deno.test("⚠️ a stored porch attach height never lands on a porch it was not
   // A recessed porch has neither.
   const recessed = calDraftRoof(stored, { type: "shed", porchDepthFt: 4 });
   assert(!has(recessed, "porchAttachFt") && !has(recessed, "porchWidthFt") && !has(recessed, "porchOutFt"), JSON.stringify(recessed));
-  // And a draft that says nothing about the porch keeps the whole stored porch, numbers included.
+  // And a typed draft that says nothing about the porch has no porch, numbers included.
   const quiet = calDraftRoof(stored, { type: "shed" });
-  assertEquals([quiet.porchOutFt, quiet.porchAttachFt, quiet.porchWidthFt], [4, 7.5, 16]);
+  for (const k of ["porchOutFt", "porchAttachFt", "porchWidthFt"]) assert(!has(quiet, k), `${k} survived: ${JSON.stringify(quiet)}`);
 });
 
 Deno.test("⚠️ the porch's posts, roof pitch and steps follow the attach height's rule (2026-09-25)", () => {
@@ -91,9 +91,9 @@ Deno.test("⚠️ the porch's posts, roof pitch and steps follow the attach heig
   // The porch stops projecting: none of it is left behind.
   const recessed = calDraftRoof(stored, { type: "shed", porchDepthFt: 4 });
   for (const k of ["porchPosts", "porchPitch", "porchSteps", "porchOutFt"]) assert(!has(recessed, k), `${k} survived: ${JSON.stringify(recessed)}`);
-  // A draft silent about the porch keeps all of it.
+  // A typed draft silent about the porch keeps none of it.
   const quiet = calDraftRoof(stored, { type: "shed" });
-  assertEquals([quiet.porchPosts, quiet.porchPitch, quiet.porchSteps], [4, 0.25, "left"]);
+  for (const k of ["porchPosts", "porchPitch", "porchSteps"]) assert(!has(quiet, k), `${k} survived: ${JSON.stringify(quiet)}`);
 });
 
 Deno.test("⚠️ A REDRAFT THAT REPORTS NO WINGS CLEARS THE STORED ONES", () => {
@@ -103,10 +103,10 @@ Deno.test("⚠️ A REDRAFT THAT REPORTS NO WINGS CLEARS THE STORED ONES", () =>
   // 0 is off, the same as absent.
   const zero = calDraftRoof(stored, { type: "gable", wingWidthFt: 0 });
   assert(!has(zero, "wingSide") && !has(zero, "wingWidthFt"), JSON.stringify(zero));
-  // A draft WITH wings carries its own, and the stored ones it did not mention stand beside them
-  // only where the draft is silent about that key -- which is how a spread has always merged.
+  // A draft WITH wings carries its own, and only its own: a typed draft replaces the roof, so the
+  // stored centre eave it did not mention does not stand beside them (2026-09-25).
   const wings = calDraftRoof(stored, { type: "gable", wingSide: "left", wingWidthFt: 6 });
-  assertEquals([wings.wingSide, wings.wingWidthFt, wings.centerEaveFt], ["left", 6, 16]);
+  assertEquals([wings.wingSide, wings.wingWidthFt, has(wings, "centerEaveFt")], ["left", 6, false]);
 });
 
 Deno.test("the frame of reference comes from the draft or not at all", () => {
@@ -138,6 +138,7 @@ Deno.test("dev/score.mjs's mergeDraft clears exactly what calDraftRoof clears", 
     [{ type: "gable", front: "eave" }, { type: "gable" }],
     [{ type: "shed", highSide: "front" }, { type: "gable", front: "eave" }],
     [{ type: "gable", front: "eave", wingSide: "both", wingWidthFt: 8 }, { pitch: 0.4 }],
+    [{ type: "gable", dormerWidthFt: 6, dormerRiseFt: 4, plateBand: true, overhangStyle: "notched" }, { type: "gable", front: "gable", wingSide: "both", wingWidthFt: 11 }],
   ];
   for (const [stored, drafted] of cases) {
     const scored = mergeDraft({ roof: stored }, { roof: drafted }, "video").roof;
@@ -151,4 +152,19 @@ Deno.test("⚠️ a draft with no roof type is not a shape read, and clears noth
   const stored = { type: "gable", front: "eave", wingSide: "both", wingWidthFt: 8 };
   assertEquals(calDraftRoof(stored, { pitch: 0.4 }), { ...stored, pitch: 0.4 });
   assertEquals(calDraftRoof(stored, null), stored);
+});
+
+
+Deno.test("⚠️ A TYPED DRAFT REPLACES THE ROOF: no stale dormer or lean-to, the builder's band and notch kept (2026-09-25)", () => {
+  // The live 2026-09-25 Tri Home regeneration: the stored roof had the old style's 6 ft dormer, the
+  // draft and all three check rounds had none, and the merge saved it anyway.
+  const stored = { type: "gable", pitch: 0.47, dormerWidthFt: 6, dormerRiseFt: 4, dormerOffsetU: 0, leanToWidthFt: 8, leanToSide: "left",
+    tailSpacingIn: 24, plateBand: true, overhangStyle: "notched" };
+  const out = calDraftRoof(stored, { type: "gable", front: "gable", pitch: 0.7, wingSide: "both", wingWidthFt: 11 });
+  for (const k of ["dormerWidthFt", "dormerRiseFt", "dormerOffsetU", "leanToWidthFt", "leanToSide", "tailSpacingIn"]) {
+    assert(!has(out, k), `${k} survived: ${JSON.stringify(out)}`);
+  }
+  assertEquals([out.plateBand, out.overhangStyle, out.pitch, out.wingWidthFt], [true, "notched", 0.7, 11]);
+  // A draft that reports a dormer keeps its own.
+  assertEquals(calDraftRoof(stored, { type: "gable", dormerWidthFt: 5 }).dormerWidthFt, 5);
 });

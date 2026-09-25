@@ -142,7 +142,12 @@ export function mergeDraft(prior, draft, source = "video") {
   // 2026-09-25, its posts, roof pitch and steps) or none; a recessed porch has none of them. A draft that reports a roof type decides the wings (no
   // wingWidthFt over 0 = no wings) and the frame (roof.front / roof.highSide), so a stored one
   // cannot turn the scored building a quarter turn away from what the draft measured.
-  const roof = { ...(p.roof || {}), ...dr };
+  // A draft that reports a roof TYPE replaces the roof (2026-09-25), keeping only the builder's own
+  // plateBand / overhangStyle — calDraftRoof's rule, so a stale dormer is never scored either.
+  const BUILDER_ONLY = ["plateBand", "overhangStyle"];
+  const base = {};
+  if (dr.type) { for (const k of BUILDER_ONLY) if (p.roof && k in p.roof) base[k] = p.roof[k]; }
+  const roof = dr.type ? { ...base, ...dr } : { ...(p.roof || {}), ...dr };
   const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"];
   if ((dr.porchOutFt || 0) > 0.5) {
     delete roof.porchDepthFt; delete roof.porchTruss;
@@ -163,7 +168,7 @@ export function mergeDraft(prior, draft, source = "video") {
     colors: { ...(p.colors || {}), ...(d.colors || {}) },
     siding: p.siding ?? null,
     wallHeightFt: d.wallHeightFt || p.wallHeightFt,
-    gableVent: (d.gableVent && d.gableVent.widthFrac > 0) ? d.gableVent : p.gableVent,
+    gableVent: (d.gableVent && d.gableVent.widthFrac > 0) ? d.gableVent : (dr.type ? undefined : p.gableVent),
     foundation: (d.foundation === "skids" || d.foundation === "slab") ? d.foundation : p.foundation,
     roofMaterial: (d.roofMaterial === "shingle" || d.roofMaterial === "metal") ? d.roofMaterial : p.roofMaterial,
   };

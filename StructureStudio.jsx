@@ -20078,9 +20078,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   //   roof.front / roof.highSide  the frame of reference the draft's own frame labels were
   //       measured in. A stored one under a draft that did not use it would turn the building a
   //       quarter turn away from the angles the self-check is about to render at.
+  //
+  // ⚠️ A DRAFT THAT REPORTS A ROOF TYPE REPLACES THE ROOF (2026-09-25). Every shape draft this panel
+  // asks for is a v2 read of the WHOLE roof: the prompt asks for the porch, the wings, a dormer and
+  // a lean-to, and says to leave out what the building does not have. So a key the draft leaves out
+  // means "not on this building", never "keep the last style's". The per-key clearing below grew
+  // one appendage at a time and missed the rest: a regenerated Tri Home saved the old style's 6 ft
+  // dormer, which its draft and all three check rounds had never drawn, because nothing cleared
+  // dormer keys. Only the builder's own roof settings the model is never asked about survive a
+  // redraft: the plate band and the overhang style. A draft with no type (not a shape read) still
+  // merges key by key, and the porch-kind rule below still covers raw data holding both porches.
   const calDraftRoof = (stored, drafted) => {
     const dr = drafted || {};
-    const roof = { ...stored, ...dr };
+    const BUILDER_ONLY = ["plateBand", "overhangStyle"];
+    const base = {};
+    if (dr.type) { for (const k of BUILDER_ONLY) if (stored && k in stored) base[k] = stored[k]; }
+    const roof = dr.type ? { ...base, ...dr } : { ...stored, ...dr };
     const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"];
     if ((dr.porchOutFt || 0) > 0.5) {
       delete roof.porchDepthFt; delete roof.porchTruss;
@@ -20151,7 +20164,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // keeps its existing value when the model omits the key, so "the frames never
     // showed the bottom of the building" leaves the builder's setting alone rather
     // than resetting it to a slab.
-    gableVent: (d3 && d3.gableVent && d3.gableVent.widthFrac > 0) ? d3.gableVent : spec.gableVent,
+    // A shape draft (it reports a roof type) is the authority on the vent too: the prompt says to
+    // leave gableVent out when the gable ends carry none, so absent means none (2026-09-25).
+    gableVent: (d3 && d3.gableVent && d3.gableVent.widthFrac > 0) ? d3.gableVent : ((d3 && d3.roof && d3.roof.type) ? undefined : spec.gableVent),
     foundation: (d3 && (d3.foundation === "skids" || d3.foundation === "slab")) ? d3.foundation : spec.foundation,
     // Third top-level field, same trap: the renderer textures the roof from this before
     // any customer roof-type pick, so a video that read "metal" and had it dropped here
