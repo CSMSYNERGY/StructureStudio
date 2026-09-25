@@ -707,8 +707,8 @@ const MEASURED_OPUS_TOKENS_PER_S = 70;
 Deno.test("⚠️ the streamed clocks' invariants, worker 0-199 s old, set-up 0-30 s: reads + 30 s <= watchdog, watchdog + 30 s <= the worker's end, reads <= 300 s", () => {
   const decl = lift(SOURCE, "const draftAbortMs =", ";\n", "the draft budget") + ";";
   const runBudget = new Function("t0", "requestStartMs", "streamed", "streamedDraftBudgetMs", "WORKER_BORN_MS", `${decl}; return draftAbortMs;`);
-  const arm = lift(lift(SOURCE, "function draftAnswer(", "\n}\n", "draftAnswer"), "deadlineMs:", ",\n", "the watchdog's deadline");
-  const runDeadline = new Function("streamedDraftDeadlineMs", "Date", "at", "WORKER_BORN_MS", `return ({ ${arm} }).deadlineMs;`);
+  const arm = lift(lift(SOURCE, "function draftAnswer(", "\n}\n", "draftAnswer"), "const deadlineMs =", ";\n", "the watchdog's deadline");
+  const runDeadline = new Function("streamedDraftDeadlineMs", "Date", "at", "WORKER_BORN_MS", `${arm}; return deadlineMs;`);
   // Every time below is in ms from the request's arrival; the worker was born `age` before it.
   const REQ = 1_000_000;
   const budget = (age: number, setup: number) =>
@@ -747,9 +747,12 @@ Deno.test("⚠️ the streamed clocks' invariants, worker 0-199 s old, set-up 0-
 // ─── 6. The work behind the answer: waitUntil, the watchdog, a caller that goes away ───────────
 Deno.test("draftAnswer arms the watchdog from the request AND this worker's birth, read once at module scope", () => {
   const fn = lift(SOURCE, "function draftAnswer(", "\n}\n", "draftAnswer");
-  assertEquals(fn.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("deadlineMs:")), [
-    "deadlineMs: streamedDraftDeadlineMs({ now: Date.now(), requestStartMs: at.requestStartMs, workerBornMs: WORKER_BORN_MS }),",
-  ]);
+  assertEquals(fn.split("\n").map((l) => l.trim()).filter((l) => /^(const )?deadlineMs\b/.test(l)), [
+    "const deadlineMs = streamedDraftDeadlineMs({ now: Date.now(), requestStartMs: at.requestStartMs, workerBornMs: WORKER_BORN_MS });",
+    "deadlineMs,",
+  ], "worked out once, and that value is the one armed");
+  // ...and the one logged when it fires (asserted end to end in the warm-worker watchdog test).
+  assert(fn.includes("context: { requestMs: Date.now() - at.requestStartMs, deadlineMs, requestDeadlineMs: DRAFT_STREAM_DEADLINE_MS,"), "the row logs the armed deadline");
   // One declaration, at module scope (column 0, outside every function), read when the worker
   // evaluates the module, and a const: nothing sets it again.
   assertEquals(SOURCE.split("\n").filter((l) => /\bWORKER_BORN_MS\s*=[^=]/.test(l)), ["export const WORKER_BORN_MS = Date.now();"]);
@@ -800,6 +803,27 @@ Deno.test("the watchdog: a draft still working at the deadline is answered strea
     const drafted = trace.db.filter((op: any) => op[0] === "ai_style_calls" && op[1][0] === "update" && op[1][1] && op[1][1].drafted);
     assertEquals(drafted.length, 1, "the ledger row got its draft: that is where the browser picks it up");
     assertEquals(trace.rows.map((r) => r.code), ["ai_draft_stream_deadline"], "and no other row");
+  });
+});
+
+Deno.test("the watchdog on a warm worker: the row logs the deadline that was actually armed, and the worker's age", async () => {
+  let open!: () => void;
+  const gate = new Promise<void>((r) => { open = r; });
+  const plan = { ...GOOD(), gate };
+  const age = 150_000;
+  await inWorld({ model: [plan, plan, plan], deadlineScale: 1_000, abortAfterMs: 5_000, workerAgeMs: age }, async (trace) => {
+    const res = await HANDLER(request(STREAMED));
+    assertEquals((await res.text()).trimStart(), STREAM_DEADLINE_BODY);
+    assertEquals(trace.deadlines.length, 1, "one watchdog");
+    const armed = trace.deadlines[0];
+    assert(armed <= DRAFT_STREAM_DEADLINE_MS - age && armed > DRAFT_STREAM_DEADLINE_MS - age - 1_000, `armed by the worker's term: ${armed}`);
+    assertEquals(trace.rows.map((r) => r.code), ["ai_draft_stream_deadline"]);
+    const ctx = (trace.rows[0] as any).context;
+    assertEquals(ctx.deadlineMs, armed, "the row says which deadline closed the answer");
+    assertEquals(ctx.requestDeadlineMs, DRAFT_STREAM_DEADLINE_MS, "and keeps the request's own ceiling beside it");
+    assert(ctx.workerAgeMs >= age && ctx.workerAgeMs < age + 5_000, `the worker's age: ${ctx.workerAgeMs}`);
+    open();
+    await Promise.allSettled(trace.kept);
   });
 });
 

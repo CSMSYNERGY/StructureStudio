@@ -531,13 +531,16 @@ function draftAnswer(
   const ua = req.headers.get("user-agent");
   const replay = new Request(req.url, { method: "POST", headers: ua ? { "user-agent": ua } : {}, body: JSON.stringify(payload) });
   const filed = withErrorLog("portal-settings", () => work(true), { alreadyFiled: (res) => filedAtReturnSite.has(res) });
+  // Worked out ONCE and logged as armed: on a warm worker the worker's term can arm it well before
+  // DRAFT_STREAM_DEADLINE_MS, and the row must say which deadline actually closed the answer.
+  const deadlineMs = streamedDraftDeadlineMs({ now: Date.now(), requestStartMs: at.requestStartMs, workerBornMs: WORKER_BORN_MS });
   return heartbeatJsonResponse(() => filed(replay), {
     headers: { ...cors, "Content-Type": "application/json" },
-    deadlineMs: streamedDraftDeadlineMs({ now: Date.now(), requestStartMs: at.requestStartMs, workerBornMs: WORKER_BORN_MS }),
+    deadlineMs,
     onDeadline: () => logEdgeError({
       fn: "portal-settings", req, clientId: at.clientId, code: "ai_draft_stream_deadline",
       message: "The streamed draft's answer reached its deadline with the work still running; it was closed with stream_deadline and the work ran on.",
-      context: { requestMs: Date.now() - at.requestStartMs, deadlineMs: DRAFT_STREAM_DEADLINE_MS, workerAgeMs: Date.now() - WORKER_BORN_MS },
+      context: { requestMs: Date.now() - at.requestStartMs, deadlineMs, requestDeadlineMs: DRAFT_STREAM_DEADLINE_MS, workerAgeMs: Date.now() - WORKER_BORN_MS },
     }),
   });
 }
