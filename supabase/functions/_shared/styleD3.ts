@@ -1039,6 +1039,14 @@ export function wantsStreamedDraft(payload: unknown): boolean {
   return dims.ok && wantsV2Prompt(p.frame, dims.dims);
 }
 
+// ─── HOW LONG A STREAMED ANSWER MAY STAY OPEN (2026-09-25) ───────────────────────────────────
+// Measured from the request's arrival (portal-settings' requestStartMs). The reads get at most
+// min(230 s, 260 s - set-up), so a set-up under 200 s leaves the model done by 260 s; the capture,
+// the ledger write and the answer normally take seconds after that, which leaves 40 s of room for a
+// slow database. Past this the answer is closed with heartbeatJson's `stream_deadline` body and the
+// work runs on behind it. The platform's own wall clock (400 s) is the hard stop above both.
+export const DRAFT_STREAM_DEADLINE_MS = 300_000;
+
 // THE LEGACY RULER, EXACTLY AS IT SHIPPED ON 2026-09-19 (d3ab404), for callers the gate keeps on
 // the old path. Frozen: the ruler speaks the old frame ("wide across the gable end") because that
 // is the frame the old dimensions card asked in, and the wall height is cut out of the legacy

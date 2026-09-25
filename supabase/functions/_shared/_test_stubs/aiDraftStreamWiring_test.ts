@@ -18,7 +18,10 @@
 //      ledger row, the hold and its release on every failure, the capture, the usage write, the coded
 //      app_errors rows AND the rows the error wrapper files, which it cannot see through a 200.
 //   5. Effort "high" and the 230/260 s budget only on the streamed request.
-//   6. The new shell's half (it asks for the stream, and reads a failure in the body exactly like a
+//   6. The work behind the answer is handed to EdgeRuntime.waitUntil; a watchdog closes the answer at
+//      DRAFT_STREAM_DEADLINE_MS with `stream_deadline` while the work runs on to its capture and
+//      ledger row; and a browser that goes away mid-stream changes nothing about the hold or the row.
+//   7. The new shell's half (it asks for the stream, and reads a failure in the body exactly like a
 //      non-2xx) is aiDraftStreamShell_test.
 //
 // HOW. The real handler, not a lifted copy: Deno.serve is stubbed while portal-settings/index.ts is
@@ -36,8 +39,11 @@
 // deno-lint-ignore-file no-explicit-any
 import { assert, assertEquals } from "jsr:@std/assert";
 import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
-import { parseKnownDims, wantsStreamedDraft, wantsV2Prompt } from "../styleD3.ts";
-import { HEARTBEAT_MS } from "../heartbeatJson.ts";
+import {
+  DRAFT_STREAM_DEADLINE_MS, parseKnownDims,
+  wantsStreamedDraft, wantsV2Prompt,
+} from "../styleD3.ts";
+import { HEARTBEAT_MS, STREAM_DEADLINE_BODY } from "../heartbeatJson.ts";
 
 const read = async (p: string) => (await Deno.readTextFile(new URL(p, import.meta.url))).replace(/\r\n/g, "\n");
 const SOURCE = await read("../../portal-settings/index.ts");
@@ -80,6 +86,7 @@ type World = {
   model?: ModelPlan[];          // one plan per model call, in send order
   abortAfterMs?: number;        // when the draft's deadline really fires
   setupMs?: number;             // how long the set-up (the auto top-up read) seems to take
+  deadlineScale?: number;       // the answer's watchdog runs this many times faster (default 100)
 };
 type Trace = {
   db: unknown[];                // every awaited table op and rpc, in order
@@ -89,6 +96,8 @@ type Trace = {
   sent: any[];                  // Anthropic request bodies
   timeouts: number[];           // AbortSignal.timeout(ms)
   intervals: number[];          // setInterval(ms)
+  deadlines: number[];          // the watchdog's setTimeout(ms), before scaling
+  kept: Promise<unknown>[];     // what was handed to EdgeRuntime.waitUntil
 };
 
 const DIMS = { widthFt: 30, lengthFt: 20, wallHeightFt: 8 };
@@ -156,14 +165,27 @@ const clock = { offset: 0 };
 const realNow = Date.now;
 
 async function inWorld<T>(world: World, body: (trace: Trace) => Promise<T>): Promise<{ trace: Trace; out: T }> {
-  const trace: Trace = { db: [], released: [], captured: [], rows: [], sent: [], timeouts: [], intervals: [] };
+  const trace: Trace = { db: [], released: [], captured: [], rows: [], sent: [], timeouts: [], intervals: [], deadlines: [], kept: [] };
   const savedEnv = Object.fromEntries(Object.keys(ENV).map((k) => [k, Deno.env.get(k)]));
   for (const [k, v] of Object.entries(ENV)) Deno.env.set(k, v);
   if (world.noKey) Deno.env.delete("ANTHROPIC_API_KEY");
   const realFetch = globalThis.fetch;
   const realTimeout = AbortSignal.timeout;
   const realSetInterval = globalThis.setInterval;
+  const realSetTimeout = globalThis.setTimeout;
   const timers: ReturnType<typeof setTimeout>[] = [];
+  // The Supabase runtime's waitUntil, which Deno's runner does not have: what the heartbeat asks it
+  // to keep alive is kept here, so a test can wait for the work behind an answer nobody read.
+  (globalThis as any).EdgeRuntime = { waitUntil: (p: Promise<unknown>) => { trace.kept.push(p); } };
+  // The answer's watchdog (DRAFT_STREAM_DEADLINE_MS, minutes): a hundred times faster by default, so
+  // 300 s is 3 s here and no fast test meets it; the watchdog's own test runs it faster still.
+  (globalThis as any).setTimeout = (fn: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
+    if (typeof ms === "number" && ms >= 250_000) {
+      trace.deadlines.push(ms);
+      return realSetTimeout(fn, Math.max(1, Math.round(ms / (world.deadlineScale ?? 100))), ...rest);
+    }
+    return realSetTimeout(fn, ms, ...rest);
+  };
   stubAuth.user = { id: "00000000-0000-4000-8000-000000000001", email: "harness@example.test" };
   stubAuth.error = null;
   stubDb.from = (table: string) => {
@@ -212,12 +234,17 @@ async function inWorld<T>(world: World, body: (trace: Trace) => Promise<T>): Pro
   }) as typeof fetch;
   try {
     const out = await body(trace);
+    // The work behind an answer nobody finished reading runs on (heartbeatJson); the world stays up
+    // until it has settled, as the runtime's waitUntil would keep the worker up for it.
+    await Promise.allSettled(trace.kept);
     return { trace, out };
   } finally {
     for (const t of timers) clearTimeout(t);
     globalThis.fetch = realFetch;
     Object.defineProperty(AbortSignal, "timeout", { configurable: true, writable: true, value: realTimeout });
     (globalThis as any).setInterval = realSetInterval;
+    (globalThis as any).setTimeout = realSetTimeout;
+    delete (globalThis as any).EdgeRuntime;
     Date.now = realNow;
     clock.offset = 0;
     stubDb.from = null;
@@ -353,13 +380,15 @@ Deno.test("wantsStreamedDraft is stream:true AND the branch's own v2Prompt AND n
 
 Deno.test("draftAnswer answers a request that does not stream with the branch's own Response, untouched", () => {
   const fn = lift(SOURCE, "function draftAnswer(", "\n}\n", "draftAnswer");
-  const body = fn.slice(fn.indexOf("{") + 1).split("\n").map((l) => l.trim()).filter(Boolean);
+  const open = "): Promise<Response> | Response {";
+  assert(fn.includes(open), "draftAnswer's signature");
+  const body = fn.slice(fn.indexOf(open) + open.length).split("\n").map((l) => l.trim()).filter(Boolean);
   assertEquals(body[0], "if (!wantsStreamedDraft(payload)) return work(false);", "the first thing it does");
   // And `streamed` changes exactly two things inside the branch: the budget and the effort.
   const BRANCH = lift(SOURCE, 'if (action === "calibrate_style_ai") return await draftAnswer(', "// ── THE FREE SECOND PASS", "the branch");
   const uses = BRANCH.split("\n").filter((l) => /\bstreamed\b/.test(l) && !l.trim().startsWith("//")).map((l) => l.trim());
   assertEquals(uses, [
-    'if (action === "calibrate_style_ai") return await draftAnswer(req, payload, async (streamed: boolean): Promise<Response> => {',
+    'if (action === "calibrate_style_ai") return await draftAnswer(req, payload, { requestStartMs, clientId }, async (streamed: boolean): Promise<Response> => {',
     "const draftAbortMs = streamed",
     'output_config: { effort: lean ? "low" : streamed ? "high" : "medium" },',
   ]);
@@ -522,4 +551,86 @@ Deno.test("the budget: streamed min(230 s, 260 s - set-up), never under 60 s; pl
     // The whole streamed request ends by 260 s whenever the set-up left the model its floor.
     if (spent <= 200_000) assert(spent + budget(true, spent) <= 260_000, `streamed, ${spent}: inside 260 s`);
   }
+  // THE ANSWER'S OWN DEADLINE sits after the reads' and below the platform's wall clock: the reads
+  // end by 260 s (a set-up under 200 s), the answer closes at DRAFT_STREAM_DEADLINE_MS, which leaves
+  // 40 s for the capture and the ledger write, and the worker's 400 s is the hard stop above both.
+  assertEquals(DRAFT_STREAM_DEADLINE_MS, 300_000);
+  assert(DRAFT_STREAM_DEADLINE_MS - 260_000 >= 30_000 && DRAFT_STREAM_DEADLINE_MS < 400_000);
 });
+
+// ─── 6. The work behind the answer: waitUntil, the watchdog, a caller that goes away ───────────
+Deno.test("a streamed draft's work is handed to EdgeRuntime.waitUntil and watched by a deadline; a plain one's is not", async () => {
+  const s = await drive(STREAMED, { model: THREE(GOOD()) });
+  assertEquals(s.trace.kept.length, 1, "the work behind the answer, once");
+  assertEquals(s.trace.deadlines.length, 1, "one watchdog");
+  assert(s.trace.deadlines[0] <= DRAFT_STREAM_DEADLINE_MS && s.trace.deadlines[0] > DRAFT_STREAM_DEADLINE_MS - 1_000,
+    `armed at the deadline measured from the request: ${s.trace.deadlines[0]}`);
+  assertEquals(s.trace.rows, [], "a draft that answered in time files nothing");
+  const p = await drive(V2, { model: THREE(GOOD()) });
+  assertEquals(p.trace.kept.length, 0, "a plain request answers with its own Response");
+  assertEquals(p.trace.deadlines, []);
+});
+
+Deno.test("the watchdog: a draft still working at the deadline is answered stream_deadline, and the work runs on to its capture and its ledger row", async () => {
+  let open!: () => void;
+  const gate = new Promise<void>((r) => { open = r; });
+  const plan = { ...GOOD(), gate };
+  // A thousand times faster: the 300 s deadline is 300 ms here, and the reads' own abort is later.
+  await inWorld({ model: [plan, plan, plan], deadlineScale: 1_000, abortAfterMs: 5_000 }, async (trace) => {
+    const res = await HANDLER(request(STREAMED));
+    assertEquals(res.status, 200);
+    const text = await res.text();
+    assert(/^ +[{]/.test(text), "the heartbeat, then the watchdog's body");
+    assertEquals(text.trimStart(), STREAM_DEADLINE_BODY);
+    const body = JSON.parse(text);
+    assertEquals([body.code, body.status, "retryable" in body], ["stream_deadline", 504, false], "not retryable: the work may still charge");
+    assertEquals(trace.captured, [], "the reads were still out when the answer closed");
+    assertEquals(trace.rows.map((r) => [r.code, r.severity]), [["ai_draft_stream_deadline", "error"]], "one coded row for the hang");
+    // The reads come back after the answer has gone. Nobody is reading; the work finishes anyway.
+    open();
+    await Promise.allSettled(trace.kept);
+    assertEquals(trace.captured.length, 1, "captured exactly once");
+    assertEquals(trace.released, [], "and never released");
+    const drafted = trace.db.filter((op: any) => op[0] === "ai_style_calls" && op[1][0] === "update" && op[1][1] && op[1][1].drafted);
+    assertEquals(drafted.length, 1, "the ledger row got its draft: that is where the browser picks it up");
+    assertEquals(trace.rows.map((r) => r.code), ["ai_draft_stream_deadline"], "and no other row");
+  });
+});
+
+// A browser that goes away mid-stream (a closed tab, a phone that put it to sleep): the body is
+// cancelled after its first space, the model answers afterwards, and the work settles the hold
+// exactly once and writes the ledger exactly as it would have for a browser that stayed.
+const DISCONNECTS: [string, ModelPlan, { captured: number; released: string[]; drafted: number; codes: string[] }][] = [
+  ["the reads draft", GOOD(), { captured: 1, released: [], drafted: 1, codes: [] }],
+  ["every read is cut off", TRUNCATED, { captured: 0, released: ["reply truncated"], drafted: 0, codes: ["ai_spec_truncated"] }],
+];
+for (const [what, base, want] of DISCONNECTS) {
+  Deno.test(`the browser goes away mid-stream and ${what}: the work runs on and settles the hold exactly once`, async () => {
+    let open!: () => void;
+    const gate = new Promise<void>((r) => { open = r; });
+    const plan = { ...base, gate };
+    await inWorld({ model: [plan, plan, plan] }, async (trace) => {
+      const res = await HANDLER(request(STREAMED));
+      const reader = res.body!.getReader();
+      const first = await reader.read();
+      assertEquals(new TextDecoder().decode(first.value), " ", "the first space arrived");
+      // Gone at once, before the work has even sent its reads.
+      await reader.cancel("the phone put the tab to sleep");
+      assertEquals(trace.kept.length, 1, "the work is the one thing kept alive");
+      // The work carries on with nobody listening: its reads go out, and wait on the model.
+      for (let i = 0; i < 200 && trace.sent.length < 3; i++) await new Promise((r) => setTimeout(r, 5));
+      assertEquals(trace.sent.length, 3, "the reads went out after the browser had gone");
+      assertEquals([trace.captured.length, trace.released.length], [0, 0], "nothing settled yet");
+      open();
+      await Promise.allSettled(trace.kept);
+      assertEquals(trace.captured.length, want.captured, "captures");
+      assertEquals(trace.released, want.released, "releases");
+      assertEquals(trace.captured.length + trace.released.length, 1, "the hold settled exactly once");
+      const ledger = trace.db.filter((op: any) => op[0] === "ai_style_calls" && op[1][0] === "update") as any[];
+      assertEquals(ledger.filter((op) => op[1][1].drafted).length, want.drafted, "the draft on the ledger row");
+      assertEquals(ledger.filter((op) => "draft_tokens" in op[1][1]).length, 1, "the usage written once");
+      assertEquals(trace.rows.map((r) => r.code), want.codes, "the app_errors rows a browser that stayed would have seen");
+    });
+  });
+}
+

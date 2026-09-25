@@ -90,7 +90,7 @@ import { aiDraftCostCents, aiModelFields } from "../_shared/styleD3.ts";
 import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftCallsUsage, consensusSplitWarning, DRAFT_CONSENSUS_GRACE_MS } from "../_shared/styleD3.ts";
 // The streamed draft (2026-09-25): a v2 draft answers behind a heartbeat so it can outlive the
 // gateway's 150 s of silence (see draftAnswer below).
-import { wantsStreamedDraft } from "../_shared/styleD3.ts";
+import { wantsStreamedDraft, DRAFT_STREAM_DEADLINE_MS } from "../_shared/styleD3.ts";
 import { heartbeatJsonResponse } from "../_shared/heartbeatJson.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
@@ -485,12 +485,33 @@ const filedAtReturnSite = new WeakSet<Response>();
 // for its client id), which files exactly the rows the unstreamed answer would have: the same
 // `alreadyFiled` rule, the same message, the same severity. The replay rethrows a throw, and the
 // heartbeat answers it as a 500.
-function draftAnswer(req: Request, payload: unknown, work: (streamed: boolean) => Promise<Response>): Promise<Response> | Response {
+//
+// THE WATCHDOG (2026-09-25). supabase-js has no timeout, so a streamed draft that hangs after its
+// reads (a database call that never returns) would keep writing spaces until the platform killed the
+// worker, and the browser would read a body cut off mid-space. The answer is closed at
+// DRAFT_STREAM_DEADLINE_MS from the request's arrival instead, with heartbeatJson's `stream_deadline`
+// body (a 504, not retryable), and one coded row is filed. The work is NOT stopped: it stays
+// registered with EdgeRuntime.waitUntil, releases or captures its hold and writes its ledger row, and
+// the browser picks the draft up from that row (calibrate_style_ai_recover).
+function draftAnswer(
+  req: Request,
+  payload: unknown,
+  at: { requestStartMs: number; clientId: string },
+  work: (streamed: boolean) => Promise<Response>,
+): Promise<Response> | Response {
   if (!wantsStreamedDraft(payload)) return work(false);
   const ua = req.headers.get("user-agent");
   const replay = new Request(req.url, { method: "POST", headers: ua ? { "user-agent": ua } : {}, body: JSON.stringify(payload) });
   const filed = withErrorLog("portal-settings", () => work(true), { alreadyFiled: (res) => filedAtReturnSite.has(res) });
-  return heartbeatJsonResponse(() => filed(replay), { headers: { ...cors, "Content-Type": "application/json" } });
+  return heartbeatJsonResponse(() => filed(replay), {
+    headers: { ...cors, "Content-Type": "application/json" },
+    deadlineMs: DRAFT_STREAM_DEADLINE_MS - (Date.now() - at.requestStartMs),
+    onDeadline: () => logEdgeError({
+      fn: "portal-settings", req, clientId: at.clientId, code: "ai_draft_stream_deadline",
+      message: "The streamed draft's answer reached its deadline with the work still running; it was closed with stream_deadline and the work ran on.",
+      context: { requestMs: Date.now() - at.requestStartMs, deadlineMs: DRAFT_STREAM_DEADLINE_MS },
+    }),
+  });
 }
 
 /**
@@ -3534,7 +3555,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   //
   // The whole branch is ONE function of `streamed` (2026-09-25), answered by draftAnswer above: run
   // as it is for every request but a streamed v2 draft, and behind a heartbeat for that one.
-  if (action === "calibrate_style_ai") return await draftAnswer(req, payload, async (streamed: boolean): Promise<Response> => {
+  if (action === "calibrate_style_ai") return await draftAnswer(req, payload, { requestStartMs, clientId }, async (streamed: boolean): Promise<Response> => {
     // Two callers, one action, one gate, one meter. `source: "video"` means the URLs are
     // frames the browser cut out of a walk-around video (the file itself never leaves the
     // phone) rather than four staged photos — so it takes eight of them and a prompt that
@@ -3758,9 +3779,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // mean charging a card as part of an error response, then retrying the hold — a second
       // money path guarded by nothing, to save one retry. Not worth it.
       //
-      // Awaited rather than backgrounded: EdgeRuntime.waitUntil is unused anywhere in this
-      // codebase, and a money path is the wrong place to prove a new primitive — a task
-      // dropped on shutdown mid-sale leaves a closed_unknown that blocks ALL future top-ups.
+      // Awaited rather than backgrounded: EdgeRuntime.waitUntil only ASKS the runtime to keep
+      // the worker (the streamed draft's heartbeat uses it for the work behind its answer), and a
+      // money path is the wrong place to lean on a request — a task dropped on shutdown mid-sale
+      // leaves a closed_unknown that blocks ALL future top-ups.
       // Cost is up to nmiPost's 30s on a request that is already running an AI 3D generation,
       // and the cooldown caps it at once an hour.
       try {
@@ -3888,7 +3910,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // gets back. Called WITHOUT await where it starts, so the round trip overlaps the hold
     // release, the log row and the rest of the handler; each exit awaits it just before its
     // `return`, because a task still running after the response is not guaranteed to finish
-    // (EdgeRuntime.waitUntil is unused here — see the auto-recharge note above). `draft_ms` is
+    // (EdgeRuntime.waitUntil is a request, not a promise — see the auto-recharge note above). `draft_ms` is
     // read when it is CALLED, which is the moment the reply (or the abort) arrived; with several
     // calls (consensus drafting, below) the moment the last of them settled, so it is the
     // builder's wall time, and each call's own time is in draft_tokens.calls.

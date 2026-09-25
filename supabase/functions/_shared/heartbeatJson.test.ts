@@ -11,11 +11,17 @@
 //      test sanitizer fails a test that leaks one).
 //   6. A caller that goes away stops the beats and the writes, and does NOT stop the work: the work
 //      holds money and has to release or capture it with nobody listening.
+//   7. The work's promise is handed to EdgeRuntime.waitUntil when the runtime has one (Supabase's
+//      does; Deno's test runner does not, and nothing breaks without it), so the worker is asked to
+//      stay up for it after the answer has gone.
+//   8. The watchdog: past `deadlineMs` the answer is closed with STREAM_DEADLINE_BODY (a 504 in the
+//      body, code stream_deadline, NOT retryable), onDeadline is called once, and the work runs on
+//      to its end. A work that answers first clears it, and leaves no timer behind.
 //
 // Deliberately dependency-free (no jsr:/npm: imports) so this suite still runs on a machine with no
 // registry access, the same rule the other _shared tests follow.
 
-import { HEARTBEAT, HEARTBEAT_MS, heartbeatJsonResponse, streamedAnswer } from "./heartbeatJson.ts";
+import { HEARTBEAT, HEARTBEAT_MS, heartbeatJsonResponse, keepAlive, STREAM_DEADLINE_BODY, STREAM_DEADLINE_CODE, streamedAnswer } from "./heartbeatJson.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
@@ -127,4 +133,113 @@ Deno.test("a caller that goes away stops the beats, and the work still runs to i
   await sleep(20);
   assert(finished, "the work ran to its end with nobody listening");
   // And nothing threw into the void: a write after the cancel is dropped, not raised.
+});
+
+// Supabase's runtime global, installed for one test and removed after it.
+async function withEdgeRuntime(waitUntil: (p: Promise<unknown>) => void, body: () => Promise<void>) {
+  // deno-lint-ignore no-explicit-any
+  const g = globalThis as any;
+  const had = "EdgeRuntime" in g;
+  const saved = g.EdgeRuntime;
+  g.EdgeRuntime = { waitUntil };
+  try { await body(); } finally {
+    if (had) g.EdgeRuntime = saved;
+    else delete g.EdgeRuntime;
+  }
+}
+
+Deno.test("the work's promise is handed to EdgeRuntime.waitUntil, and it is the WORK: it settles when the work does", async () => {
+  const kept: Promise<unknown>[] = [];
+  await withEdgeRuntime((p) => { kept.push(p); }, async () => {
+    const g = gate<Response>();
+    let finished = false;
+    const res = heartbeatJsonResponse(async () => {
+      const r = await g.p;
+      finished = true;
+      return r;
+    }, { headers: HEADERS, heartbeatMs: 5 });
+    assertEquals(kept.length, 1, "registered at once, with the answer");
+    assert(kept[0] instanceof Promise, "a promise");
+    // Still pending while the work is: it is not a promise that settled when the 200 went out.
+    const early = await Promise.race([kept[0].then(() => "settled"), sleep(20).then(() => "pending")]);
+    assertEquals(early, "pending");
+    // The caller goes away; the kept promise is what the runtime waits on.
+    const reader = res.body!.getReader();
+    await reader.read();
+    await reader.cancel("the tab closed");
+    g.open(jsonResponse({ ok: true }));
+    await kept[0];
+    assert(finished, "it settled after the work finished, not before");
+  });
+});
+
+Deno.test("no EdgeRuntime (Deno's runner), or one whose waitUntil throws: the answer is the same", async () => {
+  // deno-lint-ignore no-explicit-any
+  assert(!("EdgeRuntime" in (globalThis as any)), "this runner has no EdgeRuntime of its own");
+  const plain = await heartbeatJsonResponse(() => Promise.resolve(jsonResponse({ ok: true })), { headers: HEADERS, heartbeatMs: 5 }).text();
+  assertEquals(plain.trimStart(), '{"ok":true}');
+  await withEdgeRuntime(() => { throw new Error("waitUntil is broken"); }, async () => {
+    const out = await heartbeatJsonResponse(() => Promise.resolve(jsonResponse({ ok: true })), { headers: HEADERS, heartbeatMs: 5 }).text();
+    assertEquals(out.trimStart(), '{"ok":true}');
+  });
+  keepAlive(Promise.resolve());   // never throws, with or without a runtime
+});
+
+Deno.test("the watchdog: past the deadline the answer is stream_deadline, not retryable, and the work runs on", async () => {
+  const kept: Promise<unknown>[] = [];
+  await withEdgeRuntime((p) => { kept.push(p); }, async () => {
+    const g = gate<Response>();
+    let finished = false;
+    let fired = 0;
+    const res = heartbeatJsonResponse(async () => {
+      const r = await g.p;
+      finished = true;
+      return r;
+    }, { headers: HEADERS, heartbeatMs: 5, deadlineMs: 40, onDeadline: () => { fired++; return Promise.resolve(); } });
+    const text = await res.text();
+    assert(/^ +[{]/.test(text), "the heartbeat, then the deadline's body");
+    assertEquals(text.trimStart(), STREAM_DEADLINE_BODY);
+    const body = JSON.parse(text);
+    assertEquals(body.code, STREAM_DEADLINE_CODE);
+    assertEquals(body.code, "stream_deadline");
+    assertEquals(body.status, 504);
+    assert(!("retryable" in body), "never the automatic retry: the work may still finish and charge");
+    assert(typeof body.error === "string" && body.error.length > 0, "a sentence");
+    assertEquals(fired, 1, "onDeadline once");
+    assertEquals(kept.length, 2, "the work, and the deadline's own filing");
+    assert(!finished, "the work had not finished when the answer closed");
+    // The work finishes later, and writes nothing more: the body is closed.
+    g.open(jsonResponse({ ok: true, d3: {} }));
+    await kept[0];
+    assert(finished, "and ran to its end");
+  });
+});
+
+Deno.test("the watchdog: a work that answers first clears it, and onDeadline never runs", async () => {
+  let fired = 0;
+  const out = await heartbeatJsonResponse(async () => {
+    await sleep(10);
+    return jsonResponse({ ok: true });
+  }, { headers: HEADERS, heartbeatMs: 5, deadlineMs: 60, onDeadline: () => { fired++; } }).text();
+  assertEquals(out.trimStart(), '{"ok":true}');
+  // Past the deadline it would have had: nothing fires (and the sanitizer sees no timer left over).
+  await sleep(80);
+  assertEquals(fired, 0);
+});
+
+Deno.test("the watchdog: a work that throws at once, or a caller that goes away, leaves no timer behind", async () => {
+  let fired = 0;
+  const thrown = await heartbeatJsonResponse(() => { throw new TypeError("a synchronous typo"); }, {
+    headers: HEADERS, heartbeatMs: 5, deadlineMs: 30, onDeadline: () => { fired++; },
+  }).text();
+  assertEquals(JSON.parse(thrown), { error: "Internal Server Error", status: 500 });
+  const g = gate<Response>();
+  const res = heartbeatJsonResponse(() => g.p, { headers: HEADERS, heartbeatMs: 5, deadlineMs: 30, onDeadline: () => { fired++; } });
+  const reader = res.body!.getReader();
+  await reader.read();
+  await reader.cancel("gone");
+  await sleep(50);
+  assertEquals(fired, 0, "a cancelled answer has no deadline to meet");
+  g.open(jsonResponse({ ok: true }));
+  await sleep(5);
 });

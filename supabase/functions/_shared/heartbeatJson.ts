@@ -19,13 +19,37 @@
 //     a replay of its own error wrapper, which files it exactly as it files an unstreamed throw).
 //
 // A caller that goes away (the tab closed) cancels the body: the heartbeat stops and nothing more
-// is written, but the WORK IS NOT STOPPED. It was holding money, and it releases or captures it the
-// way it would have with nobody listening to an unstreamed answer either.
+// is written, and the work is NOT cancelled with it. It was holding money, and it releases or
+// captures it the way it would have with nobody listening to an unstreamed answer either. Once the
+// response is gone nothing else holds the worker open for it, so the work's promise is handed to
+// EdgeRuntime.waitUntil, which asks the Supabase runtime to keep the worker until it settles. That
+// is a request, not a guarantee: the platform's wall clock still ends the worker, and so does a
+// shutdown. A hold stranded that way is released by the stale-hold sweep, and the ledger row keeps
+// whatever the work had written by then. (Deno's own test runner has no EdgeRuntime; there the
+// promise simply runs on, which is all a test needs.)
+//
+// THE WATCHDOG (`deadlineMs`, 2026-09-25). supabase-js has no timeout, so a work that hangs after its
+// model calls (a database call that never returns) would keep the heartbeat going until the platform
+// killed the worker, and the caller would read a body cut off mid-space. With a deadline, the answer
+// ends on time instead: STREAM_DEADLINE_BODY (a 504 in the body, NOT retryable, code
+// "stream_deadline") is written and the body closed, and the heartbeat stops. The work is not
+// stopped: it is still registered with waitUntil, so it can still release or capture its hold and
+// write its ledger row, which is where the caller picks the draft up (calibrate_style_ai_recover).
 //
 // Dependency-free on purpose: heartbeatJson.test.ts runs in the _shared group, with no import map.
 
 export const HEARTBEAT_MS = 10_000;
 export const HEARTBEAT = " ";
+
+// What the watchdog writes. Its own code, so the caller can tell "the server gave up waiting on its
+// own work" from every answer the work itself gives, and no `retryable`: the work may still finish
+// and charge, so a second model call under the same key is the wrong answer to it.
+export const STREAM_DEADLINE_CODE = "stream_deadline";
+export const STREAM_DEADLINE_BODY = JSON.stringify({
+  error: "The draft is taking longer than this connection can wait. It is still being finished on our side.",
+  code: STREAM_DEADLINE_CODE,
+  status: 504,
+});
 
 // What a streamed answer writes last, for an unstreamed answer of `status` whose body was `text`.
 export function streamedAnswer(status: number, text: string): string {
@@ -40,17 +64,36 @@ export function streamedAnswer(status: number, text: string): string {
   return JSON.stringify({ ...body, status });
 }
 
+// Hand a promise to the Supabase edge runtime's waitUntil, where there is one. Never throws: a
+// runtime without it (Deno's test runner, a local serve) just lets the promise run.
+export function keepAlive(p: Promise<unknown>): void {
+  try {
+    // deno-lint-ignore no-explicit-any
+    (globalThis as any).EdgeRuntime?.waitUntil?.(p);
+  } catch { /* the promise runs on either way */ }
+}
+
 export function heartbeatJsonResponse(
   work: () => Promise<Response>,
-  opts: { headers: HeadersInit; heartbeatMs?: number },
+  opts: {
+    headers: HeadersInit;
+    heartbeatMs?: number;
+    // How long the answer may stay open, from now. Absent: no watchdog.
+    deadlineMs?: number;
+    // Called once if the watchdog fires (portal-settings files a row). Its promise is kept alive too.
+    onDeadline?: () => unknown;
+  },
 ): Response {
   const encoder = new TextEncoder();
   const every = opts.heartbeatMs ?? HEARTBEAT_MS;
   let open = true;
   let timer: ReturnType<typeof setInterval> | undefined;
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
   const stop = () => {
     if (timer !== undefined) clearInterval(timer);
     timer = undefined;
+    if (watchdog !== undefined) clearTimeout(watchdog);
+    watchdog = undefined;
   };
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -58,13 +101,38 @@ export function heartbeatJsonResponse(
         if (!open) return;
         try { controller.enqueue(encoder.encode(s)); } catch { open = false; }
       };
+      // The last write, whoever makes it: the work's answer or the watchdog's. Only the first one
+      // lands; the other finds the body closed and writes nothing.
+      const finish = (s: string) => {
+        stop();
+        write(s);
+        if (open) {
+          open = false;
+          try { controller.close(); } catch { /* cancelled while the last write was queued */ }
+        }
+      };
       // One byte at once, so the status line and the first byte leave together rather than
       // waiting ten seconds for the first beat.
       write(HEARTBEAT);
       timer = setInterval(() => write(HEARTBEAT), every);
+      // Armed BEFORE the work starts, so a work that settles at once (a synchronous throw) clears it
+      // in finish() rather than leaving a timer behind it.
+      if (typeof opts.deadlineMs === "number" && Number.isFinite(opts.deadlineMs)) {
+        watchdog = setTimeout(() => {
+          watchdog = undefined;
+          if (!open) return;
+          finish(STREAM_DEADLINE_BODY);
+          try {
+            const filed = opts.onDeadline?.();
+            if (filed && typeof (filed as Promise<unknown>).then === "function") {
+              keepAlive(Promise.resolve(filed).catch(() => undefined));
+            }
+          } catch { /* a logger that throws must not reach the runtime */ }
+        }, Math.max(0, opts.deadlineMs));
+      }
       // NOT awaited: start() returns now, the 200 goes out now, and the work runs behind it.
       // It cannot reject: everything in it is caught.
-      (async () => {
+      const done = (async () => {
         let last: string;
         try {
           const res = await work();
@@ -72,13 +140,9 @@ export function heartbeatJsonResponse(
         } catch {
           last = JSON.stringify({ error: "Internal Server Error", status: 500 });
         }
-        stop();
-        write(last);
-        if (open) {
-          open = false;
-          try { controller.close(); } catch { /* cancelled while the last write was queued */ }
-        }
+        finish(last);
       })();
+      keepAlive(done);
     },
     cancel() {
       open = false;
