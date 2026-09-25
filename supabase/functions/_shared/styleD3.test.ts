@@ -3928,3 +3928,15 @@ Deno.test("⚠️ v2 prompt: a porch pitch the render lowers is said as drawn, a
   // And every v2 prompt carries the rule itself, for the case the server cannot compute.
   for (const s of [p, q]) assertStringIncludes(s, "why the render's is flatter, correct roof.porchAttachFt, never porchPitch.");
 });
+
+
+Deno.test("the centre eave is built from two measured parts, in the draft and in the check (2026-09-25)", () => {
+  // Live Tri Home runs read the centre eave at 15, 14 and then 12.5 ft against a measured 14.8, and
+  // the check passed the 12.5: its test was "plainly taller or shorter". Both now measure the band
+  // of centre wall above the wing roof against the outer wall in the same frame.
+  const p = videoShapePrompt({ widthFt: 30, lengthFt: 20, wallHeightFt: 8 }, true);
+  assert(p.includes("Build it from two parts rather than reading it in one guess"), "draft: two parts");
+  assert(p.includes("A band holding a row of upper windows needs at least about 4 ft of wall."), "draft: the upper-window floor");
+  const c = selfCheckPrompt({ dims: { widthFt: 30, lengthFt: 20, wallHeightFt: 8 }, draft: (sanitizeD3Spec({ roof: { type: "gable", front: "gable", pitch: 0.5, wingSide: "both", wingWidthFt: 9, centerEaveFt: 14 } }) as { ok: true; d3: D3Spec }).d3, viewpoints: ["front", "back"] });
+  assert(c.includes("Measure it, do not eyeball it") && c.includes("If the band's share differs by a quarter or more"), "check: a measured test");
+});
