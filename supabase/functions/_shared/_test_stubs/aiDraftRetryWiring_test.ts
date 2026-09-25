@@ -52,16 +52,24 @@ const DRAFT = lift(PORTAL, 'if (action === "calibrate_style_ai") return await dr
 type Reply = { body: Record<string, unknown>; status: number };
 const json = (body: Record<string, unknown>, status = 200): Reply => ({ body, status });
 
-Deno.test("the draft call has the v2 budget: 12000 tokens, a 125 s abort unless streamed, effort low only when lean", () => {
-  assert(DRAFT.includes("max_tokens: 12000,"), "max_tokens is 12000");
+Deno.test("the draft call has the v2 budget: 12000 tokens (20000 streamed), a 125 s abort unless streamed, effort low only when lean", () => {
+  // 20000 on a STREAMED draft only (2026-09-25): at effort "high" a read can think past 12000 and be
+  // cut off with most of its 230 s left. Every other request keeps 12000.
+  const mt = DRAFT.split("\n").find((l) => l.includes("max_tokens:")) ?? "";
+  assertEquals(mt.trim(), "max_tokens: streamed ? 20000 : 12000,");
+  const maxTokens = (streamed: boolean) => new Function("streamed", `return {${mt.trim()}}.max_tokens;`)(streamed) as number;
+  assertEquals([maxTokens(false), maxTokens(true)], [12000, 20000]);
   assert(!DRAFT.includes("max_tokens: 8000"), "and the old 8000 is gone");
   assert(DRAFT.includes("const aiSignal = AbortSignal.timeout(draftAbortMs);"), "the abort is the request-measured budget below");
   // Lean is "low"; a STREAMED draft (the new shell's v2 press, which outlives the gateway) is "high";
   // everything else -- legacy, and a v2 request that is not streamed -- stays "medium" (2026-09-25).
+  // Decided once, as draftEffort, which the request sends and draft_tokens records.
   const eff = DRAFT.split("\n").find((l) => l.includes("output_config: { effort:")) ?? "";
-  assertEquals(eff.trim(), 'output_config: { effort: lean ? "low" : streamed ? "high" : "medium" },');
+  assertEquals(eff.trim(), "output_config: { effort: draftEffort },");
+  const effDecl = DRAFT.split("\n").find((l) => l.includes("const draftEffort =")) ?? "";
+  assertEquals(effDecl.trim(), 'const draftEffort = lean ? "low" : streamed ? "high" : "medium";');
   const effort = (lean: boolean, streamed: boolean) =>
-    new Function("lean", "streamed", `return {${eff.trim()}}.output_config.effort;`)(lean, streamed) as string;
+    new Function("lean", "streamed", `${effDecl.trim()}\nreturn {${eff.trim()}}.output_config.effort;`)(lean, streamed) as string;
   assertEquals([effort(false, false), effort(true, false), effort(false, true)], ["medium", "low", "high"]);
   // Only a real boolean: "true", 1 and an absent key all leave an older browser on "medium".
   const decl = DRAFT.split("\n").find((l) => l.includes("const lean =")) ?? "";

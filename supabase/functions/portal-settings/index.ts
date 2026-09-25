@@ -3856,6 +3856,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the real bound on a runaway reply, and it is a clean, released, RETRYABLE failure; the
     // budget only has to stop being the thing a normal long reply trips over.
     //
+    // 20000 ON A STREAMED DRAFT ONLY (2026-09-25). At effort "high" a read thinks for longer, and a
+    // read that thinks past 12000 is cut off unparsed however much of its 230 s is left. Every
+    // other request keeps 12000, byte for byte. What it can cost: three reads of ~21,000 input and
+    // at most 20,000 output tokens at Opus's list price (aiDraftCostCents) is at most ~$1.82 a
+    // press, against ~$1.22 at 12000 -- recorded as the capture's cost basis, never charged to the
+    // builder, whose price is the held $20 whatever the tokens.
+    //
     // The timeout is the other half. Supabase's gateway answers 504 on its own at 150 s of
     // silence, and that 504 is invisible to withErrorLog and leaves the wallet hold open until
     // the stale sweep. 125 s (110 s until 2026-09-24) still leaves room to release the hold and
@@ -3890,6 +3897,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // under 60 s: the same rule as below with the gateway's 145 s replaced by 260 s. Every request
     // that is not streamed keeps exactly the rule below.
     const lean = payload.lean === true;
+    // The reads' effort, decided once: "low" on the lean retry, "high" on a streamed draft, "medium"
+    // on everything else (see output_config below for why). The request carries it, and so does
+    // draft_tokens, so "which effort did this draft run at, and was it streamed" is a query.
+    const draftEffort = lean ? "low" : streamed ? "high" : "medium";
     const aiSource = combined ? "combined" : fromVideo ? "video" : "photos";
     const t0 = Date.now();
     const draftAbortMs = streamed
@@ -3917,11 +3928,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     //
     // aiDraftUsageWiring_test lifts the body below and RUNS it, so keep it plain JavaScript:
     // the only type annotation is on this first line, which the test uses as its anchor.
+    //
+    // `effort` and `streamed` (2026-09-25) ride at the top of the object, beside the counts, so
+    // streamed drafts at "high" can be told from the rest in SQL without a new column. A null
+    // (a single call that got no reply) stays null: that is what "no reply" means in this column.
     const recordDraftUsage = async (tokens: Record<string, unknown> | null) => {
       if (!ledgerRow?.id) return;
       try {
         const { error } = await admin.from("ai_style_calls")
-          .update({ draft_tokens: tokens, draft_ms: Date.now() - t0 }).eq("id", ledgerRow.id);
+          .update({ draft_tokens: tokens ? { ...tokens, effort: draftEffort, streamed } : tokens, draft_ms: Date.now() - t0 }).eq("id", ledgerRow.id);
         if (error) {
           await logEdgeError({
             fn: "portal-settings", req, clientId, code: "ai_style_draft_usage_log_failed",
@@ -3953,8 +3968,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       body: JSON.stringify({
         ...aiModelFields(v2Prompt),
         // Thinking and the answer share this. The video prompt's `observed` block rides on
-        // top of the spec. A truncated reply is unparseable, not partially useful.
-        max_tokens: 12000,
+        // top of the spec. A truncated reply is unparseable, not partially useful. More room only
+        // on a streamed draft, which thinks at "high" (see above).
+        max_tokens: streamed ? 20000 : 12000,
         thinking: { type: "adaptive" },
         // v2 thinks HARD (2026-09-25). At "medium", Opus often answered a walk-around in 10-15 s with
         // ~480 output tokens -- the JSON and next to no thinking -- and those shallow reads put a
@@ -3966,8 +3982,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // the lean retry. A streamed draft (draftAnswer: the new shell's v2 press) outlives the
         // gateway with a 230 s budget and thinks "high"; a v2 request that is NOT streamed keeps
         // "medium" and its 125 s, with the reads' reasoning carried in the reply itself (the prompt's
-        // evidence fields). `streamed` is never true with `lean` (wantsStreamedDraft).
-        output_config: { effort: lean ? "low" : streamed ? "high" : "medium" },
+        // evidence fields). `streamed` is never true with `lean` (wantsStreamedDraft). The choice is
+        // draftEffort, above, so draft_tokens records the very effort this request sent.
+        output_config: { effort: draftEffort },
         messages: [{
           role: "user",
           content: [

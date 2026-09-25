@@ -17,7 +17,8 @@
 //   4. Everything around the answer happens exactly as it does unstreamed, in the same order: the
 //      ledger row, the hold and its release on every failure, the capture, the usage write, the coded
 //      app_errors rows AND the rows the error wrapper files, which it cannot see through a 200.
-//   5. Effort "high" and the 230/260 s budget only on the streamed request.
+//   5. Effort "high", 20000 tokens and the 230/260 s budget only on the streamed request, and
+//      draft_tokens says which effort ran and whether it streamed.
 //   6. The work behind the answer is handed to EdgeRuntime.waitUntil; a watchdog closes the answer at
 //      DRAFT_STREAM_DEADLINE_MS with `stream_deadline` while the work runs on to its capture and
 //      ledger row; and a browser that goes away mid-stream changes nothing about the hold or the row.
@@ -40,7 +41,7 @@
 import { assert, assertEquals } from "jsr:@std/assert";
 import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
 import {
-  DRAFT_STREAM_DEADLINE_MS, parseKnownDims,
+  aiDraftCostCents, DRAFT_STREAM_DEADLINE_MS, parseKnownDims,
   wantsStreamedDraft, wantsV2Prompt,
 } from "../styleD3.ts";
 import { HEARTBEAT_MS, STREAM_DEADLINE_BODY } from "../heartbeatJson.ts";
@@ -279,6 +280,24 @@ async function drive(payload: Record<string, unknown>, world: World = {}) {
   });
 }
 
+// The ledger's usage write with its `effort` and `streamed` checked against what the request should
+// have recorded and then taken out, so a streamed trace can be compared with a plain one on
+// everything else. A write without the two keys (a null: no reply) is left as it is.
+function howItRan(db: unknown[], want: { effort: string; streamed: boolean }): unknown[] {
+  return db.map((op) => {
+    if (!Array.isArray(op) || op[0] !== "ai_style_calls") return op;
+    return op.map((step) => {
+      if (!Array.isArray(step) || step[0] !== "update") return step;
+      const row = step[1] as Record<string, any>;
+      const tok = row && row.draft_tokens;
+      if (!tok || typeof tok !== "object") return step;
+      assertEquals({ effort: tok.effort, streamed: tok.streamed }, want, "draft_tokens says how the draft ran");
+      const { effort: _e, streamed: _s, ...rest } = tok;
+      return ["update", { ...row, draft_tokens: rest }, ...step.slice(2)];
+    });
+  });
+}
+
 // Timing and stack noise out, everything else compared as it is.
 function norm(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(norm);
@@ -384,13 +403,22 @@ Deno.test("draftAnswer answers a request that does not stream with the branch's 
   assert(fn.includes(open), "draftAnswer's signature");
   const body = fn.slice(fn.indexOf(open) + open.length).split("\n").map((l) => l.trim()).filter(Boolean);
   assertEquals(body[0], "if (!wantsStreamedDraft(payload)) return work(false);", "the first thing it does");
-  // And `streamed` changes exactly two things inside the branch: the budget and the effort.
+  // And `streamed` changes exactly these things inside the branch: the effort (draftEffort, which the
+  // request sends and draft_tokens records beside `streamed`), the budget, and the room to think in.
   const BRANCH = lift(SOURCE, 'if (action === "calibrate_style_ai") return await draftAnswer(', "// ── THE FREE SECOND PASS", "the branch");
   const uses = BRANCH.split("\n").filter((l) => /\bstreamed\b/.test(l) && !l.trim().startsWith("//")).map((l) => l.trim());
   assertEquals(uses, [
     'if (action === "calibrate_style_ai") return await draftAnswer(req, payload, { requestStartMs, clientId }, async (streamed: boolean): Promise<Response> => {',
+    'const draftEffort = lean ? "low" : streamed ? "high" : "medium";',
     "const draftAbortMs = streamed",
-    'output_config: { effort: lean ? "low" : streamed ? "high" : "medium" },',
+    '.update({ draft_tokens: tokens ? { ...tokens, effort: draftEffort, streamed } : tokens, draft_ms: Date.now() - t0 }).eq("id", ledgerRow.id);',
+    "max_tokens: streamed ? 20000 : 12000,",
+  ]);
+  const effortUses = BRANCH.split("\n").filter((l) => /\bdraftEffort\b/.test(l) && !l.trim().startsWith("//")).map((l) => l.trim());
+  assertEquals(effortUses, [
+    'const draftEffort = lean ? "low" : streamed ? "high" : "medium";',
+    '.update({ draft_tokens: tokens ? { ...tokens, effort: draftEffort, streamed } : tokens, draft_ms: Date.now() - t0 }).eq("id", ledgerRow.id);',
+    "output_config: { effort: draftEffort },",
   ]);
 });
 
@@ -438,8 +466,9 @@ for (const [what, world, status] of SCENARIOS) {
       assertEquals(JSON.parse(last), { ...was, status }, "its own object plus the status it would have had");
       assertEquals(Object.keys(JSON.parse(last)), [...Object.keys(was), "status"]);
     }
-    // Everything around the answer, in the same order.
-    assertEquals(norm(streamed.trace.db), norm(plain.trace.db), "the same database work, in the same order");
+    // Everything around the answer, in the same order -- but for the two keys draft_tokens carries to
+    // say how the draft ran (2026-09-25), which are checked on their own right after.
+    assertEquals(norm(howItRan(streamed.trace.db, { effort: "high", streamed: true })), norm(howItRan(plain.trace.db, { effort: "medium", streamed: false })), "the same database work, in the same order");
     assertEquals(streamed.trace.released, plain.trace.released, "the hold released for the same reason");
     assertEquals(norm(streamed.trace.captured), norm(plain.trace.captured), "the same capture");
     assertEquals(norm(streamed.trace.rows), norm(plain.trace.rows), "the same app_errors rows, the wrapper's included");
@@ -514,14 +543,34 @@ Deno.test("the 200 and a space go out before the model has answered", async () =
 });
 
 // ─── 5. Effort and budget ──────────────────────────────────────────────────────────────────────
-Deno.test("effort high only on the streamed v2 draft; every other request as before", async () => {
+Deno.test("effort high and 20000 tokens only on the streamed v2 draft; every other request as before", async () => {
   const s = await drive(STREAMED, { model: THREE(GOOD()) });
   assertEquals(s.trace.sent.map((b) => b.output_config.effort), ["high", "high", "high"]);
+  assertEquals(s.trace.sent.map((b) => b.max_tokens), [20000, 20000, 20000]);
   assertEquals(s.trace.sent.map((b) => b.model), ["claude-opus-5", "claude-opus-5", "claude-opus-5"]);
-  // Apart from the effort, the very request the plain v2 press sends.
+  // Apart from the effort and the room to think in, the very request the plain v2 press sends.
   const p = await drive(V2, { model: THREE(GOOD()) });
   assertEquals(p.trace.sent.map((b) => b.output_config.effort), ["medium", "medium", "medium"]);
-  assertEquals(s.trace.sent[0], { ...p.trace.sent[0], output_config: { effort: "high" } });
+  assertEquals(p.trace.sent.map((b) => b.max_tokens), [12000, 12000, 12000]);
+  assertEquals(s.trace.sent[0], { ...p.trace.sent[0], max_tokens: 20000, output_config: { effort: "high" } });
+  // Every request that does not stream keeps 12000: the lean retry, and production's older shell.
+  for (const payload of [{ ...STREAMED, lean: true }, { ...STREAMED, frame: undefined }] as Record<string, unknown>[]) {
+    const o = await drive(payload, { model: THREE(GOOD()) });
+    assertEquals(o.trace.sent.map((b) => b.max_tokens), [12000], JSON.stringify({ lean: payload.lean, frame: payload.frame }));
+  }
+  // And the ledger says which: draft_tokens.effort and .streamed, at the top of the object.
+  const usage = (t: Trace) => (t.db.filter((op: any) => op[0] === "ai_style_calls" && op[1][0] === "update" && op[1][1] && "draft_tokens" in op[1][1]) as any[])
+    .map((op) => ({ effort: op[1][1].draft_tokens.effort, streamed: op[1][1].draft_tokens.streamed }));
+  assertEquals(usage(s.trace), [{ effort: "high", streamed: true }]);
+  assertEquals(usage(p.trace), [{ effort: "medium", streamed: false }]);
+});
+
+Deno.test("20000 tokens cannot make a streamed press cost more than its price: three full reads, at list price", () => {
+  // aiDraftCostCents is our cost basis (never the builder's price, which is the held $20). Three reads
+  // at a generous 21,000 input tokens each, all three spending all 20000: under $2, a tenth of the price.
+  const worst = aiDraftCostCents(true, 3 * 21_000, 3 * 20_000);
+  assertEquals(worst, 181.5);
+  assert(worst < 2000 / 10, `${worst} cents`);
 });
 
 Deno.test("the budget: streamed min(230 s, 260 s - set-up), never under 60 s; plain as before", async () => {
@@ -628,7 +677,9 @@ for (const [what, base, want] of DISCONNECTS) {
       assertEquals(trace.captured.length + trace.released.length, 1, "the hold settled exactly once");
       const ledger = trace.db.filter((op: any) => op[0] === "ai_style_calls" && op[1][0] === "update") as any[];
       assertEquals(ledger.filter((op) => op[1][1].drafted).length, want.drafted, "the draft on the ledger row");
-      assertEquals(ledger.filter((op) => "draft_tokens" in op[1][1]).length, 1, "the usage written once");
+      const usage = ledger.filter((op) => "draft_tokens" in op[1][1]);
+      assertEquals(usage.length, 1, "the usage written once");
+      assertEquals([usage[0][1][1].draft_tokens.effort, usage[0][1][1].draft_tokens.streamed], ["high", true]);
       assertEquals(trace.rows.map((r) => r.code), want.codes, "the app_errors rows a browser that stayed would have seen");
     });
   });
