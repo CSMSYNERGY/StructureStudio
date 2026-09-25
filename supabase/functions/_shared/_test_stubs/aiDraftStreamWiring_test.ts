@@ -22,8 +22,11 @@
 //   6. The work behind the answer is handed to EdgeRuntime.waitUntil; a watchdog closes the answer at
 //      DRAFT_STREAM_DEADLINE_MS with `stream_deadline` while the work runs on to its capture and
 //      ledger row; and a browser that goes away mid-stream changes nothing about the hold or the row.
-//   7. calibrate_style_ai_recover: the generation's own gate, only the caller's own row (tenant, user,
-//      style, since), the success body rebuilt from that row, and pending / lost said honestly.
+//   7. The press's key rides on its ledger row (253), and the frame map just before `drafted`, neither
+//      able to fail a generation. calibrate_style_ai_recover: the generation's own gate, only the
+//      caller's own rows found BY THE PRESS'S KEY (tenant, user, key, style), the success body rebuilt
+//      from the key's newest row -- frame map and all -- and the money said from the press's own wallet
+//      rows whenever the answer is not a recovered draft.
 //   8. The new shell's half (it asks for the stream, reads a failure in the body exactly like a
 //      non-2xx, and picks a dropped draft up) is aiDraftStreamShell_test.
 //
@@ -44,7 +47,7 @@ import { assert, assertEquals } from "jsr:@std/assert";
 import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
 import {
   aiDraftCostCents, DRAFT_RECOVER_PENDING_MS, DRAFT_RECOVER_SETTLE_MS, DRAFT_STREAM_DEADLINE_MS, parseKnownDims,
-  wantsStreamedDraft, wantsV2Prompt,
+  SELF_CHECK_CLAIM_WINDOW_MS, wantsStreamedDraft, wantsV2Prompt,
 } from "../styleD3.ts";
 import { HEARTBEAT_MS, STREAM_DEADLINE_BODY } from "../heartbeatJson.ts";
 
@@ -91,7 +94,11 @@ type World = {
   setupMs?: number;             // how long the set-up (the auto top-up read) seems to take
   deadlineScale?: number;       // the answer's watchdog runs this many times faster (default 100)
   ledger?: Record<string, unknown>[];   // ai_style_calls rows the recover action can read
-  recoverErr?: boolean;         // the recover action's read errors
+  recoverErr?: boolean;         // the recover action's ledger read errors
+  wallet?: Record<string, unknown>[];   // wallet_transactions rows the recover action can read
+  walletErr?: boolean;          // the recover action's wallet read errors
+  noIdemColumn?: boolean;       // ai_style_calls has no idem_key column (253 not applied)
+  frameMapFails?: "error" | "throw";    // the frame_map write errors, or throws
   member?: Record<string, unknown>;     // the caller's client_users row, over an owner's
 };
 type Trace = {
@@ -127,20 +134,21 @@ function answer(world: World, trace: Trace, target: string, ops: any[][]) {
     if (has("select") && (arg("select") === "id") && ops.some((o) => o[0] === "select" && o[2] && o[2].head)) return { count: world.used ?? 0, error: null };
     // The recover action's read: a real filter over world.ledger, so what it returns is decided by
     // the filters the handler actually put on the query, and nothing else.
-    if (has("select") && has("gte")) {
+    if (has("select") && has("in")) {
       if (world.recoverErr) return { data: null, error: { message: "the ledger read timed out" } };
-      let out = [...(world.ledger ?? [])];
-      for (const o of ops) {
-        if (o[0] === "eq") out = out.filter((r) => r[o[1]] === o[2]);
-        if (o[0] === "in") out = out.filter((r) => (o[2] as unknown[]).includes(r[o[1]]));
-        if (o[0] === "gte") out = out.filter((r) => Date.parse(String(r[o[1]])) >= Date.parse(String(o[2])));
-        if (o[0] === "order") out.sort((a, b) => (Date.parse(String(a[o[1]])) - Date.parse(String(b[o[1]]))) * (o[2] && o[2].ascending === false ? -1 : 1));
-        if (o[0] === "limit") out = out.slice(0, o[1]);
-      }
-      const cols = String(arg("select")).split(",").map((c) => c.trim());
-      return { data: out.map((r) => Object.fromEntries(cols.map((c) => [c, r[c] ?? null]))), error: null };
+      return { data: filtered(world.ledger ?? [], ops), error: null };
     }
-    if (has("insert")) return world.ledgerFails ? { data: null, error: { message: "the ledger is gone" } } : { data: { id: LEDGER_ID }, error: null };
+    if (has("insert")) {
+      // PostgREST refuses the WHOLE insert when one key names a column it does not have (PGRST204).
+      if (world.noIdemColumn && "idem_key" in (arg("insert") ?? {})) {
+        return { data: null, error: { code: "PGRST204", message: "Could not find the 'idem_key' column of 'ai_style_calls' in the schema cache" } };
+      }
+      return world.ledgerFails ? { data: null, error: { message: "the ledger is gone" } } : { data: { id: LEDGER_ID }, error: null };
+    }
+    if (has("update") && "frame_map" in (arg("update") ?? {})) {
+      if (world.frameMapFails === "throw") throw new TypeError("the frame_map write blew up");
+      if (world.frameMapFails === "error") return { data: null, error: { code: "PGRST204", message: "Could not find the 'frame_map' column of 'ai_style_calls' in the schema cache" } };
+    }
     return { data: null, error: null };
   }
   if (target === "wallet_accounts") {
@@ -150,6 +158,11 @@ function answer(world: World, trace: Trace, target: string, ops: any[][]) {
       return { data: { balance_cents: 8000, held_cents: 2000, auto_topup_enabled: false }, error: null };
     }
     return { data: null, error: null };
+  }
+  if (target === "wallet_transactions") {
+    // Only the recover action reads it (the wallet RPCs are rpc:... below): the same real filter.
+    if (world.walletErr) return { data: null, error: { message: "the wallet read timed out" } };
+    return { data: filtered(world.wallet ?? [], ops), error: null };
   }
   if (target === "billing_customers") return { data: null, error: null };
   if (target === "rpc:wallet_hold") {
@@ -161,6 +174,20 @@ function answer(world: World, trace: Trace, target: string, ops: any[][]) {
     return world.captureErr ? { data: null, error: { message: "capture is down" } } : { data: 6000, error: null };
   }
   throw new Error(`the fake database has no answer for ${target} ${JSON.stringify(ops)}`);
+}
+
+// A read over rows, by exactly the filters the handler put on its query, then its column list.
+function filtered(rows: Record<string, unknown>[], ops: any[][]) {
+  let out = [...rows];
+  for (const o of ops) {
+    if (o[0] === "eq") out = out.filter((r) => r[o[1]] === o[2]);
+    if (o[0] === "in") out = out.filter((r) => (o[2] as unknown[]).includes(r[o[1]]));
+    if (o[0] === "gte") out = out.filter((r) => Date.parse(String(r[o[1]])) >= Date.parse(String(o[2])));
+    if (o[0] === "order") out.sort((a, b) => (Date.parse(String(a[o[1]])) - Date.parse(String(b[o[1]]))) * (o[2] && o[2].ascending === false ? -1 : 1));
+    if (o[0] === "limit") out = out.slice(0, o[1]);
+  }
+  const cols = String((ops.find((o) => o[0] === "select") ?? [])[1]).split(",").map((c) => c.trim());
+  return out.map((r) => Object.fromEntries(cols.map((c) => [c, r[c] ?? null])));
 }
 
 function chain(world: World, trace: Trace, target: string, ops: any[][]): any {
@@ -705,26 +732,106 @@ for (const [what, base, want] of DISCONNECTS) {
   });
 }
 
-// ─── 7. Picking the draft up after the connection dropped (calibrate_style_ai_recover) ─────────
+// ─── 7. The press's key on its row, and picking the draft up by it (calibrate_style_ai_recover) ─
 const USER_ID = "00000000-0000-4000-8000-000000000001";
+const OTHER_USER = "00000000-0000-4000-8000-000000000002";
+const KEY = "press-1";          // STREAMED's own idempotencyKey
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
-const RECOVER = (o: Record<string, unknown> = {}) => ({ action: "calibrate_style_ai_recover", styleValue: "barn", since: ago(60_000), ...o });
+const RECOVER = (o: Record<string, unknown> = {}) => ({ action: "calibrate_style_ai_recover", styleValue: "barn", idempotencyKey: KEY, ...o });
 const ROW = (o: Record<string, unknown> = {}) => ({
-  id: LEDGER_ID, client_id: "harness-tenant", user_id: USER_ID, style_key: "barn", source: "video",
+  id: LEDGER_ID, client_id: "harness-tenant", user_id: USER_ID, idem_key: KEY, style_key: "barn", source: "video",
   called_at: ago(30_000), drafted: null, observed: null, frames: 12, video_count: 12, dims: DIMS,
-  draft_ms: null, charged_cents: null, ...o,
+  draft_ms: null, frame_map: null, charged_cents: null, ...o,
 });
-const LOST = "We could not pick the draft up from the server: that generation did not finish, so you are not charged for it. Press Generate to try again.";
+const TX = (o: Record<string, unknown> = {}) => ({
+  client_id: "harness-tenant", idempotency_key: KEY, actor_user_id: USER_ID, meter_kind: "video_3d_generation",
+  kind: "debit", state: "held", posted_at: null, ...o,
+});
+const NOT_CHARGED = "We could not pick the draft up from the server: that generation did not finish, so you are not charged for it. Press Generate to try again.";
+const inserts = (t: Trace) => (t.db.filter((op: any) => op[0] === "ai_style_calls" && op[1][0] === "insert") as any[]).map((op) => op[1][1]);
+const ledgerUpdates = (t: Trace) => (t.db.filter((op: any) => op[0] === "ai_style_calls" && op[1][0] === "update") as any[]).map((op) => op[1][1]);
+const walletReads = (t: Trace) => t.db.filter((op: any) => op[0] === "wallet_transactions");
+const holdIdem = (t: Trace) => ((t.db.find((op: any) => op[0] === "rpc:wallet_hold") ?? []) as any[])[1]?.[1]?.p_idem;
+const rowsOf = (t: Trace) => t.rows.map((r) => [r.code, r.severity]);
 
 // One real streamed draft: its answer, and what it wrote onto its ledger row (through a jsonb round trip).
 let liveRun: { answer: Record<string, unknown>; wrote: Record<string, any> } | null = null;
 async function live() {
   if (liveRun) return liveRun;
   const s = await drive(STREAMED, { model: [GOOD({ centerEaveFt: 15 }), GOOD({ centerEaveFt: 13 }), GOOD({ centerEaveFt: 14 })] });
-  const updates = s.trace.db.filter((op: any) => op[0] === "ai_style_calls" && op[1][0] === "update").map((op: any) => op[1][1]);
-  liveRun = { answer: JSON.parse(s.out.text), wrote: JSON.parse(JSON.stringify(Object.assign({}, ...updates))) };
+  liveRun = { answer: JSON.parse(s.out.text), wrote: JSON.parse(JSON.stringify(Object.assign({}, ...ledgerUpdates(s.trace)))) };
   return liveRun;
 }
+
+Deno.test("the press's key rides on its ledger row: the same key wallet_hold files the hold under, and a keyless press inserts what it always did", async () => {
+  for (const payload of [STREAMED, V2] as Record<string, unknown>[]) {
+    const { trace, out } = await drive(payload, { model: THREE(GOOD()) });
+    assert(/"ok":true/.test(out.text), "a draft");
+    assertEquals(inserts(trace), [{ client_id: "harness-tenant", user_id: USER_ID, style_key: "barn", source: "video", idem_key: KEY }]);
+    assertEquals(holdIdem(trace), KEY, "the key the hold is filed under is the key on the row");
+  }
+  // One cut for both: a key past 120 characters is cut the same way on the row and on the hold.
+  const long = "k".repeat(150);
+  const cut = await drive({ ...STREAMED, idempotencyKey: long }, { model: THREE(GOOD()) });
+  assertEquals(inserts(cut.trace)[0].idem_key, "k".repeat(120));
+  assertEquals(holdIdem(cut.trace), "k".repeat(120));
+  // No key (an older caller): exactly the object the insert has always written, and no null key.
+  const keyless = await drive({ ...V2, idempotencyKey: undefined }, { model: THREE(GOOD()) });
+  assertEquals(inserts(keyless.trace), [{ client_id: "harness-tenant", user_id: USER_ID, style_key: "barn", source: "video" }]);
+  assertEquals(Object.keys(inserts(keyless.trace)[0]), ["client_id", "user_id", "style_key", "source"], "the same keys in the same order as before 253");
+  assertEquals(holdIdem(keyless.trace), null);
+});
+
+Deno.test("⚠️ a missing idem_key column never fails a generation: the insert is retried without it, with one info row", async () => {
+  for (const payload of [STREAMED, V2] as Record<string, unknown>[]) {
+    const { trace, out } = await drive(payload, { model: THREE(GOOD()), noIdemColumn: true });
+    const body = JSON.parse(out.text.trimStart());
+    assertEquals([body.ok, body.checkId], [true, LEDGER_ID], `${payload.stream ? "streamed" : "plain"}: the draft, on the row the retry wrote`);
+    assertEquals(inserts(trace), [
+      { client_id: "harness-tenant", user_id: USER_ID, style_key: "barn", source: "video", idem_key: KEY },
+      { client_id: "harness-tenant", user_id: USER_ID, style_key: "barn", source: "video" },
+    ], "tried with the key, then once without");
+    assertEquals(rowsOf(trace), [["ai_style_idem_key_write_failed", "info"]], "one info row, and nothing filed as a fault");
+    assert(/253/.test(String(trace.rows[0].message)), "naming the migration");
+    assertEquals(holdIdem(trace), KEY, "the hold still carries the key");
+    assertEquals(trace.captured.length, 1, "and the press went on to its capture");
+  }
+  // A ledger that is really down fails the retry too, and refuses exactly as before: a 503, no hold.
+  const down = await drive(V2, { ledgerFails: true });
+  assertEquals(down.out.status, 503);
+  assertEquals(inserts(down.trace).length, 2);
+  assertEquals(down.trace.db.filter((op: any) => op[0] === "rpc:wallet_hold"), [], "no money is touched");
+  // A keyless press that fails is not retried: there is no key to take out.
+  const keyless = await drive({ ...V2, idempotencyKey: undefined }, { ledgerFails: true });
+  assertEquals([keyless.out.status, inserts(keyless.trace).length, keyless.trace.rows.filter((r) => r.code === "ai_style_idem_key_write_failed").length], [503, 1, 0]);
+});
+
+Deno.test("the frame map is kept on the row BEFORE the draft, and a failing map write never costs `drafted` or the answer", async () => {
+  const ok = await drive(STREAMED, { model: THREE(GOOD()) });
+  const answer = JSON.parse(ok.out.text);
+  assert(answer.frameMap && answer.frameMap.front, "the answer carries a map");
+  const ups = ledgerUpdates(ok.trace);
+  const at = (k: string) => ups.findIndex((u) => k in u);
+  // Before `drafted`, so a pickup that sees the draft always sees its map too.
+  assert(at("frame_map") >= 0 && at("drafted") > at("frame_map"), `its own update, before drafted: ${JSON.stringify(ups.map((u) => Object.keys(u)))}`);
+  assertEquals(ups[at("frame_map")], { frame_map: answer.frameMap }, "the answer's own map, and nothing else in that write");
+  assert(!("frame_map" in ups[at("drafted")]), "never a key on the 226 write");
+  // The write fails (253 not applied) or throws: the draft is on the row and the answer is the same.
+  for (const how of ["error", "throw"] as const) {
+    const bad = await drive(STREAMED, { model: THREE(GOOD()), frameMapFails: how });
+    assertEquals(norm(JSON.parse(bad.out.text)), norm(answer), `${how}: the same answer`);
+    const bu = ledgerUpdates(bad.trace);
+    assertEquals(bu.filter((u) => "drafted" in u).length, 1, `${how}: drafted written`);
+    assertEquals(norm(bu.find((u) => "drafted" in u)), norm(ups[at("drafted")]), `${how}: the same 226 write`);
+    assertEquals(rowsOf(bad.trace), [["ai_style_frame_map_write_failed", "info"]], `${how}: one info row`);
+    assertEquals(bad.trace.captured.length, 1, `${how}: captured once`);
+  }
+  // A reply with no map writes nothing more than it did before 253.
+  const noMap: ModelPlan = { body: reply(JSON.stringify({ ...SPEC, frameMap: undefined })), delayMs: 2 };
+  const bare = await drive(STREAMED, { model: THREE(noMap) });
+  assertEquals(JSON.parse(bare.out.text).frameMap, null);
+  assertEquals(ledgerUpdates(bare.trace).filter((u) => "frame_map" in u), [], "no map, no write");
+});
 
 Deno.test("the recover action is gated exactly like calibrate_style_ai", async () => {
   const gates = lift(SOURCE, "const GATES: GateTable = {", "\n};", "the GATES table");
@@ -737,110 +844,187 @@ Deno.test("the recover action is gated exactly like calibrate_style_ai", async (
     const rec = await drive(RECOVER(), { member, ledger: [ROW()] });
     assertEquals(gen.out.status, 403, JSON.stringify(member));
     assertEquals(rec.out.status, gen.out.status, `the same refusal: ${JSON.stringify(member)}`);
-    assertEquals(rec.trace.db.filter((op: any) => op[0] === "ai_style_calls"), [], "and the ledger is never read");
+    assertEquals(rec.trace.db.filter((op: any) => op[0] === "ai_style_calls" || op[0] === "wallet_transactions"), [], "and nothing is read");
   }
 });
 
-Deno.test("a drafted row answers what the streamed success answered, rebuilt from the row, plus recovered", async () => {
+Deno.test("a drafted row answers what the streamed success answered, rebuilt from the row -- frame map and all -- plus recovered", async () => {
   const { answer, wrote } = await live();
   assertEquals(answer.ok, true);
-  const row = ROW({ ...wrote, called_at: ago(200_000), draft_ms: wrote.draft_ms, charged_cents: wrote.charged_cents });
-  const got = await drive(RECOVER({ since: ago(205_000) }), { ledger: [row] });
+  assert(wrote.frame_map && wrote.drafted, "the live run wrote its draft and its map");
+  const row = ROW({ ...wrote, called_at: ago(200_000) });
+  const got = await drive(RECOVER(), { ledger: [row] });
   assertEquals(got.out.status, 200);
   const body = JSON.parse(got.out.text);
-  // Field for field and in the same order; the three the row cannot give are said to be missing:
-  // `dropped` (the shell knows what it sent), `frameMap` (the reply text is not stored, so the
-  // self-check is skipped), and `balanceCents` (a pickup takes no money).
+  // Field for field and in the same order. The frame map is the answer's own (253), so the free
+  // self-check runs on a recovered draft; only `dropped` (the shell knows what it sent) and
+  // `balanceCents` (a pickup takes no money) are said to be missing.
   assertEquals(Object.keys(body), [...Object.keys(answer), "recovered"]);
-  assertEquals(body, { ...answer, dropped: null, balanceCents: null, frameMap: null, recovered: true });
+  assertEquals(body, { ...answer, dropped: null, balanceCents: null, recovered: true });
+  assertEquals(body.frameMap, answer.frameMap, "the self-check has its map");
   assertEquals(body.checkId, LEDGER_ID, "the row it came from");
-  assertEquals(got.trace.rows.map((r) => [r.code, r.severity]), [["ai_draft_recovered", "info"]], "one countable row");
-  // Nothing but a read: no money, no model, no write.
+  assertEquals(rowsOf(got.trace), [["ai_draft_recovered", "info"]], "one countable row");
+  // Nothing but a read -- and a drafted row never reads the wallet.
   assertEquals([got.trace.sent.length, got.trace.captured.length, got.trace.released.length], [0, 0, 0]);
+  assertEquals(walletReads(got.trace), [], "the draft is the answer whatever the money says");
   assertEquals(got.trace.db.filter((op: any) => op[0] === "ai_style_calls" && op.some((s: any) => s[0] === "update" || s[0] === "insert")), []);
+  // A row written before 253 has no map: the draft still comes back, and the check is skipped.
+  const old = await drive(RECOVER(), { ledger: [ROW({ ...wrote, frame_map: null })] });
+  assertEquals(JSON.parse(old.out.text).frameMap, null);
+  // A row older than the check's claim window keeps its map, but the claim would refuse the check:
+  // the draft comes back without it, and the designer skips the check instead of asking.
+  const stale = await drive(RECOVER(), { ledger: [ROW({ ...wrote, called_at: ago(SELF_CHECK_CLAIM_WINDOW_MS + 60_000) })] });
+  const staleBody = JSON.parse(stale.out.text);
+  assertEquals([staleBody.recovered, staleBody.checkId, staleBody.frameMap], [true, LEDGER_ID, null]);
 });
 
-Deno.test("⛔ the recover action never answers from another tenant's, another user's or another style's row, nor one from before the press", async () => {
+Deno.test("⛔ never another tenant's, user's or key's row -- nor a LATER press's row on the same style under its own key", async () => {
   const { wrote } = await live();
   const drafted = wrote.drafted;
   assert(drafted && typeof drafted === "object", "a real draft to hide");
-  const rows = [
+  const others = [
     ROW({ id: "a0000000-0000-4000-8000-000000000001", client_id: "another-tenant", drafted }),
-    ROW({ id: "a0000000-0000-4000-8000-000000000002", user_id: "00000000-0000-4000-8000-000000000002", drafted }),
-    ROW({ id: "a0000000-0000-4000-8000-000000000003", style_key: "shed", drafted }),
-    ROW({ id: "a0000000-0000-4000-8000-000000000004", called_at: ago(70_000), drafted }),   // since is 60 s ago, less 5 s
-    ROW({ id: "a0000000-0000-4000-8000-000000000005", source: "photos", drafted }),
-    ROW({ id: "a0000000-0000-4000-8000-000000000006", style_key: null, drafted }),
+    ROW({ id: "a0000000-0000-4000-8000-000000000002", user_id: OTHER_USER, drafted }),
+    ROW({ id: "a0000000-0000-4000-8000-000000000003", idem_key: "some-other-press", drafted }),
+    ROW({ id: "a0000000-0000-4000-8000-000000000004", idem_key: null, drafted }),
+    ROW({ id: "a0000000-0000-4000-8000-000000000005", style_key: "shed", drafted }),
+    ROW({ id: "a0000000-0000-4000-8000-000000000006", source: "photos", drafted }),
+    // THE LATER PRESS (issue 4): another tab or device, the same user and style, its own key,
+    // newer than anything of this press's, and drafted. Matching by time returned exactly this.
+    ROW({ id: "a0000000-0000-4000-8000-000000000007", idem_key: "the-later-press", called_at: ago(1_000), drafted }),
   ];
-  const none = await drive(RECOVER({ since: ago(60_000) }), { ledger: rows });
-  assertEquals(JSON.parse(none.out.text), { ok: true, pending: false, message: LOST }, "nothing of anyone else's");
-  // The query names the RESOLVED tenant and user, the style and the press, and nothing from the body.
-  const q = none.trace.db.find((op: any) => op[0] === "ai_style_calls" && op.some((s: any) => s[0] === "gte")) as any[];
-  const steps = q.slice(1).filter((s: any) => s[0] !== "select");
-  assertEquals(steps.slice(0, 4), [
-    ["eq", "client_id", "harness-tenant"], ["eq", "user_id", USER_ID], ["eq", "style_key", "barn"], ["in", "source", ["video", "combined"]],
+  const none = await drive(RECOVER(), { ledger: others });
+  assertEquals(JSON.parse(none.out.text), { ok: true, pending: false, reason: "no_row", message: NOT_CHARGED }, "nothing of anyone else's");
+  // The query names the RESOLVED tenant and user, the key and the style, and nothing else from the body.
+  const q = none.trace.db.find((op: any) => op[0] === "ai_style_calls") as any[];
+  assertEquals(q.slice(1).filter((s: any) => s[0] !== "select"), [
+    ["eq", "client_id", "harness-tenant"], ["eq", "user_id", USER_ID], ["eq", "idem_key", KEY], ["eq", "style_key", "barn"],
+    ["in", "source", ["video", "combined"]], ["order", "called_at", { ascending: false }], ["limit", 20],
   ]);
-  assertEquals(steps[4][0], "gte");
-  assertEquals(steps.slice(5), [["order", "called_at", { ascending: false }], ["limit", 1]]);
-  // A body that names another tenant or user changes nothing.
-  const forged = await drive(RECOVER({ since: ago(60_000), clientId: "another-tenant", client_id: "another-tenant", userId: "00000000-0000-4000-8000-000000000002", user_id: "00000000-0000-4000-8000-000000000002" }), { ledger: rows });
-  assertEquals(JSON.parse(forged.out.text).pending, false);
-  // The caller's own row, among all of them, is the one it finds -- the newest, if there are two.
-  const mine = ROW({ id: "b0000000-0000-4000-8000-000000000001", called_at: ago(30_000), drafted });
-  const older = ROW({ id: "b0000000-0000-4000-8000-000000000002", called_at: ago(50_000), drafted });
-  const found = await drive(RECOVER({ since: ago(60_000) }), { ledger: [...rows, older, mine] });
-  assertEquals(JSON.parse(found.out.text).checkId, "b0000000-0000-4000-8000-000000000001");
+  assert(!q.some((s: any) => s[0] === "gte" || s[0] === "gt" || s[0] === "lt"), "no time window of any kind");
+  // A body that names another tenant or user, or carries the old clock fields, changes nothing.
+  const forged = await drive(RECOVER({ clientId: "another-tenant", client_id: "another-tenant", userId: OTHER_USER, user_id: OTHER_USER, since: ago(1), clientNow: 0 }), { ledger: others });
+  assertEquals(JSON.parse(forged.out.text).reason, "no_row");
+  // This press's own row among all of them: its answer, never the later press's draft.
+  const mine = ROW({ id: "b0000000-0000-4000-8000-000000000001", called_at: ago(60_000) });
+  const found = await drive(RECOVER(), { ledger: [...others, mine] });
+  assertEquals(JSON.parse(found.out.text), { ok: true, pending: true }, "this press is still running; the later draft is not its answer");
+  // The later press asks with its own key, and gets its own draft.
+  const theirs = await drive(RECOVER({ idempotencyKey: "the-later-press" }), { ledger: [...others, mine] });
+  assertEquals(JSON.parse(theirs.out.text).checkId, "a0000000-0000-4000-8000-000000000007");
 });
 
-Deno.test("a row with no draft yet is pending; one that ended without a draft, or is too old to get one, is not", async () => {
-  const cases: [string, Record<string, unknown>, Record<string, unknown>, string | null][] = [
-    ["young, the reads still out", { called_at: ago(40_000) }, { ok: true, pending: true }, null],
-    ["the reads done a moment ago, the draft being written", { called_at: ago(150_000), draft_ms: 100_000 }, { ok: true, pending: true }, null],
-    ["no usage written, still inside the wall clock", { called_at: ago(DRAFT_RECOVER_PENDING_MS - 30_000) }, { ok: true, pending: true }, null],
-    ["the reads ended long ago without a draft (a failure)", { called_at: ago(100_000 + DRAFT_RECOVER_SETTLE_MS + 10_000), draft_ms: 100_000 }, { ok: true, pending: false, message: LOST }, "info"],
-    ["past the wall clock with nothing", { called_at: ago(DRAFT_RECOVER_PENDING_MS + 5_000) }, { ok: true, pending: false, message: LOST }, "info"],
-  ];
-  for (const [what, row, want, severity] of cases) {
-    const got = await drive(RECOVER({ since: ago(Date.now() - Date.parse(String(row.called_at)) + 1_000) }), { ledger: [ROW(row)] });
-    assertEquals(JSON.parse(got.out.text), want, what);
-    assertEquals(got.trace.rows.map((r) => r.severity), severity ? [severity] : [], `${what}: a row only when the wait ends`);
+Deno.test("a key that owns several rows answers from the NEWEST: a failed row then a drafted retry is the retry", async () => {
+  const { wrote } = await live();
+  const failed = ROW({ id: "c0000000-0000-4000-8000-000000000001", called_at: ago(300_000), draft_ms: 120_000 });
+  const retried = ROW({ id: "c0000000-0000-4000-8000-000000000002", called_at: ago(100_000), drafted: wrote.drafted, frame_map: wrote.frame_map });
+  for (const ledger of [[failed, retried], [retried, failed]]) {
+    const got = await drive(RECOVER(), { ledger, wallet: [TX({ state: "released" }), TX({ state: "posted", posted_at: ago(90_000) })] });
+    const body = JSON.parse(got.out.text);
+    assertEquals([body.recovered, body.checkId], [true, "c0000000-0000-4000-8000-000000000002"]);
   }
-  // Charged, and the draft never reached the row: said honestly, and filed as the fault it is.
-  const charged = await drive(RECOVER({ since: ago(301_000) }), { ledger: [ROW({ called_at: ago(300_000), draft_ms: 100_000, charged_cents: 2000 })] });
-  const body = JSON.parse(charged.out.text);
-  assertEquals(body.pending, false);
-  assert(/charged once/.test(body.message) && /not been charged twice/.test(body.message), body.message);
-  assertEquals(charged.trace.rows.map((r) => [r.code, r.severity]), [["ai_draft_recover_none", "error"]]);
-  // No row at all: the press never made one, or its refusal deleted it.
-  const nothing = await drive(RECOVER(), { ledger: [] });
-  assertEquals(JSON.parse(nothing.out.text), { ok: true, pending: false, message: LOST });
+  // A newer attempt under the same key that is still running is the one answered: it is pending.
+  const running = ROW({ id: "c0000000-0000-4000-8000-000000000003", called_at: ago(5_000) });
+  for (const ledger of [[running, failed, retried], [retried, failed, running]]) {
+    const got = await drive(RECOVER(), { ledger, wallet: [TX({ state: "released" }), TX({ state: "held" })] });
+    assertEquals(JSON.parse(got.out.text), { ok: true, pending: true });
+  }
 });
 
-Deno.test("since is bounded, and clientNow puts it on the server's clock", async () => {
+Deno.test("⚠️ an unreadable draft on a CHARGED press reads the wallet and says 'charged once', never 'not charged'", async () => {
+  for (const drafted of ["gable", [1, 2], 7]) {
+    const got = await drive(RECOVER(), { ledger: [ROW({ drafted })], wallet: [TX({ state: "posted", posted_at: ago(600_000) })] });
+    const body = JSON.parse(got.out.text);
+    assert(body.pending === false && body.reason === "unreadable", `${JSON.stringify(drafted)}: ${JSON.stringify(body)}`);
+    assert(/charged once/.test(body.message) && /not been charged twice/.test(body.message) && !/not charged for it/.test(body.message), body.message);
+    assertEquals(walletReads(got.trace).length, 1, `${JSON.stringify(drafted)}: the wallet was read`);
+    assertEquals(rowsOf(got.trace), [["ai_draft_recover_none", "error"]]);
+  }
+  // A readable draft is still the answer whatever the money says, and never reads the wallet.
+  const { wrote } = await live();
+  const fine = await drive(RECOVER(), { ledger: [ROW({ ...wrote })], wallet: [TX({ state: "posted", posted_at: ago(600_000) })] });
+  assertEquals([JSON.parse(fine.out.text).recovered, walletReads(fine.trace).length], [true, 0]);
+});
+
+Deno.test("⚠️ no draft: the answer about money is the press's own wallet rows, never the timing", async () => {
+  const young = ROW({ called_at: ago(20_000) });
+  const cases: [string, Record<string, unknown>, Record<string, unknown>[], (b: any) => boolean, string[][]][] = [
+    ["released, however young the row: the draft failed, NOT charged", young, [TX({ state: "released" })],
+      (b) => b.pending === false && b.reason === "failed" && b.message === NOT_CHARGED, [["ai_draft_recover_none", "info"]]],
+    ["captured a while ago with no draft: charged once, and lost -- a fault", young, [TX({ state: "released" }), TX({ state: "posted", posted_at: ago(DRAFT_RECOVER_SETTLE_MS + 60_000) })],
+      (b) => b.pending === false && b.reason === "charged_unsaved" && /charged once/.test(b.message) && /not been charged twice/.test(b.message) && !/not charged for it/.test(b.message), [["ai_draft_recover_none", "error"]]],
+    ["captured a moment ago: the draft is a write behind it, so wait", young, [TX({ state: "posted", posted_at: ago(2_000) })],
+      (b) => b.pending === true, []],
+    ["held, however old the row: the work is still running", ROW({ called_at: ago(DRAFT_RECOVER_PENDING_MS + 60_000), draft_ms: 100_000 }), [TX({ state: "held" })],
+      (b) => b.pending === true, []],
+    ["no wallet row (the meter inactive) and the work has not ended: wait", young, [],
+      (b) => b.pending === true, []],
+    ["no wallet row and the work ended long ago without a draft: failed, and not charged is true", ROW({ called_at: ago(100_000 + DRAFT_RECOVER_SETTLE_MS + 30_000), draft_ms: 100_000 }), [],
+      (b) => b.pending === false && b.reason === "failed" && b.message === NOT_CHARGED, [["ai_draft_recover_none", "info"]]],
+    ["no wallet row and nothing written past the wall clock: lost, not charged", ROW({ called_at: ago(DRAFT_RECOVER_PENDING_MS + 5_000) }), [],
+      (b) => b.pending === false && b.reason === "stale" && b.message === NOT_CHARGED, [["ai_draft_recover_none", "info"]]],
+  ];
+  for (const [what, row, wallet, ok, rows] of cases) {
+    const got = await drive(RECOVER(), { ledger: [row], wallet });
+    const body = JSON.parse(got.out.text);
+    assert(ok(body), `${what}: ${JSON.stringify(body)}`);
+    assertEquals(rowsOf(got.trace), rows, `${what}: a row only when the wait ends`);
+  }
+  // The wallet is read by the press's key, for the resolved tenant and user and this meter only.
+  const got = await drive(RECOVER(), { ledger: [young], wallet: [TX({ state: "released" })] });
+  const q = walletReads(got.trace)[0] as any[];
+  assertEquals(q.slice(1).filter((s: any) => s[0] !== "select"), [
+    ["eq", "client_id", "harness-tenant"], ["eq", "idempotency_key", KEY], ["eq", "actor_user_id", USER_ID],
+    ["eq", "meter_kind", "video_3d_generation"], ["eq", "kind", "debit"],
+  ]);
+  // So another tenant's charge under the same key, another user's, or another meter's never reads as this press's.
+  const foreign = [
+    TX({ client_id: "another-tenant", state: "posted", posted_at: ago(600_000) }),
+    TX({ actor_user_id: OTHER_USER, state: "posted", posted_at: ago(600_000) }),
+    TX({ meter_kind: "sms_segment", state: "posted", posted_at: ago(600_000) }),
+    TX({ state: "released" }),
+  ];
+  const clean = await drive(RECOVER(), { ledger: [young], wallet: foreign });
+  assertEquals(JSON.parse(clean.out.text).message, NOT_CHARGED);
+});
+
+Deno.test("no row under the key: reason no_row, the sentence chosen by the money, one row", async () => {
+  const nothing = await drive(RECOVER(), { ledger: [] });
+  assertEquals(JSON.parse(nothing.out.text), { ok: true, pending: false, reason: "no_row", message: NOT_CHARGED });
+  assertEquals(rowsOf(nothing.trace), [["ai_draft_recover_none", "info"]]);
+  // A charge under the key that no row carries (an insert that fell back without it): never "not charged".
+  const paid = await drive(RECOVER(), { ledger: [], wallet: [TX({ state: "posted", posted_at: ago(600_000) })] });
+  const body = JSON.parse(paid.out.text);
+  assert(body.reason === "no_row" && /charged once/.test(body.message), JSON.stringify(body));
+  assertEquals(rowsOf(paid.trace), [["ai_draft_recover_none", "error"]]);
+});
+
+Deno.test("the body names the style and the press's key, and nothing else is read from it", async () => {
   for (const [what, o] of [
-    ["missing", { since: undefined }],
-    ["not a time", { since: "yesterday-ish" }],
-    ["older than fifteen minutes", { since: ago(16 * 60_000) }],
-    ["in the future beyond a minute", { since: new Date(Date.now() + 120_000).toISOString() }],
+    ["no key", { idempotencyKey: undefined }],
+    ["an empty key", { idempotencyKey: "" }],
+    ["the old since/clientNow and no key", { idempotencyKey: undefined, since: ago(1_000), clientNow: Date.now() }],
+    ["no style", { styleValue: "" }],
   ] as [string, Record<string, unknown>][]) {
     const got = await drive(RECOVER(o), { ledger: [ROW()] });
     assertEquals(got.out.status, 400, what);
-    assertEquals(got.trace.db.filter((op: any) => op[0] === "ai_style_calls"), [], `${what}: refused before the ledger is read`);
+    assertEquals(got.trace.db.filter((op: any) => op[0] === "ai_style_calls" || op[0] === "wallet_transactions"), [], `${what}: refused before anything is read`);
   }
-  assertEquals((await drive(RECOVER({ styleValue: "" }), { ledger: [ROW()] })).out.status, 400, "no style");
-  // A browser whose clock runs 40 s fast records `since` 40 s after the row was stamped.
-  const row = ROW({ called_at: ago(20_000), drafted: (await live()).wrote.drafted });
-  const fastSince = new Date(Date.now() - 21_000 + 40_000).toISOString();
-  const blind = await drive(RECOVER({ since: fastSince }), { ledger: [row] });
-  assertEquals(JSON.parse(blind.out.text).pending, false, "without clientNow the two clocks are taken to agree, and the row is missed");
-  const seen = await drive(RECOVER({ since: fastSince, clientNow: Date.now() + 40_000 }), { ledger: [row] });
-  assertEquals(JSON.parse(seen.out.text).recovered, true, "with it, `since` is moved onto the server's clock");
+  // The key is cut exactly as the insert cut it, so a long key finds its row.
+  const long = "k".repeat(150);
+  const got = await drive(RECOVER({ idempotencyKey: long }), { ledger: [ROW({ idem_key: "k".repeat(120) })] });
+  assertEquals(JSON.parse(got.out.text), { ok: true, pending: true });
 });
 
-Deno.test("a ledger that cannot be read is not an answer about the draft: 503, one coded row, and the shell asks again", async () => {
-  const got = await drive(RECOVER(), { ledger: [ROW()], recoverErr: true });
-  assertEquals(got.out.status, 503);
-  const body = JSON.parse(got.out.text);
-  assert(!("pending" in body), "never pending:false for a read that failed");
-  assertEquals(got.trace.rows.map((r) => r.code), ["ai_draft_recover_failed"], "the wrapper adds no copy");
+Deno.test("a ledger or wallet that cannot be read is not an answer about the draft: 503, one coded row, and the shell asks again", async () => {
+  for (const [what, world] of [["the ledger", { ledger: [ROW()], recoverErr: true }], ["the wallet", { ledger: [ROW()], walletErr: true }]] as [string, World][]) {
+    const got = await drive(RECOVER(), world);
+    assertEquals(got.out.status, 503, what);
+    const body = JSON.parse(got.out.text);
+    assert(!("pending" in body), `${what}: never pending:false for a read that failed`);
+    assertEquals(got.trace.rows.map((r) => r.code), ["ai_draft_recover_failed"], `${what}: the wrapper adds no copy`);
+    assert(String(got.trace.rows[0].message).includes(`Could not read ${what}`), `${what}: says which read`);
+    // The ledger read names the migration its two columns come from; the wallet's has nothing to do with it.
+    assertEquals(/253/.test(String(got.trace.rows[0].message)), what === "the ledger", `${what}: ${got.trace.rows[0].message}`);
+  }
 });

@@ -1047,123 +1047,218 @@ export function wantsStreamedDraft(payload: unknown): boolean {
 // work runs on behind it. The platform's own wall clock (400 s) is the hard stop above both.
 export const DRAFT_STREAM_DEADLINE_MS = 300_000;
 
-// ─── PICKING A STREAMED DRAFT UP AFTER THE CONNECTION DROPPED (2026-09-25) ───────────────────
-// A streamed draft runs three to five minutes, and a phone that backgrounds the tab, or a network
-// that blinks, drops the answer while the server is still working (or after it has finished and
-// charged). Asking again under the same key cannot help: it either runs the model a second time or
-// meets hold_in_flight / already_charged. But the server writes what it drafted onto the ledger
-// row (226), so the browser can read it back: calibrate_style_ai_recover, which answers from the
-// NEWEST ai_style_calls row of this tenant, this user and this style that was created since the
-// press began. No new column and no migration: every field it needs is already on the row.
-//
-// `since` is the ISO time the browser recorded just before it sent the press. Refused when it is
-// older than DRAFT_RECOVER_MAX_AGE_MS (a press is over in seven minutes; this is not a history
-// browser) or later than DRAFT_RECOVER_SKEW_MS in the future. `clientNow`, the browser's clock when
-// it asked, is optional: with it, `since` is moved onto the server's clock (called_at is the
-// database's `now()`), so a browser clock that runs fast does not hide the press's own row; without
-// it the two clocks are taken to agree. Either way the rows are read from DRAFT_RECOVER_SLACK_MS
-// before `since`. A wrong `clientNow` can only move the window over the caller's OWN rows: the
-// tenant, user and style filters are the server's, never the caller's.
-export const DRAFT_RECOVER_MAX_AGE_MS = 15 * 60_000;
-export const DRAFT_RECOVER_SKEW_MS = 60_000;
-export const DRAFT_RECOVER_SLACK_MS = 5_000;
-// How long a row with no draft is still worth waiting on: the answer's own deadline plus 100 s, which
-// is the platform's 400 s wall clock. The work can run on past its answer's deadline (it is kept
-// alive for its capture and ledger write), but no worker outlives the wall clock, so a row still
-// without a draft by then will never get one.
-export const DRAFT_RECOVER_PENDING_MS = DRAFT_STREAM_DEADLINE_MS + 100_000;
-// How long after the model phase ended (draft_ms, 251) a row may still be waiting for `drafted`.
-// On a success the usage write lands first and `drafted` a capture and one update later, so a row
-// with draft_ms and no draft is mid-write for a few seconds and a FAILURE after that: every failure
-// exit writes draft_ms and never writes `drafted`.
-export const DRAFT_RECOVER_SETTLE_MS = 90_000;
-
-export function parseRecoverSince(
-  since: unknown,
-  clientNow: unknown,
-  serverNowMs: number,
-): { ok: true; fromIso: string } | { ok: false; error: string } {
-  const sinceMs = typeof since === "string" && since.length <= 64 ? Date.parse(since) : NaN;
-  if (!Number.isFinite(sinceMs)) return { ok: false, error: "since (when the press began) is required." };
-  const clientMs = typeof clientNow === "number" && Number.isFinite(clientNow) ? clientNow : serverNowMs;
-  if (clientMs - sinceMs > DRAFT_RECOVER_MAX_AGE_MS) {
-    return { ok: false, error: "That press is too old to pick a draft up for." };
-  }
-  if (sinceMs - clientMs > DRAFT_RECOVER_SKEW_MS) {
-    return { ok: false, error: "since is in the future." };
-  }
-  const fromMs = sinceMs + (serverNowMs - clientMs) - DRAFT_RECOVER_SLACK_MS;
-  return { ok: true, fromIso: new Date(fromMs).toISOString() };
+// ─── ONE PRESS'S KEY, CUT ONE WAY (253, 2026-09-25) ──────────────────────────────────────────
+// The browser mints one idempotency key per press (calIdemRef) and sends it with the press.
+// calibrate_style_ai files the wallet hold under it (wallet_hold's p_idem) and, since 253, writes it
+// onto the press's ledger row (ai_style_calls.idem_key), and calibrate_style_ai_recover finds that
+// row and that hold by it. Three readers, so one function: a key cut two ways would find nothing.
+// Exactly the expression the hold always used: String(), the first 120 characters, empty is none.
+export function draftIdemKey(raw: unknown): string | null {
+  return String(raw ?? "").slice(0, 120) || null;
 }
 
-// The ledger row calibrate_style_ai_recover reads (select these columns, nothing else).
-export const DRAFT_RECOVER_COLUMNS = "id, called_at, drafted, observed, frames, dims, draft_ms, charged_cents";
+// ─── PICKING A STREAMED DRAFT UP AFTER THE CONNECTION DROPPED (2026-09-25, BY KEY SINCE 253) ──
+// A streamed draft runs three to five minutes, and a phone that backgrounds the tab, or a network
+// that blinks, drops the answer while the server is still working (or after it has finished and
+// charged). Asking again under the same key cannot help: with the meter off (today) it runs the
+// model a second time, and with it on the hold refuses it (hold_in_flight; already_charged only
+// once 248 is applied). But the server writes what it drafted onto the ledger row (226), so the
+// browser reads it back: calibrate_style_ai_recover.
+//
+// ⚠️ THE PRESS IS FOUND BY ITS KEY, NEVER BY TIME. The first cut matched "the newest row of this
+// tenant, user and style since the press began" and guessed the money from timing, and a review
+// confirmed all four ways that goes wrong (253's header): a drop noticed after the budget never
+// asked; a slow poll's clock correction started the window after the row; a captured hold could be
+// told "not charged"; and a LATER press on another tab could be returned. So there is no `since`,
+// no clock and no window any more. The browser mints ONE idempotency key per press (calIdemRef) and
+// sends it with the press; the ledger row carries it (253's idem_key) and wallet_hold files the hold
+// under it (128's idempotency_key). The recover action reads THAT press's rows and THAT press's
+// money, both by the key, both scoped to the tenant and user the server resolved itself.
+
+// How long a row with no draft is still worth waiting on WHEN THE WALLET HAS NO WORD ON IT (the
+// meter is inactive, which is every tenant today): the answer's own deadline plus 100 s, which is
+// the platform's 400 s wall clock. The work runs on past its answer's deadline, but no worker
+// outlives the wall clock, so a row still without draft_ms by then will never get a draft.
+export const DRAFT_RECOVER_PENDING_MS = DRAFT_STREAM_DEADLINE_MS + 100_000;
+// How long a draft may trail the write that says the work is over. NOT a money decision: the
+// sentence about money always comes from the wallet's own state. It only decides whether to keep
+// waiting. On a success the usage write (draft_ms, started without await) and the capture land a
+// moment before `drafted` (one or two round trips), so a row caught in between has finished and
+// is about to show its draft. Every failure exit writes draft_ms and never writes `drafted`, and
+// releases its hold.
+export const DRAFT_RECOVER_SETTLE_MS = 90_000;
+// A key owns one row per attempt: the press, the builder's own retry of a press that failed (the
+// key is kept until a draft lands), the lean retry. More than this under one key is not a press
+// being picked up.
+export const DRAFT_RECOVER_MAX_ROWS = 20;
+
+// The ledger rows calibrate_style_ai_recover reads (select these columns, nothing else).
+export const DRAFT_RECOVER_COLUMNS = "id, called_at, source, drafted, observed, frames, video_count, dims, draft_ms, frame_map";
 export type DraftRecoverRow = {
   id: string;
   called_at: string;
+  source: unknown;
   drafted: unknown;
   observed: unknown;
   frames: unknown;
+  video_count: unknown;
   dims: unknown;
   draft_ms: unknown;
-  charged_cents: unknown;
+  frame_map: unknown;
 };
+// And the press's wallet rows (wallet_transactions under the same key).
+export const DRAFT_RECOVER_MONEY_COLUMNS = "state, posted_at";
+export type DraftRecoverMoneyRow = { state: unknown; posted_at: unknown };
+
+const hasDraft = (r: DraftRecoverRow) => r.drafted !== null && r.drafted !== undefined;
+const calledMsOf = (r: DraftRecoverRow) => {
+  const ms = Date.parse(String(r.called_at ?? ""));
+  return Number.isFinite(ms) ? ms : -Infinity;
+};
+
+// Which of the key's rows answers: the NEWEST, drafted or not. A key can own several (a failed
+// attempt, then the retry of the same intent), and the newest is the attempt the browser is
+// waiting on. Sorted here rather than trusted from the query's order, so the choice is this
+// function's.
+export function pickRecoverRow(rows: DraftRecoverRow[] | null | undefined): DraftRecoverRow | null {
+  const list = (Array.isArray(rows) ? rows : []).filter((r) => r && typeof r === "object");
+  if (!list.length) return null;
+  return [...list].sort((a, b) => calledMsOf(b) - calledMsOf(a))[0];
+}
+
+// Whether the answer will be a recovered draft: the row's `drafted` is our own sanitised spec,
+// read back. When it is not (no row, no draft yet, or a value that is not a spec) the answer is
+// about money, so the handler reads the wallet exactly when this is false.
+export function isRecoverableDraft(row: DraftRecoverRow | null): boolean {
+  if (!row || !hasDraft(row)) return false;
+  const d3 = row.drafted;
+  return typeof d3 === "object" && !Array.isArray(d3) && sanitizeD3Spec(d3).ok;
+}
+
+// What the press's money is doing, from its own wallet rows (128: a hold is a 'held' debit, a
+// capture turns it 'posted', a release 'released'; after 248 a key can own several released rows
+// and at most one that is not). Captured beats held beats released, because one row per attempt
+// and only the latest attempt can still be running. No rows at all is the meter being inactive
+// (every tenant today) or a press refused before its hold. Any other state is not ours to guess.
+export type DraftMoney =
+  | { kind: "captured"; postedMs: number | null }
+  | { kind: "held" }
+  | { kind: "released" }
+  | { kind: "none" }
+  | { kind: "unknown" };
+export function draftMoneyState(rows: DraftRecoverMoneyRow[] | null | undefined): DraftMoney {
+  const list = Array.isArray(rows) ? rows.filter((r) => r && typeof r === "object") : [];
+  if (!list.length) return { kind: "none" };
+  const posted = list.filter((r) => r.state === "posted");
+  if (posted.length) {
+    const times = posted.map((r) => Date.parse(String(r.posted_at ?? ""))).filter((ms) => Number.isFinite(ms));
+    return { kind: "captured", postedMs: times.length ? Math.max(...times) : null };
+  }
+  if (list.some((r) => r.state === "held")) return { kind: "held" };
+  if (list.every((r) => r.state === "released")) return { kind: "released" };
+  return { kind: "unknown" };
+}
+
 export type DraftRecoverAnswer =
   | { kind: "draft"; code: string; severity: "info"; body: Record<string, unknown> }
   | { kind: "pending"; body: { ok: true; pending: true } }
-  | { kind: "lost"; code: string; severity: "info" | "error"; why: string; body: { ok: true; pending: false; message: string } };
+  | {
+    kind: "lost";
+    code: string;
+    severity: "info" | "error";
+    why: string;
+    body: { ok: true; pending: false; reason: string; message: string };
+  };
 
-const RECOVER_LOST = "We could not pick the draft up from the server: that generation did not finish, so you are not charged for it. Press Generate to try again.";
-const RECOVER_CHARGED_UNSAVED = "That generation finished and was charged once, but its draft could not be saved for pickup, so it is gone. You have not been charged twice. Reload this page before pressing Generate again; the next press will be a new charge.";
+// The three sentences a builder can be given, each true for the money state it is chosen by.
+const RECOVER_NOT_CHARGED = "We could not pick the draft up from the server: that generation did not finish, so you are not charged for it. Press Generate to try again.";
+const RECOVER_CHARGED_LOST = "That generation finished and was charged once, but its draft could not be saved for pickup, so it is gone. You have not been charged twice. Reload this page before pressing Generate again; the next press will be a new charge.";
+const RECOVER_UNSURE = "We could not pick the draft up from the server. A generation is only ever charged once, never twice. Reload this page before pressing Generate again.";
+function lostSentence(money: DraftMoney): { message: string; severity: "info" | "error" } {
+  if (money.kind === "captured") return { message: RECOVER_CHARGED_LOST, severity: "error" };
+  if (money.kind === "released" || money.kind === "none") return { message: RECOVER_NOT_CHARGED, severity: "info" };
+  return { message: RECOVER_UNSURE, severity: "error" };
+}
 
-// What the recover action answers for the newest matching row (null: none).
+// The frame map read back off the row, through the parser that made it: the same six viewpoints,
+// the same integer frames bounded by the walk frames that request sent (all of them on "video";
+// the leading `video_count` on "combined", whose trailing images are the builder's photographs),
+// the same azimuths. Our own write, so this changes nothing, but a row is data and is checked.
+function frameMapOfRow(row: DraftRecoverRow): FrameMap | null {
+  const raw = row.frame_map;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const bound = row.source === "combined" ? num(row.video_count) : num(row.frames);
+  return parseFrameMap(JSON.stringify({ frameMap: raw }), bound ?? 0);
+}
+
+// What the recover action answers, for the row pickRecoverRow chose (null: the key has none) and
+// the money draftMoneyState read under the same key.
 //   * DRAFTED: the body calibrate_style_ai's success answered with, rebuilt from the row, field for
-//     field and in the same order, plus `recovered: true`. Two fields are not on the row and are
-//     said to be missing rather than guessed: `dropped` (null: the browser knows how many it sent
-//     and works it out) and `frameMap` (null: the reply text it was read out of is not stored, so the
-//     free self-check is skipped for a recovered draft, and the designer says so). `balanceCents` is
-//     null, as a response that took no money back to the browser always has.
-//   * NOT YET: a row with no draft that may still get one, i.e. younger than
-//     DRAFT_RECOVER_PENDING_MS and not DRAFT_RECOVER_SETTLE_MS past its model phase.
-//   * LOST: no row (the press was refused before its ledger row, its row was deleted with the
-//     refusal, or it never arrived), a model phase that ended without a draft, or a row too old to
-//     wait on. Said plainly, with the charge said honestly: every one of those released its hold (or
-//     never took one), except a draft that was CAPTURED and then failed to reach the ledger.
-export function recoverDraftAnswer(row: DraftRecoverRow | null, nowMs: number): DraftRecoverAnswer {
-  const lost = (why: string, severity: "info" | "error" = "info", message = RECOVER_LOST): DraftRecoverAnswer =>
-    ({ kind: "lost", code: "ai_draft_recover_none", severity, why, body: { ok: true, pending: false, message } });
+//     field and in the same order, plus `recovered: true`. `frameMap` is the row's own (253), so the
+//     free self-check RUNS on a recovered draft exactly as on a live answer; it is null on a row
+//     written before 253, when the reply carried no map, and on a row older than the check's claim
+//     window (SELF_CHECK_CLAIM_WINDOW_MS, whose claim would refuse it), and then the designer skips
+//     the check and says why. `dropped` is null (the browser knows what it sent) and `balanceCents`
+//     null, as a response that took no money back to the browser always has. Money is not read.
+//   * NO DRAFT, by what the money says:
+//       captured  charged. Pending for DRAFT_RECOVER_SETTLE_MS after the capture (the draft is
+//                 written a moment after it), then "charged once, and lost" -- an error row.
+//       held      the work is still running: pending.
+//       released  the draft failed and its hold went back: not charged.
+//       none      nothing was held (the meter is inactive, or the press was refused), so "not
+//                 charged" is true whatever happened, and only the ledger says whether to wait:
+//                 draft_ms written means the work ended (pending for the settle window, then
+//                 failed); no draft_ms is pending until the 400 s wall clock, then lost.
+//   * NO ROW for the key: `reason: "no_row"`. Not an answer the shell acts on at once: its press's
+//     insert may not have landed, so it keeps asking for 90 s from the press. The sentence is
+//     chosen by the money like any other.
+//   Every `lost` body carries `reason` (why) beside its sentence.
+export function recoverDraftAnswer(row: DraftRecoverRow | null, money: DraftMoney, nowMs: number): DraftRecoverAnswer {
+  const lost = (why: string, said = lostSentence(money)): DraftRecoverAnswer => ({
+    kind: "lost", code: "ai_draft_recover_none", severity: said.severity, why,
+    body: { ok: true, pending: false, reason: why, message: said.message },
+  });
+  const pending: DraftRecoverAnswer = { kind: "pending", body: { ok: true, pending: true } };
   if (!row) return lost("no_row");
-  const calledMs = Date.parse(String(row.called_at ?? ""));
-  const ageMs = Number.isFinite(calledMs) ? nowMs - calledMs : Infinity;
-  if (row.drafted !== null && row.drafted !== undefined) {
-    const d3 = row.drafted;
-    // Our own sanitised write, read back. Anything else is a fault, never a draft to apply.
-    if (typeof d3 !== "object" || Array.isArray(d3) || !sanitizeD3Spec(d3).ok) return lost("unreadable", "error");
+  if (isRecoverableDraft(row)) {
     const dims = parseKnownDims(row.dims);
+    const checkable = nowMs - calledMsOf(row) < SELF_CHECK_CLAIM_WINDOW_MS;
     return {
       kind: "draft", code: "ai_draft_recovered", severity: "info",
       body: {
         ok: true,
-        d3,
+        d3: row.drafted,
         frames: typeof row.frames === "number" ? row.frames : null,
         dropped: null,
         observed: row.observed ?? null,
         balanceCents: null,
         dims: dims.ok ? dims.dims : null,
-        frameMap: null,
+        frameMap: checkable ? frameMapOfRow(row) : null,
         checkId: row.id,
         recovered: true,
       },
     };
   }
-  const draftMs = typeof row.draft_ms === "number" && Number.isFinite(row.draft_ms) ? row.draft_ms : null;
-  const settled = draftMs !== null && ageMs > draftMs + DRAFT_RECOVER_SETTLE_MS;
-  if (!settled && ageMs < DRAFT_RECOVER_PENDING_MS) return { kind: "pending", body: { ok: true, pending: true } };
-  // Charged and no draft: the capture ran and the 226 write did not (ai_style_result_log_failed).
-  if (row.charged_cents !== null && row.charged_cents !== undefined) {
-    return lost("charged_unsaved", "error", RECOVER_CHARGED_UNSAVED);
+  // A draft that is not our own sanitised write is a fault, never a draft to apply.
+  if (hasDraft(row)) {
+    const said = lostSentence(money);
+    return lost("unreadable", { message: said.message, severity: "error" });
   }
-  return lost(draftMs !== null ? "failed" : "stale");
+  if (money.kind === "captured") {
+    // Charged, and the draft has not reached the row. A moment behind the capture on a success;
+    // past the settle window the capture ran and the 226 write did not (ai_style_result_log_failed).
+    const settled = money.postedMs === null || nowMs - money.postedMs > DRAFT_RECOVER_SETTLE_MS;
+    return settled ? lost("charged_unsaved") : pending;
+  }
+  if (money.kind === "held") return pending;
+  if (money.kind === "released") return lost("failed");
+  if (money.kind === "unknown") return lost("money_unknown");
+  // Nothing held under this key: the ledger alone says whether a draft can still come.
+  const calledMs = calledMsOf(row);
+  const ageMs = Number.isFinite(calledMs) ? nowMs - calledMs : Infinity;
+  const draftMs = typeof row.draft_ms === "number" && Number.isFinite(row.draft_ms) ? row.draft_ms : null;
+  if (draftMs !== null) return ageMs > draftMs + DRAFT_RECOVER_SETTLE_MS ? lost("failed") : pending;
+  return ageMs < DRAFT_RECOVER_PENDING_MS ? pending : lost("stale");
 }
 
 // THE LEGACY RULER, EXACTLY AS IT SHIPPED ON 2026-09-19 (d3ab404), for callers the gate keeps on
@@ -1810,6 +1905,11 @@ export const SELF_CHECK_MAX_FIELDS = 8;
 // before any database call, and the claim is a compare-and-swap on `self_check_round`, so the
 // counter itself cannot pass it either.
 export const SELF_CHECK_MAX_ROUNDS = 3;
+
+// How young a generation must be for calibrate_style_check to claim it (`called_at` newer than
+// now minus this). One constant, because recoverDraftAnswer reads it too: a draft picked up after
+// this has no frame map, so the designer skips the check instead of asking for one the claim refuses.
+export const SELF_CHECK_CLAIM_WINDOW_MS = 15 * 60_000;
 
 // Which round a request is for. ABSENT MEANS ROUND 0, and that is the whole backwards-
 // compatibility story: production's older browser sends no `round`, so it keeps exactly the

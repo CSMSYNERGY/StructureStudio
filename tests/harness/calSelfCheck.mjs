@@ -33,6 +33,11 @@
 //       a later round that fails keeps the earlier round's corrections
 //   11. the six viewpoints: `back` and `otherSide` get renders and pairs, in order, and six
 //       renders stay inside the server's raised total
+//   12. ⚠️ A DRAFT PICKED UP AFTER ITS STREAM DROPPED (2026-09-25, 253). The streamed press is
+//       served a heartbeat and half its JSON; calibrate_style_ai_recover, asked by the press's own
+//       key, hands the draft back off its ledger row WITH the frame map the row kept -- and the
+//       free check runs on it exactly as on a live answer: the same row, round 0, one render per
+//       labelled view, the pairs on screen, and no "did not run" note
 //
 // Stubbed at the NETWORK layer, like calDims.mjs: no account, no login, no writes, and the
 // artifacts under test are the compiled bundles the browser really loads. A change that was
@@ -121,6 +126,11 @@ let draftObserved = { roofNote: "Gambrel, read from the ground.", porch: "projec
 // read between them.
 let checkPlan = null;
 let checkDelayMs = 0;
+// THE DROP (12): the next streamed press is served the heartbeat and half its JSON, and the recover
+// action answers with that same draft as its ledger row gives it back -- the frame map included.
+let dropNext = false;
+let recoverAnswer = null;
+const recoverCalls = [];
 const MATCHES = { ok: true, verdict: "matches", d3: null, changed: [], checked: {}, note: "", renders: 3, ms: 700 };
 
 // How many pixels differ between two JPEG data URLs, as a fraction. Decoded with the same
@@ -213,6 +223,17 @@ async function main() {
           balanceCents: 18000, dims: body.dims || null,
           frameMap: draftFrameMap, checkId: CHECK_ID,
         };
+        // THE CONNECTION DROPS mid-body (12): what the page's parser is left holding. The draft is on
+        // the server's ledger row, and that is what the recover action hands back: the success
+        // body, less what a pickup cannot know (`dropped`, `balanceCents`), frame map and all.
+        if (dropNext && body.stream === true) {
+          dropNext = false;
+          recoverAnswer = { ...drafted, dropped: null, balanceCents: null, recovered: true };
+          return route.fulfill({
+            status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" },
+            body: "          " + JSON.stringify(drafted).slice(0, 40),
+          });
+        }
         // STREAMED when asked (2026-09-25), the way the server writes it (heartbeatJson.ts): a 200,
         // a heartbeat of spaces, then the JSON. So the whole flow below -- the check, the compare
         // pairs, the rounds -- runs off a draft that arrived through the streamed shape.
@@ -223,6 +244,10 @@ async function main() {
           });
         }
         return json(route, drafted);
+      }
+      if (a === "calibrate_style_ai_recover") {
+        recoverCalls.push(body);
+        return json(route, recoverAnswer || { ok: true, pending: true });
       }
       if (a === "calibrate_style_check") {
         checkCalls.push(body);
@@ -1200,6 +1225,29 @@ async function main() {
   // The server's total rises in proportion to the views (contract §3): 1.2 MB for four is 1.8 MB for six.
   r.ok("and the six inside the raised 1.8 MB total", sixBytes.reduce((a, b) => a + b, 0) < 1800, sixBytes.reduce((a, b) => a + b, 0) + " KB");
   draftFrameMap = FRAME_MAP;
+
+  // ── 12: A DRAFT PICKED UP AFTER ITS STREAM DROPPED RUNS THE CHECK, EXACTLY AS A LIVE ONE ──
+  // Before 253 the ledger row kept no frame map, so a recovered draft skipped the check with a
+  // note. The row keeps it now and the recover action hands it back: same row, same renders.
+  draftFrameMap = FRAME_MAP;
+  checkReply = MATCHES;
+  dropNext = true;
+  const recovers0 = recoverCalls.length;
+  const rc = await press();
+  const rcAsks = recoverCalls.slice(recovers0);
+  r.ok("⚠️ THE STREAMED PRESS DROPPED, and the draft was asked for by the press's own key",
+    rcAsks.length === 1 && Boolean(rc.gen) && rc.gen.stream === true && rcAsks[0].idempotencyKey === rc.gen.idempotencyKey && !("since" in rcAsks[0]),
+    JSON.stringify(rcAsks[0] || null));
+  r.ok("⚠️ A RECOVERED DRAFT WITH ITS FRAME MAP RUNS THE FREE CHECK, on the ledger row it came from, round 0",
+    Boolean(rc.check) && rc.check.checkId === CHECK_ID && rc.check.round === 0, JSON.stringify(rc.check && { checkId: rc.check.checkId, round: rc.check.round }));
+  const rcRenders = (rc.check && rc.check.renders) || [];
+  r.ok("one render per labelled viewpoint, each naming its frame, as for a live answer",
+    rcRenders.map((x) => x.viewpoint).join(",") === "front,side,eaveCorner" && rcRenders.every((x) => x.frame === FRAME_MAP[x.viewpoint].frame),
+    rcRenders.map((x) => `${x.viewpoint}:${x.frame}`).join(","));
+  const rcPairs = await page.evaluate(() => Array.from(document.querySelectorAll("[data-ssc-pair]")).map((el) => el.getAttribute("data-ssc-pair")));
+  r.ok("the pairs are on screen", rcPairs.join(",") === "front,side,eaveCorner", rcPairs.join(","));
+  const rcText = await text();
+  r.ok("and no note that the check did not run", !/did not run this time/.test(rcText) && /Read \d+ view/.test(rcText));
 
   // ── THE CAPTION'S NUMBER IS STEP 1'S NUMBERING, EVEN WHEN THE LAP IS STRIDED ─────────
   // `pair.frame` is a 1-based index into the array THIS REQUEST WAS SENT, and calGenerateSet

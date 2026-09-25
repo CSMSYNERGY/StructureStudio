@@ -92,8 +92,16 @@ import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftC
 // gateway's 150 s of silence (see draftAnswer below).
 import { wantsStreamedDraft, DRAFT_STREAM_DEADLINE_MS } from "../_shared/styleD3.ts";
 import { heartbeatJsonResponse } from "../_shared/heartbeatJson.ts";
-// Draft recovery (2026-09-25): a streamed draft whose connection dropped is read back off its ledger row.
-import { parseRecoverSince, recoverDraftAnswer, DRAFT_RECOVER_COLUMNS, type DraftRecoverRow } from "../_shared/styleD3.ts";
+// Draft recovery (2026-09-25): a streamed draft whose connection dropped is read back off its ledger row,
+// found by the press's own idempotency key (253).
+import {
+  draftMoneyState, isRecoverableDraft, pickRecoverRow, recoverDraftAnswer, DRAFT_RECOVER_COLUMNS, DRAFT_RECOVER_MAX_ROWS,
+  DRAFT_RECOVER_MONEY_COLUMNS, type DraftMoney, type DraftRecoverMoneyRow, type DraftRecoverRow,
+} from "../_shared/styleD3.ts";
+// How young a generation must be for the self-check to claim it; the recover action reads it too.
+import { SELF_CHECK_CLAIM_WINDOW_MS } from "../_shared/styleD3.ts";
+// The press's idempotency key, cut one way for the ledger row, the wallet hold and the pickup (253).
+import { draftIdemKey } from "../_shared/styleD3.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
@@ -3551,62 +3559,83 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, uploads, path: first?.path, token: first?.token, url: first?.url });
   }
 
-  // ── PICK UP A STREAMED DRAFT WHOSE ANSWER NEVER ARRIVED (2026-09-25) ─────────────────────────
+  // ── PICK UP A STREAMED DRAFT WHOSE ANSWER NEVER ARRIVED (2026-09-25, BY KEY SINCE 253) ─────────
   // A streamed draft (calibrate_style_ai below, answered by draftAnswer) takes three to five
   // minutes behind its heartbeat, and a phone that backgrounds the tab or a network that blinks
   // drops that answer while the server works on, or after it has finished and charged. The same
-  // key asked again either runs the model a second time or meets hold_in_flight / already_charged.
-  // But the server writes what it drafted onto the generation's ledger row, so the new shell,
-  // instead of telling the builder to try again, asks HERE every ten seconds until the draft is
-  // there, the server says it never will be, or the press's own seven minutes run out.
+  // key asked again runs the model a second time with the meter off (today), and with it on the
+  // hold refuses it (hold_in_flight; already_charged only once 248 is applied). But the server
+  // writes what it drafted onto the generation's ledger row, so the new shell, instead of telling
+  // the builder to try again, asks HERE: at once when the answer drops, then every ten seconds
+  // until the draft is there, the server says it never will be, or the press's own seven minutes
+  // run out (and while the asks themselves fail, at least a minute from the first).
   //
-  // ⛔ ONLY THE CALLER'S OWN ROW. The gate is calibrate_style_ai's (GATES), and the row is filtered
-  // on the RESOLVED tenant and the RESOLVED user -- never on anything in the body -- plus the style,
-  // the shape-first sources and the press's own start. So an operator in view-as reads only the
-  // rows they generated there, and no caller can reach another user's or another tenant's draft.
-  // The body names only the style and when the press began (parseRecoverSince bounds it).
+  // ⚠️ THE PRESS IS FOUND BY ITS OWN KEY (253), and nothing here reads a clock the browser sent.
+  // The body names the style and the idempotency key the press went out with; the ledger insert
+  // below writes that key onto the press's row and wallet_hold files the hold under it, so the rows
+  // read here are that press's and nobody else's -- never a later press on another tab or device,
+  // which mints its own key -- and the sentence about money comes from that press's wallet rows,
+  // never from how long ago anything happened (styleD3.ts's recoverDraftAnswer has the table).
   //
-  // No new column, no migration, no model call and no money: a read of 226's `drafted` and the
-  // columns the success answer was built from, and what recoverDraftAnswer (styleD3.ts) makes of
-  // it: the success body rebuilt with `recovered: true`, `{pending: true}`, or `{pending: false}`
-  // with a sentence for the builder. One coded row per answer that ends the wait (none per poll).
+  // ⛔ ONLY THE CALLER'S OWN ROWS. The gate is calibrate_style_ai's (GATES), and both reads are
+  // filtered on the RESOLVED tenant and the RESOLVED user -- never on anything in the body -- plus
+  // the key, the style and the shape-first sources. So an operator in view-as reads only the rows
+  // they generated there, and a key from another tenant or user finds nothing.
+  //
+  // No model call and no money: two reads (the wallet only when the answer will not be a recovered
+  // draft) and one coded row per answer that ends the wait (none for `pending`).
   if (action === "calibrate_style_ai_recover") {
     // The style exactly as calibrate_style_ai writes it into `style_key`: the same String(), the
     // same 120-character cut, and no trim, or a style whose key has a trailing space finds nothing.
     const styleKey = String(payload.styleValue ?? "").slice(0, 120);
     if (!styleKey) return json({ error: "styleValue is required." }, 400);
-    const sinceRead = parseRecoverSince(payload.since, payload.clientNow, Date.now());
-    if (!sinceRead.ok) return json({ error: sinceRead.error }, 400);
-    const { data: rows, error: recErr } = await admin.from("ai_style_calls")
-      .select(DRAFT_RECOVER_COLUMNS)
-      .eq("client_id", clientId).eq("user_id", userId).eq("style_key", styleKey)
-      .in("source", ["video", "combined"])
-      .gte("called_at", sinceRead.fromIso)
-      .order("called_at", { ascending: false })
-      .limit(1);
-    if (recErr) {
-      // Not an answer about the draft, so not `pending: false`: the shell keeps asking.
+    // The key exactly as the insert and wallet_hold cut it (draftIdemKey).
+    const idemKey = draftIdemKey(payload.idempotencyKey);
+    if (!idemKey) return json({ error: "idempotencyKey (the press's own key) is required." }, 400);
+    if (!userId) return json({ error: "Sign in again to pick your draft up." }, 401);
+    // Not an answer about the draft, so never `pending: false`: the shell keeps asking.
+    const unreadable = async (what: string, message: string) => {
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: "ai_draft_recover_failed",
-        message: `Could not read the ledger to pick a draft up: ${recErr.message}`,
+        message: `Could not read ${what} to pick a draft up: ${message}`,
       });
       const failed = json({ error: "We could not check on your draft just now." }, 503);
       filedAtReturnSite.add(failed);
       return failed;
+    };
+    const { data: rows, error: recErr } = await admin.from("ai_style_calls")
+      .select(DRAFT_RECOVER_COLUMNS)
+      .eq("client_id", clientId).eq("user_id", userId).eq("idem_key", idemKey).eq("style_key", styleKey)
+      .in("source", ["video", "combined"])
+      .order("called_at", { ascending: false })
+      .limit(DRAFT_RECOVER_MAX_ROWS);
+    if (recErr) return await unreadable("the ledger (migration 253 may not be applied)", recErr.message);
+    const row = pickRecoverRow(rows as DraftRecoverRow[] | null);
+    // The money, whenever the answer will not be a recovered draft (isRecoverableDraft: the same
+    // test recoverDraftAnswer makes), so an unreadable draft on a charged press is said as charged.
+    // A draft to hand back is the answer whatever the wallet says. The press's own debit rows
+    // under the same key (wallet_hold's p_idem).
+    let money: DraftMoney = { kind: "none" };
+    if (!isRecoverableDraft(row)) {
+      const { data: tx, error: txErr } = await admin.from("wallet_transactions")
+        .select(DRAFT_RECOVER_MONEY_COLUMNS)
+        .eq("client_id", clientId).eq("idempotency_key", idemKey).eq("actor_user_id", userId)
+        .eq("meter_kind", "video_3d_generation").eq("kind", "debit");
+      if (txErr) return await unreadable("the wallet", txErr.message);
+      money = draftMoneyState(tx as DraftRecoverMoneyRow[] | null);
     }
-    const row = (Array.isArray(rows) && rows.length ? rows[0] : null) as DraftRecoverRow | null;
-    const out = recoverDraftAnswer(row, Date.now());
+    const out = recoverDraftAnswer(row, money, Date.now());
     if (out.kind === "draft") {
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: out.code, severity: out.severity,
         message: "A streamed draft whose answer never reached the browser was picked up from the ledger.",
-        context: { checkId: row?.id ?? null, calledAt: row?.called_at ?? null },
+        context: { checkId: row?.id ?? null, calledAt: row?.called_at ?? null, frameMap: out.body.frameMap !== null },
       });
     } else if (out.kind === "lost") {
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: out.code, severity: out.severity,
         message: `A streamed draft could not be picked up from the ledger (${out.why}).`,
-        context: { why: out.why, checkId: row?.id ?? null, calledAt: row?.called_at ?? null, draftMs: row?.draft_ms ?? null },
+        context: { why: out.why, money: money.kind, checkId: row?.id ?? null, calledAt: row?.called_at ?? null, draftMs: row?.draft_ms ?? null },
       });
     }
     return json(out.body);
@@ -3737,7 +3766,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // drift, RLS change) still let the model call proceed -- unmetered spend on exactly the
     // path the ledger exists to meter (audit 2026-08-19). Refusing is the safe side; the
     // cap query above already failed soft for the read case.
-    const { data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert({ client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null, source: combined ? "combined" : fromVideo ? "video" : "photos" }).select("id").single();
+    //
+    // ── THE PRESS'S KEY RIDES ON ITS ROW (253, 2026-09-25) ────────────────────────────────────
+    // `idem_key` is the key wallet_hold files this press's hold under (draftIdemKey: the same
+    // String() and 120-character cut, used for both), so calibrate_style_ai_recover can find THIS
+    // press's row, and its money, after a dropped stream -- by key, never by time. Production's
+    // older shell sends a key too, so its rows simply get the column filled. A request with no key
+    // (the photos path's older callers) inserts exactly the object it always did.
+    //
+    // ⚠️ A MISSING COLUMN MUST NEVER FAIL A GENERATION. This insert IS the spend cap and a failure
+    // here is a 503, so a deploy landing before 253 would refuse every press. PostgREST refuses the
+    // whole statement when one key names a column it cannot find (PGRST204), so on ANY failure with
+    // the key in it the insert is tried once more without it -- the dims write below (247) does the
+    // same -- and one info row names the migration. A second failure is the ledger really being
+    // down, and refuses exactly as before. Without the key the row cannot be picked up after a drop
+    // (the recover action answers no_row), which is the price of a migration not applied yet.
+    const idemKey = draftIdemKey(payload.idempotencyKey);
+    const ledgerInsert: Record<string, unknown> = { client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null, source: combined ? "combined" : fromVideo ? "video" : "photos" };
+    let { data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert(idemKey ? { ...ledgerInsert, idem_key: idemKey } : ledgerInsert).select("id").single();
+    if (ledgerErr && idemKey) {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ai_style_idem_key_write_failed", severity: "info",
+        message: `Could not record the press's key on its ledger row - retrying without it; migration 253 may not be applied: ${ledgerErr.message}`,
+      });
+      ({ data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert(ledgerInsert).select("id").single());
+    }
     if (ledgerErr) return json({ error: "The AI drafting meter is unavailable right now - try again shortly." }, 503);
 
     // ── WALLET HOLD ────────────────────────────────────────────────────────────────
@@ -3770,7 +3823,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // for. One press is one hold is one charge, whichever inputs it read.
     if (shapeFirst) {
       const { data: hold, error: holdErr } = await admin
-        .rpc("wallet_hold", { p_client_id: clientId, p_kind: "video_3d_generation", p_idem: String(payload.idempotencyKey ?? "").slice(0, 120) || null, p_user: userId ?? null })
+        .rpc("wallet_hold", { p_client_id: clientId, p_kind: "video_3d_generation", p_idem: idemKey, p_user: userId ?? null })
         .maybeSingle() as { data: any; error: any };
       if (holdErr) {
         await logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_hold_failed", message: `Wallet hold failed, refusing the generation: ${holdErr.message}` });
@@ -3806,8 +3859,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // the ledger row, but nothing reads it back: openCalEditor seeds from building_styles.d3,
       // which is only written on Save. So the honest answer is what it costs to try again, said
       // before they press rather than after. (calibrate_style_ai_recover, 2026-09-25, reads
-      // `drafted` back off the row, but only for the press whose STREAMED answer dropped, and only
-      // while that press is still waiting on it. A press that reaches this line is a new press.)
+      // `drafted` back off the row by the press's key, but only for a press whose STREAMED answer
+      // dropped, while the page that sent it is still open. A press that reaches this line is a
+      // new press that got this answer, and its own row is deleted just below.)
       //
       // No capture and no release: there is no live hold here, only a posted row.
       if (err === "hold_replayed") {
@@ -4318,9 +4372,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       : null;
 
     // ── WHICH FRAME GOES WITH WHICH VIEW (2026-09-19) ────────────────────────────
-    // Read out of the same reply, at no extra call. Nothing here is stored and nothing reaches
-    // the spec — sanitizeD3Spec drops it — so an older browser that ignores the field behaves
-    // exactly as it does today.
+    // Read out of the same reply, at no extra call. Nothing here reaches the spec —
+    // sanitizeD3Spec drops it — so an older browser that ignores the field behaves exactly as it
+    // does today. Since 253 it is also kept on the ledger row (`frame_map`, its own write below),
+    // so a draft picked up after its connection dropped can still run the free self-check.
     //
     // ⚠️ THE BOUND IS HOW MANY WALK FRAMES WERE SENT, not how many images were. On `combined`
     // the browser says so and the trailing images are the builder's own photographs, which must
@@ -4337,6 +4392,35 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // already own. A photos generation gets null rather than a token for an action that would
     // refuse it: a capability for something that cannot happen is an invitation to a 409.
     const checkId = shapeFirst ? (ledgerRow?.id ?? null) : null;
+
+    // ── THE FRAME MAP, KEPT FOR A DRAFT PICKED UP AFTER A DROP (253, 2026-09-25) ────────────────
+    // The free self-check cannot pair a render with a frame without it, and until 253 it lived only
+    // in the answer: a streamed draft whose answer dropped came back through
+    // calibrate_style_ai_recover with no map, and the check was skipped. Now the recover action
+    // hands the row's own map back and the check runs as it does on a live answer.
+    //
+    // ⚠️ ITS OWN UPDATE, BEFORE `drafted` IS WRITTEN, so a pickup that sees the draft sees its map
+    // too. And nothing here can reach the write below: a column that is missing (253 not applied),
+    // a write that fails or a throw costs the MAP and never the draft, and never the builder's
+    // answer -- one info row, and the recovered draft skips the check with a note, exactly as
+    // every draft did before 253. No map (a photos draft, a reply that carried none) is no write,
+    // so those requests keep yesterday's round trips.
+    if (ledgerRow?.id && frameMap) {
+      try {
+        const { error: mapErr } = await admin.from("ai_style_calls").update({ frame_map: frameMap }).eq("id", ledgerRow.id);
+        if (mapErr) {
+          await logEdgeError({
+            fn: "portal-settings", req, clientId, code: "ai_style_frame_map_write_failed", severity: "info",
+            message: `Could not keep the frame map on the generation; migration 253 may not be applied: ${mapErr.message}`,
+          });
+        }
+      } catch (e) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_style_frame_map_write_failed", severity: "info",
+          message: `Frame-map write threw: ${String(e instanceof Error ? e.message : e)}`,
+        });
+      }
+    }
 
     // ── RECORD WHAT IT SAID, not just that it ran (226) ───────────────────────────────────
     // The drafted spec goes back to the browser and lands in an in-memory draft. Unless the
@@ -4634,7 +4718,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // check needs. Scoping on `style_key` as well as `client_id` costs nothing and stops a
     // caller pairing one generation's draft with another style's frames — both its own, so not
     // a breach, but a comparison of two different buildings presented as one.
-    const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const since = new Date(Date.now() - SELF_CHECK_CLAIM_WINDOW_MS).toISOString();
     // A COMPARE-AND-SWAP ON THE ROUND (v2). `self_check_round` counts the rounds claimed, so
     // round k is claimable only while it is exactly k, and claiming it makes it k+1 — two
     // requests for one round cannot both get a row back, and no round can ever run twice.

@@ -1726,12 +1726,13 @@ function Dashboard({ session }) {
       const body = { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined, dims: d, frame: "front" };
       if (opts && opts.lean) body.lean = true;
       else body.stream = true;
-      // WHEN THIS PRESS BEGAN, recorded BEFORE it is sent: the ledger row it creates is stamped
-      // after this, so "the newest row since then" is this press's row (calibrate_style_ai_recover).
-      const since = new Date().toISOString();
+      // WHEN THIS PRESS WENT OUT, on this browser's clock and for this browser alone: how long a
+      // `no_row` pickup answer is still waited on (the press's own ledger row may not have landed
+      // yet). Never sent anywhere -- the server finds the press by its key, not by any clock.
+      const pressedAt = Date.now();
       // The success envelope, built in ONE place for both ways a draft can arrive: the answer
       // itself, or the ledger row after a dropped stream. The designer cannot tell them apart,
-      // except by `recovered`, which only tells it why the free check has nothing to pair with.
+      // except by `recovered`, which only tells it why the free check may have nothing to pair with.
       const envelope = (got, extra) => ({
         d3: got.d3, frames: got.frames || 0, dropped: got.dropped || 0,
         observed: got.observed || null, dims: got.dims || null,
@@ -1739,41 +1740,77 @@ function Dashboard({ session }) {
         ...(extra || {}),
       });
       const { data, error } = await sb.functions.invoke("portal-settings", { body });
-      // ── A STREAMED ANSWER THAT NEVER ARRIVED (2026-09-25) ──────────────────────────────────
+      // ── A STREAMED ANSWER THAT NEVER ARRIVED (2026-09-25; by the press's own key since 253) ─────
       // Two ways: the body broke off (the connection dropped: supabase-js hands back the JSON
       // parser's own error, or the body read's), or the server closed it at its own deadline with
       // `stream_deadline` while the work ran on. Either way the server may still be working, or may
       // have finished and charged, so the builder is NOT told to try again (a retry under the same
-      // key re-runs the model or meets already_charged). The draft is picked up from its ledger
-      // row instead: calibrate_style_ai_recover every ten seconds, until it hands back the draft
-      // (returned exactly as the answer would have been), says it never will (`pending: false`: its
-      // sentence, and the designer keeps the key), or the press's own budget runs out.
+      // key re-runs the model, or with the meter on is refused by the hold). The draft is picked up
+      // from its ledger row instead: calibrate_style_ai_recover, asked with THIS PRESS'S OWN
+      // idempotency key -- the key its ledger row and its wallet hold carry -- so it can only ever
+      // answer about this press.
       //
-      // Only a streamed press, never the lean retry, and only with the designer's `recover` hooks:
-      // `alive()` goes false when the designer unmounts or another press takes over, which stops
-      // the polling; `until` is the press's deadline (SS_FLOW_MAX_MS from the press);
-      // `onRecovering()` switches its progress card to the pickup copy.
+      // ⚠️ THE FIRST ASK GOES AT ONCE, WHATEVER `until` SAYS. A phone that slept through the whole
+      // press notices the drop minutes after the press's budget ran out, and its paid draft is
+      // sitting on the row: it gets one ask, and the draft if it is there. `until` (the press's
+      // SS_FLOW_MAX_MS) bounds how long this keeps asking again while the server says `pending`,
+      // every ten seconds. An ask that FAILED (no answer, or a non-2xx: the connection that dropped
+      // may still be down) is no word from the server, so after one the asking goes on to at least
+      // a minute from the first ask, however late the drop was noticed.
+      //
+      // It ends on the draft (returned exactly as the answer would have been), on `pending: false`
+      // (the server's own sentence, whose money wording comes from the wallet; the designer keeps
+      // the key), or on the budget. `no_row` is the one `pending: false` it does not take at once:
+      // for 90 s from the press the press's own row may simply not be written yet.
+      //
+      // Only a streamed press with a key, never the lean retry, and only with the designer's
+      // `recover` hooks: `alive()` goes false when the designer unmounts or another press takes
+      // over, which stops it before the next ask; `onRecovering()` switches its progress card to the
+      // pickup copy.
+      //
+      // ONE CLIENT ROW when it ends with no verdict from the server: draft_recover_timeout (an
+      // error: the builder was told nothing about their draft), or draft_recover_abandoned (info:
+      // the page moved on). A verdict needs none: the server files its own.
       const brokeOff = Boolean(error && body.stream && (error.name === "SyntaxError" || error.name === "TypeError"));
       const closedAtDeadline = Boolean(!error && body.stream && data && typeof data === "object" && data.code === "stream_deadline");
       if (brokeOff || closedAtDeadline) {
         const rec = opts && opts.recover;
-        if (!rec || typeof rec.alive !== "function") {
+        if (!rec || typeof rec.alive !== "function" || !body.idempotencyKey) {
           throw new Error("Your connection dropped before the draft arrived, so we could not show it. If it finished, you were charged for it once.");
         }
-        if (typeof rec.onRecovering === "function") rec.onRecovering();
-        const every = (typeof window !== "undefined" && Number(window.__ssRecoverPollMs)) || 10000;
-        const until = Number(rec.until) || 0;
-        for (;;) {
-          const wait = Math.min(every, until - Date.now());
-          if (!(wait > 0)) break;
-          await new Promise((r) => setTimeout(r, wait));
-          if (!rec.alive()) throw new Error("Stopped picking the draft up: this press is no longer on screen.");
-          let got = null;
+        let asked = 0;
+        let got = null;
+        const filed = (code, message, severity) => {
           try {
-            const r = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai_recover", styleValue, since, clientNow: Date.now() } });
+            ssLogError("portal", message, code, { fn: "portal-settings", action: "calibrate_style_ai_recover", asks: asked, last: asked ? (got ? (got.reason || "pending") : "failed") : null }, severity);
+          } catch (_l) { /* a log line must never cost the press */ }
+        };
+        const gone = () => {
+          filed("draft_recover_abandoned", "Stopped picking a dropped draft up: the press is no longer on screen.", "info");
+          return new Error("Stopped picking the draft up: this press is no longer on screen.");
+        };
+        if (!rec.alive()) throw gone();
+        if (typeof rec.onRecovering === "function") rec.onRecovering();
+        const hooks = typeof window !== "undefined" ? window : {};
+        const every = Number(hooks.__ssRecoverPollMs) || 10000;
+        const noRowMs = Number(hooks.__ssRecoverNoRowMs) || 90000;
+        const until = Number(rec.until) || 0;
+        const firstAskAt = Date.now();
+        for (;;) {
+          if (asked > 0) {
+            const end = got ? until : Math.max(until, firstAskAt + 60000);
+            const wait = Math.min(every, end - Date.now());
+            if (!(wait > 0)) break;
+            await new Promise((r) => setTimeout(r, wait));
+            if (!rec.alive()) throw gone();
+          }
+          asked++;
+          got = null;
+          try {
+            const r = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai_recover", styleValue, idempotencyKey: body.idempotencyKey } });
             got = r && !r.error ? r.data : null;
           } catch (_e) { got = null; }
-          if (!rec.alive()) throw new Error("Stopped picking the draft up: this press is no longer on screen.");
+          if (!rec.alive()) throw gone();
           // THE DRAFT. `dropped` is not on the ledger row, so it is worked out from what was sent.
           if (got && got.ok && got.d3) {
             return envelope(got, {
@@ -1781,12 +1818,14 @@ function Dashboard({ session }) {
               recovered: true,
             });
           }
-          if (got && got.pending === false) {
+          const young = Date.now() - pressedAt < noRowMs;
+          if (got && got.pending === false && !(got.reason === "no_row" && young)) {
             throw new Error(got.message || "We could not pick the draft up from the server. Press Generate to try again.");
           }
-          // `pending: true`, or this poll failed on the way (the connection that dropped may still
-          // be down): ask again while the press has time.
+          // `pending: true`, a young `no_row`, or this ask failed on the way (the connection that
+          // dropped may still be down): ask again while the press has time.
         }
+        filed("draft_recover_timeout", "A dropped draft was not picked up before the asking ran out, with no answer from the server about it.", "error");
         throw new Error("Your connection dropped and the draft did not reach us in time. Pressing Generate again will not charge you twice for this press.");
       }
       // `ssRetryable` IS THE SERVER'S WORD, NEVER A GUESS FROM THE STATUS. A 502 is also a model

@@ -31,14 +31,18 @@
 //      status it would have had. A `retryable` failure there must still earn exactly ONE lean retry
 //      under the SAME key, the lean retry must not ask for a stream, and a failure that is not
 //      retryable is shown in the server's own words and never resent.
-//   9. ⚠️ THE STREAMED ANSWER DROPS (2026-09-25). The route serves the heartbeat's spaces and then
-//      the body breaks off mid-JSON (what the page's parser sees when a connection dies mid-body),
-//      or the server's own deadline body (`stream_deadline`). The builder must NOT be told to try
-//      again: the progress card says the draft is being picked up, calibrate_style_ai_recover is
-//      polled with the press's `since`, and the draft it hands back is applied exactly as an answer
-//      would have been -- the success line, the key cleared, the check skipped with a note saying
-//      why. A server that says the draft will never come is shown in its own words, and the key
-//      is kept. The drop's own client log row is filed, as the transport fault it is.
+//   9. ⚠️ THE STREAMED ANSWER DROPS (2026-09-25; by the press's key since 253). The route serves the
+//      heartbeat's spaces and then the body breaks off mid-JSON (what the page's parser sees when a
+//      connection dies mid-body), or the server's own deadline body (`stream_deadline`). The builder
+//      must NOT be told to try again: the progress card says the draft is being picked up, and
+//      calibrate_style_ai_recover is asked AT ONCE and then every poll interval, with THE PRESS'S OWN
+//      idempotency key and no clock at all. The draft it hands back is applied exactly as an answer
+//      would have been -- the success line, the key cleared (a row that kept no frame map skips the
+//      check with a note; calSelfCheck.mjs runs the check on one that did). A server that says the
+//      draft will never come is shown in its own words, and the key is kept. A `no_row` on a young
+//      press is waited on, not shown. A drop noticed AFTER the press's budget (the page's clock moved
+//      on eight minutes) still asks once and applies the draft it finds. The drop's own client log
+//      row is draft_stream_dropped, an info row: the server's pickup rows carry the outcome.
 //
 // Stubbed at the NETWORK layer, like dev/verify-cal3d.mjs: no account, no login, no writes, and
 // the artifacts under test are the compiled bundles the browser really loads. A change that was
@@ -101,11 +105,13 @@ const CONFIG = {
 //   refuse402  every call answers insufficient funds: a refusal, never retryable
 //   drop       a streamed press's answer never arrives whole: "cut" serves spaces and then half the
 //              JSON (the body broke off); "deadline" serves spaces and the server's stream_deadline
-//   recover    what calibrate_style_ai_recover answers, one entry per poll (the last one repeats)
+//   recover    what calibrate_style_ai_recover answers, one entry per ask (the last one repeats)
+//   skewMs     moves the page's clock on this far just before a dropped body is served: a drop the
+//              shell only notices after the press's budget
 const generateCalls = [];
 const recoverCalls = [];
 const logRows = [];
-const stub = { fail: false, retryable: false, retryOnce: false, streamed: false, refuse402: false, drop: null, recover: [] };
+const stub = { fail: false, retryable: false, retryOnce: false, streamed: false, refuse402: false, drop: null, recover: [], skewMs: 0 };
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 
@@ -176,6 +182,13 @@ async function main() {
         // off mid-JSON, which is what the page's parser is left holding when a connection dies
         // mid-body. "deadline": the server closed the answer itself (heartbeatJson's watchdog).
         if (stub.drop && body.stream === true) {
+          if (stub.skewMs) {
+            await page.evaluate((ms) => {
+              if (!window.__ssRealNow) window.__ssRealNow = Date.now.bind(Date);
+              window.__ssSkewMs = ms;
+              Date.now = () => window.__ssRealNow() + (window.__ssSkewMs || 0);
+            }, stub.skewMs);
+          }
           const tail = stub.drop === "deadline"
             ? JSON.stringify({ error: "The draft is taking longer than this connection can wait. It is still being finished on our side.", code: "stream_deadline", status: 504 })
             : '{"ok":true,"d3":{"roof":{"type":"gamb';
@@ -405,15 +418,19 @@ async function main() {
     `${s2.calls[0] && s2.calls[0].idempotencyKey} then ${s3.calls[0] && s3.calls[0].idempotencyKey}`);
   stub.refuse402 = false; stub.streamed = false;
 
-  // ── 9: the streamed answer DROPS, and the draft is picked up from the server ────────────────
+  // ── 9: the streamed answer DROPS, and the draft is picked up from the server BY THE PRESS'S KEY ──
   // The draft a normal answer carries in this stub, and the same draft as the recover action hands
-  // it back off the ledger row: `dropped`, `balanceCents` and `frameMap` are not on the row.
+  // it back off the ledger row: `dropped` and `balanceCents` are not on the row, and this row kept no
+  // frame map (one written before 253), so the check is skipped with its note. calSelfCheck.mjs
+  // drives a recovered draft WITH a map through the whole check.
   const DRAFT_D3 = { roof: { type: "gambrel", pitch: 0.5, overhang: 0.8 }, wallHeightFt: 7.5, siding: null, colors: { body: "#00ff00" } };
   const recovered = (frames) => ({
     ok: true, d3: DRAFT_D3, frames, dropped: null,
     observed: { roofNote: "Gambrel, read from the ground.", confidence: "medium" },
     balanceCents: null, dims: null, frameMap: null, checkId: "11111111-2222-4333-8444-555555555555", recovered: true,
   });
+  const NEVER = "We could not pick the draft up from the server: that generation did not finish, so you are not charged for it. Press Generate to try again.";
+  const NO_ROW = { ok: true, pending: false, reason: "no_row", message: NEVER };
   const successLine = () => page.evaluate(() => (document.body.innerText.match(/Read \d+ view[^\n]*/) || [""])[0]);
   // A normal streamed press first, for the success line a recovered one must match.
   stub.streamed = true;
@@ -422,7 +439,7 @@ async function main() {
   const normalLine = await successLine();
   r.ok("a whole streamed answer lands as it always has", /Read 8 views/.test(normalLine), normalLine.slice(0, 80));
 
-  // One dropped press: the call it made, what the card said while it waited, what it polled.
+  // One dropped press: the call it made, what the card said while it waited, what it asked.
   const pressDrop = async (label) => {
     const n = generateCalls.length;
     const p = recoverCalls.length;
@@ -446,34 +463,39 @@ async function main() {
     r.ok(`${label}: one press sent exactly one generation call — no retry, no lean`, calls.length === 1 && !("lean" in calls[0]), `${calls.length} calls`);
     return { calls, saw, sawTryAgain, polls: recoverCalls.slice(p), logs: logRows.slice(logs) };
   };
+  // Every ask names the style and THIS press's own key, and nothing else: no clock of any kind.
+  const askedByKey = (d) => d.polls.length > 0 && d.polls.every((q) =>
+    JSON.stringify(Object.keys(q.body).sort()) === JSON.stringify(["action", "idempotencyKey", "styleValue"])
+      && q.body.idempotencyKey === d.calls[0].idempotencyKey && UUID_RE.test(q.body.idempotencyKey)
+      && q.body.styleValue === d.calls[0].styleValue);
+  const dropRowOf = (d) => d.logs.find((l) => l.p_context && l.p_context.action === "calibrate_style_ai");
 
-  // 9a: the body breaks off mid-JSON; the server has the draft on the third poll.
+  // 9a: the body breaks off mid-JSON; the server has the draft on the third ask.
   stub.drop = "cut";
   stub.recover = [{ ok: true, pending: true }, { ok: true, pending: true }, recovered(8)];
   const d1 = await pressDrop("press 14 (the body breaks off, the draft is picked up)");
   r.ok("⚠️ THE CARD SAID THE DRAFT IS BEING PICKED UP", /Your connection dropped — picking the draft up from the server/.test(d1.saw), d1.saw.slice(0, 160));
   r.ok("⚠️ AND NEVER TOLD THE BUILDER TO TRY AGAIN while it waited", !d1.sawTryAgain);
-  r.ok("⚠️ THE RECOVER ACTION WAS POLLED until the draft came back, and not once more", d1.polls.length === 3, String(d1.polls.length));
-  const since = d1.polls[0] && Date.parse(d1.polls[0].body.since);
-  r.ok("each poll names the style and when the press began (before it was sent), with the browser's clock",
-    d1.polls.every((p) => p.body.styleValue === d1.calls[0].styleValue && p.body.since === d1.polls[0].body.since && typeof p.body.clientNow === "number")
-      && Number.isFinite(since) && since <= d1.calls[0].__at,
+  r.ok("⚠️ THE RECOVER ACTION WAS ASKED until the draft came back, and not once more", d1.polls.length === 3, String(d1.polls.length));
+  r.ok("⚠️ EVERY ASK NAMES THE PRESS'S OWN KEY and the style, and no clock (no since, no clientNow)", askedByKey(d1),
     JSON.stringify(d1.polls[0] && d1.polls[0].body));
-  r.ok("and ten seconds apart live (a third of a second here), not in a burst",
+  r.ok("⚠️ THE FIRST ASK WENT AT ONCE, not a poll interval after the drop",
+    d1.polls.length > 0 && d1.polls[0].at - d1.calls[0].__at < 250, d1.polls[0] ? `${d1.polls[0].at - d1.calls[0].__at} ms` : "no ask");
+  r.ok("and the rest ten seconds apart live (a third of a second here), not in a burst",
     d1.polls.length === 3 && d1.polls[1].at - d1.polls[0].at >= 250 && d1.polls[2].at - d1.polls[1].at >= 250,
     d1.polls.map((p) => p.at - d1.polls[0].at).join(", "));
   await page.waitForFunction(() => /Read \d+ view/.test(document.body.innerText), null, { timeout: 20000 }).catch(() => {});
   const recoveredLine = await successLine();
   r.ok("⚠️ THE RECOVERED DRAFT IS APPLIED EXACTLY AS AN ANSWER: the same success line", recoveredLine === normalLine && recoveredLine.length > 0, recoveredLine.slice(0, 80));
   const afterText = await page.evaluate(() => document.body.innerText);
-  r.ok("the check says why it did not run on a draft picked up from the server",
+  r.ok("a row that kept no frame map: the check says why it did not run",
     /picked the draft up from the server/.test(afterText) && /did not run this time/.test(afterText));
   r.ok("no error on screen", !/connection dropped before|could not pick the draft up/i.test(afterText.replace(/Your connection dropped while we were drafting[^\n]*/, "")));
-  const dropRow = d1.logs.find((l) => l.p_context && l.p_context.action === "calibrate_style_ai");
-  r.ok("⚠️ THE DROP'S CLIENT LOG ROW: the parser's error, filed as a fault (the page was not leaving)",
-    Boolean(dropRow) && dropRow.p_code === "SyntaxError" && dropRow.p_severity === "error" && dropRow.p_context.status === null,
+  const dropRow = dropRowOf(d1);
+  r.ok("⚠️ THE DROP'S CLIENT LOG ROW: draft_stream_dropped, INFO (the page was staying; the server's pickup rows carry the outcome)",
+    Boolean(dropRow) && dropRow.p_code === "draft_stream_dropped" && dropRow.p_severity === "info" && dropRow.p_context.status === null,
     JSON.stringify(dropRow && { code: dropRow.p_code, severity: dropRow.p_severity, status: dropRow.p_context.status }));
-  r.ok("and the polls filed nothing", !d1.logs.some((l) => l.p_context && l.p_context.action === "calibrate_style_ai_recover"),
+  r.ok("and the asks filed nothing", !d1.logs.some((l) => l.p_context && l.p_context.action === "calibrate_style_ai_recover"),
     d1.logs.map((l) => l.p_code).join(","));
   // The key: a recovered draft is a landed draft, so the next press is a new generation.
   stub.drop = null;
@@ -484,22 +506,50 @@ async function main() {
 
   // 9b: the server's own deadline, and then it says the draft will never come.
   stub.drop = "deadline";
-  const never = "We could not pick the draft up from the server: that generation did not finish, so you are not charged for it. Press Generate to try again.";
-  stub.recover = [{ ok: true, pending: true }, { ok: true, pending: false, message: never }];
+  stub.recover = [{ ok: true, pending: true }, { ok: true, pending: false, reason: "failed", message: NEVER }];
   const d2 = await pressDrop("press 16 (stream_deadline, and the draft never comes)");
-  r.ok("the deadline is picked up the same way: the card, then the polls", /picking the draft up from the server/.test(d2.saw) && d2.polls.length === 2, `${d2.polls.length} polls`);
+  r.ok("the deadline is picked up the same way: the card, then the asks by key",
+    /picking the draft up from the server/.test(d2.saw) && d2.polls.length === 2 && askedByKey(d2), `${d2.polls.length} asks`);
   const neverText = await page.evaluate(() => document.body.innerText);
-  r.ok("⚠️ THE SERVER'S OWN SENTENCE, once it says the draft will never come", neverText.includes(never));
-  const deadlineRow = d2.logs.find((l) => l.p_context && l.p_context.action === "calibrate_style_ai");
-  r.ok("the deadline's client log row carries the 504 it would have had, as a fault",
-    Boolean(deadlineRow) && deadlineRow.p_context.status === 504 && deadlineRow.p_severity === "error",
+  r.ok("⚠️ THE SERVER'S OWN SENTENCE, once it says the draft will never come", neverText.includes(NEVER));
+  const deadlineRow = dropRowOf(d2);
+  r.ok("the deadline's client log row is draft_stream_dropped too, info, carrying the 504 it would have had",
+    Boolean(deadlineRow) && deadlineRow.p_code === "draft_stream_dropped" && deadlineRow.p_context.status === 504 && deadlineRow.p_severity === "info",
     JSON.stringify(deadlineRow && { code: deadlineRow.p_code, severity: deadlineRow.p_severity, status: deadlineRow.p_context.status }));
   stub.drop = null; stub.recover = [];
   const n2 = await pressRetry("press 17 (the builder's own press after a draft that never came)", 1);
   r.ok("⚠️ AND THE KEY IS KEPT for the builder's own press of the same intent",
     Boolean(n2.calls[0]) && n2.calls[0].idempotencyKey === d2.calls[0].idempotencyKey,
     `${d2.calls[0] && d2.calls[0].idempotencyKey} then ${n2.calls[0] && n2.calls[0].idempotencyKey}`);
-  r.ok("a press that is not dropped never polls", recoverCalls.length === d1.polls.length + d2.polls.length, String(recoverCalls.length));
+
+  // 9c: the press's own row is not there yet (no_row) -- a young press keeps asking, and gets it.
+  stub.drop = "cut";
+  stub.recover = [NO_ROW, NO_ROW, recovered(8)];
+  const d3 = await pressDrop("press 18 (no_row twice, then the row lands)");
+  r.ok("⚠️ A no_row ON A YOUNG PRESS IS WAITED ON, not shown: the draft arrives on the third ask",
+    d3.polls.length === 3 && askedByKey(d3), `${d3.polls.length} asks`);
+  await page.waitForFunction(() => /Read \d+ view/.test(document.body.innerText), null, { timeout: 20000 }).catch(() => {});
+  r.ok("and it is applied with the same success line", (await successLine()) === normalLine);
+  r.ok("and no lost-draft sentence on screen", !(await page.evaluate(() => document.body.innerText)).includes(NEVER));
+
+  // 9d: ⚠️ A PHONE THAT SLEPT THROUGH THE WHOLE PRESS. The drop surfaces after the press's seven
+  // minutes: the page's clock is moved eight minutes on just before the broken body is served, so
+  // `until` is long past when the shell sees the drop. It must still ask ONCE, and apply the draft.
+  stub.drop = "cut";
+  stub.skewMs = 8 * 60 * 1000;
+  stub.recover = [recovered(8)];
+  const d4 = await pressDrop("press 19 (the drop is noticed after the press's budget)");
+  await page.evaluate(() => { window.__ssSkewMs = 0; });
+  stub.skewMs = 0;
+  r.ok("⚠️ A DROP NOTICED AFTER THE BUDGET STILL ASKS — exactly once, by the press's key",
+    d4.polls.length === 1 && askedByKey(d4), `${d4.polls.length} asks`);
+  await page.waitForFunction(() => /Read \d+ view/.test(document.body.innerText), null, { timeout: 20000 }).catch(() => {});
+  r.ok("⚠️ AND THE PAID DRAFT IT FOUND IS APPLIED, with the same success line", (await successLine()) === normalLine, (await successLine()).slice(0, 80));
+  r.ok("no timeout sentence for a draft that was there", !/did not reach us in time/.test(await page.evaluate(() => document.body.innerText)));
+  stub.drop = null; stub.recover = [];
+
+  r.ok("a press that is not dropped never asks",
+    recoverCalls.length === d1.polls.length + d2.polls.length + d3.polls.length + d4.polls.length, String(recoverCalls.length));
   stub.streamed = false;
 
   // ── 6: nothing slipped through without one ───────────────────────────────────────────────
