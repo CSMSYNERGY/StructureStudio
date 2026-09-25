@@ -1746,11 +1746,19 @@ export function parseFrameMap(text: string, videoCount: number): FrameMap | null
 //   * Coordinates are real, finite JSON numbers. A string "412" is not a coordinate the model gave.
 //   * `size`, when given, is two positive numbers and every point lies inside it. The shed and the
 //     porch NEED it, because their span check is a share of the image's width.
-//   * GABLE (left, peak, right, on the top edge of the rakes): the peak stands ABOVE both ends
-//     (a SMALLER y, which is where the y-up mistake fails), between them, and the steeper slope is
-//     at most MEASURE_GABLE_SLOPE_RATIO times the shallower. A square-on gable end shows two rakes
-//     alike; two very different ones are an off-axis frame, a peak on the wrong landmark or a rake
-//     end on a wing roof, and their average would hide it. The answer is the mean of the two.
+//   * GABLE (left, peak, right, on the top edge of the rakes): the peak's height above the EAVE LINE
+//     from left to right, over half that line's length. That is the PITCH paragraph's definition and
+//     the renderer's (rise over half-span), and it holds however the camera was rolled, because it
+//     is measured across the line the two eave ends make, not against the image's own horizontal:
+//     real reads of one gable came back with that line tilted by 3 to 5 degrees, which a test of
+//     the two rakes against each other took for an off-axis frame and refused every time. It also
+//     leaves a saltbox (ridgeOffset) at its rise over half-span, where the mean of two unlike rakes
+//     was not. Checks: the eave line runs left to right within MEASURE_GABLE_MAX_TILT_DEG of level
+//     (steeper is a corner view or a badly rolled frame, and pointing leftward is left and right
+//     swapped); it is at least MEASURE_GABLE_MIN_SPAN of the width when `size` is given; the peak
+//     is on its SKY side (a smaller y, which is where the y-up mistake fails); and the peak's foot on
+//     the line falls strictly inside MEASURE_GABLE_PEAK_T of the way along it, so a peak at or past
+//     either end is refused.
 //   * SHED (the two vertical edges of a wall whose top slopes): the difference of the two edges'
 //     heights over the distance between them, which is the renderer's rise over the full span. The
 //     tall edge must be the taller, and the span at least MEASURE_SHED_MIN_SPAN of the width: over
@@ -1761,7 +1769,9 @@ export function parseFrameMap(text: string, videoCount: number): FrameMap | null
 //     a rake-to-peak slope would be a different number stored under a key that means something else.
 //   * The answer is rounded to two places and must be above 0 and inside the sanitiser's own CLAMPS
 //     for its key. Outside them it is null, never clamped: a clamped slope is one nobody read.
-export const MEASURE_GABLE_SLOPE_RATIO = 1.6;
+export const MEASURE_GABLE_MAX_TILT_DEG = 12;
+export const MEASURE_GABLE_MIN_SPAN = 0.12;
+export const MEASURE_GABLE_PEAK_T: readonly [number, number] = [0.05, 0.95];
 export const MEASURE_SHED_MIN_SPAN = 0.15;
 export const MEASURE_PORCH_MIN_SPAN = 0.08;
 
@@ -1772,8 +1782,9 @@ const measureObject = (v: unknown): Record<string, unknown> | null =>
 const measureXY = (v: unknown): MeasureXY | null =>
   (Array.isArray(v) && v.length === 2 && isCoord(v[0]) && isCoord(v[1])) ? [v[0], v[1]] : null;
 
-// Every named point of one block, each inside the block's size, or null. `width` is the size's.
-function measurePoints(block: unknown, keys: readonly string[], needSize: boolean): { pts: MeasureXY[]; width: number } | null {
+// Every named point of one block, each inside the block's size, or null. `size` is the block's
+// [width, height], null when it gave none (which `needSize` refuses).
+function measurePoints(block: unknown, keys: readonly string[], needSize: boolean): { pts: MeasureXY[]; size: MeasureXY | null } | null {
   const b = measureObject(block);
   if (!b) return null;
   let size: MeasureXY | null = null;
@@ -1790,7 +1801,7 @@ function measurePoints(block: unknown, keys: readonly string[], needSize: boolea
     if (size && (p[0] < 0 || p[0] > size[0] || p[1] < 0 || p[1] > size[1])) return null;
     pts.push(p);
   }
-  return { pts, width: size ? size[0] : Infinity };
+  return { pts, size };
 }
 
 function measuredValue(key: "pitch" | "porchPitch", v: number): number | null {
@@ -1807,21 +1818,31 @@ export function pitchFromMeasure(block: unknown, roofType: unknown): number | nu
     const m = measurePoints(block, ["left", "peak", "right"], false);
     if (!m) return null;
     const [[lx, ly], [px, py], [rx, ry]] = m.pts;
-    if (!(lx < px && px < rx) || !(py < ly && py < ry)) return null;
-    const a = (ly - py) / (px - lx);
-    const c = (ry - py) / (rx - px);
-    // A hair of room on the ratio, so a read at exactly 1.6 is not refused by float rounding.
-    if (!(a > 0 && c > 0) || Math.max(a, c) / Math.min(a, c) > MEASURE_GABLE_SLOPE_RATIO + 1e-9) return null;
-    return measuredValue("pitch", (a + c) / 2);
+    // e, the eave line from left to right; d, from its left end to the peak.
+    const ex = rx - lx, ey = ry - ly, dx = px - lx, dy = py - ly;
+    const span2 = ex * ex + ey * ey;
+    const span = Math.sqrt(span2);
+    if (!(span > 0) || (m.size && span < MEASURE_GABLE_MIN_SPAN * m.size[0])) return null;
+    // Its tilt: atan2 is 0 for a level line running to the RIGHT and near 180 degrees for one
+    // running left, so this also refuses left and right swapped. A hair of room for float rounding.
+    if (Math.abs(Math.atan2(ey, ex)) * 180 / Math.PI > MEASURE_GABLE_MAX_TILT_DEG + 1e-9) return null;
+    // The peak's foot on the line, as a share of the way from left to right.
+    const t = (ex * dx + ey * dy) / span2;
+    if (!(t > MEASURE_GABLE_PEAK_T[0] && t < MEASURE_GABLE_PEAK_T[1])) return null;
+    // Its height off the line. With y DOWN and the line running right, a peak on the sky side
+    // makes the cross product e x d negative, so the height is its negative over the length.
+    const rise = -(ex * dy - ey * dx) / span;
+    if (!(rise > 0)) return null;
+    return measuredValue("pitch", rise / (span / 2));
   }
   if (roofType === "shed") {
     const m = measurePoints(block, ["tallTop", "tallBottom", "shortTop", "shortBottom"], true);
-    if (!m) return null;
+    if (!m || !m.size) return null;
     const [tallTop, tallBottom, shortTop, shortBottom] = m.pts;
     const tall = tallBottom[1] - tallTop[1];
     const short = shortBottom[1] - shortTop[1];
     const span = Math.abs(tallTop[0] - shortTop[0]);
-    if (!(short > 0 && tall > short) || span < MEASURE_SHED_MIN_SPAN * m.width) return null;
+    if (!(short > 0 && tall > short) || span < MEASURE_SHED_MIN_SPAN * m.size[0]) return null;
     return measuredValue("pitch", (tall - short) / span);
   }
   return null;
@@ -1830,10 +1851,10 @@ export function pitchFromMeasure(block: unknown, roofType: unknown): number | nu
 // The projecting porch roof's own pitch from `measure.porchPitch`.
 export function porchPitchFromMeasure(block: unknown): number | null {
   const m = measurePoints(block, ["wall", "edge"], true);
-  if (!m) return null;
+  if (!m || !m.size) return null;
   const [[wx, wy], [ex, ey]] = m.pts;
   const run = Math.abs(ex - wx);
-  if (ey < wy || run < MEASURE_PORCH_MIN_SPAN * m.width) return null;
+  if (ey < wy || run < MEASURE_PORCH_MIN_SPAN * m.size[0]) return null;
   return measuredValue("porchPitch", (ey - wy) / run);
 }
 

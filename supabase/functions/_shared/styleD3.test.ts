@@ -4603,24 +4603,36 @@ Deno.test("consensusOfCalls and draftCallsUsage: the medoid's CALL, the summed u
 // ═══ MEASURED PITCHES (2026-09-26) ════════════════════════════════════════════════════════════
 // Live three-read drafts JUDGED the slope: a raised centre's 0.41 gable came back 0.45 to 0.8 and a
 // 0.25 porch roof 0.11 to 0.2. The v2 reply now carries `measure`, the pixel points each pitch is read
-// from, and the server works the slope out. What is pinned here: the arithmetic; every check that
-// sends a read back to the model's own number (the y-up mistake, a peak outside its ends, rakes too
-// unlike for a square-on frame, a span too short, a result outside the sanitiser's CLAMPS); that a
-// gambrel is never computed; that junk never throws; and that `measure` never reaches the spec.
+// from, and the server works the slope out. What is pinned here: the arithmetic, on real reads and on
+// frames rolled by hand; every check that sends a read back to the model's own number (the y-up
+// mistake, a peak outside its ends, an eave line tilted past a square-on view, a span too short, a
+// result outside the sanitiser's CLAMPS); that a gambrel is never computed; that junk never throws;
+// and that `measure` never reaches the spec.
 import {
   applyMeasuredPitches, parseMeasure, pitchFromMeasure, porchPitchFromMeasure,
-  MEASURE_GABLE_SLOPE_RATIO, MEASURE_PORCH_MIN_SPAN, MEASURE_SHED_MIN_SPAN,
+  MEASURE_GABLE_MAX_TILT_DEG, MEASURE_GABLE_MIN_SPAN, MEASURE_GABLE_PEAK_T, MEASURE_PORCH_MIN_SPAN, MEASURE_SHED_MIN_SPAN,
 } from "./styleD3.ts";
 
-// A 1600 x 900 frame. Generic points only, never a test building's.
+// A 1600 x 900 frame. Generic points only, never a test building's (the real reads below are named).
 const M_SIZE = [1600, 900];
 const gableAt = (left: number[], peak: number[], right: number[], size: unknown = M_SIZE) => ({ frame: 3, size, left, peak, right });
 const shedAt = (tallTop: number[], tallBottom: number[], shortTop: number[], shortBottom: number[], size: unknown = M_SIZE) =>
   ({ frame: 5, size, tallTop, tallBottom, shortTop, shortBottom });
 const porchAt = (wall: number[], edge: number[], size: unknown = M_SIZE) => ({ frame: 4, size, wall, edge });
+// Points as a camera rolled by `deg` would put them: turned about the frame's centre, then rounded to
+// whole pixels as a real read gives them. Positive is clockwise on screen (y counts down).
+const rolled = (deg: number, ...pts: number[][]) => {
+  const a = deg * Math.PI / 180, [cx, cy] = [M_SIZE[0] / 2, M_SIZE[1] / 2];
+  return pts.map(([x, y]) => [
+    Math.round(cx + (x - cx) * Math.cos(a) - (y - cy) * Math.sin(a)),
+    Math.round(cy + (x - cx) * Math.sin(a) + (y - cy) * Math.cos(a)),
+  ]);
+};
 
 Deno.test("measure: the checks' thresholds are the ones the brief set", () => {
-  assertEquals(MEASURE_GABLE_SLOPE_RATIO, 1.6);
+  assertEquals(MEASURE_GABLE_MAX_TILT_DEG, 12);
+  assertEquals(MEASURE_GABLE_MIN_SPAN, 0.12);
+  assertEquals(MEASURE_GABLE_PEAK_T, [0.05, 0.95]);
   assertEquals(MEASURE_SHED_MIN_SPAN, 0.15);
   assertEquals(MEASURE_PORCH_MIN_SPAN, 0.08);
 });
@@ -4635,25 +4647,65 @@ Deno.test("pitchFromMeasure: a symmetric gable is the rise over half its width",
   assertEquals(pitchFromMeasure({ size: M_SIZE, left: [400, 600], peak: [800, 400], right: [1200, 600] }, "gable"), 0.5);
 });
 
-Deno.test("pitchFromMeasure: an off-axis gable with unlike rakes inside 1.6x is their mean; beyond it, null", () => {
-  // 0.478 and 0.588: 1.23x apart, a frame a little off square. Their mean, to two places.
-  assertEquals(pitchFromMeasure(gableAt([300, 620], [760, 400], [1100, 600]), "gable"), 0.53);
-  // Exactly 1.6x (0.5 and 0.8) is still an honest read.
-  assertEquals(pitchFromMeasure(gableAt([200, 600], [600, 400], [850, 600]), "gable"), 0.65);
-  // 1.7x and 2x are not: an angled frame, a peak on the wrong landmark or a rake end on a wing roof.
-  assertEquals(pitchFromMeasure(gableAt([200, 600], [600, 400], [800, 570]), "gable"), null, "0.5 against 0.85");
-  assertEquals(pitchFromMeasure(gableAt([200, 600], [600, 400], [800, 600]), "gable"), null, "0.5 against 1.0");
+Deno.test("⚠️ pitchFromMeasure: the real reads of two gables give their pitch, where the rake-ratio test refused all four", () => {
+  // Careful reads off 1280 x 720 walk frames. Tri Home's centre gable measures 0.41 (careful reads
+  // give 0.44 to 0.45); the black cabin's gable measures 0.41 (careful reads give 0.38 to 0.39).
+  // Every one has its eave line tilted 3 to 5 degrees by the camera's roll, so its two rakes differ
+  // 1.7x to 1.9x in the image, and the 1.6x ratio test that stood here sent all four back to the
+  // model's number. Measured across the eave line, they are the pitch the model was asked for.
+  const size = [1280, 720];
+  const tri = [
+    gableAt([469, 183], [628, 89], [827, 151], size),
+    gableAt([468, 181], [628, 89], [826, 151], size),
+    gableAt([468, 183], [628, 89], [827, 152], size),
+  ];
+  assertEquals(tri.map((g) => pitchFromMeasure(g, "gable")), [0.44, 0.44, 0.44], "Tri Home, three reads");
+  assertEquals(pitchFromMeasure(gableAt([247, 222], [648, 107], [975, 266], size), "gable"), 0.38, "the black cabin");
+});
+
+Deno.test("pitchFromMeasure: a gable is its peak's height off the eave line over half that line, whatever the camera's roll", () => {
+  // The 0.5 gable above, rolled 5 degrees either way and read back to whole pixels.
+  const square = [[400, 600], [800, 400], [1200, 600]];
+  for (const deg of [5, -5, 3, -3]) {
+    const [l, p, r] = rolled(deg, ...square);
+    assertEquals(pitchFromMeasure(gableAt(l, p, r), "gable"), 0.5, `rolled ${deg} degrees`);
+  }
+  // A peak off the middle of the eave line (a saltbox, ridgeOffset) is still its rise over HALF the
+  // span, the renderer's own pitch: 200 px over 400. The mean of its two rakes would say 0.67.
+  assertEquals(pitchFromMeasure(gableAt([400, 600], [600, 400], [1200, 600]), "gable"), 0.5, "a saltbox");
+  assertEquals(pitchFromMeasure(gableAt([200, 600], [600, 400], [850, 600]), "gable"), 0.62, "200 px over 325");
+  // A line tilted 1.4 degrees with its peak a little right of centre: 208 px over 400.
+  assertEquals(pitchFromMeasure(gableAt([300, 620], [760, 400], [1100, 600]), "gable"), 0.52);
+});
+
+Deno.test("pitchFromMeasure: an eave line tilted past 12 degrees is a corner view or a badly rolled frame, and is refused", () => {
+  const square = [[400, 600], [800, 400], [1200, 600]];
+  for (const deg of [20, -20, 12.1, -12.1]) {
+    const [l, p, r] = rolled(deg, ...square);
+    assertEquals(pitchFromMeasure(gableAt(l, p, r), "gable"), null, `tilted ${deg} degrees`);
+  }
+  for (const deg of [11.9, -11.9]) {
+    const [l, p, r] = rolled(deg, ...square);
+    assertEquals(pitchFromMeasure(gableAt(l, p, r), "gable"), 0.5, `${deg} degrees is still inside`);
+  }
+  assertEquals(pitchFromMeasure(gableAt([400, 600], [800, 400], [1200, 380]), "gable"), null, "a line 15 degrees off level");
 });
 
 Deno.test("pitchFromMeasure: the y-up mistake and a peak outside its ends go back to the model's number", () => {
-  // Coordinates read with y counting UP put the peak BELOW its ends.
+  // Coordinates read with y counting UP put the peak on the ground side of the eave line.
   assertEquals(pitchFromMeasure(gableAt([400, 300], [800, 500], [1200, 300]), "gable"), null, "y up");
   assertEquals(pitchFromMeasure(gableAt([400, 600], [800, 600], [1200, 600]), "gable"), null, "a peak level with its ends");
-  assertEquals(pitchFromMeasure(gableAt([400, 600], [800, 400], [1200, 380]), "gable"), null, "a peak below one end");
   assertEquals(pitchFromMeasure(gableAt([400, 600], [300, 400], [1200, 600]), "gable"), null, "a peak left of the left end");
   assertEquals(pitchFromMeasure(gableAt([400, 600], [1300, 400], [1200, 600]), "gable"), null, "a peak right of the right end");
   assertEquals(pitchFromMeasure(gableAt([1200, 600], [800, 400], [400, 600]), "gable"), null, "left and right swapped");
-  assertEquals(pitchFromMeasure(gableAt([800, 600], [800, 400], [1200, 600]), "gable"), null, "a vertical rake");
+  assertEquals(pitchFromMeasure(gableAt([800, 600], [800, 400], [1200, 600]), "gable"), null, "a vertical rake: the peak's foot at the left end");
+  // Its foot must fall strictly between 5% and 95% of the way along the line.
+  assertEquals(pitchFromMeasure(gableAt([400, 600], [1170, 400], [1200, 600]), "gable"), null, "96% of the way along");
+  assertEquals(pitchFromMeasure(gableAt([400, 600], [430, 400], [1200, 600]), "gable"), null, "4% of the way along");
+  assertEquals(pitchFromMeasure(gableAt([400, 600], [1150, 400], [1200, 600]), "gable"), 0.5, "94% is still inside");
+  // A short eave line: under 12% of the image's width, a few pixels are a large error.
+  assertEquals(pitchFromMeasure(gableAt([700, 600], [790, 560], [880, 600]), "gable"), null, "180 px of a 1600 px frame");
+  assertEquals(pitchFromMeasure({ left: [700, 600], peak: [790, 560], right: [880, 600] }, "gable"), 0.44, "with no size there is no share to take");
 });
 
 Deno.test("pitchFromMeasure: points outside the image, and a size that is not a size, are refused", () => {
