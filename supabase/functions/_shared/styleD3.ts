@@ -1059,14 +1059,14 @@ export const EDGE_WALL_CLOCK_MS = 400_000;
 // ─── HOW LONG A STREAMED ANSWER MAY STAY OPEN (2026-09-25; 360 s since the reads got 300 s) ──
 // Measured from the request's arrival (portal-settings' requestStartMs), and never later than 40 s
 // before the worker's end (streamedDraftDeadlineMs below arms the watchdog with both). The reads get
-// at most min(300 s, 330 s - set-up) and end at least 75 s before the worker does, so a set-up under
-// 270 s leaves the model done by 330 s after the request and 35 s or more before the watchdog; the
-// capture, the ledger write and the answer normally take seconds after that, which leaves 30 s of
-// room for a slow database. Past this the answer is closed with heartbeatJson's `stream_deadline`
-// body and the work runs on behind it, with 40 s more before its worker's wall clock
-// (EDGE_WALL_CLOCK_MS) stops it for good. It was 300 s while the reads had 230 s of 260 s; live on
-// 2026-09-25 the reads needed more (8 presses in 12 had a read cut at 230 s), and this moved with
-// them.
+// at most min(300 s, 330 s - set-up) and, unless their 60 s floor decides (only after a set-up over
+// 65 s, see streamedDraftBudgetMs), end at least 75 s before the worker does: done by 330 s after
+// the request and 35 s or more before the watchdog. The capture, the ledger write and the answer
+// normally take seconds after that, which leaves 30 s of room for a slow database. Past this the
+// answer is closed with heartbeatJson's `stream_deadline` body and the work runs on behind it, with
+// 40 s more before its worker's wall clock (EDGE_WALL_CLOCK_MS) stops it for good. It was 300 s
+// while the reads had 230 s of 260 s; live on 2026-09-25 the reads needed more (8 presses in 12 had
+// a read cut at 230 s), and this moved with them.
 export const DRAFT_STREAM_DEADLINE_MS = 360_000;
 
 // ─── THE STREAMED CLOCKS, FROM THE REQUEST AND FROM THE WORKER (fix, 2026-09-26) ─────────────
