@@ -2854,3 +2854,518 @@ export function selfCheckRequest(opts: {
     },
   };
 }
+
+// ═══ CONSENSUS DRAFTING (2026-09-25) ═══════════════════════════════════════════════════════════
+// Live v2 runs of ONE video give the same SHAPE every time and wandering NUMBERS: a raised centre's
+// eave read 15, then 14, then 12.5 ft; the pitch anywhere from 0.37 to 0.7; 3 porch posts one run and
+// 4 the next; the steps in the centre, then on the right. Each read is a fair sample of what the
+// frames support, so three independent reads combined take out most of that scatter. The v2 draft
+// (and only it: see draftCallCount) therefore sends the SAME request three times in parallel, and
+// combines what comes back here.
+//
+// The half in this file is pure (runDraftCalls takes its fetch as an argument). portal-settings'
+// calibrate_style_ai owns the wiring, the hold, the ledger and the money, and
+// aiDraftConsensusWiring_test runs that wiring.
+
+// Three reads, and the cut-off for a straggler once two are in. The grace is a latency bound, not a
+// quality one: a third read that has not arrived 20 s after the second is not worth the builder's
+// wait, and two reads still take out a wandering number's worst case (see consensusDrafts).
+export const DRAFT_CONSENSUS_CALLS = 3;
+export const DRAFT_CONSENSUS_QUORUM = 2;
+export const DRAFT_CONSENSUS_GRACE_MS = 20_000;
+
+// How many calls a draft makes. ONE on every legacy request (production's older designer: its
+// request, its timing and its cost stay exactly what they were) and on the lean retry (a retry after
+// a cut-off or timed-out reply is already short of time, and three parallel reads would not make
+// the reply that ran out of room any shorter).
+export function draftCallCount(v2: boolean, lean: boolean): number {
+  return v2 && !lean ? DRAFT_CONSENSUS_CALLS : 1;
+}
+
+// One reply body, read the way calibrate_style_ai reads it: every text block joined (modelReplyText),
+// a refusal is never a draft, and the spec is parseModelSpec's (the builder's dims over the model's
+// numbers, then the sanitiser). Never throws: a body that is not JSON reads as no reply at all.
+export type DraftReading = {
+  // deno-lint-ignore no-explicit-any
+  data: Record<string, any> | null;
+  reply: ModelReply;
+  d3: D3Spec | null;
+  drafted: boolean;
+};
+export function readDraftReply(body: string, dims?: KnownDims | null): DraftReading {
+  // deno-lint-ignore no-explicit-any
+  let data: any = null;
+  try { data = JSON.parse(body); } catch { data = null; }
+  if (!data || typeof data !== "object" || Array.isArray(data)) data = null;
+  const reply = modelReplyText(data);
+  const spec = reply.stopReason === "refusal" ? null : parseModelSpec(reply.text, dims);
+  const d3 = spec && spec.ok ? spec.d3 : null;
+  return { data, reply, d3, drafted: d3 !== null };
+}
+
+// ─── The calls ─────────────────────────────────────────────────────────────────────────────────
+// Which clock stopped a call that threw, read the moment it threw: "deadline" is the draft's one
+// abort budget (draftAbortMs, shared by every call), "quorum" the straggler cut-off below.
+export type DraftCallAbort = "deadline" | "quorum";
+export type DraftCall<R> = { index: number; ms: number } & (
+  // fetch, or the body read, threw: no reply
+  | { threw: true; error: unknown; aborted: DraftCallAbort | null; status: null; httpOk: false; body: ""; reading: null }
+  // a reply that was not 2xx (a 429, a 529): its body is the error text
+  | { threw: false; error: null; aborted: null; status: number; httpOk: false; body: string; reading: null }
+  // a 2xx reply, read
+  | { threw: false; error: null; aborted: null; status: number; httpOk: true; body: string; reading: R }
+);
+
+// Sends `count` calls in parallel and settles every one of them; never rejects.
+//
+//   * ONE call is sent on the deadline signal ITSELF, so a single call is the request today's
+//     handler sent, on the signal it sent it on, classified the way it classified it.
+//   * Several calls each get their own signal, aborted by the shared deadline (one budget for all,
+//     never one each) or by the quorum cut-off: once DRAFT_CONSENSUS_QUORUM of them have DRAFTED
+//     (a 2xx reply that `read` says parses), the rest get `graceMs` more and are then aborted.
+//   * A failed call is simply one more result: the caller decides what three failures mean.
+//
+// The results come back in SEND order (index), not in arrival order, so "the first call" is always
+// the same call whichever one the network happened to answer first.
+export async function runDraftCalls<R extends { drafted: boolean }>(opts: {
+  count: number;
+  deadline: AbortSignal;
+  graceMs: number;
+  send: (signal: AbortSignal) => Promise<Response>;
+  read: (body: string) => R;
+}): Promise<DraftCall<R>[]> {
+  const count = Math.max(1, Math.floor(opts.count) || 1);
+  const quorum = Math.min(DRAFT_CONSENSUS_QUORUM, count);
+  const cutoff = new AbortController();
+  let drafted = 0;
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const one = async (index: number): Promise<DraftCall<R>> => {
+    const started = Date.now();
+    let signal = opts.deadline;
+    let unlink = () => {};
+    if (count > 1) {
+      const own = new AbortController();
+      const stop = () => own.abort();
+      opts.deadline.addEventListener("abort", stop);
+      cutoff.signal.addEventListener("abort", stop);
+      unlink = () => {
+        opts.deadline.removeEventListener("abort", stop);
+        cutoff.signal.removeEventListener("abort", stop);
+      };
+      if (opts.deadline.aborted || cutoff.signal.aborted) own.abort();
+      signal = own.signal;
+    }
+    try {
+      const res = await opts.send(signal);
+      const body = await res.text();
+      const ms = Date.now() - started;
+      if (!res.ok) return { index, ms, threw: false, error: null, aborted: null, status: res.status, httpOk: false, body, reading: null };
+      const reading = opts.read(body);
+      if (reading.drafted && count > 1 && ++drafted === quorum && quorum < count) {
+        graceTimer = setTimeout(() => cutoff.abort(), Math.max(0, opts.graceMs));
+      }
+      return { index, ms, threw: false, error: null, aborted: null, status: res.status, httpOk: true, body, reading };
+    } catch (error) {
+      const aborted: DraftCallAbort | null = opts.deadline.aborted ? "deadline" : cutoff.signal.aborted ? "quorum" : null;
+      return { index, ms: Date.now() - started, threw: true, error, aborted, status: null, httpOk: false, body: "", reading: null };
+    } finally {
+      unlink();
+    }
+  };
+  try {
+    return await Promise.all(Array.from({ length: count }, (_, i) => one(i)));
+  } finally {
+    if (graceTimer !== undefined) clearTimeout(graceTimer);
+  }
+}
+
+// ─── Combining the reads ───────────────────────────────────────────────────────────────────────
+// THE BASE IS THE MEDOID: the read that disagrees least, in total, with the others over the
+// discrete fields below. Every field this does not decide (and the builder-facing `observed` notes
+// and the frame map, which are prose and picks that cannot be averaged) is the medoid's own.
+//
+// DISCRETE FIELDS GO BY MAJORITY; a tie goes to the medoid's value. Only reads that GAVE an answer
+// vote, and a field that belongs to a structure (which end the porch is on, which side the wings are
+// on) is voted only by the reads that chose that structure: a read that saw no porch has no opinion
+// on where its steps are. Where leaving a key out is itself an answer, it votes as one: no steps, a
+// porch across the whole wall (porchWidthFt left out), a porch roof hung at the wall top
+// (porchAttachFt left out), no wings, no lean-to, no dormer, no gable vent. Presence is read the way
+// the renderer draws it (a porch, lean-to, dormer or wing over half a foot).
+//
+// NUMBERS ARE THE MEDIAN over the reads that agree with the structure chosen for them: the porch's
+// numbers from the reads with the chosen porch kind, the wings' from the reads with wings, the pitch
+// and the gambrel ratios from the reads of the chosen roof type, the tail spacing from the reads with
+// an open eave. Two values give their midpoint; porchPosts is rounded to a whole post. A dormer's
+// offset is signed (the sign is the slope it sits on), so the slope is voted first and only the reads
+// on that slope are averaged; the midpoint of -0.5 and 0.5 would put it on the ridge.
+//
+// COLOURS: per key, the median of each channel over the reads that gave the key. Two readings far
+// apart (a channel more than CONSENSUS_COLOR_BLEND_MAX apart) are a split read, not noise, and their
+// midpoint would be a third colour neither read saw, so the medoid's reading (or the best-ranked
+// read that gave one) is kept instead.
+//
+// The result goes back through sanitizeD3Spec. One read comes back exactly as it went in.
+export type ConsensusDraft = { d3: D3Spec; observed: ObservedNotes | null; frameMap: FrameMap | null };
+export type ConsensusReport = {
+  n: number;
+  // The medoid's position in the drafts given.
+  medoid: number;
+  // Per discrete field: how many of the reads that voted gave the chosen answer, "k/n".
+  discreteAgreement: Record<string, string>;
+  // Per number the reads did NOT agree on: the lowest and highest read. A number every read gave
+  // alike has no entry, which keeps the report to the fields that wandered.
+  spread: Record<string, [number, number]>;
+};
+export type ConsensusResult = {
+  d3: D3Spec;
+  observed: ObservedNotes | null;
+  frameMap: FrameMap | null;
+  medoid: number;
+  report: ConsensusReport;
+};
+
+export const CONSENSUS_COLOR_BLEND_MAX = 64;
+
+type ConsensusRoof = Record<string, unknown>;
+const cRoof = (d: D3Spec): ConsensusRoof => (d.roof || {}) as ConsensusRoof;
+const cOn = (v: unknown): boolean => (num(v) ?? 0) > 0.5;
+const cStr = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+// The porch as the renderer and the panel read it (d3ProjectingPorch, calPorchKind): over half a foot.
+function consensusPorchKind(roof: ConsensusRoof): PorchKind {
+  if (cOn(roof.porchOutFt)) return "projecting";
+  if (cOn(roof.porchDepthFt)) return "recessed";
+  return "none";
+}
+const cWings = (r: ConsensusRoof) => r.type !== "shed" && cOn(r.wingWidthFt);
+const cLeanTo = (r: ConsensusRoof) => cOn(r.leanToWidthFt);
+const cDormer = (r: ConsensusRoof) => r.type !== "shed" && cOn(r.dormerWidthFt);
+// Absent is the renderer's 0.45, which is on the right-hand (positive) slope.
+const cDormerSide = (r: ConsensusRoof) => {
+  const u = num(r.dormerOffsetU) ?? 0.45;
+  return u < 0 ? "left" : u > 0 ? "right" : "ridge";
+};
+
+type ConsensusField = {
+  name: string;
+  // Voted only among the reads whose answer to this field matches the one chosen for it.
+  parent?: string;
+  // This read's answer, or null when it gave none (or the field does not apply to it).
+  key: (d: D3Spec) => string | null;
+  // Writes the chosen answer into the result, copied from `rep` (the best-ranked read that gave it);
+  // `rep` null means nobody voted, so the key goes. Fields without one are carried by the numbers.
+  apply?: (out: D3Spec, rep: D3Spec | null) => void;
+};
+const copyRoofKey = (k: string) => (out: D3Spec, rep: D3Spec | null) => {
+  const from = rep ? cRoof(rep) : null;
+  if (from && k in from) out.roof[k] = from[k];
+  else delete out.roof[k];
+};
+const copySpecKey = (k: "roofMaterial" | "foundation") => (out: D3Spec, rep: D3Spec | null) => {
+  if (rep && rep[k] !== undefined) out[k] = rep[k];
+  else delete out[k];
+};
+const CONSENSUS_FIELDS: readonly ConsensusField[] = [
+  { name: "type", key: (d) => cStr(cRoof(d).type), apply: copyRoofKey("type") },
+  { name: "front", parent: "type", key: (d) => (cRoof(d).type !== "shed" ? cStr(cRoof(d).front) : null), apply: copyRoofKey("front") },
+  { name: "highSide", parent: "type", key: (d) => (cRoof(d).type === "shed" ? cStr(cRoof(d).highSide) : null), apply: copyRoofKey("highSide") },
+  { name: "eave", key: (d) => cStr(cRoof(d).eave), apply: copyRoofKey("eave") },
+  { name: "porch", key: (d) => consensusPorchKind(cRoof(d)) },
+  { name: "porchEnd", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) !== "none" ? cStr(cRoof(d).porchEnd) : null), apply: copyRoofKey("porchEnd") },
+  { name: "porchTruss", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "recessed" ? String(cRoof(d).porchTruss === true) : null), apply: copyRoofKey("porchTruss") },
+  { name: "porchSteps", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "projecting" ? (cStr(cRoof(d).porchSteps) ?? "none") : null), apply: copyRoofKey("porchSteps") },
+  { name: "porchAttach", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "projecting" ? (num(cRoof(d).porchAttachFt) !== null ? "given" : "wall top") : null) },
+  { name: "porchWidth", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "projecting" ? (num(cRoof(d).porchWidthFt) !== null ? "part" : "full") : null) },
+  { name: "wings", key: (d) => (cWings(cRoof(d)) ? "yes" : "no") },
+  { name: "wingSide", parent: "wings", key: (d) => (cWings(cRoof(d)) ? (cStr(cRoof(d).wingSide) ?? "both") : null), apply: copyRoofKey("wingSide") },
+  { name: "leanTo", key: (d) => (cLeanTo(cRoof(d)) ? "yes" : "no") },
+  { name: "leanToSide", parent: "leanTo", key: (d) => (cLeanTo(cRoof(d)) ? (cStr(cRoof(d).leanToSide) ?? "right") : null), apply: copyRoofKey("leanToSide") },
+  { name: "dormer", key: (d) => (cDormer(cRoof(d)) ? "yes" : "no") },
+  { name: "dormerType", parent: "dormer", key: (d) => (cDormer(cRoof(d)) ? (cStr(cRoof(d).dormerType) ?? "gable") : null), apply: copyRoofKey("dormerType") },
+  { name: "dormerSide", parent: "dormer", key: (d) => (cDormer(cRoof(d)) ? cDormerSide(cRoof(d)) : null) },
+  { name: "roofMaterial", key: (d) => cStr(d.roofMaterial), apply: copySpecKey("roofMaterial") },
+  { name: "foundation", key: (d) => cStr(d.foundation), apply: copySpecKey("foundation") },
+  { name: "gableVent", key: (d) => (d.gableVent ? "yes" : "no") },
+];
+
+type ConsensusNumber = {
+  name: string;
+  get: (d: D3Spec) => number | null;
+  set: (out: D3Spec, v: number | null) => void;
+  // Whether this read's value counts, given the answers already chosen.
+  counts: (d: D3Spec, chosen: Record<string, string | null>) => boolean;
+  whole?: boolean;
+};
+const roofNumber = (k: string, counts: ConsensusNumber["counts"], whole = false): ConsensusNumber => ({
+  name: k,
+  get: (d) => num(cRoof(d)[k]),
+  set: (out, v) => { if (v === null) delete out.roof[k]; else out.roof[k] = v; },
+  counts,
+  whole,
+});
+const sameType = (d: D3Spec, c: Record<string, string | null>) => cRoof(d).type === c.type;
+const always = () => true;
+const porchIs = (kind: PorchKind) => (d: D3Spec, c: Record<string, string | null>) => c.porch === kind && consensusPorchKind(cRoof(d)) === kind;
+const CONSENSUS_NUMBERS: readonly ConsensusNumber[] = [
+  roofNumber("pitch", sameType),
+  roofNumber("ridgeOffset", sameType),
+  roofNumber("overhang", always),
+  roofNumber("kneeU", sameType),
+  roofNumber("kneeRise", sameType),
+  roofNumber("ridgeRise", sameType),
+  roofNumber("tailSpacingIn", (d, c) => c.eave === "open" && cRoof(d).eave === "open"),
+  roofNumber("leanToWidthFt", (d, c) => c.leanTo === "yes" && cLeanTo(cRoof(d))),
+  roofNumber("leanToDropFt", (d, c) => c.leanTo === "yes" && cLeanTo(cRoof(d))),
+  roofNumber("dormerWidthFt", (d, c) => c.dormer === "yes" && cDormer(cRoof(d))),
+  roofNumber("dormerRiseFt", (d, c) => c.dormer === "yes" && cDormer(cRoof(d))),
+  roofNumber("dormerOffsetU", (d, c) => c.dormer === "yes" && cDormer(cRoof(d)) && cDormerSide(cRoof(d)) === c.dormerSide),
+  roofNumber("porchDepthFt", porchIs("recessed")),
+  roofNumber("porchOutFt", porchIs("projecting")),
+  roofNumber("porchAttachFt", (d, c) => c.porchAttach === "given" && porchIs("projecting")(d, c)),
+  roofNumber("porchWidthFt", (d, c) => c.porchWidth === "part" && porchIs("projecting")(d, c)),
+  roofNumber("porchPosts", porchIs("projecting"), true),
+  roofNumber("porchPitch", porchIs("projecting")),
+  roofNumber("wingWidthFt", (d, c) => c.wings === "yes" && cWings(cRoof(d))),
+  roofNumber("wingPitch", (d, c) => c.wings === "yes" && cWings(cRoof(d))),
+  roofNumber("centerEaveFt", (d, c) => c.wings === "yes" && cWings(cRoof(d))),
+  {
+    name: "wallHeightFt",
+    get: (d) => num(d.wallHeightFt),
+    set: (out, v) => { if (v === null) delete out.wallHeightFt; else out.wallHeightFt = v; },
+    counts: always,
+  },
+  {
+    name: "gableVent.widthFrac",
+    get: (d) => (d.gableVent ? num(d.gableVent.widthFrac) : null),
+    set: (out, v) => { if (v === null) delete out.gableVent; else out.gableVent = { widthFrac: v }; },
+    counts: (d, c) => c.gableVent === "yes" && !!d.gableVent,
+  },
+];
+const CONSENSUS_COLOR_KEYS = ["body", "trim", "roof", "wood", "corner", "fascia"] as const;
+
+// The median; two values give their midpoint, held to four places so a float sum cannot leave
+// 0.5349999999999999 in a customer's column. One value is returned exactly.
+function consensusMedian(values: number[]): number {
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  if (s.length % 2) return s[mid];
+  return Math.round(((s[mid - 1] + s[mid]) / 2) * 10_000) / 10_000;
+}
+
+function hexRgb(v: string): [number, number, number] | null {
+  const h = v.trim().replace(/^#/, "");
+  const full = h.length === 3 || h.length === 4 ? h.slice(0, 3).split("").map((c) => c + c).join("")
+    : h.length === 6 || h.length === 8 ? h.slice(0, 6) : null;
+  if (!full || !/^[0-9a-fA-F]{6}$/.test(full)) return null;
+  return [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16)) as [number, number, number];
+}
+const rgbHex = (c: number[]) => "#" + c.map((x) => Math.round(x).toString(16).padStart(2, "0")).join("");
+
+// How many of a read's OWN checks it fails (the ones portal-settings shows the builder): a read that
+// contradicts itself is the worse base when the disagreement count ties, which with two reads it
+// always does.
+function consensusSelfDoubts(d: ConsensusDraft): number {
+  const roof = cRoof(d.d3);
+  return [frameKeyWarning(roof), gambrelRoofWarning(roof), porchAgreementWarning(roof, d.observed), wingsAgreementWarning(roof, d.observed)]
+    .filter((w) => w !== null).length;
+}
+const CONFIDENCE_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
+
+export function consensusDrafts(drafts: readonly ConsensusDraft[]): ConsensusResult {
+  const n = drafts.length;
+  if (n === 0) throw new Error("consensusDrafts needs at least one draft");
+  const fieldAt = new Map(CONSENSUS_FIELDS.map((f, i) => [f.name, i]));
+  const keys = drafts.map((d) => CONSENSUS_FIELDS.map((f) => f.key(d.d3)));
+
+  // Pairwise disagreement: a field counts when both reads answered it and, for a field that belongs
+  // to a structure, when both chose the same structure (a porch-kind split is counted once, on the
+  // porch, not again on every porch detail).
+  const apart = (a: number, b: number) => {
+    let d = 0;
+    CONSENSUS_FIELDS.forEach((f, i) => {
+      const ka = keys[a][i], kb = keys[b][i];
+      if (ka === null || kb === null) return;
+      if (f.parent) {
+        const p = fieldAt.get(f.parent)!;
+        if (keys[a][p] !== keys[b][p]) return;
+      }
+      if (ka !== kb) d++;
+    });
+    return d;
+  };
+  const score = drafts.map((_, a) => drafts.reduce((s, __, b) => (a === b ? s : s + apart(a, b)), 0));
+  const doubts = drafts.map(consensusSelfDoubts);
+  const conf = drafts.map((d) => CONFIDENCE_RANK[d.observed?.confidence ?? ""] ?? 1);
+  // Best first: least disagreement, then fewest self-contradictions, then the read's own confidence,
+  // then send order. rank[0] is the medoid, and every tie below goes to the best-ranked read.
+  const rank = drafts.map((_, i) => i).sort((a, b) => score[a] - score[b] || doubts[a] - doubts[b] || conf[a] - conf[b] || a - b);
+  const medoid = rank[0];
+
+  const out = JSON.parse(JSON.stringify(drafts[medoid].d3)) as D3Spec;
+  const chosen: Record<string, string | null> = {};
+  const discreteAgreement: Record<string, string> = {};
+  CONSENSUS_FIELDS.forEach((f, i) => {
+    const p = f.parent ? fieldAt.get(f.parent)! : -1;
+    const voters = rank.filter((d) => keys[d][i] !== null && (p < 0 || keys[d][p] === chosen[f.parent!]));
+    if (!voters.length) {
+      chosen[f.name] = null;
+      f.apply?.(out, null);
+      return;
+    }
+    const tally = new Map<string, number>();
+    for (const d of voters) tally.set(keys[d][i]!, (tally.get(keys[d][i]!) ?? 0) + 1);
+    const top = Math.max(...tally.values());
+    // `voters` is in rank order, so the first one holding a top-count answer is the tie-break.
+    const rep = voters.find((d) => tally.get(keys[d][i]!) === top)!;
+    chosen[f.name] = keys[rep][i];
+    discreteAgreement[f.name] = `${top}/${voters.length}`;
+    f.apply?.(out, drafts[rep].d3);
+  });
+
+  const spread: Record<string, [number, number]> = {};
+  for (const f of CONSENSUS_NUMBERS) {
+    const values = drafts.filter((d) => f.counts(d.d3, chosen)).map((d) => f.get(d.d3)).filter((v): v is number => v !== null);
+    if (!values.length) { f.set(out, null); continue; }
+    const m = consensusMedian(values);
+    f.set(out, f.whole ? Math.round(m) : m);
+    const lo = Math.min(...values), hi = Math.max(...values);
+    if (lo < hi) spread[f.name] = [lo, hi];
+  }
+
+  const colors: Record<string, string> = {};
+  for (const k of CONSENSUS_COLOR_KEYS) {
+    const givers = rank.filter((d) => typeof drafts[d].d3.colors?.[k] === "string");
+    if (!givers.length) continue;
+    const given = givers.map((d) => drafts[d].d3.colors[k]);
+    if (given.every((v) => v === given[0])) { colors[k] = given[0]; continue; }
+    const rgb = given.map(hexRgb).filter((c): c is [number, number, number] => c !== null);
+    if (!rgb.length) { colors[k] = given[0]; continue; }
+    if (rgb.length === 2 && [0, 1, 2].some((ch) => Math.abs(rgb[0][ch] - rgb[1][ch]) > CONSENSUS_COLOR_BLEND_MAX)) {
+      colors[k] = given[0];
+      continue;
+    }
+    colors[k] = rgbHex([0, 1, 2].map((ch) => consensusMedian(rgb.map((c) => c[ch]))));
+  }
+  out.colors = colors;
+
+  const clean = sanitizeD3Spec(out);
+  return {
+    d3: clean.ok ? clean.d3 : drafts[medoid].d3,
+    observed: drafts[medoid].observed,
+    frameMap: drafts[medoid].frameMap,
+    medoid,
+    report: { n, medoid, discreteAgreement, spread },
+  };
+}
+
+// The consensus of every call that drafted, with the medoid's CALL index (`call`) so the handler can
+// answer from that call's own reply: its `observed` notes and its frame map are the consensus's.
+// Null when no call drafted, which is the handler's cue to fail exactly as a single call would.
+export function consensusOfCalls(
+  calls: readonly DraftCall<DraftReading>[],
+  walkFrames: number,
+): (ConsensusResult & { call: number }) | null {
+  const usable: { call: number; draft: ConsensusDraft }[] = [];
+  calls.forEach((c, call) => {
+    if (!c.reading || !c.reading.d3) return;
+    const text = c.reading.reply.text;
+    usable.push({ call, draft: { d3: c.reading.d3, observed: parseObservedNotes(text), frameMap: parseFrameMap(text, walkFrames) } });
+  });
+  if (!usable.length) return null;
+  const result = consensusDrafts(usable.map((u) => u.draft));
+  return { ...result, call: usable[result.medoid].call };
+}
+
+// Builder's words for each discrete field, for the split warning below.
+const CONSENSUS_FIELD_WORDS: Record<string, string> = {
+  type: "the roof type",
+  front: "which wall is the front",
+  highSide: "which wall is the high one",
+  eave: "the eave finish",
+  porch: "the porch",
+  porchEnd: "which end the porch is on",
+  porchTruss: "the porch truss",
+  porchSteps: "where the porch steps are",
+  porchAttach: "where the porch roof meets the wall",
+  porchWidth: "how wide the porch is",
+  wings: "the side wings",
+  wingSide: "which sides have wings",
+  leanTo: "the lean-to",
+  leanToSide: "which side the lean-to is on",
+  dormer: "the dormer",
+  dormerType: "the dormer's shape",
+  dormerSide: "which slope the dormer is on",
+  roofMaterial: "the roof material",
+  foundation: "the foundation",
+  gableVent: "the gable vent",
+};
+
+// Where the reads SPLIT, said to the builder: any discrete field that no two reads agreed on (1 of
+// 3, or 1 of 2). A 2-of-3 majority is a consensus and says nothing. Composed into roofNote by
+// flagObservedNotes beside the porch and wings checks, which also drops the confidence to low.
+export function consensusSplitWarning(report: ConsensusReport | null | undefined): string | null {
+  if (!report || report.n < 2) return null;
+  const split = Object.entries(report.discreteAgreement)
+    .filter(([, a]) => {
+      const [k, n] = a.split("/").map(Number);
+      return k === 1 && n >= 2;
+    })
+    .map(([f]) => CONSENSUS_FIELD_WORDS[f] ?? f);
+  if (!split.length) return null;
+  const list = split.length === 1 ? split[0] : `${split.slice(0, -1).join(", ")} and ${split[split.length - 1]}`;
+  const times = report.n === 2 ? "twice" : report.n === 3 ? "three times" : `${report.n} times`;
+  return `Check ${list} before saving: we read the video ${times} and the readings did not agree on ${split.length === 1 ? "it" : "them"}, so the drawing follows the reading that agreed best with the others. Compare the preview with the video.`;
+}
+
+// What the calls used, for a draft that made more than one (a single call records exactly what it
+// always has, in the handler). `tokens` is the draft_tokens jsonb: the SUM of every call's usage
+// under today's keys, the lead reply's shapes (the medoid's, or the first call's when none drafted),
+// one entry per call, the sanitised roof of every read that drafted (for later analysis of how far
+// reads wander), and the agreement report. `usage` is the same sum under Anthropic's own keys, for
+// the capture: every call that answered cost money, so all of them are the cost basis. A call with
+// no usage block (aborted, a 529) adds nothing, and a sum no call reported is null, never 0.
+export function draftCallsUsage(
+  // aiModelFields(v2).model, stored as the single call's record stores it.
+  model: unknown,
+  calls: readonly DraftCall<DraftReading>[],
+  lead: DraftCall<DraftReading>,
+  consensus: ConsensusResult | null,
+): { tokens: Record<string, unknown>; usage: Record<string, number | null> } {
+  const count = (c: DraftCall<DraftReading>, key: string): number | null => {
+    const v = c.reading?.data?.usage?.[key];
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  };
+  const sum = (key: string): number | null =>
+    calls.reduce<number | null>((s, c) => {
+      const v = count(c, key);
+      return v === null ? s : (s ?? 0) + v;
+    }, null);
+  const usage = {
+    input_tokens: sum("input_tokens"),
+    output_tokens: sum("output_tokens"),
+    cache_read_input_tokens: sum("cache_read_input_tokens"),
+    cache_creation_input_tokens: sum("cache_creation_input_tokens"),
+    calls: calls.length,
+  };
+  const reply = lead.reading?.reply ?? null;
+  const tokens: Record<string, unknown> = {
+    model,
+    input: usage.input_tokens,
+    output: usage.output_tokens,
+    cache_read: usage.cache_read_input_tokens,
+    cache_creation: usage.cache_creation_input_tokens,
+    stopReason: reply ? reply.stopReason : null,
+    textChars: reply ? reply.text.length : 0,
+    blockTypes: reply ? reply.blockTypes : [],
+    calls: calls.map((c) => ({
+      model,
+      output: count(c, "output_tokens"),
+      stopReason: c.reading ? c.reading.reply.stopReason : null,
+      ms: c.ms,
+      ok: !!c.reading?.drafted,
+      aborted: c.aborted,
+    })),
+    samples: calls.flatMap((c) => (c.reading?.d3 ? [c.reading.d3.roof] : [])),
+    agreement: consensus ? consensus.report : null,
+  };
+  return { tokens, usage };
+}

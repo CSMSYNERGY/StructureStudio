@@ -3940,3 +3940,393 @@ Deno.test("the centre eave is built from two measured parts, in the draft and in
   const c = selfCheckPrompt({ dims: { widthFt: 30, lengthFt: 20, wallHeightFt: 8 }, draft: (sanitizeD3Spec({ roof: { type: "gable", front: "gable", pitch: 0.5, wingSide: "both", wingWidthFt: 9, centerEaveFt: 14 } }) as { ok: true; d3: D3Spec }).d3, viewpoints: ["front", "back"] });
   assert(c.includes("Measure it, do not eyeball it") && c.includes("If the band's share differs by a quarter or more"), "check: a measured test");
 });
+
+// ═══ CONSENSUS DRAFTING (2026-09-25) ══════════════════════════════════════════════════════════
+// Live v2 runs of one video kept the SHAPE and let the NUMBERS wander: a raised centre's eave read
+// 15, 14 and 12.5 ft, the pitch 0.37 to 0.7, 3 porch posts or 4, the steps in the centre or on the
+// right. The v2 draft now reads the video three times and combines the reads. What is pinned here:
+// one read passes through untouched; numbers are medians over the reads that agree with the chosen
+// structure, never over reads of a different building; discrete fields go by majority with ties to
+// the medoid; where reads split with no majority the builder is told; and the parallel calls keep
+// one budget and cut a straggler 20 s after the second read.
+import {
+  consensusDrafts, consensusOfCalls, consensusSplitWarning, draftCallCount, draftCallsUsage, readDraftReply,
+  runDraftCalls, DRAFT_CONSENSUS_CALLS, DRAFT_CONSENSUS_GRACE_MS, DRAFT_CONSENSUS_QUORUM, CONSENSUS_COLOR_BLEND_MAX,
+} from "./styleD3.ts";
+import type { ConsensusDraft, ObservedNotes } from "./styleD3.ts";
+
+// A raised-centre house with a projecting porch, as a v2 read reports it. Generic numbers only.
+const RAISED_RAW = {
+  roof: {
+    type: "gable", front: "gable", pitch: 0.5, overhang: 0.5, eave: "fascia",
+    wingSide: "both", wingWidthFt: 9, wingPitch: 0.25, centerEaveFt: 14,
+    porchOutFt: 6, porchEnd: "front", porchAttachFt: 10, porchPosts: 4, porchPitch: 0.2, porchSteps: "center",
+  },
+  colors: { body: "#333333", trim: "#222222", roof: "#1a1a1a", corner: "#333333", fascia: "#1a1a1a", wood: "#8a6a4a" },
+  wallHeightFt: 8,
+  roofMaterial: "metal",
+  foundation: "skids",
+};
+const SAID: ObservedNotes = { roofNote: "gable centre with a wing each side", porch: "projecting", wings: "both", confidence: "medium" };
+// One read: the base with its roof, colours or top-level keys changed. `null` deletes a key.
+function read(
+  roof: Record<string, unknown> = {},
+  more: Record<string, unknown> = {},
+  observed: ObservedNotes | null = SAID,
+): ConsensusDraft {
+  const r: Record<string, unknown> = { ...RAISED_RAW.roof, ...roof };
+  for (const k of Object.keys(r)) if (r[k] === null) delete r[k];
+  const top: Record<string, unknown> = { ...RAISED_RAW, ...more, roof: r };
+  for (const k of Object.keys(top)) if (top[k] === null) delete top[k];
+  return { d3: cleanSpec(top), observed, frameMap: null };
+}
+const NO_PORCH = { porchOutFt: null, porchEnd: null, porchAttachFt: null, porchPosts: null, porchPitch: null, porchSteps: null };
+const NO_WINGS = { wingSide: null, wingWidthFt: null, wingPitch: null, centerEaveFt: null };
+
+Deno.test("consensusDrafts: ONE read comes back exactly as it went in, notes and frame map included", () => {
+  const frameMap = { front: { frame: 1, azimuthDeg: 0 } };
+  const one = { ...read(), frameMap };
+  const r = consensusDrafts([one]);
+  assertEquals(r.d3, one.d3, "the spec is untouched");
+  assertEquals(r.observed, one.observed);
+  assertEquals(r.frameMap, frameMap);
+  assertEquals(r.medoid, 0);
+  assertEquals(r.report.n, 1);
+  assert(Object.values(r.report.discreteAgreement).every((a) => a === "1/1"), JSON.stringify(r.report.discreteAgreement));
+  assertEquals(r.report.spread, {}, "one read has no spread");
+  assertEquals(consensusSplitWarning(r.report), null, "one read cannot split");
+});
+
+Deno.test("consensusDrafts: three identical reads are that read, 3/3 on everything", () => {
+  const r = consensusDrafts([read(), read(), read()]);
+  assertEquals(r.d3, read().d3);
+  assert(Object.values(r.report.discreteAgreement).every((a) => a === "3/3"), JSON.stringify(r.report.discreteAgreement));
+  assertEquals(r.report.discreteAgreement.porch, "3/3");
+  assertEquals(r.report.discreteAgreement.wings, "3/3");
+});
+
+Deno.test("consensusDrafts: the wandering numbers the live runs showed come back as their medians", () => {
+  // Same shape three times; the centre eave, pitch, posts and steps wander (the 2026-09-25 runs).
+  const a = read({ centerEaveFt: 15, pitch: 0.37, porchPosts: 3, porchSteps: "center" });
+  const b = read({ centerEaveFt: 14, pitch: 0.7, porchPosts: 4, porchSteps: "right" });
+  const c = read({ centerEaveFt: 12.5, pitch: 0.5, porchPosts: 4, porchSteps: "center" });
+  const r = consensusDrafts([a, b, c]);
+  assertEquals(r.d3.roof.centerEaveFt, 14);
+  assertEquals(r.d3.roof.pitch, 0.5);
+  assertEquals(r.d3.roof.porchPosts, 4);
+  assertEquals(r.d3.roof.porchSteps, "center");
+  assertEquals(r.report.discreteAgreement.porchSteps, "2/3");
+  assertEquals(r.report.spread.centerEaveFt, [12.5, 15]);
+  assertEquals(r.report.spread.pitch, [0.37, 0.7]);
+  assertEquals(r.report.spread.porchPosts, [3, 4]);
+  assert(!("wingWidthFt" in r.report.spread), "a number every read gave alike has no spread entry");
+  // b is the odd one out on the steps, so a or c is the base; a ties c and wins on send order.
+  assertEquals(r.medoid, 0);
+  assertEquals(consensusSplitWarning(r.report), null, "2 of 3 is a consensus, and says nothing");
+});
+
+Deno.test("consensusDrafts: a porch kind split goes by majority, and the porch numbers come only from the reads that saw that porch", () => {
+  const a = read({ porchOutFt: 6, porchAttachFt: 10, porchPosts: 4 });
+  const b = read({ porchOutFt: 5, porchAttachFt: 9, porchPosts: 4 });
+  // A porch of 0.4 ft is not drawn (the renderer's porch is over half a foot), so this read saw no
+  // porch, whatever number it wrote down.
+  const none = read({ ...NO_PORCH, porchOutFt: 0.4 }, {}, { ...SAID, porch: "none" });
+  const r = consensusDrafts([none, a, b]);
+  assertEquals(r.report.discreteAgreement.porch, "2/3");
+  assertEquals(r.d3.roof.porchOutFt, 5.5, "the no-porch read's stray 0.4 does not drag the depth toward zero");
+  assertEquals(r.d3.roof.porchAttachFt, 9.5);
+  assertEquals(r.d3.roof.porchPosts, 4);
+  assertEquals(r.d3.roof.porchSteps, "center");
+  assertEquals(r.report.discreteAgreement.porchSteps, "2/2", "only the two porch reads vote on the steps");
+  assert(r.medoid !== 0, "the dissenter is not the base");
+
+  // The other way round: one porch among three reads is no porch, and NOTHING of it survives.
+  const s = consensusDrafts([a, read(NO_PORCH, {}, { ...SAID, porch: "none" }), read(NO_PORCH, {}, { ...SAID, porch: "none" })]);
+  assertEquals(s.report.discreteAgreement.porch, "2/3");
+  for (const k of ["porchOutFt", "porchDepthFt", "porchEnd", "porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps", "porchTruss"]) {
+    assert(!(k in s.d3.roof), `${k} left behind on a building with no porch`);
+  }
+});
+
+Deno.test("consensusDrafts: three different porch kinds tie to the medoid's, and the builder is told the reads split", () => {
+  const projecting = read();
+  const recessed = read({ ...NO_PORCH, porchDepthFt: 6, porchEnd: "front" }, {}, { ...SAID, porch: "recessed" });
+  const none = read(NO_PORCH, {}, { ...SAID, porch: "none" });
+  const r = consensusDrafts([recessed, projecting, none]);
+  assertEquals(r.report.discreteAgreement.porch, "1/3");
+  // All three score alike on the discrete fields, so send order decides: the recessed read.
+  assertEquals(r.medoid, 0);
+  assertEquals(r.d3.roof.porchDepthFt, 6);
+  assert(!("porchOutFt" in r.d3.roof), "one kind at a time");
+  const w = consensusSplitWarning(r.report)!;
+  assert(w.startsWith("Check the porch before saving: we read the video three times and the readings did not agree on it"), w);
+  // And the flag lands where the builder looks, low confidence and all.
+  const flagged = flagObservedNotes(r.observed, w)!;
+  assertEquals(flagged.confidence, "low");
+  assert(flagged.roofNote!.startsWith("Check the porch before saving"), flagged.roofNote!);
+});
+
+Deno.test("consensusDrafts: wings in 2 of 3 reads are drawn, from those two reads only", () => {
+  const a = read({ wingWidthFt: 9, centerEaveFt: 15, wingPitch: 0.25 });
+  const b = read({ wingWidthFt: 8, centerEaveFt: 14, wingPitch: 0.3 });
+  // Wings of 0.4 ft are not drawn, so this read has none, and its stray centre eave is not a wing read's.
+  const plain = read({ ...NO_WINGS, wingWidthFt: 0.4, centerEaveFt: 20 }, {}, { ...SAID, wings: "none" });
+  const r = consensusDrafts([a, plain, b]);
+  assertEquals(r.report.discreteAgreement.wings, "2/3");
+  assertEquals(r.d3.roof.wingSide, "both");
+  assertEquals(r.report.discreteAgreement.wingSide, "2/2");
+  assertEquals(r.d3.roof.wingWidthFt, 8.5);
+  assertEquals(r.d3.roof.centerEaveFt, 14.5);
+  assertEquals(r.d3.roof.wingPitch, 0.275);
+  // One wing read in three: no wings, and no wing key left over for the panel to trip on.
+  const s = consensusDrafts([a, read(NO_WINGS, {}, { ...SAID, wings: "none" }), read(NO_WINGS, {}, { ...SAID, wings: "none" })]);
+  for (const k of ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt"]) assert(!(k in s.d3.roof), `${k} left behind`);
+});
+
+Deno.test("consensusDrafts: two reads — numbers meet in the middle, a discrete tie goes to the better-ranked read", () => {
+  // Same disagreement count both ways, same self-consistency: the read's own confidence decides.
+  const fascia = read({ eave: "fascia", pitch: 0.4, porchPosts: 3 }, {}, { ...SAID, confidence: "medium" });
+  const open = read({ eave: "open", tailSpacingIn: 24, pitch: 0.5, porchPosts: 4 }, {}, { ...SAID, confidence: "high" });
+  const r = consensusDrafts([fascia, open]);
+  assertEquals(r.medoid, 1, "the high-confidence read is the base");
+  assertEquals(r.d3.roof.eave, "open", "the tie goes to the medoid");
+  assertEquals(r.d3.roof.tailSpacingIn, 24, "tail spacing only from a read with an open eave");
+  assertEquals(r.d3.roof.pitch, 0.45);
+  assertEquals(r.d3.roof.porchPosts, 4, "3.5 posts round to a whole post");
+  assertEquals(r.report.discreteAgreement.eave, "1/2");
+  const w = consensusSplitWarning(r.report)!;
+  assert(w.startsWith("Check the eave finish before saving: we read the video twice"), w);
+  // A read that contradicts ITSELF loses the tie whatever its confidence says.
+  const selfContradicting = read({ eave: "open", tailSpacingIn: 16 }, {}, { ...SAID, porch: "none", confidence: "high" });
+  const t = consensusDrafts([selfContradicting, fascia]);
+  assertEquals(t.medoid, 1);
+  assertEquals(t.d3.roof.eave, "fascia");
+  assert(!("tailSpacingIn" in t.d3.roof), "no tail spacing under a fascia");
+});
+
+Deno.test("consensusDrafts: leaving a key out votes where it is an answer, and abstains where it is not", () => {
+  // porchWidthFt left out means "the whole wall": one narrow read in three loses to it.
+  const narrow = read({ porchWidthFt: 10 });
+  const r = consensusDrafts([narrow, read(), read()]);
+  assertEquals(r.report.discreteAgreement.porchWidth, "2/3");
+  assert(!("porchWidthFt" in r.d3.roof), "a porch across the whole wall");
+  // porchAttachFt given by two reads of three: the attach height is theirs.
+  const s = consensusDrafts([read({ porchAttachFt: 10 }), read({ porchAttachFt: 9 }), read({ porchAttachFt: null })]);
+  assertEquals(s.report.discreteAgreement.porchAttach, "2/3");
+  assertEquals(s.d3.roof.porchAttachFt, 9.5);
+  // The REQUIRED front is a failure to answer when left out, not a vote: the one read that gave it wins.
+  const t = consensusDrafts([read({ front: null }), read({ front: "eave" }), read({ front: null })]);
+  assertEquals(t.d3.roof.front, "eave");
+  assertEquals(t.report.discreteAgreement.front, "1/1");
+  assertEquals(consensusSplitWarning(t.report), null, "one answer is not a split");
+  // Porch posts nobody could count: left out, the renderer's rule.
+  const u = consensusDrafts([read({ porchPosts: null }), read({ porchPosts: null })]);
+  assert(!("porchPosts" in u.d3.roof), "no count, no key");
+});
+
+Deno.test("consensusDrafts: a roof-type split keeps the losing type's numbers out", () => {
+  const barn = (k: Record<string, unknown>) => read({ type: "gambrel", pitch: null, ...NO_WINGS, ...k }, {}, { ...SAID, wings: "none" });
+  const a = barn({ kneeU: 0.75, kneeRise: 0.72, ridgeRise: 1.03, front: "gable" });
+  const b = barn({ kneeU: 0.8, kneeRise: 0.7, ridgeRise: 1.0, front: "gable" });
+  const gable = read({ ...NO_WINGS, pitch: 0.5, front: "eave", kneeU: 0.2 }, {}, { ...SAID, wings: "none" });
+  const r = consensusDrafts([gable, a, b]);
+  assertEquals(r.d3.roof.type, "gambrel");
+  assertEquals(r.report.discreteAgreement.type, "2/3");
+  assertEquals(r.d3.roof.kneeU, 0.775, "the gable read's stray knee is not averaged in");
+  assertEquals(r.d3.roof.ridgeRise, 1.015);
+  assertEquals(r.d3.roof.front, "gable");
+  assertEquals(r.report.discreteAgreement.front, "2/2", "only the gambrel reads vote on the gambrel's front");
+  assert(!("pitch" in r.d3.roof), "no gambrel read gave a pitch, and the gable's is not the gambrel's");
+});
+
+Deno.test("consensusDrafts: a shed's high side by majority, its pitch by median", () => {
+  const shed = (highSide: string, pitch: number) =>
+    read({ type: "shed", front: null, highSide, pitch, ...NO_WINGS }, {}, { ...SAID, wings: "none" });
+  const r = consensusDrafts([shed("front", 0.25), shed("back", 0.2), shed("front", 0.3)]);
+  assertEquals(r.d3.roof.highSide, "front");
+  assertEquals(r.report.discreteAgreement.highSide, "2/3");
+  assertEquals(r.d3.roof.pitch, 0.25);
+  assert(!("front" in r.d3.roof), "a shed has no roof.front");
+});
+
+Deno.test("consensusDrafts: a dormer's slope is voted, so two sides never average onto the ridge", () => {
+  const d = (off: number, w: number) => read({ dormerWidthFt: w, dormerRiseFt: 3, dormerOffsetU: off, dormerType: "gable" });
+  const r = consensusDrafts([d(-0.5, 6), d(0.5, 6), d(0.45, 5)]);
+  assertEquals(r.report.discreteAgreement.dormer, "3/3");
+  assertEquals(r.report.discreteAgreement.dormerSide, "2/3");
+  assertEquals(r.d3.roof.dormerOffsetU, 0.475);
+  assertEquals(r.d3.roof.dormerWidthFt, 6);
+  // A lean-to and a gable vent in one read of three are neither.
+  const s = consensusDrafts([read({ leanToWidthFt: 8, leanToSide: "left" }, { gableVent: { widthFrac: 0.2 } }), read(), read()]);
+  for (const k of ["leanToWidthFt", "leanToSide", "leanToDropFt"]) assert(!(k in s.d3.roof), `${k} left behind`);
+  assert(!("gableVent" in s.d3), "no vent");
+  // And in two of three, the vent's width is the median of theirs.
+  const t = consensusDrafts([read({}, { gableVent: { widthFrac: 0.2 } }), read({}, { gableVent: { widthFrac: 0.3 } }), read()]);
+  assertEquals(t.d3.gableVent, { widthFrac: 0.25 });
+});
+
+Deno.test("consensusDrafts: colours are a per-channel median, and two far-apart readings are not blended into a third colour", () => {
+  const a = read({}, { colors: { body: "#302010", roof: "#1a1a1a", corner: "#ffffff", fascia: "#1a1a1a", wood: "#8A6A4A" } });
+  const b = read({}, { colors: { body: "#402818", trim: "#eeeeee", roof: "#1a1a1a", fascia: "#202020", wood: "#8A6A4A" } });
+  const c = read({}, { colors: { body: "#382420", roof: "#1a1a1a", corner: "#333333", wood: "#8A6A4A" } });
+  const r = consensusDrafts([a, b, c]);
+  assertEquals(r.d3.colors.body, "#382418", "r 30/40/38, g 20/28/24, b 10/18/20: each channel's middle");
+  assertEquals(r.d3.colors.trim, "#eeeeee", "one read gave it: that read's");
+  assertEquals(r.d3.colors.wood, "#8A6A4A", "agreeing strings come back verbatim");
+  assertEquals(r.d3.colors.fascia, "#1d1d1d", "two close readings meet in the middle");
+  // White and charcoal corners are a split, not noise: the better-ranked read's (all three rank
+  // alike here, so send order: the first read's), never a grey neither read saw.
+  assertEquals(r.d3.colors.corner, "#ffffff");
+  assert(CONSENSUS_COLOR_BLEND_MAX > 0x20 - 0x1a, "the fascia pair is inside the blend limit");
+  // A colour no read gave stays out.
+  const s = consensusDrafts([read({}, { colors: { body: "#333333" } }), read({}, { colors: { body: "#333333" } })]);
+  assertEquals(Object.keys(s.d3.colors), ["body"]);
+});
+
+Deno.test("consensusDrafts: the result is a clean spec (the sanitiser is idempotent on it) and never empty-handed", () => {
+  const r = consensusDrafts([read({ pitch: 0.37 }), read({ pitch: 0.7 }), read(NO_PORCH, {}, { ...SAID, porch: "none" })]);
+  assertEquals(cleanSpec(r.d3), r.d3);
+  let threw = false;
+  try { consensusDrafts([]); } catch { threw = true; }
+  assert(threw, "no reads is the caller's bug, not a spec");
+});
+
+Deno.test("consensusSplitWarning: only a field no two reads agreed on, in the builder's words", () => {
+  assertEquals(consensusSplitWarning(null), null);
+  assertEquals(consensusSplitWarning({ n: 3, medoid: 0, discreteAgreement: { porch: "2/3", eave: "3/3" }, spread: {} }), null);
+  assertEquals(consensusSplitWarning({ n: 1, medoid: 0, discreteAgreement: { porch: "1/1" }, spread: {} }), null);
+  const w = consensusSplitWarning({ n: 3, medoid: 0, discreteAgreement: { porch: "1/3", porchSteps: "1/2", eave: "2/3", wings: "1/1" }, spread: {} })!;
+  assertEquals(w, "Check the porch and where the porch steps are before saving: we read the video three times and the readings did not agree on them, so the drawing follows the reading that agreed best with the others. Compare the preview with the video.");
+  const x = consensusSplitWarning({ n: 3, medoid: 0, discreteAgreement: { type: "1/3", front: "1/2", roofMaterial: "1/2" }, spread: {} })!;
+  assert(x.startsWith("Check the roof type, which wall is the front and the roof material before saving"), x);
+  assert(!/[{}]|porchSteps|roofMaterial/.test(w + x), "no schema words reach the builder");
+});
+
+// ─── The reply reader and the calls ────────────────────────────────────────────────────────────
+const replyBody = (spec: unknown, extra: Record<string, unknown> = {}) => JSON.stringify({
+  content: [{ type: "thinking", thinking: "" }, { type: "text", text: typeof spec === "string" ? spec : JSON.stringify(spec) }],
+  stop_reason: "end_turn",
+  usage: { input_tokens: 21000, output_tokens: 7000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  ...extra,
+});
+
+Deno.test("draftCallCount: three reads for a v2 press, one for everything else", () => {
+  assertEquals(DRAFT_CONSENSUS_CALLS, 3);
+  assertEquals(DRAFT_CONSENSUS_QUORUM, 2);
+  assertEquals(DRAFT_CONSENSUS_GRACE_MS, 20_000);
+  assertEquals(draftCallCount(true, false), 3, "the new designer's first press");
+  assertEquals(draftCallCount(true, true), 1, "its lean retry");
+  assertEquals(draftCallCount(false, false), 1, "every legacy request");
+  assertEquals(draftCallCount(false, true), 1);
+});
+
+Deno.test("readDraftReply: reads a reply the way the handler does, and never throws", () => {
+  const ok = readDraftReply(replyBody(RAISED_RAW), { widthFt: 30, lengthFt: 20, wallHeightFt: 9 });
+  assert(ok.drafted && ok.d3 !== null, "a spec in the text blocks drafts");
+  assertEquals(ok.d3!.wallHeightFt, 9, "the builder's wall height over the model's, as parseModelSpec does");
+  assertEquals(ok.data?.usage?.output_tokens, 7000);
+  assertEquals(ok.reply.blockTypes, ["thinking", "text"]);
+  const refused = readDraftReply(replyBody(RAISED_RAW, { stop_reason: "refusal" }));
+  assert(!refused.drafted && refused.d3 === null, "a refusal is never a draft, whatever its text says");
+  const cut = readDraftReply(replyBody('{"roof":{"type":"gab', { stop_reason: "max_tokens" }));
+  assertEquals([cut.drafted, cut.reply.stopReason], [false, "max_tokens"]);
+  for (const junk of ["", "not json", "[1,2]", "42", "null"]) {
+    const r = readDraftReply(junk);
+    assertEquals([r.data, r.drafted, r.reply.text], [null, false, ""], junk);
+  }
+});
+
+type Plan = { status?: number; body?: string; delayMs: number; hang?: boolean; throws?: string };
+// A fetch stand-in: answers after delayMs unless the signal fires first. Every timer is cleared.
+function fakeSend(plans: Plan[]) {
+  const sent: AbortSignal[] = [];
+  const send = (signal: AbortSignal): Promise<Response> => {
+    const plan = plans[sent.length];
+    sent.push(signal);
+    return new Promise((resolve, reject) => {
+      if (plan.throws) { reject(new TypeError(plan.throws)); return; }
+      const t = plan.hang ? undefined : setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(new Response(plan.body ?? "", { status: plan.status ?? 200 }));
+      }, plan.delayMs);
+      const onAbort = () => { if (t !== undefined) clearTimeout(t); reject(new DOMException("The signal has been aborted", "AbortError")); };
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  };
+  return { sent, send };
+}
+const GOOD = replyBody(RAISED_RAW);
+
+Deno.test("runDraftCalls: one call is sent on the deadline signal itself", async () => {
+  const deadline = new AbortController();
+  const f = fakeSend([{ body: GOOD, delayMs: 1 }]);
+  const calls = await runDraftCalls({ count: 1, deadline: deadline.signal, graceMs: 5, send: f.send, read: (b) => readDraftReply(b) });
+  assertEquals(f.sent.length, 1);
+  assert(f.sent[0] === deadline.signal, "no signal of its own: today's single call, on today's signal");
+  assertEquals([calls[0].httpOk, calls[0].reading?.drafted], [true, true]);
+});
+
+Deno.test("runDraftCalls: three calls, each on its own signal, results in SEND order whatever order they land in", async () => {
+  const deadline = new AbortController();
+  const f = fakeSend([{ body: GOOD, delayMs: 30 }, { status: 529, body: "overloaded", delayMs: 1 }, { body: "{}", delayMs: 10 }]);
+  const calls = await runDraftCalls({ count: 3, deadline: deadline.signal, graceMs: 1000, send: f.send, read: (b) => readDraftReply(b) });
+  assertEquals(calls.map((c) => c.index), [0, 1, 2]);
+  assert(new Set(f.sent).size === 3 && !f.sent.includes(deadline.signal), "each call has its own signal");
+  assertEquals([calls[0].httpOk, calls[0].reading?.drafted], [true, true]);
+  assertEquals([calls[1].httpOk, calls[1].status, calls[1].body], [false, 529, "overloaded"]);
+  assertEquals([calls[2].httpOk, calls[2].reading?.drafted], [true, false], "a 200 that does not parse is not a draft");
+});
+
+Deno.test("runDraftCalls: once two have drafted, the third gets the grace and is then cut off", async () => {
+  const deadline = new AbortController();
+  const f = fakeSend([{ body: GOOD, delayMs: 5 }, { hang: true, delayMs: 0 }, { body: GOOD, delayMs: 10 }]);
+  const t0 = Date.now();
+  const calls = await runDraftCalls({ count: 3, deadline: deadline.signal, graceMs: 40, send: f.send, read: (b) => readDraftReply(b) });
+  const took = Date.now() - t0;
+  assertEquals([calls[0].reading?.drafted, calls[2].reading?.drafted], [true, true]);
+  assertEquals([calls[1].threw, calls[1].aborted], [true, "quorum"]);
+  assert(took >= 45 && took < 1000, `cut off after the grace, ${took} ms`);
+  assert(!deadline.signal.aborted, "the deadline itself was never touched");
+});
+
+Deno.test("runDraftCalls: the ONE deadline stops every call still out, and says so on each", async () => {
+  const deadline = new AbortController();
+  const f = fakeSend([{ hang: true, delayMs: 0 }, { throws: "connection reset", delayMs: 0 }, { hang: true, delayMs: 0 }]);
+  const run = runDraftCalls({ count: 3, deadline: deadline.signal, graceMs: 5, send: f.send, read: (b) => readDraftReply(b) });
+  const t = setTimeout(() => deadline.abort(), 20);
+  const calls = await run;
+  clearTimeout(t);
+  assertEquals(calls.map((c) => c.aborted), ["deadline", null, "deadline"], "the reset call failed on its own, before the clock ran out");
+  assertEquals(calls.map((c) => c.threw), [true, true, true]);
+  assert(calls[1].error instanceof TypeError, "the error is kept for the handler's message");
+  // One draft is not a quorum: no grace timer, nothing cut early.
+  const g = fakeSend([{ body: GOOD, delayMs: 1 }, { body: "{}", delayMs: 30 }, { status: 500, delayMs: 2 }]);
+  const one = await runDraftCalls({ count: 3, deadline: new AbortController().signal, graceMs: 5, send: g.send, read: (b) => readDraftReply(b) });
+  assertEquals(one.map((c) => c.aborted), [null, null, null], "the slow unparseable call was waited for");
+});
+
+Deno.test("consensusOfCalls and draftCallsUsage: the medoid's CALL, the summed usage, every call's entry", async () => {
+  const deadline = new AbortController();
+  const b1 = replyBody({ ...RAISED_RAW, roof: { ...RAISED_RAW.roof, centerEaveFt: 15 } });
+  const b2 = replyBody({ ...RAISED_RAW, roof: { ...RAISED_RAW.roof, centerEaveFt: 13 } }, { usage: { input_tokens: 21000, output_tokens: 9000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } });
+  const f = fakeSend([{ status: 529, body: "overloaded", delayMs: 1 }, { body: b1, delayMs: 2 }, { body: b2, delayMs: 3 }]);
+  const calls = await runDraftCalls({ count: 3, deadline: deadline.signal, graceMs: 5, send: f.send, read: (b) => readDraftReply(b) });
+  const c = consensusOfCalls(calls, 12)!;
+  assertEquals(c.report.n, 2);
+  assertEquals(c.call, 1, "the medoid is the first drafted call on a tie, named by its CALL index");
+  assertEquals(c.d3.roof.centerEaveFt, 14);
+  const u = draftCallsUsage("claude-opus-5", calls, calls[c.call], c);
+  assertEquals(u.usage, { input_tokens: 42000, output_tokens: 16000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, calls: 3 });
+  assertEquals([u.tokens.input, u.tokens.output, u.tokens.stopReason], [42000, 16000, "end_turn"]);
+  const entries = u.tokens.calls as Record<string, unknown>[];
+  assertEquals(entries.map((e) => [e.output, e.ok, e.aborted]), [[null, false, null], [7000, true, null], [9000, true, null]]);
+  assert(entries.every((e) => e.model === "claude-opus-5" && typeof e.ms === "number"), "model and ms on each");
+  assertEquals((u.tokens.samples as Record<string, unknown>[]).map((r) => r.centerEaveFt), [15, 13], "the reads' own roofs");
+  assertEquals(u.tokens.agreement, c.report);
+  // No call drafted: no consensus, nulls rather than zeros where no call reported a count.
+  const none = await runDraftCalls({ count: 3, deadline: deadline.signal, graceMs: 5, send: fakeSend([{ throws: "x", delayMs: 0 }, { status: 500, delayMs: 1 }, { throws: "y", delayMs: 0 }]).send, read: (b) => readDraftReply(b) });
+  assertEquals(consensusOfCalls(none, 12), null);
+  const z = draftCallsUsage("claude-opus-5", none, none[0], null);
+  assertEquals([z.usage.input_tokens, z.usage.output_tokens, z.tokens.stopReason, z.tokens.textChars, z.tokens.agreement], [null, null, null, 0, null]);
+  assertEquals(z.tokens.samples, []);
+});
