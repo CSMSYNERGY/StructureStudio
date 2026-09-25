@@ -47,7 +47,7 @@ import { assert, assertEquals } from "jsr:@std/assert";
 import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
 import {
   aiDraftCostCents, DRAFT_RECOVER_PENDING_MS, DRAFT_RECOVER_SETTLE_MS, DRAFT_STREAM_DEADLINE_MS, parseKnownDims,
-  wantsStreamedDraft, wantsV2Prompt,
+  SELF_CHECK_CLAIM_WINDOW_MS, wantsStreamedDraft, wantsV2Prompt,
 } from "../styleD3.ts";
 import { HEARTBEAT_MS, STREAM_DEADLINE_BODY } from "../heartbeatJson.ts";
 
@@ -871,6 +871,11 @@ Deno.test("a drafted row answers what the streamed success answered, rebuilt fro
   // A row written before 253 has no map: the draft still comes back, and the check is skipped.
   const old = await drive(RECOVER(), { ledger: [ROW({ ...wrote, frame_map: null })] });
   assertEquals(JSON.parse(old.out.text).frameMap, null);
+  // A row older than the check's claim window keeps its map, but the claim would refuse the check:
+  // the draft comes back without it, and the designer skips the check instead of asking.
+  const stale = await drive(RECOVER(), { ledger: [ROW({ ...wrote, called_at: ago(SELF_CHECK_CLAIM_WINDOW_MS + 60_000) })] });
+  const staleBody = JSON.parse(stale.out.text);
+  assertEquals([staleBody.recovered, staleBody.checkId, staleBody.frameMap], [true, LEDGER_ID, null]);
 });
 
 Deno.test("⛔ never another tenant's, user's or key's row -- nor a LATER press's row on the same style under its own key", async () => {

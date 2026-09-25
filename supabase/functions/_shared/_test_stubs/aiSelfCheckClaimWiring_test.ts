@@ -36,7 +36,7 @@
 // reaction to each answer is the one the design calls for.
 
 import { assert, assertEquals } from "jsr:@std/assert";
-import { parseSelfCheckRound, SELF_CHECK_MAX_ROUNDS } from "../styleD3.ts";
+import { parseSelfCheckRound, SELF_CHECK_CLAIM_WINDOW_MS, SELF_CHECK_MAX_ROUNDS } from "../styleD3.ts";
 
 const SRC = (await Deno.readTextFile(new URL("../../portal-settings/index.ts", import.meta.url)))
   .replace(/\r\n/g, "\n");
@@ -57,7 +57,7 @@ function lift(start: string, end: string, what: string): { at: number; block: st
 }
 
 const CLAIM = lift(
-  "    const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();",
+  "    const since = new Date(Date.now() - SELF_CHECK_CLAIM_WINDOW_MS).toISOString();",
   "    // ── THE RULER ──",
   "the calibrate_style_check claim",
 );
@@ -263,7 +263,7 @@ async function runClaim(opts: {
   let body: Row | null = null;
   let skippedReason: string | null = null;
   const factory = new Function(
-    "admin", "checkId", "clientId", "styleValue", "round", "logEdgeError", "req", "json", "skipped",
+    "admin", "checkId", "clientId", "styleValue", "round", "logEdgeError", "req", "json", "skipped", "SELF_CHECK_CLAIM_WINDOW_MS",
     `return (async () => { ${BLOCK} return { fellThrough: true, claimed }; })();`,
   );
   const res = await factory(
@@ -277,6 +277,7 @@ async function runClaim(opts: {
     null,
     (b: Row, s = 200) => { body = b; status = s; return { refused: true }; },
     (reason: string) => { skippedReason = reason; return { refused: true }; },
+    SELF_CHECK_CLAIM_WINDOW_MS,
   );
   return {
     fellThrough: !!res?.fellThrough,
@@ -327,6 +328,8 @@ Deno.test("⚠️ a row checked BEFORE 252 can neither be checked again nor cont
 });
 
 Deno.test("a stale generation refuses: the window is fifteen minutes, for every round", async () => {
+  // One constant, shared with calibrate_style_ai_recover (a draft picked up past it has no map).
+  assertEquals(SELF_CHECK_CLAIM_WINDOW_MS, 15 * 60 * 1000);
   const stale = [freshRow({ called_at: new Date(Date.now() - 16 * 60 * 1000).toISOString() })];
   assertEquals((await runClaim({ rows: stale })).status, 409, "sixteen minutes is too old");
   const inside = [freshRow({ called_at: new Date(Date.now() - 14 * 60 * 1000).toISOString() })];

@@ -98,6 +98,8 @@ import {
   draftMoneyState, isRecoverableDraft, pickRecoverRow, recoverDraftAnswer, DRAFT_RECOVER_COLUMNS, DRAFT_RECOVER_MAX_ROWS,
   DRAFT_RECOVER_MONEY_COLUMNS, type DraftMoney, type DraftRecoverMoneyRow, type DraftRecoverRow,
 } from "../_shared/styleD3.ts";
+// How young a generation must be for the self-check to claim it; the recover action reads it too.
+import { SELF_CHECK_CLAIM_WINDOW_MS } from "../_shared/styleD3.ts";
 // The press's idempotency key, cut one way for the ledger row, the wallet hold and the pickup (253).
 import { draftIdemKey } from "../_shared/styleD3.ts";
 
@@ -4715,7 +4717,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // check needs. Scoping on `style_key` as well as `client_id` costs nothing and stops a
     // caller pairing one generation's draft with another style's frames — both its own, so not
     // a breach, but a comparison of two different buildings presented as one.
-    const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const since = new Date(Date.now() - SELF_CHECK_CLAIM_WINDOW_MS).toISOString();
     // A COMPARE-AND-SWAP ON THE ROUND (v2). `self_check_round` counts the rounds claimed, so
     // round k is claimable only while it is exactly k, and claiming it makes it k+1 — two
     // requests for one round cannot both get a row back, and no round can ever run twice.

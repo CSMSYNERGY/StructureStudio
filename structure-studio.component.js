@@ -21021,7 +21021,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // A DRAFT PICKED UP FROM THE SERVER after its connection dropped (`res.recovered`, 2026-09-25)
     // carries the frame map its ledger row kept (migration 253), so it arrives with labels and is
     // checked exactly as a live answer is. Only a row that kept no map -- written before 253, or a
-    // reply that named no views -- arrives without one, and it is skipped the same way, saying why.
+    // reply that named no views -- or one picked up after the check's 15-minute claim window (the
+    // server would refuse the check) arrives without one, and it is skipped the same way, saying why.
     if (!res.checkId || !res.frameMap) {
       settle(res.recovered
         ? { verdict: "skipped", reason: "recovered", pairs: [], note: "Your connection dropped while we were drafting, so we picked the draft up from the server. It came back without the list of which view is which, so the side-by-side check did not run this time." }

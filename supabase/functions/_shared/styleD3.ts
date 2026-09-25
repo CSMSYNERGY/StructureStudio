@@ -1194,9 +1194,10 @@ function frameMapOfRow(row: DraftRecoverRow): FrameMap | null {
 // the money draftMoneyState read under the same key.
 //   * DRAFTED: the body calibrate_style_ai's success answered with, rebuilt from the row, field for
 //     field and in the same order, plus `recovered: true`. `frameMap` is the row's own (253), so the
-//     free self-check RUNS on a recovered draft exactly as on a live answer; it is null only on a
-//     row written before 253, or when the reply carried no map, and then the designer skips the
-//     check and says why. `dropped` is null (the browser knows what it sent) and `balanceCents`
+//     free self-check RUNS on a recovered draft exactly as on a live answer; it is null on a row
+//     written before 253, when the reply carried no map, and on a row older than the check's claim
+//     window (SELF_CHECK_CLAIM_WINDOW_MS, whose claim would refuse it), and then the designer skips
+//     the check and says why. `dropped` is null (the browser knows what it sent) and `balanceCents`
 //     null, as a response that took no money back to the browser always has. Money is not read.
 //   * NO DRAFT, by what the money says:
 //       captured  charged. Pending for DRAFT_RECOVER_SETTLE_MS after the capture (the draft is
@@ -1220,6 +1221,7 @@ export function recoverDraftAnswer(row: DraftRecoverRow | null, money: DraftMone
   if (!row) return lost("no_row");
   if (isRecoverableDraft(row)) {
     const dims = parseKnownDims(row.dims);
+    const checkable = nowMs - calledMsOf(row) < SELF_CHECK_CLAIM_WINDOW_MS;
     return {
       kind: "draft", code: "ai_draft_recovered", severity: "info",
       body: {
@@ -1230,7 +1232,7 @@ export function recoverDraftAnswer(row: DraftRecoverRow | null, money: DraftMone
         observed: row.observed ?? null,
         balanceCents: null,
         dims: dims.ok ? dims.dims : null,
-        frameMap: frameMapOfRow(row),
+        frameMap: checkable ? frameMapOfRow(row) : null,
         checkId: row.id,
         recovered: true,
       },
@@ -1902,6 +1904,11 @@ export const SELF_CHECK_MAX_FIELDS = 8;
 // before any database call, and the claim is a compare-and-swap on `self_check_round`, so the
 // counter itself cannot pass it either.
 export const SELF_CHECK_MAX_ROUNDS = 3;
+
+// How young a generation must be for calibrate_style_check to claim it (`called_at` newer than
+// now minus this). One constant, because recoverDraftAnswer reads it too: a draft picked up after
+// this has no frame map, so the designer skips the check instead of asking for one the claim refuses.
+export const SELF_CHECK_CLAIM_WINDOW_MS = 15 * 60_000;
 
 // Which round a request is for. ABSENT MEANS ROUND 0, and that is the whole backwards-
 // compatibility story: production's older browser sends no `round`, so it keeps exactly the

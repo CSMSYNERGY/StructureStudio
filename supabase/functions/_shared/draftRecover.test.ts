@@ -10,7 +10,8 @@
 //      from the NEWEST, drafted or not -- whatever order they arrive in.
 //   3. The money is read from the press's own wallet rows: captured beats held beats released.
 //   4. A drafted row answers the success body's keys in the success body's order, with its own
-//      frame map (253) so the self-check runs, and `recovered: true`.
+//      frame map (253) so the self-check runs -- none once the row is older than the check's claim
+//      window, which would refuse it -- and `recovered: true`.
 //   5. ⚠️ THE MONEY SENTENCE COMES FROM THE MONEY STATE, NEVER FROM TIMING. "Not charged" is said
 //      only when the press's hold was released or there never was one, however young or old the
 //      row; a captured press with no draft is "charged once", an error; a hold still open is
@@ -21,7 +22,7 @@
 import {
   DRAFT_RECOVER_MAX_ROWS, DRAFT_RECOVER_PENDING_MS, DRAFT_RECOVER_SETTLE_MS, DRAFT_STREAM_DEADLINE_MS,
   type DraftMoney, type DraftRecoverRow, draftIdemKey, draftMoneyState, isRecoverableDraft, parseModelSpec,
-  pickRecoverRow, recoverDraftAnswer,
+  pickRecoverRow, recoverDraftAnswer, SELF_CHECK_CLAIM_WINDOW_MS,
 } from "./styleD3.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
@@ -136,6 +137,20 @@ Deno.test("the row's frame map is read back through the parser that made it, bou
     assertEquals(mapOf({ frame_map: junk }), null, JSON.stringify(junk));
   }
   assertEquals(mapOf({ frames: null, frame_map: MAP }), null, "no bound, no map");
+});
+
+Deno.test("⚠️ a draft older than the check's claim window comes back WITHOUT its map, so the designer skips the check", () => {
+  // The same constant the calibrate_style_check claim filters on (called_at newer than now minus it).
+  assertEquals(SELF_CHECK_CLAIM_WINDOW_MS, 15 * 60_000);
+  const at = (ageMs: number | null) => {
+    const out = recoverDraftAnswer(ROW({ drafted: D3, frame_map: MAP, called_at: ageMs === null ? "garbage" : iso(NOW - ageMs) }), NONE, NOW);
+    assertEquals(out.kind, "draft", `the draft still comes back at ${ageMs}`);
+    return out.kind === "draft" ? out.body.frameMap : "not a draft";
+  };
+  assertEquals(at(SELF_CHECK_CLAIM_WINDOW_MS - 1_000), MAP, "inside the window: the check runs");
+  for (const ageMs of [SELF_CHECK_CLAIM_WINDOW_MS, SELF_CHECK_CLAIM_WINDOW_MS + 1, 60 * 60_000, null]) {
+    assertEquals(at(ageMs), null, `at ${ageMs}: the claim would refuse it`);
+  }
 });
 
 Deno.test("isRecoverableDraft: our own sanitised spec, and nothing else", () => {
