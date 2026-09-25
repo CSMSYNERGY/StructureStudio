@@ -735,7 +735,11 @@ Where the frames genuinely do not settle something, say so in observed and OMIT 
 // out from them (pitchFromMeasure and porchPitchFromMeasure, below), per read and before the
 // consensus. roof.pitch and roof.porchPitch stay in the schema and are what is drawn when a read
 // gives no points or its points fail the checks. `measure` never reaches the stored spec:
-// sanitizeD3Spec rebuilds from known keys, like frameMap.
+// sanitizeD3Spec rebuilds from known keys, like frameMap. It is the FIRST key of the schema, ahead
+// of roof, so the points are written down before the pitches rather than fitted to them afterwards;
+// the sentence on not re-measuring says so, so it does not read as forbidding that. The porch block
+// carries the outer corner post as well, the one vertical the frame has, to level a rolled camera.
+// A gambrel is asked for no points: the server never computes its pitch (see pitchFromMeasure).
 //
 // ⚠️ THE TESTS PIN, ACROSS BOTH PROMPTS: the schema lines for pitch, overhangIn and the three
 // gambrel numbers, and the whole GAMBREL NUMBERS paragraph, are byte-identical to the base (the
@@ -746,8 +750,12 @@ const VIDEO_SHAPE_V2 = `These images are frames from ONE continuous walk-around 
 
 Your job is to describe this building exactly enough that a 3D model drawn from your answer looks like the video: its shape first, then its colours. Both matter. The builder is about to see your drawing beside these frames, and anything you got wrong is something they must find and fix by hand.
 
-Return ONLY a JSON object with this exact shape (no prose, no markdown fence). Keep every observed string to one short phrase, under 20 words: your reasoning and this reply share one length limit, and a reply that runs out before its end is lost whole. Settle each REQUIRED decision once, from the frames named for it, and do not re-measure a number you have already given.
+Return ONLY a JSON object with this exact shape (no prose, no markdown fence). Keep every observed string to one short phrase, under 20 words: your reasoning and this reply share one length limit, and a reply that runs out before its end is lost whole. Settle each REQUIRED decision once, from the frames named for it, and do not go back to re-measure a number once you have given it. The measure block comes first on purpose: write its points down, then give the pitches they show; that is measuring each pitch once, not twice.
 {
+  "measure": {
+    "pitch": { "frame": <1-based index of the image you read the roof's slope in>, "size": [<that image's width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] } | { "frame": <as above>, "size": <as above>, "tallTop": [<x>, <y>], "tallBottom": [<x>, <y>], "shortTop": [<x>, <y>], "shortBottom": [<x>, <y>] },
+    "porchPitch": { "frame": <1-based index of the image where the porch roof's end is seen square-on from the side>, "size": [<width>, <height>], "wall": [<x>, <y>], "edge": [<x>, <y>], "postTop": [<x>, <y>], "postBottom": [<x>, <y>] }
+  },
   "roof": {
     "type": "shed" | "gable" | "gambrel",
     "front": "gable" | "eave",
@@ -802,10 +810,6 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence). K
     "corner": { "frame": <an image showing the FRONT wall and one side wall at once, three-quarters on>, "azimuthDeg": <as above> },
     "back": { "frame": <the image most square-on to the BACK wall, the one opposite the front>, "azimuthDeg": <as above> },
     "otherSide": { "frame": <the image most square-on to the side wall OPPOSITE the one you gave for side>, "azimuthDeg": <as above> }
-  },
-  "measure": {
-    "pitch": { "frame": <1-based index of the image you read the roof's slope in>, "size": [<that image's width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] } | { "frame": <as above>, "size": <as above>, "tallTop": [<x>, <y>], "tallBottom": [<x>, <y>], "shortTop": [<x>, <y>], "shortBottom": [<x>, <y>] },
-    "porchPitch": { "frame": <1-based index of the image where the porch roof's end is seen square-on from the side>, "size": [<width>, <height>], "wall": [<x>, <y>], "edge": [<x>, <y>], "postTop": [<x>, <y>], "postBottom": [<x>, <y>] }
   }
 }
 
@@ -877,7 +881,7 @@ FRAME MAP: which image goes with which view of the building. Number the images i
 
 AZIMUTH: for each image you name, where the camera was standing, as an angle around the building to the nearest 45 degrees. 0 is square in front of the FRONT wall. Going from there around the building toward its RIGHT side, 90 is square to the right-hand side wall, 180 is square to the back wall, and 270 is square to the left-hand side wall. Right and left are as seen standing in front of the FRONT wall, facing it, the same way leanToSide, wingSide and dormerOffsetU are read. Answer 0, 45, 90, 135, 180, 225, 270 or 315 and nothing in between -- this is a coarse note of where you stood, not a survey.
 
-MEASURE, measure: the points the two pitches are worked out from. Before you settle roof.pitch or roof.porchPitch, find the frame named for it and write down where the roof's edges are in that image; we work each slope out from these points, so measure them rather than judge the angle. Coordinates are pixels in that one image: x counts to the RIGHT and y counts DOWN, both from the image's top-left corner, so a point higher in the picture has a SMALLER y. Give that image's own size in pixels as size, [width, height]. Put every point on a clear landmark you can see, such as the corner where a rake board meets the eave or the tip of the peak, never where you expect an edge to be. For pitch on a gable or gambrel roof, use the frame most square-on to a gable end, the one the PITCH paragraph picks, and give three points on the TOP edge of the roof against the sky: left, where the left rake meets the eave; peak, the top of the roof at the ridge; right, where the right rake meets the eave, with left and right as they appear in the image. On a building with side wings the gable is the centre section's: its left and right are where the centre roof's rakes meet the centre section's own eaves, never the wing roofs below them. For pitch on a one-slope roof, use a frame square to one of the two walls whose top edge slopes under the MAIN roof, and give the top and the bottom of that wall's two vertical edges: tallTop and tallBottom on its tall edge, shortTop and shortBottom on its short one. For porchPitch, use a frame where the projecting porch roof's end is seen square-on from the side, and give two points on the TOP of the porch roof: wall, where it meets the wall, and edge, at its outer end. Then give the porch's OUTER corner post as it stands in that same frame, the post under the edge: postTop, where the post meets the porch roof, and postBottom, its foot on the deck. A post stands plumb, so it tells a tilted camera from a sloping roof, and a porchPitch block without it is not used. For example, a gable end in a 1600 by 900 image might read left [400, 560], peak [800, 428], right [1200, 562], and a porch roof's end in an image that size might read wall [520, 300], edge [1000, 380], postTop [996, 392], postBottom [990, 700]. Leave a block out when no frame shows it square-on, and leave measure out when neither does. Give roof.pitch and roof.porchPitch as usual either way.
+MEASURE, measure: the points the two pitches are worked out from, and the FIRST thing in the reply. Before you settle roof.pitch or roof.porchPitch, find the frame named for it and write down where the roof's edges are in that image; we work each slope out from these points, so measure them rather than judge the angle. Coordinates are pixels in that one image: x counts to the RIGHT and y counts DOWN, both from the image's top-left corner, so a point higher in the picture has a SMALLER y. Give that image's own size in pixels as size, [width, height]. Put every point on a clear landmark you can see, such as the corner where a rake board meets the eave or the tip of the peak, never where you expect an edge to be. For pitch on a gable roof, use the frame most square-on to a gable end, the one the PITCH paragraph picks, and give three points on the TOP edge of the roof against the sky: left, where the left rake meets the eave; peak, the top of the roof at the ridge; right, where the right rake meets the eave, with left and right as they appear in the image. On a building with side wings the gable is the centre section's: its left and right are where the centre roof's rakes meet the centre section's own eaves, never the wing roofs below them. For pitch on a one-slope roof, use a frame square to one of the two walls whose top edge slopes under the MAIN roof, and give the top and the bottom of that wall's two vertical edges: tallTop and tallBottom on its tall edge, shortTop and shortBottom on its short one. Leave measure.pitch out on a gambrel: its shape is the GAMBREL NUMBERS, not one slope. For porchPitch, use a frame where the projecting porch roof's end is seen square-on from the side, and give two points on the TOP of the porch roof: wall, where it meets the wall, and edge, at its outer end. Then give the porch's OUTER corner post as it stands in that same frame, the post under the edge: postTop, where the post meets the porch roof, and postBottom, its foot on the deck. A post stands plumb, so it tells a tilted camera from a sloping roof, and a porchPitch block without it is not used. For example, a gable end in a 1600 by 900 image might read left [400, 560], peak [800, 428], right [1200, 562], and a porch roof's end in an image that size might read wall [520, 300], edge [1000, 380], postTop [996, 392], postBottom [990, 700]. Leave a block out when no frame shows it square-on, and leave measure out when neither does. Give roof.pitch and roof.porchPitch as usual either way.
 
 Where the frames genuinely do not settle something, say so in observed and OMIT the key. Omitting a key leaves the builder's existing setting alone, which is better than a typical value they then have to find and undo. Do not fill a field with the middle of its stated range. The exceptions are the decisions marked REQUIRED above: give your best reading of each and put the doubt in observed.roofNote.`;
 
@@ -1733,7 +1737,7 @@ export function parseFrameMap(text: string, videoCount: number): FrameMap | null
 }
 
 // ─── The pitches, worked out from the reply's own points (2026-09-26) ────────────────────────
-// The v2 prompt asks for `measure` beside `frameMap`: for each pitch, the image it was read in, that
+// The v2 prompt asks for `measure`, first in the reply: for each pitch, the image it was read in, that
 // image's size, and the pixel points along the roof's edges (x to the right, y DOWN from the
 // top-left corner). The slope is then arithmetic done here, not a judgement made by the model,
 // which is what it was doing when live reads put a 0.41 gable at 0.45 to 0.8 (VIDEO_SHAPE_V2's

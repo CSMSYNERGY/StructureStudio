@@ -1333,7 +1333,10 @@ Deno.test("the gambrel ratios are word-for-word the same with dims as without", 
     assert(withDims.includes(marker), `the dims prompt still carries ${marker}`);
   }
   const line = (p: string, k: string) => p.split("\n").find((l) => l.includes(k)) ?? "";
-  for (const k of ['"kneeU"', '"kneeRise"', '"ridgeRise"', '"pitch"', '"overhangIn"']) {
+  // '"pitch": <' is roof.pitch's line. Since 2026-09-26 the v2 schema OPENS with the measure block,
+  // whose own '"pitch": { "frame": ...' line would otherwise be the first line naming "pitch".
+  for (const k of ['"kneeU"', '"kneeRise"', '"ridgeRise"', '"pitch": <', '"overhangIn"']) {
+    assert(line(without, k) !== "", `the base has a ${k} line to compare with`);
     assertEquals(line(withDims, k), line(without, k), `the ${k} line is unchanged by dims`);
   }
   const para = (p: string) => p.split("\n").find((l) => l.startsWith("GAMBREL NUMBERS")) ?? "";
@@ -1746,13 +1749,18 @@ Deno.test("v2 asks for the porch's posts, its roof's own pitch and its steps (20
   }
 });
 
-Deno.test("v2 asks for the pixel points each pitch is read from, in a measure block beside the frame map (2026-09-26)", () => {
+Deno.test("v2 asks for the pixel points each pitch is read from, in a measure block FIRST in the reply (2026-09-26)", () => {
   // Live reads JUDGED the slope (a 0.41 gable came back 0.45 to 0.8, a 0.25 porch roof 0.11 to 0.2);
   // the server now works both pitches out from points the model writes down (pitchFromMeasure).
+  // The block is the schema's FIRST key, ahead of roof, so the points are written before the
+  // pitches rather than fitted to a number already given.
   for (const [name, p] of V2) {
-    const map = p.indexOf('  "frameMap": {'), measure = p.indexOf('  "measure": {');
-    assert(map > 0 && measure > map, `${name}: measure comes after the frame map`);
-    assert(p.slice(map, measure).trimEnd().endsWith("},"), `${name}: directly after it, at the top level`);
+    const open = p.indexOf('\n{\n  "measure": {\n'), measure = p.indexOf('  "measure": {'), roof = p.indexOf('  "roof": {');
+    assert(open > 0 && measure === open + 3, `${name}: measure opens the reply's object`);
+    assert(roof > measure && p.slice(measure, roof).trimEnd().endsWith("},"), `${name}: and roof follows it, at the top level`);
+    assert(p.indexOf('  "frameMap": {') > roof, `${name}: the frame map is after the roof, as before`);
+    assert(p.includes('"otherSide": { "frame": <the image most square-on to the side wall OPPOSITE the one you gave for side>, "azimuthDeg": <as above> }\n  }\n}'),
+      `${name}: and closes the object`);
     for (const k of [
       '"pitch": { "frame": <1-based index of the image you read the roof\'s slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] }',
       '| { "frame": <as above>, "size": <as above>, "tallTop": [<x>, <y>], "tallBottom": [<x>, <y>], "shortTop": [<x>, <y>], "shortBottom": [<x>, <y>] },',
@@ -1760,12 +1768,15 @@ Deno.test("v2 asks for the pixel points each pitch is read from, in a measure bl
     ]) {
       assert(p.includes(k), `${name}: the schema carries ${k.slice(0, 40)}`);
     }
-    assert(p.includes("MEASURE, measure: the points the two pitches are worked out from."), `${name}: the paragraph`);
+    assert(p.includes("MEASURE, measure: the points the two pitches are worked out from, and the FIRST thing in the reply."), `${name}: the paragraph`);
     assert(p.includes("x counts to the RIGHT and y counts DOWN, both from the image's top-left corner, so a point higher in the picture has a SMALLER y"),
       `${name}: pixels, y down, from the top-left`);
     assert(p.includes("Give that image's own size in pixels as size, [width, height]."), `${name}: the image size`);
     assert(p.includes("Put every point on a clear landmark you can see"), `${name}: read along landmarks`);
-    assert(p.includes("use the frame most square-on to a gable end, the one the PITCH paragraph picks"), `${name}: the square-on frame`);
+    assert(p.includes("For pitch on a gable roof, use the frame most square-on to a gable end, the one the PITCH paragraph picks"), `${name}: the square-on frame`);
+    // A gambrel's pitch is never computed (pitchFromMeasure), so it is asked for no points.
+    assert(!p.includes("gable or gambrel roof, use the frame"), `${name}: no gable points asked for on a gambrel`);
+    assert(p.includes("Leave measure.pitch out on a gambrel: its shape is the GAMBREL NUMBERS, not one slope."), `${name}: and says to leave it out`);
     assert(p.includes("give three points on the TOP edge of the roof against the sky: left, where the left rake meets the eave; peak, the top of the roof at the ridge; right, where the right rake meets the eave"),
       `${name}: the gable's three points`);
     assert(p.includes("On a building with side wings the gable is the centre section's"), `${name}: the centre section's gable`);
@@ -3742,8 +3753,13 @@ Deno.test("v2 first pass: lean-to only where it can be drawn; vent and ridge off
       `${name}: the vent against its own gable`);
     assert(p.includes("as a fraction of the FULL width under that roof (the whole building's, or the centre section's on a building with side wings)"),
       `${name}: the ridge offset against the width under that roof`);
-    assert(p.includes("Settle each REQUIRED decision once, from the frames named for it, and do not re-measure a number you have already given."),
+    assert(p.includes("Settle each REQUIRED decision once, from the frames named for it, and do not go back to re-measure a number once you have given it."),
       `${name}: the reply budget is spent once`);
+    // 2026-09-26: measure comes first, and the sentence must not read as forbidding writing its points
+    // down before the pitches they give.
+    assert(p.includes("The measure block comes first on purpose: write its points down, then give the pitches they show; that is measuring each pitch once, not twice."),
+      `${name}: writing the points first is not a re-measure`);
+    assert(!p.includes("do not re-measure a number you have already given"), `${name}: the old wording is gone`);
   }
 });
 
