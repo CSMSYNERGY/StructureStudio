@@ -838,6 +838,29 @@ async function main() {
   await page.setViewportSize({ width: 1500, height: 1100 });
   await page.waitForTimeout(300);
 
+  // ── THE FRAME-KEY WARNING GETS A BANNER, AND DOES NOT HIDE THE ONE BEHIND IT (2026-09-25) ──
+  // frameKeyWarning is composed FIRST, and the banner's pattern did not know its opening: a v2
+  // draft that left out which way the building faces, and whose porch also disagreed with the
+  // reading, showed no banner for either. The server's own words, composed as portal-settings
+  // composes them (selfCheckPanel_test runs every opening; this proves the panel shows it).
+  const observedBefore = draftObserved;
+  draftObserved = {
+    roofNote: "Check which way the building faces before saving: the video reading did not say whether the front wall is a gable end or a long side, so the roof has been drawn the old way, with its ridge along the longer walls. Compare the preview with the video, then set Front wall below. "
+      + "Check the porch before saving: the video reading says this building has no porch, but it has been drawn with a porch standing out in front of one end, on its own posts.",
+    porch: "none", confidence: "low",
+  };
+  await press();
+  const fkBanner = await page.evaluate(() => {
+    const el = document.querySelector('[data-ssc-card="compare"] [role="alert"]');
+    return el ? el.textContent : "";
+  });
+  r.ok("⚠️ THE FRAME-KEY WARNING GETS A BANNER", /Check which way the building faces before saving/.test(fkBanner), fkBanner.slice(0, 80));
+  r.ok("and the porch warning behind it is in the same banner", /Check the porch before saving/.test(fkBanner), fkBanner.slice(0, 400));
+  r.ok("and its button opens the roof controls, where Front wall is",
+    /Open the roof controls/.test(await page.locator('[data-ssc-card="compare"] [role="alert"] button').first().innerText()),
+    await page.locator('[data-ssc-card="compare"] [role="alert"] button').first().innerText());
+  draftObserved = observedBefore;
+
   // ── A CORRECTION TO A KEY THE DRAFT NEVER CARRIED ─────────────────────────────────────
   // applySelfCheck reports `from: before ?? null` off the two sanitised specs, and an absent
   // key is exactly what the shape-first prompt asks the model to leave out — while the

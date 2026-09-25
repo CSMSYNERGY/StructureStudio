@@ -21682,11 +21682,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // the loudest of the three, because the preview they are about to confirm against their own
   // frames is then of a different building.
   //
-  // `flagObservedNotes` joins the warnings in the order gambrel, porch, knownDims, and `^`
-  // only ever sees the first, so this reads whichever fired first and arms that one's panel.
-  const calWarnBanner = /^Check (this roof|the porch|the wall height) before saving/.test(calRoofNote) ? calRoofNote : null;
+  // `flagObservedNotes` joins the warnings in the order frame key, gambrel, porch, wings,
+  // knownDims, and `^` only ever sees the first, so this reads whichever fired first and arms
+  // that one's panel. The banner still carries the whole note, so a second warning behind the
+  // first is on screen too.
+  //
+  // AND FIVE, NOT THREE (fix, 2026-09-25). The v2 generation added two openings of its own:
+  // frameKeyWarning ("Check which way the building faces…" on a two-slope roof, "Check which wall
+  // is the high one…" on a shed) and wingsAgreementWarning ("Check the side wings…"). Unmatched,
+  // the frame-key warning -- composed FIRST -- took the banner away from a porch or wall-height
+  // warning behind it as well. selfCheckPanel_test runs this line over every warning the server
+  // writes, so a sixth opening fails a test instead of losing its banner.
+  const calWarnBanner = /^Check (this roof|the porch|the wall height|the side wings|which way the building faces|which wall is the high one) before saving/.test(calRoofNote) ? calRoofNote : null;
   // Which question a machine warning belongs to, so the banner can arm that question's fix
-  // panel rather than leaving the builder to work out which of the four it was about.
+  // panel rather than leaving the builder to work out which of the four it was about. The front
+  // wall, the high side and the wings are all tiles in the ROOF panel, so those three are "roof".
   const calWarnQuestion = !calWarnBanner ? null
     : /^Check the porch/.test(calWarnBanner) ? "porch"
     : /^Check the wall height/.test(calWarnBanner) ? "walls"

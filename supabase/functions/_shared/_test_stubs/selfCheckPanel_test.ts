@@ -15,7 +15,10 @@
 // builder as `roof.tailSpacingIn`, so the two lists are compared directly.
 
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert";
-import { gambrelRoofWarning, SELF_CHECK_ALLOW } from "../styleD3.ts";
+import {
+  flagObservedNotes, frameKeyWarning, gambrelRoofWarning, knownDimsNote, porchAgreementWarning, SELF_CHECK_ALLOW,
+  wingsAgreementWarning,
+} from "../styleD3.ts";
 
 const JSX = await Deno.readTextFile(new URL("../../../../StructureStudio.jsx", import.meta.url));
 const CMP = await Deno.readTextFile(new URL("../../../../structure-studio.component.js", import.meta.url));
@@ -402,4 +405,57 @@ Deno.test("⚠️ 'What we drew' never describes a key the spec does not have", 
   // Wings are off at zero, and a shed never has them.
   assertEquals(F.ssDrewWords({ roof: { type: "gable", wingSide: "both", wingWidthFt: 0 } }), "");
   assertEquals(F.ssDrewWords({ roof: { type: "shed", wingSide: "both", wingWidthFt: 6 } }), "");
+});
+
+// ── THE WARNING BANNER KNOWS EVERY OPENING THE SERVER WRITES (fix, 2026-09-25) ──────────────
+// The panel promotes a machine warning out of the grey "What the model saw" text into a banner
+// with a button that opens the right fix panel, by matching the note's FIRST sentence. The v2
+// generation added frameKeyWarning (composed FIRST) and wingsAgreementWarning, and the banner's
+// pattern knew neither: a frame-key warning got no banner, and neither did the porch or wall-height
+// warning composed behind it. So the two lines are lifted from both twins and run over every
+// warning the server's own functions write, composed the way portal-settings composes them.
+const WARN_A = "const calWarnBanner =", WARN_B = "// ⚠️ FOUR ANSWERS BEFORE SAVE";
+const warnJsx = lift(JSX, "StructureStudio.jsx", WARN_A, WARN_B);
+const warnCmp = lift(CMP, "structure-studio.component.js", WARN_A, WARN_B);
+const warn = new Function("calRoofNote", `${warnCmp}; return { banner: calWarnBanner, question: calWarnQuestion };`) as
+  (note: string) => { banner: string | null; question: string | null };
+
+Deno.test("the banner's two lines are byte-identical in the two twins", () => {
+  assertEquals(warnJsx, warnCmp);
+});
+
+Deno.test("⚠️ every warning the server writes gets its banner, and arms the panel that fixes it", () => {
+  const shedNoSide = frameKeyWarning({ type: "shed", pitch: 0.25 });
+  const gableNoFront = frameKeyWarning({ type: "gable", pitch: 0.5 });
+  const wings = wingsAgreementWarning({ type: "gable", pitch: 0.5, front: "gable" }, { wings: "both" });
+  const wingsUnsaid = wingsAgreementWarning({ type: "gable", pitch: 0.5, front: "gable" }, {});
+  const porch = porchAgreementWarning({ type: "gable", porchOutFt: 6 }, { porch: "none" });
+  const gambrel = gambrelRoofWarning({ type: "gambrel", kneeU: 0.6, kneeRise: 0.9, ridgeRise: 0.9 });
+  // deno-lint-ignore no-explicit-any
+  const walls = knownDimsNote({ widthFt: 16, lengthFt: 10, wallHeightFt: 3 } as any);
+  const cases: Array<[string, string | null, string]> = [
+    ["shed with no high side", shedNoSide, "roof"],
+    ["two-slope roof with no front", gableNoFront, "roof"],
+    ["wings the reading contradicts", wings, "roof"],
+    ["wings the reading never named", wingsUnsaid, "roof"],
+    ["porch", porch, "porch"],
+    ["gambrel", gambrel, "roof"],
+    ["wall height", walls, "walls"],
+  ];
+  for (const [what, text, question] of cases) {
+    assert(text, `${what}: the server wrote no warning for this fixture`);
+    const noted = flagObservedNotes({ roofNote: "Shed roof, porch on the long wall." }, text)!.roofNote!;
+    const w = warn(noted);
+    assertEquals(w.banner, noted, `${what}: no banner for "${text!.slice(0, 50)}"`);
+    assertEquals(w.question, question, `${what}: arms ${w.question}`);
+  }
+  // THE FINDING: the frame-key warning is composed first. With a porch warning behind it, the note
+  // still gets a banner (the whole note, both warnings) and arms the roof panel the first one names.
+  const both = flagObservedNotes(null, shedNoSide, null, porch, null, walls)!.roofNote!;
+  assertEquals(warn(both), { banner: both, question: "roof" });
+  assertStringIncludes(warn(both).banner!, "Check the porch before saving");
+  assertStringIncludes(warn(both).banner!, "Check the wall height before saving");
+  // And the model's own sentence alone is never a banner.
+  assertEquals(warn("Shed roof, porch on the long wall."), { banner: null, question: null });
+  assertEquals(warn(""), { banner: null, question: null });
 });
