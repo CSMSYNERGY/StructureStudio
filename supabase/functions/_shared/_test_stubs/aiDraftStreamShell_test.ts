@@ -12,7 +12,8 @@
 //      cannot tell them apart. (calIdempotency drives that retry in the compiled portal.)
 //   3. A streamed body that broke off mid-way is said plainly and not retried.
 //   4. 01-core's invoke wrapper files a streamed refusal under the status it carries, so a 402 in a
-//      body stays an info row rather than a fault.
+//      body stays an info row rather than a fault; and a page leave that kills a streamed BODY
+//      (TypeError / AbortError from the read) is the navigation abort, like a FunctionsFetchError.
 
 // deno-lint-ignore-file no-explicit-any
 import { assert, assertEquals } from "jsr:@std/assert";
@@ -101,6 +102,27 @@ Deno.test("a streamed body that broke off says so plainly, and is not retried", 
   let err: any = null;
   try { await draft(URLS, "farm", 2, "key-1", DIMS, { lean: true }); } catch (e) { err = e; }
   assertEquals(err && err.message, "Unexpected end of JSON input");
+});
+
+Deno.test("01-core: a page leave that kills a streamed body mid-read is the navigation abort, not a fault", () => {
+  const decl = lift(CORE, "const ssAborted = ssPageLeaving && st === null", ";\n", "the navigation-abort test") + ";";
+  const aborted = (leaving: boolean, st: number | null, name: string) =>
+    new Function("ssPageLeaving", "st", "res", `${decl}; return ssAborted;`)(leaving, st, { error: { name }, data: null }) as boolean;
+  // Before the response: supabase-js's own error. During the body: the read's TypeError or AbortError.
+  for (const name of ["FunctionsFetchError", "TypeError", "AbortError"]) {
+    assertEquals(aborted(true, null, name), true, `${name} while leaving`);
+    assertEquals(aborted(false, null, name), false, `${name} on a page that stays is still a fault`);
+    assertEquals(aborted(true, 504, name), false, `${name} with a status the server sent is the server's`);
+  }
+  // A truncated body the parser choked on, or a refusal, is not the navigation's doing.
+  for (const name of ["SyntaxError", "FunctionsHttpError", "FunctionsRelayError", ""]) {
+    assertEquals(aborted(true, null, name), false, name || "no name");
+  }
+  assertEquals(new Function("ssPageLeaving", "st", "res", `${decl}; return ssAborted;`)(true, null, { error: null, data: { error: "x" } }), false, "no error object");
+  // And the row it becomes: info, under its own code.
+  const call = lift(CORE, "ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),", "} catch (_) {}", "the log call");
+  assert(call.includes('ssAborted ? "fetch_aborted_navigating"'), "its own code");
+  assert(call.includes('(ssAborted || ssRefusal || (st >= 400 && st < 500)) ? "info" : "error"'), "filed as info");
 });
 
 Deno.test("01-core files a streamed refusal under the status it carries, so a 402 stays a refusal", () => {

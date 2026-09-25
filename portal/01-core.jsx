@@ -387,8 +387,12 @@ __ssFunctions.invoke = async (name, opts) => {
       // stays countable, never dropped. `status` is null on this path by definition — a
       // request that never completed has no HTTP status — which is what distinguishes it
       // from a 5xx the server actually sent while the user happened to be navigating.
+      // THREE NAMES, not one (2026-09-25). A request the navigation kills before its response is
+      // supabase-js's FunctionsFetchError; one killed while its BODY is still arriving -- a streamed
+      // draft, whose 200 went out minutes before its JSON -- fails inside response.json(), and
+      // supabase-js hands back that read's own TypeError (a network error) or AbortError instead.
       const ssAborted = ssPageLeaving && st === null
-        && (res.error && res.error.name) === "FunctionsFetchError";
+        && ["FunctionsFetchError", "TypeError", "AbortError"].indexOf((res.error && res.error.name) || "") !== -1;
       // A DELIBERATE 5xx REFUSAL. The status split below reads 4xx as "the product declined"
       // and everything else as "something broke" — but a few refusals have to answer 5xx, and
       // they say so with the x-ss-refusal header (logError.ts, and the `refusal()` helpers in
