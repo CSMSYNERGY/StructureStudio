@@ -211,11 +211,11 @@ Deno.test("several calls (consensus drafting) record their summed record in plac
 });
 
 Deno.test("a measured v2 single read (the lean retry) records its roof and pitch sources in `samples`; a legacy read records none", async () => {
-  // 2026-09-26: each v2 read's pitches are worked out from its own pixel points, and where they came
+  // 2026-09-26: each v2 gable read's pitch is worked out from its own pixel points, and where it came
   // from rides in draft_tokens.samples. Three reads record every read's (draftCallsUsage); the lean
   // retry's single read records its one, under the same key, so one query reads both.
   const roof = { type: "gable", pitch: 0.36, porchOutFt: 6, porchPitch: 0.3 };
-  const pitch = { pitchSource: "points", modelPitch: 0.7, porchPitchSource: "model" };
+  const pitch = { pitchSource: "points", modelPitch: 0.7 };
   const admin = fakeAdmin(AFTER_251);
   await site(DATA, TRUNCATED, helper(admin, [], { draftEffort: "low" }), true, null, { reading: { d3: { roof }, pitch } });
   const tokens = admin.stored[0].draft_tokens;

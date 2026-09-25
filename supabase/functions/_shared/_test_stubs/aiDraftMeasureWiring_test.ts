@@ -1,16 +1,16 @@
 // Measured pitches in calibrate_style_ai's wiring (2026-09-26), RUN, not regex-read.
 //
 // WHY THIS EXISTS. Live three-read v2 drafts JUDGED the slope: a raised centre's 0.41 gable came back
-// 0.45 to 0.8, and a projecting porch's 0.25 roof 0.11 to 0.2. The v2 reply now carries `measure`, the
-// pixel points each pitch is read from, and styleD3.ts works the slopes out (pitchFromMeasure,
-// porchPitchFromMeasure; styleD3.test.ts pins the arithmetic). What only the handler can get wrong,
-// and what this pins:
+// 0.45 to 0.8. The v2 reply now carries `measure`, the pixel points a gable's pitch is read from, and
+// styleD3.ts works the slope out (pitchFromMeasure; styleD3.test.ts pins the arithmetic). Only a
+// gable is ever worked out: a shed's and a gambrel's pitch, and every porch pitch, stay the model's.
+// What only the handler can get wrong, and what this pins:
 //
-//   1. On a v2 press each read's pitches are replaced by its OWN points' BEFORE the consensus, so the
-//      median is over measured numbers; a read whose points fail keeps the model's number.
+//   1. On a v2 press each gable read's pitch is replaced by its OWN points' BEFORE the consensus, so
+//      the median is over measured numbers; a read whose points fail keeps the model's number.
 //   2. draft_tokens.samples records, per read, which source won and the model's own number when the
 //      points replaced it, on the three-read record and on the lean retry's single read alike.
-//   3. The lean retry's single read is drafted with its measured pitches too.
+//   3. The lean retry's single read is drafted with its measured pitch too.
 //   4. A legacy request (production's older designer) is untouched: its reply's points, if any, are
 //      ignored, its request bytes are what they were, and its usage record has no samples.
 //
@@ -120,12 +120,10 @@ const SIZE = [1600, 900];
 const gable = (risePx: number) => ({ frame: 2, size: SIZE, left: [400, 600], peak: [800, 600 - risePx], right: [1200, 600] });
 // The same with y read UP by mistake: the peak below its ends, which the server refuses.
 const gableYUp = { frame: 2, size: SIZE, left: [400, 300], peak: [800, 500], right: [1200, 300] };
-// A porch roof dropping `dropPx` over 500 px, its plumb corner post under the edge: porch pitch
-// dropPx / 500. The post is what lets the server level the frame; without it the block is not used.
-const porchRoof = (dropPx: number) =>
-  ({ frame: 4, size: SIZE, wall: [700, 400], edge: [1200, 400 + dropPx], postTop: [1200, 400 + dropPx], postBottom: [1200, 600 + dropPx] });
-// A porch roof whose outer end is read ABOVE the wall, which the server refuses.
-const porchUp = { frame: 4, size: SIZE, wall: [700, 400], edge: [1200, 350], postTop: [1200, 350], postBottom: [1200, 550] };
+// The porch-roof and shed points an earlier draft of the v2 prompt asked for (taken out the same day).
+// A reply that still gives them must change nothing.
+const oldPorch = { frame: 4, size: SIZE, wall: [700, 400], edge: [1200, 550], postTop: [1200, 550], postBottom: [1200, 750] };
+const oldShed = { frame: 5, size: SIZE, tallTop: [300, 200], tallBottom: [300, 700], shortTop: [1100, 440], shortBottom: [1100, 700] };
 
 function replyText(own: { pitch: number; porch: number }, measure?: Record<string, unknown>) {
   return JSON.stringify({
@@ -147,15 +145,14 @@ function body(text: string) {
 const plan = (text: string, delayMs = 2): Plan => ({ body: body(text), delayMs });
 
 // ─── 1 and 2. Three reads ─────────────────────────────────────────────────────────────────────
-Deno.test("v2, three reads: each read's pitches are its points' BEFORE the median, and a read with bad points keeps the model's", async () => {
+Deno.test("v2, three reads: each gable read's pitch is its points' BEFORE the median, and a read with bad points keeps the model's", async () => {
   const r = await run({ v2: true }, [
-    // The model said 0.8 and 0.15; its points say 0.4 and 0.3.
-    plan(replyText({ pitch: 0.8, porch: 0.15 }, { pitch: gable(160), porchPitch: porchRoof(150) })),
-    // The model said 0.6 and 0.12; its points say 0.42 and 0.3.
-    plan(replyText({ pitch: 0.6, porch: 0.12 }, { pitch: gable(168), porchPitch: porchRoof(150) })),
-    // The model said 0.5 and 0.2; its gable points are y-up and its porch points put the outer end
-    // above the wall. Both are refused.
-    plan(replyText({ pitch: 0.5, porch: 0.2 }, { pitch: gableYUp, porchPitch: porchUp })),
+    // The model said 0.8; its points say 0.4. It also gives the old porch points, which are not read.
+    plan(replyText({ pitch: 0.8, porch: 0.15 }, { pitch: gable(160), porchPitch: oldPorch })),
+    // The model said 0.6; its points say 0.42.
+    plan(replyText({ pitch: 0.6, porch: 0.12 }, { pitch: gable(168) })),
+    // The model said 0.5; its points are y-up, which is refused.
+    plan(replyText({ pitch: 0.5, porch: 0.2 }, { pitch: gableYUp })),
   ]);
   assertEquals(r.sent.length, 3, "a v2 press is still three reads");
   assertEquals(r.out.answered, null, "it drafted");
@@ -163,8 +160,8 @@ Deno.test("v2, three reads: each read's pitches are its points' BEFORE the media
   assertEquals(r.logged, []);
   // The median of 0.4, 0.42 and 0.5 is 0.42. Of the model's own 0.8, 0.6 and 0.5 it would be 0.6.
   assertEquals(r.out.drafted.d3.roof.pitch, 0.42);
-  // The porch: 0.3, 0.3 and the third read's own 0.2. Of the model's own it would be 0.15.
-  assertEquals(r.out.drafted.d3.roof.porchPitch, 0.3);
+  // The porch roof is the median of the model's own 0.15, 0.12 and 0.2: points never touch it.
+  assertEquals(r.out.drafted.d3.roof.porchPitch, 0.15);
   assertEquals(r.out.consensus.report.spread.pitch, [0.4, 0.5]);
   assert(!JSON.stringify(r.out.drafted.d3).includes("measure"), "the points never reach the spec");
   // One usage write: the three-read record, a sample per read saying which source won.
@@ -175,11 +172,7 @@ Deno.test("v2, three reads: each read's pitches are its points' BEFORE the media
     [0.42, "points", 0.6, null],
     [0.5, "model", null, true],
   ]);
-  assertEquals(samples.map((x) => [x.porchPitch, x.porchPitchSource, x.modelPorchPitch ?? null, x.porchPitchRejected ?? null]), [
-    [0.3, "points", 0.15, null],
-    [0.3, "points", 0.12, null],
-    [0.2, "model", null, true],
-  ]);
+  assertEquals(samples.map((x) => [x.porchPitch, "porchPitchSource" in x]), [[0.15, false], [0.12, false], [0.2, false]]);
   assert(samples.every((x) => x.type === "gable" && x.porchOutFt === 6), "each sample is still the read's roof");
 });
 
@@ -191,21 +184,21 @@ Deno.test("v2, three reads with no points at all: the model's numbers, exactly a
   ]);
   assertEquals([r.out.drafted.d3.roof.pitch, r.out.drafted.d3.roof.porchPitch], [0.6, 0.15]);
   const samples = r.usage[0].samples as Record<string, unknown>[];
-  assertEquals(samples.map((x) => [x.pitchSource, x.porchPitchSource]), [["model", "model"], ["model", "model"], ["model", "model"]]);
+  assertEquals(samples.map((x) => x.pitchSource), ["model", "model", "model"]);
   assert(samples.every((x) => !("pitchRejected" in x) && !("modelPitch" in x)), "no points given is not a rejection");
 });
 
 // ─── 3. The lean retry ────────────────────────────────────────────────────────────────────────
-Deno.test("v2 lean retry: its one read is drafted with its measured pitches, and its record carries that read's sample", async () => {
-  const r = await run({ v2: true, lean: true }, [plan(replyText({ pitch: 0.8, porch: 0.15 }, { pitch: gable(160), porchPitch: porchRoof(150) }))]);
+Deno.test("v2 lean retry: its one read is drafted with its measured pitch, and its record carries that read's sample", async () => {
+  const r = await run({ v2: true, lean: true }, [plan(replyText({ pitch: 0.8, porch: 0.15 }, { pitch: gable(160) }))]);
   assertEquals(r.sent.length, 1, "one read");
   assertEquals(r.out.consensus, null, "no consensus");
   assertEquals(r.out.callsUsage, null, "the single call's own record");
-  assertEquals([r.out.drafted.d3.roof.pitch, r.out.drafted.d3.roof.porchPitch], [0.4, 0.3]);
+  assertEquals([r.out.drafted.d3.roof.pitch, r.out.drafted.d3.roof.porchPitch], [0.4, 0.15]);
   const tokens = r.usage[0];
   assertEquals(tokens.model, "claude-opus-5");
-  assertEquals((tokens.samples as Record<string, unknown>[]).map((x) => [x.pitch, x.pitchSource, x.modelPitch, x.porchPitch, x.porchPitchSource, x.modelPorchPitch]),
-    [[0.4, "points", 0.8, 0.3, "points", 0.15]]);
+  assertEquals((tokens.samples as Record<string, unknown>[]).map((x) => [x.pitch, x.pitchSource, x.modelPitch, x.porchPitch]),
+    [[0.4, "points", 0.8, 0.15]]);
   // The rest of the single call's record is what it always was.
   for (const k of ["input", "output", "cache_read", "cache_creation", "stopReason", "textChars", "blockTypes"]) assert(k in tokens, `${k} is still recorded`);
 });
@@ -213,7 +206,7 @@ Deno.test("v2 lean retry: its one read is drafted with its measured pitches, and
 // ─── 4. Legacy is untouched ───────────────────────────────────────────────────────────────────
 Deno.test("legacy: a reply's points are ignored, the request bytes are unchanged, and the record has no samples", async () => {
   // A legacy reply never has points (the legacy prompts do not ask), but if one did, nothing reads them.
-  const text = replyText({ pitch: 0.8, porch: 0.15 }, { pitch: gable(160), porchPitch: porchRoof(150) });
+  const text = replyText({ pitch: 0.8, porch: 0.15 }, { pitch: gable(160) });
   const r = await run({ v2: false }, [plan(text)]);
   assertEquals(r.sent.length, 1);
   const want = parseModelSpec(text, DIMS);
@@ -233,15 +226,23 @@ Deno.test("legacy: a reply's points are ignored, the request bytes are unchanged
   assert((JSON.parse(v2.sent[0].init.body).messages[0].content.at(-1).text as string).includes('"measure": {'), "v2 asks");
 });
 
-Deno.test("a gambrel read with gable points keeps its own pitch: its pitch key is not a rake slope", async () => {
-  const gambrel = JSON.stringify({
-    roof: { type: "gambrel", front: "gable", pitch: 0.7, kneeU: 0.75, kneeRise: 0.72, ridgeRise: 1.03, overhangIn: 6 },
+Deno.test("a gambrel or a shed read keeps its own pitch whatever points it gives, and they are not counted as rejected", async () => {
+  const other = (roof: Record<string, unknown>, pitch: Record<string, unknown>) => JSON.stringify({
+    roof: { front: "gable", overhangIn: 6, ...roof },
     colors: {},
     observed: { porch: "none", wings: "none", confidence: "medium" },
-    measure: { pitch: gable(160) },
+    measure: { pitch },
   });
-  const r = await run({ v2: true, lean: true }, [plan(gambrel)]);
-  assertEquals(r.out.drafted.d3.roof.pitch, 0.7);
-  const s = (r.usage[0].samples as Record<string, unknown>[])[0];
-  assertEquals([s.pitchSource, "pitchRejected" in s, "porchPitchSource" in s], ["model", false, false]);
+  for (const [name, text, own] of [
+    // A gambrel's pitch key is not a rake slope.
+    ["a gambrel given gable points", other({ type: "gambrel", pitch: 0.7, kneeU: 0.75, kneeRise: 0.72, ridgeRise: 1.03 }, gable(160)), 0.7],
+    // A shed's slope from its wall edges read far off in a yawed frame, so it is never worked out.
+    ["a shed given its wall edges", other({ type: "shed", front: undefined, highSide: "front", pitch: 0.2 }, oldShed), 0.2],
+    ["a shed given gable points", other({ type: "shed", front: undefined, highSide: "front", pitch: 0.2 }, gable(160)), 0.2],
+  ] as const) {
+    const r = await run({ v2: true, lean: true }, [plan(text)]);
+    assertEquals(r.out.drafted.d3.roof.pitch, own, name);
+    const s = (r.usage[0].samples as Record<string, unknown>[])[0];
+    assertEquals([s.pitchSource, "pitchRejected" in s, "porchPitchSource" in s], ["model", false, false], name);
+  }
 });
