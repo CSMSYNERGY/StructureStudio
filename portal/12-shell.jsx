@@ -1510,7 +1510,10 @@ function Dashboard({ session }) {
         // The key is OMITTED, not sent as null, when the caller does not know the frames: the
         // server distinguishes absence ("leave the column alone") from an empty array ("the
         // builder removed the video"), and JSON.stringify drops an undefined property for us.
-        const body = { action: "save_style_d3", styleValue, d3, d3Photos };
+        // `frame: "front"` (2026-09-25) says this designer knows the raised-floor keys: without it
+        // the server carries a stored blocks/piers foundation and its floor height forward over the
+        // null an older panel sends (carryForwardFoundation), and with it this save can clear them.
+        const body = { action: "save_style_d3", styleValue, d3, d3Photos, frame: "front" };
         if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
         // ALWAYS PRESENT, null included (review wf_5199a3e0-d65, high). 01-core's wrapper injects
         // the view-as target whenever this key is absent, and it reads the target when the call
