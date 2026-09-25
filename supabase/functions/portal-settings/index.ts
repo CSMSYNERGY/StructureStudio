@@ -521,6 +521,36 @@ const filedAtReturnSite = new WeakSet<Response>();
 // Exported for aiDraftStreamWiring_test alone, which puts a request at a chosen age of this worker.
 export const WORKER_BORN_MS = Date.now();
 
+// ── A WORKER THAT SHUTS DOWN UNDER A STREAMED DRAFT (2026-09-26) ──────────────────────────────
+// How many streamed drafts' work is running in this worker right now. draftAnswer counts one in when
+// its work starts and out when that work settles, however it settles, and whether or not anyone is
+// still reading its answer (the watchdog closes the answer, never the work).
+let streamedDraftsInFlight = 0;
+// The runtime dispatches `beforeunload` before it ends a worker: at its wall clock (reason
+// "wall_clock"), at a CPU or memory limit, or on an early drop. The clocks above keep a streamed
+// draft inside its worker's life, so this should never file. When it does, a draft is being killed
+// mid-work: its body is cut off after the 200 went out, its ledger row never gets draft_ms, and the
+// pickup can only call it lost when its wait runs out. So the moment itself is filed, as ONE error row
+// however many drafts are in flight (`inFlight` says how many), and printed to the function's log.
+// Nothing when none is in flight, which is every ordinary shutdown. Fire-and-forget (the worker is
+// going), and it never throws into the runtime. The reason is read from `detail.reason`, the shape
+// Supabase documents, or from `detail` itself, the shape the runtime's type declaration gives.
+globalThis.addEventListener("beforeunload", (ev: Event) => {
+  try {
+    const inFlight = streamedDraftsInFlight;
+    if (!(inFlight > 0)) return;
+    const detail = (ev as CustomEvent<unknown>)?.detail;
+    const reason = typeof detail === "string" ? detail : (detail as { reason?: unknown } | null | undefined)?.reason ?? null;
+    const context = { reason, inFlight, workerAgeMs: Date.now() - WORKER_BORN_MS };
+    console.error(`[portal-settings] worker_shutdown_mid_draft ${JSON.stringify(context)}`);
+    logEdgeError({
+      fn: "portal-settings", code: "worker_shutdown_mid_draft", severity: "error",
+      message: "The worker shut down with a streamed draft still running: its answer was cut off, and the pickup will call it lost.",
+      context,
+    }).catch(() => {});
+  } catch { /* a shutdown notice never throws into the runtime */ }
+});
+
 function draftAnswer(
   req: Request,
   payload: unknown,
@@ -531,7 +561,16 @@ function draftAnswer(
   const ua = req.headers.get("user-agent");
   const replay = new Request(req.url, { method: "POST", headers: ua ? { "user-agent": ua } : {}, body: JSON.stringify(payload) });
   const filed = withErrorLog("portal-settings", () => work(true), { alreadyFiled: (res) => filedAtReturnSite.has(res) });
-  return heartbeatJsonResponse(() => filed(replay), {
+  // Counted in flight from the moment the work starts until it settles (see streamedDraftsInFlight).
+  const counted = async (): Promise<Response> => {
+    streamedDraftsInFlight += 1;
+    try {
+      return await filed(replay);
+    } finally {
+      streamedDraftsInFlight -= 1;
+    }
+  };
+  return heartbeatJsonResponse(counted, {
     headers: { ...cors, "Content-Type": "application/json" },
     deadlineMs: streamedDraftDeadlineMs({ now: Date.now(), requestStartMs: at.requestStartMs, workerBornMs: WORKER_BORN_MS }),
     onDeadline: () => logEdgeError({

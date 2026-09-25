@@ -22,8 +22,9 @@
 //      the WORKER does (2026-09-26): the platform's 400 s is a worker's life, not a request's.
 //   6. The work behind the answer is handed to EdgeRuntime.waitUntil; a watchdog closes the answer at
 //      DRAFT_STREAM_DEADLINE_MS, or 40 s before the worker's end if that is sooner, with
-//      `stream_deadline` while the work runs on to its capture and ledger row; and a browser that
-//      goes away mid-stream changes nothing about the hold or the row.
+//      `stream_deadline` while the work runs on to its capture and ledger row; a browser that goes
+//      away mid-stream changes nothing about the hold or the row; and a worker that shuts down with
+//      streamed drafts in flight files one error row saying so (2026-09-26).
 //   7. The press's key rides on its ledger row (253), and the frame map just before `drafted`, neither
 //      able to fail a generation. calibrate_style_ai_recover: the generation's own gate, only the
 //      caller's own rows found BY THE PRESS'S KEY (tenant, user, key, style), the success body rebuilt
@@ -841,6 +842,87 @@ for (const [what, base, want] of DISCONNECTS) {
     });
   });
 }
+
+// A worker that shuts down under a streamed draft (2026-09-26): the runtime's `beforeunload` files ONE
+// error row, with the reason, how many drafts were in flight and the worker's age, and prints the same
+// line to the function's log. An ordinary shutdown, with nothing in flight, files and prints nothing,
+// and so does one after every draft has settled, however it settled.
+const SHUTDOWN = "worker_shutdown_mid_draft";
+async function shutdown(detail: unknown) {
+  globalThis.dispatchEvent(new CustomEvent("beforeunload", { detail }));
+  // The row is fire-and-forget: let its insert land.
+  await new Promise((r) => setTimeout(r, 20));
+}
+Deno.test("a worker shutting down under streamed drafts files ONE error row (reason, inFlight, workerAgeMs); with none in flight, nothing", async () => {
+  const printed: string[] = [];
+  const realError = console.error;
+  console.error = (...a: unknown[]) => { printed.push(a.map(String).join(" ")); };
+  try {
+    // Nothing in flight: an ordinary shutdown.
+    await inWorld({}, async (trace) => {
+      await shutdown({ reason: "early_drop" });
+      assertEquals(trace.rows, [], "no row");
+    });
+    assertEquals(printed.filter((l) => l.includes(SHUTDOWN)), [], "and no line");
+    // Two streamed drafts on a worker 100 s old, their reads out, then the wall clock's notice.
+    let open!: () => void;
+    const gate = new Promise<void>((r) => { open = r; });
+    const plan = { ...GOOD(), gate };
+    await inWorld({ model: Array(6).fill(plan), workerAgeMs: 100_000 }, async (trace) => {
+      const a = await HANDLER(request(STREAMED));
+      const b = await HANDLER(request({ ...STREAMED, idempotencyKey: "press-2" }));
+      for (let i = 0; i < 400 && trace.sent.length < 6; i++) await new Promise((r) => setTimeout(r, 5));
+      assertEquals(trace.sent.length, 6, "both drafts' reads are out");
+      await shutdown({ reason: "wall_clock" });
+      const rows = trace.rows.filter((r) => r.code === SHUTDOWN);
+      assertEquals(rows.length, 1, "one row, however many drafts are in flight");
+      const ctx = rows[0].context as Record<string, unknown>;
+      assertEquals([rows[0].severity, ctx.reason, ctx.inFlight], ["error", "wall_clock", 2]);
+      assert(typeof ctx.workerAgeMs === "number" && ctx.workerAgeMs >= 100_000 && ctx.workerAgeMs < 105_000, `the worker's age: ${ctx.workerAgeMs}`);
+      assertEquals(Object.keys(ctx), ["reason", "inFlight", "workerAgeMs"]);
+      const lines = printed.filter((l) => l.includes(SHUTDOWN));
+      assertEquals(lines.length, 1, "and one line in the function's log");
+      assertEquals(JSON.parse(lines[0].slice(lines[0].indexOf("{"))), ctx, "saying the same");
+      // The runtime's type declaration has the reason as `detail` itself: read either way.
+      await shutdown("memory");
+      const again = trace.rows.filter((r) => r.code === SHUTDOWN);
+      assertEquals(again.length, 2, "one row per notice");
+      assertEquals([(again[1].context as any).reason, (again[1].context as any).inFlight], ["memory", 2]);
+      // The drafts settle: nothing is in flight any more.
+      open();
+      await a.text();
+      await b.text();
+      await Promise.allSettled(trace.kept);
+      await shutdown({ reason: "wall_clock" });
+      assertEquals(trace.rows.filter((r) => r.code === SHUTDOWN).length, 2, "no row once both settled");
+    });
+    // A draft that THROWS settles too: it is counted out, and a later shutdown files nothing.
+    await inWorld({ throwOn: "client_settings" }, async (trace) => {
+      const res = await HANDLER(request(STREAMED));
+      assertEquals(JSON.parse(await res.text()).status, 500);
+      await Promise.allSettled(trace.kept);
+      await shutdown({ reason: "wall_clock" });
+      assertEquals(trace.rows.filter((r) => r.code === SHUTDOWN), [], "a thrown draft is not in flight");
+    });
+    // A draft that does not stream is never counted: it has no answer to cut off behind a 200.
+    let openPlain!: () => void;
+    const plainGate = new Promise<void>((r) => { openPlain = r; });
+    const plainPlan = { ...GOOD(), gate: plainGate };
+    await inWorld({ model: Array(3).fill(plainPlan) }, async (trace) => {
+      const pending = HANDLER(request(V2));
+      for (let i = 0; i < 400 && trace.sent.length < 3; i++) await new Promise((r) => setTimeout(r, 5));
+      assertEquals(trace.sent.length, 3, "the plain draft's reads are out");
+      await shutdown({ reason: "wall_clock" });
+      assertEquals(trace.rows.filter((r) => r.code === SHUTDOWN), [], "not counted");
+      openPlain();
+      const res = await pending;
+      assertEquals(res.status, 200);
+      assert((await res.text()).startsWith('{"ok":true,'), "its own answer, as before");
+    });
+  } finally {
+    console.error = realError;
+  }
+});
 
 // ─── 7. The press's key on its row, and picking the draft up by it (calibrate_style_ai_recover) ─
 const USER_ID = "00000000-0000-4000-8000-000000000001";
