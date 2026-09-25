@@ -124,6 +124,8 @@ const gableYUp = { frame: 2, size: SIZE, left: [400, 300], peak: [800, 500], rig
 // dropPx / 500. The post is what lets the server level the frame; without it the block is not used.
 const porchRoof = (dropPx: number) =>
   ({ frame: 4, size: SIZE, wall: [700, 400], edge: [1200, 400 + dropPx], postTop: [1200, 400 + dropPx], postBottom: [1200, 600 + dropPx] });
+// A porch roof whose outer end is read ABOVE the wall, which the server refuses.
+const porchUp = { frame: 4, size: SIZE, wall: [700, 400], edge: [1200, 350], postTop: [1200, 350], postBottom: [1200, 550] };
 
 function replyText(own: { pitch: number; porch: number }, measure?: Record<string, unknown>) {
   return JSON.stringify({
@@ -151,8 +153,9 @@ Deno.test("v2, three reads: each read's pitches are its points' BEFORE the media
     plan(replyText({ pitch: 0.8, porch: 0.15 }, { pitch: gable(160), porchPitch: porchRoof(150) })),
     // The model said 0.6 and 0.12; its points say 0.42 and 0.3.
     plan(replyText({ pitch: 0.6, porch: 0.12 }, { pitch: gable(168), porchPitch: porchRoof(150) })),
-    // The model said 0.5 and 0.2; its gable points are y-up (refused) and it gave no porch points.
-    plan(replyText({ pitch: 0.5, porch: 0.2 }, { pitch: gableYUp })),
+    // The model said 0.5 and 0.2; its gable points are y-up and its porch points put the outer end
+    // above the wall. Both are refused.
+    plan(replyText({ pitch: 0.5, porch: 0.2 }, { pitch: gableYUp, porchPitch: porchUp })),
   ]);
   assertEquals(r.sent.length, 3, "a v2 press is still three reads");
   assertEquals(r.out.answered, null, "it drafted");
@@ -172,10 +175,10 @@ Deno.test("v2, three reads: each read's pitches are its points' BEFORE the media
     [0.42, "points", 0.6, null],
     [0.5, "model", null, true],
   ]);
-  assertEquals(samples.map((x) => [x.porchPitch, x.porchPitchSource, x.modelPorchPitch ?? null]), [
-    [0.3, "points", 0.15],
-    [0.3, "points", 0.12],
-    [0.2, "model", null],
+  assertEquals(samples.map((x) => [x.porchPitch, x.porchPitchSource, x.modelPorchPitch ?? null, x.porchPitchRejected ?? null]), [
+    [0.3, "points", 0.15, null],
+    [0.3, "points", 0.12, null],
+    [0.2, "model", null, true],
   ]);
   assert(samples.every((x) => x.type === "gable" && x.porchOutFt === 6), "each sample is still the read's roof");
 });

@@ -4760,6 +4760,8 @@ Deno.test("pitchFromMeasure: a shed is the difference of its two edges over the 
   assertEquals(pitchFromMeasure(shedAt([300, 200], [300, 700], [550, 260], [550, 700]), "shed"), 0.24);
   assertEquals(pitchFromMeasure(shedAt([300, 440], [300, 700], [1100, 200], [1100, 700]), "shed"), null, "the 'tall' edge is the shorter");
   assertEquals(pitchFromMeasure(shedAt([300, 200], [300, 700], [1100, 200], [1100, 700]), "shed"), null, "two equal edges: no slope");
+  // A short edge of no height is a missed landmark, not a wall: 500 px over 800 would pass the CLAMPS.
+  assertEquals(pitchFromMeasure(shedAt([300, 200], [300, 700], [1100, 700], [1100, 700]), "shed"), null, "shortTop on shortBottom");
   assertEquals(pitchFromMeasure(shedAt([300, 200], [300, 700], [520, 440], [520, 700]), "shed"), null, "220 px is under 15% of the width");
   assertEquals(pitchFromMeasure(shedAt([300, 700], [300, 200], [1100, 700], [1100, 440]), "shed"), null, "y up: tops below bottoms");
   assertEquals(pitchFromMeasure({ tallTop: [300, 200], tallBottom: [300, 700], shortTop: [1100, 440], shortBottom: [1100, 700] }, "shed"), null,
@@ -4915,6 +4917,15 @@ Deno.test("applyMeasuredPitches: points that fail, or do not fit the read, leave
   const yUp = apply({}, { pitch: gableAt([400, 300], [800, 500], [1200, 300]), porchPitch: porchAt([700, 400], [1200, 550]) });
   assertEquals([yUp.d3.roof.pitch, yUp.d3.roof.porchPitch], [0.8, 0.3]);
   assertEquals(yUp.sources, { pitchSource: "model", pitchRejected: true, porchPitchSource: "points", modelPorchPitch: 0.15 });
+  // The other way round: the gable's points hold and the projecting porch's fail (its outer end above
+  // the wall), so the porch keeps the model's number and the read says its points were refused.
+  const badPorch = apply({}, { pitch: gableAt([400, 600], [800, 440], [1200, 600]), porchPitch: porchAt([700, 400], [1200, 350]) });
+  assertEquals([badPorch.d3.roof.pitch, badPorch.d3.roof.porchPitch], [0.4, 0.15]);
+  assertEquals(badPorch.sources, { pitchSource: "points", modelPitch: 0.8, porchPitchSource: "model", porchPitchRejected: true });
+  // A porch block with no post is not used, and is recorded the same way.
+  const noPost = apply({}, { porchPitch: porchAt([700, 400], [1200, 550], M_SIZE, null) });
+  assert(noPost.d3 === noPost.model, "nothing replaced");
+  assertEquals(noPost.sources, { pitchSource: "model", porchPitchSource: "model", porchPitchRejected: true });
   // A shed read given gable points: the points must match the read's own roof type.
   const shed = apply({ type: "shed", front: undefined, highSide: "front", pitch: 0.2, porchOutFt: 0 });
   assertEquals(shed.d3.roof.pitch, 0.2);
