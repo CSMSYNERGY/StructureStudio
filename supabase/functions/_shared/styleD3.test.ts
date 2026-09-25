@@ -3812,3 +3812,23 @@ Deno.test("selfCheckRequest: the v2 check gets 8000 tokens and 90 s, and its own
     assertEquals(content[3 + 3 * i].source, { type: "base64", media_type: "image/jpeg", data: p.base64 });
   });
 });
+
+// ═══ THE DRAFT'S COST BASIS, BY MODEL (fix, 2026-09-25) ══════════════════════════════════════
+// The v2 path moved to Opus and every capture was still priced at one hardcoded Sonnet rate, so an
+// armed meter would have recorded about 60% of each v2 draft's real cost as our gross margin basis.
+import { AI_MODEL_LEGACY, AI_MODEL_LIST_USD_PER_MTOK, AI_MODEL_V2, aiDraftCostCents } from "./styleD3.ts";
+Deno.test("aiDraftCostCents: v2 at Opus's list price; legacy exactly the number every capture has recorded", () => {
+  assertEquals(AI_MODEL_LIST_USD_PER_MTOK[AI_MODEL_V2], { input: 5, output: 25 });
+  assertEquals(AI_MODEL_LIST_USD_PER_MTOK[AI_MODEL_LEGACY], { input: 2, output: 10 });
+  // Legacy: the very expression portal-settings computed before, so production's older designer
+  // records exactly what it always has.
+  for (const [i, o] of [[0, 0], [21000, 8000], [18234, 5311], [1, 1], [123456, 12000], [7, 99999]]) {
+    assertEquals(aiDraftCostCents(false, i, o), Math.round((i * 0.0003 + o * 0.0015) * 100) / 100, `${i}/${o}`);
+  }
+  // A million tokens each way on Opus: $5 in, $25 out.
+  assertEquals(aiDraftCostCents(true, 1_000_000, 0), 500);
+  assertEquals(aiDraftCostCents(true, 0, 1_000_000), 2500);
+  // A typical 12-frame v2 draft: 21,000 in and 8,000 out is 30.5 cents; Sonnet's rate said 18.3.
+  assertEquals(aiDraftCostCents(true, 21000, 8000), 30.5);
+  assertEquals(aiDraftCostCents(false, 21000, 8000), 18.3);
+});

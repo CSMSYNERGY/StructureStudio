@@ -23,6 +23,7 @@
 // key names. What it proves is the handler's own behaviour given those answers.
 
 import { assert, assertEquals } from "jsr:@std/assert";
+import { aiModelFields } from "../styleD3.ts";
 
 const read = async (p: string) => (await Deno.readTextFile(new URL(p, import.meta.url))).replace(/\r\n/g, "\n");
 const SOURCE = await read("../../portal-settings/index.ts");
@@ -116,13 +117,14 @@ function helper(admin: unknown, logged: Logged[], opts: { ledgerRow?: unknown; t
   ) as (tokens: unknown) => Promise<void>;
 }
 
-/** Run the SHIPPED reply-site block and hand back the promise it started. */
-function site(data: unknown, reply: Row, recordDraftUsage: unknown): Promise<void> {
+/** Run the SHIPPED reply-site block and hand back the promise it started. `v2Prompt` is the
+ * rollout gate the handler passes to aiModelFields, which the real function answers here. */
+function site(data: unknown, reply: Row, recordDraftUsage: unknown, v2Prompt = false): Promise<void> {
   const run = new Function(
-    "data", "reply", "text", "recordDraftUsage",
+    "data", "reply", "text", "recordDraftUsage", "aiModelFields", "v2Prompt",
     `${SITE_BLOCK}\nreturn draftUsageLogged;`,
   );
-  return run(data, reply, reply.text, recordDraftUsage);
+  return run(data, reply, reply.text, recordDraftUsage, aiModelFields, v2Prompt);
 }
 
 // Text the model "wrote". It must never appear in anything that was stored.
@@ -146,6 +148,7 @@ Deno.test("a truncated reply's usage lands as SHAPES only, in its own two-column
   assertEquals(admin.attempts.length, 1, "one round trip");
   assertEquals(Object.keys(admin.stored[0]).sort(), ["draft_ms", "draft_tokens"], "nothing else rides on this write");
   assertEquals(admin.stored[0].draft_tokens, {
+    model: "claude-sonnet-5",
     input: 21000,
     output: 8000,
     cache_read: 0,
@@ -167,9 +170,21 @@ Deno.test("a reply with no usage block records nulls, not zeros", async () => {
     admin.stored.length = 0;
     await site(data, reply, helper(admin, []));
     assertEquals(admin.stored[0].draft_tokens, {
+      model: "claude-sonnet-5",
       input: null, output: null, cache_read: null, cache_creation: null,
       stopReason: null, textChars: 0, blockTypes: [],
     });
+  }
+});
+
+Deno.test("the usage names the model the request ran, so the cost basis can be re-priced per model", async () => {
+  // 2026-09-25: the v2 path moved to Opus while every capture was still priced at Sonnet's rate,
+  // and no row said which model had run. The model rides in the jsonb, not in a new column.
+  for (const [v2, model] of [[false, "claude-sonnet-5"], [true, "claude-opus-5"]] as const) {
+    const admin = fakeAdmin(AFTER_251);
+    await site(DATA, TRUNCATED, helper(admin, []), v2);
+    assertEquals(admin.stored[0].draft_tokens.model, model, `v2Prompt ${v2}`);
+    assertEquals(Object.keys(admin.stored[0]).sort(), ["draft_ms", "draft_tokens"], "still only the two 251 columns");
   }
 });
 

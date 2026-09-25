@@ -2734,6 +2734,27 @@ export const AI_MODEL_V2 = "claude-opus-5";
 export function aiModelFields(v2: boolean): Record<string, unknown> {
   return { model: v2 ? AI_MODEL_V2 : AI_MODEL_LEGACY };
 }
+// ── WHAT A DRAFT COSTS US, BY MODEL (fix, 2026-09-25) ────────────────────────────────────────
+// List prices in US dollars per million tokens, input and output, for the two models above.
+export const AI_MODEL_LIST_USD_PER_MTOK: Readonly<Record<string, { input: number; output: number }>> = {
+  [AI_MODEL_LEGACY]: { input: 2, output: 10 },
+  [AI_MODEL_V2]: { input: 5, output: 25 },
+};
+// The cost basis a metered draft's capture records (wallet_transactions.cost_cents, OUR gross
+// margin figure, never a tenant-facing price), in cents. Picked with the SAME flag as
+// aiModelFields, so it is the model the request actually ran.
+//   v2      the Opus list price above. Until 2026-09-25 every capture used one hardcoded Sonnet
+//           rate, $3/$15, so each Opus draft recorded about 60% of what it cost.
+//   legacy  FROZEN at that $3/$15, the number every capture has recorded since the meter was
+//           built, so production's older designer records exactly what it always has. Sonnet 5
+//           lists at $2/$10, so this over-states it by half; the raw tokens are stored and
+//           `draft_tokens.model` says which model ran, so a correction can be applied later.
+export function aiDraftCostCents(v2: boolean, inputTokens: number, outputTokens: number): number {
+  if (!v2) return Math.round((inputTokens * 0.0003 + outputTokens * 0.0015) * 100) / 100;
+  const rate = AI_MODEL_LIST_USD_PER_MTOK[AI_MODEL_V2];
+  // Dollars per million tokens to cents per token: x 100 / 1,000,000.
+  return Math.round((inputTokens * rate.input / 10_000 + outputTokens * rate.output / 10_000) * 100) / 100;
+}
 
 // ── THE WHOLE REQUEST, IN ONE PURE FUNCTION (fix, 2026-09-24) ────────────────────────────────
 // The prompt, the labelled pairs, the model, the budget and the abort -- everything the check

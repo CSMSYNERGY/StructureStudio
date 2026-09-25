@@ -83,7 +83,7 @@ import { parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfChec
 // The check's rollout gate and its one request builder, and the draft's frame-key check (fix,
 // 2026-09-24): the check is gated on `frame` like the draft, and a legacy request is d3ab404's.
 import { selfCheckMode, selfCheckRequest, frameKeyWarning } from "../_shared/styleD3.ts";
-import { aiModelFields } from "../_shared/styleD3.ts";
+import { aiDraftCostCents, aiModelFields } from "../_shared/styleD3.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
@@ -3949,6 +3949,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Counts come off `usage` and are null where it did not say; nothing here carries model text.
     const draftUsage = data?.usage ?? {};
     const draftUsageLogged = recordDraftUsage({
+      // Which model ran (2026-09-25), so the cost basis can be re-priced per model later.
+      model: aiModelFields(v2Prompt).model,
       input: Number.isFinite(draftUsage.input_tokens) ? draftUsage.input_tokens : null,
       output: Number.isFinite(draftUsage.output_tokens) ? draftUsage.output_tokens : null,
       cache_read: Number.isFinite(draftUsage.cache_read_input_tokens) ? draftUsage.cache_read_input_tokens : null,
@@ -4022,10 +4024,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (holdId != null) {
       const u = data?.usage ?? null;
       const inTok = Number(u?.input_tokens ?? 0), outTok = Number(u?.output_tokens ?? 0);
-      // Sonnet list price, in cents per token. Kept here rather than in a table because it
-      // is OUR cost basis, not a tenant-facing price; the tokens themselves are stored raw
-      // so a rate correction can be applied retrospectively without losing anything.
-      const costCents = Math.round((inTok * 0.0003 + outTok * 0.0015) * 100) / 100;
+      // OUR cost basis, not a tenant-facing price, by the model this request ran (aiDraftCostCents,
+      // 2026-09-25: the v2 path runs Opus and was recorded at Sonnet's rate). The legacy path's
+      // number is exactly what it always was. The tokens are stored raw, and draft_tokens.model
+      // says which model ran, so a rate correction can be applied retrospectively.
+      const costCents = aiDraftCostCents(v2Prompt, inTok, outTok);
       const { data: bal, error: capErr2 } = await admin.rpc("wallet_capture", {
         p_hold_id: holdId, p_cost_cents: Math.round(costCents), p_usage: u, p_ref_id: String(ledgerRow?.id ?? ""),
       });
