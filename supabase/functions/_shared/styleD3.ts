@@ -1039,13 +1039,21 @@ export function wantsStreamedDraft(payload: unknown): boolean {
   return dims.ok && wantsV2Prompt(p.frame, dims.dims);
 }
 
-// ─── HOW LONG A STREAMED ANSWER MAY STAY OPEN (2026-09-25) ───────────────────────────────────
+// ─── THE PLATFORM'S WALL CLOCK ───────────────────────────────────────────────────────────────
+// No edge function request outlives 400 s on the paid plan (Supabase's documented limit; a live
+// probe on 2026-09-25 ran 220 s and answered whole). Nothing here can move it: every clock below is
+// sized to stop inside it.
+export const EDGE_WALL_CLOCK_MS = 400_000;
+
+// ─── HOW LONG A STREAMED ANSWER MAY STAY OPEN (2026-09-25; 360 s since the reads got 300 s) ──
 // Measured from the request's arrival (portal-settings' requestStartMs). The reads get at most
-// min(230 s, 260 s - set-up), so a set-up under 200 s leaves the model done by 260 s; the capture,
-// the ledger write and the answer normally take seconds after that, which leaves 40 s of room for a
+// min(300 s, 330 s - set-up), so a set-up under 270 s leaves the model done by 330 s; the capture,
+// the ledger write and the answer normally take seconds after that, which leaves 30 s of room for a
 // slow database. Past this the answer is closed with heartbeatJson's `stream_deadline` body and the
-// work runs on behind it. The platform's own wall clock (400 s) is the hard stop above both.
-export const DRAFT_STREAM_DEADLINE_MS = 300_000;
+// work runs on behind it, with 40 s more before the wall clock (EDGE_WALL_CLOCK_MS) stops it for
+// good. It was 300 s while the reads had 230 s of 260 s; live on 2026-09-25 the reads needed more
+// (8 presses in 12 had a read cut at 230 s), and this moved with them.
+export const DRAFT_STREAM_DEADLINE_MS = 360_000;
 
 // ─── ONE PRESS'S KEY, CUT ONE WAY (253, 2026-09-25) ──────────────────────────────────────────
 // The browser mints one idempotency key per press (calIdemRef) and sends it with the press.
@@ -1058,9 +1066,9 @@ export function draftIdemKey(raw: unknown): string | null {
 }
 
 // ─── PICKING A STREAMED DRAFT UP AFTER THE CONNECTION DROPPED (2026-09-25, BY KEY SINCE 253) ──
-// A streamed draft runs three to five minutes, and a phone that backgrounds the tab, or a network
-// that blinks, drops the answer while the server is still working (or after it has finished and
-// charged). Asking again under the same key cannot help: with the meter off (today) it runs the
+// A streamed draft runs up to five and a half minutes, and a phone that backgrounds the tab, or a
+// network that blinks, drops the answer while the server is still working (or after it has finished
+// and charged). Asking again under the same key cannot help: with the meter off (today) it runs the
 // model a second time, and with it on the hold refuses it (hold_in_flight; already_charged only
 // once 248 is applied). But the server writes what it drafted onto the ledger row (226), so the
 // browser reads it back: calibrate_style_ai_recover.
@@ -1076,10 +1084,14 @@ export function draftIdemKey(raw: unknown): string | null {
 // money, both by the key, both scoped to the tenant and user the server resolved itself.
 
 // How long a row with no draft is still worth waiting on WHEN THE WALLET HAS NO WORD ON IT (the
-// meter is inactive, which is every tenant today): the answer's own deadline plus 100 s, which is
-// the platform's 400 s wall clock. The work runs on past its answer's deadline, but no worker
-// outlives the wall clock, so a row still without draft_ms by then will never get a draft.
-export const DRAFT_RECOVER_PENDING_MS = DRAFT_STREAM_DEADLINE_MS + 100_000;
+// meter is inactive, which is every tenant today): the platform's 400 s wall clock, counted from
+// the row's called_at, which is never before the request arrived. The work runs on past its
+// answer's deadline, but no worker outlives the wall clock, so a row still without draft_ms by then
+// will never get a draft. A healthy draft writes draft_ms when its reads end, by 330 s, well inside.
+// ⚠️ THE WALL CLOCK ITSELF, NOT THE DEADLINE PLUS SOMETHING: it was written as the deadline plus
+// 100 s while those added up to 400 s, and moving the deadline to 360 s must not stretch it past a
+// limit no worker can outlive.
+export const DRAFT_RECOVER_PENDING_MS = EDGE_WALL_CLOCK_MS;
 // How long a draft may trail the write that says the work is over. NOT a money decision: the
 // sentence about money always comes from the wallet's own state. It only decides whether to keep
 // waiting. On a success the usage write (draft_ms, started without await) and the capture land a

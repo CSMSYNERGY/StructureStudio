@@ -20,7 +20,7 @@
 // Dependency-free (no jsr:/npm: imports), like every test in the _shared group.
 
 import {
-  DRAFT_RECOVER_MAX_ROWS, DRAFT_RECOVER_PENDING_MS, DRAFT_RECOVER_SETTLE_MS, DRAFT_STREAM_DEADLINE_MS,
+  DRAFT_RECOVER_MAX_ROWS, DRAFT_RECOVER_PENDING_MS, DRAFT_RECOVER_SETTLE_MS, DRAFT_STREAM_DEADLINE_MS, EDGE_WALL_CLOCK_MS,
   type DraftMoney, type DraftRecoverRow, draftIdemKey, draftMoneyState, isRecoverableDraft, parseModelSpec,
   pickRecoverRow, recoverDraftAnswer, SELF_CHECK_CLAIM_WINDOW_MS,
 } from "./styleD3.ts";
@@ -52,9 +52,11 @@ const CAPTURED = (agoMs: number | null): DraftMoney => ({ kind: "captured", post
 const NOT_CHARGED = /you are not charged/;
 const CHARGED_ONCE = /charged once/;
 
-Deno.test("the numbers: the answer closes at 300 s; a row no wallet speaks for is waited on to the 400 s wall clock", () => {
-  assertEquals(DRAFT_STREAM_DEADLINE_MS, 300_000);
+Deno.test("the numbers: the answer closes at 360 s; a row no wallet speaks for is waited on to the 400 s wall clock", () => {
+  assertEquals(DRAFT_STREAM_DEADLINE_MS, 360_000);
+  // The wall clock itself, not the deadline plus 100 s (which was 400 s only while the deadline was 300 s).
   assertEquals(DRAFT_RECOVER_PENDING_MS, 400_000);
+  assertEquals(DRAFT_RECOVER_PENDING_MS, EDGE_WALL_CLOCK_MS);
   assertEquals([DRAFT_RECOVER_SETTLE_MS, DRAFT_RECOVER_MAX_ROWS], [90_000, 20]);
 });
 
@@ -220,6 +222,29 @@ Deno.test("no wallet row at all (the meter inactive, today's live state): nothin
   assert(failed.kind === "lost" && failed.why === "failed" && failed.severity === "info" && NOT_CHARGED.test(failed.body.message), JSON.stringify(failed));
   // An unreadable called_at is never waited on for ever.
   assertEquals(recoverDraftAnswer(ROW({ called_at: "garbage" }), NONE, NOW).kind, "lost");
+});
+
+Deno.test("⚠️ a healthy draft at the streamed ceiling (reads end 330 s after the request) is pending the whole way, never lost", () => {
+  // The press: its row is written as the request starts, ~30 s of set-up (the hold, a top-up), then
+  // the reads' full 300 s, so they end 330 s after called_at, and `drafted` lands a moment later.
+  const pending = { ok: true, pending: true };
+  const at = (ageMs: number, money: DraftMoney, o: Partial<DraftRecoverRow> = {}) =>
+    recoverDraftAnswer(ROW({ called_at: iso(NOW - ageMs), ...o }), money, NOW);
+  // Meter off (today's live state): nothing held, so only the ledger says whether to wait. No
+  // draft_ms while the reads are out, to their end and on past the answer's watchdog.
+  for (let ageMs = 0; ageMs <= DRAFT_STREAM_DEADLINE_MS; ageMs += 5_000) {
+    assertEquals(at(ageMs, NONE).body, pending, `reads out, ${ageMs} ms after the press's row`);
+  }
+  // The reads ended: draft_ms 300 s, and the draft is waited on while it is a moment behind.
+  for (let ageMs = 330_000; ageMs <= 330_000 + 60_000; ageMs += 5_000) {
+    assertEquals(at(ageMs, NONE, { draft_ms: 300_000 }).body, pending, `reads done, ${ageMs} ms after the press's row`);
+  }
+  // Meter on: an open hold is pending, and a capture a moment old is too.
+  assertEquals(at(330_000, HELD).body, pending, "held at the ceiling");
+  assertEquals(at(335_000, CAPTURED(5_000), { draft_ms: 300_000 }).body, pending, "captured a moment ago");
+  // And the draft, once it lands, is the draft.
+  assertEquals(at(335_000, NONE, { draft_ms: 300_000, drafted: D3 }).kind, "draft");
+  assertEquals(at(335_000, CAPTURED(5_000), { draft_ms: 300_000, drafted: D3 }).kind, "draft");
 });
 
 Deno.test("no row for the key: reason no_row (the shell waits 90 s on it), and the sentence is the money's", () => {

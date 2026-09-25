@@ -4,7 +4,7 @@
 // had to stop at 125 s, and at effort "high" all three consensus reads ran past it. The gateway
 // times silence, not the request, so the new shell asks for `stream: true` and the server answers
 // 200 at once, writes a space every ten seconds, then writes the JSON (heartbeatJson.ts); the draft
-// gets 230 s and thinks at "high". That change is safe only if all of this holds, and each is pinned
+// gets 300 s and thinks at "high". That change is safe only if all of this holds, and each is pinned
 // here:
 //
 //   1. WHICH requests stream: stream:true AND the v2 prompt AND not lean -- decided before the branch
@@ -17,7 +17,7 @@
 //   4. Everything around the answer happens exactly as it does unstreamed, in the same order: the
 //      ledger row, the hold and its release on every failure, the capture, the usage write, the coded
 //      app_errors rows AND the rows the error wrapper files, which it cannot see through a 200.
-//   5. Effort "high", 20000 tokens and the 230/260 s budget only on the streamed request, and
+//   5. Effort "high", 20000 tokens and the 300/330 s budget only on the streamed request, and
 //      draft_tokens says which effort ran and whether it streamed.
 //   6. The work behind the answer is handed to EdgeRuntime.waitUntil; a watchdog closes the answer at
 //      DRAFT_STREAM_DEADLINE_MS with `stream_deadline` while the work runs on to its capture and
@@ -46,7 +46,7 @@
 import { assert, assertEquals } from "jsr:@std/assert";
 import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
 import {
-  aiDraftCostCents, DRAFT_RECOVER_PENDING_MS, DRAFT_RECOVER_SETTLE_MS, DRAFT_STREAM_DEADLINE_MS, parseKnownDims,
+  aiDraftCostCents, DRAFT_RECOVER_PENDING_MS, DRAFT_RECOVER_SETTLE_MS, DRAFT_STREAM_DEADLINE_MS, EDGE_WALL_CLOCK_MS, parseKnownDims,
   SELF_CHECK_CLAIM_WINDOW_MS, wantsStreamedDraft, wantsV2Prompt,
 } from "../styleD3.ts";
 import { HEARTBEAT_MS, STREAM_DEADLINE_BODY } from "../heartbeatJson.ts";
@@ -226,7 +226,7 @@ async function inWorld<T>(world: World, body: (trace: Trace) => Promise<T>): Pro
   // to keep alive is kept here, so a test can wait for the work behind an answer nobody read.
   (globalThis as any).EdgeRuntime = { waitUntil: (p: Promise<unknown>) => { trace.kept.push(p); } };
   // The answer's watchdog (DRAFT_STREAM_DEADLINE_MS, minutes): a hundred times faster by default, so
-  // 300 s is 3 s here and no fast test meets it; the watchdog's own test runs it faster still.
+  // 360 s is 3.6 s here and no fast test meets it; the watchdog's own test runs it faster still.
   (globalThis as any).setTimeout = (fn: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
     if (typeof ms === "number" && ms >= 250_000) {
       trace.deadlines.push(ms);
@@ -620,12 +620,13 @@ Deno.test("20000 tokens cannot make a streamed press cost more than its price: t
   assert(worst < 2000 / 10, `${worst} cents`);
 });
 
-Deno.test("the budget: streamed min(230 s, 260 s - set-up), never under 60 s; plain as before", async () => {
+Deno.test("the budget: streamed min(300 s, 330 s - set-up), never under 60 s; plain as before", async () => {
   const cases: [Record<string, unknown>, number, number][] = [
-    [STREAMED, 0, 230_000],
-    [STREAMED, 20_000, 230_000],
-    [STREAMED, 50_000, 210_000],
-    [STREAMED, 230_000, 60_000],
+    [STREAMED, 0, 300_000],
+    [STREAMED, 20_000, 300_000],
+    [STREAMED, 50_000, 280_000],
+    [STREAMED, 100_000, 230_000],
+    [STREAMED, 300_000, 60_000],
     [V2, 0, 125_000],
     [V2, 50_000, 95_000],
     [V2, 100_000, 60_000],
@@ -641,17 +642,49 @@ Deno.test("the budget: streamed min(230 s, 260 s - set-up), never under 60 s; pl
   const decl = lift(SOURCE, "const draftAbortMs =", ";\n", "the draft budget") + ";";
   const budget = (streamed: boolean, spent: number) =>
     new Function("t0", "requestStartMs", "streamed", `${decl}; return draftAbortMs;`)(1_000_000 + spent, 1_000_000, streamed) as number;
-  for (let spent = 0; spent <= 300_000; spent += 1_000) {
-    assertEquals(budget(true, spent), Math.max(60_000, Math.min(230_000, 260_000 - spent)), `streamed, ${spent}`);
+  for (let spent = 0; spent <= 360_000; spent += 1_000) {
+    assertEquals(budget(true, spent), Math.max(60_000, Math.min(300_000, 330_000 - spent)), `streamed, ${spent}`);
     assertEquals(budget(false, spent), Math.max(60_000, Math.min(125_000, 145_000 - spent)), `plain, ${spent}`);
-    // The whole streamed request ends by 260 s whenever the set-up left the model its floor.
-    if (spent <= 200_000) assert(spent + budget(true, spent) <= 260_000, `streamed, ${spent}: inside 260 s`);
+    // The whole streamed request ends by 330 s whenever the set-up left the model its floor.
+    if (spent <= 270_000) assert(spent + budget(true, spent) <= 330_000, `streamed, ${spent}: inside 330 s`);
   }
   // THE ANSWER'S OWN DEADLINE sits after the reads' and below the platform's wall clock: the reads
-  // end by 260 s (a set-up under 200 s), the answer closes at DRAFT_STREAM_DEADLINE_MS, which leaves
-  // 40 s for the capture and the ledger write, and the worker's 400 s is the hard stop above both.
-  assertEquals(DRAFT_STREAM_DEADLINE_MS, 300_000);
-  assert(DRAFT_STREAM_DEADLINE_MS - 260_000 >= 30_000 && DRAFT_STREAM_DEADLINE_MS < 400_000);
+  // end by 330 s (a set-up under 270 s), the answer closes at DRAFT_STREAM_DEADLINE_MS, which leaves
+  // 30 s for the capture and the ledger write, and the worker's 400 s is the hard stop above both.
+  assertEquals(DRAFT_STREAM_DEADLINE_MS, 360_000);
+  assert(DRAFT_STREAM_DEADLINE_MS - 330_000 >= 30_000 && DRAFT_STREAM_DEADLINE_MS < 400_000);
+});
+
+// ⚠️ THE STREAMED BUDGET'S INVARIANTS (2026-09-25, when the reads went from 230 s to 300 s), read off
+// the shipped declarations rather than restated, so a change to any one of them that breaks the
+// chain fails here. Live that day Opus streamed ~70 output tokens/s, and 8 presses in 12 had a read
+// cut at the old 230 s: the budget exists to let a whole read finish, and everything after it
+// (the capture, the ledger write, the answer) has to fit before the platform stops the worker.
+//   * the reads' latest end (the "ceiling", over every set-up the 60 s floor does not take over)
+//     is 330 s after the request;
+//   * the answer's watchdog (DRAFT_STREAM_DEADLINE_MS) closes after that, at 360 s;
+//   * and the watchdog leaves the work behind it at least 30 s before the 400 s wall clock;
+//   * a read that spends the whole of the streamed max_tokens at 70 tokens/s ends inside the reads'
+//     300 s.
+const MEASURED_OPUS_TOKENS_PER_S = 70;
+Deno.test("⚠️ the streamed budget's invariants: reads by 330 s < watchdog 360 s < wall clock 400 s - 30 s, and 20000 tokens at 70/s fit in 300 s", () => {
+  const decl = lift(SOURCE, "const draftAbortMs =", ";\n", "the draft budget") + ";";
+  const budget = (spent: number) =>
+    new Function("t0", "requestStartMs", "streamed", `${decl}; return draftAbortMs;`)(1_000_000 + spent, 1_000_000, true) as number;
+  let ceiling = 0;
+  for (let spent = 0; spent + 60_000 <= 330_000; spent += 1_000) ceiling = Math.max(ceiling, spent + budget(spent));
+  assertEquals(ceiling, 330_000, "the streamed reads end by 330 s after the request");
+  assertEquals(budget(0), 300_000, "and get 300 s after an ordinary set-up");
+  assertEquals(EDGE_WALL_CLOCK_MS, 400_000, "the paid plan's wall clock");
+  assert(ceiling < DRAFT_STREAM_DEADLINE_MS, `reads by ${ceiling} before the watchdog at ${DRAFT_STREAM_DEADLINE_MS}`);
+  assert(DRAFT_STREAM_DEADLINE_MS < EDGE_WALL_CLOCK_MS - 30_000, `watchdog at ${DRAFT_STREAM_DEADLINE_MS}, 30 s inside the wall clock`);
+  // A healthy draft at the ceiling is still pending for a pickup, never lost as stale.
+  assert(ceiling < DRAFT_RECOVER_PENDING_MS && DRAFT_RECOVER_PENDING_MS <= EDGE_WALL_CLOCK_MS, String(DRAFT_RECOVER_PENDING_MS));
+  const line = SOURCE.split("\n").find((l) => l.includes("max_tokens: streamed ?")) ?? "";
+  assertEquals(line.trim(), "max_tokens: streamed ? 20000 : 12000,");
+  const maxTokens = new Function("streamed", `return {${line.trim()}}.max_tokens;`)(true) as number;
+  const fullReadMs = (maxTokens / MEASURED_OPUS_TOKENS_PER_S) * 1000;
+  assert(fullReadMs <= budget(0), `${maxTokens} tokens at ${MEASURED_OPUS_TOKENS_PER_S}/s is ${Math.round(fullReadMs)} ms, over ${budget(0)}`);
 });
 
 // ─── 6. The work behind the answer: waitUntil, the watchdog, a caller that goes away ───────────
@@ -671,7 +704,7 @@ Deno.test("the watchdog: a draft still working at the deadline is answered strea
   let open!: () => void;
   const gate = new Promise<void>((r) => { open = r; });
   const plan = { ...GOOD(), gate };
-  // A thousand times faster: the 300 s deadline is 300 ms here, and the reads' own abort is later.
+  // A thousand times faster: the 360 s deadline is 360 ms here, and the reads' own abort is later.
   await inWorld({ model: [plan, plan, plan], deadlineScale: 1_000, abortAfterMs: 5_000 }, async (trace) => {
     const res = await HANDLER(request(STREAMED));
     assertEquals(res.status, 200);

@@ -3560,14 +3560,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   }
 
   // ── PICK UP A STREAMED DRAFT WHOSE ANSWER NEVER ARRIVED (2026-09-25, BY KEY SINCE 253) ─────────
-  // A streamed draft (calibrate_style_ai below, answered by draftAnswer) takes three to five
+  // A streamed draft (calibrate_style_ai below, answered by draftAnswer) takes up to five and a half
   // minutes behind its heartbeat, and a phone that backgrounds the tab or a network that blinks
   // drops that answer while the server works on, or after it has finished and charged. The same
   // key asked again runs the model a second time with the meter off (today), and with it on the
   // hold refuses it (hold_in_flight; already_charged only once 248 is applied). But the server
   // writes what it drafted onto the generation's ledger row, so the new shell, instead of telling
   // the builder to try again, asks HERE: at once when the answer drops, then every ten seconds
-  // until the draft is there, the server says it never will be, or the press's own seven minutes
+  // until the draft is there, the server says it never will be, or the press's own eight minutes
   // run out (and while the asks themselves fail, at least a minute from the first).
   //
   // ⚠️ THE PRESS IS FOUND BY ITS OWN KEY (253), and nothing here reads a clock the browser sent.
@@ -3979,11 +3979,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // budget only has to stop being the thing a normal long reply trips over.
     //
     // 20000 ON A STREAMED DRAFT ONLY (2026-09-25). At effort "high" a read thinks for longer, and a
-    // read that thinks past 12000 is cut off unparsed however much of its 230 s is left. Every
-    // other request keeps 12000, byte for byte. What it can cost: three reads of ~21,000 input and
-    // at most 20,000 output tokens at Opus's list price (aiDraftCostCents) is at most ~$1.82 a
-    // press, against ~$1.22 at 12000 -- recorded as the capture's cost basis, never charged to the
-    // builder, whose price is the held $20 whatever the tokens.
+    // read that thinks past 12000 is cut off unparsed however much of its 300 s is left. At the ~70
+    // output tokens/s Opus streamed live that day, a read that spends all 20000 takes ~286 s, which
+    // fits inside the 300 s budget below. Every other request keeps 12000, byte for byte. What it
+    // can cost: three reads of ~21,000 input and at most 20,000 output tokens at Opus's list price
+    // (aiDraftCostCents) is at most ~$1.82 a press, against ~$1.22 at 12000 -- recorded as the
+    // capture's cost basis, never charged to the builder, whose price is the held $20 whatever the
+    // tokens.
     //
     // The timeout is the other half. Supabase's gateway answers 504 on its own at 150 s of
     // silence, and that 504 is invisible to withErrorLog and leaves the wallet hold open until
@@ -4014,10 +4016,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     //
     // ⚠️ A STREAMED DRAFT HAS NO 150 s GATEWAY (2026-09-25, see draftAnswer): its answer is a 200 that
     // has been writing a space every 10 s since the request arrived. What bounds it instead is the
-    // platform's wall clock, which let a probe run 220 s; the whole request stays under ~260 s. So
-    // the model gets 230 s, or what is left of 260 s from the request after a slow set-up, and never
-    // under 60 s: the same rule as below with the gateway's 145 s replaced by 260 s. Every request
-    // that is not streamed keeps exactly the rule below.
+    // platform's wall clock: 400 s a request on the paid plan (Supabase's docs; a live probe ran
+    // 220 s). So the model gets 300 s, or what is left of 330 s from the request after a slow
+    // set-up, and never under 60 s: the same rule as below with the gateway's 145 s replaced by
+    // 330 s. Every request that is not streamed keeps exactly the rule below.
+    //
+    // 300 s OF 330 s SINCE 2026-09-25 (it was 230 s of 260 s). Live that day the three "high" reads
+    // took 74-215 s, and in 8 of 12 presses one or two of them hit the 230 s abort (draft_tokens
+    // `aborted: "deadline"`), which left the consensus a single read. Opus streamed ~70 output
+    // tokens/s, so a read that spends its whole 20000 needs ~286 s: 300 s lets it finish. The rest
+    // of the request still fits: the reads are done by 330 s, the answer's watchdog closes at 360 s
+    // (DRAFT_STREAM_DEADLINE_MS, 30 s for the capture and the ledger write), and the wall clock is
+    // at 400 s.
     const lean = payload.lean === true;
     // The reads' effort, decided once: "low" on the lean retry, "high" on a streamed draft, "medium"
     // on everything else (see output_config below for why). The request carries it, and so does
@@ -4026,7 +4036,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const aiSource = combined ? "combined" : fromVideo ? "video" : "photos";
     const t0 = Date.now();
     const draftAbortMs = streamed
-      ? Math.max(60_000, Math.min(230_000, 260_000 - (t0 - requestStartMs)))
+      ? Math.max(60_000, Math.min(300_000, 330_000 - (t0 - requestStartMs)))
       : Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));
 
     // ── WHAT THE DRAFT CALL USED, on every exit that reached the model (251, 2026-09-23) ──────
@@ -4102,7 +4112,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // ⚠️ ONLY WHEN STREAMED: tried live 2026-09-25 on the plain request, all three reads ran past
         // the 125 s draft budget (the gateway ends a silent request at 150 s), so every press fell to
         // the lean retry. A streamed draft (draftAnswer: the new shell's v2 press) outlives the
-        // gateway with a 230 s budget and thinks "high"; a v2 request that is NOT streamed keeps
+        // gateway with a 300 s budget and thinks "high"; a v2 request that is NOT streamed keeps
         // "medium" and its 125 s, with the reads' reasoning carried in the reply itself (the prompt's
         // evidence fields). `streamed` is never true with `lean` (wantsStreamedDraft). The choice is
         // draftEffort, above, so draft_tokens records the very effort this request sent.

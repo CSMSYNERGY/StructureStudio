@@ -54,7 +54,7 @@ const json = (body: Record<string, unknown>, status = 200): Reply => ({ body, st
 
 Deno.test("the draft call has the v2 budget: 12000 tokens (20000 streamed), a 125 s abort unless streamed, effort low only when lean", () => {
   // 20000 on a STREAMED draft only (2026-09-25): at effort "high" a read can think past 12000 and be
-  // cut off with most of its 230 s left. Every other request keeps 12000.
+  // cut off with most of its 300 s left. Every other request keeps 12000.
   const mt = DRAFT.split("\n").find((l) => l.includes("max_tokens:")) ?? "";
   assertEquals(mt.trim(), "max_tokens: streamed ? 20000 : 12000,");
   const maxTokens = (streamed: boolean) => new Function("streamed", `return {${mt.trim()}}.max_tokens;`)(streamed) as number;
@@ -91,7 +91,7 @@ Deno.test("⚠️ the model keeps its 125 s, and the gateway's 150 s is measured
   // every request that is NOT streamed gets is the second arm, character for character as before.
   const decl = lift(DRAFT, "const draftAbortMs =", ";\n", "the draft budget") + ";";
   assertEquals(decl.split("\n").map((l) => l.trim()).join(" "),
-    "const draftAbortMs = streamed ? Math.max(60_000, Math.min(230_000, 260_000 - (t0 - requestStartMs))) : Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));");
+    "const draftAbortMs = streamed ? Math.max(60_000, Math.min(300_000, 330_000 - (t0 - requestStartMs))) : Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));");
   assert(DRAFT.indexOf("const draftAbortMs =") > DRAFT.indexOf("autoTopupDecision("), "measured after the top-up has run");
   assert(DRAFT.indexOf("const draftAbortMs =") < DRAFT.indexOf("const aiSignal ="), "and before the call it bounds");
   const budget = (spentMs: number) => new Function("t0", "requestStartMs", "streamed", `${decl}; return draftAbortMs;`)(1_000_000 + spentMs, 1_000_000, false) as number;
