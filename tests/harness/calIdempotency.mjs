@@ -38,7 +38,8 @@
 //      polled with the press's `since`, and the draft it hands back is applied exactly as an answer
 //      would have been -- the success line, the key cleared, the check skipped with a note saying
 //      why. A server that says the draft will never come is shown in its own words, and the key
-//      is kept. The drop's own client log row is filed, as the transport fault it is.
+//      is kept. The drop's own client log row is draft_stream_dropped, an info row: the server's
+//      pickup rows carry the outcome.
 //
 // Stubbed at the NETWORK layer, like dev/verify-cal3d.mjs: no account, no login, no writes, and
 // the artifacts under test are the compiled bundles the browser really loads. A change that was
@@ -470,8 +471,8 @@ async function main() {
     /picked the draft up from the server/.test(afterText) && /did not run this time/.test(afterText));
   r.ok("no error on screen", !/connection dropped before|could not pick the draft up/i.test(afterText.replace(/Your connection dropped while we were drafting[^\n]*/, "")));
   const dropRow = d1.logs.find((l) => l.p_context && l.p_context.action === "calibrate_style_ai");
-  r.ok("⚠️ THE DROP'S CLIENT LOG ROW: the parser's error, filed as a fault (the page was not leaving)",
-    Boolean(dropRow) && dropRow.p_code === "SyntaxError" && dropRow.p_severity === "error" && dropRow.p_context.status === null,
+  r.ok("⚠️ THE DROP'S CLIENT LOG ROW: draft_stream_dropped, INFO (the page was staying; the server's pickup rows carry the outcome)",
+    Boolean(dropRow) && dropRow.p_code === "draft_stream_dropped" && dropRow.p_severity === "info" && dropRow.p_context.status === null,
     JSON.stringify(dropRow && { code: dropRow.p_code, severity: dropRow.p_severity, status: dropRow.p_context.status }));
   r.ok("and the polls filed nothing", !d1.logs.some((l) => l.p_context && l.p_context.action === "calibrate_style_ai_recover"),
     d1.logs.map((l) => l.p_code).join(","));
@@ -491,8 +492,8 @@ async function main() {
   const neverText = await page.evaluate(() => document.body.innerText);
   r.ok("⚠️ THE SERVER'S OWN SENTENCE, once it says the draft will never come", neverText.includes(never));
   const deadlineRow = d2.logs.find((l) => l.p_context && l.p_context.action === "calibrate_style_ai");
-  r.ok("the deadline's client log row carries the 504 it would have had, as a fault",
-    Boolean(deadlineRow) && deadlineRow.p_context.status === 504 && deadlineRow.p_severity === "error",
+  r.ok("the deadline's client log row is draft_stream_dropped too, info, carrying the 504 it would have had",
+    Boolean(deadlineRow) && deadlineRow.p_code === "draft_stream_dropped" && deadlineRow.p_context.status === 504 && deadlineRow.p_severity === "info",
     JSON.stringify(deadlineRow && { code: deadlineRow.p_code, severity: deadlineRow.p_severity, status: deadlineRow.p_context.status }));
   stub.drop = null; stub.recover = [];
   const n2 = await pressRetry("press 17 (the builder's own press after a draft that never came)", 1);

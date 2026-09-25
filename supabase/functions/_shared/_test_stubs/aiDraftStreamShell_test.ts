@@ -17,8 +17,10 @@
 //      it never will (its sentence, not retryable); or until the press's budget, and it stops the
 //      moment the designer goes away. Never for the lean retry, never without the designer's hooks.
 //   4. 01-core's invoke wrapper files a streamed refusal under the status it carries, so a 402 in a
-//      body stays an info row rather than a fault; and a page leave that kills a streamed BODY
-//      (TypeError / AbortError from the read) is the navigation abort, like a FunctionsFetchError.
+//      body stays an info row rather than a fault; a page leave that kills a streamed BODY
+//      (TypeError / AbortError from the read) is the navigation abort, like a FunctionsFetchError;
+//      and a dropped streamed draft on a page that STAYS is one info row, draft_stream_dropped (the
+//      server's pickup rows carry what became of it).
 
 // deno-lint-ignore-file no-explicit-any
 import { assert, assertEquals } from "jsr:@std/assert";
@@ -243,6 +245,34 @@ Deno.test("no pickup for the lean retry, nor for a designer without the hooks; n
   });
 });
 
+Deno.test("01-core: a dropped streamed draft on a page that stays is ONE info row under draft_stream_dropped, never a fault", () => {
+  const aborted = lift(CORE, "const ssAborted = ssPageLeaving && st === null", ";\n", "the navigation-abort test") + ";";
+  const decl = lift(CORE, "const ssDraftDropped = ", ";\n", "the dropped-draft test") + ";";
+  const run = (leaving: boolean, st: number | null, res: unknown, body: unknown) =>
+    new Function("ssPageLeaving", "st", "res", "opts", `${aborted}\n${decl}\nreturn { ssAborted, ssDraftDropped };`)(leaving, st, res, { body }) as { ssAborted: boolean; ssDraftDropped: boolean };
+  const PRESS = { action: "calibrate_style_ai", stream: true };
+  const cut = (name: string) => ({ error: { name }, data: null });
+  const deadline = { error: null, data: { error: "x", code: "stream_deadline", status: 504 } };
+  // The two drops, on a page that stays: counted, not a fault.
+  assertEquals(run(false, null, cut("SyntaxError"), PRESS), { ssAborted: false, ssDraftDropped: true });
+  assertEquals(run(false, null, cut("TypeError"), PRESS), { ssAborted: false, ssDraftDropped: true });
+  assertEquals(run(false, 504, deadline, PRESS), { ssAborted: false, ssDraftDropped: true });
+  // A page that is LEAVING is the navigation's own code, as before.
+  assertEquals(run(true, null, cut("TypeError"), PRESS), { ssAborted: true, ssDraftDropped: false });
+  // Nothing else is: the lean retry (not streamed), the pickup itself, another action, a refusal in
+  // a streamed body, a transport failure before the response, and a status the server sent.
+  assertEquals(run(false, null, cut("SyntaxError"), { action: "calibrate_style_ai", lean: true }).ssDraftDropped, false, "the lean retry");
+  assertEquals(run(false, null, cut("TypeError"), { action: "calibrate_style_ai_recover" }).ssDraftDropped, false, "a pickup ask");
+  assertEquals(run(false, null, cut("SyntaxError"), { action: "status", stream: true }).ssDraftDropped, false, "another action");
+  assertEquals(run(false, 402, { error: null, data: { error: "x", code: "insufficient_funds", status: 402 } }, PRESS).ssDraftDropped, false, "a streamed refusal");
+  assertEquals(run(false, null, cut("FunctionsFetchError"), PRESS).ssDraftDropped, false, "never reached the server");
+  assertEquals(run(false, 502, cut("TypeError"), PRESS).ssDraftDropped, false, "a status the server sent");
+  // And the row it becomes: its own code, filed as info.
+  const call = lift(CORE, "ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),", "} catch (_) {}", "the log call");
+  assert(call.includes('ssAborted ? "fetch_aborted_navigating" : ssDraftDropped ? "draft_stream_dropped" :'), "its own code");
+  assert(call.includes('(ssAborted || ssDraftDropped || ssRefusal || (st >= 400 && st < 500)) ? "info" : "error"'), "filed as info");
+});
+
 Deno.test("01-core: a page leave that kills a streamed body mid-read is the navigation abort, not a fault", () => {
   const decl = lift(CORE, "const ssAborted = ssPageLeaving && st === null", ";\n", "the navigation-abort test") + ";";
   const aborted = (leaving: boolean, st: number | null, name: string) =>
@@ -261,7 +291,7 @@ Deno.test("01-core: a page leave that kills a streamed body mid-read is the navi
   // And the row it becomes: info, under its own code.
   const call = lift(CORE, "ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),", "} catch (_) {}", "the log call");
   assert(call.includes('ssAborted ? "fetch_aborted_navigating"'), "its own code");
-  assert(call.includes('(ssAborted || ssRefusal || (st >= 400 && st < 500)) ? "info" : "error"'), "filed as info");
+  assert(call.includes('(ssAborted || ssDraftDropped || ssRefusal || (st >= 400 && st < 500)) ? "info" : "error"'), "filed as info");
 });
 
 Deno.test("01-core files a streamed refusal under the status it carries, so a 402 stays a refusal", () => {

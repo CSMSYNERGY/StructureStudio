@@ -393,6 +393,17 @@ __ssFunctions.invoke = async (name, opts) => {
       // supabase-js hands back that read's own TypeError (a network error) or AbortError instead.
       const ssAborted = ssPageLeaving && st === null
         && ["FunctionsFetchError", "TypeError", "AbortError"].indexOf((res.error && res.error.name) || "") !== -1;
+      // A STREAMED DRAFT WHOSE ANSWER DROPPED on a page that is STAYING (2026-09-25). The body broke
+      // off mid-read (the parser's SyntaxError, or the read's TypeError, with no status), or the
+      // server closed it at its own deadline (`stream_deadline`, status 504 in the body). Neither is
+      // the outcome: the shell picks the draft up by the press's key (calibrate_style_ai_recover),
+      // and the SERVER files what became of it -- ai_draft_recovered, or ai_draft_recover_none, an
+      // error when a charged draft was lost. So this row is a countable info row under its own code,
+      // never a fault on its own: a phone that backgrounds the tab mid-press is not an outage.
+      // `status` still tells the two apart (null: broke off; 504: the deadline).
+      const ssDraftDropped = !ssAborted && Boolean(opts && opts.body && opts.body.action === "calibrate_style_ai" && opts.body.stream === true)
+        && ((Boolean(res.error) && st === null && ["SyntaxError", "TypeError"].indexOf(res.error.name || "") !== -1)
+          || (!res.error && Boolean(res.data) && res.data.code === "stream_deadline"));
       // A DELIBERATE 5xx REFUSAL. The status split below reads 4xx as "the product declined"
       // and everything else as "something broke" — but a few refusals have to answer 5xx, and
       // they say so with the x-ss-refusal header (logError.ts, and the `refusal()` helpers in
@@ -410,11 +421,11 @@ __ssFunctions.invoke = async (name, opts) => {
         ssRefusal = !!(ctx && ctx.headers && ctx.headers.get("x-ss-refusal") === "1");
       } catch (_r) { /* an unreadable context must never cost us the row */ }
       ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
-        ssAborted ? "fetch_aborted_navigating" : ((res.error && res.error.name) || null),
+        ssAborted ? "fetch_aborted_navigating" : ssDraftDropped ? "draft_stream_dropped" : ((res.error && res.error.name) || null),
         { fn: name, action: opts && opts.body && opts.body.action, target: injected,
           status: st,
           reason: (res.error && res.error.ssReason) || null },
-        (ssAborted || ssRefusal || (st >= 400 && st < 500)) ? "info" : "error");
+        (ssAborted || ssDraftDropped || ssRefusal || (st >= 400 && st < 500)) ? "info" : "error");
     }
   } catch (_) {}
   // Tripwire. portal-settings echoes the tenant it actually resolved. If it disagrees with
