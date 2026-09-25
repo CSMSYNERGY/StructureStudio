@@ -432,6 +432,9 @@ async function main() {
   for (let i = 0; i < 100 && saveCalls.length === nSaves; i++) await page.waitForTimeout(100);
   const sv = saveCalls[nSaves] || null;
   r.ok("pressing Save with a blank wall height reached the wire", Boolean(sv), String(saveCalls.length - nSaves));
+  // The portal's save says it knows the raised-floor keys (2026-09-25): without frame "front" the
+  // server carries a stored blocks/piers foundation forward over what this panel sends.
+  r.ok("the portal's save_style_d3 says frame \"front\"", Boolean(sv) && sv.frame === "front", JSON.stringify(sv && sv.frame));
   r.ok("⚠️ THE MEASURED WALL SURVIVED THE BLANK — no 0, no dropped key",
     Boolean(sv) && sv.d3 && sv.d3.wallHeightFt === 9, JSON.stringify(sv && sv.d3 && sv.d3.wallHeightFt));
   // A half-typed number is out of the sanitiser's band too, and would be dropped just the same.
