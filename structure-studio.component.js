@@ -25443,11 +25443,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       <SSRow {...ssRowProps("style")}>
         <fieldset disabled={planLocked || undefined} aria-disabled={planLocked || undefined} style={ssLockStyle}>
           {/* Building Styles — one row of N tiles that scrolls (Carolyn 2026-09-14); see
-              SSStyleStrip. The click still sets the style and clears the size, as it always did. */}
+              SSStyleStrip. The click sets the style and clears the size, as it always did —
+              EXCEPT when the style is sold in exactly one size (2026-09-25). There is no choice to
+              make then, and a blank size leaves the plan and the 3D on the LAST footprint (10x12
+              on a fresh design), so a style drawn for 37x22 showed as a tall narrow tower until the
+              customer found the one size in the list. */}
           <div>
             <SSSecHead text={ssHead("style")} />
             <SSStyleStrip styles={C.buildingStyles} value={sel.style} perRow={C.branding.stylesPerRow} S={S} disabled={planLocked}
-              onPick={(v) => setSel((p) => ({ ...p, style: v, size: "" }))} />
+              onPick={(v) => {
+                const st = C.buildingStyles.find((s) => s.value === v);
+                const only = st && Array.isArray(st.sizes) && st.sizes.length === 1 ? st.sizes[0] : "";
+                setSel((p) => ({ ...p, style: v, size: only }));
+              }} />
           </div>
         </fieldset>
       </SSRow>
