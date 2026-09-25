@@ -3788,14 +3788,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // say so. The same signal covers the body read, which is why the body is read inside this
     // try: a reply that stalls mid-body is a timeout, not an "unparseable" spec.
     //
-    // ⚠️ 125 s FROM THE REQUEST, not from here (fix, 2026-09-24). The auto top-up above runs
-    // inline and can spend up to nmiPost's 30 s before this line, so a clock started here let a
-    // slow top-up plus a slow reply cross the gateway's 150 s: the builder got a bare 504 (no
-    // `retryable`, so no lean retry) while this function went on to CAPTURE the $20 for a draft
-    // nobody would see. `draftAbortMs` is what is left of 125 s since the request arrived
-    // (requestStartMs, the handler's first line), never under 60 s: a floor that still ends by
-    // ~125 s + the top-up's worst case well inside 150, and that never cuts an ordinary reply
-    // short because a top-up happened to run first.
+    // ⚠️ BOUNDED BY THE GATEWAY, MEASURED FROM THE REQUEST (fix, 2026-09-24; re-cut 2026-09-25).
+    // The auto top-up above runs inline and can spend up to nmiPost's 30 s before this line, so a
+    // 125 s clock started here let a slow top-up plus a slow reply cross the gateway's 150 s: the
+    // builder got a bare 504 (no `retryable`, so no lean retry) while this function went on to
+    // CAPTURE the $20 for a draft nobody would see.
+    //
+    // The first fix took the pre-call time out of the MODEL's 125 s, which cut every request short
+    // by its own set-up, and cut a top-up's by up to 30 s -- production's older designer included,
+    // which has no lean retry to fall back on. A 103 s legacy reply (the 09-21 log has them) that
+    // finished at ~133 s, inside the gateway, was aborted at ~95 s. So the model keeps its 125 s and
+    // only the GATEWAY's clock is charged for the set-up: 145 s from the request (requestStartMs,
+    // the handler's first line), leaving 5 s to release the hold, file the row and answer. That is
+    // the whole 125 s whenever the set-up took 20 s or less, which is every request without a slow
+    // top-up; past 20 s the model gets what is left of 145 s. Never under 60 s: a floor only a set-up
+    // over 85 s could reach, which nothing before this line can take.
     //
     // `lean: true` is the new browser's ONE automatic retry after a `retryable` failure (a cut-off
     // or timed-out reply): same press, same idempotency key — the failed attempt released its hold,
@@ -3804,7 +3811,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const lean = payload.lean === true;
     const aiSource = combined ? "combined" : fromVideo ? "video" : "photos";
     const t0 = Date.now();
-    const draftAbortMs = Math.max(60_000, 125_000 - (t0 - requestStartMs));
+    const draftAbortMs = Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));
 
     // ── WHAT THE DRAFT CALL USED, on every exit that reached the model (251, 2026-09-23) ──────
     // Until now a draft's tokens were stored only through wallet_capture, and the meter is

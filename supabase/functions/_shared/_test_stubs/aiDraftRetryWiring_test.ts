@@ -6,8 +6,9 @@
 //   1. max_tokens 8000 → 12000 and the abort 110 s → 125 s. One 09-21 generation in twelve was cut
 //      off at 8000, and the v2 prompt asks for more. The abort stays under the gateway's 150 s so
 //      the hold is still released and the failure still named. Since the fix of the same day the
-//      125 s is measured from the REQUEST (floor 60 s), because the inline auto top-up can spend
-//      30 s before the model call and the gateway's clock started with the request.
+//      abort is also bounded by the GATEWAY's clock, which started with the request: 145 s from the
+//      request, never more than 125 s for the model, never under 60 s (2026-09-25: the first cut
+//      took the set-up out of the model's 125 s, which cut every legacy reply short by it too).
 //   2. A cut-off or timed-out reply now answers `retryable: true`. The new browser retries ONCE on
 //      that field, with `lean: true` under the same idempotency key — the failed attempt released
 //      its hold, and 248 made a released key reusable. An UNPARSEABLE reply is deliberately NOT
@@ -62,25 +63,34 @@ Deno.test("the draft call has the v2 budget: 12000 tokens, a 125 s abort, effort
   assertEquals([lean({ lean: true }), lean({ lean: "true" }), lean({ lean: 1 }), lean({})], [true, false, false, false]);
 });
 
-Deno.test("⚠️ the 125 s abort runs from the REQUEST, so a slow top-up cannot push a captured draft past 150 s", () => {
+Deno.test("⚠️ the model keeps its 125 s, and the gateway's 150 s is measured from the REQUEST", () => {
   // money-rails (low), 2026-09-24: the abort used to start after the wallet hold AND the inline
   // auto top-up (nmiPost's 30 s timeout). A 20 s top-up plus a 120 s reply crossed the gateway's
   // 150 s: the builder got a bare 504 with no `retryable`, while the function captured the $20.
+  // prod-safety (low), 2026-09-25: the first fix, max(60 s, 125 s - set-up), charged the set-up to
+  // the MODEL, so production's older designer (no lean retry) lost its own set-up time on every
+  // press and up to 30 s after a top-up, and a 103 s legacy reply that ended inside 150 s was cut.
   const start = PORTAL.indexOf("const requestStartMs = Date.now();");
   assert(start > 0 && start < PORTAL.indexOf('if (req.method === "OPTIONS")'), "the clock starts on the handler's first line");
   const decl = DRAFT.split("\n").find((l) => l.includes("const draftAbortMs =")) ?? "";
-  assertEquals(decl.trim(), "const draftAbortMs = Math.max(60_000, 125_000 - (t0 - requestStartMs));");
+  assertEquals(decl.trim(), "const draftAbortMs = Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));");
   assert(DRAFT.indexOf("const draftAbortMs =") > DRAFT.indexOf("autoTopupDecision("), "measured after the top-up has run");
   assert(DRAFT.indexOf("const draftAbortMs =") < DRAFT.indexOf("const aiSignal ="), "and before the call it bounds");
   const budget = (spentMs: number) => new Function("t0", "requestStartMs", `${decl}; return draftAbortMs;`)(1_000_000 + spentMs, 1_000_000) as number;
-  assertEquals(budget(0), 125_000, "no top-up: the whole 125 s, as before");
-  assertEquals(budget(2_500), 122_500, "an ordinary press loses only its own set-up time");
-  assertEquals(budget(32_000), 93_000, "a 30 s top-up comes out of the model's share");
+  assertEquals(budget(0), 125_000, "no set-up: the whole 125 s");
+  assertEquals(budget(2_500), 125_000, "an ordinary press keeps the whole 125 s: its set-up is not the model's to pay");
+  assertEquals(budget(20_000), 125_000, "up to 20 s of set-up still leaves the model 125 s");
+  assertEquals(budget(32_000), 113_000, "a 30 s top-up: what is left of 145 s");
   assertEquals(budget(90_000), 60_000, "never under 60 s");
+  // THE LEGACY REPLY THE FIRST CUT KILLED: 3 s of set-up and a 103 s reply is inside the budget.
+  assert(103_000 <= budget(3_000), "a 103 s legacy reply after an ordinary set-up is not cut");
   // THE BOUND: every press whose pre-call work fits the top-up's 30 s (+ 5 s of set-up) has its
-  // model abort by 125 s after the request, which leaves the release, the log row and the reply
-  // well inside the gateway's 150.
-  for (let spent = 0; spent <= 35_000; spent += 500) assert(spent + budget(spent) <= 125_000, `spent ${spent} ms`);
+  // model abort by 145 s after the request, which leaves the release, the log row and the reply
+  // inside the gateway's 150.
+  for (let spent = 0; spent <= 35_000; spent += 500) {
+    assert(spent + budget(spent) <= 145_000, `spent ${spent} ms`);
+    assert(budget(spent) === Math.min(125_000, 145_000 - spent), `spent ${spent} ms: the model gets all the gateway can spare`);
+  }
   // The timeout row says which clock fired.
   assert(DRAFT.includes("requestMs: Date.now() - requestStartMs, abortMs: draftAbortMs"), "the row carries both clocks");
 });
