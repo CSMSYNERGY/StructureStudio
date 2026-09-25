@@ -28,7 +28,7 @@
 --                     callers that predate the key, and the photos path). NOT unique, on
 --                     purpose: one key can own several rows -- a press that failed and was
 --                     released, then the builder's own retry of the same intent, or the lean
---                     retry -- and the recover action prefers the one that drafted.
+--                     retry -- and the recover action answers from the newest.
 --   frame_map  jsonb  The success path's frameMap (parseFrameMap: which image shows which view,
 --                     at what azimuth; a handful of small integers). The free self-check cannot
 --                     run without it, and until now it lived only in the answer -- so a draft

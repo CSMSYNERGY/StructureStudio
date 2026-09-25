@@ -908,7 +908,7 @@ Deno.test("⛔ never another tenant's, user's or key's row -- nor a LATER press'
   assertEquals(JSON.parse(theirs.out.text).checkId, "a0000000-0000-4000-8000-000000000007");
 });
 
-Deno.test("a key that owns a failed row and a drafted retry answers from the one that drafted", async () => {
+Deno.test("a key that owns several rows answers from the NEWEST: a failed row then a drafted retry is the retry", async () => {
   const { wrote } = await live();
   const failed = ROW({ id: "c0000000-0000-4000-8000-000000000001", called_at: ago(300_000), draft_ms: 120_000 });
   const retried = ROW({ id: "c0000000-0000-4000-8000-000000000002", called_at: ago(100_000), drafted: wrote.drafted, frame_map: wrote.frame_map });
@@ -917,10 +917,12 @@ Deno.test("a key that owns a failed row and a drafted retry answers from the one
     const body = JSON.parse(got.out.text);
     assertEquals([body.recovered, body.checkId], [true, "c0000000-0000-4000-8000-000000000002"]);
   }
-  // And a still-running attempt newer than a drafted one does not hide the draft of the same intent.
+  // A newer attempt under the same key that is still running is the one answered: it is pending.
   const running = ROW({ id: "c0000000-0000-4000-8000-000000000003", called_at: ago(5_000) });
-  const got = await drive(RECOVER(), { ledger: [running, failed, retried] });
-  assertEquals(JSON.parse(got.out.text).checkId, "c0000000-0000-4000-8000-000000000002");
+  for (const ledger of [[running, failed, retried], [retried, failed, running]]) {
+    const got = await drive(RECOVER(), { ledger, wallet: [TX({ state: "released" }), TX({ state: "held" })] });
+    assertEquals(JSON.parse(got.out.text), { ok: true, pending: true });
+  }
 });
 
 Deno.test("⚠️ no draft: the answer about money is the press's own wallet rows, never the timing", async () => {

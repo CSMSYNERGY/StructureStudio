@@ -7,7 +7,7 @@
 // What only these can get wrong, and what is pinned here:
 //   1. The key is cut exactly one way, for the insert, the hold and the pickup alike.
 //   2. A key that owns several rows (a failed attempt, then the retry of the same intent) answers
-//      from the one that DRAFTED, and otherwise from the newest -- whatever order they arrive in.
+//      from the NEWEST, drafted or not -- whatever order they arrive in.
 //   3. The money is read from the press's own wallet rows: captured beats held beats released.
 //   4. A drafted row answers the success body's keys in the success body's order, with its own
 //      frame map (253) so the self-check runs, and `recovered: true`.
@@ -67,21 +67,21 @@ Deno.test("draftIdemKey: one cut for the insert, wallet_hold and the pickup", ()
   }
 });
 
-Deno.test("pickRecoverRow: the row that drafted wins over a failed attempt under the same key; else the newest", () => {
+Deno.test("pickRecoverRow: the NEWEST row under the key, drafted or not, whatever order they arrive in", () => {
   const failed = ROW({ id: "a", called_at: iso(NOW - 200_000), draft_ms: 100_000 });
   const retried = ROW({ id: "b", called_at: iso(NOW - 60_000), drafted: D3 });
-  // A failed attempt then the retry that drafted: the drafted one, in either order.
+  // A failed attempt then the retry that drafted: the retry, in either order.
   assertEquals(pickRecoverRow([failed, retried])?.id, "b");
   assertEquals(pickRecoverRow([retried, failed])?.id, "b");
-  // Drafted beats newer: a still-running later attempt does not hide a draft of the same intent.
+  // A later attempt still running is newer than a draft of the same intent: it is the one answered.
   const running = ROW({ id: "c", called_at: iso(NOW - 5_000) });
-  assertEquals(pickRecoverRow([running, failed, retried])?.id, "b");
+  assertEquals(pickRecoverRow([running, failed, retried])?.id, "c");
+  assertEquals(pickRecoverRow([retried, running, failed])?.id, "c");
   // Two drafted: the newest of them.
   const olderDraft = ROW({ id: "d", called_at: iso(NOW - 300_000), drafted: D3 });
   assertEquals(pickRecoverRow([olderDraft, retried])?.id, "b");
-  // None drafted: the newest, whatever order the query handed them over in.
-  assertEquals(pickRecoverRow([failed, running])?.id, "c");
-  assertEquals(pickRecoverRow([running, failed])?.id, "c");
+  // An unreadable called_at is never the newest.
+  assertEquals(pickRecoverRow([ROW({ id: "e", called_at: "garbage", drafted: D3 }), failed])?.id, "a");
   // Nothing.
   for (const none of [[], null, undefined]) assertEquals(pickRecoverRow(none as DraftRecoverRow[] | null), null);
 });

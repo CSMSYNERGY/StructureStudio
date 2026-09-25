@@ -1115,14 +1115,14 @@ const calledMsOf = (r: DraftRecoverRow) => {
   return Number.isFinite(ms) ? ms : -Infinity;
 };
 
-// Which of the key's rows answers. A key can own several (a failed attempt, then the retry of the
-// same intent), so the one that DRAFTED wins, and among several, or among none that drafted, the
-// newest. Sorted here rather than trusted from the query's order, so the choice is this function's.
+// Which of the key's rows answers: the NEWEST, drafted or not. A key can own several (a failed
+// attempt, then the retry of the same intent), and the newest is the attempt the browser is
+// waiting on. Sorted here rather than trusted from the query's order, so the choice is this
+// function's.
 export function pickRecoverRow(rows: DraftRecoverRow[] | null | undefined): DraftRecoverRow | null {
   const list = (Array.isArray(rows) ? rows : []).filter((r) => r && typeof r === "object");
   if (!list.length) return null;
-  const newestFirst = [...list].sort((a, b) => calledMsOf(b) - calledMsOf(a));
-  return newestFirst.find(hasDraft) ?? newestFirst[0];
+  return [...list].sort((a, b) => calledMsOf(b) - calledMsOf(a))[0];
 }
 
 // What the press's money is doing, from its own wallet rows (128: a hold is a 'held' debit, a
