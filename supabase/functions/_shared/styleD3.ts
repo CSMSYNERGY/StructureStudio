@@ -809,7 +809,7 @@ SHED HIGH SIDE, REQUIRED on a one-slope roof: roof.highSide says which wall is t
 3. Name it relative to the FRONT. "front" when the tall edges stand at the front: the front wall itself is the tall one, and the roof falls away from you toward the back. "back" when they stand at the far end: the roof rises away from you and the back wall is the tallest. "left" or "right" when the two sloping walls are the front and the back themselves: the front wall's top edge climbs toward that side.
 Leave it out on anything that is not a shed.
 
-PITCH: find a frame looking straight at a gable end and read the slope of the roof edge against the sky, comparing its rise to its horizontal run. A roof that rises half as much as it runs is 0.5. Do not guess from a corner view, where perspective flattens it. A shed has no gable end: read its one slope from a frame square to one of the two walls whose top edge runs diagonally, along the MAIN roof's edge and never a porch roof's, or work it out from the walls, as the high wall's height minus the low wall's, divided by the distance between them. A 12 ft deep shed whose high wall stands 10 ft and whose low wall stands 8 ft is (10 - 8) / 12 = 0.17.
+PITCH: find the frame looking most squarely at a gable end, the one where its two eave corners stand level and the gable looks widest, and measure the slope of its roof edge against the sky: how far the peak rises above the eave corners, compared with HALF the distance between those corners. A roof that rises half as much as it runs is 0.5. Never read it from a corner or angled view: there the gable's width is squeezed while its height is not, so the roof looks STEEPER than it is (a 6:12 roof seen from 45 degrees looks like 8.5:12). When the gable's width is known in feet (the front wall on a gable-front building, the centre section on a building with wings), check the answer in feet as well: the peak's height above the eave, read against a known height in the same frame such as the wall height, divided by half that width. A shed has no gable end: read its one slope from a frame square to one of the two walls whose top edge runs diagonally, along the MAIN roof's edge and never a porch roof's, or work it out from the walls, as the high wall's height minus the low wall's, divided by the distance between them. A 12 ft deep shed whose high wall stands 10 ft and whose low wall stands 8 ft is (10 - 8) / 12 = 0.17.
 
 GAMBREL NUMBERS, only for a gambrel, from that same frame straight at a gable end. Measure all three from the CENTRELINE under the ridge and the TOP OF THE WALL, and divide each by the distance from the centreline to the wall: kneeU is how far the knee sits out from the centreline, kneeRise is how high the knee sits above the wall, ridgeRise is how high the ridge sits above the wall. Example: a 12 ft wide barn with its knee 1.5 ft in from each wall and 4.3 ft above it, and the ridge 6.2 ft above the wall, is kneeU 0.75, kneeRise 0.72, ridgeRise 1.03. Check before you answer: kneeRise / (1 - kneeU) is the steepness of the lower slope and (ridgeRise - kneeRise) / kneeU is the upper; the lower must come out clearly larger, or you measured from the wrong point.
 
@@ -843,9 +843,9 @@ PORCH WIDTH, porchWidthFt: give it only when the porch is clearly narrower than 
 
 PORCH POSTS, porchPosts: count the posts standing along the porch's FRONT edge, the edge farthest from the wall, from the frame most square-on to the front, and include the posts at both corners. A porch with a post at each corner and one in the middle is 3. One at each corner and three between them is 5. Posts that stand beside the door or at the top of the steps count like any other. Count them one by one along the edge before answering. Count posts only, never the wall's corner boards or a handrail's newel. Leave it out when no frame shows the whole front edge.
 
-PORCH ROOF PITCH, porchPitch: the porch roof's OWN slope as rise over run, never the main roof's. Read it from a side frame, where the porch roof's edge is seen square-on: it runs from where the roof meets the wall down to its front edge, so compare how far it drops with how far it runs out from the wall. A porch roof that drops 1 ft over 5 ft of run is 0.2. Leave it out when no frame shows that edge square-on.
+PORCH ROOF PITCH, porchPitch: the porch roof's OWN slope as rise over run, never the main roof's. Read it from a side frame, where the porch roof's edge is seen square-on: it runs from where the roof meets the wall down to its front edge, so compare how far it drops with how far it runs out from the wall. A porch roof that drops 1 ft over 5 ft of run is 0.2. Build it from two heights rather than judging the angle by eye: the drop is porchAttachFt minus the height of the porch roof's FRONT edge above the floor (read that edge against the posts and the known wall height in the same frame), and the run is porchOutFt, so porchPitch is the drop divided by porchOutFt. A porch roof that meets the wall at 9 ft and whose front edge is 8 ft up, 5 ft out, is (9 - 8) / 5 = 0.2. Leave it out when no frame shows that edge square-on.
 
-PORCH STEPS, porchSteps: where a set of steps leaves the porch's deck along its FRONT edge, as seen standing in front of the porch facing it: "left", "center" or "right", with left and right read the same way as everywhere else in this reply. Leave it out when the porch has no steps, and when its steps leave the deck from one of its sides rather than its front edge.
+PORCH STEPS, porchSteps: where a set of steps leaves the porch's deck along its FRONT edge, as seen standing in front of the porch facing it: "left", "center" or "right", with left and right read the same way as everywhere else in this reply. Decide it in the frame most square-on to the front, by where the MIDDLE of the steps falls between the porch's two front corner posts: in the left third of that span is "left", the middle third "center", the right third "right". Judge it against the corner posts, never against the door or the middle of the building; steps in front of an off-centre door are still read by the thirds. Leave it out when the porch has no steps, and when its steps leave the deck from one of its sides rather than its front edge.
 
 PORCH DECISION, REQUIRED: observed.porch must carry one of exactly three answers on EVERY building — "projecting" for a porch standing out in front of the front wall under its own lower roof, "recessed" for one cut into the building under the main roof, "none" for a building with no porch. Answer it even when the answer is "none", and answer it even when you are unsure; say the doubt in observed.roofNote instead of leaving the key out. Naming a porch obliges you to give its field: "projecting" means porchOutFt, "recessed" means porchDepthFt and porchEnd. Do not report a porch here and leave its number out of the roof.
 
@@ -1014,6 +1014,156 @@ export function knownDimsParagraph(dims: KnownDims): string {
 export const PROMPT_FRAME_FRONT = "front";
 export function wantsV2Prompt(frame: unknown, dims: KnownDims | null | undefined): boolean {
   return frame === PROMPT_FRAME_FRONT && !!dims;
+}
+
+// ─── THE STREAMED DRAFT (2026-09-25) ─────────────────────────────────────────────────────────
+// Whether calibrate_style_ai answers this request behind a heartbeat (heartbeatJson.ts), so its
+// draft can run past the gateway's 150 s of silence and its reads can think at effort "high".
+// Decided from the request alone and BEFORE the branch runs, because the 200 has to go out before
+// the work starts, and decided with the functions the branch itself uses for the same questions:
+//   * `stream: true`, a real boolean: the new portal shell's opt-in. Production's older shell never
+//     sends it, so every request it makes is answered exactly as before.
+//   * not `lean: true`: the one automatic retry after a cut-off or timed-out read is a single,
+//     shallow read that fits the old budget, and it keeps that budget.
+//   * the v2 prompt: a shape-first source (video, combined) whose dims parse, with frame "front"
+//     (wantsV2Prompt above). A request whose dims do not parse is refused with a 400 before anything
+//     slow runs, so it is not streamed.
+// aiDraftStreamWiring_test runs this against the branch's own v2Prompt and lean over a grid of
+// requests, so the two cannot disagree about which requests stream.
+export function wantsStreamedDraft(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const p = payload as Record<string, unknown>;
+  if (p.stream !== true || p.lean === true) return false;
+  if (p.source !== "video" && p.source !== "combined") return false;
+  const dims = parseKnownDims(p.dims);
+  return dims.ok && wantsV2Prompt(p.frame, dims.dims);
+}
+
+// ─── HOW LONG A STREAMED ANSWER MAY STAY OPEN (2026-09-25) ───────────────────────────────────
+// Measured from the request's arrival (portal-settings' requestStartMs). The reads get at most
+// min(230 s, 260 s - set-up), so a set-up under 200 s leaves the model done by 260 s; the capture,
+// the ledger write and the answer normally take seconds after that, which leaves 40 s of room for a
+// slow database. Past this the answer is closed with heartbeatJson's `stream_deadline` body and the
+// work runs on behind it. The platform's own wall clock (400 s) is the hard stop above both.
+export const DRAFT_STREAM_DEADLINE_MS = 300_000;
+
+// ─── PICKING A STREAMED DRAFT UP AFTER THE CONNECTION DROPPED (2026-09-25) ───────────────────
+// A streamed draft runs three to five minutes, and a phone that backgrounds the tab, or a network
+// that blinks, drops the answer while the server is still working (or after it has finished and
+// charged). Asking again under the same key cannot help: it either runs the model a second time or
+// meets hold_in_flight / already_charged. But the server writes what it drafted onto the ledger
+// row (226), so the browser can read it back: calibrate_style_ai_recover, which answers from the
+// NEWEST ai_style_calls row of this tenant, this user and this style that was created since the
+// press began. No new column and no migration: every field it needs is already on the row.
+//
+// `since` is the ISO time the browser recorded just before it sent the press. Refused when it is
+// older than DRAFT_RECOVER_MAX_AGE_MS (a press is over in seven minutes; this is not a history
+// browser) or later than DRAFT_RECOVER_SKEW_MS in the future. `clientNow`, the browser's clock when
+// it asked, is optional: with it, `since` is moved onto the server's clock (called_at is the
+// database's `now()`), so a browser clock that runs fast does not hide the press's own row; without
+// it the two clocks are taken to agree. Either way the rows are read from DRAFT_RECOVER_SLACK_MS
+// before `since`. A wrong `clientNow` can only move the window over the caller's OWN rows: the
+// tenant, user and style filters are the server's, never the caller's.
+export const DRAFT_RECOVER_MAX_AGE_MS = 15 * 60_000;
+export const DRAFT_RECOVER_SKEW_MS = 60_000;
+export const DRAFT_RECOVER_SLACK_MS = 5_000;
+// How long a row with no draft is still worth waiting on: the answer's own deadline plus 100 s, which
+// is the platform's 400 s wall clock. The work can run on past its answer's deadline (it is kept
+// alive for its capture and ledger write), but no worker outlives the wall clock, so a row still
+// without a draft by then will never get one.
+export const DRAFT_RECOVER_PENDING_MS = DRAFT_STREAM_DEADLINE_MS + 100_000;
+// How long after the model phase ended (draft_ms, 251) a row may still be waiting for `drafted`.
+// On a success the usage write lands first and `drafted` a capture and one update later, so a row
+// with draft_ms and no draft is mid-write for a few seconds and a FAILURE after that: every failure
+// exit writes draft_ms and never writes `drafted`.
+export const DRAFT_RECOVER_SETTLE_MS = 90_000;
+
+export function parseRecoverSince(
+  since: unknown,
+  clientNow: unknown,
+  serverNowMs: number,
+): { ok: true; fromIso: string } | { ok: false; error: string } {
+  const sinceMs = typeof since === "string" && since.length <= 64 ? Date.parse(since) : NaN;
+  if (!Number.isFinite(sinceMs)) return { ok: false, error: "since (when the press began) is required." };
+  const clientMs = typeof clientNow === "number" && Number.isFinite(clientNow) ? clientNow : serverNowMs;
+  if (clientMs - sinceMs > DRAFT_RECOVER_MAX_AGE_MS) {
+    return { ok: false, error: "That press is too old to pick a draft up for." };
+  }
+  if (sinceMs - clientMs > DRAFT_RECOVER_SKEW_MS) {
+    return { ok: false, error: "since is in the future." };
+  }
+  const fromMs = sinceMs + (serverNowMs - clientMs) - DRAFT_RECOVER_SLACK_MS;
+  return { ok: true, fromIso: new Date(fromMs).toISOString() };
+}
+
+// The ledger row calibrate_style_ai_recover reads (select these columns, nothing else).
+export const DRAFT_RECOVER_COLUMNS = "id, called_at, drafted, observed, frames, dims, draft_ms, charged_cents";
+export type DraftRecoverRow = {
+  id: string;
+  called_at: string;
+  drafted: unknown;
+  observed: unknown;
+  frames: unknown;
+  dims: unknown;
+  draft_ms: unknown;
+  charged_cents: unknown;
+};
+export type DraftRecoverAnswer =
+  | { kind: "draft"; code: string; severity: "info"; body: Record<string, unknown> }
+  | { kind: "pending"; body: { ok: true; pending: true } }
+  | { kind: "lost"; code: string; severity: "info" | "error"; why: string; body: { ok: true; pending: false; message: string } };
+
+const RECOVER_LOST = "We could not pick the draft up from the server: that generation did not finish, so you are not charged for it. Press Generate to try again.";
+const RECOVER_CHARGED_UNSAVED = "That generation finished and was charged once, but its draft could not be saved for pickup, so it is gone. You have not been charged twice. Reload this page before pressing Generate again; the next press will be a new charge.";
+
+// What the recover action answers for the newest matching row (null: none).
+//   * DRAFTED: the body calibrate_style_ai's success answered with, rebuilt from the row, field for
+//     field and in the same order, plus `recovered: true`. Two fields are not on the row and are
+//     said to be missing rather than guessed: `dropped` (null: the browser knows how many it sent
+//     and works it out) and `frameMap` (null: the reply text it was read out of is not stored, so the
+//     free self-check is skipped for a recovered draft, and the designer says so). `balanceCents` is
+//     null, as a response that took no money back to the browser always has.
+//   * NOT YET: a row with no draft that may still get one, i.e. younger than
+//     DRAFT_RECOVER_PENDING_MS and not DRAFT_RECOVER_SETTLE_MS past its model phase.
+//   * LOST: no row (the press was refused before its ledger row, its row was deleted with the
+//     refusal, or it never arrived), a model phase that ended without a draft, or a row too old to
+//     wait on. Said plainly, with the charge said honestly: every one of those released its hold (or
+//     never took one), except a draft that was CAPTURED and then failed to reach the ledger.
+export function recoverDraftAnswer(row: DraftRecoverRow | null, nowMs: number): DraftRecoverAnswer {
+  const lost = (why: string, severity: "info" | "error" = "info", message = RECOVER_LOST): DraftRecoverAnswer =>
+    ({ kind: "lost", code: "ai_draft_recover_none", severity, why, body: { ok: true, pending: false, message } });
+  if (!row) return lost("no_row");
+  const calledMs = Date.parse(String(row.called_at ?? ""));
+  const ageMs = Number.isFinite(calledMs) ? nowMs - calledMs : Infinity;
+  if (row.drafted !== null && row.drafted !== undefined) {
+    const d3 = row.drafted;
+    // Our own sanitised write, read back. Anything else is a fault, never a draft to apply.
+    if (typeof d3 !== "object" || Array.isArray(d3) || !sanitizeD3Spec(d3).ok) return lost("unreadable", "error");
+    const dims = parseKnownDims(row.dims);
+    return {
+      kind: "draft", code: "ai_draft_recovered", severity: "info",
+      body: {
+        ok: true,
+        d3,
+        frames: typeof row.frames === "number" ? row.frames : null,
+        dropped: null,
+        observed: row.observed ?? null,
+        balanceCents: null,
+        dims: dims.ok ? dims.dims : null,
+        frameMap: null,
+        checkId: row.id,
+        recovered: true,
+      },
+    };
+  }
+  const draftMs = typeof row.draft_ms === "number" && Number.isFinite(row.draft_ms) ? row.draft_ms : null;
+  const settled = draftMs !== null && ageMs > draftMs + DRAFT_RECOVER_SETTLE_MS;
+  if (!settled && ageMs < DRAFT_RECOVER_PENDING_MS) return { kind: "pending", body: { ok: true, pending: true } };
+  // Charged and no draft: the capture ran and the 226 write did not (ai_style_result_log_failed).
+  if (row.charged_cents !== null && row.charged_cents !== undefined) {
+    return lost("charged_unsaved", "error", RECOVER_CHARGED_UNSAVED);
+  }
+  return lost(draftMs !== null ? "failed" : "stale");
 }
 
 // THE LEGACY RULER, EXACTLY AS IT SHIPPED ON 2026-09-19 (d3ab404), for callers the gate keeps on
@@ -2167,7 +2317,9 @@ ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave
        porch roof that meets the wall low is drawn flatter than porchPitch says; where that is
        why the render's is flatter, correct roof.porchAttachFt, never porchPitch.
      * roof.porchSteps, projecting porches only, currently ${stepsNow}: where steps leave the
-       porch's front edge, "left", "center" or "right" as seen standing in front of it. Give it
+       porch's front edge, "left", "center" or "right" as seen standing in front of it, by
+       which third of the span between the two front corner posts the MIDDLE of the steps
+       falls in (never judged against the door). Give it
        where the frame shows steps the render lacks, or shows them at a different place. Give
        "none" where the render shows steps the frame does not, or where the frame's steps leave
        the deck from one of its sides rather than its front edge: "none" removes them.
@@ -2180,8 +2332,10 @@ ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave
 THEN THESE, only if the pictures disagree:
 5. ROOF PROFILE. For a gambrel: kneeU, kneeRise, ridgeRise, measured from the CENTRELINE and
    the TOP OF THE WALL, each divided by the half-span. For a gable or shed: pitch. Check the
-   silhouette at the head-on viewpoint. If the render's roof and the frame's roof trace the
-   same outline, leave all of these alone.
+   silhouette at the head-on viewpoint. For a gable, compare how far the peak rises above the
+   eave corners with half the gable's width, in the frame and in the render; where one of the
+   two is seen more from an angle, remember an angled gable looks steeper than a square-on one.
+   If the render's roof and the frame's roof trace the same outline, leave all of these alone.
 6. roof.eave - "open" (a sawtooth row of rafter tails with gaps of sky between them) or
    "fascia" (one unbroken board). Only from a viewpoint that actually shows under the eave.
 7. roofMaterial, foundation, gableVent - only if plainly wrong. (roof.type is step 1's.)

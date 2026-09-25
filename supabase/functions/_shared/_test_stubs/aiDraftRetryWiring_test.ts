@@ -46,17 +46,31 @@ function lift(src: string, start: string, end: string, what: string): string {
 }
 
 // The whole generation branch, and nothing past it: the self-check below has its own budget.
-const DRAFT = lift(PORTAL, 'if (action === "calibrate_style_ai") {', "// ── THE FREE SECOND PASS", "the calibrate_style_ai branch");
+// The branch has been one function of `streamed` since 2026-09-25 (draftAnswer; aiDraftStreamWiring_test).
+const DRAFT = lift(PORTAL, 'if (action === "calibrate_style_ai") return await draftAnswer(', "// ── THE FREE SECOND PASS", "the calibrate_style_ai branch");
 
 type Reply = { body: Record<string, unknown>; status: number };
 const json = (body: Record<string, unknown>, status = 200): Reply => ({ body, status });
 
-Deno.test("the draft call has the v2 budget: 12000 tokens, a 125 s abort, effort low only when lean", () => {
-  assert(DRAFT.includes("max_tokens: 12000,"), "max_tokens is 12000");
+Deno.test("the draft call has the v2 budget: 12000 tokens (20000 streamed), a 125 s abort unless streamed, effort low only when lean", () => {
+  // 20000 on a STREAMED draft only (2026-09-25): at effort "high" a read can think past 12000 and be
+  // cut off with most of its 230 s left. Every other request keeps 12000.
+  const mt = DRAFT.split("\n").find((l) => l.includes("max_tokens:")) ?? "";
+  assertEquals(mt.trim(), "max_tokens: streamed ? 20000 : 12000,");
+  const maxTokens = (streamed: boolean) => new Function("streamed", `return {${mt.trim()}}.max_tokens;`)(streamed) as number;
+  assertEquals([maxTokens(false), maxTokens(true)], [12000, 20000]);
   assert(!DRAFT.includes("max_tokens: 8000"), "and the old 8000 is gone");
   assert(DRAFT.includes("const aiSignal = AbortSignal.timeout(draftAbortMs);"), "the abort is the request-measured budget below");
-  // v2 thinks hard (2026-09-25); legacy stays "medium"; lean is "low".
-  assert(DRAFT.includes('output_config: { effort: lean ? "low" : "medium" },'), "lean thinks less; everyone else medium (high ran past the gateway, 2026-09-25)");
+  // Lean is "low"; a STREAMED draft (the new shell's v2 press, which outlives the gateway) is "high";
+  // everything else -- legacy, and a v2 request that is not streamed -- stays "medium" (2026-09-25).
+  // Decided once, as draftEffort, which the request sends and draft_tokens records.
+  const eff = DRAFT.split("\n").find((l) => l.includes("output_config: { effort:")) ?? "";
+  assertEquals(eff.trim(), "output_config: { effort: draftEffort },");
+  const effDecl = DRAFT.split("\n").find((l) => l.includes("const draftEffort =")) ?? "";
+  assertEquals(effDecl.trim(), 'const draftEffort = lean ? "low" : streamed ? "high" : "medium";');
+  const effort = (lean: boolean, streamed: boolean) =>
+    new Function("lean", "streamed", `${effDecl.trim()}\nreturn {${eff.trim()}}.output_config.effort;`)(lean, streamed) as string;
+  assertEquals([effort(false, false), effort(true, false), effort(false, true)], ["medium", "low", "high"]);
   // Only a real boolean: "true", 1 and an absent key all leave an older browser on "medium".
   const decl = DRAFT.split("\n").find((l) => l.includes("const lean =")) ?? "";
   assertEquals(decl.trim(), "const lean = payload.lean === true;");
@@ -73,11 +87,14 @@ Deno.test("⚠️ the model keeps its 125 s, and the gateway's 150 s is measured
   // press and up to 30 s after a top-up, and a 103 s legacy reply that ended inside 150 s was cut.
   const start = PORTAL.indexOf("const requestStartMs = Date.now();");
   assert(start > 0 && start < PORTAL.indexOf('if (req.method === "OPTIONS")'), "the clock starts on the handler's first line");
-  const decl = DRAFT.split("\n").find((l) => l.includes("const draftAbortMs =")) ?? "";
-  assertEquals(decl.trim(), "const draftAbortMs = Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));");
+  // Since 2026-09-25 the declaration has a streamed arm (aiDraftStreamWiring_test pins it). The rule
+  // every request that is NOT streamed gets is the second arm, character for character as before.
+  const decl = lift(DRAFT, "const draftAbortMs =", ";\n", "the draft budget") + ";";
+  assertEquals(decl.split("\n").map((l) => l.trim()).join(" "),
+    "const draftAbortMs = streamed ? Math.max(60_000, Math.min(230_000, 260_000 - (t0 - requestStartMs))) : Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));");
   assert(DRAFT.indexOf("const draftAbortMs =") > DRAFT.indexOf("autoTopupDecision("), "measured after the top-up has run");
   assert(DRAFT.indexOf("const draftAbortMs =") < DRAFT.indexOf("const aiSignal ="), "and before the call it bounds");
-  const budget = (spentMs: number) => new Function("t0", "requestStartMs", `${decl}; return draftAbortMs;`)(1_000_000 + spentMs, 1_000_000) as number;
+  const budget = (spentMs: number) => new Function("t0", "requestStartMs", "streamed", `${decl}; return draftAbortMs;`)(1_000_000 + spentMs, 1_000_000, false) as number;
   assertEquals(budget(0), 125_000, "no set-up: the whole 125 s");
   assertEquals(budget(2_500), 125_000, "an ordinary press keeps the whole 125 s: its set-up is not the model's to pay");
   assertEquals(budget(20_000), 125_000, "up to 20 s of set-up still leaves the model 125 s");

@@ -88,6 +88,12 @@ import { selfCheckMode, selfCheckRequest, frameKeyWarning } from "../_shared/sty
 import { aiDraftCostCents, aiModelFields } from "../_shared/styleD3.ts";
 // Consensus drafting (2026-09-25): the v2 draft reads the video three times and combines the reads.
 import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftCallsUsage, consensusSplitWarning, DRAFT_CONSENSUS_GRACE_MS } from "../_shared/styleD3.ts";
+// The streamed draft (2026-09-25): a v2 draft answers behind a heartbeat so it can outlive the
+// gateway's 150 s of silence (see draftAnswer below).
+import { wantsStreamedDraft, DRAFT_STREAM_DEADLINE_MS } from "../_shared/styleD3.ts";
+import { heartbeatJsonResponse } from "../_shared/heartbeatJson.ts";
+// Draft recovery (2026-09-25): a streamed draft whose connection dropped is read back off its ledger row.
+import { parseRecoverSince, recoverDraftAnswer, DRAFT_RECOVER_COLUMNS, type DraftRecoverRow } from "../_shared/styleD3.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
@@ -162,6 +168,10 @@ const GATES: GateTable = {
   // shape for the style they are editing, so anyone who may not edit structures has no business
   // here either. Free does not mean ungated.
   calibrate_style_check:     { area: "settings_structures", level: "edit" },
+  // Reads back the draft of a STREAMED generation whose answer never reached the browser (the
+  // connection dropped). The generation's own gate, exactly: it hands back what that action would
+  // have, for the caller's own row, and nobody who may not generate may read a draft either.
+  calibrate_style_ai_recover: { area: "settings_structures", level: "edit" },
   upload_style_photo:        { area: "settings_structures", level: "edit" },
   style_photo_upload_url:    { area: "settings_structures", level: "edit" },
   save_style_media:          { area: "settings_structures", level: "edit" },
@@ -453,6 +463,62 @@ function json(body: unknown, status = 200) {
 // said nothing new. Faults still land as `error`; this removes a duplicate, not a record.
 // A WeakSet, so a response that has been answered is not held onto.
 const filedAtReturnSite = new WeakSet<Response>();
+
+// ── THE STREAMED DRAFT (2026-09-25) ──────────────────────────────────────────────────────────
+// How calibrate_style_ai answers: the branch's own Response, or the same answer behind a heartbeat.
+//
+// WHY. The gateway ends a request that has sent nothing for 150 s (a bare 504, invisible to
+// withErrorLog), so the draft's model abort has had to stop at 125 s. At effort "medium", Opus
+// often answered a walk-around in 10-15 s with ~480 output tokens, and those shallow reads were
+// wrong on the hard calls (a shed's high side on the wrong wall 6 times in 7); the reads that
+// thought (3,400-5,400 tokens) took 56-106 s and were right. At "high" all three consensus reads
+// ran past 125 s. The gateway times SILENCE, not the request (a probe that wrote a space every 10 s
+// answered 200 after 220 s), so a streamed draft can take the time a careful read needs.
+//
+// WHICH REQUESTS: wantsStreamedDraft (styleD3.ts), i.e. `stream: true` from the new shell, the v2
+// prompt, and not the lean retry. EVERY OTHER REQUEST gets `work(false)`, the branch's own
+// Response, unchanged: production's older shell, the lean retry and every legacy request.
+//
+// A streamed request answers 200 at once (heartbeatJson.ts) and runs the SAME branch behind it,
+// with `streamed` true: the only things that differ are the model's budget and effort, read inside
+// the branch. Every exit keeps its order and its hold release, ledger write, capture and log rows;
+// a failure's status rides in the body instead of the status line.
+//
+// ⚠️ THE ERROR WRAPPER CANNOT SEE THROUGH THE 200. Unstreamed, withErrorLog files a row for an
+// uncoded 5xx exit ("Could not reach the AI service", the meter's 503s) and for a throw; streamed,
+// it only ever sees a 200 and would file neither. So the work runs inside a REPLAY of the wrapper,
+// on a request carrying the three things the wrapper reads (the URL, the user agent, and the body,
+// for its client id), which files exactly the rows the unstreamed answer would have: the same
+// `alreadyFiled` rule, the same message, the same severity. The replay rethrows a throw, and the
+// heartbeat answers it as a 500.
+//
+// THE WATCHDOG (2026-09-25). supabase-js has no timeout, so a streamed draft that hangs after its
+// reads (a database call that never returns) would keep writing spaces until the platform killed the
+// worker, and the browser would read a body cut off mid-space. The answer is closed at
+// DRAFT_STREAM_DEADLINE_MS from the request's arrival instead, with heartbeatJson's `stream_deadline`
+// body (a 504, not retryable), and one coded row is filed. The work is NOT stopped: it stays
+// registered with EdgeRuntime.waitUntil, releases or captures its hold and writes its ledger row, and
+// the browser picks the draft up from that row (calibrate_style_ai_recover).
+function draftAnswer(
+  req: Request,
+  payload: unknown,
+  at: { requestStartMs: number; clientId: string },
+  work: (streamed: boolean) => Promise<Response>,
+): Promise<Response> | Response {
+  if (!wantsStreamedDraft(payload)) return work(false);
+  const ua = req.headers.get("user-agent");
+  const replay = new Request(req.url, { method: "POST", headers: ua ? { "user-agent": ua } : {}, body: JSON.stringify(payload) });
+  const filed = withErrorLog("portal-settings", () => work(true), { alreadyFiled: (res) => filedAtReturnSite.has(res) });
+  return heartbeatJsonResponse(() => filed(replay), {
+    headers: { ...cors, "Content-Type": "application/json" },
+    deadlineMs: DRAFT_STREAM_DEADLINE_MS - (Date.now() - at.requestStartMs),
+    onDeadline: () => logEdgeError({
+      fn: "portal-settings", req, clientId: at.clientId, code: "ai_draft_stream_deadline",
+      message: "The streamed draft's answer reached its deadline with the work still running; it was closed with stream_deadline and the work ran on.",
+      context: { requestMs: Date.now() - at.requestStartMs, deadlineMs: DRAFT_STREAM_DEADLINE_MS },
+    }),
+  });
+}
 
 /**
  * A database or storage call failed. Log the real reason server-side; tell the caller
@@ -3485,6 +3551,67 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, uploads, path: first?.path, token: first?.token, url: first?.url });
   }
 
+  // ── PICK UP A STREAMED DRAFT WHOSE ANSWER NEVER ARRIVED (2026-09-25) ─────────────────────────
+  // A streamed draft (calibrate_style_ai below, answered by draftAnswer) takes three to five
+  // minutes behind its heartbeat, and a phone that backgrounds the tab or a network that blinks
+  // drops that answer while the server works on, or after it has finished and charged. The same
+  // key asked again either runs the model a second time or meets hold_in_flight / already_charged.
+  // But the server writes what it drafted onto the generation's ledger row, so the new shell,
+  // instead of telling the builder to try again, asks HERE every ten seconds until the draft is
+  // there, the server says it never will be, or the press's own seven minutes run out.
+  //
+  // ⛔ ONLY THE CALLER'S OWN ROW. The gate is calibrate_style_ai's (GATES), and the row is filtered
+  // on the RESOLVED tenant and the RESOLVED user -- never on anything in the body -- plus the style,
+  // the shape-first sources and the press's own start. So an operator in view-as reads only the
+  // rows they generated there, and no caller can reach another user's or another tenant's draft.
+  // The body names only the style and when the press began (parseRecoverSince bounds it).
+  //
+  // No new column, no migration, no model call and no money: a read of 226's `drafted` and the
+  // columns the success answer was built from, and what recoverDraftAnswer (styleD3.ts) makes of
+  // it: the success body rebuilt with `recovered: true`, `{pending: true}`, or `{pending: false}`
+  // with a sentence for the builder. One coded row per answer that ends the wait (none per poll).
+  if (action === "calibrate_style_ai_recover") {
+    // The style exactly as calibrate_style_ai writes it into `style_key`: the same String(), the
+    // same 120-character cut, and no trim, or a style whose key has a trailing space finds nothing.
+    const styleKey = String(payload.styleValue ?? "").slice(0, 120);
+    if (!styleKey) return json({ error: "styleValue is required." }, 400);
+    const sinceRead = parseRecoverSince(payload.since, payload.clientNow, Date.now());
+    if (!sinceRead.ok) return json({ error: sinceRead.error }, 400);
+    const { data: rows, error: recErr } = await admin.from("ai_style_calls")
+      .select(DRAFT_RECOVER_COLUMNS)
+      .eq("client_id", clientId).eq("user_id", userId).eq("style_key", styleKey)
+      .in("source", ["video", "combined"])
+      .gte("called_at", sinceRead.fromIso)
+      .order("called_at", { ascending: false })
+      .limit(1);
+    if (recErr) {
+      // Not an answer about the draft, so not `pending: false`: the shell keeps asking.
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ai_draft_recover_failed",
+        message: `Could not read the ledger to pick a draft up: ${recErr.message}`,
+      });
+      const failed = json({ error: "We could not check on your draft just now." }, 503);
+      filedAtReturnSite.add(failed);
+      return failed;
+    }
+    const row = (Array.isArray(rows) && rows.length ? rows[0] : null) as DraftRecoverRow | null;
+    const out = recoverDraftAnswer(row, Date.now());
+    if (out.kind === "draft") {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: out.code, severity: out.severity,
+        message: "A streamed draft whose answer never reached the browser was picked up from the ledger.",
+        context: { checkId: row?.id ?? null, calledAt: row?.called_at ?? null },
+      });
+    } else if (out.kind === "lost") {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: out.code, severity: out.severity,
+        message: `A streamed draft could not be picked up from the ledger (${out.why}).`,
+        context: { why: out.why, checkId: row?.id ?? null, calledAt: row?.called_at ?? null, draftMs: row?.draft_ms ?? null },
+      });
+    }
+    return json(out.body);
+  }
+
   // Draft a 3D spec from reference photos with Claude. The builder reviews and tunes the
   // result before anything is saved — this only ever returns a draft.
   //
@@ -3492,7 +3619,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // by any owner/admin rather than by whoever holds the operator password. The ledger row
   // is written BEFORE the model call on purpose: a failing style would otherwise be a free
   // retry loop against our API key.
-  if (action === "calibrate_style_ai") {
+  //
+  // The whole branch is ONE function of `streamed` (2026-09-25), answered by draftAnswer above: run
+  // as it is for every request but a streamed v2 draft, and behind a heartbeat for that one.
+  if (action === "calibrate_style_ai") return await draftAnswer(req, payload, { requestStartMs, clientId }, async (streamed: boolean): Promise<Response> => {
     // Two callers, one action, one gate, one meter. `source: "video"` means the URLs are
     // frames the browser cut out of a walk-around video (the file itself never leaves the
     // phone) rather than four staged photos — so it takes eight of them and a prompt that
@@ -3675,8 +3805,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // ⚠️ AND THE DRAFT REALLY IS LOST, so the message must not pretend otherwise. It is on
       // the ledger row, but nothing reads it back: openCalEditor seeds from building_styles.d3,
       // which is only written on Save. So the honest answer is what it costs to try again, said
-      // before they press rather than after. (Recovering `drafted` from the row would be a new
-      // read action and a real improvement; it is not this fix.)
+      // before they press rather than after. (calibrate_style_ai_recover, 2026-09-25, reads
+      // `drafted` back off the row, but only for the press whose STREAMED answer dropped, and only
+      // while that press is still waiting on it. A press that reaches this line is a new press.)
       //
       // No capture and no release: there is no live hold here, only a posted row.
       if (err === "hold_replayed") {
@@ -3716,9 +3847,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // mean charging a card as part of an error response, then retrying the hold — a second
       // money path guarded by nothing, to save one retry. Not worth it.
       //
-      // Awaited rather than backgrounded: EdgeRuntime.waitUntil is unused anywhere in this
-      // codebase, and a money path is the wrong place to prove a new primitive — a task
-      // dropped on shutdown mid-sale leaves a closed_unknown that blocks ALL future top-ups.
+      // Awaited rather than backgrounded: EdgeRuntime.waitUntil only ASKS the runtime to keep
+      // the worker (the streamed draft's heartbeat uses it for the work behind its answer), and a
+      // money path is the wrong place to lean on a request — a task dropped on shutdown mid-sale
+      // leaves a closed_unknown that blocks ALL future top-ups.
       // Cost is up to nmiPost's 30s on a request that is already running an AI 3D generation,
       // and the cooldown caps it at once an hour.
       try {
@@ -3792,6 +3924,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the real bound on a runaway reply, and it is a clean, released, RETRYABLE failure; the
     // budget only has to stop being the thing a normal long reply trips over.
     //
+    // 20000 ON A STREAMED DRAFT ONLY (2026-09-25). At effort "high" a read thinks for longer, and a
+    // read that thinks past 12000 is cut off unparsed however much of its 230 s is left. Every
+    // other request keeps 12000, byte for byte. What it can cost: three reads of ~21,000 input and
+    // at most 20,000 output tokens at Opus's list price (aiDraftCostCents) is at most ~$1.82 a
+    // press, against ~$1.22 at 12000 -- recorded as the capture's cost basis, never charged to the
+    // builder, whose price is the held $20 whatever the tokens.
+    //
     // The timeout is the other half. Supabase's gateway answers 504 on its own at 150 s of
     // silence, and that 504 is invisible to withErrorLog and leaves the wallet hold open until
     // the stale sweep. 125 s (110 s until 2026-09-24) still leaves room to release the hold and
@@ -3818,10 +3957,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // or timed-out reply): same press, same idempotency key — the failed attempt released its hold,
     // and a released key is reusable (248) — at effort "low", which thinks less and so fits. Only a
     // real `true` counts; an older browser never sends it and keeps effort "medium".
+    //
+    // ⚠️ A STREAMED DRAFT HAS NO 150 s GATEWAY (2026-09-25, see draftAnswer): its answer is a 200 that
+    // has been writing a space every 10 s since the request arrived. What bounds it instead is the
+    // platform's wall clock, which let a probe run 220 s; the whole request stays under ~260 s. So
+    // the model gets 230 s, or what is left of 260 s from the request after a slow set-up, and never
+    // under 60 s: the same rule as below with the gateway's 145 s replaced by 260 s. Every request
+    // that is not streamed keeps exactly the rule below.
     const lean = payload.lean === true;
+    // The reads' effort, decided once: "low" on the lean retry, "high" on a streamed draft, "medium"
+    // on everything else (see output_config below for why). The request carries it, and so does
+    // draft_tokens, so "which effort did this draft run at, and was it streamed" is a query.
+    const draftEffort = lean ? "low" : streamed ? "high" : "medium";
     const aiSource = combined ? "combined" : fromVideo ? "video" : "photos";
     const t0 = Date.now();
-    const draftAbortMs = Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));
+    const draftAbortMs = streamed
+      ? Math.max(60_000, Math.min(230_000, 260_000 - (t0 - requestStartMs)))
+      : Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));
 
     // ── WHAT THE DRAFT CALL USED, on every exit that reached the model (251, 2026-09-23) ──────
     // Until now a draft's tokens were stored only through wallet_capture, and the meter is
@@ -3837,18 +3989,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // gets back. Called WITHOUT await where it starts, so the round trip overlaps the hold
     // release, the log row and the rest of the handler; each exit awaits it just before its
     // `return`, because a task still running after the response is not guaranteed to finish
-    // (EdgeRuntime.waitUntil is unused here — see the auto-recharge note above). `draft_ms` is
+    // (EdgeRuntime.waitUntil is a request, not a promise — see the auto-recharge note above). `draft_ms` is
     // read when it is CALLED, which is the moment the reply (or the abort) arrived; with several
     // calls (consensus drafting, below) the moment the last of them settled, so it is the
     // builder's wall time, and each call's own time is in draft_tokens.calls.
     //
     // aiDraftUsageWiring_test lifts the body below and RUNS it, so keep it plain JavaScript:
     // the only type annotation is on this first line, which the test uses as its anchor.
+    //
+    // `effort` and `streamed` (2026-09-25) ride at the top of the object, beside the counts, so
+    // streamed drafts at "high" can be told from the rest in SQL without a new column. A null
+    // (a single call that got no reply) stays null: that is what "no reply" means in this column.
     const recordDraftUsage = async (tokens: Record<string, unknown> | null) => {
       if (!ledgerRow?.id) return;
       try {
         const { error } = await admin.from("ai_style_calls")
-          .update({ draft_tokens: tokens, draft_ms: Date.now() - t0 }).eq("id", ledgerRow.id);
+          .update({ draft_tokens: tokens ? { ...tokens, effort: draftEffort, streamed } : tokens, draft_ms: Date.now() - t0 }).eq("id", ledgerRow.id);
         if (error) {
           await logEdgeError({
             fn: "portal-settings", req, clientId, code: "ai_style_draft_usage_log_failed",
@@ -3880,19 +4036,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       body: JSON.stringify({
         ...aiModelFields(v2Prompt),
         // Thinking and the answer share this. The video prompt's `observed` block rides on
-        // top of the spec. A truncated reply is unparseable, not partially useful.
-        max_tokens: 12000,
+        // top of the spec. A truncated reply is unparseable, not partially useful. More room only
+        // on a streamed draft, which thinks at "high" (see above).
+        max_tokens: streamed ? 20000 : 12000,
         thinking: { type: "adaptive" },
         // v2 thinks HARD (2026-09-25). At "medium", Opus often answered a walk-around in 10-15 s with
         // ~480 output tokens -- the JSON and next to no thinking -- and those shallow reads put a
         // shed's high side on the wrong wall 6 times in 7 and read a 16 ft porch as 10-12 ft with 3
         // posts; the reads that did think (3,400-5,400 tokens) got both right. "high" makes every
         // read a careful one. Legacy keeps "medium"; the lean retry keeps "low".
-        // ⚠️ NOT "high" yet: tried live 2026-09-25, all three reads ran past the 125 s draft budget
-        // (the gateway ends a silent request at 150 s), so every press fell to the lean retry.
-        // Until the draft can outlive the gateway, the reads' reasoning is carried in the reply
-        // itself (the prompt's evidence fields) at "medium".
-        output_config: { effort: lean ? "low" : "medium" },
+        // ⚠️ ONLY WHEN STREAMED: tried live 2026-09-25 on the plain request, all three reads ran past
+        // the 125 s draft budget (the gateway ends a silent request at 150 s), so every press fell to
+        // the lean retry. A streamed draft (draftAnswer: the new shell's v2 press) outlives the
+        // gateway with a 230 s budget and thinks "high"; a v2 request that is NOT streamed keeps
+        // "medium" and its 125 s, with the reads' reasoning carried in the reply itself (the prompt's
+        // evidence fields). `streamed` is never true with `lean` (wantsStreamedDraft). The choice is
+        // draftEffort, above, so draft_tokens records the very effort this request sent.
+        output_config: { effort: draftEffort },
         messages: [{
           role: "user",
           content: [
@@ -3924,7 +4084,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // that agree with the structure chosen for it).
     //
     //   * ONE budget. draftAbortMs above bounds all three together, never each. Once two have
-    //     drafted, the third gets DRAFT_CONSENSUS_GRACE_MS (20 s) more and is then cut off.
+    //     drafted, the third gets DRAFT_CONSENSUS_GRACE_MS (60 s) more and is then cut off.
     //   * A call that fails, is cut off or does not parse is dropped. One read that parses is
     //     enough to answer with; the consensus of one read is that read.
     //   * NONE parsed: the FIRST call SENT (not the first to come back) is classified exactly the
@@ -4247,7 +4407,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // write to finish; this is the last point it can be waited on before the response goes.
     await draftUsageLogged;
     return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, dropped: droppedCount, observed: observedNotes, balanceCents, dims, frameMap, checkId });
-  }
+  });
 
   // ── THE FREE SECOND PASS (2026-09-19) ──────────────────────────────────────────────────
   // The builder pressed Generate once, was held once and charged once, and has their draft.

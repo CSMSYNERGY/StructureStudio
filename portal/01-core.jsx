@@ -375,15 +375,24 @@ __ssFunctions.invoke = async (name, opts) => {
       // What makes a refusal suspicious is REPETITION, so the row has to survive:
       //   select message, count(*) from app_errors where severity = 'info'
       //   group by 1 having count(*) > 20 order by 2 desc;
-      const st = (res.error && res.error.ssStatus) || null;
+      // A STREAMED answer (calibrate_style_ai's v2 draft, 2026-09-25) is a 200 whose JSON carries the
+      // status it would have had, because its status line went out before the work began. Read it
+      // from there, or every streamed refusal (a 402, a 409, a 429) is filed as a fault.
+      const st = (res.error && res.error.ssStatus)
+        || (!res.error && res.data && res.data.error && Number.isInteger(res.data.status) && res.data.status >= 400 ? res.data.status : null)
+        || null;
       // A transport failure on a page that is ALREADY LEAVING is the navigation killing its
       // own request, not the function being unreachable. Same treatment, and for the same
       // reason, as `session_reconnecting` above: demoted to info under its OWN code so it
       // stays countable, never dropped. `status` is null on this path by definition — a
       // request that never completed has no HTTP status — which is what distinguishes it
       // from a 5xx the server actually sent while the user happened to be navigating.
+      // THREE NAMES, not one (2026-09-25). A request the navigation kills before its response is
+      // supabase-js's FunctionsFetchError; one killed while its BODY is still arriving -- a streamed
+      // draft, whose 200 went out minutes before its JSON -- fails inside response.json(), and
+      // supabase-js hands back that read's own TypeError (a network error) or AbortError instead.
       const ssAborted = ssPageLeaving && st === null
-        && (res.error && res.error.name) === "FunctionsFetchError";
+        && ["FunctionsFetchError", "TypeError", "AbortError"].indexOf((res.error && res.error.name) || "") !== -1;
       // A DELIBERATE 5xx REFUSAL. The status split below reads 4xx as "the product declined"
       // and everything else as "something broke" — but a few refusals have to answer 5xx, and
       // they say so with the x-ss-refusal header (logError.ts, and the `refusal()` helpers in

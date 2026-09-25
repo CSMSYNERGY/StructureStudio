@@ -100,10 +100,12 @@ function fakeAdmin(known: string[], mode: "ok" | "throws" | "rejects" = "ok") {
 const BEFORE_251 = ["drafted", "observed", "frames", "video_count", "dims", "self_check_tokens", "self_check_ms"];
 const AFTER_251 = [...BEFORE_251, "draft_tokens", "draft_ms"];
 
-/** Build the SHIPPED helper with the free variables the handler gives it. */
-function helper(admin: unknown, logged: Logged[], opts: { ledgerRow?: unknown; t0?: number } = {}) {
+/** Build the SHIPPED helper with the free variables the handler gives it. `draftEffort` and
+ * `streamed` (2026-09-25) are the branch's: the effort the request sent, and whether it streamed.
+ * Absent here, they are a plain request's: "medium", not streamed. */
+function helper(admin: unknown, logged: Logged[], opts: { ledgerRow?: unknown; t0?: number; draftEffort?: string; streamed?: boolean } = {}) {
   const make = new Function(
-    "ledgerRow", "admin", "logEdgeError", "req", "clientId", "t0",
+    "ledgerRow", "admin", "logEdgeError", "req", "clientId", "t0", "draftEffort", "streamed",
     `return async (tokens) => {${HELPER.text}\n};`,
   );
   return make(
@@ -114,6 +116,8 @@ function helper(admin: unknown, logged: Logged[], opts: { ledgerRow?: unknown; t
     null,
     "harness-tenant",
     opts.t0 ?? Date.now() - 1234,
+    opts.draftEffort ?? "medium",
+    opts.streamed ?? false,
   ) as (tokens: unknown) => Promise<void>;
 }
 
@@ -158,6 +162,8 @@ Deno.test("a truncated reply's usage lands as SHAPES only, in its own two-column
     stopReason: "max_tokens",
     textChars: REPLY_TEXT.length,
     blockTypes: ["thinking", "text"],
+    effort: "medium",
+    streamed: false,
   });
   assert(!JSON.stringify(admin.stored).includes(SENTINEL), "⚠️ the model's text reached the table");
   assert(typeof admin.stored[0].draft_ms === "number" && admin.stored[0].draft_ms >= 1234, "elapsed since t0");
@@ -175,6 +181,7 @@ Deno.test("a reply with no usage block records nulls, not zeros", async () => {
       model: "claude-sonnet-5",
       input: null, output: null, cache_read: null, cache_creation: null,
       stopReason: null, textChars: 0, blockTypes: [],
+      effort: "medium", streamed: false,
     });
   }
 });
@@ -197,8 +204,27 @@ Deno.test("several calls (consensus drafting) record their summed record in plac
   const tokens = { model: "claude-opus-5", input: 63000, output: 21000, calls: [{ ok: true }, { ok: true }, { ok: false }] };
   await site(DATA, TRUNCATED, helper(admin, []), true, { tokens, usage: {} });
   assertEquals(admin.attempts.length, 1, "one round trip, as before");
-  assertEquals(admin.stored[0].draft_tokens, tokens);
+  assertEquals(admin.stored[0].draft_tokens, { ...tokens, effort: "medium", streamed: false });
   assertEquals(Object.keys(admin.stored[0]).sort(), ["draft_ms", "draft_tokens"], "still only the two 251 columns");
+});
+
+Deno.test("draft_tokens says which effort the request ran at and whether it streamed, at its top level", async () => {
+  // 2026-09-25: a streamed v2 draft thinks at "high" with 20000 tokens, the lean retry at "low", every
+  // other request at "medium", and nothing recorded which, so "did high help?" had no query. Two keys
+  // at the top of the existing jsonb, no new column: the write is still the two 251 columns.
+  const tokens = { model: "claude-opus-5", input: 63000, output: 45000, calls: [{ ok: true }, { ok: true }, { ok: true }] };
+  for (const [effort, streamed] of [["high", true], ["medium", false], ["low", false]] as const) {
+    const admin = fakeAdmin(AFTER_251);
+    await site(DATA, TRUNCATED, helper(admin, [], { draftEffort: effort, streamed }), true, { tokens, usage: {} });
+    assertEquals(admin.stored[0].draft_tokens, { ...tokens, effort, streamed }, `${effort}, streamed ${streamed}`);
+    assertEquals(Object.keys(admin.stored[0]).sort(), ["draft_ms", "draft_tokens"]);
+  }
+  // A reply that never came stays null: that is what "no reply" means in this column (251's comment).
+  const admin = fakeAdmin(AFTER_251);
+  await helper(admin, [], { draftEffort: "high", streamed: true })(null);
+  assertEquals(admin.stored[0].draft_tokens, null);
+  // Both come from the branch itself, never from the tokens it was handed.
+  assert(HELPER.text.includes("draft_tokens: tokens ? { ...tokens, effort: draftEffort, streamed } : tokens"), "the helper's own shape");
 });
 
 Deno.test("⚠️ before 251 is applied, the write fails ALONE, says so once, and does not throw", async () => {

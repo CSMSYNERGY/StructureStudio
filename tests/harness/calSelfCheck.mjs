@@ -206,13 +206,23 @@ async function main() {
         genCalls.push(body);
         // The server's own shape since commit 6: `frameMap` says which image shows which view
         // and at what angle, `checkId` is the ledger row the free check claims against.
-        return json(route, {
+        const drafted = {
           ok: true, d3: draftSpec(body.dims, draftOverhang),
           frames: (body.photoUrls || []).length, dropped: 0,
           observed: draftObserved,
           balanceCents: 18000, dims: body.dims || null,
           frameMap: draftFrameMap, checkId: CHECK_ID,
-        });
+        };
+        // STREAMED when asked (2026-09-25), the way the server writes it (heartbeatJson.ts): a 200,
+        // a heartbeat of spaces, then the JSON. So the whole flow below -- the check, the compare
+        // pairs, the rounds -- runs off a draft that arrived through the streamed shape.
+        if (body.stream === true) {
+          return route.fulfill({
+            status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" },
+            body: "          " + JSON.stringify(drafted),
+          });
+        }
+        return json(route, drafted);
       }
       if (a === "calibrate_style_check") {
         checkCalls.push(body);
@@ -308,8 +318,9 @@ async function main() {
     card.includes("you are charged $20 once, however much we have to fix"), card.slice(-90));
   r.ok("with all four steps named, including the two that are new",
     card.includes("Checking our 3D against your video") && card.includes("Correcting anything that doesn't line up"));
-  // "one to three minutes" since the rounds (2026-09-24): a minute was one draft and one check.
-  r.ok("and an honest wait, not a spinner", card.includes("Usually one to three minutes"));
+  // "three to five minutes" since the streamed draft (2026-09-25): the reads think at effort "high"
+  // for up to 230 s, and the check rounds come after.
+  r.ok("and an honest wait, not a spinner", card.includes("Usually three to five minutes — it studies your video carefully"));
   // A SECOND PRESS CANNOT HAPPEN WHILE THIS IS RUNNING, and it is the DOM that says so rather
   // than a guard inside the handler. Asserted by reading `disabled` rather than by clicking:
   // Playwright's click waits for a disabled button to come back and then presses it, which
@@ -328,6 +339,8 @@ async function main() {
   // ── 1 + 2: what actually leaves the browser ───────────────────────────────────────────
   const a1 = { gen: genCalls[0], check: checkCalls[0] };
   r.ok("the paid call went out exactly once for that press", genCalls.length === 1, String(genCalls.length));
+  r.ok("⚠️ AND IT ASKED FOR THE STREAMED DRAFT, whose answer the rest of this flow ran on",
+    Boolean(a1.gen) && a1.gen.stream === true && !("lean" in a1.gen), JSON.stringify(a1.gen && { stream: a1.gen.stream, lean: a1.gen.lean }));
   r.ok("⚠️ THE FREE CHECK IS CALLED, with the ledger row the generation named",
     Boolean(a1.check) && a1.check.checkId === CHECK_ID, a1.check ? a1.check.checkId : "no call");
   r.ok("⚠️ AND IT IS ROUND 0 — the server's own counter, 0-based", Boolean(a1.check) && a1.check.round === 0, JSON.stringify(a1.check && a1.check.round));

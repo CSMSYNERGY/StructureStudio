@@ -1662,7 +1662,23 @@ function Dashboard({ session }) {
        marked `retryable` -- cut off at max_tokens, or past its own abort, with the hold already
        released. It rides the SAME idempotencyKey, and the server answers it with less thinking.
        The flag is read off the refusal's body here, because only this function can see it:
-       supabase-js leaves a non-2xx body unread on `error.context`. */
+       supabase-js leaves a non-2xx body unread on `error.context`.
+
+       `stream: true` (2026-09-25) asks for the STREAMED draft: the server answers 200 at once,
+       writes a space every ten seconds, then writes the JSON. The gateway ends a request that is
+       silent for 150 s, so an unstreamed draft has to stop at 125 s and cannot think hard; streamed,
+       it gets up to 230 s and thinks at effort "high". Sent on every press but the lean retry, a
+       short read that fits the old budget. The server streams only a v2 request (frame "front" with
+       dims, which this always is), and a function that has never heard of the key answers as before.
+       No client abort, as before: the server's clock is the only one, and abandoning this call is how
+       a slow generation becomes a lost $20.
+
+       ⚠️ A STREAMED FAILURE ARRIVES AS A 200. Its status line went out before the work began, so the
+       server writes the refusal it would have sent as a body that also carries `status`, with `error`,
+       `code` and `retryable` exactly as before. It is turned back into the SAME failure a non-2xx
+       becomes here: the same sentence (01-core's invoke wrapper puts a non-2xx body's `error` on the
+       message; this reads it off the body), the same `ssRetryable`, and so the same one lean retry
+       under the same key in calGenerate. The designer cannot tell the two apart. */
     onDraftFromCombined: async (photoUrls, styleValue, videoCount, idempotencyKey, dims, opts) => {
       // videoCount says how many of the LEADING urls are walk-around frames, so the server can
       // hand the model a prompt that describes the set it is actually being given rather than
@@ -1709,7 +1725,70 @@ function Dashboard({ session }) {
       // says "across the gable end", the frame ITS card asked in. Sent on the lean retry too.
       const body = { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined, dims: d, frame: "front" };
       if (opts && opts.lean) body.lean = true;
+      else body.stream = true;
+      // WHEN THIS PRESS BEGAN, recorded BEFORE it is sent: the ledger row it creates is stamped
+      // after this, so "the newest row since then" is this press's row (calibrate_style_ai_recover).
+      const since = new Date().toISOString();
+      // The success envelope, built in ONE place for both ways a draft can arrive: the answer
+      // itself, or the ledger row after a dropped stream. The designer cannot tell them apart,
+      // except by `recovered`, which only tells it why the free check has nothing to pair with.
+      const envelope = (got, extra) => ({
+        d3: got.d3, frames: got.frames || 0, dropped: got.dropped || 0,
+        observed: got.observed || null, dims: got.dims || null,
+        frameMap: got.frameMap || null, checkId: got.checkId || null,
+        ...(extra || {}),
+      });
       const { data, error } = await sb.functions.invoke("portal-settings", { body });
+      // ── A STREAMED ANSWER THAT NEVER ARRIVED (2026-09-25) ──────────────────────────────────
+      // Two ways: the body broke off (the connection dropped: supabase-js hands back the JSON
+      // parser's own error, or the body read's), or the server closed it at its own deadline with
+      // `stream_deadline` while the work ran on. Either way the server may still be working, or may
+      // have finished and charged, so the builder is NOT told to try again (a retry under the same
+      // key re-runs the model or meets already_charged). The draft is picked up from its ledger
+      // row instead: calibrate_style_ai_recover every ten seconds, until it hands back the draft
+      // (returned exactly as the answer would have been), says it never will (`pending: false`: its
+      // sentence, and the designer keeps the key), or the press's own budget runs out.
+      //
+      // Only a streamed press, never the lean retry, and only with the designer's `recover` hooks:
+      // `alive()` goes false when the designer unmounts or another press takes over, which stops
+      // the polling; `until` is the press's deadline (SS_FLOW_MAX_MS from the press);
+      // `onRecovering()` switches its progress card to the pickup copy.
+      const brokeOff = Boolean(error && body.stream && (error.name === "SyntaxError" || error.name === "TypeError"));
+      const closedAtDeadline = Boolean(!error && body.stream && data && typeof data === "object" && data.code === "stream_deadline");
+      if (brokeOff || closedAtDeadline) {
+        const rec = opts && opts.recover;
+        if (!rec || typeof rec.alive !== "function") {
+          throw new Error("Your connection dropped before the draft arrived, so we could not show it. If it finished, you were charged for it once.");
+        }
+        if (typeof rec.onRecovering === "function") rec.onRecovering();
+        const every = (typeof window !== "undefined" && Number(window.__ssRecoverPollMs)) || 10000;
+        const until = Number(rec.until) || 0;
+        for (;;) {
+          const wait = Math.min(every, until - Date.now());
+          if (!(wait > 0)) break;
+          await new Promise((r) => setTimeout(r, wait));
+          if (!rec.alive()) throw new Error("Stopped picking the draft up: this press is no longer on screen.");
+          let got = null;
+          try {
+            const r = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai_recover", styleValue, since, clientNow: Date.now() } });
+            got = r && !r.error ? r.data : null;
+          } catch (_e) { got = null; }
+          if (!rec.alive()) throw new Error("Stopped picking the draft up: this press is no longer on screen.");
+          // THE DRAFT. `dropped` is not on the ledger row, so it is worked out from what was sent.
+          if (got && got.ok && got.d3) {
+            return envelope(got, {
+              dropped: Number.isInteger(got.dropped) ? got.dropped : (got.frames ? Math.max(0, urls.length - got.frames) : 0),
+              recovered: true,
+            });
+          }
+          if (got && got.pending === false) {
+            throw new Error(got.message || "We could not pick the draft up from the server. Press Generate to try again.");
+          }
+          // `pending: true`, or this poll failed on the way (the connection that dropped may still
+          // be down): ask again while the press has time.
+        }
+        throw new Error("Your connection dropped and the draft did not reach us in time. Pressing Generate again will not charge you twice for this press.");
+      }
       // `ssRetryable` IS THE SERVER'S WORD, NEVER A GUESS FROM THE STATUS. A 502 is also a model
       // refusal or an unreachable AI service, and resending those is a second identical failure
       // on the builder's clock. Only a body saying `retryable: true` earns the one lean retry.
@@ -1720,6 +1799,15 @@ function Dashboard({ session }) {
           const said = ctx && typeof ctx.clone === "function" ? await ctx.clone().json() : null;
           if (said && said.retryable === true) err.ssRetryable = true;
         } catch (_e) { /* no body, or not JSON: not retryable */ }
+        throw err;
+      }
+      // THE STREAMED FAILURE (see the note above this function): a 200 whose body carries the
+      // status it would have had. The same Error the branch above builds for that status: the
+      // server's sentence (error, else message, which is what 01-core puts on a non-2xx), and the
+      // server's `retryable`.
+      if (data && typeof data === "object" && (data.error || (Number.isInteger(data.status) && data.status >= 400))) {
+        const err = new Error(data.error || data.message || "Generating failed");
+        if (data.retryable === true) err.ssRetryable = true;
         throw err;
       }
       if (!data || !data.ok || !data.d3) {
@@ -1737,11 +1825,7 @@ function Dashboard({ session }) {
       // paid, which is what makes the check free and single-use. An older function sends
       // neither, and the designer treats that as "no check on this generation" rather than
       // inventing an angle to render at.
-      return {
-        d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0,
-        observed: data.observed || null, dims: data.dims || null,
-        frameMap: data.frameMap || null, checkId: data.checkId || null,
-      };
+      return envelope(data);
     },
     /* THE FREE SECOND PASS (2026-09-19). The browser renders the draft from the angles the
        first pass labelled, and asks one narrow question: where does OUR DRAFT not match THEIR
@@ -1758,7 +1842,7 @@ function Dashboard({ session }) {
        THE CLIENT ABORT IS REAL, unlike the generation's. The server gives up at 90 s on the v2
        check this designer asks for (45 s on the legacy one); 100 here is far enough above that a
        server which answered in time is still heard, it matches the component's SS_CHECK_MS so
-       the five-minute press budget plans with the number actually in force, and it bounds the
+       the press budget (SS_FLOW_MAX_MS) plans with the number actually in force, and it bounds the
        wait at something a person will sit through. Abandoning THIS call costs nothing, which is
        exactly what separates it from the one above.
 
