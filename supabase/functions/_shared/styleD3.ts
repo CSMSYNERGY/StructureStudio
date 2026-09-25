@@ -166,6 +166,27 @@ const D3_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt"] as
 // FRONT edge, as seen standing in front of the porch facing it (left is the viewer's left, the
 // frame every left/right here is read in). Absent = no steps, which is every porch before today.
 export const D3_PORCH_STEPS = ["left", "center", "right"] as const;
+// ── WHAT THE BUILDING STANDS ON (top-level `foundation`; blocks and piers 2026-09-25) ──────────
+// "slab" and "skids" draw at grade, as they always have. "blocks" (stacked 8x8x16 concrete blocks
+// under the runners) and "piers" (round concrete piers) RAISE THE FLOOR off the ground: every
+// building filmed so far sits up like that, and drawn at grade its porch steps came out as one
+// 2-inch step and the building looked planted. Absent is still the slab every row has always drawn.
+//
+// ⚠️ PRODUCTION'S OLDER DESIGNER CANNOT HOLD THE TWO NEW VALUES. Its d3ResolveStyleSpec and its draft
+// merge rewrite anything but skids/slab to null, and its renderer draws a slab for them (which is the
+// honest fallback). So a save from that panel would ERASE a stored "blocks" or "piers" and the
+// floor height with it. carryForwardFoundation below is the save paths' answer, the roofProfile
+// precedent.
+export const D3_FOUNDATIONS = ["skids", "slab", "blocks", "piers"] as const;
+export const D3_RAISED_FOUNDATIONS = ["blocks", "piers"] as const;
+// floorHeightFt: feet from the GROUND to the TOP OF THE FLOOR, at the FRONT (a site can slope; the
+// front is where a builder measures and where the steps are). Kept only with blocks or piers.
+// 0.3 is a floor sitting almost on the grass; 6 is a building on tall piers over a slope. A reading
+// up to FLOOR_HEIGHT_ACCEPT_FT is pulled into that band (a 7 ft reading is someone's tall pier, not
+// a unit error); anything past it is inches or a hallucination and is dropped, wallHeightFt's rule.
+export const FLOOR_HEIGHT_FT: readonly [number, number] = [0.3, 6];
+const FLOOR_HEIGHT_ACCEPT_FT = 8;
+const isRaisedFoundation = (v: unknown): boolean => (D3_RAISED_FOUNDATIONS as readonly unknown[]).includes(v);
 
 const num = (v: unknown): number | null => {
   const n = typeof v === "string" ? Number(v) : v;
@@ -191,6 +212,7 @@ export type D3Spec = {
   roofProfile?: string;
   gableVent?: { widthFrac: number };
   foundation?: string;
+  floorHeightFt?: number;
   claddingChoices?: string[];
 };
 
@@ -405,8 +427,19 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
 
   // What the building sits on. "skids" draws runners under a thin deck — the shadow gap
   // that says a building is portable rather than poured. Absent means the slab the
-  // renderer has always drawn, so no existing row moves.
-  if (src.foundation === "skids" || src.foundation === "slab") d3.foundation = src.foundation;
+  // renderer has always drawn, so no existing row moves. "blocks" and "piers" (2026-09-25) raise
+  // the floor off the ground (see D3_FOUNDATIONS); anything else is still dropped.
+  if ((D3_FOUNDATIONS as readonly unknown[]).includes(src.foundation)) d3.foundation = src.foundation;
+  // How high that raised floor stands, grade to floor top at the front. Only a raised foundation
+  // has one: on a slab or skids the floor is at grade by definition, and the key is dropped rather
+  // than carried where nothing reads it. Absent is the renderer's own default for the kind, and is
+  // never written here.
+  if (isRaisedFoundation(d3.foundation)) {
+    const fh = num(src.floorHeightFt);
+    if (fh !== null && fh > 0 && fh <= FLOOR_HEIGHT_ACCEPT_FT) {
+      d3.floorHeightFt = Math.min(FLOOR_HEIGHT_FT[1], Math.max(FLOOR_HEIGHT_FT[0], fh));
+    }
+  }
 
   // Which claddings THIS style offers the customer (2026-08-25). Absent means all four,
   // which is what every existing row says by omission.
@@ -431,6 +464,38 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // or someone using a customer-visible jsonb column as free storage.
   if (JSON.stringify(d3).length > 4096) return { ok: false, error: "That 3D spec is implausibly large." };
   return { ok: true, d3 };
+}
+
+// ── A RAISED FOUNDATION SURVIVES AN OLDER PANEL'S SAVE (2026-09-25) ────────────────────────────
+// The save paths' carry-forward for `foundation` "blocks"/"piers" and `floorHeightFt`, shared by
+// portal-settings and admin-save-settings so the two cannot disagree (the roofProfile precedent,
+// which each of them inlines for a key that absence alone could erase).
+//
+// ABSENCE IS NOT ENOUGH HERE. Production's designer resolves any foundation but skids/slab to
+// null and SENDS `foundation: null`, and its draft merge can hand on a legacy draft's "slab"; it
+// never sends floorHeightFt at all. So from a request WITHOUT frame "front" -- that older panel, and
+// anything else that has not been taught the new values -- a foundation that is absent, null or
+// "slab" while the row stores blocks or piers keeps the stored foundation, and its stored floor
+// height with it. "skids" is still honoured: that panel's select offers it, so it is a real pick.
+// The current panel sends frame "front" on every save (12-shell's onSaveSpec, the operator page's
+// save), and gets exactly what it sent: it can set both keys, change them and clear them.
+//
+// Mutates `clean` (the sanitised spec about to be written). The stored height is held to the
+// sanitiser's band again, because this is the one place a stored value is written back unread.
+export function carryForwardFoundation(clean: D3Spec, sent: unknown, stored: unknown, frame: unknown): void {
+  if (frame === PROMPT_FRAME_FRONT) return;
+  if (!sent || typeof sent !== "object") return;
+  const was = (stored && typeof stored === "object") ? stored as Record<string, unknown> : null;
+  if (!was || !isRaisedFoundation(was.foundation)) return;
+  const incoming = (sent as Record<string, unknown>).foundation;
+  if (!(incoming === undefined || incoming === null || incoming === "slab")) return;
+  clean.foundation = was.foundation as string;
+  const fh = num(was.floorHeightFt);
+  if (fh !== null && fh > 0 && fh <= FLOOR_HEIGHT_ACCEPT_FT) {
+    clean.floorHeightFt = Math.min(FLOOR_HEIGHT_FT[1], Math.max(FLOOR_HEIGHT_FT[0], fh));
+  } else {
+    delete clean.floorHeightFt;
+  }
 }
 
 // Reference photos for a spec: http(s) only, capped in both count and length. These are
@@ -706,7 +771,8 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence). K
     "porchSteps": "left" | "center" | "right"
   },
   "gableVent": { "widthFrac": <vent width as a fraction of the width of the gable wall it sits in, e.g. 0.25 for a 2 ft vent on an 8 ft wall> },
-  "foundation": "skids" | "slab",
+  "foundation": "skids" | "slab" | "blocks" | "piers",
+  "floorHeightFt": <blocks or piers only: feet from the ground up to the TOP of the floor, at the FRONT>,
   "roofMaterial": "shingle" | "metal",
   "colors": { "body": "#rrggbb", "trim": "#rrggbb", "roof": "#rrggbb", "corner": "#rrggbb", "fascia": "#rrggbb", "wood": "#rrggbb" },
   "observed": {
@@ -787,7 +853,9 @@ DORMER: a small roofed box sitting ON one of the main roof slopes, breaking its 
 
 COLOURS matter here: the builder compares your drawing with these frames. Give each colour as the paint looks in EVEN daylight: not the side in shadow, which reads darker and bluer than the paint is, and not a face in hard sun, glare or a reflection of the sky, which reads paler. When those are the only faces you have, the paint lies between them, and dark paint stays dark: never report a dark wall's sun-bleached reading as its colour. body is the main wall colour; trim is the window and door casings (the boards framing them, not shutters); roof is the roofing. corner is the vertical boards at the building's corners, and fascia is the boards along the roof edges — along the eaves, up the rakes, and round the porch roof. Look at those two on their own rather than assuming they match the casings, and ALWAYS give both: repeat trim's value only when they really are the casings' colour. They often differ: on board-and-batten and panel siding the corner boards are usually the wall colour, and the fascia is often the roof colour. Leaving corner out draws the corners in the trim colour, which on a dark building with white window casings is a white stripe down every corner. wood is the natural or stained lumber of a porch — posts, deck and rafters — and only when there is a porch. Give each as the #rrggbb you see, not the name of a paint.
 
-FOUNDATION: look at the very bottom of the building. "skids" means it is raised on runners, with a visible shadow gap underneath and often blocks or shims between the runners and the ground — the normal look for a building that gets delivered on a trailer. "slab" means the walls meet the ground with no gap. Omit if the bottom is never visible.
+FOUNDATION: look at the very bottom of the building, all the way round. "slab" means the walls meet the ground with no gap. "skids" means it sits low on wooden runners lying on the ground or on thin shims, with only a narrow shadow gap under the floor — the normal look for a building that was delivered on a trailer and set down. "blocks" means its runners or beams rest on stacked grey concrete blocks, with a clear gap under the building. "piers" means it stands on concrete piers (round or square concrete posts, often with a wooden beam across their tops), with a clear gap under the building. Omit if the bottom is never visible.
+
+FLOOR HEIGHT, floorHeightFt, with "blocks" or "piers" only: how many feet the TOP of the floor stands above the ground, at the FRONT. The ground often slopes, so read it at the front wall, where the door, the porch and its steps are, and report that. Read it against something whose size you know: a door opening is 6 ft 8 in tall, so compare the gap under the building with the door; a porch deck is at floor level, and each porch or entry step rises about 7 in, so count the risers from the ground up to the deck. Leave it out for "skids" or "slab", and when the bottom of the front wall is never visible.
 
 Ignore every OTHER building in the frames. On a sales lot the subject is usually the one that stays roughly centred as the camera moves around it; neighbours drift past in the background and are often a different model entirely.
 
@@ -1658,6 +1726,10 @@ export const SELF_CHECK_ALLOW = [
   // The porch's own framing (2026-09-25): its posts, its roof's pitch, and where its steps leave
   // the deck. Projecting porch only, which sanitizeD3Spec holds them to on the way out.
   "roof.porchPosts", "roof.porchPitch", "roof.porchSteps",
+  // How high a raised floor stands (2026-09-25), top-level beside foundation, which is already on
+  // the list and now takes "blocks" and "piers" too. Blocks or piers only, which sanitizeD3Spec
+  // holds it to on the way out.
+  "floorHeightFt",
 ] as const;
 
 // `massing` (v2) is the answer to the new first step: which way the building faces, which wall
@@ -1887,6 +1959,16 @@ export function selfCheckPrompt(opts: {
   const centreNow = num(roof.centerEaveFt) !== null
     ? feet("centerEaveFt")
     : hasWings ? "not set, which draws it 3 ft above the top of the wing roofs" : "not set";
+  // What the building stands on (2026-09-25), each said as what the render DRAWS: absent is a slab
+  // at grade, and a raised foundation with no height is drawn at the renderer's default for it
+  // (d3GradeFt in the designer: 1 ft on blocks, 1.5 ft on piers).
+  const raised = isRaisedFoundation(draft.foundation);
+  const foundationNow = typeof draft.foundation === "string"
+    ? `"${draft.foundation}"`
+    : "not set, which draws a slab on the ground";
+  const floorNow = !raised ? "not set, and drawn only with blocks or piers"
+    : num(draft.floorHeightFt) !== null ? `${dimFt(num(draft.floorHeightFt) as number)} ft`
+    : `not set, which draws the floor ${draft.foundation === "piers" ? "1.5 ft" : "1 ft"} up`;
   // ⚠️ AND THE TWO FRAME KEYS (fix, 2026-09-24). A draft without roof.front / roof.highSide is
   // drawn in the OLD frame (d3RoofAxes' portrait/landscape rule): a two-slope roof's ridge along
   // the footprint's longer walls, with a porch on the gable end at the WEST (left) when the front
@@ -2103,6 +2185,13 @@ THEN THESE, only if the pictures disagree:
 6. roof.eave - "open" (a sawtooth row of rafter tails with gaps of sky between them) or
    "fascia" (one unbroken board). Only from a viewpoint that actually shows under the eave.
 7. roofMaterial, foundation, gableVent - only if plainly wrong. (roof.type is step 1's.)
+   foundation, currently ${foundationNow}: "slab" (the walls meet the ground), "skids" (low
+   runners on the ground, a narrow shadow gap), "blocks" (stacked concrete blocks under the
+   runners, a clear gap) or "piers" (concrete piers, a clear gap). With blocks or piers,
+   floorHeightFt, currently ${floorNow}: feet from the ground to the TOP of the floor at the
+   FRONT. Judge the gap under the building against the door (6 ft 8 in tall), or count the
+   porch steps' risers (about 7 in each) from the ground up to the deck. Correct it only where
+   the render's building plainly stands higher or lower off the ground than the frame's.
 
 RETURN ONLY this JSON object, no prose and no markdown fence:
 {
@@ -2425,6 +2514,14 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
     if ((D3_ROOF_TYPES as readonly string[]).includes(String(wanted.get(field)))) continue;
     dropped.push(field);
     wanted.delete(field);
+  }
+  // AN OLDER DESIGNER'S CHECK KEEPS ITS OLD FOUNDATION WORDS (2026-09-25). The sanitiser now keeps
+  // "blocks" and "piers", which that designer can neither draw nor show, so a legacy correction to
+  // either is dropped as it always was (and the destructive pass never sees it). Its prompt, frozen,
+  // names neither.
+  if (mode === "legacy" && wanted.has("foundation") && !["skids", "slab"].includes(String(wanted.get("foundation")))) {
+    dropped.push("foundation");
+    wanted.delete("foundation");
   }
 
   // "none" TAKES THE PORCH STEPS OFF (v2, fix 2026-09-25). No steps is an ABSENT roof.porchSteps,
