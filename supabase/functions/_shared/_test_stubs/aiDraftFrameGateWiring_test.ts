@@ -38,8 +38,9 @@ function lift(src: string, start: string, end: string, what: string): string {
   return src.slice(i, j);
 }
 
-// The whole generation branch, and nothing past it.
-const DRAFT = lift(PORTAL, 'if (action === "calibrate_style_ai") {', "// ── THE FREE SECOND PASS", "the calibrate_style_ai branch");
+// The whole generation branch, and nothing past it. One function of `streamed` since 2026-09-25
+// (draftAnswer; aiDraftStreamWiring_test).
+const DRAFT = lift(PORTAL, 'if (action === "calibrate_style_ai") return await draftAnswer(', "// ── THE FREE SECOND PASS", "the calibrate_style_ai branch");
 const DIMS = { widthFt: 16, lengthFt: 10, wallHeightFt: 7 };
 
 Deno.test("the draft branch decides v2 with wantsV2Prompt(payload.frame, dims), and only frame \"front\" with dims passes", () => {

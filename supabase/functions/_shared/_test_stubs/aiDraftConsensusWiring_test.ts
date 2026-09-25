@@ -59,7 +59,7 @@ const PARAMS = [
   "videoCount", "dims", "fromVideo", "videoShapePrompt", "SPEC_PROMPT", "apiKey", "draftCallCount", "runDraftCalls",
   "DRAFT_CONSENSUS_GRACE_MS", "fetch", "readDraftReply", "consensusOfCalls", "draftCallsUsage", "recordDraftUsage",
   "releaseHold", "logEdgeError", "req", "clientId", "t0", "requestStartMs", "aiSource", "json", "filedAtReturnSite",
-  "parseModelSpec",
+  "parseModelSpec", "streamed",
 ];
 const RUN = new AsyncFunction(
   ...PARAMS,
@@ -68,7 +68,10 @@ const RUN = new AsyncFunction(
 
 const DIMS = { widthFt: 30, lengthFt: 20, wallHeightFt: 8 };
 const FRAMES = Array.from({ length: 12 }, (_, i) => `https://example.test/walk/f${i + 1}.jpg`);
-type Scenario = { v2: boolean; lean?: boolean; source?: "video" | "combined" | "photos"; videoCount?: number; photoUrls?: string[]; graceMs?: number; abortMs?: number };
+// `streamed` (2026-09-25) is the branch's parameter: true only for the new shell's v2 press, which
+// answers behind a heartbeat and thinks at effort "high" (aiDraftStreamWiring_test). Every case here
+// that does not name it is a request that is not streamed, so it pins the plain request unchanged.
+type Scenario = { v2: boolean; lean?: boolean; streamed?: boolean; source?: "video" | "combined" | "photos"; videoCount?: number; photoUrls?: string[]; graceMs?: number; abortMs?: number };
 
 async function run(s: Scenario, plans: Plan[]) {
   const timers: ReturnType<typeof setTimeout>[] = [];
@@ -124,7 +127,7 @@ async function run(s: Scenario, plans: Plan[]) {
       async (e: { code: string; context?: Record<string, unknown> }) => { logged.push({ code: e.code, context: e.context }); },
       null, "harness-tenant", t0, t0 - 1_000, source,
       (body: Record<string, unknown>, status = 200): Reply => ({ body, status }),
-      filed, parseModelSpec,
+      filed, parseModelSpec, s.streamed ?? false,
     );
     // A return from inside the block is a Reply; falling off its end is the success object.
     const answered = out && "status" in out && "body" in out ? out as Reply : null;
@@ -169,12 +172,12 @@ const REFUSED: Plan = { body: body("", { stop: "refusal", category: "cyber" }), 
 const OVERLOADED: Plan = { status: 529, body: '{"type":"error","error":{"type":"overloaded_error"}}', delayMs: 2 };
 
 // The request the single call has always sent, built HERE, independently of the handler, key for key.
-function expectedBody(r: Awaited<ReturnType<typeof run>>, v2: boolean, lean: boolean, videoCount: number) {
+function expectedBody(r: Awaited<ReturnType<typeof run>>, v2: boolean, lean: boolean, videoCount: number, streamed = false) {
   return JSON.stringify({
     model: v2 ? "claude-opus-5" : "claude-sonnet-5",
     max_tokens: 12000,
     thinking: { type: "adaptive" },
-    output_config: { effort: lean ? "low" : "medium" },
+    output_config: { effort: lean ? "low" : streamed ? "high" : "medium" },
     messages: [{
       role: "user",
       content: [
@@ -227,6 +230,22 @@ Deno.test("a v2 press sends THREE identical requests, all before any answer come
     assert(init.signal !== r.out.aiSignal, "each on its own signal, which the one deadline aborts");
   }
   assertEquals(new Set(r.sent.map((x) => x.init.signal)).size, 3);
+});
+
+Deno.test("a STREAMED v2 press sends the same three requests at effort high, and nothing else changes", async () => {
+  const plain = await run({ v2: true }, [GOOD(), GOOD(), GOOD()]);
+  const r = await run({ v2: true, streamed: true }, [GOOD(), GOOD(), GOOD()]);
+  assertEquals(r.sent.length, 3);
+  assertEquals(r.sentWhenFirstAnswered, 3, "still in parallel");
+  const want = expectedBody(r, true, false, 0, true);
+  for (const { init } of r.sent) {
+    assertEquals(init.headers, HEADERS);
+    assertEquals(init.body, want, "Opus, the v2 prompt, effort high");
+    assertEquals(JSON.parse(init.body).output_config, { effort: "high" });
+  }
+  // The only difference from the plain v2 request is the effort.
+  assertEquals(JSON.parse(r.sent[0].init.body), { ...JSON.parse(plain.sent[0].init.body), output_config: { effort: "high" } });
+  assertEquals(r.out.drafted.d3, plain.out.drafted.d3, "the same reads, the same draft");
 });
 
 // ─── 2. Two of three is enough ─────────────────────────────────────────────────────────────────

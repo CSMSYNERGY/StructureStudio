@@ -88,6 +88,10 @@ import { selfCheckMode, selfCheckRequest, frameKeyWarning } from "../_shared/sty
 import { aiDraftCostCents, aiModelFields } from "../_shared/styleD3.ts";
 // Consensus drafting (2026-09-25): the v2 draft reads the video three times and combines the reads.
 import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftCallsUsage, consensusSplitWarning, DRAFT_CONSENSUS_GRACE_MS } from "../_shared/styleD3.ts";
+// The streamed draft (2026-09-25): a v2 draft answers behind a heartbeat so it can outlive the
+// gateway's 150 s of silence (see draftAnswer below).
+import { wantsStreamedDraft } from "../_shared/styleD3.ts";
+import { heartbeatJsonResponse } from "../_shared/heartbeatJson.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
@@ -453,6 +457,41 @@ function json(body: unknown, status = 200) {
 // said nothing new. Faults still land as `error`; this removes a duplicate, not a record.
 // A WeakSet, so a response that has been answered is not held onto.
 const filedAtReturnSite = new WeakSet<Response>();
+
+// ── THE STREAMED DRAFT (2026-09-25) ──────────────────────────────────────────────────────────
+// How calibrate_style_ai answers: the branch's own Response, or the same answer behind a heartbeat.
+//
+// WHY. The gateway ends a request that has sent nothing for 150 s (a bare 504, invisible to
+// withErrorLog), so the draft's model abort has had to stop at 125 s. At effort "medium", Opus
+// often answered a walk-around in 10-15 s with ~480 output tokens, and those shallow reads were
+// wrong on the hard calls (a shed's high side on the wrong wall 6 times in 7); the reads that
+// thought (3,400-5,400 tokens) took 56-106 s and were right. At "high" all three consensus reads
+// ran past 125 s. The gateway times SILENCE, not the request (a probe that wrote a space every 10 s
+// answered 200 after 220 s), so a streamed draft can take the time a careful read needs.
+//
+// WHICH REQUESTS: wantsStreamedDraft (styleD3.ts), i.e. `stream: true` from the new shell, the v2
+// prompt, and not the lean retry. EVERY OTHER REQUEST gets `work(false)`, the branch's own
+// Response, unchanged: production's older shell, the lean retry and every legacy request.
+//
+// A streamed request answers 200 at once (heartbeatJson.ts) and runs the SAME branch behind it,
+// with `streamed` true: the only things that differ are the model's budget and effort, read inside
+// the branch. Every exit keeps its order and its hold release, ledger write, capture and log rows;
+// a failure's status rides in the body instead of the status line.
+//
+// ⚠️ THE ERROR WRAPPER CANNOT SEE THROUGH THE 200. Unstreamed, withErrorLog files a row for an
+// uncoded 5xx exit ("Could not reach the AI service", the meter's 503s) and for a throw; streamed,
+// it only ever sees a 200 and would file neither. So the work runs inside a REPLAY of the wrapper,
+// on a request carrying the three things the wrapper reads (the URL, the user agent, and the body,
+// for its client id), which files exactly the rows the unstreamed answer would have: the same
+// `alreadyFiled` rule, the same message, the same severity. The replay rethrows a throw, and the
+// heartbeat answers it as a 500.
+function draftAnswer(req: Request, payload: unknown, work: (streamed: boolean) => Promise<Response>): Promise<Response> | Response {
+  if (!wantsStreamedDraft(payload)) return work(false);
+  const ua = req.headers.get("user-agent");
+  const replay = new Request(req.url, { method: "POST", headers: ua ? { "user-agent": ua } : {}, body: JSON.stringify(payload) });
+  const filed = withErrorLog("portal-settings", () => work(true), { alreadyFiled: (res) => filedAtReturnSite.has(res) });
+  return heartbeatJsonResponse(() => filed(replay), { headers: { ...cors, "Content-Type": "application/json" } });
+}
 
 /**
  * A database or storage call failed. Log the real reason server-side; tell the caller
@@ -3492,7 +3531,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // by any owner/admin rather than by whoever holds the operator password. The ledger row
   // is written BEFORE the model call on purpose: a failing style would otherwise be a free
   // retry loop against our API key.
-  if (action === "calibrate_style_ai") {
+  //
+  // The whole branch is ONE function of `streamed` (2026-09-25), answered by draftAnswer above: run
+  // as it is for every request but a streamed v2 draft, and behind a heartbeat for that one.
+  if (action === "calibrate_style_ai") return await draftAnswer(req, payload, async (streamed: boolean): Promise<Response> => {
     // Two callers, one action, one gate, one meter. `source: "video"` means the URLs are
     // frames the browser cut out of a walk-around video (the file itself never leaves the
     // phone) rather than four staged photos — so it takes eight of them and a prompt that
@@ -3818,10 +3860,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // or timed-out reply): same press, same idempotency key — the failed attempt released its hold,
     // and a released key is reusable (248) — at effort "low", which thinks less and so fits. Only a
     // real `true` counts; an older browser never sends it and keeps effort "medium".
+    //
+    // ⚠️ A STREAMED DRAFT HAS NO 150 s GATEWAY (2026-09-25, see draftAnswer): its answer is a 200 that
+    // has been writing a space every 10 s since the request arrived. What bounds it instead is the
+    // platform's wall clock, which let a probe run 220 s; the whole request stays under ~260 s. So
+    // the model gets 230 s, or what is left of 260 s from the request after a slow set-up, and never
+    // under 60 s: the same rule as below with the gateway's 145 s replaced by 260 s. Every request
+    // that is not streamed keeps exactly the rule below.
     const lean = payload.lean === true;
     const aiSource = combined ? "combined" : fromVideo ? "video" : "photos";
     const t0 = Date.now();
-    const draftAbortMs = Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));
+    const draftAbortMs = streamed
+      ? Math.max(60_000, Math.min(230_000, 260_000 - (t0 - requestStartMs)))
+      : Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));
 
     // ── WHAT THE DRAFT CALL USED, on every exit that reached the model (251, 2026-09-23) ──────
     // Until now a draft's tokens were stored only through wallet_capture, and the meter is
@@ -3888,11 +3939,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // shed's high side on the wrong wall 6 times in 7 and read a 16 ft porch as 10-12 ft with 3
         // posts; the reads that did think (3,400-5,400 tokens) got both right. "high" makes every
         // read a careful one. Legacy keeps "medium"; the lean retry keeps "low".
-        // ⚠️ NOT "high" yet: tried live 2026-09-25, all three reads ran past the 125 s draft budget
-        // (the gateway ends a silent request at 150 s), so every press fell to the lean retry.
-        // Until the draft can outlive the gateway, the reads' reasoning is carried in the reply
-        // itself (the prompt's evidence fields) at "medium".
-        output_config: { effort: lean ? "low" : "medium" },
+        // ⚠️ ONLY WHEN STREAMED: tried live 2026-09-25 on the plain request, all three reads ran past
+        // the 125 s draft budget (the gateway ends a silent request at 150 s), so every press fell to
+        // the lean retry. A streamed draft (draftAnswer: the new shell's v2 press) outlives the
+        // gateway with a 230 s budget and thinks "high"; a v2 request that is NOT streamed keeps
+        // "medium" and its 125 s, with the reads' reasoning carried in the reply itself (the prompt's
+        // evidence fields). `streamed` is never true with `lean` (wantsStreamedDraft).
+        output_config: { effort: lean ? "low" : streamed ? "high" : "medium" },
         messages: [{
           role: "user",
           content: [
@@ -3924,7 +3977,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // that agree with the structure chosen for it).
     //
     //   * ONE budget. draftAbortMs above bounds all three together, never each. Once two have
-    //     drafted, the third gets DRAFT_CONSENSUS_GRACE_MS (20 s) more and is then cut off.
+    //     drafted, the third gets DRAFT_CONSENSUS_GRACE_MS (60 s) more and is then cut off.
     //   * A call that fails, is cut off or does not parse is dropped. One read that parses is
     //     enough to answer with; the consensus of one read is that read.
     //   * NONE parsed: the FIRST call SENT (not the first to come back) is classified exactly the
@@ -4247,7 +4300,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // write to finish; this is the last point it can be waited on before the response goes.
     await draftUsageLogged;
     return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, dropped: droppedCount, observed: observedNotes, balanceCents, dims, frameMap, checkId });
-  }
+  });
 
   // ── THE FREE SECOND PASS (2026-09-19) ──────────────────────────────────────────────────
   // The builder pressed Generate once, was held once and charged once, and has their draft.

@@ -1016,6 +1016,29 @@ export function wantsV2Prompt(frame: unknown, dims: KnownDims | null | undefined
   return frame === PROMPT_FRAME_FRONT && !!dims;
 }
 
+// ─── THE STREAMED DRAFT (2026-09-25) ─────────────────────────────────────────────────────────
+// Whether calibrate_style_ai answers this request behind a heartbeat (heartbeatJson.ts), so its
+// draft can run past the gateway's 150 s of silence and its reads can think at effort "high".
+// Decided from the request alone and BEFORE the branch runs, because the 200 has to go out before
+// the work starts, and decided with the functions the branch itself uses for the same questions:
+//   * `stream: true`, a real boolean: the new portal shell's opt-in. Production's older shell never
+//     sends it, so every request it makes is answered exactly as before.
+//   * not `lean: true`: the one automatic retry after a cut-off or timed-out read is a single,
+//     shallow read that fits the old budget, and it keeps that budget.
+//   * the v2 prompt: a shape-first source (video, combined) whose dims parse, with frame "front"
+//     (wantsV2Prompt above). A request whose dims do not parse is refused with a 400 before anything
+//     slow runs, so it is not streamed.
+// aiDraftStreamWiring_test runs this against the branch's own v2Prompt and lean over a grid of
+// requests, so the two cannot disagree about which requests stream.
+export function wantsStreamedDraft(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const p = payload as Record<string, unknown>;
+  if (p.stream !== true || p.lean === true) return false;
+  if (p.source !== "video" && p.source !== "combined") return false;
+  const dims = parseKnownDims(p.dims);
+  return dims.ok && wantsV2Prompt(p.frame, dims.dims);
+}
+
 // THE LEGACY RULER, EXACTLY AS IT SHIPPED ON 2026-09-19 (d3ab404), for callers the gate keeps on
 // the old path. Frozen: the ruler speaks the old frame ("wide across the gable end") because that
 // is the frame the old dimensions card asked in, and the wall height is cut out of the legacy
