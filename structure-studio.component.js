@@ -15545,7 +15545,8 @@ function ssProbeLook(px, w, h, luma) {
 //   · change: a SUSTAINED spike (this step over 1.6 x the clip's median and the next over 1.3 x)
 //     makes a probe fair at best: parallax from walking close past the building
 // The lap is measured in time, each probe's stretch counted at 1 when good, 0.6 when fair and
-// 0.25 when bad. The K picks are the ones whose places along that lap are closest to evenly
+// 0.25 when bad, and scaled by how far the view MOVED over it (ssProbeMotion): a pause counts
+// for a tenth. The K picks are the ones whose places along that lap are closest to evenly
 // spaced (the squared error of every gap against lap / K, the lap's two ends included) plus 0, 1
 // or 4 for a good, fair or bad pick and up to 0.3 for motion blur against its four neighbours.
 // An exact dynamic programme: K x N^2 steps, about 35 000 at 54 probes.
@@ -15563,14 +15564,39 @@ function ssProbeClasses(probes) {
     return c;
   });
 }
+// A PAUSE IS NOT PART OF THE LAP (fix, 2026-09-25). Time is what an orbit advances with only
+// while the builder walks. Standing still at the start, at a corner or at the end, the phone
+// films the same view for as long as they stand there, and a lap measured in plain time spread
+// picks through it: a 15 s pause at the start of a 60 s clip took 3 of the 12 frames, all one
+// view, and those are the back and far-side views the wings and high-side reads depend on.
+//
+// So each step between two probes counts for how far the view moved over it, read off `change`
+// (the mean luma difference the probes already measure): under a quarter of the clip's median
+// change it is a pause and counts 0.1, half the median or more counts in full, a straight ramp
+// between. The knee sits below anything walking produces: on the four real laps (2026-09-24)
+// the smallest step was 0.55 to 0.69 of its clip's median, so none of them moves. A clip with no
+// change at all (a still frame, a tripod) counts every step in full, which is plain time.
+// Returns one number per probe: [i] is the step INTO probe i, and [0] repeats [1] for the stretch
+// before the first probe.
+function ssProbeMotion(probes) {
+  const N = probes.length;
+  const s = probes.slice(1).map((p) => p.change).sort((x, y) => x - y);
+  const mc = s.length ? s[s.length >> 1] : 0;
+  const step = (i) => {
+    if (!(mc > 0) || i < 1 || i >= N) return 1;
+    return 0.1 + 0.9 * Math.max(0, Math.min(1, (probes[i].change / mc - 0.25) / 0.25));
+  };
+  return probes.map((_, i) => step(Math.max(1, i)));
+}
 function ssOrbitPicks(probes, K) {
   const N = probes.length;
   if (N <= K) return probes.map((_, i) => i);
   const q = ssProbeClasses(probes);
+  const move = ssProbeMotion(probes);
   const WEIGHT = [0.25, 0.6, 1], COST = [4, 1, 0];
-  const P = [Math.max(0, probes[0].t) * WEIGHT[q[0]]];
-  for (let i = 1; i < N; i++) P.push(P[i - 1] + Math.max(0, probes[i].t - probes[i - 1].t) * (WEIGHT[q[i - 1]] + WEIGHT[q[i]]) / 2);
-  const lap = P[N - 1] + (Math.max(0, probes[N - 1].t - probes[N - 2].t) / 2) * WEIGHT[q[N - 1]];
+  const P = [Math.max(0, probes[0].t) * WEIGHT[q[0]] * move[0]];
+  for (let i = 1; i < N; i++) P.push(P[i - 1] + Math.max(0, probes[i].t - probes[i - 1].t) * (WEIGHT[q[i - 1]] + WEIGHT[q[i]]) / 2 * move[i]);
+  const lap = P[N - 1] + (Math.max(0, probes[N - 1].t - probes[N - 2].t) / 2) * WEIGHT[q[N - 1]] * move[N - 1];
   const ideal = lap / K;
   const gap = (x) => { const e = ideal > 0 ? (x - ideal) / ideal : 0; return e * e; };
   const own = probes.map((p, i) => {

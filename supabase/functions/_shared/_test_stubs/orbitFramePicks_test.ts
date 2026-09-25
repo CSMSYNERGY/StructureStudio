@@ -46,7 +46,7 @@ Deno.test("every lifted frame-choice region is byte-identical in the two twins",
 // deno-lint-ignore no-explicit-any
 type Any = any;
 const F = new Function(
-  `${blocks.map((b) => b.cmp).join("\n")}; return { SS_VID_FRAMES, SS_VID_PROBE_MAX, ssSkyPixel, ssProbeLook, ssProbeClasses, ssOrbitPicks };`,
+  `${blocks.map((b) => b.cmp).join("\n")}; return { SS_VID_FRAMES, SS_VID_PROBE_MAX, ssSkyPixel, ssProbeLook, ssProbeClasses, ssProbeMotion, ssOrbitPicks };`,
 )() as Record<string, Any>;
 
 // ── Probes drawn by hand: 32x18 RGBA, the size the cutter reads ───────────────────────────
@@ -198,4 +198,66 @@ Deno.test("a motion-blurred probe gives way to its sharp neighbour", () => {
     assert(!blurry.has(i), `picked blurry probe ${i}`);
     assert(Math.abs(i - sharpPicks[k]) <= 2, `pick ${k} moved from ${sharpPicks[k]} to ${i}`);
   });
+});
+
+// ── A pause is not part of the lap (2026-09-25) ────────────────────────────────────────────
+// A builder standing still films one view for as long as they stand there. Measured in plain
+// time, a 15 s pause at the start of a 60 s clip took 3 of the 12 frames and a 30 s pause in the
+// middle of a 90 s clip took 4, every one the same view. The `change` of a still phone is a few
+// luma steps (hand shake, exposure drift); walking is 20 and up, varying.
+const STILL = (i: number) => 1 + (i % 3);                  // a handheld phone, standing still
+const WALK = (i: number) => 20 + ((i * 7) % 5) * 3;        // 20..32, never twice the same in a row
+/** The cutter's schedule over `dur` seconds, whole views throughout, standing still where `still(t)`. */
+function walk(dur: number, still: (t: number) => boolean) {
+  const N = Math.max(12, Math.min(F.SS_VID_PROBE_MAX, Math.round(dur * 1.2)));
+  return Array.from({ length: N }, (_, i) => {
+    const t = dur * ((i + 0.5) / N);
+    return { t, change: i === 0 ? 0 : still(t) ? STILL(i) : WALK(i), sharp: 20, ...WHOLE };
+  });
+}
+
+Deno.test("⚠️ A PAUSE TAKES ONE FRAME AT MOST: 15 s standing still at the start of a 60 s clip", () => {
+  const still = (t: number) => t < 15;
+  const p = walk(60, still);
+  const picks = F.ssOrbitPicks(p, 12);
+  assertEquals(picks.length, 12);
+  for (let k = 1; k < picks.length; k++) assert(picks[k] > picks[k - 1], "walk order");
+  const t = picks.map((i: number) => p[i].t);
+  assert(t.filter(still).length <= 1, `picks in the pause at ${t.filter(still).map((x: number) => x.toFixed(1))}`);
+  // …and the frames it did not spend there cover the walk: no gap over 6 s, the end reached.
+  const walking = t.filter((x: number) => !still(x));
+  assert(walking.length >= 11, String(walking.length));
+  for (let k = 1; k < walking.length; k++) assert(walking[k] - walking[k - 1] < 6, `gap ${walking[k - 1]} → ${walking[k]}`);
+  assert(t[t.length - 1] > 55, `last ${t[t.length - 1]}`);
+});
+
+Deno.test("⚠️ …and 30 s standing still in the middle of a 90 s clip", () => {
+  const still = (t: number) => t >= 30 && t < 60;
+  const p = walk(90, still);
+  const picks = F.ssOrbitPicks(p, 12);
+  assertEquals(picks.length, 12);
+  const t = picks.map((i: number) => p[i].t);
+  assert(t.filter(still).length <= 1, `picks in the pause at ${t.filter(still).map((x: number) => x.toFixed(1))}`);
+  assert(t.filter((x: number) => x < 30).length >= 5 && t.filter((x: number) => x >= 60).length >= 5, t.map((x: number) => x.toFixed(1)).join(" "));
+});
+
+Deno.test("ssProbeMotion: a pause counts a tenth, a walk counts in full, and no change at all is plain time", () => {
+  const m = F.ssProbeMotion(walk(60, (t: number) => t < 15));
+  assert(m.length === 54 && m.every((v: number) => v >= 0.1 - 1e-12 && v <= 1), "one per probe, 0.1..1");
+  assertEquals(m[5], 0.1, "standing still");
+  assertEquals(m[40], 1, "walking");
+  assertEquals(m[0], m[1], "the stretch before the first probe counts like the first step");
+  // A tripod or a still frame: nothing moves anywhere, so nothing is discounted.
+  assert(F.ssProbeMotion(lap(54, 72, () => WHOLE).map((p) => ({ ...p, change: 0 }))).every((v: number) => v === 1));
+});
+
+Deno.test("⚠️ a real walk is still plain time: every step at half the median change or more changes no pick", () => {
+  // The four real laps' smallest steps were 0.55 to 0.69 of their clip's median (2026-09-24).
+  const even = F.ssOrbitPicks(lap(54, 72, () => WHOLE), 12);
+  // Under 1.6 x the median everywhere, so no step is a parallax spike and every probe stays good.
+  const ratios = [0.55, 1, 1.5, 0.7, 1.2, 0.9, 1.25];
+  const uneven = lap(54, 72, () => WHOLE).map((p, i) => ({ ...p, change: i === 0 ? 0 : 20 * ratios[i % ratios.length] }));
+  assert(F.ssProbeClasses(uneven).every((c: number) => c === 2), "every probe good, as in the even lap");
+  assert(F.ssProbeMotion(uneven).every((v: number) => v === 1));
+  assertEquals(F.ssOrbitPicks(uneven, 12), even);
 });
