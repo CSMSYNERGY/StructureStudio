@@ -41,7 +41,7 @@
 //      check with a note; calSelfCheck.mjs runs the check on one that did). A server that says the
 //      draft will never come is shown in its own words, and the key is kept. A `no_row` on a young
 //      press is waited on, not shown. A drop noticed AFTER the press's budget (the page's clock moved
-//      on eight minutes) still asks once and applies the draft it finds. The drop's own client log
+//      on ten minutes) still asks once and applies the draft it finds. The drop's own client log
 //      row is draft_stream_dropped, an info row: the server's pickup rows carry the outcome.
 //
 // Stubbed at the NETWORK layer, like dev/verify-cal3d.mjs: no account, no login, no writes, and
@@ -532,11 +532,12 @@ async function main() {
   r.ok("and it is applied with the same success line", (await successLine()) === normalLine);
   r.ok("and no lost-draft sentence on screen", !(await page.evaluate(() => document.body.innerText)).includes(NEVER));
 
-  // 9d: ⚠️ A PHONE THAT SLEPT THROUGH THE WHOLE PRESS. The drop surfaces after the press's seven
-  // minutes: the page's clock is moved eight minutes on just before the broken body is served, so
-  // `until` is long past when the shell sees the drop. It must still ask ONCE, and apply the draft.
+  // 9d: ⚠️ A PHONE THAT SLEPT THROUGH THE WHOLE PRESS. The drop surfaces after the press's eight
+  // minutes (SS_FLOW_MAX_MS): the page's clock is moved ten minutes on just before the broken body
+  // is served, so `until` is long past when the shell sees the drop. It must still ask ONCE, and
+  // apply the draft.
   stub.drop = "cut";
-  stub.skewMs = 8 * 60 * 1000;
+  stub.skewMs = 10 * 60 * 1000;
   stub.recover = [recovered(8)];
   const d4 = await pressDrop("press 19 (the drop is noticed after the press's budget)");
   await page.evaluate(() => { window.__ssSkewMs = 0; });
