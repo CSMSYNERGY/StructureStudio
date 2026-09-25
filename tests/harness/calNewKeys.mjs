@@ -184,8 +184,10 @@ export async function main() {
     ok("the readout line ends with the posts and the pitch built", /Posts .* clear, porch roof meets the wall at 9' 0" .*\. 4 posts, porch roof 3:12/.test(hint), hint.slice(0, 260));
     await typeNumber(page, attach, 8);
     hint = (await field(page, /^Depth \(ft\)/).innerText()).replace(/\s+/g, " ");
+    // A GIVEN pitch is the builder's measured porch and is honoured down to 6 ft under the beam
+    // (the solver's own pitch still aims for 6' 8"), so the floor the readout names is 6' 0".
     ok("⚠️ hung too low for 3 in 12, the readout says the pitch was LOWERED and to what",
-      /Porch roof lowered to \d+(\.\d)?:12 from 3:12, to keep 6' 8" under the beam\. 4 posts/.test(hint), hint.slice(0, 260));
+      /Porch roof lowered to \d+(\.\d)?:12 from 3:12, to keep 6' 0" under the beam\. 4 posts/.test(hint), hint.slice(0, 260));
     await typeNumber(page, posts, 30);
     d3 = await save(page, calls);
     ok("a post count past the band saves at its top (8)", d3.roof.porchPosts === 8, String(d3.roof.porchPosts));

@@ -5152,6 +5152,11 @@ function d3PorchGeom(S, H, D, trimFace, capY, attachFt, framing) {
   const { POST, HDR_H, HDR_D, RAF_D, PR_T, SHEATH, OVP } = sizes;
   const MIN_CLEAR = 6.67, POST_SPAN = 8.5, RAF_OC = 2;
   const WANT = fr.pitch > 0 ? fr.pitch : 2 / 12;
+  // A pitch the style GIVES (read off the builder's own video) is honoured down to 6 ft under the
+  // header, because real porches are built lower than the 6'8" the solver aims for: Farmstand's
+  // measured 3:12 porch roof leaves about 6'5", and holding it to 6'8" drew it nearly flat beside
+  // a frame that plainly slopes. Without a given pitch the solver's 6'8" stands, unchanged.
+  const CLEAR_FLOOR = fr.pitch > 0 ? 6.0 : MIN_CLEAR;
   const dWall = D3.WALL_T / 2;                              // the gable wall's outer face
   const dPost = D - POST / 2;                               // post centres: outer faces on the deck edge
   const dEnd = D + OVP;                                     // the porch roof's front edge
@@ -5161,14 +5166,14 @@ function d3PorchGeom(S, H, D, trimFace, capY, attachFt, framing) {
   const stack = (p) => (PR_T + SHEATH) * Math.sqrt(1 + p * p);   // roof sheet + ceiling, measured plumb
   const clearAt = (p) => yHigh - p * run - stack(p) - HDR_H;
   let pitch = WANT;
-  if (clearAt(pitch) < MIN_CLEAR) {
+  if (clearAt(pitch) < CLEAR_FLOOR) {
     if (fr.pitch > 0) {
       // The steepest pitch at or under the style's that still clears: clearAt falls as the pitch
       // rises, so bisect between the floor and the ask.
-      if (clearAt(0.05) < MIN_CLEAR) pitch = 0.05;
+      if (clearAt(0.05) < CLEAR_FLOOR) pitch = 0.05;
       else {
         let lo = 0.05, hi = WANT;
-        for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (clearAt(mid) >= MIN_CLEAR) lo = mid; else hi = mid; }
+        for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (clearAt(mid) >= CLEAR_FLOOR) lo = mid; else hi = mid; }
         pitch = lo;
       }
     } else {
@@ -5186,7 +5191,9 @@ function d3PorchGeom(S, H, D, trimFace, capY, attachFt, framing) {
     bays, posts: bays + 1,
     nRaf: Math.max(2, Math.round((2 * side) / RAF_OC) + 1),
     side, dWall, dPost, dEnd,
-    short: postH < 6.66,
+    // Short against the floor in force: 6'8" for the solver's own pitch, as always; 6 ft for a pitch
+    // the style gives, which is the builder's measured porch, not a porch we are proposing.
+    short: postH < (fr.pitch > 0 ? CLEAR_FLOOR - 0.01 : 6.66),
     hNeeded: MIN_CLEAR + HDR_H + stack(WANT) + WANT * run + 0.2,
     sizes,
     ...(fr.pitch > 0 ? { pitchWant: WANT } : {}),

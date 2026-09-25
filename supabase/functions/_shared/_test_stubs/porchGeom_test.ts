@@ -368,7 +368,7 @@ Deno.test("porchPosts: that many posts, evenly spaced, but never closer than a p
   for (const k of ["pitch", "yHigh", "postH", "hdrTop", "ceilWall", "nRaf", "side", "dPost", "dEnd"]) assertEquals(b[k], a[k], k);
 });
 
-Deno.test("porchPitch: asked for, kept where it clears 6'8\", lowered only as far as it must be", () => {
+Deno.test("porchPitch: asked for, kept where it clears 6 ft (a measured porch), lowered only as far as it must be", () => {
   // Plenty of wall: the style's pitch, exactly, and not flagged.
   const tall = F.d3PorchGeom(16, 12, 4, PANEL_TRIM, Infinity, 10, { pitch: 0.25 });
   assertEquals([tall.pitch, tall.pitchClamped, tall.short, tall.pitchWant], [0.25, false, false, 0.25]);
@@ -376,12 +376,21 @@ Deno.test("porchPitch: asked for, kept where it clears 6'8\", lowered only as fa
   const run = tall.dPost - tall.sizes.HDR_D / 2 - tall.dWall;
   const stack = (tall.sizes.PR_T + tall.sizes.SHEATH) * Math.sqrt(1 + 0.25 * 0.25);
   assertAlmostEquals(tall.hdrTop, 10 - 0.25 * run - stack, 1e-12);
-  // Attach 8 on a tall front: 0.25 would leave under 6'8", so it is lowered to the pitch that leaves
-  // exactly 6'8" (6.67) under the header, flagged, and not short.
-  const low = F.d3PorchGeom(16, 10, 4, PANEL_TRIM, Infinity, 8, { pitch: 0.25 });
+  // Attach 8 on a tall front: 0.25 leaves about 6'4" under the header. That is under the solver's
+  // 6'8" but it is the builder's measured porch (Farmstand's is about 6'5"), so it is KEPT: a given
+  // pitch is honoured down to 6 ft, unflagged and not short.
+  const kept = F.d3PorchGeom(16, 10, 4, PANEL_TRIM, Infinity, 8, { pitch: 0.25 });
+  assertEquals([kept.pitch, kept.pitchClamped, kept.short], [0.25, false, false]);
+  assert(kept.postH < 6.67 && kept.postH >= 6.0, String(kept.postH));
+  // Attach 7.3: 0.25 would leave under 6 ft, so it is lowered to the pitch that leaves exactly 6 ft
+  // under the header, flagged, and not short.
+  const low = F.d3PorchGeom(16, 10, 4, PANEL_TRIM, Infinity, 7.3, { pitch: 0.25 });
   assert(low.pitch < 0.25 && low.pitch > 0.05, String(low.pitch));
   assertEquals([low.pitchClamped, low.short, low.pitchWant], [true, false, 0.25]);
-  assertAlmostEquals(low.postH, 6.67, 1e-9);
+  assertAlmostEquals(low.postH, 6.0, 1e-9);
+  // Without a given pitch the solver still holds 6'8" and still calls anything under it short.
+  const solver = F.d3PorchGeom(16, 10, 4, PANEL_TRIM, Infinity, 7.3);
+  assert(solver.postH >= 6.67 - 1e-9 || solver.pitch === 0.05, String(solver.postH));
   // A pitch no wall can carry is floored at 0.05 and the porch is short, as today.
   assertEquals(F.d3PorchGeom(16, 7, 6.5, PANEL_TRIM, Infinity, 0, { pitch: 0.3 }).pitch, 0.05);
   assertEquals(F.d3PorchGeom(16, 7, 6.5, PANEL_TRIM, Infinity, 0, { pitch: 0.3 }).short, true);
@@ -422,8 +431,8 @@ Deno.test("d3PorchReadout reports the posts, pitch and steps that are built", ()
   const r = F.d3PorchReadout({ roof, wallHeightFt: 7.3 }, "16x10");
   assertEquals([r.posts, r.framing.posts, r.framing.pitch, r.framing.steps], [4, 4, 0.25, "left"]);
   assert(r.steps && r.steps.where === "left" && r.steps.x < 0, JSON.stringify(r.steps));
-  // Hung at 8 ft, 0.25 would leave under 6'8": the readout says the pitch it had to build.
-  assert(r.pitch < 0.25 && r.pitchClamped && !r.short, `${r.pitch} ${r.pitchClamped} ${r.short}`);
+  // Hung at 8 ft, 0.25 leaves about 6'4" under the header: a measured porch, so it is built as given.
+  assert(r.pitch === 0.25 && !r.pitchClamped && !r.short, `${r.pitch} ${r.pitchClamped} ${r.short}`);
   // The same as the renderer's function, called the way the renderer calls it.
   const g = F.d3PorchGeom(16, r.wallTop, 4, PANEL_TRIM, F.d3PorchCapFt(roof, 16, 10, 7.3, PANEL_TRIM), 8, F.d3PorchFraming(roof));
   assertEquals([g.posts, g.pitch], [r.posts, r.pitch]);

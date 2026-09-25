@@ -96,11 +96,12 @@ const CASES = [
   { id: "P1", label: "Frame Porch Framing", size: "16x10", H: 7, ux: false, tallNeg: false, high: "south", porch: { wall: "south", onCap: false, span: 16, attach: 8.6 }, colors: FARM_COLORS, eave: "fascia",
     framing: { posts: 4, pitch: 0.25, clamped: false, steps: "left" },
     d3: { roof: { ...FARM_ROOF, porchAttachFt: 8.6, porchPosts: 4, porchPitch: 0.25, porchSteps: "left" }, siding: "batten", colors: FARM_COLORS, wallHeightFt: 7, roofMaterial: "metal" } },
-  // Hung at 8 ft the same 3 in 12 would leave under 6'8" at the header: lowered only as far as that,
-  // and flagged. Steps in the middle bay.
-  { id: "P2", label: "Frame Porch Held Pitch", size: "16x10", H: 7, ux: false, tallNeg: false, high: "south", porch: { wall: "south", onCap: false, span: 16, attach: 8 }, colors: FARM_COLORS, eave: "fascia",
+  // Hung at 7.3 ft the same 3 in 12 would leave under 6 ft at the header: lowered only as far as that,
+  // and flagged. (At 8 ft it now fits: a GIVEN pitch is the builder's measured porch and is honoured
+  // down to 6 ft, not the solver's 6'8".) Steps in the middle bay.
+  { id: "P2", label: "Frame Porch Held Pitch", size: "16x10", H: 7, ux: false, tallNeg: false, high: "south", porch: { wall: "south", onCap: false, span: 16, attach: 7.3 }, colors: FARM_COLORS, eave: "fascia",
     framing: { posts: 4, pitch: 0.25, clamped: true, steps: "center" },
-    d3: { roof: { ...FARM_ROOF, porchPosts: 4, porchPitch: 0.25, porchSteps: "center" }, siding: "batten", colors: FARM_COLORS, wallHeightFt: 7, roofMaterial: "metal" } },
+    d3: { roof: { ...FARM_ROOF, porchAttachFt: 7.3, porchPosts: 4, porchPitch: 0.25, porchSteps: "center" }, siding: "batten", colors: FARM_COLORS, wallHeightFt: 7, roofMaterial: "metal" } },
   // On the BACK (north) wall the person standing in front of the porch faces south, so their right
   // is the WEST: "right" steps stand at -x.
   { id: "P3", label: "Frame Porch Back Steps", size: "24x14", H: 9, ux: false, porch: { wall: "north", onCap: false, span: 24 }, colors: PLAIN,
@@ -452,11 +453,11 @@ async function runCase(ctx, c, ok, dir) {
           }
           if (fr.pitch != null) {
             if (fr.clamped) {
-              ok(`${id}: porchPitch ${fr.pitch} is LOWERED, only as far as 6'8" under the header needs, and flagged`,
-                m.porchRoof.slope < fr.pitch - 0.01 && P.pitchClamped === true && P.short === false && near(P.postH, 6.67, 0.001) && P.pitchWant === fr.pitch,
+              ok(`${id}: porchPitch ${fr.pitch} is LOWERED, only as far as 6 ft under the header needs, and flagged`,
+                m.porchRoof.slope < fr.pitch - 0.01 && P.pitchClamped === true && P.short === false && near(P.postH, 6.0, 0.001) && P.pitchWant === fr.pitch,
                 `slope ${f3(m.porchRoof.slope)} postH ${f3(P.postH)} clamped ${P.pitchClamped} want ${P.pitchWant}`);
             } else {
-              ok(`${id}: porchPitch ${fr.pitch}: the porch roof slopes ${fr.pitch} (+-0.01)`, near(m.porchRoof.slope, fr.pitch, 0.01) && P.pitchClamped === false && P.postH >= 6.67 - 1e-6,
+              ok(`${id}: porchPitch ${fr.pitch}: the porch roof slopes ${fr.pitch} (+-0.01)`, near(m.porchRoof.slope, fr.pitch, 0.01) && P.pitchClamped === false && P.postH >= 6.0 - 1e-6,
                 `slope ${f3(m.porchRoof.slope)} postH ${f3(P.postH)}`);
             }
           }
