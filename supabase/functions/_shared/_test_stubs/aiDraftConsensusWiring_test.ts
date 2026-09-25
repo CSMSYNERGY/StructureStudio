@@ -174,7 +174,7 @@ function expectedBody(r: Awaited<ReturnType<typeof run>>, v2: boolean, lean: boo
     model: v2 ? "claude-opus-5" : "claude-sonnet-5",
     max_tokens: 12000,
     thinking: { type: "adaptive" },
-    output_config: { effort: lean ? "low" : "medium" },
+    output_config: { effort: lean ? "low" : (v2 ? "high" : "medium") },
     messages: [{
       role: "user",
       content: [

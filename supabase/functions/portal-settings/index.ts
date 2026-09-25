@@ -3883,7 +3883,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // top of the spec. A truncated reply is unparseable, not partially useful.
         max_tokens: 12000,
         thinking: { type: "adaptive" },
-        output_config: { effort: lean ? "low" : "medium" },
+        // v2 thinks HARD (2026-09-25). At "medium", Opus often answered a walk-around in 10-15 s with
+        // ~480 output tokens -- the JSON and next to no thinking -- and those shallow reads put a
+        // shed's high side on the wrong wall 6 times in 7 and read a 16 ft porch as 10-12 ft with 3
+        // posts; the reads that did think (3,400-5,400 tokens) got both right. "high" makes every
+        // read a careful one. Legacy keeps "medium"; the lean retry keeps "low".
+        output_config: { effort: lean ? "low" : (v2Prompt ? "high" : "medium") },
         messages: [{
           role: "user",
           content: [

@@ -4377,7 +4377,7 @@ const replyBody = (spec: unknown, extra: Record<string, unknown> = {}) => JSON.s
 Deno.test("draftCallCount: three reads for a v2 press, one for everything else", () => {
   assertEquals(DRAFT_CONSENSUS_CALLS, 3);
   assertEquals(DRAFT_CONSENSUS_QUORUM, 2);
-  assertEquals(DRAFT_CONSENSUS_GRACE_MS, 20_000);
+  assertEquals(DRAFT_CONSENSUS_GRACE_MS, 60_000);
   assertEquals(draftCallCount(true, false), 3, "the new designer's first press");
   assertEquals(draftCallCount(true, true), 1, "its lean retry");
   assertEquals(draftCallCount(false, false), 1, "every legacy request");

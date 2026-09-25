@@ -2965,11 +2965,13 @@ export function selfCheckRequest(opts: {
 // aiDraftConsensusWiring_test runs that wiring.
 
 // Three reads, and the cut-off for a straggler once two are in. The grace is a latency bound, not a
-// quality one: a third read that has not arrived 20 s after the second is not worth the builder's
-// wait, and two reads still take out a wandering number's worst case (see consensusDrafts).
+// quality one. It was 20 s until 2026-09-25, and live runs showed what that cost: the straggler is
+// usually the read that THOUGHT (3,400-5,400 tokens, 56-106 s) while the two quick ones had barely
+// thought at all, so a 20 s grace kept the two shallow reads and threw the careful one away. At
+// effort "high" every read thinks; 60 s lets the slowest of them in within the draft budget.
 export const DRAFT_CONSENSUS_CALLS = 3;
 export const DRAFT_CONSENSUS_QUORUM = 2;
-export const DRAFT_CONSENSUS_GRACE_MS = 20_000;
+export const DRAFT_CONSENSUS_GRACE_MS = 60_000;
 
 // How many calls a draft makes. ONE on every legacy request (production's older designer: its
 // request, its timing and its cost stay exactly what they were) and on the lean retry (a retry after
