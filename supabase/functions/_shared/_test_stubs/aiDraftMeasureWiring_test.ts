@@ -120,8 +120,10 @@ const SIZE = [1600, 900];
 const gable = (risePx: number) => ({ frame: 2, size: SIZE, left: [400, 600], peak: [800, 600 - risePx], right: [1200, 600] });
 // The same with y read UP by mistake: the peak below its ends, which the server refuses.
 const gableYUp = { frame: 2, size: SIZE, left: [400, 300], peak: [800, 500], right: [1200, 300] };
-// A porch roof dropping `dropPx` over 500 px: porch pitch dropPx / 500.
-const porchRoof = (dropPx: number) => ({ frame: 4, size: SIZE, wall: [700, 400], edge: [1200, 400 + dropPx] });
+// A porch roof dropping `dropPx` over 500 px, its plumb corner post under the edge: porch pitch
+// dropPx / 500. The post is what lets the server level the frame; without it the block is not used.
+const porchRoof = (dropPx: number) =>
+  ({ frame: 4, size: SIZE, wall: [700, 400], edge: [1200, 400 + dropPx], postTop: [1200, 400 + dropPx], postBottom: [1200, 600 + dropPx] });
 
 function replyText(own: { pitch: number; porch: number }, measure?: Record<string, unknown>) {
   return JSON.stringify({

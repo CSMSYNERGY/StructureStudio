@@ -1756,7 +1756,7 @@ Deno.test("v2 asks for the pixel points each pitch is read from, in a measure bl
     for (const k of [
       '"pitch": { "frame": <1-based index of the image you read the roof\'s slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] }',
       '| { "frame": <as above>, "size": <as above>, "tallTop": [<x>, <y>], "tallBottom": [<x>, <y>], "shortTop": [<x>, <y>], "shortBottom": [<x>, <y>] },',
-      '"porchPitch": { "frame": <1-based index of the image where the porch roof\'s end is seen square-on from the side>, "size": [<width>, <height>], "wall": [<x>, <y>], "edge": [<x>, <y>] }',
+      '"porchPitch": { "frame": <1-based index of the image where the porch roof\'s end is seen square-on from the side>, "size": [<width>, <height>], "wall": [<x>, <y>], "edge": [<x>, <y>], "postTop": [<x>, <y>], "postBottom": [<x>, <y>] }',
     ]) {
       assert(p.includes(k), `${name}: the schema carries ${k.slice(0, 40)}`);
     }
@@ -1771,6 +1771,11 @@ Deno.test("v2 asks for the pixel points each pitch is read from, in a measure bl
     assert(p.includes("On a building with side wings the gable is the centre section's"), `${name}: the centre section's gable`);
     assert(p.includes("tallTop and tallBottom on its tall edge, shortTop and shortBottom on its short one"), `${name}: the shed's four points`);
     assert(p.includes("wall, where it meets the wall, and edge, at its outer end"), `${name}: the porch roof's two points`);
+    // The post levels a rolled frame (porchPitchFromMeasure); without it the block is not used.
+    assert(p.includes("Then give the porch's OUTER corner post as it stands in that same frame, the post under the edge: postTop, where the post meets the porch roof, and postBottom, its foot on the deck."),
+      `${name}: the porch's corner post`);
+    assert(p.includes("A post stands plumb, so it tells a tilted camera from a sloping roof, and a porchPitch block without it is not used."), `${name}: why the post`);
+    assert(p.includes("a porch roof's end in an image that size might read wall [520, 300], edge [1000, 380], postTop [996, 392], postBottom [990, 700]"), `${name}: a generic porch example`);
     assert(p.includes("Leave a block out when no frame shows it square-on, and leave measure out when neither does."), `${name}: a block may be left out`);
     // The model's own numbers stay in the schema: they are the fallback when the points fail.
     assert(p.includes("Give roof.pitch and roof.porchPitch as usual either way."), `${name}: the numbers are still given`);
@@ -4611,6 +4616,7 @@ Deno.test("consensusOfCalls and draftCallsUsage: the medoid's CALL, the summed u
 import {
   applyMeasuredPitches, parseMeasure, pitchFromMeasure, porchPitchFromMeasure,
   MEASURE_GABLE_MAX_TILT_DEG, MEASURE_GABLE_MIN_SPAN, MEASURE_GABLE_PEAK_T, MEASURE_PORCH_MIN_SPAN, MEASURE_SHED_MIN_SPAN,
+  MEASURE_PORCH_MAX_POST_TILT_DEG, MEASURE_PORCH_MIN_POST,
 } from "./styleD3.ts";
 
 // A 1600 x 900 frame. Generic points only, never a test building's (the real reads below are named).
@@ -4618,7 +4624,10 @@ const M_SIZE = [1600, 900];
 const gableAt = (left: number[], peak: number[], right: number[], size: unknown = M_SIZE) => ({ frame: 3, size, left, peak, right });
 const shedAt = (tallTop: number[], tallBottom: number[], shortTop: number[], shortBottom: number[], size: unknown = M_SIZE) =>
   ({ frame: 5, size, tallTop, tallBottom, shortTop, shortBottom });
-const porchAt = (wall: number[], edge: number[], size: unknown = M_SIZE) => ({ frame: 4, size, wall, edge });
+// A porch roof's two points and its outer corner post, [top, foot]: by default a plumb 200 px post
+// standing under the edge. `null` leaves the post out.
+const porchAt = (wall: number[], edge: number[], size: unknown = M_SIZE, post: number[][] | null = [edge, [edge[0], edge[1] + 200]]) =>
+  ({ frame: 4, size, wall, edge, ...(post ? { postTop: post[0], postBottom: post[1] } : {}) });
 // Points as a camera rolled by `deg` would put them: turned about the frame's centre, then rounded to
 // whole pixels as a real read gives them. Positive is clockwise on screen (y counts down).
 const rolled = (deg: number, ...pts: number[][]) => {
@@ -4635,6 +4644,8 @@ Deno.test("measure: the checks' thresholds are the ones the brief set", () => {
   assertEquals(MEASURE_GABLE_PEAK_T, [0.05, 0.95]);
   assertEquals(MEASURE_SHED_MIN_SPAN, 0.15);
   assertEquals(MEASURE_PORCH_MIN_SPAN, 0.08);
+  assertEquals(MEASURE_PORCH_MAX_POST_TILT_DEG, 8);
+  assertEquals(MEASURE_PORCH_MIN_POST, 0.08);
 });
 
 Deno.test("pitchFromMeasure: a symmetric gable is the rise over half its width", () => {
@@ -4759,8 +4770,42 @@ Deno.test("porchPitchFromMeasure: the porch roof's drop over its run, from the w
   assertEquals(porchPitchFromMeasure(porchAt([700, 400], [1200, 425])), 0.05, "the clamp's own floor");
   assertEquals(porchPitchFromMeasure(porchAt([700, 400], [800, 420])), null, "100 px is under 8% of the width");
   assertEquals(porchPitchFromMeasure(porchAt([700, 400], [900, 440])), 0.2, "200 px is over it");
-  assertEquals(porchPitchFromMeasure({ wall: [700, 400], edge: [1200, 550] }), null, "no size");
+  assertEquals(porchPitchFromMeasure({ wall: [700, 400], edge: [1200, 550], postTop: [1200, 550], postBottom: [1200, 750] }), null, "no size");
   assertEquals(porchPitchFromMeasure(porchAt([700, 400], [1700, 550])), null, "past the right edge");
+  assertEquals(porchPitchFromMeasure(porchAt([700, 400], [1200, 550], M_SIZE, [[1200, 550], [1200, 950]])), null, "a post foot below the image");
+});
+
+Deno.test("⚠️ porchPitchFromMeasure: the corner post levels the frame, so a rolled camera reads the porch roof's own pitch", () => {
+  // A porch roof is nearly flat, so a few degrees of roll is as big as its slope. The 0.3 porch above,
+  // with its outer post, rolled by hand: at 5 degrees the wall and edge alone read 0.21 or 0.4.
+  const scene = [[700, 400], [1200, 550], [1200, 550], [1200, 750]];
+  for (const deg of [3, -3, 5, -5, 7, -7]) {
+    const [wall, edge, top, foot] = rolled(deg, ...scene);
+    const unlevelled = (edge[1] - wall[1]) / Math.abs(edge[0] - wall[0]);
+    assert(Math.abs(unlevelled - 0.3) > (Math.abs(deg) >= 5 ? 0.09 : 0.05), `rolled ${deg}: the roll alone moves it (${unlevelled.toFixed(2)})`);
+    assertEquals(porchPitchFromMeasure(porchAt(wall, edge, M_SIZE, [top, foot])), 0.3, `rolled ${deg} degrees`);
+  }
+  // A post more than 8 degrees off vertical is a wrong landmark or a frame too rolled to trust.
+  for (const deg of [9, -9, 15]) {
+    const [wall, edge, top, foot] = rolled(deg, ...scene);
+    assertEquals(porchPitchFromMeasure(porchAt(wall, edge, M_SIZE, [top, foot])), null, `rolled ${deg} degrees`);
+  }
+  // Levelled, the edge must still be below the wall. Here it drops 40 px in the image (0.08, inside
+  // the clamps), but the post leans 5.7 degrees: stood back up, the edge is 10 px ABOVE the wall.
+  assertEquals(porchPitchFromMeasure(porchAt([700, 400], [1200, 440], M_SIZE, [[1200, 440], [1170, 740]])), null, "above the wall once levelled");
+  // A post upside down (its "foot" above its top) is 180 degrees off vertical.
+  assertEquals(porchPitchFromMeasure(porchAt([700, 400], [1200, 550], M_SIZE, [[1200, 750], [1200, 550]])), null, "top and foot swapped");
+  // Under 8% of the image's height (72 px of 900), a post's angle is a pixel or two of noise.
+  assertEquals(porchPitchFromMeasure(porchAt([700, 400], [1200, 550], M_SIZE, [[1200, 550], [1200, 620]])), null, "a 70 px post");
+  assertEquals(porchPitchFromMeasure(porchAt([700, 400], [1200, 550], M_SIZE, [[1200, 550], [1200, 630]])), 0.3, "an 80 px post");
+});
+
+Deno.test("porchPitchFromMeasure: without its post a porch block is not worked out unlevelled, so the model's number stands", () => {
+  // The unlevelled drop over run is exactly the number a roll spoils; null keeps the model's own.
+  assertEquals(porchPitchFromMeasure(porchAt([700, 400], [1200, 550], M_SIZE, null)), null, "no post");
+  assertEquals(porchPitchFromMeasure({ frame: 4, size: M_SIZE, wall: [700, 400], edge: [1200, 550], postTop: [1200, 550] }), null, "no foot");
+  assertEquals(porchPitchFromMeasure({ frame: 4, size: M_SIZE, wall: [700, 400], edge: [1200, 550], postBottom: [1200, 750] }), null, "no top");
+  assertEquals(porchPitchFromMeasure({ frame: 4, size: M_SIZE, wall: [700, 400], edge: [1200, 550], postTop: "1200,550", postBottom: [1200, 750] }), null, "a post that is not points");
 });
 
 Deno.test("measure: garbage in is null out, never a throw", () => {
