@@ -4754,6 +4754,11 @@ Deno.test("pitchFromMeasure: a distant gable under the rise floor is refused", (
       gableAt([468, 183], [628, 89], [827, 152], size), gableAt([247, 222], [648, 107], [975, 266], size)].map((g) => pitchFromMeasure(g, "gable")),
     [0.44, 0.44, 0.44, 0.38],
   );
+  // Portrait video: frames are cut with the long edge at 1280, so a portrait frame is 720 x 1280 at the
+  // SAME pixel scale. The floor follows the shorter side (57.6 px either way), so Tri Home's first read,
+  // moved into a portrait frame, still gives its 0.44; a floor on the height alone (102.4 px) refused it.
+  assertEquals(pitchFromMeasure(gableAt([169, 483], [328, 389], [527, 451], [720, 1280]), "gable"), 0.44, "portrait, 80 px rise");
+  assertEquals(pitchFromMeasure(gableAt([200, 700], [360, 643], [520, 700], [720, 1280]), "gable"), null, "portrait, 57 px is under 57.6");
 });
 
 Deno.test("pitchFromMeasure: points outside the image, and a size that is not a size, are refused", () => {

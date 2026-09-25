@@ -1836,8 +1836,11 @@ export function pitchFromMeasure(block: unknown, roofType: unknown): number | nu
   // makes the cross product e x d negative, so the height is its negative over the length.
   const rise = -(ex * dy - ey * dx) / span;
   if (!(rise > 0)) return null;
-  // The rise floor: a share of the image's height, or a fixed number of pixels without a size.
-  if (rise < (m.size ? MEASURE_GABLE_MIN_RISE * m.size[1] : MEASURE_GABLE_MIN_RISE_PX)) return null;
+  // The rise floor: a share of the image's SHORTER side, or a fixed number of pixels without a size.
+  // The shorter side, not the height: frames are cut with the long edge at 1280 whichever way the
+  // phone was held, so a portrait 720 x 1280 frame has the same pixel scale as a landscape
+  // 1280 x 720 one, and a landmark is placed to the same few pixels in both.
+  if (rise < (m.size ? MEASURE_GABLE_MIN_RISE * Math.min(m.size[0], m.size[1]) : MEASURE_GABLE_MIN_RISE_PX)) return null;
   const pitch = Math.round(rise / (span / 2) * 100) / 100;
   const [lo, hi] = CLAMPS.pitch;
   return pitch > 0 && pitch >= lo && pitch <= hi ? pitch : null;
