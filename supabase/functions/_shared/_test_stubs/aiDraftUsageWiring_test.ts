@@ -118,13 +118,15 @@ function helper(admin: unknown, logged: Logged[], opts: { ledgerRow?: unknown; t
 }
 
 /** Run the SHIPPED reply-site block and hand back the promise it started. `v2Prompt` is the
- * rollout gate the handler passes to aiModelFields, which the real function answers here. */
-function site(data: unknown, reply: Row, recordDraftUsage: unknown, v2Prompt = false): Promise<void> {
+ * rollout gate the handler passes to aiModelFields, which the real function answers here.
+ * `callsUsage` is consensus drafting's record of every call (2026-09-25): null on a single call,
+ * which is every case below but one, so those pin the single call's record exactly as it was. */
+function site(data: unknown, reply: Row, recordDraftUsage: unknown, v2Prompt = false, callsUsage: unknown = null): Promise<void> {
   const run = new Function(
-    "data", "reply", "text", "recordDraftUsage", "aiModelFields", "v2Prompt",
+    "data", "reply", "text", "recordDraftUsage", "aiModelFields", "v2Prompt", "callsUsage",
     `${SITE_BLOCK}\nreturn draftUsageLogged;`,
   );
-  return run(data, reply, reply.text, recordDraftUsage, aiModelFields, v2Prompt);
+  return run(data, reply, reply.text, recordDraftUsage, aiModelFields, v2Prompt, callsUsage);
 }
 
 // Text the model "wrote". It must never appear in anything that was stored.
@@ -186,6 +188,17 @@ Deno.test("the usage names the model the request ran, so the cost basis can be r
     assertEquals(admin.stored[0].draft_tokens.model, model, `v2Prompt ${v2}`);
     assertEquals(Object.keys(admin.stored[0]).sort(), ["draft_ms", "draft_tokens"], "still only the two 251 columns");
   }
+});
+
+Deno.test("several calls (consensus drafting) record their summed record in place of the single call's", async () => {
+  // aiDraftConsensusWiring_test proves what that record holds; here, only that the reply site takes
+  // it whole when there is one, through the same single write.
+  const admin = fakeAdmin(AFTER_251);
+  const tokens = { model: "claude-opus-5", input: 63000, output: 21000, calls: [{ ok: true }, { ok: true }, { ok: false }] };
+  await site(DATA, TRUNCATED, helper(admin, []), true, { tokens, usage: {} });
+  assertEquals(admin.attempts.length, 1, "one round trip, as before");
+  assertEquals(admin.stored[0].draft_tokens, tokens);
+  assertEquals(Object.keys(admin.stored[0]).sort(), ["draft_ms", "draft_tokens"], "still only the two 251 columns");
 });
 
 Deno.test("⚠️ before 251 is applied, the write fails ALONE, says so once, and does not throw", async () => {

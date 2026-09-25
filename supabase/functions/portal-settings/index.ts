@@ -84,6 +84,8 @@ import { parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfChec
 // 2026-09-24): the check is gated on `frame` like the draft, and a legacy request is d3ab404's.
 import { selfCheckMode, selfCheckRequest, frameKeyWarning } from "../_shared/styleD3.ts";
 import { aiDraftCostCents, aiModelFields } from "../_shared/styleD3.ts";
+// Consensus drafting (2026-09-25): the v2 draft reads the video three times and combines the reads.
+import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftCallsUsage, consensusSplitWarning, DRAFT_CONSENSUS_GRACE_MS } from "../_shared/styleD3.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
@@ -3828,7 +3830,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // release, the log row and the rest of the handler; each exit awaits it just before its
     // `return`, because a task still running after the response is not guaranteed to finish
     // (EdgeRuntime.waitUntil is unused here — see the auto-recharge note above). `draft_ms` is
-    // read when it is CALLED, which is the moment the reply (or the abort) arrived.
+    // read when it is CALLED, which is the moment the reply (or the abort) arrived; with several
+    // calls (consensus drafting, below) the moment the last of them settled, so it is the
+    // builder's wall time, and each call's own time is in draft_tokens.calls.
     //
     // aiDraftUsageWiring_test lifts the body below and RUNS it, so keep it plain JavaScript:
     // the only type annotation is on this first line, which the test uses as its anchor.
@@ -3855,51 +3859,92 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     };
 
     const aiSignal = AbortSignal.timeout(draftAbortMs);
-    let res: Response;
-    let replyBody = "";
-    try {
-      res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        // v2 (the new designer) runs Opus; legacy keeps Sonnet — see aiModelFields in
-        // styleD3.ts for the measurement behind the switch.
-        headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-        signal: aiSignal,
-        body: JSON.stringify({
-          ...aiModelFields(v2Prompt),
-          // Thinking and the answer share this. The video prompt's `observed` block rides on
-          // top of the spec. A truncated reply is unparseable, not partially useful.
-          max_tokens: 12000,
-          thinking: { type: "adaptive" },
-          output_config: { effort: lean ? "low" : "medium" },
-          messages: [{
-            role: "user",
-            content: [
-              // URL sources: the photos live in public buckets, so Anthropic can fetch them
-              // and we never proxy the bytes through this function.
-              ...photoUrls.map((url) => ({ type: "image", source: { type: "url", url } })),
-              // A combined set gets a prompt that says which images are walk frames and which are
-              // staged photographs. Until 2026-09-10 it got VIDEO_SHAPE_PROMPT verbatim, whose
-              // first sentence claims every image is a consecutive frame of one lap - false the
-              // moment a builder's own photos are appended, and false in a way that changes how
-              // the model reconciles the views it is shown.
-              // `dims` rides on both shape-first prompts and on neither of them when it is null:
-              // videoShapePrompt(null) IS the old VIDEO_SHAPE_PROMPT constant and a two-argument
-              // combinedShapePrompt is byte-identical to what shipped, so a request without dims
-              // sends exactly the string it sent before this line changed.
-              // v2Prompt (the rollout gate): the v2 prompt only for the new designer's frame.
-              { type: "text", text: combined ? combinedShapePrompt(videoCount, photoUrls.length - videoCount, dims, v2Prompt) : (fromVideo ? videoShapePrompt(dims, v2Prompt) : SPEC_PROMPT) },
-            ],
-          }],
-        }),
-      });
-      replyBody = await res.text();
-    } catch (e) {
-      // No reply to describe on any of these three exits, so draft_tokens stays null; draft_ms
-      // still says how long the press waited before it gave up.
-      const usageLogged = recordDraftUsage(null);
-      if (aiSignal.aborted) {
-        // Ours, not the network's: the signal fired. Release first, then file one coded row
-        // and mark the response so withErrorLog does not add a generic copy of it.
+    // ── THE REQUEST, BUILT ONCE (2026-09-25) ─────────────────────────────────────────────────
+    // Outside the call, so consensus drafting (below) can send the very same bytes more than once.
+    // The body is the object the single call has always sent, key for key and in the same order,
+    // so a legacy or lean request is byte-for-byte what it was: aiDraftConsensusWiring_test builds
+    // the expected string on its own and compares.
+    const draftInit = {
+      method: "POST",
+      // v2 (the new designer) runs Opus; legacy keeps Sonnet — see aiModelFields in
+      // styleD3.ts for the measurement behind the switch.
+      headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        ...aiModelFields(v2Prompt),
+        // Thinking and the answer share this. The video prompt's `observed` block rides on
+        // top of the spec. A truncated reply is unparseable, not partially useful.
+        max_tokens: 12000,
+        thinking: { type: "adaptive" },
+        output_config: { effort: lean ? "low" : "medium" },
+        messages: [{
+          role: "user",
+          content: [
+            // URL sources: the photos live in public buckets, so Anthropic can fetch them
+            // and we never proxy the bytes through this function.
+            ...photoUrls.map((url) => ({ type: "image", source: { type: "url", url } })),
+            // A combined set gets a prompt that says which images are walk frames and which are
+            // staged photographs. Until 2026-09-10 it got VIDEO_SHAPE_PROMPT verbatim, whose
+            // first sentence claims every image is a consecutive frame of one lap - false the
+            // moment a builder's own photos are appended, and false in a way that changes how
+            // the model reconciles the views it is shown.
+            // `dims` rides on both shape-first prompts and on neither of them when it is null:
+            // videoShapePrompt(null) IS the old VIDEO_SHAPE_PROMPT constant and a two-argument
+            // combinedShapePrompt is byte-identical to what shipped, so a request without dims
+            // sends exactly the string it sent before this line changed.
+            // v2Prompt (the rollout gate): the v2 prompt only for the new designer's frame.
+            { type: "text", text: combined ? combinedShapePrompt(videoCount, photoUrls.length - videoCount, dims, v2Prompt) : (fromVideo ? videoShapePrompt(dims, v2Prompt) : SPEC_PROMPT) },
+          ],
+        }],
+      }),
+    };
+
+    // ── CONSENSUS DRAFTING (2026-09-25) ──────────────────────────────────────────────────────
+    // Live v2 runs of one video give the same shape every time and wandering numbers: a raised
+    // centre's eave read 15, 14 and 12.5 ft, the pitch anywhere from 0.37 to 0.7, 3 porch posts or
+    // 4, the steps in the centre or on the right. So the v2 draft sends the SAME request three
+    // times in parallel and combines the reads (consensusDrafts in styleD3.ts: the medoid read is
+    // the base, every discrete field goes by majority, every number is the median of the reads
+    // that agree with the structure chosen for it).
+    //
+    //   * ONE budget. draftAbortMs above bounds all three together, never each. Once two have
+    //     drafted, the third gets DRAFT_CONSENSUS_GRACE_MS (20 s) more and is then cut off.
+    //   * A call that fails, is cut off or does not parse is dropped. One read that parses is
+    //     enough to answer with; the consensus of one read is that read.
+    //   * NONE parsed: the FIRST call SENT (not the first to come back) is classified exactly the
+    //     way the single call always was, by the exits below, with the hold released as before.
+    //   * ONE call, exactly today's request and handling: every legacy request (production's
+    //     older designer) and the lean retry (draftCallCount). runDraftCalls sends a lone call on
+    //     aiSignal itself.
+    //
+    // THE LEAD is the call this branch answers from: the medoid's call when any call drafted, so
+    // the `observed` notes and the frame map read off `text` below are the medoid's own, and
+    // otherwise the first call sent.
+    const draftCalls = draftCallCount(v2Prompt, lean);
+    const calls = await runDraftCalls({
+      count: draftCalls,
+      deadline: aiSignal,
+      graceMs: DRAFT_CONSENSUS_GRACE_MS,
+      send: (signal) => fetch("https://api.anthropic.com/v1/messages", { ...draftInit, signal }),
+      read: (body) => readDraftReply(body, dims),
+    });
+    // How many walk frames a frame map may point into (see the note beside frameMap, below).
+    // Declared here because the consensus parses every read's map, not only the lead's.
+    const walkFrames = combined ? videoCount : photoUrls.length;
+    const consensus = draftCalls > 1 ? consensusOfCalls(calls, walkFrames) : null;
+    const lead = consensus ? calls[consensus.call] : calls[0];
+    // What EVERY call used, for draft_tokens and the capture. Null on a single call, whose usage is
+    // recorded exactly as it always has been, at each exit below.
+    const callsUsage = draftCalls > 1 ? draftCallsUsage(aiModelFields(v2Prompt).model, calls, lead, consensus) : null;
+    if (lead.threw) {
+      // No reply to describe on any of these three exits, so draft_tokens stays null (on a single
+      // call; several record what each call did); draft_ms still says how long the press waited
+      // before it gave up.
+      const usageLogged = recordDraftUsage(callsUsage ? callsUsage.tokens : null);
+      if (lead.aborted === "deadline") {
+        // Ours, not the network's: the signal fired while this call was waiting (read the moment
+        // it threw, so a first call that failed on its own at 5 s is not relabelled a timeout by
+        // the other two running out the clock). Release first, then file one coded row and mark
+        // the response so withErrorLog does not add a generic copy of it.
         await releaseHold("model timeout");
         await logEdgeError({
           fn: "portal-settings", req, clientId, code: "ai_call_timeout",
@@ -3917,18 +3962,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       await releaseHold("fetch failed");            // never reached Anthropic, or dropped mid-reply
       await usageLogged;
-      return json({ error: `Could not reach the AI service: ${e instanceof Error ? e.message : String(e)}` }, 502);
+      return json({ error: `Could not reach the AI service: ${lead.error instanceof Error ? lead.error.message : String(lead.error)}` }, 502);
     }
-    if (!res.ok) {
-      const usageLogged = recordDraftUsage(null);
-      await releaseHold(`upstream ${res.status}`);  // our 429/500 is not the builder's fault
+    if (!lead.httpOk) {
+      const usageLogged = recordDraftUsage(callsUsage ? callsUsage.tokens : null);
+      await releaseHold(`upstream ${lead.status}`);  // our 429/500 is not the builder's fault
       await usageLogged;
-      return json({ error: `AI service returned ${res.status}: ${replyBody.slice(0, 300)}` }, 502);
+      return json({ error: `AI service returned ${lead.status}: ${lead.body.slice(0, 300)}` }, 502);
     }
-    let data: any = null;
-    try { data = JSON.parse(replyBody); } catch { data = null; }
-    // Every text block joined, never content[0] -- see modelReplyText for why that mattered.
-    const reply = modelReplyText(data);
+    // Read ONCE, inside runDraftCalls: readDraftReply is the JSON parse and modelReplyText that ran
+    // here before (every text block joined, never content[0] -- see modelReplyText for why).
+    const data = lead.reading.data;
+    const reply = lead.reading.reply;
     const text = reply.text;
     // SHAPES ONLY in the failure rows below: no reply text, no image URLs. Enough for the next
     // failure to name its own cause (thinking used the budget, a refusal, a prose reply) and
@@ -3947,8 +3992,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Every outcome that got a reply passes through this line — refused, truncated, unparseable
     // and drafted alike — so the column's distribution is the whole population, not the failures.
     // Counts come off `usage` and are null where it did not say; nothing here carries model text.
+    // Several calls (consensus drafting) record callsUsage instead: the same keys summed over every
+    // call, plus one entry per call, the reads' roofs and the agreement report (draftCallsUsage).
     const draftUsage = data?.usage ?? {};
-    const draftUsageLogged = recordDraftUsage({
+    const draftUsageLogged = recordDraftUsage(callsUsage ? callsUsage.tokens : {
       // Which model ran (2026-09-25), so the cost basis can be re-priced per model later.
       model: aiModelFields(v2Prompt).model,
       input: Number.isFinite(draftUsage.input_tokens) ? draftUsage.input_tokens : null,
@@ -3999,6 +4046,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       await draftUsageLogged;
       return failed;
     }
+    // THE CONSENSUS TAKES THE LEAD'S PLACE here, and only here. Every exit above answered from the
+    // lead's own reply (a medoid always drafted, so none of them is reachable with a consensus);
+    // everything below (the capture, the flags, the ledger's `drafted`, the response) takes the
+    // combined spec.
+    if (consensus) drafted.d3 = consensus.d3;
 
     // ── HOW THE OVERHANG IS FRAMED: NOT ASKED FOR, AND NOT WRITTEN DOWN EITHER ─────────
     // Neither prompt mentions overhangStyle, and that is the point rather than an oversight.
@@ -4022,7 +4074,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // makes that visible rather than surprising.
     let balanceCents: number | null = null;
     if (holdId != null) {
-      const u = data?.usage ?? null;
+      // Consensus drafting paid for EVERY call that answered, so the cost basis is their sum
+      // (draftCallsUsage: Anthropic's keys, summed, with `calls`). A single call is exactly as before.
+      const u = callsUsage ? callsUsage.usage : (data?.usage ?? null);
       const inTok = Number(u?.input_tokens ?? 0), outTok = Number(u?.output_tokens ?? 0);
       // OUR cost basis, not a tenant-facing price, by the model this request ran (aiDraftCostCents,
       // 2026-09-25: the v2 path runs Opus and was recorded at Sonnet's rate). The legacy path's
@@ -4076,9 +4130,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // makes roof.front (gable, gambrel) and roof.highSide (shed) REQUIRED, and a draft without
     // them is drawn in the old frame -- on a long-fronted building, turned round -- so it is the
     // first thing the builder is sent to look at, and the draft comes back low-confidence.
+    //
+    // THE SPLIT CHECK joins them with consensus drafting (2026-09-25): a discrete field no two of
+    // the reads agreed on (1 of 3, or 1 of 2) is named, so the builder is told where the reads split
+    // and the draft comes back low-confidence. A 2-of-3 majority says nothing. Only when there is a
+    // consensus, which is v2 only; the checks around it read the combined spec and the medoid's notes.
     const observedRead = shapeFirst ? parseObservedNotes(text) : null;
     const observedNotes = shapeFirst
-      ? flagObservedNotes(observedRead, v2Prompt ? frameKeyWarning(drafted.d3.roof) : null, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead), v2Prompt ? wingsAgreementWarning(drafted.d3.roof, observedRead) : null, knownDimsNote(dims))
+      ? flagObservedNotes(observedRead, v2Prompt ? frameKeyWarning(drafted.d3.roof) : null, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead), v2Prompt ? wingsAgreementWarning(drafted.d3.roof, observedRead) : null, consensus ? consensusSplitWarning(consensus.report) : null, knownDimsNote(dims))
       : null;
 
     // ── WHICH FRAME GOES WITH WHICH VIEW (2026-09-19) ────────────────────────────
@@ -4092,7 +4151,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // frame — that is the prompt's opening sentence — so the bound is the whole array, which
     // also keeps the legacy onDraftFromVideo caller working: it sends no videoCount at all, and
     // taking `videoCount` there would bound every index to zero and drop the whole map.
-    const walkFrames = combined ? videoCount : photoUrls.length;
+    // (`walkFrames` is declared beside the model call, since consensus drafting parses every
+    // read's map with the same bound.)
     const frameMap = shapeFirst ? parseFrameMap(text, walkFrames) : null;
     // The token for the free follow-up check, and only where a check can happen. The row id is a
     // uuid, so it is unguessable, and the claim that spends it is scoped to this client_id as

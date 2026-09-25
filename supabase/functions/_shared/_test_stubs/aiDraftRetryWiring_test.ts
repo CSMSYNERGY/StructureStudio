@@ -116,7 +116,9 @@ Deno.test("a timed-out reply is retryable, and its hold is released before it an
   assertEquals(out.body.retryable, true);
   assertEquals(out.body.error, "The AI took too long to answer - please try again.");
   // The retry reuses the SAME idempotency key, which is only safe because the hold was released.
-  const branch = lift(DRAFT, "if (aiSignal.aborted) {", "return timedOut;", "the abort branch");
+  // Consensus drafting (2026-09-25): whether the deadline stopped THIS call, read the moment it
+  // threw (runDraftCalls), which on a single call is the aiSignal.aborted this branch read before.
+  const branch = lift(DRAFT, 'if (lead.aborted === "deadline") {', "return timedOut;", "the abort branch");
   assert(branch.indexOf('await releaseHold("model timeout");') > -1, "the hold is released on a timeout");
   assert(branch.indexOf('await releaseHold("model timeout");') < branch.indexOf("const timedOut = json("), "before the reply is built");
   const trunc = lift(DRAFT, "const truncated = reply.stopReason", "return failed;", "the truncation branch");
