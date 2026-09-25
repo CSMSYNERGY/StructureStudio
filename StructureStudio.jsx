@@ -16047,11 +16047,15 @@ const SSC_CAL_CSS = ".ssc-dim-in{font-size:13px}@media (pointer:coarse){.ssc-dim
 // can be asked to sit through, and they are deliberately not the same as the server's.
 //
 //   call 1   the draft        server-side abort at SS_DRAFT_SERVER_MS, and NO client abort.
+//                             STREAMED since 2026-09-25: the server answers 200 at once and
+//                             writes a space every ten seconds, so the gateway's 150 s of
+//                             silence never ends it, and its reads think at effort "high".
 //                             Abandoning a call that has already taken the hold is the one
 //                             thing that would turn a slow generation into a lost $20. A reply
 //                             the server marks `retryable` (cut off at max_tokens, or timed
-//                             out: the hold is already released) is sent ONCE more, lean,
-//                             under the same key, inside the same press -- see calGenerate.
+//                             out: the hold is already released) is sent ONCE more, lean and
+//                             NOT streamed (the old 125 s budget), under the same key, inside
+//                             the same press -- see calGenerate.
 //   render   SS_RENDER_MS     wall clock in this browser. Over it, the check is skipped and
 //                             the builder keeps the draft. WebGL cannot be interrupted, so
 //                             the loser of the race still runs to its own dispose.
@@ -16065,24 +16069,31 @@ const SSC_CAL_CSS = ".ssc-dim-in{font-size:13px}@media (pointer:coarse){.ssc-dim
 //                             up to three times per generation (ssCheckNext says when not).
 //
 // ⚠️ THE BUDGET MOVED, AND ON PURPOSE. One round was 110 + 5 + 60 = 175 s, inside the three
-// minutes the 09-19 design budgeted. A draft now has 125 s (max_tokens 8000 → 12000 after the
+// minutes the 09-19 design budgeted. A draft then had 125 s (max_tokens 8000 → 12000 after the
 // Tri Home press died at the old ceiling), the check 100 s, and a single check round cannot fix
-// what a single check round has already mis-fixed -- so the first round always runs
-// (125 + 5 + 100 = 230 s) and a LATER round starts only while a whole round (5 + 100 s) still
-// fits inside SS_FLOW_MAX_MS of the press: after a draft at its ceiling there is no second
-// round, after a one-minute draft there is one. A check that answers in its usual half-minute
-// leaves room for all three. The one path past five minutes is a draft the server asked us to
-// retry (two drafts), and ssCheckNext gives that path no second round. Still no watchdog that
-// could throw away a paid draft to enforce any of it.
+// what a single check round has already mis-fixed -- so the first round always runs and a LATER
+// round starts only while a whole round (5 + 100 s) still fits inside SS_FLOW_MAX_MS of the press.
+//
+// ⚠️ AND AGAIN ON 2026-09-25, for the streamed draft. Shallow reads were the wrong reads (a shed's
+// high side on the wrong wall 6 times in 7), the reads that thought took 56-106 s, and at effort
+// "high" all three consensus reads ran past 125 s. So the draft now has 230 s (the server's own
+// rule: 230 s, or what is left of 260 s after a slow set-up) and the press has seven minutes. The
+// first round always runs (230 + 5 + 100 = 335 s at every ceiling). After a draft at its ceiling a
+// second round starts only if the first check answered inside 80 s (its usual half-minute does);
+// after a one-minute draft all three rounds fit. The one path past seven minutes is a draft the
+// server asked us to retry (the streamed draft at 230 s, then the lean one at its own 125 s), and
+// ssCheckNext gives that path no second round. Still no watchdog that could throw away a paid
+// draft to enforce any of it.
 const SS_RENDER_MS = 5000;
 const SS_CHECK_MS = 100000;
 // After SS_RENDER_MS on purpose: selfCheckPanel_test lifts this block from that line.
-const SS_DRAFT_SERVER_MS = 125000;
+const SS_DRAFT_SERVER_MS = 230000;
 const SS_CHECK_ROUNDS = 3;
-const SS_FLOW_MAX_MS = 300000;
-// When the progress card stops saying "usually one to three minutes" and says so. Moved with
-// the rounds: at 90 s it fired on an ordinary press that was merely on its second check.
-const SS_SLOW_MS = 180000;
+const SS_FLOW_MAX_MS = 420000;
+// When the progress card stops saying "usually three to five minutes" and says so: at five
+// minutes, past the press it describes. Moved with the streamed draft (2026-09-25): at three
+// minutes it fired on an ordinary press whose draft was merely thinking.
+const SS_SLOW_MS = 300000;
 // How far one arrow key turns a compare render. 15° is small enough to land on a frame's own
 // angle and big enough that a builder is not pressing it forty times.
 const SS_SPIN_STEP_DEG = 15;
@@ -17899,7 +17910,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Where a drag started, and how far it has travelled since. A ref, because a pointermove
   // that re-rendered the panel would fight the drag it is trying to follow.
   const calDragRef = useRef(null);      // { viewpoint, x, from } | null
-  // "Still going." after a minute and a half. A boolean rather than a live elapsed counter:
+  // "Still going." after SS_SLOW_MS (five minutes). A boolean rather than a live elapsed counter:
   // a number ticking up beside a paid generation reads as a stopwatch on a fault, and the
   // only thing a builder can do with it is worry.
   const [adminCalSlow, setAdminCalSlow] = useState(false);
@@ -17907,7 +17918,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (!adminCalBusy || !adminCalCheck) { setAdminCalSlow(false); return undefined; }
     const t = setTimeout(() => setAdminCalSlow(true), SS_SLOW_MS);
     return () => clearTimeout(t);
-    // Keyed on the press, not on the step: the ninety seconds is the whole wait, and
+    // Keyed on the press, not on the step: SS_SLOW_MS is the whole wait, and
     // restarting the clock at each step would mean it never fired.
   }, [adminCalBusy, adminCalCheck && adminCalCheck.at]);
   // Which run a late answer belongs to. A builder who presses Generate again while a check is
@@ -23816,7 +23827,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         <div style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", lineHeight: 1.5 }}>
                           {adminCalSlow
                             ? "Still going. Big videos take longer — don't close the page."
-                            : "Usually one to three minutes. You can leave this page open and come back."}
+                            : "Usually three to five minutes — it studies your video carefully. You can leave this page open and come back."}
                         </div>
                         {/* THE MONEY LINE. Under a rule, on every render of this card. */}
                         <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #DDD6FE", fontSize: 11, color: "#4C1D95", fontWeight: 700, lineHeight: 1.5 }}>

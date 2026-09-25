@@ -1662,7 +1662,23 @@ function Dashboard({ session }) {
        marked `retryable` -- cut off at max_tokens, or past its own abort, with the hold already
        released. It rides the SAME idempotencyKey, and the server answers it with less thinking.
        The flag is read off the refusal's body here, because only this function can see it:
-       supabase-js leaves a non-2xx body unread on `error.context`. */
+       supabase-js leaves a non-2xx body unread on `error.context`.
+
+       `stream: true` (2026-09-25) asks for the STREAMED draft: the server answers 200 at once,
+       writes a space every ten seconds, then writes the JSON. The gateway ends a request that is
+       silent for 150 s, so an unstreamed draft has to stop at 125 s and cannot think hard; streamed,
+       it gets up to 230 s and thinks at effort "high". Sent on every press but the lean retry, a
+       short read that fits the old budget. The server streams only a v2 request (frame "front" with
+       dims, which this always is), and a function that has never heard of the key answers as before.
+       No client abort, as before: the server's clock is the only one, and abandoning this call is how
+       a slow generation becomes a lost $20.
+
+       ⚠️ A STREAMED FAILURE ARRIVES AS A 200. Its status line went out before the work began, so the
+       server writes the refusal it would have sent as a body that also carries `status`, with `error`,
+       `code` and `retryable` exactly as before. It is turned back into the SAME failure a non-2xx
+       becomes here: the same sentence (01-core's invoke wrapper puts a non-2xx body's `error` on the
+       message; this reads it off the body), the same `ssRetryable`, and so the same one lean retry
+       under the same key in calGenerate. The designer cannot tell the two apart. */
     onDraftFromCombined: async (photoUrls, styleValue, videoCount, idempotencyKey, dims, opts) => {
       // videoCount says how many of the LEADING urls are walk-around frames, so the server can
       // hand the model a prompt that describes the set it is actually being given rather than
@@ -1709,7 +1725,15 @@ function Dashboard({ session }) {
       // says "across the gable end", the frame ITS card asked in. Sent on the lean retry too.
       const body = { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined, dims: d, frame: "front" };
       if (opts && opts.lean) body.lean = true;
+      else body.stream = true;
       const { data, error } = await sb.functions.invoke("portal-settings", { body });
+      // A STREAMED ANSWER THAT BROKE OFF mid-body (the connection dropped): supabase-js hands back
+      // the JSON parser's own error, or the body read's, and neither sentence means anything to a
+      // builder. Said plainly instead, and NOT retryable: the server may have finished and charged,
+      // and the builder's own retry under the same key is what finds that out (already_charged).
+      if (error && body.stream && (error.name === "SyntaxError" || error.name === "TypeError")) {
+        throw new Error("The connection dropped before the answer arrived - please try again.");
+      }
       // `ssRetryable` IS THE SERVER'S WORD, NEVER A GUESS FROM THE STATUS. A 502 is also a model
       // refusal or an unreachable AI service, and resending those is a second identical failure
       // on the builder's clock. Only a body saying `retryable: true` earns the one lean retry.
@@ -1720,6 +1744,15 @@ function Dashboard({ session }) {
           const said = ctx && typeof ctx.clone === "function" ? await ctx.clone().json() : null;
           if (said && said.retryable === true) err.ssRetryable = true;
         } catch (_e) { /* no body, or not JSON: not retryable */ }
+        throw err;
+      }
+      // THE STREAMED FAILURE (see the note above this function): a 200 whose body carries the
+      // status it would have had. The same Error the branch above builds for that status: the
+      // server's sentence (error, else message, which is what 01-core puts on a non-2xx), and the
+      // server's `retryable`.
+      if (data && typeof data === "object" && (data.error || (Number.isInteger(data.status) && data.status >= 400))) {
+        const err = new Error(data.error || data.message || "Generating failed");
+        if (data.retryable === true) err.ssRetryable = true;
         throw err;
       }
       if (!data || !data.ok || !data.d3) {
@@ -1758,7 +1791,7 @@ function Dashboard({ session }) {
        THE CLIENT ABORT IS REAL, unlike the generation's. The server gives up at 90 s on the v2
        check this designer asks for (45 s on the legacy one); 100 here is far enough above that a
        server which answered in time is still heard, it matches the component's SS_CHECK_MS so
-       the five-minute press budget plans with the number actually in force, and it bounds the
+       the press budget (SS_FLOW_MAX_MS) plans with the number actually in force, and it bounds the
        wait at something a person will sit through. Abandoning THIS call costs nothing, which is
        exactly what separates it from the one above.
 

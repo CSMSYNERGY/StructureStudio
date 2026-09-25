@@ -26,6 +26,11 @@
 //      press, no second press asked of the builder. Never a third call, never on any other
 //      failure (1-6 above are all non-retryable, and every one of them is exactly one call), and
 //      a press that fails lean as well leaves the key pending for the builder's own retry.
+//   8. ⚠️ THE STREAMED ANSWER (2026-09-25). A press asks for `stream: true`, and the server answers
+//      200, a heartbeat of spaces, then the JSON, with a failure riding in that body beside the
+//      status it would have had. A `retryable` failure there must still earn exactly ONE lean retry
+//      under the SAME key, the lean retry must not ask for a stream, and a failure that is not
+//      retryable is shown in the server's own words and never resent.
 //
 // Stubbed at the NETWORK layer, like dev/verify-cal3d.mjs: no account, no login, no writes, and
 // the artifacts under test are the compiled bundles the browser really loads. A change that was
@@ -82,8 +87,12 @@ const CONFIG = {
 //   fail       a 503 with no `retryable`: the old timeout shape, which the builder retries
 //   retryable  every call answers 502 { retryable: true }: cut off, hold released
 //   retryOnce  the first call of a press is retryable, the lean one succeeds
+//   streamed   a request that asks for `stream: true` is answered the way the server streams it:
+//              200, spaces, then the JSON, a failure's status inside it (off: the answer an older
+//              function gives, which never heard of the key)
+//   refuse402  every call answers insufficient funds: a refusal, never retryable
 const generateCalls = [];
-const stub = { fail: false, retryable: false, retryOnce: false };
+const stub = { fail: false, retryable: false, retryOnce: false, streamed: false, refuse402: false };
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 
@@ -141,6 +150,17 @@ async function main() {
       if (a === "catalog") return json(route, { ok: true, aiReady: true, styles: STYLES, sizes: [], layoutItems: [], fixtures: [], colors: [] });
       if (a === "calibrate_style_ai") {
         generateCalls.push(body);
+        // THE SERVER'S STREAMED SHAPE (heartbeatJson.ts): a 200 whatever happened, a heartbeat, then
+        // the object -- a failure's own object plus the status it would have had.
+        const answer = (obj, status = 200) => (stub.streamed && body.stream === true)
+          ? route.fulfill({
+            status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" },
+            body: "     " + JSON.stringify(status === 200 ? obj : { ...obj, status }),
+          })
+          : json(route, obj, status);
+        if (stub.refuse402) {
+          return answer({ error: "This 3D generation costs $20.00 and your wallet has $5.00. Add funds in Settings → Billing.", code: "insufficient_funds", priceCents: 2000, balanceCents: 500 }, 402);
+        }
         // 503, not a dropped connection: this is the shape of the timeout path the key exists
         // for — the server answered, the hold was released, and the builder has every reason to
         // press again.
@@ -148,11 +168,11 @@ async function main() {
         // THE SERVER'S OWN SHAPE for a reply it could not finish (contract §3): the hold is
         // released, the sentence is for a person, and `retryable` is for this panel.
         const cutOff = { error: "The AI ran out of room before finishing - please try again.", code: "ai_spec_truncated", retryable: true };
-        if (stub.retryable) return json(route, cutOff, 502);
-        if (stub.retryOnce && !body.lean) return json(route, cutOff, 502);
+        if (stub.retryable) return answer(cutOff, 502);
+        if (stub.retryOnce && !body.lean) return answer(cutOff, 502);
         // Slow enough that the progress card's "reading it again" line can be caught in flight.
         if (stub.retryOnce && body.lean) await new Promise((res) => setTimeout(res, 1500));
-        return json(route, {
+        return answer({
           ok: true,
           d3: { roof: { type: "gambrel", pitch: 0.5, overhang: 0.8 }, wallHeightFt: 7.5, siding: null, colors: { body: "#00ff00" } },
           frames: (body.photoUrls || []).length, dropped: 0,
@@ -293,6 +313,11 @@ async function main() {
   const t1 = await pressRetry("press 7 (cut off, then the lean retry lands)", 2);
   r.ok("⚠️ THE FIRST CALL WAS AN ORDINARY ONE", Boolean(t1.calls[0]) && !("lean" in t1.calls[0]), JSON.stringify(t1.calls[0] && { lean: t1.calls[0].lean }));
   r.ok("⚠️ AND THE AUTOMATIC SECOND ONE ASKED FOR A LEAN ANSWER", Boolean(t1.calls[1]) && t1.calls[1].lean === true, JSON.stringify(t1.calls[1] && { lean: t1.calls[1].lean }));
+  // The press asks for the streamed draft; the lean retry, a short read on the old budget, does not.
+  // (This stub answers plainly, as a function that never heard of the key would.)
+  r.ok("the press asked for a stream, and the lean retry did not",
+    t1.calls.length === 2 && t1.calls[0].stream === true && !("stream" in t1.calls[1]),
+    JSON.stringify(t1.calls.map((c) => c.stream)));
   r.ok("⚠️ UNDER THE SAME KEY — one intent, one charge",
     t1.calls.length === 2 && t1.calls[0].idempotencyKey === t1.calls[1].idempotencyKey,
     t1.calls.map((c) => c.idempotencyKey).join(" then "));
@@ -320,6 +345,34 @@ async function main() {
     t3.calls.length === 2 && t2.calls[0] && t3.calls[0].idempotencyKey === t2.calls[0].idempotencyKey,
     `${t2.calls[0] && t2.calls[0].idempotencyKey} then ${t3.calls[0] && t3.calls[0].idempotencyKey}`);
   stub.retryable = false;
+
+  // ── 8: the STREAMED answer ────────────────────────────────────────────────────────────────
+  // Cut off, but in a 200's body: the failure arrives after a heartbeat, carrying status 502 and
+  // retryable. The designer must not be able to tell it from the 502 above.
+  stub.streamed = true; stub.retryOnce = true;
+  const s1 = await pressRetry("press 10 (streamed: cut off in the body, then the lean retry lands)", 2);
+  r.ok("⚠️ THE PRESS ASKED FOR THE STREAMED DRAFT", Boolean(s1.calls[0]) && s1.calls[0].stream === true && !("lean" in s1.calls[0]),
+    JSON.stringify(s1.calls[0] && { stream: s1.calls[0].stream, lean: s1.calls[0].lean }));
+  r.ok("⚠️ A RETRYABLE FAILURE IN A 200's BODY EARNED THE ONE LEAN RETRY, NOT STREAMED",
+    Boolean(s1.calls[1]) && s1.calls[1].lean === true && !("stream" in s1.calls[1]),
+    JSON.stringify(s1.calls[1] && { stream: s1.calls[1].stream, lean: s1.calls[1].lean }));
+  r.ok("⚠️ UNDER THE SAME KEY — one intent, one charge",
+    s1.calls.length === 2 && s1.calls[0].idempotencyKey === s1.calls[1].idempotencyKey && s1.calls[0].idempotencyKey === (t2.calls[0] && t2.calls[0].idempotencyKey),
+    s1.calls.map((c) => c.idempotencyKey).join(" then "));
+  r.ok("the progress card said it was reading again", /ran out of room before it finished/.test(s1.saw), s1.saw.slice(0, 120));
+  await page.waitForFunction(() => /Read \d+ view/.test(document.body.innerText), null, { timeout: 20000 }).catch(() => {});
+  r.ok("⚠️ AND THE DRAFT LANDED, read out of the lean retry", /Read \d+ view/.test(await page.evaluate(() => document.body.innerText)));
+  // A streamed refusal that is NOT retryable: one call, the server's own words, and the key kept
+  // for the builder's own retry of the same intent.
+  stub.retryOnce = false; stub.refuse402 = true;
+  const s2 = await pressRetry("press 11 (streamed: insufficient funds in the body)", 1);
+  r.ok("⚠️ A STREAMED REFUSAL IS NEVER RETRIED", s2.calls.length === 1 && s2.calls[0].stream === true, String(s2.calls.length));
+  r.ok("and the builder reads the server's own sentence", /Add funds in Settings/.test(await page.evaluate(() => document.body.innerText)));
+  const s3 = await pressRetry("press 12 (the builder's own retry of the refused press)", 1);
+  r.ok("the builder's own retry of a refused press keeps its key",
+    Boolean(s3.calls[0]) && Boolean(s2.calls[0]) && s3.calls[0].idempotencyKey === s2.calls[0].idempotencyKey && s3.calls[0].idempotencyKey !== s1.calls[0].idempotencyKey,
+    `${s2.calls[0] && s2.calls[0].idempotencyKey} then ${s3.calls[0] && s3.calls[0].idempotencyKey}`);
+  stub.refuse402 = false; stub.streamed = false;
 
   // ── 6: nothing slipped through without one ───────────────────────────────────────────────
   const missing = generateCalls.filter((c) => !c.idempotencyKey).length;

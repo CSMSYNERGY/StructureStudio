@@ -375,7 +375,12 @@ __ssFunctions.invoke = async (name, opts) => {
       // What makes a refusal suspicious is REPETITION, so the row has to survive:
       //   select message, count(*) from app_errors where severity = 'info'
       //   group by 1 having count(*) > 20 order by 2 desc;
-      const st = (res.error && res.error.ssStatus) || null;
+      // A STREAMED answer (calibrate_style_ai's v2 draft, 2026-09-25) is a 200 whose JSON carries the
+      // status it would have had, because its status line went out before the work began. Read it
+      // from there, or every streamed refusal (a 402, a 409, a 429) is filed as a fault.
+      const st = (res.error && res.error.ssStatus)
+        || (!res.error && res.data && res.data.error && Number.isInteger(res.data.status) && res.data.status >= 400 ? res.data.status : null)
+        || null;
       // A transport failure on a page that is ALREADY LEAVING is the navigation killing its
       // own request, not the function being unreachable. Same treatment, and for the same
       // reason, as `session_reconnecting` above: demoted to info under its OWN code so it

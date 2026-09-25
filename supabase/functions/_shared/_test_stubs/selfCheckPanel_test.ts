@@ -224,7 +224,7 @@ Deno.test("the four questions are the measured failure list, in order", () => {
   }
 });
 
-Deno.test("⚠️ the clocks: the first round always fits, and no LATER round runs past five minutes", () => {
+Deno.test("⚠️ the clocks: the first round always fits, and no LATER round runs past seven minutes", () => {
   // THE BUDGET MOVED ON 2026-09-24, deliberately. This test used to pin 110 + 5 + 60 <= 180 s:
   // one round inside three minutes. The draft now has 125 s (max_tokens 8000 -> 12000) and the
   // check runs up to three rounds, so the rule is restated rather than loosened: the FIRST
@@ -234,7 +234,13 @@ Deno.test("⚠️ the clocks: the first round always fits, and no LATER round ru
   assertEquals(F.SS_CHECK_ROUNDS, 3);
   assert(F.SS_DRAFT_SERVER_MS + F.SS_RENDER_MS + F.SS_CHECK_MS <= F.SS_FLOW_MAX_MS,
     `${F.SS_DRAFT_SERVER_MS} + ${F.SS_RENDER_MS} + ${F.SS_CHECK_MS} is over ${F.SS_FLOW_MAX_MS}`);
-  assert(F.SS_FLOW_MAX_MS <= 300000, "five minutes is the ceiling this was designed to");
+  // SEVEN MINUTES since 2026-09-25: the draft is streamed and thinks at effort "high" inside the
+  // server's 230 s (it was 125 s, capped by the gateway's 150 s of silence, and five minutes).
+  assertEquals(F.SS_DRAFT_SERVER_MS, 230000, "the streamed draft's model budget, portal-settings' 230 s");
+  assert(F.SS_FLOW_MAX_MS <= 420000, "seven minutes is the ceiling this was designed to");
+  // A slow set-up can push the streamed draft's end to 260 s after the request (the server's rule is
+  // 230 s or what is left of 260 s); the first round still fits after that.
+  assert(260000 + F.SS_RENDER_MS + F.SS_CHECK_MS <= F.SS_FLOW_MAX_MS, "the first round fits after the latest streamed draft");
   // The worst ordinary press: the slowest draft, then every round at its own ceiling, each one
   // started only when ssCheckNext allows it.
   const worst = (draftMs: number) => {
@@ -249,21 +255,28 @@ Deno.test("⚠️ the clocks: the first round always fits, and no LATER round ru
   };
   const one = worst(F.SS_DRAFT_SERVER_MS);
   assert(one.t <= F.SS_FLOW_MAX_MS, `the worst ordinary press ends at ${one.t}`);
-  // 2026-09-24: the check's abort went 60 → 100 s with the server's v2 check going 45 → 90 s, so
-  // a draft that used its whole 125 s no longer leaves room for a second round at the ceiling
-  // timings (230 + 105 > 300). That is the budget working, not a regression: a later round only
-  // starts when it can finish inside five minutes. A draft that answers in a minute still gets
-  // a second look even when every check runs to its abort.
+  // A draft that used its whole 230 s leaves no room for a second round at the ceiling timings
+  // (335 + 105 > 420). That is the budget working, not a regression: a later round only starts
+  // when it can finish inside seven minutes. A draft that answers in a minute still gets a second
+  // look even when every check runs to its abort, and a ceiling draft whose first check answered
+  // in its usual half-minute does too.
   assertEquals(one.rounds, 1);
   assertEquals(one.stop, "time");
   const minute = worst(60000);
   assert(minute.t <= F.SS_FLOW_MAX_MS, `a one-minute draft's press ends at ${minute.t}`);
   assert(minute.rounds >= 2, `a one-minute draft still gets a second look (${minute.rounds} rounds, stopped on ${minute.stop})`);
-  // THE RETRY PATH: two drafts at the ceiling. It is the one path past five minutes, and it
-  // takes no second round -- which is what keeps it to one check's worth past the ceiling.
-  const retried = worst(2 * F.SS_DRAFT_SERVER_MS);
-  assertEquals(retried.rounds, 1);
-  assertEquals(retried.stop, "time");
+  const quickCheck = F.SS_DRAFT_SERVER_MS + F.SS_RENDER_MS + 30000;
+  assertEquals(F.ssCheckNext({ verdict: "corrections", d3: {}, changed: [{ field: "roof.pitch" }] }, 0, [], "b", quickCheck), null,
+    "a ceiling draft whose first check took 30 s goes round again");
+  // THE RETRY PATH: the streamed draft at its ceiling, then the lean retry, which is NOT streamed and
+  // keeps the old 125 s. It is the one path past seven minutes, and it takes no second round --
+  // which is what keeps it to one check's worth past the ceiling. (Two streamed drafts would stop
+  // the same way: the bound below holds for any retry at least as long.)
+  for (const retry of [125000, F.SS_DRAFT_SERVER_MS]) {
+    const retried = worst(F.SS_DRAFT_SERVER_MS + retry);
+    assertEquals(retried.rounds, 1);
+    assertEquals(retried.stop, "time");
+  }
   // And the check's client abort has to sit ABOVE the server's own 90 s for the v2 check, with
   // room for the reply to travel, or a server that answered in time would never be heard.
   assert(F.SS_CHECK_MS >= 90000 + 10000, String(F.SS_CHECK_MS));
