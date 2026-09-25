@@ -88,6 +88,8 @@ import { selfCheckMode, selfCheckRequest, frameKeyWarning } from "../_shared/sty
 import { aiDraftCostCents, aiModelFields } from "../_shared/styleD3.ts";
 // Consensus drafting (2026-09-25): the v2 draft reads the video three times and combines the reads.
 import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftCallsUsage, consensusSplitWarning, DRAFT_CONSENSUS_GRACE_MS } from "../_shared/styleD3.ts";
+// Measured pitches (2026-09-26): each v2 read's pitches are worked out from its own pixel points.
+import { draftReadSample } from "../_shared/styleD3.ts";
 // The streamed draft (2026-09-25): a v2 draft answers behind a heartbeat so it can outlive the
 // gateway's 150 s of silence (see draftAnswer below).
 import { wantsStreamedDraft, DRAFT_STREAM_DEADLINE_MS } from "../_shared/styleD3.ts";
@@ -4181,13 +4183,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // THE LEAD is the call this branch answers from: the medoid's call when any call drafted, so
     // the `observed` notes and the frame map read off `text` below are the medoid's own, and
     // otherwise the first call sent.
+    //
+    // MEASURED PITCHES (2026-09-26), v2 only: the v2 reply carries `measure`, the pixel points each
+    // pitch is read from, and readDraftReply works each read's pitch and porch pitch out from its OWN
+    // points before the consensus sees it, so the median is over measured numbers. A read whose
+    // points are missing or fail the checks keeps the model's own number. Every legacy request
+    // passes false and reads exactly as before.
     const draftCalls = draftCallCount(v2Prompt, lean);
     const calls = await runDraftCalls({
       count: draftCalls,
       deadline: aiSignal,
       graceMs: DRAFT_CONSENSUS_GRACE_MS,
       send: (signal) => fetch("https://api.anthropic.com/v1/messages", { ...draftInit, signal }),
-      read: (body) => readDraftReply(body, dims),
+      read: (body) => readDraftReply(body, dims, v2Prompt),
     });
     // How many walk frames a frame map may point into (see the note beside frameMap, below).
     // Declared here because the consensus parses every read's map, not only the lead's.
@@ -4267,6 +4275,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       stopReason: reply.stopReason,
       textChars: text.length,
       blockTypes: reply.blockTypes,
+      // The v2 lean retry's ONE read (2026-09-26): its roof and where its pitches came from, as the
+      // three-read record keeps every read's in `samples`. Absent on every legacy reply.
+      ...(lead.reading.pitch ? { samples: [draftReadSample(lead.reading)] } : {}),
     });
     if (reply.stopReason === "refusal") {
       await releaseHold("model refused");
@@ -4282,8 +4293,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return refused;
     }
     // The builder's numbers go over the model's INSIDE parseModelSpec, between the inches fold
-    // and the sanitiser — see its header for why that is the only position that works.
-    const drafted = parseModelSpec(text, dims);
+    // and the sanitiser — see its header for why that is the only position that works. On v2 the
+    // reply's own points then give the pitches (2026-09-26), exactly as the lead's reading did, which
+    // is what a single read (the lean retry) is drafted with; three reads are replaced below.
+    const drafted = parseModelSpec(text, dims, v2Prompt);
     if (!drafted.ok) {
       // The model answered unusably. The builder got nothing, so charging for our own
       // parse failure buys a support ticket and teaches them not to trust the feature.

@@ -4175,6 +4175,7 @@ Deno.test("v2 check: the floor height and a raised foundation are correctable; l
 import {
   consensusDrafts, consensusOfCalls, consensusSplitWarning, draftCallCount, draftCallsUsage, readDraftReply,
   runDraftCalls, DRAFT_CONSENSUS_CALLS, DRAFT_CONSENSUS_GRACE_MS, DRAFT_CONSENSUS_QUORUM, CONSENSUS_COLOR_BLEND_MAX,
+  draftReadSample,
 } from "./styleD3.ts";
 import type { ConsensusDraft, ObservedNotes } from "./styleD3.ts";
 
@@ -4457,6 +4458,51 @@ Deno.test("readDraftReply: reads a reply the way the handler does, and never thr
     const r = readDraftReply(junk);
     assertEquals([r.data, r.drafted, r.reply.text], [null, false, ""], junk);
   }
+});
+
+// `measure` (2026-09-26, the v2 draft): each read's pitches from its own points, BEFORE the consensus.
+// MEASURED_REPLY and the point helpers live in the MEASURED PITCHES section at the end of this file.
+Deno.test("readDraftReply(measure): the read's pitches are its points', and the reading says where they came from", () => {
+  const body = replyBody(MEASURED_REPLY());
+  const measured = readDraftReply(body, DIMS, true);
+  assert(measured.drafted && measured.d3 !== null, "it drafts");
+  assertEquals([measured.d3!.roof.pitch, measured.d3!.roof.porchPitch], [0.4, 0.3]);
+  assertEquals(measured.pitch, { pitchSource: "points", modelPitch: 0.8, porchPitchSource: "points", modelPorchPitch: 0.15 });
+  assert(!JSON.stringify(measured.d3).includes("measure"), "the points stay out of the spec");
+  // Without the flag (every legacy request): the model's numbers, and no `pitch` key at all.
+  const legacy = readDraftReply(body, DIMS);
+  assertEquals([legacy.d3!.roof.pitch, legacy.d3!.roof.porchPitch], [0.8, 0.15]);
+  assert(!("pitch" in legacy), "a legacy reading is exactly the object it was");
+  // A reply that does not draft carries no sources, measured or not.
+  const cut = readDraftReply(replyBody('{"roof":{"type":"gab', { stop_reason: "max_tokens" }), DIMS, true);
+  assert(!cut.drafted && !("pitch" in cut), "nothing drafted, nothing recorded");
+  const refused = readDraftReply(replyBody(MEASURED_REPLY(), { stop_reason: "refusal" }), DIMS, true);
+  assert(!refused.drafted && !("pitch" in refused), "a refusal is never a draft");
+});
+
+Deno.test("draftReadSample and draftCallsUsage: every measured read's sample says where its pitches came from", async () => {
+  assertEquals(draftReadSample(null), null);
+  assertEquals(draftReadSample(readDraftReply("not json", DIMS, true)), null, "a read that did not draft");
+  const plain = readDraftReply(replyBody(RAISED_RAW));
+  assert(draftReadSample(plain) === plain.d3!.roof, "an unmeasured read's sample is its roof, the same object as before");
+  // Three measured reads: two with good points, one whose points fail (y up).
+  const porch = porchAt([700, 400], [1200, 550]);
+  const good = replyBody(MEASURED_REPLY());
+  const other = replyBody(MEASURED_REPLY({ pitch: 0.6 }, { pitch: gableAt([400, 600], [800, 432], [1200, 600]), porchPitch: porch }));
+  const yUp = replyBody(MEASURED_REPLY({ pitch: 0.5 }, { pitch: gableAt([400, 440], [800, 600], [1200, 440]), porchPitch: porch }));
+  const f = fakeSend([{ body: good, delayMs: 1 }, { body: other, delayMs: 2 }, { body: yUp, delayMs: 3 }]);
+  const calls = await runDraftCalls({ count: 3, deadline: new AbortController().signal, graceMs: 50, send: f.send, read: (b) => readDraftReply(b, DIMS, true) });
+  const c = consensusOfCalls(calls, 12)!;
+  assertEquals(c.d3.roof.pitch, 0.42, "the median of 0.4, 0.42 and 0.5: the measured numbers, not the model's 0.8, 0.6 and 0.5");
+  assertEquals(c.report.spread.pitch, [0.4, 0.5]);
+  const samples = draftCallsUsage("claude-opus-5", calls, calls[c.call], c).tokens.samples as Record<string, unknown>[];
+  assertEquals(samples.map((s) => [s.pitch, s.pitchSource, s.modelPitch, s.pitchRejected]), [
+    [0.4, "points", 0.8, undefined],
+    [0.42, "points", 0.6, undefined],
+    [0.5, "model", undefined, true],
+  ]);
+  assertEquals(samples.map((s) => [s.porchPitch, s.porchPitchSource, s.modelPorchPitch]), [[0.3, "points", 0.15], [0.3, "points", 0.15], [0.3, "points", 0.15]]);
+  assertEquals(samples[0].type, "gable", "the roof itself is still the sample");
 });
 
 type Plan = { status?: number; body?: string; delayMs: number; hang?: boolean; throws?: string };

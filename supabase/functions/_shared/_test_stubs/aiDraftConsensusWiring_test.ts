@@ -23,7 +23,7 @@ import {
   aiDraftCostCents, aiModelFields, combinedShapePrompt, consensusOfCalls, consensusSplitWarning,
   draftCallCount, draftCallsUsage, flagObservedNotes, frameKeyWarning, gambrelRoofWarning, knownDimsNote,
   parseModelSpec, parseObservedNotes, porchAgreementWarning, readDraftReply, runDraftCalls, SPEC_PROMPT,
-  videoShapePrompt, wingsAgreementWarning, DRAFT_CONSENSUS_GRACE_MS,
+  videoShapePrompt, wingsAgreementWarning, DRAFT_CONSENSUS_GRACE_MS, draftReadSample,
 } from "../styleD3.ts";
 
 const read = async (p: string) => (await Deno.readTextFile(new URL(p, import.meta.url))).replace(/\r\n/g, "\n");
@@ -60,6 +60,8 @@ const PARAMS = [
   "DRAFT_CONSENSUS_GRACE_MS", "fetch", "readDraftReply", "consensusOfCalls", "draftCallsUsage", "recordDraftUsage",
   "releaseHold", "logEdgeError", "req", "clientId", "t0", "requestStartMs", "aiSource", "json", "filedAtReturnSite",
   "parseModelSpec", "streamed", "draftEffort",
+  // 2026-09-26: the single read's record names where its pitches came from (draftReadSample).
+  "draftReadSample",
 ];
 const RUN = new AsyncFunction(
   ...PARAMS,
@@ -131,6 +133,7 @@ async function run(s: Scenario, plans: Plan[]) {
       // The branch's own draftEffort, declared above the lifted block (aiDraftRetryWiring_test pins
       // its expression): "low" when lean, "high" when streamed, else "medium".
       s.lean ? "low" : s.streamed ? "high" : "medium",
+      draftReadSample,
     );
     // A return from inside the block is a Reply; falling off its end is the success object.
     const answered = out && "status" in out && "body" in out ? out as Reply : null;

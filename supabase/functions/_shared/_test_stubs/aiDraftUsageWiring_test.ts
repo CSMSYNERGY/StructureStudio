@@ -23,7 +23,7 @@
 // key names. What it proves is the handler's own behaviour given those answers.
 
 import { assert, assertEquals } from "jsr:@std/assert";
-import { aiModelFields } from "../styleD3.ts";
+import { aiModelFields, draftReadSample } from "../styleD3.ts";
 
 const read = async (p: string) => (await Deno.readTextFile(new URL(p, import.meta.url))).replace(/\r\n/g, "\n");
 const SOURCE = await read("../../portal-settings/index.ts");
@@ -124,13 +124,15 @@ function helper(admin: unknown, logged: Logged[], opts: { ledgerRow?: unknown; t
 /** Run the SHIPPED reply-site block and hand back the promise it started. `v2Prompt` is the
  * rollout gate the handler passes to aiModelFields, which the real function answers here.
  * `callsUsage` is consensus drafting's record of every call (2026-09-25): null on a single call,
- * which is every case below but one, so those pin the single call's record exactly as it was. */
-function site(data: unknown, reply: Row, recordDraftUsage: unknown, v2Prompt = false, callsUsage: unknown = null): Promise<void> {
+ * which is every case below but one, so those pin the single call's record exactly as it was.
+ * `lead` is the call the handler answers from (2026-09-26): its reading carries `pitch` only on a
+ * measured v2 read. The default is a legacy reading, which records no samples. */
+function site(data: unknown, reply: Row, recordDraftUsage: unknown, v2Prompt = false, callsUsage: unknown = null, lead: unknown = { reading: { d3: null } }): Promise<void> {
   const run = new Function(
-    "data", "reply", "text", "recordDraftUsage", "aiModelFields", "v2Prompt", "callsUsage",
+    "data", "reply", "text", "recordDraftUsage", "aiModelFields", "v2Prompt", "callsUsage", "lead", "draftReadSample",
     `${SITE_BLOCK}\nreturn draftUsageLogged;`,
   );
-  return run(data, reply, reply.text, recordDraftUsage, aiModelFields, v2Prompt, callsUsage);
+  return run(data, reply, reply.text, recordDraftUsage, aiModelFields, v2Prompt, callsUsage, lead, draftReadSample);
 }
 
 // Text the model "wrote". It must never appear in anything that was stored.
@@ -206,6 +208,24 @@ Deno.test("several calls (consensus drafting) record their summed record in plac
   assertEquals(admin.attempts.length, 1, "one round trip, as before");
   assertEquals(admin.stored[0].draft_tokens, { ...tokens, effort: "medium", streamed: false });
   assertEquals(Object.keys(admin.stored[0]).sort(), ["draft_ms", "draft_tokens"], "still only the two 251 columns");
+});
+
+Deno.test("a measured v2 single read (the lean retry) records its roof and pitch sources in `samples`; a legacy read records none", async () => {
+  // 2026-09-26: each v2 read's pitches are worked out from its own pixel points, and where they came
+  // from rides in draft_tokens.samples. Three reads record every read's (draftCallsUsage); the lean
+  // retry's single read records its one, under the same key, so one query reads both.
+  const roof = { type: "gable", pitch: 0.36, porchOutFt: 6, porchPitch: 0.3 };
+  const pitch = { pitchSource: "points", modelPitch: 0.7, porchPitchSource: "model" };
+  const admin = fakeAdmin(AFTER_251);
+  await site(DATA, TRUNCATED, helper(admin, [], { draftEffort: "low" }), true, null, { reading: { d3: { roof }, pitch } });
+  const tokens = admin.stored[0].draft_tokens;
+  assertEquals(tokens.samples, [{ ...roof, ...pitch }], "the one read, with where its pitches came from");
+  assertEquals(tokens.model, "claude-opus-5");
+  assertEquals(Object.keys(admin.stored[0]).sort(), ["draft_ms", "draft_tokens"], "still only the two 251 columns");
+  // A reading with no `pitch` (every legacy read) records exactly the object it always did.
+  const legacy = fakeAdmin(AFTER_251);
+  await site(DATA, TRUNCATED, helper(legacy, []), false, null, { reading: { d3: { roof } } });
+  assert(!("samples" in legacy.stored[0].draft_tokens), "no samples key on a legacy read");
 });
 
 Deno.test("draft_tokens says which effort the request ran at and whether it streamed, at its top level", async () => {

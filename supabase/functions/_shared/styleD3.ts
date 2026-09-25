@@ -3510,14 +3510,20 @@ export function draftCallCount(v2: boolean, lean: boolean): number {
 // One reply body, read the way calibrate_style_ai reads it: every text block joined (modelReplyText),
 // a refusal is never a draft, and the spec is parseModelSpec's (the builder's dims over the model's
 // numbers, then the sanitiser). Never throws: a body that is not JSON reads as no reply at all.
+//
+// `measure` (2026-09-26, the v2 draft only): each read's pitches are worked out from its own points
+// HERE, before the consensus sees the read, so the median is taken over the measured numbers. The
+// reading then carries `pitch`, where each pitch came from, which draft_tokens records per read
+// (draftReadSample). Without it the reading is exactly what it was, with no `pitch` key.
 export type DraftReading = {
   // deno-lint-ignore no-explicit-any
   data: Record<string, any> | null;
   reply: ModelReply;
   d3: D3Spec | null;
   drafted: boolean;
+  pitch?: PitchSources;
 };
-export function readDraftReply(body: string, dims?: KnownDims | null): DraftReading {
+export function readDraftReply(body: string, dims?: KnownDims | null, measure = false): DraftReading {
   // deno-lint-ignore no-explicit-any
   let data: any = null;
   try { data = JSON.parse(body); } catch { data = null; }
@@ -3525,7 +3531,17 @@ export function readDraftReply(body: string, dims?: KnownDims | null): DraftRead
   const reply = modelReplyText(data);
   const spec = reply.stopReason === "refusal" ? null : parseModelSpec(reply.text, dims);
   const d3 = spec && spec.ok ? spec.d3 : null;
-  return { data, reply, d3, drafted: d3 !== null };
+  if (!measure || !d3) return { data, reply, d3, drafted: d3 !== null };
+  const measured = applyMeasuredPitches(d3, reply.text);
+  return { data, reply, d3: measured.d3, drafted: true, pitch: measured.sources };
+}
+
+// One read as draft_tokens keeps it: its sanitised roof, plus where its pitches came from on a
+// measured (v2) read. Null for a read that did not draft. A reading with no `pitch` gives its roof
+// exactly as before, the same object.
+export function draftReadSample(reading: DraftReading | null | undefined): Record<string, unknown> | null {
+  if (!reading || !reading.d3) return null;
+  return reading.pitch ? { ...reading.d3.roof, ...reading.pitch } : reading.d3.roof;
 }
 
 // ─── The calls ─────────────────────────────────────────────────────────────────────────────────
@@ -3945,7 +3961,8 @@ export function consensusSplitWarning(report: ConsensusReport | null | undefined
 // always has, in the handler). `tokens` is the draft_tokens jsonb: the SUM of every call's usage
 // under today's keys, the lead reply's shapes (the medoid's, or the first call's when none drafted),
 // one entry per call, the sanitised roof of every read that drafted (for later analysis of how far
-// reads wander), and the agreement report. `usage` is the same sum under Anthropic's own keys, for
+// reads wander; since 2026-09-26 with pitchSource and the model's own pitch beside it, see
+// PitchSources), and the agreement report. `usage` is the same sum under Anthropic's own keys, for
 // the capture: every call that answered cost money, so all of them are the cost basis. A call with
 // no usage block (aborted, a 529) adds nothing, and a sum no call reported is null, never 0.
 export function draftCallsUsage(
@@ -3989,7 +4006,11 @@ export function draftCallsUsage(
       ok: !!c.reading?.drafted,
       aborted: c.aborted,
     })),
-    samples: calls.flatMap((c) => (c.reading?.d3 ? [c.reading.d3.roof] : [])),
+    // Each read's roof; on a measured read also where its pitches came from (draftReadSample).
+    samples: calls.flatMap((c) => {
+      const s = draftReadSample(c.reading);
+      return s ? [s] : [];
+    }),
     agreement: consensus ? consensus.report : null,
   };
   return { tokens, usage };
