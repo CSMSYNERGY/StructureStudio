@@ -3203,14 +3203,68 @@ Deno.test("⚠️ v2: the porch's posts, pitch and steps land on a projecting po
   assertEquals(r.changed.map((c) => [c.field, c.from, c.to]), [
     ["roof.porchPosts", null, 4], ["roof.porchPitch", null, 0.5], ["roof.porchSteps", null, "center"],
   ], "rounded, clamped, and reported as what landed");
-  // A word the sanitiser cannot read does not delete the steps the draft already had.
+  // A word the sanitiser cannot read does not delete the steps the draft already had. ("none" is
+  // not such a word since 2026-09-25: it is how the check takes steps off, tested below.)
   const stepped = cleanSpec({ ...SHED_BACK_HIGH, roof: { ...SHED_BACK_HIGH.roof, porchSteps: "left" } });
-  const junk = applySelfCheck(stepped, readOf({
+  for (const word of ["middle", "front", "", null, 0]) {
+    const junk = applySelfCheck(stepped, readOf({
+      verdict: "corrections", corrections: { roof: { porchSteps: word } }, changed: [change("roof.porchSteps")],
+    }));
+    assert(junk.ok, "usable");
+    if (!junk.ok) return;
+    assertEquals([junk.verdict, junk.d3.roof.porchSteps, junk.dropped], ["matches", "left", ["roof.porchSteps"]], JSON.stringify(word));
+  }
+});
+
+Deno.test("⚠️ v2: \"none\" takes the porch steps off, and the destructive pass does not put them back", () => {
+  // Found 2026-09-25: no steps is an ABSENT key, and a correction could not say absent. null, "none"
+  // and "" were dropped by the sanitiser and the draft's steps restored, so invented steps stood
+  // through all three rounds.
+  const stepped = cleanSpec({ ...SHED_BACK_HIGH, roof: { ...SHED_BACK_HIGH.roof, porchSteps: "center" } });
+  for (const word of ["none", " None ", "NONE"]) {
+    const r = applySelfCheck(stepped, readOf({
+      verdict: "corrections", corrections: { roof: { porchSteps: word } },
+      changed: [{ field: "roof.porchSteps", from: "center", to: word, why: "the frame shows no steps" }],
+    }));
+    assert(r.ok, "usable");
+    if (!r.ok) return;
+    assertEquals(r.verdict, "corrections", JSON.stringify(word));
+    assert(!("porchSteps" in r.d3.roof), `${JSON.stringify(word)}: the key is gone`);
+    assertEquals(r.changed, [{ field: "roof.porchSteps", from: "center", to: null, why: "the frame shows no steps" }]);
+    assertEquals(r.dropped, []);
+    // Nothing else moved with it.
+    const { porchSteps: _gone, ...rest } = stepped.roof as Record<string, unknown>;
+    assertEquals(r.d3.roof, rest);
+  }
+  // "none" on a porch with no steps changes nothing, and says it was not applied.
+  const plain = applySelfCheck(SHED_BACK_HIGH, readOf({
     verdict: "corrections", corrections: { roof: { porchSteps: "none" } }, changed: [change("roof.porchSteps")],
   }));
-  assert(junk.ok, "usable");
-  if (!junk.ok) return;
-  assertEquals([junk.verdict, junk.d3.roof.porchSteps, junk.dropped], ["matches", "left", ["roof.porchSteps"]]);
+  assert(plain.ok, "usable");
+  if (!plain.ok) return;
+  assertEquals([plain.verdict, plain.dropped], ["matches", ["roof.porchSteps"]]);
+  // Beside another correction it clears the steps and lands the other one too.
+  const both = applySelfCheck(stepped, readOf({
+    verdict: "corrections", corrections: { roof: { porchSteps: "none", porchPosts: 4 } },
+    changed: [change("roof.porchSteps"), change("roof.porchPosts")],
+  }));
+  assert(both.ok && both.verdict === "corrections", "applied");
+  if (!both.ok) return;
+  assertEquals(both.changed.map((c) => [c.field, c.from, c.to]), [["roof.porchSteps", "center", null], ["roof.porchPosts", null, 4]]);
+  // The legacy check never had the key: it is dropped there, and the steps stand.
+  const legacy = applySelfCheck(stepped, readOf({
+    verdict: "corrections", corrections: { roof: { porchSteps: "none" } }, changed: [change("roof.porchSteps")],
+  }), null, "legacy");
+  assert(legacy.ok, "usable");
+  if (!legacy.ok) return;
+  assertEquals([legacy.verdict, legacy.d3.roof.porchSteps, legacy.dropped], ["matches", "center", ["roof.porchSteps"]]);
+});
+
+Deno.test("v2 prompt: the steps step offers \"none\" to take steps off", () => {
+  const stepped = cleanSpec({ ...SHED_BACK_HIGH, roof: { ...SHED_BACK_HIGH.roof, porchSteps: "left" } });
+  const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: stepped, viewpoints: ["front", "side"] });
+  assert(p.includes('Give\n       "none" where the render shows steps the frame does not'), "the none sentence");
+  assert(p.includes('"none" removes them.'), "and what it does");
 });
 
 Deno.test("v2 prompt: the porch's posts, pitch and steps are checked, each said as what it draws when absent", () => {
@@ -3831,4 +3885,39 @@ Deno.test("aiDraftCostCents: v2 at Opus's list price; legacy exactly the number 
   // A typical 12-frame v2 draft: 21,000 in and 8,000 out is 30.5 cents; Sonnet's rate said 18.3.
   assertEquals(aiDraftCostCents(true, 21000, 8000), 30.5);
   assertEquals(aiDraftCostCents(false, 21000, 8000), 18.3);
+});
+
+// ═══ THE CHECK IS TOLD THE PORCH PITCH THE RENDER DRAWS (fix, 2026-09-25) ═══════════════════
+// The renderer builds a given porchPitch only as steep as leaves 6 ft under the porch beam. Told
+// "currently 0.25" beside a render drawn far flatter, the check "corrected" the pitch upward: a
+// change that draws nothing. porchGeom_test runs porchPitchDrawable beside the renderer's own
+// d3PorchGeom; here, what the prompt says with it.
+import { porchPitchDrawable } from "./styleD3.ts";
+import { assertStringIncludes } from "jsr:@std/assert";
+Deno.test("porchPitchDrawable: the stored pitch where it clears 6 ft, the steepest that does where not, null where unknowable", () => {
+  assertEquals(porchPitchDrawable(null), null);
+  assertEquals(porchPitchDrawable({ porchOutFt: 4, porchPitch: 0.25 }), null, "no attach height: the wall top is the renderer's to know");
+  assertEquals(porchPitchDrawable({ porchOutFt: 4, porchAttachFt: 8 }), null, "no pitch: the solver's own, not the style's");
+  assertEquals(porchPitchDrawable({ porchAttachFt: 8, porchPitch: 0.25 }), null, "no projecting porch");
+  assertEquals(porchPitchDrawable({ porchOutFt: 4, porchAttachFt: 10, porchPitch: 0.25 }), 0.25, "plenty of height");
+  assertEquals(porchPitchDrawable({ porchOutFt: 4, porchAttachFt: 8, porchPitch: 0.25 }), 0.25, "Farmstand: about 6 ft 4 in, kept");
+  const low = porchPitchDrawable({ porchOutFt: 4, porchAttachFt: 7.3, porchPitch: 0.25 })!;
+  assert(low > 0.05 && low < 0.25, String(low));
+  assertEquals(porchPitchDrawable({ porchOutFt: 6, porchAttachFt: 6.5, porchPitch: 0.3 }), 0.05, "nothing clears: the floor");
+  assertEquals(porchPitchDrawable({ porchOutFt: 4, porchAttachFt: 12, porchPitch: 0.9 }), 0.5, "held to the sanitiser's band");
+});
+
+Deno.test("⚠️ v2 prompt: a porch pitch the render lowers is said as drawn, and the model is sent to porchAttachFt", () => {
+  const lowered = cleanSpec({ ...SHED_BACK_HIGH, roof: { ...SHED_BACK_HIGH.roof, porchOutFt: 4, porchAttachFt: 7.3, porchPitch: 0.25 } });
+  const drawn = Math.round(porchPitchDrawable(lowered.roof as Record<string, unknown>)! * 100) / 100;
+  const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: lowered, viewpoints: ["front", "side"] });
+  assertStringIncludes(p, `roof.porchPitch, projecting porches only, currently 0.25 but DRAWN AT ${drawn} (hung at porchAttachFt 7.3 ft`);
+  assertStringIncludes(p, "raising the number changes nothing; if the frame's porch roof meets the wall higher, correct roof.porchAttachFt)");
+  // Where it is drawn as stored, the number alone, as before.
+  const kept = cleanSpec({ ...SHED_BACK_HIGH, roof: { ...SHED_BACK_HIGH.roof, porchOutFt: 4, porchAttachFt: 8, porchPitch: 0.25 } });
+  const q = selfCheckPrompt({ dims: CHECK_DIMS, draft: kept, viewpoints: ["front", "side"] });
+  assertStringIncludes(q, "roof.porchPitch, projecting porches only, currently 0.25: the porch");
+  assert(!q.includes("DRAWN AT"), "nothing said where nothing is lowered");
+  // And every v2 prompt carries the rule itself, for the case the server cannot compute.
+  for (const s of [p, q]) assertStringIncludes(s, "why the render's is flatter, correct roof.porchAttachFt, never porchPitch.");
 });

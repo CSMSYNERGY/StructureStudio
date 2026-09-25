@@ -1755,6 +1755,36 @@ export type SelfCheckRead = {
   note: string;
 };
 
+// ── HOW STEEP THE RENDER CAN DRAW THE STYLE'S PORCH PITCH (fix, 2026-09-25) ─────────────────
+// The renderer (d3PorchGeom, in both designer twins) builds a GIVEN porchPitch only as steep as
+// leaves 6 ft under the porch beam, lowering it as far as it must. The check was told "currently
+// 0.25" beside a render drawn at 0.05, so it "corrected" the pitch upward: a change that draws
+// nothing, costs a round, and is listed to the builder as a change.
+//
+// The porch roof's high edge sits AT porchAttachFt or lower (the renderer also holds it under the
+// building's own outline and the eave over it), so with porchAttachFt set this is an UPPER bound on
+// the pitch the render shows: when even it is under the stored pitch, the render is certainly
+// flatter, and the prompt says so. Without porchAttachFt, or without a porchPitch, null: the
+// server does not know the wall top the renderer hangs the porch from, and says nothing it cannot
+// stand behind. The member sizes and the bisection are d3PorchGeom's exactly; porchGeom_test runs
+// the two side by side.
+export function porchPitchDrawable(roof: Record<string, unknown> | null | undefined): number | null {
+  const want = num(roof?.porchPitch), attach = num(roof?.porchAttachFt), out = num(roof?.porchOutFt);
+  if (want === null || !(want > 0) || attach === null || !(attach > 0) || out === null || !(out > 0.5)) return null;
+  const D = Math.min(12, out);
+  const POST = 0.46, HDR_H = 0.62, HDR_D = 0.29, PR_T = 0.12, SHEATH = 0.04, WALL_T = 0.3, CLEAR_FLOOR = 6.0;
+  const WANT = Math.max(0.05, Math.min(0.5, want));
+  const dWall = WALL_T / 2, dPost = D - POST / 2;
+  const run = Math.max(0.1, dPost - HDR_D / 2 - dWall);
+  const stack = (p: number) => (PR_T + SHEATH) * Math.sqrt(1 + p * p);
+  const clearAt = (p: number) => attach - p * run - stack(p) - HDR_H;
+  if (clearAt(WANT) >= CLEAR_FLOOR) return WANT;
+  if (clearAt(0.05) < CLEAR_FLOOR) return 0.05;
+  let lo = 0.05, hi = WANT;
+  for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (clearAt(mid) >= CLEAR_FLOOR) lo = mid; else hi = mid; }
+  return lo;
+}
+
 // ── THE PROMPT ────────────────────────────────────────────────────────────────────────────
 // Built as a template because the draft and the builder's measurements are interpolated per
 // generation. The refusal path is kept VERBATIM and stated three separate times — "it matches"
@@ -1842,9 +1872,15 @@ export function selfCheckPrompt(opts: {
   const postsNow = num(roof.porchPosts) === null
     ? "not set, which draws a post at each corner and one every 8.5 ft or less between them"
     : String(num(roof.porchPosts));
-  const porchPitchNow = num(roof.porchPitch) === null
+  // …and where the render cannot draw the stored pitch at this attach height, the number the
+  // render DOES show, and why (porchPitchDrawable, 2026-09-25).
+  const pitchDrawn = porchPitchDrawable(roof);
+  const pitchStored = num(roof.porchPitch);
+  const porchPitchNow = pitchStored === null
     ? "not set, which draws a 2 in 12 porch roof, lower where the wall is too short for it"
-    : String(num(roof.porchPitch));
+    : pitchDrawn !== null && pitchDrawn < Math.min(0.5, pitchStored) - 1e-6
+    ? `${pitchStored} but DRAWN AT ${Math.round(pitchDrawn * 100) / 100} (hung at porchAttachFt ${feet("porchAttachFt")}, anything steeper leaves less than 6 ft under the porch beam, so the render's porch roof is flatter than this number and raising the number changes nothing; if the frame's porch roof meets the wall higher, correct roof.porchAttachFt)`
+    : String(pitchStored);
   const stepsNow = typeof roof.porchSteps === "string" ? said("porchSteps") : "not set, which draws no steps";
   const hasWings = (num(roof.wingWidthFt) ?? 0) > 0;
   // The centre's default is only a thing the renderer DRAWS when there are wings to stand it on.
@@ -2040,10 +2076,15 @@ ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave
        viewpoint, in the frame and in the render, and correct it only where the counts differ.
      * roof.porchPitch, projecting porches only, currently ${porchPitchNow}: the porch
        roof's own rise over run, from a side viewpoint where its edge is seen square-on. Correct
-       it only where the porch roof plainly falls more steeply, or less, than the render's.
+       it only where the porch roof plainly falls more steeply, or less, than the render's. The
+       render never draws a porch roof so steep that less than 6 ft stands under its beam, so a
+       porch roof that meets the wall low is drawn flatter than porchPitch says; where that is
+       why the render's is flatter, correct roof.porchAttachFt, never porchPitch.
      * roof.porchSteps, projecting porches only, currently ${stepsNow}: where steps leave the
        porch's front edge, "left", "center" or "right" as seen standing in front of it. Give it
-       where the frame shows steps the render lacks, or shows them at a different place.
+       where the frame shows steps the render lacks, or shows them at a different place. Give
+       "none" where the render shows steps the frame does not, or where the frame's steps leave
+       the deck from one of its sides rather than its front edge: "none" removes them.
 
 4. THE WALL, AS DRAWN (not the number). You cannot change wallHeightFt - it is measured. But
    if the render's walls look plainly shorter or taller than the frame's at the same angle
@@ -2382,6 +2423,20 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
     wanted.delete(field);
   }
 
+  // "none" TAKES THE PORCH STEPS OFF (v2, fix 2026-09-25). No steps is an ABSENT roof.porchSteps,
+  // and absent is the one value a correction could not say: null, "none" and "" were all dropped by
+  // the sanitiser, and the destructive pass below then put the draft's steps back. A first pass that
+  // invented steps, or put a side stair on the front edge, could never be corrected in three rounds.
+  // So an explicit "none" (the word the prompt offers) CLEARS the key: build() deletes it, and it is
+  // never in `wanted`, so the destructive pass cannot restore it. Any other unreadable word still
+  // leaves the draft's steps standing. Legacy never had the key on its allow-list.
+  const cleared = new Set<string>();
+  if (mode === "v2" && wanted.has("roof.porchSteps")
+      && String(wanted.get("roof.porchSteps")).trim().toLowerCase() === "none") {
+    wanted.delete("roof.porchSteps");
+    cleared.add("roof.porchSteps");
+  }
+
   // WHICH KEYS THE PORCH EXCLUSION TOOK OUT, recorded by build() rather than inferred by the
   // two passes that need it. They need it for opposite reasons and both were wrong without it:
   // the destructive pass must not undo a removal that was the POINT of the correction, and the
@@ -2396,6 +2451,7 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
       if (field.startsWith("roof.")) roof[field.slice(5)] = value;
       else merged[field] = value;
     }
+    for (const field of cleared) delete roof[field.slice(5)];
     // THE PORCH EXCLUSION, which is calDraftRoof's rule and has to run HERE rather than be left
     // to the sanitiser. sanitizeD3Spec drops porchDepthFt when porchOutFt is above 0.5 — the
     // projecting-wins direction — so a correction changing a PROJECTING porch to a RECESSED one
@@ -2463,7 +2519,7 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   const report = declared.slice();
   for (const f of excluded) if (!report.includes(f)) report.push(f);
   for (const field of report) {
-    const proposed = wanted.has(field);
+    const proposed = wanted.has(field) || cleared.has(field);
     if (!proposed && !excluded.has(field)) continue;
     const before = readSpecPath(base.d3, field);
     const after = readSpecPath(finalSpec.d3, field);
