@@ -21019,11 +21019,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // guessed angle would show the builder a mismatch we invented and ask them to judge it.
     //
     // A DRAFT PICKED UP FROM THE SERVER after its connection dropped (`res.recovered`, 2026-09-25)
-    // has no labels either: the frame map is read out of the model's reply, and the ledger row it
-    // was picked up from does not keep that. So it is skipped the same way, and says why.
+    // carries the frame map its ledger row kept (migration 253), so it arrives with labels and is
+    // checked exactly as a live answer is. Only a row that kept no map -- written before 253, or a
+    // reply that named no views -- arrives without one, and it is skipped the same way, saying why.
     if (!res.checkId || !res.frameMap) {
       settle(res.recovered
-        ? { verdict: "skipped", reason: "recovered", pairs: [], note: "Your connection dropped while we were drafting, so we picked the draft up from the server. The side-by-side check needs the live answer, so it did not run this time." }
+        ? { verdict: "skipped", reason: "recovered", pairs: [], note: "Your connection dropped while we were drafting, so we picked the draft up from the server. It came back without the list of which view is which, so the side-by-side check did not run this time." }
         : { verdict: "skipped", reason: "no_frames", pairs: [] });
       return;
     }
@@ -21295,10 +21296,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // ⚠️ AND ITS STREAMED ANSWER CAN DROP (2026-09-25). The press waits three to five minutes on a
       // streamed answer, and a phone that backgrounds the tab or a network that blinks drops it while
       // the server works on. `recover` lets the host pick the draft up from the server instead of
-      // failing (see onDraftFromCombined): it asks only while this panel is mounted and this press is
-      // still the one on screen, never past the press's own budget, and it switches the card to say
-      // so. A draft picked up that way comes back here exactly as an answer would, and everything
-      // below -- the apply, the key, the message, the check -- runs as it does for an answer.
+      // failing (see onDraftFromCombined). It asks by THIS press's key (`idem`, which its ledger row
+      // and its hold carry), so it can only ever find this press's draft; the first ask goes at once
+      // after the drop, even one noticed after the budget (a phone that slept through the press), and
+      // it asks again only while this panel is mounted, this press is still the one on screen and
+      // `until` has not passed; and it switches the card to say so. A draft picked up that way comes
+      // back here exactly as an answer would, frame map included, and everything below -- the apply,
+      // the key, the message, the check -- runs as it does for an answer.
       let res;
       try {
         res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount, idem, dims, {
