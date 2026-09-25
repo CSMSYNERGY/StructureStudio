@@ -3888,7 +3888,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // shed's high side on the wrong wall 6 times in 7 and read a 16 ft porch as 10-12 ft with 3
         // posts; the reads that did think (3,400-5,400 tokens) got both right. "high" makes every
         // read a careful one. Legacy keeps "medium"; the lean retry keeps "low".
-        output_config: { effort: lean ? "low" : (v2Prompt ? "high" : "medium") },
+        // ⚠️ NOT "high" yet: tried live 2026-09-25, all three reads ran past the 125 s draft budget
+        // (the gateway ends a silent request at 150 s), so every press fell to the lean retry.
+        // Until the draft can outlive the gateway, the reads' reasoning is carried in the reply
+        // itself (the prompt's evidence fields) at "medium".
+        output_config: { effort: lean ? "low" : "medium" },
         messages: [{
           role: "user",
           content: [

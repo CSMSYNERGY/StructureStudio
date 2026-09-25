@@ -56,7 +56,7 @@ Deno.test("the draft call has the v2 budget: 12000 tokens, a 125 s abort, effort
   assert(!DRAFT.includes("max_tokens: 8000"), "and the old 8000 is gone");
   assert(DRAFT.includes("const aiSignal = AbortSignal.timeout(draftAbortMs);"), "the abort is the request-measured budget below");
   // v2 thinks hard (2026-09-25); legacy stays "medium"; lean is "low".
-  assert(DRAFT.includes('output_config: { effort: lean ? "low" : (v2Prompt ? "high" : "medium") },'), "lean thinks less; v2 high; legacy as before");
+  assert(DRAFT.includes('output_config: { effort: lean ? "low" : "medium" },'), "lean thinks less; everyone else medium (high ran past the gateway, 2026-09-25)");
   // Only a real boolean: "true", 1 and an absent key all leave an older browser on "medium".
   const decl = DRAFT.split("\n").find((l) => l.includes("const lean =")) ?? "";
   assertEquals(decl.trim(), "const lean = payload.lean === true;");
