@@ -211,8 +211,12 @@ Deno.test("no wallet row at all (the meter inactive, today's live state): nothin
   const pending = { ok: true, pending: true };
   assertEquals(at(10_000).body, pending, "the reads are out");
   assertEquals(at(DRAFT_RECOVER_PENDING_MS - 1).body, pending, "no usage written yet, inside the wall clock");
+  // Past the wall clock with no draft_ms, the reads never ended: the worker was ended under them
+  // (2026-09-26). A fault, so an error row, and the sentence is still the money's: not charged.
   const stale = at(DRAFT_RECOVER_PENDING_MS + 1);
-  assert(stale.kind === "lost" && stale.why === "stale" && NOT_CHARGED.test(stale.body.message), JSON.stringify(stale));
+  assert(stale.kind === "lost" && stale.why === "stale" && stale.severity === "error" && NOT_CHARGED.test(stale.body.message), JSON.stringify(stale));
+  const failedLong = at(DRAFT_RECOVER_PENDING_MS + 1, { draft_ms: 1 });
+  assert(failedLong.kind === "lost" && stale.kind === "lost" && stale.body.message === failedLong.body.message, "the same sentence as a draft that failed");
   // The reads ended (draft_ms) and no draft: the success path writes `drafted` a moment after
   // draft_ms, so it is waited on for the settle window, and then it failed -- not charged, which is
   // TRUE here because nothing was held.
@@ -220,8 +224,9 @@ Deno.test("no wallet row at all (the meter inactive, today's live state): nothin
   assertEquals(at(100_000 + DRAFT_RECOVER_SETTLE_MS, { draft_ms: 100_000 }).body, pending);
   const failed = at(100_000 + DRAFT_RECOVER_SETTLE_MS + 1, { draft_ms: 100_000 });
   assert(failed.kind === "lost" && failed.why === "failed" && failed.severity === "info" && NOT_CHARGED.test(failed.body.message), JSON.stringify(failed));
-  // An unreadable called_at is never waited on for ever.
-  assertEquals(recoverDraftAnswer(ROW({ called_at: "garbage" }), NONE, NOW).kind, "lost");
+  // An unreadable called_at is never waited on for ever, and is a fault too.
+  const garbage = recoverDraftAnswer(ROW({ called_at: "garbage" }), NONE, NOW);
+  assert(garbage.kind === "lost" && garbage.why === "stale" && garbage.severity === "error" && NOT_CHARGED.test(garbage.body.message), JSON.stringify(garbage));
 });
 
 Deno.test("⚠️ a healthy draft at the streamed ceiling (reads end 330 s after the request) is pending the whole way, never lost", () => {

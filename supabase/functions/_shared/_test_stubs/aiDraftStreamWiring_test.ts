@@ -1153,8 +1153,10 @@ Deno.test("⚠️ no draft: the answer about money is the press's own wallet row
       (b) => b.pending === true, []],
     ["no wallet row and the work ended long ago without a draft: failed, and not charged is true", ROW({ called_at: ago(100_000 + DRAFT_RECOVER_SETTLE_MS + 30_000), draft_ms: 100_000 }), [],
       (b) => b.pending === false && b.reason === "failed" && b.message === NOT_CHARGED, [["ai_draft_recover_none", "info"]]],
-    ["no wallet row and nothing written past the wall clock: lost, not charged", ROW({ called_at: ago(DRAFT_RECOVER_PENDING_MS + 5_000) }), [],
-      (b) => b.pending === false && b.reason === "stale" && b.message === NOT_CHARGED, [["ai_draft_recover_none", "info"]]],
+    // The reads never ended, so the worker was ended under them (2026-09-26): an error row, and the
+    // sentence is still the money's.
+    ["no wallet row and nothing written past the wall clock: lost, not charged -- a fault", ROW({ called_at: ago(DRAFT_RECOVER_PENDING_MS + 5_000) }), [],
+      (b) => b.pending === false && b.reason === "stale" && b.message === NOT_CHARGED, [["ai_draft_recover_none", "error"]]],
   ];
   for (const [what, row, wallet, ok, rows] of cases) {
     const got = await drive(RECOVER(), { ledger: [row], wallet });

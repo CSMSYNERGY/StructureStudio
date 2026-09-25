@@ -1143,9 +1143,12 @@ export function draftIdemKey(raw: unknown): string | null {
 
 // How long a row with no draft is still worth waiting on WHEN THE WALLET HAS NO WORD ON IT (the
 // meter is inactive, which is every tenant today): the platform's 400 s wall clock, counted from
-// the row's called_at, which is never before the request arrived. The work runs on past its
-// answer's deadline, but no worker outlives the wall clock, so a row still without draft_ms by then
-// will never get a draft. A healthy draft writes draft_ms when its reads end, by 330 s, well inside.
+// the row's called_at, which is never before the request arrived. That clock is the WORKER's, and a
+// worker is ended 400 s after its birth, which was no later than the request's arrival: so no worker
+// serving the press is still running 400 s after called_at. The work runs on past its answer's
+// deadline, but a row still without draft_ms by then will never get a draft: its worker was ended
+// under it (recoverDraftAnswer's `stale`, an error row since 2026-09-26). A healthy draft writes
+// draft_ms when its reads end, by 330 s, well inside.
 // ⚠️ THE WALL CLOCK ITSELF, NOT THE DEADLINE PLUS SOMETHING: it was written as the deadline plus
 // 100 s while those added up to 400 s, and moving the deadline to 360 s must not stretch it past a
 // limit no worker can outlive.
@@ -1278,7 +1281,10 @@ function frameMapOfRow(row: DraftRecoverRow): FrameMap | null {
 //       none      nothing was held (the meter is inactive, or the press was refused), so "not
 //                 charged" is true whatever happened, and only the ledger says whether to wait:
 //                 draft_ms written means the work ended (pending for the settle window, then
-//                 failed); no draft_ms is pending until the 400 s wall clock, then lost.
+//                 failed); no draft_ms is pending until the 400 s wall clock, then lost as
+//                 `stale`: the reads never ended, so the worker was ended under them, and that
+//                 is filed as an ERROR row (2026-09-26; it was info until then). The builder's
+//                 sentence is still the money's: nothing was held, so "not charged" stays true.
 //   * NO ROW for the key: `reason: "no_row"`. Not an answer the shell acts on at once: its press's
 //     insert may not have landed, so it keeps asking for 90 s from the press. The sentence is
 //     chosen by the money like any other.
@@ -1328,7 +1334,10 @@ export function recoverDraftAnswer(row: DraftRecoverRow | null, money: DraftMone
   const ageMs = Number.isFinite(calledMs) ? nowMs - calledMs : Infinity;
   const draftMs = typeof row.draft_ms === "number" && Number.isFinite(row.draft_ms) ? row.draft_ms : null;
   if (draftMs !== null) return ageMs > draftMs + DRAFT_RECOVER_SETTLE_MS ? lost("failed") : pending;
-  return ageMs < DRAFT_RECOVER_PENDING_MS ? pending : lost("stale");
+  if (ageMs < DRAFT_RECOVER_PENDING_MS) return pending;
+  // Past the wall clock with no draft_ms: the worker was ended under the reads. A fault, filed as
+  // an error; the sentence stays the one the money chooses.
+  return lost("stale", { message: lostSentence(money).message, severity: "error" });
 }
 
 // THE LEGACY RULER, EXACTLY AS IT SHIPPED ON 2026-09-19 (d3ab404), for callers the gate keeps on
