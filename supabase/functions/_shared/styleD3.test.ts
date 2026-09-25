@@ -4553,3 +4553,227 @@ Deno.test("consensusOfCalls and draftCallsUsage: the medoid's CALL, the summed u
   assertEquals([z.usage.input_tokens, z.usage.output_tokens, z.tokens.stopReason, z.tokens.textChars, z.tokens.agreement], [null, null, null, 0, null]);
   assertEquals(z.tokens.samples, []);
 });
+
+// ═══ MEASURED PITCHES (2026-09-26) ════════════════════════════════════════════════════════════
+// Live three-read drafts JUDGED the slope: a raised centre's 0.41 gable came back 0.45 to 0.8 and a
+// 0.25 porch roof 0.11 to 0.2. The v2 reply now carries `measure`, the pixel points each pitch is read
+// from, and the server works the slope out. What is pinned here: the arithmetic; every check that
+// sends a read back to the model's own number (the y-up mistake, a peak outside its ends, rakes too
+// unlike for a square-on frame, a span too short, a result outside the sanitiser's CLAMPS); that a
+// gambrel is never computed; that junk never throws; and that `measure` never reaches the spec.
+import {
+  applyMeasuredPitches, parseMeasure, pitchFromMeasure, porchPitchFromMeasure,
+  MEASURE_GABLE_SLOPE_RATIO, MEASURE_PORCH_MIN_SPAN, MEASURE_SHED_MIN_SPAN,
+} from "./styleD3.ts";
+
+// A 1600 x 900 frame. Generic points only, never a test building's.
+const M_SIZE = [1600, 900];
+const gableAt = (left: number[], peak: number[], right: number[], size: unknown = M_SIZE) => ({ frame: 3, size, left, peak, right });
+const shedAt = (tallTop: number[], tallBottom: number[], shortTop: number[], shortBottom: number[], size: unknown = M_SIZE) =>
+  ({ frame: 5, size, tallTop, tallBottom, shortTop, shortBottom });
+const porchAt = (wall: number[], edge: number[], size: unknown = M_SIZE) => ({ frame: 4, size, wall, edge });
+
+Deno.test("measure: the checks' thresholds are the ones the brief set", () => {
+  assertEquals(MEASURE_GABLE_SLOPE_RATIO, 1.6);
+  assertEquals(MEASURE_SHED_MIN_SPAN, 0.15);
+  assertEquals(MEASURE_PORCH_MIN_SPAN, 0.08);
+});
+
+Deno.test("pitchFromMeasure: a symmetric gable is the rise over half its width", () => {
+  assertEquals(pitchFromMeasure(gableAt([400, 600], [800, 400], [1200, 600]), "gable"), 0.5);
+  // The v2 prompt's own example, worked the server's way: a generic 0.33 (4:12).
+  assertEquals(pitchFromMeasure(gableAt([400, 560], [800, 428], [1200, 562]), "gable"), 0.33);
+  // `size` is optional on a gable; without it the points are simply not bounded.
+  assertEquals(pitchFromMeasure({ left: [400, 600], peak: [800, 400], right: [1200, 600] }, "gable"), 0.5);
+  // The frame index is the model's note of where it looked, not part of the arithmetic.
+  assertEquals(pitchFromMeasure({ size: M_SIZE, left: [400, 600], peak: [800, 400], right: [1200, 600] }, "gable"), 0.5);
+});
+
+Deno.test("pitchFromMeasure: an off-axis gable with unlike rakes inside 1.6x is their mean; beyond it, null", () => {
+  // 0.478 and 0.588: 1.23x apart, a frame a little off square. Their mean, to two places.
+  assertEquals(pitchFromMeasure(gableAt([300, 620], [760, 400], [1100, 600]), "gable"), 0.53);
+  // Exactly 1.6x (0.5 and 0.8) is still an honest read.
+  assertEquals(pitchFromMeasure(gableAt([200, 600], [600, 400], [850, 600]), "gable"), 0.65);
+  // 1.7x and 2x are not: an angled frame, a peak on the wrong landmark or a rake end on a wing roof.
+  assertEquals(pitchFromMeasure(gableAt([200, 600], [600, 400], [800, 570]), "gable"), null, "0.5 against 0.85");
+  assertEquals(pitchFromMeasure(gableAt([200, 600], [600, 400], [800, 600]), "gable"), null, "0.5 against 1.0");
+});
+
+Deno.test("pitchFromMeasure: the y-up mistake and a peak outside its ends go back to the model's number", () => {
+  // Coordinates read with y counting UP put the peak BELOW its ends.
+  assertEquals(pitchFromMeasure(gableAt([400, 300], [800, 500], [1200, 300]), "gable"), null, "y up");
+  assertEquals(pitchFromMeasure(gableAt([400, 600], [800, 600], [1200, 600]), "gable"), null, "a peak level with its ends");
+  assertEquals(pitchFromMeasure(gableAt([400, 600], [800, 400], [1200, 380]), "gable"), null, "a peak below one end");
+  assertEquals(pitchFromMeasure(gableAt([400, 600], [300, 400], [1200, 600]), "gable"), null, "a peak left of the left end");
+  assertEquals(pitchFromMeasure(gableAt([400, 600], [1300, 400], [1200, 600]), "gable"), null, "a peak right of the right end");
+  assertEquals(pitchFromMeasure(gableAt([1200, 600], [800, 400], [400, 600]), "gable"), null, "left and right swapped");
+  assertEquals(pitchFromMeasure(gableAt([800, 600], [800, 400], [1200, 600]), "gable"), null, "a vertical rake");
+});
+
+Deno.test("pitchFromMeasure: points outside the image, and a size that is not a size, are refused", () => {
+  assertEquals(pitchFromMeasure(gableAt([400, 600], [800, 400], [1700, 600]), "gable"), null, "past the right edge");
+  assertEquals(pitchFromMeasure(gableAt([400, 950], [800, 400], [1200, 950]), "gable"), null, "below the bottom");
+  assertEquals(pitchFromMeasure(gableAt([-10, 600], [800, 400], [1200, 600]), "gable"), null, "left of the left edge");
+  for (const size of [[0, 900], [1600, -900], [1600], [1600, 900, 3], "1600x900", ["1600", "900"], [NaN, 900], null, {}]) {
+    assertEquals(pitchFromMeasure(gableAt([400, 600], [800, 400], [1200, 600], size), "gable"), null, `size ${JSON.stringify(size)}`);
+  }
+});
+
+Deno.test("pitchFromMeasure: the answer must lie inside the sanitiser's pitch CLAMPS and above 0", () => {
+  // Rakes of 3: past the 2 the renderer is allowed, so the model's own number stands.
+  assertEquals(pitchFromMeasure(gableAt([700, 800], [800, 500], [900, 800]), "gable"), null, "a spike");
+  // Two px of rise over 800 px rounds to 0, which is not a roof anyone measured.
+  assertEquals(pitchFromMeasure(gableAt([0, 402], [800, 400], [1600, 402]), "gable"), null, "flat");
+  assertEquals(pitchFromMeasure(gableAt([400, 1400], [800, 600], [1200, 1400], [1600, 1600]), "gable"), 2, "2 itself is inside");
+});
+
+Deno.test("pitchFromMeasure: a shed is the difference of its two edges over the span between them", () => {
+  // Tall edge 500 px, short edge 260 px, 800 px apart: 240 / 800.
+  assertEquals(pitchFromMeasure(shedAt([300, 200], [300, 700], [1100, 440], [1100, 700]), "shed"), 0.3);
+  assertEquals(pitchFromMeasure(shedAt([1100, 200], [1100, 700], [300, 440], [300, 700]), "shed"), 0.3, "the tall edge on the right");
+  // A 250 px span is past 15% of 1600 (240 px): 60 / 250.
+  assertEquals(pitchFromMeasure(shedAt([300, 200], [300, 700], [550, 260], [550, 700]), "shed"), 0.24);
+  assertEquals(pitchFromMeasure(shedAt([300, 440], [300, 700], [1100, 200], [1100, 700]), "shed"), null, "the 'tall' edge is the shorter");
+  assertEquals(pitchFromMeasure(shedAt([300, 200], [300, 700], [1100, 200], [1100, 700]), "shed"), null, "two equal edges: no slope");
+  assertEquals(pitchFromMeasure(shedAt([300, 200], [300, 700], [520, 440], [520, 700]), "shed"), null, "220 px is under 15% of the width");
+  assertEquals(pitchFromMeasure(shedAt([300, 700], [300, 200], [1100, 700], [1100, 440]), "shed"), null, "y up: tops below bottoms");
+  assertEquals(pitchFromMeasure({ tallTop: [300, 200], tallBottom: [300, 700], shortTop: [1100, 440], shortBottom: [1100, 700] }, "shed"), null,
+    "no size: the span has nothing to be a share of");
+  assertEquals(pitchFromMeasure(shedAt([300, 50], [300, 850], [600, 750], [600, 850]), "shed"), null, "past the CLAMPS: 700 / 300");
+});
+
+Deno.test("pitchFromMeasure: the points must match the read's own roof type, and a gambrel is never computed", () => {
+  const g = gableAt([400, 600], [800, 400], [1200, 600]);
+  const s = shedAt([300, 200], [300, 700], [1100, 440], [1100, 700]);
+  assertEquals(pitchFromMeasure(g, "shed"), null, "gable points on a shed read");
+  assertEquals(pitchFromMeasure(s, "gable"), null, "shed points on a gable read");
+  assertEquals(pitchFromMeasure(g, "gambrel"), null, "a gambrel's pitch key means something else");
+  assertEquals(pitchFromMeasure({ ...g, ...s }, "gambrel"), null);
+  for (const t of [undefined, null, "", "hip", "Gable"]) assertEquals(pitchFromMeasure(g, t), null, `type ${JSON.stringify(t)}`);
+});
+
+Deno.test("porchPitchFromMeasure: the porch roof's drop over its run, from the wall out", () => {
+  assertEquals(porchPitchFromMeasure(porchAt([700, 400], [1200, 550])), 0.3);
+  assertEquals(porchPitchFromMeasure(porchAt([1200, 400], [700, 550])), 0.3, "the porch seen from the other side");
+  assertEquals(porchPitchFromMeasure(porchAt([700, 400], [1200, 350])), null, "the outer end higher than the wall");
+  assertEquals(porchPitchFromMeasure(porchAt([700, 400], [1200, 400])), null, "level: 0 is under the 0.05 clamp");
+  assertEquals(porchPitchFromMeasure(porchAt([700, 400], [1200, 700])), null, "0.6 is over the 0.5 clamp");
+  assertEquals(porchPitchFromMeasure(porchAt([700, 400], [1200, 425])), 0.05, "the clamp's own floor");
+  assertEquals(porchPitchFromMeasure(porchAt([700, 400], [800, 420])), null, "100 px is under 8% of the width");
+  assertEquals(porchPitchFromMeasure(porchAt([700, 400], [900, 440])), 0.2, "200 px is over it");
+  assertEquals(porchPitchFromMeasure({ wall: [700, 400], edge: [1200, 550] }), null, "no size");
+  assertEquals(porchPitchFromMeasure(porchAt([700, 400], [1700, 550])), null, "past the right edge");
+});
+
+Deno.test("measure: garbage in is null out, never a throw", () => {
+  const junk: unknown[] = [
+    null, undefined, 0, 42, "x", true, [], [1, 2], {},
+    { left: "400,600", peak: "800,400", right: "1200,600" },
+    gableAt([400, 600, 1], [800, 400], [1200, 600]),
+    gableAt([NaN, 600], [800, 400], [1200, 600]),
+    gableAt([400, 600], [800, Infinity], [1200, 600]),
+    { size: M_SIZE, left: ["400", "600"], peak: ["800", "400"], right: ["1200", "600"] },
+    { size: M_SIZE, left: { x: 400, y: 600 }, peak: { x: 800, y: 400 }, right: { x: 1200, y: 600 } },
+    { size: M_SIZE, wall: null, edge: [1200, 550] },
+    { size: M_SIZE, tallTop: [300, 200], tallBottom: [300, 700], shortTop: [1100, 440] },
+  ];
+  for (const j of junk) {
+    for (const t of ["gable", "shed", "gambrel"]) assertEquals(pitchFromMeasure(j, t), null, `${JSON.stringify(j)} on a ${t}`);
+    assertEquals(porchPitchFromMeasure(j), null, `${JSON.stringify(j)} as a porch`);
+  }
+});
+
+// A v2 reply: a gable with a projecting porch, its own numbers, and the points they were read from.
+// The points give 0.4 and 0.3 against the model's own 0.8 and 0.15. NO_MEASURE leaves the block out.
+const NO_MEASURE = Symbol("no measure");
+const MEASURED_REPLY = (roof: Record<string, unknown> = {}, measure: unknown = {
+  pitch: gableAt([400, 600], [800, 440], [1200, 600]),
+  porchPitch: porchAt([700, 400], [1200, 550]),
+}) => JSON.stringify({
+  roof: { type: "gable", front: "gable", pitch: 0.8, overhangIn: 6, porchOutFt: 6, porchEnd: "front", porchPitch: 0.15, porchPosts: 4, ...roof },
+  colors: { body: "#333333", trim: "#222222", roof: "#1a1a1a" },
+  observed: { roofNote: "a gable with a porch in front", porch: "projecting", confidence: "medium" },
+  frameMap: { front: { frame: 1, azimuthDeg: 0 } },
+  ...(measure === NO_MEASURE ? {} : { measure }),
+});
+
+Deno.test("parseMeasure: the reply's measure block is read, and it never reaches the stored spec", () => {
+  const text = MEASURED_REPLY();
+  const m = parseMeasure(text)!;
+  assertEquals(m.pitch, gableAt([400, 600], [800, 440], [1200, 600]));
+  assertEquals(m.porchPitch, porchAt([700, 400], [1200, 550]));
+  // sanitizeD3Spec is a whitelist: the block is dropped on the way to the column, measured or not.
+  for (const measure of [false, true]) {
+    const spec = parseModelSpec(text, DIMS, measure);
+    assert(spec.ok, "the reply drafts");
+    if (spec.ok) {
+      assert(!JSON.stringify(spec.d3).includes("measure") && !JSON.stringify(spec.d3).includes("peak"), `measure ${measure}: no points in the spec`);
+    }
+  }
+  // Tucked inside the roof, it is dropped all the same.
+  const inRoof = parseModelSpec(JSON.stringify({ roof: { type: "gable", pitch: 0.5, measure: { pitch: gableAt([400, 600], [800, 400], [1200, 600]) } }, colors: {} }), DIMS, true);
+  assert(inRoof.ok && !JSON.stringify(inRoof.d3).includes("measure"), "not in the roof either");
+  assert(inRoof.ok && inRoof.d3.roof.pitch === 0.5, "and a block the parser never looked for changes nothing");
+});
+
+Deno.test("parseMeasure: no measure, or one that is not an object, is fine and changes nothing", () => {
+  const without = MEASURED_REPLY({}, NO_MEASURE);
+  assertEquals(parseMeasure(without), null);
+  const spec = parseModelSpec(without, DIMS, true);
+  assert(spec.ok && spec.d3.roof.pitch === 0.8 && spec.d3.roof.porchPitch === 0.15, "the model's own numbers stand");
+  for (const measure of [null, [], "points", 5, {}, { pitch: 5, porchPitch: "x" }, { pitch: [1, 2] }]) {
+    assertEquals(parseMeasure(MEASURED_REPLY({}, measure)), null, JSON.stringify(measure));
+  }
+  for (const text of ["", "no json", "{", "[1,2]", "null"]) assertEquals(parseMeasure(text), null, text);
+  // One block alone is still a measure.
+  assertEquals(parseMeasure(MEASURED_REPLY({}, { porchPitch: porchAt([700, 400], [1200, 550]) }))!.pitch, null);
+});
+
+Deno.test("applyMeasuredPitches: a gable's pitch and a projecting porch's pitch come from the points, and say so", () => {
+  const text = MEASURED_REPLY();
+  const model = parseModelSpec(text, DIMS);
+  assert(model.ok, "fixture");
+  if (!model.ok) return;
+  const r = applyMeasuredPitches(model.d3, text);
+  assertEquals(r.d3.roof.pitch, 0.4, "160 px over 400 px, both rakes");
+  assertEquals(r.d3.roof.porchPitch, 0.3, "150 px over 500 px");
+  assertEquals(r.sources, { pitchSource: "points", modelPitch: 0.8, porchPitchSource: "points", modelPorchPitch: 0.15 });
+  // Everything else is the read's own, in the sanitiser's key order.
+  assertEquals(r.d3, cleanSpec({ ...model.d3, roof: { ...model.d3.roof, pitch: 0.4, porchPitch: 0.3 } }));
+  // parseModelSpec's `measure` is the same thing, and without it the model's numbers stand.
+  assertEquals(parseModelSpec(text, DIMS, true), { ok: true, d3: r.d3 });
+  assertEquals([model.d3.roof.pitch, model.d3.roof.porchPitch], [0.8, 0.15]);
+});
+
+Deno.test("applyMeasuredPitches: points that fail, or do not fit the read, leave the model's number and say which", () => {
+  const apply = (roof: Record<string, unknown>, measure?: unknown) => {
+    const text = MEASURED_REPLY(roof, measure);
+    const model = parseModelSpec(text, DIMS);
+    if (!model.ok) throw new Error(model.error);
+    return { model: model.d3, ...applyMeasuredPitches(model.d3, text) };
+  };
+  // The y-up mistake on the gable; the porch's points still hold.
+  const yUp = apply({}, { pitch: gableAt([400, 300], [800, 500], [1200, 300]), porchPitch: porchAt([700, 400], [1200, 550]) });
+  assertEquals([yUp.d3.roof.pitch, yUp.d3.roof.porchPitch], [0.8, 0.3]);
+  assertEquals(yUp.sources, { pitchSource: "model", pitchRejected: true, porchPitchSource: "points", modelPorchPitch: 0.15 });
+  // A shed read given gable points: the points must match the read's own roof type.
+  const shed = apply({ type: "shed", front: undefined, highSide: "front", pitch: 0.2, porchOutFt: 0 });
+  assertEquals(shed.d3.roof.pitch, 0.2);
+  assertEquals(shed.sources, { pitchSource: "model", pitchRejected: true }, "no porch, so nothing said about one");
+  // A gambrel is never computed, and its points are not "rejected": they were never a question.
+  const gambrel = apply({ type: "gambrel", kneeU: 0.75, kneeRise: 0.72, ridgeRise: 1.03 });
+  assertEquals(gambrel.d3.roof.pitch, 0.8);
+  assertEquals(gambrel.sources.pitchSource, "model");
+  assert(!("pitchRejected" in gambrel.sources), "a gambrel's points are not a failed read");
+  // A RECESSED porch has no roof of its own: porch points change nothing and nothing is recorded.
+  const recessed = apply({ porchOutFt: 0, porchDepthFt: 6 });
+  assertEquals(recessed.d3.roof.porchPitch, undefined);
+  assert(!("porchPitchSource" in recessed.sources), "no projecting porch, no porch source");
+  // No measure at all: the SAME object back, and every pitch the model's.
+  const none = apply({}, NO_MEASURE);
+  assert(none.d3 === none.model, "nothing replaced, nothing rebuilt");
+  assertEquals(none.sources, { pitchSource: "model", porchPitchSource: "model" });
+  // The model gave no pitch of its own: the points' number is all there is, and modelPitch says so.
+  const bare = apply({ pitch: undefined });
+  assertEquals([bare.d3.roof.pitch, bare.sources.modelPitch], [0.4, null]);
+});

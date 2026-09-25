@@ -1531,12 +1531,18 @@ export function foldOverhangInches(raw: unknown): unknown {
 // beat a measured one, and moving either after the sanitiser would mean a second set of clamps.
 // With no `dims` the middle step is the identity by reference, so an old caller's spec is the
 // same object it has always been.
-export function parseModelSpec(text: string, dims?: KnownDims | null): { ok: true; d3: D3Spec } | { ok: false; error: string } {
+//
+// `measure` (2026-09-26) is the v2 draft's: the sanitised spec then takes the pitches the reply's
+// own points give (applyMeasuredPitches), exactly as readDraftReply's reading of the same text does.
+// Off, which is every other caller, this is the function it always was.
+export function parseModelSpec(text: string, dims?: KnownDims | null, measure = false): { ok: true; d3: D3Spec } | { ok: false; error: string } {
   const m = String(text || "").match(/\{[\s\S]*\}/);
   if (!m) return { ok: false, error: "The model did not return a spec." };
   let parsed: unknown;
   try { parsed = JSON.parse(m[0]); } catch { return { ok: false, error: "The model returned malformed JSON." }; }
-  return sanitizeD3Spec(applyKnownDims(foldOverhangInches(parsed), dims));
+  const clean = sanitizeD3Spec(applyKnownDims(foldOverhangInches(parsed), dims));
+  if (!measure || !clean.ok) return clean;
+  return { ok: true, d3: applyMeasuredPitches(clean.d3, text).d3 };
 }
 
 // ─── Reading a Messages API reply (2026-09-17) ───────────────────────────────────────────
@@ -1724,6 +1730,176 @@ export function parseFrameMap(text: string, videoCount: number): FrameMap | null
     out[k] = { frame, azimuthDeg: (Math.round(norm / 45) * 45) % AZIMUTH_LAP };
   }
   return Object.keys(out).length ? out : null;
+}
+
+// ─── The pitches, worked out from the reply's own points (2026-09-26) ────────────────────────
+// The v2 prompt asks for `measure` beside `frameMap`: for each pitch, the image it was read in, that
+// image's size, and the pixel points along the roof's edges (x to the right, y DOWN from the
+// top-left corner). The slope is then arithmetic done here, not a judgement made by the model,
+// which is what it was doing when live reads put a 0.41 gable at 0.45 to 0.8 (VIDEO_SHAPE_V2's
+// header has the numbers).
+//
+// NOTHING HERE IS REPAIRED. Each function answers a pitch or null, and null means "keep the
+// model's own number", which is what every draft did before this. So every check leans to
+// refusing: a read whose points cannot vouch for a slope keeps exactly the pitch it had.
+//
+//   * Coordinates are real, finite JSON numbers. A string "412" is not a coordinate the model gave.
+//   * `size`, when given, is two positive numbers and every point lies inside it. The shed and the
+//     porch NEED it, because their span check is a share of the image's width.
+//   * GABLE (left, peak, right, on the top edge of the rakes): the peak stands ABOVE both ends
+//     (a SMALLER y, which is where the y-up mistake fails), between them, and the steeper slope is
+//     at most MEASURE_GABLE_SLOPE_RATIO times the shallower. A square-on gable end shows two rakes
+//     alike; two very different ones are an off-axis frame, a peak on the wrong landmark or a rake
+//     end on a wing roof, and their average would hide it. The answer is the mean of the two.
+//   * SHED (the two vertical edges of a wall whose top slopes): the difference of the two edges'
+//     heights over the distance between them, which is the renderer's rise over the full span. The
+//     tall edge must be the taller, and the span at least MEASURE_SHED_MIN_SPAN of the width: over
+//     a short span a few pixels are a large error.
+//   * PORCH (wall, edge, on the top of the porch roof): the drop over the run, with the outer end
+//     no higher than the wall end and the run at least MEASURE_PORCH_MIN_SPAN of the width.
+//   * GAMBREL: never computed. d3RoofProfile draws a gambrel from kneeU, kneeRise and ridgeRise, so
+//     a rake-to-peak slope would be a different number stored under a key that means something else.
+//   * The answer is rounded to two places and must be above 0 and inside the sanitiser's own CLAMPS
+//     for its key. Outside them it is null, never clamped: a clamped slope is one nobody read.
+export const MEASURE_GABLE_SLOPE_RATIO = 1.6;
+export const MEASURE_SHED_MIN_SPAN = 0.15;
+export const MEASURE_PORCH_MIN_SPAN = 0.08;
+
+type MeasureXY = [number, number];
+const isCoord = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const measureObject = (v: unknown): Record<string, unknown> | null =>
+  (v && typeof v === "object" && !Array.isArray(v)) ? v as Record<string, unknown> : null;
+const measureXY = (v: unknown): MeasureXY | null =>
+  (Array.isArray(v) && v.length === 2 && isCoord(v[0]) && isCoord(v[1])) ? [v[0], v[1]] : null;
+
+// Every named point of one block, each inside the block's size, or null. `width` is the size's.
+function measurePoints(block: unknown, keys: readonly string[], needSize: boolean): { pts: MeasureXY[]; width: number } | null {
+  const b = measureObject(block);
+  if (!b) return null;
+  let size: MeasureXY | null = null;
+  if (b.size !== undefined) {
+    size = measureXY(b.size);
+    if (!size || size[0] <= 0 || size[1] <= 0) return null;
+  } else if (needSize) {
+    return null;
+  }
+  const pts: MeasureXY[] = [];
+  for (const k of keys) {
+    const p = measureXY(b[k]);
+    if (!p) return null;
+    if (size && (p[0] < 0 || p[0] > size[0] || p[1] < 0 || p[1] > size[1])) return null;
+    pts.push(p);
+  }
+  return { pts, width: size ? size[0] : Infinity };
+}
+
+function measuredValue(key: "pitch" | "porchPitch", v: number): number | null {
+  if (!Number.isFinite(v)) return null;
+  const r = Math.round(v * 100) / 100;
+  const [lo, hi] = CLAMPS[key];
+  return r > 0 && r >= lo && r <= hi ? r : null;
+}
+
+// The main roof's pitch from `measure.pitch`, for a read whose roof.type is `roofType`: the gable
+// points on a gable, the wall edges on a shed, and nothing on anything else.
+export function pitchFromMeasure(block: unknown, roofType: unknown): number | null {
+  if (roofType === "gable") {
+    const m = measurePoints(block, ["left", "peak", "right"], false);
+    if (!m) return null;
+    const [[lx, ly], [px, py], [rx, ry]] = m.pts;
+    if (!(lx < px && px < rx) || !(py < ly && py < ry)) return null;
+    const a = (ly - py) / (px - lx);
+    const c = (ry - py) / (rx - px);
+    // A hair of room on the ratio, so a read at exactly 1.6 is not refused by float rounding.
+    if (!(a > 0 && c > 0) || Math.max(a, c) / Math.min(a, c) > MEASURE_GABLE_SLOPE_RATIO + 1e-9) return null;
+    return measuredValue("pitch", (a + c) / 2);
+  }
+  if (roofType === "shed") {
+    const m = measurePoints(block, ["tallTop", "tallBottom", "shortTop", "shortBottom"], true);
+    if (!m) return null;
+    const [tallTop, tallBottom, shortTop, shortBottom] = m.pts;
+    const tall = tallBottom[1] - tallTop[1];
+    const short = shortBottom[1] - shortTop[1];
+    const span = Math.abs(tallTop[0] - shortTop[0]);
+    if (!(short > 0 && tall > short) || span < MEASURE_SHED_MIN_SPAN * m.width) return null;
+    return measuredValue("pitch", (tall - short) / span);
+  }
+  return null;
+}
+
+// The projecting porch roof's own pitch from `measure.porchPitch`.
+export function porchPitchFromMeasure(block: unknown): number | null {
+  const m = measurePoints(block, ["wall", "edge"], true);
+  if (!m) return null;
+  const [[wx, wy], [ex, ey]] = m.pts;
+  const run = Math.abs(ex - wx);
+  if (ey < wy || run < MEASURE_PORCH_MIN_SPAN * m.width) return null;
+  return measuredValue("porchPitch", (ey - wy) / run);
+}
+
+// The reply's `measure` blocks, read the way parseFrameMap reads its map: out of the first {...} in
+// the text, never stored. Null when the reply has none, which is every legacy reply.
+export type MeasureBlocks = { pitch: Record<string, unknown> | null; porchPitch: Record<string, unknown> | null };
+export function parseMeasure(text: string): MeasureBlocks | null {
+  const m = String(text || "").match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(m[0]); } catch { return null; }
+  const top = measureObject(parsed);
+  const src = top ? measureObject(top.measure) : null;
+  if (!src) return null;
+  const out = { pitch: measureObject(src.pitch), porchPitch: measureObject(src.porchPitch) };
+  return out.pitch || out.porchPitch ? out : null;
+}
+
+// Where one read's pitches came from, recorded per read in draft_tokens (draftReadSample) so a query
+// can set the points' number beside the model's own. `pitchSource` is on every measured read;
+// `porchPitchSource` only on a read with a projecting porch. `modelPitch` / `modelPorchPitch` are the
+// model's own numbers when the points replaced them (null when it gave none). `pitchRejected` /
+// `porchPitchRejected` mark a block that was given and failed the checks above, so "the model gave
+// no points" and "its points did not hold up" are two different answers in SQL.
+export type PitchSources = {
+  pitchSource: "points" | "model";
+  modelPitch?: number | null;
+  pitchRejected?: true;
+  porchPitchSource?: "points" | "model";
+  modelPorchPitch?: number | null;
+  porchPitchRejected?: true;
+};
+
+// One read's spec with its pitches worked out from its own points. The pitch is replaced only on a
+// gable or a shed, from the points that match the read's OWN roof.type; the porch pitch only on a
+// projecting porch (porchOutFt over half a foot, the sanitiser's own test). The result goes back
+// through sanitizeD3Spec, so key order and every other rule stay the sanitiser's. With nothing
+// replaced, the spec comes back as the very object it went in as.
+export function applyMeasuredPitches(d3: D3Spec, text: string): { d3: D3Spec; sources: PitchSources } {
+  const roof = d3.roof || {};
+  const measure = parseMeasure(text);
+  const type = roof.type;
+  const projecting = (num(roof.porchOutFt) ?? 0) > 0.5;
+  const pitch = measure ? pitchFromMeasure(measure.pitch, type) : null;
+  const porchPitch = measure && projecting ? porchPitchFromMeasure(measure.porchPitch) : null;
+  // Always in this key order, so every sample in draft_tokens reads the same way.
+  const sourcesOf = (p: number | null, pp: number | null): PitchSources => {
+    const s: PitchSources = { pitchSource: p !== null ? "points" : "model" };
+    if (p !== null) s.modelPitch = num(roof.pitch);
+    else if (measure?.pitch && (type === "gable" || type === "shed")) s.pitchRejected = true;
+    if (projecting) {
+      s.porchPitchSource = pp !== null ? "points" : "model";
+      if (pp !== null) s.modelPorchPitch = num(roof.porchPitch);
+      else if (measure?.porchPitch) s.porchPitchRejected = true;
+    }
+    return s;
+  };
+  if (pitch === null && porchPitch === null) return { d3, sources: sourcesOf(null, null) };
+  const next: Record<string, unknown> = { ...roof };
+  if (pitch !== null) next.pitch = pitch;
+  if (porchPitch !== null) next.porchPitch = porchPitch;
+  const clean = sanitizeD3Spec({ ...d3, roof: next });
+  // Unreachable with the checks above (both numbers are inside their CLAMPS), and if it ever were
+  // reached, the read keeps the spec it came with rather than losing its draft.
+  if (!clean.ok) return { d3, sources: sourcesOf(null, null) };
+  return { d3: clean.d3, sources: sourcesOf(pitch, porchPitch) };
 }
 
 // ─── A drafted gambrel that cannot look like one (2026-09-16) ─────────────────────────────
