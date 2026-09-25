@@ -4631,7 +4631,7 @@ Deno.test("consensusOfCalls and draftCallsUsage: the medoid's CALL, the summed u
 // stay the model's own; that junk never throws; and that `measure` never reaches the spec.
 import {
   applyMeasuredPitches, parseMeasure, pitchFromMeasure,
-  MEASURE_GABLE_MAX_TILT_DEG, MEASURE_GABLE_MIN_SPAN, MEASURE_GABLE_PEAK_T,
+  MEASURE_GABLE_MAX_TILT_DEG, MEASURE_GABLE_MIN_SPAN, MEASURE_GABLE_PEAK_T, MEASURE_GABLE_MIN_RISE, MEASURE_GABLE_MIN_RISE_PX,
 } from "./styleD3.ts";
 
 // A 1600 x 900 frame. Generic points only, never a test building's (the real reads below are named).
@@ -4656,6 +4656,8 @@ Deno.test("measure: the checks' thresholds are the ones the brief set", () => {
   assertEquals(MEASURE_GABLE_MAX_TILT_DEG, 12);
   assertEquals(MEASURE_GABLE_MIN_SPAN, 0.12);
   assertEquals(MEASURE_GABLE_PEAK_T, [0.05, 0.95]);
+  assertEquals(MEASURE_GABLE_MIN_RISE, 0.08);
+  assertEquals(MEASURE_GABLE_MIN_RISE_PX, 50);
 });
 
 Deno.test("pitchFromMeasure: a symmetric gable is the rise over half its width", () => {
@@ -4725,8 +4727,33 @@ Deno.test("pitchFromMeasure: the y-up mistake and a peak outside its ends go bac
   assertEquals(pitchFromMeasure(gableAt([400, 600], [430, 400], [1200, 600]), "gable"), null, "4% of the way along");
   assertEquals(pitchFromMeasure(gableAt([400, 600], [1150, 400], [1200, 600]), "gable"), 0.5, "94% is still inside");
   // A short eave line: under 12% of the image's width, a few pixels are a large error.
-  assertEquals(pitchFromMeasure(gableAt([700, 600], [790, 560], [880, 600]), "gable"), null, "180 px of a 1600 px frame");
-  assertEquals(pitchFromMeasure({ left: [700, 600], peak: [790, 560], right: [880, 600] }, "gable"), 0.44, "with no size there is no share to take");
+  assertEquals(pitchFromMeasure(gableAt([700, 600], [790, 520], [880, 600]), "gable"), null, "180 px of a 1600 px frame");
+  assertEquals(pitchFromMeasure({ left: [700, 600], peak: [790, 520], right: [880, 600] }, "gable"), 0.89, "with no size there is no share to take");
+});
+
+Deno.test("pitchFromMeasure: a distant gable under the rise floor is refused", () => {
+  // A distant gable's peak is placed to a few pixels, and over a short rise those pixels are the slope.
+  // In a 1600 x 900 frame the floor is 8% of 900, 72 px. This one spans 400 px (well past 12% of the
+  // width) and would read 0.3, but its peak stands only 60 px above the eave line.
+  assertEquals(pitchFromMeasure(gableAt([600, 500], [800, 440], [1000, 500]), "gable"), null, "a 60 px rise");
+  assertEquals(pitchFromMeasure(gableAt([400, 600], [800, 529], [1200, 600]), "gable"), null, "71 px is under 72");
+  assertEquals(pitchFromMeasure(gableAt([400, 600], [800, 528], [1200, 600]), "gable"), 0.18, "72 px is the floor itself");
+  // The rise is measured across the eave line, so a rolled frame is held to the same floor.
+  const [l, p, r] = rolled(5, [600, 500], [800, 440], [1000, 500]);
+  assertEquals(pitchFromMeasure(gableAt(l, p, r), "gable"), null, "the 60 px rise, rolled 5 degrees");
+  // The simulation's distant gable: a 33 px rise in a 1280 x 720 frame, where 5 px of peak error is 15%.
+  assertEquals(pitchFromMeasure(gableAt([540, 300], [640, 267], [740, 300], [1280, 720]), "gable"), null, "33 px of 720");
+  // Without a size there is no height to take a share of: the floor is 50 px.
+  assertEquals(pitchFromMeasure({ left: [400, 600], peak: [800, 551], right: [1200, 600] }, "gable"), null, "49 px, no size");
+  assertEquals(pitchFromMeasure({ left: [400, 600], peak: [800, 550], right: [1200, 600] }, "gable"), 0.13, "50 px, no size");
+  // The four real reads (the test above) rise 78 to 80 px in a 720 px frame, whose floor is 57.6 px,
+  // and 139 px: all four still give their pitch.
+  const size = [1280, 720];
+  assertEquals(
+    [gableAt([469, 183], [628, 89], [827, 151], size), gableAt([468, 181], [628, 89], [826, 151], size),
+      gableAt([468, 183], [628, 89], [827, 152], size), gableAt([247, 222], [648, 107], [975, 266], size)].map((g) => pitchFromMeasure(g, "gable")),
+    [0.44, 0.44, 0.44, 0.38],
+  );
 });
 
 Deno.test("pitchFromMeasure: points outside the image, and a size that is not a size, are refused", () => {
@@ -4741,8 +4768,8 @@ Deno.test("pitchFromMeasure: points outside the image, and a size that is not a 
 Deno.test("pitchFromMeasure: the answer must lie inside the sanitiser's pitch CLAMPS and above 0", () => {
   // Rakes of 3: past the 2 the renderer is allowed, so the model's own number stands.
   assertEquals(pitchFromMeasure(gableAt([700, 800], [800, 500], [900, 800]), "gable"), null, "a spike");
-  // Two px of rise over 800 px rounds to 0, which is not a roof anyone measured.
-  assertEquals(pitchFromMeasure(gableAt([0, 402], [800, 400], [1600, 402]), "gable"), null, "flat");
+  // 50 px of rise over 20000 px, with no size to bound it, rounds to 0, which is not a roof anyone measured.
+  assertEquals(pitchFromMeasure({ left: [0, 1050], peak: [20000, 1000], right: [40000, 1050] }, "gable"), null, "flat");
   assertEquals(pitchFromMeasure(gableAt([400, 1400], [800, 600], [1200, 1400], [1600, 1600]), "gable"), 2, "2 itself is inside");
 });
 
@@ -4853,6 +4880,11 @@ Deno.test("applyMeasuredPitches: points that fail, or do not fit the read, leave
   assert(yUp.d3 === yUp.model, "nothing replaced");
   assertEquals([yUp.d3.roof.pitch, yUp.d3.roof.porchPitch], [0.8, 0.15]);
   assertEquals(yUp.sources, { pitchSource: "model", pitchRejected: true });
+  // A distant gable under the rise floor is refused the same way.
+  const distant = apply({}, { pitch: gableAt([600, 500], [800, 440], [1000, 500]) });
+  assert(distant.d3 === distant.model, "nothing replaced");
+  assertEquals(distant.d3.roof.pitch, 0.8);
+  assertEquals(distant.sources, { pitchSource: "model", pitchRejected: true });
   // A porch block alone is no measure at all.
   const porchOnly = apply({}, { porchPitch: OLD_PORCH_POINTS });
   assert(porchOnly.d3 === porchOnly.model, "nothing replaced");

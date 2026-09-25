@@ -1770,8 +1770,13 @@ export function parseFrameMap(text: string, videoCount: number): FrameMap | null
 //     MEASURE_GABLE_MAX_TILT_DEG of level (steeper is a corner view or a badly rolled frame, and
 //     pointing leftward is left and right swapped); it is at least MEASURE_GABLE_MIN_SPAN of the
 //     width when `size` is given; the peak is on its SKY side (a smaller y, which is where the y-up
-//     mistake fails); and the peak's foot on the line falls strictly inside MEASURE_GABLE_PEAK_T
-//     of the way along it, so a peak at or past either end is refused.
+//     mistake fails); the peak's foot on the line falls strictly inside MEASURE_GABLE_PEAK_T of the
+//     way along it, so a peak at or past either end is refused; and the peak stands at least
+//     MEASURE_GABLE_MIN_RISE of the image's height above the line, or MEASURE_GABLE_MIN_RISE_PX
+//     when no `size` is given. That last is the RISE FLOOR: a distant gable's peak is placed to a
+//     few pixels, and on a short rise those pixels are the slope (in the simulation, 5 px on a
+//     33 px rise was 15%). The real reads in the tests rise about 80 px in a 720 px frame and
+//     139 px in another, well clear of it.
 //   * Any roof.type but "gable" is never computed: a shed (above), and a gambrel, which
 //     d3RoofProfile draws from kneeU, kneeRise and ridgeRise, so a rake-to-peak slope would be a
 //     different number stored under a key that means something else.
@@ -1780,6 +1785,8 @@ export function parseFrameMap(text: string, videoCount: number): FrameMap | null
 export const MEASURE_GABLE_MAX_TILT_DEG = 12;
 export const MEASURE_GABLE_MIN_SPAN = 0.12;
 export const MEASURE_GABLE_PEAK_T: readonly [number, number] = [0.05, 0.95];
+export const MEASURE_GABLE_MIN_RISE = 0.08;
+export const MEASURE_GABLE_MIN_RISE_PX = 50;
 
 type MeasureXY = [number, number];
 const isCoord = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -1830,6 +1837,8 @@ export function pitchFromMeasure(block: unknown, roofType: unknown): number | nu
   // makes the cross product e x d negative, so the height is its negative over the length.
   const rise = -(ex * dy - ey * dx) / span;
   if (!(rise > 0)) return null;
+  // The rise floor: a share of the image's height, or a fixed number of pixels without a size.
+  if (rise < (m.size ? MEASURE_GABLE_MIN_RISE * m.size[1] : MEASURE_GABLE_MIN_RISE_PX)) return null;
   const pitch = Math.round(rise / (span / 2) * 100) / 100;
   const [lo, hi] = CLAMPS.pitch;
   return pitch > 0 && pitch >= lo && pitch <= hi ? pitch : null;
