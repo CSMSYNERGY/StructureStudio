@@ -1634,6 +1634,10 @@ Deno.test("v2 asks for the porch's posts, its roof's own pitch and its steps (20
     assert(p.includes("Leave it out when the porch has no steps"), `${name}: absent is no steps`);
     // Generic numbers only: the two test buildings are a 4-post porch, not a 3.
     assert(p.includes("A porch with a post at each corner and one in the middle is 3."), `${name}: a generic post count`);
+    // Counting, not recall (2026-09-25): the first live Farmstand draft said 3 for its 4 posts. The
+    // second example is 5, still neither test building's own number.
+    assert(p.includes("One at each corner and three between them is 5.") && p.includes("Count them one by one along the edge before answering."), `${name}: count them`);
+    assert(!p.includes("is 4."), `${name}: no example that is a test building's own count`);
     assert(p.includes("A porch roof that drops 1 ft over 5 ft of run is 0.2."), `${name}: a generic pitch`);
   }
   // The legacy prompts are frozen (their bytes are pinned by hash above): none of this is in them.
@@ -1679,9 +1683,12 @@ Deno.test("v2 says colours MATTER, read as the paint looks in even daylight, wit
     assert(p.includes("dark paint stays dark"), `${name}: dark stays dark`);
     assert(p.includes("(the boards framing them, not shutters)"), `${name}: shutters are not trim`);
     assert(p.includes('"corner": "#rrggbb"') && p.includes('"fascia": "#rrggbb"'), `${name}: corner and fascia are asked for`);
-    assert(p.includes("give corner and fascia ONLY when they differ from trim"), `${name}: absent means trim`);
-    // A generic example, not a description of either test building.
-    assert(p.includes("for example corners in the body colour and a fascia in the roof colour"), `${name}: the pattern, as an example`);
+    // ALWAYS both (2026-09-25): the first live Farmstand draft left corner out, so its corners drew
+    // in the white trim colour down a brown building, and colours are off the check's allow-list.
+    assert(p.includes("ALWAYS give both: repeat trim's value only when they really are the casings' colour"), `${name}: corner and fascia always given`);
+    assert(!p.includes("give corner and fascia ONLY when they differ from trim"), `${name}: no longer optional`);
+    // A generic pattern, not a description of either test building.
+    assert(p.includes("the corner boards are usually the wall colour, and the fascia is often the roof colour"), `${name}: the pattern`);
     assert(!p.includes("while only the window casings are white"), `${name}: not the Farmstand's own paint job`);
     // The porch's lumber, now that colour is part of the match (the legacy prompt still never asks).
     assert(p.includes('"wood": "#rrggbb"') && p.includes("only when there is a porch"), `${name}: porch wood, only with a porch`);
