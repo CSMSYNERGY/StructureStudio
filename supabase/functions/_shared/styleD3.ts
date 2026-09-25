@@ -1047,6 +1047,125 @@ export function wantsStreamedDraft(payload: unknown): boolean {
 // work runs on behind it. The platform's own wall clock (400 s) is the hard stop above both.
 export const DRAFT_STREAM_DEADLINE_MS = 300_000;
 
+// ─── PICKING A STREAMED DRAFT UP AFTER THE CONNECTION DROPPED (2026-09-25) ───────────────────
+// A streamed draft runs three to five minutes, and a phone that backgrounds the tab, or a network
+// that blinks, drops the answer while the server is still working (or after it has finished and
+// charged). Asking again under the same key cannot help: it either runs the model a second time or
+// meets hold_in_flight / already_charged. But the server writes what it drafted onto the ledger
+// row (226), so the browser can read it back: calibrate_style_ai_recover, which answers from the
+// NEWEST ai_style_calls row of this tenant, this user and this style that was created since the
+// press began. No new column and no migration: every field it needs is already on the row.
+//
+// `since` is the ISO time the browser recorded just before it sent the press. Refused when it is
+// older than DRAFT_RECOVER_MAX_AGE_MS (a press is over in seven minutes; this is not a history
+// browser) or later than DRAFT_RECOVER_SKEW_MS in the future. `clientNow`, the browser's clock when
+// it asked, is optional: with it, `since` is moved onto the server's clock (called_at is the
+// database's `now()`), so a browser clock that runs fast does not hide the press's own row; without
+// it the two clocks are taken to agree. Either way the rows are read from DRAFT_RECOVER_SLACK_MS
+// before `since`. A wrong `clientNow` can only move the window over the caller's OWN rows: the
+// tenant, user and style filters are the server's, never the caller's.
+export const DRAFT_RECOVER_MAX_AGE_MS = 15 * 60_000;
+export const DRAFT_RECOVER_SKEW_MS = 60_000;
+export const DRAFT_RECOVER_SLACK_MS = 5_000;
+// How long a row with no draft is still worth waiting on: the answer's own deadline plus 100 s, which
+// is the platform's 400 s wall clock. The work can run on past its answer's deadline (it is kept
+// alive for its capture and ledger write), but no worker outlives the wall clock, so a row still
+// without a draft by then will never get one.
+export const DRAFT_RECOVER_PENDING_MS = DRAFT_STREAM_DEADLINE_MS + 100_000;
+// How long after the model phase ended (draft_ms, 251) a row may still be waiting for `drafted`.
+// On a success the usage write lands first and `drafted` a capture and one update later, so a row
+// with draft_ms and no draft is mid-write for a few seconds and a FAILURE after that: every failure
+// exit writes draft_ms and never writes `drafted`.
+export const DRAFT_RECOVER_SETTLE_MS = 90_000;
+
+export function parseRecoverSince(
+  since: unknown,
+  clientNow: unknown,
+  serverNowMs: number,
+): { ok: true; fromIso: string } | { ok: false; error: string } {
+  const sinceMs = typeof since === "string" && since.length <= 64 ? Date.parse(since) : NaN;
+  if (!Number.isFinite(sinceMs)) return { ok: false, error: "since (when the press began) is required." };
+  const clientMs = typeof clientNow === "number" && Number.isFinite(clientNow) ? clientNow : serverNowMs;
+  if (clientMs - sinceMs > DRAFT_RECOVER_MAX_AGE_MS) {
+    return { ok: false, error: "That press is too old to pick a draft up for." };
+  }
+  if (sinceMs - clientMs > DRAFT_RECOVER_SKEW_MS) {
+    return { ok: false, error: "since is in the future." };
+  }
+  const fromMs = sinceMs + (serverNowMs - clientMs) - DRAFT_RECOVER_SLACK_MS;
+  return { ok: true, fromIso: new Date(fromMs).toISOString() };
+}
+
+// The ledger row calibrate_style_ai_recover reads (select these columns, nothing else).
+export const DRAFT_RECOVER_COLUMNS = "id, called_at, drafted, observed, frames, dims, draft_ms, charged_cents";
+export type DraftRecoverRow = {
+  id: string;
+  called_at: string;
+  drafted: unknown;
+  observed: unknown;
+  frames: unknown;
+  dims: unknown;
+  draft_ms: unknown;
+  charged_cents: unknown;
+};
+export type DraftRecoverAnswer =
+  | { kind: "draft"; code: string; severity: "info"; body: Record<string, unknown> }
+  | { kind: "pending"; body: { ok: true; pending: true } }
+  | { kind: "lost"; code: string; severity: "info" | "error"; why: string; body: { ok: true; pending: false; message: string } };
+
+const RECOVER_LOST = "We could not pick the draft up from the server: that generation did not finish, so you are not charged for it. Press Generate to try again.";
+const RECOVER_CHARGED_UNSAVED = "That generation finished and was charged once, but its draft could not be saved for pickup, so it is gone. You have not been charged twice. Reload this page before pressing Generate again; the next press will be a new charge.";
+
+// What the recover action answers for the newest matching row (null: none).
+//   * DRAFTED: the body calibrate_style_ai's success answered with, rebuilt from the row, field for
+//     field and in the same order, plus `recovered: true`. Two fields are not on the row and are
+//     said to be missing rather than guessed: `dropped` (null: the browser knows how many it sent
+//     and works it out) and `frameMap` (null: the reply text it was read out of is not stored, so the
+//     free self-check is skipped for a recovered draft, and the designer says so). `balanceCents` is
+//     null, as a response that took no money back to the browser always has.
+//   * NOT YET: a row with no draft that may still get one, i.e. younger than
+//     DRAFT_RECOVER_PENDING_MS and not DRAFT_RECOVER_SETTLE_MS past its model phase.
+//   * LOST: no row (the press was refused before its ledger row, its row was deleted with the
+//     refusal, or it never arrived), a model phase that ended without a draft, or a row too old to
+//     wait on. Said plainly, with the charge said honestly: every one of those released its hold (or
+//     never took one), except a draft that was CAPTURED and then failed to reach the ledger.
+export function recoverDraftAnswer(row: DraftRecoverRow | null, nowMs: number): DraftRecoverAnswer {
+  const lost = (why: string, severity: "info" | "error" = "info", message = RECOVER_LOST): DraftRecoverAnswer =>
+    ({ kind: "lost", code: "ai_draft_recover_none", severity, why, body: { ok: true, pending: false, message } });
+  if (!row) return lost("no_row");
+  const calledMs = Date.parse(String(row.called_at ?? ""));
+  const ageMs = Number.isFinite(calledMs) ? nowMs - calledMs : Infinity;
+  if (row.drafted !== null && row.drafted !== undefined) {
+    const d3 = row.drafted;
+    // Our own sanitised write, read back. Anything else is a fault, never a draft to apply.
+    if (typeof d3 !== "object" || Array.isArray(d3) || !sanitizeD3Spec(d3).ok) return lost("unreadable", "error");
+    const dims = parseKnownDims(row.dims);
+    return {
+      kind: "draft", code: "ai_draft_recovered", severity: "info",
+      body: {
+        ok: true,
+        d3,
+        frames: typeof row.frames === "number" ? row.frames : null,
+        dropped: null,
+        observed: row.observed ?? null,
+        balanceCents: null,
+        dims: dims.ok ? dims.dims : null,
+        frameMap: null,
+        checkId: row.id,
+        recovered: true,
+      },
+    };
+  }
+  const draftMs = typeof row.draft_ms === "number" && Number.isFinite(row.draft_ms) ? row.draft_ms : null;
+  const settled = draftMs !== null && ageMs > draftMs + DRAFT_RECOVER_SETTLE_MS;
+  if (!settled && ageMs < DRAFT_RECOVER_PENDING_MS) return { kind: "pending", body: { ok: true, pending: true } };
+  // Charged and no draft: the capture ran and the 226 write did not (ai_style_result_log_failed).
+  if (row.charged_cents !== null && row.charged_cents !== undefined) {
+    return lost("charged_unsaved", "error", RECOVER_CHARGED_UNSAVED);
+  }
+  return lost(draftMs !== null ? "failed" : "stale");
+}
+
 // THE LEGACY RULER, EXACTLY AS IT SHIPPED ON 2026-09-19 (d3ab404), for callers the gate keeps on
 // the old path. Frozen: the ruler speaks the old frame ("wide across the gable end") because that
 // is the frame the old dimensions card asked in, and the wall height is cut out of the legacy
