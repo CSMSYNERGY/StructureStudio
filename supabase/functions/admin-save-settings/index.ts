@@ -2,7 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { checkAdminAuth } from "../_shared/adminAuth.ts";
 import { withErrorLog } from "../_shared/logError.ts";
-import { sanitizeD3Spec, sanitizePhotoUrls, WALK_FRAME_MAX } from "../_shared/styleD3.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, WALK_FRAME_MAX, carryForwardFoundation } from "../_shared/styleD3.ts";
 
 // Operator (super-admin) bootstrap tool, used by the designer's ?admin=1 panel.
 // Gated by the shared ADMIN_PASSWORD edge-function secret. Owners use the
@@ -88,7 +88,7 @@ Deno.serve(withErrorLog("admin-save-settings", async (req: Request) => {
   // teaches get_config to emit it; the validation now lives in _shared/styleD3.ts so
   // this and portal-settings' builder-facing twin cannot drift apart.
   if (action === "save_style_d3") {
-    const { styleValue, d3, d3Photos, d3VideoFrames } = payload || {};
+    const { styleValue, d3, d3Photos, d3VideoFrames, frame } = payload || {};
     if (!styleValue || typeof styleValue !== "string") {
       return json({ error: "styleValue is required." }, 400);
     }
@@ -128,6 +128,10 @@ Deno.serve(withErrorLog("admin-save-settings", async (req: Request) => {
         clean.d3.roofProfile = stored;
       }
     }
+    // A raised foundation (blocks / piers and floorHeightFt, 2026-09-25): an operator page served by
+    // an older bundle sends foundation null and no floor height, and must not erase the stored pair;
+    // the current editor sends frame "front" and gets what it sent. See carryForwardFoundation.
+    carryForwardFoundation(clean.d3, d3, lockRow?.d3, frame);
 
     // Matched on the style KEY, which is what the editor knows as `value`;
     // (client_id, key) is unique, so this touches exactly one row.

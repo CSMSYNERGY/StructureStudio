@@ -33,6 +33,8 @@ import {
   parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfCheckChangedFields,
   SELF_CHECK_MAX_ROUNDS, SELF_CHECK_MAX_RENDERS, SELF_CHECK_TOTAL_RENDER_BYTES,
 } from "./styleD3.ts";
+// A raised floor (2026-09-25): the widened foundation, its height, and the save carry-forward.
+import { carryForwardFoundation, D3_FOUNDATIONS, D3_RAISED_FOUNDATIONS, FLOOR_HEIGHT_FT } from "./styleD3.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
@@ -348,20 +350,105 @@ Deno.test("the measured Urban spec survives the sanitiser intact", () => {
   assertEquals(r.d3.gableVent, { widthFrac: 0.25 });
 });
 
-Deno.test("foundation round-trips skids/slab, is omitted when absent, drops junk", () => {
+Deno.test("foundation round-trips skids/slab/blocks/piers, is omitted when absent, drops junk", () => {
   const bare = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 } });
   assert(bare.ok, "minimal spec accepted");
   if (bare.ok) assert(!("foundation" in (bare.d3 as Record<string, unknown>)), "absent stays absent, so no existing row grows a slab it did not ask for");
-  for (const v of ["skids", "slab"]) {
+  // "blocks" and "piers" joined on 2026-09-25 (a raised floor): "piers" was pinned here as junk
+  // until then, and is deliberately a value now.
+  assertEquals([...D3_FOUNDATIONS], ["skids", "slab", "blocks", "piers"]);
+  assertEquals([...D3_RAISED_FOUNDATIONS], ["blocks", "piers"]);
+  for (const v of ["skids", "slab", "blocks", "piers"]) {
     const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, foundation: v });
     assert(r.ok, `${v} accepted`);
     if (r.ok) assertEquals(r.d3.foundation, v);
+    // Never a default height: a raised foundation with none stays without one.
+    if (r.ok) assert(!("floorHeightFt" in (r.d3 as Record<string, unknown>)), `${v}: no floorHeightFt invented`);
   }
-  for (const junk of ["piers", "", 3, null, {}]) {
+  for (const junk of ["pier", "Blocks", "posts", "", 3, null, {}]) {
     const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, foundation: junk });
     assert(r.ok, "junk is dropped, never an error");
     if (r.ok) assert(!("foundation" in (r.d3 as Record<string, unknown>)), `${JSON.stringify(junk)} must not persist`);
   }
+});
+
+Deno.test("floorHeightFt: kept only with blocks or piers, clamped to 0.3..6, a unit error dropped, never a default", () => {
+  const spec = (foundation: unknown, floorHeightFt: unknown) =>
+    sanitizeD3Spec({ roof: { type: "shed", pitch: 0.25 }, foundation, floorHeightFt });
+  assertEquals([...FLOOR_HEIGHT_FT], [0.3, 6]);
+  for (const f of ["blocks", "piers"]) {
+    const r = spec(f, 1.1);
+    assert(r.ok && r.d3.floorHeightFt === 1.1, `${f} keeps 1.1`);
+    // A string number is a number, as everywhere else in the sanitiser.
+    const s = spec(f, "1.5");
+    assert(s.ok && s.d3.floorHeightFt === 1.5, `${f} reads "1.5"`);
+  }
+  // The clamp, and the accept band past it: 7 ft is somebody's tall pier, 13 is inches.
+  for (const [v, want] of [[0.1, 0.3], [0.3, 0.3], [6, 6], [7, 6], [8, 6]] as const) {
+    const r = spec("piers", v);
+    assert(r.ok && r.d3.floorHeightFt === want, `${v} -> ${want}: ${JSON.stringify(r)}`);
+  }
+  for (const v of [0, -1, 8.5, 13, 18, "", "tall", null, undefined, {}]) {
+    const r = spec("blocks", v);
+    assert(r.ok && !("floorHeightFt" in (r.d3 as Record<string, unknown>)), `${JSON.stringify(v)} must not persist`);
+  }
+  // Without a raised foundation the key means nothing and is dropped.
+  for (const f of ["skids", "slab", undefined, "junk"]) {
+    const r = spec(f, 1.2);
+    assert(r.ok && !("floorHeightFt" in (r.d3 as Record<string, unknown>)), `${String(f)}: dropped`);
+  }
+  // It sits beside foundation in the stored object.
+  const r = spec("blocks", 1.1);
+  if (r.ok) assertEquals(Object.keys(r.d3).slice(-2), ["foundation", "floorHeightFt"]);
+  // And a row without a raised foundation is byte-for-byte what it was.
+  const legacy = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, foundation: "skids", floorHeightFt: 2 });
+  assert(legacy.ok, "a skids row sanitises");
+  if (legacy.ok) assertEquals(legacy.d3, { roof: { type: "gable", pitch: 0.4 }, siding: null, colors: {}, foundation: "skids" });
+});
+
+Deno.test("⚠️ a raised foundation survives an older panel's save; the current panel sets and clears it", () => {
+  const stored = { roof: { type: "shed" }, foundation: "blocks", floorHeightFt: 1.1 };
+  const save = (sent: Record<string, unknown>, frame?: unknown, was: unknown = stored) => {
+    const clean = sanitizeD3Spec(sent);
+    assert(clean.ok, JSON.stringify(sent));
+    if (!clean.ok) throw new Error("unreachable");
+    carryForwardFoundation(clean.d3, sent, was, frame);
+    return clean.d3 as Record<string, unknown>;
+  };
+  const roof = { type: "shed", pitch: 0.25 };
+  // The older panel: foundation null (its resolver's answer for blocks), absent, or a draft's "slab".
+  for (const sent of [{ roof, foundation: null }, { roof }, { roof, foundation: "slab" }]) {
+    const out = save(sent);
+    assertEquals([out.foundation, out.floorHeightFt], ["blocks", 1.1], JSON.stringify(sent));
+  }
+  // Piers too, and a stored raised foundation with no height keeps no height.
+  const piers = save({ roof, foundation: null }, undefined, { roof, foundation: "piers" });
+  assertEquals([piers.foundation, "floorHeightFt" in piers], ["piers", false]);
+  // A stored height outside the band is held to it on the way back in.
+  assertEquals(save({ roof }, undefined, { roof, foundation: "piers", floorHeightFt: 7.5 }).floorHeightFt, 6);
+  // "skids" is a real pick on that panel's select, and is honoured.
+  const skids = save({ roof, foundation: "skids" });
+  assertEquals([skids.foundation, "floorHeightFt" in skids], ["skids", false]);
+  // Any frame but "front" is the older panel.
+  assertEquals(save({ roof, foundation: null }, "back").foundation, "blocks");
+  // The current panel sends frame "front" and gets exactly what it sent: it can clear...
+  const cleared = save({ roof, foundation: null }, "front");
+  assert(!("foundation" in cleared) && !("floorHeightFt" in cleared), JSON.stringify(cleared));
+  assertEquals(save({ roof, foundation: "slab" }, "front").foundation, "slab");
+  // ...change the height, or the kind...
+  assertEquals(save({ roof, foundation: "blocks", floorHeightFt: 2 }, "front").floorHeightFt, 2);
+  assertEquals(save({ roof, foundation: "piers", floorHeightFt: 1.5 }, "front").foundation, "piers");
+  // ...and drop just the height.
+  assert(!("floorHeightFt" in save({ roof, foundation: "blocks" }, "front")), "the height alone clears");
+  // Nothing moves for a row that stores no raised foundation, whatever is sent.
+  for (const was of [null, {}, { roof }, { roof, foundation: "skids" }, { roof, foundation: "slab", floorHeightFt: 2 }]) {
+    const out = save({ roof, foundation: null }, undefined, was);
+    assert(!("foundation" in out) && !("floorHeightFt" in out), JSON.stringify(was));
+  }
+  // And a request with no d3 object at all (sanitizeD3Spec would have refused it) is left alone.
+  const d3 = { roof, siding: null, colors: {} } as D3Spec;
+  carryForwardFoundation(d3, undefined, stored, undefined);
+  assert(!("foundation" in d3), "no d3 sent, nothing carried");
 });
 
 Deno.test("a full video reply carries the eave, vent and foundation through the sanitiser", () => {
@@ -2870,8 +2957,8 @@ Deno.test("⚠️ every field the prompt names is on the allow-list, and nothing
                  "roof.front", "roof.highSide", "roof.wingSide", "roof.wingWidthFt", "roof.wingPitch",
                  "roof.centerEaveFt", "roof.porchEnd", "roof.porchAttachFt", "roof.porchWidthFt",
                  "roof.leanToWidthFt",
-                 // 2026-09-25: the porch's own framing.
-                 "roof.porchPosts", "roof.porchPitch", "roof.porchSteps"];
+                 // 2026-09-25: the porch's own framing, and a raised floor's height.
+                 "roof.porchPosts", "roof.porchPitch", "roof.porchSteps", "floorHeightFt"];
   const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
   for (const f of named) {
     assert((SELF_CHECK_ALLOW as readonly string[]).includes(f), `${f} is named in the prompt`);
@@ -3061,7 +3148,8 @@ Deno.test("⚠️ v2: every new ROOF key is correctable, and no new colour is", 
   for (const f of ["colors.corner", "colors.fascia", "colors", "wallHeightFt"]) {
     assert(!allow.includes(f), `${f} must never be applicable`);
   }
-  assertEquals(allow.length, 33, "22 before v2, eight roof keys after, and the porch's three framing keys (2026-09-25)");
+  assert(allow.includes("floorHeightFt") && allow.includes("foundation"), "a raised floor's height and kind are correctable");
+  assertEquals(allow.length, 34, "22 before v2, eight roof keys after, the porch's three framing keys and floorHeightFt (2026-09-25)");
   assertEquals(new Set(allow).size, allow.length, "and no path is listed twice");
 });
 
@@ -3939,6 +4027,82 @@ Deno.test("the centre eave is built from two measured parts, in the draft and in
   assert(p.includes("A band holding a row of upper windows needs at least about 4 ft of wall."), "draft: the upper-window floor");
   const c = selfCheckPrompt({ dims: { widthFt: 30, lengthFt: 20, wallHeightFt: 8 }, draft: (sanitizeD3Spec({ roof: { type: "gable", front: "gable", pitch: 0.5, wingSide: "both", wingWidthFt: 9, centerEaveFt: 14 } }) as { ok: true; d3: D3Spec }).d3, viewpoints: ["front", "back"] });
   assert(c.includes("Measure it, do not eyeball it") && c.includes("If the band's share differs by a quarter or more"), "check: a measured test");
+});
+
+// ── A RAISED FLOOR: blocks and piers, and how high the floor stands (2026-09-25) ──────────────
+Deno.test("the v2 prompts teach blocks, piers and floorHeightFt; the legacy prompts never mention them", () => {
+  for (const [name, p] of V2) {
+    assert(p.includes('"foundation": "skids" | "slab" | "blocks" | "piers"'), `${name}: the four foundations in the schema`);
+    assert(p.includes('"floorHeightFt": <blocks or piers only'), `${name}: and the height beside it`);
+    assert(p.includes('"blocks" means its runners or beams rest on stacked grey concrete blocks'), `${name}: blocks defined`);
+    assert(p.includes('"piers" means it stands on concrete piers'), `${name}: piers defined`);
+    assert(p.includes("FLOOR HEIGHT, floorHeightFt"), `${name}: the height has its own paragraph`);
+    assert(p.includes("at the FRONT") && p.includes("a door opening is 6 ft 8 in tall") && p.includes("each porch or entry step rises about 7 in"),
+      `${name}: measured at the front against the door or the risers`);
+  }
+  for (const p of [VIDEO_SHAPE_PROMPT, videoShapePrompt(DIMS), combinedShapePrompt(8, 4, DIMS)]) {
+    assert(!p.includes("floorHeightFt") && !p.includes('"blocks"') && !p.includes('"piers"'), "the legacy prompts are untouched");
+  }
+});
+
+Deno.test("v2 check: step 7 says what the building stands on and how high, as drawn", () => {
+  const plain = selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(plain.includes("7. roofMaterial, foundation, gableVent - only if plainly wrong."), "the step keeps its line");
+  assert(plain.includes("foundation, currently not set, which draws a slab on the ground"), "absent is said as the slab it draws");
+  assert(plain.includes("floorHeightFt, currently not set, and drawn only with blocks or piers"), "and the height as not drawn");
+  const raised = cleanSpec({ ...DRAFT, foundation: "piers", floorHeightFt: 1.5 });
+  const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: raised, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(p.includes('foundation, currently "piers"') && p.includes("floorHeightFt, currently 1.5 ft"), "the draft's own values");
+  const bare = selfCheckPrompt({ dims: CHECK_DIMS, draft: cleanSpec({ ...DRAFT, foundation: "blocks" }), viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(bare.includes("floorHeightFt, currently not set, which draws the floor 1 ft up"), "a raised foundation's default height is said");
+  // The step stays after the profile and eave steps.
+  assert(p.indexOf("7. roofMaterial") > p.indexOf("6. roof.eave") && p.indexOf("floorHeightFt, currently") > p.indexOf("7. roofMaterial"), "in step 7");
+});
+
+Deno.test("v2 check: the floor height and a raised foundation are correctable; legacy keeps skids/slab only", () => {
+  const draft = cleanSpec({ ...DRAFT, foundation: "blocks", floorHeightFt: 0.8 });
+  const r = applySelfCheck(draft, readOf({
+    verdict: "corrections",
+    corrections: { floorHeightFt: 1.4 },
+    changed: [{ field: "floorHeightFt", from: 0.8, to: 1.4, why: "three risers to the deck in the front frame" }],
+  }));
+  assert(r.ok && r.verdict === "corrections", "applied");
+  if (r.ok) assertEquals([r.d3.foundation, r.d3.floorHeightFt], ["blocks", 1.4]);
+  const k = applySelfCheck(CLEAN, readOf({
+    verdict: "corrections",
+    corrections: { foundation: "piers", floorHeightFt: 2 },
+    changed: [{ field: "foundation", from: null, to: "piers", why: "piers under the corners" },
+              { field: "floorHeightFt", from: null, to: 2, why: "the gap is a third of the door" }],
+  }));
+  assert(k.ok, "applied");
+  if (k.ok) assertEquals([k.d3.foundation, k.d3.floorHeightFt], ["piers", 2]);
+  // A height on a slab is dropped by the sanitiser, and the change is not reported as made.
+  const slab = applySelfCheck(CLEAN, readOf({
+    verdict: "corrections",
+    corrections: { floorHeightFt: 2 },
+    changed: [{ field: "floorHeightFt", from: null, to: 2, why: "x" }],
+  }));
+  assert(slab.ok && !("floorHeightFt" in (slab.d3 as Record<string, unknown>)), "no height without blocks or piers");
+  // An older designer's check: its allow-list has no floorHeightFt, and a foundation it cannot draw
+  // is dropped as it always was, leaving the draft's own.
+  const skidsDraft = cleanSpec({ ...DRAFT, foundation: "skids" });
+  const legacy = applySelfCheck(skidsDraft, readOf({
+    verdict: "corrections",
+    corrections: { foundation: "piers", floorHeightFt: 2 },
+    changed: [{ field: "foundation", from: "skids", to: "piers", why: "x" }, { field: "floorHeightFt", from: null, to: 2, why: "x" }],
+  }), null, "legacy");
+  assert(legacy.ok, "legacy ran");
+  if (legacy.ok) {
+    assertEquals(legacy.d3.foundation, "skids");
+    assert(!("floorHeightFt" in (legacy.d3 as Record<string, unknown>)), "no height on the legacy path");
+    assert(legacy.dropped.includes("foundation") && legacy.dropped.includes("floorHeightFt"), JSON.stringify(legacy.dropped));
+  }
+  const legacySlab = applySelfCheck(skidsDraft, readOf({
+    verdict: "corrections",
+    corrections: { foundation: "slab" },
+    changed: [{ field: "foundation", from: "skids", to: "slab", why: "x" }],
+  }), null, "legacy");
+  assert(legacySlab.ok && legacySlab.d3.foundation === "slab", "legacy still corrects skids to slab");
 });
 
 // ═══ CONSENSUS DRAFTING (2026-09-25) ══════════════════════════════════════════════════════════

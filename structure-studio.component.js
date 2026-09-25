@@ -4811,6 +4811,39 @@ function d3PorchSpanWings(roofCfg, W, L, H) {
   const m = d3Massing(roofCfg, W, L, H);
   return m.wings.length ? { span: m.Sc, centerU: m.uc, wallTopFt: m.Hc } : null;
 }
+// ── WHAT THE BUILDING STANDS ON: A RAISED FLOOR (foundation "blocks" | "piers", 2026-09-25) ──────
+// Every building filmed so far sits up off the ground on concrete blocks or piers, and drawn at
+// grade its porch steps came out as one 2-inch step and the building looked planted.
+//
+// THE FLOOR STAYS AT y = 0 AND THE GROUND GOES DOWN. Doors, windows, electrical heights, the drag
+// planes, every interior item, ramps' tops and the porch deck are all measured from the floor, so
+// raising the building instead would move every one of them. d3GradeFt is how far below the floor's
+// top the ground is drawn: D3.FLOOR_T on a slab, on skids and with no foundation at all -- where the
+// ground has always been, so nothing about those buildings moves -- and with blocks or piers the
+// style's floorHeightFt (grade to the floor's top, at the front), else the kind's own default. Never
+// less than the floor band itself. Held to the sanitiser's band, so raw data outside it draws what
+// Save would store.
+// Every value a style's `foundation` can hold (the sanitiser's D3_FOUNDATIONS), and the raised two.
+const D3_FOUNDATIONS = ["skids", "slab", "blocks", "piers"];
+const D3_RAISED_FOUNDATIONS = ["blocks", "piers"];
+const D3_FLOOR_HEIGHT_DEFAULT_FT = { blocks: 1, piers: 1.5 };
+function d3RaisedFoundation(spec) {
+  const f = spec && spec.foundation;
+  return D3_RAISED_FOUNDATIONS.indexOf(f) >= 0 ? f : null;
+}
+function d3GradeFt(spec) {
+  const f = d3RaisedFoundation(spec);
+  if (!f) return D3.FLOOR_T;
+  const h = Number(spec.floorHeightFt);
+  const v = isFinite(h) && h > 0 && h <= 8 ? Math.max(0.3, Math.min(6, h)) : D3_FLOOR_HEIGHT_DEFAULT_FT[f];
+  return Math.max(D3.FLOOR_T, v);
+}
+// How much further down the ground is than it has always been: exactly 0 on every building that is
+// not raised, so each camera that subtracts it (the viewer, the docked panel, the quote shot, the
+// self-check) is the arithmetic it always was.
+function d3GradeLiftFt(spec) {
+  return d3GradeFt(spec) - D3.FLOOR_T;
+}
 // The model's real top, in feet off the floor: the ridge of the centre when there are wings, the
 // roof's own peak otherwise.
 function d3ModelTopFt(spec, W, L) {
@@ -4829,11 +4862,20 @@ function d3ModelTopFt(spec, W, L) {
 // the frame's edge), so a building it passes is in frame. Of the shapes that stored styles can
 // have, only a 14 ft wall under a 12:12 or gambrel roof on a 12 ft or smaller footprint moves, and
 // those were the ones the old frame clipped at the far ridge.
+//
+// A RAISED FLOOR (d3GradeLiftFt, 2026-09-25) is framed FROM ITS GROUND: the answer is in the frame
+// whose zero is the lowered grade, so the top it has to hold is the model's top plus the lift, the
+// frame it starts from is D3.WALL_H plus the lift (it IS a building that much taller, grass to
+// peak, and framed at the bare D3.WALL_H a deep porch on tall piers ran off the side of the docked
+// panel's narrow frame), and every caller lowers its eye and its target by the same lift. The
+// building, its supports and the ground they stand on are then framed as a building of that total
+// height at grade. The lift is 0 on every other building, so nothing else moves.
 function d3FrameHeightFt(spec, W, L) {
   const w = Number(W), l = Number(L);
   if (!spec || !(w > 0) || !(l > 0)) return D3.WALL_H;
   // The profile's peak plus what is built on it (slab, ridge cap), out to the overhang past the ends.
-  const top = d3ModelTopFt(spec, w, l) + 0.4;
+  const lift = d3GradeLiftFt(spec);
+  const top = d3ModelTopFt(spec, w, l) + 0.4 + lift;
   const ovRaw = Number(spec.roof && spec.roof.overhang);
   const ov = isFinite(ovRaw) && ovRaw > 0 ? ovRaw : D3.OVERHANG;
   const M = Math.max(w, l) * 0.5;
@@ -4844,8 +4886,9 @@ function d3FrameHeightFt(spec, W, L) {
     const up = Math.max(Math.atan2(top - eyeY, near), Math.atan2(top - eyeY, dist + M + ov));
     return axis + up <= half && axis - Math.atan2(eyeY, near) >= -half;
   };
-  if (fits(D3.WALL_H)) return D3.WALL_H;
-  let lo = D3.WALL_H, hi = Math.max(2 * D3.WALL_H, 2 * top);
+  const base = D3.WALL_H + lift;
+  if (fits(base)) return base;
+  let lo = base, hi = Math.max(2 * base, 2 * top);
   for (let i = 0; i < 20 && !fits(hi); i++) hi *= 1.5;
   for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (fits(mid)) hi = mid; else lo = mid; }
   return hi;
@@ -5241,13 +5284,16 @@ function d3PorchFraming(roofCfg) {
 //   w       3.5 ft, or the clear gap between two posts where that is narrower.
 //   count   ceil(deck height above grade / 7.5 in), at least 1: the number of STEPS (treads). The
 //           climb from grade to the deck is count + 1 risers, each h / (count + 1), so no riser
-//           tops 7.5 in. The deck is the floor (y 0) and grade is -D3.FLOOR_T, so today's porch
-//           gets one step, 2.1 in up, then 2.1 in onto the deck.
+//           tops 7.5 in. The deck is the floor (y 0) and grade is -gradeFt: d3GradeFt's, which is
+//           D3.FLOOR_T at grade, so a porch on a slab or skids gets one step, 2.1 in up, then 2.1 in
+//           onto the deck. On a raised floor (blocks or piers, 2026-09-25) the steps climb the whole
+//           height: 1.1 ft is two steps and three 4.4 in risers, 1.5 ft three steps and four 4.5 in
+//           risers, landing on the lowered grass.
 //   tread   11 in deep, the treads running out from the deck's edge.
-function d3PorchStepsGeom(g, D, where) {
+function d3PorchStepsGeom(g, D, where, gradeFt) {
   if (!g || D3_PORCH_STEP_SIDES.indexOf(where) < 0) return null;
   const POST = g.sizes.POST;
-  const h = D3.FLOOR_T;                                     // deck top (the floor, y 0) above grade
+  const h = gradeFt > 0 ? gradeFt : D3.FLOOR_T;             // deck top (the floor, y 0) above grade
   const count = Math.max(1, Math.ceil(h / 0.625 - 1e-9));
   const rise = h / (count + 1);
   const tread = 11 / 12;
@@ -5367,7 +5413,7 @@ function d3PorchReadout(spec, sizeLabel) {
   // With porchAttachFt set it is the ATTACH height, not the wall, that decides the headroom, so the
   // panel's suggestion is where to hang the porch roof: hNeeded is a wall top, 0.2 above that.
   return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2, atMost,
-    framing, steps: d3PorchStepsGeom(g, porch.D, framing.steps) };
+    framing, steps: d3PorchStepsGeom(g, porch.D, framing.steps, d3GradeFt(spec)) };
 }
 
 // A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
@@ -5670,8 +5716,14 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     // erased from the column the first time a builder opens and saves the panel.
     gableVent: (o.gableVent && o.gableVent.widthFrac > 0) ? o.gableVent : (base.gableVent || null),
     // Named for the same reason gableVent is: the literal drops what it does not list,
-    // and the calibration panel round-trips through this resolver.
-    foundation: (o.foundation === "skids" || o.foundation === "slab") ? o.foundation : (base.foundation || null),
+    // and the calibration panel round-trips through this resolver. "blocks" and "piers" since
+    // 2026-09-25 (a raised floor): production's older resolver still rewrites them to null, which
+    // is why both save paths carry a stored raised foundation forward (carryForwardFoundation).
+    foundation: D3_FOUNDATIONS.indexOf(o.foundation) >= 0 ? o.foundation : (base.foundation || null),
+    // How high a raised floor stands (grade to floor top at the front), named for the same reason,
+    // and only beside blocks or piers: the key is simply absent on every other style, so their
+    // resolved object is the one it always was.
+    ...(D3_RAISED_FOUNDATIONS.indexOf(o.foundation) >= 0 && Number(o.floorHeightFt) > 0 ? { floorHeightFt: Number(o.floorHeightFt) } : {}),
     // LEGACY DATA, still named here on purpose. Nothing reads d3.claddingChoices any more —
     // 207 moved the offered set into style_cladding and seeded it from this key — but the
     // literal drops what it does not list, and the calibration panel round-trips through this
@@ -6625,6 +6677,12 @@ function buildShed3DModel(THREE, p) {
   // side (roof.highSide). Every branch it opens below is guarded by this, so with neither key the
   // model is built by exactly the code it always was.
   const NEW_FRAME = d3NewFrame(roofCfg);
+  // A RAISED FLOOR (d3GradeFt, 2026-09-25): how far below the floor's top the ground is drawn, and
+  // which raised foundation stands in the gap. GRADE is D3.FLOOR_T and RAISED null on every building
+  // that is not on blocks or piers, where the ground, the labels on it, a ramp's drop and the porch
+  // steps have always been.
+  const GRADE = d3GradeFt(p.styleSpec);
+  const RAISED = d3RaisedFoundation(p.styleSpec);
 
   // Environment: grass field to the horizon + on-ground dimension labels
   // (SmartBuild-style landscape; the "Landscape" toggle hides this group).
@@ -6636,7 +6694,7 @@ function buildShed3DModel(THREE, p) {
   const ground = new THREE.Mesh(new THREE.CircleGeometry(groundR, 64),
     new THREE.MeshLambertMaterial({ color: "#9DBE77", ...(grassTex ? { map: grassTex } : {}) }));
   ground.rotation.x = -Math.PI / 2;
-  ground.position.y = -D3.FLOOR_T;
+  ground.position.y = -GRADE;
   envGroup.add(ground);
   // Dimension labels on the grass for the FRONT and LEFT edges (same display
   // mapping the 2D labels use), plus a small N compass off the NW corner.
@@ -6655,12 +6713,12 @@ function buildShed3DModel(THREE, p) {
     else if (pos === "south") { holder.position.set(0, 0, bldgH / 2 + off); }
     else if (pos === "west") { holder.position.set(-bldgW / 2 - off, 0, 0); holder.rotation.y = Math.PI / 2; }
     else { holder.position.set(bldgW / 2 + off, 0, 0); holder.rotation.y = -Math.PI / 2; }
-    lbl.position.y = -D3.FLOOR_T + 0.04;
+    lbl.position.y = -GRADE + 0.04;
     holder.add(lbl);
     envGroup.add(holder);
   });
   const nLbl = d3MakeGroundLabel(THREE, "N", Math.max(1.6, lblH * 1.2));
-  if (nLbl) { nLbl.position.set(-bldgW / 2 - R2 * 0.35, -D3.FLOOR_T + 0.04, -bldgH / 2 - R2 * 0.35); envGroup.add(nLbl); }
+  if (nLbl) { nLbl.position.set(-bldgW / 2 - R2 * 0.35, -GRADE + 0.04, -bldgH / 2 - R2 * 0.35); envGroup.add(nLbl); }
   root.add(envGroup);
   // Base. A slab by default; runners when the style says so. Everything below is drawn
   // INSIDE the slab's own 0.35 ft band, on purpose: the ground plane, every ramp's rise
@@ -6700,6 +6758,129 @@ function buildShed3DModel(THREE, p) {
       sk.position.set(alongX ? 0 : at, -DECK_T - SKID_T / 2, alongX ? at : 0);
       root.add(sk);
     }
+  }
+  // ── A RAISED FLOOR: skirt, runners, and the blocks or piers under them (2026-09-25) ─────────────
+  // On blocks or piers the floor band above is the slab's, as on any building, and the ground is
+  // GRADE below the floor's top instead of the band's depth. What fills the gap, top down:
+  //   skirt     the siding carried down over the floor band's edge to about half a foot under the
+  //             floor, as the real buildings are clad to the bottom of their floor framing: wallMat
+  //             (so live paint follows it), on each wall's own plane and thickness, with the walls'
+  //             world-feet UVs (wallBox's rewrite, repeated here because the walls' frames are built
+  //             further down). It follows the FOOTPRINT, not a recessed porch's set-back wall: under
+  //             the porch opening it is the floor's rim board.
+  //   runners   the skids' rule (along the long axis, one every 4 ft or less across, inset from the
+  //             long walls), under the floor band instead of inside it: 4x lumber, as deep as the
+  //             gap allows, up to a 4x6 on edge.
+  //   supports  a row under every runner, one near each end and one every 7 ft or less between, from
+  //             the runner's underside down to the grass: stacked 8x8x16 concrete blocks, their long
+  //             side across the runner as the Farmstand's sit, a course per 8 in of height (each
+  //             course its share of it, so the stack meets the grass and the runner exactly); or
+  //             round concrete piers 12 in across.
+  // Every number is recorded on the model (model.foundation) for tests/harness/foundation.mjs.
+  // Nothing here reads an item, so only a full build draws it, and nothing is built without the key.
+  let foundationInfo = null;
+  // A translucent dark sheet on the grass, centred at (x, z), w along x by d along z: see "THE SHADE
+  // UNDER IT" below. The projecting porch's deck gets one too, once it is placed.
+  const addUnderShade = (x, z, w, d) => {
+    const sm = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.5, depthWrite: false });
+    const sh = new THREE.Mesh(new THREE.PlaneGeometry(w, d), sm);
+    sh.rotation.x = -Math.PI / 2;
+    sh.position.set(x, -GRADE + 0.02, z);
+    sh.userData.ssFoundationPart = "shade";
+    envGroup.add(sh);
+  };
+  // ONE SUPPORT, from `y1` (the underside of what it carries) down to the grass at (x, z) in `grp`'s
+  // frame, whose y is the floor's: a stack of 8x8x16 blocks, each course its share of the height and
+  // a 0.02 ft joint between courses, the 16 in side along x when `longX`; or a 12 in round pier.
+  // Shared by the building's runners and the projecting porch's deck, so the two never differ.
+  // Returns the courses drawn (0 for a pier, or where there is no height to fill).
+  const concreteMat = RAISED ? mat(RAISED === "piers" ? "#9A988F" : "#9C9B95", { roughness: 0.95 }) : null;
+  const addSupport = (grp, x, z, y1, longX) => {
+    const bh = y1 + GRADE;
+    if (!RAISED || bh < 0.04) return 0;
+    if (RAISED === "piers") {
+      const pier = cyl(concreteMat, 0.5, bh);
+      pier.position.set(x, -GRADE + bh / 2, z);
+      pier.userData.ssFoundationPart = "pier";
+      grp.add(pier);
+      return 0;
+    }
+    const BLOCK_L = 16 / 12, BLOCK_W = 8 / 12, JOINT = 0.02;
+    const n = Math.max(1, Math.round(bh / (8 / 12))), hc = bh / n;
+    for (let c = 0; c < n; c++) {
+      const hb = hc - (c < n - 1 ? JOINT : 0);
+      const blk = longX ? box(concreteMat, BLOCK_L, hb, BLOCK_W) : box(concreteMat, BLOCK_W, hb, BLOCK_L);
+      blk.position.set(x, -GRADE + c * hc + hb / 2, z);
+      blk.userData.ssFoundationPart = "block";
+      grp.add(blk);
+    }
+    return n;
+  };
+  if (RAISED) {
+    const gap = GRADE - D3.FLOOR_T;                        // the floor band's underside to the grass
+    const SKIRT = Math.min(0.5, Math.max(D3.FLOOR_T, GRADE - 0.1));
+    const fGroup = new THREE.Group();
+    fGroup.userData.ssFoundation = RAISED;
+    const skirtBox = (O, U, a0, a1) => {
+      const b = box(wallMat, a1 - a0, SKIRT, T);
+      const uvA = b.geometry.attributes.uv, posA = b.geometry.attributes.position;
+      const cu = (a0 + a1) / 2, cv = -SKIRT / 2;
+      for (let i = 0; i < uvA.count; i++) uvA.setXY(i, posA.getX(i) + cu, posA.getY(i) + cv);
+      uvA.needsUpdate = true;
+      b.position.set(O[0] + U[0] * cu, cv, O[1] + U[1] * cu);
+      if (U[0] === 0) b.rotation.y = Math.PI / 2;
+      b.userData.ssFoundationPart = "skirt";
+      return b;
+    };
+    // North and south run corner to corner over the walls' ends; west and east stop between them,
+    // so no two skirt faces share a plane.
+    fGroup.add(skirtBox([-bldgW / 2, -bldgH / 2], [1, 0], -T / 2, bldgW + T / 2));
+    fGroup.add(skirtBox([-bldgW / 2, bldgH / 2], [1, 0], -T / 2, bldgW + T / 2));
+    fGroup.add(skirtBox([-bldgW / 2, -bldgH / 2], [0, 1], T / 2, bldgH - T / 2));
+    fGroup.add(skirtBox([bldgW / 2, -bldgH / 2], [0, 1], T / 2, bldgH - T / 2));
+    const runners = [], supports = [];
+    if (gap > 0.05) {
+      const alongX = bldgW >= bldgH;
+      const across = alongX ? bldgH : bldgW, len = alongX ? bldgW : bldgH;
+      const nRun = Math.max(2, Math.round(across / 4));
+      const inset = Math.min(1.0, across * 0.14);
+      const RUN_W = 3.5 / 12;
+      // A thin gap is all runner (a shimmed skid); otherwise the runner takes about 40 % of it.
+      const RUN_H = gap < 0.25 ? gap : Math.min(0.46, Math.max(0.15, gap * 0.4));
+      const runBot = -D3.FLOOR_T - RUN_H;
+      const runMat = mat(D3_COLORS.bench);
+      const END = 0.6, OC = 7;
+      const nSup = Math.max(2, Math.ceil((len - 2 * END) / OC - 1e-9) + 1);
+      let courses = 0;
+      for (let i = 0; i < nRun; i++) {
+        const t = i / (nRun - 1);
+        const at = -across / 2 + inset + t * (across - 2 * inset);
+        const run = alongX ? box(runMat, bldgW + 0.2, RUN_H, RUN_W) : box(runMat, RUN_W, RUN_H, bldgH + 0.2);
+        run.position.set(alongX ? 0 : at, -D3.FLOOR_T - RUN_H / 2, alongX ? at : 0);
+        run.userData.ssFoundationPart = "runner";
+        fGroup.add(run);
+        runners.push({ at, y0: runBot, y1: -D3.FLOOR_T });
+        if (runBot + GRADE < 0.04) continue;
+        for (let k = 0; k < nSup; k++) {
+          const along = -len / 2 + END + (k * (len - 2 * END)) / (nSup - 1);
+          const x = alongX ? along : at, z = alongX ? at : along;
+          // The block's long side ACROSS the runner: along z when the runners run along x.
+          courses = addSupport(fGroup, x, z, runBot, !alongX);
+          supports.push({ x, z, y0: -GRADE, y1: runBot });
+        }
+      }
+      foundationInfo = { kind: RAISED, grade: GRADE, skirt: SKIRT, runnerH: RUN_H, courses, runners, supports };
+    } else {
+      foundationInfo = { kind: RAISED, grade: GRADE, skirt: SKIRT, runnerH: 0, courses: 0, runners, supports };
+    }
+    root.add(fGroup);
+    // THE SHADE UNDER IT. A raised building is dark underneath -- it shuts out the sky, not only the
+    // sun -- and that dark band between the blocks is most of what says "raised" in every frame of
+    // the real buildings. The renderer has no ambient occlusion, so without this the gap showed grass
+    // lit straight through. A translucent black sheet over the grass under the footprint out to the
+    // walls' outer faces (where a projecting porch's deck, and its own sheet, begins), in the
+    // ENVIRONMENT group so it hides with the grass (the Landscape toggle), a hair above it.
+    addUnderShade(0, 0, bldgW + T, bldgH + T);
   }
 
   // Wall frames: O = the wall's along=0 end (in x/z), U = unit vector along the
@@ -7970,10 +8151,13 @@ function buildShed3DModel(THREE, p) {
     // runs get a third rather than an unsupported header.
     const nPost = L > 12 ? 3 : 2;
     const inset = Math.min(0.8, L * 0.08);
+    // On a raised floor (2026-09-25) the posts stand on the lowered ground, not in the air at the
+    // floor's level; 0 on every other building, as they always stood.
+    const postBot = RAISED ? -GRADE : 0;
     for (let i = 0; i < nPost; i++) {
       const t = nPost === 1 ? 0.5 : i / (nPost - 1);
-      const post = box(trimMat, 0.3, y1, 0.3);
-      post.position.set(u1, y1 / 2, inset + t * (L - 2 * inset));
+      const post = box(trimMat, 0.3, y1 - postBot, 0.3);
+      post.position.set(u1, (y1 + postBot) / 2, inset + t * (L - 2 * inset));
       post.userData.ssLeanTo = true;
       rg.add(post);
     }
@@ -9057,9 +9241,12 @@ function buildShed3DModel(THREE, p) {
     ledger.position.set(0, geom.ceilWall + RAF_D - (LED_H + RAF_D) / 2, ledFace / 2);
     pg.add(part(ledger, "ledger"));
     // DECK at floor level: boards parallel to the wall with 0.03 ft gaps, a rim on the three open
-    // sides, and a dark plane under the gaps so they do not show grass. The floor is never raised,
-    // so the rim is the 0.23 ft left inside the slab's band, not the real building's 0.6 ft board.
-    const DECK_T = 0.09, BOARD = 0.46, GAP = 0.03, RIM_T = 0.12, RIM_H = Math.max(0.1, D3.FLOOR_T - DECK_T - 0.03);
+    // sides, and a dark plane under the gaps so they do not show grass. At grade the rim is the
+    // 0.23 ft left inside the slab's band, not the real building's 0.6 ft board. On a RAISED floor
+    // (blocks or piers, 2026-09-25) there is room under it: the rim is a real band board, up to half
+    // a foot deep, and the deck gets supports of its own below.
+    const DECK_T = 0.09, BOARD = 0.46, GAP = 0.03, RIM_T = 0.12;
+    const RIM_H = RAISED ? Math.max(0.1, Math.min(0.5, GRADE - DECK_T - 0.2)) : Math.max(0.1, D3.FLOOR_T - DECK_T - 0.03);
     const nB = Math.max(1, Math.round((D - dWall) / (BOARD + GAP)));
     const boardStep = (D - dWall) / nB;
     for (let i = 0; i < nB; i++) {
@@ -9078,6 +9265,24 @@ function buildShed3DModel(THREE, p) {
     const under = box(mat("#3B3024", { roughness: 1 }), 2 * side - 2 * RIM_T, 0.02, D - dWall - RIM_T);
     under.position.set(0, -DECK_T - 0.06, (dWall + D - RIM_T) / 2);
     deck.add(part(under, "deckVoid"));
+    // THE DECK'S OWN SUPPORTS on a raised floor (2026-09-25): the building's blocks or piers
+    // (addSupport), from the rim's underside down to the grass, one under every post along the
+    // front rim with its outer face at the rim's, and a second row across the middle of a deck more
+    // than 7 ft deep. The wall side rides on the building's ledger. Tagged "deckSupport"; none are
+    // built at grade.
+    if (RAISED) {
+      const top = -DECK_T - RIM_H;
+      const outer = side - POST / 2;
+      const rows = [D - (RAISED === "piers" ? 0.5 : 1 / 3)];
+      if (D - dWall > 7) rows.push((dWall + D) / 2);
+      rows.forEach((dz) => {
+        for (let i = 0; i <= geom.bays; i++) {
+          const n0 = deck.children.length;
+          addSupport(deck, -outer + (i * 2 * outer) / geom.bays, dz, top, true);
+          for (let k = n0; k < deck.children.length; k++) part(deck.children[k], "deckSupport");
+        }
+      });
+    }
     // STEPS (roof.porchSteps, 2026-09-25): off the deck's FRONT edge, standing on the grass, every
     // number d3PorchStepsGeom's. Lumber like the deck: a tread per step, a closed riser under each,
     // and a stringer either side cut to the steps' outline. Their own group in the deck group, so
@@ -9085,7 +9290,7 @@ function buildShed3DModel(THREE, p) {
     // tagged ssPorchPart "steps" with the side in ssPorchSteps, so anything that places things
     // against the deck's edge (the harness, a ramp on that wall) can find them. Nothing is built
     // without the key, so every porch before it is unchanged.
-    const stepsGeom = d3PorchStepsGeom(geom, D, framing.steps);
+    const stepsGeom = d3PorchStepsGeom(geom, D, framing.steps, GRADE);
     if (stepsGeom) {
       const { x: sx, w: sw, count, rise, tread, d0, grade } = stepsGeom;
       const TREAD_T = Math.min(0.09, rise * 0.6), STR_T = 0.125, RISER_T = 0.06, NOSE = 0.03, EPS = 0.005;
@@ -9094,13 +9299,17 @@ function buildShed3DModel(THREE, p) {
       const st = new THREE.Group();
       st.userData.ssPorchPart = "steps";
       st.userData.ssPorchSteps = stepsGeom.where;
+      // The risers a shade darker than the treads, as they are in daylight under the tread's nose;
+      // in one flat colour a flight of steps read as a single block.
+      const riserMat = woodMat.clone();
+      riserMat.color.multiplyScalar(0.72);
       for (let k = 1; k <= count; k++) {
         const t = box(woodMat, sw, TREAD_T, tread);
         t.position.set(sx, topOf(k) - TREAD_T / 2, frontOf(k) - tread / 2);
         st.add(part(t, "stepTread"));
         const rh = topOf(k) - TREAD_T - grade;
         if (rh > 0.005) {
-          const r = box(woodMat, sw - 2 * STR_T - 0.02, rh, RISER_T);
+          const r = box(riserMat, sw - 2 * STR_T - 0.02, rh, RISER_T);
           r.position.set(sx, grade + rh / 2, frontOf(k) - NOSE - RISER_T / 2);
           st.add(part(r, "stepRiser"));
         }
@@ -9298,6 +9507,17 @@ function buildShed3DModel(THREE, p) {
     porchDeckGroup.position.copy(rg.position);
     porchDeckGroup.rotation.copy(rg.rotation);
     root.add(porchDeckGroup);
+    // On a raised floor the deck is dark underneath too (addUnderShade): over the deck's own boards
+    // and rim, read off the placed group, so it follows the porch onto whichever wall it stands on.
+    if (RAISED) {
+      porchDeckGroup.updateMatrixWorld(true);
+      const db = new THREE.Box3(), mb = new THREE.Box3();
+      porchDeckGroup.traverse((o) => {
+        if (!o.isMesh || !o.userData || (o.userData.ssPorchPart !== "deckBoard" && o.userData.ssPorchPart !== "rim")) return;
+        db.union(mb.setFromObject(o));
+      });
+      if (!db.isEmpty()) addUnderShade((db.min.x + db.max.x) / 2, (db.min.z + db.max.z) / 2, db.max.x - db.min.x, db.max.z - db.min.z);
+    }
   }
   // Corner trim boards live in roofGroup so "look inside" hides them with the roof.
   // Half-extent from trimFace, not a constant of its own: the post must reach past the
@@ -9322,8 +9542,11 @@ function buildShed3DModel(THREE, p) {
       const uc = (uAxisIsX ? c[0] : c[1]) - mass.uc;   // in rg's u: the centre's, with wings
       cTop = Math.max(H, Math.min(cH, profYAt(uc - Math.sign(uc) * half)));
     }
-    const post = box(cornerMat, half * 2, cTop, half * 2);
-    post.position.set(c[0], cTop / 2, c[1]);
+    // On a raised floor (2026-09-25) the board runs on down over the siding's skirt to its bottom
+    // edge, as the cladding does; 0 on every other building, where it stands on the floor.
+    const cBot = foundationInfo ? -foundationInfo.skirt : 0;
+    const post = box(cornerMat, half * 2, cTop - cBot, half * 2);
+    post.position.set(c[0], (cTop + cBot) / 2, c[1]);
     if (cTop !== H) post.userData.ssCorner = "tall";
     roofGroup.add(post);
   });
@@ -9682,7 +9905,15 @@ function buildShed3DModel(THREE, p) {
       if (!wf) return;
       const w = it.widthFt || 3;
       const along = wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale;
-      const run = 3, drop = D3.FLOOR_T;
+      // A RAISED FLOOR LENGTHENS THE RAMP (2026-09-25): it always runs from the floor down to the
+      // grass, at 1 in 4 or gentler -- 3 ft as it has always been while that holds (a floor up to
+      // 0.75 ft), and 4 ft of run for every foot of drop past it, so a 1.1 ft floor's ramp is 4.4 ft
+      // and a 3 ft floor's 12 ft. Lengthened rather than refused: the customer placed it, the price
+      // is per ramp, and a ramp that stops in mid-air, or vanishes, is the one drawing that is wrong
+      // whatever it costs. The 2D plan still draws its footprint at the wall; the calibration panel's
+      // floor height line says ramps are drawn longer. On a slab or skids drop is D3.FLOOR_T and the
+      // run 3, exactly as before.
+      const drop = GRADE, run = Math.max(3, 4 * drop);
       const g = new THREE.Group();
       g.userData.ssRamp = it.wall;       // porchStepsVsRamps finds the ramps on the porch wall by it
       const deck = box(mat(D3_COLORS.ramp), w, 0.12, Math.sqrt(run * run + drop * drop));
@@ -9771,6 +10002,10 @@ function buildShed3DModel(THREE, p) {
   // The massing this was built from (d3Massing: centre span, offset, eave, wings), for
   // tests/harness/wings.mjs; nothing in the app reads it.
   model.massing = mass;
+  // The ground's depth below the floor's top (d3GradeFt) and, on blocks or piers, the skirt, runners
+  // and supports as built, for tests/harness/foundation.mjs; nothing in the app reads them.
+  model.grade = GRADE;
+  model.foundation = foundationInfo;
   model.rebuildWalls = (names, itemsNow) => {
     names.forEach((wname) => {
       if (!WALLS[wname]) return;
@@ -9958,10 +10193,13 @@ function d3DefaultShotCamera(p) {
   const dist = R * 3.66;
   const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
   const camX = (OUT[0] / outLen) * dist, camZ = (OUT[1] / outLen) * dist;
+  // A raised floor's lowered ground (d3GradeLiftFt, 0 otherwise): frameH is measured from it, so the
+  // eye and the aim come down with it and the supports are in the shot.
+  const lift = d3GradeLiftFt(p.style3d);
   return [{
     fov: 34, far: dist * 10,
-    eye: [camX, dist * 0.5, camZ],
-    at: [0, frameH * 0.45, 0],
+    eye: [camX, dist * 0.5 - lift, camZ],
+    at: [0, frameH * 0.45 - lift, 0],
     sun: [camX * 0.8, dist * 0.9, camZ * 0.8],
   }];
 }
@@ -10089,7 +10327,9 @@ function ssFitDistance(f) {
   const fits = (d) => {
     const pitch = Math.atan2(f.lookY - f.eyeY, d);
     const fx = Math.cos(pitch), fy = Math.sin(pitch);
-    const pts = [[d - f.depthHalf, 0], [d + f.depthHalf, 0], [d, f.peak], [d - f.depthHalf, f.peak]];
+    // The base points sit on the floor, or on a raised floor's lowered ground (f.base, below 0).
+    const base = f.base || 0;
+    const pts = [[d - f.depthHalf, base], [d + f.depthHalf, base], [d, f.peak], [d - f.depthHalf, f.peak]];
     for (let i = 0; i < pts.length; i++) {
       const hx = pts[i][0], dy = pts[i][1] - f.eyeY;
       if (hx <= 0.5) return false;
@@ -10140,6 +10380,11 @@ function ssSelfCheckCameras(p, frameMap) {
   // A RAISED CENTRE (wings, d3Massing) stands above its outer walls by more than that allows for:
   // frame its real ridge too, with the same half-foot of air. Unchanged without wings.
   if (d3Massing(roof, W, L, H).wings.length) peak = Math.max(peak, d3ModelTopFt(spec, W, L) + 0.5);
+  // A RAISED FLOOR (d3GradeLiftFt, 2026-09-25) puts the ground `lift` further down than it has always
+  // been. The phone that filmed it was held at chest height above THAT ground, so the eye comes down
+  // by the lift, and the framing's base points go down to it, so the supports are in shot. 0 on
+  // every other building: every number below is the one it always was.
+  const lift = d3GradeLiftFt(spec);
   const out = [];
   for (let i = 0; i < SS_SELFCHECK_VIEWS.length; i++) {
     const view = SS_SELFCHECK_VIEWS[i];
@@ -10154,19 +10399,22 @@ function ssSelfCheckCameras(p, frameMap) {
     // is the support function of the rectangle, so this is right at 45° as well as at 0.
     const depthHalf = Math.abs(dir[0]) * W / 2 + Math.abs(dir[1]) * L / 2;
     const crossHalf = Math.abs(dir[1]) * W / 2 + Math.abs(dir[0]) * L / 2;
-    const eyeY = SS_SHOT.EYE_FT;
+    const eyeY = SS_SHOT.EYE_FT - lift;
     out.push(view === "eaveCorner"
       ? ssEaveCamera(dir, W, L, H, peak, depthHalf, crossHalf, frame, az)
-      : ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view));
+      : ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view, lift));
   }
   return out;
 }
 
 // The wide views (every one but the eave close-up): where a person filming would have stood,
 // at the angle they stood at.
-function ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view) {
-  const lookY = peak * 0.45;
-  const dist = ssFitDistance({ depthHalf, crossHalf, peak, eyeY, lookY, fovDeg: SS_SHOT.FOV });
+// `lift` (a raised floor's, 0 otherwise) frames from the lowered ground up: the aim sits 0.45 of the
+// way up from it, and the footprint's base points are on it.
+function ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view, lift) {
+  const lf = lift > 0 ? lift : 0;
+  const lookY = (peak + lf) * 0.45 - lf;
+  const dist = ssFitDistance({ depthHalf, crossHalf, peak, eyeY, lookY, fovDeg: SS_SHOT.FOV, base: -lf });
   const ex = dir[0] * dist, ez = dir[1] * dist;
   return {
     viewpoint: view, frame, azimuthDeg: az, fov: SS_SHOT.FOV, far: dist * 10,
@@ -10424,6 +10672,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // frameH is D3.WALL_H — the framing this has always had — unless the building would leave the
       // frame (d3FrameHeightFt): a raised centre, a 20 ft wall. The target below reads it too.
       const frameH = d3FrameHeightFt(spec, bldgW, bldgH);
+      // A raised floor's lowered ground (d3GradeLiftFt, 2026-09-25; 0 on every other building):
+      // frameH is measured from it, so the eye, the orbit target and the sky dome come down with it
+      // and the blocks or piers are framed with the building.
+      const liftFt = d3GradeLiftFt(spec);
       const R = Math.max(bldgW, bldgH) * 0.5 + frameH;
       // 34° lens (was 45°): the long-lens architectural look — less perspective
       // distortion on the box, matching how buildings are photographed. dist
@@ -10449,7 +10701,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       scene.add(sun);
       // far covers the sky dome even at controls.maxDistance (2.5d + 6.5d < 10d).
       const camera = new THREE.PerspectiveCamera(34, 1, 0.1, dist * 10);
-      camera.position.set(camX, dist * 0.5, camZ);
+      camera.position.set(camX, dist * 0.5 - liftFt, camZ);
       // Sky dome: gradient + soft clouds on the inside of a hemisphere, slightly
       // past the horizon so no gap shows between grass edge and sky. Hidden by
       // the Landscape toggle along with the model's envGroup.
@@ -10458,7 +10710,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         new THREE.SphereGeometry(dist * 6.5, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2 + 0.14),
         new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, depthWrite: false })
       ) : null;
-      if (sky) { sky.position.y = -0.5; scene.add(sky); }
+      if (sky) { sky.position.y = -0.5 - liftFt; scene.add(sky); }
       // SmartBuild-style camera presets (3×3 grid), azimuth relative to the
       // FRONT wall so "F" always faces the side the 2D labels call FRONT.
       const setViewPreset = (relDeg, polDeg) => {
@@ -11697,7 +11949,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       };
 
       const controls = new OrbitControls(camera, canvasRef.current);
-      controls.target.set(0, frameH * 0.45, 0);
+      controls.target.set(0, frameH * 0.45 - liftFt, 0);
       controls.maxPolarAngle = Math.PI * 0.495; // never below the ground plane
       controls.minDistance = R * 1.1;
       controls.maxDistance = dist * 2.5;
@@ -12367,6 +12619,12 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       // frame (a raised centre, a 20 ft wall), so the designer's dock keeps its numbers too.
       const fitH = (p) => Math.max(D3.WALL_H, Number(p.fitHeightFt) || 0, d3FrameHeightFt(p.style3d, p.bldgW, p.bldgH));
       const frameFor = (p) => { const r = Math.max(p.bldgW, p.bldgH) * 0.5 + fitH(p); return { R: r, dist: r * 3.66 }; };
+      // A raised floor's lowered ground (d3GradeLiftFt, 2026-09-25; 0 on every other building): the
+      // eye, the target and the sky dome come down by it, as in the modal. `framedLift` is the one the
+      // camera is set for now, so a floor height typed in the calibration panel moves the view with
+      // the ground (applyFraming) instead of tilting it.
+      const liftOf = (p) => d3GradeLiftFt(p.style3d);
+      let framedLift = liftOf(p0);
       const f0 = frameFor(p0);
       const R = f0.R, dist = f0.dist;
       const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
@@ -12385,7 +12643,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       scene.add(sun);
 
       const camera = new THREE.PerspectiveCamera(34, 1, 0.1, dist * 10);
-      camera.position.set(camX, dist * 0.5, camZ);
+      camera.position.set(camX, dist * 0.5 - framedLift, camZ);
 
       // The sky dome stays. buildShed3DModel sizes the grass disc to "stay inside
       // the viewer's sky dome" — drop the dome and the customer sees a green disc
@@ -12395,10 +12653,10 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
         new THREE.SphereGeometry(dist * 6.5, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2 + 0.14),
         new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, depthWrite: false })
       ) : null;
-      if (sky) { sky.position.y = -0.5; scene.add(sky); }
+      if (sky) { sky.position.y = -0.5 - framedLift; scene.add(sky); }
 
       const controls = new OrbitControls(camera, canvas);
-      controls.target.set(0, fitH(p0) * 0.45, 0);
+      controls.target.set(0, fitH(p0) * 0.45 - framedLift, 0);
       controls.maxPolarAngle = Math.PI * 0.495;   // never below the ground plane
       controls.minDistance = R * 1.1;
       controls.maxDistance = dist * 2.5;
@@ -12523,7 +12781,15 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
         applyFraming: () => {
           const p = pRef.current;
           const f = frameFor(p);
-          controls.target.set(0, fitH(p) * 0.45, 0);
+          // A floor height that changed moves the eye and the sky with the ground, by the change
+          // alone, so the orbit keeps its angle to the building.
+          const lift = liftOf(p);
+          if (lift !== framedLift) {
+            camera.position.y -= lift - framedLift;
+            if (sky) sky.position.y = -0.5 - lift;
+            framedLift = lift;
+          }
+          controls.target.set(0, fitH(p) * 0.45 - lift, 0);
           controls.minDistance = f.R * 1.1;
           controls.maxDistance = f.dist * 2.5;
           // Grow-only: the sky dome was sized dist*6.5 from the MOUNT-time distance and is
@@ -12533,6 +12799,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
           camera.updateProjectionMatrix();
           controls.update();
         },
+        framedLift: () => framedLift,
       };
       canvas.addEventListener("webglcontextlost", (ev) => { ev.preventDefault(); setPhase("error"); });
       // preventDefault above is what asks the browser to restore the context. Without a
@@ -12599,7 +12866,8 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
     // Framing first: applyFull queues the rAF that actually paints, so this costs no
     // frame. Guarded on fitHeightFt so a caller that never passes one is untouched — unless the
     // building would leave the old frame (d3FrameHeightFt: a raised centre, a 20 ft wall).
-    if (fitHeightFt || d3FrameHeightFt(style3d, bldgW, bldgH) > D3.WALL_H) e.applyFraming();
+    // ...and a raised floor, or one that just stopped being raised (d3GradeLiftFt), whose ground moved.
+    if (fitHeightFt || d3FrameHeightFt(style3d, bldgW, bldgH) > D3.WALL_H || d3GradeLiftFt(style3d) > 0 || (e.framedLift && e.framedLift() > 0)) e.applyFraming();
     e.applyFull();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geomSig]);
@@ -15952,6 +16220,8 @@ function ssShotSig(spec) {
   return JSON.stringify([
     spec.roof || null, spec.wallHeightFt ?? null, spec.siding ?? null, spec.colors || null,
     spec.foundation ?? null, spec.roofMaterial ?? null, spec.gableVent ?? null,
+    // A raised floor's height (2026-09-25) moves the ground, the supports and the porch steps.
+    spec.floorHeightFt ?? null,
   ]);
 }
 
@@ -15997,6 +16267,7 @@ function ssRoofInFeet(roof, spanFt, centre) {
 // built ones, and a lowered pitch says so; without it (no size yet) they are the spec's.
 function ssDrewWords(spec, porchBuilt) {
   const roof = (spec && spec.roof) || {};
+  const raisedOn = spec && (spec.foundation === "blocks" || spec.foundation === "piers") ? spec.foundation : null;
   const type = roof.type || "gable";
   const out = [];
   const walls = { front: "the front", back: "the back", left: "the left side", right: "the right side" };
@@ -16033,10 +16304,22 @@ function ssDrewWords(spec, porchBuilt) {
         : `a roof sloping ${in12(pb ? pb.pitch : roof.porchPitch)}`);
     }
     const stepsAt = ({ left: "on the left", center: "in the middle", right: "on the right" })[roof.porchSteps];
-    if (stepsAt) built.push(`steps ${stepsAt}`);
+    // On a raised floor (2026-09-25) the steps climb its whole height, so how many is worth saying:
+    // the readout's count, built to the same grade. At grade it is always one, and never said.
+    const nSteps = raisedOn && porchBuilt && porchBuilt.steps ? Math.round(Number(porchBuilt.steps.count)) : 0;
+    if (stepsAt) built.push(nSteps > 0 ? `${nSteps === 1 ? "one step" : `${nSteps} steps`} ${stepsAt}` : `steps ${stepsAt}`);
     if (built.length) out.push(`It has ${built.length > 1 ? built.slice(0, -1).join(", ") + " and " + built[built.length - 1] : built[0]}.`);
   } else if (inFt > 0.5) {
     out.push(`The porch is cut ${ssFtInWords(inFt)} into the ${end} ${face}.`);
+  }
+  // A RAISED FLOOR (2026-09-25): what it stands on and how high, only where the style says. A height
+  // it does not give is said as the one drawn, and as not measured.
+  if (raisedOn) {
+    const what = raisedOn === "blocks" ? "stacked concrete blocks" : "concrete piers";
+    const h = Number(spec.floorHeightFt);
+    out.push(h > 0
+      ? `It stands on ${what}, its floor ${ssFtInWords(h)} off the ground at the front.`
+      : `It stands on ${what}; no floor height is given, so its floor is drawn ${ssFtInWords(raisedOn === "blocks" ? 1 : 1.5)} off the ground.`);
   }
   return out.join(" ");
 }
@@ -16085,7 +16368,9 @@ const SS_CHANGE_WORDS = {
   "roof.porchPitch": ["How steep the porch roof is", (v) => `${Math.round(Number(v) * 120) / 10} in 12`],
   "roof.porchSteps": ["Where the porch steps are", (v) => ({ left: "on the left", center: "in the middle", right: "on the right" })[String(v)] || String(v)],
   gableVent: ["The vent in the gable", (v) => (v && v.widthFrac > 0 ? "there" : "not there")],
-  foundation: ["What it sits on", (v) => (String(v) === "skids" ? "runners" : "a slab")],
+  foundation: ["What it sits on", (v) => ({ skids: "runners", blocks: "concrete blocks", piers: "concrete piers" })[String(v)] || "a slab"],
+  // A raised floor's height (2026-09-25), top-level beside foundation, in the panel's own words.
+  floorHeightFt: ["How high the floor stands off the ground", (v) => ssFtInWords(Number(v))],
   roofMaterial: ["What the roof is made of", (v) => String(v)],
 };
 // A ratio has no builder-readable value, so the line says which WAY it moved instead of
@@ -19974,6 +20259,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // trim colour), so a control that is cleared DELETES its key rather than storing "" or 0. The
   // sanitiser never emits a default, and neither does this panel: an untouched style saves
   // byte-for-byte what it loaded.
+  // WHAT THE BUILDING STANDS ON (2026-09-25). A blank pick DELETES `foundation` (the slab absent has
+  // always drawn), and the floor height belongs to blocks or piers only: leaving them deletes it,
+  // as the sanitiser would on Save, so the preview never draws a height Save cannot store. A cleared
+  // height box DELETES floorHeightFt and the renderer draws the kind's own default.
+  const calTidyFloor = (spec) => {
+    if (!d3RaisedFoundation(spec) && "floorHeightFt" in spec) { const out = { ...spec }; delete out.floorHeightFt; return out; }
+    return spec;
+  };
+  const calSetFoundation = (v) => setAdminCal((p) => {
+    const spec = { ...p.spec };
+    if (D3_FOUNDATIONS.indexOf(v) >= 0) spec.foundation = v;
+    else delete spec.foundation;
+    return { ...p, spec: calTidyFloor(spec) };
+  });
+  const calSetFloorHeight = (n) => setAdminCal((p) => {
+    const spec = { ...p.spec };
+    if (n === null || n === undefined || !(Number(n) > 0)) delete spec.floorHeightFt;
+    else spec.floorHeightFt = Number(n);
+    return { ...p, spec };
+  });
   const calSetRoofOpt = (key, v) => setAdminCal((p) => {
     const roof = { ...p.spec.roof };
     if (v === "" || v === null || v === undefined) delete roof[key];
@@ -20020,6 +20325,39 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         base.onChange(e);
       },
     };
+  };
+  // WHAT THE BUILDING STANDS ON, AND HOW HIGH (2026-09-25): one pair of controls, drawn in the walls
+  // fix panel and in the full field grid, so the two can never offer different choices. The height
+  // box shows only for blocks and piers, the two that raise the floor; blank is the kind's default.
+  const calFoundationFields = (idPrefix, labelStyle, inputStyle) => {
+    const spec = (adminCal && adminCal.spec) || {};
+    const raised = d3RaisedFoundation(spec);
+    const grade = d3GradeFt(spec);
+    return (
+      <>
+        <label style={labelStyle}>What it stands on
+          <select value={D3_FOUNDATIONS.indexOf(spec.foundation) >= 0 ? spec.foundation : ""} onChange={(e) => calSetFoundation(e.target.value)}
+            data-ss-foundation={idPrefix} style={inputStyle}>
+            <option value="">Not set (a slab on the ground)</option>
+            <option value="slab">Slab (the walls meet the ground)</option>
+            <option value="skids">Skids (runners on the ground)</option>
+            <option value="blocks">Concrete blocks (raised off the ground)</option>
+            <option value="piers">Concrete piers (raised off the ground)</option>
+          </select>
+        </label>
+        {raised && (
+          <label style={labelStyle}>Floor height off the ground, at the front (ft)
+            <input className="ssc-dim-in" type="number" step="0.1" min="0.3" max="6" inputMode="decimal"
+              placeholder={`${D3_FLOOR_HEIGHT_DEFAULT_FT[raised]} ft`} data-ss-floor-height={idPrefix}
+              {...calOptNumProps(idPrefix + "-floorHeightFt", spec.floorHeightFt, [0.3, 6], (n) => calSetFloorHeight(n))}
+              style={inputStyle} />
+            <span style={{ display: "block", fontWeight: 400, marginTop: 2, fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
+              Ground to the top of the floor where the door or porch is. A door is 6 ft 8 in tall, and each step up is about 7 in. Blank draws {ssFtInWords(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}. Porch steps climb the whole height, and a ramp a customer adds is drawn {grade > 0.75 ? ssFtInWords(4 * grade) : "3 ft"} long so it reaches the ground.
+            </span>
+          </label>
+        )}
+      </>
+    );
   };
   // Grow and shrink the set. Carolyn 2026-09-04 @16:30: "they may just add more, but they may
   // also just remove one." Both are simple now that no position carries a meaning: append, and
@@ -20154,7 +20492,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // its FINAL spec to the spec as it stood BEFORE the generation rather than on top of the
   // first draft. Merging twice is exactly how a porch key survives its own exclusion — see
   // calPreGenRef. Same body, same rules, one caller more.
-  const calShapeMerged = (spec, d3) => ({
+  const calShapeMerged = (spec, d3) => calTidyFloor({
     ...spec,
     roof: calDraftRoof(spec.roof, d3 && d3.roof),
     // Only the keys the model actually read — see the header. An unreported colour is absent
@@ -20169,7 +20507,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // A shape draft (it reports a roof type) is the authority on the vent too: the prompt says to
     // leave gableVent out when the gable ends carry none, so absent means none (2026-09-25).
     gableVent: (d3 && d3.gableVent && d3.gableVent.widthFrac > 0) ? d3.gableVent : ((d3 && d3.roof && d3.roof.type) ? undefined : spec.gableVent),
-    foundation: (d3 && (d3.foundation === "skids" || d3.foundation === "slab")) ? d3.foundation : spec.foundation,
+    // blocks and piers (2026-09-25) by the same rule: the draft's when it gives one, else the stored.
+    foundation: (d3 && D3_FOUNDATIONS.indexOf(d3.foundation) >= 0) ? d3.foundation : spec.foundation,
+    // ...and a raised floor's height likewise. calTidyFloor then takes it off anything that is no
+    // longer on blocks or piers, as the sanitiser would on Save.
+    ...((d3 && Number(d3.floorHeightFt) > 0) ? { floorHeightFt: Number(d3.floorHeightFt) } : {}),
     // Third top-level field, same trap: the renderer textures the roof from this before
     // any customer roof-type pick, so a video that read "metal" and had it dropped here
     // would show shingles on a metal building and look like the model got it wrong.
@@ -21415,7 +21757,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // building faces and the wings are the ROOF's shape, the attach height and width the PORCH's.
     if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt]);
     if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps]);
-    if (key === "walls") return String(spec.wallHeightFt);
+    // What it stands on and how high (2026-09-25) are set in the walls panel, beside the wall.
+    if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt]);
     return JSON.stringify([spec.colors, spec.roofMaterial]);
   };
   // ⚠️ ANSWERED IS NOT AGREED. calChecksAnswered counts any non-empty answer, so "No" -- the
@@ -21714,6 +22057,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
             Floor to the top of the outside wall at the eave, not to the peak — on a one-slant roof, the low side. <b>This is the number you gave us in step 2</b> — changing it here changes it there, because it is one measurement with two boxes.
           </div>
+          {calFoundationFields("ssc-fix", calFixLabel, { ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" })}
         </div>
       );
     }
@@ -21833,7 +22177,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // load them - `calVideoFrames` there is structurally [], and sending it would have made
         // every operator "Save to config" wipe the builder's walk-around. Omitting the key is
         // what tells the server to leave the column as it found it.
-        body: { adminPassword: adminPwd, clientId: C.clientId, action: "save_style_d3", styleValue: adminCal.styleValue, d3: adminCal.spec, d3Photos: adminCal.photos.filter(Boolean) },
+        // `frame: "front"` (2026-09-25): this editor knows blocks, piers and floorHeightFt, so the
+        // server applies what it sends rather than carrying a stored raised floor forward.
+        body: { adminPassword: adminPwd, clientId: C.clientId, action: "save_style_d3", styleValue: adminCal.styleValue, d3: adminCal.spec, d3Photos: adminCal.photos.filter(Boolean), frame: "front" },
       });
       if (error) throw new Error(error.message || "Save failed");
       if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");
@@ -24056,6 +24402,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <span style={{ display: "block", fontWeight: 400, marginTop: 2 }}>Used when a customer picks a metal roof. The preview shows it once Roof material is Metal.</span>
                   )}
                 </label>
+                {/* WHAT IT STANDS ON (2026-09-25). A top-level key with NO control until today: the
+                    generator could set skids or a slab and nothing on screen could change it. Blocks
+                    and piers raise the floor off the ground; the same pair of controls is in the
+                    walls fix panel (calFoundationFields). */}
+                {calFoundationFields("ss-grid", { fontSize: 11, color: "#92400E", fontWeight: 700 }, { ...S.sel, width: "100%", boxSizing: "border-box" })}
                 {/* PITCH IS ENTERED AS THE RISE, which is the only way a builder states a
                     roof. Carolyn, 2026-08-28 @44:17-46:36: she typed 10 expecting a 10:12,
                     and the drawing came back "120:12" with a 76'6" peak, because this field

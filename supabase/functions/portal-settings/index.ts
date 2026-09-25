@@ -75,6 +75,8 @@ import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
 // The v2 generator's two additions (2026-09-24), on their own line so the long list above can move
 // without this one: the walk-around frame cap every frame path shares, and the wings check.
 import { WALK_FRAME_MAX, wingsAgreementWarning, wantsV2Prompt } from "../_shared/styleD3.ts";
+// A raised foundation's save carry-forward (2026-09-25), on its own line for the same reason.
+import { carryForwardFoundation } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
@@ -3188,6 +3190,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         clean.d3.roofProfile = stored;
       }
     }
+    // A RAISED FOUNDATION (blocks / piers and floorHeightFt, 2026-09-25): an older panel sends
+    // foundation null (or a draft's "slab") and never floorHeightFt, so a save without frame
+    // "front" keeps the stored pair (carryForwardFoundation). The current panel sends frame "front"
+    // and gets what it sent. Before the guard too, so an old panel's re-save of a raised style
+    // compares as the duplicate it is.
+    carryForwardFoundation(clean.d3, payload.d3, found.style!.d3, payload.frame);
     // THE LATE-SAVE GUARD, BY VERSION (see _shared/styleSaveGuard.ts, and why content alone was
     // not enough). A caller that sent no baseVersion — an older bundle, the operator ?admin=1
     // page — writes unconditionally, exactly as before. A DUPLICATE (this exact save already
