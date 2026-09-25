@@ -39,8 +39,9 @@
 -- idem_key only when there is a key, and on any failure is retried without it (one
 -- `ai_style_idem_key_write_failed` info row naming this migration) -- a missing column must never
 -- refuse a generation, because the insert is the spend cap and a refusal there is a 503. The
--- frame map is its OWN update after the 226 `drafted` write, so a missing column costs the map
--- and never the draft (`ai_style_frame_map_write_failed`, info). The recover action reads both
+-- frame map is its OWN update just before the 226 `drafted` write (so a pickup that sees the draft
+-- sees its map), and a missing column costs the map and never the draft
+-- (`ai_style_frame_map_write_failed`, info). The recover action reads both
 -- columns, so until this is applied it answers 503 (`ai_draft_recover_failed`) and the shell
 -- keeps waiting to the press's budget, exactly as it does when the ledger cannot be read.
 --
@@ -89,7 +90,7 @@ comment on column public.ai_style_calls.idem_key is
   'state from wallet_transactions under the same key.';
 comment on column public.ai_style_calls.frame_map is
   'The frameMap the success answer carried (which image shows which view, and its azimuth), '
-  'written by its own best-effort update after `drafted`, so a draft picked up after its '
+  'written by its own best-effort update just before `drafted`, so a draft picked up after its '
   'connection dropped can still run the free self-check. NULL when there was none.';
 
 -- Refuse to report success if the columns or the index did not land. Both writes fail SOFT

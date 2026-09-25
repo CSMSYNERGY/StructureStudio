@@ -4388,6 +4388,35 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // refuse it: a capability for something that cannot happen is an invitation to a 409.
     const checkId = shapeFirst ? (ledgerRow?.id ?? null) : null;
 
+    // ── THE FRAME MAP, KEPT FOR A DRAFT PICKED UP AFTER A DROP (253, 2026-09-25) ────────────────
+    // The free self-check cannot pair a render with a frame without it, and until 253 it lived only
+    // in the answer: a streamed draft whose answer dropped came back through
+    // calibrate_style_ai_recover with no map, and the check was skipped. Now the recover action
+    // hands the row's own map back and the check runs as it does on a live answer.
+    //
+    // ⚠️ ITS OWN UPDATE, BEFORE `drafted` IS WRITTEN, so a pickup that sees the draft sees its map
+    // too. And nothing here can reach the write below: a column that is missing (253 not applied),
+    // a write that fails or a throw costs the MAP and never the draft, and never the builder's
+    // answer -- one info row, and the recovered draft skips the check with a note, exactly as
+    // every draft did before 253. No map (a photos draft, a reply that carried none) is no write,
+    // so those requests keep yesterday's round trips.
+    if (ledgerRow?.id && frameMap) {
+      try {
+        const { error: mapErr } = await admin.from("ai_style_calls").update({ frame_map: frameMap }).eq("id", ledgerRow.id);
+        if (mapErr) {
+          await logEdgeError({
+            fn: "portal-settings", req, clientId, code: "ai_style_frame_map_write_failed", severity: "info",
+            message: `Could not keep the frame map on the generation; migration 253 may not be applied: ${mapErr.message}`,
+          });
+        }
+      } catch (e) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_style_frame_map_write_failed", severity: "info",
+          message: `Frame-map write threw: ${String(e instanceof Error ? e.message : e)}`,
+        });
+      }
+    }
+
     // ── RECORD WHAT IT SAID, not just that it ran (226) ───────────────────────────────────
     // The drafted spec goes back to the browser and lands in an in-memory draft. Unless the
     // builder then presses Save it exists NOWHERE ELSE — so on 2026-09-10/11 three generations
@@ -4435,34 +4464,6 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         await logEdgeError({
           fn: "portal-settings", req, clientId, code: "ai_style_result_log_failed",
           message: `Could not record the drafted spec: ${logErr.message}`,
-        });
-      }
-    }
-
-    // ── THE FRAME MAP, KEPT FOR A DRAFT PICKED UP AFTER A DROP (253, 2026-09-25) ────────────────
-    // The free self-check cannot pair a render with a frame without it, and until 253 it lived only
-    // in the answer: a streamed draft whose answer dropped came back through
-    // calibrate_style_ai_recover with no map, and the check was skipped. Now the recover action
-    // hands the row's own map back and the check runs as it does on a live answer.
-    //
-    // ⚠️ ITS OWN UPDATE, AFTER `drafted` IS WRITTEN, and nothing here can reach the write above: a
-    // column that is missing (253 not applied), a write that fails or a throw costs the MAP and
-    // never the draft, and never the builder's answer -- one info row, and the recovered draft
-    // skips the check with a note, exactly as every draft did before 253. No map (a photos draft,
-    // a reply that carried none) is no write, so those requests keep yesterday's round trips.
-    if (ledgerRow?.id && frameMap) {
-      try {
-        const { error: mapErr } = await admin.from("ai_style_calls").update({ frame_map: frameMap }).eq("id", ledgerRow.id);
-        if (mapErr) {
-          await logEdgeError({
-            fn: "portal-settings", req, clientId, code: "ai_style_frame_map_write_failed", severity: "info",
-            message: `Could not keep the frame map on the generation; migration 253 may not be applied: ${mapErr.message}`,
-          });
-        }
-      } catch (e) {
-        await logEdgeError({
-          fn: "portal-settings", req, clientId, code: "ai_style_frame_map_write_failed", severity: "info",
-          message: `Frame-map write threw: ${String(e instanceof Error ? e.message : e)}`,
         });
       }
     }

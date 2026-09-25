@@ -805,13 +805,14 @@ Deno.test("⚠️ a missing idem_key column never fails a generation: the insert
   assertEquals([keyless.out.status, inserts(keyless.trace).length, keyless.trace.rows.filter((r) => r.code === "ai_style_idem_key_write_failed").length], [503, 1, 0]);
 });
 
-Deno.test("the frame map is kept on the row AFTER the draft, and a failing map write never costs `drafted` or the answer", async () => {
+Deno.test("the frame map is kept on the row BEFORE the draft, and a failing map write never costs `drafted` or the answer", async () => {
   const ok = await drive(STREAMED, { model: THREE(GOOD()) });
   const answer = JSON.parse(ok.out.text);
   assert(answer.frameMap && answer.frameMap.front, "the answer carries a map");
   const ups = ledgerUpdates(ok.trace);
   const at = (k: string) => ups.findIndex((u) => k in u);
-  assert(at("drafted") >= 0 && at("frame_map") > at("drafted"), `its own update, after drafted: ${JSON.stringify(ups.map((u) => Object.keys(u)))}`);
+  // Before `drafted`, so a pickup that sees the draft always sees its map too.
+  assert(at("frame_map") >= 0 && at("drafted") > at("frame_map"), `its own update, before drafted: ${JSON.stringify(ups.map((u) => Object.keys(u)))}`);
   assertEquals(ups[at("frame_map")], { frame_map: answer.frameMap }, "the answer's own map, and nothing else in that write");
   assert(!("frame_map" in ups[at("drafted")]), "never a key on the 226 write");
   // The write fails (253 not applied) or throws: the draft is on the row and the answer is the same.
