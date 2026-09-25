@@ -1726,6 +1726,16 @@ Deno.test("v2 asks for the porch's posts, its roof's own pitch and its steps (20
     assert(p.includes("One at each corner and three between them is 5.") && p.includes("Count them one by one along the edge before answering."), `${name}: count them`);
     assert(!p.includes("is 4."), `${name}: no example that is a test building's own count`);
     assert(p.includes("A porch roof that drops 1 ft over 5 ft of run is 0.2."), `${name}: a generic pitch`);
+    // Measured, not judged (2026-09-25 live runs): the porch pitch came back 0.15 for a porch roof
+    // that measures 0.25, and the steps came back "center" for steps at the right end.
+    assert(p.includes("Build it from two heights rather than judging the angle by eye"), `${name}: porch pitch from two heights`);
+    assert(p.includes("is (9 - 8) / 5 = 0.2."), `${name}: a generic worked porch pitch`);
+    assert(p.includes('in the left third of that span is "left", the middle third "center", the right third "right"'), `${name}: steps by thirds`);
+    assert(p.includes("never against the door or the middle of the building"), `${name}: not by the door`);
+    // A corner view makes a gable look STEEPER (its width is foreshortened, its height is not).
+    // The old sentence said perspective "flattens" it, and live Opus reads came back 0.5-0.9
+    // for a 0.41 gable.
+    assert(p.includes("so the roof looks STEEPER than it is") && !p.includes("where perspective flattens it"), `${name}: angled gables look steeper`);
   }
   // The legacy prompts are frozen (their bytes are pinned by hash above): none of this is in them.
   for (const p of [VIDEO_SHAPE_PROMPT, videoShapePrompt(DIMS), combinedShapePrompt(8, 4, DIMS)]) {
@@ -3360,6 +3370,9 @@ Deno.test("v2 prompt: the steps step offers \"none\" to take steps off", () => {
   const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: stepped, viewpoints: ["front", "side"] });
   assert(p.includes('Give\n       "none" where the render shows steps the frame does not'), "the none sentence");
   assert(p.includes('"none" removes them.'), "and what it does");
+  // Read by thirds between the corner posts, and an angled gable looks steeper (2026-09-25).
+  assert(p.includes("which third of the span between the two front corner posts the MIDDLE of the steps"), "steps by thirds");
+  assert(p.includes("an angled gable looks steeper than a square-on one"), "angled gables look steeper");
 });
 
 Deno.test("v2 prompt: the porch's posts, pitch and steps are checked, each said as what it draws when absent", () => {
