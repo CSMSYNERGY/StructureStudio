@@ -1746,6 +1746,47 @@ Deno.test("v2 asks for the porch's posts, its roof's own pitch and its steps (20
   }
 });
 
+Deno.test("v2 asks for the pixel points each pitch is read from, in a measure block beside the frame map (2026-09-26)", () => {
+  // Live reads JUDGED the slope (a 0.41 gable came back 0.45 to 0.8, a 0.25 porch roof 0.11 to 0.2);
+  // the server now works both pitches out from points the model writes down (pitchFromMeasure).
+  for (const [name, p] of V2) {
+    const map = p.indexOf('  "frameMap": {'), measure = p.indexOf('  "measure": {');
+    assert(map > 0 && measure > map, `${name}: measure comes after the frame map`);
+    assert(p.slice(map, measure).trimEnd().endsWith("},"), `${name}: directly after it, at the top level`);
+    for (const k of [
+      '"pitch": { "frame": <1-based index of the image you read the roof\'s slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] }',
+      '| { "frame": <as above>, "size": <as above>, "tallTop": [<x>, <y>], "tallBottom": [<x>, <y>], "shortTop": [<x>, <y>], "shortBottom": [<x>, <y>] },',
+      '"porchPitch": { "frame": <1-based index of the image where the porch roof\'s end is seen square-on from the side>, "size": [<width>, <height>], "wall": [<x>, <y>], "edge": [<x>, <y>] }',
+    ]) {
+      assert(p.includes(k), `${name}: the schema carries ${k.slice(0, 40)}`);
+    }
+    assert(p.includes("MEASURE, measure: the points the two pitches are worked out from."), `${name}: the paragraph`);
+    assert(p.includes("x counts to the RIGHT and y counts DOWN, both from the image's top-left corner, so a point higher in the picture has a SMALLER y"),
+      `${name}: pixels, y down, from the top-left`);
+    assert(p.includes("Give that image's own size in pixels as size, [width, height]."), `${name}: the image size`);
+    assert(p.includes("Put every point on a clear landmark you can see"), `${name}: read along landmarks`);
+    assert(p.includes("use the frame most square-on to a gable end, the one the PITCH paragraph picks"), `${name}: the square-on frame`);
+    assert(p.includes("give three points on the TOP edge of the roof against the sky: left, where the left rake meets the eave; peak, the top of the roof at the ridge; right, where the right rake meets the eave"),
+      `${name}: the gable's three points`);
+    assert(p.includes("On a building with side wings the gable is the centre section's"), `${name}: the centre section's gable`);
+    assert(p.includes("tallTop and tallBottom on its tall edge, shortTop and shortBottom on its short one"), `${name}: the shed's four points`);
+    assert(p.includes("wall, where it meets the wall, and edge, at its outer end"), `${name}: the porch roof's two points`);
+    assert(p.includes("Leave a block out when no frame shows it square-on, and leave measure out when neither does."), `${name}: a block may be left out`);
+    // The model's own numbers stay in the schema: they are the fallback when the points fail.
+    assert(p.includes("Give roof.pitch and roof.porchPitch as usual either way."), `${name}: the numbers are still given`);
+    assert(p.includes('"pitch": <rise over run of one slope, e.g. 0.42 for 5:12>,'), `${name}: roof.pitch is still asked for`);
+    assert(p.includes('"porchPitch": <projecting porch only: the porch roof\'s own rise over run>,'), `${name}: and roof.porchPitch`);
+    // A generic example (a 0.33 gable), never a test building's own points or pitch.
+    assert(p.includes("a gable end in a 1600 by 900 image might read left [400, 560], peak [800, 428], right [1200, 562]"), `${name}: a generic example`);
+    const para = p.slice(p.indexOf("MEASURE, measure:"), p.indexOf("\n\n", p.indexOf("MEASURE, measure:")));
+    for (const own of ["0.41", "0.25", "0.22", "0.23"]) assert(!para.includes(own), `${name}: ${own} is a test building's number`);
+  }
+  // Legacy prompts are frozen (hashes above) and the photo path is out of scope: none of them asks.
+  for (const p of [VIDEO_SHAPE_PROMPT, videoShapePrompt(DIMS), combinedShapePrompt(8, 4), combinedShapePrompt(8, 4, DIMS), SPEC_PROMPT]) {
+    assert(!p.includes('"measure"') && !p.includes("MEASURE,"), "a legacy prompt never asks for points");
+  }
+});
+
 Deno.test("v2 tells ENCLOSED wings from an OPEN lean-to, and forces the wings answer like the porch's", () => {
   for (const [name, p] of V2) {
     for (const k of ['"wingSide"', '"wingWidthFt"', '"wingPitch"', '"centerEaveFt"']) {

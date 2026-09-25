@@ -727,6 +727,16 @@ Where the frames genuinely do not settle something, say so in observed and OMIT 
 // cut off anywhere loses the spec, the notes and the frame map together (one JSON object). Every
 // new key is a short number or word; the prose lives in `observed`, capped at one phrase each.
 //
+// THE POINTS BEHIND THE PITCHES (2026-09-26). Live three-read drafts put a raised centre's gable at
+// 0.45 to 0.8 against a measured 0.41, and a projecting porch's roof at 0.11 to 0.2 against 0.25. In
+// an offline run on the app's own frames, every stand-in read that came out close had written pixel
+// coordinates down first, so the model was judging the slope rather than measuring it. The reply
+// now carries `measure`: the pixel points each pitch is read from, and the SERVER works the slope
+// out from them (pitchFromMeasure and porchPitchFromMeasure, below), per read and before the
+// consensus. roof.pitch and roof.porchPitch stay in the schema and are what is drawn when a read
+// gives no points or its points fail the checks. `measure` never reaches the stored spec:
+// sanitizeD3Spec rebuilds from known keys, like frameMap.
+//
 // ⚠️ THE TESTS PIN, ACROSS BOTH PROMPTS: the schema lines for pitch, overhangIn and the three
 // gambrel numbers, and the whole GAMBREL NUMBERS paragraph, are byte-identical to the base (the
 // gambrel ratios measurably work — see the test); `wallHeightFt` appears nowhere in here; and
@@ -792,6 +802,10 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence). K
     "corner": { "frame": <an image showing the FRONT wall and one side wall at once, three-quarters on>, "azimuthDeg": <as above> },
     "back": { "frame": <the image most square-on to the BACK wall, the one opposite the front>, "azimuthDeg": <as above> },
     "otherSide": { "frame": <the image most square-on to the side wall OPPOSITE the one you gave for side>, "azimuthDeg": <as above> }
+  },
+  "measure": {
+    "pitch": { "frame": <1-based index of the image you read the roof's slope in>, "size": [<that image's width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] } | { "frame": <as above>, "size": <as above>, "tallTop": [<x>, <y>], "tallBottom": [<x>, <y>], "shortTop": [<x>, <y>], "shortBottom": [<x>, <y>] },
+    "porchPitch": { "frame": <1-based index of the image where the porch roof's end is seen square-on from the side>, "size": [<width>, <height>], "wall": [<x>, <y>], "edge": [<x>, <y>] }
   }
 }
 
@@ -862,6 +876,8 @@ Ignore every OTHER building in the frames. On a sales lot the subject is usually
 FRAME MAP: which image goes with which view of the building. Number the images in the order you were given them, starting at 1, and name the ONE image that best shows each of the six views in frameMap. Count only the walk-around frames and never one of the builder's own photographs, which were taken separately and are not part of the lap. The same image may serve two views. A view you have no good image for should be LEFT OUT: naming an image that does not show it is worse than saying nothing, because that image is about to be put beside a drawing of that view and the builder asked to say whether the two match.
 
 AZIMUTH: for each image you name, where the camera was standing, as an angle around the building to the nearest 45 degrees. 0 is square in front of the FRONT wall. Going from there around the building toward its RIGHT side, 90 is square to the right-hand side wall, 180 is square to the back wall, and 270 is square to the left-hand side wall. Right and left are as seen standing in front of the FRONT wall, facing it, the same way leanToSide, wingSide and dormerOffsetU are read. Answer 0, 45, 90, 135, 180, 225, 270 or 315 and nothing in between -- this is a coarse note of where you stood, not a survey.
+
+MEASURE, measure: the points the two pitches are worked out from. Before you settle roof.pitch or roof.porchPitch, find the frame named for it and write down where the roof's edges are in that image; we work each slope out from these points, so measure them rather than judge the angle. Coordinates are pixels in that one image: x counts to the RIGHT and y counts DOWN, both from the image's top-left corner, so a point higher in the picture has a SMALLER y. Give that image's own size in pixels as size, [width, height]. Put every point on a clear landmark you can see, such as the corner where a rake board meets the eave or the tip of the peak, never where you expect an edge to be. For pitch on a gable or gambrel roof, use the frame most square-on to a gable end, the one the PITCH paragraph picks, and give three points on the TOP edge of the roof against the sky: left, where the left rake meets the eave; peak, the top of the roof at the ridge; right, where the right rake meets the eave, with left and right as they appear in the image. On a building with side wings the gable is the centre section's: its left and right are where the centre roof's rakes meet the centre section's own eaves, never the wing roofs below them. For pitch on a one-slope roof, use a frame square to one of the two walls whose top edge slopes under the MAIN roof, and give the top and the bottom of that wall's two vertical edges: tallTop and tallBottom on its tall edge, shortTop and shortBottom on its short one. For porchPitch, use a frame where the projecting porch roof's end is seen square-on from the side, and give two points on the TOP of the porch roof: wall, where it meets the wall, and edge, at its outer end. For example, a gable end in a 1600 by 900 image might read left [400, 560], peak [800, 428], right [1200, 562]. Leave a block out when no frame shows it square-on, and leave measure out when neither does. Give roof.pitch and roof.porchPitch as usual either way.
 
 Where the frames genuinely do not settle something, say so in observed and OMIT the key. Omitting a key leaves the builder's existing setting alone, which is better than a typical value they then have to find and undo. Do not fill a field with the middle of its stated range. The exceptions are the decisions marked REQUIRED above: give your best reading of each and put the doubt in observed.roofNote.`;
 
