@@ -1731,6 +1731,9 @@ Deno.test("v2 asks for the porch's posts, its roof's own pitch and its steps (20
     assert(p.includes("Build it from two heights rather than judging the angle by eye"), `${name}: porch pitch from two heights`);
     assert(p.includes("is (9 - 8) / 5 = 0.2."), `${name}: a generic worked porch pitch`);
     assert(p.includes('in the left third of that span is "left", the middle third "center", the right third "right"'), `${name}: steps by thirds`);
+    // Never "center" beside a middle post (2026-09-26): the renderer draws "center" steps at the
+    // porch's exact middle, and with an odd porchPosts a post stands there.
+    assert(p.includes('the right third "right". When a post stands at the middle of the front edge (an odd number of posts), the steps are never "center": answer "left" or "right" for the side of that middle post they are on.'), `${name}: never center at a middle post`);
     assert(p.includes("never against the door or the middle of the building"), `${name}: not by the door`);
     // A corner view makes a gable look STEEPER (its width is foreshortened, its height is not).
     // The old sentence said perspective "flattens" it, and live Opus reads came back 0.5-0.9
@@ -3372,6 +3375,8 @@ Deno.test("v2 prompt: the steps step offers \"none\" to take steps off", () => {
   assert(p.includes('"none" removes them.'), "and what it does");
   // Read by thirds between the corner posts, and an angled gable looks steeper (2026-09-25).
   assert(p.includes("which third of the span between the two front corner posts the MIDDLE of the steps"), "steps by thirds");
+  // Never "center" beside a middle post (2026-09-26), as the first pass is told.
+  assert(p.includes('falls in (never judged against the door; with a post at the middle of the front edge,\n       never "center", only the side of that post). Give it'), "never center at a middle post");
   assert(p.includes("an angled gable looks steeper than a square-on one"), "angled gables look steeper");
 });
 
