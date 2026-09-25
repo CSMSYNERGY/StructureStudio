@@ -1749,11 +1749,15 @@ Deno.test("v2 asks for the porch's posts, its roof's own pitch and its steps (20
   }
 });
 
-Deno.test("v2 asks for the pixel points each pitch is read from, in a measure block FIRST in the reply (2026-09-26)", () => {
-  // Live reads JUDGED the slope (a 0.41 gable came back 0.45 to 0.8, a 0.25 porch roof 0.11 to 0.2);
-  // the server now works both pitches out from points the model writes down (pitchFromMeasure).
-  // The block is the schema's FIRST key, ahead of roof, so the points are written before the
-  // pitches rather than fitted to a number already given.
+Deno.test("v2 asks for the pixel points a gable's pitch is read from, in a measure block FIRST in the reply (2026-09-26)", () => {
+  // Live reads JUDGED the slope (a 0.41 gable came back 0.45 to 0.8); the server now works a gable's
+  // pitch out from points the model writes down (pitchFromMeasure). The block is the schema's FIRST
+  // key, ahead of roof, so the points are written before the pitch rather than fitted to a number
+  // already given. Only a gable is asked for points: shed and porch points both read far off in a
+  // camera simulation and were taken out, and a gambrel's pitch is never computed.
+  const MEASURE_SCHEMA = '  "measure": {\n' +
+    '    "pitch": { "frame": <1-based index of the image you read the gable\'s slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] }\n' +
+    '  },\n  "roof": {\n';
   for (const [name, p] of V2) {
     const open = p.indexOf('\n{\n  "measure": {\n'), measure = p.indexOf('  "measure": {'), roof = p.indexOf('  "roof": {');
     assert(open > 0 && measure === open + 3, `${name}: measure opens the reply's object`);
@@ -1761,41 +1765,37 @@ Deno.test("v2 asks for the pixel points each pitch is read from, in a measure bl
     assert(p.indexOf('  "frameMap": {') > roof, `${name}: the frame map is after the roof, as before`);
     assert(p.includes('"otherSide": { "frame": <the image most square-on to the side wall OPPOSITE the one you gave for side>, "azimuthDeg": <as above> }\n  }\n}'),
       `${name}: and closes the object`);
-    for (const k of [
-      '"pitch": { "frame": <1-based index of the image you read the roof\'s slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] }',
-      '| { "frame": <as above>, "size": <as above>, "tallTop": [<x>, <y>], "tallBottom": [<x>, <y>], "shortTop": [<x>, <y>], "shortBottom": [<x>, <y>] },',
-      '"porchPitch": { "frame": <1-based index of the image where the porch roof\'s end is seen square-on from the side>, "size": [<width>, <height>], "wall": [<x>, <y>], "edge": [<x>, <y>], "postTop": [<x>, <y>], "postBottom": [<x>, <y>] }',
-    ]) {
-      assert(p.includes(k), `${name}: the schema carries ${k.slice(0, 40)}`);
+    // The block holds the gable's pitch and nothing else, word for word.
+    assert(p.includes(MEASURE_SCHEMA), `${name}: the measure block is the gable's pitch alone`);
+    for (const gone of ['"porchPitch": {', '"tallTop"', '"shortTop"', '"wall": [', '"edge": [', '"postTop"', '"postBottom"', '"size": <as above>']) {
+      assert(!p.includes(gone), `${name}: no ${gone} is asked for`);
     }
-    assert(p.includes("MEASURE, measure: the points the two pitches are worked out from, and the FIRST thing in the reply."), `${name}: the paragraph`);
+    assert(p.includes("MEASURE, measure: the points a gable roof's pitch is worked out from, and the FIRST thing in the reply."), `${name}: the paragraph`);
+    assert(p.includes("Before you settle roof.pitch on a gable, find the frame named for it"), `${name}: the pitch it is for`);
     assert(p.includes("x counts to the RIGHT and y counts DOWN, both from the image's top-left corner, so a point higher in the picture has a SMALLER y"),
       `${name}: pixels, y down, from the top-left`);
     assert(p.includes("Give that image's own size in pixels as size, [width, height]."), `${name}: the image size`);
     assert(p.includes("Put every point on a clear landmark you can see"), `${name}: read along landmarks`);
     assert(p.includes("For pitch on a gable roof, use the frame most square-on to a gable end, the one the PITCH paragraph picks"), `${name}: the square-on frame`);
-    // A gambrel's pitch is never computed (pitchFromMeasure), so it is asked for no points.
-    assert(!p.includes("gable or gambrel roof, use the frame"), `${name}: no gable points asked for on a gambrel`);
-    assert(p.includes("Leave measure.pitch out on a gambrel: its shape is the GAMBREL NUMBERS, not one slope."), `${name}: and says to leave it out`);
     assert(p.includes("give three points on the TOP edge of the roof against the sky: left, where the left rake meets the eave; peak, the top of the roof at the ridge; right, where the right rake meets the eave"),
       `${name}: the gable's three points`);
     assert(p.includes("On a building with side wings the gable is the centre section's"), `${name}: the centre section's gable`);
-    assert(p.includes("tallTop and tallBottom on its tall edge, shortTop and shortBottom on its short one"), `${name}: the shed's four points`);
-    assert(p.includes("wall, where it meets the wall, and edge, at its outer end"), `${name}: the porch roof's two points`);
-    // The post levels a rolled frame (porchPitchFromMeasure); without it the block is not used.
-    assert(p.includes("Then give the porch's OUTER corner post as it stands in that same frame, the post under the edge: postTop, where the post meets the porch roof, and postBottom, its foot on the deck."),
-      `${name}: the porch's corner post`);
-    assert(p.includes("A post stands plumb, so it tells a tilted camera from a sloping roof, and a porchPitch block without it is not used."), `${name}: why the post`);
-    assert(p.includes("a porch roof's end in an image that size might read wall [520, 300], edge [1000, 380], postTop [996, 392], postBottom [990, 700]"), `${name}: a generic porch example`);
-    assert(p.includes("Leave a block out when no frame shows it square-on, and leave measure out when neither does."), `${name}: a block may be left out`);
-    // The model's own numbers stay in the schema: they are the fallback when the points fail.
-    assert(p.includes("Give roof.pitch and roof.porchPitch as usual either way."), `${name}: the numbers are still given`);
+    // A shed's and a gambrel's pitch are never computed (pitchFromMeasure), so both are told plainly
+    // to leave the block out.
+    assert(!p.includes("gable or gambrel roof, use the frame"), `${name}: no gable points asked for on a gambrel`);
+    assert(p.includes("Leave measure out on a one-slope (shed) roof, and on a gambrel, whose shape is the GAMBREL NUMBERS rather than one slope."),
+      `${name}: leave it out on a shed and a gambrel`);
+    assert(p.includes("Leave it out too when no frame shows a gable end square-on."), `${name}: and with no square-on gable`);
+    // The model's own number stays in the schema: it is the fallback when the points fail.
+    assert(p.includes("Give roof.pitch as usual either way."), `${name}: the number is still given`);
     assert(p.includes('"pitch": <rise over run of one slope, e.g. 0.42 for 5:12>,'), `${name}: roof.pitch is still asked for`);
-    assert(p.includes('"porchPitch": <projecting porch only: the porch roof\'s own rise over run>,'), `${name}: and roof.porchPitch`);
+    assert(p.includes('"porchPitch": <projecting porch only: the porch roof\'s own rise over run>,'), `${name}: and roof.porchPitch, the model's own`);
     // A generic example (a 0.33 gable), never a test building's own points or pitch.
     assert(p.includes("a gable end in a 1600 by 900 image might read left [400, 560], peak [800, 428], right [1200, 562]"), `${name}: a generic example`);
     const para = p.slice(p.indexOf("MEASURE, measure:"), p.indexOf("\n\n", p.indexOf("MEASURE, measure:")));
     for (const own of ["0.41", "0.25", "0.22", "0.23"]) assert(!para.includes(own), `${name}: ${own} is a test building's number`);
+    // Nothing in the paragraph asks about a porch, a post or a shed's wall edges any more.
+    assert(!/porch|\bposts?\b|tallTop|vertical edges/i.test(para), `${name}: no porch, post or shed-edge sentence is left`);
   }
   // Legacy prompts are frozen (hashes above) and the photo path is out of scope: none of them asks.
   for (const p of [VIDEO_SHAPE_PROMPT, videoShapePrompt(DIMS), combinedShapePrompt(8, 4), combinedShapePrompt(8, 4, DIMS), SPEC_PROMPT]) {
