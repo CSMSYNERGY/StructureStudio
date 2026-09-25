@@ -16079,24 +16079,28 @@ const SSC_CAL_CSS = ".ssc-dim-in{font-size:13px}@media (pointer:coarse){.ssc-dim
 //
 // ⚠️ AND AGAIN ON 2026-09-25, for the streamed draft. Shallow reads were the wrong reads (a shed's
 // high side on the wrong wall 6 times in 7), the reads that thought took 56-106 s, and at effort
-// "high" all three consensus reads ran past 125 s. So the draft now has 230 s (the server's own
-// rule: 230 s, or what is left of 260 s after a slow set-up) and the press has seven minutes. The
-// first round always runs (230 + 5 + 100 = 335 s at every ceiling). After a draft at its ceiling a
-// second round starts only if the first check answered inside 80 s (its usual half-minute does);
-// after a one-minute draft all three rounds fit. The one path past seven minutes is a draft the
-// server asked us to retry (the streamed draft at 230 s, then the lean one at its own 125 s), and
-// ssCheckNext gives that path no second round. Still no watchdog that could throw away a paid
-// draft to enforce any of it.
+// "high" all three consensus reads ran past 125 s. So the draft is streamed and has 300 s (the
+// server's own rule: 300 s, or what is left of 330 s after a slow set-up) and the press has eight
+// minutes. It was 230 s and seven minutes until the same day's live presses: the reads took
+// 74-215 s, and 8 presses in 12 had a read cut at 230 s, which leaves the consensus one read. The
+// first round always runs: 300 + 5 + 100 = 405 s after a draft at its ceiling, and 330 + 5 + 100 =
+// 435 s after one a slow set-up pushed to the server's 330 s, both inside 480. After a draft at
+// its ceiling a second round starts only if the first check answered inside 70 s (its usual
+// half-minute does); after a one-minute draft all three rounds fit. The one path past eight
+// minutes is a draft the server asked us to retry (the streamed draft at 300 s, then the lean one
+// at its own 125 s), and ssCheckNext gives that path no second round. Still no watchdog that could
+// throw away a paid draft to enforce any of it.
 const SS_RENDER_MS = 5000;
 const SS_CHECK_MS = 100000;
 // After SS_RENDER_MS on purpose: selfCheckPanel_test lifts this block from that line.
-const SS_DRAFT_SERVER_MS = 230000;
+const SS_DRAFT_SERVER_MS = 300000;
 const SS_CHECK_ROUNDS = 3;
-const SS_FLOW_MAX_MS = 420000;
-// When the progress card stops saying "usually three to five minutes" and says so: at five
+const SS_FLOW_MAX_MS = 480000;
+// When the progress card stops saying "usually four to six minutes" and says so: at six
 // minutes, past the press it describes. Moved with the streamed draft (2026-09-25): at three
-// minutes it fired on an ordinary press whose draft was merely thinking.
-const SS_SLOW_MS = 300000;
+// minutes it fired on an ordinary press whose draft was merely thinking, and at five it would fire
+// on a draft using its 300 s.
+const SS_SLOW_MS = 360000;
 // How far one arrow key turns a compare render. 15° is small enough to land on a frame's own
 // angle and big enough that a builder is not pressing it forty times.
 const SS_SPIN_STEP_DEG = 15;
@@ -17913,7 +17917,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Where a drag started, and how far it has travelled since. A ref, because a pointermove
   // that re-rendered the panel would fight the drag it is trying to follow.
   const calDragRef = useRef(null);      // { viewpoint, x, from } | null
-  // "Still going." after SS_SLOW_MS (five minutes). A boolean rather than a live elapsed counter:
+  // "Still going." after SS_SLOW_MS (six minutes). A boolean rather than a live elapsed counter:
   // a number ticking up beside a paid generation reads as a stopwatch on a fault, and the
   // only thing a builder can do with it is worry.
   const [adminCalSlow, setAdminCalSlow] = useState(false);
@@ -21294,7 +21298,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // retry, and never on any other failure -- a refusal, a 402 or a 409 is not the model
       // running out of room, and resending it would only repeat it.
       //
-      // ⚠️ AND ITS STREAMED ANSWER CAN DROP (2026-09-25). The press waits three to five minutes on a
+      // ⚠️ AND ITS STREAMED ANSWER CAN DROP (2026-09-25). The press waits four to six minutes on a
       // streamed answer, and a phone that backgrounds the tab or a network that blinks drops it while
       // the server works on. `recover` lets the host pick the draft up from the server instead of
       // failing (see onDraftFromCombined). It asks by THIS press's key (`idem`, which its ledger row
@@ -23868,7 +23872,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         <div style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", lineHeight: 1.5 }}>
                           {adminCalSlow
                             ? "Still going. Big videos take longer — don't close the page."
-                            : "Usually three to five minutes — it studies your video carefully. You can leave this page open and come back."}
+                            : "Usually four to six minutes — it studies your video carefully. You can leave this page open and come back."}
                         </div>
                         {/* THE MONEY LINE. Under a rule, on every render of this card. */}
                         <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #DDD6FE", fontSize: 11, color: "#4C1D95", fontWeight: 700, lineHeight: 1.5 }}>

@@ -1667,7 +1667,7 @@ function Dashboard({ session }) {
        `stream: true` (2026-09-25) asks for the STREAMED draft: the server answers 200 at once,
        writes a space every ten seconds, then writes the JSON. The gateway ends a request that is
        silent for 150 s, so an unstreamed draft has to stop at 125 s and cannot think hard; streamed,
-       it gets up to 230 s and thinks at effort "high". Sent on every press but the lean retry, a
+       it gets up to 300 s and thinks at effort "high". Sent on every press but the lean retry, a
        short read that fits the old budget. The server streams only a v2 request (frame "front" with
        dims, which this always is), and a function that has never heard of the key answers as before.
        No client abort, as before: the server's clock is the only one, and abandoning this call is how

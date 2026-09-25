@@ -343,9 +343,10 @@ async function main() {
     card.includes("you are charged $20 once, however much we have to fix"), card.slice(-90));
   r.ok("with all four steps named, including the two that are new",
     card.includes("Checking our 3D against your video") && card.includes("Correcting anything that doesn't line up"));
-  // "three to five minutes" since the streamed draft (2026-09-25): the reads think at effort "high"
-  // for up to 230 s, and the check rounds come after.
-  r.ok("and an honest wait, not a spinner", card.includes("Usually three to five minutes — it studies your video carefully"));
+  // "four to six minutes" since the streamed draft's reads got 300 s (2026-09-25; three to five while
+  // they had 230 s): the reads think at effort "high", and the check rounds come after.
+  r.ok("and an honest wait, not a spinner", card.includes("Usually four to six minutes — it studies your video carefully"));
+  r.ok("and not the old three-to-five", !card.includes("three to five minutes"));
   // A SECOND PRESS CANNOT HAPPEN WHILE THIS IS RUNNING, and it is the DOM that says so rather
   // than a guard inside the handler. Asserted by reading `disabled` rather than by clicking:
   // Playwright's click waits for a disabled button to come back and then presses it, which
