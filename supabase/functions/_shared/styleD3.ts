@@ -1060,9 +1060,10 @@ export function draftIdemKey(raw: unknown): string | null {
 // ─── PICKING A STREAMED DRAFT UP AFTER THE CONNECTION DROPPED (2026-09-25, BY KEY SINCE 253) ──
 // A streamed draft runs three to five minutes, and a phone that backgrounds the tab, or a network
 // that blinks, drops the answer while the server is still working (or after it has finished and
-// charged). Asking again under the same key cannot help: it either runs the model a second time or
-// meets hold_in_flight / already_charged. But the server writes what it drafted onto the ledger row
-// (226), so the browser reads it back: calibrate_style_ai_recover.
+// charged). Asking again under the same key cannot help: with the meter off (today) it runs the
+// model a second time, and with it on the hold refuses it (hold_in_flight; already_charged only
+// once 248 is applied). But the server writes what it drafted onto the ledger row (226), so the
+// browser reads it back: calibrate_style_ai_recover.
 //
 // ⚠️ THE PRESS IS FOUND BY ITS KEY, NEVER BY TIME. The first cut matched "the newest row of this
 // tenant, user and style since the press began" and guessed the money from timing, and a review

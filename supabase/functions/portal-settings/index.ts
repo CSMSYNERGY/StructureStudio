@@ -3563,11 +3563,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // A streamed draft (calibrate_style_ai below, answered by draftAnswer) takes three to five
   // minutes behind its heartbeat, and a phone that backgrounds the tab or a network that blinks
   // drops that answer while the server works on, or after it has finished and charged. The same
-  // key asked again either runs the model a second time or meets hold_in_flight / already_charged.
-  // But the server writes what it drafted onto the generation's ledger row, so the new shell,
-  // instead of telling the builder to try again, asks HERE: at once when the answer drops, then
-  // every ten seconds until the draft is there, the server says it never will be, or the press's
-  // own seven minutes run out (and while the asks themselves fail, at least a minute from the first).
+  // key asked again runs the model a second time with the meter off (today), and with it on the
+  // hold refuses it (hold_in_flight; already_charged only once 248 is applied). But the server
+  // writes what it drafted onto the generation's ledger row, so the new shell, instead of telling
+  // the builder to try again, asks HERE: at once when the answer drops, then every ten seconds
+  // until the draft is there, the server says it never will be, or the press's own seven minutes
+  // run out (and while the asks themselves fail, at least a minute from the first).
   //
   // ⚠️ THE PRESS IS FOUND BY ITS OWN KEY (253), and nothing here reads a clock the browser sent.
   // The body names the style and the idempotency key the press went out with; the ledger insert

@@ -1745,9 +1745,10 @@ function Dashboard({ session }) {
       // parser's own error, or the body read's), or the server closed it at its own deadline with
       // `stream_deadline` while the work ran on. Either way the server may still be working, or may
       // have finished and charged, so the builder is NOT told to try again (a retry under the same
-      // key re-runs the model or meets already_charged). The draft is picked up from its ledger row
-      // instead: calibrate_style_ai_recover, asked with THIS PRESS'S OWN idempotency key -- the key
-      // its ledger row and its wallet hold carry -- so it can only ever answer about this press.
+      // key re-runs the model, or with the meter on is refused by the hold). The draft is picked up
+      // from its ledger row instead: calibrate_style_ai_recover, asked with THIS PRESS'S OWN
+      // idempotency key -- the key its ledger row and its wallet hold carry -- so it can only ever
+      // answer about this press.
       //
       // ⚠️ THE FIRST ASK GOES AT ONCE, WHATEVER `until` SAYS. A phone that slept through the whole
       // press notices the drop minutes after the press's budget ran out, and its paid draft is
