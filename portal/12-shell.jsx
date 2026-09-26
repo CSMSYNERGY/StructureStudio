@@ -1878,12 +1878,15 @@ function Dashboard({ session }) {
        and the only thing that throws is a 409 on the claim — which means this generation has
        already been checked, and the caller handles it the same way.
 
-       THE CLIENT ABORT IS REAL, unlike the generation's. The server gives up at 90 s on the v2
-       check this designer asks for (45 s on the legacy one); 100 here is far enough above that a
-       server which answered in time is still heard, it matches the component's SS_CHECK_MS so
-       the press budget (SS_FLOW_MAX_MS) plans with the number actually in force, and it bounds the
-       wait at something a person will sit through. Abandoning THIS call costs nothing, which is
-       exactly what separates it from the one above.
+       THE CLIENT ABORT IS REAL, unlike the generation's. The server gives up at 125 s on the v2
+       check this designer asks for (45 s on the legacy one; the v2 check had 90 s until it moved
+       to effort "high" on 2026-09-26, see SELF_CHECK_BUDGET in styleD3.ts). 140 here is far
+       enough above that a server which answered in time is still heard after the renders' upload
+       and its own set-up, it matches the component's SS_CHECK_MS so the press budget
+       (SS_FLOW_MAX_MS) plans with the number actually in force, and it bounds the wait at
+       something a person will sit through. Abandoning THIS call costs nothing, which is exactly
+       what separates it from the one above. selfCheckPanel_test pins all three: this number, the
+       component's, and the server's below them.
 
        `round` (2026-09-24) is which check of this generation this is, 0-based: the server claims
        round k by moving the row's counter from k to k + 1, at most three times, so a repeat of
@@ -1900,7 +1903,7 @@ function Dashboard({ session }) {
       if (Number.isInteger(round) && round >= 0) body.round = round;
       const { data, error } = await sb.functions.invoke("portal-settings", {
         body,
-        signal: AbortSignal.timeout(100000),
+        signal: AbortSignal.timeout(140000),
       });
       // A 4xx carries a body, and the body is what says WHY. supabase-js hands back a
       // FunctionsHttpError whose response has to be read for it, so a caller that only looked
@@ -1908,7 +1911,7 @@ function Dashboard({ session }) {
       // builder for what is usually "that generation has already been checked".
       //
       // ⚠️ AND THE SIBLING CASE, which has no body to read at all. A network failure or the
-      // 60 s abort above raises a FunctionsFetchError whose `.context` is the underlying Error,
+      // abort above raises a FunctionsFetchError whose `.context` is the underlying Error,
       // not a Response — so `.json()` throws, `said` stays empty, and `error.message` is the
       // vendor's own fixed string, "Failed to send a request to the Edge Function". The panel
       // renders `note` verbatim under its friendly line, so that sentence landed on the screen

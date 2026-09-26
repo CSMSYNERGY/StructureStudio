@@ -17,11 +17,13 @@
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert";
 import {
   flagObservedNotes, frameKeyWarning, gambrelRoofWarning, knownDimsNote, porchAgreementWarning, SELF_CHECK_ALLOW,
-  wingsAgreementWarning,
+  SELF_CHECK_BUDGET, wingsAgreementWarning,
 } from "../styleD3.ts";
 
 const JSX = await Deno.readTextFile(new URL("../../../../StructureStudio.jsx", import.meta.url));
 const CMP = await Deno.readTextFile(new URL("../../../../structure-studio.component.js", import.meta.url));
+// The host whose onSelfCheck owns the check's real abort (the component only budgets with it).
+const SHELL = await Deno.readTextFile(new URL("../../../../portal/12-shell.jsx", import.meta.url));
 
 function lift(src: string, file: string, start: string, end: string): string {
   const i = src.indexOf(start);
@@ -243,7 +245,11 @@ Deno.test("⚠️ the clocks: the first round always fits, and no LATER round ru
   // A slow set-up can push the streamed draft's end to 330 s after the request (the server's rule is
   // 300 s or what is left of 330 s); the first round still fits after that.
   assert(330000 + F.SS_RENDER_MS + F.SS_CHECK_MS <= F.SS_FLOW_MAX_MS, "the first round fits after the latest streamed draft");
-  assertEquals(F.SS_DRAFT_SERVER_MS + F.SS_RENDER_MS + F.SS_CHECK_MS, 405000, "300 + 5 + 100 = 405 s < 480 s");
+  // 140 s a round since 2026-09-26 (it was 100): the v2 check thinks at effort "high" inside the
+  // server's 125 s.
+  assertEquals(F.SS_CHECK_MS, 140000, "the check's client abort");
+  assertEquals(F.SS_DRAFT_SERVER_MS + F.SS_RENDER_MS + F.SS_CHECK_MS, 445000, "300 + 5 + 140 = 445 s < 480 s");
+  assertEquals(330000 + F.SS_RENDER_MS + F.SS_CHECK_MS, 475000, "330 + 5 + 140 = 475 s < 480 s");
   // The worst ordinary press: the slowest draft, then every round at its own ceiling, each one
   // started only when ssCheckNext allows it.
   const worst = (draftMs: number) => {
@@ -259,18 +265,28 @@ Deno.test("⚠️ the clocks: the first round always fits, and no LATER round ru
   const one = worst(F.SS_DRAFT_SERVER_MS);
   assert(one.t <= F.SS_FLOW_MAX_MS, `the worst ordinary press ends at ${one.t}`);
   // A draft that used its whole 300 s leaves no room for a second round at the ceiling timings
-  // (405 + 105 > 480). That is the budget working, not a regression: a later round only starts
+  // (445 + 145 > 480). That is the budget working, not a regression: a later round only starts
   // when it can finish inside eight minutes. A draft that answers in a minute still gets a second
   // look even when every check runs to its abort, and a ceiling draft whose first check answered
-  // in its usual half-minute does too.
+  // inside half a minute does too.
   assertEquals(one.rounds, 1);
   assertEquals(one.stop, "time");
   const minute = worst(60000);
   assert(minute.t <= F.SS_FLOW_MAX_MS, `a one-minute draft's press ends at ${minute.t}`);
   assert(minute.rounds >= 2, `a one-minute draft still gets a second look (${minute.rounds} rounds, stopped on ${minute.stop})`);
+  // The draft on Opus 5.5 (2026-09-26) usually answers in 40-90 s. With every check at its 140 s
+  // abort, a 90 s draft still gets two rounds (90 + 145 + 145 = 380 s) and a 45 s one all three
+  // (45 + 3 x 145 = 480 s); each press still ends inside eight minutes.
+  for (const [draftMs, rounds] of [[40000, 3], [45000, 3], [60000, 2], [90000, 2]]) {
+    const w = worst(draftMs);
+    assertEquals(w.rounds, rounds, `a ${draftMs / 1000} s draft at ceiling checks: ${w.rounds} rounds, stopped on ${w.stop}`);
+    assert(w.t <= F.SS_FLOW_MAX_MS, `a ${draftMs / 1000} s draft's press ends at ${w.t}`);
+  }
   const quickCheck = F.SS_DRAFT_SERVER_MS + F.SS_RENDER_MS + 30000;
   assertEquals(F.ssCheckNext({ verdict: "corrections", d3: {}, changed: [{ field: "roof.pitch" }] }, 0, [], "b", quickCheck), null,
     "a ceiling draft whose first check took 30 s goes round again");
+  assertEquals(F.ssCheckNext({ verdict: "corrections", d3: {}, changed: [{ field: "roof.pitch" }] }, 0, [], "b", quickCheck + 1), "time",
+    "and one whose first check took a moment longer stops: 335 s is the last start that finishes by 480 s");
   // THE RETRY PATH: the streamed draft at its ceiling, then the lean retry, which is NOT streamed and
   // keeps the old 125 s. It is the one path past eight minutes, and it takes no second round --
   // which is what keeps it to one check's worth past the ceiling. (Two streamed drafts would stop
@@ -280,11 +296,21 @@ Deno.test("⚠️ the clocks: the first round always fits, and no LATER round ru
     assertEquals(retried.rounds, 1);
     assertEquals(retried.stop, "time");
   }
-  // And the check's client abort has to sit ABOVE the server's own 90 s for the v2 check, with
-  // room for the reply to travel, or a server that answered in time would never be heard.
-  assert(F.SS_CHECK_MS >= 90000 + 10000, String(F.SS_CHECK_MS));
+  // And the check's client abort has to sit ABOVE the server's own abort for the v2 check
+  // (SELF_CHECK_BUDGET.v2, read from the server's module), with room for the renders' upload and
+  // the reply to travel, or a server that answered in time would never be heard.
+  assert(F.SS_CHECK_MS >= SELF_CHECK_BUDGET.v2.abortMs + 10000, `${F.SS_CHECK_MS} vs the server's ${SELF_CHECK_BUDGET.v2.abortMs}`);
   // "Still going" must not fire on an ordinary press that is merely on its second round.
   assert(F.SS_SLOW_MS > F.SS_DRAFT_SERVER_MS + F.SS_RENDER_MS + 30000, String(F.SS_SLOW_MS));
+});
+
+Deno.test("⚠️ the host's real abort on the check IS SS_CHECK_MS, above the server's own", () => {
+  // The component only budgets the press with SS_CHECK_MS; the abort that ends the wait is the
+  // shell's onSelfCheck signal. Two numbers that must agree, so they are read and compared.
+  const fn = lift(SHELL, "portal/12-shell.jsx", "onSelfCheck: async (", "\n    // Frames the browser cut out of a walk-around video.");
+  const aborts = [...fn.matchAll(/AbortSignal\.timeout\(([\d_]+)\)/g)].map((m) => Number(m[1].replace(/_/g, "")));
+  assertEquals(aborts, [F.SS_CHECK_MS], "one abort in onSelfCheck, and it is the component's number");
+  assert(aborts[0] >= SELF_CHECK_BUDGET.v2.abortMs + 10000, `the host waits ${aborts[0]} for a server that gives up at ${SELF_CHECK_BUDGET.v2.abortMs}`);
 });
 
 // ── More than one round ───────────────────────────────────────────────────────────────────

@@ -16059,12 +16059,14 @@ const SSC_CAL_CSS = ".ssc-dim-in{font-size:13px}@media (pointer:coarse){.ssc-dim
 //   render   SS_RENDER_MS     wall clock in this browser. Over it, the check is skipped and
 //                             the builder keeps the draft. WebGL cannot be interrupted, so
 //                             the loser of the race still runs to its own dispose.
-//   call 2   the check        the server gives the v2 check 90 s (it was 45 s, and the v2
-//                             prompt with up to twelve frames and six renders ran out of it);
-//                             the browser aborts at SS_CHECK_MS, far enough above that a
-//                             server that answered in time is still heard. ⚠️ The abort itself
-//                             is the host's (onSelfCheck in portal/12-shell.jsx) and must
-//                             equal this number: this one only budgets the press with it.
+//   call 2   the check        the server gives the v2 check 125 s at effort "high" (45 s until
+//                             2026-09-24, when the v2 prompt with up to twelve frames and six
+//                             renders ran out of it; then 90 s at "medium" until 2026-09-26);
+//                             the browser aborts at SS_CHECK_MS, 15 s above that, so a server
+//                             that answered in time is still heard after the renders' upload
+//                             and its own set-up. ⚠️ The abort itself is the host's
+//                             (onSelfCheck in portal/12-shell.jsx) and must equal this number:
+//                             this one only budgets the press with it.
 //   rounds   SS_CHECK_ROUNDS  the check runs again on renders of the CORRECTED building,
 //                             up to three times per generation (ssCheckNext says when not).
 //
@@ -16072,23 +16074,33 @@ const SSC_CAL_CSS = ".ssc-dim-in{font-size:13px}@media (pointer:coarse){.ssc-dim
 // minutes the 09-19 design budgeted. A draft then had 125 s (max_tokens 8000 → 12000 after the
 // Tri Home press died at the old ceiling), the check 100 s, and a single check round cannot fix
 // what a single check round has already mis-fixed -- so the first round always runs and a LATER
-// round starts only while a whole round (5 + 100 s) still fits inside SS_FLOW_MAX_MS of the press.
+// round starts only while a whole round (SS_RENDER_MS + SS_CHECK_MS, then 5 + 100 s) still fits
+// inside SS_FLOW_MAX_MS of the press.
 //
 // ⚠️ AND AGAIN ON 2026-09-25, for the streamed draft. Shallow reads were the wrong reads (a shed's
 // high side on the wrong wall 6 times in 7), the reads that thought took 56-106 s, and at effort
 // "high" all three consensus reads ran past 125 s. So the draft is streamed and has 300 s (the
 // server's own rule: 300 s, or what is left of 330 s after a slow set-up) and the press has eight
 // minutes. It was 230 s and seven minutes until the same day's live presses: the reads took
-// 74-215 s, and 8 presses in 12 had a read cut at 230 s, which leaves the consensus one read. The
-// first round always runs: 300 + 5 + 100 = 405 s after a draft at its ceiling, and 330 + 5 + 100 =
-// 435 s after one a slow set-up pushed to the server's 330 s, both inside 480. After a draft at
-// its ceiling a second round starts only if the first check answered inside 70 s (its usual
-// half-minute does); after a one-minute draft all three rounds fit. The one path past eight
-// minutes is a draft the server asked us to retry (the streamed draft at 300 s, then the lean one
-// at its own 125 s), and ssCheckNext gives that path no second round. Still no watchdog that could
-// throw away a paid draft to enforce any of it.
+// 74-215 s, and 8 presses in 12 had a read cut at 230 s, which leaves the consensus one read.
+//
+// ⚠️ AND THE CHECK ON 2026-09-26: 140 s a round, not 100. On Opus 5.5 at effort "medium" a check
+// round took 18-37 s and was not consistent (a centre eave 2 ft low was corrected by the measured
+// difference in 5 runs of 6 and called a match in the sixth), so the v2 check now thinks at "high"
+// inside a 125 s server abort, and this waits 140 s. A whole round is now 5 + 140 = 145 s, and
+// ssCheckNext charges exactly that: it reads SS_RENDER_MS and SS_CHECK_MS and has no number of its
+// own. The first round always runs: 300 + 5 + 140 = 445 s after a draft at its ceiling, and
+// 330 + 5 + 140 = 475 s after one a slow set-up pushed to the server's 330 s, both inside 480. A
+// later round starts only while elapsed + 145 s still fits in 480 s, i.e. no later than 335 s into
+// the press. After a draft at its ceiling that means only when the first check answered inside
+// 30 s. But the draft on Opus 5.5 usually answers in 40-90 s, and then two rounds fit even with
+// every check running to its 140 s abort (90 + 145 + 145 = 380 s), and all three when the draft
+// took 45 s or less (45 + 3 x 145 = 480 s) or the checks answer well inside their abort, as they
+// usually do. The one path past eight minutes is a draft the server asked us to retry (the
+// streamed draft at 300 s, then the lean one at its own 125 s), and ssCheckNext gives that path no
+// second round. Still no watchdog that could throw away a paid draft to enforce any of it.
 const SS_RENDER_MS = 5000;
-const SS_CHECK_MS = 100000;
+const SS_CHECK_MS = 140000;
 // After SS_RENDER_MS on purpose: selfCheckPanel_test lifts this block from that line.
 const SS_DRAFT_SERVER_MS = 300000;
 const SS_CHECK_ROUNDS = 3;
