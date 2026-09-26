@@ -2363,12 +2363,21 @@ function selfCheckRules(mode: SelfCheckMode): SelfCheckRules {
 // answered "matches" on everything. "high" makes every round think before it answers.
 //   * 125 s because the check is NOT streamed: the Supabase gateway ends a request that has sent
 //     nothing for 150 s, so the answer must be out inside that. 125 s leaves the handler's set-up
-//     (the kill-switch read, the style read and the claim, about a second) and its ledger writes
+//     (the kill-switch read, the style read and the claim, a second or two) and its ledger writes
 //     after the call well inside 150 s. It is the non-streamed draft's 125 s for the same reason.
 //   * 12000 is room, not a target. At the ~70 output tokens/s Opus streamed on 09-25, 125 s buys
 //     roughly 8,000 tokens once the twelve images are read, so a round that thinks that long
-//     meets the abort before it meets max_tokens; the tokens never cut an answer the clock allowed.
-//     If `self_check_tokens` shows rounds ending at the abort, the clock is what binds.
+//     normally meets the abort before it meets max_tokens: at these rates the clock binds first.
+//     If `self_check_tokens` shows rounds ending at the abort, it is the clock that needs moving.
+//   * THE WORKER'S LIFE needs no term of its own here. The platform's 400 s is the WORKER's
+//     (EDGE_WALL_CLOCK_MS), not the request's, and a worker is routed no new request once it is
+//     200 s old. So a check that lands on a worker up to 199 s old and then runs its call the whole
+//     125 s ends by 324 s of that worker's life: 76 s before the kill, which is the 75 s margin the
+//     streamed reads keep (STREAMED_READS_WORKER_MARGIN_MS) and a second over, for the set-up
+//     before the call and the ledger writes after it. And because it is not streamed, the gateway
+//     closes the answer 150 s after the request arrived in any case, by 349 s of the oldest worker's
+//     life. workerClock.test.ts pins the sum; a longer abort must pass it again or get a worker term
+//     like streamedDraftBudgetMs.
 // ⚠️ The browser's own abort on this call has to sit above the server's (the designer's SS_CHECK_MS
 // and 12-shell's onSelfCheck signal, 140 s, pinned against this by selfCheckPanel_test), or it cuts
 // the server off.

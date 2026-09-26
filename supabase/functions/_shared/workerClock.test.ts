@@ -16,12 +16,14 @@
 //   3. The request's own terms still apply (300 s, 330 s - set-up, 360 s from the request), and the
 //      budget's 60 s floor decides only after a set-up no routed worker leaves room for.
 //   4. The watchdog never goes under its small floor, whatever the clocks say.
+//   5. The self-check, which is not streamed and has no worker term (2026-09-26): its whole abort,
+//      on the oldest worker a request can land on, still ends 75 s or more before that worker does.
 //
 // Dependency-free (no jsr:/npm: imports), like every test in the _shared group.
 
 import {
-  DRAFT_STREAM_DEADLINE_MS, EDGE_WALL_CLOCK_MS, STREAMED_DEADLINE_FLOOR_MS, STREAMED_DEADLINE_WORKER_MARGIN_MS,
-  STREAMED_READS_WORKER_MARGIN_MS, streamedDraftBudgetMs, streamedDraftDeadlineMs,
+  DRAFT_STREAM_DEADLINE_MS, EDGE_WALL_CLOCK_MS, SELF_CHECK_BUDGET, STREAMED_DEADLINE_FLOOR_MS,
+  STREAMED_DEADLINE_WORKER_MARGIN_MS, STREAMED_READS_WORKER_MARGIN_MS, streamedDraftBudgetMs, streamedDraftDeadlineMs,
 } from "./styleD3.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
@@ -113,4 +115,18 @@ Deno.test("streamedDraftDeadlineMs: never later than 360 s from the request, and
   assertEquals(deadlineAt(0, 400_000), STREAMED_DEADLINE_FLOOR_MS);
   assertEquals(deadlineAt(359_500), 1_000, "half a second left is still the floor");
   assertEquals(deadlineAt(355_000), 5_000);
+});
+
+Deno.test("the self-check needs no worker term: its whole abort on a 199 s old worker ends 75 s or more before the kill", () => {
+  // A worker is routed no request once it is 200 s old, so 199 s is the oldest a check can land on.
+  const OLDEST_ROUTED_MS = 199_000;
+  assertEquals(SELF_CHECK_BUDGET.v2.abortMs, 125_000, "the v2 check's abort since 2026-09-26");
+  for (const mode of ["v2", "legacy"] as const) {
+    const ends = OLDEST_ROUTED_MS + SELF_CHECK_BUDGET[mode].abortMs;
+    assert(ends <= EDGE_WALL_CLOCK_MS - STREAMED_READS_WORKER_MARGIN_MS,
+      `${mode}: the call ends at ${ends} of the worker's life, inside 75 s of its ${EDGE_WALL_CLOCK_MS} end`);
+  }
+  assertEquals(EDGE_WALL_CLOCK_MS - (OLDEST_ROUTED_MS + SELF_CHECK_BUDGET.v2.abortMs), 76_000, "199 + 125 = 324 s: 76 s to spare");
+  // Not streamed, so the gateway's 150 s of silence ends the whole request first in any case.
+  assert(OLDEST_ROUTED_MS + 150_000 < EDGE_WALL_CLOCK_MS, "the gateway closes it by 349 s of the worker's life");
 });
