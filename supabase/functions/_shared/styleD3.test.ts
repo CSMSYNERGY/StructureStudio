@@ -3062,8 +3062,8 @@ Deno.test("⚠️ the prompt states the wall the RENDER was drawn at, not the on
   const p = selfCheckPrompt({ dims: typed, draft: drawn, viewpoints: SELF_CHECK_VIEWPOINTS });
   assert(p.includes("wall height at the eave: 5 ft"), "the wall as DRAWN");
   assert(!/(^|[^\d.])4 ft/.test(p), "and the typed 4 appears nowhere");
-  assert(p.includes("times the 5 ft wall, to its"), "the overhang step converts against the drawn wall");
-  assert(p.includes("a twentieth of 5 ft"), "and the arithmetic it hands the model uses the drawn wall too");
+  assert(p.includes("on a 5 ft wall is about"), "the overhang step converts against the drawn wall");
+  assert(p.includes("   5/20 ft"), "and the arithmetic it hands the model uses the drawn wall too");
   // Width and length never clamp, so they are stated exactly as typed.
   assert(p.includes("building size: 30 ft wide by 40 ft long"), "the size is untouched");
   // The unclamped case is unchanged, which is every ordinary building.
@@ -3105,7 +3105,7 @@ Deno.test("⚠️ a builder who MEASURED the eave does not have it re-measured f
   const guessed: KnownDims = { widthFt: 16, lengthFt: 24, wallHeightFt: 9 };
   const p2 = selfCheckPrompt({ dims: guessed, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
   assert(!p2.includes("eave overhang:"), "nothing is claimed about an eave nobody measured");
-  assert(p2.includes("correct roof.overhang BY THE\n   DIFFERENCE"), "and the overhang step asks for it, by the difference (2026-09-26)");
+  assert(p2.includes("Do not settle on 1.0 ft"), "and step 1 asks for it as before");
   const applied2 = applySelfCheck(CLEAN, read, guessed);
   assert(applied2.ok, "and so is the unmeasured one");
   assertEquals((applied2 as { d3: D3Spec }).d3.roof.overhang, 0.15, "the correction lands");
@@ -4168,8 +4168,11 @@ Deno.test("the centre eave is built from two measured parts, in the draft and in
   // The overhang and the porch roof's attach height are corrected the same way (2026-09-26): live, Opus 5.5
   // read Tri Home's 1 ft overhang as 4-6 in on every run, and the old step told it "values near 0.15 ft
   // are real. Do not settle on 1.0 ft because it is typical".
-  assert(c.includes("correct roof.overhang BY THE\n   DIFFERENCE") && c.includes("the rake board stands out past the corner of the wall below it"), "check: the overhang by the difference");
-  assert(!c.includes("Do not settle on 1.0 ft"), "check: no push toward a flush eave");
+  // The overhang is NOT corrected by the difference (tried 2026-09-26 and reverted the same day): the
+  // model's overhang read is about +-0.3 ft, so the rule fixed Tri Home's once in five and overshot
+  // Farmstand's twice in four (0.8 to 1.2), where the draft's own number was right. The step is 8fe5d30's.
+  assert(!c.includes("correct roof.overhang BY THE"), "check: the overhang is not corrected by the difference");
+  assert(c.includes("Do not settle on 1.0 ft"), "check: the overhang step is the original one");
   // The wing roofs' slope too (2026-09-26): live Opus 5.5 reads of a 0.2 wing spread 0.10-0.25, mostly low.
   assert(c.includes("correct roof.wingPitch BY THE") && c.includes("divided by\n       roof.wingWidthFt, to its current value"), "check: the wing pitch by the difference");
   assert(c.includes("roof.porchAttachFt") && c.includes("compare the height of the porch roof's top where it meets the wall"), "check: the porch attach by the difference");
