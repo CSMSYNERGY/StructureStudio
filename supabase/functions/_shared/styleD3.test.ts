@@ -4131,7 +4131,12 @@ Deno.test("the centre eave is built from two measured parts, in the draft and in
   assert(p.includes("Build it from two parts rather than reading it in one guess"), "draft: two parts");
   assert(p.includes("A band holding a row of upper windows needs at least about 4 ft of wall."), "draft: the upper-window floor");
   const c = selfCheckPrompt({ dims: { widthFt: 30, lengthFt: 20, wallHeightFt: 8 }, draft: (sanitizeD3Spec({ roof: { type: "gable", front: "gable", pitch: 0.5, wingSide: "both", wingWidthFt: 9, centerEaveFt: 14 } }) as { ok: true; d3: D3Spec }).d3, viewpoints: ["front", "back"] });
-  assert(c.includes("Measure it, do not eyeball it") && c.includes("If the band's share differs by a quarter or more"), "check: a measured test");
+  assert(c.includes("Measure it, do not eyeball it") && c.includes("If the two shares differ by a tenth of the outer wall"), "check: a measured test");
+  // Corrected BY THE DIFFERENCE (live, 2026-09-26): rebuilt as "where the wing roof meets the centre
+  // wall plus the band", the check's number left out the wing roof's own depth above its wall (about
+  // 0.8 ft on the test building), so a corrected centre eave still came out low.
+  assert(c.includes("correct roof.centerEaveFt BY THE DIFFERENCE") && c.includes("never rebuild it from the wing roof"), "check: corrected by the difference");
+  assert(!c.includes("to where the wing roof meets the centre wall plus the band"), "check: the rebuild is gone");
 });
 
 // ── A RAISED FLOOR: blocks and piers, and how high the floor stands (2026-09-25) ──────────────
@@ -5048,6 +5053,14 @@ const LOCK_GABLE: D3Spec = cleanSpec({
 // model is shown to be the only thing in the body that changed.
 const V2_MODEL_FIELD_AT_8FE5D30 = '{"model":"claude-opus-5",';
 const V2_MODEL_FIELD_NOW = '{"model":"claude-opus-5-5",';
+// The wing band's correction has moved since as well (2026-09-26: corrected BY THE DIFFERENCE, not
+// rebuilt from the wing roof). The test puts 8fe5d30's sentence back before hashing, so that sentence
+// and the model are shown to be the only things that changed.
+const BAND_NOW = /render, at the same viewpoint\. If the two shares[\s\S]*?which a rebuilt number leaves out\./;
+const BAND_AT_8FE5D30 = "render. If the band's share differs by a quarter or more (a band as tall as half the\n" +
+  "       outer wall in the frame and a quarter of it in the render, say), correct\n" +
+  "       roof.centerEaveFt to where the wing roof meets the centre wall plus the band you\n" +
+  "       measured in the frame.";
 const UNLOCKED_AT_8FE5D30: Record<string, [number, string]> = {
   gable: [14049, "562a88d3eea746701ffd3858bf3b3c34186de2f2de4982f6542489ec5bee37b3"],
   gableEaveRound1: [14157, "b228f27eaff83aaf40509ef70b9fe9afafd142e7b419f5aefa8a0435c9c2bbb2"],
@@ -5069,6 +5082,10 @@ Deno.test("⛔ without the lock, the v2 check prompt and its request body are 8f
     };
     assert(out.body.startsWith(V2_MODEL_FIELD_NOW), `the body names ${V2_MODEL_FIELD_NOW} first`);
     out.body = V2_MODEL_FIELD_AT_8FE5D30 + out.body.slice(V2_MODEL_FIELD_NOW.length);
+    for (const k of Object.keys(out)) {
+      assert(BAND_NOW.test(out[k]), `${k}: today's band sentence is there to put back`);
+      out[k] = out[k].replace(BAND_NOW, k === "body" ? JSON.stringify(BAND_AT_8FE5D30).slice(1, -1) : BAND_AT_8FE5D30);
+    }
     for (const [k, [length, hash]] of Object.entries(UNLOCKED_AT_8FE5D30)) {
       assertEquals(out[k].length, length, `${k} ${JSON.stringify(lock)}: its length`);
       assertEquals(await sha256(out[k]), hash, `${k} ${JSON.stringify(lock)}: its bytes`);

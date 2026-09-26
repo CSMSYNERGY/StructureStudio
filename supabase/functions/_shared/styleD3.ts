@@ -2670,10 +2670,12 @@ effort here.
        from the floor to the top of the centre walls). Measure it, do not eyeball it: in a
        frame square to the front or the back, compare the BAND of centre wall showing above the
        wing roof with the height of the wing's outer wall below it, then do the same in the
-       render. If the band's share differs by a quarter or more (a band as tall as half the
-       outer wall in the frame and a quarter of it in the render, say), correct
-       roof.centerEaveFt to where the wing roof meets the centre wall plus the band you
-       measured in the frame.
+       render, at the same viewpoint. If the two shares differ by a tenth of the outer wall
+       or more, correct roof.centerEaveFt BY THE DIFFERENCE: add the frame's share minus the
+       render's share, times the ${wall} ft outer wall, to its current value. A band half as
+       tall as the outer wall in the frame and a quarter of it in the render adds a quarter of
+       ${wall} ft. Correct it by the difference, never rebuild it from the wing roof: the render
+       already draws the wing roof's own depth above its wall, which a rebuilt number leaves out.
    If the render and the frames trace the same outline from every viewpoint you have, leave
    all of these alone.
 
