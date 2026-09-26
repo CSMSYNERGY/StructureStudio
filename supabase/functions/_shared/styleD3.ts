@@ -2682,13 +2682,15 @@ effort here.
 ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave}). THE BUILDER MEASURED THIS ONE TOO
    and it is already in the draft. It is not yours to change: a correction to roof.overhang
    will be thrown away. Mark "overhang" as "ok" and spend the effort on the porch below.` : `2. THE EAVE OVERHANG (roof.overhang, currently ${eave}). Look at the close-up
-   viewpoint, where the roof edge is seen in profile against the sky with the wall below it.
-   Measure how far the roof stands out past the wall as a FRACTION OF THE WALL HEIGHT you
-   were given, in the frame and in the render, and convert: a roof that projects a
-   twentieth of the wall's height on a ${wall} ft wall is about
-   ${wall}/20 ft. Buildings with a tight, trimmed eave are common and read as
-   almost no projection at all - values near 0.15 ft are real. Do not settle on 1.0 ft
-   because it is typical; report what this eave actually does.${eaveRuler}`}
+   viewpoint, where the roof edge is seen in profile against the sky with the wall below it,
+   and at a gable end, where the rake board stands out past the corner of the wall below it
+   by the same overhang. Measure how far the roof stands out past the wall as a FRACTION OF
+   THE WALL HEIGHT, in the frame and in the render, at the same viewpoint. If the two
+   fractions differ by a twentieth of the wall or more, correct roof.overhang BY THE
+   DIFFERENCE: add the frame's fraction minus the render's, times the ${wall} ft wall, to its
+   current value. A roof that stands out a tenth of the wall's height in the frame and a
+   twentieth of it in the render adds a twentieth of ${wall} ft. Flush eaves and deep ones
+   are both common: report what this eave actually does.${eaveRuler}`}
 
 3. THE PORCH, AND WHICH KIND (roof.porchOutFt / roof.porchDepthFt). There are two kinds and
    they are not interchangeable:
@@ -2709,7 +2711,10 @@ ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave
      * roof.porchAttachFt, projecting porches only, currently ${attachNow}: feet
        from the floor to the TOP of the porch roof where it meets the wall. Look at what shows
        between the porch roof and the top of that wall: a band of siding in the frame and none
-       in the render, or the reverse, means this is wrong. Work it out against the ruler.
+       in the render, or the reverse, means this is wrong. Correct it BY THE DIFFERENCE: in the
+       front viewpoint, compare the height of the porch roof's top where it meets the wall, above
+       the floor, as a share of the ${wall} ft wall, in the frame and in the render, and add the
+       frame's share minus the render's, times ${wall} ft, to its current value.
      * roof.porchWidthFt, projecting porches only, currently ${feet("porchWidthFt")}: how far
        the porch runs along its wall. "not set" means the whole wall, or the centre section
        when there are wings. Correct it only where the frame shows plain wall beyond the

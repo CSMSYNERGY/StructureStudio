@@ -3062,8 +3062,8 @@ Deno.test("⚠️ the prompt states the wall the RENDER was drawn at, not the on
   const p = selfCheckPrompt({ dims: typed, draft: drawn, viewpoints: SELF_CHECK_VIEWPOINTS });
   assert(p.includes("wall height at the eave: 5 ft"), "the wall as DRAWN");
   assert(!/(^|[^\d.])4 ft/.test(p), "and the typed 4 appears nowhere");
-  assert(p.includes("on a 5 ft wall is about"), "the overhang step converts against the drawn wall");
-  assert(p.includes("   5/20 ft"), "and the arithmetic it hands the model uses the drawn wall too");
+  assert(p.includes("times the 5 ft wall, to its"), "the overhang step converts against the drawn wall");
+  assert(p.includes("a twentieth of 5 ft"), "and the arithmetic it hands the model uses the drawn wall too");
   // Width and length never clamp, so they are stated exactly as typed.
   assert(p.includes("building size: 30 ft wide by 40 ft long"), "the size is untouched");
   // The unclamped case is unchanged, which is every ordinary building.
@@ -3105,7 +3105,7 @@ Deno.test("⚠️ a builder who MEASURED the eave does not have it re-measured f
   const guessed: KnownDims = { widthFt: 16, lengthFt: 24, wallHeightFt: 9 };
   const p2 = selfCheckPrompt({ dims: guessed, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
   assert(!p2.includes("eave overhang:"), "nothing is claimed about an eave nobody measured");
-  assert(p2.includes("Do not settle on 1.0 ft"), "and step 1 asks for it as before");
+  assert(p2.includes("correct roof.overhang BY THE\n   DIFFERENCE"), "and the overhang step asks for it, by the difference (2026-09-26)");
   const applied2 = applySelfCheck(CLEAN, read, guessed);
   assert(applied2.ok, "and so is the unmeasured one");
   assertEquals((applied2 as { d3: D3Spec }).d3.roof.overhang, 0.15, "the correction lands");
@@ -4137,6 +4137,12 @@ Deno.test("the centre eave is built from two measured parts, in the draft and in
   // 0.8 ft on the test building), so a corrected centre eave still came out low.
   assert(c.includes("correct roof.centerEaveFt BY THE DIFFERENCE") && c.includes("never rebuild it from the wing roof"), "check: corrected by the difference");
   assert(!c.includes("to where the wing roof meets the centre wall plus the band"), "check: the rebuild is gone");
+  // The overhang and the porch roof's attach height are corrected the same way (2026-09-26): live, Opus 5.5
+  // read Tri Home's 1 ft overhang as 4-6 in on every run, and the old step told it "values near 0.15 ft
+  // are real. Do not settle on 1.0 ft because it is typical".
+  assert(c.includes("correct roof.overhang BY THE\n   DIFFERENCE") && c.includes("the rake board stands out past the corner of the wall below it"), "check: the overhang by the difference");
+  assert(!c.includes("Do not settle on 1.0 ft"), "check: no push toward a flush eave");
+  assert(c.includes("roof.porchAttachFt") && c.includes("compare the height of the porch roof's top where it meets the wall"), "check: the porch attach by the difference");
 });
 
 // ── A RAISED FLOOR: blocks and piers, and how high the floor stands (2026-09-25) ──────────────
@@ -5057,6 +5063,18 @@ const V2_MODEL_FIELD_NOW = '{"model":"claude-opus-5-5",';
 // rebuilt from the wing roof). The test puts 8fe5d30's sentence back before hashing, so that sentence
 // and the model are shown to be the only things that changed.
 const BAND_NOW = /render, at the same viewpoint\. If the two shares[\s\S]*?which a rebuilt number leaves out\./;
+// The overhang and porch-attach steps moved to the same rule (2026-09-26); their 8fe5d30 text goes back too.
+const OVERHANG_NOW = /Look at the close-up\n   viewpoint, where the roof edge is seen in profile against the sky with the wall below it,\n   and at a gable end[\s\S]*?are both common: report what this eave actually does\./;
+const OVERHANG_AT_8FE5D30 = (wall: string) => "Look at the close-up\n" +
+  "   viewpoint, where the roof edge is seen in profile against the sky with the wall below it.\n" +
+  "   Measure how far the roof stands out past the wall as a FRACTION OF THE WALL HEIGHT you\n" +
+  "   were given, in the frame and in the render, and convert: a roof that projects a\n" +
+  `   twentieth of the wall's height on a ${wall} ft wall is about\n` +
+  `   ${wall}/20 ft. Buildings with a tight, trimmed eave are common and read as\n` +
+  "   almost no projection at all - values near 0.15 ft are real. Do not settle on 1.0 ft\n" +
+  "   because it is typical; report what this eave actually does.";
+const ATTACH_NOW = / Correct it BY THE DIFFERENCE: in the\n       front viewpoint, compare the height of the porch roof's top[\s\S]*?to its current value\./;
+const ATTACH_AT_8FE5D30 = " Work it out against the ruler.";
 const BAND_AT_8FE5D30 = "render. If the band's share differs by a quarter or more (a band as tall as half the\n" +
   "       outer wall in the frame and a quarter of it in the render, say), correct\n" +
   "       roof.centerEaveFt to where the wing roof meets the centre wall plus the band you\n" +
@@ -5085,6 +5103,18 @@ Deno.test("⛔ without the lock, the v2 check prompt and its request body are 8f
     for (const k of Object.keys(out)) {
       assert(BAND_NOW.test(out[k]), `${k}: today's band sentence is there to put back`);
       out[k] = out[k].replace(BAND_NOW, k === "body" ? JSON.stringify(BAND_AT_8FE5D30).slice(1, -1) : BAND_AT_8FE5D30);
+      // The body is JSON: its newlines are the two characters \ and n, so the regexes run on a copy
+      // with them turned back into newlines, and the result is escaped again.
+      const plain = k === "body" ? out[k].replace(/\\n/g, "\n") : out[k];
+      const m = plain.match(/on a (\S+) ft wall is about|times the (\S+) ft wall, to its/);
+      const wall = m ? (m[1] ?? m[2]) : "";
+      if (OVERHANG_NOW.test(plain)) {
+        const back = plain.replace(OVERHANG_NOW, OVERHANG_AT_8FE5D30(wall)).replace(ATTACH_NOW, ATTACH_AT_8FE5D30);
+        out[k] = k === "body" ? back.replace(/\n/g, "\\n") : back;
+      } else {
+        const back = plain.replace(ATTACH_NOW, ATTACH_AT_8FE5D30);
+        out[k] = k === "body" ? back.replace(/\n/g, "\\n") : back;
+      }
     }
     for (const [k, [length, hash]] of Object.entries(UNLOCKED_AT_8FE5D30)) {
       assertEquals(out[k].length, length, `${k} ${JSON.stringify(lock)}: its length`);
