@@ -203,7 +203,7 @@ Deno.test("several calls (consensus drafting) record their summed record in plac
   // aiDraftConsensusWiring_test proves what that record holds; here, only that the reply site takes
   // it whole when there is one, through the same single write.
   const admin = fakeAdmin(AFTER_251);
-  const tokens = { model: "claude-opus-5-5", input: 63000, output: 21000, calls: [{ ok: true }, { ok: true }, { ok: false }] };
+  const tokens = { model: "claude-opus-5-5", input: 84000, output: 28000, calls: [{ ok: true }, { ok: true }, { ok: false }, { ok: true }, { ok: true }] };
   await site(DATA, TRUNCATED, helper(admin, []), true, { tokens, usage: {} });
   assertEquals(admin.attempts.length, 1, "one round trip, as before");
   assertEquals(admin.stored[0].draft_tokens, { ...tokens, effort: "medium", streamed: false });
@@ -212,7 +212,7 @@ Deno.test("several calls (consensus drafting) record their summed record in plac
 
 Deno.test("a measured v2 single read (the lean retry) records its roof and pitch sources in `samples`; a legacy read records none", async () => {
   // 2026-09-26: each v2 gable read's pitch is worked out from its own pixel points, and where it came
-  // from rides in draft_tokens.samples. Three reads record every read's (draftCallsUsage); the lean
+  // from rides in draft_tokens.samples. Five reads record every read's (draftCallsUsage); the lean
   // retry's single read records its one, under the same key, so one query reads both.
   const roof = { type: "gable", pitch: 0.36, porchOutFt: 6, porchPitch: 0.3 };
   const pitch = { pitchSource: "points", modelPitch: 0.7 };
@@ -232,7 +232,7 @@ Deno.test("draft_tokens says which effort the request ran at and whether it stre
   // 2026-09-25: a streamed v2 draft thinks at "high" with 20000 tokens, the lean retry at "low", every
   // other request at "medium", and nothing recorded which, so "did high help?" had no query. Two keys
   // at the top of the existing jsonb, no new column: the write is still the two 251 columns.
-  const tokens = { model: "claude-opus-5-5", input: 63000, output: 45000, calls: [{ ok: true }, { ok: true }, { ok: true }] };
+  const tokens = { model: "claude-opus-5-5", input: 105000, output: 75000, calls: [{ ok: true }, { ok: true }, { ok: true }, { ok: true }, { ok: true }] };
   for (const [effort, streamed] of [["high", true], ["medium", false], ["low", false]] as const) {
     const admin = fakeAdmin(AFTER_251);
     await site(DATA, TRUNCATED, helper(admin, [], { draftEffort: effort, streamed }), true, { tokens, usage: {} });

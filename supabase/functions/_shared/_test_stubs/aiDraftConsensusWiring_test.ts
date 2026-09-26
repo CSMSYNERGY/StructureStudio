@@ -2,15 +2,18 @@
 //
 // WHY THIS EXISTS. Live v2 runs of one video kept the shape and let the numbers wander (a raised
 // centre's eave 15, 14 and 12.5 ft; the pitch 0.37 to 0.7; 3 posts or 4), so the v2 draft now sends
-// its request three times in parallel and combines the reads (consensusDrafts, styleD3.test.ts). The
-// pure half is tested there. What only the handler can get wrong, and what this pins:
+// its request five times in parallel (three until 2026-09-26) and combines the reads
+// (consensusDrafts, styleD3.test.ts). The pure half is tested there. What only the handler can get
+// wrong, and what this pins:
 //
-//   1. v2 sends THREE identical request bodies, in parallel; every legacy request and the lean retry
-//      send ONE, byte-for-byte the request the single call always sent, on the deadline signal itself.
-//   2. Two reads of three are enough: the answer is their consensus, and a straggler is cut off.
+//   1. v2 sends FIVE identical request bodies, in parallel, streamed or not; every legacy request and
+//      the lean retry send ONE, byte-for-byte the request the single call always sent, on the
+//      deadline signal itself.
+//   2. Three reads of five are the quorum: once they are in, the other two get the grace and are
+//      cut off, and the answer is the consensus of whatever drafted -- one, two, three, four or five.
 //   3. When no read drafts, the builder gets exactly the error a single call would have given for
 //      the FIRST call sent (not the first to come back): the same status, code, `retryable` and
-//      hold release, whatever the other two did.
+//      hold release, whatever the other four did.
 //   4. Every call's usage is summed, for draft_tokens and for the capture's cost basis.
 //
 // HOW: the aiDraftUsageWiring_test idiom. The handler's block from the abort signal to the end of the
@@ -225,10 +228,12 @@ Deno.test("legacy requests and the lean retry send ONE call: today's request, by
   }
 });
 
-Deno.test("a v2 press sends THREE identical requests, all before any answer comes back", async () => {
-  const r = await run({ v2: true }, [GOOD(), GOOD(), GOOD()]);
-  assertEquals(r.sent.length, 3);
-  assertEquals(r.sentWhenFirstAnswered, 3, "in parallel: all three were out before the first reply landed");
+const FIVE = (p: Plan): Plan[] => [p, p, p, p, p];
+
+Deno.test("a v2 press sends FIVE identical requests, all before any answer comes back", async () => {
+  const r = await run({ v2: true }, FIVE(GOOD()));
+  assertEquals(r.sent.length, 5);
+  assertEquals(r.sentWhenFirstAnswered, 5, "in parallel: all five were out before the first reply landed");
   const want = expectedBody(r, true, false, 0);
   for (const { url, init } of r.sent) {
     assertEquals(url, "https://api.anthropic.com/v1/messages");
@@ -236,14 +241,16 @@ Deno.test("a v2 press sends THREE identical requests, all before any answer come
     assertEquals(init.body, want, "the same bytes each time: Opus, medium effort, the v2 prompt");
     assert(init.signal !== r.out.aiSignal, "each on its own signal, which the one deadline aborts");
   }
-  assertEquals(new Set(r.sent.map((x) => x.init.signal)).size, 3);
+  assertEquals(new Set(r.sent.map((x) => x.init.signal)).size, 5);
+  assertEquals(r.out.consensus.report.n, 5);
+  assert(Object.values(r.out.consensus.report.discreteAgreement).every((a) => a === "5/5"), "five alike, 5/5 on everything");
 });
 
-Deno.test("a STREAMED v2 press sends the same three requests at effort high with 20000 tokens, and nothing else changes", async () => {
-  const plain = await run({ v2: true }, [GOOD(), GOOD(), GOOD()]);
-  const r = await run({ v2: true, streamed: true }, [GOOD(), GOOD(), GOOD()]);
-  assertEquals(r.sent.length, 3);
-  assertEquals(r.sentWhenFirstAnswered, 3, "still in parallel");
+Deno.test("a STREAMED v2 press sends the same five requests at effort high with 20000 tokens, and nothing else changes", async () => {
+  const plain = await run({ v2: true }, FIVE(GOOD()));
+  const r = await run({ v2: true, streamed: true }, FIVE(GOOD()));
+  assertEquals(r.sent.length, 5);
+  assertEquals(r.sentWhenFirstAnswered, 5, "still in parallel");
   const want = expectedBody(r, true, false, 0, true);
   for (const { init } of r.sent) {
     assertEquals(init.headers, HEADERS);
@@ -257,49 +264,77 @@ Deno.test("a STREAMED v2 press sends the same three requests at effort high with
   assertEquals(r.out.drafted.d3, plain.out.drafted.d3, "the same reads, the same draft");
 });
 
-// ─── 2. Two of three is enough ─────────────────────────────────────────────────────────────────
-Deno.test("2 of 3: the answer is the consensus of the two that drafted, and the usage is every call's", async () => {
-  const r = await run({ v2: true }, [GOOD({ centerEaveFt: 15, pitch: 0.4 }, { out: 7000 }), OVERLOADED, GOOD({ centerEaveFt: 13, pitch: 0.5 }, { out: 9000 })]);
+// ─── 2. Three of five is the quorum; any number that drafted is combined ───────────────────────
+Deno.test("five reads, two failing (one overloaded, one dropped): the consensus of the three that drafted, and every call's usage", async () => {
+  const r = await run({ v2: true }, [
+    GOOD({ centerEaveFt: 15, pitch: 0.4 }, { out: 7000 }), OVERLOADED, GOOD({ centerEaveFt: 13, pitch: 0.5 }, { out: 9000 }),
+    { throws: "connection reset" }, GOOD({ centerEaveFt: 14, pitch: 0.45 }, { out: 8000 }),
+  ]);
   assertEquals(r.answered, null, "no error reply");
   assertEquals(r.released, [], "the hold is not released: this press is charged");
   assertEquals(r.logged, []);
-  assertEquals(r.out.drafted.d3.roof.centerEaveFt, 14, "the midpoint of the two reads");
+  assertEquals(r.out.drafted.d3.roof.centerEaveFt, 14, "the median of the three reads");
   assertEquals(r.out.drafted.d3.roof.pitch, 0.45);
-  assertEquals(r.out.consensus.report.n, 2);
+  assertEquals(r.out.consensus.report.n, 3);
   assert(r.out.lead === r.out.calls[0], "the lead is the medoid's call, whose notes and frame map the response carries");
   assertEquals(r.out.text, JSON.stringify(spec({ centerEaveFt: 15, pitch: 0.4 })));
-  // One usage write, the summed record.
+  // One usage write, the summed record: the overloaded and the dropped call reported no usage.
   assertEquals(r.usage.length, 1);
   const tokens = r.usage[0] as Record<string, unknown>;
-  assertEquals([tokens.model, tokens.input, tokens.output, tokens.stopReason], ["claude-opus-5-5", 42000, 16000, "end_turn"]);
-  assertEquals((tokens.calls as Record<string, unknown>[]).map((c) => [c.ok, c.output, c.stopReason]), [[true, 7000, "end_turn"], [false, null, null], [true, 9000, "end_turn"]]);
-  assertEquals((tokens.samples as Record<string, unknown>[]).map((x) => x.centerEaveFt), [15, 13]);
-  assertEquals((tokens.agreement as Record<string, unknown>).n, 2);
-  assertEquals(r.out.callsUsage.usage, { input_tokens: 42000, output_tokens: 16000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, calls: 3 });
+  assertEquals([tokens.model, tokens.input, tokens.output, tokens.stopReason], ["claude-opus-5-5", 63000, 24000, "end_turn"]);
+  assertEquals((tokens.calls as Record<string, unknown>[]).map((c) => [c.ok, c.output, c.stopReason, c.aborted]), [
+    [true, 7000, "end_turn", null], [false, null, null, null], [true, 9000, "end_turn", null], [false, null, null, null], [true, 8000, "end_turn", null],
+  ]);
+  assertEquals((tokens.samples as Record<string, unknown>[]).map((x) => x.centerEaveFt), [15, 13, 14]);
+  assertEquals((tokens.agreement as Record<string, unknown>).n, 3);
+  assertEquals(r.out.callsUsage.usage, { input_tokens: 63000, output_tokens: 24000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, calls: 5 });
 });
 
-Deno.test("two reads in, the third is cut off after the grace, and the answer does not wait for the deadline", async () => {
-  const r = await run({ v2: true, graceMs: 40, abortMs: 5_000 }, [GOOD({ centerEaveFt: 15 }), { hang: true }, GOOD({ centerEaveFt: 12.5 })]);
+Deno.test("two reads of five, three failing: no quorum, nothing cut, and the answer is the consensus of the two", async () => {
+  const r = await run({ v2: true, graceMs: 5 }, [TRUNCATED, GOOD({ centerEaveFt: 15 }), UNPARSEABLE, OVERLOADED, GOOD({ centerEaveFt: 12.5 })]);
   assertEquals(r.answered, null);
-  assertEquals(r.out.drafted.d3.roof.centerEaveFt, 13.75);
+  assertEquals(r.out.consensus.report.n, 2);
+  assertEquals(r.out.drafted.d3.roof.centerEaveFt, 13.75, "an even count: the midpoint of its middle two");
   const calls = (r.usage[0] as Record<string, unknown>).calls as Record<string, unknown>[];
-  assertEquals(calls.map((c) => [c.ok, c.aborted]), [[true, null], [false, "quorum"], [true, null]]);
+  assertEquals(calls.map((c) => [c.ok, c.aborted]), [[false, null], [true, null], [false, null], [false, null], [true, null]]);
+});
+
+Deno.test("three reads in, the other two are cut off after the grace, and the answer does not wait for the deadline", async () => {
+  const r = await run({ v2: true, graceMs: 40, abortMs: 5_000 }, [GOOD({ centerEaveFt: 15 }), { hang: true }, GOOD({ centerEaveFt: 12.5 }), { hang: true }, GOOD({ centerEaveFt: 14 })]);
+  assertEquals(r.answered, null);
+  assertEquals(r.out.consensus.report.n, 3);
+  assertEquals(r.out.drafted.d3.roof.centerEaveFt, 14);
+  const calls = (r.usage[0] as Record<string, unknown>).calls as Record<string, unknown>[];
+  assertEquals(calls.map((c) => [c.ok, c.aborted]), [[true, null], [false, "quorum"], [true, null], [false, "quorum"], [true, null]]);
   assert(r.ms < 1_000, `answered ${r.ms} ms after the press, well inside the 5 s deadline`);
 });
 
-Deno.test("one read of three is enough to answer: the consensus of one read is that read", async () => {
-  const r = await run({ v2: true }, [TRUNCATED, GOOD({ centerEaveFt: 15 }), UNPARSEABLE]);
+Deno.test("a fourth read that lands inside the grace joins the consensus; the fifth, still out, is cut", async () => {
+  const r = await run({ v2: true, graceMs: 200, abortMs: 5_000 }, [
+    GOOD({ centerEaveFt: 15 }), GOOD({ centerEaveFt: 13 }), GOOD({ centerEaveFt: 14 }),
+    { ...GOOD({ centerEaveFt: 12 }), delayMs: 30 }, { hang: true },
+  ]);
+  assertEquals(r.answered, null);
+  assertEquals(r.out.consensus.report.n, 4);
+  assertEquals(r.out.drafted.d3.roof.centerEaveFt, 13.5, "the median of four: the midpoint of 13 and 14");
+  const calls = (r.usage[0] as Record<string, unknown>).calls as Record<string, unknown>[];
+  assertEquals(calls.map((c) => [c.ok, c.aborted]), [[true, null], [true, null], [true, null], [true, null], [false, "quorum"]]);
+  assert(r.ms >= 200 && r.ms < 2_000, `the grace ran out before the answer: ${r.ms} ms`);
+});
+
+Deno.test("one read of five is enough to answer: the consensus of one read is that read", async () => {
+  const r = await run({ v2: true }, [TRUNCATED, GOOD({ centerEaveFt: 15 }), UNPARSEABLE, REFUSED, OVERLOADED]);
   assertEquals(r.answered, null);
   assertEquals(r.out.drafted.d3, specOf(JSON.stringify(spec({ centerEaveFt: 15 })), DIMS));
   assert(r.out.lead === r.out.calls[1]);
   assertEquals(consensusSplitWarning(r.out.consensus.report), null, "one read cannot split");
   const tokens = r.usage[0] as Record<string, unknown>;
-  assertEquals(tokens.output, 12000 + 7000 + 7000, "the two failures cost money too");
+  assertEquals(tokens.output, 12000 + 7000 + 7000 + 7000, "the failures that answered cost money too; the 529 reported nothing");
 });
 
-// ─── 3. None of three: today's error, for the FIRST call sent ──────────────────────────────────
+// ─── 3. None of five: today's error, for the FIRST call sent ───────────────────────────────────
 // Each case runs the SAME first-call outcome twice: alone as a legacy single call (today's handling,
-// unchanged) and as the first of three failing v2 calls. The builder must get the same answer.
+// unchanged) and as the first of five failing v2 calls. The builder must get the same answer.
 const FAILURES: [string, Plan, { status: number; code: string | null; retryable: boolean; release: string }][] = [
   ["a reply cut off at max_tokens", TRUNCATED, { status: 502, code: "ai_spec_truncated", retryable: true, release: "reply truncated" }],
   ["an unparseable reply", UNPARSEABLE, { status: 502, code: "ai_spec_unparseable", retryable: false, release: "unparseable spec" }],
@@ -311,10 +346,12 @@ const FAILURES: [string, Plan, { status: number; code: string | null; retryable:
 for (const [what, first, want] of FAILURES) {
   Deno.test(`no read drafts, the first call was ${what}: today's ${want.status}${want.code ? ` ${want.code}` : ""}, hold released`, async () => {
     const single = await run({ v2: false, abortMs: 60 }, [first]);
-    // The other two fail differently, and more slowly: the first call SENT decides, not the first back.
-    const others: Plan[] = what === "the deadline" ? [UNPARSEABLE, REFUSED] : [{ hang: true }, { ...TRUNCATED, delayMs: 20 }];
-    const triple = await run({ v2: true, abortMs: 60 }, [first, ...others]);
-    for (const [label, r] of [["single", single], ["v2 triple", triple]] as const) {
+    // The other four fail differently, and more slowly: the first call SENT decides, not the first back.
+    const others: Plan[] = what === "the deadline"
+      ? [UNPARSEABLE, REFUSED, OVERLOADED, TRUNCATED]
+      : [{ hang: true }, { ...TRUNCATED, delayMs: 20 }, { ...REFUSED, delayMs: 10 }, { throws: "connection reset" }];
+    const five = await run({ v2: true, abortMs: 60 }, [first, ...others]);
+    for (const [label, r] of [["single", single], ["v2 five", five]] as const) {
       assert(r.answered !== null, `${label}: an error reply`);
       assertEquals(r.answered!.status, want.status, `${label}: status`);
       assertEquals(r.answered!.body.retryable === true, want.retryable, `${label}: retryable`);
@@ -322,27 +359,27 @@ for (const [what, first, want] of FAILURES) {
       assertEquals(r.logged.map((l) => l.code), want.code ? [want.code] : [], `${label}: the coded row`);
       assertEquals(r.filed.has(r.answered), want.code !== null, `${label}: filed at the return site exactly when coded`);
     }
-    assertEquals(triple.answered!.body, single.answered!.body, "the builder reads the same sentence");
-    assertEquals(triple.sent.length, 3);
-    // Usage: the single call records today's shape; three calls record all three.
+    assertEquals(five.answered!.body, single.answered!.body, "the builder reads the same sentence");
+    assertEquals(five.sent.length, 5);
+    // Usage: the single call records today's shape; five calls record all five.
     const one = single.usage[0] as Record<string, unknown> | null;
     if (first.throws || first.hang) assertEquals(one, null, "no reply, no usage, as before");
     else if (first.status) assertEquals(one, null);
     else assert(one !== null && !("calls" in one), "the single call's own record");
-    const three = triple.usage[0] as Record<string, unknown>;
-    assertEquals((three.calls as unknown[]).length, 3, "every call is on the record, even with no draft");
-    assertEquals(three.agreement, null);
+    const all = five.usage[0] as Record<string, unknown>;
+    assertEquals((all.calls as unknown[]).length, 5, "every call is on the record, even with no draft");
+    assertEquals(all.agreement, null);
   });
 }
 
-Deno.test("a first call that failed on its own is not relabelled a timeout by the other two running out the clock", async () => {
-  // The single call's catch read aiSignal.aborted when IT threw. With three calls the deadline has
-  // usually fired by the time all three settle, so it is read per call, the moment each one threw.
-  const r = await run({ v2: true, abortMs: 40 }, [{ throws: "connection reset" }, { hang: true }, { hang: true }]);
+Deno.test("a first call that failed on its own is not relabelled a timeout by the other four running out the clock", async () => {
+  // The single call's catch read aiSignal.aborted when IT threw. With five calls the deadline has
+  // usually fired by the time all five settle, so it is read per call, the moment each one threw.
+  const r = await run({ v2: true, abortMs: 40 }, [{ throws: "connection reset" }, { hang: true }, { hang: true }, { hang: true }, { hang: true }]);
   assertEquals(r.answered!.status, 502);
   assertEquals(r.answered!.body.error, "Could not reach the AI service: connection reset");
   assertEquals(r.released, ["fetch failed"]);
-  assertEquals(((r.usage[0] as Record<string, unknown>).calls as Record<string, unknown>[]).map((c) => c.aborted), [null, "deadline", "deadline"]);
+  assertEquals(((r.usage[0] as Record<string, unknown>).calls as Record<string, unknown>[]).map((c) => c.aborted), [null, "deadline", "deadline", "deadline", "deadline"]);
 });
 
 // ─── 4. The capture and the flags ──────────────────────────────────────────────────────────────

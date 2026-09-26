@@ -4254,11 +4254,12 @@ Deno.test("v2 check: the floor height and a raised foundation are correctable; l
 // ═══ CONSENSUS DRAFTING (2026-09-25) ══════════════════════════════════════════════════════════
 // Live v2 runs of one video kept the SHAPE and let the NUMBERS wander: a raised centre's eave read
 // 15, 14 and 12.5 ft, the pitch 0.37 to 0.7, 3 porch posts or 4, the steps in the centre or on the
-// right. The v2 draft now reads the video three times and combines the reads. What is pinned here:
-// one read passes through untouched; numbers are medians over the reads that agree with the chosen
-// structure, never over reads of a different building; discrete fields go by majority with ties to
-// the medoid; where reads split with no majority the builder is told; and the parallel calls keep
-// one budget and cut a straggler 20 s after the second read.
+// right. The v2 draft now reads the video five times (three until 2026-09-26) and combines the reads.
+// What is pinned here: one read passes through untouched; numbers are medians over the reads that
+// agree with the chosen structure, never over reads of a different building; discrete fields go by
+// majority with ties to the medoid; where reads split with no majority the builder is told; and the
+// parallel calls keep one budget and cut the stragglers DRAFT_CONSENSUS_GRACE_MS after the third
+// read has drafted. Any count that actually answered, one to five, is combined the same way.
 import {
   consensusDrafts, consensusOfCalls, consensusSplitWarning, draftCallCount, draftCallsUsage, readDraftReply,
   runDraftCalls, DRAFT_CONSENSUS_CALLS, DRAFT_CONSENSUS_GRACE_MS, DRAFT_CONSENSUS_QUORUM, CONSENSUS_COLOR_BLEND_MAX,
@@ -4521,11 +4522,15 @@ const replyBody = (spec: unknown, extra: Record<string, unknown> = {}) => JSON.s
   ...extra,
 });
 
-Deno.test("draftCallCount: three reads for a v2 press, one for everything else", () => {
-  assertEquals(DRAFT_CONSENSUS_CALLS, 3);
-  assertEquals(DRAFT_CONSENSUS_QUORUM, 2);
+Deno.test("draftCallCount: five reads for a v2 press, one for everything else", () => {
+  // Five reads and a quorum of three since 2026-09-26 (three and two before): a majority of what
+  // was sent, so an odd read is outvoted and the median has a real middle.
+  assertEquals(DRAFT_CONSENSUS_CALLS, 5);
+  assertEquals(DRAFT_CONSENSUS_QUORUM, 3);
+  assert(DRAFT_CONSENSUS_QUORUM * 2 > DRAFT_CONSENSUS_CALLS && DRAFT_CONSENSUS_QUORUM < DRAFT_CONSENSUS_CALLS,
+    "the quorum is a majority of the reads, and short of all of them, so a straggler can be cut");
   assertEquals(DRAFT_CONSENSUS_GRACE_MS, 60_000);
-  assertEquals(draftCallCount(true, false), 3, "the new designer's first press");
+  assertEquals(draftCallCount(true, false), 5, "the new designer's first press, streamed or not");
   assertEquals(draftCallCount(true, true), 1, "its lean retry");
   assertEquals(draftCallCount(false, false), 1, "every legacy request");
   assertEquals(draftCallCount(false, true), 1);
@@ -4622,65 +4627,122 @@ Deno.test("runDraftCalls: one call is sent on the deadline signal itself", async
   assertEquals([calls[0].httpOk, calls[0].reading?.drafted], [true, true]);
 });
 
-Deno.test("runDraftCalls: three calls, each on its own signal, results in SEND order whatever order they land in", async () => {
+Deno.test("runDraftCalls: five calls, each on its own signal, results in SEND order whatever order they land in", async () => {
   const deadline = new AbortController();
-  const f = fakeSend([{ body: GOOD, delayMs: 30 }, { status: 529, body: "overloaded", delayMs: 1 }, { body: "{}", delayMs: 10 }]);
-  const calls = await runDraftCalls({ count: 3, deadline: deadline.signal, graceMs: 1000, send: f.send, read: (b) => readDraftReply(b) });
-  assertEquals(calls.map((c) => c.index), [0, 1, 2]);
-  assert(new Set(f.sent).size === 3 && !f.sent.includes(deadline.signal), "each call has its own signal");
+  const f = fakeSend([
+    { body: GOOD, delayMs: 30 }, { status: 529, body: "overloaded", delayMs: 1 }, { body: "{}", delayMs: 10 },
+    { body: GOOD, delayMs: 20 }, { throws: "connection reset", delayMs: 0 },
+  ]);
+  const calls = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: deadline.signal, graceMs: 1000, send: f.send, read: (b) => readDraftReply(b) });
+  assertEquals(calls.map((c) => c.index), [0, 1, 2, 3, 4]);
+  assert(new Set(f.sent).size === 5 && !f.sent.includes(deadline.signal), "each call has its own signal");
   assertEquals([calls[0].httpOk, calls[0].reading?.drafted], [true, true]);
   assertEquals([calls[1].httpOk, calls[1].status, calls[1].body], [false, 529, "overloaded"]);
   assertEquals([calls[2].httpOk, calls[2].reading?.drafted], [true, false], "a 200 that does not parse is not a draft");
+  assertEquals([calls[3].httpOk, calls[3].reading?.drafted], [true, true]);
+  assertEquals([calls[4].threw, calls[4].aborted], [true, null], "a dropped connection is its own failure, not a cut-off");
 });
 
-Deno.test("runDraftCalls: once two have drafted, the third gets the grace and is then cut off", async () => {
+Deno.test("runDraftCalls: once three of five have drafted, the other two get the grace and are then cut off", async () => {
   const deadline = new AbortController();
-  const f = fakeSend([{ body: GOOD, delayMs: 5 }, { hang: true, delayMs: 0 }, { body: GOOD, delayMs: 10 }]);
+  const f = fakeSend([{ body: GOOD, delayMs: 5 }, { hang: true, delayMs: 0 }, { body: GOOD, delayMs: 10 }, { hang: true, delayMs: 0 }, { body: GOOD, delayMs: 15 }]);
   const t0 = Date.now();
-  const calls = await runDraftCalls({ count: 3, deadline: deadline.signal, graceMs: 40, send: f.send, read: (b) => readDraftReply(b) });
+  const calls = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: deadline.signal, graceMs: 40, send: f.send, read: (b) => readDraftReply(b) });
   const took = Date.now() - t0;
-  assertEquals([calls[0].reading?.drafted, calls[2].reading?.drafted], [true, true]);
-  assertEquals([calls[1].threw, calls[1].aborted], [true, "quorum"]);
-  assert(took >= 45 && took < 1000, `cut off after the grace, ${took} ms`);
+  assertEquals(calls.map((c) => c.reading?.drafted ?? false), [true, false, true, false, true]);
+  assertEquals(calls.map((c) => c.aborted), [null, "quorum", null, "quorum", null], "both stragglers cut by the quorum's clock");
+  assert(took >= 50 && took < 1000, `the grace ran from the THIRD draft (15 ms) and then cut off: ${took} ms`);
   assert(!deadline.signal.aborted, "the deadline itself was never touched");
+});
+
+Deno.test("runDraftCalls: a straggler that drafts inside the grace is kept; one still out when it ends is cut", async () => {
+  const f = fakeSend([
+    { body: GOOD, delayMs: 5 }, { body: GOOD, delayMs: 8 }, { body: GOOD, delayMs: 10 },
+    // 30 ms: inside the 150 ms grace that began at 10 ms.
+    { body: GOOD, delayMs: 30 },
+    { hang: true, delayMs: 0 },
+  ]);
+  const t0 = Date.now();
+  const calls = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 150, send: f.send, read: (b) => readDraftReply(b) });
+  const took = Date.now() - t0;
+  assertEquals(calls.map((c) => c.reading?.drafted ?? false), [true, true, true, true, false]);
+  assertEquals(calls.map((c) => c.aborted), [null, null, null, null, "quorum"]);
+  assert(took >= 155 && took < 1500, `the last one waited out the whole grace: ${took} ms`);
+  // All five in before the grace ends: nothing is cut, and nothing waits for the grace either.
+  const g = fakeSend([5, 8, 10, 12, 20].map((delayMs) => ({ body: GOOD, delayMs })));
+  const t1 = Date.now();
+  const all = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 5_000, send: g.send, read: (b) => readDraftReply(b) });
+  assertEquals(all.map((c) => [c.reading?.drafted, c.aborted]), Array(5).fill([true, null]));
+  assert(Date.now() - t1 < 1_000, "answered when the fifth landed, not when the grace would have ended");
+});
+
+Deno.test("runDraftCalls: two drafts are not a quorum of five, so nothing is cut until a third drafts or the deadline", async () => {
+  // Two drafted and two failed: the fifth can still make three, so it is waited for, however slow.
+  const f = fakeSend([
+    { body: GOOD, delayMs: 1 }, { body: GOOD, delayMs: 2 }, { status: 529, body: "overloaded", delayMs: 3 },
+    { throws: "connection reset", delayMs: 0 }, { body: GOOD, delayMs: 60 },
+  ]);
+  const t0 = Date.now();
+  const late = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 5, send: f.send, read: (b) => readDraftReply(b) });
+  assertEquals(late.map((c) => c.aborted), [null, null, null, null, null], "no cut-off before the quorum");
+  assertEquals(late[4].reading?.drafted, true, "the slow fifth read drafted and counts");
+  assert(Date.now() - t0 >= 55, "it was waited for");
+  // Two drafted and three still out: only the ONE deadline ends them, and it says so on each.
+  const deadline = new AbortController();
+  const g = fakeSend([{ body: GOOD, delayMs: 1 }, { hang: true, delayMs: 0 }, { body: GOOD, delayMs: 2 }, { hang: true, delayMs: 0 }, { hang: true, delayMs: 0 }]);
+  const run = runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: deadline.signal, graceMs: 5, send: g.send, read: (b) => readDraftReply(b) });
+  const t = setTimeout(() => deadline.abort(), 30);
+  const calls = await run;
+  clearTimeout(t);
+  assertEquals(calls.map((c) => c.aborted), [null, "deadline", null, "deadline", "deadline"]);
 });
 
 Deno.test("runDraftCalls: the ONE deadline stops every call still out, and says so on each", async () => {
   const deadline = new AbortController();
-  const f = fakeSend([{ hang: true, delayMs: 0 }, { throws: "connection reset", delayMs: 0 }, { hang: true, delayMs: 0 }]);
-  const run = runDraftCalls({ count: 3, deadline: deadline.signal, graceMs: 5, send: f.send, read: (b) => readDraftReply(b) });
+  const f = fakeSend([{ hang: true, delayMs: 0 }, { throws: "connection reset", delayMs: 0 }, { hang: true, delayMs: 0 }, { hang: true, delayMs: 0 }, { hang: true, delayMs: 0 }]);
+  const run = runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: deadline.signal, graceMs: 5, send: f.send, read: (b) => readDraftReply(b) });
   const t = setTimeout(() => deadline.abort(), 20);
   const calls = await run;
   clearTimeout(t);
-  assertEquals(calls.map((c) => c.aborted), ["deadline", null, "deadline"], "the reset call failed on its own, before the clock ran out");
-  assertEquals(calls.map((c) => c.threw), [true, true, true]);
+  assertEquals(calls.map((c) => c.aborted), ["deadline", null, "deadline", "deadline", "deadline"], "the reset call failed on its own, before the clock ran out");
+  assertEquals(calls.map((c) => c.threw), [true, true, true, true, true]);
   assert(calls[1].error instanceof TypeError, "the error is kept for the handler's message");
   // One draft is not a quorum: no grace timer, nothing cut early.
-  const g = fakeSend([{ body: GOOD, delayMs: 1 }, { body: "{}", delayMs: 30 }, { status: 500, delayMs: 2 }]);
-  const one = await runDraftCalls({ count: 3, deadline: new AbortController().signal, graceMs: 5, send: g.send, read: (b) => readDraftReply(b) });
-  assertEquals(one.map((c) => c.aborted), [null, null, null], "the slow unparseable call was waited for");
+  const g = fakeSend([{ body: GOOD, delayMs: 1 }, { body: "{}", delayMs: 30 }, { status: 500, delayMs: 2 }, { body: "{}", delayMs: 20 }, { status: 529, delayMs: 3 }]);
+  const one = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 5, send: g.send, read: (b) => readDraftReply(b) });
+  assertEquals(one.map((c) => c.aborted), [null, null, null, null, null], "the slow unparseable calls were waited for");
+  // A count at or under the quorum has no cut-off at all: three calls, two drafted, the third waited for.
+  const h = fakeSend([{ body: GOOD, delayMs: 1 }, { body: GOOD, delayMs: 2 }, { body: GOOD, delayMs: 40 }]);
+  const three = await runDraftCalls({ count: 3, deadline: new AbortController().signal, graceMs: 5, send: h.send, read: (b) => readDraftReply(b) });
+  assertEquals(three.map((c) => [c.reading?.drafted, c.aborted]), [[true, null], [true, null], [true, null]]);
 });
 
 Deno.test("consensusOfCalls and draftCallsUsage: the medoid's CALL, the summed usage, every call's entry", async () => {
   const deadline = new AbortController();
   const b1 = replyBody({ ...RAISED_RAW, roof: { ...RAISED_RAW.roof, centerEaveFt: 15 } });
   const b2 = replyBody({ ...RAISED_RAW, roof: { ...RAISED_RAW.roof, centerEaveFt: 13 } }, { usage: { input_tokens: 21000, output_tokens: 9000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } });
-  const f = fakeSend([{ status: 529, body: "overloaded", delayMs: 1 }, { body: b1, delayMs: 2 }, { body: b2, delayMs: 3 }]);
-  const calls = await runDraftCalls({ count: 3, deadline: deadline.signal, graceMs: 5, send: f.send, read: (b) => readDraftReply(b) });
+  const b3 = replyBody({ ...RAISED_RAW, roof: { ...RAISED_RAW.roof, centerEaveFt: 14.5 } });
+  // Five calls: one overloaded, three drafted, and one still out when the grace ends (cut, no usage).
+  const f = fakeSend([{ status: 529, body: "overloaded", delayMs: 1 }, { body: b1, delayMs: 2 }, { body: b2, delayMs: 3 }, { body: b3, delayMs: 4 }, { hang: true, delayMs: 0 }]);
+  const calls = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: deadline.signal, graceMs: 5, send: f.send, read: (b) => readDraftReply(b) });
   const c = consensusOfCalls(calls, 12)!;
-  assertEquals(c.report.n, 2);
+  assertEquals(c.report.n, 3, "the three that drafted, not the five that were sent");
   assertEquals(c.call, 1, "the medoid is the first drafted call on a tie, named by its CALL index");
-  assertEquals(c.d3.roof.centerEaveFt, 14);
+  assertEquals(c.d3.roof.centerEaveFt, 14.5, "the median of 15, 13 and 14.5");
   const u = draftCallsUsage("claude-opus-5-5", calls, calls[c.call], c);
-  assertEquals(u.usage, { input_tokens: 42000, output_tokens: 16000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, calls: 3 });
-  assertEquals([u.tokens.input, u.tokens.output, u.tokens.stopReason], [42000, 16000, "end_turn"]);
+  assertEquals(u.usage, { input_tokens: 63000, output_tokens: 23000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, calls: 5 });
+  assertEquals([u.tokens.input, u.tokens.output, u.tokens.stopReason], [63000, 23000, "end_turn"]);
   const entries = u.tokens.calls as Record<string, unknown>[];
-  assertEquals(entries.map((e) => [e.output, e.ok, e.aborted]), [[null, false, null], [7000, true, null], [9000, true, null]]);
+  assertEquals(entries.map((e) => [e.output, e.ok, e.aborted]), [[null, false, null], [7000, true, null], [9000, true, null], [7000, true, null], [null, false, "quorum"]]);
   assert(entries.every((e) => e.model === "claude-opus-5-5" && typeof e.ms === "number"), "model and ms on each");
-  assertEquals((u.tokens.samples as Record<string, unknown>[]).map((r) => r.centerEaveFt), [15, 13], "the reads' own roofs");
+  assertEquals((u.tokens.samples as Record<string, unknown>[]).map((r) => r.centerEaveFt), [15, 13, 14.5], "the reads' own roofs");
   assertEquals(u.tokens.agreement, c.report);
   // No call drafted: no consensus, nulls rather than zeros where no call reported a count.
-  const none = await runDraftCalls({ count: 3, deadline: deadline.signal, graceMs: 5, send: fakeSend([{ throws: "x", delayMs: 0 }, { status: 500, delayMs: 1 }, { throws: "y", delayMs: 0 }]).send, read: (b) => readDraftReply(b) });
+  const none = await runDraftCalls({
+    count: DRAFT_CONSENSUS_CALLS, deadline: deadline.signal, graceMs: 5,
+    send: fakeSend([{ throws: "x", delayMs: 0 }, { status: 500, delayMs: 1 }, { throws: "y", delayMs: 0 }, { status: 529, delayMs: 2 }, { body: "{}", delayMs: 1 }]).send,
+    read: (b) => readDraftReply(b),
+  });
   assertEquals(consensusOfCalls(none, 12), null);
   const z = draftCallsUsage("claude-opus-5-5", none, none[0], null);
   assertEquals([z.usage.input_tokens, z.usage.output_tokens, z.tokens.stopReason, z.tokens.textChars, z.tokens.agreement], [null, null, null, 0, null]);

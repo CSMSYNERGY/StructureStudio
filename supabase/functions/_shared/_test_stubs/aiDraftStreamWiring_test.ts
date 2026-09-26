@@ -10,7 +10,7 @@
 //   1. WHICH requests stream: stream:true AND the v2 prompt AND not lean -- decided before the branch
 //      runs (wantsStreamedDraft), and never in disagreement with the branch's own v2Prompt and lean.
 //   2. A request that does not stream is answered exactly as before: the branch's own Response, not a
-//      stream; the one call, the three calls, effort "medium" (or "low" when lean), the 125 s budget.
+//      stream; the one call, the five calls, effort "medium" (or "low" when lean), the 125 s budget.
 //   3. A streamed request gets a 200 and a heartbeat at once, and then the SAME answer the plain
 //      request would have given: a success byte for byte, and every failure as its own object plus
 //      the status it would have had, `retryable`, `code` and `error` untouched.
@@ -396,12 +396,12 @@ const TRUNCATED: ModelPlan = { body: reply('{"roof":{"type":"gable","pit', { sto
 const UNPARSEABLE: ModelPlan = { body: reply("I could not tell what this building is."), delayMs: 2 };
 const REFUSED: ModelPlan = { body: reply("", { stop: "refusal" }), delayMs: 2 };
 const OVERLOADED: ModelPlan = { status: 529, body: '{"type":"error","error":{"type":"overloaded_error"}}', delayMs: 2 };
-const THREE = (p: ModelPlan) => [p, p, p];
+const FIVE = (p: ModelPlan) => [p, p, p, p, p];
 
 // Every way the branch can answer, each one run plain and streamed against the same world.
 const SCENARIOS: [string, World, number][] = [
-  ["a draft (three reads, a consensus)", { model: [GOOD({ centerEaveFt: 15 }), GOOD({ centerEaveFt: 13 }), GOOD({ centerEaveFt: 14 })] }, 200],
-  ["a draft whose capture failed", { model: THREE(GOOD()), captureErr: true }, 200],
+  ["a draft (five reads, a consensus)", { model: [GOOD({ centerEaveFt: 15 }), GOOD({ centerEaveFt: 13 }), GOOD({ centerEaveFt: 14 }), GOOD({ centerEaveFt: 12.5 }), GOOD({ centerEaveFt: 14.5 })] }, 200],
+  ["a draft whose capture failed", { model: FIVE(GOOD()), captureErr: true }, 200],
   ["no API key", { noKey: true }, 500],
   ["the daily cap", { cap: 10, used: 10 }, 429],
   ["the ledger insert failing", { ledgerFails: true }, 503],
@@ -410,12 +410,12 @@ const SCENARIOS: [string, World, number][] = [
   ["a hold already in flight", { hold: { err: "hold_in_flight" } }, 409],
   ["a press already charged (hold_replayed)", { hold: { err: "hold_replayed" } }, 409],
   ["an unpriced meter", { hold: { err: "meter_unknown" } }, 503],
-  ["every read timing out", { model: THREE({ hang: true }), abortAfterMs: 40 }, 504],
-  ["every read cut off at max_tokens", { model: THREE(TRUNCATED) }, 502],
-  ["every read unparseable", { model: THREE(UNPARSEABLE) }, 502],
-  ["every read refused", { model: THREE(REFUSED) }, 502],
-  ["the API overloaded", { model: THREE(OVERLOADED) }, 502],
-  ["the API unreachable", { model: THREE({ throws: "connection reset" }) }, 502],
+  ["every read timing out", { model: FIVE({ hang: true }), abortAfterMs: 40 }, 504],
+  ["every read cut off at max_tokens", { model: FIVE(TRUNCATED) }, 502],
+  ["every read unparseable", { model: FIVE(UNPARSEABLE) }, 502],
+  ["every read refused", { model: FIVE(REFUSED) }, 502],
+  ["the API overloaded", { model: FIVE(OVERLOADED) }, 502],
+  ["the API unreachable", { model: FIVE({ throws: "connection reset" }) }, 502],
 ];
 
 // ─── 1. Which requests stream ──────────────────────────────────────────────────────────────────
@@ -483,13 +483,13 @@ Deno.test("draftAnswer answers a request that does not stream with the branch's 
 // ─── 2. A request that does not stream ─────────────────────────────────────────────────────────
 Deno.test("requests that do not stream are answered as before: a plain Response, effort medium or low, 125 s", async () => {
   const cases: [string, Record<string, unknown>, { calls: number; effort: string; model: string }][] = [
-    ["the new shell's v2 press without stream (an older edge caller)", V2, { calls: 3, effort: "medium", model: "claude-opus-5-5" }],
+    ["the new shell's v2 press without stream (an older edge caller)", V2, { calls: 5, effort: "medium", model: "claude-opus-5-5" }],
     ["the lean retry, even if it says stream", { ...STREAMED, lean: true }, { calls: 1, effort: "low", model: "claude-opus-5-5" }],
     ["production's older shell (no frame), even if it says stream", { ...STREAMED, frame: undefined }, { calls: 1, effort: "medium", model: "claude-sonnet-5" }],
-    ["stream as a string", { ...V2, stream: "true" }, { calls: 3, effort: "medium", model: "claude-opus-5-5" }],
+    ["stream as a string", { ...V2, stream: "true" }, { calls: 5, effort: "medium", model: "claude-opus-5-5" }],
   ];
   for (const [what, payload, want] of cases) {
-    const { trace, out } = await drive(payload, { model: THREE(GOOD()) });
+    const { trace, out } = await drive(payload, { model: FIVE(GOOD()) });
     assertEquals(out.status, 200, what);
     assert(out.text.startsWith('{"ok":true,'), `${what}: no heartbeat, the JSON itself`);
     assertEquals(trace.sent.length, want.calls, `${what}: calls`);
@@ -558,7 +558,7 @@ Deno.test("every failure after the hold releases it once, streamed, with its ret
     assertEquals(trace.rows.filter((r) => r.code === String(w.status)).length, w.code === String(w.status) ? 1 : 0, `${what}: the wrapper adds no copy of a coded row`);
   }
   // And a draft is captured once and released never.
-  const ok = await drive(STREAMED, { model: THREE(GOOD()) });
+  const ok = await drive(STREAMED, { model: FIVE(GOOD()) });
   assertEquals(ok.trace.released, []);
   assertEquals(ok.trace.captured.length, 1);
 });
@@ -577,7 +577,7 @@ Deno.test("the 200 and a space go out before the model has answered", async () =
   let open!: () => void;
   const gate = new Promise<void>((r) => { open = r; });
   const plan = { ...GOOD(), gate };
-  await inWorld({ model: [plan, plan, plan] }, async (trace) => {
+  await inWorld({ model: FIVE(plan) }, async (trace) => {
     const res = await HANDLER(request(STREAMED));
     assertEquals(res.status, 200);
     const reader = res.body!.getReader();
@@ -585,7 +585,7 @@ Deno.test("the 200 and a space go out before the model has answered", async () =
     assertEquals(new TextDecoder().decode(first.value), " ");
     // The branch is still waiting on the model: the ledger row and the hold are in, the capture is not.
     await new Promise((r) => setTimeout(r, 30));
-    assertEquals(trace.sent.length, 3, "the three reads are out");
+    assertEquals(trace.sent.length, 5, "the five reads are out");
     assertEquals(trace.captured, [], "and nothing has been captured yet");
     open();
     let text = "";
@@ -602,18 +602,18 @@ Deno.test("the 200 and a space go out before the model has answered", async () =
 
 // ─── 5. Effort and budget ──────────────────────────────────────────────────────────────────────
 Deno.test("effort high and 20000 tokens only on the streamed v2 draft; every other request as before", async () => {
-  const s = await drive(STREAMED, { model: THREE(GOOD()) });
-  assertEquals(s.trace.sent.map((b) => b.output_config.effort), ["high", "high", "high"]);
-  assertEquals(s.trace.sent.map((b) => b.max_tokens), [20000, 20000, 20000]);
-  assertEquals(s.trace.sent.map((b) => b.model), ["claude-opus-5-5", "claude-opus-5-5", "claude-opus-5-5"]);
+  const s = await drive(STREAMED, { model: FIVE(GOOD()) });
+  assertEquals(s.trace.sent.map((b) => b.output_config.effort), Array(5).fill("high"));
+  assertEquals(s.trace.sent.map((b) => b.max_tokens), Array(5).fill(20000));
+  assertEquals(s.trace.sent.map((b) => b.model), Array(5).fill("claude-opus-5-5"));
   // Apart from the effort and the room to think in, the very request the plain v2 press sends.
-  const p = await drive(V2, { model: THREE(GOOD()) });
-  assertEquals(p.trace.sent.map((b) => b.output_config.effort), ["medium", "medium", "medium"]);
-  assertEquals(p.trace.sent.map((b) => b.max_tokens), [12000, 12000, 12000]);
+  const p = await drive(V2, { model: FIVE(GOOD()) });
+  assertEquals(p.trace.sent.map((b) => b.output_config.effort), Array(5).fill("medium"));
+  assertEquals(p.trace.sent.map((b) => b.max_tokens), Array(5).fill(12000));
   assertEquals(s.trace.sent[0], { ...p.trace.sent[0], max_tokens: 20000, output_config: { effort: "high" } });
   // Every request that does not stream keeps 12000: the lean retry, and production's older shell.
   for (const payload of [{ ...STREAMED, lean: true }, { ...STREAMED, frame: undefined }] as Record<string, unknown>[]) {
-    const o = await drive(payload, { model: THREE(GOOD()) });
+    const o = await drive(payload, { model: FIVE(GOOD()) });
     assertEquals(o.trace.sent.map((b) => b.max_tokens), [12000], JSON.stringify({ lean: payload.lean, frame: payload.frame }));
   }
   // And the ledger says which: draft_tokens.effort and .streamed, at the top of the object.
@@ -657,7 +657,7 @@ Deno.test("the budget: streamed min(300 s, 330 s - set-up, 75 s before the worke
     [V2, 0, 199_000, 125_000],
   ];
   for (const [payload, setupMs, workerAgeMs, want] of cases) {
-    const { trace } = await drive(payload, { model: THREE(GOOD()), setupMs, workerAgeMs });
+    const { trace } = await drive(payload, { model: FIVE(GOOD()), setupMs, workerAgeMs });
     assertEquals(trace.timeouts.length, 1, "one deadline for all the reads");
     const got = trace.timeouts[0];
     // The set-up is measured on the real clock too, so a few milliseconds of it are real.
@@ -765,18 +765,18 @@ Deno.test("draftAnswer arms the watchdog from the request AND this worker's birt
 });
 
 Deno.test("a streamed draft's work is handed to EdgeRuntime.waitUntil and watched by a deadline; a plain one's is not", async () => {
-  const s = await drive(STREAMED, { model: THREE(GOOD()), workerAgeMs: 0 });
+  const s = await drive(STREAMED, { model: FIVE(GOOD()), workerAgeMs: 0 });
   assertEquals(s.trace.kept.length, 1, "the work behind the answer, once");
   assertEquals(s.trace.deadlines.length, 1, "one watchdog");
   assert(s.trace.deadlines[0] <= DRAFT_STREAM_DEADLINE_MS && s.trace.deadlines[0] > DRAFT_STREAM_DEADLINE_MS - 1_000,
     `armed at the deadline measured from the request: ${s.trace.deadlines[0]}`);
   assertEquals(s.trace.rows, [], "a draft that answered in time files nothing");
-  const p = await drive(V2, { model: THREE(GOOD()) });
+  const p = await drive(V2, { model: FIVE(GOOD()) });
   assertEquals(p.trace.kept.length, 0, "a plain request answers with its own Response");
   assertEquals(p.trace.deadlines, []);
   // On a warm worker the watchdog is armed 40 s before the worker's end: 360 s less its age.
   for (const age of [30_000, 150_000, 199_000]) {
-    const w = await drive(STREAMED, { model: THREE(GOOD()), workerAgeMs: age });
+    const w = await drive(STREAMED, { model: FIVE(GOOD()), workerAgeMs: age });
     const want = streamedDraftDeadlineMs({ now: WORKER_BORN + age, requestStartMs: WORKER_BORN + age, workerBornMs: WORKER_BORN });
     assertEquals(want, DRAFT_STREAM_DEADLINE_MS - age);
     assertEquals(w.trace.deadlines.length, 1, `worker ${age}: one watchdog`);
@@ -790,7 +790,7 @@ Deno.test("the watchdog: a draft still working at the deadline is answered strea
   const gate = new Promise<void>((r) => { open = r; });
   const plan = { ...GOOD(), gate };
   // A thousand times faster: the 360 s deadline is 360 ms here, and the reads' own abort is later.
-  await inWorld({ model: [plan, plan, plan], deadlineScale: 1_000, abortAfterMs: 5_000, workerAgeMs: 0 }, async (trace) => {
+  await inWorld({ model: FIVE(plan), deadlineScale: 1_000, abortAfterMs: 5_000, workerAgeMs: 0 }, async (trace) => {
     const res = await HANDLER(request(STREAMED));
     assertEquals(res.status, 200);
     const text = await res.text();
@@ -816,7 +816,7 @@ Deno.test("the watchdog on a warm worker: the row logs the deadline that was act
   const gate = new Promise<void>((r) => { open = r; });
   const plan = { ...GOOD(), gate };
   const age = 150_000;
-  await inWorld({ model: [plan, plan, plan], deadlineScale: 1_000, abortAfterMs: 5_000, workerAgeMs: age }, async (trace) => {
+  await inWorld({ model: FIVE(plan), deadlineScale: 1_000, abortAfterMs: 5_000, workerAgeMs: age }, async (trace) => {
     const res = await HANDLER(request(STREAMED));
     assertEquals((await res.text()).trimStart(), STREAM_DEADLINE_BODY);
     assertEquals(trace.deadlines.length, 1, "one watchdog");
@@ -844,7 +844,7 @@ for (const [what, base, want] of DISCONNECTS) {
     let open!: () => void;
     const gate = new Promise<void>((r) => { open = r; });
     const plan = { ...base, gate };
-    await inWorld({ model: [plan, plan, plan] }, async (trace) => {
+    await inWorld({ model: FIVE(plan) }, async (trace) => {
       const res = await HANDLER(request(STREAMED));
       const reader = res.body!.getReader();
       const first = await reader.read();
@@ -853,8 +853,8 @@ for (const [what, base, want] of DISCONNECTS) {
       await reader.cancel("the phone put the tab to sleep");
       assertEquals(trace.kept.length, 1, "the work is the one thing kept alive");
       // The work carries on with nobody listening: its reads go out, and wait on the model.
-      for (let i = 0; i < 200 && trace.sent.length < 3; i++) await new Promise((r) => setTimeout(r, 5));
-      assertEquals(trace.sent.length, 3, "the reads went out after the browser had gone");
+      for (let i = 0; i < 200 && trace.sent.length < 5; i++) await new Promise((r) => setTimeout(r, 5));
+      assertEquals(trace.sent.length, 5, "the reads went out after the browser had gone");
       assertEquals([trace.captured.length, trace.released.length], [0, 0], "nothing settled yet");
       open();
       await Promise.allSettled(trace.kept);
@@ -904,18 +904,18 @@ async function live() {
 
 Deno.test("the press's key rides on its ledger row: the same key wallet_hold files the hold under, and a keyless press inserts what it always did", async () => {
   for (const payload of [STREAMED, V2] as Record<string, unknown>[]) {
-    const { trace, out } = await drive(payload, { model: THREE(GOOD()) });
+    const { trace, out } = await drive(payload, { model: FIVE(GOOD()) });
     assert(/"ok":true/.test(out.text), "a draft");
     assertEquals(inserts(trace), [{ client_id: "harness-tenant", user_id: USER_ID, style_key: "barn", source: "video", idem_key: KEY }]);
     assertEquals(holdIdem(trace), KEY, "the key the hold is filed under is the key on the row");
   }
   // One cut for both: a key past 120 characters is cut the same way on the row and on the hold.
   const long = "k".repeat(150);
-  const cut = await drive({ ...STREAMED, idempotencyKey: long }, { model: THREE(GOOD()) });
+  const cut = await drive({ ...STREAMED, idempotencyKey: long }, { model: FIVE(GOOD()) });
   assertEquals(inserts(cut.trace)[0].idem_key, "k".repeat(120));
   assertEquals(holdIdem(cut.trace), "k".repeat(120));
   // No key (an older caller): exactly the object the insert has always written, and no null key.
-  const keyless = await drive({ ...V2, idempotencyKey: undefined }, { model: THREE(GOOD()) });
+  const keyless = await drive({ ...V2, idempotencyKey: undefined }, { model: FIVE(GOOD()) });
   assertEquals(inserts(keyless.trace), [{ client_id: "harness-tenant", user_id: USER_ID, style_key: "barn", source: "video" }]);
   assertEquals(Object.keys(inserts(keyless.trace)[0]), ["client_id", "user_id", "style_key", "source"], "the same keys in the same order as before 253");
   assertEquals(holdIdem(keyless.trace), null);
@@ -923,7 +923,7 @@ Deno.test("the press's key rides on its ledger row: the same key wallet_hold fil
 
 Deno.test("⚠️ a missing idem_key column never fails a generation: the insert is retried without it, with one info row", async () => {
   for (const payload of [STREAMED, V2] as Record<string, unknown>[]) {
-    const { trace, out } = await drive(payload, { model: THREE(GOOD()), noIdemColumn: true });
+    const { trace, out } = await drive(payload, { model: FIVE(GOOD()), noIdemColumn: true });
     const body = JSON.parse(out.text.trimStart());
     assertEquals([body.ok, body.checkId], [true, LEDGER_ID], `${payload.stream ? "streamed" : "plain"}: the draft, on the row the retry wrote`);
     assertEquals(inserts(trace), [
@@ -946,7 +946,7 @@ Deno.test("⚠️ a missing idem_key column never fails a generation: the insert
 });
 
 Deno.test("the frame map is kept on the row BEFORE the draft, and a failing map write never costs `drafted` or the answer", async () => {
-  const ok = await drive(STREAMED, { model: THREE(GOOD()) });
+  const ok = await drive(STREAMED, { model: FIVE(GOOD()) });
   const answer = JSON.parse(ok.out.text);
   assert(answer.frameMap && answer.frameMap.front, "the answer carries a map");
   const ups = ledgerUpdates(ok.trace);
@@ -957,7 +957,7 @@ Deno.test("the frame map is kept on the row BEFORE the draft, and a failing map 
   assert(!("frame_map" in ups[at("drafted")]), "never a key on the 226 write");
   // The write fails (253 not applied) or throws: the draft is on the row and the answer is the same.
   for (const how of ["error", "throw"] as const) {
-    const bad = await drive(STREAMED, { model: THREE(GOOD()), frameMapFails: how });
+    const bad = await drive(STREAMED, { model: FIVE(GOOD()), frameMapFails: how });
     assertEquals(norm(JSON.parse(bad.out.text)), norm(answer), `${how}: the same answer`);
     const bu = ledgerUpdates(bad.trace);
     assertEquals(bu.filter((u) => "drafted" in u).length, 1, `${how}: drafted written`);
@@ -967,7 +967,7 @@ Deno.test("the frame map is kept on the row BEFORE the draft, and a failing map 
   }
   // A reply with no map writes nothing more than it did before 253.
   const noMap: ModelPlan = { body: reply(JSON.stringify({ ...SPEC, frameMap: undefined })), delayMs: 2 };
-  const bare = await drive(STREAMED, { model: THREE(noMap) });
+  const bare = await drive(STREAMED, { model: FIVE(noMap) });
   assertEquals(JSON.parse(bare.out.text).frameMap, null);
   assertEquals(ledgerUpdates(bare.trace).filter((u) => "frame_map" in u), [], "no map, no write");
 });
@@ -979,7 +979,7 @@ Deno.test("the recover action is gated exactly like calibrate_style_ai", async (
   assertEquals(gate("calibrate_style_ai_recover"), gate("calibrate_style_ai"));
   // And through resolveTenant: whoever the generation refuses, the pickup refuses the same way.
   for (const member of [{ role: "user", access: { settings_structures: "view" } }, { role: "user", access: { settings_structures: "none" } }]) {
-    const gen = await drive(STREAMED, { member, model: THREE(GOOD()) });
+    const gen = await drive(STREAMED, { member, model: FIVE(GOOD()) });
     const rec = await drive(RECOVER(), { member, ledger: [ROW()] });
     assertEquals(gen.out.status, 403, JSON.stringify(member));
     assertEquals(rec.out.status, gen.out.status, `the same refusal: ${JSON.stringify(member)}`);

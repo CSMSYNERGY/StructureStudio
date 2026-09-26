@@ -3596,27 +3596,42 @@ export function selfCheckRequest(opts: {
 // Live v2 runs of ONE video give the same SHAPE every time and wandering NUMBERS: a raised centre's
 // eave read 15, then 14, then 12.5 ft; the pitch anywhere from 0.37 to 0.7; 3 porch posts one run and
 // 4 the next; the steps in the centre, then on the right. Each read is a fair sample of what the
-// frames support, so three independent reads combined take out most of that scatter. The v2 draft
-// (and only it: see draftCallCount) therefore sends the SAME request three times in parallel, and
-// combines what comes back here.
+// frames support, so several independent reads combined take out most of that scatter. The v2 draft
+// (and only it: see draftCallCount) therefore sends the SAME request DRAFT_CONSENSUS_CALLS times in
+// parallel, and combines what comes back here.
 //
 // The half in this file is pure (runDraftCalls takes its fetch as an argument). portal-settings'
 // calibrate_style_ai owns the wiring, the hold, the ledger and the money, and
 // aiDraftConsensusWiring_test runs that wiring.
 
-// Three reads, and the cut-off for a straggler once two are in. The grace is a latency bound, not a
-// quality one. It was 20 s until 2026-09-25, and live runs showed what that cost: the straggler is
-// usually the read that THOUGHT (3,400-5,400 tokens, 56-106 s) while the two quick ones had barely
-// thought at all, so a 20 s grace kept the two shallow reads and threw the careful one away. At
-// effort "high" every read thinks; 60 s lets the slowest of them in within the draft budget.
-export const DRAFT_CONSENSUS_CALLS = 3;
-export const DRAFT_CONSENSUS_QUORUM = 2;
+// FIVE READS, QUORUM THREE (2026-09-26; three reads with a quorum of two until then). On Opus 5.5 a
+// read takes ~30-80 s, and with three reads one odd read still sometimes decided a number (a shed
+// drafted at 0.28 against a true 0.22): two reads on the same wrong side ARE the median of three, and
+// when one read is cut off the midpoint of the other two gives an odd read half the say. The median
+// of five moves only when three reads sit on the wrong side, and a discrete field needs three of five
+// for a majority. Ahsan approved the cost (two more reads a press; aiDraftCostCents and the pins in
+// aiDraftStreamWiring_test).
+//
+// The quorum stays "a majority of the calls sent": once three have DRAFTED, the other two get the
+// grace and are then cut off, and the answer is the consensus of whatever drafted by then (any count
+// from one to five; consensusDrafts is written for every one of them). The grace is a latency bound,
+// not a quality one. It was 20 s until 2026-09-25, and live runs showed what that cost: the straggler
+// is usually the read that THOUGHT (3,400-5,400 tokens, 56-106 s) while the quick ones had barely
+// thought at all, so a 20 s grace kept the shallow reads and threw the careful one away. At effort
+// "high" every read thinks; 60 s lets the slowest of them in within the draft budget, which still
+// bounds all five together (the deadline in runDraftCalls).
+export const DRAFT_CONSENSUS_CALLS = 5;
+export const DRAFT_CONSENSUS_QUORUM = 3;
 export const DRAFT_CONSENSUS_GRACE_MS = 60_000;
 
-// How many calls a draft makes. ONE on every legacy request (production's older designer: its
+// How many calls a draft makes. DRAFT_CONSENSUS_CALLS on every v2 draft, streamed (effort "high",
+// 300 s) or not (effort "medium", 125 s): no current browser sends a v2 press without the stream, so
+// the unstreamed one is a stale tab's, and it gains the most from more reads -- its shallow reads
+// scatter more, and with five in flight a press is less likely to have none drafted inside its 125 s
+// (a timeout, then the lean retry). ONE on every legacy request (production's older designer: its
 // request, its timing and its cost stay exactly what they were) and on the lean retry (a retry after
-// a cut-off or timed-out reply is already short of time, and three parallel reads would not make
-// the reply that ran out of room any shorter).
+// a cut-off or timed-out reply is already short of time, and more parallel reads would not make the
+// reply that ran out of room any shorter).
 export function draftCallCount(v2: boolean, lean: boolean): number {
   return v2 && !lean ? DRAFT_CONSENSUS_CALLS : 1;
 }
@@ -3677,8 +3692,11 @@ export type DraftCall<R> = { index: number; ms: number } & (
 //     handler sent, on the signal it sent it on, classified the way it classified it.
 //   * Several calls each get their own signal, aborted by the shared deadline (one budget for all,
 //     never one each) or by the quorum cut-off: once DRAFT_CONSENSUS_QUORUM of them have DRAFTED
-//     (a 2xx reply that `read` says parses), the rest get `graceMs` more and are then aborted.
-//   * A failed call is simply one more result: the caller decides what three failures mean.
+//     (a 2xx reply that `read` says parses), the rest get `graceMs` more and are then aborted. Until
+//     then nothing is cut: with two drafted and two failed, the fifth is waited for (the deadline
+//     still bounds it), because it can still make the quorum. With the quorum at least `count`,
+//     there is no cut-off at all.
+//   * A failed call is simply one more result: the caller decides what the failures mean.
 //
 // The results come back in SEND order (index), not in arrival order, so "the first call" is always
 // the same call whichever one the network happened to answer first.
@@ -3739,7 +3757,9 @@ export async function runDraftCalls<R extends { drafted: boolean }>(opts: {
 // discrete fields below. Every field this does not decide (and the builder-facing `observed` notes
 // and the frame map, which are prose and picks that cannot be averaged) is the medoid's own.
 //
-// DISCRETE FIELDS GO BY MAJORITY; a tie goes to the medoid's value. Only reads that GAVE an answer
+// DISCRETE FIELDS GO BY MAJORITY (strictly, the answer the most voters gave); a tie goes to the
+// best-ranked read that gave a tied answer, the medoid's when it is one of them, so a 2-2 split of
+// four reads or a 2-2-1 of five is decided the same way every time. Only reads that GAVE an answer
 // vote, and a field that belongs to a structure (which end the porch is on, which side the wings are
 // on) is voted only by the reads that chose that structure: a read that saw no porch has no opinion
 // on where its steps are. Where leaving a key out is itself an answer, it votes as one: no steps, a
@@ -3750,9 +3770,10 @@ export async function runDraftCalls<R extends { drafted: boolean }>(opts: {
 // NUMBERS ARE THE MEDIAN over the reads that agree with the structure chosen for them: the porch's
 // numbers from the reads with the chosen porch kind, the wings' from the reads with wings, the pitch
 // and the gambrel ratios from the reads of the chosen roof type, the tail spacing from the reads with
-// an open eave. Two values give their midpoint; porchPosts is rounded to a whole post. A dormer's
-// offset is signed (the sign is the slope it sits on), so the slope is voted first and only the reads
-// on that slope are averaged; the midpoint of -0.5 and 0.5 would put it on the ridge.
+// an open eave. An even count (two reads, or four) gives the midpoint of its middle two; porchPosts is
+// rounded to a whole post. A dormer's offset is signed (the sign is the slope it sits on), so the
+// slope is voted first and only the reads on that slope are averaged; the midpoint of -0.5 and 0.5
+// would put it on the ridge.
 //
 // COLOURS: per key, the median of each channel over the reads that gave the key. Two readings far
 // apart (a channel more than CONSENSUS_COLOR_BLEND_MAX apart) are a split read, not noise, and their

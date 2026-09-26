@@ -86,7 +86,8 @@ import { parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfChec
 // 2026-09-24): the check is gated on `frame` like the draft, and a legacy request is d3ab404's.
 import { selfCheckMode, selfCheckRequest, frameKeyWarning } from "../_shared/styleD3.ts";
 import { aiDraftCostCents, aiModelFields } from "../_shared/styleD3.ts";
-// Consensus drafting (2026-09-25): the v2 draft reads the video three times and combines the reads.
+// Consensus drafting (2026-09-25): the v2 draft reads the video several times (five since
+// 2026-09-26, DRAFT_CONSENSUS_CALLS) and combines the reads.
 import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftCallsUsage, consensusSplitWarning, DRAFT_CONSENSUS_GRACE_MS } from "../_shared/styleD3.ts";
 // Measured pitches (2026-09-26): each v2 gable read's pitch is worked out from its own pixel points.
 import { draftReadSample } from "../_shared/styleD3.ts";
@@ -4168,13 +4169,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // ── CONSENSUS DRAFTING (2026-09-25) ──────────────────────────────────────────────────────
     // Live v2 runs of one video give the same shape every time and wandering numbers: a raised
     // centre's eave read 15, 14 and 12.5 ft, the pitch anywhere from 0.37 to 0.7, 3 porch posts or
-    // 4, the steps in the centre or on the right. So the v2 draft sends the SAME request three
-    // times in parallel and combines the reads (consensusDrafts in styleD3.ts: the medoid read is
-    // the base, every discrete field goes by majority, every number is the median of the reads
-    // that agree with the structure chosen for it).
+    // 4, the steps in the centre or on the right. So the v2 draft sends the SAME request five times
+    // (DRAFT_CONSENSUS_CALLS; three until 2026-09-26) in parallel and combines the reads
+    // (consensusDrafts in styleD3.ts: the medoid read is the base, every discrete field goes by
+    // majority, every number is the median of the reads that agree with the structure chosen for it).
+    // Streamed or not: draftCallCount says why the unstreamed v2 press gets five too.
     //
-    //   * ONE budget. draftAbortMs above bounds all three together, never each. Once two have
-    //     drafted, the third gets DRAFT_CONSENSUS_GRACE_MS (60 s) more and is then cut off.
+    //   * ONE budget. draftAbortMs above bounds all five together, never each. Once three have
+    //     drafted (DRAFT_CONSENSUS_QUORUM), the other two get DRAFT_CONSENSUS_GRACE_MS (60 s) more
+    //     and are then cut off; the answer combines whatever drafted by then.
     //   * A call that fails, is cut off or does not parse is dropped. One read that parses is
     //     enough to answer with; the consensus of one read is that read.
     //   * NONE parsed: the FIRST call SENT (not the first to come back) is classified exactly the
@@ -4279,7 +4282,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       textChars: text.length,
       blockTypes: reply.blockTypes,
       // The v2 lean retry's ONE read (2026-09-26): its roof and where its pitch came from, as the
-      // three-read record keeps every read's in `samples`. Absent on every legacy reply.
+      // consensus record keeps every read's in `samples`. Absent on every legacy reply.
       ...(lead.reading.pitch ? { samples: [draftReadSample(lead.reading)] } : {}),
     });
     if (reply.stopReason === "refusal") {
@@ -4298,7 +4301,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // The builder's numbers go over the model's INSIDE parseModelSpec, between the inches fold
     // and the sanitiser — see its header for why that is the only position that works. On v2 the
     // reply's own points then give a gable's pitch (2026-09-26), exactly as the lead's reading did,
-    // which is what a single read (the lean retry) is drafted with; three reads are replaced below.
+    // which is what a single read (the lean retry) is drafted with; a consensus replaces it below.
     const drafted = parseModelSpec(text, dims, v2Prompt);
     if (!drafted.ok) {
       // The model answered unusably. The builder got nothing, so charging for our own
