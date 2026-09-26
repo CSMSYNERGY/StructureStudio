@@ -90,6 +90,8 @@ import { aiDraftCostCents, aiModelFields } from "../_shared/styleD3.ts";
 import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftCallsUsage, consensusSplitWarning, DRAFT_CONSENSUS_GRACE_MS } from "../_shared/styleD3.ts";
 // Measured pitches (2026-09-26): each v2 gable read's pitch is worked out from its own pixel points.
 import { draftReadSample } from "../_shared/styleD3.ts";
+// ...and a pitch at least two reads measured is locked in the self-check (2026-09-26).
+import { measuredPitchLock } from "../_shared/styleD3.ts";
 // The streamed draft (2026-09-25): a v2 draft answers behind a heartbeat so it can outlive the
 // gateway's 150 s of silence (see draftAnswer below).
 import { wantsStreamedDraft, DRAFT_STREAM_DEADLINE_MS } from "../_shared/styleD3.ts";
@@ -4785,7 +4787,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ? claim.is("self_check_at", null)
       : claim.eq("self_check_verdict", "corrections");
     const { data: claimed, error: claimErr } = await claim
-      .select("drafted, dims, self_check_after, self_check_changed, self_check_rounds").maybeSingle();
+      .select("drafted, dims, self_check_after, self_check_changed, self_check_rounds, draft_tokens").maybeSingle();
     if (claimErr) {
       // A database fault: a dropped connection, a statement timeout, a permission change — OR
       // MIGRATION 252 NOT APPLIED. This is the first statement in the action to name a 252
@@ -4850,6 +4852,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return skipped("row_unusable", "The check could not run on this generation - review the draft yourself.");
     }
 
+    // ── A MEASURED GABLE PITCH IS LOCKED (2026-09-26, measuredPitchLock) ─────────────────
+    // Live, a draft whose reads measured a 0.41 gable from their own points came out at 0.415, and
+    // round 0 of this check then moved it to 0.7 by eye. So a pitch at least two reads MEASURED is
+    // treated like a builder-measured eave: the prompt says it is not the check's to change and
+    // applySelfCheck drops a correction to it. Worked out ONCE, off the ROW (draft_tokens.samples
+    // and the first draft, `drafted`), so it holds for every round of this generation. v2 only:
+    // the legacy check is d3ab404's, rules and prompt alike.
+    const pitchLocked = v2Check && measuredPitchLock(claimed.draft_tokens, claimed.drafted);
+
     // ── THE SECOND CALL ──────────────────────────────────────────────────────────────────
     // The builder's frame first and our render second, one pair per viewpoint, with a line
     // naming which is which. Reality before our attempt at it. The whole request -- prompt,
@@ -4868,7 +4879,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // allow-listed NAMES off the row's own self_check_changed, never the model's prose.
     const plan = selfCheckRequest({
       mode: checkMode, dims, draft: draftRead.d3, pairs,
-      round, earlier: selfCheckChangedFields(claimed.self_check_changed),
+      round, earlier: selfCheckChangedFields(claimed.self_check_changed), pitchLocked,
     });
     const checkSignal = AbortSignal.timeout(plan.abortMs);
     let checkRes: Response;
@@ -4925,8 +4936,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // stops being answerable.
     // `dims` rides along so a builder who MEASURED the eave keeps it: roof.overhang comes off
     // the allow-list for that generation, the same way wallHeightFt and sizeFt are permanently
-    // off it. selfCheckPrompt stops asking for it in the same breath.
-    const applied = applySelfCheck(draftRead.d3, read, dims, checkMode);
+    // off it. selfCheckPrompt stops asking for it in the same breath. `pitchLocked` does the same
+    // for roof.pitch where the reads measured it (above).
+    const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked);
     if (!applied.ok) {
       return await failedCheck("ai_selfcheck_merge_failed", applied.error, { elapsedMs: Date.now() - t0, renders: pairs.length, tokens });
     }
@@ -4938,7 +4950,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: "ai_selfcheck_field_dropped", severity: "info",
         message: `The self-check proposed ${applied.dropped.length} change(s) that were not applied.`,
-        context: { checkId, verdict: applied.verdict, dropped: applied.dropped.slice(0, 20) },
+        context: { checkId, verdict: applied.verdict, dropped: applied.dropped.slice(0, 20), ...(pitchLocked ? { pitchLocked } : {}) },
       });
     }
 

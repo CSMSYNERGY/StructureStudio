@@ -295,8 +295,11 @@ Deno.test("a fresh row is claimed once, and hands back the draft, the ruler and 
   const rows = [freshRow()];
   const r = await runClaim({ rows });
   assert(r.fellThrough, "the claim passed and the check may run");
+  // draft_tokens (2026-09-26) carries the reads' samples, which say whether the pitch was measured
+  // (measuredPitchLock); this fixture row has none.
   assertEquals(r.claimed, {
     drafted: D3, dims: DIMS, self_check_after: null, self_check_changed: null, self_check_rounds: null,
+    draft_tokens: null,
   }, "and it returned exactly what the check needs, all of it off the row");
   assert(rows[0].self_check_at, "the row is marked used BEFORE any model call");
   assertEquals(rows[0].self_check_round, 1, "and round 0 has been counted");
