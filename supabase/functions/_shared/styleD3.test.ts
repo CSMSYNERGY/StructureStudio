@@ -1777,8 +1777,13 @@ Deno.test("v2 asks for the pixel points a gable's pitch is read from, in a measu
     assert(p.includes("Give that image's own size in pixels as size, [width, height]."), `${name}: the image size`);
     assert(p.includes("Put every point on a clear landmark you can see"), `${name}: read along landmarks`);
     assert(p.includes("For pitch on a gable roof, use the frame most square-on to a gable end, the one the PITCH paragraph picks"), `${name}: the square-on frame`);
-    assert(p.includes("give three points on the TOP edge of the roof against the sky: left, where the left rake meets the eave; peak, the top of the roof at the ridge; right, where the right rake meets the eave"),
+    assert(p.includes("give three points on the TOP edge of the roof's outline against the sky, the sloping edge of the rake board: left, the outer tip where that sloping edge ends on the left"),
       `${name}: the gable's three points`);
+    // Where the ends go (live, 2026-09-26): Opus 5.5 on the full draft put the right end anywhere from
+    // the rake tip (y 151) down to the eave return's lower corner (y 195), which reads 0.44 to 0.57 for
+    // a 0.41 gable. Naming the tip and ruling out the corners below it narrowed the reads.
+    assert(p.includes("Each end is the TIP of the sloping top edge, never the lower corner of the eave, the fascia, the soffit or an eave return below it"),
+      `${name}: the tip, never the corner below it`);
     assert(p.includes("On a building with side wings the gable is the centre section's"), `${name}: the centre section's gable`);
     // A shed's and a gambrel's pitch are never computed (pitchFromMeasure), so both are told plainly
     // to leave the block out.
