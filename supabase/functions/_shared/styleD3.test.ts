@@ -4142,6 +4142,8 @@ Deno.test("the centre eave is built from two measured parts, in the draft and in
   // are real. Do not settle on 1.0 ft because it is typical".
   assert(c.includes("correct roof.overhang BY THE\n   DIFFERENCE") && c.includes("the rake board stands out past the corner of the wall below it"), "check: the overhang by the difference");
   assert(!c.includes("Do not settle on 1.0 ft"), "check: no push toward a flush eave");
+  // The wing roofs' slope too (2026-09-26): live Opus 5.5 reads of a 0.2 wing spread 0.10-0.25, mostly low.
+  assert(c.includes("correct roof.wingPitch BY THE") && c.includes("divided by\n       roof.wingWidthFt, to its current value"), "check: the wing pitch by the difference");
   assert(c.includes("roof.porchAttachFt") && c.includes("compare the height of the porch roof's top where it meets the wall"), "check: the porch attach by the difference");
 });
 
@@ -5075,6 +5077,9 @@ const OVERHANG_AT_8FE5D30 = (wall: string) => "Look at the close-up\n" +
   "   because it is typical; report what this eave actually does.";
 const ATTACH_NOW = / Correct it BY THE DIFFERENCE: in the\n       front viewpoint, compare the height of the porch roof's top[\s\S]*?to its current value\./;
 const ATTACH_AT_8FE5D30 = " Work it out against the ruler.";
+// ...and the wing roofs' slope (2026-09-26), corrected by the difference as well.
+const WING_NOW = /the slope of the wing roofs \(roof\.wingPitch, rise over run:\n[\s\S]*?roof\.wingWidthFt, to its current value\), and/;
+const WING_AT_8FE5D30 = "the slope of the wing roofs (roof.wingPitch, rise over run), and";
 const BAND_AT_8FE5D30 = "render. If the band's share differs by a quarter or more (a band as tall as half the\n" +
   "       outer wall in the frame and a quarter of it in the render, say), correct\n" +
   "       roof.centerEaveFt to where the wing roof meets the centre wall plus the band you\n" +
@@ -5109,10 +5114,10 @@ Deno.test("⛔ without the lock, the v2 check prompt and its request body are 8f
       const m = plain.match(/on a (\S+) ft wall is about|times the (\S+) ft wall, to its/);
       const wall = m ? (m[1] ?? m[2]) : "";
       if (OVERHANG_NOW.test(plain)) {
-        const back = plain.replace(OVERHANG_NOW, OVERHANG_AT_8FE5D30(wall)).replace(ATTACH_NOW, ATTACH_AT_8FE5D30);
+        const back = plain.replace(OVERHANG_NOW, OVERHANG_AT_8FE5D30(wall)).replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30);
         out[k] = k === "body" ? back.replace(/\n/g, "\\n") : back;
       } else {
-        const back = plain.replace(ATTACH_NOW, ATTACH_AT_8FE5D30);
+        const back = plain.replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30);
         out[k] = k === "body" ? back.replace(/\n/g, "\\n") : back;
       }
     }

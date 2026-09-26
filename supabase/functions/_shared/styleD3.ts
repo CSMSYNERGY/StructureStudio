@@ -2665,7 +2665,12 @@ effort here.
        roof.centerEaveFt (feet from the floor to the top of the centre walls) - all measured
        against the ${wall} ft outer walls.
        Where both show wings, compare each wing's width against the ruler (roof.wingWidthFt;
-       0 removes the wings), the slope of the wing roofs (roof.wingPitch, rise over run), and
+       0 removes the wings), the slope of the wing roofs (roof.wingPitch, rise over run:
+       in the front viewpoint, compare how far a wing roof rises from its outer eave to where it
+       meets the centre wall, as a share of the outer wall's height, in the frame and in the
+       render; if the two differ by a tenth of the wall or more, correct roof.wingPitch BY THE
+       DIFFERENCE: add the frame's share minus the render's, times ${wall} ft, divided by
+       roof.wingWidthFt, to its current value), and
        the CENTRE section's eave (roof.centerEaveFt, currently ${centreNow}: feet
        from the floor to the top of the centre walls). Measure it, do not eyeball it: in a
        frame square to the front or the back, compare the BAND of centre wall showing above the
