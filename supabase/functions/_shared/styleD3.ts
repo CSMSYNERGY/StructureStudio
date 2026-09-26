@@ -2435,8 +2435,14 @@ export function selfCheckPrompt(opts: {
   // caller that passes neither -- gets the single check that has always run.
   round?: number;
   earlier?: readonly string[];
+  // measuredPitchLock's answer for the row, read by the caller (2026-09-26). True says the draft's
+  // gable pitch was worked out from the reads' own points: step 5 says it is not the check's to
+  // change and the rules list it beside the other measured fields. Absent or false, the prompt is
+  // byte for byte the one every check sent before this.
+  pitchLocked?: boolean;
 }): string {
   const { dims, draft } = opts;
+  const pitchLocked = opts.pitchLocked === true;
   const views = SELF_CHECK_VIEWPOINTS.filter((v) => opts.viewpoints.includes(v));
   const roof = (draft.roof ?? {}) as Record<string, unknown>;
   const overhang = num(roof["overhang"]);
@@ -2564,6 +2570,12 @@ export function selfCheckPrompt(opts: {
     ? `
    Measure against the wall directly under THAT eave: ${wall} ft for ${roof.type === "shed" ? "the LOW eave" : "a wing's outer eave"}; ${eaveWalls.join("; ")}.`
     : "";
+  // ── A MEASURED GABLE PITCH (2026-09-26, measuredPitchLock) ──
+  // With the lock, step 5 keeps its gambrel sentence and says the pitch was measured, in place of
+  // asking for it to be judged by eye, which is what moved a measured 0.415 to 0.7 live.
+  // applySelfCheck drops a correction to it for the same row, so this only stops the model
+  // spending its effort on a field that cannot land, as step 2 does for a measured eave.
+  const pitchNow = num(roof.pitch) === null ? "not set" : String(num(roof.pitch));
   // ── THE ROUND (v2) ──
   // A later round judges renders of the spec the round before it PRODUCED, and says so. Without
   // this the model reads "YOUR DRAFT" as its own first answer and a correction an earlier round
@@ -2724,12 +2736,18 @@ ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave
    check whether the gambrel rises below are carrying it.
 
 THEN THESE, only if the pictures disagree:
-5. ROOF PROFILE. For a gambrel: kneeU, kneeRise, ridgeRise, measured from the CENTRELINE and
+${pitchLocked ? `5. ROOF PROFILE. For a gambrel: kneeU, kneeRise, ridgeRise, measured from the CENTRELINE and
+   the TOP OF THE WALL, each divided by the half-span. THE PITCH (roof.pitch, currently ${pitchNow})
+   WAS MEASURED: it was worked out from points marked on the builder's own frames, not judged
+   by eye. It is not yours to change: a correction to roof.pitch will be thrown away. Leave it
+   alone even where the peak looks higher or lower in a frame than in the render - a gable seen
+   from an angle looks steeper than a square-on one. On a gable there is nothing else in this
+   step: mark "roofProfile" as "ok".` : `5. ROOF PROFILE. For a gambrel: kneeU, kneeRise, ridgeRise, measured from the CENTRELINE and
    the TOP OF THE WALL, each divided by the half-span. For a gable or shed: pitch. Check the
    silhouette at the head-on viewpoint. For a gable, compare how far the peak rises above the
    eave corners with half the gable's width, in the frame and in the render; where one of the
    two is seen more from an angle, remember an angled gable looks steeper than a square-on one.
-   If the render's roof and the frame's roof trace the same outline, leave all of these alone.
+   If the render's roof and the frame's roof trace the same outline, leave all of these alone.`}
 6. roof.eave - "open" (a sawtooth row of rafter tails with gaps of sky between them) or
    "fascia" (one unbroken board). Only from a viewpoint that actually shows under the eave.
 7. roofMaterial, foundation, gableVent - only if plainly wrong. (roof.type is step 1's.)
@@ -2764,7 +2782,7 @@ RULES FOR THE ANSWER:
     "changed": []. That is a complete, correct answer. Stop there.
   * Every field in "corrections" must also appear in "changed". Anything not in both is
     ignored.
-  * Never return wallHeightFt, sizeFt, colors or siding${measuredEave === null ? "" : " or roof.overhang"}. They are not yours to change here.
+  * Never return wallHeightFt, sizeFt, colors or siding${measuredEave === null ? "" : " or roof.overhang"}${pitchLocked ? " or roof.pitch" : ""}. They are not yours to change here.
   * Change at most ${SELF_CHECK_MAX_FIELDS} fields. If you believe more than ${SELF_CHECK_MAX_FIELDS} are wrong, the draft is
     not worth patching: return the ${SELF_CHECK_MAX_FIELDS} that matter most and say so in "note".
   * "unclear" is better than a guess. A field the frames genuinely do not settle should be
@@ -2999,7 +3017,12 @@ export function parseSelfCheck(text: string, mode: SelfCheckMode = "v2"): SelfCh
 // `mode` (fix, 2026-09-24) picks the allow-list and the cap: "legacy" is d3ab404's gate exactly
 // (22 paths, six fields, and no v2 consequence report), so no v2 key can land from a check an
 // older designer ran. Absent is "v2", which is every call this file's tests already make.
-export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: KnownDims | null, mode: SelfCheckMode = "v2"):
+//
+// `pitchLocked` (2026-09-26) is measuredPitchLock's answer for the row: the draft's gable pitch was
+// worked out from the reads' own points, so roof.pitch comes off the allow-list for this generation
+// the way roof.overhang does for a measured eave, and a correction to it lands in `dropped`. The
+// caller passes it on a v2 check only. Absent (every existing caller) is false: the list is unchanged.
+export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: KnownDims | null, mode: SelfCheckMode = "v2", pitchLocked = false):
   | { ok: false; error: string }
   | {
     ok: true;
@@ -3025,8 +3048,8 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   }
 
   const measuredEave = !!dims && dims.overhangIn !== undefined && dims.overhangIn !== null;
-  const allow = measuredEave
-    ? rules.allow.filter((f) => f !== "roof.overhang")
+  const allow = measuredEave || pitchLocked
+    ? rules.allow.filter((f) => !(measuredEave && f === "roof.overhang") && !(pitchLocked && f === "roof.pitch"))
     : rules.allow;
   const dropped: string[] = [];
   // The value the model wants at each allowed path. Read out of `corrections`, never out of the
@@ -3476,11 +3499,13 @@ export function selfCheckRequest(opts: {
   // v2 only, and read off the ledger row by the caller (see selfCheckPrompt).
   round?: number;
   earlier?: readonly string[];
+  // v2 only (measuredPitchLock, 2026-09-26). The legacy prompt is frozen and never sees it.
+  pitchLocked?: boolean;
 }): { abortMs: number; body: Record<string, unknown> } {
   const viewpoints = opts.pairs.map((p) => p.viewpoint);
   const text = opts.mode === "legacy"
     ? legacySelfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints })
-    : selfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints, round: opts.round, earlier: opts.earlier });
+    : selfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints, round: opts.round, earlier: opts.earlier, pitchLocked: opts.pitchLocked });
   const content: unknown[] = [{ type: "text", text }];
   for (const p of opts.pairs) {
     content.push({ type: "text", text: selfCheckPairLabel(p.viewpoint, opts.mode) });

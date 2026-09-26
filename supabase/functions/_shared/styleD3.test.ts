@@ -5006,3 +5006,139 @@ Deno.test("measuredPitchLock reads the record draftCallsUsage writes: three real
   const lc = consensusOfCalls(legacyCalls, 12)!;
   assert(!measuredPitchLock(draftCallsUsage("claude-sonnet-5", legacyCalls, legacyCalls[lc.call], lc).tokens, lc.d3), "an unmeasured record");
 });
+
+// The prompt. A gable with a porch, as a locked row's draft would be.
+const LOCK_GABLE: D3Spec = cleanSpec({
+  roof: { type: "gable", front: "gable", pitch: 0.42, overhang: 1, eave: "fascia", porchOutFt: 6, porchEnd: "front" },
+  siding: "lap", colors: { body: "#8b6f4e", trim: "#e8e0d0", roof: "#2a2a2a" }, wallHeightFt: 9,
+});
+// Length and SHA-256 of what 8fe5d30's selfCheckPrompt / selfCheckRequest returned for the inputs in
+// the test below, line endings normalised.
+const UNLOCKED_AT_8FE5D30: Record<string, [number, string]> = {
+  gable: [14049, "562a88d3eea746701ffd3858bf3b3c34186de2f2de4982f6542489ec5bee37b3"],
+  gableEaveRound1: [14157, "b228f27eaff83aaf40509ef70b9fe9afafd142e7b419f5aefa8a0435c9c2bbb2"],
+  gambrel: [14242, "40502a3b26afee4f869d6d216c0fd12eb9152656b207eb59811ceee207702be7"],
+  body: [15840, "6f655dfa3ea9fb50fbf68925983154f85f1fd678ecafdb6a5bd0a2d0c770f847"],
+};
+
+Deno.test("⛔ without the lock, the v2 check prompt and its request body are 8fe5d30's byte for byte", async () => {
+  for (const lock of [{}, { pitchLocked: false }]) {
+    const out: Record<string, string> = {
+      gable: lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS, ...lock })),
+      gableEaveRound1: lf(selfCheckPrompt({
+        dims: { ...CHECK_DIMS, overhangIn: 6 }, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS,
+        round: 1, earlier: ["roof.pitch", "roof.front"], ...lock,
+      })),
+      gambrel: lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS, ...lock })),
+      body: JSON.stringify(selfCheckRequest({ mode: "v2", dims: CHECK_DIMS, draft: LOCK_GABLE, pairs: PAIRS4, round: 0, ...lock }).body)
+        .replace(/\\r\\n/g, "\\n"),
+    };
+    for (const [k, [length, hash]] of Object.entries(UNLOCKED_AT_8FE5D30)) {
+      assertEquals(out[k].length, length, `${k} ${JSON.stringify(lock)}: its length`);
+      assertEquals(await sha256(out[k]), hash, `${k} ${JSON.stringify(lock)}: its bytes`);
+    }
+  }
+});
+
+// The two places a locked prompt differs, as the model reads them.
+const LOCKED_STEP_5 = `5. ROOF PROFILE. For a gambrel: kneeU, kneeRise, ridgeRise, measured from the CENTRELINE and
+   the TOP OF THE WALL, each divided by the half-span. THE PITCH (roof.pitch, currently 0.42)
+   WAS MEASURED: it was worked out from points marked on the builder's own frames, not judged
+   by eye. It is not yours to change: a correction to roof.pitch will be thrown away. Leave it
+   alone even where the peak looks higher or lower in a frame than in the render - a gable seen
+   from an angle looks steeper than a square-on one. On a gable there is nothing else in this
+   step: mark "roofProfile" as "ok".
+6. roof.eave`;
+
+Deno.test("⚠️ a locked prompt says the pitch was MEASURED and lists it as not the check's, and changes nothing else", () => {
+  const unlocked = lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS }));
+  const locked = lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS, pitchLocked: true }));
+  assert(locked.includes(`THEN THESE, only if the pictures disagree:\n${LOCKED_STEP_5}`), "step 5, in full, in its place");
+  assert(!locked.includes("For a gable or shed: pitch."), "it no longer asks for the pitch");
+  assert(!locked.includes("compare how far the peak rises above the"), "or for the peak to be judged by eye");
+  assert(locked.includes("  * Never return wallHeightFt, sizeFt, colors or siding or roof.pitch. They are not yours to change here."),
+    "and the rules list it beside the other measured fields");
+  // Everything outside those two places is the unlocked prompt's.
+  const rest = (p: string) => p.slice(0, p.indexOf("5. ROOF PROFILE")) + p.slice(p.indexOf("6. roof.eave"))
+    .replace("colors or siding or roof.pitch.", "colors or siding.");
+  assertEquals(rest(locked), rest(unlocked), "nothing else moved");
+  // With the builder's eave measured too, both are listed, the eave first as it always was.
+  const both = lf(selfCheckPrompt({ dims: { ...CHECK_DIMS, overhangIn: 6 }, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS, pitchLocked: true }));
+  assert(both.includes("Never return wallHeightFt, sizeFt, colors or siding or roof.overhang or roof.pitch. They are not"), "both measured fields");
+  assert(both.includes("THE BUILDER MEASURED THIS ONE TOO") && both.includes("WAS MEASURED: it was worked out from points"), "and both steps say so");
+  // The lock is a property of the row, so a later round is told too.
+  const later = lf(selfCheckPrompt({
+    dims: CHECK_DIMS, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS, round: 2, earlier: ["roof.eave"], pitchLocked: true,
+  }));
+  assert(later.includes("THIS IS CHECK ROUND 3 OF") && later.includes(LOCKED_STEP_5), "round 3 of 3");
+  // Only `true` locks: the handler hands it measuredPitchLock's boolean, and nothing else is read as one.
+  for (const junk of [1, "true", {}]) {
+    assertEquals(lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS, pitchLocked: junk as unknown as boolean })),
+      unlocked, `pitchLocked ${JSON.stringify(junk)}`);
+  }
+});
+
+Deno.test("selfCheckRequest: v2 carries the lock into its prompt; the legacy body is d3ab404's whatever it is handed", async () => {
+  const v2 = selfCheckRequest({ mode: "v2", dims: CHECK_DIMS, draft: LOCK_GABLE, pairs: PAIRS4, round: 0, pitchLocked: true });
+  const text = lf(((v2.body.messages as { content: { text?: string }[] }[])[0].content[0].text) ?? "");
+  assertEquals(text, lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: LOCK_GABLE, viewpoints: FOUR, round: 0, pitchLocked: true })));
+  assert(text.includes(LOCKED_STEP_5), "the locked step");
+  // ⛔ The legacy prompt is frozen: the lock never reaches it (the handler never passes one either).
+  const legacy = selfCheckRequest({ mode: "legacy", dims: CHECK_DIMS, draft: CLEAN, pairs: PAIRS4, round: 0, earlier: ["roof.front"], pitchLocked: true });
+  const body = JSON.stringify(legacy.body).replace(/\\r\\n/g, "\\n");
+  assertEquals(body.length, LEGACY_CHECK_BODY_LENGTH, "the legacy body's length");
+  assertEquals(await sha256(body), LEGACY_CHECK_BODY_SHA256, "and its bytes");
+});
+
+Deno.test("⚠️ applySelfCheck with the lock drops a pitch correction and keeps every other one", () => {
+  const read = readOf({
+    verdict: "corrections",
+    corrections: { roof: { pitch: 0.7, eave: "open" } },
+    changed: [
+      { field: "roof.pitch", from: 0.42, to: 0.7, why: "the peak rises nearly as much as its half-span" },
+      { field: "roof.eave", from: "fascia", to: "open", why: "rafter tails in the close-up" },
+    ],
+    checked: {}, note: "",
+  });
+  const locked = applySelfCheck(LOCK_GABLE, read, CHECK_DIMS, "v2", true);
+  assert(locked.ok, "the merge is buildable");
+  if (!locked.ok) return;
+  assertEquals(locked.verdict, "corrections");
+  assertEquals(locked.d3.roof.pitch, 0.42, "the measured pitch stands");
+  assertEquals(locked.d3.roof.eave, "open", "the eave lands");
+  assertEquals(locked.changed.map((c) => c.field), ["roof.eave"], "only the eave is reported");
+  assertEquals(locked.dropped, ["roof.pitch"], "the pitch is recorded as not applied");
+  // Unlocked (the default, and every existing caller's shape) both land.
+  for (const unlocked of [applySelfCheck(LOCK_GABLE, read, CHECK_DIMS), applySelfCheck(LOCK_GABLE, read, CHECK_DIMS, "v2", false)]) {
+    assert(unlocked.ok, "unlocked");
+    if (!unlocked.ok) return;
+    assertEquals([unlocked.d3.roof.pitch, unlocked.d3.roof.eave], [0.7, "open"], "both land");
+    assertEquals(unlocked.changed.map((c) => c.field), ["roof.pitch", "roof.eave"]);
+    assertEquals(unlocked.dropped, []);
+  }
+  // A pitch correction alone is a "matches": the draft stands, and `dropped` says the model tried.
+  const pitchOnly = readOf({
+    verdict: "corrections", corrections: { roof: { pitch: 0.7 } },
+    changed: [{ field: "roof.pitch", from: 0.42, to: 0.7, why: "steeper" }], checked: {}, note: "",
+  });
+  const alone = applySelfCheck(LOCK_GABLE, pitchOnly, CHECK_DIMS, "v2", true);
+  assert(alone.ok, "buildable");
+  if (!alone.ok) return;
+  assertEquals([alone.verdict, alone.changed.length, alone.dropped], ["matches", 0, ["roof.pitch"]]);
+  assertEquals(alone.d3.roof.pitch, 0.42, "the draft's pitch");
+  // With the eave measured too, both come off the list together.
+  const both = readOf({
+    verdict: "corrections", corrections: { roof: { pitch: 0.7, overhang: 0.2, eave: "open" } },
+    changed: [
+      { field: "roof.pitch", from: 0.42, to: 0.7, why: "steeper" },
+      { field: "roof.overhang", from: 0.5, to: 0.2, why: "tight" },
+      { field: "roof.eave", from: "fascia", to: "open", why: "tails" },
+    ],
+    checked: {}, note: "",
+  });
+  const measured = applySelfCheck(LOCK_GABLE, both, { ...CHECK_DIMS, overhangIn: 6 }, "v2", true);
+  assert(measured.ok, "buildable");
+  if (!measured.ok) return;
+  assertEquals(measured.dropped, ["roof.pitch", "roof.overhang"], "both measured fields dropped");
+  assertEquals(measured.changed.map((c) => c.field), ["roof.eave"], "and the rest lands");
+});
