@@ -5488,6 +5488,332 @@ Deno.test("applyMeasuredPitches: points that fail, or do not fit the read, leave
   assertEquals([bare.d3.roof.pitch, bare.sources.modelPitch], [0.4, null]);
 });
 
+// ═══ MEASURED WING PITCHES (2026-09-26) ═══════════════════════════════════════════════════════════
+// Live on Opus 5.5 the wing roofs of a raised-centre building came back low: the model's own
+// wingPitch was 0.10 to 0.14 on many reads against a measured 0.20. The v2 reply's measure block now
+// also carries `wing`, the four corners of the two wing roofs' sloping top edges in the square-on front
+// frame, and the server works the slope out as the tangent of the mean of the two wings' ANGLES, which
+// a camera's roll cannot move. What is pinned here: the six live reads, a rolled frame, every check
+// that sends a read back to the model's own number, that only a read with wings on both sides is
+// computed, and what each read records in draft_tokens.
+import { MEASURE_WING_MAX_GAP_DEG, MEASURE_WING_MIN_RUN, wingPitchFromMeasure } from "./styleD3.ts";
+
+// A read's sanitised roof with a wing each side, whose own wingPitch is 0.13.
+const WINGS_ROOF = { type: "gable", front: "gable", pitch: 0.5, wingSide: "both", wingWidthFt: 5, wingPitch: 0.13, centerEaveFt: 13 };
+const wingAt = (leftOuter: number[], leftInner: number[], rightInner: number[], rightOuter: number[], size: unknown = M_SIZE) =>
+  ({ frame: 1, size, leftOuter, leftInner, rightInner, rightOuter });
+// A generic 0.3 in a 1600 x 900 frame: each wing falls 78 px over a 260 px run.
+const WINGS_SQUARE = [[300, 560], [560, 482], [1040, 482], [1300, 560]];
+const wingsSquare = (size: unknown = M_SIZE) => wingAt(WINGS_SQUARE[0], WINGS_SQUARE[1], WINGS_SQUARE[2], WINGS_SQUARE[3], size);
+// The six live reads (2026-09-26): leftOuter, leftInner, rightInner and rightOuter in the 1280 x 720
+// front frame of one raised-centre building, asked for on the full prompt, and the wingPitch each of
+// those reads gave of its own.
+const LIVE_WING_SIZE = [1280, 720];
+const LIVE_WING_POINTS = [
+  [[320, 298], [492, 280], [806, 264], [1192, 312]],
+  [[312, 332], [492, 282], [806, 268], [1192, 316]],
+  [[312, 330], [490, 280], [805, 265], [1195, 335]],
+  [[310, 330], [470, 282], [805, 265], [1192, 335]],
+  [[310, 332], [492, 282], [805, 265], [1192, 318]],
+  [[322, 330], [492, 280], [805, 265], [1192, 338]],
+];
+const LIVE_WING_READS = LIVE_WING_POINTS.map(([lo, li, ri, ro]) => wingAt(lo, li, ri, ro, LIVE_WING_SIZE));
+const LIVE_WING_OWN = [0.13, 0.17, 0.21, 0.13, 0.14, 0.25];
+// Rise over run of one wing's edge, from its outer end to its inner one, to two places.
+const edgeSlope = (outer: number[], inner: number[]) => Math.round(Math.abs((outer[1] - inner[1]) / (outer[0] - inner[0])) * 100) / 100;
+
+Deno.test("wing measure: the checks' thresholds are the ones the brief set", () => {
+  assertEquals(MEASURE_WING_MIN_RUN, 0.05);
+  assertEquals(MEASURE_WING_MAX_GAP_DEG, 15);
+});
+
+Deno.test("⚠️ wingPitchFromMeasure: the six live reads give 0.11 to 0.24, median 0.215, where the same reads' own numbers had 0.155", () => {
+  const measured = LIVE_WING_READS.map((w) => wingPitchFromMeasure(w, WINGS_ROOF));
+  assertEquals(measured, [0.11, 0.2, 0.23, 0.24, 0.2, 0.24]);
+  // To three places, the brief's own arithmetic: sL and sR each wing's fall over its run, and the
+  // answer tan((atan(sL) + atan(sR)) / 2).
+  const exact = LIVE_WING_POINTS.map(([lo, li, ri, ro]) => {
+    const sL = (lo[1] - li[1]) / (li[0] - lo[0]), sR = (ro[1] - ri[1]) / (ro[0] - ri[0]);
+    return Math.tan((Math.atan(sL) + Math.atan(sR)) / 2);
+  });
+  assertEquals(exact.map((v) => Math.round(v * 1000) / 1000), [0.114, 0.2, 0.23, 0.24, 0.205, 0.241]);
+  // The fifth is 0.2049, so two places from the exact value (not from the three-place 0.205) is 0.2.
+  assertEquals(exact.map((v) => Math.round(v * 100) / 100), measured, "and the function is that, to two places");
+  // The median of six is the midpoint of the middle two, held to four places, as the consensus takes it.
+  const median = (v: number[]) => {
+    const s = [...v].sort((a, b) => a - b);
+    return Math.round(((s[2] + s[3]) / 2) * 10_000) / 10_000;
+  };
+  assertEquals(median(measured as number[]), 0.215, "about the measured 0.2, from the points");
+  assertEquals(median(LIVE_WING_OWN), 0.155, "the same six reads' own wingPitch");
+  // Either wing alone carries the roll: the left edges read 0.1 to 0.3, the right 0.12 to 0.19.
+  assertEquals(LIVE_WING_POINTS.map(([lo, li]) => edgeSlope(lo, li)), [0.1, 0.28, 0.28, 0.3, 0.27, 0.29]);
+  assertEquals(LIVE_WING_POINTS.map(([, , ri, ro]) => edgeSlope(ro, ri)), [0.12, 0.12, 0.18, 0.18, 0.14, 0.19]);
+});
+
+Deno.test("wingPitchFromMeasure: a rolled frame gives the unrolled pitch, where either wing alone does not", () => {
+  assertEquals(wingPitchFromMeasure(wingsSquare(), WINGS_ROOF), 0.3, "square: 78 px over 260 px, both wings");
+  // A roll adds its angle to one wing and takes it from the other, so their mean angle stands.
+  for (const deg of [3, -3, 5, -5, 7, -7, 7.4, -7.4]) {
+    const [lo, li, ri, ro] = rolled(deg, ...WINGS_SQUARE);
+    assertEquals(wingPitchFromMeasure(wingAt(lo, li, ri, ro), WINGS_ROOF), 0.3, `rolled ${deg} degrees`);
+  }
+  // Rolled 5 degrees clockwise, the left wing alone reads 0.21 and the right 0.4.
+  const [lo, li, ri, ro] = rolled(5, ...WINGS_SQUARE);
+  assertEquals([edgeSlope(lo, li), edgeSlope(ro, ri)], [0.21, 0.4]);
+  // Unlike wings are the mean of their angles: 20 and 10 degrees give tan(15 degrees).
+  const tan = (deg: number) => Math.tan(deg * Math.PI / 180);
+  assertEquals(wingPitchFromMeasure(wingAt([300, 560], [560, 560 - 260 * tan(20)], [1040, 560 - 260 * tan(10)], [1300, 560]), WINGS_ROOF), 0.27);
+});
+
+Deno.test("wingPitchFromMeasure: wings more than 15 degrees apart are a bad read or a strong perspective, and are refused", () => {
+  // A roll parts the two wings by twice its angle: 7.6 degrees is 15.3 apart in whole pixels.
+  for (const deg of [7.6, -7.6, 8, -8, 12, -12]) {
+    const [lo, li, ri, ro] = rolled(deg, ...WINGS_SQUARE);
+    assertEquals(wingPitchFromMeasure(wingAt(lo, li, ri, ro), WINGS_ROOF), null, `rolled ${deg} degrees`);
+  }
+  // Built to the degree: 15 apart is inside, either way round; 15.1 is not.
+  const tan = (deg: number) => Math.tan(deg * Math.PI / 180);
+  const apart = (left: number, right: number) => wingAt([300, 560], [560, 560 - 260 * tan(left)], [1040, 560 - 260 * tan(right)], [1300, 560]);
+  assertEquals(wingPitchFromMeasure(apart(20, 5), WINGS_ROOF), 0.22, "20 and 5 degrees: tan(12.5)");
+  assertEquals(wingPitchFromMeasure(apart(5, 20), WINGS_ROOF), 0.22, "5 and 20 degrees");
+  assertEquals(wingPitchFromMeasure(apart(20, 4.9), WINGS_ROOF), null, "20 and 4.9 degrees");
+  assertEquals(wingPitchFromMeasure(apart(4.9, 20), WINGS_ROOF), null, "4.9 and 20 degrees");
+  assertEquals(wingPitchFromMeasure(apart(30, 10), WINGS_ROOF), null, "one wing read at twice the other's slope and more");
+});
+
+Deno.test("wingPitchFromMeasure: points out of order, a wing that does not fall outward, and a short run are refused", () => {
+  const [lo, li, ri, ro] = WINGS_SQUARE;
+  const w = (a: number[], b: number[], c: number[], d: number[]) => wingPitchFromMeasure(wingAt(a, b, c, d), WINGS_ROOF);
+  // Strictly left to right: leftOuter, leftInner, rightInner, rightOuter.
+  assertEquals(w(li, lo, ri, ro), null, "the left wing's two ends swapped");
+  assertEquals(w(lo, li, ro, ri), null, "the right wing's two ends swapped");
+  assertEquals(w(ro, ri, li, lo), null, "left and right swapped");
+  assertEquals(w(lo, [1100, 482], ri, ro), null, "the two inner points crossed");
+  assertEquals(w(lo, [1040, 482], ri, ro), null, "the two inner points on one x");
+  assertEquals(w(lo, [300, 482], ri, ro), null, "a vertical left edge: no run");
+  assertEquals(w(lo, li, ri, [1040, 560]), null, "a vertical right edge");
+  // Each wing falls toward its outer wall: with y DOWN, its outer end has the larger y.
+  assertEquals(w([300, 404], li, ri, [1300, 404]), null, "y read UP: both wings rise outward");
+  assertEquals(w([300, 404], li, ri, ro), null, "the left wing rising outward");
+  assertEquals(w(lo, li, ri, [1300, 404]), null, "the right wing rising outward");
+  assertEquals(w([300, 482], li, ri, ro), null, "a level left wing");
+  assertEquals(w(lo, li, ri, [1300, 482]), null, "a level right wing");
+  // A run under 5% of the image's width, 80 px of 1600, is a few pixels of slope.
+  assertEquals(w([481, 506], li, ri, [1119, 506]), null, "two 79 px runs");
+  assertEquals(w(lo, li, ri, [1119, 506]), null, "one 79 px run");
+  assertEquals(w([480, 506], li, ri, [1120, 506]), 0.3, "80 px is the floor itself");
+  assertEquals(wingPitchFromMeasure({ leftOuter: [481, 506], leftInner: li, rightInner: ri, rightOuter: [1119, 506] }, WINGS_ROOF), 0.3,
+    "with no size there is no share to take");
+  assertEquals(wingPitchFromMeasure({ leftOuter: lo, leftInner: li, rightInner: ri, rightOuter: ro }, WINGS_ROOF), 0.3, "size is optional");
+  // The run is a share of the WIDTH: in a portrait 720 x 1280 frame the floor is 36 px.
+  assertEquals(wingPitchFromMeasure(wingAt([100, 600], [140, 588], [580, 588], [620, 600], [720, 1280]), WINGS_ROOF), 0.3, "40 px of 720");
+  assertEquals(wingPitchFromMeasure(wingAt([100, 600], [135, 590], [585, 590], [620, 600], [720, 1280]), WINGS_ROOF), null, "35 px of 720");
+});
+
+Deno.test("wingPitchFromMeasure: points outside the image, a size that is not a size, and an answer outside the CLAMPS are refused", () => {
+  assertEquals(wingPitchFromMeasure(wingAt(WINGS_SQUARE[0], WINGS_SQUARE[1], WINGS_SQUARE[2], [1700, 560]), WINGS_ROOF), null, "past the right edge");
+  assertEquals(wingPitchFromMeasure(wingAt([300, 950], WINGS_SQUARE[1], WINGS_SQUARE[2], WINGS_SQUARE[3]), WINGS_ROOF), null, "below the bottom");
+  assertEquals(wingPitchFromMeasure(wingAt([-10, 560], WINGS_SQUARE[1], WINGS_SQUARE[2], WINGS_SQUARE[3]), WINGS_ROOF), null, "left of the left edge");
+  for (const size of [[0, 900], [1600, -900], [1600], [1600, 900, 3], "1600x900", ["1600", "900"], [NaN, 900], null, {}]) {
+    assertEquals(wingPitchFromMeasure(wingsSquare(size), WINGS_ROOF), null, `size ${JSON.stringify(size)}`);
+  }
+  // wingPitch's CLAMPS are 0..1.5: two wings of 2 are a spike, and 1.5 itself is inside.
+  assertEquals(wingPitchFromMeasure(wingAt([300, 560], [400, 360], [1200, 360], [1300, 560]), WINGS_ROOF), null, "2 is past 1.5");
+  assertEquals(wingPitchFromMeasure(wingAt([300, 560], [400, 410], [1200, 410], [1300, 560]), WINGS_ROOF), 1.5, "1.5 itself");
+  // A pixel over a thousand, with no size to bound it, rounds to 0, which is not a roof anyone measured.
+  assertEquals(wingPitchFromMeasure({ leftOuter: [0, 1001], leftInner: [1000, 1000], rightInner: [3000, 1000], rightOuter: [4000, 1001] }, WINGS_ROOF), null, "flat");
+});
+
+Deno.test("wingPitchFromMeasure: only a read with wings on both sides is computed, and never an eave-front one", () => {
+  const w = wingsSquare();
+  assertEquals(wingPitchFromMeasure(w, WINGS_ROOF), 0.3, "the points themselves are good");
+  assertEquals(wingPitchFromMeasure(w, { ...WINGS_ROOF, type: "gambrel", kneeU: 0.75, kneeRise: 0.72, ridgeRise: 1.03 }), 0.3,
+    "a gambrel centre's wings are the same two roofs");
+  assertEquals(wingPitchFromMeasure(w, { ...WINGS_ROOF, front: undefined }), 0.3, "a read that left roof.front out");
+  // One wing, or wings along the front and back, are not two wings seen square from the front.
+  for (const side of ["left", "right", "front", "back", undefined, null, "", "Both", "BOTH", ["both"]]) {
+    assertEquals(wingPitchFromMeasure(w, { ...WINGS_ROOF, wingSide: side }), null, `wingSide ${JSON.stringify(side)}`);
+  }
+  // On an eave-front roof "both" is the front and back walls, and the front frame sees a wing roof's face.
+  assertEquals(wingPitchFromMeasure(w, { ...WINGS_ROOF, front: "eave" }), null, "an eave front");
+  assertEquals(wingPitchFromMeasure(w, { type: "gable", front: "gable", pitch: 0.5 }), null, "a building with no wings");
+  for (const roof of [null, undefined, "both", 42, [], [WINGS_ROOF]]) {
+    assertEquals(wingPitchFromMeasure(w, roof), null, `roof ${JSON.stringify(roof)}`);
+  }
+});
+
+Deno.test("wing measure: garbage in is null out, never a throw", () => {
+  const [lo, li, ri, ro] = WINGS_SQUARE;
+  const junk: unknown[] = [
+    null, undefined, 0, 42, "x", true, [], [1, 2], {},
+    { leftOuter: "300,560", leftInner: "560,482", rightInner: "1040,482", rightOuter: "1300,560" },
+    wingAt([300, 560, 1], li, ri, ro),
+    wingAt([NaN, 560], li, ri, ro),
+    wingAt(lo, li, ri, [1300, Infinity]),
+    { size: M_SIZE, leftOuter: ["300", "560"], leftInner: ["560", "482"], rightInner: ["1040", "482"], rightOuter: ["1300", "560"] },
+    { size: M_SIZE, leftOuter: { x: 300, y: 560 }, leftInner: li, rightInner: ri, rightOuter: ro },
+    { size: M_SIZE, leftOuter: lo, leftInner: li, rightInner: ri },
+    { size: M_SIZE, leftOuter: lo, leftInner: null, rightInner: ri, rightOuter: ro },
+    // The gable's own points are not wing points.
+    gableAt([400, 600], [800, 400], [1200, 600]),
+  ];
+  for (const j of junk) assertEquals(wingPitchFromMeasure(j, WINGS_ROOF), null, JSON.stringify(j));
+});
+
+// A v2 reply of a raised centre with a wing each side, its own numbers (a 0.8 gable, 0.13 wings), and
+// the points both were read from: the gable's give 0.4 and the wings' 0.3. NO_MEASURE leaves the block out.
+const WINGED_REPLY = (roof: Record<string, unknown> = {}, measure: unknown = {
+  pitch: gableAt([400, 600], [800, 440], [1200, 600]),
+  wing: wingsSquare(),
+}) => JSON.stringify({
+  roof: { type: "gable", front: "gable", pitch: 0.8, overhangIn: 6, wingSide: "both", wingWidthFt: 5, wingPitch: 0.13, centerEaveFt: 13, ...roof },
+  colors: { body: "#333333", trim: "#222222", roof: "#1a1a1a" },
+  observed: { roofNote: "a raised gable centre with a wing each side", porch: "none", wings: "both", confidence: "medium" },
+  frameMap: { front: { frame: 1, azimuthDeg: 0 } },
+  ...(measure === NO_MEASURE ? {} : { measure }),
+});
+
+Deno.test("parseMeasure: the wing block is read beside the gable's or alone, and never reaches the stored spec", () => {
+  const g = gableAt([400, 600], [800, 440], [1200, 600]);
+  const w = wingsSquare();
+  assertEquals(parseMeasure(WINGED_REPLY()), { pitch: g, wing: w });
+  assertEquals(parseMeasure(WINGED_REPLY({}, { wing: w })), { wing: w }, "alone");
+  assertEquals(parseMeasure(WINGED_REPLY({}, { pitch: g })), { pitch: g }, "the gable's alone, as before");
+  for (const wing of [null, [], "points", 5, [1, 2], true]) {
+    assertEquals(parseMeasure(WINGED_REPLY({}, { wing })), null, `wing ${JSON.stringify(wing)} alone is no measure at all`);
+    assertEquals(parseMeasure(WINGED_REPLY({}, { pitch: g, wing })), { pitch: g }, `wing ${JSON.stringify(wing)} beside the gable's is left behind`);
+  }
+  // sanitizeD3Spec is a whitelist: the points are dropped on the way to the column, measured or not.
+  for (const measure of [false, true]) {
+    const spec = parseModelSpec(WINGED_REPLY(), DIMS, measure);
+    assert(spec.ok, "the reply drafts");
+    if (spec.ok) {
+      const stored = JSON.stringify(spec.d3);
+      for (const k of ["measure", "leftOuter", "leftInner", "rightInner", "rightOuter", "peak"]) assert(!stored.includes(k), `measure ${measure}: no ${k} in the spec`);
+    }
+  }
+  // Tucked inside the roof, it is dropped all the same, and changes nothing.
+  const inRoof = parseModelSpec(JSON.stringify({ roof: { ...WINGS_ROOF, measure: { wing: w } }, colors: {} }), DIMS, true);
+  assert(inRoof.ok && !JSON.stringify(inRoof.d3).includes("leftOuter") && inRoof.d3.roof.wingPitch === 0.13, "not in the roof either");
+});
+
+Deno.test("applyMeasuredPitches: a read with wings on both sides takes its wing pitch from its points too, and says so", () => {
+  const text = WINGED_REPLY();
+  const model = parseModelSpec(text, DIMS);
+  assert(model.ok, "fixture");
+  if (!model.ok) return;
+  const r = applyMeasuredPitches(model.d3, text);
+  assertEquals([r.d3.roof.pitch, r.d3.roof.wingPitch], [0.4, 0.3], "both from their points");
+  assertEquals(r.sources, { pitchSource: "points", modelPitch: 0.8, wingPitchSource: "points", modelWingPitch: 0.13 });
+  // Everything else is the read's own, in the sanitiser's key order.
+  assertEquals(r.d3, cleanSpec({ ...model.d3, roof: { ...model.d3.roof, pitch: 0.4, wingPitch: 0.3 } }));
+  assertEquals(parseModelSpec(text, DIMS, true), { ok: true, d3: r.d3 }, "parseModelSpec's measure is the same thing");
+  assertEquals([model.d3.roof.pitch, model.d3.roof.wingPitch], [0.8, 0.13], "and without it the model's numbers stand");
+  // Each block is decided on its own: the wing's alone leaves the gable the model's, and that is not a
+  // rejection, because no gable points were given.
+  const wingOnly = applyMeasuredPitches(model.d3, WINGED_REPLY({}, { wing: wingsSquare() }));
+  assertEquals([wingOnly.d3.roof.pitch, wingOnly.d3.roof.wingPitch], [0.8, 0.3]);
+  assertEquals(wingOnly.sources, { pitchSource: "model", wingPitchSource: "points", modelWingPitch: 0.13 });
+  // The gable's points refused (y up) while the wings' hold.
+  const mixed = applyMeasuredPitches(model.d3, WINGED_REPLY({}, { pitch: gableAt([400, 300], [800, 500], [1200, 300]), wing: wingsSquare() }));
+  assertEquals([mixed.d3.roof.pitch, mixed.d3.roof.wingPitch], [0.8, 0.3]);
+  assertEquals(mixed.sources, { pitchSource: "model", pitchRejected: true, wingPitchSource: "points", modelWingPitch: 0.13 });
+  // The wings' refused (y up) while the gable's hold.
+  const flipped = applyMeasuredPitches(model.d3, WINGED_REPLY({}, { pitch: gableAt([400, 600], [800, 440], [1200, 600]), wing: wingAt([300, 404], [560, 482], [1040, 482], [1300, 404]) }));
+  assertEquals([flipped.d3.roof.pitch, flipped.d3.roof.wingPitch], [0.4, 0.13]);
+  assertEquals(flipped.sources, { pitchSource: "points", modelPitch: 0.8, wingPitchSource: "model", wingPitchRejected: true });
+  // The model gave no wing pitch of its own: the points' number is all there is, and modelWingPitch says so.
+  const bareText = WINGED_REPLY({ wingPitch: undefined });
+  const bare = parseModelSpec(bareText, DIMS);
+  assert(bare.ok && !("wingPitch" in bare.d3.roof), "fixture: no wingPitch");
+  if (!bare.ok) return;
+  const b = applyMeasuredPitches(bare.d3, bareText);
+  assertEquals([b.d3.roof.wingPitch, b.sources.modelWingPitch], [0.3, null]);
+});
+
+Deno.test("applyMeasuredPitches: wing points that fail keep the model's number and say so; one wing, or none, is never a question", () => {
+  const apply = (roof: Record<string, unknown>, measure?: unknown) => {
+    const text = WINGED_REPLY(roof, measure);
+    const model = parseModelSpec(text, DIMS);
+    if (!model.ok) throw new Error(model.error);
+    return { model: model.d3, ...applyMeasuredPitches(model.d3, text) };
+  };
+  // Refused points on a read with wings on both sides: the model's number, and the read says so.
+  for (const [name, wing] of [
+    ["y read up", wingAt([300, 404], [560, 482], [1040, 482], [1300, 404])],
+    ["20 degrees apart", wingAt([300, 560], [560, 560 - 260 * Math.tan(Math.PI / 6)], [1040, 560 - 260 * Math.tan(Math.PI / 18)], [1300, 560])],
+    ["out of order", wingAt([560, 482], [300, 560], [1040, 482], [1300, 560])],
+    ["an empty block", {}],
+  ] as const) {
+    const r = apply({}, { wing });
+    assert(r.d3 === r.model, `${name}: nothing replaced`);
+    assertEquals(r.d3.roof.wingPitch, 0.13, name);
+    assertEquals(r.sources, { pitchSource: "model", wingPitchSource: "model", wingPitchRejected: true }, name);
+  }
+  // One wing: the model's number, and the points were never a question, so they are not rejected.
+  for (const side of ["left", "right"]) {
+    const one = apply({ wingSide: side }, { wing: wingsSquare() });
+    assert(one.d3 === one.model, `one wing on the ${side}: nothing replaced`);
+    assertEquals(one.d3.roof.wingPitch, 0.13);
+    assertEquals(one.sources, { pitchSource: "model", wingPitchSource: "model" }, `one wing on the ${side}`);
+  }
+  // An eave front's "both" is the front and back walls: not a question either.
+  const eave = apply({ front: "eave" }, { wing: wingsSquare() });
+  assert(eave.d3 === eave.model, "an eave front: nothing replaced");
+  assertEquals(eave.sources, { pitchSource: "model", wingPitchSource: "model" });
+  // No wings at all: the sources say nothing about wings, exactly what such a read recorded before.
+  for (const measure of [{ wing: wingsSquare() }, NO_MEASURE]) {
+    const none = apply({ wingSide: undefined, wingWidthFt: undefined, wingPitch: undefined, centerEaveFt: undefined }, measure);
+    assert(none.d3 === none.model, "no wings: nothing replaced");
+    assertEquals(none.sources, { pitchSource: "model" }, `no wings, ${measure === NO_MEASURE ? "no measure" : "given wing points"}`);
+  }
+  // A shed carries no wings (the sanitiser drops them), so its wing points are never read either.
+  const shed = apply({ type: "shed", front: undefined, highSide: "front", pitch: 0.2 }, { wing: wingsSquare() });
+  assert(shed.d3 === shed.model, "a shed: nothing replaced");
+  assertEquals(shed.sources, { pitchSource: "model" });
+  // Wings on both sides and no measure at all: the SAME object back, and where its numbers came from.
+  const bare = apply({}, NO_MEASURE);
+  assert(bare.d3 === bare.model, "nothing replaced, nothing rebuilt");
+  assertEquals(bare.sources, { pitchSource: "model", wingPitchSource: "model" });
+});
+
+Deno.test("draftReadSample and draftCallsUsage: five winged reads take each wing pitch from its points before the median, and every sample says where it came from", async () => {
+  // Three live reads, one whose wing points are y-up (refused), and one with no points at all. Their
+  // own wingPitch: 0.17, 0.21, 0.13, 0.14 and 0.25.
+  const bodies = [
+    replyBody(WINGED_REPLY({ wingPitch: 0.17 }, { wing: LIVE_WING_READS[1] })),
+    replyBody(WINGED_REPLY({ wingPitch: 0.21 }, { wing: LIVE_WING_READS[2] })),
+    replyBody(WINGED_REPLY({ wingPitch: 0.13 }, { wing: LIVE_WING_READS[3] })),
+    replyBody(WINGED_REPLY({ wingPitch: 0.14 }, { wing: wingAt([300, 404], [560, 482], [1040, 482], [1300, 404]) })),
+    replyBody(WINGED_REPLY({ wingPitch: 0.25 }, NO_MEASURE)),
+  ];
+  const f = fakeSend(bodies.map((body, i) => ({ body, delayMs: i + 1 })));
+  const calls = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 50, send: f.send, read: (b) => readDraftReply(b, DIMS, true) });
+  const c = consensusOfCalls(calls, 12)!;
+  assertEquals(c.report.n, 5);
+  // The median of 0.2, 0.23, 0.24, 0.14 and 0.25. Of the reads' own numbers it would be 0.17.
+  assertEquals(c.d3.roof.wingPitch, 0.23);
+  assertEquals(c.report.spread.wingPitch, [0.14, 0.25]);
+  const tokens = JSON.parse(JSON.stringify({ ...draftCallsUsage("claude-opus-5-5", calls, calls[c.call], c).tokens, effort: "high", streamed: true }));
+  const samples = tokens.samples as Record<string, unknown>[];
+  assertEquals(samples.map((s) => [s.wingPitch, s.wingPitchSource, s.modelWingPitch ?? null, s.wingPitchRejected ?? null]), [
+    [0.2, "points", 0.17, null],
+    [0.23, "points", 0.21, null],
+    [0.24, "points", 0.13, null],
+    [0.14, "model", null, true],
+    [0.25, "model", null, null],
+  ]);
+  // The gable's own pitch rides beside it, the model's on every read here (no gable points were given).
+  assertEquals(samples.map((s) => [s.pitch, s.pitchSource, "pitchRejected" in s]), Array(5).fill([0.8, "model", false]));
+  // ⛔ No lock for the wing pitch: the self-check's lock reads the gable's points, and there are none.
+  assert(!measuredPitchLock(tokens, JSON.parse(JSON.stringify(c.d3))), "wing points never lock anything");
+  // An unmeasured read (every legacy read) is its roof, the same object, with no wing sources.
+  const plain = readDraftReply(bodies[0], DIMS);
+  assert(draftReadSample(plain) === plain.d3!.roof && !("wingPitchSource" in plain.d3!.roof), "a legacy reading");
+  assertEquals(plain.d3!.roof.wingPitch, 0.17, "which keeps the model's own number");
+});
+
 // ═══ A MEASURED GABLE PITCH IS LOCKED IN THE SELF-CHECK (2026-09-26) ═══════════════════════════
 // Live, a draft whose reads measured a 0.41 gable from their points came out at 0.415, and round 0
 // of the v2 self-check then moved it to 0.7 by eye. measuredPitchLock says, off the row, when the

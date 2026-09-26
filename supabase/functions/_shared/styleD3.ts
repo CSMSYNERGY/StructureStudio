@@ -1846,9 +1846,65 @@ export function pitchFromMeasure(block: unknown, roofType: unknown): number | nu
   return pitch > 0 && pitch >= lo && pitch <= hi ? pitch : null;
 }
 
-// The reply's `measure.pitch` block, read the way parseFrameMap reads its map: out of the first {...}
-// in the text, never stored. Null when the reply has none, which is every legacy reply.
-export type MeasureBlocks = { pitch: Record<string, unknown> };
+// ─── The wing roofs' slope, worked out from the reply's own points (2026-09-26) ──────────────────
+// Live on Opus 5.5 the WING roofs of a raised-centre building came back low: the model's own
+// wingPitch read 0.10 to 0.14 on many reads against a measured 0.20. A probe on the full v2 prompt
+// asked instead for the four corners of the two wing roofs' sloping top edges in the square-on front
+// frame, and six reads of them gave 0.11 to 0.24 (median about 0.22) where the same reads' own
+// numbers were 0.13 to 0.25. So `measure.wing` carries those four points, and the slope is worked
+// out here, per read and before the consensus, exactly as pitchFromMeasure does for the gable.
+//
+// THE MEAN ANGLE, NOT EITHER WING. The left wing's top edge rises to the right and the right wing's
+// falls to the right, so a camera rolled by some angle adds it to one wing's slope angle and takes it
+// from the other's. The mean of the two ANGLES cancels the roll exactly, which is why the answer is
+// tan(mean(atan(sL), atan(sR))) and not the mean of the two slopes: in the live reads the left wing
+// alone read up to 0.30 and the right alone down to 0.12, one roll apart.
+//
+// NOTHING HERE IS REPAIRED, pitchFromMeasure's rule: null means "keep the model's own wingPitch".
+//   * Only a read whose roof.wingSide is "both": the four points are two wings, one each side. A read
+//     whose roof.front is "eave" is refused too: its "both" is the front and back walls, and the frame
+//     square to the front looks at a wing roof's face, not along its edge.
+//   * Coordinates are finite JSON numbers, and inside `size` when it is given (measurePoints).
+//   * leftOuter, leftInner, rightInner and rightOuter run strictly left to right in the image.
+//   * Both slopes are above 0, with y DOWN: each wing's roof falls toward its outer wall. The y-up
+//     mistake makes both negative.
+//   * With `size`, each wing's horizontal run is at least MEASURE_WING_MIN_RUN of the image's width:
+//     over a shorter run a few pixels of placement are the slope.
+//   * The two wings' angles differ by at most MEASURE_WING_MAX_GAP_DEG. A roll moves them apart by
+//     twice its angle, and a walk-around frame is rolled a few degrees (the gable reads' eave lines
+//     tilted 3 to 5); a larger gap is a bad read or a strong perspective, not a roll. The six live
+//     reads differ by 1.1 to 8.4 degrees.
+//   * The answer is rounded to two places and must be above 0 and inside the sanitiser's wingPitch
+//     CLAMPS. Outside them it is null, never clamped.
+export const MEASURE_WING_MIN_RUN = 0.05;
+export const MEASURE_WING_MAX_GAP_DEG = 15;
+
+// The wing roofs' pitch from `measure.wing`, for a read whose sanitised roof is `roof`.
+export function wingPitchFromMeasure(block: unknown, roof: unknown): number | null {
+  const r = measureObject(roof);
+  if (!r || r.wingSide !== "both" || r.front === "eave") return null;
+  const m = measurePoints(block, ["leftOuter", "leftInner", "rightInner", "rightOuter"]);
+  if (!m) return null;
+  const [[lox, loy], [lix, liy], [rix, riy], [rox, roy]] = m.pts;
+  if (!(lox < lix && lix < rix && rix < rox)) return null;
+  const runL = lix - lox, runR = rox - rix;
+  if (m.size && (runL < MEASURE_WING_MIN_RUN * m.size[0] || runR < MEASURE_WING_MIN_RUN * m.size[0])) return null;
+  // Each wing's fall toward its outer wall over its run, y DOWN: the outer end is LOWER, a larger y.
+  const sL = (loy - liy) / runL, sR = (roy - riy) / runR;
+  if (!(sL > 0 && sR > 0)) return null;
+  const aL = Math.atan(sL), aR = Math.atan(sR);
+  // A hair of room for float rounding, as in pitchFromMeasure's tilt check.
+  if (Math.abs(aL - aR) * 180 / Math.PI > MEASURE_WING_MAX_GAP_DEG + 1e-9) return null;
+  const pitch = Math.round(Math.tan((aL + aR) / 2) * 100) / 100;
+  const [lo, hi] = CLAMPS.wingPitch;
+  return pitch > 0 && pitch >= lo && pitch <= hi ? pitch : null;
+}
+
+// The reply's `measure` blocks, read the way parseFrameMap reads its map: out of the first {...} in
+// the text, never stored. `pitch` is the gable's points and `wing` the wing roofs' (2026-09-26); each
+// is there only when the reply gave it as an object. Null when the reply has neither, which is every
+// legacy reply.
+export type MeasureBlocks = { pitch?: Record<string, unknown>; wing?: Record<string, unknown> };
 export function parseMeasure(text: string): MeasureBlocks | null {
   const m = String(text || "").match(/\{[\s\S]*\}/);
   if (!m) return null;
@@ -1857,7 +1913,9 @@ export function parseMeasure(text: string): MeasureBlocks | null {
   const top = measureObject(parsed);
   const src = top ? measureObject(top.measure) : null;
   const pitch = src ? measureObject(src.pitch) : null;
-  return pitch ? { pitch } : null;
+  const wing = src ? measureObject(src.wing) : null;
+  if (!pitch && !wing) return null;
+  return { ...(pitch ? { pitch } : {}), ...(wing ? { wing } : {}) };
 }
 
 // Where one read's pitch came from, recorded per read in draft_tokens (draftReadSample) so a query
@@ -1866,27 +1924,51 @@ export function parseMeasure(text: string): MeasureBlocks | null {
 // `pitchRejected` marks a gable read whose points were given and failed the checks above, so "the
 // model gave no points" and "its points did not hold up" are two different answers in SQL. Points
 // on any other roof were never a question, so they are never rejected.
+//
+// The wing roofs' three (2026-09-26) are the same, for roof.wingPitch: `wingPitchSource` is on every
+// measured read whose roof names a wingSide, and on no other, so a read with no wings records exactly
+// what it did before. `modelWingPitch` is the model's own number when the points replaced it.
+// `wingPitchRejected` marks a read with wings on both sides whose wing points were given and refused;
+// wing points on a one-sided or eave-front read were never a question, so they are never rejected.
 export type PitchSources = {
   pitchSource: "points" | "model";
   modelPitch?: number | null;
   pitchRejected?: true;
+  wingPitchSource?: "points" | "model";
+  modelWingPitch?: number | null;
+  wingPitchRejected?: true;
 };
+// The wing half of PitchSources, which a read with no wings leaves out altogether.
+type WingSources = Pick<PitchSources, "wingPitchSource" | "modelWingPitch" | "wingPitchRejected">;
 
-// One read's spec with its pitch worked out from its own points: on a gable only (pitchFromMeasure).
+// One read's spec with its pitches worked out from its own points: the main roof's on a gable only
+// (pitchFromMeasure), and the wing roofs' on a read with wings on both sides (wingPitchFromMeasure).
 // roof.porchPitch is always the model's own. The result goes back through sanitizeD3Spec, so key
 // order and every other rule stay the sanitiser's. With nothing replaced, the spec comes back as
 // the very object it went in as.
 export function applyMeasuredPitches(d3: D3Spec, text: string): { d3: D3Spec; sources: PitchSources } {
   const roof = d3.roof || {};
-  const block = parseMeasure(text)?.pitch ?? null;
+  const blocks = parseMeasure(text);
+  const block = blocks?.pitch ?? null;
   const pitch = pitchFromMeasure(block, roof.type);
   const kept: PitchSources = block && roof.type === "gable" ? { pitchSource: "model", pitchRejected: true } : { pitchSource: "model" };
-  if (pitch === null) return { d3, sources: kept };
-  const clean = sanitizeD3Spec({ ...d3, roof: { ...roof, pitch } });
-  // Unreachable with the checks above (the number is inside its CLAMPS), and if it ever were
+  const wingBlock = blocks?.wing ?? null;
+  const wingPitch = wingPitchFromMeasure(wingBlock, roof);
+  const hasWings = typeof roof.wingSide === "string";
+  const wingAsked = roof.wingSide === "both" && roof.front !== "eave";
+  const wingKept: WingSources = !hasWings ? {}
+    : wingBlock && wingAsked ? { wingPitchSource: "model", wingPitchRejected: true } : { wingPitchSource: "model" };
+  if (pitch === null && wingPitch === null) return { d3, sources: { ...kept, ...wingKept } };
+  const clean = sanitizeD3Spec({
+    ...d3,
+    roof: { ...roof, ...(pitch !== null ? { pitch } : {}), ...(wingPitch !== null ? { wingPitch } : {}) },
+  });
+  // Unreachable with the checks above (each number is inside its CLAMPS), and if it ever were
   // reached, the read keeps the spec it came with rather than losing its draft.
-  if (!clean.ok) return { d3, sources: kept };
-  return { d3: clean.d3, sources: { pitchSource: "points", modelPitch: num(roof.pitch) } };
+  if (!clean.ok) return { d3, sources: { ...kept, ...wingKept } };
+  const gable: PitchSources = pitch !== null ? { pitchSource: "points", modelPitch: num(roof.pitch) } : kept;
+  const wing: WingSources = wingPitch !== null ? { wingPitchSource: "points", modelWingPitch: num(roof.wingPitch) } : wingKept;
+  return { d3: clean.d3, sources: { ...gable, ...wing } };
 }
 
 // ─── A measured gable pitch is locked in the self-check (2026-09-26) ─────────────────────────
