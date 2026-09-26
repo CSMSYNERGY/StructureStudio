@@ -1866,8 +1866,15 @@ export function pitchFromMeasure(block: unknown, roofType: unknown): number | nu
 // THE MEAN ANGLE, NOT EITHER WING. The left wing's top edge rises to the right and the right wing's
 // falls to the right, so a camera rolled by some angle adds it to one wing's slope angle and takes it
 // from the other's. The mean of the two ANGLES cancels the roll exactly, which is why the answer is
-// tan(mean(atan(sL), atan(sR))) and not the mean of the two slopes: in the live reads the left wing
-// alone read up to 0.30 and the right alone down to 0.12, one roll apart.
+// tan(mean(atan(sL), atan(sR))) and not the mean of the two slopes.
+//
+// IT DOES NOT CANCEL YAW. In the live reads the left wing alone read up to 0.30 and the right alone
+// down to 0.12, but that was mostly the camera's ANGLE to the front, not its roll: the left run was
+// 160-182 px against the right's 386-390 (2.2x), which a pinhole simulation reproduces at about 30
+// degrees of yaw, while a roll of a few degrees moves that ratio by only ~3%. A yawed frame reads the
+// wings steep, by about 1/cos(yaw) plus perspective: about +5% at 20 degrees, +11-16% at 30, +25-32%
+// at 40 (so the live median of ~0.215 against a measured 0.20 is mostly that). The gap gate below is
+// therefore NOT a roll allowance: most of a live gap is perspective.
 //
 // NOTHING HERE IS REPAIRED, pitchFromMeasure's rule: null means "keep the model's own wingPitch".
 //   * Only a read whose roof.wingSide is "both": the four points are two wings, one each side. A read
@@ -1875,14 +1882,15 @@ export function pitchFromMeasure(block: unknown, roofType: unknown): number | nu
 //     square to the front looks at a wing roof's face, not along its edge.
 //   * Coordinates are finite JSON numbers, and inside `size` when it is given (measurePoints).
 //   * leftOuter, leftInner, rightInner and rightOuter run strictly left to right in the image.
-//   * Both slopes are above 0, with y DOWN: each wing's roof falls toward its outer wall. The y-up
-//     mistake makes both negative.
+//   * The two wings' angles SUM above 0, with y DOWN: the roofs fall toward their outer walls. The
+//     y-up mistake makes both negative and the sum too. Per wing a slope may dip to 0 or below: a
+//     shallow wing in a rolled frame does (a 0.06 wing rolled 4 degrees), and the mean angle still
+//     gives its pitch exactly.
 //   * With `size`, each wing's horizontal run is at least MEASURE_WING_MIN_RUN of the image's width:
 //     over a shorter run a few pixels of placement are the slope.
 //   * The two wings' angles differ by at most MEASURE_WING_MAX_GAP_DEG. A roll moves them apart by
-//     twice its angle, and a walk-around frame is rolled a few degrees (the gable reads' eave lines
-//     tilted 3 to 5); a larger gap is a bad read or a strong perspective, not a roll. The six live
-//     reads differ by 1.1 to 8.4 degrees.
+//     twice its angle and yaw's perspective moves them apart too (above); a larger gap is a bad read
+//     or a frame too far off the front. The six live reads differ by 1.1 to 8.4 degrees.
 //   * The answer is rounded to two places and must be above 0 and inside the sanitiser's wingPitch
 //     CLAMPS. Outside them it is null, never clamped.
 export const MEASURE_WING_MIN_RUN = 0.05;
@@ -1900,8 +1908,8 @@ export function wingPitchFromMeasure(block: unknown, roof: unknown): number | nu
   if (m.size && (runL < MEASURE_WING_MIN_RUN * m.size[0] || runR < MEASURE_WING_MIN_RUN * m.size[0])) return null;
   // Each wing's fall toward its outer wall over its run, y DOWN: the outer end is LOWER, a larger y.
   const sL = (loy - liy) / runL, sR = (roy - riy) / runR;
-  if (!(sL > 0 && sR > 0)) return null;
   const aL = Math.atan(sL), aR = Math.atan(sR);
+  if (!(aL + aR > 0)) return null;
   // A hair of room for float rounding, as in pitchFromMeasure's tilt check.
   if (Math.abs(aL - aR) * 180 / Math.PI > MEASURE_WING_MAX_GAP_DEG + 1e-9) return null;
   const pitch = Math.round(Math.tan((aL + aR) / 2) * 100) / 100;

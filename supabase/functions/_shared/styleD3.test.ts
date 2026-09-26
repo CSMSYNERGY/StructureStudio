@@ -5595,6 +5595,25 @@ Deno.test("⚠️ wingPitchFromMeasure: the six live reads give 0.11 to 0.24, me
   assertEquals(LIVE_WING_POINTS.map(([, , ri, ro]) => edgeSlope(ro, ri)), [0.12, 0.12, 0.18, 0.18, 0.14, 0.19]);
 });
 
+Deno.test("wingPitchFromMeasure: a shallow wing in a rolled frame is kept (the angles' SUM decides), the y-up mistake is not", () => {
+  // Square-on, a true 0.06 wing each side, then the frame rolled 4 degrees about its centre: one wing's
+  // edge dips below level, yet the mean angle gives 0.06 exactly.
+  const t = Math.atan(0.06), roll = 4 * Math.PI / 180;
+  const cx = 800, cy = 450;
+  const rot = ([x, y]: [number, number]): [number, number] => {
+    const dx = x - cx, dy = y - cy;
+    return [cx + dx * Math.cos(roll) - dy * Math.sin(roll), cy + dx * Math.sin(roll) + dy * Math.cos(roll)];
+  };
+  const run = 260, iy = 480, oy = iy + run * Math.tan(t);
+  const pts = { leftOuter: rot([300, oy]), leftInner: rot([300 + run, iy]), rightInner: rot([1040, iy]), rightOuter: rot([1040 + run, oy]) };
+  const both = { wingSide: "both" };
+  assertEquals(wingPitchFromMeasure({ size: [1600, 900], ...pts }, both), 0.06, "the rolled shallow wing");
+  // One wing level or rising and the gap under the gate: the sum is positive, so it is kept.
+  assertEquals(wingPitchFromMeasure({ size: [1600, 900], leftOuter: [300, 470], leftInner: [560, 482], rightInner: [1040, 482], rightOuter: [1300, 521] }, both), 0.05);
+  // The y-up mistake: both wings rising outward, the sum negative: refused.
+  assertEquals(wingPitchFromMeasure({ size: [1600, 900], leftOuter: [300, 430], leftInner: [560, 482], rightInner: [1040, 482], rightOuter: [1300, 430] }, both), null);
+});
+
 Deno.test("wingPitchFromMeasure: a rolled frame gives the unrolled pitch, where either wing alone does not", () => {
   assertEquals(wingPitchFromMeasure(wingsSquare(), WINGS_ROOF), 0.3, "square: 78 px over 260 px, both wings");
   // A roll adds its angle to one wing and takes it from the other, so their mean angle stands.
