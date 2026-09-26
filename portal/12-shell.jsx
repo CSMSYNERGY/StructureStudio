@@ -1677,7 +1677,7 @@ function Dashboard({ session }) {
        server writes the refusal it would have sent as a body that also carries `status`, with `error`,
        `code` and `retryable` exactly as before. It is turned back into the SAME failure a non-2xx
        becomes here: the same sentence (01-core's invoke wrapper puts a non-2xx body's `error` on the
-       message; this reads it off the body), the same `ssRetryable`, and so the same one lean retry
+       message; this reads it off the body), the same `ssRetryable` (and `ssRetryCode`), and so the same one lean retry
        under the same key in calGenerate. The designer cannot tell the two apart. */
     onDraftFromCombined: async (photoUrls, styleValue, videoCount, idempotencyKey, dims, opts) => {
       // videoCount says how many of the LEADING urls are walk-around frames, so the server can
@@ -1831,12 +1831,18 @@ function Dashboard({ session }) {
       // `ssRetryable` IS THE SERVER'S WORD, NEVER A GUESS FROM THE STATUS. A 502 is also a model
       // refusal or an unreachable AI service, and resending those is a second identical failure
       // on the builder's clock. Only a body saying `retryable: true` earns the one lean retry.
+      // `ssRetryCode` (2026-09-26) is that body's `code`, so the designer can say WHY it reads again:
+      // ai_upstream_transient is the AI service failing the read (a download it could not make, a busy
+      // API, the network), not a read that ran out of room. Only ever set beside ssRetryable.
       if (error) {
         const err = new Error(error.message || "Generating failed");
         try {
           const ctx = error.context;
           const said = ctx && typeof ctx.clone === "function" ? await ctx.clone().json() : null;
-          if (said && said.retryable === true) err.ssRetryable = true;
+          if (said && said.retryable === true) {
+            err.ssRetryable = true;
+            if (typeof said.code === "string") err.ssRetryCode = said.code;
+          }
         } catch (_e) { /* no body, or not JSON: not retryable */ }
         throw err;
       }
@@ -1846,7 +1852,10 @@ function Dashboard({ session }) {
       // server's `retryable`.
       if (data && typeof data === "object" && (data.error || (Number.isInteger(data.status) && data.status >= 400))) {
         const err = new Error(data.error || data.message || "Generating failed");
-        if (data.retryable === true) err.ssRetryable = true;
+        if (data.retryable === true) {
+          err.ssRetryable = true;
+          if (typeof data.code === "string") err.ssRetryCode = data.code;
+        }
         throw err;
       }
       if (!data || !data.ok || !data.d3) {

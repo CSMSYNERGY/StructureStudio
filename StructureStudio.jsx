@@ -21308,6 +21308,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // retry, and never on any other failure -- a refusal, a 402 or a 409 is not the model
       // running out of room, and resending it would only repeat it.
       //
+      // Since 2026-09-26 the server also marks a draft the AI SERVICE failed (code
+      // ai_upstream_transient: a frame download it could not make, a busy API, the network) as
+      // retryable, after sending its reads again itself. The same one lean retry takes it; only the
+      // card's line says the other reason (see `retry: "upstream"` below).
+      //
       // ⚠️ AND ITS STREAMED ANSWER CAN DROP (2026-09-25). The press waits four to six minutes on a
       // streamed answer, and a phone that backgrounds the tab or a network that blinks drops it while
       // the server works on. `recover` lets the host pick the draft up from the server instead of
@@ -21329,7 +21334,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         });
       } catch (e1) {
         if (!(e1 && e1.ssRetryable) || !mine()) throw e1;
-        setAdminCalCheck((p) => (p ? { ...p, retry: true } : p));
+        // WHY it reads again, for the card (2026-09-26): "upstream" when the AI service failed the
+        // read itself (ai_upstream_transient: it could not load the views, was busy, or could not be
+        // reached, even after sending the read again), otherwise the read ran out of room or time.
+        setAdminCalCheck((p) => (p ? { ...p, retry: e1.ssRetryCode === "ai_upstream_transient" ? "upstream" : true } : p));
         res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount, idem, dims, { lean: true });
       }
       // A DRAFT LANDED, so this intent is finished and the money for it is spent. The next press
@@ -23868,7 +23876,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                             builder knows the first read was thrown away and that it cost nothing. */}
                         {adminCalCheck.retry && adminCalCheck.step === "draft" && (
                           <div style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", fontWeight: 700, lineHeight: 1.5 }}>
-                            The first read ran out of room before it finished, so we are reading your views again with a shorter answer. It is still one generation.
+                            {adminCalCheck.retry === "upstream"
+                              ? "The AI service couldn't finish the first read, so we are reading your views again. It is still one generation."
+                              : "The first read ran out of room before it finished, so we are reading your views again with a shorter answer. It is still one generation."}
                           </div>
                         )}
                         {/* THE PICKUP, said while it happens (2026-09-25). The answer this press was

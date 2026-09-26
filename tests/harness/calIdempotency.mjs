@@ -31,6 +31,12 @@
 //      status it would have had. A `retryable` failure there must still earn exactly ONE lean retry
 //      under the SAME key, the lean retry must not ask for a stream, and a failure that is not
 //      retryable is shown in the server's own words and never resent.
+//   8b. ⚠️ THE AI SERVICE FAILED THE DRAFT (2026-09-26). The server sends a read the API could not
+//      serve again itself, and when every read still fails it answers a plain sentence, retryable,
+//      with code ai_upstream_transient (the live failure: the API timed out downloading the frames).
+//      Plain or in a streamed 200's body, that must still earn exactly ONE lean retry under the SAME
+//      key, and the progress card must say the AI service could not finish the read, not that the
+//      read ran out of room.
 //   9. ⚠️ THE STREAMED ANSWER DROPS (2026-09-25; by the press's key since 253). The route serves the
 //      heartbeat's spaces and then the body breaks off mid-JSON (what the page's parser sees when a
 //      connection dies mid-body), or the server's own deadline body (`stream_deadline`). The builder
@@ -99,6 +105,8 @@ const CONFIG = {
 //   fail       a 503 with no `retryable`: the old timeout shape, which the builder retries
 //   retryable  every call answers 502 { retryable: true }: cut off, hold released
 //   retryOnce  the first call of a press is retryable, the lean one succeeds
+//   upstreamOnce  the first call of a press is the AI service's failure (ai_upstream_transient,
+//              retryable), the lean one succeeds
 //   streamed   a request that asks for `stream: true` is answered the way the server streams it:
 //              200, spaces, then the JSON, a failure's status inside it (off: the answer an older
 //              function gives, which never heard of the key)
@@ -111,7 +119,7 @@ const CONFIG = {
 const generateCalls = [];
 const recoverCalls = [];
 const logRows = [];
-const stub = { fail: false, retryable: false, retryOnce: false, streamed: false, refuse402: false, drop: null, recover: [], skewMs: 0 };
+const stub = { fail: false, retryable: false, retryOnce: false, upstreamOnce: false, streamed: false, refuse402: false, drop: null, recover: [], skewMs: 0 };
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 
@@ -214,8 +222,12 @@ async function main() {
         const cutOff = { error: "The AI ran out of room before finishing - please try again.", code: "ai_spec_truncated", retryable: true };
         if (stub.retryable) return answer(cutOff, 502);
         if (stub.retryOnce && !body.lean) return answer(cutOff, 502);
+        // THE SERVER'S OWN SHAPE when the AI service failed every read, after its own resends
+        // (draftUpstreamFailure, 2026-09-26): a plain sentence, the code, retryable.
+        const upstream = { error: "The AI service couldn't load your views just now - please press Generate again.", code: "ai_upstream_transient", retryable: true };
+        if (stub.upstreamOnce && !body.lean) return answer(upstream, 502);
         // Slow enough that the progress card's "reading it again" line can be caught in flight.
-        if (stub.retryOnce && body.lean) await new Promise((res) => setTimeout(res, 1500));
+        if ((stub.retryOnce || stub.upstreamOnce) && body.lean) await new Promise((res) => setTimeout(res, 1500));
         return answer({
           ok: true,
           d3: { roof: { type: "gambrel", pitch: 0.5, overhang: 0.8 }, wallHeightFt: 7.5, siding: null, colors: { body: "#00ff00" } },
@@ -343,7 +355,7 @@ async function main() {
         const b = Array.from(document.querySelectorAll("button")).find((x) => /Generate the 3D model|Working/.test(x.textContent || ""));
         return { card: card ? card.textContent : "", idle: Boolean(b) && !b.disabled && /Generate the 3D model/.test(b.textContent || "") };
       });
-      if (/ran out of room before it finished/.test(st.card)) saw = st.card;
+      if (/ran out of room before it finished|couldn't finish the first read/.test(st.card)) saw = st.card;
       if (st.idle && generateCalls.length > n) break;
       await page.waitForTimeout(50);
     }
@@ -416,7 +428,25 @@ async function main() {
   r.ok("the builder's own retry of a refused press keeps its key",
     Boolean(s3.calls[0]) && Boolean(s2.calls[0]) && s3.calls[0].idempotencyKey === s2.calls[0].idempotencyKey && s3.calls[0].idempotencyKey !== s1.calls[0].idempotencyKey,
     `${s2.calls[0] && s2.calls[0].idempotencyKey} then ${s3.calls[0] && s3.calls[0].idempotencyKey}`);
-  stub.refuse402 = false; stub.streamed = false;
+  stub.refuse402 = false;
+
+  // ── 8b: the AI SERVICE failed the draft, streamed and then plain ─────────────────────────
+  for (const streamed of [true, false]) {
+    stub.streamed = streamed; stub.upstreamOnce = true;
+    const how = streamed ? "streamed, in the body" : "plain, a 502";
+    const u = await pressRetry(`press (${how}: the AI service could not load the views, then the lean retry lands)`, 2);
+    r.ok(`⚠️ ${how}: THE AI SERVICE'S RETRYABLE FAILURE EARNED EXACTLY ONE LEAN RETRY, NOT STREAMED`,
+      u.calls.length === 2 && u.calls[0].stream === true && !("lean" in u.calls[0]) && u.calls[1].lean === true && !("stream" in u.calls[1]),
+      JSON.stringify(u.calls.map((c) => ({ stream: c.stream, lean: c.lean }))));
+    r.ok(`${how}: under the same key`, u.calls.length === 2 && UUID_RE.test(u.calls[0].idempotencyKey || "") && u.calls[0].idempotencyKey === u.calls[1].idempotencyKey,
+      u.calls.map((c) => c.idempotencyKey).join(" then "));
+    r.ok(`⚠️ ${how}: the card said the AI service could not finish the first read, not that it ran out of room`,
+      /couldn't finish the first read/.test(u.saw) && !/ran out of room/.test(u.saw) && /still one generation/.test(u.saw), u.saw.slice(0, 160));
+    await page.waitForFunction(() => /Read \d+ view/.test(document.body.innerText), null, { timeout: 20000 }).catch(() => {});
+    r.ok(`${how}: and the draft landed, read out of the lean retry`, /Read \d+ view/.test(await page.evaluate(() => document.body.innerText)));
+    r.ok(`${how}: no raw JSON on screen`, !/invalid_request_error|"type":"error"/.test(await page.evaluate(() => document.body.innerText)));
+  }
+  stub.upstreamOnce = false; stub.streamed = false;
 
   // ── 9: the streamed answer DROPS, and the draft is picked up from the server BY THE PRESS'S KEY ──
   // The draft a normal answer carries in this stub, and the same draft as the recover action hands

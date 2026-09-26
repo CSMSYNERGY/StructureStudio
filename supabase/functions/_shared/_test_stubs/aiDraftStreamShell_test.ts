@@ -8,8 +8,9 @@
 //   1. It asks for `stream: true` on a press and never on the lean retry (a short read that keeps
 //      the old 125 s budget), and the server streams exactly the first of those two bodies.
 //   2. A failure in a streamed body becomes exactly the Error a non-2xx becomes: the same sentence,
-//      the same `ssRetryable`, and nothing else, so calGenerate's one lean retry under the same key
-//      cannot tell them apart. (calIdempotency drives that retry in the compiled portal.)
+//      the same `ssRetryable` (and, on a retryable one, the same `ssRetryCode`, 2026-09-26), and
+//      nothing else, so calGenerate's one lean retry under the same key cannot tell them apart.
+//      (calIdempotency drives that retry in the compiled portal.)
 //   3. A streamed answer that never arrived -- the body broke off, or the server closed it at its
 //      deadline with `stream_deadline` -- is NOT "try again": the shell asks calibrate_style_ai_recover
 //      with THE PRESS'S OWN idempotency key (never a clock), AT ONCE -- even for a drop noticed after
@@ -80,6 +81,10 @@ Deno.test("a failure in a streamed body is exactly the Error a non-2xx becomes",
   const failures: [Record<string, unknown>, number][] = [
     [{ error: "The AI took too long to answer - please try again.", retryable: true }, 504],
     [{ error: "The AI ran out of room before finishing - please try again.", retryable: true }, 502],
+    // The AI service failed the draft (2026-09-26): said plainly, retryable, and its code says why.
+    [{ error: "The AI service couldn't load your views just now - please press Generate again.", code: "ai_upstream_transient", retryable: true }, 502],
+    [{ error: "The AI service is busy right now - please press Generate again.", code: "ai_upstream_transient", retryable: true }, 503],
+    [{ error: "The AI service could not take this request. Please press Generate again, and if it keeps happening, tell CSM Synergy.", code: "ai_upstream_error" }, 502],
     [{ error: "The model returned malformed JSON." }, 502],
     [{ error: "This 3D generation costs $20.00 and your wallet has $5.00. Add funds in Settings → Billing.", code: "insufficient_funds", priceCents: 2000, balanceCents: 500 }, 402],
     [{ error: "A 3D generation is already running for this account - wait for it to finish." }, 409],
@@ -89,7 +94,7 @@ Deno.test("a failure in a streamed body is exactly the Error a non-2xx becomes",
   ];
   const caught = async (answer: () => { data: unknown; error: unknown }) => {
     const { draft } = shellWith(answer);
-    try { await draft(URLS, "farm", 2, "key-1", DIMS); } catch (e) { return e as Error & { ssRetryable?: boolean }; }
+    try { await draft(URLS, "farm", 2, "key-1", DIMS); } catch (e) { return e as Error & { ssRetryable?: boolean; ssRetryCode?: string }; }
     throw new Error("it did not throw");
   };
   for (const [obj, status] of failures) {
@@ -101,6 +106,9 @@ Deno.test("a failure in a streamed body is exactly the Error a non-2xx becomes",
     assertEquals(streamed.message, plain.message, `${status}: the same sentence`);
     assertEquals(streamed.ssRetryable === true, plain.ssRetryable === true, `${status}: the same retryable`);
     assertEquals(streamed.ssRetryable === true, obj.retryable === true);
+    // The code rides only beside retryable: it says why the designer reads again, nothing more.
+    assertEquals(streamed.ssRetryCode, plain.ssRetryCode, `${status}: the same retry code`);
+    assertEquals(streamed.ssRetryCode, obj.retryable === true && typeof obj.code === "string" ? obj.code : undefined, `${status}: the server's code, only when retryable`);
     assertEquals(Object.keys(streamed), Object.keys(plain), `${status}: no other property on either`);
   }
 });
