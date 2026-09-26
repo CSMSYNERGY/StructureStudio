@@ -196,7 +196,7 @@ Deno.test("v2 lean retry: its one read is drafted with its measured pitch, and i
   assertEquals(r.out.callsUsage, null, "the single call's own record");
   assertEquals([r.out.drafted.d3.roof.pitch, r.out.drafted.d3.roof.porchPitch], [0.4, 0.15]);
   const tokens = r.usage[0];
-  assertEquals(tokens.model, "claude-opus-5");
+  assertEquals(tokens.model, "claude-opus-5-5");
   assertEquals((tokens.samples as Record<string, unknown>[]).map((x) => [x.pitch, x.pitchSource, x.modelPitch, x.porchPitch]),
     [[0.4, "points", 0.8, 0.15]]);
   // The rest of the single call's record is what it always was.

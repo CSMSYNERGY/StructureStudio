@@ -180,7 +180,7 @@ const OVERLOADED: Plan = { status: 529, body: '{"type":"error","error":{"type":"
 // The request the single call has always sent, built HERE, independently of the handler, key for key.
 function expectedBody(r: Awaited<ReturnType<typeof run>>, v2: boolean, lean: boolean, videoCount: number, streamed = false) {
   return JSON.stringify({
-    model: v2 ? "claude-opus-5" : "claude-sonnet-5",
+    model: v2 ? "claude-opus-5-5" : "claude-sonnet-5",
     // 20000 on a streamed draft only (2026-09-25); every other request keeps 12000.
     max_tokens: streamed ? 20000 : 12000,
     thinking: { type: "adaptive" },
@@ -271,7 +271,7 @@ Deno.test("2 of 3: the answer is the consensus of the two that drafted, and the 
   // One usage write, the summed record.
   assertEquals(r.usage.length, 1);
   const tokens = r.usage[0] as Record<string, unknown>;
-  assertEquals([tokens.model, tokens.input, tokens.output, tokens.stopReason], ["claude-opus-5", 42000, 16000, "end_turn"]);
+  assertEquals([tokens.model, tokens.input, tokens.output, tokens.stopReason], ["claude-opus-5-5", 42000, 16000, "end_turn"]);
   assertEquals((tokens.calls as Record<string, unknown>[]).map((c) => [c.ok, c.output, c.stopReason]), [[true, 7000, "end_turn"], [false, null, null], [true, 9000, "end_turn"]]);
   assertEquals((tokens.samples as Record<string, unknown>[]).map((x) => x.centerEaveFt), [15, 13]);
   assertEquals((tokens.agreement as Record<string, unknown>).n, 2);
@@ -354,7 +354,9 @@ Deno.test("the capture's cost basis is the summed usage of every call", () => {
   const lead = { usage: { input_tokens: 21000, output_tokens: 7000 } };
   assertEquals(cost({ usage: summed }, lead, true), [summed, aiDraftCostCents(true, 63000, 21000)], "three calls: three calls' cost");
   assertEquals(cost(null, lead, false), [lead.usage, aiDraftCostCents(false, 21000, 7000)], "one call: exactly as before");
-  assertEquals(aiDraftCostCents(true, 63000, 21000), 84, "3 x 21k in and 3 x 7k out on Opus is 84 cents");
+  // Opus 5.5, $4 / $20 per million tokens (2026-09-26): 63,000 x 4 / 10,000 = 25.2 cents in, plus
+  // 21,000 x 20 / 10,000 = 42 cents out, is 67.2. (Opus 5's $5 / $25 made it 31.5 + 52.5 = 84.)
+  assertEquals(aiDraftCostCents(true, 63000, 21000), 67.2, "3 x 21k in and 3 x 7k out on Opus 5.5 is 67.2 cents");
 });
 
 Deno.test("the split check rides the flags only with a consensus, and turns the draft low-confidence", () => {

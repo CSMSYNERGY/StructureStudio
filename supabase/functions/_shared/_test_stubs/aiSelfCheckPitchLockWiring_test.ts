@@ -125,7 +125,7 @@ const DRAFTED = spec({
 const read = (pitch: number, source: "points" | "model", extra: Row = {}) =>
   ({ type: "gable", front: "gable", pitch, overhang: 1, eave: "fascia", pitchSource: source, ...extra });
 const TWO_MEASURED = {
-  model: "claude-opus-5", input: 3, output: 3, effort: "medium", streamed: true,
+  model: "claude-opus-5-5", input: 3, output: 3, effort: "medium", streamed: true,
   samples: [read(0.41, "points", { modelPitch: 0.62 }), read(0.4, "points", { modelPitch: 0.55 }), read(0.45, "model", { pitchRejected: true })],
 };
 const ONE_MEASURED = { ...TWO_MEASURED, samples: [read(0.41, "points", { modelPitch: 0.62 }), read(0.45, "model"), read(0.5, "model")] };

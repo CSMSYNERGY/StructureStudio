@@ -483,10 +483,10 @@ Deno.test("draftAnswer answers a request that does not stream with the branch's 
 // ─── 2. A request that does not stream ─────────────────────────────────────────────────────────
 Deno.test("requests that do not stream are answered as before: a plain Response, effort medium or low, 125 s", async () => {
   const cases: [string, Record<string, unknown>, { calls: number; effort: string; model: string }][] = [
-    ["the new shell's v2 press without stream (an older edge caller)", V2, { calls: 3, effort: "medium", model: "claude-opus-5" }],
-    ["the lean retry, even if it says stream", { ...STREAMED, lean: true }, { calls: 1, effort: "low", model: "claude-opus-5" }],
+    ["the new shell's v2 press without stream (an older edge caller)", V2, { calls: 3, effort: "medium", model: "claude-opus-5-5" }],
+    ["the lean retry, even if it says stream", { ...STREAMED, lean: true }, { calls: 1, effort: "low", model: "claude-opus-5-5" }],
     ["production's older shell (no frame), even if it says stream", { ...STREAMED, frame: undefined }, { calls: 1, effort: "medium", model: "claude-sonnet-5" }],
-    ["stream as a string", { ...V2, stream: "true" }, { calls: 3, effort: "medium", model: "claude-opus-5" }],
+    ["stream as a string", { ...V2, stream: "true" }, { calls: 3, effort: "medium", model: "claude-opus-5-5" }],
   ];
   for (const [what, payload, want] of cases) {
     const { trace, out } = await drive(payload, { model: THREE(GOOD()) });
@@ -605,7 +605,7 @@ Deno.test("effort high and 20000 tokens only on the streamed v2 draft; every oth
   const s = await drive(STREAMED, { model: THREE(GOOD()) });
   assertEquals(s.trace.sent.map((b) => b.output_config.effort), ["high", "high", "high"]);
   assertEquals(s.trace.sent.map((b) => b.max_tokens), [20000, 20000, 20000]);
-  assertEquals(s.trace.sent.map((b) => b.model), ["claude-opus-5", "claude-opus-5", "claude-opus-5"]);
+  assertEquals(s.trace.sent.map((b) => b.model), ["claude-opus-5-5", "claude-opus-5-5", "claude-opus-5-5"]);
   // Apart from the effort and the room to think in, the very request the plain v2 press sends.
   const p = await drive(V2, { model: THREE(GOOD()) });
   assertEquals(p.trace.sent.map((b) => b.output_config.effort), ["medium", "medium", "medium"]);
@@ -626,8 +626,13 @@ Deno.test("effort high and 20000 tokens only on the streamed v2 draft; every oth
 Deno.test("20000 tokens cannot make a streamed press cost more than its price: three full reads, at list price", () => {
   // aiDraftCostCents is our cost basis (never the builder's price, which is the held $20). Three reads
   // at a generous 21,000 input tokens each, all three spending all 20000: under $2, a tenth of the price.
+  // At Opus 5.5's $4 / $20 per million tokens (2026-09-26), in cents (x 100 / 1,000,000 = / 10,000):
+  //   input   3 x 21,000 = 63,000 tokens x 4 / 10,000  =  25.2
+  //   output  3 x 20,000 = 60,000 tokens x 20 / 10,000 = 120.0
+  //   total                                              145.2 cents
+  // (Opus 5's $5 / $25 made it 31.5 + 150 = 181.5.)
   const worst = aiDraftCostCents(true, 3 * 21_000, 3 * 20_000);
-  assertEquals(worst, 181.5);
+  assertEquals(worst, 145.2);
   assert(worst < 2000 / 10, `${worst} cents`);
 });
 

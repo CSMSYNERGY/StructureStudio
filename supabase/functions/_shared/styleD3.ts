@@ -3462,25 +3462,43 @@ export function selfCheckPairLabel(viewpoint: FrameMapViewpoint, mode: SelfCheck
 // help" was about fields the old vocabulary could express; the discrete massing reads added since
 // (which wall is high, both wings, porch in front of the wall) are where the model is the limit.
 //
+// 2026-09-26: v2 moves from claude-opus-5 to claude-opus-5-5, the draft and its self-check alike
+// (both take the model from aiModelFields). Measured live on the same Tri Home frames with a
+// focused pitch prompt, true pitch 0.41: claude-opus-5 read 0.38 to 0.78, 1 read of 9 within 0.04
+// of the truth; claude-opus-5-5 read 0.37 to 0.44, 7 of 7 within 0.04; claude-fable-5-1 read 0.48
+// to 0.58. Opus 5.5 is also cheaper per token ($4/$20 per million against $5/$25). The request
+// shape carries over as it is: every v2 body sends thinking {type: "adaptive"} with an explicit
+// output_config.effort and no tool_choice. Opus 5.5 refuses thinking disabled, budget_tokens and a
+// forced tool_choice, and its default effort is "medium" rather than Opus 5's "high", so the
+// explicit effort matters. The effort levels (portal-settings' draftEffort, the check's "medium")
+// were tuned on Opus 5, and Opus 5.5 tends to think more at the same level: watch draft_ms and the
+// stopReason in draft_tokens and self_check_tokens for max_tokens stops or time-outs after the switch.
+//
 // A refusal is handled exactly as before on both paths (ai_spec_refused / the check's refused
-// verdict): the hold is released and the builder is told plainly.
+// verdict): the hold is released and the builder is told plainly. Opus 5.5 adds "bio" and
+// "reasoning_extraction" to the refusal categories that ai_spec_refused records.
 export const AI_MODEL_LEGACY = "claude-sonnet-5";
-export const AI_MODEL_V2 = "claude-opus-5";
+export const AI_MODEL_V2 = "claude-opus-5-5";
 // The model field of a request body for one path: spread into the body, never mutated.
 export function aiModelFields(v2: boolean): Record<string, unknown> {
   return { model: v2 ? AI_MODEL_V2 : AI_MODEL_LEGACY };
 }
 // ── WHAT A DRAFT COSTS US, BY MODEL (fix, 2026-09-25) ────────────────────────────────────────
-// List prices in US dollars per million tokens, input and output, for the two models above.
+// List prices in US dollars per million tokens, input and output: the two models above, and
+// claude-opus-5, which v2 ran until 2026-09-26.
 export const AI_MODEL_LIST_USD_PER_MTOK: Readonly<Record<string, { input: number; output: number }>> = {
   [AI_MODEL_LEGACY]: { input: 2, output: 10 },
-  [AI_MODEL_V2]: { input: 5, output: 25 },
+  // v2's model until 2026-09-26. KEPT: draft_tokens rows written before the switch say
+  // "claude-opus-5", and re-pricing those rows needs this price.
+  "claude-opus-5": { input: 5, output: 25 },
+  [AI_MODEL_V2]: { input: 4, output: 20 },
 };
 // The cost basis a metered draft's capture records (wallet_transactions.cost_cents, OUR gross
 // margin figure, never a tenant-facing price), in cents. Picked with the SAME flag as
 // aiModelFields, so it is the model the request actually ran.
-//   v2      the Opus list price above. Until 2026-09-25 every capture used one hardcoded Sonnet
-//           rate, $3/$15, so each Opus draft recorded about 60% of what it cost.
+//   v2      the list price of AI_MODEL_V2 above. Until 2026-09-25 every capture used one hardcoded
+//           Sonnet rate, $3/$15, so each Opus draft recorded about 60% of what it cost. From
+//           2026-09-26 that is Opus 5.5's $4/$20; captures before then used Opus 5's $5/$25.
 //   legacy  FROZEN at that $3/$15, the number every capture has recorded since the meter was
 //           built, so production's older designer records exactly what it always has. Sonnet 5
 //           lists at $2/$10, so this over-states it by half; the raw tokens are stored and

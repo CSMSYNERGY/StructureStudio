@@ -4022,10 +4022,10 @@ Deno.test("selfCheckRequest: the v2 check gets 8000 tokens and 90 s, and its own
   const req = selfCheckRequest({ mode: "v2", dims: CHECK_DIMS, draft: CLEAN, pairs, round: 1, earlier: ["roof.overhang"] });
   assertEquals(req.abortMs, 90_000);
   const body = req.body as { model: string; max_tokens: number; thinking: unknown; output_config: unknown; messages: { role: string; content: { type: string; text?: string; source?: Record<string, string> }[] }[] };
-  // Opus on the v2 path (measured 2026-09-24, see aiModelFields); the legacy body keeps Sonnet and
-  // is pinned byte for byte by its hash test.
-  assertEquals([body.model, body.max_tokens], ["claude-opus-5", 8000]);
-  assertEquals(aiModelFields(true), { model: "claude-opus-5" });
+  // Opus on the v2 path (measured 2026-09-24, Opus 5.5 since 2026-09-26, see aiModelFields); the
+  // legacy body keeps Sonnet and is pinned byte for byte by its hash test.
+  assertEquals([body.model, body.max_tokens], ["claude-opus-5-5", 8000]);
+  assertEquals(aiModelFields(true), { model: "claude-opus-5-5" });
   assertEquals(aiModelFields(false), { model: "claude-sonnet-5" });
   assertEquals(Object.keys(body).includes("fallbacks"), false, "no extra request fields beyond the model");
   assertEquals(body.thinking, { type: "adaptive" });
@@ -4047,19 +4047,39 @@ Deno.test("selfCheckRequest: the v2 check gets 8000 tokens and 90 s, and its own
 // armed meter would have recorded about 60% of each v2 draft's real cost as our gross margin basis.
 import { AI_MODEL_LEGACY, AI_MODEL_LIST_USD_PER_MTOK, AI_MODEL_V2, aiDraftCostCents } from "./styleD3.ts";
 Deno.test("aiDraftCostCents: v2 at Opus's list price; legacy exactly the number every capture has recorded", () => {
-  assertEquals(AI_MODEL_LIST_USD_PER_MTOK[AI_MODEL_V2], { input: 5, output: 25 });
+  // Opus 5.5 since 2026-09-26: $4 in and $20 out per million tokens (Opus 5 was $5 / $25).
+  assertEquals(AI_MODEL_LIST_USD_PER_MTOK[AI_MODEL_V2], { input: 4, output: 20 });
   assertEquals(AI_MODEL_LIST_USD_PER_MTOK[AI_MODEL_LEGACY], { input: 2, output: 10 });
   // Legacy: the very expression portal-settings computed before, so production's older designer
   // records exactly what it always has.
   for (const [i, o] of [[0, 0], [21000, 8000], [18234, 5311], [1, 1], [123456, 12000], [7, 99999]]) {
     assertEquals(aiDraftCostCents(false, i, o), Math.round((i * 0.0003 + o * 0.0015) * 100) / 100, `${i}/${o}`);
   }
-  // A million tokens each way on Opus: $5 in, $25 out.
-  assertEquals(aiDraftCostCents(true, 1_000_000, 0), 500);
-  assertEquals(aiDraftCostCents(true, 0, 1_000_000), 2500);
-  // A typical 12-frame v2 draft: 21,000 in and 8,000 out is 30.5 cents; Sonnet's rate said 18.3.
-  assertEquals(aiDraftCostCents(true, 21000, 8000), 30.5);
+  // A million tokens each way on Opus 5.5: $4 in, $20 out (400 and 2000 cents).
+  assertEquals(aiDraftCostCents(true, 1_000_000, 0), 400);
+  assertEquals(aiDraftCostCents(true, 0, 1_000_000), 2000);
+  // A typical 12-frame v2 draft, 21,000 in and 8,000 out: 21,000 x 4 / 10,000 = 8.4 cents in plus
+  // 8,000 x 20 / 10,000 = 16 cents out is 24.4 cents. Opus 5's $5 / $25 made it 10.5 + 20 = 30.5,
+  // and Sonnet's frozen rate says 18.3.
+  assertEquals(aiDraftCostCents(true, 21000, 8000), 24.4);
   assertEquals(aiDraftCostCents(false, 21000, 8000), 18.3);
+});
+
+// 2026-09-26: v2 moved to claude-opus-5-5. Legacy must not move with it, and the price of the model
+// v2 ran before stays in the table, because draft_tokens rows already on the ledger name it.
+Deno.test("the v2 switch to claude-opus-5-5 leaves legacy on claude-sonnet-5 and keeps both Opus price rows", () => {
+  assertEquals(AI_MODEL_LEGACY, "claude-sonnet-5");
+  assertEquals(aiModelFields(false), { model: "claude-sonnet-5" });
+  assertEquals(AI_MODEL_V2, "claude-opus-5-5");
+  assertEquals(aiModelFields(true), { model: "claude-opus-5-5" });
+  assertEquals({ ...AI_MODEL_LIST_USD_PER_MTOK }, {
+    "claude-sonnet-5": { input: 2, output: 10 },
+    "claude-opus-5": { input: 5, output: 25 },
+    "claude-opus-5-5": { input: 4, output: 20 },
+  }, "the legacy row and both Opus rows, nothing else");
+  // The legacy cost basis is still the frozen $3 / $15 expression, not the table:
+  // 1,000,000 x 0.0003 + 1,000,000 x 0.0015 = 300 + 1,500 = 1,800 cents.
+  assertEquals(aiDraftCostCents(false, 1_000_000, 1_000_000), 1800);
 });
 
 // ═══ THE CHECK IS TOLD THE PORCH PITCH THE RENDER DRAWS (fix, 2026-09-25) ═══════════════════
@@ -4515,7 +4535,7 @@ Deno.test("draftReadSample and draftCallsUsage: every measured read's sample say
   const c = consensusOfCalls(calls, 12)!;
   assertEquals(c.d3.roof.pitch, 0.42, "the median of 0.4, 0.42 and 0.5: the measured numbers, not the model's 0.8, 0.6 and 0.5");
   assertEquals(c.report.spread.pitch, [0.4, 0.5]);
-  const samples = draftCallsUsage("claude-opus-5", calls, calls[c.call], c).tokens.samples as Record<string, unknown>[];
+  const samples = draftCallsUsage("claude-opus-5-5", calls, calls[c.call], c).tokens.samples as Record<string, unknown>[];
   assertEquals(samples.map((s) => [s.pitch, s.pitchSource, s.modelPitch, s.pitchRejected]), [
     [0.4, "points", 0.8, undefined],
     [0.42, "points", 0.6, undefined],
@@ -4605,18 +4625,18 @@ Deno.test("consensusOfCalls and draftCallsUsage: the medoid's CALL, the summed u
   assertEquals(c.report.n, 2);
   assertEquals(c.call, 1, "the medoid is the first drafted call on a tie, named by its CALL index");
   assertEquals(c.d3.roof.centerEaveFt, 14);
-  const u = draftCallsUsage("claude-opus-5", calls, calls[c.call], c);
+  const u = draftCallsUsage("claude-opus-5-5", calls, calls[c.call], c);
   assertEquals(u.usage, { input_tokens: 42000, output_tokens: 16000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, calls: 3 });
   assertEquals([u.tokens.input, u.tokens.output, u.tokens.stopReason], [42000, 16000, "end_turn"]);
   const entries = u.tokens.calls as Record<string, unknown>[];
   assertEquals(entries.map((e) => [e.output, e.ok, e.aborted]), [[null, false, null], [7000, true, null], [9000, true, null]]);
-  assert(entries.every((e) => e.model === "claude-opus-5" && typeof e.ms === "number"), "model and ms on each");
+  assert(entries.every((e) => e.model === "claude-opus-5-5" && typeof e.ms === "number"), "model and ms on each");
   assertEquals((u.tokens.samples as Record<string, unknown>[]).map((r) => r.centerEaveFt), [15, 13], "the reads' own roofs");
   assertEquals(u.tokens.agreement, c.report);
   // No call drafted: no consensus, nulls rather than zeros where no call reported a count.
   const none = await runDraftCalls({ count: 3, deadline: deadline.signal, graceMs: 5, send: fakeSend([{ throws: "x", delayMs: 0 }, { status: 500, delayMs: 1 }, { throws: "y", delayMs: 0 }]).send, read: (b) => readDraftReply(b) });
   assertEquals(consensusOfCalls(none, 12), null);
-  const z = draftCallsUsage("claude-opus-5", none, none[0], null);
+  const z = draftCallsUsage("claude-opus-5-5", none, none[0], null);
   assertEquals([z.usage.input_tokens, z.usage.output_tokens, z.tokens.stopReason, z.tokens.textChars, z.tokens.agreement], [null, null, null, 0, null]);
   assertEquals(z.tokens.samples, []);
 });
@@ -4927,7 +4947,7 @@ import { measuredPitchLock, MEASURED_PITCH_LOCK_MIN_READS, MEASURED_PITCH_LOCK_T
 // One read as draft_tokens.samples records it (draftReadSample): its roof, then its pitch's source.
 const lockRead = (pitch: unknown, source: unknown = "points", type: unknown = "gable") =>
   ({ type, front: "gable", pitch, overhang: 1, pitchSource: source });
-const lockTokens = (...samples: unknown[]) => ({ model: "claude-opus-5", input: 1, output: 1, samples });
+const lockTokens = (...samples: unknown[]) => ({ model: "claude-opus-5-5", input: 1, output: 1, samples });
 const lockDraft = (pitch: unknown, type: unknown = "gable") => ({ roof: { type, pitch, overhang: 1 }, colors: {} });
 
 Deno.test("measuredPitchLock: two reads that MEASURED a pitch near the drafted one lock it", () => {
@@ -4941,6 +4961,10 @@ Deno.test("measuredPitchLock: two reads that MEASURED a pitch near the drafted o
   // The rest of a real record rides along untouched (effort, streamed, calls, agreement).
   assert(measuredPitchLock({ ...lockTokens(lockRead(0.41), lockRead(0.4)), effort: "medium", streamed: true, calls: [], agreement: null },
     lockDraft(0.415)), "the whole draft_tokens object");
+  // A generation drafted on claude-opus-5 before the 2026-09-26 switch and checked after it: the
+  // lock reads the samples, never the model, so that row locks exactly as a new one does.
+  assert(measuredPitchLock({ ...lockTokens(lockRead(0.41), lockRead(0.4)), model: "claude-opus-5" }, lockDraft(0.415)),
+    "a row the model before the switch drafted");
 });
 
 Deno.test("measuredPitchLock: ONE measured read, or measured reads far from the draft, do not lock it", () => {
@@ -4992,7 +5016,7 @@ Deno.test("measuredPitchLock reads the record draftCallsUsage writes: three real
   const f = fakeSend([{ body: good, delayMs: 1 }, { body: other, delayMs: 2 }, { body: yUp, delayMs: 3 }]);
   const calls = await runDraftCalls({ count: 3, deadline: new AbortController().signal, graceMs: 50, send: f.send, read: (b) => readDraftReply(b, DIMS, true) });
   const c = consensusOfCalls(calls, 12)!;
-  const tokens = draftCallsUsage("claude-opus-5", calls, calls[c.call], c).tokens;
+  const tokens = draftCallsUsage("claude-opus-5-5", calls, calls[c.call], c).tokens;
   assertEquals(c.d3.roof.pitch, 0.42, "the fixture's consensus");
   // As recordDraftUsage stores it, and as the claim reads it back (JSON through the column).
   const stored = JSON.parse(JSON.stringify({ ...tokens, effort: "medium", streamed: true }));
@@ -5014,6 +5038,11 @@ const LOCK_GABLE: D3Spec = cleanSpec({
 });
 // Length and SHA-256 of what 8fe5d30's selfCheckPrompt / selfCheckRequest returned for the inputs in
 // the test below, line endings normalised.
+// The body's model has moved since (claude-opus-5 to claude-opus-5-5, 2026-09-26). The pin stays
+// 8fe5d30's: the test puts the old model back into the body's first field before hashing, so the
+// model is shown to be the only thing in the body that changed.
+const V2_MODEL_FIELD_AT_8FE5D30 = '{"model":"claude-opus-5",';
+const V2_MODEL_FIELD_NOW = '{"model":"claude-opus-5-5",';
 const UNLOCKED_AT_8FE5D30: Record<string, [number, string]> = {
   gable: [14049, "562a88d3eea746701ffd3858bf3b3c34186de2f2de4982f6542489ec5bee37b3"],
   gableEaveRound1: [14157, "b228f27eaff83aaf40509ef70b9fe9afafd142e7b419f5aefa8a0435c9c2bbb2"],
@@ -5021,7 +5050,7 @@ const UNLOCKED_AT_8FE5D30: Record<string, [number, string]> = {
   body: [15840, "6f655dfa3ea9fb50fbf68925983154f85f1fd678ecafdb6a5bd0a2d0c770f847"],
 };
 
-Deno.test("⛔ without the lock, the v2 check prompt and its request body are 8fe5d30's byte for byte", async () => {
+Deno.test("⛔ without the lock, the v2 check prompt and its request body are 8fe5d30's byte for byte (the body's model aside)", async () => {
   for (const lock of [{}, { pitchLocked: false }]) {
     const out: Record<string, string> = {
       gable: lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS, ...lock })),
@@ -5033,6 +5062,8 @@ Deno.test("⛔ without the lock, the v2 check prompt and its request body are 8f
       body: JSON.stringify(selfCheckRequest({ mode: "v2", dims: CHECK_DIMS, draft: LOCK_GABLE, pairs: PAIRS4, round: 0, ...lock }).body)
         .replace(/\\r\\n/g, "\\n"),
     };
+    assert(out.body.startsWith(V2_MODEL_FIELD_NOW), `the body names ${V2_MODEL_FIELD_NOW} first`);
+    out.body = V2_MODEL_FIELD_AT_8FE5D30 + out.body.slice(V2_MODEL_FIELD_NOW.length);
     for (const [k, [length, hash]] of Object.entries(UNLOCKED_AT_8FE5D30)) {
       assertEquals(out[k].length, length, `${k} ${JSON.stringify(lock)}: its length`);
       assertEquals(await sha256(out[k]), hash, `${k} ${JSON.stringify(lock)}: its bytes`);

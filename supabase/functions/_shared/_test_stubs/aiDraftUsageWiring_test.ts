@@ -191,7 +191,7 @@ Deno.test("a reply with no usage block records nulls, not zeros", async () => {
 Deno.test("the usage names the model the request ran, so the cost basis can be re-priced per model", async () => {
   // 2026-09-25: the v2 path moved to Opus while every capture was still priced at Sonnet's rate,
   // and no row said which model had run. The model rides in the jsonb, not in a new column.
-  for (const [v2, model] of [[false, "claude-sonnet-5"], [true, "claude-opus-5"]] as const) {
+  for (const [v2, model] of [[false, "claude-sonnet-5"], [true, "claude-opus-5-5"]] as const) {
     const admin = fakeAdmin(AFTER_251);
     await site(DATA, TRUNCATED, helper(admin, []), v2);
     assertEquals(admin.stored[0].draft_tokens.model, model, `v2Prompt ${v2}`);
@@ -203,7 +203,7 @@ Deno.test("several calls (consensus drafting) record their summed record in plac
   // aiDraftConsensusWiring_test proves what that record holds; here, only that the reply site takes
   // it whole when there is one, through the same single write.
   const admin = fakeAdmin(AFTER_251);
-  const tokens = { model: "claude-opus-5", input: 63000, output: 21000, calls: [{ ok: true }, { ok: true }, { ok: false }] };
+  const tokens = { model: "claude-opus-5-5", input: 63000, output: 21000, calls: [{ ok: true }, { ok: true }, { ok: false }] };
   await site(DATA, TRUNCATED, helper(admin, []), true, { tokens, usage: {} });
   assertEquals(admin.attempts.length, 1, "one round trip, as before");
   assertEquals(admin.stored[0].draft_tokens, { ...tokens, effort: "medium", streamed: false });
@@ -220,7 +220,7 @@ Deno.test("a measured v2 single read (the lean retry) records its roof and pitch
   await site(DATA, TRUNCATED, helper(admin, [], { draftEffort: "low" }), true, null, { reading: { d3: { roof }, pitch } });
   const tokens = admin.stored[0].draft_tokens;
   assertEquals(tokens.samples, [{ ...roof, ...pitch }], "the one read, with where its pitches came from");
-  assertEquals(tokens.model, "claude-opus-5");
+  assertEquals(tokens.model, "claude-opus-5-5");
   assertEquals(Object.keys(admin.stored[0]).sort(), ["draft_ms", "draft_tokens"], "still only the two 251 columns");
   // A reading with no `pitch` (every legacy read) records exactly the object it always did.
   const legacy = fakeAdmin(AFTER_251);
@@ -232,7 +232,7 @@ Deno.test("draft_tokens says which effort the request ran at and whether it stre
   // 2026-09-25: a streamed v2 draft thinks at "high" with 20000 tokens, the lean retry at "low", every
   // other request at "medium", and nothing recorded which, so "did high help?" had no query. Two keys
   // at the top of the existing jsonb, no new column: the write is still the two 251 columns.
-  const tokens = { model: "claude-opus-5", input: 63000, output: 45000, calls: [{ ok: true }, { ok: true }, { ok: true }] };
+  const tokens = { model: "claude-opus-5-5", input: 63000, output: 45000, calls: [{ ok: true }, { ok: true }, { ok: true }] };
   for (const [effort, streamed] of [["high", true], ["medium", false], ["low", false]] as const) {
     const admin = fakeAdmin(AFTER_251);
     await site(DATA, TRUNCATED, helper(admin, [], { draftEffort: effort, streamed }), true, { tokens, usage: {} });
