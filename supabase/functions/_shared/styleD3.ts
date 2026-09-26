@@ -3691,8 +3691,9 @@ export type DraftCallAbort = "deadline" | "quorum";
 // staggered first send. The rest of the result is its LAST attempt's, and `ms` runs from its first
 // send to that last answer.
 export type DraftCall<R> = { index: number; ms: number; attempts: number } & (
-  // fetch, or the body read, threw: no reply
-  | { threw: true; error: unknown; aborted: DraftCallAbort | null; status: null; httpOk: false; body: ""; reading: null }
+  // fetch, or the body read, threw: no reply. `replied` is true when the reply's headers had arrived
+  // and its BODY broke off while being read (optional: absent reads as false).
+  | { threw: true; error: unknown; aborted: DraftCallAbort | null; status: null; httpOk: false; body: ""; reading: null; replied?: boolean }
   // a reply that was not 2xx (a 429, a 529): its body is the error text
   | { threw: false; error: null; aborted: null; status: number; httpOk: false; body: string; reading: null }
   // a 2xx reply, read
@@ -3858,7 +3859,7 @@ export async function runDraftCalls<R extends { drafted: boolean }>(opts: {
       } catch (error) {
         const aborted = abortedNow();
         return {
-          call: { index, ms: Date.now() - started, attempts, threw: true, error, aborted, status: null, httpOk: false, body: "", reading: null },
+          call: { index, ms: Date.now() - started, attempts, threw: true, error, aborted, status: null, httpOk: false, body: "", reading: null, ...(replied ? { replied: true } : {}) },
           // The network, before any reply: never our own abort, and never a body that broke off.
           again: !replied && aborted === null,
         };
@@ -3915,6 +3916,7 @@ export const DRAFT_UPSTREAM_SENTENCES = {
   overloaded: "The AI service is busy right now - please press Generate again.",
   upstream: "The AI service had a problem just now - please press Generate again.",
   network: "We couldn't reach the AI service just now - please press Generate again.",
+  broken: "The AI's answer was cut off on its way back - please press Generate again.",
   refused: "The AI service could not take this request. Please press Generate again, and if it keeps happening, tell CSM Synergy.",
 } as const;
 export type DraftUpstreamFailure = {
@@ -3929,18 +3931,24 @@ export type DraftUpstreamFailure = {
   context: Record<string, unknown>;
 };
 export function draftUpstreamFailure(lead: DraftCall<unknown>, calls: readonly DraftCall<unknown>[] = [lead]): DraftUpstreamFailure {
-  const kind: DraftUpstreamFailure["kind"] = lead.threw ? "network" : transientUpstream(lead.status, lead.body) ?? "refused";
-  const transient = kind !== "refused";
+  // A reply whose BODY broke off after its headers arrived is NOT transient: a non-streaming reply only
+  // sends its headers once the model has finished, so that read was almost certainly billed, which is
+  // why runDraftCalls does not send it again. The builder is told plainly and presses again themself;
+  // nothing resends it automatically (no `retryable`, so no lean retry either).
+  const kind: DraftUpstreamFailure["kind"] = lead.threw
+    ? ("replied" in lead && lead.replied ? "broken" : "network")
+    : transientUpstream(lead.status, lead.body) ?? "refused";
+  const transient = kind !== "refused" && kind !== "broken";
   const code = transient ? "ai_upstream_transient" : "ai_upstream_error";
   const message = lead.threw
-    ? `Could not reach the AI service: ${lead.error instanceof Error ? lead.error.message : String(lead.error)}`
+    ? `${kind === "broken" ? "The AI service's reply broke off" : "Could not reach the AI service"}: ${lead.error instanceof Error ? lead.error.message : String(lead.error)}`
     : `AI service returned ${lead.status}: ${lead.body.slice(0, 2000)}`;
   return {
     transient,
     kind,
     status: kind === "overloaded" ? 503 : 502,
     code,
-    answer: transient ? { error: DRAFT_UPSTREAM_SENTENCES[kind], code, retryable: true } : { error: DRAFT_UPSTREAM_SENTENCES.refused, code },
+    answer: transient ? { error: DRAFT_UPSTREAM_SENTENCES[kind], code, retryable: true } : { error: DRAFT_UPSTREAM_SENTENCES[kind], code },
     message,
     context: {
       status: lead.status,

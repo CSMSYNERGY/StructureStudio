@@ -5030,6 +5030,25 @@ Deno.test("runDraftCalls: a send that threw is sent again; a body that broke off
   assertEquals([calls[0].attempts, calls[0].reading?.drafted], [2, true], "the network, before any reply: sent again");
   assertEquals([calls[1].attempts, calls[1].threw, calls[1].aborted], [1, true, null], "a reply that broke off may have been paid for: kept as it is");
   assertEquals(f.sends(1).length, 1);
+  // ...and it says so, so the answer does not invite an automatic resend either.
+  assertEquals((calls[1] as { replied?: boolean }).replied, true, "the body broke off after the reply");
+  assert(!("replied" in calls[0]) || !(calls[0] as { replied?: boolean }).replied, "read 0 drafted");
+  const broken = draftUpstreamFailure(calls[1]);
+  assertEquals([broken.kind, broken.transient, broken.code, broken.status], ["broken", false, "ai_upstream_error", 502]);
+  assertEquals(broken.answer, { error: DRAFT_UPSTREAM_SENTENCES.broken, code: "ai_upstream_error" });
+  assert(!("retryable" in broken.answer), "never resent automatically: the read was probably billed");
+});
+
+Deno.test("runDraftCalls: a read that drafts on its retry counts ONCE toward the quorum, so the other three are not cut", async () => {
+  // Read 0 is turned away once and then drafts quickly (attempts 2); read 1 drafts quickly; reads 2-4
+  // draft at ~200 ms. With a 30 ms grace, a double count would make read 0 look like two drafts, reach
+  // the quorum of three with read 1, and cut reads 2-4. Counted once, the quorum waits for a third.
+  const slow: ReadPlan = { body: GOOD, delayMs: 200 };
+  const f = perRead([[R_529, R_OK], [R_OK], [slow], [slow], [slow]]);
+  const calls = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 30, send: f.send, read: readPlain, retry: QUICK({ delaysMs: [10], minLeftMs: 0 }) });
+  assertEquals(calls.map((c) => c.reading?.drafted ?? false), [true, true, true, true, true], "all five drafted");
+  assertEquals(calls.map((c) => c.aborted), [null, null, null, null, null], "none cut by the quorum");
+  assertEquals(calls.map((c) => c.attempts), [2, 1, 1, 1, 1]);
 });
 
 Deno.test("runDraftCalls: the deadline cuts a backoff short, the last failure stands, and nothing more is sent", async () => {
