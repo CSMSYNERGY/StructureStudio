@@ -1755,8 +1755,11 @@ Deno.test("v2 asks for the pixel points a gable's pitch is read from, in a measu
   // key, ahead of roof, so the points are written before the pitch rather than fitted to a number
   // already given. Only a gable is asked for points: shed and porch points both read far off in a
   // camera simulation and were taken out, and a gambrel's pitch is never computed.
+  // Since later the same day the block also carries the wing roofs' points, on the line after the
+  // gable's (the next test), so the gable's line now ends in a comma.
   const MEASURE_SCHEMA = '  "measure": {\n' +
-    '    "pitch": { "frame": <1-based index of the image you read the gable\'s slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] }\n' +
+    '    "pitch": { "frame": <1-based index of the image you read the gable\'s slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] },\n' +
+    '    "wing": { "frame": <1-based index of the image you read the wing roofs\' slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] }\n' +
     '  },\n  "roof": {\n';
   for (const [name, p] of V2) {
     const open = p.indexOf('\n{\n  "measure": {\n'), measure = p.indexOf('  "measure": {'), roof = p.indexOf('  "roof": {');
@@ -1765,8 +1768,8 @@ Deno.test("v2 asks for the pixel points a gable's pitch is read from, in a measu
     assert(p.indexOf('  "frameMap": {') > roof, `${name}: the frame map is after the roof, as before`);
     assert(p.includes('"otherSide": { "frame": <the image most square-on to the side wall OPPOSITE the one you gave for side>, "azimuthDeg": <as above> }\n  }\n}'),
       `${name}: and closes the object`);
-    // The block holds the gable's pitch and nothing else, word for word.
-    assert(p.includes(MEASURE_SCHEMA), `${name}: the measure block is the gable's pitch alone`);
+    // The block holds the gable's pitch and the wing roofs' points and nothing else, word for word.
+    assert(p.includes(MEASURE_SCHEMA), `${name}: the measure block is the gable's pitch and the wings' points alone`);
     for (const gone of ['"porchPitch": {', '"tallTop"', '"shortTop"', '"wall": [', '"edge": [', '"postTop"', '"postBottom"', '"size": <as above>']) {
       assert(!p.includes(gone), `${name}: no ${gone} is asked for`);
     }
@@ -1786,10 +1789,12 @@ Deno.test("v2 asks for the pixel points a gable's pitch is read from, in a measu
       `${name}: the tip, never the corner below it`);
     assert(p.includes("On a building with side wings the gable is the centre section's"), `${name}: the centre section's gable`);
     // A shed's and a gambrel's pitch are never computed (pitchFromMeasure), so both are told plainly
-    // to leave the block out.
+    // to leave the gable's points out. Since the wing points (2026-09-26) the sentence names
+    // measure.pitch, so a gambrel centre with a wing each side still gives its wing points.
     assert(!p.includes("gable or gambrel roof, use the frame"), `${name}: no gable points asked for on a gambrel`);
-    assert(p.includes("Leave measure out on a one-slope (shed) roof, and on a gambrel, whose shape is the GAMBREL NUMBERS rather than one slope."),
+    assert(p.includes("Leave measure.pitch out on a one-slope (shed) roof, and on a gambrel, whose shape is the GAMBREL NUMBERS rather than one slope."),
       `${name}: leave it out on a shed and a gambrel`);
+    assert(!p.includes("Leave measure out"), `${name}: the whole block is never ruled out`);
     assert(p.includes("Leave it out too when no frame shows a gable end square-on."), `${name}: and with no square-on gable`);
     // The model's own number stays in the schema: it is the fallback when the points fail.
     assert(p.includes("Give roof.pitch as usual either way."), `${name}: the number is still given`);
@@ -1805,6 +1810,45 @@ Deno.test("v2 asks for the pixel points a gable's pitch is read from, in a measu
   // Legacy prompts are frozen (hashes above) and the photo path is out of scope: none of them asks.
   for (const p of [VIDEO_SHAPE_PROMPT, videoShapePrompt(DIMS), combinedShapePrompt(8, 4), combinedShapePrompt(8, 4, DIMS), SPEC_PROMPT]) {
     assert(!p.includes('"measure"') && !p.includes("MEASURE,"), "a legacy prompt never asks for points");
+  }
+});
+
+Deno.test("v2 asks for the wing roofs' four points in the measure block, only on a building with wings on both sides (2026-09-26)", () => {
+  // Live, the model's own wingPitch read a raised centre's wing roofs low (0.10 to 0.14 against a
+  // measured 0.20); the server now works it out from four points (wingPitchFromMeasure, whose tests
+  // are with the other measured pitches below).
+  const WING_LINE = '    "wing": { "frame": <1-based index of the image you read the wing roofs\' slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] }\n  },\n  "roof": {\n';
+  const WING_POINTS = "WING POINTS, measure.wing, only for a building with enclosed side wings on BOTH sides, the left and the right: " +
+    "the points the wing roofs' slope is worked out from. Use the frame most square-on to the FRONT, give that image's own size as above, " +
+    "and give four points, two on each wing roof's sloping top edge along the front of the building: leftOuter, where the left wing's top " +
+    "edge ends at the building's left outer corner, the outer tip of that edge; leftInner, where that same edge meets the centre section's " +
+    "wall; then rightInner and rightOuter, the same two points on the right wing. They are pixels in that image, x to the RIGHT and y DOWN, " +
+    "like every point above. For example, the wings in a 1600 by 900 image might read leftOuter [300, 560], leftInner [560, 482], " +
+    "rightInner [1040, 480], rightOuter [1300, 559]. Leave measure.wing out on any other building, and give roof.wingPitch as usual either way.";
+  for (const [name, p] of V2) {
+    // The wing line is the block's last, right after the gable's, and the block still comes first.
+    assert(p.includes(WING_LINE), `${name}: the wing line closes the measure block`);
+    const measure = p.indexOf('  "measure": {'), wing = p.indexOf('    "wing": {'), roof = p.indexOf('  "roof": {');
+    assert(measure > 0 && measure < wing && wing < roof, `${name}: inside the block that comes first`);
+    // The words, whole, at the END of the MEASURE paragraph, so the check on that paragraph's numbers
+    // in the test above covers them too.
+    const start = p.indexOf("MEASURE, measure:");
+    const para = p.slice(start, p.indexOf("\n\n", start));
+    assert(para.endsWith(WING_POINTS), `${name}: WING POINTS ends the MEASURE paragraph, word for word`);
+    assertEquals(p.split("WING POINTS").length, 2, `${name}: said once`);
+    // A generic example: none of the live reads' points, and none of the pitches they or the test
+    // buildings measure.
+    for (const own of ["0.41", "0.25", "0.22", "0.23", "0.2", "0.11", "0.24"]) assert(!para.includes(own), `${name}: no ${own}`);
+    for (const pt of LIVE_WING_POINTS.flat()) assert(!para.includes(`[${pt[0]}, ${pt[1]}]`), `${name}: no live point ${pt}`);
+    // The server's own arithmetic on the prompt's own example: a generic 0.3.
+    const ex = (k: string) => JSON.parse(para.match(new RegExp(`${k} (\\[\\d+, \\d+\\])`))![1]);
+    const example = { size: [1600, 900], leftOuter: ex("leftOuter"), leftInner: ex("leftInner"), rightInner: ex("rightInner"), rightOuter: ex("rightOuter") };
+    assertEquals(example.leftOuter, [300, 560], `${name}: the example is read back`);
+    assertEquals(wingPitchFromMeasure(example, { type: "gable", front: "gable", wingSide: "both" }), 0.3, `${name}: the example is a 0.3`);
+  }
+  // Legacy prompts are frozen (hashes above): none of them asks for wing points either.
+  for (const p of [VIDEO_SHAPE_PROMPT, videoShapePrompt(DIMS), combinedShapePrompt(8, 4), combinedShapePrompt(8, 4, DIMS), SPEC_PROMPT]) {
+    assert(!p.includes('"wing": {') && !p.includes("WING POINTS") && !p.includes("leftOuter"), "a legacy prompt never asks for wing points");
   }
 });
 
