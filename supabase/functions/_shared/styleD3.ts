@@ -1905,6 +1905,17 @@ export function applyMeasuredPitches(d3: D3Spec, text: string): { d3: D3Spec; so
 //   * and that pitch is within MEASURED_PITCH_LOCK_TOLERANCE of at least one of those measured
 //     pitches. A consensus that settled on a judged read's number is not a measured one.
 // Anything else, including anything malformed, is false: the check goes on exactly as before.
+//
+// TWO, AND STILL TWO WITH FIVE READS (2026-09-26). The rule counts independent sets of points, not a
+// share of the reads: two frames that each measured the slope are the same evidence whether they sit
+// among three reads or five, and the second clause already makes the draft agree with one of them.
+// More reads make that draft sturdier, not weaker: its pitch is the median of up to five, so it
+// leaves the measured numbers only when most of the reads put the slope somewhere else, and then
+// nothing measured is within 0.03 and the lock is off anyway. Raising it to three
+// would unlock exactly the case the lock was built for -- a draft whose reads measured 0.41 and 0.40
+// being moved to 0.7 by eye -- on every row where only two reads' points held (a read gives none, or
+// has them refused, often enough: two of three on the live draft that started this), on every
+// three-read row already in the ledger, and on a five-read press that lost reads to the quorum.
 export const MEASURED_PITCH_LOCK_MIN_READS = 2;
 export const MEASURED_PITCH_LOCK_TOLERANCE = 0.03;
 export function measuredPitchLock(draftTokens: unknown, drafted: unknown): boolean {

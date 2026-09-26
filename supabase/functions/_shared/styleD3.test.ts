@@ -5264,6 +5264,45 @@ Deno.test("measuredPitchLock reads the record draftCallsUsage writes: three real
   assert(!measuredPitchLock(draftCallsUsage("claude-sonnet-5", legacyCalls, legacyCalls[lc.call], lc).tokens, lc.d3), "an unmeasured record");
 });
 
+Deno.test("measuredPitchLock with five reads: two measured reads still lock, counted, not as a share", () => {
+  // Kept at two when the draft went to five reads (2026-09-26; MEASURED_PITCH_LOCK_MIN_READS says why).
+  assertEquals(MEASURED_PITCH_LOCK_MIN_READS, 2);
+  // Two of five measured, three judged, and the median of all five (0.43) sits by the measured 0.41.
+  assert(measuredPitchLock(lockTokens(lockRead(0.41), lockRead(0.45, "model"), lockRead(0.4), lockRead(0.5, "model"), lockRead(0.43, "model")), lockDraft(0.43)),
+    "two measured of five");
+  assert(measuredPitchLock(lockTokens(lockRead(0.41), lockRead(0.42), lockRead(0.4), lockRead(0.7, "model"), lockRead(0.7, "model")), lockDraft(0.41)),
+    "three measured of five");
+  // One measured of five is still one set of points.
+  assert(!measuredPitchLock(lockTokens(lockRead(0.41), lockRead(0.42, "model"), lockRead(0.4, "model"), lockRead(0.43, "model"), lockRead(0.41, "model")), lockDraft(0.41)),
+    "one measured of five");
+  // Three judged reads carried the median away from the two measured ones: nothing measured is near it.
+  assert(!measuredPitchLock(lockTokens(lockRead(0.41), lockRead(0.7, "model"), lockRead(0.4), lockRead(0.72, "model"), lockRead(0.75, "model")), lockDraft(0.7)),
+    "the judged majority's number");
+  // A five-read press that lost reads to the quorum records fewer samples, and locks the same way.
+  assert(measuredPitchLock(lockTokens(lockRead(0.41), lockRead(0.4), lockRead(0.6, "model")), lockDraft(0.41)), "three of five answered");
+});
+
+Deno.test("measuredPitchLock reads the record draftCallsUsage writes: five real v2 reads, three measured", async () => {
+  // Points giving 0.4, 0.42 and 0.43, a y-up read that keeps the model's 0.5, and a read with no
+  // points at 0.45. The median is 0.43, one of the measured three.
+  const bodies = [
+    replyBody(MEASURED_REPLY()),
+    replyBody(MEASURED_REPLY({ pitch: 0.6 }, { pitch: gableAt([400, 600], [800, 432], [1200, 600]) })),
+    replyBody(MEASURED_REPLY({ pitch: 0.5 }, { pitch: gableAt([400, 440], [800, 600], [1200, 440]) })),
+    replyBody(MEASURED_REPLY({ pitch: 0.7 }, { pitch: gableAt([400, 600], [800, 428], [1200, 600]) })),
+    replyBody(MEASURED_REPLY({ pitch: 0.45 }, NO_MEASURE)),
+  ];
+  const f = fakeSend(bodies.map((body, i) => ({ body, delayMs: i + 1 })));
+  const calls = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 50, send: f.send, read: (b) => readDraftReply(b, DIMS, true) });
+  const c = consensusOfCalls(calls, 12)!;
+  assertEquals(c.report.n, 5);
+  assertEquals(c.d3.roof.pitch, 0.43, "the median of 0.4, 0.42, 0.5, 0.43 and 0.45");
+  const tokens = JSON.parse(JSON.stringify({ ...draftCallsUsage("claude-opus-5-5", calls, calls[c.call], c).tokens, effort: "high", streamed: true }));
+  assertEquals((tokens.samples as Record<string, unknown>[]).map((s) => [s.pitch, s.pitchSource]),
+    [[0.4, "points"], [0.42, "points"], [0.5, "model"], [0.43, "points"], [0.45, "model"]]);
+  assert(measuredPitchLock(tokens, JSON.parse(JSON.stringify(c.d3))), "three measured reads, and the draft is one of them");
+});
+
 // The prompt. A gable with a porch, as a locked row's draft would be.
 const LOCK_GABLE: D3Spec = cleanSpec({
   roof: { type: "gable", front: "gable", pitch: 0.42, overhang: 1, eave: "fascia", porchOutFt: 6, porchEnd: "front" },
