@@ -4000,17 +4000,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the real bound on a runaway reply, and it is a clean, released, RETRYABLE failure; the
     // budget only has to stop being the thing a normal long reply trips over.
     //
-    // 20000 ON A STREAMED DRAFT ONLY (2026-09-25). At effort "high" a read thinks for longer, and a
-    // read that thinks past 12000 is cut off unparsed however much of its 300 s is left. At the ~70
-    // output tokens/s Opus streamed live that day, a read that spends all 20000 takes ~286 s, which
-    // fits inside the 300 s budget below. Every other request keeps 12000, byte for byte. What it
-    // can cost: five reads (three until 2026-09-26) of ~21,000-25,000 input and at most 20,000 output
-    // tokens at the v2 model's list price (aiDraftCostCents; Opus 5.5, $4/$20, since 2026-09-26) is at
-    // most ~$2.42-$2.50 a press, against ~$1.62-$1.70 for the unstreamed v2 press at 12000, and a
-    // typical press (~7,000 output tokens a read) ~$1.12 -- recorded as the capture's cost basis,
+    // 12000 ON EVERY READ AGAIN (2026-09-26). The streamed draft had 20000 from 2026-09-25, when Opus 5
+    // at effort "high" thought past 12000; Opus 5.5 reads measured live the next day use about 2,000-
+    // 7,000 output tokens, so 12000 is still ~1.7x the longest seen, and it keeps five reads' worst
+    // case under the ceiling below. A read that did run past it is cut off unparsed and dropped from
+    // the consensus, like any failed read. What a press can cost: five reads (Ahsan approved five on
+    // 2026-09-26) of ~26,000 input tokens each (measured live: 78,051 for three) and at most 12,000
+    // output at the v2 model's list price (aiDraftCostCents; Opus 5.5, $4/$20) is at most ~$1.72, and a
+    // typical press (~2,000-5,000 output a read) ~$0.72-$1.02 -- recorded as the capture's cost basis,
     // never charged to the builder, whose price is the held $20 whatever the tokens.
-    // aiDraftStreamWiring_test holds the worst case to an eighth of that price (a tenth, with three
-    // reads).
+    // aiDraftStreamWiring_test holds the worst case under a tenth of that price.
     //
     // The timeout is the other half. Supabase's gateway answers 504 on its own at 150 s of
     // silence, and that 504 is invisible to withErrorLog and leaves the wallet hold open until
@@ -4052,8 +4051,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // 300 s OF 330 s SINCE 2026-09-25 (it was 230 s of 260 s). Live that day the three "high" reads
     // took 74-215 s, and in 8 of 12 presses one or two of them hit the 230 s abort (draft_tokens
     // `aborted: "deadline"`), which left the consensus a single read. Opus streamed ~70 output
-    // tokens/s, so a read that spends its whole 20000 needs ~286 s: 300 s lets it finish on a fresh
-    // worker. The rest of the request still fits: the reads are done by 330 s from the request and
+    // tokens/s, so a read that spent 20000 (its cap then) needed ~286 s: 300 s let it finish on a fresh
+    // worker. Opus 5.5 reads (2026-09-26) take 30-80 s with a 12000 cap. The rest of the request still fits: the reads are done by 330 s from the request and
     // 75 s before the worker's end, the answer's watchdog closes by 360 s and 40 s before the
     // worker's end (streamedDraftDeadlineMs; 30 s or more for the capture and the ledger write), and
     // the worker's own end comes after both.
@@ -4129,9 +4128,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       body: JSON.stringify({
         ...aiModelFields(v2Prompt),
         // Thinking and the answer share this. The video prompt's `observed` block rides on
-        // top of the spec. A truncated reply is unparseable, not partially useful. More room only
-        // on a streamed draft, which thinks at "high" (see above).
-        max_tokens: streamed ? 20000 : 12000,
+        // top of the spec. A truncated reply is unparseable, not partially useful. 12000 on every
+        // read (see above).
+        max_tokens: 12000,
         thinking: { type: "adaptive" },
         // v2 thinks HARD (2026-09-25). At "medium", Opus often answered a walk-around in 10-15 s with
         // ~480 output tokens -- the JSON and next to no thinking -- and those shallow reads put a

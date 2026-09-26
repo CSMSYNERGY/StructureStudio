@@ -184,8 +184,9 @@ const OVERLOADED: Plan = { status: 529, body: '{"type":"error","error":{"type":"
 function expectedBody(r: Awaited<ReturnType<typeof run>>, v2: boolean, lean: boolean, videoCount: number, streamed = false) {
   return JSON.stringify({
     model: v2 ? "claude-opus-5-5" : "claude-sonnet-5",
-    // 20000 on a streamed draft only (2026-09-25); every other request keeps 12000.
-    max_tokens: streamed ? 20000 : 12000,
+    // 12000 on every read (20000 on a streamed draft from 2026-09-25 to 2026-09-26, while Opus 5 thought
+    // past 12000 at effort high; Opus 5.5's reads use 2,000-7,000).
+    max_tokens: 12000,
     thinking: { type: "adaptive" },
     output_config: { effort: lean ? "low" : streamed ? "high" : "medium" },
     messages: [{
@@ -246,7 +247,7 @@ Deno.test("a v2 press sends FIVE identical requests, all before any answer comes
   assert(Object.values(r.out.consensus.report.discreteAgreement).every((a) => a === "5/5"), "five alike, 5/5 on everything");
 });
 
-Deno.test("a STREAMED v2 press sends the same five requests at effort high with 20000 tokens, and nothing else changes", async () => {
+Deno.test("a STREAMED v2 press sends the same five requests at effort high with 12000 tokens, and nothing else changes", async () => {
   const plain = await run({ v2: true }, FIVE(GOOD()));
   const r = await run({ v2: true, streamed: true }, FIVE(GOOD()));
   assertEquals(r.sent.length, 5);
@@ -254,13 +255,13 @@ Deno.test("a STREAMED v2 press sends the same five requests at effort high with 
   const want = expectedBody(r, true, false, 0, true);
   for (const { init } of r.sent) {
     assertEquals(init.headers, HEADERS);
-    assertEquals(init.body, want, "Opus, the v2 prompt, effort high, 20000 tokens");
+    assertEquals(init.body, want, "Opus, the v2 prompt, effort high, 12000 tokens");
     assertEquals(JSON.parse(init.body).output_config, { effort: "high" });
-    assertEquals(JSON.parse(init.body).max_tokens, 20000);
+    assertEquals(JSON.parse(init.body).max_tokens, 12000);
   }
-  // The only differences from the plain v2 request are the effort and the room to think in.
+  // The only difference from the plain v2 request is the effort.
   assertEquals(JSON.parse(plain.sent[0].init.body).max_tokens, 12000, "the plain v2 request keeps 12000");
-  assertEquals(JSON.parse(r.sent[0].init.body), { ...JSON.parse(plain.sent[0].init.body), max_tokens: 20000, output_config: { effort: "high" } });
+  assertEquals(JSON.parse(r.sent[0].init.body), { ...JSON.parse(plain.sent[0].init.body), output_config: { effort: "high" } });
   assertEquals(r.out.drafted.d3, plain.out.drafted.d3, "the same reads, the same draft");
 });
 

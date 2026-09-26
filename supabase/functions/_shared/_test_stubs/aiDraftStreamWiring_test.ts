@@ -17,7 +17,7 @@
 //   4. Everything around the answer happens exactly as it does unstreamed, in the same order: the
 //      ledger row, the hold and its release on every failure, the capture, the usage write, the coded
 //      app_errors rows AND the rows the error wrapper files, which it cannot see through a 200.
-//   5. Effort "high", 20000 tokens and the 300/330 s budget only on the streamed request, and
+//   5. Effort "high" and the 300/330 s budget only on the streamed request (12000 tokens on every read), and
 //      draft_tokens says which effort ran and whether it streamed. The budget also ends 75 s before
 //      the WORKER does (2026-09-26): the platform's 400 s is a worker's life, not a request's.
 //   6. The work behind the answer is handed to EdgeRuntime.waitUntil; a watchdog closes the answer at
@@ -470,7 +470,6 @@ Deno.test("draftAnswer answers a request that does not stream with the branch's 
     'const draftEffort = lean ? "low" : streamed ? "high" : "medium";',
     "const draftAbortMs = streamed",
     '.update({ draft_tokens: tokens ? { ...tokens, effort: draftEffort, streamed } : tokens, draft_ms: Date.now() - t0 }).eq("id", ledgerRow.id);',
-    "max_tokens: streamed ? 20000 : 12000,",
   ]);
   const effortUses = BRANCH.split("\n").filter((l) => /\bdraftEffort\b/.test(l) && !l.trim().startsWith("//")).map((l) => l.trim());
   assertEquals(effortUses, [
@@ -601,16 +600,16 @@ Deno.test("the 200 and a space go out before the model has answered", async () =
 });
 
 // ─── 5. Effort and budget ──────────────────────────────────────────────────────────────────────
-Deno.test("effort high and 20000 tokens only on the streamed v2 draft; every other request as before", async () => {
+Deno.test("effort high only on the streamed v2 draft, 12000 tokens on every read; every other request as before", async () => {
   const s = await drive(STREAMED, { model: FIVE(GOOD()) });
   assertEquals(s.trace.sent.map((b) => b.output_config.effort), Array(5).fill("high"));
-  assertEquals(s.trace.sent.map((b) => b.max_tokens), Array(5).fill(20000));
+  assertEquals(s.trace.sent.map((b) => b.max_tokens), Array(5).fill(12000));
   assertEquals(s.trace.sent.map((b) => b.model), Array(5).fill("claude-opus-5-5"));
   // Apart from the effort and the room to think in, the very request the plain v2 press sends.
   const p = await drive(V2, { model: FIVE(GOOD()) });
   assertEquals(p.trace.sent.map((b) => b.output_config.effort), Array(5).fill("medium"));
   assertEquals(p.trace.sent.map((b) => b.max_tokens), Array(5).fill(12000));
-  assertEquals(s.trace.sent[0], { ...p.trace.sent[0], max_tokens: 20000, output_config: { effort: "high" } });
+  assertEquals(s.trace.sent[0], { ...p.trace.sent[0], output_config: { effort: "high" } });
   // Every request that does not stream keeps 12000: the lean retry, and production's older shell.
   for (const payload of [{ ...STREAMED, lean: true }, { ...STREAMED, frame: undefined }] as Record<string, unknown>[]) {
     const o = await drive(payload, { model: FIVE(GOOD()) });
@@ -623,36 +622,34 @@ Deno.test("effort high and 20000 tokens only on the streamed v2 draft; every oth
   assertEquals(usage(p.trace), [{ effort: "medium", streamed: false }]);
 });
 
-Deno.test("20000 tokens cannot make a streamed press cost more than an eighth of its price: five full reads, at list price", () => {
-  // aiDraftCostCents is our cost basis (never the builder's price, which is the held $20). Every read
-  // of the press (DRAFT_CONSENSUS_CALLS, five since 2026-09-26) spending all 20000, at Opus 5.5's
-  // $4 / $20 per million tokens, in cents (x 100 / 1,000,000 = / 10,000):
-  //   at 21,000 input tokens a read
-  //     input   5 x 21,000 = 105,000 tokens x 4 / 10,000  =  42.0
-  //     output  5 x 20,000 = 100,000 tokens x 20 / 10,000 = 200.0
-  //     total                                               242.0 cents
-  //   at 25,000 input tokens a read (the top of the ~21,000-25,000 a twelve-frame v2 read takes)
-  //     input   5 x 25,000 = 125,000 tokens x 4 / 10,000  =  50.0
-  //     total                                               250.0 cents
-  // ⚠️ THE CEILING MOVED WITH THE READS, ON PURPOSE (2026-09-26). This guard keeps the worst a press
-  // can cost us well under what the builder pays for it. With three reads the worst was 145.2 cents
-  // against a ceiling of a tenth of the price (200 cents), and five reads cannot meet that: two more
-  // reads are two more reads' tokens. Ahsan approved five reads knowing it. The ceiling is now an
-  // EIGHTH of the price (250 cents), which the worst case meets exactly at 25,000 input tokens, so any
-  // further growth (a sixth read, more room to think, a dearer model) trips it and has to be decided
-  // again rather than slipping through.
+Deno.test("five full reads cannot make a press cost more than a tenth of its price, at list price", () => {
+  // aiDraftCostCents is our cost basis (never the builder's price, which is the held $20). This guard
+  // keeps the worst a press can cost us under a tenth of what the builder pays for it. Ahsan approved
+  // five reads on 2026-09-26 (quoted ~$0.40 a generation, corrected the same day to ~$0.90-$1.20 from
+  // live token counts); the ceiling itself is unchanged since three reads. It holds with five because
+  // every read is back to max_tokens 12000 (Opus 5.5's reads use 2,000-7,000). Every read of the press
+  // (DRAFT_CONSENSUS_CALLS) spending all 12000, at Opus 5.5's $4 / $20 per million tokens, in cents
+  // (x 100 / 1,000,000 = / 10,000):
+  //   at 26,000 input tokens a read (measured live 2026-09-26: 78,051 for three reads)
+  //     input   5 x 26,000 = 130,000 tokens x 4 / 10,000  =  52.0
+  //     output  5 x 12,000 =  60,000 tokens x 20 / 10,000 = 120.0
+  //     total                                               172.0 cents
+  //   at 30,000 input tokens a read (headroom for a longer prompt or bigger frames)
+  //     input   5 x 30,000 = 150,000 tokens x 4 / 10,000  =  60.0
+  //     total                                               180.0 cents
+  // A sixth read, more room to think or a dearer model has to be decided again rather than slip
+  // through: at 30,000 input a read, a sixth read is 216 cents and 20000 tokens a read 260.
   const PRICE_CENTS = 2000;
   assertEquals(DRAFT_CONSENSUS_CALLS, 5, "the arithmetic above is for five reads");
-  assertEquals(aiDraftCostCents(true, DRAFT_CONSENSUS_CALLS * 21_000, DRAFT_CONSENSUS_CALLS * 20_000), 242);
-  const worst = aiDraftCostCents(true, DRAFT_CONSENSUS_CALLS * 25_000, DRAFT_CONSENSUS_CALLS * 20_000);
-  assertEquals(worst, 250);
-  assert(worst <= PRICE_CENTS / 8, `${worst} cents`);
-  // The v2 press that does not stream keeps 12000 a read: 50 + 5 x 12,000 x 20 / 10,000 = 50 + 120.
-  assertEquals(aiDraftCostCents(true, DRAFT_CONSENSUS_CALLS * 25_000, DRAFT_CONSENSUS_CALLS * 12_000), 170);
-  // A typical press, 7,000 output tokens a read: 42 + 5 x 7,000 x 20 / 10,000 = 42 + 70.
-  assertEquals(aiDraftCostCents(true, DRAFT_CONSENSUS_CALLS * 21_000, DRAFT_CONSENSUS_CALLS * 7_000), 112);
-  // Three reads were 25.2 + 120 = 145.2 (Opus 5's $5 / $25 made that 31.5 + 150 = 181.5).
-  assertEquals(aiDraftCostCents(true, 3 * 21_000, 3 * 20_000), 145.2);
+  assertEquals(aiDraftCostCents(true, DRAFT_CONSENSUS_CALLS * 26_000, DRAFT_CONSENSUS_CALLS * 12_000), 172);
+  const worst = aiDraftCostCents(true, DRAFT_CONSENSUS_CALLS * 30_000, DRAFT_CONSENSUS_CALLS * 12_000);
+  assertEquals(worst, 180);
+  assert(worst < PRICE_CENTS / 10, `${worst} cents`);
+  assert(aiDraftCostCents(true, 6 * 30_000, 6 * 12_000) > PRICE_CENTS / 10, "a sixth read would trip it");
+  assert(aiDraftCostCents(true, DRAFT_CONSENSUS_CALLS * 30_000, DRAFT_CONSENSUS_CALLS * 20_000) > PRICE_CENTS / 10, "and so would 20000 tokens a read");
+  // A typical press, measured live: ~26,000 in and 2,000-5,000 out a read: 52 + 20 to 52 + 50.
+  assertEquals(aiDraftCostCents(true, DRAFT_CONSENSUS_CALLS * 26_000, DRAFT_CONSENSUS_CALLS * 2_000), 72);
+  assertEquals(aiDraftCostCents(true, DRAFT_CONSENSUS_CALLS * 26_000, DRAFT_CONSENSUS_CALLS * 5_000), 102);
 });
 
 Deno.test("the budget: streamed min(300 s, 330 s - set-up, 75 s before the worker's end), never under 60 s; plain as before", async () => {
@@ -761,8 +758,8 @@ Deno.test("⚠️ the streamed clocks' invariants, worker 0-199 s old, set-up 0-
   assert(latestReads <= 330_000, `the streamed reads end by 330 s after the request: ${latestReads}`);
   // A healthy draft whose reads ran to the end is still pending for a pickup, never lost as stale.
   assert(latestReads < DRAFT_RECOVER_PENDING_MS && DRAFT_RECOVER_PENDING_MS <= EDGE_WALL_CLOCK_MS, String(DRAFT_RECOVER_PENDING_MS));
-  const line = SOURCE.split("\n").find((l) => l.includes("max_tokens: streamed ?")) ?? "";
-  assertEquals(line.trim(), "max_tokens: streamed ? 20000 : 12000,");
+  const line = SOURCE.split("\n").find((l) => l.trim().startsWith("max_tokens:")) ?? "";
+  assertEquals(line.trim(), "max_tokens: 12000,");
   const maxTokens = new Function("streamed", `return {${line.trim()}}.max_tokens;`)(true) as number;
   const fullReadMs = (maxTokens / MEASURED_OPUS_TOKENS_PER_S) * 1000;
   assert(fullReadMs <= budget(0, 3_000), `${maxTokens} tokens at ${MEASURED_OPUS_TOKENS_PER_S}/s is ${Math.round(fullReadMs)} ms, over ${budget(0, 3_000)}`);

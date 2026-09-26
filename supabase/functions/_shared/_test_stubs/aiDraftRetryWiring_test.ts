@@ -52,13 +52,13 @@ const DRAFT = lift(PORTAL, 'if (action === "calibrate_style_ai") return await dr
 type Reply = { body: Record<string, unknown>; status: number };
 const json = (body: Record<string, unknown>, status = 200): Reply => ({ body, status });
 
-Deno.test("the draft call has the v2 budget: 12000 tokens (20000 streamed), a 125 s abort unless streamed, effort low only when lean", () => {
-  // 20000 on a STREAMED draft only (2026-09-25): at effort "high" a read can think past 12000 and be
-  // cut off with most of its 300 s left. Every other request keeps 12000.
+Deno.test("the draft call has the v2 budget: 12000 tokens on every read, a 125 s abort unless streamed, effort low only when lean", () => {
+  // 12000 on every read (2026-09-26). The streamed draft had 20000 for a day, while Opus 5 at effort
+  // "high" thought past 12000; Opus 5.5's reads use 2,000-7,000.
   const mt = DRAFT.split("\n").find((l) => l.includes("max_tokens:")) ?? "";
-  assertEquals(mt.trim(), "max_tokens: streamed ? 20000 : 12000,");
+  assertEquals(mt.trim(), "max_tokens: 12000,");
   const maxTokens = (streamed: boolean) => new Function("streamed", `return {${mt.trim()}}.max_tokens;`)(streamed) as number;
-  assertEquals([maxTokens(false), maxTokens(true)], [12000, 20000]);
+  assertEquals([maxTokens(false), maxTokens(true)], [12000, 12000]);
   assert(!DRAFT.includes("max_tokens: 8000"), "and the old 8000 is gone");
   assert(DRAFT.includes("const aiSignal = AbortSignal.timeout(draftAbortMs);"), "the abort is the request-measured budget below");
   // Lean is "low"; a STREAMED draft (the new shell's v2 press, which outlives the gateway) is "high";
