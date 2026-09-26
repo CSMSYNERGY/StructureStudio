@@ -387,13 +387,15 @@ Deno.test("the capture's cost basis is the summed usage of every call", () => {
   const stmt = lift("      const u = callsUsage ? callsUsage.usage : (data?.usage ?? null);", "      const { data: bal", "the capture's cost basis");
   const cost = (callsUsage: unknown, data: unknown, v2Prompt: boolean) =>
     new Function("callsUsage", "data", "v2Prompt", "aiDraftCostCents", `${stmt}\nreturn [u, costCents];`)(callsUsage, data, v2Prompt, aiDraftCostCents);
-  const summed = { input_tokens: 63000, output_tokens: 21000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, calls: 3 };
+  const summed = { input_tokens: 105000, output_tokens: 35000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, calls: 5 };
   const lead = { usage: { input_tokens: 21000, output_tokens: 7000 } };
-  assertEquals(cost({ usage: summed }, lead, true), [summed, aiDraftCostCents(true, 63000, 21000)], "three calls: three calls' cost");
+  assertEquals(cost({ usage: summed }, lead, true), [summed, aiDraftCostCents(true, 105000, 35000)], "five calls: five calls' cost");
   assertEquals(cost(null, lead, false), [lead.usage, aiDraftCostCents(false, 21000, 7000)], "one call: exactly as before");
-  // Opus 5.5, $4 / $20 per million tokens (2026-09-26): 63,000 x 4 / 10,000 = 25.2 cents in, plus
-  // 21,000 x 20 / 10,000 = 42 cents out, is 67.2. (Opus 5's $5 / $25 made it 31.5 + 52.5 = 84.)
-  assertEquals(aiDraftCostCents(true, 63000, 21000), 67.2, "3 x 21k in and 3 x 7k out on Opus 5.5 is 67.2 cents");
+  // A typical five-read press on Opus 5.5, $4 / $20 per million tokens (2026-09-26): 5 x 21,000 =
+  // 105,000 x 4 / 10,000 = 42 cents in, plus 5 x 7,000 = 35,000 x 20 / 10,000 = 70 cents out, is 112.
+  // (Three reads were 25.2 + 42 = 67.2.)
+  assertEquals(aiDraftCostCents(true, 105000, 35000), 112, "5 x 21k in and 5 x 7k out on Opus 5.5 is 112 cents");
+  assertEquals(aiDraftCostCents(true, 63000, 21000), 67.2, "3 x 21k in and 3 x 7k out was 67.2 cents");
 });
 
 Deno.test("the split check rides the flags only with a consensus, and turns the draft low-confidence", () => {

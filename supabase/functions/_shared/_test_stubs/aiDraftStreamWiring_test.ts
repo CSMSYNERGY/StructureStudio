@@ -48,7 +48,7 @@
 import { assert, assertEquals } from "jsr:@std/assert";
 import { stubAuth, stubDb, stubRpc } from "./supabase_stub.ts";
 import {
-  aiDraftCostCents, DRAFT_RECOVER_PENDING_MS, DRAFT_RECOVER_SETTLE_MS, DRAFT_STREAM_DEADLINE_MS, EDGE_WALL_CLOCK_MS, parseKnownDims,
+  aiDraftCostCents, DRAFT_CONSENSUS_CALLS, DRAFT_RECOVER_PENDING_MS, DRAFT_RECOVER_SETTLE_MS, DRAFT_STREAM_DEADLINE_MS, EDGE_WALL_CLOCK_MS, parseKnownDims,
   SELF_CHECK_CLAIM_WINDOW_MS, streamedDraftBudgetMs, streamedDraftDeadlineMs, wantsStreamedDraft, wantsV2Prompt,
 } from "../styleD3.ts";
 import { HEARTBEAT_MS, STREAM_DEADLINE_BODY } from "../heartbeatJson.ts";
@@ -623,17 +623,36 @@ Deno.test("effort high and 20000 tokens only on the streamed v2 draft; every oth
   assertEquals(usage(p.trace), [{ effort: "medium", streamed: false }]);
 });
 
-Deno.test("20000 tokens cannot make a streamed press cost more than its price: three full reads, at list price", () => {
-  // aiDraftCostCents is our cost basis (never the builder's price, which is the held $20). Three reads
-  // at a generous 21,000 input tokens each, all three spending all 20000: under $2, a tenth of the price.
-  // At Opus 5.5's $4 / $20 per million tokens (2026-09-26), in cents (x 100 / 1,000,000 = / 10,000):
-  //   input   3 x 21,000 = 63,000 tokens x 4 / 10,000  =  25.2
-  //   output  3 x 20,000 = 60,000 tokens x 20 / 10,000 = 120.0
-  //   total                                              145.2 cents
-  // (Opus 5's $5 / $25 made it 31.5 + 150 = 181.5.)
-  const worst = aiDraftCostCents(true, 3 * 21_000, 3 * 20_000);
-  assertEquals(worst, 145.2);
-  assert(worst < 2000 / 10, `${worst} cents`);
+Deno.test("20000 tokens cannot make a streamed press cost more than an eighth of its price: five full reads, at list price", () => {
+  // aiDraftCostCents is our cost basis (never the builder's price, which is the held $20). Every read
+  // of the press (DRAFT_CONSENSUS_CALLS, five since 2026-09-26) spending all 20000, at Opus 5.5's
+  // $4 / $20 per million tokens, in cents (x 100 / 1,000,000 = / 10,000):
+  //   at 21,000 input tokens a read
+  //     input   5 x 21,000 = 105,000 tokens x 4 / 10,000  =  42.0
+  //     output  5 x 20,000 = 100,000 tokens x 20 / 10,000 = 200.0
+  //     total                                               242.0 cents
+  //   at 25,000 input tokens a read (the top of the ~21,000-25,000 a twelve-frame v2 read takes)
+  //     input   5 x 25,000 = 125,000 tokens x 4 / 10,000  =  50.0
+  //     total                                               250.0 cents
+  // ⚠️ THE CEILING MOVED WITH THE READS, ON PURPOSE (2026-09-26). This guard keeps the worst a press
+  // can cost us well under what the builder pays for it. With three reads the worst was 145.2 cents
+  // against a ceiling of a tenth of the price (200 cents), and five reads cannot meet that: two more
+  // reads are two more reads' tokens. Ahsan approved five reads knowing it. The ceiling is now an
+  // EIGHTH of the price (250 cents), which the worst case meets exactly at 25,000 input tokens, so any
+  // further growth (a sixth read, more room to think, a dearer model) trips it and has to be decided
+  // again rather than slipping through.
+  const PRICE_CENTS = 2000;
+  assertEquals(DRAFT_CONSENSUS_CALLS, 5, "the arithmetic above is for five reads");
+  assertEquals(aiDraftCostCents(true, DRAFT_CONSENSUS_CALLS * 21_000, DRAFT_CONSENSUS_CALLS * 20_000), 242);
+  const worst = aiDraftCostCents(true, DRAFT_CONSENSUS_CALLS * 25_000, DRAFT_CONSENSUS_CALLS * 20_000);
+  assertEquals(worst, 250);
+  assert(worst <= PRICE_CENTS / 8, `${worst} cents`);
+  // The v2 press that does not stream keeps 12000 a read: 50 + 5 x 12,000 x 20 / 10,000 = 50 + 120.
+  assertEquals(aiDraftCostCents(true, DRAFT_CONSENSUS_CALLS * 25_000, DRAFT_CONSENSUS_CALLS * 12_000), 170);
+  // A typical press, 7,000 output tokens a read: 42 + 5 x 7,000 x 20 / 10,000 = 42 + 70.
+  assertEquals(aiDraftCostCents(true, DRAFT_CONSENSUS_CALLS * 21_000, DRAFT_CONSENSUS_CALLS * 7_000), 112);
+  // Three reads were 25.2 + 120 = 145.2 (Opus 5's $5 / $25 made that 31.5 + 150 = 181.5).
+  assertEquals(aiDraftCostCents(true, 3 * 21_000, 3 * 20_000), 145.2);
 });
 
 Deno.test("the budget: streamed min(300 s, 330 s - set-up, 75 s before the worker's end), never under 60 s; plain as before", async () => {

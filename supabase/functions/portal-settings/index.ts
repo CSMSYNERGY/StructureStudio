@@ -4004,11 +4004,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // read that thinks past 12000 is cut off unparsed however much of its 300 s is left. At the ~70
     // output tokens/s Opus streamed live that day, a read that spends all 20000 takes ~286 s, which
     // fits inside the 300 s budget below. Every other request keeps 12000, byte for byte. What it
-    // can cost: three reads of ~21,000 input and at most 20,000 output tokens at the v2 model's list
-    // price (aiDraftCostCents; Opus 5.5, $4/$20, since 2026-09-26) is at most ~$1.45 a press, against
-    // ~$0.97 at 12000 -- recorded as the
-    // capture's cost basis, never charged to the builder, whose price is the held $20 whatever the
-    // tokens.
+    // can cost: five reads (three until 2026-09-26) of ~21,000-25,000 input and at most 20,000 output
+    // tokens at the v2 model's list price (aiDraftCostCents; Opus 5.5, $4/$20, since 2026-09-26) is at
+    // most ~$2.42-$2.50 a press, against ~$1.62-$1.70 for the unstreamed v2 press at 12000, and a
+    // typical press (~7,000 output tokens a read) ~$1.12 -- recorded as the capture's cost basis,
+    // never charged to the builder, whose price is the held $20 whatever the tokens.
+    // aiDraftStreamWiring_test holds the worst case to an eighth of that price (a tenth, with three
+    // reads).
     //
     // The timeout is the other half. Supabase's gateway answers 504 on its own at 150 s of
     // silence, and that 504 is invisible to withErrorLog and leaves the wallet hold open until
