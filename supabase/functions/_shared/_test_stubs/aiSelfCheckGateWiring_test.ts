@@ -85,8 +85,12 @@ Deno.test("every gate is handed the mode, and the fetch sends the one request bu
   assert(body.includes("selfCheckRequest({\n      mode: checkMode, dims, draft: draftRead.d3, pairs,"), "the prompt, the labels and the budget");
   assert(body.includes("const checkSignal = AbortSignal.timeout(plan.abortMs);"), "the abort is the mode's");
   assert(body.includes("body: JSON.stringify(plan.body),"), "and the body is exactly what was built");
-  // Nothing left inline that could send a different prompt, budget or label than the builder's.
-  for (const stray of ["selfCheckPrompt(", "legacySelfCheckPrompt(", "selfCheckPairLabel(", "max_tokens:", "AbortSignal.timeout(45_000)", "AbortSignal.timeout(90_000)"]) {
+  // Nothing left inline that could send a different prompt, budget, effort or label than the
+  // builder's (the v2 check's effort moved to "high" on 2026-09-26, in SELF_CHECK_BUDGET alone).
+  for (const stray of [
+    "selfCheckPrompt(", "legacySelfCheckPrompt(", "selfCheckPairLabel(", "max_tokens:", "output_config", "effort:",
+    "AbortSignal.timeout(45_000)", "AbortSignal.timeout(90_000)", "AbortSignal.timeout(125_000)",
+  ]) {
     assert(!body.includes(stray), `no ${stray} in the check action`);
   }
   assertEquals(body.split("fetch(").length - 1, 1, "one model call");

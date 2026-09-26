@@ -2347,17 +2347,34 @@ function selfCheckRules(mode: SelfCheckMode): SelfCheckRules {
     };
 }
 
-// THE CALL'S BUDGET, per mode. Legacy is d3ab404's 4000 tokens and 45 s. v2 is 8000 and 90 s
-// (fix, 2026-09-24): the v2 check carries up to six frame+render pairs (twelve images, six fetched
-// by URL) and a longer prompt with the massing step, and at the ~78 tokens/s measured on 09-21,
-// 45 s is ~3,500 tokens including the time to the first one. A timeout ENDS the rounds, so the
-// massing corrections v2 depends on (round 0 turning the building, round 1 refining widths) were
-// the ones cut off. 90 s + the handler's own overhead stays well inside the gateway's 150 s, and
-// nothing about money rides on this call. ⚠️ The browser's own abort on this call has to sit above
-// 90 s (the designer's SS_CHECK_MS and 12-shell's onSelfCheck signal), or it cuts the server off.
-export const SELF_CHECK_BUDGET: Record<SelfCheckMode, { maxTokens: number; abortMs: number }> = {
-  legacy: { maxTokens: 4000, abortMs: 45_000 },
-  v2: { maxTokens: 8000, abortMs: 90_000 },
+// THE CALL'S BUDGET, per mode: output tokens, the server's abort, and how hard it thinks
+// (output_config.effort; thinking stays adaptive in both). Legacy is d3ab404's 4000 tokens, 45 s
+// and "medium", byte for byte (styleD3.test.ts hashes its whole body).
+//
+// v2 was 8000 tokens and 90 s at "medium" (fix, 2026-09-24): the v2 check carries up to six
+// frame+render pairs (twelve images, six fetched by URL) and a longer prompt with the massing
+// step, and at the ~78 tokens/s measured on 09-21, 45 s was ~3,500 tokens including the time to the
+// first one. A timeout ENDS the rounds, so the massing corrections v2 depends on (round 0 turning
+// the building, round 1 refining widths) were the ones cut off.
+//
+// v2 IS 12000 TOKENS AND 125 s AT "high" SINCE 2026-09-26. Live on Opus 5.5 a round at "medium"
+// took 18-37 s end to end and was not consistent: with the draft's centre eave at 12.5-12.8 ft
+// against a true 14.8, it corrected it by the measured difference in 5 runs of 6 and in the sixth
+// answered "matches" on everything. "high" makes every round think before it answers.
+//   * 125 s because the check is NOT streamed: the Supabase gateway ends a request that has sent
+//     nothing for 150 s, so the answer must be out inside that. 125 s leaves the handler's set-up
+//     (the kill-switch read, the style read and the claim, about a second) and its ledger writes
+//     after the call well inside 150 s. It is the non-streamed draft's 125 s for the same reason.
+//   * 12000 is room, not a target. At the ~70 output tokens/s Opus streamed on 09-25, 125 s buys
+//     roughly 8,000 tokens once the twelve images are read, so a round that thinks that long
+//     meets the abort before it meets max_tokens; the tokens never cut an answer the clock allowed.
+//     If `self_check_tokens` shows rounds ending at the abort, the clock is what binds.
+// ⚠️ The browser's own abort on this call has to sit above the server's (the designer's SS_CHECK_MS
+// and 12-shell's onSelfCheck signal, 140 s, pinned against this by selfCheckPanel_test), or it cuts
+// the server off.
+export const SELF_CHECK_BUDGET: Record<SelfCheckMode, { maxTokens: number; abortMs: number; effort: "medium" | "high" }> = {
+  legacy: { maxTokens: 4000, abortMs: 45_000, effort: "medium" },
+  v2: { maxTokens: 12000, abortMs: 125_000, effort: "high" },
 };
 
 export type SelfCheckChange = { field: string; from: unknown; to: unknown; why: string };
@@ -3524,10 +3541,11 @@ export function aiDraftCostCents(v2: boolean, inputTokens: number, outputTokens:
 }
 
 // ── THE WHOLE REQUEST, IN ONE PURE FUNCTION (fix, 2026-09-24) ────────────────────────────────
-// The prompt, the labelled pairs, the model, the budget and the abort -- everything the check
-// sends -- built here rather than inline in portal-settings, so "an older designer's check is
-// d3ab404's check" is a test on the BYTES of the request (styleD3.test.ts hashes the legacy body
-// against what d3ab404's handler built for the same row) rather than a claim about a handler.
+// The prompt, the labelled pairs, the model, the budget (tokens and effort) and the abort --
+// everything the check sends -- built here rather than inline in portal-settings, so "an older
+// designer's check is d3ab404's check" is a test on the BYTES of the request (styleD3.test.ts
+// hashes the legacy body against what d3ab404's handler built for the same row) rather than a
+// claim about a handler.
 // The caller only adds the headers and the signal, and reads `abortMs` for the latter.
 export type SelfCheckPair = { viewpoint: FrameMapViewpoint; frameUrl: string; base64: string };
 export function selfCheckRequest(opts: {
@@ -3558,7 +3576,7 @@ export function selfCheckRequest(opts: {
       ...aiModelFields(opts.mode !== "legacy"),
       max_tokens: budget.maxTokens,
       thinking: { type: "adaptive" },
-      output_config: { effort: "medium" },
+      output_config: { effort: budget.effort },
       messages: [{ role: "user", content }],
     },
   };

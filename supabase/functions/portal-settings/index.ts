@@ -4867,16 +4867,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // ── THE SECOND CALL ──────────────────────────────────────────────────────────────────
     // The builder's frame first and our render second, one pair per viewpoint, with a line
     // naming which is which. Reality before our attempt at it. The whole request -- prompt,
-    // pairs, model, max_tokens and abort -- is built by selfCheckRequest, so what each mode
-    // sends is pinned on its bytes in styleD3.test.ts.
+    // pairs, model, max_tokens, effort and abort -- is built by selfCheckRequest, so what each
+    // mode sends is pinned on its bytes in styleD3.test.ts.
     //
-    // THE BUDGET (SELF_CHECK_BUDGET). LEGACY: d3ab404's 45 s and 4000 tokens, well under call 1's
-    // 125 s -- the builder already has their draft, so a slow check is worth abandoning. v2
-    // (fix, 2026-09-24): 90 s and 8000 tokens. The v2 check reads up to twelve images against a
-    // longer prompt, and at ~78 tokens/s 45 s bought ~3,500 tokens; a timeout ends the rounds,
-    // which cut off exactly the massing corrections v2 exists for. The answer is still bounded at
-    // eight fields, so the room is for thinking. ⚠️ The browser's own abort on this call must sit
-    // above 90 s. If `self_check_tokens` shows replies stopping at max_tokens, move the budget.
+    // THE BUDGET (SELF_CHECK_BUDGET). LEGACY: d3ab404's 45 s and 4000 tokens at effort "medium",
+    // well under call 1's 125 s -- the builder already has their draft, so a slow check is worth
+    // abandoning. v2: 90 s and 8000 tokens at "medium" from 2026-09-24 (45 s bought ~3,500 tokens
+    // against up to twelve images, and a timeout ends the rounds, which cut off exactly the massing
+    // corrections v2 exists for); 125 s and 12000 tokens at "high" since 2026-09-26, because on
+    // Opus 5.5 the "medium" check answered in 18-37 s and in one run of six called a 2 ft low
+    // centre eave a match. 125 s is the most a request that is not streamed can have: the gateway
+    // ends one that has sent nothing for 150 s, and the set-up above and the ledger writes below
+    // take seconds. The answer is still bounded at eight fields, so the room is for thinking.
+    // ⚠️ The browser's own abort on this call (140 s) must sit above 125 s. If `self_check_tokens`
+    // shows replies stopping at max_tokens, or rounds ending at the abort, move the budget.
     //
     // A later round is told it is one, and which fields the rounds before it changed —
     // allow-listed NAMES off the row's own self_check_changed, never the model's prose.

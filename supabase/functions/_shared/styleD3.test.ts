@@ -3878,8 +3878,9 @@ Deno.test("v2 check: wings the frames show and the render lacks are ADDED in one
 // what d3ab404's own function returned for the same inputs), the whole request body, the 22-path
 // allow-list, the six-field cap, the four viewpoints in their old words, the render caps, the
 // `checked` keys and the budget. Without the gate the v2 check could save roof.front, highSide and
-// the wing keys into a style that designer's renderer cannot draw. The v2 check's own budget moves
-// to 8000 tokens and 90 s.
+// the wing keys into a style that designer's renderer cannot draw. The v2 check's own budget moved
+// to 8000 tokens and 90 s, and on 2026-09-26 to 12000 tokens and 125 s at effort "high"; the
+// legacy budget (4000, 45 s, "medium") never moves.
 import {
   legacySelfCheckPrompt, selfCheckMode, selfCheckRequest, SELF_CHECK_BUDGET, aiModelFields,
   SELF_CHECK_LEGACY_ALLOW, SELF_CHECK_LEGACY_MAX_FIELDS, SELF_CHECK_LEGACY_MAX_RENDERS,
@@ -3932,7 +3933,25 @@ Deno.test("⛔ ...and the whole REQUEST BODY an older designer's check sends is 
   assertEquals(await sha256(body), LEGACY_CHECK_BODY_SHA256, "the body's bytes: model, 4000 tokens, prompt, labels, images");
   assertEquals(req.abortMs, 45_000, "and d3ab404's 45 s abort");
   assertEquals((req.body as { max_tokens: number }).max_tokens, 4000);
-  assertEquals(SELF_CHECK_BUDGET.legacy, { maxTokens: 4000, abortMs: 45_000 });
+  assertEquals(SELF_CHECK_BUDGET.legacy, { maxTokens: 4000, abortMs: 45_000, effort: "medium" });
+});
+
+Deno.test("⛔ the v2 check thinking harder (2026-09-26) leaves the legacy check's budget exactly where it was", async () => {
+  // The v2 budget moved to 12000 tokens, 125 s and effort "high"; production's older designer keeps
+  // d3ab404's 4000, 45 s and "medium" on every request, whatever it is handed.
+  assertEquals(SELF_CHECK_BUDGET.legacy, { maxTokens: 4000, abortMs: 45_000, effort: "medium" });
+  for (const opts of [{}, { round: 0 }, { round: 2, earlier: ["roof.pitch"] }, { pitchLocked: true }]) {
+    const req = selfCheckRequest({ mode: "legacy", dims: CHECK_DIMS, draft: CLEAN, pairs: PAIRS4, ...opts });
+    const body = req.body as { model: string; max_tokens: number; thinking: unknown; output_config: unknown };
+    assertEquals(req.abortMs, 45_000, `${JSON.stringify(opts)}: the abort`);
+    assertEquals([body.model, body.max_tokens], ["claude-sonnet-5", 4000], `${JSON.stringify(opts)}: model and tokens`);
+    assertEquals(body.thinking, { type: "adaptive" });
+    assertEquals(body.output_config, { effort: "medium" }, `${JSON.stringify(opts)}: the effort`);
+    assertEquals(Object.keys(body), ["model", "max_tokens", "thinking", "output_config", "messages"], "no new field, in d3ab404's order");
+  }
+  // And the whole body, bytes and all, is still the one the hash test pins.
+  const same = JSON.stringify(selfCheckRequest({ mode: "legacy", dims: CHECK_DIMS, draft: CLEAN, pairs: PAIRS4 }).body).replace(/\\r\\n/g, "\\n");
+  assertEquals(await sha256(same), LEGACY_CHECK_BODY_SHA256);
 });
 
 Deno.test("⛔ the legacy check's RULES are d3ab404's: 22 paths, six fields, four views, four renders, 1.2 MB", () => {
@@ -4021,20 +4040,29 @@ Deno.test("parseSelfCheckRound: a legacy check has ONE round, d3ab404's", () => 
   assertEquals(parseSelfCheckRound(2), { ok: true, round: 2 }, "absent max is v2's three");
 });
 
-Deno.test("selfCheckRequest: the v2 check gets 8000 tokens and 90 s, and its own prompt and words", () => {
-  assertEquals(SELF_CHECK_BUDGET.v2, { maxTokens: 8000, abortMs: 90_000 });
+Deno.test("selfCheckRequest: the v2 check gets 12000 tokens and 125 s at effort \"high\", and its own prompt and words", () => {
+  // 8000 tokens and 90 s at "medium" from 2026-09-24; since 2026-09-26 it thinks at "high" (a
+  // "medium" check on Opus 5.5 called a 2 ft low centre eave a match in one run of six). 125 s is
+  // the most a request that is not streamed can have inside the gateway's 150 s.
+  assertEquals(SELF_CHECK_BUDGET.v2, { maxTokens: 12000, abortMs: 125_000, effort: "high" });
   const pairs = [...PAIRS4, { viewpoint: "back" as const, frameUrl: "https://bucket.test/f9.jpg", base64: "EEEE" }];
   const req = selfCheckRequest({ mode: "v2", dims: CHECK_DIMS, draft: CLEAN, pairs, round: 1, earlier: ["roof.overhang"] });
-  assertEquals(req.abortMs, 90_000);
+  assertEquals(req.abortMs, 125_000);
   const body = req.body as { model: string; max_tokens: number; thinking: unknown; output_config: unknown; messages: { role: string; content: { type: string; text?: string; source?: Record<string, string> }[] }[] };
   // Opus on the v2 path (measured 2026-09-24, Opus 5.5 since 2026-09-26, see aiModelFields); the
   // legacy body keeps Sonnet and is pinned byte for byte by its hash test.
-  assertEquals([body.model, body.max_tokens], ["claude-opus-5-5", 8000]);
+  assertEquals([body.model, body.max_tokens], ["claude-opus-5-5", 12000]);
   assertEquals(aiModelFields(true), { model: "claude-opus-5-5" });
   assertEquals(aiModelFields(false), { model: "claude-sonnet-5" });
   assertEquals(Object.keys(body).includes("fallbacks"), false, "no extra request fields beyond the model");
-  assertEquals(body.thinking, { type: "adaptive" });
-  assertEquals(body.output_config, { effort: "medium" });
+  assertEquals(body.thinking, { type: "adaptive" }, "thinking stays adaptive: the effort is what moved");
+  assertEquals(body.output_config, { effort: "high" });
+  // Every round and a locked pitch alike: the budget is the mode's, not the round's.
+  for (const opts of [{ round: 0 }, { round: 2, earlier: ["roof.pitch"] }, { round: 0, pitchLocked: true }]) {
+    const r = selfCheckRequest({ mode: "v2", dims: CHECK_DIMS, draft: CLEAN, pairs, ...opts });
+    const b = r.body as { max_tokens: number; output_config: unknown };
+    assertEquals([r.abortMs, b.max_tokens, b.output_config], [125_000, 12000, { effort: "high" }], JSON.stringify(opts));
+  }
   const content = body.messages[0].content;
   assertEquals(content[0].text, selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: pairs.map((p) => p.viewpoint), round: 1, earlier: ["roof.overhang"] }),
     "the v2 prompt, with the round note");
@@ -5061,6 +5089,11 @@ const LOCK_GABLE: D3Spec = cleanSpec({
 // model is shown to be the only thing in the body that changed.
 const V2_MODEL_FIELD_AT_8FE5D30 = '{"model":"claude-opus-5",';
 const V2_MODEL_FIELD_NOW = '{"model":"claude-opus-5-5",';
+// The body's budget has moved too (2026-09-26: 12000 tokens at effort "high", from 8000 at
+// "medium"). The fields right after the model are put back to 8fe5d30's the same way, so the
+// model, max_tokens and the effort are shown to be the only things in the body's head that moved.
+const V2_BUDGET_FIELDS_AT_8FE5D30 = '"max_tokens":8000,"thinking":{"type":"adaptive"},"output_config":{"effort":"medium"},';
+const V2_BUDGET_FIELDS_NOW = '"max_tokens":12000,"thinking":{"type":"adaptive"},"output_config":{"effort":"high"},';
 // The wing band's correction has moved since as well (2026-09-26: corrected BY THE DIFFERENCE, not
 // rebuilt from the wing roof). The test puts 8fe5d30's sentence back before hashing, so that sentence
 // and the model are shown to be the only things that changed.
@@ -5091,7 +5124,7 @@ const UNLOCKED_AT_8FE5D30: Record<string, [number, string]> = {
   body: [15840, "6f655dfa3ea9fb50fbf68925983154f85f1fd678ecafdb6a5bd0a2d0c770f847"],
 };
 
-Deno.test("⛔ without the lock, the v2 check prompt and its request body are 8fe5d30's byte for byte (the body's model aside)", async () => {
+Deno.test("⛔ without the lock, the v2 check prompt and its request body are 8fe5d30's byte for byte (the body's model and budget aside)", async () => {
   for (const lock of [{}, { pitchLocked: false }]) {
     const out: Record<string, string> = {
       gable: lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS, ...lock })),
@@ -5104,7 +5137,9 @@ Deno.test("⛔ without the lock, the v2 check prompt and its request body are 8f
         .replace(/\\r\\n/g, "\\n"),
     };
     assert(out.body.startsWith(V2_MODEL_FIELD_NOW), `the body names ${V2_MODEL_FIELD_NOW} first`);
-    out.body = V2_MODEL_FIELD_AT_8FE5D30 + out.body.slice(V2_MODEL_FIELD_NOW.length);
+    assert(out.body.startsWith(V2_MODEL_FIELD_NOW + V2_BUDGET_FIELDS_NOW), `and ${V2_BUDGET_FIELDS_NOW} right after it`);
+    out.body = V2_MODEL_FIELD_AT_8FE5D30 + V2_BUDGET_FIELDS_AT_8FE5D30 +
+      out.body.slice(V2_MODEL_FIELD_NOW.length + V2_BUDGET_FIELDS_NOW.length);
     for (const k of Object.keys(out)) {
       assert(BAND_NOW.test(out[k]), `${k}: today's band sentence is there to put back`);
       out[k] = out[k].replace(BAND_NOW, k === "body" ? JSON.stringify(BAND_AT_8FE5D30).slice(1, -1) : BAND_AT_8FE5D30);
