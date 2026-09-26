@@ -3770,15 +3770,15 @@ function pauseUnlessAborted(ms: number, signal: AbortSignal): Promise<boolean> {
       resolve(false);
       return;
     }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const done = (ran: boolean) => {
-      if (timer !== undefined) clearTimeout(timer);
-      signal.removeEventListener("abort", onAbort);
-      resolve(ran);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
     };
-    const onAbort = () => done(false);
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, Math.max(0, ms));
     signal.addEventListener("abort", onAbort, { once: true });
-    timer = setTimeout(() => done(true), Math.max(0, ms));
   });
 }
 

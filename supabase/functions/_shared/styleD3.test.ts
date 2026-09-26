@@ -4951,11 +4951,10 @@ function perRead(plans: ReadPlan[][]) {
     const plan = plans[read]?.[k] ?? { hang: true };
     return new Promise((resolve, reject) => {
       if (plan.throws) { reject(new TypeError(plan.throws)); return; }
-      let t: ReturnType<typeof setTimeout> | undefined;
-      const onAbort = () => { if (t !== undefined) clearTimeout(t); reject(new DOMException("The signal has been aborted", "AbortError")); };
-      signal.addEventListener("abort", onAbort, { once: true });
-      if (plan.hang) return;
-      t = setTimeout(() => {
+      const aborted = () => new DOMException("The signal has been aborted", "AbortError");
+      if (plan.hang) { signal.addEventListener("abort", () => reject(aborted()), { once: true }); return; }
+      const onAbort = () => { clearTimeout(t); reject(aborted()); };
+      const t = setTimeout(() => {
         signal.removeEventListener("abort", onAbort);
         // `breaks`: the reply arrived, and its body broke off while it was being read.
         const body = plan.breaks
@@ -4963,6 +4962,7 @@ function perRead(plans: ReadPlan[][]) {
           : plan.body ?? "";
         resolve(new Response(body, { status: plan.status ?? 200 }));
       }, plan.delayMs ?? 1);
+      signal.addEventListener("abort", onAbort, { once: true });
     });
   };
   return { send, log, sends: (read: number) => log.filter((l) => l.read === read) };
