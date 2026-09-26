@@ -61,7 +61,7 @@ for (const [ts, js] of [["let checkRes: Response;", "let checkRes;"], ["let chec
 // The wiring this file is about, named so a diff that drops one fails with its name.
 for (const must of [
   '.select("drafted, dims, self_check_after, self_check_changed, self_check_rounds, draft_tokens")',
-  "const pitchLocked = v2Check && measuredPitchLock(claimed.draft_tokens, claimed.drafted);",
+  'const pitchLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredPitchLock(claimed.draft_tokens, claimed.drafted);',
   "round, earlier: selfCheckChangedFields(claimed.self_check_changed), pitchLocked,",
   "const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked);",
 ]) {

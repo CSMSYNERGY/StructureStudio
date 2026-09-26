@@ -81,7 +81,7 @@ Deno.test("every gate is handed the mode, and the fetch sends the one request bu
   assert(body.includes("applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked)"), "the allow-list and the cap");
   // The measured-pitch lock is v2's alone (aiSelfCheckPitchLockWiring_test runs it): a legacy check
   // keeps d3ab404's rules.
-  assert(body.includes("const pitchLocked = v2Check && measuredPitchLock(claimed.draft_tokens, claimed.drafted);"), "the lock is v2's");
+  assert(body.includes('const pitchLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredPitchLock(claimed.draft_tokens, claimed.drafted);'), "the lock is v2's");
   assert(body.includes("selfCheckRequest({\n      mode: checkMode, dims, draft: draftRead.d3, pairs,"), "the prompt, the labels and the budget");
   assert(body.includes("const checkSignal = AbortSignal.timeout(plan.abortMs);"), "the abort is the mode's");
   assert(body.includes("body: JSON.stringify(plan.body),"), "and the body is exactly what was built");

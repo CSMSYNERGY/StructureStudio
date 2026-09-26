@@ -4859,7 +4859,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // applySelfCheck drops a correction to it. Worked out ONCE, off the ROW (draft_tokens.samples
     // and the first draft, `drafted`), so it holds for every round of this generation. v2 only:
     // the legacy check is d3ab404's, rules and prompt alike.
-    const pitchLocked = v2Check && measuredPitchLock(claimed.draft_tokens, claimed.drafted);
+    // ...and only while the spec this round judges is still a gable: a round that follows one which
+    // turned the roof into a shed is not told its pitch was measured.
+    const pitchLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredPitchLock(claimed.draft_tokens, claimed.drafted);
 
     // ── THE SECOND CALL ──────────────────────────────────────────────────────────────────
     // The builder's frame first and our render second, one pair per viewpoint, with a line

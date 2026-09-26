@@ -5090,6 +5090,33 @@ Deno.test("selfCheckRequest: v2 carries the lock into its prompt; the legacy bod
   assertEquals(await sha256(body), LEGACY_CHECK_BODY_SHA256, "and its bytes");
 });
 
+Deno.test("applySelfCheck: the lock lets go when the same answer turns the gable into another roof", () => {
+  // A measured gable pitch is rise over HALF the span. When the check's own step 1 overturns the roof
+  // type, the new type's pitch must land, or a shed keeps a gable's number and reads 19 ft high.
+  const read = readOf({
+    verdict: "corrections",
+    corrections: { roof: { type: "shed", highSide: "front", pitch: 0.17 } },
+    changed: [
+      { field: "roof.type", from: "gable", to: "shed", why: "one slope in the side view" },
+      { field: "roof.highSide", from: null, to: "front", why: "the tall wall is the front" },
+      { field: "roof.pitch", from: 0.42, to: 0.17, why: "the shed's own slope" },
+    ],
+    checked: {}, note: "",
+  });
+  const r = applySelfCheck(LOCK_GABLE, read, CHECK_DIMS, "v2", true);
+  assert(r.ok, "buildable");
+  if (!r.ok) return;
+  assertEquals([r.d3.roof.type, r.d3.roof.pitch], ["shed", 0.17], "the shed's own pitch lands");
+  assertEquals(r.dropped, [], "nothing dropped");
+  // A shed being judged (a later round, after the type changed) is never locked either.
+  const shed = cleanSpec({ ...LOCK_GABLE, roof: { ...LOCK_GABLE.roof, type: "shed", highSide: "front", pitch: 0.2 } });
+  const pitchOnly = readOf({ verdict: "corrections", corrections: { roof: { pitch: 0.25 } }, changed: [change("roof.pitch")], checked: {}, note: "" });
+  const s = applySelfCheck(shed, pitchOnly, CHECK_DIMS, "v2", true);
+  assert(s.ok, "buildable");
+  if (!s.ok) return;
+  assertEquals([s.d3.roof.pitch, s.dropped], [0.25, []], "a shed's pitch is the check's to change");
+});
+
 Deno.test("⚠️ applySelfCheck with the lock drops a pitch correction and keeps every other one", () => {
   const read = readOf({
     verdict: "corrections",

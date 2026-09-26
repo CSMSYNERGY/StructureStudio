@@ -3048,8 +3048,16 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   }
 
   const measuredEave = !!dims && dims.overhangIn !== undefined && dims.overhangIn !== null;
-  const allow = measuredEave || pitchLocked
-    ? rules.allow.filter((f) => !(measuredEave && f === "roof.overhang") && !(pitchLocked && f === "roof.pitch"))
+  // The lock holds only while the roof IS a gable. A measured pitch is a gable's rise over its
+  // HALF-span; the moment this answer turns the roof into a shed (whose pitch runs the full depth)
+  // or anything else, that number means something else and the new type's own pitch must land.
+  const roofNow = (base.d3 as { roof?: { type?: unknown } }).roof;
+  const typeWanted = declared.includes("roof.type")
+    ? ((read.corrections as { roof?: { type?: unknown } }).roof ?? {}).type
+    : undefined;
+  const lockPitch = pitchLocked && roofNow?.type === "gable" && (typeWanted === undefined || typeWanted === "gable");
+  const allow = measuredEave || lockPitch
+    ? rules.allow.filter((f) => !(measuredEave && f === "roof.overhang") && !(lockPitch && f === "roof.pitch"))
     : rules.allow;
   const dropped: string[] = [];
   // The value the model wants at each allowed path. Read out of `corrections`, never out of the
