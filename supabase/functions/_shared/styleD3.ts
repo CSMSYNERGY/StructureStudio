@@ -3471,8 +3471,9 @@ export function selfCheckPairLabel(viewpoint: FrameMapViewpoint, mode: SelfCheck
 // output_config.effort and no tool_choice. Opus 5.5 refuses thinking disabled, budget_tokens and a
 // forced tool_choice, and its default effort is "medium" rather than Opus 5's "high", so the
 // explicit effort matters. The effort levels (portal-settings' draftEffort, the check's "medium")
-// were tuned on Opus 5, and Opus 5.5 tends to think more at the same level: watch draft_ms and the
-// stopReason in draft_tokens and self_check_tokens for max_tokens stops or time-outs after the switch.
+// were tuned on Opus 5, and Opus 5.5 tends to think more at the same level: after the switch, watch
+// draft_ms and draft_tokens.calls[].stopReason for the draft, and for the check the app_errors rows
+// coded ai_selfcheck_truncated / ai_selfcheck_timeout (self_check_tokens holds only {input, output}).
 //
 // A refusal is handled exactly as before on both paths (ai_spec_refused / the check's refused
 // verdict): the hold is released and the builder is told plainly. Opus 5.5 adds "bio" and
