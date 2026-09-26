@@ -3686,7 +3686,11 @@ export function draftReadSample(reading: DraftReading | null | undefined): Recor
 // Which clock stopped a call that threw, read the moment it threw: "deadline" is the draft's one
 // abort budget (draftAbortMs, shared by every call), "quorum" the straggler cut-off below.
 export type DraftCallAbort = "deadline" | "quorum";
-export type DraftCall<R> = { index: number; ms: number } & (
+// `attempts` (2026-09-26): how many times this read was SENT. 1 unless the API could not serve it
+// and it was sent again (DRAFT_READ_RETRY, below); 0 for a read the draft stopped before its
+// staggered first send. The rest of the result is its LAST attempt's, and `ms` runs from its first
+// send to that last answer.
+export type DraftCall<R> = { index: number; ms: number; attempts: number } & (
   // fetch, or the body read, threw: no reply
   | { threw: true; error: unknown; aborted: DraftCallAbort | null; status: null; httpOk: false; body: ""; reading: null }
   // a reply that was not 2xx (a 429, a 529): its body is the error text
@@ -3694,6 +3698,89 @@ export type DraftCall<R> = { index: number; ms: number } & (
   // a 2xx reply, read
   | { threw: false; error: null; aborted: null; status: number; httpOk: true; body: string; reading: R }
 );
+
+// ─── A read the API could not serve, and the stagger (2026-09-26) ──────────────────────────────
+// LIVE, 2026-09-26: a v2 press failed about 7 s after Generate with Anthropic's 400 "The request
+// timed out while trying to download the file". Anthropic fetches every image URL itself, from our
+// public storage bucket, and the five parallel reads fetched the same twelve frames five times over,
+// all at once. The builder saw the raw JSON under the panel, and nothing retried: nothing said it
+// could. So, on the v2 consensus draft only (several reads; a lone call is never touched, below):
+//
+//   * THE STAGGER. Read i's first send waits i x staggerMs; the first goes at once. Sixty downloads
+//     no longer start in the same instant, and five reads are all out a little over a second in.
+//   * THE RETRY. A read whose answer is a TRANSIENT upstream failure (transientUpstream: a 429, 500,
+//     502, 503 or 529, or a 400 saying the file download timed out or could not be fetched), or
+//     whose send threw with no reply that was not our own abort (the network), is sent again: at
+//     most delaysMs.length more times, after delaysMs[k] plus up to jitterMs, drawn per read so
+//     reads that failed together do not come back together. Only while neither the deadline nor
+//     the quorum cut-off has fired, and only when the retry would still START with minLeftMs of its
+//     budget left: until the draft's deadline, or until the grace ends once three have drafted. A
+//     read takes ~30-80 s on Opus 5.5, so a retry that starts with less than 40 s left would mostly
+//     be cut off before it drafted, and would only have spent the builder's wait.
+//   * NOTHING ELSE IS RETRIED. A body that broke off after a reply arrived may have been billed; a
+//     refusal, a cut-off or an unparseable reply is an answer; a real invalid_request_error would
+//     fail the same way again.
+//
+// What a retry costs: the API bills none of the failures retried here (a 429, a 5xx, a 529, or a
+// request it gave up on before reading). A send that threw had no reply we could read, and is the one
+// case where the API may, rarely, have done work we cannot see.
+//
+// `attempts` on each call (and in draft_tokens.calls, draftCallsUsage) says how many sends it took.
+export type DraftReadRetry = {
+  delaysMs: readonly number[];
+  jitterMs: number;
+  minLeftMs: number;
+  staggerMs: number;
+};
+export const DRAFT_READ_RETRY: Readonly<DraftReadRetry> = Object.freeze({
+  delaysMs: Object.freeze([1_500, 4_000]),
+  jitterMs: 400,
+  minLeftMs: 40_000,
+  staggerMs: 300,
+});
+
+// Which upstream failures are worth sending again, and why each one failed (what the builder is told,
+// draftUpstreamFailure). "download" is the API's own failure to fetch one of our image URLs, the live
+// 400 above. Its pattern is tight on purpose: the message has to name a download or a fetch AND say it
+// timed out, failed or could not happen, so a real invalid_request_error (a bad field, an image the API
+// could not decode) is never resent. Everything that is not JSON is read as the raw text.
+export type DraftUpstreamKind = "download" | "overloaded" | "upstream";
+const TRANSIENT_UPSTREAM_STATUS: Record<number, DraftUpstreamKind> = {
+  429: "overloaded", 503: "overloaded", 529: "overloaded", 500: "upstream", 502: "upstream",
+};
+export function transientUpstream(status: number, body: string): DraftUpstreamKind | null {
+  const kind = TRANSIENT_UPSTREAM_STATUS[status];
+  if (kind) return kind;
+  if (status !== 400) return null;
+  let message = "";
+  try {
+    const data = JSON.parse(body);
+    message = typeof data?.error?.message === "string" ? data.error.message : "";
+  } catch {
+    message = String(body ?? "").slice(0, 500);
+  }
+  return /\b(download|fetch)/i.test(message) && /\b(timed out|timeout|could not|couldn't|failed)\b/i.test(message) ? "download" : null;
+}
+
+// Waits `ms`, or less when `signal` fires first. True when the wait ran its course. Never rejects, and
+// leaves no timer or listener behind.
+function pauseUnlessAborted(ms: number, signal: AbortSignal): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve(false);
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const done = (ran: boolean) => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve(ran);
+    };
+    const onAbort = () => done(false);
+    signal.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(() => done(true), Math.max(0, ms));
+  });
+}
 
 // Sends `count` calls in parallel and settles every one of them; never rejects.
 //
@@ -3706,6 +3793,10 @@ export type DraftCall<R> = { index: number; ms: number } & (
 //     still bounds it), because it can still make the quorum. With the quorum at least `count`,
 //     there is no cut-off at all.
 //   * A failed call is simply one more result: the caller decides what the failures mean.
+//   * With several calls and `retry` (the handler passes DRAFT_READ_RETRY and when its deadline
+//     fires), the reads' first sends are staggered and a read the API could not serve is sent again
+//     (see DRAFT_READ_RETRY). A lone call never is, whatever `retry` says: every legacy request and
+//     the lean retry send exactly what they sent, once, at once.
 //
 // The results come back in SEND order (index), not in arrival order, so "the first call" is always
 // the same call whichever one the network happened to answer first.
@@ -3715,14 +3806,20 @@ export async function runDraftCalls<R extends { drafted: boolean }>(opts: {
   graceMs: number;
   send: (signal: AbortSignal) => Promise<Response>;
   read: (body: string) => R;
+  // `deadlineAt` is when `deadline` fires (epoch ms). `random` draws the jitter: Math.random unless a
+  // test fixes it.
+  retry?: (DraftReadRetry & { deadlineAt: number; random?: () => number }) | null;
 }): Promise<DraftCall<R>[]> {
   const count = Math.max(1, Math.floor(opts.count) || 1);
   const quorum = Math.min(DRAFT_CONSENSUS_QUORUM, count);
+  const policy = count > 1 && opts.retry ? opts.retry : null;
   const cutoff = new AbortController();
   let drafted = 0;
   let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  // When the grace ends, once the quorum has drafted: a retry after that has only the grace left.
+  let graceEndsAt = Infinity;
   const one = async (index: number): Promise<DraftCall<R>> => {
-    const started = Date.now();
+    let started = Date.now();
     let signal = opts.deadline;
     let unlink = () => {};
     if (count > 1) {
@@ -3737,19 +3834,52 @@ export async function runDraftCalls<R extends { drafted: boolean }>(opts: {
       if (opts.deadline.aborted || cutoff.signal.aborted) own.abort();
       signal = own.signal;
     }
-    try {
-      const res = await opts.send(signal);
-      const body = await res.text();
-      const ms = Date.now() - started;
-      if (!res.ok) return { index, ms, threw: false, error: null, aborted: null, status: res.status, httpOk: false, body, reading: null };
-      const reading = opts.read(body);
-      if (reading.drafted && count > 1 && ++drafted === quorum && quorum < count) {
-        graceTimer = setTimeout(() => cutoff.abort(), Math.max(0, opts.graceMs));
+    const abortedNow = (): DraftCallAbort | null => opts.deadline.aborted ? "deadline" : cutoff.signal.aborted ? "quorum" : null;
+    // One send, classified exactly as the single call always was, plus whether it may go again.
+    const attempt = async (attempts: number): Promise<{ call: DraftCall<R>; again: boolean }> => {
+      let replied = false;
+      try {
+        const res = await opts.send(signal);
+        replied = true;
+        const body = await res.text();
+        const ms = Date.now() - started;
+        if (!res.ok) {
+          return {
+            call: { index, ms, attempts, threw: false, error: null, aborted: null, status: res.status, httpOk: false, body, reading: null },
+            again: transientUpstream(res.status, body) !== null,
+          };
+        }
+        const reading = opts.read(body);
+        if (reading.drafted && count > 1 && ++drafted === quorum && quorum < count) {
+          graceEndsAt = Date.now() + Math.max(0, opts.graceMs);
+          graceTimer = setTimeout(() => cutoff.abort(), Math.max(0, opts.graceMs));
+        }
+        return { call: { index, ms, attempts, threw: false, error: null, aborted: null, status: res.status, httpOk: true, body, reading }, again: false };
+      } catch (error) {
+        const aborted = abortedNow();
+        return {
+          call: { index, ms: Date.now() - started, attempts, threw: true, error, aborted, status: null, httpOk: false, body: "", reading: null },
+          // The network, before any reply: never our own abort, and never a body that broke off.
+          again: !replied && aborted === null,
+        };
       }
-      return { index, ms, threw: false, error: null, aborted: null, status: res.status, httpOk: true, body, reading };
-    } catch (error) {
-      const aborted: DraftCallAbort | null = opts.deadline.aborted ? "deadline" : cutoff.signal.aborted ? "quorum" : null;
-      return { index, ms: Date.now() - started, threw: true, error, aborted, status: null, httpOk: false, body: "", reading: null };
+    };
+    try {
+      if (policy && index > 0 && policy.staggerMs > 0 && !(await pauseUnlessAborted(index * policy.staggerMs, signal))) {
+        // The deadline (or the cut-off) fired before this read's turn came: it was never sent.
+        const error = new DOMException("The draft stopped before this read was sent.", "AbortError");
+        return { index, ms: Date.now() - started, attempts: 0, threw: true, error, aborted: abortedNow(), status: null, httpOk: false, body: "", reading: null };
+      }
+      started = Date.now();
+      for (let attempts = 1;; attempts++) {
+        const { call, again } = await attempt(attempts);
+        if (!policy || !again || attempts > policy.delaysMs.length) return call;
+        const jitter = Math.floor((policy.random ?? Math.random)() * Math.max(0, policy.jitterMs));
+        const wait = Math.max(0, policy.delaysMs[attempts - 1]) + jitter;
+        if (signal.aborted || Math.min(policy.deadlineAt, graceEndsAt) - (Date.now() + wait) < policy.minLeftMs) return call;
+        // The deadline or the cut-off during the wait: the last failure stands.
+        if (!(await pauseUnlessAborted(wait, signal))) return call;
+      }
     } finally {
       unlink();
     }
@@ -3759,6 +3889,66 @@ export async function runDraftCalls<R extends { drafted: boolean }>(opts: {
   } finally {
     if (graceTimer !== undefined) clearTimeout(graceTimer);
   }
+}
+
+// ─── What the builder is told when the API failed the draft (2026-09-26) ───────────────────────
+// Until this, a draft whose reads the API all failed answered `AI service returned 400: {"type":
+// "error",...}`, the API's own JSON, which the designer showed under the panel word for word, and a
+// send that threw answered `Could not reach the AI service: <the runtime's error>`. Neither said what
+// to do, and neither was retryable. Now the answer is a plain sentence, and the raw status and body go
+// into ONE coded app_errors row instead: the handler files it and marks the answer filed, so the error
+// wrapper adds no copy.
+//
+//   * TRANSIENT (transientUpstream's statuses and download failures, and a send that threw on its
+//     own): `retryable: true`, code ai_upstream_transient, 503 when the API was busy and 502
+//     otherwise. The hold is released by then, so the new designer sends the press again once by
+//     itself, lean (calGenerate), and an older one shows the sentence.
+//   * ANYTHING ELSE (a real invalid_request_error, a 401, a 404): not retryable, because it would
+//     fail the same way; code ai_upstream_error, 502, and a sentence that asks the builder to tell us
+//     if it keeps happening.
+//
+// EVERY draft answers this way, a lone call included: the lean retry is the builder's last automatic
+// try and must not end in raw JSON either. Its request, its one send and its hold are untouched. The
+// handler never passes a lead the deadline stopped: a timeout keeps its own retryable answer.
+export const DRAFT_UPSTREAM_SENTENCES = {
+  download: "The AI service couldn't load your views just now - please press Generate again.",
+  overloaded: "The AI service is busy right now - please press Generate again.",
+  upstream: "The AI service had a problem just now - please press Generate again.",
+  network: "We couldn't reach the AI service just now - please press Generate again.",
+  refused: "The AI service could not take this request. Please press Generate again, and if it keeps happening, tell CSM Synergy.",
+} as const;
+export type DraftUpstreamFailure = {
+  transient: boolean;
+  kind: keyof typeof DRAFT_UPSTREAM_SENTENCES;
+  status: 502 | 503;
+  code: "ai_upstream_transient" | "ai_upstream_error";
+  // The builder's answer: never the API's own text.
+  answer: { error: string; code: "ai_upstream_transient" | "ai_upstream_error"; retryable?: true };
+  // The app_errors row's message and context: the raw status and body, and how every read went.
+  message: string;
+  context: Record<string, unknown>;
+};
+export function draftUpstreamFailure(lead: DraftCall<unknown>, calls: readonly DraftCall<unknown>[] = [lead]): DraftUpstreamFailure {
+  const kind: DraftUpstreamFailure["kind"] = lead.threw ? "network" : transientUpstream(lead.status, lead.body) ?? "refused";
+  const transient = kind !== "refused";
+  const code = transient ? "ai_upstream_transient" : "ai_upstream_error";
+  const message = lead.threw
+    ? `Could not reach the AI service: ${lead.error instanceof Error ? lead.error.message : String(lead.error)}`
+    : `AI service returned ${lead.status}: ${lead.body.slice(0, 2000)}`;
+  return {
+    transient,
+    kind,
+    status: kind === "overloaded" ? 503 : 502,
+    code,
+    answer: transient ? { error: DRAFT_UPSTREAM_SENTENCES[kind], code, retryable: true } : { error: DRAFT_UPSTREAM_SENTENCES.refused, code },
+    message,
+    context: {
+      status: lead.status,
+      kind,
+      attempts: lead.attempts,
+      reads: calls.map((c) => ({ status: c.status, threw: c.threw, aborted: c.aborted, attempts: c.attempts })),
+    },
+  };
 }
 
 // ─── Combining the reads ───────────────────────────────────────────────────────────────────────
@@ -4162,6 +4352,9 @@ export function draftCallsUsage(
       ms: c.ms,
       ok: !!c.reading?.drafted,
       aborted: c.aborted,
+      // How many sends this read took (2026-09-26): more than 1 only when the API could not serve it
+      // and it was sent again (DRAFT_READ_RETRY); 0 when the draft stopped before its turn.
+      attempts: c.attempts,
     })),
     // Each read's roof; on a measured read also where its pitch came from (draftReadSample).
     samples: calls.flatMap((c) => {

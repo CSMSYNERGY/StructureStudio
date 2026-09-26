@@ -4877,6 +4877,304 @@ Deno.test("consensusOfCalls and draftCallsUsage: the medoid's CALL, the summed u
   assertEquals(z.tokens.samples, []);
 });
 
+// ═══ A READ THE API COULD NOT SERVE, AND THE STAGGER (2026-09-26) ════════════════════════════════
+// LIVE: a v2 press failed about 7 s after Generate on the API's 400 "The request timed out while
+// trying to download the file" (the API fetches our frame URLs itself, and five reads fetched the same
+// twelve at once), and the builder read the raw JSON under the panel. What is pinned here: which
+// failures are transient, and that nothing else is; that runDraftCalls sends such a read again after
+// its backoff, at most twice, only while the deadline, the cut-off and the budget allow; that the
+// reads' first sends are staggered, in order; that a lone call is never retried or staggered; that
+// every call says how many sends it took; and the builder's plain sentence for every upstream failure.
+import { DRAFT_READ_RETRY, DRAFT_UPSTREAM_SENTENCES, draftUpstreamFailure, transientUpstream } from "./styleD3.ts";
+import type { DraftCall, DraftReadRetry } from "./styleD3.ts";
+
+// The live body, word for word as the API sent it (it carries no identifiers).
+const DOWNLOAD_TIMED_OUT = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "The request timed out while trying to download the file. Please try again later." } });
+const INVALID_REQUEST = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "messages.0.content.12: image exceeds the maximum allowed size" } });
+const OVERLOADED_BODY = JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "Overloaded" } });
+const apiError = (message: string) => JSON.stringify({ type: "error", error: { type: "invalid_request_error", message } });
+
+Deno.test("DRAFT_READ_RETRY: two more sends after 1.5 s and 4 s (plus up to 0.4 s), 40 s of budget to start one, first sends 300 ms apart", () => {
+  assertEquals([...DRAFT_READ_RETRY.delaysMs], [1_500, 4_000]);
+  assertEquals([DRAFT_READ_RETRY.jitterMs, DRAFT_READ_RETRY.minLeftMs, DRAFT_READ_RETRY.staggerMs], [400, 40_000, 300]);
+  assert(Object.isFrozen(DRAFT_READ_RETRY) && Object.isFrozen(DRAFT_READ_RETRY.delaysMs), "one shared constant, which nothing can change by accident");
+  // What the stagger costs a press: its five reads are all out 1.2 s in.
+  assertEquals(DRAFT_READ_RETRY.staggerMs * (DRAFT_CONSENSUS_CALLS - 1), 1_200);
+  // The most a read's retries add to the wait, both backoffs at their full jitter.
+  assertEquals(DRAFT_READ_RETRY.delaysMs.reduce((s, d) => s + d, 0) + DRAFT_READ_RETRY.delaysMs.length * DRAFT_READ_RETRY.jitterMs, 6_300);
+});
+
+Deno.test("transientUpstream: the API's busy and broken statuses and its own download failure, and nothing else", () => {
+  for (const [status, kind] of [[429, "overloaded"], [503, "overloaded"], [529, "overloaded"], [500, "upstream"], [502, "upstream"]] as const) {
+    assertEquals(transientUpstream(status, OVERLOADED_BODY), kind, String(status));
+    assertEquals(transientUpstream(status, ""), kind, `${status} with no body`);
+  }
+  assertEquals(transientUpstream(400, DOWNLOAD_TIMED_OUT), "download", "the live failure");
+  for (const message of [
+    "Timeout while downloading the file",
+    "The file could not be fetched",
+    "Failed to download the image",
+    "Couldn't fetch the URL: timed out",
+    "the request timed out while trying to fetch the url",
+  ]) {
+    assertEquals(transientUpstream(400, apiError(message)), "download", message);
+  }
+  assertEquals(transientUpstream(400, "The request timed out while trying to download the file."), "download", "a body that is not JSON is read as text");
+  // A real invalid request is never resent: it would fail the same way.
+  for (const message of [
+    "messages.0.content.12: image exceeds the maximum allowed size",
+    "Could not process image",
+    "Unable to download the file. Please verify the URL and try again.",
+    "max_tokens: must be at most 128000",
+    "The request timed out.",
+  ]) {
+    assertEquals(transientUpstream(400, apiError(message)), null, message);
+  }
+  assertEquals(transientUpstream(400, INVALID_REQUEST), null);
+  assertEquals(transientUpstream(400, JSON.stringify({ type: "error", error: { type: "invalid_request_error" } })), null, "no message");
+  assertEquals(transientUpstream(400, JSON.stringify({ error: "download timed out" })), null, "not the API's error shape");
+  for (const status of [200, 401, 403, 404, 413, 504]) assertEquals(transientUpstream(status, DOWNLOAD_TIMED_OUT), null, String(status));
+});
+
+type ReadPlan = { status?: number; body?: string; delayMs?: number; hang?: boolean; throws?: string; breaks?: boolean };
+// Read i's k-th send gets plans[i][k], and a hang once they run out. The reads are told apart by the
+// signal each one sends on (its own, with several calls); every send is logged with its time.
+function perRead(plans: ReadPlan[][]) {
+  const signals: AbortSignal[] = [];
+  const log: { read: number; at: number; signal: AbortSignal }[] = [];
+  const t0 = Date.now();
+  const send = (signal: AbortSignal): Promise<Response> => {
+    let read = signals.indexOf(signal);
+    if (read < 0) read = signals.push(signal) - 1;
+    const k = log.filter((l) => l.read === read).length;
+    log.push({ read, at: Date.now() - t0, signal });
+    const plan = plans[read]?.[k] ?? { hang: true };
+    return new Promise((resolve, reject) => {
+      if (plan.throws) { reject(new TypeError(plan.throws)); return; }
+      let t: ReturnType<typeof setTimeout> | undefined;
+      const onAbort = () => { if (t !== undefined) clearTimeout(t); reject(new DOMException("The signal has been aborted", "AbortError")); };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (plan.hang) return;
+      t = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        // `breaks`: the reply arrived, and its body broke off while it was being read.
+        const body = plan.breaks
+          ? new ReadableStream({ start(c) { c.error(new TypeError("error reading a body from connection")); } })
+          : plan.body ?? "";
+        resolve(new Response(body, { status: plan.status ?? 200 }));
+      }, plan.delayMs ?? 1);
+    });
+  };
+  return { send, log, sends: (read: number) => log.filter((l) => l.read === read) };
+}
+// The policy at a scale a test can wait for: 20 ms and 40 ms backoffs, no jitter, 50 ms to start a
+// retry in, no stagger, and a deadline far off. Each case changes what it is about.
+type RetryOpts = DraftReadRetry & { deadlineAt: number; random?: () => number };
+const QUICK = (o: Partial<RetryOpts> = {}): RetryOpts => ({ delaysMs: [20, 40], jitterMs: 0, minLeftMs: 50, staggerMs: 0, deadlineAt: Date.now() + 10_000, ...o });
+const R_OK: ReadPlan = { body: GOOD, delayMs: 1 };
+const R_DOWNLOAD: ReadPlan = { status: 400, body: DOWNLOAD_TIMED_OUT, delayMs: 1 };
+const R_529: ReadPlan = { status: 529, body: OVERLOADED_BODY, delayMs: 1 };
+const readPlain = (b: string) => readDraftReply(b);
+
+Deno.test("runDraftCalls: a read that 400s with the download message is sent again after its backoff, and drafts (attempts 2)", async () => {
+  const f = perRead([[R_DOWNLOAD, R_OK], [R_OK], [R_OK], [R_OK], [R_OK]]);
+  const calls = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 5_000, send: f.send, read: readPlain, retry: QUICK() });
+  assertEquals(calls.map((c) => [c.reading?.drafted ?? false, c.attempts]), [[true, 2], [true, 1], [true, 1], [true, 1], [true, 1]]);
+  assertEquals(f.sends(0).length, 2, "read 0 went twice");
+  assert(f.sends(0)[1].signal === f.sends(0)[0].signal, "on its own signal both times");
+  assert(f.sends(0)[1].at - f.sends(0)[0].at >= 19, `after the 20 ms backoff: ${f.sends(0)[1].at - f.sends(0)[0].at} ms`);
+  assertEquals([calls[0].status, calls[0].httpOk], [200, true], "the call is its LAST attempt's");
+  assert(calls[0].ms >= 20, "ms runs from the first send to the last answer");
+  // draft_tokens.calls says so, for SQL.
+  const entries = draftCallsUsage("claude-opus-5-5", calls, calls[0], null).tokens.calls as Record<string, unknown>[];
+  assertEquals(entries.map((e) => e.attempts), [2, 1, 1, 1, 1]);
+  assertEquals(entries.map((e) => e.ok), [true, true, true, true, true]);
+});
+
+Deno.test("runDraftCalls: a 529 twice and then a draft is three sends, the second backoff the longer", async () => {
+  const f = perRead([[R_529, R_529, R_OK], [R_OK], [R_OK], [R_OK], [R_OK]]);
+  const calls = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 5_000, send: f.send, read: readPlain, retry: QUICK() });
+  assertEquals(calls.map((c) => c.attempts), [3, 1, 1, 1, 1]);
+  assertEquals(calls[0].reading?.drafted, true);
+  const at = f.sends(0).map((s) => s.at);
+  assert(at[1] - at[0] >= 19 && at[2] - at[1] >= 39, `20 ms, then 40 ms: ${at.join(", ")}`);
+});
+
+Deno.test("runDraftCalls: at most two more sends; a read the API fails three times is dropped with its LAST failure", async () => {
+  const f = perRead([[R_529, { status: 503, body: "busy", delayMs: 1 }, R_DOWNLOAD, R_OK], [R_OK], [R_OK], [R_OK], [R_OK]]);
+  const calls = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 5_000, send: f.send, read: readPlain, retry: QUICK() });
+  assertEquals(f.sends(0).length, 3, "never a fourth");
+  assertEquals([calls[0].attempts, calls[0].status, calls[0].body, calls[0].httpOk], [3, 400, DOWNLOAD_TIMED_OUT, false]);
+});
+
+Deno.test("runDraftCalls: a real invalid_request_error, a 401, a 404, a refusal, a cut-off or an unparseable reply is never sent again", async () => {
+  const f = perRead([
+    [{ status: 400, body: INVALID_REQUEST, delayMs: 1 }, R_OK],
+    [{ status: 401, body: apiError("invalid x-api-key"), delayMs: 1 }, R_OK],
+    [{ status: 404, body: apiError("model not found"), delayMs: 1 }, R_OK],
+    [{ body: replyBody(RAISED_RAW, { stop_reason: "refusal" }), delayMs: 1 }, R_OK],
+    [{ body: replyBody('{"roof":{"type":"gab', { stop_reason: "max_tokens" }), delayMs: 1 }, R_OK],
+  ]);
+  const calls = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 5_000, send: f.send, read: readPlain, retry: QUICK() });
+  assertEquals(f.log.length, 5, "one send each");
+  assertEquals(calls.map((c) => c.attempts), [1, 1, 1, 1, 1]);
+  assertEquals(calls.map((c) => c.status), [400, 401, 404, 200, 200]);
+  const g = perRead([[{ body: "{}", delayMs: 1 }, R_OK], [R_OK], [R_OK], [R_OK], [R_OK]]);
+  const junk = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 5_000, send: g.send, read: readPlain, retry: QUICK() });
+  assertEquals([junk[0].attempts, junk[0].reading?.drafted], [1, false], "an unparseable 200 is an answer, not a failure to serve");
+});
+
+Deno.test("runDraftCalls: a send that threw is sent again; a body that broke off after its reply is not", async () => {
+  const f = perRead([[{ throws: "connection reset" }, R_OK], [{ breaks: true, delayMs: 1 }, R_OK], [R_OK], [R_OK], [R_OK]]);
+  const calls = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 5_000, send: f.send, read: readPlain, retry: QUICK() });
+  assertEquals([calls[0].attempts, calls[0].reading?.drafted], [2, true], "the network, before any reply: sent again");
+  assertEquals([calls[1].attempts, calls[1].threw, calls[1].aborted], [1, true, null], "a reply that broke off may have been paid for: kept as it is");
+  assertEquals(f.sends(1).length, 1);
+});
+
+Deno.test("runDraftCalls: the deadline cuts a backoff short, the last failure stands, and nothing more is sent", async () => {
+  const deadline = new AbortController();
+  const f = perRead([[R_529, R_OK], [R_DOWNLOAD, R_OK], [{ hang: true }], [{ hang: true }], [{ hang: true }]]);
+  const t0 = Date.now();
+  const run = runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: deadline.signal, graceMs: 5, send: f.send, read: readPlain, retry: QUICK({ delaysMs: [400, 400] }) });
+  const t = setTimeout(() => deadline.abort(), 40);
+  const calls = await run;
+  clearTimeout(t);
+  assert(Date.now() - t0 < 300, "the 400 ms backoffs were not waited out");
+  assertEquals(f.log.length, 5, "no read went again");
+  assertEquals(calls.map((c) => [c.status, c.attempts, c.aborted]), [[529, 1, null], [400, 1, null], [null, 1, "deadline"], [null, 1, "deadline"], [null, 1, "deadline"]]);
+});
+
+Deno.test("runDraftCalls: no retry starts without minLeftMs of the budget left after its wait", async () => {
+  // 100 ms to the deadline: a 20 ms backoff after a ~1 ms failure leaves under 80 ms, short of 95
+  // and well over 30.
+  const plans = () => perRead([[R_529, R_OK], [R_OK], [R_OK], [R_OK], [R_OK]]);
+  const short = plans();
+  const none = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 5_000, send: short.send, read: readPlain, retry: QUICK({ delaysMs: [20], deadlineAt: Date.now() + 100, minLeftMs: 95 }) });
+  assertEquals([none[0].attempts, none[0].status, short.sends(0).length], [1, 529, 1], "not enough left: dropped at once");
+  const room = plans();
+  const again = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 5_000, send: room.send, read: readPlain, retry: QUICK({ delaysMs: [20], deadlineAt: Date.now() + 100, minLeftMs: 30 }) });
+  assertEquals([again[0].attempts, again[0].reading?.drafted], [2, true], "enough left: sent again");
+});
+
+Deno.test("runDraftCalls: once three have drafted, the grace is the budget, and the cut-off ends a backoff", async () => {
+  // Three draft at ~1 ms and the grace is 150 ms; the fourth read 529s at ~30 ms and would go again
+  // ~20 ms later, with ~100 ms of the grace left (the deadline is ten seconds off).
+  const plans = () => perRead([[R_OK], [R_OK], [R_OK], [{ ...R_529, delayMs: 30 }, R_OK], [R_OK]]);
+  const tight = plans();
+  const dropped = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 150, send: tight.send, read: readPlain, retry: QUICK({ delaysMs: [20], minLeftMs: 135 }) });
+  assertEquals([dropped[3].attempts, dropped[3].status], [1, 529], "too little of the grace: not sent again, whatever the deadline says");
+  const loose = plans();
+  const kept = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 150, send: loose.send, read: readPlain, retry: QUICK({ delaysMs: [20], minLeftMs: 40 }) });
+  assertEquals([kept[3].attempts, kept[3].reading?.drafted], [2, true], "room in the grace: sent again, and drafted inside it");
+  // The cut-off fires DURING a backoff that began before the quorum: the wait ends, the 529 stands.
+  const g = perRead([[{ ...R_OK, delayMs: 10 }], [{ ...R_OK, delayMs: 10 }], [{ ...R_OK, delayMs: 10 }], [R_529, R_OK], [{ hang: true }]]);
+  const t0 = Date.now();
+  const cut = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 20, send: g.send, read: readPlain, retry: QUICK({ delaysMs: [400] }) });
+  assert(Date.now() - t0 < 300, "the 400 ms backoff was not waited out");
+  assertEquals([cut[3].attempts, cut[3].status, cut[3].aborted], [1, 529, null]);
+  assertEquals(cut[4].aborted, "quorum");
+  assertEquals(g.sends(3).length, 1, "never sent again");
+});
+
+Deno.test("runDraftCalls: the stagger sends first sends in read order, staggerMs apart, the first at once, none waiting on an answer", async () => {
+  const f = perRead(Array.from({ length: DRAFT_CONSENSUS_CALLS }, () => [{ body: GOOD, delayMs: 250 }]));
+  const calls = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 5_000, send: f.send, read: readPlain, retry: QUICK({ staggerMs: 40 }) });
+  assertEquals(f.log.map((l) => l.read), [0, 1, 2, 3, 4], "in read order");
+  assert(f.log[0].at < 15, `the first at once: ${f.log[0].at} ms`);
+  // Each read's turn is i x staggerMs from the start (a timer that fires late does not push the next).
+  for (let i = 1; i < f.log.length; i++) {
+    assert(f.log[i].at >= i * 40 - 2 && f.log[i].at < i * 40 + 80, `send ${i} went ${f.log[i].at} ms in, its turn at ${i * 40}`);
+  }
+  assert(f.log[4].at < 250, "all five were out before the first answer");
+  assertEquals(calls.map((c) => [c.reading?.drafted, c.attempts]), Array(5).fill([true, 1]));
+});
+
+Deno.test("runDraftCalls: a read whose turn has not come when the deadline fires is never sent (attempts 0)", async () => {
+  const deadline = new AbortController();
+  const f = perRead(Array.from({ length: DRAFT_CONSENSUS_CALLS }, () => [{ hang: true }]));
+  const run = runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: deadline.signal, graceMs: 5, send: f.send, read: readPlain, retry: QUICK({ staggerMs: 40 }) });
+  const t = setTimeout(() => deadline.abort(), 60);
+  const calls = await run;
+  clearTimeout(t);
+  assertEquals(f.log.map((l) => l.read), [0, 1], "two had their turn");
+  assertEquals(calls.map((c) => [c.attempts, c.threw, c.aborted]), [[1, true, "deadline"], [1, true, "deadline"], [0, true, "deadline"], [0, true, "deadline"], [0, true, "deadline"]]);
+  assert(calls[4].error instanceof DOMException && calls[4].error.name === "AbortError", "stopped, never sent");
+});
+
+Deno.test("runDraftCalls: a lone call (legacy, the lean retry) is never sent again or staggered, whatever `retry` says", async () => {
+  for (const first of [R_DOWNLOAD, R_529, { throws: "connection reset" }] as ReadPlan[]) {
+    const deadline = new AbortController();
+    const f = perRead([[first, R_OK]]);
+    const calls = await runDraftCalls({ count: 1, deadline: deadline.signal, graceMs: 5, send: f.send, read: readPlain, retry: QUICK({ staggerMs: 1_000, minLeftMs: 0 }) });
+    assertEquals(f.log.length, 1, JSON.stringify(first));
+    assert(f.log[0].signal === deadline.signal, "on the deadline signal itself, as always");
+    assertEquals([calls[0].attempts, calls[0].reading], [1, null]);
+  }
+  // And several calls with no `retry` at all are exactly what they were: every read once, at once.
+  const g = perRead([[R_DOWNLOAD, R_OK], [R_OK], [R_OK], [R_OK], [R_OK]]);
+  const plain = await runDraftCalls({ count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 5_000, send: g.send, read: readPlain });
+  assertEquals(plain.map((c) => c.attempts), [1, 1, 1, 1, 1]);
+  assertEquals(g.log.length, 5);
+});
+
+Deno.test("runDraftCalls: the jitter is drawn per read and added to its backoff", async () => {
+  let draws = 0;
+  const f = perRead([[R_529, R_OK], [R_529, R_OK], [R_OK], [R_OK], [R_OK]]);
+  await runDraftCalls({
+    count: DRAFT_CONSENSUS_CALLS, deadline: new AbortController().signal, graceMs: 5_000, send: f.send, read: readPlain,
+    retry: QUICK({ delaysMs: [10], jitterMs: 100, random: () => (++draws === 1 ? 0 : 0.99) }),
+  });
+  assertEquals(draws, 2, "one draw per retry");
+  // Whichever read drew first went again after 10 ms, the other after 10 + 99.
+  const gaps = [0, 1].map((read) => f.sends(read)[1].at - f.sends(read)[0].at).sort((a, b) => a - b);
+  assert(gaps[0] >= 9 && gaps[0] < 60, `no jitter: ${gaps[0]} ms`);
+  assert(gaps[1] >= 108, `10 ms plus 99: ${gaps[1]} ms`);
+});
+
+Deno.test("draftUpstreamFailure: a plain sentence for the builder, the raw text for the row, retryable only when it was transient", () => {
+  const call = (o: Record<string, unknown>) =>
+    ({ index: 0, ms: 5, attempts: 3, threw: false, error: null, aborted: null, status: 400, httpOk: false, body: "", reading: null, ...o }) as unknown as DraftCall<null>;
+  const dl = draftUpstreamFailure(call({ body: DOWNLOAD_TIMED_OUT }));
+  assertEquals([dl.status, dl.code, dl.transient, dl.kind], [502, "ai_upstream_transient", true, "download"]);
+  assertEquals(dl.answer, { error: "The AI service couldn't load your views just now - please press Generate again.", code: "ai_upstream_transient", retryable: true });
+  assertEquals(dl.message, `AI service returned 400: ${DOWNLOAD_TIMED_OUT}`, "the raw body goes to the row");
+  for (const [status, kind, http] of [[529, "overloaded", 503], [429, "overloaded", 503], [503, "overloaded", 503], [500, "upstream", 502], [502, "upstream", 502]] as const) {
+    const f = draftUpstreamFailure(call({ status, body: OVERLOADED_BODY }));
+    assertEquals([f.status, f.kind, f.answer.retryable, f.answer.error], [http, kind, true, DRAFT_UPSTREAM_SENTENCES[kind]], String(status));
+  }
+  const net = draftUpstreamFailure(call({ threw: true, error: new TypeError("connection reset"), status: null }));
+  assertEquals([net.status, net.kind, net.code, net.answer.retryable], [502, "network", "ai_upstream_transient", true]);
+  assertEquals(net.answer.error, "We couldn't reach the AI service just now - please press Generate again.");
+  assertEquals(net.message, "Could not reach the AI service: connection reset");
+  // Not transient: said plainly too, never retryable, and the row keeps what the API said.
+  for (const [status, body] of [[400, INVALID_REQUEST], [401, apiError("invalid x-api-key")], [404, apiError("model not found")]] as const) {
+    const f = draftUpstreamFailure(call({ status, body }));
+    assertEquals([f.status, f.code, f.transient, f.kind], [502, "ai_upstream_error", false, "refused"], String(status));
+    assertEquals(f.answer, { error: DRAFT_UPSTREAM_SENTENCES.refused, code: "ai_upstream_error" });
+    assert(!("retryable" in f.answer), `${status}: never retried automatically`);
+    assertEquals(f.message, `AI service returned ${status}: ${body}`);
+  }
+  // The builder never reads the API's own words, whatever it sent.
+  for (const s of Object.values(DRAFT_UPSTREAM_SENTENCES)) assert(!/[{}"]|invalid_request|error/i.test(s), s);
+  // A long body is cut for the row; the row's context says how every read went.
+  const long = draftUpstreamFailure(call({ status: 400, body: "x".repeat(5_000) }));
+  assertEquals(long.message.length, "AI service returned 400: ".length + 2_000);
+  const reads = [
+    call({ index: 0, status: 529, body: OVERLOADED_BODY }),
+    call({ index: 1, threw: true, error: new TypeError("reset"), status: null, attempts: 3 }),
+    call({ index: 2, threw: true, aborted: "deadline", status: null, attempts: 0 }),
+  ];
+  assertEquals(draftUpstreamFailure(reads[0], reads).context, {
+    status: 529, kind: "overloaded", attempts: 3,
+    reads: [
+      { status: 529, threw: false, aborted: null, attempts: 3 },
+      { status: null, threw: true, aborted: null, attempts: 3 },
+      { status: null, threw: true, aborted: "deadline", attempts: 0 },
+    ],
+  });
+});
+
 // ═══ MEASURED PITCHES (2026-09-26) ════════════════════════════════════════════════════════════
 // Live three-read drafts JUDGED the slope: a raised centre's 0.41 gable came back 0.45 to 0.8. The v2
 // reply now carries `measure`, the pixel points a gable's pitch is read from, and the server works the
