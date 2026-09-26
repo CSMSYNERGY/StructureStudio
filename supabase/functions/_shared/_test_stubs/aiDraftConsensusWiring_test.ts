@@ -15,6 +15,10 @@
 //      the FIRST call sent (not the first to come back): the same status, code, `retryable` and
 //      hold release, whatever the other four did.
 //   4. Every call's usage is summed, for draft_tokens and for the capture's cost basis.
+//   5. (2026-09-26) The five reads' first sends are staggered, a read the API could not serve is sent
+//      again while the budget has room, and a lone call is neither. When the API failed the draft,
+//      the builder gets a plain sentence (retryable when it was transient) and one coded row gets the
+//      raw status and body.
 //
 // HOW: the aiDraftUsageWiring_test idiom. The handler's block from the abort signal to the end of the
 // parse-failure exit is lifted between stable anchors and run as an async function against a stand-in
@@ -27,6 +31,7 @@ import {
   draftCallCount, draftCallsUsage, flagObservedNotes, frameKeyWarning, gambrelRoofWarning, knownDimsNote,
   parseModelSpec, parseObservedNotes, porchAgreementWarning, readDraftReply, runDraftCalls, SPEC_PROMPT,
   videoShapePrompt, wingsAgreementWarning, DRAFT_CONSENSUS_GRACE_MS, draftReadSample,
+  DRAFT_READ_RETRY, DRAFT_UPSTREAM_SENTENCES, draftUpstreamFailure,
 } from "../styleD3.ts";
 
 const read = async (p: string) => (await Deno.readTextFile(new URL(p, import.meta.url))).replace(/\r\n/g, "\n");
@@ -53,7 +58,7 @@ for (const must of ["runDraftCalls(", "consensusOfCalls(", "if (consensus) draft
 
 // ─── The stand-ins ─────────────────────────────────────────────────────────────────────────────
 type Plan = { status?: number; body?: string; delayMs?: number; hang?: boolean; throws?: string };
-type Sent = { url: string; init: RequestInit & { signal: AbortSignal; body: string } };
+type Sent = { url: string; init: RequestInit & { signal: AbortSignal; body: string }; at: number };
 type Reply = { body: Record<string, unknown>; status: number };
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -65,6 +70,8 @@ const PARAMS = [
   "parseModelSpec", "streamed", "draftEffort",
   // 2026-09-26: the single read's record names where its pitches came from (draftReadSample).
   "draftReadSample",
+  // 2026-09-26: the stagger and the retry, and the plain sentence for an upstream failure.
+  "DRAFT_READ_RETRY", "draftUpstreamFailure",
 ];
 const RUN = new AsyncFunction(
   ...PARAMS,
@@ -76,7 +83,13 @@ const FRAMES = Array.from({ length: 12 }, (_, i) => `https://example.test/walk/f
 // `streamed` (2026-09-25) is the branch's parameter: true only for the new shell's v2 press, which
 // answers behind a heartbeat and thinks at effort "high" (aiDraftStreamWiring_test). Every case here
 // that does not name it is a request that is not streamed, so it pins the plain request unchanged.
-type Scenario = { v2: boolean; lean?: boolean; streamed?: boolean; source?: "video" | "combined" | "photos"; videoCount?: number; photoUrls?: string[]; graceMs?: number; abortMs?: number };
+type Scenario = { v2: boolean; lean?: boolean; streamed?: boolean; source?: "video" | "combined" | "photos"; videoCount?: number; photoUrls?: string[]; graceMs?: number; abortMs?: number; retry?: typeof DRAFT_READ_RETRY };
+
+// What the block is handed as DRAFT_READ_RETRY (2026-09-26). By default the real one without its
+// stagger, so the five reads go at once as they did before and every case keeps its own timing; and
+// with the default 2 s deadline no retry has the 40 s it needs to start, so a failed read is simply
+// dropped, as before. The stagger and the retry have their own cases (section 5), on the real policy.
+const NO_STAGGER = { ...DRAFT_READ_RETRY, staggerMs: 0 };
 
 async function run(s: Scenario, plans: Plan[]) {
   const timers: ReturnType<typeof setTimeout>[] = [];
@@ -92,7 +105,7 @@ async function run(s: Scenario, plans: Plan[]) {
   const pending: ReturnType<typeof setTimeout>[] = [];
   const fetch = (url: string, init: Sent["init"]): Promise<Response> => {
     const plan = plans[sent.length] ?? { hang: true };
-    sent.push({ url, init });
+    sent.push({ url, init, at: Date.now() });
     return new Promise((resolve, reject) => {
       if (plan.throws) { reject(new TypeError(plan.throws)); return; }
       const signal = init.signal;
@@ -110,7 +123,7 @@ async function run(s: Scenario, plans: Plan[]) {
     });
   };
   const released: string[] = [];
-  const logged: { code: string; context?: Record<string, unknown> }[] = [];
+  const logged: { code: string; message?: string; context?: Record<string, unknown> }[] = [];
   const usage: unknown[] = [];
   const filed = new Set<unknown>();
   const source = s.source ?? "video";
@@ -129,7 +142,7 @@ async function run(s: Scenario, plans: Plan[]) {
       // deno-lint-ignore require-await
       async (reason: string) => { released.push(reason); },
       // deno-lint-ignore require-await
-      async (e: { code: string; context?: Record<string, unknown> }) => { logged.push({ code: e.code, context: e.context }); },
+      async (e: { code: string; message?: string; context?: Record<string, unknown> }) => { logged.push({ code: e.code, message: e.message, context: e.context }); },
       null, "harness-tenant", t0, t0 - 1_000, source,
       (body: Record<string, unknown>, status = 200): Reply => ({ body, status }),
       filed, parseModelSpec, s.streamed ?? false,
@@ -137,10 +150,11 @@ async function run(s: Scenario, plans: Plan[]) {
       // its expression): "low" when lean, "high" when streamed, else "medium".
       s.lean ? "low" : s.streamed ? "high" : "medium",
       draftReadSample,
+      s.retry ?? NO_STAGGER, draftUpstreamFailure,
     );
     // A return from inside the block is a Reply; falling off its end is the success object.
     const answered = out && "status" in out && "body" in out ? out as Reply : null;
-    return { out, answered, sent, sentWhenFirstAnswered, released, logged, usage, filed, ms: Date.now() - t0, dims, photoUrls, combined, fromVideo };
+    return { out, answered, sent, sentWhenFirstAnswered, released, logged, usage, filed, ms: Date.now() - t0, t0, dims, photoUrls, combined, fromVideo };
   } finally {
     for (const t of timers) clearTimeout(t);
     for (const t of pending) clearTimeout(t);
@@ -231,10 +245,17 @@ Deno.test("legacy requests and the lean retry send ONE call: today's request, by
 
 const FIVE = (p: Plan): Plan[] => [p, p, p, p, p];
 
-Deno.test("a v2 press sends FIVE identical requests, all before any answer comes back", async () => {
-  const r = await run({ v2: true }, FIVE(GOOD()));
+Deno.test("a v2 press sends FIVE identical requests, ~300 ms apart and all before any answer comes back", async () => {
+  // THE REAL STAGGER (2026-09-26, DRAFT_READ_RETRY): read i goes i x 300 ms in, so the sixty frame
+  // downloads the API makes for five reads do not start in the same instant. Replies that take 1.3 s
+  // show no send waits for an answer.
+  const r = await run({ v2: true, retry: DRAFT_READ_RETRY, abortMs: 5_000 }, FIVE({ ...GOOD(), delayMs: 1_300 }));
   assertEquals(r.sent.length, 5);
   assertEquals(r.sentWhenFirstAnswered, 5, "in parallel: all five were out before the first reply landed");
+  r.sent.forEach((s, i) => {
+    const at = s.at - r.t0;
+    assert(at >= i * 300 - 2 && at < i * 300 + 150, `read ${i} went ${at} ms in, its turn at ${i * 300}`);
+  });
   const want = expectedBody(r, true, false, 0);
   for (const { url, init } of r.sent) {
     assertEquals(url, "https://api.anthropic.com/v1/messages");
@@ -336,12 +357,15 @@ Deno.test("one read of five is enough to answer: the consensus of one read is th
 // ─── 3. None of five: today's error, for the FIRST call sent ───────────────────────────────────
 // Each case runs the SAME first-call outcome twice: alone as a legacy single call (today's handling,
 // unchanged) and as the first of five failing v2 calls. The builder must get the same answer.
+// An upstream failure (the overloaded API, the dropped connection) is said in plain words since
+// 2026-09-26, retryable, with one coded row carrying the raw text (draftUpstreamFailure); the 60 ms
+// deadline here leaves no room to send a read again, which section 5 covers.
 const FAILURES: [string, Plan, { status: number; code: string | null; retryable: boolean; release: string }][] = [
   ["a reply cut off at max_tokens", TRUNCATED, { status: 502, code: "ai_spec_truncated", retryable: true, release: "reply truncated" }],
   ["an unparseable reply", UNPARSEABLE, { status: 502, code: "ai_spec_unparseable", retryable: false, release: "unparseable spec" }],
   ["a refusal", REFUSED, { status: 502, code: "ai_spec_refused", retryable: false, release: "model refused" }],
-  ["an overloaded API", OVERLOADED, { status: 502, code: null, retryable: false, release: "upstream 529" }],
-  ["a dropped connection", { throws: "connection reset" }, { status: 502, code: null, retryable: false, release: "fetch failed" }],
+  ["an overloaded API", OVERLOADED, { status: 503, code: "ai_upstream_transient", retryable: true, release: "upstream 529" }],
+  ["a dropped connection", { throws: "connection reset" }, { status: 502, code: "ai_upstream_transient", retryable: true, release: "fetch failed" }],
   ["the deadline", { hang: true }, { status: 504, code: "ai_call_timeout", retryable: true, release: "model timeout" }],
 ];
 for (const [what, first, want] of FAILURES) {
@@ -378,8 +402,10 @@ Deno.test("a first call that failed on its own is not relabelled a timeout by th
   // usually fired by the time all five settle, so it is read per call, the moment each one threw.
   const r = await run({ v2: true, abortMs: 40 }, [{ throws: "connection reset" }, { hang: true }, { hang: true }, { hang: true }, { hang: true }]);
   assertEquals(r.answered!.status, 502);
-  assertEquals(r.answered!.body.error, "Could not reach the AI service: connection reset");
+  assertEquals(r.answered!.body.error, DRAFT_UPSTREAM_SENTENCES.network, "said plainly (2026-09-26)");
+  assertEquals(r.answered!.body.retryable, true);
   assertEquals(r.released, ["fetch failed"]);
+  assertEquals(r.logged.map((l) => [l.code, l.context?.kind]), [["ai_upstream_transient", "network"]], "not the timeout's row");
   assertEquals(((r.usage[0] as Record<string, unknown>).calls as Record<string, unknown>[]).map((c) => c.aborted), [null, "deadline", "deadline", "deadline", "deadline"]);
 });
 
@@ -449,4 +475,118 @@ Deno.test("the combined spec is what the ledger, the flags and the response read
   assert(swap < SOURCE.indexOf("        drafted: drafted.d3,"), "before the ledger write");
   assert(swap < SOURCE.indexOf("return json({ ok: true, d3: drafted.d3,"), "before the response");
   assertEquals(SOURCE.split("drafted.d3 = ").length - 1, 1, "and nowhere else");
+});
+
+// ─── 5. The stagger, the retry, and the plain sentence (2026-09-26) ────────────────────────────
+// LIVE: a v2 press failed ~7 s after Generate on the API's 400 "The request timed out while trying
+// to download the file", and the builder read the raw JSON. styleD3.test.ts pins runDraftCalls and
+// draftUpstreamFailure; this pins what the handler's block does with them.
+const DOWNLOAD_400: Plan = {
+  status: 400, delayMs: 2,
+  body: JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "The request timed out while trying to download the file. Please try again later." } }),
+};
+const INVALID_400: Plan = {
+  status: 400, delayMs: 2,
+  body: JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "messages.0.content.12: image exceeds the maximum allowed size" } }),
+};
+// The real policy with its jitter fixed, for the cases that measure its real waits.
+const REAL = { ...DRAFT_READ_RETRY, random: () => 0 };
+// The real policy's shape at a hundredth of its waits, for the cases that only count sends. With a
+// 5 s deadline its 400 ms of room to start a retry is always there.
+const QUICK = { delaysMs: [15, 40], jitterMs: 0, minLeftMs: 400, staggerMs: 3 };
+const FIFTEEN = (p: Plan): Plan[] => Array(15).fill(p);
+const attemptsOf = (r: Awaited<ReturnType<typeof run>>) => ((r.usage[0] as Record<string, unknown>).calls as Record<string, unknown>[]).map((c) => c.attempts);
+
+Deno.test("the block hands runDraftCalls DRAFT_READ_RETRY, and when its one deadline fires", () => {
+  assert(CALL_BLOCK.includes("      retry: { ...DRAFT_READ_RETRY, deadlineAt: t0 + draftAbortMs },"), "the policy and the budget it is measured against");
+  assert(CALL_BLOCK.indexOf("const aiSignal = AbortSignal.timeout(draftAbortMs);") < CALL_BLOCK.indexOf("deadlineAt: t0 + draftAbortMs"), "the same budget aiSignal fires on");
+});
+
+Deno.test("the live failure, one read: the download 400 is sent again 1.5 s later on the real policy, and the press drafts", async () => {
+  const r = await run({ v2: true, abortMs: 120_000, retry: REAL }, [DOWNLOAD_400, GOOD(), GOOD(), GOOD(), GOOD(), GOOD()]);
+  assertEquals(r.answered, null, "a draft, no error");
+  assertEquals([r.released, r.logged], [[], []], "nothing released, nothing filed: this press is charged once");
+  assertEquals(r.sent.length, 6);
+  // Sends: read 0 at once, reads 1-4 at 300-1200 ms, read 0 again 1.5 s after its failure.
+  assert(r.sent[5].init.signal === r.sent[0].init.signal, "the sixth send is read 0 again, on its own signal");
+  assertEquals(r.sent[5].init.body, r.sent[0].init.body, "the very same request");
+  const gap = r.sent[5].at - r.sent[0].at;
+  assert(gap >= 1_500 && gap < 1_800, `1.5 s after the first send's failure: ${gap} ms`);
+  assertEquals(attemptsOf(r), [2, 1, 1, 1, 1], "draft_tokens.calls says read 0 took two sends");
+  assertEquals(r.out.consensus.report.n, 5, "and all five reads count");
+});
+
+Deno.test("every read the API cannot serve: three sends each, then ONE plain retryable answer, one release, one row with the raw body", async () => {
+  const cases: [string, Plan, number, string, string][] = [
+    ["the download failure", DOWNLOAD_400, 502, "The AI service couldn't load your views just now - please press Generate again.", "upstream 400"],
+    ["the API overloaded", OVERLOADED, 503, "The AI service is busy right now - please press Generate again.", "upstream 529"],
+    ["the network", { throws: "connection reset" }, 502, "We couldn't reach the AI service just now - please press Generate again.", "fetch failed"],
+  ];
+  for (const [what, plan, status, sentence, release] of cases) {
+    for (const streamed of [false, true]) {
+      const r = await run({ v2: true, streamed, abortMs: 5_000, retry: QUICK }, FIFTEEN(plan));
+      const label = `${what}${streamed ? ", streamed" : ""}`;
+      assertEquals(r.sent.length, 15, `${label}: every read sent three times`);
+      assertEquals(r.answered!.status, status, label);
+      assertEquals(r.answered!.body, { error: sentence, code: "ai_upstream_transient", retryable: true }, `${label}: the builder's sentence`);
+      assert(!JSON.stringify(r.answered!.body).includes("invalid_request_error"), `${label}: never the API's own JSON`);
+      assertEquals(r.released, [release], `${label}: the hold released once, as before`);
+      assertEquals(r.logged.map((l) => l.code), ["ai_upstream_transient"], `${label}: one coded row`);
+      assert(r.filed.has(r.answered), `${label}: filed at the return site, so the wrapper adds no copy`);
+      const row = r.logged[0];
+      if (plan.throws) assertEquals(row.message, "Could not reach the AI service: connection reset");
+      else assertEquals(row.message, `AI service returned ${plan.status}: ${plan.body}`, `${label}: the raw status and body`);
+      assertEquals((row.context!.reads as Record<string, unknown>[]).map((c) => c.attempts), [3, 3, 3, 3, 3]);
+      assertEquals([row.context!.attempts, row.context!.v2, row.context!.lean], [3, true, false]);
+      assertEquals(attemptsOf(r), [3, 3, 3, 3, 3]);
+    }
+  }
+});
+
+Deno.test("a real invalid_request_error is not sent again: a plain sentence, not retryable, the raw body in its own row", async () => {
+  const r = await run({ v2: true, abortMs: 5_000, retry: QUICK }, [...FIVE(INVALID_400), GOOD()]);
+  assertEquals(r.sent.length, 5, "one send a read");
+  assertEquals(r.answered!.status, 502);
+  assertEquals(r.answered!.body, { error: DRAFT_UPSTREAM_SENTENCES.refused, code: "ai_upstream_error" });
+  assertEquals(r.released, ["upstream 400"]);
+  assertEquals(r.logged.map((l) => l.code), ["ai_upstream_error"]);
+  assert(r.logged[0].message!.includes("image exceeds the maximum allowed size"), "what the API said is kept for us");
+  assert(r.filed.has(r.answered), "filed at the return site");
+  assertEquals(attemptsOf(r), [1, 1, 1, 1, 1]);
+});
+
+Deno.test("a lone call (legacy, the lean retry) is never sent again or staggered, and its failure is said plainly too", async () => {
+  const cases: [string, Scenario][] = [
+    ["legacy walk-around (production's older designer)", { v2: false }],
+    ["the v2 lean retry", { v2: true, lean: true }],
+  ];
+  const firsts: [Plan, number, keyof typeof DRAFT_UPSTREAM_SENTENCES, string][] = [
+    [DOWNLOAD_400, 502, "download", "upstream 400"],
+    [OVERLOADED, 503, "overloaded", "upstream 529"],
+    [{ throws: "connection reset" }, 502, "network", "fetch failed"],
+  ];
+  for (const [what, s] of cases) {
+    for (const [first, status, kind, release] of firsts) {
+      // Room to retry, and a stagger that would show: a lone call takes neither.
+      const r = await run({ ...s, abortMs: 5_000, retry: { ...QUICK, staggerMs: 1_000 } }, [first, GOOD()]);
+      const label = `${what}, ${kind}`;
+      assertEquals(r.sent.length, 1, `${label}: one call`);
+      assertEquals(r.sent[0].init.body, expectedBody(r, s.v2, s.lean ?? false, 0), `${label}: today's bytes`);
+      assert(r.sent[0].at - r.t0 < 200, `${label}: sent at once`);
+      assertEquals(r.answered!.status, status, label);
+      assertEquals(r.answered!.body, { error: DRAFT_UPSTREAM_SENTENCES[kind], code: "ai_upstream_transient", retryable: true }, label);
+      assertEquals(r.released, [release], label);
+      assertEquals(r.logged.map((l) => [l.code, l.context?.attempts, l.context?.lean]), [["ai_upstream_transient", 1, s.lean ?? false]], label);
+      assertEquals(r.usage, [null], `${label}: the single call's usage record, as before`);
+    }
+  }
+});
+
+Deno.test("no retry starts once the budget is too short for one: the reads fail once each and the answer comes at once", async () => {
+  // The real policy on a 2 s deadline: its 40 s of room is never there, so nothing is sent again.
+  const r = await run({ v2: true, abortMs: 2_000, retry: { ...REAL, staggerMs: 0 } }, FIFTEEN(OVERLOADED));
+  assertEquals(r.sent.length, 5);
+  assert(r.ms < 1_000, `no backoff was waited: ${r.ms} ms`);
+  assertEquals(r.answered!.status, 503);
+  assertEquals(attemptsOf(r), [1, 1, 1, 1, 1]);
 });

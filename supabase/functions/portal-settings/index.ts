@@ -93,6 +93,9 @@ import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftC
 import { draftReadSample } from "../_shared/styleD3.ts";
 // ...and a pitch at least two reads measured is locked in the self-check (2026-09-26).
 import { measuredPitchLock } from "../_shared/styleD3.ts";
+// A read the API could not serve is sent again, the five reads' first sends are staggered, and an
+// upstream failure is told to the builder in a plain sentence (2026-09-26).
+import { DRAFT_READ_RETRY, draftUpstreamFailure } from "../_shared/styleD3.ts";
 // The streamed draft (2026-09-25): a v2 draft answers behind a heartbeat so it can outlive the
 // gateway's 150 s of silence (see draftAnswer below).
 import { wantsStreamedDraft, DRAFT_STREAM_DEADLINE_MS } from "../_shared/styleD3.ts";
@@ -4186,6 +4189,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     //   * ONE call, exactly today's request and handling: every legacy request (production's
     //     older designer) and the lean retry (draftCallCount). runDraftCalls sends a lone call on
     //     aiSignal itself.
+    //   * STAGGERED, AND SENT AGAIN WHEN THE API COULD NOT SERVE A READ (2026-09-26, after a live
+    //     press failed in 7 s on the API's 400 "timed out while trying to download the file"): the
+    //     five reads go ~300 ms apart, and a read that got a 429, 5xx, 529 or that download failure,
+    //     or whose send threw, goes again up to twice while the budget has room (DRAFT_READ_RETRY in
+    //     styleD3.ts). A lone call never is, so the legacy request and the lean retry are as before.
+    //
+    // WHEN THE API FAILED THE DRAFT (the lead threw on its own, or answered non-2xx), the builder
+    // gets a plain sentence and the raw status and body go to one coded app_errors row
+    // (draftUpstreamFailure): `retryable` when it was transient, so the new designer's one lean
+    // retry takes it, with the hold released exactly as before. On every draft, a lone call too.
     //
     // THE LEAD is the call this branch answers from: the medoid's call when any call drafted, so
     // the `observed` notes and the frame map read off `text` below are the medoid's own, and
@@ -4201,6 +4214,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       count: draftCalls,
       deadline: aiSignal,
       graceMs: DRAFT_CONSENSUS_GRACE_MS,
+      // aiSignal fires draftAbortMs after t0 (give or take the microseconds between the two lines),
+      // which is what "enough budget left for a retry" is measured against.
+      retry: { ...DRAFT_READ_RETRY, deadlineAt: t0 + draftAbortMs },
       send: (signal) => fetch("https://api.anthropic.com/v1/messages", { ...draftInit, signal }),
       read: (body) => readDraftReply(body, dims, v2Prompt),
     });
@@ -4212,6 +4228,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // What EVERY call used, for draft_tokens and the capture. Null on a single call, whose usage is
     // recorded exactly as it always has been, at each exit below.
     const callsUsage = draftCalls > 1 ? draftCallsUsage(aiModelFields(v2Prompt).model, calls, lead, consensus) : null;
+    // THE API FAILED THE DRAFT (2026-09-26): the two exits below, after their hold release. One coded
+    // row with the raw status and body, and the builder's plain sentence (draftUpstreamFailure),
+    // marked filed so the error wrapper adds no copy, streamed or not.
+    const upstreamFailed = async () => {
+      const failure = draftUpstreamFailure(lead, calls);
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: failure.code, message: failure.message,
+        context: { ...failure.context, elapsedMs: Date.now() - t0, requestMs: Date.now() - requestStartMs, abortMs: draftAbortMs, source: aiSource, frames: photoUrls.length, lean, v2: v2Prompt },
+      });
+      const answered = json(failure.answer, failure.status);
+      filedAtReturnSite.add(answered);
+      return answered;
+    };
     if (lead.threw) {
       // No reply to describe on any of these three exits, so draft_tokens stays null (on a single
       // call; several record what each call did); draft_ms still says how long the press waited
@@ -4238,14 +4267,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         return timedOut;
       }
       await releaseHold("fetch failed");            // never reached Anthropic, or dropped mid-reply
+      const unreachable = await upstreamFailed();
       await usageLogged;
-      return json({ error: `Could not reach the AI service: ${lead.error instanceof Error ? lead.error.message : String(lead.error)}` }, 502);
+      return unreachable;
     }
     if (!lead.httpOk) {
       const usageLogged = recordDraftUsage(callsUsage ? callsUsage.tokens : null);
       await releaseHold(`upstream ${lead.status}`);  // our 429/500 is not the builder's fault
+      const upstream = await upstreamFailed();
       await usageLogged;
-      return json({ error: `AI service returned ${lead.status}: ${lead.body.slice(0, 300)}` }, 502);
+      return upstream;
     }
     // Read ONCE, inside runDraftCalls: readDraftReply is the JSON parse and modelReplyText that ran
     // here before (every text block joined, never content[0] -- see modelReplyText for why).

@@ -100,6 +100,7 @@ type World = {
   setupMs?: number;             // how long the set-up (the auto top-up read) seems to take
   workerAgeMs?: number;         // the request arrives on a worker this old (default: however long ago this file imported it)
   deadlineScale?: number;       // the answer's watchdog runs this many times faster (default 100)
+  readScale?: number;           // the reads' stagger and retry waits run this many times faster (default 100)
   ledger?: Record<string, unknown>[];   // ai_style_calls rows the recover action can read
   recoverErr?: boolean;         // the recover action's ledger read errors
   wallet?: Record<string, unknown>[];   // wallet_transactions rows the recover action can read
@@ -114,6 +115,7 @@ type Trace = {
   captured: unknown[];
   rows: Record<string, unknown>[];   // app_errors
   sent: any[];                  // Anthropic request bodies
+  sentAt: number[];             // when each was sent (Date.now, which a world may have moved)
   timeouts: number[];           // AbortSignal.timeout(ms)
   intervals: number[];          // setInterval(ms)
   deadlines: number[];          // the watchdog's setTimeout(ms), before scaling
@@ -220,7 +222,7 @@ const clock = { offset: 0 };
 const realNow = Date.now;
 
 async function inWorld<T>(world: World, body: (trace: Trace) => Promise<T>): Promise<{ trace: Trace; out: T }> {
-  const trace: Trace = { db: [], released: [], captured: [], rows: [], sent: [], timeouts: [], intervals: [], deadlines: [], kept: [] };
+  const trace: Trace = { db: [], released: [], captured: [], rows: [], sent: [], sentAt: [], timeouts: [], intervals: [], deadlines: [], kept: [] };
   const savedEnv = Object.fromEntries(Object.keys(ENV).map((k) => [k, Deno.env.get(k)]));
   for (const [k, v] of Object.entries(ENV)) Deno.env.set(k, v);
   if (world.noKey) Deno.env.delete("ANTHROPIC_API_KEY");
@@ -236,10 +238,18 @@ async function inWorld<T>(world: World, body: (trace: Trace) => Promise<T>): Pro
   // 360 s is 3.6 s here and no fast test meets it; the watchdog's own test runs it faster still.
   // Every timer of 100 s or more is the watchdog: on a worker 199 s old it is armed at 161 s, and
   // nothing else on the draft's path sets one that long (the consensus grace is 60 s).
+  // The reads' stagger and their retry waits (DRAFT_READ_RETRY, 2026-09-26: 300 ms a read, then
+  // 1.5 s and 4 s plus up to 0.4 s) run a hundred times faster by default too, so a five-read press
+  // is out in 12 ms rather than 1.2 s. Nothing else on the draft's path sets a timer between 250 ms
+  // and 5 s (the stand-in fetch answers in a few ms; the deadline below is on the real clock), and a
+  // world can set readScale: 1 to see the real spacing.
   (globalThis as any).setTimeout = (fn: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
     if (typeof ms === "number" && ms >= 100_000) {
       trace.deadlines.push(ms);
       return realSetTimeout(fn, Math.max(1, Math.round(ms / (world.deadlineScale ?? 100))), ...rest);
+    }
+    if (typeof ms === "number" && ms >= 250 && ms < 5_000) {
+      return realSetTimeout(fn, Math.max(1, Math.round(ms / (world.readScale ?? 100))), ...rest);
     }
     return realSetTimeout(fn, ms, ...rest);
   };
@@ -259,7 +269,8 @@ async function inWorld<T>(world: World, body: (trace: Trace) => Promise<T>): Pro
     value: (ms: number) => {
       trace.timeouts.push(ms);
       const c = new AbortController();
-      timers.push(setTimeout(() => c.abort(new DOMException("Signal timed out.", "TimeoutError")), world.abortAfterMs ?? 3_000));
+      // The real clock, never the read-timer scaling above: a world's abortAfterMs is what it says.
+      timers.push(realSetTimeout(() => c.abort(new DOMException("Signal timed out.", "TimeoutError")), world.abortAfterMs ?? 3_000));
       return c.signal;
     },
   });
@@ -274,6 +285,7 @@ async function inWorld<T>(world: World, body: (trace: Trace) => Promise<T>): Pro
     if (url !== "https://api.anthropic.com/v1/messages") throw new Error(`unexpected fetch: ${url}`);
     const plan = (world.model ?? [])[calls++] ?? { hang: true };
     trace.sent.push(JSON.parse(String(init?.body)));
+    trace.sentAt.push(Date.now());
     const signal = init?.signal as AbortSignal;
     return new Promise<Response>((resolve, reject) => {
       if (plan.throws) { reject(new TypeError(plan.throws)); return; }
@@ -396,7 +408,15 @@ const TRUNCATED: ModelPlan = { body: reply('{"roof":{"type":"gable","pit', { sto
 const UNPARSEABLE: ModelPlan = { body: reply("I could not tell what this building is."), delayMs: 2 };
 const REFUSED: ModelPlan = { body: reply("", { stop: "refusal" }), delayMs: 2 };
 const OVERLOADED: ModelPlan = { status: 529, body: '{"type":"error","error":{"type":"overloaded_error"}}', delayMs: 2 };
+// The live failure of 2026-09-26, the API's body word for word (it carries no identifiers).
+const DOWNLOAD_TIMED_OUT: ModelPlan = {
+  status: 400, delayMs: 2,
+  body: '{"type":"error","error":{"type":"invalid_request_error","message":"The request timed out while trying to download the file. Please try again later."}}',
+};
 const FIVE = (p: ModelPlan) => [p, p, p, p, p];
+// Every send of a five-read press when every read is sent three times (DRAFT_READ_RETRY: the first
+// send and two more), so a read the API cannot serve fails for good rather than hanging on a plan.
+const FIFTEEN = (p: ModelPlan) => Array(15).fill(p) as ModelPlan[];
 
 // Every way the branch can answer, each one run plain and streamed against the same world.
 const SCENARIOS: [string, World, number][] = [
@@ -414,8 +434,11 @@ const SCENARIOS: [string, World, number][] = [
   ["every read cut off at max_tokens", { model: FIVE(TRUNCATED) }, 502],
   ["every read unparseable", { model: FIVE(UNPARSEABLE) }, 502],
   ["every read refused", { model: FIVE(REFUSED) }, 502],
-  ["the API overloaded", { model: FIVE(OVERLOADED) }, 502],
-  ["the API unreachable", { model: FIVE({ throws: "connection reset" }) }, 502],
+  // Since 2026-09-26 every read is sent three times before these answer, and they answer in plain
+  // words, retryable (draftUpstreamFailure): 503 when the API was busy, 502 when it could not be reached.
+  ["the API overloaded", { model: FIFTEEN(OVERLOADED) }, 503],
+  ["the API failing every download", { model: FIFTEEN(DOWNLOAD_TIMED_OUT) }, 502],
+  ["the API unreachable", { model: FIFTEEN({ throws: "connection reset" }) }, 502],
 ];
 
 // ─── 1. Which requests stream ──────────────────────────────────────────────────────────────────
@@ -540,8 +563,10 @@ Deno.test("every failure after the hold releases it once, streamed, with its ret
     "every read cut off at max_tokens": { release: "reply truncated", retryable: true, code: "ai_spec_truncated", status: 502 },
     "every read unparseable": { release: "unparseable spec", retryable: false, code: "ai_spec_unparseable", status: 502 },
     "every read refused": { release: "model refused", retryable: false, code: "ai_spec_refused", status: 502 },
-    "the API overloaded": { release: "upstream 529", retryable: false, code: "502", status: 502 },
-    "the API unreachable": { release: "fetch failed", retryable: false, code: "502", status: 502 },
+    // One coded row each (2026-09-26), never the wrapper's copy, and retryable: the hold is released.
+    "the API overloaded": { release: "upstream 529", retryable: true, code: "ai_upstream_transient", status: 503 },
+    "the API failing every download": { release: "upstream 400", retryable: true, code: "ai_upstream_transient", status: 502 },
+    "the API unreachable": { release: "fetch failed", retryable: true, code: "ai_upstream_transient", status: 502 },
   };
   for (const [what, world] of SCENARIOS) {
     const w = want[what];
@@ -560,6 +585,78 @@ Deno.test("every failure after the hold releases it once, streamed, with its ret
   const ok = await drive(STREAMED, { model: FIVE(GOOD()) });
   assertEquals(ok.trace.released, []);
   assertEquals(ok.trace.captured.length, 1);
+});
+
+// ─── The live failure of 2026-09-26, through the real handler ──────────────────────────────────
+// A v2 press failed ~7 s after Generate on the API's 400 "The request timed out while trying to
+// download the file", and the builder read the raw JSON with nothing retried. Since then the reads go
+// ~300 ms apart, a read the API could not serve is sent again, and an upstream failure is said in a
+// plain sentence, retryable when it was transient (DRAFT_READ_RETRY, draftUpstreamFailure).
+Deno.test("the live failure, one read: its download 400 is sent again and the press drafts, streamed and not, charged once", async () => {
+  for (const payload of [V2, STREAMED]) {
+    const what = payload === STREAMED ? "streamed" : "plain";
+    const { trace, out } = await drive(payload, { model: [DOWNLOAD_TIMED_OUT, GOOD(), GOOD(), GOOD(), GOOD(), GOOD()] });
+    assertEquals(out.status, 200, what);
+    assert(/^ *[{]"ok":true,/.test(out.text), `${what}: a draft`);
+    assertEquals(trace.sent.length, 6, `${what}: the failed read went again`);
+    assertEquals(trace.sent[5], trace.sent[0], `${what}: the very same request`);
+    assertEquals([trace.released, trace.captured.length, trace.rows], [[], 1, []], `${what}: captured once, nothing released or filed`);
+    const usage = trace.db.find((op: any) => op[0] === "ai_style_calls" && op[1][0] === "update" && op[1][1] && "draft_tokens" in op[1][1]) as any;
+    assertEquals(usage[1][1].draft_tokens.calls.map((c: any) => c.attempts), [2, 1, 1, 1, 1], `${what}: draft_tokens.calls says so`);
+  }
+});
+
+Deno.test("the live failure, every read: ONE plain, retryable answer (its status in the body when streamed), one release, one row with the raw body", async () => {
+  const plain = await drive(V2, { model: FIFTEEN(DOWNLOAD_TIMED_OUT) });
+  const streamed = await drive(STREAMED, { model: FIFTEEN(DOWNLOAD_TIMED_OUT) });
+  const answer = { error: "The AI service couldn't load your views just now - please press Generate again.", code: "ai_upstream_transient", retryable: true };
+  assertEquals([plain.out.status, JSON.parse(plain.out.text)], [502, answer], "a 502 the new designer retries once, lean");
+  assertEquals([streamed.out.status, JSON.parse(streamed.out.text.trimStart())], [200, { ...answer, status: 502 }], "the same, in a 200's body");
+  for (const [what, run] of [["plain", plain], ["streamed", streamed]] as const) {
+    assert(!run.out.text.includes("invalid_request_error"), `${what}: never the API's own JSON`);
+    assertEquals(run.trace.sent.length, 15, `${what}: every read sent three times`);
+    assertEquals(run.trace.released, ["upstream 400"], `${what}: the hold released once, as before`);
+    assertEquals(run.trace.captured, [], `${what}: never captured`);
+    assertEquals(run.trace.rows.map((r) => [r.code, r.severity]), [["ai_upstream_transient", "error"]], `${what}: one coded row, and no copy from the wrapper`);
+    const row = run.trace.rows[0] as any;
+    assertEquals(row.message, `AI service returned 400: ${DOWNLOAD_TIMED_OUT.body}`, `${what}: the raw status and body`);
+    assertEquals(row.context.reads.map((c: any) => [c.status, c.attempts]), Array(5).fill([400, 3]), `${what}: how every read went`);
+  }
+});
+
+Deno.test("a real invalid_request_error: one send a read, a plain sentence that is not retryable, the raw body in its row", async () => {
+  const invalid: ModelPlan = { status: 400, delayMs: 2, body: '{"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content.12: image exceeds the maximum allowed size"}}' };
+  for (const payload of [V2, STREAMED]) {
+    const what = payload === STREAMED ? "streamed" : "plain";
+    const { trace, out } = await drive(payload, { model: FIFTEEN(invalid) });
+    const body = JSON.parse(out.text.trimStart());
+    assertEquals(body.error, "The AI service could not take this request. Please press Generate again, and if it keeps happening, tell CSM Synergy.", what);
+    assertEquals([body.code, "retryable" in body], ["ai_upstream_error", false], what);
+    assertEquals(trace.sent.length, 5, `${what}: never sent again`);
+    assertEquals(trace.released, ["upstream 400"], what);
+    assertEquals(trace.rows.map((r) => r.code), ["ai_upstream_error"], what);
+    assert(String((trace.rows[0] as any).message).includes("image exceeds the maximum allowed size"), `${what}: what the API said is kept for us`);
+  }
+});
+
+Deno.test("the lean retry and production's older shell: one send, never again, and a transient failure said plainly and retryable", async () => {
+  for (const payload of [{ ...STREAMED, lean: true }, { ...STREAMED, frame: undefined }] as Record<string, unknown>[]) {
+    const what = payload.lean ? "the lean retry" : "production's older shell";
+    const { trace, out } = await drive(payload, { model: FIFTEEN(DOWNLOAD_TIMED_OUT) });
+    assertEquals(out.status, 502, `${what}: answered plainly, not streamed`);
+    assertEquals(JSON.parse(out.text), { error: "The AI service couldn't load your views just now - please press Generate again.", code: "ai_upstream_transient", retryable: true }, what);
+    assertEquals(trace.sent.length, 1, `${what}: one send`);
+    assertEquals(trace.released, ["upstream 400"], what);
+    assertEquals(trace.rows.map((r) => r.code), ["ai_upstream_transient"], what);
+  }
+});
+
+Deno.test("the five reads go out ~300 ms apart through the real handler, the first at once", async () => {
+  const { trace, out } = await drive(STREAMED, { model: FIVE(GOOD()), readScale: 1 });
+  assertEquals(JSON.parse(out.text.trimStart()).ok, true);
+  assertEquals(trace.sent.length, 5);
+  const at = trace.sentAt.map((t) => t - trace.sentAt[0]);
+  at.forEach((ms, i) => assert(ms >= i * 300 - 2 && ms < i * 300 + 150, `read ${i} went ${ms} ms after the first, its turn at ${i * 300}`));
 });
 
 Deno.test("a throw inside the streamed draft is filed as the wrapper files it, and answers a 500", async () => {

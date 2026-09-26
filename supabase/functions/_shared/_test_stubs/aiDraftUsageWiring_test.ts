@@ -305,7 +305,9 @@ Deno.test("every exit after the model call waits for the usage write before it r
       `${ret} is not preceded by await draftUsageLogged`,
     );
   }
-  for (const ret of ["return timedOut;", "return json({ error: `Could not reach the AI service", "return json({ error: `AI service returned"]) {
+  // The two upstream exits answer through upstreamFailed since 2026-09-26 (a plain sentence, one
+  // coded row); each still waits for the usage write first.
+  for (const ret of ["return timedOut;", "return unreachable;", "return upstream;"]) {
     const k = SOURCE.indexOf(ret, HELPER.j);
     assert(k > 0 && k < SITE.i, `found ${ret} between the helper and the reply site`);
     assert(SOURCE.slice(0, k).trimEnd().endsWith("await usageLogged;"), `${ret} is not preceded by await usageLogged`);

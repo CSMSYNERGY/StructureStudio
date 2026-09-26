@@ -22,6 +22,7 @@ import { assert, assertEquals } from "jsr:@std/assert";
 import {
   aiModelFields, combinedShapePrompt, consensusOfCalls, draftCallCount, draftCallsUsage, draftReadSample,
   parseModelSpec, readDraftReply, runDraftCalls, SPEC_PROMPT, videoShapePrompt, DRAFT_CONSENSUS_GRACE_MS,
+  DRAFT_READ_RETRY, draftUpstreamFailure,
 } from "../styleD3.ts";
 
 const read = async (p: string) => (await Deno.readTextFile(new URL(p, import.meta.url))).replace(/\r\n/g, "\n");
@@ -61,6 +62,9 @@ const PARAMS = [
   "DRAFT_CONSENSUS_GRACE_MS", "fetch", "readDraftReply", "consensusOfCalls", "draftCallsUsage", "recordDraftUsage",
   "releaseHold", "logEdgeError", "req", "clientId", "t0", "requestStartMs", "aiSource", "json", "filedAtReturnSite",
   "parseModelSpec", "streamed", "draftEffort", "draftReadSample",
+  // 2026-09-26: the stagger and the retry (off here: the reads go at once, and a 2 s deadline leaves
+  // no room to retry), and the plain sentence for an upstream failure.
+  "DRAFT_READ_RETRY", "draftUpstreamFailure",
 ];
 const RUN = new AsyncFunction(
   ...PARAMS,
@@ -105,6 +109,7 @@ async function run(s: { v2: boolean; lean?: boolean }, plans: Plan[]) {
       null, "harness-tenant", t0, t0 - 1_000, "video",
       (body: Record<string, unknown>, status = 200): Reply => ({ body, status }),
       new Set(), parseModelSpec, false, s.lean ? "low" : "medium", draftReadSample,
+      { ...DRAFT_READ_RETRY, staggerMs: 0 }, draftUpstreamFailure,
     );
     return { out, sent, released, logged, usage };
   } finally {
