@@ -2368,7 +2368,8 @@ function selfCheckRules(mode: SelfCheckMode): SelfCheckRules {
 //   * 12000 is room, not a target. At the ~70 output tokens/s Opus streamed on 09-25, 125 s buys
 //     roughly 8,000 tokens once the twelve images are read, so a round that thinks that long
 //     normally meets the abort before it meets max_tokens: at these rates the clock binds first.
-//     If `self_check_tokens` shows rounds ending at the abort, it is the clock that needs moving.
+//     If app_errors shows ai_selfcheck_timeout rows, or self_check_ms / self_check_rounds[].ms sit
+//     near 125000, it is the clock that needs moving (a timed-out round writes no self_check_tokens).
 //   * THE WORKER'S LIFE needs no term of its own here. The platform's 400 s is the WORKER's
 //     (EDGE_WALL_CLOCK_MS), not the request's, and a worker is routed no new request once it is
 //     200 s old. So a check that lands on a worker up to 199 s old and then runs its call the whole
@@ -3508,8 +3509,8 @@ export function selfCheckPairLabel(viewpoint: FrameMapViewpoint, mode: SelfCheck
 // shape carries over as it is: every v2 body sends thinking {type: "adaptive"} with an explicit
 // output_config.effort and no tool_choice. Opus 5.5 refuses thinking disabled, budget_tokens and a
 // forced tool_choice, and its default effort is "medium" rather than Opus 5's "high", so the
-// explicit effort matters. The effort levels (portal-settings' draftEffort, the check's "medium")
-// were tuned on Opus 5, and Opus 5.5 tends to think more at the same level: after the switch, watch
+// explicit effort matters. The effort levels (portal-settings' draftEffort; the check's, "medium" at
+// the switch and "high" for v2 since 2026-09-26, SELF_CHECK_BUDGET) were tuned on Opus 5, and Opus 5.5 tends to think more at the same level: after the switch, watch
 // draft_ms and draft_tokens.calls[].stopReason for the draft, and for the check the app_errors rows
 // coded ai_selfcheck_truncated / ai_selfcheck_timeout (self_check_tokens holds only {input, output}).
 //

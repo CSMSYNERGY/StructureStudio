@@ -251,9 +251,11 @@ Deno.test("⚠️ the clocks: the first round always fits, and no LATER round ru
   assertEquals(F.SS_DRAFT_SERVER_MS + F.SS_RENDER_MS + F.SS_CHECK_MS, 445000, "300 + 5 + 140 = 445 s < 480 s");
   assertEquals(330000 + F.SS_RENDER_MS + F.SS_CHECK_MS, 475000, "330 + 5 + 140 = 475 s < 480 s");
   // The worst ordinary press: the slowest draft, then every round at its own ceiling, each one
-  // started only when ssCheckNext allows it.
+  // started only when ssCheckNext allows it. Modelled as the loop runs: the draft is rendered once,
+  // each round that corrects is RESHOT before ssCheckNext decides, so the first decision comes after
+  // the first render, the first check and its reshoot.
   const worst = (draftMs: number) => {
-    let t = draftMs + F.SS_RENDER_MS + F.SS_CHECK_MS;
+    let t = draftMs + F.SS_RENDER_MS + F.SS_CHECK_MS + F.SS_RENDER_MS;
     let rounds = 1;
     for (let round = 0; ; round++) {
       const next = F.ssCheckNext({ verdict: "corrections", d3: {}, changed: [{ field: "roof.pitch" }] }, round, [], "b" + round, t);
@@ -274,10 +276,11 @@ Deno.test("⚠️ the clocks: the first round always fits, and no LATER round ru
   const minute = worst(60000);
   assert(minute.t <= F.SS_FLOW_MAX_MS, `a one-minute draft's press ends at ${minute.t}`);
   assert(minute.rounds >= 2, `a one-minute draft still gets a second look (${minute.rounds} rounds, stopped on ${minute.stop})`);
-  // The draft on Opus 5.5 (2026-09-26) usually answers in 40-90 s. With every check at its 140 s
-  // abort, a 90 s draft still gets two rounds (90 + 145 + 145 = 380 s) and a 45 s one all three
-  // (45 + 3 x 145 = 480 s); each press still ends inside eight minutes.
-  for (const [draftMs, rounds] of [[40000, 3], [45000, 3], [60000, 2], [90000, 2]]) {
+  // The draft on Opus 5.5 (2026-09-26) usually answers in 40-90 s. With every check and every render
+  // at its ceiling, a 90 s draft still gets two rounds and a 40 s one all three
+  // (40 + 5 + 3 x 145 = 480 s); a 45 s one gets two, since its third would end at 485 s. Each press
+  // still ends inside eight minutes.
+  for (const [draftMs, rounds] of [[40000, 3], [45000, 2], [60000, 2], [90000, 2]]) {
     const w = worst(draftMs);
     assertEquals(w.rounds, rounds, `a ${draftMs / 1000} s draft at ceiling checks: ${w.rounds} rounds, stopped on ${w.stop}`);
     assert(w.t <= F.SS_FLOW_MAX_MS, `a ${draftMs / 1000} s draft's press ends at ${w.t}`);

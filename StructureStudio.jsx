@@ -16093,9 +16093,9 @@ const SSC_CAL_CSS = ".ssc-dim-in{font-size:13px}@media (pointer:coarse){.ssc-dim
 // 330 + 5 + 140 = 475 s after one a slow set-up pushed to the server's 330 s, both inside 480. A
 // later round starts only while elapsed + 145 s still fits in 480 s, i.e. no later than 335 s into
 // the press. After a draft at its ceiling that means only when the first check answered inside
-// 30 s. But the draft on Opus 5.5 usually answers in 40-90 s, and then two rounds fit even with
+// about 25 s (the reshoot after it counts). But the draft on Opus 5.5 usually answers in 40-90 s, and then two rounds fit even with
 // every check running to its 140 s abort (90 + 145 + 145 = 380 s), and all three when the draft
-// took 45 s or less (45 + 3 x 145 = 480 s) or the checks answer well inside their abort, as they
+// took 40 s or less (40 + 5 + 3 x 145 = 480 s, the first render included) or the checks answer well inside their abort, as they
 // usually do. The one path past eight minutes is a draft the server asked us to retry (the
 // streamed draft at 300 s, then the lean one at its own 125 s), and ssCheckNext gives that path no
 // second round. Still no watchdog that could throw away a paid draft to enforce any of it.

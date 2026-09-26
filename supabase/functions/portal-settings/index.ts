@@ -4879,8 +4879,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // centre eave a match. 125 s is the most a request that is not streamed can have: the gateway
     // ends one that has sent nothing for 150 s, and the set-up above and the ledger writes below
     // take seconds. The answer is still bounded at eight fields, so the room is for thinking.
-    // ⚠️ The browser's own abort on this call (140 s) must sit above 125 s. If `self_check_tokens`
-    // shows replies stopping at max_tokens, or rounds ending at the abort, move the budget.
+    // ⚠️ The browser's own abort on this call (140 s) must sit above 125 s. If app_errors shows
+    // ai_selfcheck_truncated or ai_selfcheck_timeout rows, or self_check_ms sits near 125000, move the
+    // budget (self_check_tokens holds only {input, output}, and a timed-out round writes none).
     //
     // A later round is told it is one, and which fields the rounds before it changed —
     // allow-listed NAMES off the row's own self_check_changed, never the model's prose.
