@@ -1889,6 +1889,41 @@ export function applyMeasuredPitches(d3: D3Spec, text: string): { d3: D3Spec; so
   return { d3: clean.d3, sources: { pitchSource: "points", modelPitch: num(roof.pitch) } };
 }
 
+// ─── A measured gable pitch is locked in the self-check (2026-09-26) ─────────────────────────
+// Live, a three-read draft of a 0.41 gable came out at 0.415 (two reads measured 0.41 and 0.40
+// from their points), and the v2 self-check's first round then moved it to 0.7 because "the centre
+// gable's peak rises nearly as much as its half-span". The check judges by eye; the draft measured.
+// So a pitch the reads MEASURED is treated like a builder-measured eave: selfCheckPrompt says it is
+// not the check's to change, and applySelfCheck drops a correction to it.
+//
+// True only when all of these hold, read off the ledger row (draft_tokens and drafted), so the
+// answer is the same for every round of one generation:
+//   * draft_tokens.samples has at least MEASURED_PITCH_LOCK_MIN_READS gable reads whose pitch came
+//     from their points (pitchSource "points", a finite pitch). One read is one set of points, and
+//     one set can be a lucky frame.
+//   * the drafted spec is a gable with a finite pitch;
+//   * and that pitch is within MEASURED_PITCH_LOCK_TOLERANCE of at least one of those measured
+//     pitches. A consensus that settled on a judged read's number is not a measured one.
+// Anything else, including anything malformed, is false: the check goes on exactly as before.
+export const MEASURED_PITCH_LOCK_MIN_READS = 2;
+export const MEASURED_PITCH_LOCK_TOLERANCE = 0.03;
+export function measuredPitchLock(draftTokens: unknown, drafted: unknown): boolean {
+  const tokens = measureObject(draftTokens);
+  const spec = measureObject(drafted);
+  const roof = spec ? measureObject(spec.roof) : null;
+  if (!tokens || !Array.isArray(tokens.samples) || !roof || roof.type !== "gable") return false;
+  const pitch = roof.pitch;
+  if (!isCoord(pitch)) return false;
+  const measured: number[] = [];
+  for (const s of tokens.samples) {
+    const read = measureObject(s);
+    if (read && read.pitchSource === "points" && read.type === "gable" && isCoord(read.pitch)) measured.push(read.pitch);
+  }
+  if (measured.length < MEASURED_PITCH_LOCK_MIN_READS) return false;
+  // A hair of room for float rounding, so 0.41 against 0.44 is "within 0.03".
+  return measured.some((p) => Math.abs(p - pitch) <= MEASURED_PITCH_LOCK_TOLERANCE + 1e-9);
+}
+
 // ─── A drafted gambrel that cannot look like one (2026-09-16) ─────────────────────────────
 // A walk-around of a lofted barn drafted kneeU 0.55 / kneeRise 0.35 / ridgeRise 0.75. Every
 // number was in range, the type said gambrel, and the read-back looked right. Rendered, the

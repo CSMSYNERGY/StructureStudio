@@ -4914,3 +4914,95 @@ Deno.test("applyMeasuredPitches: points that fail, or do not fit the read, leave
   const bare = apply({ pitch: undefined });
   assertEquals([bare.d3.roof.pitch, bare.sources.modelPitch], [0.4, null]);
 });
+
+// ═══ A MEASURED GABLE PITCH IS LOCKED IN THE SELF-CHECK (2026-09-26) ═══════════════════════════
+// Live, a draft whose reads measured a 0.41 gable from their points came out at 0.415, and round 0
+// of the v2 self-check then moved it to 0.7 by eye. measuredPitchLock says, off the row, when the
+// pitch was measured; the v2 check prompt then says so and applySelfCheck drops a correction to it,
+// exactly as for a builder-measured eave. Unlocked, the v2 prompt and request body are 8fe5d30's
+// byte for byte (hashes below, computed by running 8fe5d30's styleD3.ts over the same inputs), and
+// the legacy check never sees the lock. The handler's half is aiSelfCheckPitchLockWiring_test.
+import { measuredPitchLock, MEASURED_PITCH_LOCK_MIN_READS, MEASURED_PITCH_LOCK_TOLERANCE } from "./styleD3.ts";
+
+// One read as draft_tokens.samples records it (draftReadSample): its roof, then its pitch's source.
+const lockRead = (pitch: unknown, source: unknown = "points", type: unknown = "gable") =>
+  ({ type, front: "gable", pitch, overhang: 1, pitchSource: source });
+const lockTokens = (...samples: unknown[]) => ({ model: "claude-opus-5", input: 1, output: 1, samples });
+const lockDraft = (pitch: unknown, type: unknown = "gable") => ({ roof: { type, pitch, overhang: 1 }, colors: {} });
+
+Deno.test("measuredPitchLock: two reads that MEASURED a pitch near the drafted one lock it", () => {
+  assertEquals([MEASURED_PITCH_LOCK_MIN_READS, MEASURED_PITCH_LOCK_TOLERANCE], [2, 0.03]);
+  assert(measuredPitchLock(lockTokens(lockRead(0.41), lockRead(0.4), lockRead(0.45, "model")), lockDraft(0.415)),
+    "two measured reads and a judged one, and the draft between the measured two");
+  assert(measuredPitchLock(lockTokens(lockRead(0.41), lockRead(0.4)), lockDraft(0.41)), "two reads and no third");
+  // Near ONE of them is enough, and 0.03 away is near (float rounding makes 0.44 - 0.41 a hair over).
+  assert(measuredPitchLock(lockTokens(lockRead(0.44), lockRead(0.52)), lockDraft(0.41)), "0.03 from the nearer");
+  assert(measuredPitchLock(lockTokens(lockRead(0.38), lockRead(0.3)), lockDraft(0.41)), "0.03 below counts too");
+  // The rest of a real record rides along untouched (effort, streamed, calls, agreement).
+  assert(measuredPitchLock({ ...lockTokens(lockRead(0.41), lockRead(0.4)), effort: "medium", streamed: true, calls: [], agreement: null },
+    lockDraft(0.415)), "the whole draft_tokens object");
+});
+
+Deno.test("measuredPitchLock: ONE measured read, or measured reads far from the draft, do not lock it", () => {
+  assert(!measuredPitchLock(lockTokens(lockRead(0.41), lockRead(0.45, "model"), lockRead(0.5, "model")), lockDraft(0.415)),
+    "one read's points can be a lucky frame");
+  assert(!measuredPitchLock(lockTokens(lockRead(0.41)), lockDraft(0.41)), "one read and nothing else");
+  assert(!measuredPitchLock(lockTokens(lockRead(0.45, "model", "gable"), lockRead(0.5, "model")), lockDraft(0.45)), "no measured read");
+  // The consensus landed on a judged read's number: the measured ones are 0.04 and more away.
+  assert(!measuredPitchLock(lockTokens(lockRead(0.41), lockRead(0.4), lockRead(0.7, "model")), lockDraft(0.45)), "0.04 from the nearer");
+  assert(!measuredPitchLock(lockTokens(lockRead(0.41), lockRead(0.4), lockRead(0.7, "model")), lockDraft(0.7)), "the judged read's number");
+  // A rejected read is the model's number, not a measured one (applyMeasuredPitches marks it so).
+  assert(!measuredPitchLock(lockTokens(lockRead(0.41), { ...lockRead(0.4, "model"), pitchRejected: true }), lockDraft(0.41)),
+    "a read whose points were refused is not a measured one");
+});
+
+Deno.test("measuredPitchLock: only a gable is locked; a shed or a gambrel never is", () => {
+  const two = lockTokens(lockRead(0.41), lockRead(0.4));
+  for (const type of ["shed", "gambrel", "GABLE", "", null]) {
+    assert(!measuredPitchLock(two, lockDraft(0.41, type)), `a drafted ${String(type)}`);
+  }
+  // Points only ever come from a gable read, so a points sample on any other roof is not one the server wrote.
+  assert(!measuredPitchLock(lockTokens(lockRead(0.41, "points", "shed"), lockRead(0.4, "points", "gambrel")), lockDraft(0.41)),
+    "points samples that are not gables do not count");
+  assert(!measuredPitchLock(lockTokens(lockRead(0.41), lockRead(0.4, "points", "shed")), lockDraft(0.41)), "so only one counts here");
+});
+
+Deno.test("measuredPitchLock: anything malformed is false, and nothing throws", () => {
+  const two = lockTokens(lockRead(0.41), lockRead(0.4));
+  const draft = lockDraft(0.41);
+  for (const tokens of [null, undefined, "x", 42, true, [], {}, { samples: null }, { samples: "two" }, { samples: {} },
+    { samples: [null, 1, "a", [], {}] }, lockTokens(lockRead("0.41"), lockRead("0.4")), lockTokens(lockRead(NaN), lockRead(Infinity)),
+    lockTokens(lockRead(0.41, "Points"), lockRead(0.4, "POINTS")), lockTokens(lockRead(0.41, true), lockRead(0.4, 1)),
+    [lockRead(0.41), lockRead(0.4)]]) {
+    assert(!measuredPitchLock(tokens, draft), `tokens ${JSON.stringify(tokens)}`);
+  }
+  for (const drafted of [null, undefined, "x", 42, [], {}, { roof: null }, { roof: [] }, { roof: "gable" }, { roof: { type: "gable" } },
+    lockDraft("0.41"), lockDraft(NaN), lockDraft(null), [lockDraft(0.41)]]) {
+    assert(!measuredPitchLock(two, drafted), `drafted ${JSON.stringify(drafted)}`);
+  }
+  assert(measuredPitchLock(two, draft), "and the same two reads do lock a well-formed draft");
+});
+
+Deno.test("measuredPitchLock reads the record draftCallsUsage writes: three real v2 reads, two measured", async () => {
+  // The fixture draftReadSample's own test uses: points giving 0.4 and 0.42, and a y-up read that
+  // keeps the model's 0.5. The consensus is 0.42.
+  const good = replyBody(MEASURED_REPLY());
+  const other = replyBody(MEASURED_REPLY({ pitch: 0.6 }, { pitch: gableAt([400, 600], [800, 432], [1200, 600]) }));
+  const yUp = replyBody(MEASURED_REPLY({ pitch: 0.5 }, { pitch: gableAt([400, 440], [800, 600], [1200, 440]) }));
+  const f = fakeSend([{ body: good, delayMs: 1 }, { body: other, delayMs: 2 }, { body: yUp, delayMs: 3 }]);
+  const calls = await runDraftCalls({ count: 3, deadline: new AbortController().signal, graceMs: 50, send: f.send, read: (b) => readDraftReply(b, DIMS, true) });
+  const c = consensusOfCalls(calls, 12)!;
+  const tokens = draftCallsUsage("claude-opus-5", calls, calls[c.call], c).tokens;
+  assertEquals(c.d3.roof.pitch, 0.42, "the fixture's consensus");
+  // As recordDraftUsage stores it, and as the claim reads it back (JSON through the column).
+  const stored = JSON.parse(JSON.stringify({ ...tokens, effort: "medium", streamed: true }));
+  assert(measuredPitchLock(stored, JSON.parse(JSON.stringify(c.d3))), "two measured reads, and the draft is one of them");
+  // Without `measure` (every legacy draft) the samples say nothing about points, and nothing locks.
+  const legacyCalls = await runDraftCalls({
+    count: 3, deadline: new AbortController().signal, graceMs: 50,
+    send: fakeSend([{ body: good, delayMs: 1 }, { body: other, delayMs: 2 }, { body: yUp, delayMs: 3 }]).send,
+    read: (b) => readDraftReply(b, DIMS),
+  });
+  const lc = consensusOfCalls(legacyCalls, 12)!;
+  assert(!measuredPitchLock(draftCallsUsage("claude-sonnet-5", legacyCalls, legacyCalls[lc.call], lc).tokens, lc.d3), "an unmeasured record");
+});
