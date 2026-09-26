@@ -4412,10 +4412,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // them is drawn in the old frame -- on a long-fronted building, turned round -- so it is the
     // first thing the builder is sent to look at, and the draft comes back low-confidence.
     //
-    // THE SPLIT CHECK joins them with consensus drafting (2026-09-25): a discrete field no two of
-    // the reads agreed on (1 of 3, or 1 of 2) is named, so the builder is told where the reads split
-    // and the draft comes back low-confidence. A 2-of-3 majority says nothing. Only when there is a
-    // consensus, which is v2 only; the checks around it read the combined spec and the medoid's notes.
+    // THE SPLIT CHECK joins them with consensus drafting (2026-09-25): a discrete field whose answer
+    // had no majority of the reads that voted on it (1 of 2, 1 of 3, 2 of 4, 2 of 5) is named, so the
+    // builder is told where the reads split and the draft comes back low-confidence. A majority (2 of
+    // 3, 3 of 5) says nothing. Only when there is a consensus, which is v2 only; the checks around it
+    // read the combined spec and the medoid's notes.
     const observedRead = shapeFirst ? parseObservedNotes(text) : null;
     const observedNotes = shapeFirst
       ? flagObservedNotes(observedRead, v2Prompt ? frameKeyWarning(drafted.d3.roof) : null, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead), v2Prompt ? wingsAgreementWarning(drafted.d3.roof, observedRead) : null, consensus ? consensusSplitWarning(consensus.report) : null, knownDimsNote(dims))

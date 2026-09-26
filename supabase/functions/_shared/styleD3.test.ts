@@ -4503,15 +4503,140 @@ Deno.test("consensusDrafts: the result is a clean spec (the sanitiser is idempot
   assert(threw, "no reads is the caller's bug, not a spec");
 });
 
-Deno.test("consensusSplitWarning: only a field no two reads agreed on, in the builder's words", () => {
+// ─── Five reads (2026-09-26), and any count that actually answered ─────────────────────────────
+// The v2 draft sends five; one, two, three, four or five of them may draft (failures, the quorum's
+// cut-off). Everything above holds for each count; what an odd count of five and an even count of
+// four add is pinned here: the median of five, a 3-2 majority, a 2-2 tie of four and a 2-2-1 of
+// five decided by rank, the medoid of five, and colours with a middle pair.
+const shedRead = (highSide: string, pitch: number) =>
+  read({ type: "shed", front: null, highSide, pitch, ...NO_WINGS }, {}, { ...SAID, wings: "none" });
+
+Deno.test("consensusDrafts: five reads -- two odd reads cannot move the number, and a 3-2 split goes to the three", () => {
+  // The live case: a shed drafted at 0.28 against a true 0.22. Two reads wander (0.28, 0.3), and put
+  // the high side on the wrong wall.
+  const r = consensusDrafts([shedRead("front", 0.22), shedRead("back", 0.28), shedRead("front", 0.21), shedRead("back", 0.3), shedRead("front", 0.22)]);
+  assertEquals(r.report.n, 5);
+  assertEquals(r.d3.roof.highSide, "front");
+  assertEquals(r.report.discreteAgreement.highSide, "3/5");
+  assertEquals(r.d3.roof.pitch, 0.22, "the median of 0.21, 0.22, 0.22, 0.28 and 0.3");
+  assertEquals(r.report.spread.pitch, [0.21, 0.3]);
+  assert([0, 2, 4].includes(r.medoid), `the base is one of the three: ${r.medoid}`);
+  assertEquals(consensusSplitWarning(r.report), null, "3 of 5 is a consensus, and says nothing");
+  // The same two odd reads among THREE were the median and the majority: what five reads fix.
+  const three = consensusDrafts([shedRead("front", 0.22), shedRead("back", 0.28), shedRead("back", 0.3)]);
+  assertEquals([three.d3.roof.highSide, three.d3.roof.pitch], ["back", 0.28]);
+});
+
+Deno.test("consensusDrafts: four reads (one of five lost) -- a 2-2 split ties to the best-ranked read, the median is the middle pair's midpoint", () => {
+  const fascia = (pitch: number, posts: number) => read({ eave: "fascia", pitch, porchPosts: posts });
+  const open = (pitch: number, posts: number, tail: number, confidence: ObservedNotes["confidence"]) =>
+    read({ eave: "open", tailSpacingIn: tail, pitch, porchPosts: posts }, {}, { ...SAID, confidence });
+  // Every read disagrees with two others on the eave, and none contradicts itself: the one read that
+  // said "high" is the base, and the tie goes its way.
+  const r = consensusDrafts([fascia(0.4, 3), open(0.5, 4, 24, "medium"), fascia(0.45, 3), open(0.6, 4, 16, "high")]);
+  assertEquals(r.report.n, 4);
+  assertEquals(r.medoid, 3);
+  assertEquals(r.d3.roof.eave, "open");
+  assertEquals(r.report.discreteAgreement.eave, "2/4");
+  assertEquals(r.d3.roof.tailSpacingIn, 20, "the tail spacing from the two open reads only");
+  assertEquals(r.d3.roof.pitch, 0.475, "0.4, 0.45, 0.5, 0.6: the midpoint of 0.45 and 0.5");
+  assertEquals(r.d3.roof.porchPosts, 4, "3, 3, 4, 4: 3.5 posts round to a whole post");
+  const w = consensusSplitWarning(r.report)!;
+  assert(w.startsWith("Check the eave finish before saving: we read the video four times and the readings did not agree on it"), w);
+  // The same four in another order: the tie follows the base, not the send order.
+  const s = consensusDrafts([open(0.6, 4, 16, "high"), fascia(0.4, 3), open(0.5, 4, 24, "medium"), fascia(0.45, 3)]);
+  assertEquals([s.medoid, s.d3.roof.eave, s.d3.roof.pitch], [0, "open", 0.475]);
+  // Three of four agree: a majority, and silent.
+  const t = consensusDrafts([fascia(0.4, 3), fascia(0.45, 3), open(0.5, 4, 24, "high"), fascia(0.42, 4)]);
+  assertEquals([t.d3.roof.eave, t.report.discreteAgreement.eave], ["fascia", "3/4"]);
+  assert(!("tailSpacingIn" in t.d3.roof), "no tail spacing under a fascia");
+  assertEquals(consensusSplitWarning(t.report), null);
+});
+
+Deno.test("consensusDrafts: a 2-2-1 split of five goes to the best-ranked of the two leaders, only their numbers count, and the builder is told", () => {
+  const projecting = (confidence: ObservedNotes["confidence"] = "medium") => read({}, {}, { ...SAID, confidence });
+  const recessed = (depth: number) => read({ ...NO_PORCH, porchDepthFt: depth, porchEnd: "front" }, {}, { ...SAID, porch: "recessed" });
+  const none = read(NO_PORCH, {}, { ...SAID, porch: "none" });
+  // Four reads tie on disagreement (each differs from three others on the porch) and the no-porch
+  // read differs from all four, so send order decides among the four: the first recessed read.
+  const r = consensusDrafts([recessed(6), projecting(), none, projecting(), recessed(7)]);
+  assertEquals(r.medoid, 0);
+  assertEquals(r.report.discreteAgreement.porch, "2/5");
+  assertEquals(r.d3.roof.porchDepthFt, 6.5, "the two recessed reads' depths only");
+  assert(!("porchOutFt" in r.d3.roof) && !("porchPosts" in r.d3.roof), "nothing of the projecting porch");
+  assertEquals(r.report.discreteAgreement.porchEnd, "2/2", "only the recessed reads vote on its end");
+  const w = consensusSplitWarning(r.report)!;
+  assert(w.startsWith("Check the porch before saving: we read the video five times and the readings did not agree on it"), w);
+  // A projecting read that is surer of itself outranks them all: the tie goes the other way.
+  const s = consensusDrafts([recessed(6), projecting(), none, projecting("high"), recessed(7)]);
+  assertEquals([s.medoid, s.report.discreteAgreement.porch], [3, "2/5"]);
+  assertEquals([s.d3.roof.porchOutFt, s.d3.roof.porchPosts], [6, 4]);
+  assert(!("porchDepthFt" in s.d3.roof), "nothing of the recessed porch");
+  // A leader that did not tie (2 of 5 against 1, 1 and 1) still wins, and is still a split.
+  const steps = (where: string | null) => read({ porchSteps: where });
+  const u = consensusDrafts([steps("left"), steps("center"), steps(null), steps("center"), steps("right")]);
+  assertEquals([u.d3.roof.porchSteps, u.report.discreteAgreement.porchSteps], ["center", "2/5"]);
+  const v = consensusSplitWarning(u.report)!;
+  assert(v.startsWith("Check where the porch steps are before saving: we read the video five times"), v);
+});
+
+Deno.test("consensusDrafts: the medoid of five is the read that disagrees least with the other four", () => {
+  const openEave = read({ eave: "open", tailSpacingIn: 24 });
+  const other = read({ eave: "open", tailSpacingIn: 16 }, { roofMaterial: "shingle", foundation: "slab" });
+  // Three plain reads disagree with the open one on one field and with `other` on three: 4 each.
+  // The open read: 3 plain + 2 with `other` = 5. `other`: 3 x 3 + 2 = 11.
+  const r = consensusDrafts([openEave, read(), read(), read(), other]);
+  assertEquals(r.medoid, 1, "the first of the three plain reads");
+  assertEquals([r.d3.roof.eave, r.report.discreteAgreement.eave], ["fascia", "3/5"]);
+  assertEquals([r.d3.roofMaterial, r.report.discreteAgreement.roofMaterial], ["metal", "4/5"]);
+  assertEquals([r.d3.foundation, r.report.discreteAgreement.foundation], ["skids", "4/5"]);
+  assert(!("tailSpacingIn" in r.d3.roof), "the open reads' tails do not ride on a fascia");
+  assertEquals(consensusSplitWarning(r.report), null);
+});
+
+Deno.test("consensusDrafts: colours with four and five readings -- a far-apart middle pair is a split, never a blend", () => {
+  const withCorner = (corner: string) => read({}, { colors: { ...RAISED_RAW.colors, corner } });
+  // Two white and two charcoal: the median would be a grey no read saw, so the best-ranked read's
+  // (all four rank alike here, so the first sent).
+  const r = consensusDrafts([withCorner("#333333"), withCorner("#ffffff"), withCorner("#ffffff"), withCorner("#333333")]);
+  assertEquals(r.d3.colors.corner, "#333333");
+  // Three close and one far: the middle pair is two of the close three, so they meet in the middle.
+  const s = consensusDrafts([withCorner("#302010"), withCorner("#ffffff"), withCorner("#382418"), withCorner("#342214")]);
+  assertEquals(s.d3.colors.corner, "#362316", "r 30/34/38/ff, g 20/22/24/ff, b 10/14/18/ff: each middle pair's midpoint");
+  // Five: three white against two charcoal is white, a reading's own value.
+  const t = consensusDrafts([withCorner("#333333"), withCorner("#ffffff"), withCorner("#ffffff"), withCorner("#333333"), withCorner("#ffffff")]);
+  assertEquals(t.d3.colors.corner, "#ffffff");
+  // A 2-2 split among four readings that also has a far middle in one channel only is still a split.
+  const w = consensusDrafts([withCorner("#302010"), withCorner("#30a010"), withCorner("#302010"), withCorner("#30a010")]);
+  assertEquals(w.d3.colors.corner, "#302010", "green alone is 0x80 apart: the first read's");
+  // And a pair keeps the rule it always had (the three-read test above pins the far pair).
+  const u = consensusDrafts([withCorner("#1a1a1a"), withCorner("#202020")]);
+  assertEquals(u.d3.colors.corner, "#1d1d1d");
+});
+
+Deno.test("consensusSplitWarning: only a field no answer held a majority on, in the builder's words", () => {
   assertEquals(consensusSplitWarning(null), null);
   assertEquals(consensusSplitWarning({ n: 3, medoid: 0, discreteAgreement: { porch: "2/3", eave: "3/3" }, spread: {} }), null);
   assertEquals(consensusSplitWarning({ n: 1, medoid: 0, discreteAgreement: { porch: "1/1" }, spread: {} }), null);
   const w = consensusSplitWarning({ n: 3, medoid: 0, discreteAgreement: { porch: "1/3", porchSteps: "1/2", eave: "2/3", wings: "1/1" }, spread: {} })!;
-  assertEquals(w, "Check the porch and where the porch steps are before saving: we read the video three times and the readings did not agree on them, so the drawing follows the reading that agreed best with the others. Compare the preview with the video.");
+  assertEquals(w, "Check the porch and where the porch steps are before saving: we read the video three times and the readings did not agree on them, so the drawing follows the answer given most often, or on a tie the reading that agreed best with the others. Compare the preview with the video.");
   const x = consensusSplitWarning({ n: 3, medoid: 0, discreteAgreement: { type: "1/3", front: "1/2", roofMaterial: "1/2" }, spread: {} })!;
   assert(x.startsWith("Check the roof type, which wall is the front and the roof material before saving"), x);
   assert(!/[{}]|porchSteps|roofMaterial/.test(w + x), "no schema words reach the builder");
+  // Up to three voters the rule is exactly the old one ("no two reads agreed").
+  for (const [a, flagged] of [["1/1", false], ["1/2", true], ["2/2", false], ["1/3", true], ["2/3", false], ["3/3", false]] as const) {
+    assertEquals(consensusSplitWarning({ n: 3, medoid: 0, discreteAgreement: { eave: a }, spread: {} }) !== null, flagged, a);
+  }
+  // Four and five voters: a majority is more than half.
+  for (const [a, flagged] of [["2/4", true], ["3/4", false], ["4/4", false], ["2/5", true], ["3/5", false], ["4/5", false], ["5/5", false]] as const) {
+    assertEquals(consensusSplitWarning({ n: 5, medoid: 0, discreteAgreement: { eave: a }, spread: {} }) !== null, flagged, a);
+  }
+  const y = consensusSplitWarning({ n: 5, medoid: 0, discreteAgreement: { porch: "2/5", eave: "3/5", type: "5/5", porchSteps: "2/2" }, spread: {} })!;
+  assert(y.startsWith("Check the porch before saving: we read the video five times and the readings did not agree on it,"), y);
+  const z = consensusSplitWarning({ n: 4, medoid: 0, discreteAgreement: { eave: "2/4", porch: "3/4" }, spread: {} })!;
+  assert(z.startsWith("Check the eave finish before saving: we read the video four times"), z);
+  // A malformed agreement says nothing rather than throwing.
+  assertEquals(consensusSplitWarning({ n: 5, medoid: 0, discreteAgreement: { porch: "x/5", eave: "", wings: "0/0" }, spread: {} }), null);
 });
 
 // ─── The reply reader and the calls ────────────────────────────────────────────────────────────

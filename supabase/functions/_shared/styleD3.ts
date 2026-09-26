@@ -3775,10 +3775,12 @@ export async function runDraftCalls<R extends { drafted: boolean }>(opts: {
 // slope is voted first and only the reads on that slope are averaged; the midpoint of -0.5 and 0.5
 // would put it on the ridge.
 //
-// COLOURS: per key, the median of each channel over the reads that gave the key. Two readings far
-// apart (a channel more than CONSENSUS_COLOR_BLEND_MAX apart) are a split read, not noise, and their
-// midpoint would be a third colour neither read saw, so the medoid's reading (or the best-ranked
-// read that gave one) is kept instead.
+// COLOURS: per key, the median of each channel over the reads that gave the key. An odd count's
+// median is a reading's own value, channel by channel. An even count's is the midpoint of its middle
+// two, and two middles far apart (a channel more than CONSENSUS_COLOR_BLEND_MAX apart: the two
+// readings of a pair, or a 2-2 split of four) are a split read, not noise; their midpoint would be a
+// third colour no read saw, so the medoid's reading (or the best-ranked read that gave one) is kept
+// instead.
 //
 // The result goes back through sanitizeD3Spec. One read comes back exactly as it went in.
 export type ConsensusDraft = { d3: D3Spec; observed: ObservedNotes | null; frameMap: FrameMap | null };
@@ -4015,7 +4017,12 @@ export function consensusDrafts(drafts: readonly ConsensusDraft[]): ConsensusRes
     if (given.every((v) => v === given[0])) { colors[k] = given[0]; continue; }
     const rgb = given.map(hexRgb).filter((c): c is [number, number, number] => c !== null);
     if (!rgb.length) { colors[k] = given[0]; continue; }
-    if (rgb.length === 2 && [0, 1, 2].some((ch) => Math.abs(rgb[0][ch] - rgb[1][ch]) > CONSENSUS_COLOR_BLEND_MAX)) {
+    // An even count's middle two, per channel: for a pair this is the pair itself, as it always was.
+    const middlesApart = rgb.length % 2 === 0 && [0, 1, 2].some((ch) => {
+      const s = rgb.map((c) => c[ch]).sort((a, b) => a - b);
+      return s[s.length / 2] - s[s.length / 2 - 1] > CONSENSUS_COLOR_BLEND_MAX;
+    });
+    if (middlesApart) {
       colors[k] = given[0];
       continue;
     }
@@ -4075,21 +4082,27 @@ const CONSENSUS_FIELD_WORDS: Record<string, string> = {
   gableVent: "the gable vent",
 };
 
-// Where the reads SPLIT, said to the builder: any discrete field that no two reads agreed on (1 of
-// 3, or 1 of 2). A 2-of-3 majority is a consensus and says nothing. Composed into roofNote by
-// flagObservedNotes beside the porch and wings checks, which also drops the confidence to low.
+// Where the reads SPLIT, said to the builder: any discrete field whose chosen answer did not have
+// MORE THAN HALF of the reads that voted on it -- 1 of 2, 1 of 3, 2 of 4 (a 2-2 tie), 2 of 5 (a 2-2-1
+// or a 2-1-1-1). A majority (2 of 3, 3 of 4, 3 of 5) is a consensus and says nothing. Up to three
+// voters this is exactly the rule it replaced (2026-09-26), "no two reads agreed": five reads only
+// add the pluralities that rule could not see. Composed into roofNote by flagObservedNotes beside the
+// porch and wings checks, which also drops the confidence to low.
+const CONSENSUS_TIMES: Record<number, string> = { 2: "twice", 3: "three times", 4: "four times", 5: "five times" };
 export function consensusSplitWarning(report: ConsensusReport | null | undefined): string | null {
   if (!report || report.n < 2) return null;
   const split = Object.entries(report.discreteAgreement)
     .filter(([, a]) => {
       const [k, n] = a.split("/").map(Number);
-      return k === 1 && n >= 2;
+      return n >= 2 && k * 2 <= n;
     })
     .map(([f]) => CONSENSUS_FIELD_WORDS[f] ?? f);
   if (!split.length) return null;
   const list = split.length === 1 ? split[0] : `${split.slice(0, -1).join(", ")} and ${split[split.length - 1]}`;
-  const times = report.n === 2 ? "twice" : report.n === 3 ? "three times" : `${report.n} times`;
-  return `Check ${list} before saving: we read the video ${times} and the readings did not agree on ${split.length === 1 ? "it" : "them"}, so the drawing follows the reading that agreed best with the others. Compare the preview with the video.`;
+  const times = CONSENSUS_TIMES[report.n] ?? `${report.n} times`;
+  // "Given most often, or on a tie...": with five reads a split can still have a leader (2 of 5
+  // against 1, 1, 1), and the drawing takes it; a true tie goes to the best-ranked read.
+  return `Check ${list} before saving: we read the video ${times} and the readings did not agree on ${split.length === 1 ? "it" : "them"}, so the drawing follows the answer given most often, or on a tie the reading that agreed best with the others. Compare the preview with the video.`;
 }
 
 // What the calls used, for a draft that made more than one (a single call records exactly what it

@@ -415,6 +415,28 @@ Deno.test("the split check rides the flags only with a consensus, and turns the 
   assertEquals(split.confidence, "low");
   assert(split.roofNote.startsWith("Check where the porch steps are before saving: we read the video three times"), split.roofNote);
   assert(split.roofNote.endsWith("The model's own reading: raised gable centre, a wing each side"), "the medoid's own note is kept after it");
+  // Five reads: three of five is a majority and says nothing; two of five is not.
+  assertEquals(flags({ report: { n: 5, medoid: 0, discreteAgreement: { porch: "3/5" }, spread: {} } }).confidence, "medium", "a 3-of-5 majority says nothing");
+  const plural = flags({ report: { n: 5, medoid: 0, discreteAgreement: { porch: "2/5" }, spread: {} } });
+  assertEquals(plural.confidence, "low");
+  assert(plural.roofNote.startsWith("Check the porch before saving: we read the video five times"), plural.roofNote);
+});
+
+Deno.test("five real reads: a 3-2 split is the three's and silent; a 2-2 split of four (one read lost) is the best-ranked read's and named", async () => {
+  const steps = (where: string) => GOOD({ porchSteps: where });
+  const three = await run({ v2: true }, [steps("center"), steps("right"), steps("center"), steps("right"), steps("center")]);
+  assertEquals(three.out.drafted.d3.roof.porchSteps, "center");
+  assertEquals(three.out.consensus.report.discreteAgreement.porchSteps, "3/5");
+  assertEquals(consensusSplitWarning(three.out.consensus.report), null);
+  // One read overloaded: four left, two and two. Every read disagrees with two others, so send order
+  // ranks them, and the first read's answer is drawn.
+  const tie = await run({ v2: true }, [steps("right"), steps("center"), OVERLOADED, steps("right"), steps("center")]);
+  assertEquals(tie.out.consensus.report.n, 4);
+  assertEquals(tie.out.drafted.d3.roof.porchSteps, "right");
+  assertEquals(tie.out.consensus.report.discreteAgreement.porchSteps, "2/4");
+  assert(tie.out.lead === tie.out.calls[0], "the medoid's call leads");
+  const w = consensusSplitWarning(tie.out.consensus.report)!;
+  assert(w.startsWith("Check where the porch steps are before saving: we read the video four times"), w);
 });
 
 Deno.test("the combined spec is what the ledger, the flags and the response read, and it replaces the lead's only after every exit", () => {
