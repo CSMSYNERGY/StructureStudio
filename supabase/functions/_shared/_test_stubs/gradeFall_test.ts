@@ -235,6 +235,27 @@ Deno.test("d3PorchStepsGradeFt: d3GradeFt on level ground; with a fall, the deep
   for (const k of ["pitch", "yHigh", "postH", "posts", "D", "wall", "S"]) assertEquals(rb[k], flat[k], k);
 });
 
+Deno.test("d3PorchStepsOnGround: one flight measured and drawn, the builder's step count passed to every call", () => {
+  const src = lift(CMP, "structure-studio.component.js", "function d3PorchStepsOnGround(", "\n}\n") + "\n}\n";
+  assertEquals(lift(JSX, "StructureStudio.jsx", "function d3PorchStepsOnGround(", "\n}\n") + "\n}\n", src);
+  const calls: Any[] = [];
+  const make = () => new Function("d3PorchStepsGeom", "d3PorchStepsGradeFt", `${src}; return d3PorchStepsOnGround;`)(
+    (...a: Any[]) => { calls.push(a); return { grade: -a[3] }; },
+    (_s: Any, w: number, l: number, at: Any) => { assertEquals([w, l], [16, 24]); at(1.5); at(2); return 2.25; },
+  );
+  assertEquals(make()({ roof: { porchStepCount: 4 } }, 16, 24, "g", 6, "center"), { grade: -2.25 });
+  assertEquals(calls, [["g", 6, "center", 1.5, 4], ["g", 6, "center", 2, 4], ["g", 6, "center", 2.25, 4]]);
+  calls.length = 0;
+  make()(null, 16, 24, "g", 6, "left");
+  assert(calls.length === 3 && calls.every((c: Any) => c.length === 5 && c[4] === undefined), "no roof: no count");
+  // Both call sites go through it, the readout's and the renderer's, and nothing else calls d3PorchStepsGeom.
+  for (const t of [CMP, JSX]) {
+    assertStringIncludes(t, "framing, steps: d3PorchStepsOnGround(spec, w, d, g, porch.D, framing.steps) };");
+    assertStringIncludes(t, "const stepsGeom = d3PorchStepsOnGround(p.styleSpec, bldgW, bldgH, geom, D, framing.steps);");
+    assertEquals(t.split("d3PorchStepsGeom(").length - 1, 2, "the definition and d3PorchStepsOnGround's own call");
+  }
+});
+
 // ── THE KEYS ROUND-TRIP; NOTHING IS INVENTED ─────────────────────────────────────────────────
 
 Deno.test("d3ResolveStyleSpec names both keys beside blocks or piers, and never defaults them", () => {

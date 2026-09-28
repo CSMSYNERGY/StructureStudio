@@ -4932,8 +4932,8 @@ function d3PorchToRoot(roofCfg, W, L) {
 // from the deck's edge out to the bottom tread and across its width, so the bottom step stands on
 // the grass and no corner of it floats. That depth sets the count and the count sets how far out
 // the flight reaches, so it walks out until the count stops changing (each step can only reach
-// deeper, so it settles). `stepsAt(gradeFt)` is the caller's own d3PorchStepsGeom call.
-// ⚠️ MERGE: whatever else the caller passes d3PorchStepsGeom, stepsAt passes too.
+// deeper, so it settles). `stepsAt(gradeFt)` is the caller's own d3PorchStepsGeom call, and
+// d3PorchStepsOnGround below is the one caller: whatever it passes d3PorchStepsGeom, stepsAt passes.
 function d3PorchStepsGradeFt(spec, W, L, stepsAt) {
   const grade = d3GradeFt(spec);
   if (!d3GradeFall(spec)) return grade;
@@ -4958,6 +4958,17 @@ function d3PorchStepsGradeFt(spec, W, L, stepsAt) {
     h = next;
   }
   return h;
+}
+// THE PORCH'S STEPS ON THE GROUND UNDER THEM: the one call the panel's readout and the renderer both
+// make, so the flight whose ground is measured and the flight that is drawn are always the same flight.
+// ⚠️ MERGE (ss/aa-steps, roof.porchStepCount): the builder's count goes to d3PorchStepsGeom through
+// `at`, the measuring calls and the drawn one alike, so a fixed count stands on the ground under its
+// own flight. d3PorchStepsGeom takes it as a fifth argument on that branch; on this one it takes four
+// and every flight is the automatic count. Resolve both call-site conflicts to this function.
+function d3PorchStepsOnGround(spec, W, L, g, D, where) {
+  const count = spec && spec.roof ? spec.roof.porchStepCount : undefined;
+  const at = (h) => d3PorchStepsGeom(g, D, where, h, count);
+  return at(d3PorchStepsGradeFt(spec, W, L, at));
 }
 // The model's real top, in feet off the floor: the ridge of the centre when there are wings, the
 // roof's own peak otherwise.
@@ -5528,8 +5539,8 @@ function d3PorchReadout(spec, sizeLabel) {
   // With porchAttachFt set it is the ATTACH height, not the wall, that decides the headroom, so the
   // panel's suggestion is where to hang the porch roof: hNeeded is a wall top, 0.2 above that.
   return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2, atMost,
-    // The steps climb from the ground under them (d3PorchStepsGradeFt): d3GradeFt on level ground.
-    framing, steps: d3PorchStepsGeom(g, porch.D, framing.steps, d3PorchStepsGradeFt(spec, w, d, (h) => d3PorchStepsGeom(g, porch.D, framing.steps, h))) };
+    // The steps climb from the ground under them (d3PorchStepsOnGround): d3GradeFt on level ground.
+    framing, steps: d3PorchStepsOnGround(spec, w, d, g, porch.D, framing.steps) };
 }
 
 // A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
@@ -9548,8 +9559,8 @@ function buildShed3DModel(THREE, p) {
     // tagged ssPorchPart "steps" with the side in ssPorchSteps, so anything that places things
     // against the deck's edge (the harness, a ramp on that wall) can find them. Nothing is built
     // without the key, so every porch before it is unchanged.
-    // They climb from the ground under the flight (d3PorchStepsGradeFt): GRADE on level ground.
-    const stepsGeom = d3PorchStepsGeom(geom, D, framing.steps, d3PorchStepsGradeFt(p.styleSpec, bldgW, bldgH, (h) => d3PorchStepsGeom(geom, D, framing.steps, h)));
+    // They climb from the ground under the flight (d3PorchStepsOnGround): GRADE on level ground.
+    const stepsGeom = d3PorchStepsOnGround(p.styleSpec, bldgW, bldgH, geom, D, framing.steps);
     if (stepsGeom) {
       const { x: sx, w: sw, count, rise, tread, d0, grade } = stepsGeom;
       const TREAD_T = Math.min(0.09, rise * 0.6), STR_T = 0.125, RISER_T = 0.06, NOSE = 0.03, EPS = 0.005;
