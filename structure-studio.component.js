@@ -25102,8 +25102,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // The spec the draft was last seeded with. Every cal* setter makes a NEW spec object, so "is it
   // still this one" is exactly "has anything been changed since".
   const advSeedRef = useRef(null);
-  // A style this page CREATED whose shape then failed to save. The next Save under the same name
-  // finishes that style instead of creating a second one.
+  // A style this page CREATED whose hide or shape then failed to save. The next Save under the
+  // same name finishes that style, in the tenant it was made in, instead of creating a second one.
   const advMadeRef = useRef(null);
   const ADV_MIN_FT = 6, ADV_MAX_FT = 60;
   const advFt = (v) => { const n = Number(v); return (String(v).trim() !== "" && Number.isInteger(n) && n >= ADV_MIN_FT && n <= ADV_MAX_FT) ? n : null; };
@@ -25142,8 +25142,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const p = parseSize(sel.size);
     if (p) setAdvDims({ w: String(p.w), l: String(p.h) });
   };
-  // SAVE AS A NEW STYLE: create it, save this shape onto it, then HIDE it. A new style has no
-  // sizes or prices yet, so customers must never see it until the builder has added them.
+  // SAVE AS A NEW STYLE: create it, HIDE it, then save this shape onto it. A new style has no
+  // sizes or prices yet, so customers must never see it until the builder has added them — and
+  // create_style makes a style visible, so the hide goes straight after it (review 2026-09-29):
+  // the window a shopper could catch it in is one round trip, not three.
+  //
+  // ONE TENANT FOR ALL THREE CALLS (review 2026-09-29). onCreateStyle reads the view-as target in
+  // the click's tick and hands it back as `target`; the hide and the shape are sent to THAT tenant
+  // explicitly. Read again after the create's await, it could be another builder's (an operator
+  // pressing Back mid-save), and the shape would land on their style of the same key.
   // Server words are shown as they come, like every other setup3d call.
   const advSave = async () => {
     const name = advName.trim();
@@ -25159,16 +25166,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       let made = (advMadeRef.current && advMadeRef.current.name === name) ? advMadeRef.current : null;
       if (!made) {
         const r = await setup3d.onCreateStyle(name);
-        made = { name, key: r.key, styleId: r.styleId };
+        made = { name, key: r.key, styleId: r.styleId, target: r.target };
         advMadeRef.current = made;
       }
-      let shapeErr = null;
-      try { await setup3d.onSaveSpec(made.key, spec, [], undefined); } catch (e) { shapeErr = e; }
-      // Hidden EVEN WHEN THE SHAPE FAILED: create_style makes the style visible, and one with no
-      // shape, sizes or prices must not stay in front of customers while the builder retries.
-      await setup3d.onSetStyleActive(made.styleId, false, made.key);
-      if (shapeErr) throw shapeErr;
+      await setup3d.onSetStyleActive(made.styleId, false, made.key, made.target);
+      await setup3d.onSaveSpec(made.key, spec, [], undefined, made.target);
       advMadeRef.current = null;
+      // Saved: what is on screen is in the new style now, so nothing here is unsaved any more —
+      // Start from stops asking, and the portal stops warning before an account switch.
+      advSeedRef.current = spec;
       setAdvName("");
       setAdvMsg({ ok: true, msg: `Saved as “${name}” — hidden from customers. Add its sizes and prices in Settings → Structures, then switch it on.` });
     } catch (e) {

@@ -485,8 +485,10 @@ const ssStyleSaveTail = new Map();
 
 // Read in the CALLER's tick, like 01-core's wrapper reads the view-as target, and for the same
 // reason: a queued save runs later, by which time an operator may be viewing somebody else.
-function ssStyleSaveKey(styleValue) {
-  return `${ssTargetClientId || ""}|${styleValue}`;
+// `target` is for a caller that read the view-as target even earlier and pins it (the Advanced
+// page's Save); left out, it is the target now, exactly as before.
+function ssStyleSaveKey(styleValue, target = ssTargetClientId) {
+  return `${target || ""}|${styleValue}`;
 }
 
 function ssQueueStyleSave(key, run) {
@@ -1532,10 +1534,12 @@ function Dashboard({ session }) {
     // the photos, not inside them, so reopening a style can still answer "has this got a video".
     // Through the style-save queue since 2026-09-14: deadline, side door, base — see
     // ssRunStyleSave above Dashboard.
-    onSaveSpec: (styleValue, d3, d3Photos, d3VideoFrames) => {
+    onSaveSpec: (styleValue, d3, d3Photos, d3VideoFrames, pinnedTarget) => {
       // Captured NOW, in the click's tick: the save may wait behind another in the queue.
-      const target = ssTargetClientId;
-      const key = ssStyleSaveKey(styleValue);
+      // `pinnedTarget` is a target the CALLER captured earlier still (the Advanced page's Save,
+      // below), null meaning the caller's own tenant; left out, it is read here, as before.
+      const target = pinnedTarget !== undefined ? pinnedTarget : ssTargetClientId;
+      const key = ssStyleSaveKey(styleValue, target);
       return ssRunStyleSave(key, target, styleValue, "save 3D look", (base) => {
         // The key is OMITTED, not sent as null, when the caller does not know the frames: the
         // server distinguishes absence ("leave the column alone") from an empty array ("the
@@ -1558,32 +1562,40 @@ function Dashboard({ session }) {
         return body;
       }, (data) => ssConfirmStyleVersion(key, data));
     },
-    // THE ADVANCED PAGE'S "Save as a new style" (2026-09-28): create_style, then onSaveSpec above
-    // with the new key, then onSetStyleActive(false). Both carry the view-as target captured in
-    // the click's tick and sent explicitly, null included, like onSaveSpec (see its note).
+    // THE ADVANCED PAGE'S "Save as a new style" (2026-09-28): create_style, then
+    // onSetStyleActive(false), then onSaveSpec above with the new key.
+    //
+    // ONE TENANT FOR ALL THREE (review 2026-09-29). onCreateStyle reads the view-as target in the
+    // click's tick and RETURNS it; the page hands it back to the other two as their pinned target.
+    // Each used to read ssTargetClientId when it was called, which is AFTER the create's await: an
+    // operator who pressed Back into another builder mid-save had the style made in one tenant
+    // and its hide and shape sent to the other — where set_style_active matches no row and still
+    // answers ok (so the new style stayed visible), and save_style_d3 could overwrite that
+    // builder's style of the same key.
     //
     // create_style gets NO deadline and NO side-door retry, on purpose: it is not idempotent. A
     // request that stalled may still land, and a retry through the functions host would then make
-    // a SECOND style with the same name. A slow create is better than two. Returns { key, styleId }.
+    // a SECOND style with the same name. A slow create is better than two.
+    // Returns { key, styleId, target } — target null for the caller's own tenant.
     onCreateStyle: async (label) => {
-      const target = ssTargetClientId;
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "create_style", label, targetClientId: target || null } });
+      const target = ssTargetClientId || null;
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "create_style", label, targetClientId: target } });
       if (error) throw new Error(error.message || "Could not create that style");
       if (!data || !data.ok || !data.key) throw new Error((data && data.error) || "Could not create that style");
-      return { key: data.key, styleId: data.styleId };
+      return { key: data.key, styleId: data.styleId, target };
     },
     // Show or hide one style. Idempotent, so it goes through the style-save call (deadline, side
-    // door) and, when the caller names the style's key, waits in that style's queue behind any
-    // save still running — "hidden" must never land before the shape it hides.
-    onSetStyleActive: (styleId, active, styleValue) => {
-      const target = ssTargetClientId;
+    // door) and, when the caller names the style's key, waits in that style's queue, so it lands
+    // in order with that style's saves. `pinnedTarget` as onSaveSpec's.
+    onSetStyleActive: (styleId, active, styleValue, pinnedTarget) => {
+      const target = pinnedTarget !== undefined ? pinnedTarget : ssTargetClientId;
       const body = { action: "set_style_active", styleId, active: active !== false, targetClientId: target || null };
       const run = async () => {
         const r = await ssStyleSaveCall(body, "show or hide a style");
         if (r.error || !r.data || !r.data.ok) throw ssStyleSaveError(r);
         return r.data;
       };
-      return styleValue ? ssQueueStyleSave(ssStyleSaveKey(styleValue), run) : run();
+      return styleValue ? ssQueueStyleSave(ssStyleSaveKey(styleValue, target), run) : run();
     },
     // Reference photos are no longer in the customer-facing config (migration 093 stopped
     // get_config broadcasting a builder's photos of their real buildings to anonymous
