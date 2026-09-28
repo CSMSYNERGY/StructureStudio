@@ -8,18 +8,22 @@
 //      treads and risers, climbing the same height (each riser height / (count + 1)); the top tread
 //      meets the deck, one riser under it, its back edge at the deck's front edge; the flight lands
 //      on the grass; model.porch.steps says the same count. Without the key the renderer's own count
-//      is drawn (one per 7.5 in), on piers and at grade.
+//      is drawn (one per 7.5 in), on piers and at grade. On a front end, a back end (turned half a
+//      circle) and a shed's eave wall (a quarter turn), measured in the turned deck's own frame.
 //   B. THE CUSTOMER'S PIERS. A style with no foundation, a tenant offering Piers on the Foundation
 //      tab. Before: at grade, no supports, one porch step. Ticking Piers stands the building on piers
 //      in the docked 3D (rebuilt in place) and in the full-screen viewer: model.foundation.kind
 //      "piers", the renderer's 1.5 ft default, a pier under every runner every 7 ft or less, each
 //      from the grass to its runner, and the porch steps climbing the new height (three). Unticking
-//      returns to the style's own foundation. A style on 1.1 ft blocks keeps its 1.1 ft as piers.
+//      returns to the style's own foundation. A style on 1.1 ft blocks keeps its 1.1 ft as piers, and
+//      one on blocks with no height stays at the blocks' own 1 ft: the floor never moves. (A tenant
+//      that does not offer piers is customerFoundation_test's: there is no Piers button to tick.)
 //   C. THE PANEL (?admin=1). "Number of steps" shows beside "Porch steps" only with steps chosen,
 //      blank, its placeholder the renderer's count for the floor height ("blank = 3" on 1.5 ft
 //      piers); the hint says each step's rise, amber with a plain warning past 8 in or under 4 in; an
 //      untouched style saves no count; a typed count saves rounded and held to 1..12; a cleared box
-//      deletes it; "None" for the steps deletes the count too; the 3D preview draws the typed count.
+//      deletes it; "None" for the steps deletes the count too; the rule's own count warns too when it
+//      comes out shallow (0.75 ft of floor: two 3 in steps); the 3D preview draws the typed count.
 //   D. zero page errors.
 //
 //   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
@@ -137,10 +141,14 @@ async function measure(page, handle) {
     const out = { grade: M.grade, foundation: M.foundation || null, porchSteps: M.porch && M.porch.steps ? { count: M.porch.steps.count, rise: M.porch.steps.rise } : null,
       piers, runners, deckSupports: all(M.root, inDeck).length };
     if (steps && deck) {
-      // In the DECK's own frame: y up from the floor, z out from the wall, whichever wall it is on.
-      const treads = all(steps, (q) => tag(q, "ssPorchPart", "stepTread")).map((q) => bbOf(q, deck));
+      // In the porch's own frame: y up from the floor, z out from the wall, whichever wall it is on.
+      // That is the frame of the group the steps hang in (the renderer's inner deck group, turned
+      // onto the porch's wall), NOT the outer ssPorch "deck" group, which carries only the roof
+      // group's placement: in that one z is out from the wall on a front end alone.
+      const frame = steps.parent;
+      const treads = all(steps, (q) => tag(q, "ssPorchPart", "stepTread")).map((q) => bbOf(q, frame));
       const risers = all(steps, (q) => tag(q, "ssPorchPart", "stepRiser")).length;
-      const boards = all(deck, (q) => tag(q, "ssPorchPart", "deckBoard") || tag(q, "ssPorchPart", "rim")).map((q) => bbOf(q, deck));
+      const boards = all(deck, (q) => tag(q, "ssPorchPart", "deckBoard") || tag(q, "ssPorchPart", "rim")).map((q) => bbOf(q, frame));
       const flight = bbOf(steps);
       out.steps = { visible: steps.visible, treads, risers, bottom: flight.mn[1], top: flight.mx[1],
         deckFront: Math.max(...boards.map((b) => b.mx[2])), deckTop: Math.max(...boards.map((b) => b.mx[1])),
@@ -181,6 +189,13 @@ const STEP_CASES = [
     d3: { roof: { ...GABLE_PORCH, porchSteps: "center", porchStepCount: 2 }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal" } },
   { id: "A1", label: "Steps Auto At Grade", size: "12x16", grade: 0.35, count: 1, asked: false,
     d3: { roof: { ...GABLE_PORCH, porchSteps: "center" }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal" } },
+  // The porch on the BACK end: its deck group is turned half a circle.
+  { id: "A4B", label: "Steps Four Back Porch", size: "12x16", grade: 1.5, count: 4, asked: true,
+    d3: { roof: { ...GABLE_PORCH, porchEnd: "back", porchSteps: "right", porchStepCount: 4 }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
+  // Farmstand's porch, on a shed's high EAVE wall: its deck group is turned a quarter.
+  { id: "A3E", label: "Steps Three Eave Porch", size: "16x10", grade: 1.1, count: 3, asked: true,
+    d3: { roof: { type: "shed", highSide: "front", pitch: 0.22, overhang: 0.8, eave: "fascia", porchEnd: "front", porchOutFt: 4, porchAttachFt: 8, porchPosts: 4, porchPitch: 0.25, porchSteps: "center", porchStepCount: 3 },
+      siding: "batten", colors: PLAIN, wallHeightFt: 7.3, roofMaterial: "metal", foundation: "blocks", floorHeightFt: 1.1 } },
 ];
 
 function stepAsserts(ok, tag, m, g, count) {
@@ -308,30 +323,54 @@ async function runPiers(ctx, ok, shots) {
   }
 }
 
-// A style on 1.1 ft blocks: the customer's piers stand at the style's own measured height; a tenant
-// that does not offer piers draws the style's own foundation whatever sel says.
-async function runPiersOnBlocks(ctx, ok) {
+// A style on blocks: the customer's piers stand with the floor exactly where the blocks had it, the
+// style's measured 1.1 ft, or the blocks' own 1 ft when it stores no height (not the piers' 1.5 ft:
+// ticking the site work must not drop the ground). A tenant that does not offer piers has no Piers
+// button to tick; that rule is customerFoundation_test's (d3CustomerFoundation).
+async function runPiersOnBlocks(ctx, ok, heightFt, shots) {
   const W = 16, L = 10, SIZE = "16x10";
+  const g = heightFt == null ? 1 : heightFt, said = heightFt == null ? "its own 1 ft (no height stored)" : `${heightFt} ft`;
   const page = await ctx.newPage();
   const errors = collectErrors(page);
   await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
-  const config = configFor({ clientId: "harness-cust-piers-blocks", label: "Customer Piers Blocks", size: SIZE,
-    d3: { roof: { type: "gable", pitch: 0.4, overhang: 0.6 }, siding: "lap", colors: PLAIN, wallHeightFt: 8, foundation: "blocks", floorHeightFt: 1.1 },
+  const label = heightFt == null ? "Customer Piers Blocks Default" : "Customer Piers Blocks";
+  const config = configFor({ clientId: heightFt == null ? "harness-cust-piers-blocks-default" : "harness-cust-piers-blocks", label, size: SIZE,
+    d3: { roof: { type: "gable", pitch: 0.4, overhang: 0.6 }, siding: "lap", colors: PLAIN, wallHeightFt: 8, foundation: "blocks", ...(heightFt == null ? {} : { floorHeightFt: heightFt }) },
     foundationItems: [PIERS_OFFER] });
   await stubSupabase(page, { config, fixtures: FIXTURES });
-  const tag = "B2 blocks style";
+  const tag = `B2 blocks style at ${said}`;
   try {
     await openDesigner(page, config.clientId);
-    await pickStyle(page, "Customer Piers Blocks");
+    await pickStyle(page, label);
     await chooseSize(page, SIZE);
     await dockModel(page);
     let d = await measure(page, "__ss3dPanel");
-    ok(`${tag}: before, the style's own blocks at 1.1 ft`, d.foundation && d.foundation.kind === "blocks" && near(d.grade, 1.1, 1e-9), JSON.stringify(d.foundation && d.foundation.kind));
+    ok(`${tag}: before, the style's own blocks at ${g} ft`, d.foundation && d.foundation.kind === "blocks" && near(d.grade, g, 1e-9), JSON.stringify(d.foundation && d.foundation.kind) + ` grade ${f3(d.grade)}`);
     await showOptTab(page, "foundation");
     await page.locator(".ssd-fd button", { hasText: "Piers" }).first().click();
     await page.waitForFunction(() => { const P = window.__ss3dPanel; return !!(P && P.model && P.model.foundation && P.model.foundation.kind === "piers"); }, null, { timeout: 30000 }).catch(() => {});
     d = await measure(page, "__ss3dPanel");
-    pierAsserts(ok, `${tag}: piers ticked, at the style's own 1.1 ft`, d, W, L, 1.1, false);
+    pierAsserts(ok, `${tag}: ⚠️ PIERS TICKED, THE FLOOR STAYS AT ${g} FT`, d, W, L, g, false);
+    if (heightFt == null) {
+      // The full-screen viewer too, ticked then unticked, from the same low corner, so the pair of
+      // pictures shows the floor line staying put while blocks become piers.
+      const eye = [W * 1.3, 2.2, -L * 1.15], at = [0, -0.1, -1];
+      await openEditor(page);
+      let m = await measure(page, "__ss3dEngine");
+      pierAsserts(ok, `${tag} (viewer)`, m, W, L, g, false);
+      if (shots) await shoot(page, eye, at, join(shots, "B-4-blocks-no-height-after-piers.png"));
+      await closeEditor(page);
+      await showOptTab(page, "foundation");
+      const btn = page.locator(".ssd-fd button", { hasText: "Piers" }).first();
+      if ((await btn.getAttribute("aria-pressed")) === "true") await btn.click();
+      await settle(page, 600);
+      await openEditor(page);
+      m = await measure(page, "__ss3dEngine");
+      ok(`${tag}: unticked, the viewer is back on its blocks at the same ${g} ft`, m.foundation && m.foundation.kind === "blocks" && near(m.grade, g, 1e-9) && m.piers.length === 0,
+        JSON.stringify(m.foundation && m.foundation.kind) + ` grade ${f3(m.grade)}`);
+      if (shots) await shoot(page, eye, at, join(shots, "B-4-blocks-no-height-before-blocks.png"));
+      await closeEditor(page);
+    }
     ok(`${tag}: zero page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
   } catch (e) {
     ok(`${tag}: ran`, false, e && e.message ? e.message.split("\n")[0] : String(e));
@@ -428,6 +467,18 @@ async function runPanel(ctx, ok, shots) {
     await stepsSel().selectOption("right");
     await settle(page);
     ok(`${tag}: steps back on, the count is blank (nothing remembered)`, (await count().inputValue()) === "");
+    // THE RULE'S OWN COUNT WARNS TOO. On 0.75 ft of floor it draws two steps, each rising 3 in: the
+    // box is blank, and the hint still says so, because typing a count is the fix either way.
+    const floor = page.locator('input[data-ss-floor-height="ss-grid"]');
+    const setFloor = async (v) => { await floor.click(); await floor.fill(String(v)); await page.keyboard.press("Tab"); await settle(page, 300); };
+    await setFloor(0.75);
+    r = await riseText();
+    ok(`${tag}: on 0.75 ft of floor the blank reads "blank = 2"`, (await count().getAttribute("placeholder")) === "blank = 2", await count().getAttribute("placeholder"));
+    ok(`${tag}: ⚠️ ...AND THE RULE'S TWO 3 IN STEPS WARN, BOX BLANK`, (await count().inputValue()) === "" && r.text === "Each step rises 3 in. Fewer steps would make them easier to climb." && r.color === AMBER, JSON.stringify(r));
+    if (shots) await count().locator("xpath=../..").screenshot({ path: join(shots, "C-4-panel-auto-shallow-warning.png") }).catch(() => {});
+    await setFloor(1.5);
+    r = await riseText();
+    ok(`${tag}: back on 1.5 ft, the rule's 4.5 in steps do not warn`, r.text === "Each step rises 4.5 in." && r.color !== AMBER, JSON.stringify(r));
     // The preview draws the DRAFT: type the count, then open it.
     await typeCount(6);
     await page.getByRole("button", { name: /Preview in 3D/ }).first().click();
@@ -452,7 +503,7 @@ const { browser, ctx } = await launch({ width: 1280, height: 900 });
 try {
   const jobs = [];
   if (want("A")) jobs.push((async () => { for (const c of STEP_CASES) await runStepCase(ctx, c, ok, shots); })());
-  if (want("B")) jobs.push((async () => { await runPiers(ctx, ok, shots); await runPiersOnBlocks(ctx, ok); })());
+  if (want("B")) jobs.push((async () => { await runPiers(ctx, ok, shots); await runPiersOnBlocks(ctx, ok, 1.1, shots); await runPiersOnBlocks(ctx, ok, null, shots); })());
   if (want("C")) jobs.push(runPanel(ctx, ok, shots));
   await Promise.all(jobs);
 } finally {

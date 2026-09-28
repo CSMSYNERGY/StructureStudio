@@ -747,6 +747,44 @@ async function main() {
   r.ok("with Save still live, because a builder must always be able to save", (await saveEnabled()) === true);
   await page.locator('[data-ssc-card="compare"]').screenshot({ path: join(shots, "05-four-nos.png") });
 
+  // ── THE PORCH'S STEP COUNT IN ITS FIX PANEL (roof.porchStepCount, 2026-09-28) ─────────────
+  // One panel is open at a time, and a "No" already given opens nothing on a second click, so
+  // "Yes" then "No" is what reopens the porch's. The draft's projecting porch has no steps.
+  await answer("porch", "Yes");
+  await answer("porch", "No");
+  const fixPorch = page.locator("#ssc-fix-porch");
+  const fixCount = fixPorch.locator('input[data-ss-step-count="ss-fix"]');
+  const fixSteps = fixPorch.locator("label").filter({ hasText: /^Steps off its front/ }).locator("select");
+  const typeFixCount = async (v) => { await fixCount.click(); await fixCount.fill(String(v)); await page.keyboard.press("Tab"); await page.waitForTimeout(300); };
+  r.ok("the porch fix panel has no step count while the porch has no steps",
+    (await fixPorch.count()) === 1 && (await fixSteps.count()) === 1 && (await fixCount.count()) === 0);
+  await fixSteps.selectOption("left");
+  await page.waitForTimeout(300);
+  r.ok("with steps chosen, \"How many steps\" appears blank, its placeholder the rule's count at grade",
+    (await fixCount.count()) === 1 && (await fixCount.inputValue()) === "" && (await fixCount.getAttribute("placeholder")) === "blank = 1",
+    `${await fixCount.count()} ${await fixCount.getAttribute("placeholder").catch(() => "")}`);
+  r.ok("...and What we drew says steps on the left, no count", /\bsteps on the left/.test(await spanLine()) && !/\d steps on the left|one step on the left/.test(await spanLine()), await spanLine());
+  await typeFixCount(4);
+  r.ok("⚠️ A COUNT TYPED IN THE FIX PANEL REACHES THE DRAWING: \"4 steps on the left\"", /4 steps on the left/.test(await spanLine()), await spanLine());
+  await fixPorch.screenshot({ path: join(shots, "05b-porch-fix-step-count.png") }).catch(() => {});
+  const gridCount = page.locator('input[data-ss-step-count="ss-grid"]');
+  if (await gridCount.count()) r.ok("and the grid's Number of steps reads the same 4: one spec", (await gridCount.inputValue()) === "4", await gridCount.inputValue());
+  await typeFixCount(7.4);
+  r.ok("7.4 is drawn rounded, 7 steps", /7 steps on the left/.test(await spanLine()), await spanLine());
+  await typeFixCount(40);
+  r.ok("past the band it is drawn at its top, 12 steps", /12 steps on the left/.test(await spanLine()), await spanLine());
+  await typeFixCount("");
+  r.ok("⚠️ A CLEARED BOX GOES BACK TO THE RULE: steps on the left, no count",
+    (await fixCount.inputValue()) === "" && /\bsteps on the left/.test(await spanLine()) && !/\d steps on the left/.test(await spanLine()), await spanLine());
+  await typeFixCount(3);
+  await fixSteps.selectOption("");
+  await page.waitForTimeout(300);
+  r.ok("\"No steps\" hides the count and the drawing has no steps", (await fixCount.count()) === 0 && !/steps? on the left/.test(await spanLine()), await spanLine());
+  await fixSteps.selectOption("left");
+  await page.waitForTimeout(300);
+  r.ok("⚠️ STEPS BACK ON, THE COUNT WENT WITH \"No steps\": blank, no count drawn",
+    (await fixCount.inputValue()) === "" && !/\d steps on the left/.test(await spanLine()), await spanLine());
+
   // ── THE WARNING BANNER HAS TO REACH A CONTROL, INCLUDING WHERE THERE ARE NO PAIRS ─────
   // The banner is a machine warning promoted out of "What the model saw", and its whole
   // point is that a builder should not have to work out which of the four questions it was
