@@ -16529,7 +16529,11 @@ function ssRoofInFeet(roof, spanFt, centre) {
 // 12 porch roof on 7 ft walls is built at 0.6 in 12, and a line saying "3 in 12" beside it sent
 // the builder to check a roof that is not on screen. With the readout the posts and pitch are the
 // built ones, and a lowered pitch says so; without it (no size yet) they are the spec's.
-function ssDrewWords(spec, porchBuilt) {
+// `massBuilt` (optional) is d3Massing of the spec at that size: with a wing attach (roof.wingAttach,
+// 2026-09-28) where the wing roof meets and how tall the middle stands are said as BUILT -- a distance
+// moved down to clear the eave, held short of the ridge, or a wing roof that cannot reach the roof and
+// meets the wall under it, and a middle held 1 ft over the walls.
+function ssDrewWords(spec, porchBuilt, massBuilt) {
   const roof = (spec && spec.roof) || {};
   const raisedOn = spec && (spec.foundation === "blocks" || spec.foundation === "piers") ? spec.foundation : null;
   const type = roof.type || "gable";
@@ -16541,11 +16545,16 @@ function ssDrewWords(spec, porchBuilt) {
   const wing = Number(roof.wingWidthFt) || 0;
   if (type !== "shed" && wing > 0) {
     const where = ({ both: "each side", left: "the left side", right: "the right side", front: "the front", back: "the back" })[roof.wingSide] || "the side";
-    const centre = Number(roof.centerEaveFt) > 0 ? `, and the middle section's walls rise to ${ssFtInWords(Number(roof.centerEaveFt))}` : "";
-    // Where that roof meets the middle section (roof.wingAttach, 2026-09-28), only when the style says.
-    const by = Number(roof.wingAttachFt) > 0 ? ssFtInWords(Number(roof.wingAttachFt)) : null;
-    const meets = roof.wingAttach === "roof" ? ` that runs up onto the middle section's roof${by ? `, ${by} above its eave` : ""}`
-      : roof.wingAttach === "wall" ? ` that meets the middle section's wall ${by ? `${by} below its eave` : "at its eave"}` : "";
+    // Where that roof meets the middle section (roof.wingAttach, 2026-09-28), only when the style says,
+    // and as built when the caller has the massing.
+    const mb = massBuilt && massBuilt.attach && massBuilt.attach === roof.wingAttach && massBuilt.wings && massBuilt.wings[0] ? massBuilt : null;
+    const hc = mb ? mb.Hc : Number(roof.centerEaveFt);
+    const centre = hc > 0 && (mb || Number(roof.centerEaveFt) > 0) ? `, and the middle section's walls rise to ${ssFtInWords(hc)}` : "";
+    const place = mb ? mb.wings[0].meets : roof.wingAttach;
+    const byFt = mb ? mb.wings[0].meetFt : Number(roof.wingAttachFt);
+    const by = byFt > 0.005 ? ssFtInWords(byFt) : null;
+    const meets = place === "roof" ? ` that runs up onto the middle section's roof${by ? `, ${by} above its eave` : ""}`
+      : place === "wall" ? ` that meets the middle section's wall ${by ? `${by} below its eave` : "at its eave"}` : "";
     out.push(`A lower wing ${ssFtInWords(wing)} wide runs along ${where} under its own roof${meets}${centre}.`);
   }
   // "wall" in the new frame, where the front can be a long side; "end" on every older style,
@@ -24460,7 +24469,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       are true at once, so the number stays a ratio on the wire and becomes
                       feet here. */}
                   <div style={{ marginTop: 10, fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
-                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec, calDrewPorch)}
+                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec, calDrewPorch, calReadoutMass)}
                   </div>
                   {/* ── THE FOUR QUESTIONS ───────────────────────────────────────────────
                       ONLY WHERE THERE IS SOMETHING TO ANSWER THEM AGAINST, which is the same
