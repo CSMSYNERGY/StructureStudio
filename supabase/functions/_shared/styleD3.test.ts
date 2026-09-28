@@ -6480,3 +6480,57 @@ Deno.test("consensus: the step is voted among the reads of the chosen roof type,
   const warn = RS.consensusSplitWarning(split.report) ?? "";
   assert(warn.includes("the step in the roof"), warn);
 });
+
+// ⚠️ THE RISE IS SIGNED, so its direction is voted before any number is taken (the dormer offset's
+// rule). A plain median over both signs cancels them out: 0.5, 0.6, -0.5 and -0.6 give 0, which the
+// sanitiser then drops, so a step four of five reads saw was not drawn at all; 0.6 and -0.4 give
+// 0.1, a step no read saw.
+Deno.test("⚠️ consensus: a 2-2 split on which way the roof steps keeps the step, at a rise one side gave", () => {
+  const five = RS.consensusDrafts([
+    stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.5 }), stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.6 }),
+    stepRead({ rearStepFt: 12, rearEaveRiseFt: -0.5 }), stepRead({ rearStepFt: 12, rearEaveRiseFt: -0.6 }),
+    stepRead({}),
+  ]);
+  assertEquals(five.report.discreteAgreement.roofStep, "4/5");
+  assertEquals(five.report.discreteAgreement.roofStepDir, "2/4");
+  // The tie goes to the best-ranked read that gave a tied answer: every stepped read is 3 apart from
+  // the others, so the first one sent, which stepped up.
+  assertEquals(five.medoid, 0);
+  assert(five.d3.roof.rearStepFt === 12 && five.d3.roof.rearEaveRiseFt === 0.55, `the step is drawn, 0.55 higher: ${JSON.stringify(five.d3.roof)}`);
+  assertEquals(five.report.spread.rearEaveRiseFt, [0.5, 0.6], "the spread is of the reads that were counted");
+  const warn = RS.consensusSplitWarning(five.report) ?? "";
+  assert(warn.includes("whether the back of the roof steps up or down"), warn);
+  assert(!warn.includes("the step in the roof"), `4 of 5 saw a step: ${warn}`);
+  // Four reads, every one stepped, split two and two: the same.
+  const four = RS.consensusDrafts([
+    stepRead({ rearStepFt: 12, rearEaveRiseFt: -0.5 }), stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.5 }),
+    stepRead({ rearStepFt: 12, rearEaveRiseFt: -0.6 }), stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.6 }),
+  ]);
+  assertEquals(four.report.discreteAgreement.roofStepDir, "2/4");
+  assert(four.d3.roof.rearStepFt === 12 && four.d3.roof.rearEaveRiseFt === -0.55, `the first read stepped down: ${JSON.stringify(four.d3.roof)}`);
+});
+
+Deno.test("⚠️ consensus: two reads that step opposite ways keep one read's own rise, never their midpoint", () => {
+  const pair = RS.consensusDrafts([stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.6 }), stepRead({ rearStepFt: 12, rearEaveRiseFt: -0.4 })]);
+  assertEquals(pair.report.discreteAgreement.roofStep, "2/2");
+  assertEquals(pair.report.discreteAgreement.roofStepDir, "1/2");
+  assert(pair.d3.roof.rearStepFt === 12 && pair.d3.roof.rearEaveRiseFt === 0.6, `the medoid's 0.6, not 0.1: ${JSON.stringify(pair.d3.roof)}`);
+  assert(!("rearEaveRiseFt" in pair.report.spread), "one read counted, so nothing wandered");
+  assert((RS.consensusSplitWarning(pair.report) ?? "").includes("whether the back of the roof steps up or down"), "the builder is told");
+  // Sent the other way round, the other read's own -0.4.
+  const back = RS.consensusDrafts([stepRead({ rearStepFt: 12, rearEaveRiseFt: -0.4 }), stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.6 })]);
+  assertEquals(back.d3.roof.rearEaveRiseFt, -0.4);
+});
+
+Deno.test("consensus: the joint is the median of the reads that stepped the chosen way only", () => {
+  const r = RS.consensusDrafts([
+    stepRead({ rearStepFt: 10, rearEaveRiseFt: 0.5 }), stepRead({ rearStepFt: 20, rearEaveRiseFt: -0.5 }), stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.6 }),
+  ]);
+  assertEquals(r.report.discreteAgreement.roofStepDir, "2/3");
+  assert(r.d3.roof.rearStepFt === 11 && r.d3.roof.rearEaveRiseFt === 0.55, `10 and 12, not the 12 of all three: ${JSON.stringify(r.d3.roof)}`);
+  assertEquals(RS.consensusSplitWarning(r.report), null, "2 of 3 is a majority, and says nothing");
+  // All one way: no split to say, and the numbers are every read's.
+  const same = RS.consensusDrafts([stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }), stepRead({ rearStepFt: 13, rearEaveRiseFt: 0.5 }), stepRead({ rearStepFt: 11, rearEaveRiseFt: 0.6 })]);
+  assertEquals(same.report.discreteAgreement.roofStepDir, "3/3");
+  assert(same.d3.roof.rearStepFt === 12 && same.d3.roof.rearEaveRiseFt === 0.5, JSON.stringify(same.d3.roof));
+});
