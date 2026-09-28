@@ -9,7 +9,8 @@
 //     panel posts back AS THE STYLE -- gets exactly the object it always got, and a customer's pick
 //     can never be frozen into a tenant's column;
 //   · a style at grade (a slab, skids, nothing said) goes up on piers at the renderer's own 1.5 ft,
-//     a style on blocks keeps its measured floor height, a style already on piers does not move;
+//     a style on blocks keeps the floor height it was drawn at (its measured one, or the blocks'
+//     own 1 ft when it stores none: the floor never jumps), a style already on piers does not move;
 //   · every customer-facing call site passes it, so the docked 3D, the full-screen viewer, the quote's
 //     shot, the gable-vent placement and the dormer-window price gate agree about the building.
 //
@@ -35,8 +36,10 @@ function lift(src: string, file: string, start: string, end: string): string {
 }
 
 const REGIONS: Array<[string, string]> = [
+  ["const D3 = {", "// The casing reveal every opening"],
   ["const D3_STYLE_DEFAULTS = {", "// ── CLADDING ──"],
-  ["const D3_FOUNDATIONS = [", "function d3RaisedFoundation("],
+  // d3RaisedFoundation and d3GradeFt with them: a blocks style's piers are pinned to d3GradeFt.
+  ["const D3_FOUNDATIONS = [", "// How much further down the ground is than it has always been"],
   ["const FOUNDATION_ITEM_LABEL = {", "function foundationLabelOf("],
   ["function d3ResolveStyleSpec(", "// Carolyn (2026-07-02): horizontal lap siding"],
   ["function d3CustomerFoundation(", "// Natural-material fallbacks"],
@@ -54,7 +57,7 @@ Deno.test("every lifted region is byte-identical in the two twins", () => {
 // deno-lint-ignore no-explicit-any
 type Any = any;
 const F = new Function(
-  `${blocks.map((b) => b.cmp).join("\n")}; return { d3ResolveStyleSpec, d3CustomerFoundation, resolveFoundation };`,
+  `${blocks.map((b) => b.cmp).join("\n")}; return { d3ResolveStyleSpec, d3CustomerFoundation, resolveFoundation, d3GradeFt };`,
 )() as Record<string, Any>;
 
 const ROOF = { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6, porchOutFt: 6, porchSteps: "left" };
@@ -91,13 +94,23 @@ Deno.test("customer piers: a style at grade goes up on piers at the renderer's d
   }
 });
 
-Deno.test("customer piers: a raised style keeps its measured height; one already on piers does not move", () => {
+Deno.test("customer piers: a raised style keeps the floor where it was drawn; one already on piers does not move", () => {
   const b = resolve(STYLES.blocks, "piers");
   assertEquals([b.foundation, b.floorHeightFt], ["piers", 1.1]);
   assertEquals(JSON.stringify({ ...b, foundation: "blocks" }), JSON.stringify(resolve(STYLES.blocks)));
-  const bd = resolve(STYLES.blocksDefault, "piers");
-  assertEquals(bd.foundation, "piers");
-  assert(!("floorHeightFt" in bd));
+  // ⚠️ A BLOCKS STYLE THAT STORES NO HEIGHT is drawn at the blocks' own 1 ft. Left absent, the piers'
+  // 1.5 ft default would drop the ground 6 in when all the customer ticked was the site work.
+  const bdWas = resolve(STYLES.blocksDefault), bd = resolve(STYLES.blocksDefault, "piers");
+  assertEquals([bd.foundation, bd.floorHeightFt], ["piers", 1]);
+  assertEquals(F.d3GradeFt(bd), F.d3GradeFt(bdWas));
+  // Whatever height the blocks were drawn at, the piers are: out-of-band stored heights included
+  // (d3GradeFt's own rule decides both).
+  for (const h of [0.2, 0.3, 0.8, 1.1, 2.75, 6, 7.5, 9, -1, 0]) {
+    const s = style({ roof: ROOF, siding: "batten", wallHeightFt: 8, foundation: "blocks", floorHeightFt: h });
+    const was = resolve(s), now = resolve(s, "piers");
+    assertEquals(now.foundation, "piers", `blocks at ${h}`);
+    assertEquals(F.d3GradeFt(now), F.d3GradeFt(was), `blocks at ${h}`);
+  }
   assertEquals(JSON.stringify(resolve(STYLES.piers, "piers")), JSON.stringify(resolve(STYLES.piers)));
   // The style's own object is never written to.
   assertEquals(STYLES.none.d3.foundation, undefined);

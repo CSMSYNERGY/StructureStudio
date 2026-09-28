@@ -5755,14 +5755,17 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
   // this object is what the calibration panel posts back as the style, and a customer's pick must
   // never be frozen into it. Without it the object above is returned untouched.
   //   · The style already stands on piers: nothing changes.
-  //   · It stands on blocks (raised): piers at the same floor height, over the same ground.
+  //   · It stands on blocks (raised): piers with the floor exactly where the blocks had it, over the
+  //     same ground. The height is PINNED to the one the blocks were drawn at (d3GradeFt, read before
+  //     the foundation changes), so a blocks style that stores no height stays at the blocks' own
+  //     1 ft instead of jumping to the piers' 1.5 ft: all the customer changed is what holds it up.
   //   · It sits at grade (a slab, skids, or nothing said): piers, with no floor height, so the
   //     renderer's own piers default (1.5 ft) is drawn; and no fall of the ground, which only a
   //     style that is already raised can have been measured with.
   if (D3_FOUNDATIONS.indexOf(customerFoundation) >= 0 && spec.foundation !== customerFoundation) {
-    const ownRaised = D3_RAISED_FOUNDATIONS.indexOf(spec.foundation) >= 0;
+    if (D3_RAISED_FOUNDATIONS.indexOf(spec.foundation) >= 0) spec.floorHeightFt = d3GradeFt(spec);
+    else { delete spec.floorHeightFt; delete spec.gradeFallFt; delete spec.gradeFallToward; }
     spec.foundation = customerFoundation;
-    if (!ownRaised) { delete spec.floorHeightFt; delete spec.gradeFallFt; delete spec.gradeFallToward; }
   }
   return spec;
 }
