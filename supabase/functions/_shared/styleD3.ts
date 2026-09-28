@@ -4010,6 +4010,9 @@ export type DraftReading = {
   d3: D3Spec | null;
   drafted: boolean;
   pitch?: PitchSources;
+  // The read's measure.step block (2026-09-29), on a read that gave a roof step and marked it: the
+  // draft crops the joint out of the frame these points name (_shared/stepZoom.ts).
+  stepPoints?: Record<string, unknown>;
 };
 export function readDraftReply(body: string, dims?: KnownDims | null, measure = false): DraftReading {
   // deno-lint-ignore no-explicit-any
@@ -4021,7 +4024,8 @@ export function readDraftReply(body: string, dims?: KnownDims | null, measure = 
   const d3 = spec && spec.ok ? spec.d3 : null;
   if (!measure || !d3) return { data, reply, d3, drafted: d3 !== null };
   const measured = applyMeasuredPitches(d3, reply.text, dims?.lengthFt);
-  return { data, reply, d3: measured.d3, drafted: true, pitch: measured.sources };
+  const stepPoints = measured.sources.stepSource ? parseMeasure(reply.text)?.step : undefined;
+  return { data, reply, d3: measured.d3, drafted: true, pitch: measured.sources, ...(stepPoints ? { stepPoints } : {}) };
 }
 
 // One read as draft_tokens keeps it: its sanitised roof, plus where its pitch came from on a
