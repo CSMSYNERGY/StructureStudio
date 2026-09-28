@@ -601,6 +601,12 @@ function ssRunStyleSave(key, target, styleValue, label, build, confirm) {
   });
 }
 
+// How long a cold /portal/advanced waits on "Checking your account…" for the tenant's billing
+// answer before it gives up and shows the Designer (review 2026-09-29). Long enough for a cold
+// edge function, short enough that a failed call does not strand anyone. A "yes" that lands later
+// still opens the page. window.__ssAdvancedHoldMs overrides it for the harness.
+const SS_ADVANCED_HOLD_MS = 8000;
+
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
   // Seeded FROM THE URL, so a refresh or a pasted deep link lands where it says it will.
@@ -694,6 +700,11 @@ function Dashboard({ session }) {
   // ssAdvancedOn, so latching on the raw tab here can never mount it for a tenant without it.
   const [advancedOpened, setAdvancedOpened] = useState(false);
   useEffect(() => { if (tab === "advanced") setAdvancedOpened(true); }, [tab]);
+  // A cold /portal/advanced is HELD on "Checking your account…" until the entitlement answers
+  // (the gate below), but not for ever: a billing call that failed, hung, or answered without an
+  // entitlement never answers, and the route would sit there for the whole session (review
+  // 2026-09-29). Set by the effect beside the clamp, after SS_ADVANCED_HOLD_MS.
+  const [advancedHoldOver, setAdvancedHoldOver] = useState(false);
   // Bumped when the embedded designer submits, so DesignsTable refetches on next view.
   const [designsRefreshKey, setDesignsRefreshKey] = useState(0);
   // "Open in the portal designer" request ({clientId, code, version, n}) set by the
@@ -937,7 +948,10 @@ function Dashboard({ session }) {
           "viewed_ctx_unreadable", { clientId: viewing && viewing.clientId });
         return;
       }
-      setViewedCtx({ access: st.data.access || null, entitlement: bl.data.entitlement || null });
+      // `clientId` says WHOSE answer this is. The state is not cleared when an operator moves
+      // straight from one viewed builder to another, so until the new answer lands it still holds
+      // the last one; the Advanced gate (below) reads a mismatch as "not answered yet".
+      setViewedCtx({ access: st.data.access || null, entitlement: bl.data.entitlement || null, clientId: viewing ? viewing.clientId : null });
     };
     load(0);
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
@@ -974,14 +988,27 @@ function Dashboard({ session }) {
   // Derived inline HERE, not from gateEnt: that is declared below the early returns, and read up
   // here it would be a var-hoisted `undefined` (the placement note above). Same shape as gateEnt:
   // the viewed tenant's entitlement in view-as, your own otherwise.
-  const advancedEnt = viewing ? (viewedCtx ? viewedCtx.entitlement : null) : entitlement;
-  const advancedOn = ssAdvancedOn(advancedEnt);
+  //
+  // ONLY THE VIEWED TENANT'S OWN ANSWER (review 2026-09-29). viewedCtx is not cleared when an
+  // operator moves straight from our account to another builder, so until that builder's answer
+  // lands it still holds OURS — and the item and a page instance appeared for a builder without
+  // Advanced. An answer tagged with another clientId is read as no answer yet.
+  const advancedCtx = (viewing && viewedCtx && viewedCtx.clientId === viewing.clientId) ? viewedCtx : null;
+  const advancedEnt = viewing ? (advancedCtx ? advancedCtx.entitlement : null) : entitlement;
+  // AND ONLY SOMEONE WHO MAY RUN THE ACCOUNT (review 2026-09-29). The page's whole output is a new
+  // style, saved through setup3d, which is built for canAdmin alone; a team member was offered a
+  // page that could only say no. In view-as that is a platform operator — a support operator wears
+  // the builder's map, not the owner's chair — and isSupportOp null (still asking) is not yet a yes.
+  const advancedMayRun = viewing ? (!!isOperator && isSupportOp === false) : !!canAdminForUrl;
+  const advancedOn = ssAdvancedOn(advancedEnt) && advancedMayRun;
   // The entitlement arrives AFTER the tenant, so a cold /portal/advanced first renders with no
   // answer. Refusing then would rewrite our own account's address bar to /portal/designer and
   // mount the Designer, only to jump back when the answer lands. So while it is out the route is
   // HELD: the page says "Checking…" and neither the nav item nor the page itself is drawn (both
-  // read advancedOn, never this). Only a real answer decides.
-  const advancedAsked = viewing ? viewedCtx !== null : entitlement !== null;
+  // read advancedOn, never this). Only a real answer decides — or the hold's time limit
+  // (advancedHoldOver), after which a route still unanswered is refused like any other "no".
+  const advancedAnswered = viewing ? (advancedCtx !== null && isSupportOp !== null) : entitlement !== null;
+  const advancedAsked = advancedAnswered || advancedHoldOver;
   const advancedClampOn = advancedOn || (tab === "advanced" && !advancedAsked);
   // ⚠️ canProjects belongs in BOTH clamps or a typed /portal/projects gets rewritten away
   // under a team member while the page itself renders correctly — the exact silent,
@@ -1031,6 +1058,16 @@ function Dashboard({ session }) {
   useEffect(() => {
     if (tab === "advanced" && resolvedTab === "designer") setDesignerOpened(true);
   }, [tab, resolvedTab]);
+  // The hold's time limit (see advancedHoldOver). Started afresh each time the route is held, and
+  // lifted the moment a real answer lands or the builder goes elsewhere. A late "yes" still wins:
+  // `tab` stays "advanced" under a refusal, so the page opens when the answer finally arrives.
+  useEffect(() => {
+    setAdvancedHoldOver(false);
+    if (tab !== "advanced" || advancedAnswered) return;
+    const ms = (typeof window !== "undefined" && Number(window.__ssAdvancedHoldMs)) || SS_ADVANCED_HOLD_MS;
+    const t = setTimeout(() => setAdvancedHoldOver(true), ms);
+    return () => clearTimeout(t);
+  }, [tab, advancedAnswered]);
   const viewingFetch = useCallback(async () => {
     const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId } });
     if (error) {
@@ -2176,6 +2213,9 @@ function Dashboard({ session }) {
   // other ssClampTab calls ask about designer/orders tabs, never read that argument, and keep
   // plain supportView.
   const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects, advancedClampOn);
+  // The Advanced route while it is HELD (see advancedClampOn): nobody has been given the page yet,
+  // so the topbar must not name it either — for a builder without Advanced that was a flash of it.
+  const advancedHeld = activeTab === "advanced" && !advancedOn;
   // Remember the last WORKSPACE page, for Back to Workspace. Assigned during render, not in
   // an effect, and deliberately: it must already be correct on the very first render in which
   // the Settings rail appears, and an effect runs after that render has painted. Idempotent
@@ -2760,8 +2800,8 @@ function Dashboard({ session }) {
               same thing again over a caption line saying it a third time. Accounts and Admin
               are in the Settings rail but are ordinary pages, so they keep TAB_META. */}
           <div className="ttl">
-            {settingsActive ? settingsActive[1] : (TAB_META[activeTab] || [activeTab])[0]}
-            <span>{settingsActive ? settingsActive[2] : (TAB_META[activeTab] || [])[1]}</span>
+            {settingsActive ? settingsActive[1] : advancedHeld ? "One moment" : (TAB_META[activeTab] || [activeTab])[0]}
+            <span>{settingsActive ? settingsActive[2] : advancedHeld ? "" : (TAB_META[activeTab] || [])[1]}</span>
           </div>
           {viewing && (
             <div title="You are acting as this builder. Changes you make here are live in THEIR account. Design statuses show the last cached value — the live GHL refresh only runs for the tenant's own login."
@@ -3276,7 +3316,7 @@ function Dashboard({ session }) {
             {/* A cold /portal/advanced before the entitlement has answered (advancedClampOn holds
                 the route open). Nothing of the page is drawn until ssAdvancedOn says yes; a "no"
                 lands on the Designer. */}
-            {!gateLocked && activeTab === "advanced" && !advancedOn && (
+            {!gateLocked && advancedHeld && (
               <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Checking your account…</div>
             )}
             {!gateLocked && activeTab === "view-3d" && (

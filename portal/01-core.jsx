@@ -631,6 +631,10 @@ const SS_SOON_TABS = ["rent-to-own-contracts", "reports", "self-serve-display-un
 //
 // Pass the EFFECTIVE tenant's entitlement (the viewed one in view-as). null = not answered yet,
 // which reads as off, so the nav item can never flash for a builder who does not have it.
+//
+// This is the TENANT half. WHO on that tenant gets the page is the shell's `advancedMayRun`
+// (12-shell.jsx): whoever may run the account, the same bar setup3d — the page's only way to
+// save — already sets. It is not part of the per-tenant setting, so it stays out of here.
 function ssAdvancedOn(entitlement) {
   return !!(entitlement && entitlement.reason === "internal");
 }
