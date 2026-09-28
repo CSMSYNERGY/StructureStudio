@@ -604,6 +604,38 @@ Deno.test("roof: a wing roof that cannot reach the roof is built as far as it sh
   for (const g of F.d3Massing({ ...TRI37, pitch: 8 / 12, wingAttach: "wall", wingAttachFt: 2 }, 37, 22, 8).wings) assertEquals([g.meets, g.meetFt], ["wall", 2]);
 });
 
+Deno.test("⚠️ a transom dormer stops short of a wing roof or a lean-to that lands on the roof it sits on", () => {
+  // The Tri Home (37 x 22, 10 ft walls, centre 14, 8:12): a 6 ft transom dormer runs toward +u.
+  const base = { ...TRI37, pitch: 0.67, dormerType: "transom", dormerWidthFt: 6, dormerRiseFt: 2.5, dormerOffsetU: 0.45 };
+  const spec = (roof: Any) => ({ roof, wallHeightFt: 10 });
+  const none = F.d3DormerReadout(spec(base), "37x22");
+  // On the wall nothing covers the centre's roof: the dormer is the one it always was.
+  const wall = F.d3DormerReadout(spec({ ...base, wingAttach: "wall", wingAttachFt: 1 }), "37x22");
+  assertEquals([wall.uTop, wall.run, wall.uOut], [none.uTop, none.run, none.uOut]);
+  assertAlmostEquals(wall.face, none.face, 1e-9);
+  assertAlmostEquals(none.face, 1.43, 0.01);
+  for (const d of [1, 2]) {
+    const roof = { ...base, wingAttach: "roof", wingAttachFt: d };
+    const m = F.d3Massing(roof, 37, 22, 10);
+    const land = m.wings.find((g: Any) => g.side > 0).uIn - m.uc;
+    const dg = F.d3DormerReadout(spec(roof), "37x22");
+    assert(dg.uOut <= land - 0.3 + 1e-9, `the face at ${dg.uOut} stands clear of the landing at ${land}`);
+    assert(dg.face < none.face - 0.3, `a smaller face (${dg.face}) than the bare roof's (${none.face})`);
+    assertEquals(dg.clamped, true);
+    assertAlmostEquals(F.d3DormerFaceFt(spec(roof), 37, 22), dg.face, 1e-12, "the window is sized to that face");
+  }
+  // A lean-to 1.5 ft up a 12 x 16's right slope lands 2.25 ft from the middle, inside the dormer's own top
+  // (2.7): nothing of it can stand, and the renderer draws nothing (run under 0.8), no window either.
+  const lt = { type: "gable", pitch: 0.4, dormerType: "transom", dormerWidthFt: 4, dormerOffsetU: 0.45, leanToWidthFt: 8, leanToDropFt: 2 };
+  const onLt = F.d3DormerReadout({ roof: { ...lt, leanToSide: "right", leanToAttach: "roof", leanToAttachFt: 1.5 }, wallHeightFt: 8 }, "12x16");
+  assertEquals([onLt.run, onLt.face, onLt.clamped], [0, 0.3, true]);
+  // The lean-to on the OTHER side, or on the wall, or with no attach: today's dormer.
+  const plain = F.d3DormerReadout({ roof: { ...lt, leanToSide: "right" }, wallHeightFt: 8 }, "12x16");
+  for (const extra of [{ leanToSide: "left", leanToAttach: "roof", leanToAttachFt: 1.5 }, { leanToSide: "right", leanToAttach: "wall", leanToAttachFt: 1 }]) {
+    assertEquals(F.d3DormerReadout({ roof: { ...lt, ...extra }, wallHeightFt: 8 }, "12x16"), plain, JSON.stringify(extra));
+  }
+});
+
 Deno.test("a lean-to up the roof cuts or not by its drop and width alone, wherever it meets; level with the roof it lands", () => {
   const shed = { type: "shed", highSide: "left", pitch: 0.25, leanToWidthFt: 8, leanToSide: "right", leanToAttach: "roof" };
   const seat = (F.D3.ROOF_T + 0.02) * Math.sqrt(1 + 0.25 * 0.25);

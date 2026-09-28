@@ -5035,7 +5035,10 @@ function d3FrameHeightFt(spec, W, L) {
 // dormer needs a longer run, and eventually it runs out of roof. `maxFace` is the tallest
 // face this style and size can build, and `clamped` says whether the builder's number was
 // honoured — the two fields the panel needs to stop the input lying.
-function d3TransomDormerGeom(roofCfg, S, profYAt) {
+// `lands` (d3RoofLands, 2026-09-28): where a wing roof or a lean-to run up onto this roof covers it from
+// the wall in, per side, in this profile's u. The dormer then runs out toward that eave only to 0.3 ft
+// short of the landing, so its face never sinks into the roof over it; absent is every other building.
+function d3TransomDormerGeom(roofCfg, S, profYAt, lands) {
   const cfg = roofCfg || {};
   const fr = Math.max(-0.85, Math.min(0.85, cfg.dormerOffsetU != null ? cfg.dormerOffsetU : 0.45));
   const uTop = (S / 2) * fr;
@@ -5048,11 +5051,13 @@ function d3TransomDormerGeom(roofCfg, S, profYAt) {
   // gambrel's two pitches as well as a gable's one.
   const mainSlope = Math.max(0.05, (yTop - profYAt(uTop + dirU * probe)) / probe);
   const dormSlope = Math.max(0.08, mainSlope * 0.35);          // visibly shallower than the roof
-  const eaveU = dirU > 0 ? (S / 2 - 0.3) : (-S / 2 + 0.3);
+  const land = lands && lands[dirU] != null ? lands[dirU] : null;
+  const eaveU = land != null ? (dirU > 0 ? Math.min(S / 2 - 0.3, land - 0.3) : Math.max(-S / 2 + 0.3, land + 0.3))
+    : (dirU > 0 ? (S / 2 - 0.3) : (-S / 2 + 0.3));
   const wantRise = Math.max(0.5, cfg.dormerRiseFt != null ? cfg.dormerRiseFt : 2.5);
   const gain = Math.max(1e-6, mainSlope - dormSlope);
   const wantRun = wantRise / gain;
-  const maxRun = Math.abs(eaveU - uTop);
+  const maxRun = land != null ? Math.max(0, dirU * (eaveU - uTop)) : Math.abs(eaveU - uTop);
   const run = Math.min(wantRun, maxRun);
   const uOut = uTop + dirU * run;
   const yOut = yTop - dormSlope * run;                          // the dormer's own roof line
@@ -5079,16 +5084,28 @@ function d3TransomDormerGeom(roofCfg, S, profYAt) {
 // span, a Tri Home-sized building's face came out 2.50 ft where the 3D's is 1.31, and a 30x36 in
 // window was offered and PRICED on a dormer that could not draw it. d3DormerRoof is that one profile,
 // for both functions; without wings it is exactly the span and wall the two always used.
+// WHERE ANOTHER ROOF LANDS ON THE CENTRE'S (2026-09-28): a wing roof or a lean-to run up onto the roof
+// (wingAttach / leanToAttach "roof") covers its eave leg from the wall in to where it lands, so a transom
+// dormer toward that eave must stop short of it. { [side]: u } in the CENTRE's own u, or null -- every
+// building without such an attach. One that cannot reach the roof (cuts) covers nothing: it meets the
+// wall under the eave (a wing) or runs in under the deck (a lean-to).
+function d3RoofLands(roofCfg, m, W, L, H) {
+  let out = null;
+  m.wings.forEach((g) => { if (g.attach === "roof" && !g.cuts) (out = out || {})[g.side] = g.uIn - m.uc; });
+  const lt = d3LeanToGeom(roofCfg, W, L, H);
+  if (lt && lt.mode === "roof" && !lt.noRoof && !lt.cuts && !m.wings.some((g) => g.side === lt.dir)) (out = out || {})[lt.dir] = lt.ua - m.uc;
+  return out;
+}
 function d3DormerRoof(roof, wFt, dFt, H) {
   const m = d3Massing(roof, wFt, dFt, H);
-  return { S: m.Sc, profYAt: d3MakeProfYAt(m.prof, m.Hc) };
+  return { S: m.Sc, profYAt: d3MakeProfYAt(m.prof, m.Hc), lands: d3RoofLands(roof, m, wFt, dFt, H) };
 }
 function d3DormerFaceFt(spec, wFt, dFt) {
   const roof = (spec && spec.roof) || {};
   if (roof.type === "shed" || !((roof.dormerWidthFt || 0) > 0.5)) return 0;
   if (roof.dormerType !== "transom") return Math.max(0.3, roof.dormerRiseFt != null ? roof.dormerRiseFt : 2.5);
   const r = d3DormerRoof(roof, Number(wFt) || 12, Number(dFt) || 16, (spec && spec.wallHeightFt) || 8);
-  return d3TransomDormerGeom(roof, r.S, r.profYAt).face;
+  return d3TransomDormerGeom(roof, r.S, r.profYAt, r.lands).face;
 }
 
 // WHERE THE CUSTOMER'S CHOSEN WINDOW SITS ON A DORMER FACE, and whether it fits there at all.
@@ -5152,7 +5169,7 @@ function d3DormerReadout(spec, sizeLabel) {
   const m = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
   const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
   const r = d3DormerRoof(roof, w, d, (spec && spec.wallHeightFt) || 8);
-  return d3TransomDormerGeom(roof, r.S, r.profYAt);
+  return d3TransomDormerGeom(roof, r.S, r.profYAt, r.lands);
 }
 
 // Feet as a builder writes them: 4' 7" rather than 0.55 x half-span. This is the whole
@@ -8711,7 +8728,7 @@ function buildShed3DModel(THREE, p) {
     // builder what their rise number will really build and the two must be the same code.
     // Read that function for why the run is derived and why the main slope is measured off
     // the profile rather than read from roofCfg.pitch.
-    const dg = d3TransomDormerGeom(roofCfg, S, profYAt);
+    const dg = d3TransomDormerGeom(roofCfg, S, profYAt, d3RoofLands(roofCfg, mass, bldgW, bldgH, H));
     const { uTop, yTop, dirU, run, uOut, yOut, yBase, face } = dg;
     if (run > 0.8) {
       const du = uOut - uTop, dy = yOut - yTop;
