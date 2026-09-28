@@ -555,3 +555,52 @@ Deno.test("a lean-to off a wing meets the WING's roof; off the other side of one
   const offCentre = F.d3LeanToGeom({ ...tri, leanToSide: "right", leanToDropFt: 3, leanToAttach: "wall", leanToAttachFt: 2 }, 24, 28, 9);
   assertEquals([offCentre.E, offCentre.ya, offCentre.y1, offCentre.u0, offCentre.flat], [17, 15, 14, 12, false]);
 });
+
+// ── REVIEW, 2026-09-29: what "cuts" really depends on, and what is built when it happens ─────────────
+// Up the roof, p(d) = (Hc - H + d) / (w + d / k): every foot further up adds k of rise per foot of run,
+// so the wing roof reaches the centre's roof exactly when Hc - H <= k * w, at EVERY distance. "Move it
+// higher up the roof" can never cure it; a lower centre (at most H + k * w), a steeper centre roof or
+// "On the wall" can, and the panel says the height. Level with the centre's roof (p == k) is one plane.
+const TRI37 = { type: "gable", front: "gable", overhang: 1, eave: "fascia", wingSide: "both", wingWidthFt: 12, wingPitch: 0.333, centerEaveFt: 14 };
+
+Deno.test("roof: whether the wing roof reaches the centre's roof does not depend on the distance; level with it, it lands", () => {
+  // Carolyn's own numbers: 37 x 22, front a gable end, 12 ft wings, 8 ft walls, centre 14 -- k * w = 6 at 6:12.
+  for (const d of [0, 0.5, 1, 2, 4, 8]) {
+    const at = (pitch: number) => F.d3Massing({ ...TRI37, pitch, wingAttach: "roof", wingAttachFt: d }, 37, 22, 8);
+    for (const g of at(5 / 12).wings) assertEquals([g.cuts, g.meets], [true, "wall"], `5:12 cannot be reached at ${d}`);
+    for (const g of at(0.5).wings) {
+      assertEquals([g.cuts, g.meets], [false, "roof"], `6:12 is one plane with the wing roof at ${d}`);
+      assertAlmostEquals(g.pitch, 0.5, 1e-12);
+    }
+    for (const g of at(8 / 12).wings) assertEquals([g.cuts, g.meets], [false, "roof"], `8:12 at ${d}`);
+  }
+  // ...and the same line for the Tri Home the tests draw: 17 over 9 ft walls is 8 over, and 8 ft wings
+  // on its 6:12 reach 4 -- every distance is flagged; bring the centre to 13 and every one lands.
+  for (const d of [0, 0.5, 1, 1.5, 1.75]) {
+    assertEquals(F.d3Massing({ ...TRI, wingAttach: "roof", wingAttachFt: d }, 24, 28, 9).wings.every((g: Any) => g.cuts), true, `17 at ${d}`);
+    assertEquals(F.d3Massing({ ...TRI, centerEaveFt: 13, wingAttach: "roof", wingAttachFt: d }, 24, 28, 9).wings.every((g: Any) => !g.cuts), true, `13 at ${d}`);
+  }
+});
+
+Deno.test("roof: a wing roof that cannot reach the roof is built as far as it shows -- to the centre's wall, under its eave", () => {
+  const k = 5 / 12;
+  const m = F.d3Massing({ ...TRI37, pitch: k, wingAttach: "roof", wingAttachFt: 1 }, 37, 22, 8);
+  assertEquals([m.Hc, m.attach], [14, "roof"]);
+  const p = (14 + 1 - 8) / (12 + 1 / k);
+  for (const g of m.wings) {
+    assertAlmostEquals(g.pitch, p, 1e-12);
+    assertEquals([g.uIn, g.run, g.attach, g.attachFt, g.meets], [g.u0, 12, "roof", 1, "wall"], "the mode and the distance asked stay the builder's");
+    assertAlmostEquals(g.ya, 8 + 12 * p, 1e-12, "where the wing line meets the centre's wall");
+    assertAlmostEquals(g.meetFt, 14 - (8 + 12 * p), 1e-12);
+    assert(g.ya < m.Hc);
+  }
+  assertAlmostEquals(m.ya, 8 + 12 * p, 1e-12);
+  // The outline: the wing line out to the centre's wall, the centre's own roof from there in.
+  const gW = m.wings.find((g: Any) => g.side < 0);
+  assertAlmostEquals(F.d3MassingTopAt(m, gW.u0 - 1), 8 + 11 * p, 1e-12);
+  assertAlmostEquals(F.d3MassingTopAt(m, gW.u0 + 0.5), 14 + 0.5 * k, 1e-9);
+  // Where it does land, meets / meetFt are the attach itself.
+  for (const g of F.d3Massing({ ...TRI37, pitch: 8 / 12, wingAttach: "roof", wingAttachFt: 1 }, 37, 22, 8).wings) assertEquals([g.meets, g.meetFt], ["roof", 1]);
+  for (const g of F.d3Massing({ ...TRI37, pitch: 8 / 12, wingAttach: "wall", wingAttachFt: 2 }, 37, 22, 8).wings) assertEquals([g.meets, g.meetFt], ["wall", 2]);
+});
+

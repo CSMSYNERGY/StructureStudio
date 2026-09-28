@@ -4758,11 +4758,18 @@ function d3RoofEnd(dedup, side) {
 //         it (clamped). A centre too low to clear even a flat wing roof is drawn anyway, and flagged (cuts).
 //   roof  the wing roof runs up ONTO the centre's roof and lands d ABOVE its eave, on the centre's own
 //         eave leg -- never past its knee or ridge, held 0.25 ft short of it (clamped): A = Hc + d at
-//         uIn = u0 - side * d / k, over a run of w + d / k. It needs a wing roof flatter than the centre's
-//         eave (p < k), or the centre's eave pokes up through it: drawn so, and flagged (cuts). Never
-//         switched to "wall" -- the builder said which.
+//         uIn = u0 - side * d / k, over a run of w + d / k. It needs a wing roof no steeper than the
+//         centre's eave leg (p <= k; level with it, p == k, the two are one plane and it lands). Since
+//         p = (Hc - H + d) / (w + d / k), every foot further up adds k of rise per foot of run, so
+//         p <= k exactly when Hc - H <= k * w, WHATEVER d is: a centre taller than H + k * w cannot be
+//         reached from its roof at any distance (the panel says so, with that height). Then the wing
+//         line runs in UNDER the centre's eave and is built as far as it shows -- to the centre's wall,
+//         H + w * p up (uIn = u0, ya there, meets "wall") -- and flagged (cuts). Never switched to "wall"
+//         as a mode: the builder said which, and the distance they asked stays theirs.
 // Each wing gains pitch (the BUILT one), ya = A, uIn, run, attach, attachFt (the d built), k (the
-// centre's eave slope on that side), clamped and cuts. u0 stays the centre wall line the walls stand on.
+// centre's eave slope on that side), clamped, cuts, and meets / meetFt: where the wing roof actually
+// meets the centre ("roof" or "wall") and how far above or below its eave, for every reader that says
+// it in words. u0 stays the centre wall line the walls stand on.
 function d3WingsAttach(m, c, dRaw, ov) {
   const d0 = Number(dRaw);
   const ask = isFinite(d0) ? Math.max(0, Math.min(10, d0)) : 0;
@@ -4786,8 +4793,10 @@ function d3WingsAttach(m, c, dRaw, ov) {
       if (k > 0.05) { uIn = g.u0 - g.side * (d / k); run = g.w + d / k; }
     }
     const p = (A - Hn) / run;
-    if (m.attach === "roof" && p >= k - 1e-9) cuts = true;
-    Object.assign(g, { pitch: p, ya: A, uIn, run, attach: m.attach, attachFt: d, k, clamped, cuts });
+    if (m.attach === "roof" && p > k + 1e-9) cuts = true;
+    let meets = m.attach, meetFt = d;
+    if (m.attach === "roof" && cuts) { uIn = g.u0; run = g.w; A = Hn + g.w * p; meets = "wall"; meetFt = Hc - A; }
+    Object.assign(g, { pitch: p, ya: A, uIn, run, attach: m.attach, attachFt: d, k, clamped, cuts, meets, meetFt });
   });
   m.ya = m.wings.reduce((y, g) => Math.max(y, g.ya), Hn);
 }
@@ -5828,7 +5837,7 @@ function d3WingsElevation(spec, sizeLabel, focusKey) {
       {label(PL - 26, (Y(0) + Y(H)) / 2, d3FtIn(H), "wall", "wallHeightFt", "end")}
       {/* THE CENTRE'S EAVE and the PEAK, right */}
       <line x1={VW - PR + 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(m.Hc)} {...dimStroke("centerEaveFt")} />
-      {label(VW - PR + 14, (Y(H) + Y(m.Hc)) / 2, d3FtIn(m.Hc), m.hcRaised ? "centre, raised" : "centre eave", "centerEaveFt", "start")}
+      {label(VW - PR + 14, (Y(H) + Y(m.Hc)) / 2, d3FtIn(m.Hc), m.hcRaised ? "centre, raised" : (m.hcLow ? "centre, min." : "centre eave"), "centerEaveFt", "start")}
       <line x1={VW - 8} y1={Y(0)} x2={VW - 8} y2={Y(peak)} stroke={DIM} strokeWidth="1" />
       {label(VW - 12, Y(peak) + 10, d3FtIn(peak), "peak", null, "end")}
       {/* SPAN and the first wing's WIDTH, bottom */}
@@ -5839,7 +5848,7 @@ function d3WingsElevation(spec, sizeLabel, focusKey) {
       {/* WHERE THE WING ROOF MEETS THE CENTRE (wingAttach, 2026-09-28), a line under the wing's own */}
       {g0.attach && (
         <text x={(X(g0.u1) + X(g0.u0)) / 2} y={Y(g0.ye) + 30} textAnchor="middle" style={{ fontSize: 8, fill: on("wingAttachFt") ? HL : DIM }}>
-          {`meets the ${g0.attach} ${d3FtIn(g0.attachFt)} ${g0.attach === "roof" ? "up" : "down"}`}
+          {`meets the ${g0.meets} ${d3FtIn(g0.meetFt)} ${g0.meets === "roof" ? "up" : "down"}`}
         </text>
       )}
     </svg>
@@ -24922,9 +24931,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   const wm = on && roof.wingAttach ? d3Massing(roof, bldgW, bldgH, Number(adminCal.spec.wallHeightFt) || D3.WALL_H) : null;
                   const wg = wm && wm.attach ? wm.wings : [];
                   const wIn12 = [...new Set(wg.map((g) => String(Math.round(g.pitch * 120) / 10)))].join(" / ");
+                  // Up the roof, the wing roof reaches the centre's roof only while the centre's walls stand
+                  // no more than k * w over the outside walls, at ANY distance (d3WingsAttach): past that
+                  // height, moving it up the roof never helps, so the warning names the height that does.
+                  const reachHc = wg.filter((g) => g.cuts).reduce((h, g) => Math.min(h, wm.H + g.k * g.w), Infinity);
                   const wWarn = !wg.length ? null
                     : wm.hcLow ? `The middle section must stand at least 1 ft above the outside walls, so it is drawn at ${d3FtIn(wm.Hc)}.`
-                      : wg.some((g) => g.cuts) ? (wm.attach === "roof" ? "The middle roof's edge cuts through the wing roof — move it higher up the roof." : "The middle section is too low for its roof edge to clear the wing roof — raise its wall height.")
+                      : wg.some((g) => g.cuts) ? (wm.attach === "roof"
+                        ? (reachHc >= wm.H + 1
+                          ? `The middle section is too tall for the wing roofs to reach its roof, so they meet its wall. Bring its walls down to ${d3FtIn(Math.floor(reachHc * 12 + 1e-6) / 12)} or lower, or pick "On the wall".`
+                          : `The middle roof is too flat for the wing roofs to run up onto it, so they meet its wall. Pick "On the wall".`)
+                        : "The middle section is too low for its roof edge to clear the wing roof — raise its wall height.")
                         : wg.some((g) => g.clamped) ? (wm.attach === "roof"
                           ? `The middle roof only goes ${d3FtIn(Math.min(...wg.map((g) => g.attachFt)))} up, so the wing roof meets there.`
                           : `Moved down to ${d3FtIn(Math.max(...wg.map((g) => g.attachFt)))} so the middle roof's edge clears the wing roof.`)
@@ -24973,7 +24990,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                             style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                           {wg.length > 0 && (
                             <div style={{ ...hint, color: wWarn ? "#B45309" : "#A16207" }}>
-                              {`Meets the ${wm.attach === "roof" ? "roof" : "wall"} ${d3FtIn(wg[0].attachFt)} ${wm.attach === "roof" ? "above" : "below"} the centre eave`}
+                              {`Meets the ${wg[0].meets} ${d3FtIn(wg[0].meetFt)} ${wg[0].meets === "roof" ? "above" : "below"} the centre eave`}
                               {wWarn && <div>{wWarn}</div>}
                             </div>
                           )}
