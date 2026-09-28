@@ -5667,6 +5667,7 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
   // The eave the overhang is dimensioned at: the left one, or the right when a lean-to drawn on the
   // left (roof.leanToAttach) would run through its label, which then sits inside the wall under it.
   const ovAt = LT && LT.dir < 0 ? [eaveR, S / 2] : [eaveL, -S / 2];
+  const WX = LT && LT.dir < 0 ? X(-S / 2) + 14 : PL - 22;
 
   const HL = "#B45309", DIM = "#A16207", INK = "#78350F";
   const on = (k) => focusKey === k;
@@ -5704,11 +5705,14 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
         </g>
       )}
 
-      {/* WALL HEIGHT, left */}
-      {tick(PL - 22, Y(0), Y(H), "wallHeightFt")}
-      <line x1={PL - 26} y1={Y(H)} x2={PL - 18} y2={Y(H)} {...dimStroke("wallHeightFt")} />
-      <line x1={PL - 26} y1={Y(0)} x2={PL - 18} y2={Y(0)} {...dimStroke("wallHeightFt")} />
-      {label(PL - 30, (Y(0) + Y(H)) / 2, d3FtIn(H), "wall", "wallHeightFt", "end")}
+      {/* WALL HEIGHT, left -- or, with a lean-to drawn on the left (roof.leanToAttach), just inside the
+          building's own left wall, so it measures that wall and not the lean-to's shorter posts. */}
+      {tick(WX, Y(0), Y(H), "wallHeightFt")}
+      <line x1={WX - 4} y1={Y(H)} x2={WX + 4} y2={Y(H)} {...dimStroke("wallHeightFt")} />
+      <line x1={WX - 4} y1={Y(0)} x2={WX + 4} y2={Y(0)} {...dimStroke("wallHeightFt")} />
+      {LT && LT.dir < 0
+        ? label(WX + 6, (Y(0) + Y(H)) / 2, d3FtIn(H), "wall", "wallHeightFt", "start")
+        : label(PL - 30, (Y(0) + Y(H)) / 2, d3FtIn(H), "wall", "wallHeightFt", "end")}
 
       {/* PEAK, right -- read-only, the number a builder actually measures against */}
       {tick(VW - PR + 22, Y(0), Y(peak), null)}
