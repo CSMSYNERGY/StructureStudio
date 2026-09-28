@@ -9007,6 +9007,11 @@ function buildShed3DModel(THREE, p) {
             const soffit = box(fasciaMat, soffitW, D3_EAVE.SOFFIT_T, sec.zLen);
             soffit.position.set((wallU + edgeU) / 2, deckBotY - D3_EAVE.SOFFIT_T / 2, sec.zMid);
             rg.add(soffit);
+            // A roof step's section keeps its boxed eave's outline (the wall, the corner where the
+            // soffit meets the deck's underside, and that underside's slope), so the joint can close
+            // the lower section's box where it ends (the end cap beside the wedge). Only a stepped
+            // roof's sections carry `boxes`; the whole roof records nothing.
+            if (sec.boxes) sec.boxes.push({ wallU, cornerU: eaveU + nx * D3_EAVE.DECK_N, soffitY: deckBotY, slope: uy / ux });
           }
         }
       } else {
@@ -9165,15 +9170,18 @@ function buildShed3DModel(THREE, p) {
   // (d3RoofStep) the front section runs from the joint to the front and the rear section from the
   // back to the joint on its own profile; neither overhangs the joint, and the wedge below closes
   // what shows between them.
+  // `stepSecs` keeps the two sections of a stepped roof for the joint's trim below; null without one.
+  let stepSecs = null;
   if (!STEP) {
     const whole = { Hr, peak: profPeak, joint: jointPartnerAt, zLen: L + OV * 2, zMid: L / 2, z0: 0, z1: L, end0: true, endL: true };
     slopes.concat(wingSlopes).forEach((sl) => buildSlope(sl, whole));
   } else {
     const zJ = STEP.stepFt;
-    const front = { Hr, peak: profPeak, joint: jointPartnerAt, zLen: L - zJ + OV, zMid: (zJ + L + OV) / 2, z0: zJ, z1: L, end0: false, endL: true };
+    const front = { Hr, peak: profPeak, joint: jointPartnerAt, zLen: L - zJ + OV, zMid: (zJ + L + OV) / 2, z0: zJ, z1: L, end0: false, endL: true, boxes: [] };
     slopes.concat(wingSlopes).forEach((sl) => buildSlope(sl, front));
-    const rear = { Hr: rearProf.H, peak: rearProf.peak, joint: jointPartnerIn(rearProf.slopes), zLen: zJ + OV, zMid: (zJ - OV) / 2, z0: 0, z1: zJ, end0: true, endL: false };
+    const rear = { Hr: rearProf.H, peak: rearProf.peak, joint: jointPartnerIn(rearProf.slopes), zLen: zJ + OV, zMid: (zJ - OV) / 2, z0: 0, z1: zJ, end0: true, endL: false, boxes: [] };
     rearProf.slopes.forEach((sl) => buildSlope(sl, rear));
+    stepSecs = { front, rear };
   }
   // ── THE ROOF STEP: THE WEDGE AT THE JOINT (d3RoofStep, 2026-09-28) ───────────────────────────────
   // Where the two sections meet, the higher one's roof stands above the lower one's by the rise at
@@ -9221,6 +9229,28 @@ function buildShed3DModel(THREE, p) {
       wedge.userData.ssRoofStep = "wedge";
       wedge.userData.ssRoofStepSide = s;
       rg.add(wedge);
+    });
+    // ── AND THE LOWER SECTION'S BOXED EAVE, CLOSED AT THE JOINT ──
+    // A notched fascia eave is a box: the level soffit, the fascia and, over them, the deck's
+    // underside rising back to the wall. The lower section's box ends open at the joint, and seen
+    // from the HIGHER side, under the higher eave, the triangle between its soffit and its deck
+    // showed the soffit's lit top face. It is closed with a thin fascia-coloured end cap on the joint
+    // plane, on the higher section's side: from the soffit's underside up to the deck's underside,
+    // from the wall out to the corner where the two meet (inside the fascia). The wedge stands on
+    // the other side of the plane and above the lower deck's top face, so the two never share a
+    // face. No soffit (an open or extended eave) leaves nothing to close. userData "eaveCap".
+    const TC = 0.04;
+    (hiRear ? stepSecs.front : stepSecs.rear).boxes.forEach((b) => {
+      const yWall = b.soffitY + (b.wallU - b.cornerU) * b.slope;   // the deck's underside over the wall
+      if (!(yWall - b.soffitY > 0.01)) return;
+      const bot = b.soffitY - D3_EAVE.SOFFIT_T;
+      const csh = new THREE.Shape();
+      [[b.wallU, bot], [b.cornerU, bot], [b.cornerU, b.soffitY], [b.wallU, yWall]].forEach((pt, i) => (i === 0 ? csh.moveTo(pt[0], pt[1]) : csh.lineTo(pt[0], pt[1])));
+      const cap = new THREE.Mesh(new THREE.ExtrudeGeometry(csh, { depth: TC, bevelEnabled: false }), fasciaMat);
+      cap.position.z = hiRear ? zJ - TC : zJ;
+      cap.userData.ssRoofStep = "eaveCap";
+      cap.userData.ssRoofStepSide = Math.sign(b.wallU);
+      rg.add(cap);
     });
   }
   // ── PROJECTING PORCH (roof.porchOutFt, 2026-09-17) ──────────────────────────────────────────

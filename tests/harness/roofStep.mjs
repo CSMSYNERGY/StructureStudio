@@ -16,8 +16,12 @@
 //   4. the wedge: one fascia-coloured board per long side at the joint, on the LOWER section's side,
 //      deepest at the eave (at least the step between the two fascias, reaching from the lower
 //      fascia's top to the higher one's), closing to under an inch at the ridge
+//   4b. the LOWER section's boxed eave is closed at the joint: one fascia-coloured end cap per long
+//      side on the HIGHER section's side of the joint plane, from the lower soffit's underside up to
+//      the lower deck's underside, from the wall out inside the lower fascia, and clear of the wedge
+//      (the other side of the plane, and below it at every u); none on an open eave
 //   5. a negative rise mirrors all of it: the rear walls are shorter and the wedge stands on the
-//      rear side of the joint
+//      rear side of the joint, the end cap on the front side
 //   6. an old-frame portrait style (no front) with an open eave, lap siding, a gable vent and a plate
 //      band: the back cap's vent and band sit the rise higher, and no two rafter tails share a place
 //      at the joint; a dormer over the joint is seated on the lower roof and draws, and a dormer
@@ -154,7 +158,7 @@ async function measure(page) {
       for (let i = 0; i < p.count; i++) { const v = new V().fromBufferAttribute(p, i).applyMatrix4(q.matrixWorld); out.push([v.x, v.y, v.z]); }
       return out;
     };
-    const out = { step: M.roofStep || null, walls: {}, prisms: [], wedges: [], fascias: [], caps: [], corners: [], louvers: [], bands: [], tails: [], dormers: [] };
+    const out = { step: M.roofStep || null, walls: {}, prisms: [], wedges: [], eaveCaps: [], fascias: [], soffits: [], caps: [], corners: [], louvers: [], bands: [], tails: [], dormers: [] };
     M.wallsGroup.children.forEach((g) => {
       if (!g.userData || !g.userData.wall) return;
       const pieces = [];
@@ -165,10 +169,12 @@ async function measure(page) {
       if (!q.isMesh || !q.geometry) return;
       const ud = q.userData || {}, g = q.geometry, pr = g.parameters || {};
       if (ud.ssRoofStep === "wedge") { out.wedges.push({ side: ud.ssRoofStepSide, ...bb(q), v: verts(q), fascia: q.material === M.fasciaMat }); return; }
+      if (ud.ssRoofStep === "eaveCap") { out.eaveCaps.push({ side: ud.ssRoofStepSide, ...bb(q), v: verts(q), fascia: q.material === M.fasciaMat }); return; }
       if (g.type === "ExtrudeGeometry" && Array.isArray(q.material) && !ud.ssPorchPart && !ud.ssWing) { out.prisms.push({ rear: ud.ssRoofStep === "rear", ...bb(q) }); return; }
       if (g.type !== "BoxGeometry") return;
       const b = bb(q);
       if (q.material === M.fasciaMat && b.mx[0] - b.mn[0] < 0.2 && b.mx[2] - b.mn[2] > 2) out.fascias.push(b);
+      else if (q.material === M.fasciaMat && Math.abs(pr.height - 0.05) < 1e-9 && b.mx[2] - b.mn[2] > 2) out.soffits.push(b);
       else if (Math.abs(pr.width - 0.55) < 1e-9 && Math.abs(pr.height - 0.06) < 1e-9) out.caps.push(b);
       else if (q.parent === M.roofGroup && q.material === M.cornerMat) out.corners.push(b);
       else if (ud.ssPorch === "band") out.bands.push(b);
@@ -210,7 +216,7 @@ async function runCase(ctx, c, ok, shots, digests) {
     if (c.digest || c.digestOf) digests[c.id] = await digest(page);
     const m = await measure(page);
     if (c.digest || c.digestOf) {
-      ok(`${tag}: no step is built`, !m.step && m.wedges.length === 0 && !m.prisms.some((p) => p.rear), JSON.stringify(m.step));
+      ok(`${tag}: no step is built`, !m.step && m.wedges.length === 0 && m.eaveCaps.length === 0 && !m.prisms.some((p) => p.rear), JSON.stringify(m.step));
     } else {
       const roof = c.d3.roof, H = c.H, st = m.step;
       ok(`${tag}: the model built a step (${st && `${st.stepFt} ft, rise ${st.rise}`})`, !!st && st.stepFt === roof.rearStepFt && Math.abs(st.rise - roof.rearEaveRiseFt) < 1e-9, JSON.stringify(st));
@@ -280,6 +286,38 @@ async function runCase(ctx, c, ok, shots, digests) {
           ok(`${tag}: ⚠️ NO GAP at the ${side} eave: the wedge runs from the lower fascia's top up to the higher fascia's, and out to its face`,
             lo && hi && Math.min(...outer) <= lo.mx[1] + 0.03 && Math.max(...outer) >= hi.mx[1] - 0.03 && uOut >= Math.max(Math.abs(hi.mn[0]), Math.abs(hi.mx[0])) - 1e-6,
             JSON.stringify({ wedge: [f3(Math.min(...outer)), f3(Math.max(...outer)), f3(uOut)], lo: lo && f3(lo.mx[1]), hi: hi && [f3(hi.mx[1]), f3(Math.max(Math.abs(hi.mn[0]), Math.abs(hi.mx[0])))] }));
+        }
+      }
+      // 4b. the lower section's boxed eave, closed at the joint
+      if (roof.eave === "open") {
+        ok(`${tag}: an open eave has no box to close, and no end cap`, m.eaveCaps.length === 0, String(m.eaveCaps.length));
+      } else {
+        ok(`${tag}: one fascia-coloured end cap per long side on the lower section's eave`, m.eaveCaps.length === 2 && m.eaveCaps.every((c) => c.fascia) && new Set(m.eaveCaps.map((c) => c.side)).size === 2, String(m.eaveCaps.length));
+        for (const cap of m.eaveCaps) {
+          const side = cap.side < 0 ? "west" : "east";
+          ok(`${tag}: ⚠️ the ${side} end cap stands on the HIGHER section's side of the joint, 0.04 ft thick`,
+            rise > 0 ? Math.abs(cap.mx[2] - zJ) < 1e-6 && Math.abs(cap.mn[2] - (zJ - 0.04)) < 1e-6 : Math.abs(cap.mn[2] - zJ) < 1e-6 && Math.abs(cap.mx[2] - (zJ + 0.04)) < 1e-6,
+            `${f3(cap.mn[2])}..${f3(cap.mx[2])} joint ${f3(zJ)}`);
+          // The lower section's soffit on this side: under the lower eave, in front of the joint when the
+          // rear is higher, behind it when the rear is lower.
+          const lowSoffit = m.soffits.find((b) => Math.sign(b.mn[0] + b.mx[0]) === cap.side && Math.abs(Math.min(Math.abs(b.mn[0]), Math.abs(b.mx[0])) - S / 2) < 1e-6
+            && (rise > 0 ? b.mn[2] >= zJ - 1e-6 : b.mx[2] <= zJ + 1e-6));
+          const au = (v) => Math.abs(v[0]);
+          const uIn = Math.min(...cap.v.map(au)), uOut = Math.max(...cap.v.map(au));
+          const yTopAtWall = Math.max(...cap.v.filter((v) => Math.abs(au(v) - uIn) < 1e-6).map((v) => v[1]));
+          ok(`${tag}: ⚠️ the ${side} end cap closes the box: from the lower soffit's underside, from the wall (${f3(S / 2)}) out inside the fascia, up to the deck over the wall`,
+            !!lowSoffit && Math.abs(cap.mn[1] - lowSoffit.mn[1]) < 1e-6 && Math.abs(uIn - S / 2) < 1e-6
+              && Math.abs(uOut - Math.max(Math.abs(lowSoffit.mn[0]), Math.abs(lowSoffit.mx[0]))) < 0.2
+              && yTopAtWall - lowSoffit.mx[1] > 0.3,
+            JSON.stringify({ cap: [f3(uIn), f3(uOut), f3(cap.mn[1]), f3(yTopAtWall)], soffit: lowSoffit && [f3(lowSoffit.mn[1]), f3(lowSoffit.mx[1]), f3(Math.max(Math.abs(lowSoffit.mn[0]), Math.abs(lowSoffit.mx[0])))] }));
+          // Clear of the wedge: the other side of the joint plane, and below its bottom edge at every u.
+          const w = m.wedges.find((q) => q.side === cap.side);
+          const wIn = w && Math.min(...w.v.map(au)), wOut = w && Math.max(...w.v.map(au));
+          const wLow = (uu) => Math.min(...w.v.filter((v) => Math.abs(au(v) - uu) < 1e-6).map((v) => v[1]));
+          const under = (uu) => wLow(wIn) + (uu - wIn) * (wLow(wOut) - wLow(wIn)) / (wOut - wIn);
+          ok(`${tag}: ⚠️ NO Z-FIGHT: the ${side} end cap and the wedge share no volume and no face`,
+            !!w && (rise > 0 ? cap.mx[2] <= w.mn[2] + 1e-9 : cap.mn[2] >= w.mx[2] - 1e-9) && cap.v.every((v) => v[1] < under(au(v)) - 0.1),
+            w ? `cap z ${f3(cap.mn[2])}..${f3(cap.mx[2])} wedge z ${f3(w.mn[2])}..${f3(w.mx[2])}` : "no wedge");
         }
       }
       // 6. the old-frame style's vents, band, tails and dormer
