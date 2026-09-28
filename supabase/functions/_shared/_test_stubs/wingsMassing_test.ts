@@ -54,7 +54,7 @@ type Any = any;
 const F = new Function(
   `const isVentItem = (it) => !!(it && it.isVent);\n${blocks.map((b) => b.cmp).join("\n")}; return { D3, d3RoofAxes, d3Massing, d3MassingTopAt, d3WallTops, d3WallTopFt, d3CeilingFt, ` +
     `d3PorchSpanWings, d3PorchSpan, d3PorchWallTopFt, d3ModelTopFt, d3FrameHeightFt, d3DefaultShotCamera, ssSelfCheckCameras, ssGableVentFit, SS_SHOT, ` +
-    `d3DormerFaceFt, d3DormerReadout, d3TransomDormerGeom, d3MakeProfYAt, d3RoofProfile, d3DormerWindowFit, d3RoofEnd };`,
+    `d3DormerFaceFt, d3DormerReadout, d3TransomDormerGeom, d3MakeProfYAt, d3RoofProfile, d3DormerWindowFit, d3RoofEnd, d3LeanToGeom };`,
 )() as Record<string, Any>;
 
 // The Tri Home, as the task drew it: 24 wide across the gable end, 28 deep, 9 ft outer walls, 8 ft
@@ -495,4 +495,63 @@ Deno.test("d3RoofEnd: the eave and the leg rising from it, at either end, a shed
   const shed = F.d3RoofProfile({ type: "shed", pitch: 0.25 }, 12, 8, true).dedup;
   const hi = F.d3RoofEnd(shed, -1), lo = F.d3RoofEnd(shed, 1);
   assertEquals([hi.y, hi.k, lo.y, lo.k], [11, -0.25, 8, 0.25]);
+});
+
+// ── WHERE A LEAN-TO MEETS THE BUILDING (roof.leanToAttach / leanToAttachFt) ──────────────────────
+Deno.test("⚠️ a lean-to with no attach has no attach geometry: the renderer builds today's", () => {
+  const base = { type: "gable", pitch: 0.4, leanToWidthFt: 8, leanToDropFt: 2, leanToSide: "left" };
+  assertEquals(F.d3LeanToGeom(base, 12, 16, 8), null);
+  assertEquals(F.d3LeanToGeom({ ...base, leanToAttach: "side", leanToAttachFt: 2 }, 12, 16, 8), null);
+  assertEquals(F.d3LeanToGeom({ ...base, leanToWidthFt: 0.5, leanToAttach: "roof" }, 12, 16, 8), null, "no lean-to");
+});
+
+Deno.test("a lean-to on the wall meets it d below the eave; up the roof, d above it and in by d / k", () => {
+  const base = { type: "gable", pitch: 0.4, leanToWidthFt: 8, leanToDropFt: 2, leanToSide: "left" };
+  const wall = F.d3LeanToGeom({ ...base, leanToAttach: "wall", leanToAttachFt: 1 }, 12, 16, 8);
+  assertEquals([wall.u0, wall.u1, wall.ua, wall.ya, wall.y1, wall.E, wall.mode], [-6, -14, -6, 7, 6, 8, "wall"]);
+  assertAlmostEquals(wall.pitch, 1 / 8, 1e-12);
+  const seat = (F.D3.ROOF_T + 0.02) * Math.sqrt(1 + 0.16);
+  const roof = F.d3LeanToGeom({ ...base, leanToAttach: "roof", leanToAttachFt: 1.5 }, 12, 16, 8);
+  assertAlmostEquals(roof.ua, -(6 - 1.5 / 0.4), 1e-12);
+  assertAlmostEquals(roof.ya, 9.5 + seat, 1e-12, "seated on the deck's top face");
+  assertEquals(roof.y1, 6, "the outer edge keeps leanToDropFt under the eave");
+  // "The further out they go, the higher up in the roof they have to go": up the roof it is steeper than
+  // hung at the eave, and flatter than the roof it sits on.
+  assert(roof.pitch > 2 / 8 && roof.pitch < 0.4, String(roof.pitch));
+  assertEquals([roof.clamped, roof.flat, roof.cuts, roof.noRoof], [false, false, false, false]);
+  // The right side mirrors it.
+  assertAlmostEquals(F.d3LeanToGeom({ ...base, leanToSide: "right", leanToAttach: "roof", leanToAttachFt: 1.5 }, 12, 16, 8).ua, 6 - 1.5 / 0.4, 1e-12);
+  // Up past the ridge is held 0.25 ft short of it.
+  assertEquals(F.d3LeanToGeom({ ...base, leanToAttach: "roof", leanToAttachFt: 8 }, 12, 16, 8).clamped, true);
+});
+
+Deno.test("a lean-to's odd cases are drawn as asked and flagged, never switched", () => {
+  const shed = { type: "shed", highSide: "left", pitch: 0.25, leanToWidthFt: 8, leanToDropFt: 1 };
+  // The single slant's HIGH side (west, eave 11): the wall is fine, the roof has nothing above it.
+  const hw = F.d3LeanToGeom({ ...shed, leanToSide: "left", leanToAttach: "wall", leanToAttachFt: 0.5 }, 12, 16, 8);
+  assertEquals([hw.E, hw.ya, hw.y1, hw.k], [11, 10.5, 10, -0.25]);
+  const hr = F.d3LeanToGeom({ ...shed, leanToSide: "left", leanToAttach: "roof", leanToAttachFt: 1 }, 12, 16, 8);
+  assertEquals([hr.mode, hr.noRoof, hr.clamped, hr.ua, hr.ya, hr.d], ["roof", true, true, -6, 11, 0]);
+  // A roof attach steeper than the roof it sits on: the main eave pokes through it (cuts).
+  const steep = F.d3LeanToGeom({ ...shed, leanToSide: "right", leanToDropFt: 2, leanToAttach: "roof", leanToAttachFt: 1 }, 12, 16, 8);
+  assertEquals([steep.mode, steep.cuts], ["roof", true]);
+  // A wall attach below the outer edge: a sliver of pitch is held, and flagged.
+  const flat = F.d3LeanToGeom({ ...shed, leanToSide: "right", leanToAttach: "wall", leanToAttachFt: 3 }, 12, 16, 8);
+  assertEquals([flat.flat, flat.mode], [true, "wall"]);
+  assertAlmostEquals(flat.ya, flat.y1 + 0.05, 1e-12);
+});
+
+Deno.test("a lean-to off a wing meets the WING's roof; off the other side of one wing, the centre's tall wall", () => {
+  const tri = { ...TRI, wingSide: "left", leanToWidthFt: 6, leanToDropFt: 1 };
+  // Off the wing (west): the eave is H, the roof above it the wing's.
+  const onWing = F.d3LeanToGeom({ ...tri, leanToSide: "left", leanToAttach: "roof", leanToAttachFt: 1 }, 24, 28, 9);
+  assertEquals([onWing.E, onWing.k], [9, 0.25]);
+  assertAlmostEquals(onWing.ua, -12 + 1 / 0.25, 1e-12);
+  // ...a wing whose own pitch is worked out from its attach carries that pitch to the lean-to.
+  const wAtt = F.d3LeanToGeom({ ...tri, wingAttach: "wall", wingAttachFt: 2, leanToSide: "left", leanToAttach: "wall", leanToAttachFt: 0 }, 24, 28, 9);
+  assertAlmostEquals(wAtt.k, (15 - 9) / 8, 1e-12);
+  // Off the other side (east): no wing, so it is the centre's own wall at Hc = 17 -- both the attach
+  // and the outer edge's drop are measured from there.
+  const offCentre = F.d3LeanToGeom({ ...tri, leanToSide: "right", leanToDropFt: 3, leanToAttach: "wall", leanToAttachFt: 2 }, 24, 28, 9);
+  assertEquals([offCentre.E, offCentre.ya, offCentre.y1, offCentre.u0, offCentre.flat], [17, 15, 14, 12, false]);
 });
