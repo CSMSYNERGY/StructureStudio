@@ -1961,11 +1961,13 @@ Deno.test("⚠️ every roof key the v2 schema asks for survives the sanitiser",
     dormerWidthFt: 4, dormerRiseFt: 2, dormerOffsetU: 0.5,
     porchDepthFt: 6, porchEnd: "front", porchTruss: true, porchOutFt: 6, porchAttachFt: 8, porchWidthFt: 10,
     porchPosts: 3, porchPitch: 0.2, porchSteps: "right",
+    rearStepFt: 12, rearEaveRiseFt: 0.42,
   };
   assertEquals([...asked].sort(), Object.keys(SAMPLE).sort(), "this test covers exactly the keys the schema asks for");
   for (const k of asked) {
     const roof: Record<string, unknown> = { type: k === "highSide" ? "shed" : "gable", [k]: SAMPLE[k] };
     if (["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"].includes(k)) roof.porchOutFt = 6;   // projecting porch only
+    if (k === "rearStepFt" || k === "rearEaveRiseFt") Object.assign(roof, { rearStepFt: 12, rearEaveRiseFt: 0.42 });   // both or neither
     const r = parseModelSpec(JSON.stringify({ roof }), DIMS);
     assert(r.ok, `a reply carrying ${k} parses`);
     const stored = k === "overhangIn" ? "overhang" : k;                     // inches fold to feet
@@ -6329,4 +6331,44 @@ Deno.test("roof step: a model reply carrying both keys reaches the spec; the leg
   for (const p of [RS.VIDEO_SHAPE_PROMPT, RS.SPEC_PROMPT, RS.videoShapePrompt({ widthFt: 16, lengthFt: 30, wallHeightFt: 8 }, false), RS.combinedShapePrompt(8, 4)]) {
     assert(!p.includes("rearStepFt") && !p.includes("ROOF STEP"), "a legacy prompt asks nothing about a step");
   }
+});
+
+// The paragraph the v2 prompt carries, read out of the prompt itself.
+const STEP_V2 = RS.videoShapePrompt({ widthFt: 16, lengthFt: 30, wallHeightFt: 8 }, true);
+const STEP_PARA = (() => {
+  const i = STEP_V2.indexOf("ROOF STEP:");
+  return i < 0 ? "" : STEP_V2.slice(i, STEP_V2.indexOf("\n", i));
+})();
+
+Deno.test("the v2 prompt asks for the roof step: the schema lines and a ROOF STEP paragraph", () => {
+  assert(STEP_V2.includes('    "rearStepFt": <only if the roof is built in TWO SECTIONS with a step where they meet: feet from the BACK wall to that joint>,\n'), "the step's schema line");
+  assert(STEP_V2.includes('    "rearEaveRiseFt": <with rearStepFt: how much HIGHER the rear section\'s eave sits than the front section\'s, in feet; negative when it sits lower>,\n'), "the rise's schema line");
+  assert(STEP_PARA.length > 400, "the paragraph is there");
+  for (const [why, re] of [
+    ["how to recognise it: a joint across the roof", /a joint runs up the roof from the eave to the ridge/],
+    ["the rear eave higher or lower", /HIGHER than the front section's, or sometimes lower/],
+    ["the wedge, deepest at the eave", /wedge-shaped step[^.]*deepest at the eave, closing to nothing at the ridge/],
+    ["the ridges level", /The two ridges line up/],
+    ["on BOTH long sides", /BOTH long sides/],
+    ["the distance from the BACK wall", /how far the joint is from the BACK wall/],
+    ["counted in battens or measured against the depth", /count the battens, grooves or panels[^.]*or measure it as a share of the building's known depth/],
+    ["the rise against the known wall height, inches to feet", /read the step in inches against the known wall height, then divide by 12/],
+    ["a lower rear eave is negative", /negative number when the rear section's eave is the lower one/],
+    ["both or neither", /Give both keys or neither/],
+    ["left out when there is no step", /Leave both out when the roof runs unbroken/],
+  ] as const) {
+    assert(re.test(STEP_PARA), `the paragraph says ${why}`);
+  }
+  // It sits with the other roof appendages, after the dormer and before the colours.
+  assert(STEP_V2.indexOf("DORMER:") < STEP_V2.indexOf("ROOF STEP:") && STEP_V2.indexOf("ROOF STEP:") < STEP_V2.indexOf("COLOURS matter here"), "placed after DORMER");
+});
+
+Deno.test("⚠️ the roof step's examples are generic, never the Black Cabin's own numbers", () => {
+  // The building this was written for: 14 ft from the back, about 0.6 ft higher, 40 ft deep. A
+  // prompt that shows the model the answer teaches it to give that answer to every building.
+  const nums = [...STEP_PARA.matchAll(/\d+(\.\d+)?/g)].map((m) => m[0]);
+  assert(nums.length >= 3, "the paragraph has a worked example");
+  for (const bad of ["14", "0.6", "40", "7.75", "8.25", "0.34"]) assert(!nums.includes(bad), `the example uses ${bad}`);
+  // The worked example is self-consistent: 5 in over 12 is 0.42.
+  assert(/a step of 5 inches is 0\.42/.test(STEP_PARA) && /rearStepFt 12 and rearEaveRiseFt 0\.42/.test(STEP_PARA), "5 in / 12 = 0.42");
 });
