@@ -16514,6 +16514,9 @@ function ssShotSig(spec) {
     spec.foundation ?? null, spec.roofMaterial ?? null, spec.gableVent ?? null,
     // A raised floor's height (2026-09-25) moves the ground, the supports and the porch steps.
     spec.floorHeightFt ?? null,
+    // ...and so does the ground falling away under it (2026-09-28). Appended only when the style
+    // carries either key, so every signature taken before is the one it was.
+    ...(spec.gradeFallFt != null || spec.gradeFallToward != null ? [spec.gradeFallFt ?? null, spec.gradeFallToward ?? null] : []),
   ]);
 }
 
@@ -16612,6 +16615,13 @@ function ssDrewWords(spec, porchBuilt) {
     out.push(h > 0
       ? `It stands on ${what}, its floor ${ssFtInWords(h)} off the ground at the front.`
       : `It stands on ${what}; no floor height is given, so its floor is drawn ${ssFtInWords(raisedOn === "blocks" ? 1 : 1.5)} off the ground.`);
+    // The ground falling away under it (2026-09-28): d3GradeFall's reading, spelt out here so this
+    // stays a pure function of the spec.
+    const fallRaw = Number(spec.gradeFallFt);
+    if (isFinite(fallRaw) && fallRaw > 0) {
+      const toward = spec.gradeFallToward === "left" || spec.gradeFallToward === "right" ? spec.gradeFallToward : "back";
+      out.push(`The ground falls ${ssFtInWords(Math.min(6, fallRaw))} toward the ${toward}, so the ${raisedOn === "blocks" ? "blocks" : "piers"} on that side stand taller.`);
+    }
   }
   return out.join(" ");
 }
@@ -20561,9 +20571,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // always drawn), and the floor height belongs to blocks or piers only: leaving them deletes it,
   // as the sanitiser would on Save, so the preview never draws a height Save cannot store. A cleared
   // height box DELETES floorHeightFt and the renderer draws the kind's own default.
+  // The ground's fall (gradeFallFt / gradeFallToward, 2026-09-28) is a raised floor's too, and goes with
+  // it the same way: onto skids, a slab or "Not set", and when a video draft's foundation is not raised.
+  const CAL_RAISED_ONLY = ["floorHeightFt", "gradeFallFt", "gradeFallToward"];
   const calTidyFloor = (spec) => {
-    if (!d3RaisedFoundation(spec) && "floorHeightFt" in spec) { const out = { ...spec }; delete out.floorHeightFt; return out; }
-    return spec;
+    if (d3RaisedFoundation(spec) || !CAL_RAISED_ONLY.some((k) => k in spec)) return spec;
+    const out = { ...spec };
+    for (const k of CAL_RAISED_ONLY) delete out[k];
+    return out;
   };
   const calSetFoundation = (v) => setAdminCal((p) => {
     const spec = { ...p.spec };
@@ -20575,6 +20590,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const spec = { ...p.spec };
     if (n === null || n === undefined || !(Number(n) > 0)) delete spec.floorHeightFt;
     else spec.floorHeightFt = Number(n);
+    return { ...p, spec };
+  });
+  // A TOP-LEVEL optional key (the ground's fall, 2026-09-28): "", null or undefined DELETES it, the
+  // calSetRoofOpt rule, so a cleared box saves no key and the preview draws level ground.
+  const calSetTopOpt = (key, v) => setAdminCal((p) => {
+    const spec = { ...p.spec };
+    if (v === "" || v === null || v === undefined) delete spec[key];
+    else spec[key] = v;
     return { ...p, spec };
   });
   const calSetRoofOpt = (key, v) => setAdminCal((p) => {
@@ -20627,10 +20650,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // WHAT THE BUILDING STANDS ON, AND HOW HIGH (2026-09-25): one pair of controls, drawn in the walls
   // fix panel and in the full field grid, so the two can never offer different choices. The height
   // box shows only for blocks and piers, the two that raise the floor; blank is the kind's default.
+  // THE GROUND FALLING AWAY (2026-09-28): blocks and piers only, blank or 0 is level ground. Which way
+  // it falls shows once it falls, and says where the floor height is taken and which piers grow.
   const calFoundationFields = (idPrefix, labelStyle, inputStyle) => {
     const spec = (adminCal && adminCal.spec) || {};
     const raised = d3RaisedFoundation(spec);
     const grade = d3GradeFt(spec);
+    const fall = d3GradeFall(spec);
+    const uphill = fall && fall.toward === "left" ? "right side" : fall && fall.toward === "right" ? "left side" : "front";
+    const noteStyle = { display: "block", fontWeight: 400, marginTop: 2, fontSize: 11, color: "#64748B", lineHeight: 1.5 };
     return (
       <>
         <label style={labelStyle}>What it stands on
@@ -20644,13 +20672,34 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           </select>
         </label>
         {raised && (
-          <label style={labelStyle}>Floor height off the ground, at the front (ft)
+          <label style={labelStyle}>Floor height off the ground, {uphill === "front" ? "at the front" : `on the ${uphill}`} (ft)
             <input className="ssc-dim-in" type="number" step="0.1" min="0.3" max="6" inputMode="decimal"
               placeholder={`${D3_FLOOR_HEIGHT_DEFAULT_FT[raised]} ft`} data-ss-floor-height={idPrefix}
               {...calOptNumProps(idPrefix + "-floorHeightFt", spec.floorHeightFt, [0.3, 6], (n) => calSetFloorHeight(n))}
               style={inputStyle} />
             <span style={{ display: "block", fontWeight: 400, marginTop: 2, fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
               Ground to the top of the floor where the door or porch is. A door is 6 ft 8 in tall, and each step up is about 7 in. Blank draws {ssFtInWords(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}. Porch steps climb the whole height, and a ramp a customer adds is drawn {grade > 0.75 ? ssFtInWords(4 * grade) : "3 ft"} long so it reaches the ground.
+            </span>
+          </label>
+        )}
+        {raised && (
+          <label style={labelStyle}>Ground falls away (ft)
+            <input className="ssc-dim-in" type="number" step="0.5" min="0" max="6" inputMode="decimal"
+              placeholder="blank = level" data-ss-grade-fall={idPrefix}
+              {...calOptNumProps(idPrefix + "-gradeFallFt", spec.gradeFallFt, [0, 6], (n) => calSetTopOpt("gradeFallFt", n > 0 ? n : null))}
+              style={inputStyle} />
+          </label>
+        )}
+        {fall && (
+          <label style={labelStyle}>Toward
+            <select value={fall.toward} onChange={(e) => calSetTopOpt("gradeFallToward", e.target.value)}
+              data-ss-grade-fall-toward={idPrefix} style={inputStyle}>
+              <option value="back">Back</option>
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+            </select>
+            <span style={noteStyle}>
+              Floor height is measured {uphill === "front" ? "at the front" : `on the ${uphill}`}. The {fall.toward === "back" ? "far side's" : `${fall.toward} side's`} {raised} stand this much taller.
             </span>
           </label>
         )}
@@ -22089,7 +22138,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt]);
     if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps]);
     // What it stands on and how high (2026-09-25) are set in the walls panel, beside the wall.
-    if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt]);
+    if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt, spec.gradeFallFt, spec.gradeFallToward]);
     return JSON.stringify([spec.colors, spec.roofMaterial]);
   };
   // ⚠️ ANSWERED IS NOT AGREED. calChecksAnswered counts any non-empty answer, so "No" -- the
