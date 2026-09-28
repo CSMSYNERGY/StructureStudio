@@ -53,7 +53,7 @@ const PANEL: Array<[string, string]> = [
 // The panel's tidy-up and the video draft's merge, which live inside the component.
 const CAL: Array<[string, string]> = [
   ["const CAL_RAISED_ONLY = ", "  const calSetFoundation"],
-  ["const calShapeMerged = (spec, d3) => calTidyFloor({", "  const applyDraftedShape"],
+  ["const calFloorFromFront = ", "  const applyDraftedShape"],
 ];
 const liftAll = (regions: Array<[string, string]>) => regions.map(([a, b]) => ({
   a,
@@ -71,14 +71,16 @@ type Any = any;
 const F = new Function(
   `${renderBlocks.map((b) => b.cmp).join("\n")}; return { D3, D3_GRADE_FALL_TOWARD, d3GradeFt, d3GradeLiftFt, d3GradeMaxFt, d3GradeFall, d3GradeFallAxis, ` +
     `d3GradeFallBlendFt, d3GradeAt, d3FrameHeightFt, d3PorchToRoot, d3PorchStepsGradeFt, d3PorchStepsGeom, d3PorchGeom, d3PorchFraming, ` +
-    `d3PorchReadout, d3ResolveStyleSpec, d3DefaultShotCamera, ssSelfCheckCameras, D3_FOUNDATIONS, d3RaisedFoundation };`,
+    `d3PorchReadout, d3ResolveStyleSpec, d3DefaultShotCamera, ssSelfCheckCameras, D3_FOUNDATIONS, d3RaisedFoundation, ` +
+    `d3FloorHeightFromFront, d3FrontGableWall };`,
 )() as Record<string, Any>;
 const P = new Function(`${panelBlocks.map((b) => b.cmp).join("\n")}; return { ssDrewWords, ssShotSig };`)() as Record<string, Any>;
 // calDraftRoof is the roof half of the merge (calDraftRoof_test's); a plain spread stands in for it.
+// bldgW x bldgH is the calibration preview's footprint, the component's own state.
 const C = new Function(
-  "calDraftRoof", "D3_FOUNDATIONS", "d3RaisedFoundation",
+  "calDraftRoof", "D3_FOUNDATIONS", "d3RaisedFoundation", "d3GradeFall", "d3FloorHeightFromFront", "bldgW", "bldgH",
   `${calBlocks.map((b) => b.cmp).join("\n")}; return { calTidyFloor, calShapeMerged, CAL_RAISED_ONLY };`,
-)((s: Any, d: Any) => ({ ...(s || {}), ...(d || {}) }), F.D3_FOUNDATIONS, F.d3RaisedFoundation) as Record<string, Any>;
+)((s: Any, d: Any) => ({ ...(s || {}), ...(d || {}) }), F.D3_FOUNDATIONS, F.d3RaisedFoundation, F.d3GradeFall, F.d3FloorHeightFromFront, 16, 24) as Record<string, Any>;
 
 const PIERS = { roof: { type: "gable", pitch: 0.4 }, wallHeightFt: 8, foundation: "piers", floorHeightFt: 1.5 };
 const W = 16, L = 24;
@@ -235,6 +237,40 @@ Deno.test("d3PorchStepsGradeFt: d3GradeFt on level ground; with a fall, the deep
   for (const k of ["pitch", "yHigh", "postH", "posts", "D", "wall", "S"]) assertEquals(rb[k], flat[k], k);
 });
 
+Deno.test("d3FloorHeightFromFront: a reading at the front wall's middle, as the uphill edge's height", () => {
+  const at = (roof: Any, toward: Any, w: number, l: number, fh = 3) =>
+    F.d3FloorHeightFromFront({ ...PIERS, roof, gradeFallFt: 2, ...(toward ? { gradeFallToward: toward } : {}) }, w, l, fh);
+  const nf = { type: "gable", front: "gable", pitch: 0.4 };
+  // Level ground and a slab: the reading, exactly.
+  for (const spec of [PIERS, { ...PIERS, gradeFallFt: 0 }, { foundation: "slab", gradeFallFt: 2, gradeFallToward: "left" }]) {
+    assertEquals(F.d3FloorHeightFromFront(spec, W, L, 2.37), 2.37);
+  }
+  // New frame: the front is the south wall, the uphill edge of a back fall and across a left or right one.
+  assertEquals(F.d3FrontGableWall(nf, W, L), "south");
+  assertEquals(at(nf, "back", W, L), 3);
+  assertEquals(at(nf, undefined, W, L), 3);
+  assertEquals(at(nf, "left", W, L), 2);
+  assertEquals(at(nf, "right", W, L), 2);
+  // An old-frame landscape gable (24 x 12): its front is the WEST end wall. A left fall ends there (the
+  // whole fall down), a right fall starts there (the uphill edge), a back fall crosses it.
+  const of = { type: "gable", pitch: 0.4 };
+  assertEquals(F.d3FrontGableWall(of, 24, 12), "west");
+  assertEquals(at(of, "left", 24, 12), 1);
+  assertEquals(at(of, "right", 24, 12), 3);
+  assertEquals(at(of, "back", 24, 12), 2);
+  // The inverse of the renderer: the ground d3GradeAt puts under the front wall's middle is the reading.
+  for (const [roof, w, l] of [[nf, W, L], [of, 24, 12], [of, 12, 16]] as Array<[Any, number, number]>) {
+    for (const toward of ["back", "left", "right"]) {
+      const spec = { ...PIERS, roof, gradeFallFt: 2, gradeFallToward: toward };
+      const fh = F.d3FloorHeightFromFront(spec, w, l, 3.2);
+      const n = ({ south: [0, 1], north: [0, -1], east: [1, 0], west: [-1, 0] } as Any)[F.d3FrontGableWall(roof, w, l)];
+      assertAlmostEquals(F.d3GradeAt({ ...spec, floorHeightFt: fh }, w, l, (n[0] * w) / 2, (n[1] * l) / 2), 3.2, 1e-9, `${w}x${l} ${toward}`);
+    }
+  }
+  assertEquals(at(nf, "left", W, L, 0.8), 0.3, "held at 0.3");
+  assertEquals(F.d3FloorHeightFromFront({ ...PIERS, gradeFallFt: 2, gradeFallToward: "left" }, 0, L, 3), 3, "no footprint: the reading");
+});
+
 Deno.test("d3PorchStepsOnGround: one flight measured and drawn, the builder's step count passed to every call", () => {
   const src = lift(CMP, "structure-studio.component.js", "function d3PorchStepsOnGround(", "\n}\n") + "\n}\n";
   assertEquals(lift(JSX, "StructureStudio.jsx", "function d3PorchStepsOnGround(", "\n}\n") + "\n}\n", src);
@@ -294,6 +330,23 @@ Deno.test("the panel's tidy-up and the video draft's merge: the fall goes with t
     const m = C.calShapeMerged(stored, { roof: { type: "gable" }, foundation: f });
     assert(!("gradeFallFt" in m) && !("gradeFallToward" in m), f);
   }
+  // A DRAFT'S FLOOR HEIGHT IS READ AT THE FRONT WALL'S MIDDLE; floorHeightFt is the uphill edge's. The
+  // preview here is 16x24 in the new frame (front = south): a left or right fall puts the front wall's
+  // middle half the fall down the slope, so the reading comes back up by that much; a back fall's
+  // front wall IS the uphill edge, and level ground keeps the reading exactly.
+  const draft = (fh: number) => ({ roof: { type: "gable", front: "gable" }, foundation: "piers", floorHeightFt: fh });
+  assertEquals(C.calShapeMerged(stored, draft(2.5)).floorHeightFt, 1.5, "left 2 ft: 2.5 at the door is 1.5 on the right side");
+  assertEquals(C.calShapeMerged({ ...stored, gradeFallToward: "right" }, draft(2.5)).floorHeightFt, 1.5, "right");
+  assertEquals(C.calShapeMerged({ ...stored, gradeFallToward: "back" }, draft(2.5)).floorHeightFt, 2.5, "back: the front is uphill");
+  assertEquals(C.calShapeMerged({ ...stored, gradeFallToward: undefined }, draft(2.5)).floorHeightFt, 2.5, "absent is back");
+  assertEquals(C.calShapeMerged({ ...PIERS, colors: {} }, draft(2.5)).floorHeightFt, 2.5, "level: the reading");
+  assertEquals(C.calShapeMerged(stored, draft(1)).floorHeightFt, 0.3, "never under the sanitiser's 0.3");
+  assertEquals(C.calShapeMerged(stored, { roof: { type: "gable" }, foundation: "piers" }).floorHeightFt, 1.5, "no reading: the stored height");
+  const slabDraft = C.calShapeMerged(stored, { ...draft(2.5), foundation: "slab" });
+  assert(!("floorHeightFt" in slabDraft) && !("gradeFallFt" in slabDraft), "a slab draft: neither");
+  // Level ground is the merge it has always been: the same keys, in the same order.
+  assertEquals(Object.keys(C.calShapeMerged({ ...PIERS, colors: {} }, draft(2.5))),
+    ["roof", "wallHeightFt", "foundation", "floorHeightFt", "colors", "gableVent", "roofMaterial"]);
   // A draft never brings a fall of its own: the video cannot see one.
   const fromDraft = C.calShapeMerged({ ...PIERS, colors: {} }, { roof: { type: "gable" }, foundation: "piers", gradeFallFt: 3, gradeFallToward: "right" });
   assert(!("gradeFallFt" in fromDraft) && !("gradeFallToward" in fromDraft));
@@ -316,6 +369,12 @@ Deno.test("What we drew: the fall is said where there is one, and nothing else c
     "The ground falls 2 ft toward the left, so the piers on that side stand taller.");
   assertStringIncludes(P.ssDrewWords({ ...base, foundation: "blocks", gradeFallFt: 1.5 }),
     "The ground falls 1 ft 6 in toward the back, so the blocks on that side stand taller.");
+  // The floor height is the uphill edge's, in the panel's words: the front, or the other side.
+  assertStringIncludes(P.ssDrewWords({ ...base, gradeFallFt: 2, gradeFallToward: "left" }), "its floor 1 ft 6 in off the ground on the right side.");
+  assertStringIncludes(P.ssDrewWords({ ...base, gradeFallFt: 2, gradeFallToward: "right" }), "its floor 1 ft 6 in off the ground on the left side.");
+  assertStringIncludes(P.ssDrewWords({ ...base, gradeFallFt: 2 }), "its floor 1 ft 6 in off the ground at the front.");
+  assertStringIncludes(P.ssDrewWords({ roof: base.roof, foundation: "piers", gradeFallFt: 2, gradeFallToward: "right" }),
+    "no floor height is given, so its floor is drawn 1 ft 6 in off the ground on the left side.");
   for (const extra of [{}, { gradeFallFt: 0 }, { gradeFallToward: "left" }]) {
     assertEquals(P.ssDrewWords({ ...base, ...extra }), P.ssDrewWords(base), JSON.stringify(extra));
   }

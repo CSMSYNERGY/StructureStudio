@@ -4909,6 +4909,23 @@ function d3GradeMaxFt(spec) {
   const f = d3GradeFall(spec);
   return d3GradeFt(spec) + (f ? f.fallFt : 0);
 }
+// A FLOOR HEIGHT READ AT THE FRONT WALL, as floorHeightFt stores it. A video draft reads the floor at
+// the middle of its front wall, where the door and the steps are (the prompt's rule, and the wall
+// d3FrontGableWall names), but floorHeightFt is the height at the fall's UPHILL edge (d3GradeAt).
+// Across a left or right fall that wall's middle stands half the fall lower, and on an old-frame end
+// wall at the downhill side the whole fall, so the reading is taken back up the slope and the door is
+// drawn at the height the video saw. Level ground, and a front wall on the uphill edge, keep the
+// reading exactly; never under the sanitiser's 0.3 (the floor meets the ground there).
+function d3FloorHeightFromFront(spec, W, L, frontFt) {
+  const f = d3GradeFall(spec);
+  const w = Number(W) || 0, l = Number(L) || 0;
+  if (!f || !(w > 0) || !(l > 0)) return frontFt;
+  const n = { south: [0, 1], north: [0, -1], east: [1, 0], west: [-1, 0] }[d3FrontGableWall(spec.roof, w, l)] || [0, 1];
+  const ax = d3GradeFallAxis(f.toward, w, l);
+  const t = ((n[0] * w * ax.dir[0] + n[1] * l * ax.dir[1]) / 2 + ax.ext / 2) / ax.ext;
+  if (!(t > 1e-9)) return frontFt;
+  return Math.max(0.3, Math.round((frontFt - f.fallFt * t) * 100) / 100);
+}
 // WHERE THE PROJECTING PORCH'S OWN FRAME LANDS IN THE BUILDING'S, for the ground under its deck and
 // steps: a function from a point in the porch's frame -- x across it, positive to the right of
 // someone standing in front of it facing it, d out from the wall's mid-plane (d3PorchStepsGeom's
@@ -16623,15 +16640,18 @@ function ssDrewWords(spec, porchBuilt) {
   if (raisedOn) {
     const what = raisedOn === "blocks" ? "stacked concrete blocks" : "concrete piers";
     const h = Number(spec.floorHeightFt);
-    out.push(h > 0
-      ? `It stands on ${what}, its floor ${ssFtInWords(h)} off the ground at the front.`
-      : `It stands on ${what}; no floor height is given, so its floor is drawn ${ssFtInWords(raisedOn === "blocks" ? 1 : 1.5)} off the ground.`);
     // The ground falling away under it (2026-09-28): d3GradeFall's reading, spelt out here so this
-    // stays a pure function of the spec.
+    // stays a pure function of the spec. The floor height is the UPHILL edge's, as the panel's box
+    // says: the front, or across a left or right fall the other side.
     const fallRaw = Number(spec.gradeFallFt);
-    if (isFinite(fallRaw) && fallRaw > 0) {
-      const toward = spec.gradeFallToward === "left" || spec.gradeFallToward === "right" ? spec.gradeFallToward : "back";
-      out.push(`The ground falls ${ssFtInWords(Math.min(6, fallRaw))} toward the ${toward}, so the ${raisedOn === "blocks" ? "blocks" : "piers"} on that side stand taller.`);
+    const fall = isFinite(fallRaw) && fallRaw > 0 ? Math.min(6, fallRaw) : 0;
+    const toward = spec.gradeFallToward === "left" || spec.gradeFallToward === "right" ? spec.gradeFallToward : "back";
+    const at = fall > 0 && toward !== "back" ? `on the ${toward === "left" ? "right" : "left"} side` : "at the front";
+    out.push(h > 0
+      ? `It stands on ${what}, its floor ${ssFtInWords(h)} off the ground ${at}.`
+      : `It stands on ${what}; no floor height is given, so its floor is drawn ${ssFtInWords(raisedOn === "blocks" ? 1 : 1.5)} off the ground${fall > 0 ? ` ${at}` : ""}.`);
+    if (fall > 0) {
+      out.push(`The ground falls ${ssFtInWords(fall)} toward the ${toward}, so the ${raisedOn === "blocks" ? "blocks" : "piers"} on that side stand taller.`);
     }
   }
   return out.join(" ");
@@ -20689,7 +20709,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {...calOptNumProps(idPrefix + "-floorHeightFt", spec.floorHeightFt, [0.3, 6], (n) => calSetFloorHeight(n))}
               style={inputStyle} />
             <span style={{ display: "block", fontWeight: 400, marginTop: 2, fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
-              Ground to the top of the floor where the door or porch is. A door is 6 ft 8 in tall, and each step up is about 7 in. Blank draws {ssFtInWords(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}. Porch steps climb the whole height, and a ramp a customer adds is drawn {grade > 0.75 ? ssFtInWords(4 * grade) : "3 ft"} long so it reaches the ground.
+              {fall ? `Ground to the top of the floor ${uphill === "front" ? "at the front" : `on the ${uphill}`}, where the ground is highest.` : "Ground to the top of the floor where the door or porch is."} A door is 6 ft 8 in tall, and each step up is about 7 in. Blank draws {ssFtInWords(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}. Porch steps climb the whole height, and a ramp a customer adds is drawn {grade > 0.75 ? ssFtInWords(4 * grade) : "3 ft"} long so it reaches the ground.
             </span>
           </label>
         )}
@@ -20710,7 +20730,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <option value="right">Right</option>
             </select>
             <span style={noteStyle}>
-              Floor height is measured {uphill === "front" ? "at the front" : `on the ${uphill}`}. The {fall.toward === "back" ? "far side's" : `${fall.toward} side's`} {raised} stand this much taller.
+              Floor height is measured {uphill === "front" ? "at the front" : `on the ${uphill}`}. The {fall.toward === "back" ? "far side's" : `${fall.toward} side's`} {raised} stand this much taller.{fall.toward === "back" ? "" : " Left and right are as you face the front."}
             </span>
           </label>
         )}
@@ -20850,7 +20870,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // its FINAL spec to the spec as it stood BEFORE the generation rather than on top of the
   // first draft. Merging twice is exactly how a porch key survives its own exclusion — see
   // calPreGenRef. Same body, same rules, one caller more.
-  const calShapeMerged = (spec, d3) => calTidyFloor({
+  // A VIDEO'S FLOOR HEIGHT ACROSS A FALL (2026-09-28): the draft reads it at the front wall's middle,
+  // floorHeightFt keeps the uphill edge's (d3FloorHeightFromFront), so a builder's left or right fall
+  // kept across a regenerated draft still draws the door at the height the video saw. Only a draft
+  // that gives a height, on a building whose ground falls: every other merge is the object it was.
+  const calFloorFromFront = (m, d3) => ((d3 && Number(d3.floorHeightFt) > 0 && d3GradeFall(m))
+    ? { ...m, floorHeightFt: d3FloorHeightFromFront(m, bldgW, bldgH, Number(d3.floorHeightFt)) }
+    : m);
+  const calShapeMerged = (spec, d3) => calTidyFloor(calFloorFromFront({
     ...spec,
     roof: calDraftRoof(spec.roof, d3 && d3.roof),
     // Only the keys the model actually read — see the header. An unreported colour is absent
@@ -20874,7 +20901,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // any customer roof-type pick, so a video that read "metal" and had it dropped here
     // would show shingles on a metal building and look like the model got it wrong.
     roofMaterial: (d3 && (d3.roofMaterial === "shingle" || d3.roofMaterial === "metal")) ? d3.roofMaterial : spec.roofMaterial,
-  });
+  }, d3));
   const applyDraftedShape = (d3) => setAdminCal((p) => ({ ...p, spec: calShapeMerged(p.spec, d3) }));
   const copyCalJson = () => {
     const out = JSON.stringify({ d3: adminCal.spec, d3Photos: adminCal.photos.filter(Boolean), d3VideoFrames: calVideoFrames }, null, 2);

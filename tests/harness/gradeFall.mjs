@@ -30,8 +30,9 @@
 //      before this) builds from the same style, and the same camera
 //   8. THE PANEL (?admin=1): blocks and piers show "Ground falls away (ft)"; an untouched style saves
 //      no fall keys, and a style storing a fall saves it back exactly; a typed fall saves, "Toward"
-//      appears with its hint and saves its word; a cleared box deletes gradeFallFt; leaving blocks or
-//      piers deletes both keys; the preview draws the typed fall
+//      appears with its hint and saves its word; the height box's hint says where the height is
+//      taken (the uphill side); a cleared box deletes gradeFallFt; leaving blocks or piers deletes
+//      both keys; the preview draws the typed fall
 //   9. zero page errors
 //
 //   python -m http.server 8142 --bind 127.0.0.1 --directory <repo root>
@@ -630,6 +631,8 @@ async function runPanel(ctx, ok, shots) {
     await page.getByText("3D Style Calibration").first().waitFor({ state: "visible", timeout: 30000 });
     await page.getByPlaceholder("Admin password").fill("harness");
     await openStyle("Harness Fall Cabin");
+    const fhLevel = (await page.locator('input[data-ss-floor-height="ss-grid"]').locator("xpath=..").innerText()).replace(/\s+/g, " ");
+    ok("panel: level ground keeps the height box's hint it always had", fhLevel.includes("Ground to the top of the floor where the door or porch is. A door is 6 ft 8 in tall"), fhLevel);
     ok("panel: piers show 'Ground falls away (ft)', blank = level, and no 'Toward' without a fall",
       (await fallBox().count()) === 1 && (await fallBox().inputValue()) === "" && (await fallBox().getAttribute("placeholder")) === "blank = level" && (await toward().count()) === 0);
     const label = (await fallBox().locator("xpath=..").innerText()).replace(/\s+/g, " ").trim();
@@ -643,7 +646,9 @@ async function runPanel(ctx, ok, shots) {
     ok("panel: ...offering Back, Left and Right", JSON.stringify(opts) === JSON.stringify(["Back", "Left", "Right"]), JSON.stringify(opts));
     const hint = (await toward().locator("xpath=..").innerText()).replace(/\s+/g, " ");
     ok("panel: ...with the hint: floor height at the front, the far side's piers this much taller",
-      hint.includes("Floor height is measured at the front. The far side's piers stand this much taller."), hint);
+      hint.includes("Floor height is measured at the front. The far side's piers stand this much taller.") && !hint.includes("Left and right"), hint);
+    const fhBack = (await page.locator('input[data-ss-floor-height="ss-grid"]').locator("xpath=..").innerText()).replace(/\s+/g, " ");
+    ok("panel: ...and the height box's hint: at the front, where the ground is highest", fhBack.includes("Ground to the top of the floor at the front, where the ground is highest."), fhBack);
     body = await save();
     ok("panel: a typed 2 saves gradeFallFt 2 and no direction (back is what absent draws)", body.d3.gradeFallFt === 2 && !has(body.d3, "gradeFallToward"), JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
     await toward().selectOption("left");
@@ -653,6 +658,9 @@ async function runPanel(ctx, ok, shots) {
       hintL.includes("Floor height is measured on the right side. The left side's piers stand this much taller."), hintL);
     const fhLabel = (await page.locator('input[data-ss-floor-height="ss-grid"]').locator("xpath=..").innerText()).replace(/\s+/g, " ");
     ok("panel: ...and the floor height box says on the right side", /^Floor height off the ground, on the right side \(ft\)/.test(fhLabel), fhLabel.slice(0, 60));
+    ok("panel: ...its hint says the height is taken there, where the ground is highest (not 'where the door or porch is')",
+      fhLabel.includes("Ground to the top of the floor on the right side, where the ground is highest.") && !fhLabel.includes("where the door or porch is"), fhLabel);
+    ok("panel: ...and Toward says which way left is", hintL.includes("Left and right are as you face the front."), hintL);
     body = await save();
     ok("panel: Left saves gradeFallToward \"left\"", body.d3.gradeFallFt === 2 && body.d3.gradeFallToward === "left", JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
     await typeFall(9);
