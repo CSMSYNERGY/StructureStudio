@@ -20550,6 +20550,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const roof = { ...p.spec.roof, type };
     if (type === "shed") { delete roof.front; for (const k of CAL_WING_KEYS) delete roof[k]; }
     else delete roof.highSide;
+    // The roof step (2026-09-28) is a gable's only: the sanitiser drops both keys on anything else.
+    if (type !== "gable") { delete roof.rearStepFt; delete roof.rearEaveRiseFt; }
     return { ...p, spec: { ...p.spec, roof } };
   });
   // The wings on and off. Off deletes all four keys: a builder who says "no wings" has said
@@ -22036,7 +22038,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const roof = spec.roof || {};
     // The 2026-09-24 keys are in the slice of the question whose panel sets them: which way the
     // building faces and the wings are the ROOF's shape, the attach height and width the PORCH's.
-    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt]);
+    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt, roof.rearStepFt, roof.rearEaveRiseFt]);
     if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps]);
     // What it stands on and how high (2026-09-25) are set in the walls panel, beside the wall.
     if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt]);
@@ -24772,6 +24774,47 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge offset (−0.35…0.35)
                   <input type="number" step="0.05" {...calNumProps("ridgeOffset", adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0, (n) => calSetRoof({ ridgeOffset: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
+                {/* THE ROOF STEP (2026-09-28): a gable built in two sections, the rear one's roof edge
+                    higher (or lower) than the front's while the two ridges line up. Offered on a gable
+                    whose front is not a long side, the only roof Save keeps it on; both numbers or
+                    neither, and a cleared box deletes its key (calOptNumProps). The step is typed in
+                    feet from the BACK wall like every length here, the rise in INCHES because that is
+                    the size it comes in (7 in is 0.58 ft). The line under the rise is d3RoofStep's own
+                    answer at this size, so it says what the preview draws, or why it draws no step. */}
+                {adminCal.spec.roof.type === "gable" && adminCal.spec.roof.front !== "eave" && (() => {
+                  const roof = adminCal.spec.roof;
+                  const hint = { display: "block", fontWeight: 400, marginTop: 2 };
+                  const hasStep = roof.rearStepFt != null && roof.rearStepFt !== "";
+                  const hasRise = roof.rearEaveRiseFt != null && roof.rearEaveRiseFt !== "";
+                  const st = d3RoofStep(roof, bldgW, bldgH, Number(adminCal.spec.wallHeightFt) || D3.WALL_H);
+                  const riseIn = (ft) => Math.round(Math.abs(ft) * 120) / 10;
+                  const why = !hasStep && !hasRise ? "Blank: one roof from the front to the back."
+                    : !(hasStep && hasRise) ? "Give both numbers. One without the other is not drawn or saved."
+                    : st ? `Drawn: the back ${ssFtInWords(st.stepFt)} has its own roof, its edge ${riseIn(st.rise)} in ${st.rise > 0 ? "higher" : "lower"} at ${Math.round(st.pitchB * 120) / 10} in 12, so the ridges line up.`
+                    : !(Number(roof.rearStepFt) > 0.5) ? "A step of 0 is no step."
+                    : !(Math.abs(Number(roof.rearEaveRiseFt)) >= 0.01) ? "A rise of 0 draws no step."
+                    : (Number(roof.wingWidthFt) || 0) > 0.5 ? "Not drawn with lower wings: they run the length of the building at one height."
+                    : (Number(roof.leanToWidthFt) || 0) > 0.5 ? "Not drawn with a lean-to: it runs the length of the building at one height."
+                    : roof.porchEnd === "back" && ((Number(roof.porchDepthFt) || 0) > 0.5 || (Number(roof.porchOutFt) || 0) > 0.5) ? "Not drawn with the porch at the back."
+                    : !d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? `Not drawn on ${sel.size || "this size"}: its ridge runs side to side. Set the front wall to a gable end.`
+                    : `Not drawn: ${sel.size || "this size"} is too short to leave 4 ft each side of the step.`;
+                  return (
+                    <>
+                      <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof step from back (ft)
+                        <input type="number" step="0.5" min="0" max="56" placeholder="blank = no step" data-ss-roof-step="at"
+                          {...calOptNumProps("rearStepFt", roof.rearStepFt, [0, 56], (n) => calSetRoofOpt("rearStepFt", n))}
+                          style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                        <span style={hint}>Where the rear section's own roof starts, measured from the back wall.</span>
+                      </label>
+                      <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Rear roof edge higher by (in)
+                        <input type="number" step="0.5" min="-18" max="18" placeholder="negative = lower" data-ss-roof-step="rise"
+                          {...calOptNumProps("rearEaveRiseIn", roof.rearEaveRiseFt == null || roof.rearEaveRiseFt === "" ? null : Math.round(Number(roof.rearEaveRiseFt) * 1200) / 100, [-18, 18], (n) => calSetRoofOpt("rearEaveRiseFt", n == null ? null : n / 12))}
+                          style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                        <span style={hint} data-ss-roof-step="why">{why}</span>
+                      </label>
+                    </>
+                  );
+                })()}
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height (ft)
                   <input type="number" step="0.5" {...calNumProps("wallHeightFt", adminCal.spec.wallHeightFt || 8, (n) => calSet({ wallHeightFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
