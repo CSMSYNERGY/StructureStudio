@@ -20,7 +20,8 @@
 //      rear side of the joint
 //   6. an old-frame portrait style (no front) with an open eave, lap siding, a gable vent and a plate
 //      band: the back cap's vent and band sit the rise higher, and no two rafter tails share a place
-//      at the joint; a dormer over the joint is seated and draws
+//      at the joint; a dormer over the joint is seated on the lower roof and draws, and a dormer
+//      wholly behind the joint of a HIGHER rear section sits on the rear roof, not buried in it
 //   7. ABSENT KEYS BUILD THE SAME BUILDING, mesh for mesh (positions, uvs, transforms, materials,
 //      order): a step of 0, a rise of 0, either key alone, both keys on a landscape old-frame size
 //      (its ridge runs side to side) and both keys beside wings
@@ -50,6 +51,8 @@ const CASES = [
   { id: "cabin-plain", label: "Harness Plain Cabin", size: "14x40", H: 7.75, d3: cabin(CABIN), shots: true, digest: true },
   { id: "cabin-lower", label: "Harness Lower Rear", size: "14x40", H: 7.75, d3: cabin({ ...CABIN, rearStepFt: 12, rearEaveRiseFt: -0.75 }) },
   { id: "old", label: "Harness Old Frame Step", size: "12x32", H: 8, d3: { roof: { ...OLD, rearStepFt: 14, rearEaveRiseFt: 0.5 }, siding: "lap", colors: COLORS, wallHeightFt: 8, gableVent: { widthFrac: 0.2 } } },
+  // The dormer (13..19 ft from the back wall) wholly on a rear section that stands 0.5 ft higher.
+  { id: "old-rear-dormer", label: "Harness Rear Dormer", size: "12x32", H: 8, d3: { roof: { ...OLD, rearStepFt: 24, rearEaveRiseFt: 0.5 }, siding: "lap", colors: COLORS, wallHeightFt: 8 } },
   // Absent keys: each of these must be the plain building, mesh for mesh.
   { id: "off-step0", label: "Harness Off Step Zero", size: "14x40", H: 7.75, d3: cabin({ ...CABIN, rearStepFt: 0, rearEaveRiseFt: 0.6 }), digestOf: "cabin-plain" },
   { id: "off-rise0", label: "Harness Off Rise Zero", size: "14x40", H: 7.75, d3: cabin({ ...CABIN, rearStepFt: 14, rearEaveRiseFt: 0 }), digestOf: "cabin-plain" },
@@ -296,6 +299,15 @@ async function runCase(ctx, c, ok, shots, digests) {
         const dU = (S / 2) * roof.dormerOffsetU, seat = H + (S / 2 - dU) * pitch;
         ok(`${tag}: a dormer over the joint is seated on the lower roof under it (${f3(seat)}), not floating`,
           m.dormers.length === 1 && Math.abs(m.dormers[0].mn[1] - seat) < 0.05 && m.dormers[0].mn[2] < zJ && m.dormers[0].mx[2] > zJ, JSON.stringify(m.dormers.map((b) => [f3(b.mn[1]), f3(b.mn[2]), f3(b.mx[2])])));
+      }
+      // A dormer wholly behind the joint sits on the REAR roof: its base on the rear slope at dU, the
+      // rear eave Hb plus the rest of the half-span at the rear pitch. The front plane there is
+      // lower, and a dormer seated on it stood buried in the higher rear roof.
+      if (c.id === "old-rear-dormer") {
+        const dU = (S / 2) * roof.dormerOffsetU, seat = Hb + (S / 2 - dU) * pitchB, frontSeat = H + (S / 2 - dU) * pitch;
+        ok(`${tag}: ⚠️ a dormer wholly behind the joint sits on the higher rear roof (${f3(seat)}), not on the front plane (${f3(frontSeat)})`,
+          m.dormers.length === 1 && Math.abs(m.dormers[0].mn[1] - seat) < 0.05 && Math.abs(m.dormers[0].mn[1] - frontSeat) > 0.2 && m.dormers[0].mx[2] < zJ,
+          JSON.stringify(m.dormers.map((b) => [f3(b.mn[1]), f3(b.mn[2]), f3(b.mx[2])])));
       }
     }
     if (shots && c.shots) {

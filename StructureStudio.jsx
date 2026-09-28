@@ -5013,7 +5013,26 @@ function d3TransomDormerGeom(roofCfg, S, profYAt) {
 // for both functions; without wings it is exactly the span and wall the two always used.
 function d3DormerRoof(roof, wFt, dFt, H) {
   const m = d3Massing(roof, wFt, dFt, H);
-  return { S: m.Sc, profYAt: d3MakeProfYAt(m.prof, m.Hc) };
+  const own = d3MakeProfYAt(m.prof, m.Hc);
+  // A ROOF STEP (d3RoofStep, 2026-09-28): the dormer sits on the roof under it, the rear section's
+  // behind the joint (d3DormerSeatYAt), exactly as buildShed3DModel seats it. Null on every other
+  // building, which keeps the one profile it always had.
+  const st = d3RoofStep(roof, wFt, dFt, H);
+  if (!st) return { S: m.Sc, profYAt: own };
+  const rear = d3MakeProfYAt(d3RoofProfile(st.rearCfg, m.S, st.Hb, m.tallNeg).dedup, st.Hb);
+  return { S: m.Sc, profYAt: d3DormerSeatYAt(own, rear, m.L, (roof && roof.dormerWidthFt) || 0, st.stepFt) };
+}
+// WHICH ROOF A DORMER SITS ON when the roof steps (d3RoofStep): the dormer is centred at L/2 and
+// dormW long along the ridge, local z 0 the back wall and the joint at stepFt. Wholly behind the
+// joint it sits on the rear section's roof (rearYAt), wholly in front of it on the front section's
+// (frontYAt). Straddling the joint it takes the LOWER of the two, so no part of it floats above a
+// roof (the higher roof's slab passes through its box, as every dormer's slab does). With no rear
+// section it is frontYAt itself. (Taking the lower roof wherever the dormer reached behind the
+// joint seated one standing wholly on a higher rear roof on the front plane, buried in its slab.)
+function d3DormerSeatYAt(frontYAt, rearYAt, L, dormW, stepFt) {
+  if (!rearYAt || L / 2 - dormW / 2 >= stepFt) return frontYAt;
+  if (L / 2 + dormW / 2 <= stepFt) return rearYAt;
+  return (u) => Math.min(frontYAt(u), rearYAt(u));
 }
 function d3DormerFaceFt(spec, wFt, dFt) {
   const roof = (spec && spec.roof) || {};
@@ -8439,10 +8458,10 @@ function buildShed3DModel(THREE, p) {
   // Absent means gable, so every saved style renders exactly as it did.
   const dormW = roofCfg.dormerWidthFt || 0;
   const dormerIsTransom = roofCfg.dormerType === "transom";
-  // THE ROOF STEP: a dormer centred at L/2 that reaches over the rear section is seated on the LOWER
-  // of the two roofs under it, so no part of it floats above a roof (the higher roof's slab passes
-  // through its box, as every dormer's slab does). The one roof, everywhere else.
-  const dormerYAt = rearProf && L / 2 - dormW / 2 < STEP.stepFt ? (u) => Math.min(profYAt(u), rearProf.yAt(u)) : profYAt;
+  // THE ROOF STEP: the dormer is seated on the roof UNDER it, chosen by what it covers along the
+  // ridge (d3DormerSeatYAt, which the panel's dormer readouts share). The seat, the transom's
+  // geometry and its cheeks all read this one profile. The one roof, everywhere else.
+  const dormerYAt = d3DormerSeatYAt(profYAt, rearProf ? rearProf.yAt : null, L, dormW, STEP ? STEP.stepFt : 0);
 
   // ── THE DORMER'S WINDOW — the customer's, not the renderer's (2026-09-07) ──────────────
   // A per-DESIGN value threaded in like p.wallHeightFt, NOT a style field: the style says

@@ -51,7 +51,7 @@ Deno.test("every lifted roof-step region is byte-identical in the two twins", ()
 type Any = any;
 const F = new Function(
   `const isVentItem = (it) => !!(it && it.isVent);\n${blocks.map((b) => b.cmp).join("\n")}; return { D3, d3RoofAxes, d3RoofProfile, d3RoofStep, ` +
-    `d3WallTops, d3WallTopFt, d3CeilingFt, ssGableVentFit };`,
+    `d3WallTops, d3WallTopFt, d3CeilingFt, ssGableVentFit, d3MakeProfYAt, d3DormerSeatYAt, d3DormerRoof, d3DormerFaceFt, d3DormerReadout, d3TransomDormerGeom };`,
 )() as Record<string, Any>;
 
 // The Black Cabin, as measured: 14 ft wide by 40 ft deep, a gable front with a recessed 6 ft porch,
@@ -191,6 +191,41 @@ Deno.test("a vent on the back wall is fitted to the rear section's gable, on its
   const steep = { type: "gable", front: "gable", pitch: 0.3, rearStepFt: 10, rearEaveRiseFt: 1.2 };
   assert(F.ssGableVentFit({ type: "gable", front: "gable", pitch: 0.3 }, 14, 30, "north", H, big, null, null), "fits the full gable");
   assertEquals(F.ssGableVentFit(steep, 14, 30, "north", H, big, null, null), null);
+});
+
+Deno.test("⚠️ a dormer sits on the roof UNDER it: the rear section's wholly behind the joint, the front's wholly in front, the lower across it", () => {
+  // A higher rear roof over a front one, as functions of u; the dormer is 6 ft long at mid-length
+  // of a 32 ft building (13..19 ft from the back wall).
+  const front = (u: number) => 10 - Math.abs(u) * 0.4, rear = (u: number) => 10.2 - Math.abs(u) * 0.35;
+  assertEquals(F.d3DormerSeatYAt(front, rear, 32, 6, 24), rear, "joint 24 ft from the back: wholly behind it");
+  assertEquals(F.d3DormerSeatYAt(front, rear, 32, 6, 19), rear, "its front end on the joint is still wholly behind it");
+  assertEquals(F.d3DormerSeatYAt(front, rear, 32, 6, 12), front, "joint 12: wholly in front");
+  assertEquals(F.d3DormerSeatYAt(front, rear, 32, 6, 13), front, "its back end on the joint is still wholly in front");
+  const across = F.d3DormerSeatYAt(front, rear, 32, 6, 16);
+  for (const u of [-4, 0, 3]) assertEquals(across(u), Math.min(front(u), rear(u)), "across the joint: the lower roof");
+  assertEquals(F.d3DormerSeatYAt(front, null, 32, 6, 0), front, "no rear section: the one roof");
+  // The panel's readouts seat it the same way (d3DormerRoof): a transom dormer's face on a higher
+  // rear section is measured on the rear roof, as the renderer now builds it, not on the front one.
+  const OLDT = { type: "gable", pitch: 0.45, overhang: 0.8, dormerWidthFt: 6, dormerOffsetU: 0.5, dormerType: "transom", dormerRiseFt: 1.5 };
+  const faceOn = (roof: Record<string, unknown>, yAt: (u: number) => number) => F.d3TransomDormerGeom(roof, 12, yAt).face;
+  for (const [stepFt, rise, on] of [[24, 0.5, "rear"], [24, -0.75, "rear"], [16, 0.5, "front"], [16, -0.75, "rear"], [12, 0.5, "front"]] as const) {
+    const roof = { ...OLDT, rearStepFt: stepFt, rearEaveRiseFt: rise };
+    const st = F.d3RoofStep(roof, 12, 32, 8), ax = F.d3RoofAxes(roof, 12, 32);
+    const fYAt = F.d3MakeProfYAt(F.d3RoofProfile(roof, ax.S, 8, ax.tallNeg).dedup, 8);
+    const rYAt = F.d3MakeProfYAt(F.d3RoofProfile(st.rearCfg, ax.S, st.Hb, ax.tallNeg).dedup, st.Hb);
+    const want = on === "rear" ? rYAt : fYAt;
+    const r = F.d3DormerRoof(roof, 12, 32, 8);
+    for (const u of [-5, -2, 0, 2, 5]) assertAlmostEquals(r.profYAt(u), want(u), 1e-12, `${stepFt}/${rise} at u ${u}: the ${on} roof`);
+    assertEquals(F.d3DormerFaceFt({ roof, wallHeightFt: 8 }, 12, 32), faceOn(roof, want), `${stepFt}/${rise}: the face`);
+  }
+  // The case the fix is for: on a higher rear roof the face is not the front plane's.
+  const onRear = { ...OLDT, rearStepFt: 24, rearEaveRiseFt: 0.5 };
+  const fAx = F.d3RoofAxes(onRear, 12, 32);
+  assert(Math.abs(F.d3DormerFaceFt({ roof: onRear, wallHeightFt: 8 }, 12, 32) - faceOn(onRear, F.d3MakeProfYAt(F.d3RoofProfile(onRear, fAx.S, 8, fAx.tallNeg).dedup, 8))) > 0.1, "measured on the rear roof");
+  // Without a step, exactly the one profile it always read.
+  const bare = F.d3DormerRoof(OLDT, 12, 32, 8), plain = F.d3MakeProfYAt(F.d3RoofProfile(OLDT, 12, 8, true).dedup, 8);
+  for (const u of [-5, 0, 5]) assertEquals(bare.profYAt(u), plain(u));
+  assertEquals(F.d3DormerReadout({ roof: OLDT, wallHeightFt: 8 }, "12x32"), F.d3TransomDormerGeom(OLDT, 12, plain));
 });
 
 // ── THREE: the step AS DRAWN, told to the check (server) and to the builder ("What we drew") ──
