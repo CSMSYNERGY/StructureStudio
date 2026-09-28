@@ -6227,3 +6227,106 @@ Deno.test("⚠️ applySelfCheck with the lock drops a pitch correction and keep
   assertEquals(measured.dropped, ["roof.pitch", "roof.overhang"], "both measured fields dropped");
   assertEquals(measured.changed.map((c) => c.field), ["roof.eave"], "and the rest lands");
 });
+
+// ═══ THE ROOF STEP (roof.rearStepFt / roof.rearEaveRiseFt, 2026-09-28) ═══════════════════════════
+// A gable built in two sections: the rear section's roof starts at a joint rearStepFt from the BACK
+// wall, its eave stands rearEaveRiseFt higher (negative: lower) than the front's, and the ridges stay
+// level. What is pinned here, server side: the sanitiser keeps the two keys together or not at all,
+// clamps them, and keeps them only on a gable whose front is a gable end, never beside wings, a
+// lean-to or a porch at the back; the v2 prompt asks for them in plain words with generic numbers
+// (never the Black Cabin's own); the self-check may add, move or remove a step (and only the v2
+// check); and the reads' consensus votes a step's presence and takes its numbers' medians from the
+// reads that drew one. The renderer's side is _test_stubs/roofStep_test.ts and
+// tests/harness/roofStep.mjs.
+import * as RS from "./styleD3.ts";
+
+const stepRoof = (roof: Record<string, unknown> = {}) => ({ type: "gable", front: "gable", pitch: 0.4, overhang: 1, ...roof });
+const sanitisedRoof = (roof: Record<string, unknown>): Record<string, unknown> => {
+  const r = RS.sanitizeD3Spec({ roof });
+  if (!r.ok) throw new Error(r.error);
+  return r.d3.roof;
+};
+const hasKey = (o: Record<string, unknown>, k: string) => Object.prototype.hasOwnProperty.call(o, k);
+
+Deno.test("roof step: both keys on a gable-front gable are kept as given", () => {
+  const roof = sanitisedRoof(stepRoof({ rearStepFt: 12, rearEaveRiseFt: 0.42 }));
+  assertEquals(roof.rearStepFt, 12);
+  assertEquals(roof.rearEaveRiseFt, 0.42);
+  // A lower rear eave is a negative rise, and it is kept as negative.
+  assertEquals(sanitisedRoof(stepRoof({ rearStepFt: 9, rearEaveRiseFt: -0.5 })).rearEaveRiseFt, -0.5);
+  // No front at all (an old-frame style) keeps them: only the size can say which way its ridge
+  // runs, so the renderer decides (d3RoofStep).
+  const old = sanitisedRoof({ type: "gable", pitch: 0.4, rearStepFt: 12, rearEaveRiseFt: 0.42 });
+  assert(old.rearStepFt === 12 && old.rearEaveRiseFt === 0.42, JSON.stringify(old));
+  // Numbers in strings are numbers, as everywhere in the sanitiser; junk is dropped with its pair.
+  assertEquals(sanitisedRoof(stepRoof({ rearStepFt: "12", rearEaveRiseFt: "0.5" })).rearStepFt, 12);
+  assert(!hasKey(sanitisedRoof(stepRoof({ rearStepFt: "twelve", rearEaveRiseFt: 0.5 })), "rearEaveRiseFt"), "junk takes its pair with it");
+});
+
+Deno.test("roof step: the clamps (4..56 ft from the back, -1.5..1.5 ft of rise)", () => {
+  assertEquals(sanitisedRoof(stepRoof({ rearStepFt: 2, rearEaveRiseFt: 0.5 })).rearStepFt, 4, "a step under 4 ft is pulled up to 4");
+  assertEquals(sanitisedRoof(stepRoof({ rearStepFt: 80, rearEaveRiseFt: 0.5 })).rearStepFt, 56);
+  assertEquals(sanitisedRoof(stepRoof({ rearStepFt: 10, rearEaveRiseFt: 3 })).rearEaveRiseFt, 1.5);
+  assertEquals(sanitisedRoof(stepRoof({ rearStepFt: 10, rearEaveRiseFt: -4 })).rearEaveRiseFt, -1.5);
+});
+
+Deno.test("⚠️ roof step: one key without the other is dropped, and so is an off step or a zero rise", () => {
+  for (const [what, keys] of [
+    ["the step alone", { rearStepFt: 12 }],
+    ["the rise alone", { rearEaveRiseFt: 0.5 }],
+    ["a step of 0", { rearStepFt: 0, rearEaveRiseFt: 0.5 }],
+    ["a step of half a foot", { rearStepFt: 0.5, rearEaveRiseFt: 0.5 }],
+    ["a zero rise", { rearStepFt: 12, rearEaveRiseFt: 0 }],
+    ["a rise under 0.01 ft", { rearStepFt: 12, rearEaveRiseFt: -0.005 }],
+    ["a null rise", { rearStepFt: 12, rearEaveRiseFt: null }],
+  ] as const) {
+    const roof = sanitisedRoof(stepRoof(keys));
+    assert(!hasKey(roof, "rearStepFt") && !hasKey(roof, "rearEaveRiseFt"), `${what}: ${JSON.stringify(roof)}`);
+  }
+});
+
+Deno.test("⚠️ roof step: dropped on a shed, a gambrel and an eave front, kept beside a front porch and a dormer", () => {
+  const both = { rearStepFt: 12, rearEaveRiseFt: 0.5 };
+  for (const [what, roof] of [
+    ["a shed", { type: "shed", highSide: "front", pitch: 0.25, ...both }],
+    ["a gambrel", { type: "gambrel", front: "gable", ...both }],
+    ["an eave front", stepRoof({ front: "eave", ...both })],
+    ["wings", stepRoof({ wingSide: "both", wingWidthFt: 6, ...both })],
+    ["a lean-to", stepRoof({ leanToWidthFt: 8, leanToSide: "left", ...both })],
+    ["a recessed porch at the back", stepRoof({ porchDepthFt: 6, porchEnd: "back", ...both })],
+    ["a projecting porch at the back", stepRoof({ porchOutFt: 6, porchEnd: "back", ...both })],
+  ] as const) {
+    const out = sanitisedRoof(roof as Record<string, unknown>);
+    assert(!hasKey(out, "rearStepFt") && !hasKey(out, "rearEaveRiseFt"), `${what} keeps no step: ${JSON.stringify(out)}`);
+  }
+  for (const [what, roof] of [
+    ["a recessed porch at the front", stepRoof({ porchDepthFt: 6, porchEnd: "front", porchTruss: true, ...both })],
+    ["a projecting porch at the front", stepRoof({ porchOutFt: 6, ...both })],
+    ["a porch end of back with no porch", stepRoof({ porchEnd: "back", ...both })],
+    ["a dormer", stepRoof({ dormerWidthFt: 5, ...both })],
+    ["wings switched off", stepRoof({ wingSide: "both", wingWidthFt: 0, ...both })],
+    ["a lean-to switched off", stepRoof({ leanToWidthFt: 0, ...both })],
+  ] as const) {
+    const out = sanitisedRoof(roof as Record<string, unknown>);
+    assert(out.rearStepFt === 12 && out.rearEaveRiseFt === 0.5, `${what} keeps the step: ${JSON.stringify(out)}`);
+  }
+});
+
+Deno.test("⚠️ roof step: a spec without the keys sanitises exactly as it did, key for key", () => {
+  // Every row stored before today: the new rule deletes keys that were never there and writes none.
+  const raw = { roof: { type: "gable", front: "gable", pitch: 0.41, overhang: 1.3, eave: "fascia", porchDepthFt: 6, porchEnd: "front", porchTruss: true }, siding: "batten", colors: { body: "#3a3d3f" }, wallHeightFt: 7.75 };
+  const r = RS.sanitizeD3Spec(raw);
+  assert(r.ok, "parses");
+  if (r.ok) {
+    assertEquals(Object.keys(r.d3.roof), ["type", "pitch", "overhang", "porchDepthFt", "porchEnd", "porchTruss", "eave", "front"]);
+    assert(!JSON.stringify(r.d3).includes("rear"), "no step key written");
+  }
+});
+
+Deno.test("roof step: a model reply carrying both keys reaches the spec; the legacy prompts never ask", () => {
+  const r = RS.parseModelSpec(JSON.stringify({ roof: stepRoof({ rearStepFt: 12, rearEaveRiseFt: 0.42 }) }), { widthFt: 16, lengthFt: 30, wallHeightFt: 8 });
+  assert(r.ok && r.d3.roof.rearStepFt === 12 && r.d3.roof.rearEaveRiseFt === 0.42, JSON.stringify(r));
+  for (const p of [RS.VIDEO_SHAPE_PROMPT, RS.SPEC_PROMPT, RS.videoShapePrompt({ widthFt: 16, lengthFt: 30, wallHeightFt: 8 }, false), RS.combinedShapePrompt(8, 4)]) {
+    assert(!p.includes("rearStepFt") && !p.includes("ROOF STEP"), "a legacy prompt asks nothing about a step");
+  }
+});

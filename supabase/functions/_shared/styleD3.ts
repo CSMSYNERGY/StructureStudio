@@ -122,6 +122,16 @@ const CLAMPS: Record<string, [number, number]> = {
   // it, and the panel says so. 0.05 is the solver's own floor; 0.5 (6:12) is steeper than any
   // porch roof hung under a main roof's eave.
   porchPitch: [0.05, 0.5],
+  // ── THE ROOF STEP (2026-09-28) ── A gable built in two sections, the Black Cabin's roof: the rear
+  // section's own roof starts at a joint rearStepFt from the BACK wall, and its eave (wall plate and
+  // fascia) stands rearEaveRiseFt higher than the front section's, or lower when negative, while the
+  // two ridges stay level. Both keys or neither, gable with a gable-end front only (the rules below
+  // sanitizeD3Spec's enums), and half a foot or less is off, the rule every appendage width follows.
+  // 56 leaves the renderer's 4 ft in front of a joint on a 60 ft building, the longest porchWidthFt
+  // allows for; the renderer holds the step to the size it draws (d3RoofStep in both twins). A rise
+  // past a foot and a half is a second storey, not a step.
+  rearStepFt: [0, 56],
+  rearEaveRiseFt: [-1.5, 1.5],
 };
 
 // Which eave the lean-to hangs off. Not a clamp, so it is checked separately.
@@ -235,7 +245,9 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
                    // v2 (2026-09-24). APPENDED, so every existing spec keeps its key order.
                    "porchAttachFt", "porchWidthFt", "wingWidthFt", "wingPitch", "centerEaveFt",
                    // 2026-09-25, appended for the same reason.
-                   "porchPosts", "porchPitch"]) {
+                   "porchPosts", "porchPitch",
+                   // 2026-09-28, the roof step, appended for the same reason.
+                   "rearStepFt", "rearEaveRiseFt"]) {
     const v = clamped(k, rawRoof[k]);
     if (v !== null) roof[k] = v;
   }
@@ -364,6 +376,29 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   if ((D3_PORCH_STEPS as readonly string[]).includes(String(rawRoof.porchSteps))
       && typeof roof.porchOutFt === "number" && roof.porchOutFt > 0.5) {
     roof.porchSteps = String(rawRoof.porchSteps);
+  }
+  // ── THE ROOF STEP (2026-09-28) ─────────────────────────────────────────────────────────────────
+  // rearStepFt and rearEaveRiseFt describe ONE thing, the rear roof section, so they are kept
+  // together or not at all: one without the other is dropped, and so is a step of half a foot or
+  // less (the off switch) or a rise under 0.01 ft either way, a joint with nothing to see. A step
+  // under 4 ft is pulled up to 4, the least building the renderer leaves behind a joint; the room
+  // in front of it depends on the size, so the renderer holds that end.
+  // Only where the renderer can draw it: a GABLE (a gambrel's knee and a shed's one slope have no
+  // level ridge to keep) whose ridge runs front to back, so the back wall is a gable wall. On an
+  // "eave" front both keys go; with no front they stay, because the old frame runs a portrait
+  // footprint's ridge front to back and only the size can say which (the renderer asks it). Never
+  // beside wings or a lean-to, which run the length of an eave wall at ONE eave height, and never
+  // with a porch at the back, which the rear section would stand over. Dropped rather than stored
+  // for later, the porch attach height's rule: an inert key is a trap for the next edit.
+  const stepAt = num(roof.rearStepFt), stepRise = num(roof.rearEaveRiseFt);
+  const roofOn = (k: string) => (num(roof[k]) ?? 0) > 0.5;
+  if (stepAt !== null && stepAt > 0.5 && stepRise !== null && Math.abs(stepRise) >= 0.01
+      && type === "gable" && roof.front !== "eave" && !roofOn("wingWidthFt") && !roofOn("leanToWidthFt")
+      && !(roof.porchEnd === "back" && (roofOn("porchDepthFt") || roofOn("porchOutFt")))) {
+    roof.rearStepFt = Math.max(4, stepAt);
+  } else {
+    delete roof.rearStepFt;
+    delete roof.rearEaveRiseFt;
   }
 
   // Anything that is not a renderable cladding means "unset", which the renderer
