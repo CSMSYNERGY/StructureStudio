@@ -40,6 +40,8 @@ const REGIONS: Array<[string, string]> = [
   ["const D3_STYLE_DEFAULTS = {", "// ── CLADDING ──"],
   // d3RaisedFoundation and d3GradeFt with them: a blocks style's piers are pinned to d3GradeFt.
   ["const D3_FOUNDATIONS = [", "// How much further down the ground is than it has always been"],
+  // The resolver names the ground's fall beside the floor height (the slope branch, merged 2026-09-29).
+  ["const D3_GRADE_FALL_TOWARD = [", "// { fallFt, toward }"],
   ["const FOUNDATION_ITEM_LABEL = {", "function foundationLabelOf("],
   ["function d3ResolveStyleSpec(", "// Carolyn (2026-07-02): horizontal lap siding"],
   ["function d3CustomerFoundation(", "// Natural-material fallbacks"],
