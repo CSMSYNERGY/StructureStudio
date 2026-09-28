@@ -24943,15 +24943,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           with steps to count. Blank is the renderer's own count, one step for every
                           7.5 in of floor height, and the placeholder says that number. The hint is how
                           far each step rises, from the readout (the renderer's own numbers); amber when
-                          the builder's count makes a step taller than 8 in or shorter than 4 in, the
-                          range a step is comfortable in. It warns and refuses nothing. */}
+                          a step would rise more than 8 in or less than 4 in, the range a step is
+                          comfortable in, and only when another count could help. That is the drawn
+                          count whether the builder typed it or left it blank: the rule's own count
+                          can come out shallow (0.75 ft of floor is two 3 in steps), and typing a
+                          number is the fix either way. Judged on the inches the hint shows, so it
+                          never says "4 in" and "less than 4 in" at once. It refuses nothing. */}
                       {kind === "projecting" && roof.porchSteps && (() => {
                         const autoSteps = d3PorchAutoStepCount(d3GradeFt(adminCal.spec));
                         const st = pr && pr.steps;
-                        const riseIn = st ? st.rise * 12 : null;
-                        const asked = roof.porchStepCount != null && roof.porchStepCount !== "";
-                        const steep = asked && riseIn != null && riseIn > 8 && st.count < 12;
-                        const shallow = asked && riseIn != null && riseIn < 4 && st.count > 1;
+                        const riseIn = st ? Math.round(st.rise * 120) / 10 : null;
+                        const steep = riseIn != null && riseIn > 8 && st.count < 12;
+                        const shallow = riseIn != null && riseIn < 4 && st.count > 1;
                         return (
                           <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Number of steps
                             <input type="number" step="1" min="1" max="12" placeholder={`blank = ${autoSteps}`} data-ss-step-count="ss-grid"
@@ -24959,7 +24962,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                               style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                             {riseIn != null && (
                               <div data-ss-step-rise="ss-grid" style={{ ...hint, color: steep || shallow ? "#B45309" : "#A16207" }}>
-                                {`Each step rises ${Math.round(riseIn * 10) / 10} in.${steep ? " More steps would make them easier to climb." : shallow ? " Fewer steps would make them easier to climb." : ""}`}
+                                {`Each step rises ${riseIn} in.${steep ? " More steps would make them easier to climb." : shallow ? " Fewer steps would make them easier to climb." : ""}`}
                               </div>
                             )}
                           </label>
