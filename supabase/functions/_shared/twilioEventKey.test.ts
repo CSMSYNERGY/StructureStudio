@@ -8,7 +8,7 @@
 // The payloads are shaped like the rows stored in sms_registration_events.detail: `timestamp`
 // and `updateddate` arrive as JSON numbers (epoch ms).
 
-import { campaignVerdictPredatesResubmit, eventOccurrenceKey, eventOccurrenceStamp } from "./twilioEventKey.ts";
+import { campaignVerdictPredatesResubmit, eventOccurrenceKey, eventOccurrenceStamp, numberEventTarget } from "./twilioEventKey.ts";
 
 function check(name: string, cond: boolean, detail?: string) {
   if (!cond) throw new Error(`${name}${detail ? `: ${detail}` : ""}`);
@@ -85,4 +85,27 @@ Deno.test("without a timestamp or a copy time the verdict is never treated as st
   check("no copy time", campaignVerdictPredatesResubmit({ timestamp: 1788372071569 }, null) === false);
   check("bad copy time", campaignVerdictPredatesResubmit({ timestamp: 1788372071569 }, "not a date") === false);
   check("null payload", campaignVerdictPredatesResubmit(null, "2026-09-19T19:11:00.000Z") === false);
+});
+
+// A number-registration payload as Twilio sends it (made-up SID and 555 number).
+const PN_SID = "PN" + "0123456789abcdef".repeat(2);
+
+Deno.test("a number event is matched on its PN SID, and its phone gets the + back", () => {
+  const t = numberEventTarget({ phonenumber: "18165550123", phonenumbersid: PN_SID });
+  check("sid", t.sid === PN_SID, String(t.sid));
+  check("phone is E.164", t.phone === "+18165550123", String(t.phone));
+});
+
+Deno.test("a number already in E.164, a 10-digit number and camelCase keys all normalise", () => {
+  check("plus kept", numberEventTarget({ phonenumber: "+18165550123" }).phone === "+18165550123");
+  check("ten digits", numberEventTarget({ phoneNumber: "8165550123" }).phone === "+18165550123");
+  check("camelCase sid", numberEventTarget({ phoneNumberSid: PN_SID }).sid === PN_SID);
+});
+
+Deno.test("anything that is not a US number or a PN SID is null, never a guess", () => {
+  const t = numberEventTarget({ phonenumber: "4420712345678", phonenumbersid: "MG" + "0".repeat(32) });
+  check("foreign number", t.phone === null, String(t.phone));
+  check("wrong SID type", t.sid === null, String(t.sid));
+  const e = numberEventTarget(null);
+  check("null payload", e.sid === null && e.phone === null);
 });
