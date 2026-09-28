@@ -1759,7 +1759,8 @@ Deno.test("v2 asks for the pixel points a gable's pitch is read from, in a measu
   // gable's (the next test), so the gable's line now ends in a comma.
   const MEASURE_SCHEMA = '  "measure": {\n' +
     '    "pitch": { "frame": <1-based index of the image you read the gable\'s slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] },\n' +
-    '    "wing": { "frame": <1-based index of the image you read the wing roofs\' slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] }\n' +
+    '    "wing": { "frame": <1-based index of the image you read the wing roofs\' slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] },\n' +
+    '    "step": { "frame": <1-based index of the image you marked the roof step in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "backBase": [<x>, <y>], "jointBase": [<x>, <y>], "frontBase": [<x>, <y>], "frontFascia": [<x>, <y>], "jointFront": [<x>, <y>], "jointRear": [<x>, <y>] }\n' +
     '  },\n  "roof": {\n';
   for (const [name, p] of V2) {
     const open = p.indexOf('\n{\n  "measure": {\n'), measure = p.indexOf('  "measure": {'), roof = p.indexOf('  "roof": {');
@@ -1768,7 +1769,8 @@ Deno.test("v2 asks for the pixel points a gable's pitch is read from, in a measu
     assert(p.indexOf('  "frameMap": {') > roof, `${name}: the frame map is after the roof, as before`);
     assert(p.includes('"otherSide": { "frame": <the image most square-on to the side wall OPPOSITE the one you gave for side>, "azimuthDeg": <as above> }\n  }\n}'),
       `${name}: and closes the object`);
-    // The block holds the gable's pitch and the wing roofs' points and nothing else, word for word.
+    // The block holds the gable's pitch, the wing roofs' points and the roof step's (2026-09-28) and
+    // nothing else, word for word.
     assert(p.includes(MEASURE_SCHEMA), `${name}: the measure block is the gable's pitch and the wings' points alone`);
     for (const gone of ['"porchPitch": {', '"tallTop"', '"shortTop"', '"wall": [', '"edge": [', '"postTop"', '"postBottom"', '"size": <as above>']) {
       assert(!p.includes(gone), `${name}: no ${gone} is asked for`);
@@ -1817,7 +1819,8 @@ Deno.test("v2 asks for the wing roofs' four points in the measure block, only on
   // Live, the model's own wingPitch read a raised centre's wing roofs low (0.10 to 0.14 against a
   // measured 0.20); the server now works it out from four points (wingPitchFromMeasure, whose tests
   // are with the other measured pitches below).
-  const WING_LINE = '    "wing": { "frame": <1-based index of the image you read the wing roofs\' slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] }\n  },\n  "roof": {\n';
+  // Since 2026-09-28 the roof step's line follows it and closes the block.
+  const WING_LINE = '    "wing": { "frame": <1-based index of the image you read the wing roofs\' slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] },\n    "step": { "frame":';
   const WING_POINTS = "WING POINTS, measure.wing, only for a building with enclosed side wings on BOTH sides, the left and the right: " +
     "the points the wing roofs' slope is worked out from. Use the frame most square-on to the FRONT, give that image's own size as above, " +
     "and give four points, two on each wing roof's sloping top edge along the front of the building: leftOuter, where the left wing's top " +
@@ -6578,4 +6581,131 @@ Deno.test("⚠️ the v2 self-check says the roof step as DRAWN at the renders' 
   const asStored = prompt(stepRoof({ ...porch, rearStepFt: 14, rearEaveRiseFt: 0.6 }), 14, 40);
   assert(asStored.includes("currently roof.rearStepFt 14 ft and roof.rearEaveRiseFt 0.6 ft: the joint 14 ft from the back wall, the rear eave 7.2 in higher.") && !/but DRAWN WITH|NOT DRAWN \(/.test(asStored), "as stored");
   assert(prompt(stepRoof(porch), 12, 16).includes("* The roof step - currently none, which draws one roof from the front to the back."), "no step");
+});
+
+// ─── The roof step from points (2026-09-28) ─────────────────────────────────────────────────
+// A pinhole camera looking at one long side of an L ft deep building (x from the BACK corner, y up,
+// the wall in the plane z = 0), turned `yawDeg` about the vertical, `distFt` out from the wall and
+// `camXFt` along it. Returns the six measure.step points as they land in a 1600 by 900 frame.
+type StepScene = { L: number; S: number; H: number; rise: number; yawDeg: number; distFt: number; camXFt: number; camYFt?: number; backOnRight?: boolean };
+const stepShot = (sc: StepScene) => {
+  const W = 1600, Hpx = 900, f = 900, cy = sc.camYFt ?? 5;
+  const yaw = sc.yawDeg * Math.PI / 180;
+  // The back corner on the right of the frame: the camera sees x running right to left.
+  const sx = sc.backOnRight ? -1 : 1;
+  const proj = (x: number, y: number): [number, number] => {
+    const X = sx * (x - sc.camXFt), Y = y - cy, Z = sc.distFt;
+    const xc = X * Math.cos(yaw) + Z * Math.sin(yaw), zc = Z * Math.cos(yaw) - X * Math.sin(yaw);
+    return [Math.round((W / 2 + f * xc / zc) * 10) / 10, Math.round((Hpx / 2 - f * Y / zc) * 10) / 10];
+  };
+  // The frame is centred on the side (a shifted principal point, which is a crop of a wider frame:
+  // it moves every point alike, so no ratio changes).
+  const dx = W / 2 - (proj(0, 0)[0] + proj(sc.L, 0)[0]) / 2;
+  const at = (x: number, y: number): [number, number] => {
+    const [u, v] = proj(x, y);
+    return [Math.round((u + dx) * 10) / 10, v];
+  };
+  return {
+    size: [W, Hpx] as [number, number],
+    backBase: at(0, 0), jointBase: at(sc.S, 0), frontBase: at(sc.L, 0),
+    frontFascia: at(sc.L, sc.H), jointFront: at(sc.S + 0.05, sc.H), jointRear: at(sc.S - 0.05, sc.H + sc.rise),
+  };
+};
+const CABIN: StepScene = { L: 40, S: 14, H: 7.75, rise: 0.6, yawDeg: 0, distFt: 30, camXFt: 20 };
+
+Deno.test("stepFromMeasure: a square-on side gives the joint's place and the rise exactly", () => {
+  assertEquals(RS.stepFromMeasure(stepShot(CABIN), 40, 7.75), { atFt: 14, riseFt: 0.6 });
+  // The back corner on the right of the frame reads the same.
+  assertEquals(RS.stepFromMeasure(stepShot({ ...CABIN, backOnRight: true }), 40, 7.75), { atFt: 14, riseFt: 0.6 });
+});
+
+Deno.test("stepFromMeasure: an angled side is undone by the vanishing point, where a plain share is feet out", () => {
+  for (const yawDeg of [-30, -15, 15, 30]) {
+    for (const backOnRight of [false, true]) {
+      const m = stepShot({ ...CABIN, yawDeg, camXFt: 26, distFt: 45, backOnRight });
+      const r = RS.stepFromMeasure(m, 40, 7.75);
+      const what = `yaw ${yawDeg}${backOnRight ? " mirrored" : ""}`;
+      assert(r !== null, what);
+      // Within a hundredth: the two fascia points stand a hair either side of the joint, at two depths.
+      assert(r!.riseFt !== null && Math.abs(r!.riseFt - 0.6) <= 0.011, `${what}: rise ${r!.riseFt}`);
+      assert(r!.atFt !== null && Math.abs(r!.atFt - 14) <= 0.5, `${what}: ${r!.atFt}`);
+      // What a plain share of the base line would have said: the live error.
+      const plain = 40 * Math.abs(m.jointBase[0] - m.backBase[0]) / Math.abs(m.frontBase[0] - m.backBase[0]);
+      if (Math.abs(yawDeg) === 30) assert(Math.abs(plain - 14) > 2, `${what}: a plain share is ${plain.toFixed(1)} ft`);
+    }
+  }
+});
+
+Deno.test("stepFromMeasure: the rise's SIGN is the fascias' order in the frame, the thing the eye got wrong live", () => {
+  assertEquals(RS.stepFromMeasure(stepShot({ ...CABIN, rise: -0.4 }), 40, 7.75), { atFt: 14, riseFt: -0.4 });
+  assertEquals(RS.stepFromMeasure(stepShot({ ...CABIN, yawDeg: 20, camXFt: 26 }), 40, 7.75)?.riseFt, 0.6);
+});
+
+Deno.test("stepFromMeasure: each number stands or falls on its own points", () => {
+  const m = stepShot(CABIN);
+  // No depth known: the rise alone. No wall height: the place alone.
+  assertEquals(RS.stepFromMeasure(m, null, 7.75), { atFt: null, riseFt: 0.6 });
+  assertEquals(RS.stepFromMeasure(m, 40, null), { atFt: 14, riseFt: null });
+  // A step too small to draw is no rise.
+  assertEquals(RS.stepFromMeasure(stepShot({ ...CABIN, rise: 0.02 }), 40, 7.75), { atFt: 14, riseFt: null });
+  // The joint's points off its vertical: no rise.
+  assertEquals(RS.stepFromMeasure({ ...m, jointRear: [m.jointRear[0] + 200, m.jointRear[1]] }, 40, 7.75), { atFt: 14, riseFt: null });
+  // A fascia gap of more than a quarter of the wall is not a step.
+  const wall = m.jointBase[1] - m.jointFront[1];
+  assertEquals(RS.stepFromMeasure({ ...m, jointRear: [m.jointRear[0], m.jointFront[1] - 0.3 * wall] }, 40, 7.75), { atFt: 14, riseFt: null });
+  // The joint outside the corners, or a front fascia below the base line: no place.
+  assertEquals(RS.stepFromMeasure({ ...m, jointBase: [m.backBase[0] - 20, m.backBase[1]] }, 40, 7.75)?.atFt ?? null, null);
+  assertEquals(RS.stepFromMeasure({ ...m, frontFascia: [m.frontFascia[0], m.frontBase[1] + 30] }, 40, 7.75)?.atFt ?? null, null);
+  // A vanishing point between the corners is no camera's: no place. (A front fascia 60 px above the
+  // base at the joint and 205 px above it at the front meets the base line between the corners.)
+  assertEquals(RS.stepFromMeasure({ ...m, jointFront: [m.jointFront[0], m.jointBase[1] - 60] }, 40, 7.75)?.atFt ?? null, null);
+  // Points outside the given size, or a missing point, are no measure at all.
+  assertEquals(RS.stepFromMeasure({ ...m, jointRear: [1700, 300] }, 40, 7.75), null);
+  const { jointRear: _gone, ...five } = m;
+  assertEquals(RS.stepFromMeasure(five, 40, 7.75), null);
+});
+
+const STEP_REPLY = (roof: Record<string, unknown>, step?: unknown) => JSON.stringify({
+  ...(step ? { measure: { step } } : {}),
+  roof: { type: "gable", front: "gable", pitch: 0.4, overhangIn: 12, eave: "fascia", ...roof },
+  siding: "batten", colors: { body: "#555555" },
+});
+const CABIN_DIMS: KnownDims = { widthFt: 14, lengthFt: 40, wallHeightFt: 7.75 };
+const specOf = (text: string): D3Spec => {
+  const r = RS.parseModelSpec(text, CABIN_DIMS);
+  if (!r.ok) throw new Error(r.error);
+  return r.d3;
+};
+
+Deno.test("applyMeasuredPitches: a read's roof step takes its points' numbers and says so; points never make a step", () => {
+  const pts = stepShot({ ...CABIN, yawDeg: 20, camXFt: 26, distFt: 34 });
+  const text = STEP_REPLY({ rearStepFt: 11, rearEaveRiseFt: -0.25 }, pts);
+  const r = RS.applyMeasuredPitches(specOf(text), text, 40);
+  assertEquals([r.d3.roof.rearStepFt, r.d3.roof.rearEaveRiseFt], [14, 0.6], "the live misread, set right by its points");
+  assertEquals([r.sources.stepSource, r.sources.modelStep], ["points", [11, -0.25]]);
+  // readDraftReply's measured reading is the same, and draft_tokens records where it came from.
+  const body = JSON.stringify({ content: [{ type: "text", text }], stop_reason: "end_turn" });
+  const reading = RS.readDraftReply(body, CABIN_DIMS, true);
+  assertEquals([reading.d3?.roof.rearStepFt, reading.d3?.roof.rearEaveRiseFt], [14, 0.6]);
+  assertEquals(RS.draftReadSample(reading)?.stepSource, "points");
+  // No step given: the points are ignored and nothing about a step is recorded.
+  const none = STEP_REPLY({}, pts);
+  const n = RS.applyMeasuredPitches(specOf(none), none, 40);
+  assertEquals(n.d3.roof.rearStepFt, undefined);
+  assert(!("stepSource" in n.sources), "no step, no step source");
+  // Points that fail keep the model's pair and say so; no points at all is plain "model".
+  const bad = STEP_REPLY({ rearStepFt: 11, rearEaveRiseFt: -0.25 }, { ...pts, jointBase: [pts.backBase[0] - 20, pts.backBase[1]], jointRear: [pts.jointRear[0] + 400, pts.jointRear[1]] });
+  const b = RS.applyMeasuredPitches(specOf(bad), bad, 40);
+  assertEquals([b.d3.roof.rearStepFt, b.d3.roof.rearEaveRiseFt, b.sources.stepSource, b.sources.stepRejected], [11, -0.25, "model", true]);
+  const plain = STEP_REPLY({ rearStepFt: 11, rearEaveRiseFt: -0.25 });
+  const p = RS.applyMeasuredPitches(specOf(plain), plain, 40);
+  assertEquals([p.sources.stepSource, "stepRejected" in p.sources], ["model", false]);
+});
+
+Deno.test("v2 prompt: the roof step asks for its six points and names which fascia is higher by the face at the joint", () => {
+  const p = RS.videoShapePrompt({ widthFt: 16, lengthFt: 30, wallHeightFt: 8 }, true);
+  assert(p.includes('"step": { "frame":'), "the schema's measure block has the step");
+  for (const k of ["backBase", "jointBase", "frontBase", "frontFascia", "jointFront", "jointRear"]) assert(p.includes(`"${k}": [<x>, <y>]`), k);
+  assert(p.includes("STEP POINTS, measure.step, only when you give rearStepFt"), "asked for only with a step");
+  assert(p.includes("the HIGHER section's roof ends there in a narrow wedge-shaped face"), "the direction's tell");
 });

@@ -784,6 +784,17 @@ Where the frames genuinely do not settle something, say so in observed and OMIT 
 // the gable's. The paragraph's "leave it out" sentences now name measure.pitch and measure.wing, so a
 // gambrel centre with wings is not told to leave its wing points out. Its example is generic (a 0.3).
 //
+// THE ROOF STEP'S POINTS (2026-09-28). Live, three five-read drafts of a building whose rear roof
+// section stands 0.6 ft HIGHER, 14 ft from the back wall, all found the step and all gave it as
+// LOWER (-0.2 to -0.3 in 15 reads of 15) and 10 to 12 ft from the back. The frames are not in doubt:
+// both long sides show the rear fascia above the front's, with the rear section's end face at the
+// joint and the front roof running in under it. The distance is perspective: read off the one frame
+// that shows a whole side as a plain share of its length it comes out near 9 ft, because the camera
+// stood nearer the front. So the ROOF STEP paragraph now asks for `measure.step`, six points in one
+// side frame, and the server works both numbers out (stepFromMeasure, below): the rise from the
+// three points on the joint's own vertical, where perspective scales them all alike, and the
+// distance by a cross-ratio against the side's vanishing point.
+//
 // ⚠️ THE TESTS PIN, ACROSS BOTH PROMPTS: the schema lines for pitch, overhangIn and the three
 // gambrel numbers, and the whole GAMBREL NUMBERS paragraph, are byte-identical to the base (the
 // gambrel ratios measurably work — see the test); `wallHeightFt` appears nowhere in here; and
@@ -797,7 +808,8 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence). K
 {
   "measure": {
     "pitch": { "frame": <1-based index of the image you read the gable's slope in>, "size": [<that image's width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] },
-    "wing": { "frame": <1-based index of the image you read the wing roofs' slope in>, "size": [<that image's width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] }
+    "wing": { "frame": <1-based index of the image you read the wing roofs' slope in>, "size": [<that image's width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] },
+    "step": { "frame": <1-based index of the image you marked the roof step in>, "size": [<that image's width in pixels>, <its height in pixels>], "backBase": [<x>, <y>], "jointBase": [<x>, <y>], "frontBase": [<x>, <y>], "frontFascia": [<x>, <y>], "jointFront": [<x>, <y>], "jointRear": [<x>, <y>] }
   },
   "roof": {
     "type": "shed" | "gable" | "gambrel",
@@ -914,7 +926,7 @@ PORCH DECISION, REQUIRED: observed.porch must carry one of exactly three answers
 
 DORMER: a small roofed box sitting ON one of the main roof slopes, breaking its line. Give its width, how far it stands above the slope, and how far ACROSS the roof it sits -- measured sideways from the ridge line toward one eave, as a fraction of the half-span, negative for the left side and positive for the right as seen standing in front of the FRONT wall. When the front is an eave wall the two slopes face front and back instead: negative for the back slope, positive for the front one. Omit all three keys if the roof is unbroken, which is the common case.
 
-ROOF STEP: some gable buildings are built in two sections, and the roof shows it. Seen from a long side, a joint runs up the roof from the eave to the ridge, and behind it the rear section's roof edge, its fascia, sits a few inches HIGHER than the front section's, or sometimes lower. The two ridges line up and only the eaves differ, so at the joint there is a small wedge-shaped step between the two roof edges: deepest at the eave, closing to nothing at the ridge. The walls below usually carry straight on, the siding unbroken. A real step shows on BOTH long sides at the same place, so look at the other side before you give it; a step seen on one side only is not a step. Give rearStepFt, how far the joint is from the BACK wall, in feet: count the battens, grooves or panels along the side wall from the back corner to the joint and multiply by their spacing, or measure it as a share of the building's known depth along that wall. Give rearEaveRiseFt, how much higher the rear section's eave is than the front section's, measured at the joint in a frame square to that side: read the step in inches against the known wall height, then divide by 12, so a step of 5 inches is 0.42. Give it as a negative number when the rear section's eave is the lower one. For example, a 30 ft deep cabin whose joint stands 12 ft in from the back wall, with the rear eave 5 inches higher, is rearStepFt 12 and rearEaveRiseFt 0.42. Give both keys or neither, and only on a two-slope roof whose front is a gable end. Leave both out when the roof runs unbroken from the front to the back, which is the common case.
+ROOF STEP: some gable buildings are built in two sections, and the roof shows it. Seen from a long side, a joint runs up the roof from the eave to the ridge, and behind it the rear section's roof edge, its fascia, sits a few inches HIGHER than the front section's, or sometimes lower. The two ridges line up and only the eaves differ, so at the joint there is a small wedge-shaped step between the two roof edges: deepest at the eave, closing to nothing at the ridge. The walls below usually carry straight on, the siding unbroken. A real step shows on BOTH long sides at the same place, so look at the other side before you give it; a step seen on one side only is not a step. Give rearStepFt, how far the joint is from the BACK wall, in feet: count the battens, grooves or panels along the side wall from the back corner to the joint and multiply by their spacing, or measure it as a share of the building's known depth along that wall. Give rearEaveRiseFt, how much higher the rear section's eave is than the front section's, measured at the joint in a frame square to that side: read the step in inches against the known wall height, then divide by 12, so a step of 5 inches is 0.42. Give it as a negative number when the rear section's eave is the lower one. Which one is higher is plain at the joint: the HIGHER section's roof ends there in a narrow wedge-shaped face, and the lower section's roof runs in underneath that face; the higher fascia is the one higher in the frame. For example, a 30 ft deep cabin whose joint stands 12 ft in from the back wall, with the rear eave 5 inches higher, is rearStepFt 12 and rearEaveRiseFt 0.42. Give both keys or neither, and only on a two-slope roof whose front is a gable end. Leave both out when the roof runs unbroken from the front to the back, which is the common case. STEP POINTS, measure.step, only when you give rearStepFt: we work the step's place and height out from these points, so mark them rather than judge. Use ONE frame that shows a whole long side, from its back corner to its front corner, with the joint in view; the more square-on to that side the better. Give that image's own size as size, [width, height], and six points in pixels, x to the RIGHT and y DOWN from the top-left corner: backBase, the foot of that side wall at the BACK corner, where the siding meets the foundation or the ground; frontBase, the foot of the same side at the FRONT corner, the corner of the front wall or, when a porch is recessed under the main roof, the foot of its corner post; jointBase, the foot of the side wall straight below the joint; jointFront, the bottom edge of the FRONT section's fascia right at the joint; jointRear, the bottom edge of the REAR section's fascia right at the joint, so those two sit either side of the joint, one a little above the other; and frontFascia, the bottom edge of the fascia straight above frontBase. Put each on what you see: the higher fascia has the smaller y, whichever section it belongs to. For example, a side in a 1600 by 900 image might read backBase [1420, 610], jointBase [1130, 618], frontBase [260, 650], frontFascia [250, 318], jointFront [1128, 342], jointRear [1134, 334].
 
 COLOURS matter here: the builder compares your drawing with these frames. Give each colour as the paint looks in EVEN daylight: not the side in shadow, which reads darker and bluer than the paint is, and not a face in hard sun, glare or a reflection of the sky, which reads paler. When those are the only faces you have, the paint lies between them, and dark paint stays dark: never report a dark wall's sun-bleached reading as its colour. body is the main wall colour; trim is the window and door casings (the boards framing them, not shutters); roof is the roofing. corner is the vertical boards at the building's corners, and fascia is the boards along the roof edges — along the eaves, up the rakes, and round the porch roof. Look at those two on their own rather than assuming they match the casings, and ALWAYS give both: repeat trim's value only when they really are the casings' colour. They often differ: on board-and-batten and panel siding the corner boards are usually the wall colour, and the fascia is often the roof colour. Leaving corner out draws the corners in the trim colour, which on a dark building with white window casings is a white stripe down every corner. wood is the natural or stained lumber of a porch — posts, deck and rafters — and only when there is a porch. Give each as the #rrggbb you see, not the name of a paint.
 
@@ -1593,7 +1605,7 @@ export function parseModelSpec(text: string, dims?: KnownDims | null, measure = 
   try { parsed = JSON.parse(m[0]); } catch { return { ok: false, error: "The model returned malformed JSON." }; }
   const clean = sanitizeD3Spec(applyKnownDims(foldOverhangInches(parsed), dims));
   if (!measure || !clean.ok) return clean;
-  return { ok: true, d3: applyMeasuredPitches(clean.d3, text).d3 };
+  return { ok: true, d3: applyMeasuredPitches(clean.d3, text, dims?.lengthFt).d3 };
 }
 
 // ─── Reading a Messages API reply (2026-09-17) ───────────────────────────────────────────
@@ -1956,11 +1968,110 @@ export function wingPitchFromMeasure(block: unknown, roof: unknown): number | nu
   return pitch > 0 && pitch >= lo && pitch <= hi ? pitch : null;
 }
 
+// ─── The roof step from points (2026-09-28) ─────────────────────────────────────────────────
+// `measure.step` is six points in ONE frame of a long side (the ROOF STEP paragraph): the foot of
+// the wall at the back corner, below the joint and at the front corner (backBase, jointBase,
+// frontBase), the two fascias' bottom edges either side of the joint (jointFront, jointRear) and the
+// fascia's bottom edge above the front corner (frontFascia).
+//
+// THE RISE comes from the joint's own vertical. jointBase, jointFront and jointRear stand at one
+// place along the wall, so perspective scales them alike and the ratio of the fascia gap to the wall
+// below it is the real one: rise = (jointFront.y - jointRear.y) / (jointBase.y - jointFront.y) x the
+// wall height. y is DOWN, so a rear fascia higher in the frame is a positive rise. Its SIGN is the
+// thing the model's eye got wrong live (15 reads of 15), and the points carry it.
+//
+// THE DISTANCE is a cross-ratio. The base line (backBase to frontBase) and the front fascia's line
+// (jointFront to frontFascia) are parallel on the building, so in the frame they meet at the side's
+// vanishing point, u_v along the base line. With the back corner at u = 0, the front corner at u1 and
+// the joint at uJ, and the building L ft deep:
+//     L / (L - S) = (u1 (u_v - uJ)) / ((u1 - uJ) u_v)
+// which gives S, the joint's feet from the back. Lines that do not meet (a square-on frame) are the
+// limit u_v -> infinity, a plain share: S = L uJ / u1.
+//
+// NOTHING HERE IS REPAIRED, pitchFromMeasure's rule: each number is null ("keep the model's own")
+// when its points fail a check. The checks:
+//   * RISE: the joint's three points are on one vertical (each within MEASURE_STEP_MAX_LEAN of the
+//     wall's height in the frame from jointBase's x); the wall below the front fascia is at least
+//     MEASURE_STEP_MIN_WALL of the image's height (MEASURE_STEP_MIN_WALL_PX without a size); the
+//     fascia gap is at most MEASURE_STEP_MAX_GAP of that wall; and the rise is at least
+//     MEASURE_STEP_MIN_RISE_FT, since a step that small is no step to draw.
+//   * DISTANCE: the base line spans at least MEASURE_STEP_MIN_SPAN of the image's width; jointBase
+//     lies between the corners (strictly inside MEASURE_STEP_JOINT_T of the way) and within
+//     MEASURE_STEP_MAX_LEAN of the wall's height off the base line; both fascia points are above the
+//     base line; the vanishing point, when the lines meet, lies OUTSIDE the two corners (between
+//     them is not a perspective any camera makes); and S lies strictly inside MEASURE_STEP_JOINT_T
+//     of L.
+export const MEASURE_STEP_MIN_WALL = 0.08;
+export const MEASURE_STEP_MIN_WALL_PX = 40;
+export const MEASURE_STEP_MAX_LEAN = 0.25;
+export const MEASURE_STEP_MAX_GAP = 0.25;
+export const MEASURE_STEP_MIN_RISE_FT = 0.05;
+export const MEASURE_STEP_MIN_SPAN = 0.25;
+export const MEASURE_STEP_JOINT_T: readonly [number, number] = [0.03, 0.97];
+export type StepMeasure = { atFt: number | null; riseFt: number | null };
+export function stepFromMeasure(block: unknown, lengthFt: unknown, wallFt: unknown): StepMeasure | null {
+  const m = measurePoints(block, ["backBase", "jointBase", "frontBase", "frontFascia", "jointFront", "jointRear"]);
+  if (!m) return null;
+  const [b0, bJ, b1, fF, jF, jR] = m.pts;
+  const wallPx = bJ[1] - jF[1];
+  const minWall = m.size ? MEASURE_STEP_MIN_WALL * m.size[1] : MEASURE_STEP_MIN_WALL_PX;
+  let riseFt: number | null = null;
+  const H = num(wallFt);
+  if (H !== null && H > 0 && wallPx >= minWall
+    && Math.abs(jF[0] - bJ[0]) <= MEASURE_STEP_MAX_LEAN * wallPx
+    && Math.abs(jR[0] - bJ[0]) <= MEASURE_STEP_MAX_LEAN * wallPx
+    && jR[1] < bJ[1]) {
+    const gap = jF[1] - jR[1];
+    if (Math.abs(gap) <= MEASURE_STEP_MAX_GAP * wallPx) {
+      const rise = Math.round(gap / wallPx * H * 100) / 100;
+      const [lo, hi] = CLAMPS.rearEaveRiseFt;
+      if (Math.abs(rise) >= MEASURE_STEP_MIN_RISE_FT && rise >= lo && rise <= hi) riseFt = rise;
+    }
+  }
+  let atFt: number | null = null;
+  const L = num(lengthFt);
+  const dx = b1[0] - b0[0], dy = b1[1] - b0[1];
+  const span = Math.hypot(dx, dy);
+  const minSpan = m.size ? MEASURE_STEP_MIN_SPAN * m.size[0] : 0;
+  if (L !== null && L > 0 && span > 0 && span >= minSpan && wallPx > 0) {
+    const ux = dx / span, uy = dy / span;
+    const along = (p: MeasureXY) => (p[0] - b0[0]) * ux + (p[1] - b0[1]) * uy;
+    // Signed distance off the base line, positive DOWN the frame (y down), whichever way the side
+    // runs (the back corner may be on either side): points above the line are negative.
+    const off = (p: MeasureXY) => ((p[1] - b0[1]) * ux - (p[0] - b0[0]) * uy) * Math.sign(ux);
+    const uJ = along(bJ), u1 = span;
+    const inJoint = uJ > MEASURE_STEP_JOINT_T[0] * u1 && uJ < MEASURE_STEP_JOINT_T[1] * u1;
+    // A side seen from a long side runs across the frame: a base line steeper than 45 degrees is not one.
+    if (Math.abs(ux) >= Math.SQRT1_2 && inJoint && Math.abs(off(bJ)) <= MEASURE_STEP_MAX_LEAN * wallPx && off(jF) < 0 && off(fF) < 0) {
+      // Where the front fascia's line crosses the base line, as u along it: the vanishing point.
+      const ex = fF[0] - jF[0], ey = fF[1] - jF[1];
+      const denom = ux * ey - uy * ex;
+      let share: number | null = null;
+      if (Math.abs(denom) < 1e-9 * Math.hypot(ex, ey)) {
+        share = uJ / u1;
+      } else {
+        const t = ((jF[0] - b0[0]) * ey - (jF[1] - b0[1]) * ex) / denom;
+        const uv = t;
+        if (uv < 0 || uv > u1) {
+          const R = (u1 * (uv - uJ)) / ((u1 - uJ) * uv);
+          if (Number.isFinite(R) && R > 1) share = 1 - 1 / R;
+        }
+      }
+      if (share !== null && share > MEASURE_STEP_JOINT_T[0] && share < MEASURE_STEP_JOINT_T[1]) {
+        const at = Math.round(share * L * 2) / 2;
+        const [lo, hi] = CLAMPS.rearStepFt;
+        if (at > lo && at <= hi) atFt = at;
+      }
+    }
+  }
+  return atFt === null && riseFt === null ? null : { atFt, riseFt };
+}
+
 // The reply's `measure` blocks, read the way parseFrameMap reads its map: out of the first {...} in
 // the text, never stored. `pitch` is the gable's points and `wing` the wing roofs' (2026-09-26); each
 // is there only when the reply gave it as an object. Null when the reply has neither, which is every
 // legacy reply.
-export type MeasureBlocks = { pitch?: Record<string, unknown>; wing?: Record<string, unknown> };
+export type MeasureBlocks = { pitch?: Record<string, unknown>; wing?: Record<string, unknown>; step?: Record<string, unknown> };
 export function parseMeasure(text: string): MeasureBlocks | null {
   const m = String(text || "").match(/\{[\s\S]*\}/);
   if (!m) return null;
@@ -1970,8 +2081,9 @@ export function parseMeasure(text: string): MeasureBlocks | null {
   const src = top ? measureObject(top.measure) : null;
   const pitch = src ? measureObject(src.pitch) : null;
   const wing = src ? measureObject(src.wing) : null;
-  if (!pitch && !wing) return null;
-  return { ...(pitch ? { pitch } : {}), ...(wing ? { wing } : {}) };
+  const step = src ? measureObject(src.step) : null;
+  if (!pitch && !wing && !step) return null;
+  return { ...(pitch ? { pitch } : {}), ...(wing ? { wing } : {}), ...(step ? { step } : {}) };
 }
 
 // Where one read's pitch came from, recorded per read in draft_tokens (draftReadSample) so a query
@@ -1993,6 +2105,12 @@ export type PitchSources = {
   wingPitchSource?: "points" | "model";
   modelWingPitch?: number | null;
   wingPitchRejected?: true;
+  // The roof step's (2026-09-28), on a read that gave a step only: "points" when either of its two
+  // numbers came from measure.step, with the model's own pair beside them; `stepRejected` when the
+  // points were given and neither number held up.
+  stepSource?: "points" | "model";
+  modelStep?: [number | null, number | null];
+  stepRejected?: true;
 };
 // The wing half of PitchSources, which a read with no wings leaves out altogether.
 type WingSources = Pick<PitchSources, "wingPitchSource" | "modelWingPitch" | "wingPitchRejected">;
@@ -2002,9 +2120,17 @@ type WingSources = Pick<PitchSources, "wingPitchSource" | "modelWingPitch" | "wi
 // roof.porchPitch is always the model's own. The result goes back through sanitizeD3Spec, so key
 // order and every other rule stay the sanitiser's. With nothing replaced, the spec comes back as
 // the very object it went in as.
-export function applyMeasuredPitches(d3: D3Spec, text: string): { d3: D3Spec; sources: PitchSources } {
+export function applyMeasuredPitches(d3: D3Spec, text: string, lengthFt?: number | null): { d3: D3Spec; sources: PitchSources } {
   const roof = d3.roof || {};
   const blocks = parseMeasure(text);
+  // The roof step's two numbers (2026-09-28), only on a read that gave a step: points never make one.
+  const stepGiven = num(roof.rearStepFt) !== null && num(roof.rearEaveRiseFt) !== null;
+  const stepBlock = stepGiven ? blocks?.step ?? null : null;
+  const step = stepBlock ? stepFromMeasure(stepBlock, lengthFt, d3.wallHeightFt) : null;
+  const stepSrc: Pick<PitchSources, "stepSource" | "modelStep" | "stepRejected"> = !stepGiven ? {}
+    : step ? { stepSource: "points", modelStep: [num(roof.rearStepFt), num(roof.rearEaveRiseFt)] }
+    : stepBlock ? { stepSource: "model", stepRejected: true } : { stepSource: "model" };
+  const stepKeys = step ? { ...(step.atFt !== null ? { rearStepFt: step.atFt } : {}), ...(step.riseFt !== null ? { rearEaveRiseFt: step.riseFt } : {}) } : {};
   const block = blocks?.pitch ?? null;
   const pitch = pitchFromMeasure(block, roof.type);
   const kept: PitchSources = block && roof.type === "gable" ? { pitchSource: "model", pitchRejected: true } : { pitchSource: "model" };
@@ -2014,17 +2140,18 @@ export function applyMeasuredPitches(d3: D3Spec, text: string): { d3: D3Spec; so
   const wingAsked = roof.wingSide === "both" && roof.front !== "eave";
   const wingKept: WingSources = !hasWings ? {}
     : wingBlock && wingAsked ? { wingPitchSource: "model", wingPitchRejected: true } : { wingPitchSource: "model" };
-  if (pitch === null && wingPitch === null) return { d3, sources: { ...kept, ...wingKept } };
+  const stepFallback = stepGiven ? (stepBlock ? { stepSource: "model" as const, stepRejected: true as const } : { stepSource: "model" as const }) : {};
+  if (pitch === null && wingPitch === null && !step) return { d3, sources: { ...kept, ...wingKept, ...stepSrc } };
   const clean = sanitizeD3Spec({
     ...d3,
-    roof: { ...roof, ...(pitch !== null ? { pitch } : {}), ...(wingPitch !== null ? { wingPitch } : {}) },
+    roof: { ...roof, ...(pitch !== null ? { pitch } : {}), ...(wingPitch !== null ? { wingPitch } : {}), ...stepKeys },
   });
   // Unreachable with the checks above (each number is inside its CLAMPS), and if it ever were
   // reached, the read keeps the spec it came with rather than losing its draft.
-  if (!clean.ok) return { d3, sources: { ...kept, ...wingKept } };
+  if (!clean.ok) return { d3, sources: { ...kept, ...wingKept, ...stepFallback } };
   const gable: PitchSources = pitch !== null ? { pitchSource: "points", modelPitch: num(roof.pitch) } : kept;
   const wing: WingSources = wingPitch !== null ? { wingPitchSource: "points", modelWingPitch: num(roof.wingPitch) } : wingKept;
-  return { d3: clean.d3, sources: { ...gable, ...wing } };
+  return { d3: clean.d3, sources: { ...gable, ...wing, ...stepSrc } };
 }
 
 // ─── A measured gable pitch is locked in the self-check (2026-09-26) ─────────────────────────
@@ -3893,7 +4020,7 @@ export function readDraftReply(body: string, dims?: KnownDims | null, measure = 
   const spec = reply.stopReason === "refusal" ? null : parseModelSpec(reply.text, dims);
   const d3 = spec && spec.ok ? spec.d3 : null;
   if (!measure || !d3) return { data, reply, d3, drafted: d3 !== null };
-  const measured = applyMeasuredPitches(d3, reply.text);
+  const measured = applyMeasuredPitches(d3, reply.text, dims?.lengthFt);
   return { data, reply, d3: measured.d3, drafted: true, pitch: measured.sources };
 }
 
