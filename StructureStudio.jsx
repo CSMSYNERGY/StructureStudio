@@ -4824,7 +4824,11 @@ function d3MassingTopAt(m, u) {
 // leanToDropFt keeps its meaning -- the OUTER edge this far below the eave at that wall -- so moving the
 // attach up the roof steepens the lean-to and keeps its outer clearance. An attach point that is not
 // above the outer edge holds a sliver of pitch (flat); a roof attach steeper than the roof it sits on
-// has that roof's eave poking through it (cuts). Both are drawn and flagged, never corrected.
+// has that roof's eave poking through it (cuts). Both are drawn and flagged, never corrected. Up the
+// roof its pitch is (d + seat + drop) / (width + d / k), so every foot further up adds k of rise per
+// foot of run: it is steeper than the roof exactly when drop + seat > k * width, WHEREVER it meets.
+// Moving it up the roof never cures a cut; less drop or a wider lean-to does (d3LeanToReadout says by
+// how much). Level with the roof (pitch == k) it lies on the deck as one plane, and is not a cut.
 // Null without a lean-to, and WITHOUT leanToAttach: the renderer then builds today's lean-to from its
 // own lines, untouched, hung at the plate H. Everything is in the building's own profile u.
 function d3LeanToGeom(roofCfg, W, L, H) {
@@ -4854,7 +4858,7 @@ function d3LeanToGeom(roofCfg, W, L, H) {
   const flat = ya < y1 + 0.05;
   if (flat) ya = y1 + 0.05;
   const pitch = (ya - y1) / Math.abs(u1 - ua);
-  return { dir, u0, u1, ua, ya, y1, E, k, drop, d, mode, pitch, clamped, flat, noRoof, cuts: mode === "roof" && !noRoof && pitch >= k - 1e-9 };
+  return { dir, u0, u1, ua, ya, y1, E, k, drop, d, mode, pitch, clamped, flat, noRoof, cuts: mode === "roof" && !noRoof && pitch > k + 1e-9 };
 }
 // PER-WALL TOPS: how tall wall `wall` stands along its length, as [[a0, a1, top], ...] in the PLAN's
 // along-frame (feet from its west or north end), or null when it is one height, H, end to end —
@@ -5549,6 +5553,13 @@ function d3PorchReadout(spec, sizeLabel) {
 // at that size -- the numbers the renderer builds -- plus, on the wall, whether the roof edge above hangs
 // into it: the eave finish's lowest point out at the overhang (d3EaveFinishDrop, the number the 3D hangs
 // its boards at) against the lean-to's top out there. Null without a lean-to or without an attach.
+// What to do about it, solved rather than read off the current numbers (both change as they move):
+//   fasciaAt  the least distance below the eave that clears on the wall. The lean-to builds
+//             (drop - d) / width there, flatter the lower it meets, so the finish's need grows with d
+//             and the need at the current d undershoots: d >= (a + (k - drop / width) * OV) / (1 - OV /
+//             width), the wing wall clamp's closed form. Null when only a lean-to with no fall would clear.
+//   dropMax   up the roof, the most drop that keeps it no steeper than the roof it sits on (k * width -
+//             seat), and widthMin the least width that does at this drop. Null with no roof above.
 function d3LeanToReadout(spec, sizeLabel) {
   const roof = (spec && spec.roof) || {};
   const mm = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
@@ -5558,8 +5569,17 @@ function d3LeanToReadout(spec, sizeLabel) {
   const ovRaw = roof.overhang != null ? Number(roof.overhang) : D3.OVERHANG;
   const OV = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
   const ny = 1 / Math.sqrt(1 + g.k * g.k);
-  const fasciaNeed = Math.max(0, g.k - g.pitch) * OV + D3.ROOF_T + (g.k > 0 ? d3EaveFinishDrop(roof, ny) : D3_EAVE.SOFFIT_T) + 0.03;
-  return { ...g, fasciaNeed, fasciaCuts: g.mode === "wall" && g.E - g.ya < fasciaNeed - 1e-9 };
+  const a = D3.ROOF_T + (g.k > 0 ? d3EaveFinishDrop(roof, ny) : D3_EAVE.SOFFIT_T) + 0.03;
+  const fasciaNeed = Math.max(0, g.k - g.pitch) * OV + a;
+  const wLt = Math.abs(g.u1 - g.u0);
+  let fasciaAt = null;
+  if (a <= g.drop - g.k * wLt) fasciaAt = a;
+  else if (wLt > OV + 1e-6) fasciaAt = (a + (g.k - g.drop / wLt) * OV) / (1 - OV / wLt);
+  if (fasciaAt != null && fasciaAt > Math.min(8, g.drop - 0.05) + 1e-9) fasciaAt = null;
+  const seat = (D3.ROOF_T + 0.02) * Math.sqrt(1 + g.k * g.k);
+  const dropMax = g.k > 0.05 ? g.k * wLt - seat : null;
+  const widthMin = g.k > 0.05 ? (g.drop + seat) / g.k : null;
+  return { ...g, fasciaNeed, fasciaAt, dropMax, widthMin, fasciaCuts: g.mode === "wall" && g.E - g.ya < fasciaNeed - 1e-9 };
 }
 
 // A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
@@ -5677,7 +5697,7 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
           <polyline points={[[LT.ua, LT.mode === "roof" && !LT.noRoof ? LT.E + LT.d : LT.ya], [LT.u1 + LT.dir * OV, LT.y1 - OV * LT.pitch]].map((p) => X(p[0]) + "," + Y(p[1])).join(" ")}
             fill="none" stroke={on("leanToAttachFt") ? HL : INK} strokeWidth="2" />
           <line x1={X(LT.u1)} y1={Y(LT.y1)} x2={X(LT.u1)} y2={Y(0)} stroke={INK} strokeWidth="1.2" />
-          {label(X((LT.u0 + LT.u1) / 2), Y(LT.y1) + 22, `${d3FtIn(LT.d)} ${LT.mode === "roof" ? "up the roof" : "down the wall"}`, `lean-to, ${Math.round(LT.pitch * 120) / 10} in 12`, "leanToAttachFt")}
+          {label(X((LT.u0 + LT.u1) / 2), Y(LT.y1) + 22, LT.noRoof ? "at the eave" : `${d3FtIn(LT.d)} ${LT.mode === "roof" ? "up the roof" : "down the wall"}`, `lean-to, ${Math.round(LT.pitch * 120) / 10} in 12`, "leanToAttachFt")}
         </g>
       )}
 
@@ -24887,10 +24907,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   const roof = adminCal.spec.roof;
                   const hint = { fontSize: 10, fontWeight: 700, marginTop: 3, color: "#A16207" };
                   const lr = roof.leanToAttach ? d3LeanToReadout(adminCal.spec, sel.size) : null;
+                  // Suggested numbers are rounded to the inch on the side that works.
+                  const upIn = (ft) => Math.ceil(ft * 12 - 1e-6) / 12, downIn = (ft) => Math.floor(ft * 12 + 1e-6) / 12;
+                  const cutFix = lr && lr.cuts ? [
+                    lr.dropMax != null && lr.dropMax >= 0 ? `set the lean-to drop to ${d3FtIn(downIn(lr.dropMax))} or less` : null,
+                    lr.widthMin != null && lr.widthMin <= 16 ? `make it at least ${d3FtIn(upIn(lr.widthMin))} wide` : null,
+                  ].filter(Boolean).join(", or ") : "";
+                  // Unset, the lean-to hangs at the outside walls' height: the eave, except on a shed's high
+                  // side or the middle section's tall wall beside one wing. The option says which it builds.
+                  const at0 = d3LeanToReadout({ ...adminCal.spec, roof: { ...roof, leanToAttach: "wall", leanToAttachFt: 0 } }, sel.size);
+                  const underEave = at0 ? at0.E - ((adminCal.spec.wallHeightFt) || D3.WALL_H) : 0;
                   const warn = !lr ? null
                     : lr.noRoof ? "This is the roof's high side, with no roof above it to meet, so it meets at the eave."
-                      : lr.cuts ? "The main roof's eave cuts through the lean-to — move it higher up the roof or lower the outer edge."
-                        : lr.fasciaCuts ? `The roof edge above hangs into the lean-to — meet the wall at least ${d3FtIn(lr.fasciaNeed)} below the eave.`
+                      : lr.cuts ? `The lean-to is steeper than the roof it sits on, so the main roof's edge pokes through it. ${cutFix ? cutFix.charAt(0).toUpperCase() + cutFix.slice(1) + "." : "Pick \"On the wall\"."}`
+                        : lr.fasciaCuts ? (lr.fasciaAt != null
+                          ? `The roof edge above hangs into the lean-to — meet the wall at least ${d3FtIn(upIn(lr.fasciaAt))} below the eave.`
+                          : "The roof edge above hangs into the lean-to — give it more drop, or meet it on the roof.")
                           : lr.flat ? "Its roof would slope back toward the building — lower the outer edge or meet the wall higher."
                             : lr.clamped ? `This roof only goes ${d3FtIn(lr.d)} up from here, so it meets there.`
                               : null;
@@ -24898,7 +24930,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <>
                       <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Lean-to meets the building
                         <select value={roof.leanToAttach || ""} onChange={(e) => calSetAttach("leanToAttach", "leanToAttachFt", e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
-                          <option value="">At the eave</option>
+                          <option value="">{underEave > 0.01 ? `At wall height, ${d3FtIn(underEave)} below the eave` : "At the eave"}</option>
                           <option value="wall">On the wall, below the eave</option>
                           <option value="roof">On the roof, above the eave</option>
                         </select>
@@ -24911,7 +24943,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                             style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                           {lr && (
                             <div style={{ ...hint, color: warn ? "#B45309" : "#A16207" }}>
-                              {`Builds ${Math.round(lr.pitch * 120) / 10} in 12 · meets the ${lr.mode === "roof" ? "roof" : "wall"} ${d3FtIn(lr.d)} ${lr.mode === "roof" ? "above" : "below"} the eave`}
+                              {`Builds ${Math.round(lr.pitch * 120) / 10} in 12 · ${lr.noRoof ? "meets at the eave" : `meets the ${lr.mode === "roof" ? "roof" : "wall"} ${d3FtIn(lr.d)} ${lr.mode === "roof" ? "above" : "below"} the eave`}`}
                               {warn && <div>{warn}</div>}
                             </div>
                           )}

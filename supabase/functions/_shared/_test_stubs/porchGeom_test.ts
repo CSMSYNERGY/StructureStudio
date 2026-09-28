@@ -53,7 +53,7 @@ Deno.test("every lifted porch region is byte-identical in the two twins", () => 
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
-const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, d3PorchCapFt, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3WallTops, d3PorchWallTopFt, d3NewFrame, d3Massing, d3EaveFinishDrop, d3PorchFraming, d3PorchStepsGeom };`)() as Record<string, Any>;
+const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, d3PorchCapFt, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3WallTops, d3PorchWallTopFt, d3NewFrame, d3Massing, d3EaveFinishDrop, d3PorchFraming, d3PorchStepsGeom, d3LeanToReadout };`)() as Record<string, Any>;
 
 const PANEL_TRIM = 0.18;   // trimFace on panel cladding: T/2 + 0.03
 
@@ -508,4 +508,34 @@ Deno.test("the review's cabin: 3 in 12 on a 12x16 with 7 ft walls is BUILT far f
   const r = F.d3PorchReadout({ roof: { type: "gable", front: "gable", pitch: 0.5, porchOutFt: 6, porchPitch: 0.25 }, wallHeightFt: 7 }, "12x16");
   assert(r.pitchClamped && r.pitch < 0.1, `built at ${r.pitch}`);
   assertEquals(r.pitchWant, 0.25);
+});
+
+// ── THE LEAN-TO READOUT'S SUGGESTIONS (review, 2026-09-29) ──────────────────────────────────────────
+// Every number the panel suggests is SOLVED for the building it will build, not read off the one on screen:
+// on the wall the lean-to flattens as it meets lower, so the eave finish needs more the lower it goes; up
+// the roof, the cut is decided by drop and width alone.
+Deno.test("the lean-to readout suggests the distance, drop and width that clear, solved, and they do", () => {
+  const gable = { type: "gable", pitch: 0.4, overhang: 0.6, leanToWidthFt: 8, leanToDropFt: 2, leanToSide: "left", leanToAttach: "wall" };
+  const at = (d: number) => F.d3LeanToReadout({ roof: { ...gable, leanToAttachFt: d }, wallHeightFt: 8 }, "12x16");
+  const r = at(0.25);
+  assertEquals(r.fasciaCuts, true);
+  assert(r.fasciaAt > r.fasciaNeed + 1e-3, `the need at 0.25 (${r.fasciaNeed}) undershoots the least that clears (${r.fasciaAt})`);
+  assertEquals(at(r.fasciaAt + 1e-6).fasciaCuts, false, "the suggested distance clears");
+  assertEquals(at(r.fasciaAt - 0.005).fasciaCuts, true, "and it is the least that does");
+  assertAlmostEquals(at(1.5).fasciaAt, r.fasciaAt, 1e-12, "the same answer wherever it is asked from");
+  // Up the roof: steeper than the 4.8:12 it sits on at a 3.5 ft drop, at every distance up it.
+  const up = { ...gable, leanToAttach: "roof", leanToDropFt: 3.5, leanToAttachFt: 1 };
+  const u = F.d3LeanToReadout({ roof: up, wallHeightFt: 8 }, "12x16");
+  assertEquals(u.cuts, true);
+  const seat = (0.2 + 0.02) * Math.sqrt(1 + 0.16);
+  assertAlmostEquals(u.dropMax, 0.4 * 8 - seat, 1e-12);
+  assertAlmostEquals(u.widthMin, (3.5 + seat) / 0.4, 1e-12);
+  for (const d of [0.5, 1, 2]) {
+    assertEquals(F.d3LeanToReadout({ roof: { ...up, leanToAttachFt: d }, wallHeightFt: 8 }, "12x16").cuts, true, `still cut at ${d}`);
+    assertEquals(F.d3LeanToReadout({ roof: { ...up, leanToDropFt: u.dropMax - 0.01, leanToAttachFt: d }, wallHeightFt: 8 }, "12x16").cuts, false, `less drop at ${d}`);
+    assertEquals(F.d3LeanToReadout({ roof: { ...up, leanToWidthFt: u.widthMin + 0.01, leanToAttachFt: d }, wallHeightFt: 8 }, "12x16").cuts, false, `wider at ${d}`);
+  }
+  // No roof above (a shed's high side): nothing to suggest up the roof.
+  const hi = F.d3LeanToReadout({ roof: { type: "shed", highSide: "left", pitch: 0.25, leanToWidthFt: 8, leanToDropFt: 1, leanToSide: "left", leanToAttach: "roof", leanToAttachFt: 1 }, wallHeightFt: 8 }, "12x16");
+  assertEquals([hi.noRoof, hi.dropMax, hi.widthMin], [true, null, null]);
 });

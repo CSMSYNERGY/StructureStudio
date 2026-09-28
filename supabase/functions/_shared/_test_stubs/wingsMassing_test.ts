@@ -604,3 +604,14 @@ Deno.test("roof: a wing roof that cannot reach the roof is built as far as it sh
   for (const g of F.d3Massing({ ...TRI37, pitch: 8 / 12, wingAttach: "wall", wingAttachFt: 2 }, 37, 22, 8).wings) assertEquals([g.meets, g.meetFt], ["wall", 2]);
 });
 
+Deno.test("a lean-to up the roof cuts or not by its drop and width alone, wherever it meets; level with the roof it lands", () => {
+  const shed = { type: "shed", highSide: "left", pitch: 0.25, leanToWidthFt: 8, leanToSide: "right", leanToAttach: "roof" };
+  const seat = (F.D3.ROOF_T + 0.02) * Math.sqrt(1 + 0.25 * 0.25);
+  for (const d of [0.5, 1, 2, 2.75]) {
+    assertEquals(F.d3LeanToGeom({ ...shed, leanToDropFt: 1.5, leanToAttachFt: d }, 12, 16, 8).cuts, false, `drop 1.5 at ${d}`);
+    for (const drop of [2, 3]) assertEquals(F.d3LeanToGeom({ ...shed, leanToDropFt: drop, leanToAttachFt: d }, 12, 16, 8).cuts, true, `drop ${drop} at ${d}`);
+    const level = F.d3LeanToGeom({ ...shed, leanToDropFt: 0.25 * 8 - seat, leanToAttachFt: d }, 12, 16, 8);
+    assertAlmostEquals(level.pitch, 0.25, 1e-9);
+    assertEquals(level.cuts, false, `level with the roof at ${d}: one plane`);
+  }
+});
