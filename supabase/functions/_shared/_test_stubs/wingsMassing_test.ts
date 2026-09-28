@@ -54,7 +54,7 @@ type Any = any;
 const F = new Function(
   `const isVentItem = (it) => !!(it && it.isVent);\n${blocks.map((b) => b.cmp).join("\n")}; return { D3, d3RoofAxes, d3Massing, d3MassingTopAt, d3WallTops, d3WallTopFt, d3CeilingFt, ` +
     `d3PorchSpanWings, d3PorchSpan, d3PorchWallTopFt, d3ModelTopFt, d3FrameHeightFt, d3DefaultShotCamera, ssSelfCheckCameras, ssGableVentFit, SS_SHOT, ` +
-    `d3DormerFaceFt, d3DormerReadout, d3TransomDormerGeom, d3MakeProfYAt, d3RoofProfile, d3DormerWindowFit };`,
+    `d3DormerFaceFt, d3DormerReadout, d3TransomDormerGeom, d3MakeProfYAt, d3RoofProfile, d3DormerWindowFit, d3RoofEnd };`,
 )() as Record<string, Any>;
 
 // The Tri Home, as the task drew it: 24 wide across the gable end, 28 deep, 9 ft outer walls, 8 ft
@@ -354,4 +354,145 @@ Deno.test("⚠️ with wings the dormer face is measured on the centre, the roof
   const before = F.d3TransomDormerGeom(plain, S, F.d3MakeProfYAt(F.d3RoofProfile(plain, S, 9, true).dedup, 9));
   assertEquals(F.d3DormerFaceFt({ roof: plain, wallHeightFt: 9 }, 28, 20), before.face);
   assertEquals(F.d3DormerReadout({ roof: plain, wallHeightFt: 9 }, "28x20"), before);
+});
+
+// ── WHERE THE WING ROOFS MEET THE CENTRE (roof.wingAttach / wingAttachFt, 2026-09-28) ─────────────
+// Carolyn, 09-28, on the Tri Home: "It even pushed the roof up ... they need to specify if it goes on
+// the roof or if it goes on the sidewall ... I don't think we want it to just automatically switch."
+// With an attach the centre's eave is the builder's number EXACTLY, the wing roof's pitch is worked out
+// from where it meets, and wingPitch is stored but unread. Absent (or an unknown word) is today's rule,
+// push included -- every pin above.
+
+Deno.test("⚠️ no attach, or a word the sanitiser would drop, is today's massing exactly", () => {
+  for (const junk of [undefined, null, "", "sidewall", "ROOF", 1]) {
+    const m = F.d3Massing({ ...TRI, centerEaveFt: 10, wingAttach: junk, wingAttachFt: 3 }, 24, 28, 9);
+    assertAlmostEquals(m.Hc, 12, 1e-12, `today pushes the 10 asked to the wing top + 1 (${String(junk)})`);
+    assertEquals(m.hcRaised, true);
+    assertEquals(m.attach, undefined);
+    for (const g of m.wings) {
+      assertEquals([g.pitch, g.uIn, g.run, g.attach], [0.25, undefined, undefined, undefined]);
+      assertAlmostEquals(g.ya, 11, 1e-12);
+    }
+  }
+  // The distance alone describes nothing.
+  assertEquals(F.d3Massing({ ...TRI, wingAttachFt: 2 }, 24, 28, 9).Hc, 17);
+});
+
+Deno.test("wall: the centre's eave is EXACTLY the one asked; the wing roof meets its wall d below it", () => {
+  // wingPitch 1.2 is ignored while an attach is set: the pitch is worked out.
+  const roof = { ...TRI, wingPitch: 1.2, wingAttach: "wall", wingAttachFt: 2 };
+  const m = F.d3Massing(roof, 24, 28, 9);
+  assertEquals([m.Hc, m.hcRaised, m.attach], [17, false, "wall"]);
+  for (const g of m.wings) {
+    assertEquals(g.ya, 15, "A = Hc - d");
+    assertEquals(g.uIn, g.u0, "on the centre's wall line");
+    assertEquals(g.run, 8);
+    assertAlmostEquals(g.pitch, (15 - 9) / 8, 1e-12);
+    assertEquals([g.attach, g.attachFt, g.clamped, g.cuts], ["wall", 2, false, false]);
+  }
+  // The outline follows the worked-out pitch: H at the outer wall, A at the centre's wall.
+  assertAlmostEquals(F.d3MassingTopAt(m, -12), 9, 1e-12);
+  assertAlmostEquals(F.d3MassingTopAt(m, -8), 12, 1e-12);
+  assertAlmostEquals(F.d3MassingTopAt(m, -4.0001), 15, 1e-3);
+  // The clerestory's wall is the one that holds it: the gable ends still step H | Hc | H.
+  assertEquals(F.d3WallTops(roof, 24, 28, 9, "south").map((p: Any) => p[2]), [9, 17, 9]);
+  // Blank centre eave: today's default, the stored wing's top + 3 -- and still not pushed.
+  const { centerEaveFt: _c, ...noEave } = roof;
+  assertAlmostEquals(F.d3Massing(noEave, 24, 28, 9).Hc, 9 + 8 * 1.2 + 3, 1e-12);
+});
+
+Deno.test("wall: where today would PUSH the centre up, the centre stays put", () => {
+  // Carolyn's complaint in numbers: a wing top of 11 and a centre asked at 11.5. Today: 12, raised.
+  const asked = { ...TRI, centerEaveFt: 11.5 };
+  assertEquals(F.d3Massing(asked, 24, 28, 9).hcRaised, true);
+  const m = F.d3Massing({ ...asked, wingAttach: "wall", wingAttachFt: 1 }, 24, 28, 9);
+  assertEquals([m.Hc, m.hcRaised], [11.5, false]);
+  for (const g of m.wings) {
+    assertEquals(g.ya, 10.5);
+    assertAlmostEquals(g.pitch, 1.5 / 8, 1e-12);
+  }
+});
+
+Deno.test("wall: a distance the centre's eave cannot clear is moved DOWN to the least that clears, and flagged", () => {
+  // A 12:12 centre, 1 ft overhang, asked 0.3 ft: its fascia hangs into the wing roof. Solved in closed
+  // form, the least d is a + (k - p(d)) * ov with p(d) = (Hc - d - H) / w.
+  const roof = { ...TRI, pitch: 1, wingAttach: "wall", wingAttachFt: 0.3 };
+  const m = F.d3Massing(roof, 24, 28, 9);
+  const a = F.D3.ROOF_T + 0.43;
+  for (const g of m.wings) {
+    assertEquals([m.Hc, g.clamped, g.cuts], [17, true, false]);
+    assertAlmostEquals(g.attachFt, a + (1 - g.pitch) * 1, 1e-9, "exactly the clearance, not more");
+    assertAlmostEquals(g.ya, 17 - g.attachFt, 1e-12);
+    // What the centre's eave hangs clears the wing slab's top by today's 0.1 ft at the overhang.
+    const eaveEdgeBottom = m.Hc - 1 * 1 - 0.3;
+    const wingTopThere = g.ya - 1 * g.pitch + F.D3.ROOF_T + 0.02;
+    assert(eaveEdgeBottom - wingTopThere >= 0.1 - 1e-9, `${eaveEdgeBottom} vs ${wingTopThere}`);
+  }
+  // Asked far enough down, nothing moves.
+  assertEquals(F.d3Massing({ ...roof, wingAttachFt: 2 }, 24, 28, 9).wings[0].clamped, false);
+  // A centre too low to clear even a flat wing roof: drawn flat at the outside walls, flagged, and the
+  // centre's eave STILL where it was asked -- never pushed, never switched to "roof".
+  const low = F.d3Massing({ ...TRI, centerEaveFt: 10, wingAttach: "wall", wingAttachFt: 0.5 }, 24, 28, 9);
+  assertEquals([low.Hc, low.attach], [10, "wall"]);
+  for (const g of low.wings) assertEquals([g.ya, g.pitch, g.clamped, g.cuts], [9, 0, true, true]);
+});
+
+Deno.test("roof: the wing roof runs up onto the centre's roof, lands d above its eave, and the pitch follows", () => {
+  // Centre asked at 11 (today: pushed to 12), a 6:12 centre over 8 ft wings: 1 ft up its roof is 2 ft in.
+  const roof = { ...TRI, centerEaveFt: 11, wingAttach: "roof", wingAttachFt: 1 };
+  const m = F.d3Massing(roof, 24, 28, 9);
+  assertEquals([m.Hc, m.hcRaised, m.attach], [11, false, "roof"]);
+  for (const g of m.wings) {
+    assertEquals(g.ya, 12, "A = Hc + d");
+    assertAlmostEquals(g.uIn, g.side * (4 - 1 / 0.5), 1e-12, "in by d / k from the centre wall");
+    assertAlmostEquals(g.run, 10, 1e-12);
+    assertAlmostEquals(g.pitch, 3 / 10, 1e-12);
+    assertEquals([g.k, g.clamped, g.cuts], [0.5, false, false]);
+  }
+  // The outline: the wing line out to where it lands, the centre's roof above it from there on.
+  assertAlmostEquals(F.d3MassingTopAt(m, -8), 9 + 4 * 0.3, 1e-12);
+  assertAlmostEquals(F.d3MassingTopAt(m, -3), 9 + 9 * 0.3, 1e-12, "over the centre's eave: the wing roof, above it");
+  assertAlmostEquals(F.d3MassingTopAt(m, -2), 12, 1e-12);
+  assertAlmostEquals(F.d3MassingTopAt(m, -1), 12.5, 1e-12, "past the landing: the centre's own roof");
+  // The walls do not move: the centre's wall line is still u0, its eave Hc.
+  assertEquals(F.d3WallTops(roof, 24, 28, 9, "south").map((p: Any) => p[2]), [9, 11, 9]);
+});
+
+Deno.test("roof: never past the centre's own eave leg, and a wing steeper than it is flagged, not switched", () => {
+  // The 6:12 centre's leg rises 2 ft to the ridge: 5 ft up is held 0.25 ft short of it.
+  const m = F.d3Massing({ ...TRI, centerEaveFt: 11, wingAttach: "roof", wingAttachFt: 5 }, 24, 28, 9);
+  for (const g of m.wings) assertEquals([g.attachFt, g.ya, g.clamped], [1.75, 12.75, true]);
+  // The Tri Home as the test draws it (17 ft centre): a wing roof landing 1 ft up needs 9 in 10 -- steeper
+  // than the 6:12 it sits on, so the centre's eave pokes through. Built as asked, and flagged.
+  const steep = F.d3Massing({ ...TRI, wingAttach: "roof", wingAttachFt: 1 }, 24, 28, 9);
+  for (const g of steep.wings) {
+    assertEquals([steep.Hc, g.attach, g.cuts], [17, "roof", true]);
+    assertAlmostEquals(g.pitch, 0.9, 1e-12);
+  }
+  // A gambrel's lower leg is its eave leg: up to its knee.
+  const gam = F.d3Massing({ type: "gambrel", wingSide: "both", wingWidthFt: 6, centerEaveFt: 12, wingAttach: "roof", wingAttachFt: 9 }, 24, 28, 9);
+  const knee = (12 / 2) * 0.55;   // s2 * kneeRise over the centre's 12 ft span
+  for (const g of gam.wings) {
+    assertAlmostEquals(g.attachFt, knee - 0.25, 1e-12);
+    assertEquals(g.clamped, true);
+  }
+});
+
+Deno.test("the centre never stands lower than 1 ft over the outside walls with an attach, and says so", () => {
+  const m = F.d3Massing({ ...TRI, centerEaveFt: 8, wingAttach: "roof", wingAttachFt: 1 }, 24, 28, 9);
+  assertEquals([m.Hc, m.hcLow], [10, true]);
+  assertEquals(F.d3Massing({ ...TRI, wingAttach: "roof", wingAttachFt: 1 }, 24, 28, 9).hcLow, false);
+});
+
+// d3RoofEnd, which both appendages read: the eave at a wall and the roof that rises from it.
+Deno.test("d3RoofEnd: the eave and the leg rising from it, at either end, a shed's high side falling inward", () => {
+  const gable = F.d3RoofProfile({ type: "gable", pitch: 0.4 }, 12, 8, true).dedup;
+  const l = F.d3RoofEnd(gable, -1);
+  assertEquals([l.u, l.y], [-6, 8]);
+  assertAlmostEquals(l.k, 0.4, 1e-12);
+  assertAlmostEquals(l.rise, 2.4, 1e-12);
+  assertAlmostEquals(F.d3RoofEnd(gable, 1).k, 0.4, 1e-12);
+  const shed = F.d3RoofProfile({ type: "shed", pitch: 0.25 }, 12, 8, true).dedup;
+  const hi = F.d3RoofEnd(shed, -1), lo = F.d3RoofEnd(shed, 1);
+  assertEquals([hi.y, hi.k, lo.y, lo.k], [11, -0.25, 8, 0.25]);
 });

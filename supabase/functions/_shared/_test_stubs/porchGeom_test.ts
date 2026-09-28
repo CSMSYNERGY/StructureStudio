@@ -329,6 +329,22 @@ Deno.test("with wings a centre porch hangs under the wing roofs its sheet reache
   assertEquals(F.d3PorchReadout({ roof: { ...roof, overhang: 0 }, wallHeightFt: 9 }, "28x20").atMost, false);
 });
 
+Deno.test("wing roofs run up onto the centre's roof: a centre porch's ceiling is the wing line, not the centre's buried eave", () => {
+  // wingAttach "roof" (2026-09-28): the wing roofs land 1 ft up the centre's 8:12, 1.49 ft in from its
+  // walls, so the centre's eave corner at u0 is inside the wing's body and hangs nothing over the porch.
+  const roof = { type: "gable", front: "gable", pitch: 0.67, overhang: 1, wingSide: "both", wingWidthFt: 8, wingPitch: 0.2, centerEaveFt: 11,
+    porchOutFt: 6, wingAttach: "roof", wingAttachFt: 1 };
+  const m = F.d3Massing(roof, 28, 20, 9);
+  const p = m.wings[0].pitch;
+  assertEquals([m.Hc, m.wings[0].ya, m.wings[0].cuts], [11, 12, false]);
+  const edge = 6 + PANEL_TRIM + 0.08;
+  assertAlmostEquals(F.d3PorchCapFt(roof, 28, 20, 9, PANEL_TRIM), 9 + (14 - edge) * p - 0.2, 1e-9);
+  // On the wall instead, the wing roof meets the centre wall under its eave, and that corner is the outline.
+  const wall = { ...roof, wingAttach: "wall" };
+  const mw = F.d3Massing(wall, 28, 20, 9);
+  assertAlmostEquals(F.d3PorchCapFt(wall, 28, 20, 9, PANEL_TRIM), Math.min(mw.wings[0].ya, 9 + (14 - edge) * mw.wings[0].pitch) - 0.2, 1e-9);
+});
+
 // ── THE PORCH'S OWN FRAMING (roof.porchPosts / porchPitch / porchSteps, 2026-09-25) ────────────────
 // Each is null when the style does not say, and null builds today's porch exactly: the same numbers,
 // and the same KEYS (model.porch is d3PorchGeom's object, and the legacy snapshot hashes it).

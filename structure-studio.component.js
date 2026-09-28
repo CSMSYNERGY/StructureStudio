@@ -4714,12 +4714,85 @@ function d3Massing(roofCfg, W, L, H) {
       const minHc = out.ya + Math.max(1.0, D3.ROOF_T + 0.43 + Math.max(0, eaveSlope - pitch) * ov);
       const rawHc = Number(cfg.centerEaveFt);
       const wantHc = isFinite(rawHc) && rawHc > 0 ? rawHc : out.ya + 3;
-      out.Hc = Math.max(wantHc, minHc);
-      out.hcRaised = out.Hc > wantHc + 1e-9;
+      // WHERE THE WING ROOFS MEET THE CENTRE, CHOSEN (roof.wingAttach / wingAttachFt, 2026-09-28). With
+      // an attach the centre's eave is the builder's number EXACTLY and nothing below moves it: the push
+      // is what Carolyn saw on the Tri Home and did not want -- "It even pushed the roof up ... they need
+      // to specify if it goes on the roof or if it goes on the sidewall ... I don't think we want it to
+      // just automatically switch" (09-28 @16:41). The wing roof's pitch is then WORKED OUT from where it
+      // meets (d3WingsAttach), and wingPitch stays stored, unread, for the day the attach is cleared.
+      // Absent, this is the rule it always was, push and all, so no stored style moves.
+      const attach = cfg.wingAttach === "roof" || cfg.wingAttach === "wall" ? cfg.wingAttach : null;
+      if (!attach) {
+        out.Hc = Math.max(wantHc, minHc);
+        out.hcRaised = out.Hc > wantHc + 1e-9;
+      } else {
+        // The one floor left: a centre no taller than the outside walls is not a raised centre at all,
+        // and every wall and roof built from it would stand upside down. The panel says so (hcLow).
+        out.Hc = Math.max(wantHc, Hn + 1);
+        out.hcLow = out.Hc > wantHc + 1e-9;
+        out.attach = attach;
+        d3WingsAttach(out, c, cfg.wingAttachFt, ov);
+      }
     }
   }
   out.prof = d3RoofProfile(cfg, out.Sc, out.Hc, ax.tallNeg).dedup;
   return out;
+}
+// The eave at one END of a roof profile (side -1 = the -u end) and the leg of roof that rises from it:
+// { u, y } the eave point -- the TOP of a shed's plumb high edge -- k the leg's slope rising INWARD
+// (negative where the roof falls inward, a shed's high side), rise the leg's own rise to its far end
+// (a gable's ridge, a gambrel's knee). Pure: it reads only the profile d3RoofProfile drew.
+function d3RoofEnd(dedup, side) {
+  const pts = side < 0 ? dedup : dedup.slice().reverse();
+  let i = 0;
+  while (i + 1 < pts.length && Math.abs(pts[i + 1][0] - pts[0][0]) < 1e-9) i++;
+  const e = pts[i], nx = pts[i + 1];
+  if (!nx) return { u: e[0], y: e[1], k: 0, rise: 0 };
+  return { u: e[0], y: e[1], k: (nx[1] - e[1]) / Math.abs(nx[0] - e[0]), rise: nx[1] - e[1] };
+}
+// Each wing's roof line when roof.wingAttach says where it meets the centre (2026-09-28). `m` is the
+// massing being built, its Hc already the builder's; `c` the centre's profile with its eave at 0. The
+// distance is VERTICAL feet from the centre's eave, like porchAttachFt and every dimension in the drawing:
+//   wall  the wing roof meets the centre's side wall d BELOW its eave: A = Hc - d over the wing's width.
+//         The one thing held is physical: the centre's eave finish, hung off its overhang above the wing
+//         roof, clears the wing slab by today's margin (ROOF_T + 0.43 ft, plus the extra fall of the
+//         centre's steeper eave out to its overhang) -- today's rule WITHOUT its 1 ft floor. The wing's
+//         pitch depends on d, so the least d is solved in closed form, and a d under it is moved down to
+//         it (clamped). A centre too low to clear even a flat wing roof is drawn anyway, and flagged (cuts).
+//   roof  the wing roof runs up ONTO the centre's roof and lands d ABOVE its eave, on the centre's own
+//         eave leg -- never past its knee or ridge, held 0.25 ft short of it (clamped): A = Hc + d at
+//         uIn = u0 - side * d / k, over a run of w + d / k. It needs a wing roof flatter than the centre's
+//         eave (p < k), or the centre's eave pokes up through it: drawn so, and flagged (cuts). Never
+//         switched to "wall" -- the builder said which.
+// Each wing gains pitch (the BUILT one), ya = A, uIn, run, attach, attachFt (the d built), k (the
+// centre's eave slope on that side), clamped and cuts. u0 stays the centre wall line the walls stand on.
+function d3WingsAttach(m, c, dRaw, ov) {
+  const d0 = Number(dRaw);
+  const ask = isFinite(d0) ? Math.max(0, Math.min(10, d0)) : 0;
+  const Hn = m.H, Hc = m.Hc, a = D3.ROOF_T + 0.43;
+  m.wings.forEach((g) => {
+    const e = d3RoofEnd(c, g.side);
+    const k = Math.max(0, e.k);
+    let d = ask, A, uIn = g.u0, run = g.w, clamped = false, cuts = false;
+    if (m.attach === "wall") {
+      const need = g.w > ov + 1e-6 ? Math.max(a, (a + k * ov - ov * (Hc - Hn) / g.w) / (1 - ov / g.w)) : a + k * ov;
+      if (d < need - 1e-9) { d = need; clamped = true; }
+      // Never a wing roof falling toward the centre: at the outside wall's height it is flat, and a
+      // centre that low may not clear it.
+      if (Hc - d < Hn) { d = Hc - Hn; clamped = true; cuts = d < need - 1e-9; }
+      A = Hc - d;
+    } else {
+      const most = Math.max(0, e.rise - 0.25);
+      if (!(k > 0.05)) { clamped = d > 0; d = 0; cuts = true; }
+      else if (d > most + 1e-9) { d = most; clamped = true; }
+      A = Hc + d;
+      if (k > 0.05) { uIn = g.u0 - g.side * (d / k); run = g.w + d / k; }
+    }
+    const p = (A - Hn) / run;
+    if (m.attach === "roof" && p >= k - 1e-9) cuts = true;
+    Object.assign(g, { pitch: p, ya: A, uIn, run, attach: m.attach, attachFt: d, k, clamped, cuts });
+  });
+  m.ya = m.wings.reduce((y, g) => Math.max(y, g.ya), Hn);
 }
 // The top of the massing's outline at the building's own u: the centre's roof over the centre, the
 // wing roof's line over a wing. Null-safe on u outside the span (the nearest end's answer).
@@ -4727,6 +4800,9 @@ function d3MassingTopAt(m, u) {
   for (let i = 0; i < m.wings.length; i++) {
     const g = m.wings[i];
     if ((u - g.u0) * g.side > 0) return g.ye + Math.min(g.w, Math.abs(u - g.u1)) * g.pitch;
+    // A wing roof run up onto the centre's roof (wingAttach "roof") is the top out to where it lands --
+    // unless it is too steep to (cuts), where the centre's eave stands above it.
+    if (g.uIn != null && (u - g.uIn) * g.side > 0) return Math.max(g.ye + Math.abs(u - g.u1) * g.pitch, d3MakeProfYAt(m.prof, m.Hc)(u - m.uc));
   }
   return d3MakeProfYAt(m.prof, m.Hc)(u - m.uc);
 }
@@ -5334,8 +5410,11 @@ function d3PorchCapFt(roofCfg, W, L, H, trimFace) {
   const top = d3PorchWallTopFt(cfg, W, L, H);
   const reach = P.span / 2 + trimFace + 0.08;          // d3PorchGeom's side + sizes.SIDE_OV
   if (P.onCap) {
-    const corners = m.prof.map((c) => [c[0] + m.uc, c[1]]);
-    m.wings.forEach((g) => { corners.push([g.u1, g.ye], [g.u0, g.ya]); });
+    // A wing roof that runs up onto the centre's roof (wingAttach "roof", 2026-09-28) meets it at uIn,
+    // and the centre's own eave corner under it is no part of the outline; everywhere else uIn is u0.
+    const landed = m.wings.filter((g) => g.attach === "roof" && !g.cuts);
+    const corners = m.prof.map((c) => [c[0] + m.uc, c[1]]).filter((c) => !landed.some((g) => (c[0] - g.uIn) * g.side > 1e-9));
+    m.wings.forEach((g) => { corners.push([g.u1, g.ye], [g.uIn != null ? g.uIn : g.u0, g.ya]); });
     const outline = (u) => {
       const at = corners.filter((c) => Math.abs(c[0] - u) < 1e-9);
       return at.length ? Math.min(...at.map((c) => c[1])) : d3MassingTopAt(m, u);
@@ -5643,7 +5722,12 @@ function d3WingsElevation(spec, sizeLabel, focusKey) {
     const k = OV / Math.abs(dx);
     return [near[0] + dx * k, near[1] + dy * k];
   };
-  const centreRoof = [ext(cp[1], cp[0])].concat(cp, [ext(cp[cp.length - 2], cp[cp.length - 1])]);
+  // A wing roof that lands ON the centre's roof (wingAttach "roof", 2026-09-28) covers the centre's eave
+  // on that side, so the centre's line starts where the wing's ends, as the 3D cuts it.
+  const landL = m.wings.find((g) => g.side < 0 && g.attach === "roof" && !g.cuts);
+  const landR = m.wings.find((g) => g.side > 0 && g.attach === "roof" && !g.cuts);
+  const centreRoof = [landL ? [landL.uIn, landL.ya] : ext(cp[1], cp[0])]
+    .concat(cp.slice(landL ? 1 : 0, landR ? cp.length - 1 : cp.length), [landR ? [landR.uIn, landR.ya] : ext(cp[cp.length - 2], cp[cp.length - 1])]);
   const pts = (arr) => arr.map((p) => X(p[0]) + "," + Y(p[1])).join(" ");
   const cL = cp[0][0], cR = cp[cp.length - 1][0];
   const g0 = m.wings[0];
@@ -5655,7 +5739,7 @@ function d3WingsElevation(spec, sizeLabel, focusKey) {
       <rect x={X(cL)} y={Y(m.Hc)} width={(cR - cL) * sc} height={(m.Hc - H) * sc} fill="#FEF3C7" stroke={INK} strokeWidth="1.2" />
       {/* each wing's roof: from its outer eave (out past the wall by the overhang) up to the centre wall */}
       {m.wings.map((g) => (
-        <polyline key={"wing" + g.side} points={pts([[g.u1 + g.side * OV, g.ye - OV * g.pitch], [g.u1, g.ye], [g.u0, g.ya]])}
+        <polyline key={"wing" + g.side} points={pts([[g.u1 + g.side * OV, g.ye - OV * g.pitch], [g.u1, g.ye], [g.uIn != null ? g.uIn : g.u0, g.ya]])}
           fill="none" stroke={on("wingPitch") || on("wingWidthFt") ? HL : INK} strokeWidth="2" strokeLinejoin="round" />
       ))}
       <polyline points={pts(centreRoof)} fill="none" stroke={INK} strokeWidth="2" strokeLinejoin="round" />
@@ -5672,7 +5756,13 @@ function d3WingsElevation(spec, sizeLabel, focusKey) {
       <line x1={X(-s2)} y1={Y(0) + 16} x2={X(s2)} y2={Y(0) + 16} stroke={DIM} strokeWidth="1" />
       {label((X(-s2) + X(s2)) / 2, Y(0) + 29, d3FtIn(S), "span", null)}
       <line x1={X(g0.u1)} y1={Y(0) + 6} x2={X(g0.u0)} y2={Y(0) + 6} {...dimStroke("wingWidthFt")} />
-      {label((X(g0.u1) + X(g0.u0)) / 2, Y(g0.ye) + 12, d3FtIn(g0.w), `wing, ${Math.round(g0.pitch * 12)}:12`, "wingWidthFt")}
+      {label((X(g0.u1) + X(g0.u0)) / 2, Y(g0.ye) + 12, d3FtIn(g0.w), g0.attach ? `wing, ${Math.round(g0.pitch * 120) / 10} in 12` : `wing, ${Math.round(g0.pitch * 12)}:12`, "wingWidthFt")}
+      {/* WHERE THE WING ROOF MEETS THE CENTRE (wingAttach, 2026-09-28), a line under the wing's own */}
+      {g0.attach && (
+        <text x={(X(g0.u1) + X(g0.u0)) / 2} y={Y(g0.ye) + 30} textAnchor="middle" style={{ fontSize: 8, fill: on("wingAttachFt") ? HL : DIM }}>
+          {`meets the ${g0.attach} ${d3FtIn(g0.attachFt)} ${g0.attach === "roof" ? "up" : "down"}`}
+        </text>
+      )}
     </svg>
   );
 }
@@ -6993,7 +7083,11 @@ function buildShed3DModel(THREE, p) {
   // items, and never pickable (no `wall` name: nothing can be placed on them).
   const CLERESTORY = {};
   mass.wings.forEach((g) => {
-    const u0 = g.u0, bot = Math.max(H, g.ya - (T / 2) * g.pitch - 0.3);
+    // A wing roof run up onto the centre's roof (wingAttach "roof", 2026-09-28) leaves no centre wall
+    // showing above it: the wing's own body closes the gable end up to it instead.
+    if (g.attach === "roof" && !g.cuts) return;
+    const yF = g.attach === "roof" ? H + (g.w - T / 2) * g.pitch : g.ya - (T / 2) * g.pitch;
+    const u0 = g.u0, bot = Math.max(H, yF - 0.3);
     CLERESTORY[g.side < 0 ? "clerestoryNeg" : "clerestoryPos"] = mass.uAxisIsX
       ? { len: mass.L, O: [u0, -mass.L / 2], U: [0, 1], N: [g.side, 0], a0Ft: 0, bot, tops: [[0, mass.L, mass.Hc]], clerestory: g.side }
       : { len: mass.L, O: [-mass.L / 2, u0], U: [1, 0], N: [0, g.side], a0Ft: 0, bot, tops: [[0, mass.L, mass.Hc]], clerestory: g.side };
@@ -8718,14 +8812,30 @@ function buildShed3DModel(THREE, p) {
   // the same slab, eave finish and rake boards the main roof gets, with the inner end stopped at
   // the clerestory face and no ridge cap. Every mesh is tagged userData.ssWing (the side, -1 or 1),
   // and the projecting porch's clearance scan measures a wing by what hangs over the porch.
+  // WING ROOFS THAT LAND ON THE CENTRE'S ROOF (roof.wingAttach "roof", 2026-09-28): the centre's slope
+  // ends where the wing roof meets it and has no eave of its own on that side -- under the wing roof it
+  // would only show as a raw slab end and a fascia beneath the wing's overhang. The (negative) extension
+  // that stops a centre slab at the landing when P is the centre's eave point on such a side; null
+  // everywhere else, which is every building without that attach.
+  const wingLandsAt = (P) => {
+    const g = mass.wings.find((q) => q.attach === "roof" && !q.cuts && Math.abs(P[0] - (q.u0 - mass.uc)) < 1e-6 && Math.abs(P[1] - Hr) < 1e-6);
+    return g ? -Math.hypot(g.uIn - mass.uc - P[0], g.ya - P[1]) : null;
+  };
   const wingSlopes = [];
   mass.wings.forEach((g) => {
     // `face` is the clerestory's OUTER face, the wing's side of the centre wall line.
     const s = g.side, lu1 = g.u1 - mass.uc, face = g.u0 + s * (T / 2) - mass.uc;
     const yFace = H + (g.w - T / 2) * g.pitch;
+    // ON THE CENTRE'S ROOF (wingAttach "roof", 2026-09-28) the wing roof lands at (uIn, ya), up the
+    // centre's eave leg, and the body is closed up to it: the wedge between the centre's roof line,
+    // carried out to the face, and the wing's. Its caps are the gable end's wall there.
+    const onRoof = g.attach === "roof" && !g.cuts;
     if (yFace - H > 0.02) {
       const sh = new THREE.Shape();
-      sh.moveTo(lu1, H); sh.lineTo(face, H); sh.lineTo(face, yFace); sh.lineTo(lu1, H);
+      sh.moveTo(lu1, H); sh.lineTo(face, H);
+      if (onRoof) { sh.lineTo(face, mass.Hc - (T / 2) * g.k); sh.lineTo(g.uIn - mass.uc, g.ya); }
+      else sh.lineTo(face, yFace);
+      sh.lineTo(lu1, H);
       const wgeo = new THREE.ExtrudeGeometry(sh, { depth: L, bevelEnabled: false });
       const wuv = wgeo.attributes.uv;
       if (wuv) { for (let i = 0; i < wuv.count; i++) wuv.setX(i, wuv.getX(i) + (mass.S / 2 + mass.uc)); wuv.needsUpdate = true; }
@@ -8748,18 +8858,20 @@ function buildShed3DModel(THREE, p) {
     // just clear of the clerestory's own relief and between its corner boards.
     const slabTop = yFace + (D3.ROOF_T + 0.02) * Math.sqrt(1 + g.pitch * g.pitch);
     const fT = Math.max(0.03, cladReach - T / 2 + 0.02), fLen = L - 2 * trimFace;
-    if (fLen > 0.5) {
+    if (fLen > 0.5 && !onRoof) {
       const fl = box(roofMat, fT, 0.38, fLen);
       d3RoofSlabUVs(fl);
       fl.position.set(face + s * fT / 2, slabTop + 0.14, L / 2);
       fl.userData.ssWing = s;
       rg.add(fl);
     }
-    const outer = [lu1, H], inner = [face, yFace];
+    // On the centre's roof the slab runs to where it lands and stops square there: the two decks meet in
+    // a valley, so each top face runs on under the other's (jointExt's concave case, an extension of 0).
+    const outer = [lu1, H], inner = onRoof ? [g.uIn - mass.uc, g.ya] : [face, yFace];
     const sl = s < 0 ? [outer, inner] : [inner, outer];   // left to right, so the slab's normal points up
     sl.wing = s;
     sl.wingIn = inner;
-    sl.wingInExt = (D3.ROOF_T + 0.02) * g.pitch + 0.005;  // the slab's top edge reaches the face
+    sl.wingInExt = onRoof ? 0 : (D3.ROOF_T + 0.02) * g.pitch + 0.005;  // the slab's top edge reaches the face
     wingSlopes.push(sl);
   });
   slopes.concat(wingSlopes).forEach((sl) => {
@@ -8788,7 +8900,12 @@ function buildShed3DModel(THREE, p) {
     const t = D3.ROOF_T / 2 + 0.02;
     const jointExt = (P, dirInX, dirInY) => {
       const o = jointPartnerAt(P, sl);
-      if (!o) return sl.wingIn === P ? sl.wingInExt : OV;   // free edge: the real eave overhang (a wing's inner end stops at the wall)
+      if (!o) {
+        if (sl.wingIn === P) return sl.wingInExt;   // a wing's inner end stops at the wall
+        // The centre's eave under a wing roof that lands on it (wingAttach "roof"): cut back to the landing.
+        const cut = sl.wing ? null : wingLandsAt(P);
+        return cut != null ? cut : OV;               // free edge: the real eave overhang
+      }
       const odu = o[1][0] - o[0][0], ody = o[1][1] - o[0][1];
       const olen = Math.sqrt(odu * odu + ody * ody) || 1;
       const onx = -ody / olen, ony = odu / olen;
@@ -8814,7 +8931,7 @@ function buildShed3DModel(THREE, p) {
     // detached at some angles. Only slopes that reach the wall plate get one
     // (a gambrel's upper legs do not).
     const lowEnd = A[1] <= B[1] ? A : B;
-    if (lowEnd[1] <= Hr + 0.01) {
+    if (lowEnd[1] <= Hr + 0.01 && (sl.wing || wingLandsAt(lowEnd) == null)) {
       const towardLow = lowEnd === A ? -1 : 1;
       // The eave end ON the slope line. Every eave detail registers against this point:
       // at a free edge jointExt returns OV, so the slab's end face is the plane through
