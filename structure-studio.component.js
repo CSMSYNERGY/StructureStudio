@@ -5695,8 +5695,10 @@ function d3WingsElevation(spec, sizeLabel, focusKey) {
 // sidingOverride (from d3SidingOverride) wins over everything — it's the
 // customer's selected siding upgrade. customerWallHeightFt is the customer's
 // wall-height pick from the 3D view (sel.wallHeight) and beats the style's
-// default height, like IdeaRoom's wall-raise feature.
-function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOverride, customerWallHeightFt) {
+// default height, like IdeaRoom's wall-raise feature. customerFoundation (from
+// d3CustomerFoundation, 2026-09-28) is the customer's foundation pick: "piers" stands
+// the building on piers whatever the style's own foundation is (see the end).
+function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOverride, customerWallHeightFt, customerFoundation) {
   const key = String(styleValue || "").trim().toLowerCase();
   const base = D3_STYLE_DEFAULTS[key] || {};
   const o = (styleCfg && styleCfg.d3) || {};
@@ -5712,7 +5714,7 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
   // The default is a RENDER-TIME fallback instead, and only that: d3OverhangStyle answers for
   // the 3D, the elevation drawing and the panel's own select, every time, from the overhang the
   // style already stores. Only an explicit pick in the panel ever writes the key.
-  return {
+  const spec = {
     roof: { ...D3_DEFAULT_ROOF, ...(base.roof || {}), ...(o.roof || {}) },
     siding: sidingOverride || (o.siding !== undefined ? o.siding : (base.siding || null)),
     colors: { ...(base.colors || {}), ...(o.colors || {}) },
@@ -5748,6 +5750,21 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     claddingChoices: Array.isArray(o.claddingChoices) ? o.claddingChoices : (base.claddingChoices || undefined),
     wallHeightFt: customerWallHeightFt || o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || globalWallHeightFt || 0,
   };
+  // THE CUSTOMER'S FOUNDATION PICK (2026-09-28, Carolyn: "if they choose piers, we could show it on
+  // the building"). Only the customer-facing call sites pass it; openCalEditor never does, because
+  // this object is what the calibration panel posts back as the style, and a customer's pick must
+  // never be frozen into it. Without it the object above is returned untouched.
+  //   · The style already stands on piers: nothing changes.
+  //   · It stands on blocks (raised): piers at the same floor height, over the same ground.
+  //   · It sits at grade (a slab, skids, or nothing said): piers, with no floor height, so the
+  //     renderer's own piers default (1.5 ft) is drawn; and no fall of the ground, which only a
+  //     style that is already raised can have been measured with.
+  if (D3_FOUNDATIONS.indexOf(customerFoundation) >= 0 && spec.foundation !== customerFoundation) {
+    const ownRaised = D3_RAISED_FOUNDATIONS.indexOf(spec.foundation) >= 0;
+    spec.foundation = customerFoundation;
+    if (!ownRaised) { delete spec.floorHeightFt; delete spec.gradeFallFt; delete spec.gradeFallToward; }
+  }
+  return spec;
 }
 
 // Carolyn (2026-07-02): horizontal lap siding is THE universal upgrade —
@@ -5775,6 +5792,20 @@ function d3SidingOverride(config, sel) {
     if (/lap/i.test(v) && (/sid/i.test(v) || /sid/i.test(k))) return "lap";
   }
   return null;
+}
+
+// THE CUSTOMER'S PIERS, DRAWN (2026-09-28). Carolyn, opening Designer > Foundation: "if they choose
+// piers, we could show it on the building." "piers" when the customer ticked Piers on the Foundation
+// tab (sel.foundation, the priced site-work list) and this tenant offers them (resolveFoundation, the
+// pricing rule, so an item a rep selected still counts), else null: the style's own foundation.
+// d3ResolveStyleSpec's last argument. Only piers draws; the other site work (a gravel pad, a slab,
+// fence removal) is what the building already sits on or nothing the 3D shows. HOW MANY piers stays
+// the renderer's rule (one every 7 ft or less under every runner), not the priced quantity, which
+// is a price input that defaults to 1.
+function d3CustomerFoundation(config, sel) {
+  if (!config || !sel || !Array.isArray(sel.foundation)) return null;
+  const on = sel.foundation.some((f) => f && f.id === "piers");
+  return on && resolveFoundation(config, "piers") ? "piers" : null;
 }
 
 // Natural-material fallbacks for "No Paint" designs (and for palette values the
@@ -18567,7 +18598,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // nudged, and on a render only while a vent is SELECTED (the toolbar's zone readout), so an
   // ordinary render never pays for it.
   const ventRoof2D = () => {
-    const s = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW));
+    const s = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel));
     return { roof: (s && s.roof) || D3_DEFAULT_ROOF, H: (s && s.wallHeightFt) || D3.WALL_H };
   };
   const sizeOpts = selectedStyle && Array.isArray(selectedStyle.sizes) ? selectedStyle.sizes : (C.defaultSizes || []);
@@ -22423,7 +22454,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           bldgW, bldgH, items, itemTypes: ITEMS, frontWall,
           painted: sel.paint === "Painted", paintBody: paintColors.body, paintTrim: paintColors.trim,
           scale, mgX, mgY,
-          style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW)),
+          style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel)),
           roofType: sel.roofType,
           roofColorHex: (() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })(),
           fixtures: C.fixtures, bodyColors: bodyPaintPool, trimColors: trimPaintPool,
@@ -22743,7 +22774,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // them back into the modal, and billing for a window that is nowhere on the drawing is
           // the one outcome worth a few lines to prevent. The choice STAYS on the design; it comes
           // back the moment the dormer can hold it again.
-          const dSpec = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW));
+          const dSpec = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel));
           const dRoof = (dSpec && dSpec.roof) || {};
           if (!d3DormerWindowFit(fx, Number(dRoof.dormerWidthFt) || 0, d3DormerFaceFt(dSpec, bldgW, bldgH), sel.dormerWindowOffset)) return [];
           return [{
@@ -26733,7 +26764,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
               painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
               frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
-              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW))}
+              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel))}
               roofType={sel.roofType}
               roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
               fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
@@ -27812,7 +27843,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           styleValue={sel.style} frontWall={frontWall}
           painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
-          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW))}
+          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel))}
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
           fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
