@@ -10486,7 +10486,7 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, roOffer, placeableDoors, placeableWindows, placeableRamps, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, dormerWindowId, dormerWindowOffset, perimeterFt, showPricing, onPaintChange, onWallHeight, onDormerWindow, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, roOffer, placeableDoors, placeableWindows, placeableRamps, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, dormerWindowId, dormerWindowOffset, perimeterFt, showPricing, onPaintChange, onWallHeight, onDormerWindow, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose, draftOnly = false }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -12167,7 +12167,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         )}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 16px", background: "#0F172A" }}>
-        {/* Add-item palette: every class places with the same pipeline as 2D clicks */}
+        {/* Add-item palette: every class places with the same pipeline as 2D clicks.
+            Not on a style DRAFT (`draftOnly`, the portal's Advanced page): the building there is a
+            new style's shape, not a customer's quote, so doors, notes and lines have nowhere to go. */}
+        {!draftOnly && (
         <div style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
           <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>Add</span>
           {/* The placeable set is handed in by the parent — the SAME list the 2D tool row
@@ -12210,6 +12213,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             </button>
           )}
         </div>
+        )}
         {/* WALL HEIGHT — the SAME priced increases the 2D picker offers, and for one reason.
             This row used to be a fixed 6/7/8/9/10 ft writing sel.wallHeight, the UNPRICED
             legacy field, while clearing sel.wallHeightDeltaIn. The two were "mutually
@@ -12430,7 +12434,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           {/* Stored items (Carolyn, 2026-08-25). Its own control rather than a palette tool:
               there is nothing to aim at, so choosing one drops it on the floor and the
               customer drags it. Placing also flips to Look-inside, because the whole point is
-              seeing your mower IN the building and a prop behind a closed roof is invisible. */}
+              seeing your mower IN the building and a prop behind a closed roof is invisible.
+              Not on a style draft (`draftOnly`), for the Add row's reason. */}
+          {!draftOnly && (
           <div style={{ position: "relative" }}>
             {itemsOpen && (
               <div style={{ position: "absolute", bottom: "115%", left: "50%", transform: "translateX(-50%)", background: "#0F172A", border: "1px solid #334155", borderRadius: 10, padding: 8, display: "grid", gridTemplateColumns: "repeat(3, 104px)", gap: 6, zIndex: 5 }}>
@@ -12448,12 +12454,16 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               📦 Items {itemsOpen ? "▾" : "▴"}
             </button>
           </div>
+          )}
           <button onClick={() => setInterior((v) => !v)} disabled={phase !== "ready"} style={{ background: "#1E293B", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
           {interior ? "🏠 Show exterior" : "👁 Look inside"}
         </button>
+        {/* No quote to put a view in on a style draft (`draftOnly`). */}
+        {!draftOnly && (
         <button onClick={takeSnapshot} disabled={phase !== "ready"} style={{ background: accent, color: ssOnFill(accent), border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
           {shotTaken ? "✓ Added to quote — retake?" : "📸 Use this view in my quote"}
         </button>
+        )}
         </div>
       </div>
     </div>
@@ -25075,6 +25085,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={false}
           onSnapshot={() => {}}
+          draftOnly={advancedOnly}
           onClose={() => setAdminCalPreview(false)}
         />
   );
@@ -25314,9 +25325,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     grid in cal3dPanel. Until then the grid shows every section at once. */}
                 {/* row-reverse: the 3D is FIRST in the markup so it lands on top when the row wraps
                     on a narrow screen, and on the right when it does not. minWidth:0 on both
-                    columns for the reason the calibration row gives (auto-fit grids overflow). */}
-                <div ref={canvasRowRef} style={{ display: "flex", flexDirection: "row-reverse", flexWrap: "wrap", alignItems: "flex-start", gap: 12 }}>
-                  <div data-ss-adv="view" style={{ flex: "1 1 440px", minWidth: 0, ...(dockOn ? { position: "sticky", top: 74 } : {}) }}>
+                    columns for the reason the calibration row gives (auto-fit grids overflow).
+                    DOCKED MEANS SIDE BY SIDE (review 2026-09-29). The dock switches on at a 760 px
+                    row, but two wrapping columns only sat side by side from ~872 px, and in between
+                    the sticky 3D wrapped on TOP of the form and covered it as the page scrolled
+                    (a 1366 px laptop at 125% lands there). So while docked the row never wraps: a
+                    fixed-share 3D column beside a form that takes the rest, like the calibration
+                    row, and only then is the column sticky. It is capped at the window's height and
+                    scrolls on its own, so a short screen cannot push the end view out of reach. */}
+                <div ref={canvasRowRef} style={{ display: "flex", flexDirection: "row-reverse", flexWrap: dockOn ? "nowrap" : "wrap", alignItems: "flex-start", gap: 12 }}>
+                  <div data-ss-adv="view" style={dockOn
+                    ? { flex: "0 0 clamp(340px, 48%, 760px)", minWidth: 0, position: "sticky", top: 74, maxHeight: "calc(100vh - 86px)", overflowY: "auto" }
+                    : { flex: "1 1 440px", minWidth: 0 }}>
                     {/* The `!adminCalPreview` term sits on the render site, as on the calibration
                         surface: the docked panel and the full-screen viewer can never hold two
                         WebGL contexts at once. */}
@@ -25356,7 +25376,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       </div>
                     </div>
                   </div>
-                  <div data-ss-adv="fields" style={{ flex: "1 1 420px", minWidth: 0 }}>{cal3dPanel}</div>
+                  <div data-ss-adv="fields" style={{ flex: dockOn ? "1 1 0" : "1 1 420px", minWidth: 0 }}>{cal3dPanel}</div>
                 </div>
               </>
             )}
