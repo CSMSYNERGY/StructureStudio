@@ -148,7 +148,7 @@ export function mergeDraft(prior, draft, source = "video") {
   const base = {};
   if (dr.type) { for (const k of BUILDER_ONLY) if (p.roof && k in p.roof) base[k] = p.roof[k]; }
   const roof = dr.type ? { ...base, ...dr } : { ...(p.roof || {}), ...dr };
-  const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"];
+  const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps", "porchStepCount"];
   if ((dr.porchOutFt || 0) > 0.5) {
     delete roof.porchDepthFt; delete roof.porchTruss;
     for (const k of own) if (!(k in dr)) delete roof[k];

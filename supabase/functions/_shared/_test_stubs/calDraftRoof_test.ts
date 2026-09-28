@@ -96,6 +96,19 @@ Deno.test("⚠️ the porch's posts, roof pitch and steps follow the attach heig
   for (const k of ["porchPosts", "porchPitch", "porchSteps"]) assert(!has(quiet, k), `${k} survived: ${JSON.stringify(quiet)}`);
 });
 
+Deno.test("⚠️ the porch's step count follows its steps: a redraft brings its own or none (2026-09-28)", () => {
+  const stored = { type: "gable", porchOutFt: 6, porchSteps: "left", porchStepCount: 5 };
+  // Not builder-only: a typed draft replaces the roof, and the count goes with the stored steps.
+  for (const dr of [{ type: "gable", porchOutFt: 6 }, { type: "gable", porchOutFt: 6, porchSteps: "right" }, { type: "gable", porchDepthFt: 4 }, { type: "gable" }]) {
+    assert(!has(calDraftRoof(stored, dr), "porchStepCount"), `survived ${JSON.stringify(dr)}`);
+  }
+  // An untyped draft reporting a projecting porch brings its own count or none, the posts' rule.
+  assert(!has(calDraftRoof(stored, { porchOutFt: 5 }), "porchStepCount"));
+  assertEquals(calDraftRoof(stored, { porchOutFt: 5, porchSteps: "left", porchStepCount: 3 }).porchStepCount, 3);
+  // An untyped draft that says nothing about the porch clears nothing.
+  assertEquals(calDraftRoof(stored, { pitch: 0.5 }).porchStepCount, 5);
+});
+
 Deno.test("⚠️ A REDRAFT THAT REPORTS NO WINGS CLEARS THE STORED ONES", () => {
   const stored = { type: "gable", wingSide: "both", wingWidthFt: 8, wingPitch: 0.25, centerEaveFt: 16 };
   const plain = calDraftRoof(stored, { type: "gable", pitch: 0.5 });
@@ -133,6 +146,9 @@ Deno.test("dev/score.mjs's mergeDraft clears exactly what calDraftRoof clears", 
     [{ type: "shed", porchOutFt: 4, porchPosts: 4, porchPitch: 0.25, porchSteps: "left" }, { type: "shed", porchOutFt: 5, porchPosts: 3 }],
     [{ type: "shed", porchOutFt: 4, porchPosts: 4, porchPitch: 0.25, porchSteps: "left" }, { type: "shed", porchDepthFt: 4 }],
     [{ type: "shed", porchOutFt: 4, porchPosts: 4, porchPitch: 0.25, porchSteps: "left" }, { type: "shed" }],
+    [{ type: "gable", porchOutFt: 6, porchSteps: "left", porchStepCount: 5 }, { type: "gable", porchOutFt: 6, porchSteps: "right" }],
+    [{ type: "gable", porchOutFt: 6, porchSteps: "left", porchStepCount: 5 }, { porchOutFt: 5 }],
+    [{ type: "gable", porchOutFt: 6, porchSteps: "left", porchStepCount: 5 }, { pitch: 0.5 }],
     [{ type: "gable", wingSide: "both", wingWidthFt: 8, wingPitch: 0.25, centerEaveFt: 16 }, { type: "gable", pitch: 0.5 }],
     [{ type: "gable", wingSide: "both", wingWidthFt: 8, centerEaveFt: 16 }, { type: "gable", wingSide: "left", wingWidthFt: 6 }],
     [{ type: "gable", front: "eave" }, { type: "gable" }],

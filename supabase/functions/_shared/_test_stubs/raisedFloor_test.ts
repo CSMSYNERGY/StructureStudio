@@ -139,6 +139,35 @@ Deno.test("the panel's porch readout counts the steps at the style's own grade",
   for (const k of ["pitch", "yHigh", "postH", "posts", "D", "wall", "S"]) assertEquals(blocks[k], at[k], k);
 });
 
+// ── THE BUILDER'S STEP COUNT (roof.porchStepCount, 2026-09-28) ─────────────────────────────────
+
+Deno.test("a step count on a raised floor: that many steps up the same height, and absent is the rule's", () => {
+  const piers = { roof: { ...FARM, porchStepCount: 5 }, wallHeightFt: 7.3, foundation: "piers", floorHeightFt: 1.5 };
+  const r = F.d3PorchReadout(piers, "16x10");
+  assertEquals([r.steps.count, r.steps.grade], [5, -1.5]);
+  assertAlmostEquals(r.steps.rise, 0.25, 1e-12, "six 3 in risers from the grass to the deck");
+  assertEquals(F.d3PorchReadout({ ...piers, roof: FARM }, "16x10").steps.count, 3, "absent: the 7.5 in rule's three");
+  // Two steps on 4 ft piers is the builder's call, and the risers say what it costs: 16 in each.
+  const tall = F.d3PorchReadout({ ...piers, roof: { ...FARM, porchStepCount: 2 }, floorHeightFt: 4 }, "16x10");
+  assertEquals(tall.steps.count, 2);
+  assertAlmostEquals(tall.steps.rise * 12, 16, 1e-9);
+  // At grade a count is honoured too: 3 steps up 0.35 ft.
+  const flat = F.d3PorchReadout({ roof: { ...FARM, porchStepCount: 3 }, wallHeightFt: 7.3 }, "16x10");
+  assertEquals([flat.steps.count, flat.steps.grade], [3, -0.35]);
+});
+
+Deno.test("What we drew says the builder's step count, raised or not; absent says what it always did", () => {
+  const built = (count: number) => ({ posts: 4, pitch: 0.25, pitchClamped: false, steps: { count } });
+  const asked = { roof: { ...FARM, porchStepCount: 4 } };
+  assertStringIncludes(P.ssDrewWords(asked, built(4)), "4 steps in the middle");
+  assertStringIncludes(P.ssDrewWords(asked), "4 steps in the middle", "no readout yet: the count as given");
+  assertStringIncludes(P.ssDrewWords({ roof: { ...FARM, porchStepCount: 1 } }, built(1)), "one step in the middle");
+  assertStringIncludes(P.ssDrewWords({ ...asked, foundation: "piers" }, built(4)), "4 steps in the middle");
+  // Without the key: at grade no count, raised the readout's, word for word what it was.
+  assert(!/\d steps|one step/.test(P.ssDrewWords({ roof: FARM }, built(1))), "at grade no count");
+  assertStringIncludes(P.ssDrewWords({ roof: FARM, foundation: "piers" }, built(3)), "3 steps in the middle");
+});
+
 // ── THE ORBIT CAMERAS AND THE QUOTE'S SHOT ───────────────────────────────────────────────────
 
 // Where a world point lands on a pinhole camera's film, in [-1, 1] on each axis when it is in frame.

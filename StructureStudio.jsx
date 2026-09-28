@@ -5268,6 +5268,13 @@ function d3PorchFraming(roofCfg) {
     steps: D3_PORCH_STEP_SIDES.indexOf(cfg.porchSteps) >= 0 ? cfg.porchSteps : null,
   };
 }
+// How many steps the renderer builds off a deck gradeFt above the grass when the style does not
+// say: one for every 7.5 in of height, at least one (d3PorchStepsGeom's own rule, below). The
+// calibration panel's "blank = N" is this number, so the blank says what is drawn.
+function d3PorchAutoStepCount(gradeFt) {
+  const h = gradeFt > 0 ? gradeFt : D3.FLOOR_T;
+  return Math.max(1, Math.ceil(h / 0.625 - 1e-9));
+}
 // THE PORCH'S STEPS (roof.porchSteps, 2026-09-25), in the porch's own frame, or null without them:
 // x across the porch from its middle, POSITIVE to the right of someone standing in front of the
 // porch facing it (the frame the porch groups are built in: its z runs out toward that person, so
@@ -5287,11 +5294,17 @@ function d3PorchFraming(roofCfg) {
 //           height: 1.1 ft is two steps and three 4.4 in risers, 1.5 ft three steps and four 4.5 in
 //           risers, landing on the lowered grass.
 //   tread   11 in deep, the treads running out from the deck's edge.
-function d3PorchStepsGeom(g, D, where, gradeFt) {
+// stepCount is roof.porchStepCount (2026-09-28, Carolyn: "steps is something I can see us needing,
+// especially with larger buildings"): the builder's own number of steps, the TREADS, the count above
+// and the one the panel's readout says. Held to the sanitiser's band, 1..12, and a whole number.
+// The climb does not change, so the risers are still h / (count + 1): more steps, shorter risers.
+// Absent (null, undefined, blank) is the count above, so every porch before it is unchanged.
+function d3PorchStepsGeom(g, D, where, gradeFt, stepCount) {
   if (!g || D3_PORCH_STEP_SIDES.indexOf(where) < 0) return null;
   const POST = g.sizes.POST;
   const h = gradeFt > 0 ? gradeFt : D3.FLOOR_T;             // deck top (the floor, y 0) above grade
-  const count = Math.max(1, Math.ceil(h / 0.625 - 1e-9));
+  const want = typeof stepCount === "number" || (typeof stepCount === "string" && stepCount.trim() !== "") ? Number(stepCount) : NaN;
+  const count = isFinite(want) ? Math.round(Math.max(1, Math.min(12, want))) : d3PorchAutoStepCount(h);
   const rise = h / (count + 1);
   const tread = 11 / 12;
   const outer = g.side - POST / 2;                          // the corner posts' centres
@@ -5401,7 +5414,7 @@ function d3PorchReadout(spec, sizeLabel) {
   const attachFt = Number(roof.porchAttachFt) || 0;
   const trimFace = D3.WALL_T / 2 + 0.03;
   // The style's post count, porch-roof pitch and steps (2026-09-25), exactly as the renderer reads
-  // them, so `posts` and `pitch` below are the ones built.
+  // them, so `posts` and `pitch` below are the ones built. The steps' count (2026-09-28) too.
   const framing = d3PorchFraming(roof);
   const g = d3PorchGeom(S, top, porch.D, trimFace, d3PorchCapFt(roof, w, d, H, trimFace), attachFt, framing);
   const ovRaw = roof.overhang != null ? Number(roof.overhang) : D3.OVERHANG;
@@ -5410,7 +5423,7 @@ function d3PorchReadout(spec, sizeLabel) {
   // With porchAttachFt set it is the ATTACH height, not the wall, that decides the headroom, so the
   // panel's suggestion is where to hang the porch roof: hNeeded is a wall top, 0.2 above that.
   return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2, atMost,
-    framing, steps: d3PorchStepsGeom(g, porch.D, framing.steps, d3GradeFt(spec)) };
+    framing, steps: d3PorchStepsGeom(g, porch.D, framing.steps, d3GradeFt(spec), roof.porchStepCount) };
 }
 
 // A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
@@ -9286,8 +9299,9 @@ function buildShed3DModel(THREE, p) {
     // they sit with the floor (look-inside keeps them) and turn with the porch onto its wall;
     // tagged ssPorchPart "steps" with the side in ssPorchSteps, so anything that places things
     // against the deck's edge (the harness, a ramp on that wall) can find them. Nothing is built
-    // without the key, so every porch before it is unchanged.
-    const stepsGeom = d3PorchStepsGeom(geom, D, framing.steps, GRADE);
+    // without the key, so every porch before it is unchanged. How many is the style's own
+    // roof.porchStepCount where it gives one (2026-09-28), the readout's count either way.
+    const stepsGeom = d3PorchStepsGeom(geom, D, framing.steps, GRADE, roofCfg.porchStepCount);
     if (stepsGeom) {
       const { x: sx, w: sw, count, rise, tread, d0, grade } = stepsGeom;
       const TREAD_T = Math.min(0.09, rise * 0.6), STR_T = 0.125, RISER_T = 0.06, NOSE = 0.03, EPS = 0.005;
@@ -16329,8 +16343,11 @@ function ssDrewWords(spec, porchBuilt) {
     }
     const stepsAt = ({ left: "on the left", center: "in the middle", right: "on the right" })[roof.porchSteps];
     // On a raised floor (2026-09-25) the steps climb its whole height, so how many is worth saying:
-    // the readout's count, built to the same grade. At grade it is always one, and never said.
-    const nSteps = raisedOn && porchBuilt && porchBuilt.steps ? Math.round(Number(porchBuilt.steps.count)) : 0;
+    // the readout's count, built to the same grade. At grade it is always one, and never said --
+    // unless the builder gave the count (roof.porchStepCount, 2026-09-28), which is always said: the
+    // readout's, which is theirs, or theirs as given when there is no readout.
+    const askedSteps = Number(roof.porchStepCount) >= 1 ? Math.round(Math.min(12, Number(roof.porchStepCount))) : 0;
+    const nSteps = (raisedOn || askedSteps) && porchBuilt && porchBuilt.steps ? Math.round(Number(porchBuilt.steps.count)) : askedSteps;
     if (stepsAt) built.push(nSteps > 0 ? `${nSteps === 1 ? "one step" : `${nSteps} steps`} ${stepsAt}` : `steps ${stepsAt}`);
     if (built.length) out.push(`It has ${built.length > 1 ? built.slice(0, -1).join(", ") + " and " + built[built.length - 1] : built[0]}.`);
   } else if (inFt > 0.5) {
@@ -20243,8 +20260,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calPorchKind = (roof) => (((roof && roof.porchOutFt) || 0) > 0.5 ? "projecting"
     : ((roof && roof.porchDepthFt) || 0) > 0.5 ? "recessed" : "none");
   // What only a PROJECTING porch has: where its roof meets the wall, its width, its posts, its
-  // roof pitch and its steps. The sanitiser keeps each only while porchOutFt is over 0.5.
-  const CAL_PORCH_OWN_KEYS = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"];
+  // roof pitch, its steps and how many (2026-09-28). The sanitiser keeps each only while
+  // porchOutFt is over 0.5.
+  const CAL_PORCH_OWN_KEYS = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps", "porchStepCount"];
   // Switches the kind, or sets the depth of the one that is on. The other kind's key is DELETED, not
   // written as 0, so a row carries only the porch it has:
   //   none        deletes both depths. porchEnd stays, so a porch turned back on keeps its end.
@@ -20314,6 +20332,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const roof = { ...p.spec.roof };
     if (v === "" || v === null || v === undefined) delete roof[key];
     else roof[key] = v;
+    return { ...p, spec: { ...p.spec, roof } };
+  });
+  // Where the porch steps are (roof.porchSteps). "No steps" DELETES their count as well
+  // (roof.porchStepCount, 2026-09-28): with nothing to count it describes nothing, the sanitiser
+  // drops it on Save, and the preview must not keep a number Save will not store.
+  const calSetPorchSteps = (v) => setAdminCal((p) => {
+    const roof = { ...p.spec.roof };
+    if (v === "" || v === null || v === undefined) { delete roof.porchSteps; delete roof.porchStepCount; }
+    else roof.porchSteps = v;
     return { ...p, spec: { ...p.spec, roof } };
   });
   // colors.corner / colors.fascia. Blank is "same as trim", which is what absent draws.
@@ -20465,7 +20492,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const base = {};
     if (dr.type) { for (const k of BUILDER_ONLY) if (stored && k in stored) base[k] = stored[k]; }
     const roof = dr.type ? { ...base, ...dr } : { ...stored, ...dr };
-    const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"];
+    const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps", "porchStepCount"];
     if ((dr.porchOutFt || 0) > 0.5) {
       delete roof.porchDepthFt; delete roof.porchTruss;
       for (const k of own) if (!(k in dr)) delete roof[k];
@@ -21820,7 +21847,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // The 2026-09-24 keys are in the slice of the question whose panel sets them: which way the
     // building faces and the wings are the ROOF's shape, the attach height and width the PORCH's.
     if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt]);
-    if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps]);
+    if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps, roof.porchStepCount]);
     // What it stands on and how high (2026-09-25) are set in the walls panel, beside the wall.
     if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt]);
     return JSON.stringify([spec.colors, spec.roofMaterial]);
@@ -22075,7 +22102,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
               </label>
               <label style={calFixLabel}>Steps off its front
-                <select value={roof.porchSteps || ""} onChange={(e) => calSetRoofOpt("porchSteps", e.target.value)}
+                <select value={roof.porchSteps || ""} onChange={(e) => calSetPorchSteps(e.target.value)}
                   style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }}>
                   <option value="">No steps</option>
                   <option value="left">On the left</option>
@@ -22083,6 +22110,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   <option value="right">On the right</option>
                 </select>
               </label>
+              {/* HOW MANY STEPS (2026-09-28), only with steps to count. Blank is the renderer's own
+                  count for this floor height, which the placeholder says, and is stored as nothing. */}
+              {roof.porchSteps && (
+                <label style={calFixLabel}>How many steps
+                  <input className="ssc-dim-in" type="number" step="1" min="1" max="12" inputMode="numeric" data-ss-step-count="ss-fix"
+                    placeholder={`blank = ${d3PorchAutoStepCount(d3GradeFt(adminCal && adminCal.spec))}`}
+                    {...calOptNumProps("ssc-fix-porchStepCount", roof.porchStepCount, [1, 12], (n) => calSetRoofOpt("porchStepCount", n == null ? null : Math.round(n)))}
+                    style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
+                </label>
+              )}
             </div>
           )}
           {kind !== "none" && (
@@ -24859,7 +24896,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       )}
                       {kind === "projecting" && (
                         <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch steps
-                          <select value={roof.porchSteps || ""} onChange={(e) => calSetRoofOpt("porchSteps", e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                          <select value={roof.porchSteps || ""} onChange={(e) => calSetPorchSteps(e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
                             <option value="">None</option>
                             <option value="left">Left</option>
                             <option value="center">Center</option>
@@ -24868,6 +24905,32 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           <div style={hint}>Off the deck's front edge, as seen standing in front of the porch.</div>
                         </label>
                       )}
+                      {/* HOW MANY STEPS (roof.porchStepCount, 2026-09-28), beside where they are and only
+                          with steps to count. Blank is the renderer's own count, one step for every
+                          7.5 in of floor height, and the placeholder says that number. The hint is how
+                          far each step rises, from the readout (the renderer's own numbers); amber when
+                          the builder's count makes a step taller than 8 in or shorter than 4 in, the
+                          range a step is comfortable in. It warns and refuses nothing. */}
+                      {kind === "projecting" && roof.porchSteps && (() => {
+                        const autoSteps = d3PorchAutoStepCount(d3GradeFt(adminCal.spec));
+                        const st = pr && pr.steps;
+                        const riseIn = st ? st.rise * 12 : null;
+                        const asked = roof.porchStepCount != null && roof.porchStepCount !== "";
+                        const steep = asked && riseIn != null && riseIn > 8 && st.count < 12;
+                        const shallow = asked && riseIn != null && riseIn < 4 && st.count > 1;
+                        return (
+                          <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Number of steps
+                            <input type="number" step="1" min="1" max="12" placeholder={`blank = ${autoSteps}`} data-ss-step-count="ss-grid"
+                              {...calOptNumProps("porchStepCount", roof.porchStepCount, [1, 12], (n) => calSetRoofOpt("porchStepCount", n == null ? null : Math.round(n)))}
+                              style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                            {riseIn != null && (
+                              <div data-ss-step-rise="ss-grid" style={{ ...hint, color: steep || shallow ? "#B45309" : "#A16207" }}>
+                                {`Each step rises ${Math.round(riseIn * 10) / 10} in.${steep ? " More steps would make them easier to climb." : shallow ? " Fewer steps would make them easier to climb." : ""}`}
+                              </div>
+                            )}
+                          </label>
+                        );
+                      })()}
                       {/* Gable only: the renderer draws the truss on a gable roof and nowhere else,
                           so on a gambrel this box used to tick and change nothing. */}
                       {kind === "recessed" && (roof.type || "gable") === "gable" && (

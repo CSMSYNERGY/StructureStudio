@@ -53,7 +53,7 @@ Deno.test("every lifted porch region is byte-identical in the two twins", () => 
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
-const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, d3PorchCapFt, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3WallTops, d3PorchWallTopFt, d3NewFrame, d3Massing, d3EaveFinishDrop, d3PorchFraming, d3PorchStepsGeom };`)() as Record<string, Any>;
+const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, d3PorchCapFt, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3WallTops, d3PorchWallTopFt, d3NewFrame, d3Massing, d3EaveFinishDrop, d3PorchFraming, d3PorchStepsGeom, d3PorchAutoStepCount };`)() as Record<string, Any>;
 
 const PANEL_TRIM = 0.18;   // trimFace on panel cladding: T/2 + 0.03
 
@@ -439,6 +439,52 @@ Deno.test("d3PorchReadout reports the posts, pitch and steps that are built", ()
   // Absent: no steps, the rule's posts, the solver's pitch.
   const plain = F.d3PorchReadout({ roof: { type: "gambrel", porchOutFt: 6.5 }, wallHeightFt: 9 }, "16x24");
   assertEquals([plain.steps, plain.posts, plain.framing.posts], [null, 3, null]);
+});
+
+// ── HOW MANY STEPS (roof.porchStepCount, 2026-09-28) ─────────────────────────────────────────
+// Carolyn: "steps is something I can see us needing, especially with larger buildings." The
+// builder's own number of TREADS, the count the readout already says. The climb is the deck's
+// height either way, so the risers are h / (count + 1): more steps, shorter risers.
+Deno.test("porchStepCount: the builder's number of steps, climbing the same height, standing where they did", () => {
+  const g4 = F.d3PorchGeom(16, 10, 4, PANEL_TRIM, Infinity, 8, { posts: 4 });
+  // Absent, null or blank is today's count, the same object key for key.
+  for (const h of [undefined, 0.35, 1.1, 1.5, 4]) {
+    const today = F.d3PorchStepsGeom(g4, 4, "left", h);
+    for (const c of [undefined, null, "", "  ", "junk", NaN]) {
+      assertEquals(JSON.stringify(F.d3PorchStepsGeom(g4, 4, "left", h, c)), JSON.stringify(today), `${h} ft, count ${String(c)}`);
+    }
+    // d3PorchAutoStepCount IS that count: the panel's "blank = N".
+    assertEquals(F.d3PorchAutoStepCount(h), today.count, `${h} ft`);
+  }
+  for (const h of [0.35, 1.1, 1.5, 4]) {
+    const auto = F.d3PorchStepsGeom(g4, 4, "left", h);
+    for (const n of [1, 2, 3, 5, 12]) {
+      const s = F.d3PorchStepsGeom(g4, 4, "left", h, n);
+      assertEquals(s.count, n, `${h} ft, ${n} asked`);
+      assertAlmostEquals(s.rise * (n + 1), h, 1e-12, `${h} ft, ${n}: grass to deck exactly`);
+      // Where they stand, how wide and how deep each tread is do not move with the count.
+      assertEquals([s.where, s.x, s.w, s.d0, s.grade, s.tread], [auto.where, auto.x, auto.w, 4, -h, auto.tread]);
+    }
+  }
+  // Tri Home on 1.5 ft piers: 3 steps by the rule (4.5 in risers); 5 asked is six 3 in risers.
+  assertAlmostEquals(F.d3PorchStepsGeom(g4, 4, "right", 1.5, 5).rise * 12, 3, 1e-9);
+  // The sanitiser's band and rounding, so raw data draws what Save would store.
+  assertEquals(F.d3PorchStepsGeom(g4, 4, "left", 1.5, 3.6).count, 4);
+  assertEquals(F.d3PorchStepsGeom(g4, 4, "left", 1.5, 0).count, 1);
+  assertEquals(F.d3PorchStepsGeom(g4, 4, "left", 1.5, -3).count, 1);
+  assertEquals(F.d3PorchStepsGeom(g4, 4, "left", 1.5, 40).count, 12);
+  assertEquals(F.d3PorchStepsGeom(g4, 4, "left", 1.5, "5").count, 5);
+  // No steps, nothing to count.
+  assertEquals(F.d3PorchStepsGeom(g4, 4, null, 1.5, 5), null);
+  // The readout passes the style's count, and nothing else in it moves.
+  const roof = { type: "shed", highSide: "front", pitch: 0.22, overhang: 0.8, porchOutFt: 4, porchAttachFt: 8, porchPosts: 4, porchPitch: 0.25, porchSteps: "left" };
+  const before = F.d3PorchReadout({ roof, wallHeightFt: 7.3 }, "16x10");
+  const after = F.d3PorchReadout({ roof: { ...roof, porchStepCount: 4 }, wallHeightFt: 7.3 }, "16x10");
+  assertEquals([before.steps.count, after.steps.count], [1, 4]);
+  assertAlmostEquals(after.steps.rise, 0.35 / 5, 1e-12);
+  assertEquals(after.framing, before.framing, "d3PorchFraming's shape is unchanged");
+  for (const k of ["pitch", "yHigh", "postH", "posts", "bays", "D", "wall", "S"]) assertEquals(after[k], before[k], k);
+  assertEquals(JSON.stringify({ ...after, steps: null }), JSON.stringify({ ...before, steps: null }), "only the steps moved");
 });
 
 // ── CENTRE STEPS GET A BAY IN THE MIDDLE (fix, 2026-09-25) ────────────────────────────────
