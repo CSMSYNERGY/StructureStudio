@@ -545,3 +545,28 @@ Deno.test("the roof step reads in the words of its panel controls, and 'What we 
   }
   assert(!/0\.\d/.test(cabin), "no ratio reaches the line");
 });
+
+// ⚠️ A "No" ON THE ROOF IS CLEARED BY FIXING THE STEP. calQuestionSig is the slice of the spec each
+// question is about: a "No" whose slice has not moved since it was given is named under Save as
+// unfixed. The step is set in the roof's fields, so its two keys are in the ROOF's slice; left out,
+// a builder who answered the roof "No" and fixed only the step would still be told nothing had
+// changed. Lifted from StructureStudioInner (both twins, byte-identical) and run on a stub adminCal.
+Deno.test("⚠️ the roof question's slice holds the roof step: an edit to the step alone clears an unfixed roof 'No'", () => {
+  const [a, b] = ["  const calQuestionSig = (key) => {", "  // ⚠️ ANSWERED IS NOT AGREED."];
+  const cmp = lift(CMP, "structure-studio.component.js", a, b), jsx = lift(JSX, "StructureStudio.jsx", a, b);
+  assertEquals(jsx, cmp, "the two twins' calQuestionSig");
+  const sigFor = new Function("adminCal", `${cmp}; return calQuestionSig;`) as (cal: unknown) => (key: string) => string;
+  const sig = (spec: Record<string, unknown>, key: string) => sigFor({ spec })(key);
+  const roof = { type: "gable", front: "gable", pitch: 0.41, overhang: 1.3, eave: "fascia", porchDepthFt: 6, porchEnd: "front" };
+  const base = { roof, wallHeightFt: 7.75, colors: { body: "#3a3d3f" }, roofMaterial: "metal" };
+  const stepped = { ...base, roof: { ...roof, rearStepFt: 12, rearEaveRiseFt: 0.5 } };
+  for (const [what, from, to] of [
+    ["a step added", base, stepped],
+    ["the joint moved", stepped, { ...base, roof: { ...roof, rearStepFt: 14, rearEaveRiseFt: 0.5 } }],
+    ["the rise changed", stepped, { ...base, roof: { ...roof, rearStepFt: 12, rearEaveRiseFt: -0.25 } }],
+    ["the step taken off", stepped, base],
+  ] as const) {
+    assert(sig(from, "roof") !== sig(to, "roof"), `${what}: the roof's slice moves, so its "No" is no longer unfixed`);
+    for (const k of ["porch", "walls", "colours"]) assertEquals(sig(from, k), sig(to, k), `${what}: the ${k} question's slice does not`);
+  }
+});

@@ -6374,7 +6374,8 @@ Deno.test("⚠️ the roof step's examples are generic, never the Black Cabin's 
   // prompt that shows the model the answer teaches it to give that answer to every building.
   const nums = [...STEP_PARA.matchAll(/\d+(\.\d+)?/g)].map((m) => m[0]);
   assert(nums.length >= 3, "the paragraph has a worked example");
-  for (const bad of ["14", "0.6", "40", "7.75", "8.25", "0.34"]) assert(!nums.includes(bad), `the example uses ${bad}`);
+  // 0.41 is its 5:12 pitch, the number a model is likeliest to copy across as a rise.
+  for (const bad of ["14", "0.6", "40", "7.75", "8.25", "0.34", "0.41"]) assert(!nums.includes(bad), `the example uses ${bad}`);
   // The worked example is self-consistent: 5 in over 12 is 0.42.
   assert(/a step of 5 inches is 0\.42/.test(STEP_PARA) && /rearStepFt 12 and rearEaveRiseFt 0\.42/.test(STEP_PARA), "5 in / 12 = 0.42");
 });
@@ -6533,6 +6534,25 @@ Deno.test("consensus: the joint is the median of the reads that stepped the chos
   const same = RS.consensusDrafts([stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }), stepRead({ rearStepFt: 13, rearEaveRiseFt: 0.5 }), stepRead({ rearStepFt: 11, rearEaveRiseFt: 0.6 })]);
   assertEquals(same.report.discreteAgreement.roofStepDir, "3/3");
   assert(same.d3.roof.rearStepFt === 12 && same.d3.roof.rearEaveRiseFt === 0.5, JSON.stringify(same.d3.roof));
+});
+
+Deno.test("consensus: with a non-gable roof chosen, gable reads that split on a step are not voted, and nothing is said", () => {
+  const gambrel = (): RS.ConsensusDraft => ({ ...stepRead({}), d3: cleanSpec({ roof: { type: "gambrel", front: "gable", overhang: 1, porchDepthFt: 6, porchEnd: "front" }, siding: "batten", colors: { body: "#555555" }, wallHeightFt: 8 }) });
+  const r = RS.consensusDrafts([gambrel(), stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.5 }), gambrel(), stepRead({}), gambrel()]);
+  assertEquals(r.d3.roof.type, "gambrel");
+  assertEquals(r.report.discreteAgreement.type, "3/5");
+  assert(!("roofStep" in r.report.discreteAgreement) && !("roofStepDir" in r.report.discreteAgreement), JSON.stringify(r.report.discreteAgreement));
+  assert(!hasKey(r.d3.roof, "rearStepFt") && !hasKey(r.d3.roof, "rearEaveRiseFt"), JSON.stringify(r.d3.roof));
+  assertEquals(RS.consensusSplitWarning(r.report), null, "the gable reads' disagreement is about a roof that is not drawn");
+});
+
+Deno.test("⚠️ applySelfCheck: declaring BOTH step keys 0 takes the step off, and reports nothing as not applied", () => {
+  const off = RS.applySelfCheck(STEPPED_DRAFT, checkRead({ roof: { rearStepFt: 0, rearEaveRiseFt: 0 } }, ["roof.rearStepFt", "roof.rearEaveRiseFt"]), STEP_DIMS, "v2");
+  assert(off.ok && off.verdict === "corrections" && !hasKey(off.d3.roof, "rearStepFt") && !hasKey(off.d3.roof, "rearEaveRiseFt"), JSON.stringify(off));
+  if (off.ok) {
+    assertEquals(off.dropped, [], "a rise of 0 beside a step of 0 is part of taking it off, not a refused correction");
+    assertEquals(off.changed.map((c) => [c.field, c.from, c.to]).sort(), [["roof.rearEaveRiseFt", 0.42, null], ["roof.rearStepFt", 12, null]]);
+  }
 });
 
 // The porch pitch's trap again (porchPitchNow): the renderer holds a step to what the size can carry
