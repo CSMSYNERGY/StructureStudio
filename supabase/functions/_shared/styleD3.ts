@@ -4141,8 +4141,10 @@ export function draftUpstreamFailure(lead: DraftCall<unknown>, calls: readonly D
 // on) is voted only by the reads that chose that structure: a read that saw no porch has no opinion
 // on where its steps are. Where leaving a key out is itself an answer, it votes as one: no steps, a
 // porch across the whole wall (porchWidthFt left out), a porch roof hung at the wall top
-// (porchAttachFt left out), no wings, no lean-to, no dormer, no gable vent. Presence is read the way
-// the renderer draws it (a porch, lean-to, dormer or wing over half a foot).
+// (porchAttachFt left out), no wings, no lean-to, no dormer, no roof step, no gable vent. Presence is
+// read the way the renderer draws it (a porch, lean-to, dormer or wing over half a foot; a roof step,
+// 2026-09-28, is a gable's with both of its keys, voted among the reads of the chosen roof type, and
+// its joint and rise are the median of the reads that drew one).
 //
 // NUMBERS ARE THE MEDIAN over the reads that agree with the structure chosen for them: the porch's
 // numbers from the reads with the chosen porch kind, the wings' from the reads with wings, the pitch
@@ -4194,6 +4196,8 @@ function consensusPorchKind(roof: ConsensusRoof): PorchKind {
 const cWings = (r: ConsensusRoof) => r.type !== "shed" && cOn(r.wingWidthFt);
 const cLeanTo = (r: ConsensusRoof) => cOn(r.leanToWidthFt);
 const cDormer = (r: ConsensusRoof) => r.type !== "shed" && cOn(r.dormerWidthFt);
+// The roof step as the sanitiser keeps it: a gable's, with both keys (the rise is never 0 there).
+const cStep = (r: ConsensusRoof) => r.type === "gable" && cOn(r.rearStepFt) && num(r.rearEaveRiseFt) !== null;
 // Absent is the renderer's 0.45, which is on the right-hand (positive) slope.
 const cDormerSide = (r: ConsensusRoof) => {
   const u = num(r.dormerOffsetU) ?? 0.45;
@@ -4232,6 +4236,7 @@ const CONSENSUS_FIELDS: readonly ConsensusField[] = [
   { name: "porchWidth", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "projecting" ? (num(cRoof(d).porchWidthFt) !== null ? "part" : "full") : null) },
   { name: "wings", key: (d) => (cWings(cRoof(d)) ? "yes" : "no") },
   { name: "wingSide", parent: "wings", key: (d) => (cWings(cRoof(d)) ? (cStr(cRoof(d).wingSide) ?? "both") : null), apply: copyRoofKey("wingSide") },
+  { name: "roofStep", parent: "type", key: (d) => (cRoof(d).type === "gable" ? (cStep(cRoof(d)) ? "yes" : "no") : null) },
   { name: "leanTo", key: (d) => (cLeanTo(cRoof(d)) ? "yes" : "no") },
   { name: "leanToSide", parent: "leanTo", key: (d) => (cLeanTo(cRoof(d)) ? (cStr(cRoof(d).leanToSide) ?? "right") : null), apply: copyRoofKey("leanToSide") },
   { name: "dormer", key: (d) => (cDormer(cRoof(d)) ? "yes" : "no") },
@@ -4282,6 +4287,8 @@ const CONSENSUS_NUMBERS: readonly ConsensusNumber[] = [
   roofNumber("wingWidthFt", (d, c) => c.wings === "yes" && cWings(cRoof(d))),
   roofNumber("wingPitch", (d, c) => c.wings === "yes" && cWings(cRoof(d))),
   roofNumber("centerEaveFt", (d, c) => c.wings === "yes" && cWings(cRoof(d))),
+  roofNumber("rearStepFt", (d, c) => c.roofStep === "yes" && cStep(cRoof(d))),
+  roofNumber("rearEaveRiseFt", (d, c) => c.roofStep === "yes" && cStep(cRoof(d))),
   {
     name: "wallHeightFt",
     get: (d) => num(d.wallHeightFt),
@@ -4449,6 +4456,7 @@ const CONSENSUS_FIELD_WORDS: Record<string, string> = {
   porchWidth: "how wide the porch is",
   wings: "the side wings",
   wingSide: "which sides have wings",
+  roofStep: "the step in the roof",
   leanTo: "the lean-to",
   leanToSide: "which side the lean-to is on",
   dormer: "the dormer",

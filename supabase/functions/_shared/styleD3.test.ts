@@ -6431,3 +6431,52 @@ Deno.test("⚠️ applySelfCheck: a step is added with both keys, moved with one
   const legacyOff = RS.applySelfCheck(STEPPED_DRAFT, checkRead({ roof: { rearStepFt: 0 } }, ["roof.rearStepFt"]), STEP_DIMS, "legacy");
   assert(legacyOff.ok && legacyOff.d3.roof.rearStepFt === 12, JSON.stringify(legacyOff));
 });
+
+// A gable cabin with a recessed porch, as a v2 read reports it. Generic numbers only.
+const CABIN_READ = { type: "gable", front: "gable", pitch: 0.4, overhang: 1, eave: "fascia", porchDepthFt: 6, porchEnd: "front" };
+const stepRead = (roof: Record<string, unknown>, porch = "recessed"): RS.ConsensusDraft => ({
+  d3: cleanSpec({ roof: { ...CABIN_READ, ...roof }, siding: "batten", colors: { body: "#555555" }, wallHeightFt: 8 }),
+  observed: { roofNote: "gable cabin", porch, wings: "none", confidence: "medium" },
+  frameMap: null,
+});
+
+Deno.test("consensus: a step in 2 of 3 reads is drawn, its joint and rise the medians of those two", () => {
+  const r = RS.consensusDrafts([
+    stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }),
+    stepRead({}),
+    stepRead({ rearStepFt: 11, rearEaveRiseFt: 0.5 }),
+  ]);
+  assertEquals(r.report.discreteAgreement.roofStep, "2/3");
+  assertEquals(r.d3.roof.rearStepFt, 11.5);
+  assertEquals(r.d3.roof.rearEaveRiseFt, 0.45);
+  // Three of five: the median read of the three.
+  const five = RS.consensusDrafts([
+    stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }), stepRead({}), stepRead({ rearStepFt: 13, rearEaveRiseFt: 0.6 }),
+    stepRead({}), stepRead({ rearStepFt: 11, rearEaveRiseFt: 0.5 }),
+  ]);
+  assertEquals(five.report.discreteAgreement.roofStep, "3/5");
+  assert(five.d3.roof.rearStepFt === 12 && five.d3.roof.rearEaveRiseFt === 0.5, JSON.stringify(five.d3.roof));
+});
+
+Deno.test("consensus: a step in 1 of 3 reads is not drawn, and leaves neither key behind", () => {
+  const r = RS.consensusDrafts([stepRead({}), stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }), stepRead({})]);
+  assertEquals(r.report.discreteAgreement.roofStep, "2/3");
+  assert(!hasKey(r.d3.roof, "rearStepFt") && !hasKey(r.d3.roof, "rearEaveRiseFt"), JSON.stringify(r.d3.roof));
+  // Even when the one stepped read is the medoid: it is the base, and the vote still takes it off.
+  const m = RS.consensusDrafts([stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }), stepRead({}), stepRead({})]);
+  assert(!hasKey(m.d3.roof, "rearStepFt") && !hasKey(m.d3.roof, "rearEaveRiseFt"), JSON.stringify(m.d3.roof));
+});
+
+Deno.test("consensus: the step is voted among the reads of the chosen roof type, and a split is said", () => {
+  // A gambrel read has no step to give; with a gable chosen it abstains rather than voting "no".
+  const gambrel: RS.ConsensusDraft = { ...stepRead({}), d3: cleanSpec({ roof: { type: "gambrel", front: "gable", overhang: 1, porchDepthFt: 6 }, siding: "batten", colors: { body: "#555555" }, wallHeightFt: 8 }) };
+  const r = RS.consensusDrafts([stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }), gambrel, stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 })]);
+  assertEquals(r.d3.roof.type, "gable");
+  assertEquals(r.report.discreteAgreement.roofStep, "2/2");
+  assert(r.d3.roof.rearStepFt === 12 && r.d3.roof.rearEaveRiseFt === 0.4, JSON.stringify(r.d3.roof));
+  // Two reads that disagree: the builder is told, in words.
+  const split = RS.consensusDrafts([stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }), stepRead({})]);
+  assertEquals(split.report.discreteAgreement.roofStep, "1/2");
+  const warn = RS.consensusSplitWarning(split.report) ?? "";
+  assert(warn.includes("the step in the roof"), warn);
+});
