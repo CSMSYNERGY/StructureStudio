@@ -16533,7 +16533,7 @@ function calTrimPhotos(list) {
     .filter((u) => typeof u === "string" && u && !Object.prototype.hasOwnProperty.call(seen, u) && (seen[u] = 1))
     .slice(0, CAL_PHOTO_MAX);
 }
-function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onOpenOrder = null, canPushInvoice = false }) {
+function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
   //   embedded = true  → the Designer tab inside portal.html: business users building
@@ -25194,6 +25194,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setAdvBusy(false);
     }
   };
+  // Unsaved work, told to the portal so switching or leaving an account can ask first (the page is
+  // remounted per account, which throws the building away): a building changed since it was seeded
+  // or last saved, or a save still going. Reported, never read back. Hooks, so above the returns.
+  const advDirty = advancedOnly && (advBusy || Boolean(adminCal && advSeedRef.current && adminCal.spec !== advSeedRef.current));
+  useEffect(() => { if (advancedOnly && onAdvancedDirty) onAdvancedDirty(advDirty); }, [advDirty]);
+  useEffect(() => () => { if (advancedOnly && onAdvancedDirty) onAdvancedDirty(false); }, []);
 
   // Settings → Designer → 3D. The calibration editor needs everything this component
   // already computes (the style list, the resolved config, the live 3D preview), so the
@@ -28126,7 +28132,7 @@ class DesignerErrorBoundary extends Component {
 // bundle uses (multi-tenant RPC vs. legacy direct table access).
 console.log("[StructureStudio] multi-tenant build: config-loader + RPC data path");
 
-function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onOpenOrder = null, canPushInvoice = false }) {
+function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false }) {
   // state shape: { status: "ready", config } | { status: "loading" } | { status: "error", clientId, message }
   const [state, setState] = useState(() => (
     configProp ? { status: "ready", config: configProp } : { status: "loading" }
@@ -28284,7 +28290,7 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
       </div>
     );
   }
-  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} calibrationOnly={calibrationOnly} advancedOnly={advancedOnly} onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} /></DesignerErrorBoundary>;
+  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} calibrationOnly={calibrationOnly} advancedOnly={advancedOnly} onAdvancedDirty={onAdvancedDirty} onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} /></DesignerErrorBoundary>;
 }
 
 // Publish for the host pages' thin mount blocks (cross-block const sharing does not

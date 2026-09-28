@@ -700,6 +700,10 @@ function Dashboard({ session }) {
   // ssAdvancedOn, so latching on the raw tab here can never mount it for a tenant without it.
   const [advancedOpened, setAdvancedOpened] = useState(false);
   useEffect(() => { if (tab === "advanced") setAdvancedOpened(true); }, [tab]);
+  // Does the Advanced page hold a building that is not saved, or a save still going? The page
+  // reports it (AdvancedTab's onDirty), and openAccount / exitAccount ask before throwing it away
+  // (the page is remounted per account). A ref: nothing renders from it.
+  const advancedDirtyRef = useRef(false);
   // A cold /portal/advanced is HELD on "Checking your account…" until the entitlement answers
   // (the gate below), but not for ever: a billing call that failed, hung, or answered without an
   // entitlement never answers, and the route would sit there for the whole session (review
@@ -1093,8 +1097,12 @@ function Dashboard({ session }) {
     }
   }, [isOperator]);
   const openAccount = (c) => {
-    // Switching account remounts the Designer, discarding anything in progress.
-    if (designerOpened && !window.confirm("Opening another account will discard the design you have open in the Designer tab. Continue?")) return;
+    // Switching account remounts the Designer, discarding anything in progress — and the Advanced
+    // page, whose unsaved building (or save still going) is named too (review 2026-09-29).
+    const advDirty = advancedDirtyRef.current;
+    const lose = designerOpened && advDirty ? "the design you have open in the Designer tab and the building you haven't saved on the Advanced page"
+      : advDirty ? "the building you haven't saved on the Advanced page" : "the design you have open in the Designer tab";
+    if ((designerOpened || advDirty) && !window.confirm(`Opening another account will discard ${lose}. Continue?`)) return;
     // A consumed Open request must not survive the switch: the remounted DesignerTab
     // would replay it on mount and silently rehydrate that customer's design (with its
     // live GHL estimate refs) into what the operator expects to be a blank designer.
@@ -1106,6 +1114,9 @@ function Dashboard({ session }) {
     try { window.history.replaceState({ page: "designs", sub: null }, "", "/portal/designs?view=" + encodeURIComponent(c.clientId)); } catch (_e) {}
   };
   const exitAccount = () => {
+    // Leaving remounts the Advanced page too. Only its UNSAVED work asks: that page reports it, and
+    // the Designer (which never asked here) is left as it was.
+    if (advancedDirtyRef.current && !window.confirm("Leaving this account will discard the building you haven't saved on the Advanced page. Continue?")) return;
     setOpenDesign(null);                        // same replay guard as openAccount
     ssTargetClientId = null;
     setViewing(null); setTab("accounts"); setSub(null);
@@ -2843,7 +2854,8 @@ function Dashboard({ session }) {
               Asks ssAdvancedOn again rather than trusting the clamp: that is only a router. */}
           {advancedOpened && advancedOn && !gateLocked && (
             <div style={{ display: activeTab === "advanced" ? "block" : "none" }}>
-              <AdvancedTab key={"a-" + effClientId} clientId={effClientId} setup3d={setup3d} canAdmin={canAdmin} />
+              <AdvancedTab key={"a-" + effClientId} clientId={effClientId} setup3d={setup3d} canAdmin={canAdmin}
+                onDirty={(d) => { advancedDirtyRef.current = !!d; }} />
             </div>
           )}
           <div className="ss-inner">

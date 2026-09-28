@@ -517,7 +517,9 @@ function DesignerTab({ clientId, onSaved, openDesign = null, setup3d = null, vie
 //
 // setup3d is the calibration contract (12-shell.jsx), built only for someone who may run this
 // account (canAdmin) on an account with 3D. Without it there is nothing to preview or save.
-function AdvancedTab({ clientId, setup3d = null, canAdmin = false }) {
+// `onDirty(bool)` hears whether the page holds unsaved work, so the shell can ask before an account
+// switch throws it away.
+function AdvancedTab({ clientId, setup3d = null, canAdmin = false, onDirty = null }) {
   // Hook FIRST — see useDesigner's note.
   const { SS, failed } = useDesigner();
   if (!setup3d) {
@@ -537,7 +539,7 @@ function AdvancedTab({ clientId, setup3d = null, canAdmin = false }) {
   // The same 1728 cap as the Designer page, for the same ultrawide reason (see DesignerTab).
   return (
     <div style={{ maxWidth: 1728, margin: "0 auto", width: "100%" }}>
-      <SS clientId={clientId} embedded advancedOnly setup3d={setup3d} view3d />
+      <SS clientId={clientId} embedded advancedOnly setup3d={setup3d} view3d onAdvancedDirty={onDirty} />
     </div>
   );
 }
