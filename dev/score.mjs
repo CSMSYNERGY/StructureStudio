@@ -73,6 +73,7 @@ const CLAMPS = {
   leanToWidthFt: [0, 16], leanToDropFt: [0, 6],
   dormerWidthFt: [0, 12], dormerRiseFt: [0, 6], dormerOffsetU: [-1, 1],
   porchDepthFt: [0, 12], porchOutFt: [0, 12],
+  rearStepFt: [0, 56], rearEaveRiseFt: [-1.5, 1.5],
 };
 const WALL_CLAMP = [5, 14];   // styleD3.ts: min(14, max(5, wh)), after the 3..20 accept gate
 
@@ -94,6 +95,13 @@ export function rendersAs(roof) {
   const lower = deg(Math.atan2(kneeRise, 1 - kneeU));
   const upper = deg(Math.atan2(ridgeRise - kneeRise, kneeU));
   return lower - upper >= R.GAMBREL_MIN_BEND_DEG ? "gambrel" : "gable";
+}
+
+// A roof step (2026-09-28) as the sanitiser keeps it: a gable's, with both keys, a step over half a
+// foot. A truth or draft with one key and not the other has none, which is what renders.
+export function hasRoofStep(roof) {
+  const r = roof || {};
+  return r.type === "gable" && (num(r.rearStepFt) || 0) > 0.5 && num(r.rearEaveRiseFt) !== null && Math.abs(num(r.rearEaveRiseFt)) >= 0.01;
 }
 
 // One porch, one kind. Projecting wins, which is the sanitiser's own order.
@@ -268,6 +276,18 @@ const FIELDS = [
   // dimensions card ships — an error of zero BY CONSTRUCTION is not a measurement of a
   // generator. See also `shape_no_wall`, which is the headline for any before/after that
   // straddles that change.
+  // THE ROOF STEP (2026-09-28): scored only on a building that has one, so no truth without a step
+  // moves (a draft that invents one is a PHANTOM, below). The joint in feet from the back wall, a
+  // foot either way being a batten or two; the rise in feet, an inch and a quarter being a read.
+  { id: "roof.step", group: G.SHAPE, w: 6, kind: "cat",
+    live: (t) => hasRoofStep(roofOf(t)),
+    get: (s) => (hasRoofStep(roofOf(s)) ? "yes" : "no"), stated: (d) => roofOf(d).rearStepFt != null },
+  { id: "roof.rearStepFt", group: G.SHAPE, w: 3, kind: "num", full: 1.0, zero: 5.0,
+    live: (t) => hasRoofStep(roofOf(t)),
+    get: (s) => (hasRoofStep(roofOf(s)) ? num(roofOf(s).rearStepFt) : 0), stated: (d) => roofOf(d).rearStepFt != null },
+  { id: "roof.rearEaveRiseFt", group: G.SHAPE, w: 3, kind: "num", full: 0.1, zero: 0.5,
+    live: (t) => hasRoofStep(roofOf(t)),
+    get: (s) => (hasRoofStep(roofOf(s)) ? num(roofOf(s).rearEaveRiseFt) : 0), stated: (d) => roofOf(d).rearEaveRiseFt != null },
   { id: "wallHeightFt", group: G.SHAPE, w: 12, kind: "num", full: 0.25, zero: 2.0,
     owner: (ctx) => (ctx.dimsWall == null ? "model" : "given"),
     live: (t, ctx) => ctx.dimsWall == null,
@@ -358,6 +378,7 @@ const PHANTOMS = [
   { id: "leanTo", w: 6, on: (s) => (num(roofOf(s).leanToWidthFt) || 0) > 0 },
   { id: "dormer", w: 6, on: (s) => (num(roofOf(s).dormerWidthFt) || 0) > 0 },
   { id: "porch",  w: 6, on: (s) => porchKind(roofOf(s)) !== "none" },
+  { id: "roofStep", w: 4, on: (s) => hasRoofStep(roofOf(s)) },
 ];
 
 // ─── AGREEMENT: does the model's prose match its own numbers? ────────────────────────────
