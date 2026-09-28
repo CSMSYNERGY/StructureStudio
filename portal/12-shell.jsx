@@ -30,6 +30,9 @@ function DesignsLegacySub({ sub, navigate }) {
 const ICONS = {
   admin: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>),
   designer: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>,
+  // Stacked layers — every control, one on top of another. Not the view-3d cube: the two pages
+  // can sit in one rail, and two cubes would read as one thing.
+  advanced: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>,
   quickbooks: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12a3 3 0 0 1 3-3h1v9"/><path d="M16 12a3 3 0 0 1-3 3h-1V6"/></svg>,
   accounts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="7" width="9" height="14" rx="1"/><rect x="13" y="3" width="9" height="18" rx="1"/><path d="M6 11h1M6 15h1M17 7h1M17 11h1M17 15h1"/></svg>,
   // Kanban columns of descending height — the section is named Pipeline now, and the old
@@ -683,6 +686,12 @@ function Dashboard({ session }) {
   // still latches this and mounts the host hidden, which costs a fetch and shows nothing.
   useEffect(() => { if (tab === "designer") setDesignerOpened(true); }, [tab]);
   useEffect(() => { if (tab === "admin") setAdminOpened(true); }, [tab]);
+  // The Advanced page gets the designer's treatment: mounted on first open, then kept, so a
+  // building half-built there survives a trip to another page. It is its OWN designer instance,
+  // so the quote in progress on the Designer page is never touched by it. The render also asks
+  // ssAdvancedOn, so latching on the raw tab here can never mount it for a tenant without it.
+  const [advancedOpened, setAdvancedOpened] = useState(false);
+  useEffect(() => { if (tab === "advanced") setAdvancedOpened(true); }, [tab]);
   // Bumped when the embedded designer submits, so DesignsTable refetches on next view.
   const [designsRefreshKey, setDesignsRefreshKey] = useState(0);
   // "Open in the portal designer" request ({clientId, code, version, n}) set by the
@@ -959,6 +968,19 @@ function Dashboard({ session }) {
   // what the tenant has PAID for is a separate question, answered by gateEnt below for every
   // operator alike since 2026-09-15.
   const canAdminForUrl = viewing ? (isOperator && !supportView) : (tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin"));
+  // ── ADVANCED (2026-09-28): one rule, ssAdvancedOn (01-core), asked about the tenant ON SCREEN.
+  // Derived inline HERE, not from gateEnt: that is declared below the early returns, and read up
+  // here it would be a var-hoisted `undefined` (the placement note above). Same shape as gateEnt:
+  // the viewed tenant's entitlement in view-as, your own otherwise.
+  const advancedEnt = viewing ? (viewedCtx ? viewedCtx.entitlement : null) : entitlement;
+  const advancedOn = ssAdvancedOn(advancedEnt);
+  // The entitlement arrives AFTER the tenant, so a cold /portal/advanced first renders with no
+  // answer. Refusing then would rewrite our own account's address bar to /portal/designer and
+  // mount the Designer, only to jump back when the answer lands. So while it is out the route is
+  // HELD: the page says "Checking…" and neither the nav item nor the page itself is drawn (both
+  // read advancedOn, never this). Only a real answer decides.
+  const advancedAsked = viewing ? viewedCtx !== null : entitlement !== null;
+  const advancedClampOn = advancedOn || (tab === "advanced" && !advancedAsked);
   // ⚠️ canProjects belongs in BOTH clamps or a typed /portal/projects gets rewritten away
   // under a team member while the page itself renders correctly — the exact silent,
   // operator-tabs-only failure the placement comment above this block was written about.
@@ -966,7 +988,7 @@ function Dashboard({ session }) {
   // projects branches, so passing it here refuses those two routes to a support account on
   // its own portal and changes nothing else. `canAdminForUrl` above keeps plain supportView.
   const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
-    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects);
+    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects, advancedClampOn);
   useEffect(() => {
     // Popout windows never normalise the URL: a resolved refusal (canProjects false, or a
     // hand-typed non-projects path) would replaceState to the fallback tab, and that URL
@@ -999,6 +1021,14 @@ function Dashboard({ session }) {
     // the address bar keeps a path that bounces again on every reload. isSupportOp is listed
     // for the same reason: gatesResolved reads it too.
   }, [resolvedTab, tab, sub, isOperator, canAdminForUrl, entitlement, tenant, canProjects, isSupportOp]);
+  // A REFUSED /portal/advanced shows the Designer, so the Designer host has to mount. The effect
+  // above rewrites the address bar but leaves `tab` on "advanced", and designerOpened latches on
+  // the raw tab — so without this line the page under /portal/designer is blank. Leaving `tab`
+  // alone is deliberate: an operator's cold /portal/advanced?view=<ours> is refused for a moment
+  // (their own entitlement answers before ?view= arms) and then resolves, and the URL follows.
+  useEffect(() => {
+    if (tab === "advanced" && resolvedTab === "designer") setDesignerOpened(true);
+  }, [tab, resolvedTab]);
   const viewingFetch = useCallback(async () => {
     const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId } });
     if (error) {
@@ -1527,6 +1557,33 @@ function Dashboard({ session }) {
         if (base && base.version !== undefined) body.baseVersion = base.version;
         return body;
       }, (data) => ssConfirmStyleVersion(key, data));
+    },
+    // THE ADVANCED PAGE'S "Save as a new style" (2026-09-28): create_style, then onSaveSpec above
+    // with the new key, then onSetStyleActive(false). Both carry the view-as target captured in
+    // the click's tick and sent explicitly, null included, like onSaveSpec (see its note).
+    //
+    // create_style gets NO deadline and NO side-door retry, on purpose: it is not idempotent. A
+    // request that stalled may still land, and a retry through the functions host would then make
+    // a SECOND style with the same name. A slow create is better than two. Returns { key, styleId }.
+    onCreateStyle: async (label) => {
+      const target = ssTargetClientId;
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "create_style", label, targetClientId: target || null } });
+      if (error) throw new Error(error.message || "Could not create that style");
+      if (!data || !data.ok || !data.key) throw new Error((data && data.error) || "Could not create that style");
+      return { key: data.key, styleId: data.styleId };
+    },
+    // Show or hide one style. Idempotent, so it goes through the style-save call (deadline, side
+    // door) and, when the caller names the style's key, waits in that style's queue behind any
+    // save still running — "hidden" must never land before the shape it hides.
+    onSetStyleActive: (styleId, active, styleValue) => {
+      const target = ssTargetClientId;
+      const body = { action: "set_style_active", styleId, active: active !== false, targetClientId: target || null };
+      const run = async () => {
+        const r = await ssStyleSaveCall(body, "show or hide a style");
+        if (r.error || !r.data || !r.data.ok) throw ssStyleSaveError(r);
+        return r.data;
+      };
+      return styleValue ? ssQueueStyleSave(ssStyleSaveKey(styleValue), run) : run();
     },
     // Reference photos are no longer in the customer-facing config (migration 093 stopped
     // get_config broadcasting a builder's photos of their real buildings to anonymous
@@ -2106,7 +2163,7 @@ function Dashboard({ session }) {
   // consolesBarred, not supportView, for the same reason as resolvedTab's clamp above. The
   // other ssClampTab calls ask about designer/orders tabs, never read that argument, and keep
   // plain supportView.
-  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects);
+  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects, advancedClampOn);
   // Remember the last WORKSPACE page, for Back to Workspace. Assigned during render, not in
   // an effect, and deliberately: it must already be correct on the very first render in which
   // the Settings rail appears, and an effect runs after that render has painted. Idempotent
@@ -2429,6 +2486,10 @@ function Dashboard({ session }) {
         <div className="ss-navlabel">Workspace</div>
         <nav className="ss-nav">
           {navItem("designer", "Designer")}
+          {/* Directly under Designer (Carolyn 2026-09-28), and only where ssAdvancedOn says so —
+              our own account, for now. `advancedOn` is false until the entitlement answers, so
+              the item arrives late on a cold load and never flashes for anyone else. */}
+          {advancedOn && navItem("advanced", "Advanced")}
           {/* TWO items again. Carolyn, 2026-08-26 12:15, having used the merged one: "we have
               contacts as one, and then we have another one that says pipeline ... I would
               rather have more tabs and one specific name on it." Contacts first — a person,
@@ -2722,6 +2783,15 @@ function Dashboard({ session }) {
                    sending someone to a tab they cannot open is its own dead end. */
                 onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView) === "orders"
                   ? (id) => navigate("orders", "o-" + id) : null} />
+            </div>
+          )}
+          {/* Keep-mounted Advanced host, the same treatment as the Designer's above and for the
+              same reason: a building half-built here survives a trip to another page. A plain
+              scrolling page (no ss-designer-active), so the 3D column can be position:sticky.
+              Asks ssAdvancedOn again rather than trusting the clamp: that is only a router. */}
+          {advancedOpened && advancedOn && !gateLocked && (
+            <div style={{ display: activeTab === "advanced" ? "block" : "none" }}>
+              <AdvancedTab key={"a-" + effClientId} clientId={effClientId} setup3d={setup3d} canAdmin={canAdmin} />
             </div>
           )}
           <div className="ss-inner">
@@ -3190,6 +3260,12 @@ function Dashboard({ session }) {
                 available
               />
               )
+            )}
+            {/* A cold /portal/advanced before the entitlement has answered (advancedClampOn holds
+                the route open). Nothing of the page is drawn until ssAdvancedOn says yes; a "no"
+                lands on the Designer. */}
+            {!gateLocked && activeTab === "advanced" && !advancedOn && (
+              <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Checking your account…</div>
             )}
             {!gateLocked && activeTab === "view-3d" && (
               view3dUnlocked

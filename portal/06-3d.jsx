@@ -504,3 +504,40 @@ function DesignerTab({ clientId, onSaved, openDesign = null, setup3d = null, vie
   );
 }
 
+
+// ─── Advanced (2026-09-28) ───
+// Carolyn: "an advanced tab that is only available in Structure Studio for us yet" — where a
+// builder designs a custom building from scratch with every option. Our own account only for
+// now (ssAdvancedOn in 01-core decides, and the shell mounts this only when it says yes).
+//
+// A SEPARATE designer instance from the Designer page's, on purpose: the building drawn here
+// is a draft of a new STYLE, not a customer's quote, and the quote in progress next door must
+// never be touched by it. The component renders just the Advanced surface (`advancedOnly`),
+// the same way Settings → Designer → 3D mounts it with `calibrationOnly`.
+//
+// setup3d is the calibration contract (12-shell.jsx), built only for someone who may run this
+// account (canAdmin) on an account with 3D. Without it there is nothing to preview or save.
+function AdvancedTab({ clientId, setup3d = null, canAdmin = false }) {
+  // Hook FIRST — see useDesigner's note.
+  const { SS, failed } = useDesigner();
+  if (!setup3d) {
+    return (
+      <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14, lineHeight: 1.6 }}>
+        {canAdmin
+          ? "Advanced needs 3D. Turn 3D on for this account and this page opens."
+          : "Only an owner or admin can use Advanced."}
+      </div>
+    );
+  }
+  if (!SS) {
+    return failed
+      ? <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>The designer failed to load — refresh the page. (structure-studio.component.js must be served alongside portal.html.)</div>
+      : <DesignerLoading />;
+  }
+  // The same 1728 cap as the Designer page, for the same ultrawide reason (see DesignerTab).
+  return (
+    <div style={{ maxWidth: 1728, margin: "0 auto", width: "100%" }}>
+      <SS clientId={clientId} embedded advancedOnly setup3d={setup3d} view3d />
+    </div>
+  );
+}

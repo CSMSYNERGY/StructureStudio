@@ -10,6 +10,9 @@ const ROUTES = [
   "/portal/inventory", "/portal/orders", "/portal/build-schedule", "/portal/delivery-schedule", "/portal/repairs",
   "/portal/commissions", "/portal/quickbooks", "/portal/view-3d",
   "/portal/support", "/portal/support/mine", "/portal/support/features", "/portal/support/fixes", "/portal/support/roadmap",
+  // Our own account only (ssAdvancedOn). For the test owner it must land on the Designer, which
+  // is a render; tests/harness/advancedTab.mjs drives both sides of the gate.
+  "/portal/advanced",
   // The pre-2026-08-30 name. Kept deliberately: these are the LEGACY paths, still live in
   // bookmarks and in links the product hands out, and they must keep resolving through
   // SS_TAB_ALIASES. If someone deletes the alias, these five turn red rather than a builder

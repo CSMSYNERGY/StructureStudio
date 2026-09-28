@@ -71,6 +71,9 @@ interface World {
   canProjects: boolean | null;
   tab: string;
   entitlement?: unknown;
+  // The Advanced page's route gate (2026-09-28): both lifted clamps read it. Off by default, which
+  // is every tenant but ours — and the Advanced route is no part of what this file pins.
+  advancedClampOn?: boolean;
 }
 // An owner-ish map for the support account's own row on the internal tenant. Deliberately wide:
 // "and yet Admin/Projects are refused" must not be an accident of a narrow map.
@@ -80,12 +83,12 @@ function shell(w: World) {
   const tenant = { role: w.role, access: OWN_MAP };
   const isAdmin = w.role === "owner" || w.role === "admin";
   const f = new Function(
-    "ssClampTab", "isOperator", "isSupportOp", "viewing", "tenant", "canProjects", "tab", "isAdmin", "myAccess", "entitlement", "adminOpened",
+    "ssClampTab", "isOperator", "isSupportOp", "viewing", "tenant", "canProjects", "tab", "isAdmin", "myAccess", "entitlement", "adminOpened", "advancedClampOn",
     [SUPPORT_VIEW, CONSOLES_BARRED, CAN_ADMIN_FOR_URL, RESOLVED_TAB, GATES_RESOLVED, CAN_ADMIN, ACTIVE_TAB].join("\n") +
       `\nreturn { supportView, consolesBarred, resolvedTab, gatesResolved, canAdmin, activeTab, adminNav: !!(${NAV![1]}), adminMount: !!(${MOUNT![1]}) };`,
   );
   return f(ssClampTab, w.isOperator, w.isSupportOp, w.viewing, tenant, w.canProjects, w.tab, isAdmin, OWN_MAP,
-    w.entitlement === undefined ? { status: "active" } : w.entitlement, true) as {
+    w.entitlement === undefined ? { status: "active" } : w.entitlement, true, w.advancedClampOn === true) as {
       supportView: unknown; consolesBarred: unknown; resolvedTab: string; gatesResolved: boolean; canAdmin: boolean;
       activeTab: string; adminNav: boolean; adminMount: boolean;
     };
@@ -161,6 +164,24 @@ Deno.test("a non-operator never gets the Admin console, whatever the support fla
   for (const isSupportOp of [null, false, true]) {
     const r = shell({ isOperator: false, isSupportOp, viewing: null, role: "owner", canProjects: false, tab: "admin" });
     assert(!r.adminNav && !r.adminMount && r.activeTab !== "admin");
+  }
+});
+
+Deno.test("ADVANCED (2026-09-28): both lifted clamps agree on /portal/advanced, off or on", () => {
+  // advancedClampOn is the shell's one input for the Advanced route (see advancedGate_test for how
+  // it is derived). Off, an owner or an operator lands on the Designer; on, the page resolves.
+  // Every Admin/Projects case above runs with it off, which is what every tenant but ours sees.
+  for (const isOperator of [false, true]) {
+    const off = shell({ isOperator, isSupportOp: false, viewing: null, role: "owner", canProjects: false, tab: "advanced" });
+    assertEquals([off.resolvedTab, off.activeTab], ["designer", "designer"]);
+    const on = shell({ isOperator, isSupportOp: false, viewing: null, role: "owner", canProjects: false, tab: "advanced", advancedClampOn: true });
+    assertEquals([on.resolvedTab, on.activeTab], ["advanced", "advanced"]);
+    // …and it moves no other route.
+    for (const tab of ["admin", "designs", "orders"]) {
+      const a = shell({ isOperator, isSupportOp: false, viewing: null, role: "owner", canProjects: true, tab });
+      const b = shell({ isOperator, isSupportOp: false, viewing: null, role: "owner", canProjects: true, tab, advancedClampOn: true });
+      assertEquals([b.resolvedTab, b.activeTab], [a.resolvedTab, a.activeTab]);
+    }
   }
 });
 
