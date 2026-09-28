@@ -520,3 +520,28 @@ Deno.test("⚠️ 'What we drew' says the porch's pitch and posts as BUILT when 
   // A readout without numbers (no porch at that size) is ignored rather than printed as NaN.
   assertEquals(F.ssDrewWords({ roof }, {}), F.ssDrewWords({ roof }));
 });
+
+// ── The roof step (2026-09-28), in words ──────────────────────────────────────────────────
+
+Deno.test("the roof step reads in the words of its panel controls, and 'What we drew' says it", () => {
+  assertEquals(F.ssChangeLine({ field: "roof.rearStepFt", from: null, to: 12, why: "" }).text, "not set → 12 ft");
+  assertEquals(F.ssChangeLine({ field: "roof.rearEaveRiseFt", from: 0.42, to: -0.25, why: "" }).text, "5 in → 3 in lower");
+  for (const k of ["roof.rearStepFt", "roof.rearEaveRiseFt"]) {
+    const line = F.ssChangeLine({ field: k, from: null, to: null, why: "" });
+    assert(line.label !== k && !/[a-z][A-Z]/.test(line.label), `${k} is shown as ${line.label}`);
+  }
+  const cabin = F.ssDrewWords({ roof: { type: "gable", front: "gable", rearStepFt: 12, rearEaveRiseFt: 0.42 } });
+  assertStringIncludes(cabin, "The roof steps 12 ft from the back wall: behind the step its edge sits 5 in higher, and the two ridges line up.");
+  assertStringIncludes(F.ssDrewWords({ roof: { type: "gable", rearStepFt: 9, rearEaveRiseFt: -0.5 } }), "its edge sits 6 in lower");
+  // Only what the renderer can draw: never on a shed, a gambrel or an eave front, never with one key.
+  for (const roof of [
+    { type: "shed", rearStepFt: 12, rearEaveRiseFt: 0.42 },
+    { type: "gambrel", rearStepFt: 12, rearEaveRiseFt: 0.42 },
+    { type: "gable", front: "eave", rearStepFt: 12, rearEaveRiseFt: 0.42 },
+    { type: "gable", rearStepFt: 12 },
+    { type: "gable", rearStepFt: 0, rearEaveRiseFt: 0.42 },
+  ]) {
+    assert(!/steps/.test(F.ssDrewWords({ roof })), JSON.stringify(roof));
+  }
+  assert(!/0\.\d/.test(cabin), "no ratio reaches the line");
+});

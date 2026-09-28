@@ -16511,6 +16511,12 @@ function ssDrewWords(spec, porchBuilt) {
     const centre = Number(roof.centerEaveFt) > 0 ? `, and the middle section's walls rise to ${ssFtInWords(Number(roof.centerEaveFt))}` : "";
     out.push(`A lower wing ${ssFtInWords(wing)} wide runs along ${where} under its own roof${centre}.`);
   }
+  // A ROOF STEP (2026-09-28): where the rear roof section starts and which way its eave steps, only
+  // where the style gives both keys on a roof that can carry them (the sanitiser's rule).
+  const stepAt = Number(roof.rearStepFt) || 0, stepRise = Number(roof.rearEaveRiseFt) || 0;
+  if (type === "gable" && roof.front !== "eave" && stepAt > 0.5 && Math.abs(stepRise) >= 0.01) {
+    out.push(`The roof steps ${ssFtInWords(stepAt)} from the back wall: behind the step its edge sits ${Math.round(Math.abs(stepRise) * 12)} in ${stepRise > 0 ? "higher" : "lower"}, and the two ridges line up.`);
+  }
   // "wall" in the new frame, where the front can be a long side; "end" on every older style,
   // where the porch was only ever on a gable end and the panel has always called it that.
   const face = (roof.front != null || roof.highSide != null) ? "wall" : "end";
@@ -16598,6 +16604,10 @@ const SS_CHANGE_WORDS = {
   "roof.porchPosts": ["How many posts the porch has", (v) => `${Math.round(Number(v))} posts`],
   "roof.porchPitch": ["How steep the porch roof is", (v) => `${Math.round(Number(v) * 120) / 10} in 12`],
   "roof.porchSteps": ["Where the porch steps are", (v) => ({ left: "on the left", center: "in the middle", right: "on the right" })[String(v)] || String(v)],
+  // The roof step (2026-09-28), in the words its panel controls use: feet from the back wall, and the
+  // rear roof edge's rise in inches (a lower one says so).
+  "roof.rearStepFt": ["Where the roof steps, from the back wall", (v) => (Number(v) > 0.5 ? ssFtInWords(Number(v)) : "no step")],
+  "roof.rearEaveRiseFt": ["How much higher the rear roof edge is", (v) => (Number(v) < 0 ? `${Math.round(-Number(v) * 12)} in lower` : `${Math.round(Number(v) * 12)} in`)],
   gableVent: ["The vent in the gable", (v) => (v && v.widthFrac > 0 ? "there" : "not there")],
   foundation: ["What it sits on", (v) => ({ skids: "runners", blocks: "concrete blocks", piers: "concrete piers" })[String(v)] || "a slab"],
   // A raised floor's height (2026-09-25), top-level beside foundation, in the panel's own words.

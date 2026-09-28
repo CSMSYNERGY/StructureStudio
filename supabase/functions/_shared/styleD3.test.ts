@@ -3079,7 +3079,9 @@ Deno.test("⚠️ every field the prompt names is on the allow-list, and nothing
                  "roof.centerEaveFt", "roof.porchEnd", "roof.porchAttachFt", "roof.porchWidthFt",
                  "roof.leanToWidthFt",
                  // 2026-09-25: the porch's own framing, and a raised floor's height.
-                 "roof.porchPosts", "roof.porchPitch", "roof.porchSteps", "floorHeightFt"];
+                 "roof.porchPosts", "roof.porchPitch", "roof.porchSteps", "floorHeightFt",
+                 // 2026-09-28: the roof step.
+                 "roof.rearStepFt", "roof.rearEaveRiseFt"];
   const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
   for (const f of named) {
     assert((SELF_CHECK_ALLOW as readonly string[]).includes(f), `${f} is named in the prompt`);
@@ -3263,14 +3265,15 @@ Deno.test("⚠️ v2: every new ROOF key is correctable, and no new colour is", 
   const allow = SELF_CHECK_ALLOW as readonly string[];
   for (const f of ["roof.front", "roof.highSide", "roof.porchAttachFt", "roof.porchWidthFt",
                    "roof.wingSide", "roof.wingWidthFt", "roof.wingPitch", "roof.centerEaveFt",
-                   "roof.porchPosts", "roof.porchPitch", "roof.porchSteps"]) {
+                   "roof.porchPosts", "roof.porchPitch", "roof.porchSteps",
+                   "roof.rearStepFt", "roof.rearEaveRiseFt"]) {
     assert(allow.includes(f), `${f} is on the allow-list`);
   }
   for (const f of ["colors.corner", "colors.fascia", "colors", "wallHeightFt"]) {
     assert(!allow.includes(f), `${f} must never be applicable`);
   }
   assert(allow.includes("floorHeightFt") && allow.includes("foundation"), "a raised floor's height and kind are correctable");
-  assertEquals(allow.length, 34, "22 before v2, eight roof keys after, the porch's three framing keys and floorHeightFt (2026-09-25)");
+  assertEquals(allow.length, 36, "22 before v2, eight roof keys after, the porch's three framing keys and floorHeightFt (2026-09-25), the roof step's two (2026-09-28)");
   assertEquals(new Set(allow).size, allow.length, "and no path is listed twice");
 });
 
@@ -6050,6 +6053,8 @@ const ATTACH_AT_8FE5D30 = " Work it out against the ruler.";
 // ...and the wing roofs' slope (2026-09-26), corrected by the difference as well.
 const WING_NOW = /the slope of the wing roofs \(roof\.wingPitch, rise over run:\n[\s\S]*?roof\.wingWidthFt, to its current value\), and/;
 const WING_AT_8FE5D30 = "the slope of the wing roofs (roof.wingPitch, rise over run), and";
+// ...and the roof step's bullet (2026-09-28), which 8fe5d30 did not have at all: taken out whole.
+const STEP_NOW = /\n     \* The roof step - currently [\s\S]*?a step the frames do not, set roof\.rearStepFt to 0, which removes it\./;
 const BAND_AT_8FE5D30 = "render. If the band's share differs by a quarter or more (a band as tall as half the\n" +
   "       outer wall in the frame and a quarter of it in the render, say), correct\n" +
   "       roof.centerEaveFt to where the wing roof meets the centre wall plus the band you\n" +
@@ -6085,11 +6090,12 @@ Deno.test("⛔ without the lock, the v2 check prompt and its request body are 8f
       const plain = k === "body" ? out[k].replace(/\\n/g, "\n") : out[k];
       const m = plain.match(/on a (\S+) ft wall is about|times the (\S+) ft wall, to its/);
       const wall = m ? (m[1] ?? m[2]) : "";
+      assert(STEP_NOW.test(plain), `${k}: today's roof-step bullet is there to take out`);
       if (OVERHANG_NOW.test(plain)) {
-        const back = plain.replace(OVERHANG_NOW, OVERHANG_AT_8FE5D30(wall)).replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30);
+        const back = plain.replace(OVERHANG_NOW, OVERHANG_AT_8FE5D30(wall)).replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30).replace(STEP_NOW, "");
         out[k] = k === "body" ? back.replace(/\n/g, "\\n") : back;
       } else {
-        const back = plain.replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30);
+        const back = plain.replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30).replace(STEP_NOW, "");
         out[k] = k === "body" ? back.replace(/\n/g, "\\n") : back;
       }
     }
@@ -6371,4 +6377,57 @@ Deno.test("⚠️ the roof step's examples are generic, never the Black Cabin's 
   for (const bad of ["14", "0.6", "40", "7.75", "8.25", "0.34"]) assert(!nums.includes(bad), `the example uses ${bad}`);
   // The worked example is self-consistent: 5 in over 12 is 0.42.
   assert(/a step of 5 inches is 0\.42/.test(STEP_PARA) && /rearStepFt 12 and rearEaveRiseFt 0\.42/.test(STEP_PARA), "5 in / 12 = 0.42");
+});
+
+const STEP_DIMS: KnownDims = { widthFt: 16, lengthFt: 30, wallHeightFt: 8 };
+const STEP_DRAFT: D3Spec = cleanSpec({ roof: stepRoof({ eave: "fascia" }), siding: "batten", colors: { body: "#555555" }, wallHeightFt: 8 });
+const STEPPED_DRAFT: D3Spec = cleanSpec({ roof: stepRoof({ eave: "fascia", rearStepFt: 12, rearEaveRiseFt: 0.42 }), siding: "batten", colors: { body: "#555555" }, wallHeightFt: 8 });
+const checkRead = (corrections: Record<string, unknown>, fields: string[]) => ({
+  verdict: "corrections" as const,
+  corrections,
+  changed: fields.map((field) => ({ field, from: null, to: null, why: "the frames show it" })),
+  checked: {},
+  note: "",
+});
+
+Deno.test("the v2 self-check compares the roof step, and may correct it; the legacy check may not", () => {
+  assert((RS.SELF_CHECK_ALLOW as readonly string[]).includes("roof.rearStepFt") && (RS.SELF_CHECK_ALLOW as readonly string[]).includes("roof.rearEaveRiseFt"), "on the v2 allow-list");
+  assert(!(RS.SELF_CHECK_LEGACY_ALLOW as readonly string[]).includes("roof.rearStepFt"), "never on the legacy one");
+  const none = lf(RS.selfCheckPrompt({ dims: STEP_DIMS, draft: STEP_DRAFT, viewpoints: RS.SELF_CHECK_VIEWPOINTS }));
+  assert(none.includes("* The roof step - currently none, which draws one roof from the front to the back."), "a draft without a step is said as one roof");
+  assert(/give BOTH in one answer: roof\.rearStepFt \(feet from\n\s+the BACK wall to the joint/.test(none), "both keys, from the back wall");
+  assert(/measured against the 30 ft\n\s+depth/.test(none), "against the known depth");
+  assert(none.includes("read in inches against\n       the 8 ft wall and divided by 12"), "the rise against the known wall");
+  assert(none.includes("set roof.rearStepFt to 0, which removes it."), "and how to take one off");
+  const stepped = lf(RS.selfCheckPrompt({ dims: STEP_DIMS, draft: STEPPED_DRAFT, viewpoints: RS.SELF_CHECK_VIEWPOINTS }));
+  assert(stepped.includes("currently roof.rearStepFt 12 ft and roof.rearEaveRiseFt 0.42 ft: the joint 12 ft from the back wall, the rear eave 5 in higher."), "a drawn step is said as drawn");
+  const legacy = lf(RS.legacySelfCheckPrompt({ dims: STEP_DIMS, draft: STEP_DRAFT, viewpoints: ["front", "side", "eaveCorner", "corner"] }));
+  assert(!legacy.includes("roof step") && !legacy.includes("rearStepFt"), "the legacy prompt is untouched");
+});
+
+Deno.test("⚠️ applySelfCheck: a step is added with both keys, moved with one, and a step of 0 takes it off", () => {
+  const added = RS.applySelfCheck(STEP_DRAFT, checkRead({ roof: { rearStepFt: 12, rearEaveRiseFt: 0.42 } }, ["roof.rearStepFt", "roof.rearEaveRiseFt"]), STEP_DIMS, "v2");
+  assert(added.ok && added.verdict === "corrections" && added.d3.roof.rearStepFt === 12 && added.d3.roof.rearEaveRiseFt === 0.42, JSON.stringify(added));
+  if (added.ok) assertEquals(added.changed.map((c) => c.field).sort(), ["roof.rearEaveRiseFt", "roof.rearStepFt"]);
+  // One key with no step to join is dropped, and said so.
+  const half = RS.applySelfCheck(STEP_DRAFT, checkRead({ roof: { rearStepFt: 12 } }, ["roof.rearStepFt"]), STEP_DIMS, "v2");
+  assert(half.ok && half.verdict === "matches" && !hasKey(half.d3.roof, "rearStepFt") && half.dropped.includes("roof.rearStepFt"), JSON.stringify(half));
+  // On a stepped draft one key moves it.
+  const moved = RS.applySelfCheck(STEPPED_DRAFT, checkRead({ roof: { rearStepFt: 10 } }, ["roof.rearStepFt"]), STEP_DIMS, "v2");
+  assert(moved.ok && moved.d3.roof.rearStepFt === 10 && moved.d3.roof.rearEaveRiseFt === 0.42, JSON.stringify(moved));
+  // 0 TAKES IT OFF: both keys go, both are reported, and the destructive pass cannot put them back.
+  const off = RS.applySelfCheck(STEPPED_DRAFT, checkRead({ roof: { rearStepFt: 0 } }, ["roof.rearStepFt"]), STEP_DIMS, "v2");
+  assert(off.ok && off.verdict === "corrections" && !hasKey(off.d3.roof, "rearStepFt") && !hasKey(off.d3.roof, "rearEaveRiseFt"), JSON.stringify(off));
+  if (off.ok) {
+    assertEquals(off.changed.map((c) => [c.field, c.from, c.to]).sort(), [["roof.rearEaveRiseFt", 0.42, null], ["roof.rearStepFt", 12, null]]);
+    assert(!off.dropped.length, "nothing reported as not applied");
+  }
+  // An unreadable step is not a 0: the draft's step stands.
+  const junk = RS.applySelfCheck(STEPPED_DRAFT, checkRead({ roof: { rearStepFt: "somewhere" } }, ["roof.rearStepFt"]), STEP_DIMS, "v2");
+  assert(junk.ok && junk.d3.roof.rearStepFt === 12 && junk.d3.roof.rearEaveRiseFt === 0.42, JSON.stringify(junk));
+  // The legacy check cannot touch it, in either direction.
+  const legacy = RS.applySelfCheck(STEP_DRAFT, checkRead({ roof: { rearStepFt: 12, rearEaveRiseFt: 0.42 } }, ["roof.rearStepFt", "roof.rearEaveRiseFt"]), STEP_DIMS, "legacy");
+  assert(legacy.ok && !hasKey(legacy.d3.roof, "rearStepFt") && legacy.dropped.includes("roof.rearStepFt"), JSON.stringify(legacy));
+  const legacyOff = RS.applySelfCheck(STEPPED_DRAFT, checkRead({ roof: { rearStepFt: 0 } }, ["roof.rearStepFt"]), STEP_DIMS, "legacy");
+  assert(legacyOff.ok && legacyOff.d3.roof.rearStepFt === 12, JSON.stringify(legacyOff));
 });

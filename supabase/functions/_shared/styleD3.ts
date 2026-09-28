@@ -2422,6 +2422,10 @@ export const SELF_CHECK_ALLOW = [
   // the list and now takes "blocks" and "piers" too. Blocks or piers only, which sanitizeD3Spec
   // holds it to on the way out.
   "floorHeightFt",
+  // The roof step (2026-09-28): where the rear roof section starts and how much higher its eave is.
+  // Both or neither, gable with a gable-end front only, which sanitizeD3Spec holds them to on the
+  // way out; a step of 0 takes it off (applySelfCheck).
+  "roof.rearStepFt", "roof.rearEaveRiseFt",
 ] as const;
 
 // `massing` (v2) is the answer to the new first step: which way the building faces, which wall
@@ -2680,6 +2684,12 @@ export function selfCheckPrompt(opts: {
     : String(pitchStored);
   const stepsNow = typeof roof.porchSteps === "string" ? said("porchSteps") : "not set, which draws no steps";
   const hasWings = (num(roof.wingWidthFt) ?? 0) > 0;
+  // The roof step (2026-09-28), said as what the render draws: none, or where the joint is and which
+  // way the rear eave steps. sanitizeD3Spec keeps the two keys together or not at all.
+  const stepAt = num(roof.rearStepFt), stepRise = num(roof.rearEaveRiseFt);
+  const stepNow = stepAt !== null && stepRise !== null
+    ? `roof.rearStepFt ${dimFt(stepAt)} ft and roof.rearEaveRiseFt ${dimFt(stepRise)} ft: the joint ${dimFt(stepAt)} ft from the back wall, the rear eave ${dimFt(Math.round(Math.abs(stepRise) * 120) / 10)} in ${stepRise > 0 ? "higher" : "lower"}`
+    : "none, which draws one roof from the front to the back";
   // The centre's default is only a thing the renderer DRAWS when there are wings to stand it on.
   const centreNow = num(roof.centerEaveFt) !== null
     ? feet("centerEaveFt")
@@ -2857,6 +2867,16 @@ effort here.
        tall as the outer wall in the frame and a quarter of it in the render adds a quarter of
        ${wall} ft. Correct it by the difference, never rebuild it from the wing roof: the render
        already draws the wing roof's own depth above its wall, which a rebuilt number leaves out.
+     * The roof step - currently ${stepNow}. Some gable buildings are built in two sections: on
+       BOTH long sides a joint runs up the roof, the rear section's eave sits higher (or lower)
+       than the front's, and the two ridges line up, so the roof edges show a small wedge-shaped
+       step at the joint, deepest at the eave. Compare the side and otherSide viewpoints. If the
+       frames show a step the render lacks, give BOTH in one answer: roof.rearStepFt (feet from
+       the BACK wall to the joint, counted in battens or measured against the ${dimFt(D)} ft
+       depth) and roof.rearEaveRiseFt (how much higher the rear eave is, read in inches against
+       the ${wall} ft wall and divided by 12; negative when it is lower). Where both show one,
+       correct the joint's place or the rise only where they plainly differ. If the render shows
+       a step the frames do not, set roof.rearStepFt to 0, which removes it.
    If the render and the frames trace the same outline from every viewpoint you have, leave
    all of these alone.
 
@@ -3301,6 +3321,18 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
       && String(wanted.get("roof.porchSteps")).trim().toLowerCase() === "none") {
     wanted.delete("roof.porchSteps");
     cleared.add("roof.porchSteps");
+  }
+  // A STEP OF 0 TAKES THE ROOF STEP OFF (v2, 2026-09-28), for the porch steps' reason: no step is
+  // an ABSENT rearStepFt and rearEaveRiseFt, a step of 0 is exactly what the sanitiser drops, and
+  // the destructive pass below would then put the draft's step straight back, so a step the render
+  // drew wrongly could never be taken off. A declared roof.rearStepFt of half a foot or less (the
+  // prompt offers 0) CLEARS BOTH keys; neither is in `wanted`, so nothing can restore them. An
+  // unreadable value is not a 0 and leaves the draft's step standing.
+  if (mode === "v2" && wanted.has("roof.rearStepFt") && !((num(wanted.get("roof.rearStepFt")) ?? 1) > 0.5)) {
+    wanted.delete("roof.rearStepFt");
+    wanted.delete("roof.rearEaveRiseFt");
+    cleared.add("roof.rearStepFt");
+    cleared.add("roof.rearEaveRiseFt");
   }
 
   // WHICH KEYS THE PORCH EXCLUSION TOOK OUT, recorded by build() rather than inferred by the
