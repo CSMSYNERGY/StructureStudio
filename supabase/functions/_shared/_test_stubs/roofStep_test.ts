@@ -15,6 +15,7 @@
 // it answers for the same roof with the keys taken off, on every roof and size.
 
 import { assert, assertAlmostEquals, assertEquals } from "jsr:@std/assert";
+import { roofStepAtSize } from "../styleD3.ts";
 
 const JSX = await Deno.readTextFile(new URL("../../../../StructureStudio.jsx", import.meta.url));
 const CMP = await Deno.readTextFile(new URL("../../../../structure-studio.component.js", import.meta.url));
@@ -190,4 +191,69 @@ Deno.test("a vent on the back wall is fitted to the rear section's gable, on its
   const steep = { type: "gable", front: "gable", pitch: 0.3, rearStepFt: 10, rearEaveRiseFt: 1.2 };
   assert(F.ssGableVentFit({ type: "gable", front: "gable", pitch: 0.3 }, 14, 30, "north", H, big, null, null), "fits the full gable");
   assertEquals(F.ssGableVentFit(steep, 14, 30, "north", H, big, null, null), null);
+});
+
+// ── THREE: the step AS DRAWN, told to the check (server) and to the builder ("What we drew") ──
+
+Deno.test("⚠️ the server's roofStepAtSize draws exactly d3RoofStep's step, on every roof and size", () => {
+  const roofs: Record<string, unknown>[] = [
+    CABIN, { type: "gable", pitch: 0.4 }, { type: "gable", front: "gable", pitch: 0.1 }, { type: "gable", front: "gable", pitch: 0.01 },
+    { type: "gable", front: "gable", pitch: 0.41, porchOutFt: 6 }, { ...CABIN, porchEnd: "back" }, { type: "gable", front: "eave", pitch: 0.4 },
+    { ...CABIN, wingSide: "both", wingWidthFt: 4 }, { ...CABIN, leanToWidthFt: 8 }, { type: "gambrel", front: "gable" },
+    { type: "shed", highSide: "front", pitch: 0.25 }, { type: "gable", front: "gable", pitch: 0.5, ridgeOffset: 0.2 }, { type: "gable", front: "gable" },
+  ];
+  const steps = [[14, 0.6], [56, 1.5], [12, -0.75], [2, 0.5], [30, -1.5], [10, 1], [0, 0.5], [14, 0], [6, 0.005]];
+  const sizes = [[14, 40], [12, 16], [40, 14], [24, 12], [10, 8], [14, 13], [20, 36], [16, 30], [14, 10]];
+  let drawn = 0, none = 0;
+  for (const base of roofs) {
+    for (const [at, rise] of steps) {
+      const roof = { ...base, rearStepFt: at, rearEaveRiseFt: rise };
+      for (const [W, L] of sizes) {
+        const st = F.d3RoofStep(roof, W, L, H), s = roofStepAtSize(roof, W, L), tag = `${JSON.stringify(roof)} ${W}x${L}`;
+        if (!st) {
+          assert(s === null || s.drawn === null, `${tag}: the render draws none, the server says ${JSON.stringify(s)}`);
+          if (s) assert(typeof s.why === "string" && s.why.length > 0, `${tag}: and says why`);
+          none++;
+          continue;
+        }
+        assert(s && s.drawn, `${tag}: the render draws one`);
+        assertEquals(s.drawn.stepFt, st.stepFt, tag);
+        assertEquals(s.drawn.rise, st.rise, tag);
+        // Drawn as stored, and only then, it says nothing more (within the sanitiser's bands).
+        if (at >= 4 && Math.abs(rise) <= 1.5) assertEquals(s.why === null, st.stepFt === at && st.rise === rise, `${tag}: ${s.why}`);
+        drawn++;
+      }
+    }
+  }
+  assert(drawn > 60 && none > 600, `${drawn} drawn, ${none} not`);
+});
+
+// "What we drew" is the compare step's pure half, lifted the way selfCheckPanel_test lifts it (that
+// file pins the two twins' copies byte-identical); handed d3RoofStep at the panel's size, as the
+// panel's calDrewStep hands it.
+const WORDS = [["function d3FtIn(", "// ── THE PROJECTING PORCH'S NUMBERS"], ["const SS_RENDER_MS =", "// Upload a list with BOUNDED CONCURRENCY"]]
+  .map(([a, b]) => lift(CMP, "structure-studio.component.js", a, b));
+const Wd = new Function(`${WORDS.join("\n")}; return { ssDrewWords };`)() as Record<string, Any>;
+const drewStep = (roof: Record<string, unknown>, W: number, L: number) =>
+  (Wd.ssDrewWords({ roof, wallHeightFt: H }, null, F.d3RoofStep(roof, W, L, H)) as string).split(/(?<=\.)\s/).filter((s) => /steps/.test(s)).join(" ");
+
+Deno.test("⚠️ 'What we drew' says the roof step the renderer DRAWS at the panel's size, and nothing where it draws none", () => {
+  // A 56 ft step typed on a 14x40 cabin with a 6 ft porch is drawn 30 ft from the back.
+  assertEquals(drewStep({ ...CABIN, rearStepFt: 56, rearEaveRiseFt: 1.5 }, 14, 40),
+    "The roof steps 30 ft from the back wall (held there from 56 ft to leave 4 ft of room in front of it): behind the step its edge sits 18 in higher, and the two ridges line up.");
+  // 12 ft on a 12x16 with the same porch: 6.
+  assertEquals(drewStep({ ...CABIN, rearStepFt: 12, rearEaveRiseFt: 0.5 }, 12, 16),
+    "The roof steps 6 ft from the back wall (held there from 12 ft to leave 4 ft of room in front of it): behind the step its edge sits 6 in higher, and the two ridges line up.");
+  // Wings on (the panel lets them be set after the step): no step is drawn, so none is said.
+  assertEquals(drewStep({ ...CABIN, porchDepthFt: 0, wingSide: "both", wingWidthFt: 4, rearStepFt: 12, rearEaveRiseFt: 0.5 }, 14, 40), "");
+  // An old-frame style (no front) on a landscape footprint: its ridge runs side to side.
+  assertEquals(drewStep({ type: "gable", pitch: 0.4, rearStepFt: 10, rearEaveRiseFt: 0.5 }, 40, 14), "");
+  // A rise the pitch cannot carry is said as drawn, lowered.
+  assertEquals(drewStep({ type: "gable", front: "gable", pitch: 0.1, rearStepFt: 10, rearEaveRiseFt: 1 }, 14, 30),
+    "The roof steps 10 ft from the back wall: behind the step its edge sits 7 in higher (lowered from 12 in: the roof is too flat for more), and the two ridges line up.");
+  // Drawn as stored: exactly the words the spec alone gives, lower rears included.
+  for (const roof of [{ ...CABIN, ...STEP }, { ...CABIN, rearStepFt: 12, rearEaveRiseFt: -0.75 }]) {
+    assertEquals(Wd.ssDrewWords({ roof, wallHeightFt: H }, null, F.d3RoofStep(roof, 14, 40, H)), Wd.ssDrewWords({ roof, wallHeightFt: H }), JSON.stringify(roof));
+  }
+  assertEquals(drewStep({ ...CABIN, ...STEP }, 14, 40), "The roof steps 14 ft from the back wall: behind the step its edge sits 7 in higher, and the two ridges line up.");
 });

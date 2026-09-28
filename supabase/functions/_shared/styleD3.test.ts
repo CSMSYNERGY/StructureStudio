@@ -6534,3 +6534,28 @@ Deno.test("consensus: the joint is the median of the reads that stepped the chos
   assertEquals(same.report.discreteAgreement.roofStepDir, "3/3");
   assert(same.d3.roof.rearStepFt === 12 && same.d3.roof.rearEaveRiseFt === 0.5, JSON.stringify(same.d3.roof));
 });
+
+// The porch pitch's trap again (porchPitchNow): the renderer holds a step to what the size can carry
+// (d3RoofStep), so a check told only the stored numbers "corrects" them toward a render that is drawn
+// otherwise and moves nothing. roofStepAtSize is the renderer's arithmetic, run beside it in
+// _test_stubs/roofStep_test.ts.
+Deno.test("⚠️ the v2 self-check says the roof step as DRAWN at the renders' size where that differs from the stored one", () => {
+  const prompt = (roof: Record<string, unknown>, widthFt: number, lengthFt: number) =>
+    lf(RS.selfCheckPrompt({ dims: { widthFt, lengthFt, wallHeightFt: 8 }, draft: cleanSpec({ roof, siding: "batten", colors: { body: "#555555" }, wallHeightFt: 8 }), viewpoints: RS.SELF_CHECK_VIEWPOINTS }));
+  const porch = { porchDepthFt: 6, porchEnd: "front" };
+  // 56 ft behind a 6 ft recessed porch on a 40 ft deep cabin: drawn 30 ft from the back.
+  assert(prompt(stepRoof({ ...porch, rearStepFt: 56, rearEaveRiseFt: 1.5 }), 14, 40).includes(
+    "currently roof.rearStepFt 56 ft and roof.rearEaveRiseFt 1.5 ft: the joint 56 ft from the back wall, the rear eave 18 in higher, but DRAWN WITH the joint 30 ft from the back wall, the rear eave 18 in higher (this size leaves at most 30 ft behind the joint), so the render's step is not the one these numbers say and pushing them further changes nothing in it."), "56 ft on a 14x40 with a porch");
+  // 12 ft on a 12x16 with the same porch: 6.
+  assert(prompt(stepRoof({ ...porch, rearStepFt: 12, rearEaveRiseFt: 0.5 }), 12, 16).includes("but DRAWN WITH the joint 6 ft from the back wall, the rear eave 6 in higher (this size leaves at most 6 ft behind the joint)"), "12 ft on a 12x16");
+  // A rise the pitch cannot carry.
+  assert(prompt(stepRoof({ pitch: 0.1, rearStepFt: 10, rearEaveRiseFt: 1 }), 14, 30).includes("but DRAWN WITH the joint 10 ft from the back wall, the rear eave 6.7 in higher (the roof is too flat for a bigger step)"), "a flat roof");
+  // None drawn: an old-frame style on a landscape footprint, and a building too short for a joint.
+  const old = prompt({ type: "gable", pitch: 0.4, overhang: 1, rearStepFt: 10, rearEaveRiseFt: 0.5 }, 40, 14);
+  assert(old.includes("the rear eave 6 in higher, but NOT DRAWN (on this footprint its ridge runs from side to side, so the back wall is not a gable end), so the render shows one roof from the front to the back and changing these two numbers changes nothing in it."), "old frame, landscape");
+  assert(prompt(stepRoof({ ...porch, rearStepFt: 8, rearEaveRiseFt: 0.5 }), 14, 10).includes("but NOT DRAWN (the building is too short to leave 4 ft each side of the joint)"), "too short");
+  // Drawn as stored: exactly the sentence it always was, and no step says what it always said.
+  const asStored = prompt(stepRoof({ ...porch, rearStepFt: 14, rearEaveRiseFt: 0.6 }), 14, 40);
+  assert(asStored.includes("currently roof.rearStepFt 14 ft and roof.rearEaveRiseFt 0.6 ft: the joint 14 ft from the back wall, the rear eave 7.2 in higher.") && !/but DRAWN WITH|NOT DRAWN \(/.test(asStored), "as stored");
+  assert(prompt(stepRoof(porch), 12, 16).includes("* The roof step - currently none, which draws one roof from the front to the back."), "no step");
+});

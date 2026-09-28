@@ -2580,6 +2580,49 @@ export function porchPitchDrawable(roof: Record<string, unknown> | null | undefi
   return lo;
 }
 
+// ── THE ROOF STEP THE RENDER DRAWS AT A SIZE (2026-09-28) ───────────────────────────────────
+// The renderer (d3RoofStep, in both designer twins) holds a stored step to what the building can
+// carry: the joint to leave 4 ft of room in front of it (in front of a recessed front porch too),
+// the rise to what leaves the rear roof a pitch of at least 0.02, and no step at all where the
+// ridge runs side to side (an old-frame style on a footprint wider than it is deep) or the building
+// is too short for 4 ft each side of a joint. The check was told the stored numbers beside a render
+// drawn otherwise, the porch pitch's trap: a "correction" toward the render that moves nothing.
+//   null                  no step asked for: fewer than both keys, an off step or rise, or a roof
+//                         the sanitiser keeps none on (d3RoofStep is null there too)
+//   { drawn: null, why }  asked for, and the render at this size draws none; `why` in words
+//   { drawn, why }        drawn at drawn.stepFt / drawn.rise; `why` says what was held back, and is
+//                         null when both are drawn as stored
+// The arithmetic is d3RoofStep's exactly, at the size the renders were drawn (the known width and
+// depth); roofStep_test runs the two side by side.
+export type RoofStepAtSize = { drawn: { stepFt: number; rise: number } | null; why: string | null };
+export function roofStepAtSize(roof: Record<string, unknown> | null | undefined, widthFt: number, lengthFt: number): RoofStepAtSize | null {
+  const cfg = roof ?? {};
+  const want = num(cfg.rearStepFt), rise0 = num(cfg.rearEaveRiseFt);
+  if (cfg.type !== "gable" || want === null || rise0 === null || !(want > 0.5) || !(Math.abs(rise0) >= 0.01)) return null;
+  const front = cfg.front === "gable" || cfg.front === "eave" ? cfg.front : null;
+  if (front === "eave" || (num(cfg.wingWidthFt) ?? 0) > 0.5 || (num(cfg.leanToWidthFt) ?? 0) > 0.5) return null;
+  const porchOut = Math.min(12, num(cfg.porchOutFt) ?? 0) > 0.5;
+  if (cfg.porchEnd === "back" && (porchOut || (num(cfg.porchDepthFt) ?? 0) > 0.5)) return null;
+  // d3RoofAxes: a gable front runs the ridge front to back; without a front, a portrait footprint does.
+  if (!(front === "gable" || lengthFt >= widthFt)) {
+    return { drawn: null, why: "on this footprint its ridge runs from side to side, so the back wall is not a gable end" };
+  }
+  const S = widthFt, L = lengthFt;
+  const porchIn = porchOut ? 0 : Math.max(0, Math.min(num(cfg.porchDepthFt) ?? 0, L - 4));
+  const room = L - (porchIn > 0.5 ? porchIn : 0) - 4;
+  if (!(room >= 4)) return { drawn: null, why: "the building is too short to leave 4 ft each side of the joint" };
+  const stepFt = Math.max(4, Math.min(room, want));
+  const pitch = num(cfg.pitch) || 0.4;
+  const half = S / 2;
+  const rise = Math.max(-1.5, Math.min(1.5, Math.max(0, (pitch - 0.02) * half), rise0));
+  if (!(Math.abs(rise) >= 0.01)) return { drawn: null, why: "the roof is too flat to raise its rear eave" };
+  const why: string[] = [];
+  if (stepFt < want) why.push(`this size leaves at most ${dimFt(room)} ft behind the joint`);
+  if (stepFt > want) why.push("a joint is never drawn nearer than 4 ft to the back wall");
+  if (rise0 > 0 && rise < Math.min(1.5, rise0)) why.push("the roof is too flat for a bigger step");
+  return { drawn: { stepFt, rise }, why: why.length ? why.join(", and ") : null };
+}
+
 // ── THE PROMPT ────────────────────────────────────────────────────────────────────────────
 // Built as a template because the draft and the builder's measurements are interpolated per
 // generation. The refusal path is kept VERBATIM and stated three separate times — "it matches"
@@ -2686,9 +2729,19 @@ export function selfCheckPrompt(opts: {
   const hasWings = (num(roof.wingWidthFt) ?? 0) > 0;
   // The roof step (2026-09-28), said as what the render draws: none, or where the joint is and which
   // way the rear eave steps. sanitizeD3Spec keeps the two keys together or not at all.
+  // …and where the render cannot draw the stored step at this size, what it DOES draw, and why
+  // (roofStepAtSize, the renderer's d3RoofStep): a step held nearer the back wall, a smaller rise, or
+  // none at all. A step drawn as stored reads exactly as it always did.
   const stepAt = num(roof.rearStepFt), stepRise = num(roof.rearEaveRiseFt);
+  const stepSaid = (at: number, rise: number) =>
+    `the joint ${dimFt(at)} ft from the back wall, the rear eave ${dimFt(Math.round(Math.abs(rise) * 120) / 10)} in ${rise > 0 ? "higher" : "lower"}`;
+  const stepSize = roofStepAtSize(roof, dims.widthFt, dims.lengthFt);
+  const stepDrawn = !stepSize ? ""
+    : !stepSize.drawn ? `, but NOT DRAWN (${stepSize.why}), so the render shows one roof from the front to the back and changing these two numbers changes nothing in it`
+    : stepSize.why ? `, but DRAWN WITH ${stepSaid(stepSize.drawn.stepFt, stepSize.drawn.rise)} (${stepSize.why}), so the render's step is not the one these numbers say and pushing them further changes nothing in it`
+    : "";
   const stepNow = stepAt !== null && stepRise !== null
-    ? `roof.rearStepFt ${dimFt(stepAt)} ft and roof.rearEaveRiseFt ${dimFt(stepRise)} ft: the joint ${dimFt(stepAt)} ft from the back wall, the rear eave ${dimFt(Math.round(Math.abs(stepRise) * 120) / 10)} in ${stepRise > 0 ? "higher" : "lower"}`
+    ? `roof.rearStepFt ${dimFt(stepAt)} ft and roof.rearEaveRiseFt ${dimFt(stepRise)} ft: ${stepSaid(stepAt, stepRise)}${stepDrawn}`
     : "none, which draws one roof from the front to the back";
   // The centre's default is only a thing the renderer DRAWS when there are wings to stand it on.
   const centreNow = num(roof.centerEaveFt) !== null

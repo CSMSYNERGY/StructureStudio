@@ -16499,7 +16499,11 @@ function ssRoofInFeet(roof, spanFt, centre) {
 // 12 porch roof on 7 ft walls is built at 0.6 in 12, and a line saying "3 in 12" beside it sent
 // the builder to check a roof that is not on screen. With the readout the posts and pitch are the
 // built ones, and a lowered pitch says so; without it (no size yet) they are the spec's.
-function ssDrewWords(spec, porchBuilt) {
+// The ROOF STEP the same way (2026-09-28): `stepBuilt` is the panel's d3RoofStep of this spec at
+// that size, and the step is said as DRAWN there. A 56 ft step on a 14x40 cabin behind a 6 ft porch
+// is drawn at 30 ft, a 12 ft one on a 12x16 at 6, and beside wings or on an old-frame landscape size
+// there is no step at all (null), so nothing is said. Undefined (no size yet) says the spec's own.
+function ssDrewWords(spec, porchBuilt, stepBuilt) {
   const roof = (spec && spec.roof) || {};
   const raisedOn = spec && (spec.foundation === "blocks" || spec.foundation === "piers") ? spec.foundation : null;
   const type = roof.type || "gable";
@@ -16515,10 +16519,21 @@ function ssDrewWords(spec, porchBuilt) {
     out.push(`A lower wing ${ssFtInWords(wing)} wide runs along ${where} under its own roof${centre}.`);
   }
   // A ROOF STEP (2026-09-28): where the rear roof section starts and which way its eave steps, only
-  // where the style gives both keys on a roof that can carry them (the sanitiser's rule).
+  // where the style gives both keys on a roof that can carry them (the sanitiser's rule), and as
+  // DRAWN where the panel hands over d3RoofStep at its size (`stepBuilt`). A number the renderer
+  // held back is said as drawn, with the one given beside it, the porch pitch's way.
   const stepAt = Number(roof.rearStepFt) || 0, stepRise = Number(roof.rearEaveRiseFt) || 0;
   if (type === "gable" && roof.front !== "eave" && stepAt > 0.5 && Math.abs(stepRise) >= 0.01) {
-    out.push(`The roof steps ${ssFtInWords(stepAt)} from the back wall: behind the step its edge sits ${Math.round(Math.abs(stepRise) * 12)} in ${stepRise > 0 ? "higher" : "lower"}, and the two ridges line up.`);
+    const sb = stepBuilt === undefined ? { stepFt: stepAt, rise: stepRise }
+      : stepBuilt && isFinite(Number(stepBuilt.stepFt)) && isFinite(Number(stepBuilt.rise)) ? stepBuilt : null;
+    if (sb) {
+      const inches = (ft) => Math.round(Math.abs(Number(ft)) * 12);
+      const atNote = ssFtInWords(Number(sb.stepFt)) === ssFtInWords(stepAt) ? ""
+        : Number(sb.stepFt) < stepAt ? ` (held there from ${ssFtInWords(stepAt)} to leave 4 ft of room in front of it)`
+        : ` (moved out from ${ssFtInWords(stepAt)}: a step is never drawn nearer than 4 ft to the back wall)`;
+      const riseNote = inches(sb.rise) < inches(stepRise) ? ` (lowered from ${inches(stepRise)} in: the roof is too flat for more)` : "";
+      out.push(`The roof steps ${ssFtInWords(Number(sb.stepFt))} from the back wall${atNote}: behind the step its edge sits ${inches(sb.rise)} in ${Number(sb.rise) > 0 ? "higher" : "lower"}${riseNote}, and the two ridges line up.`);
+    }
   }
   // "wall" in the new frame, where the front can be a long side; "end" on every older style,
   // where the porch was only ever on a gable end and the panel has always called it that.
@@ -22029,6 +22044,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // The porch "What we drew" describes, as BUILT at that same size (ssDrewWords): the renderer's
   // own numbers, so a lowered porch pitch or a capped post count is said as drawn.
   const calDrewPorch = calReadoutMass ? d3PorchReadout(adminCal.spec, `${calReadoutW}x${calReadoutL}`) : null;
+  // ...and the roof step as DRAWN at that size (d3RoofStep): null where the renderer draws none there,
+  // so the line says nothing about a step that is not on screen.
+  const calDrewStep = calReadoutMass ? d3RoofStep(adminCal.spec.roof, calReadoutW, calReadoutL, Number(adminCal.spec.wallHeightFt) || D3.WALL_H) : undefined;
   const calChecksAnswered = SS_CHECKS.filter(([k]) => adminCalAnswers[k]).length;
   // ⚠️ THE ONE SLICE EACH QUESTION IS ABOUT, so a "No" can be told from a "No, fixed". Cheap
   // and exact: every fix panel writes adminCal.spec, so comparing the slice at answer time
@@ -24427,7 +24445,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       are true at once, so the number stays a ratio on the wire and becomes
                       feet here. */}
                   <div style={{ marginTop: 10, fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
-                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec, calDrewPorch)}
+                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec, calDrewPorch, calDrewStep)}
                   </div>
                   {/* ── THE FOUR QUESTIONS ───────────────────────────────────────────────
                       ONLY WHERE THERE IS SOMETHING TO ANSWER THEM AGAINST, which is the same
