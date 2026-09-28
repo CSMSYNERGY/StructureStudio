@@ -122,6 +122,24 @@ const CLAMPS: Record<string, [number, number]> = {
   // it, and the panel says so. 0.05 is the solver's own floor; 0.5 (6:12) is steeper than any
   // porch roof hung under a main roof's eave.
   porchPitch: [0.05, 0.5],
+
+  // ── WHERE AN APPENDAGE MEETS THE BUILDING, AND HOW MANY STEPS (2026-09-28, Carolyn's call) ──────
+  // Absent is today's render exactly, for the lean-to reason at the top of this table: one table
+  // serves beta and production, and an older renderer does not read a key it has never heard of.
+  //
+  // leanToAttachFt / wingAttachFt: with roof.leanToAttach / roof.wingAttach set, how far the
+  // appendage's roof meets the building ABOVE the eave (attach "roof": up the main roof's slope) or
+  // BELOW it (attach "wall": down the sidewall), in vertical feet. "Slide it up here, and slide it
+  // down on the side here" (09-28 @9:20). Without its enum the number describes nothing and the
+  // renderer ignores it; it is stored regardless, like leanToSide, so switching back remembers it.
+  // 8 ft up a roof is past any lean-to a portable building carries; 10 ft down a centre wall is
+  // past the tallest raised centre.
+  leanToAttachFt: [0, 8],
+  wingAttachFt: [0, 10],
+  // How many steps come down off the projecting porch's deck: the TREADS, the count the panel's
+  // readout already says ("3 steps"). Absent is the renderer's own count, one per 7.5 inches of
+  // height. A WHOLE number, rounded after the clamp like porchPosts. Kept only with porchSteps.
+  porchStepCount: [1, 12],
 };
 
 // Which eave the lean-to hangs off. Not a clamp, so it is checked separately.
@@ -161,11 +179,18 @@ export const D3_SHED_HIGH_SIDES = ["front", "back", "left", "right"] as const;
 // renderer, not here, because the sanitiser cannot know which way a later edit will turn the roof.
 export const D3_WING_SIDES = ["both", "left", "right", "front", "back"] as const;
 // The keys that only mean something with a ridge. Dropped as a set on a shed.
-const D3_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt"] as const;
+const D3_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt"] as const;
 // roof.porchSteps (2026-09-25): where a set of steps leaves the projecting porch's deck, along its
 // FRONT edge, as seen standing in front of the porch facing it (left is the viewer's left, the
 // frame every left/right here is read in). Absent = no steps, which is every porch before today.
 export const D3_PORCH_STEPS = ["left", "center", "right"] as const;
+// roof.leanToAttach / roof.wingAttach (2026-09-28): does the appendage's roof meet the building ON
+// THE ROOF (above the eave, up the main roof's slope) or ON THE WALL (below the eave)? Carolyn,
+// 09-28 @17:40: "they need to specify if it goes on the roof or if it goes on the sidewall ... I
+// don't think we want it to just automatically switch." So it is the builder's word, stored as
+// given, and the renderer never flips it. ABSENT is today's render: a lean-to hung at the eave, and
+// wings whose centre section is pushed up out of the way of a steep wing roof.
+export const D3_ATTACH = ["roof", "wall"] as const;
 // ── WHAT THE BUILDING STANDS ON (top-level `foundation`; blocks and piers 2026-09-25) ──────────
 // "slab" and "skids" draw at grade, as they always have. "blocks" (stacked 8x8x16 concrete blocks
 // under the runners) and "piers" (round concrete piers) RAISE THE FLOOR off the ground: every
@@ -186,6 +211,15 @@ export const D3_RAISED_FOUNDATIONS = ["blocks", "piers"] as const;
 // a unit error); anything past it is inches or a hallucination and is dropped, wallHeightFt's rule.
 export const FLOOR_HEIGHT_FT: readonly [number, number] = [0.3, 6];
 const FLOOR_HEIGHT_ACCEPT_FT = 8;
+// ── GROUND THAT FALLS AWAY (top-level gradeFallFt / gradeFallToward, 2026-09-28) ─────────────────
+// Carolyn, 09-28 @16:04 and @18:53, on the Tri Home: "these piers are, like, deeper here", drawing the
+// ground falling away from the corner. floorHeightFt stays the height at the FRONT; gradeFallFt is how
+// much LOWER the ground is at the far side, toward gradeFallToward, so the piers there stand that
+// much taller. Raised foundations only (blocks, piers): a slab or skids sits on the grade by
+// definition. Absent or 0 is today's level ground; absent toward with a fall is "back", at RENDER
+// time, and is never written here.
+export const GRADE_FALL_FT: readonly [number, number] = [0, 6];
+export const D3_GRADE_FALL_TOWARD = ["back", "left", "right"] as const;
 const isRaisedFoundation = (v: unknown): boolean => (D3_RAISED_FOUNDATIONS as readonly unknown[]).includes(v);
 
 const num = (v: unknown): number | null => {
@@ -213,6 +247,8 @@ export type D3Spec = {
   gableVent?: { widthFrac: number };
   foundation?: string;
   floorHeightFt?: number;
+  gradeFallFt?: number;
+  gradeFallToward?: string;
   claddingChoices?: string[];
 };
 
@@ -235,16 +271,25 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
                    // v2 (2026-09-24). APPENDED, so every existing spec keeps its key order.
                    "porchAttachFt", "porchWidthFt", "wingWidthFt", "wingPitch", "centerEaveFt",
                    // 2026-09-25, appended for the same reason.
-                   "porchPosts", "porchPitch"]) {
+                   "porchPosts", "porchPitch",
+                   // 2026-09-28, appended for the same reason.
+                   "leanToAttachFt", "wingAttachFt", "porchStepCount"]) {
     const v = clamped(k, rawRoof[k]);
     if (v !== null) roof[k] = v;
   }
   // A post count is a count. Rounded AFTER the clamp, so it stays inside 2..8 either way.
   if (typeof roof.porchPosts === "number") roof.porchPosts = Math.round(roof.porchPosts);
+  // A step count is a count, the same rule.
+  if (typeof roof.porchStepCount === "number") roof.porchStepCount = Math.round(roof.porchStepCount);
   // Which eave the lean-to hangs off. Only meaningful when leanToWidthFt > 0; stored
   // regardless so toggling the width back up remembers the side.
   if ((D3_LEANTO_SIDES as readonly string[]).includes(String(rawRoof.leanToSide))) {
     roof.leanToSide = String(rawRoof.leanToSide);
+  }
+  // Where the lean-to's roof meets the building (2026-09-28). The leanToSide posture: a known word
+  // is stored whether or not the width is on, anything else is dropped, absence is never filled in.
+  if ((D3_ATTACH as readonly string[]).includes(String(rawRoof.leanToAttach))) {
+    roof.leanToAttach = String(rawRoof.leanToAttach);
   }
   // Which of the two dormer shapes. Like leanToSide, stored whether or not dormerWidthFt is
   // currently above zero, so turning the width back up remembers the shape. Not in the
@@ -335,6 +380,7 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     // The porch's posts and its roof's pitch (2026-09-25) are that roof's too.
     delete roof.porchPosts;
     delete roof.porchPitch;
+    delete roof.porchStepCount;
   }
 
   // ── v2 ENUMS AND THE ROOF-TYPE RULES (2026-09-24) ──────────────────────────────────────────
@@ -353,6 +399,11 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   if ((D3_WING_SIDES as readonly string[]).includes(String(rawRoof.wingSide))) {
     roof.wingSide = String(rawRoof.wingSide);
   }
+  // Where the wings' roofs meet the centre section (2026-09-28): leanToAttach's posture, and a wing
+  // key, so a shed drops it with the rest of the set just below.
+  if ((D3_ATTACH as readonly string[]).includes(String(rawRoof.wingAttach))) {
+    roof.wingAttach = String(rawRoof.wingAttach);
+  }
   // Wings need a ridge to stand either side of. On a shed the whole set goes, numbers included —
   // after the numeric loop, which is where the numbers were written.
   if (type === "shed") {
@@ -365,6 +416,9 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
       && typeof roof.porchOutFt === "number" && roof.porchOutFt > 0.5) {
     roof.porchSteps = String(rawRoof.porchSteps);
   }
+  // A step COUNT needs steps to count (2026-09-28). Without porchSteps it describes nothing, and it
+  // goes rather than lying in wait for the next porch: the porchAttachFt rule.
+  if (!("porchSteps" in roof)) delete roof.porchStepCount;
 
   // Anything that is not a renderable cladding means "unset", which the renderer
   // draws as panel siding. Matches the AI validator's posture: drop what we cannot
@@ -439,6 +493,14 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     if (fh !== null && fh > 0 && fh <= FLOOR_HEIGHT_ACCEPT_FT) {
       d3.floorHeightFt = Math.min(FLOOR_HEIGHT_FT[1], Math.max(FLOOR_HEIGHT_FT[0], fh));
     }
+    // The ground falling away under it (2026-09-28). Raised foundations only, like floorHeightFt.
+    // 0 is level ground and is not stored; the direction is stored whether or not there is a fall,
+    // like leanToSide, so turning the fall back up remembers where to.
+    const gf = num(src.gradeFallFt);
+    if (gf !== null && gf > 0) d3.gradeFallFt = Math.min(GRADE_FALL_FT[1], gf);
+    if ((D3_GRADE_FALL_TOWARD as readonly unknown[]).includes(src.gradeFallToward)) {
+      d3.gradeFallToward = src.gradeFallToward;
+    }
   }
 
   // Which claddings THIS style offers the customer (2026-08-25). Absent means all four,
@@ -488,13 +550,25 @@ export function carryForwardFoundation(clean: D3Spec, sent: unknown, stored: unk
   const was = (stored && typeof stored === "object") ? stored as Record<string, unknown> : null;
   if (!was || !isRaisedFoundation(was.foundation)) return;
   const incoming = (sent as Record<string, unknown>).foundation;
-  if (!(incoming === undefined || incoming === null || incoming === "slab")) return;
-  clean.foundation = was.foundation as string;
-  const fh = num(was.floorHeightFt);
-  if (fh !== null && fh > 0 && fh <= FLOOR_HEIGHT_ACCEPT_FT) {
-    clean.floorHeightFt = Math.min(FLOOR_HEIGHT_FT[1], Math.max(FLOOR_HEIGHT_FT[0], fh));
-  } else {
-    delete clean.floorHeightFt;
+  if (incoming === undefined || incoming === null || incoming === "slab") {
+    clean.foundation = was.foundation as string;
+    const fh = num(was.floorHeightFt);
+    if (fh !== null && fh > 0 && fh <= FLOOR_HEIGHT_ACCEPT_FT) {
+      clean.floorHeightFt = Math.min(FLOOR_HEIGHT_FT[1], Math.max(FLOOR_HEIGHT_FT[0], fh));
+    } else {
+      delete clean.floorHeightFt;
+    }
+  }
+  // The ground's fall (2026-09-28) rides with a raised floor that is still raised. No panel before
+  // today can send it at all -- its d3ResolveStyleSpec names every top-level key it keeps -- so from
+  // those requests ABSENCE means "never heard of it", not "cleared". Only the fields the request
+  // did not send are carried, each re-held to its band, and only onto a floor that is raised.
+  if (!isRaisedFoundation(clean.foundation)) return;
+  const s = sent as Record<string, unknown>;
+  const gf = num(was.gradeFallFt);
+  if (!("gradeFallFt" in s) && gf !== null && gf > 0) clean.gradeFallFt = Math.min(GRADE_FALL_FT[1], gf);
+  if (!("gradeFallToward" in s) && (D3_GRADE_FALL_TOWARD as readonly unknown[]).includes(was.gradeFallToward)) {
+    clean.gradeFallToward = was.gradeFallToward as string;
   }
 }
 

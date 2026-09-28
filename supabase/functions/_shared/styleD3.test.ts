@@ -35,6 +35,8 @@ import {
 } from "./styleD3.ts";
 // A raised floor (2026-09-25): the widened foundation, its height, and the save carry-forward.
 import { carryForwardFoundation, D3_FOUNDATIONS, D3_RAISED_FOUNDATIONS, FLOOR_HEIGHT_FT } from "./styleD3.ts";
+// Where an appendage meets the building, the porch's step count, and the ground's fall (2026-09-28).
+import { D3_ATTACH, D3_GRADE_FALL_TOWARD, GRADE_FALL_FT } from "./styleD3.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
@@ -2101,6 +2103,133 @@ Deno.test("the wing keys round-trip and clamp on a ridge, and go as a set on a s
   for (const junk of ["sides", "Both", "", 2, null]) {
     assert(!("wingSide" in roofOf({ type: "gable", wingSide: junk })), `${JSON.stringify(junk)} is dropped`);
   }
+});
+
+Deno.test("leanToAttach / leanToAttachFt round-trip, clamp, and are never invented (2026-09-28)", () => {
+  for (const v of D3_ATTACH) assertEquals(roofOf({ type: "gable", leanToWidthFt: 8, leanToAttach: v }).leanToAttach, v, `attach "${v}"`);
+  // Every roof type: a lean-to has no roof-type gate, and neither does where it meets the building.
+  for (const type of ["shed", "gable", "gambrel"]) {
+    const r = roofOf({ type, leanToWidthFt: 8, leanToAttach: "roof", leanToAttachFt: 2 });
+    assertEquals([r.leanToAttach, r.leanToAttachFt], ["roof", 2], `${type} keeps both`);
+  }
+  assertEquals(roofOf({ type: "gable", leanToAttachFt: 30 }).leanToAttachFt, 8, "past any roof clamps to 8");
+  assertEquals(roofOf({ type: "gable", leanToAttachFt: -1 }).leanToAttachFt, 0, "and to 0 at the bottom");
+  assertEquals(roofOf({ type: "gable", leanToAttachFt: "1.5" }).leanToAttachFt, 1.5, "a numeric string reads as its number");
+  // Stored with the width off, like leanToSide, so turning the lean-to back on remembers it.
+  const off = roofOf({ type: "gable", leanToWidthFt: 0, leanToAttach: "wall", leanToAttachFt: 1 });
+  assertEquals([off.leanToAttach, off.leanToAttachFt], ["wall", 1], "an off lean-to keeps where it meets");
+  for (const junk of ["Roof", "eave", "", 1, true, null, { v: "roof" }]) {
+    assert(!("leanToAttach" in roofOf({ type: "gable", leanToAttach: junk })), `${JSON.stringify(junk)} is dropped`);
+  }
+  assert(!("leanToAttach" in roofOf({ type: "gable", leanToWidthFt: 8 })), "absent stays absent: today's eave attach");
+});
+
+Deno.test("wingAttach / wingAttachFt round-trip on a ridge, clamp, and go with the wing set on a shed (2026-09-28)", () => {
+  for (const type of ["gable", "gambrel"]) {
+    for (const v of D3_ATTACH) {
+      const r = roofOf({ type, wingWidthFt: 12, wingAttach: v, wingAttachFt: 1.5 });
+      assertEquals([r.wingAttach, r.wingAttachFt], [v, 1.5], `${type} keeps wingAttach "${v}"`);
+    }
+  }
+  assertEquals(roofOf({ type: "gable", wingAttachFt: 40 }).wingAttachFt, 10, "clamps to 10");
+  assertEquals(roofOf({ type: "gable", wingAttachFt: -3 }).wingAttachFt, 0, "and to 0");
+  const off = roofOf({ type: "gable", wingWidthFt: 0, wingAttach: "roof" });
+  assertEquals([off.wingWidthFt, off.wingAttach], [0, "roof"], "an off wing keeps where it meets");
+  const shed = roofOf({ type: "shed", pitch: 0.25, wingWidthFt: 6, wingAttach: "roof", wingAttachFt: 2 });
+  for (const k of ["wingAttach", "wingAttachFt"]) assert(!(k in shed), `a shed drops ${k} with the wing set`);
+  for (const junk of ["side", "ROOF", "", 0, null]) {
+    assert(!("wingAttach" in roofOf({ type: "gable", wingAttach: junk })), `${JSON.stringify(junk)} is dropped`);
+  }
+  assert(!("wingAttach" in roofOf({ type: "gable", wingWidthFt: 12 })), "absent stays absent: today's pushed-up centre");
+});
+
+Deno.test("porchStepCount rounds, clamps, and exists only with a projecting porch's steps (2026-09-28)", () => {
+  const on = (extra: Record<string, unknown>) => roofOf({ type: "shed", pitch: 0.23, porchOutFt: 4, porchSteps: "center", ...extra });
+  assertEquals(on({ porchStepCount: 3 }).porchStepCount, 3, "a count passes through");
+  assertEquals(on({ porchStepCount: 3.6 }).porchStepCount, 4, "3.6 steps is 4");
+  assertEquals(on({ porchStepCount: "5" }).porchStepCount, 5, "a numeric string reads as its number");
+  assertEquals(on({ porchStepCount: 0 }).porchStepCount, 1, "under one clamps up to one");
+  assertEquals(on({ porchStepCount: 40 }).porchStepCount, 12, "past any porch clamps to 12");
+  for (const junk of ["many", null, true, { n: 3 }]) {
+    assert(!("porchStepCount" in on({ porchStepCount: junk })), `${JSON.stringify(junk)} is dropped`);
+  }
+  // THE VALIDITY RULE: no steps, nothing to count; no projecting porch, no steps.
+  assert(!("porchStepCount" in roofOf({ type: "shed", porchOutFt: 4, porchStepCount: 3 })), "no porchSteps drops it");
+  for (const porchOutFt of [undefined, 0, 0.5]) {
+    const x = roofOf({ type: "gable", pitch: 0.4, porchOutFt, porchSteps: "left", porchStepCount: 3 });
+    assert(!("porchStepCount" in x) && !("porchSteps" in x), `porchOutFt ${porchOutFt} drops both`);
+  }
+  const recessed = roofOf({ type: "gable", pitch: 0.4, porchDepthFt: 6, porchSteps: "left", porchStepCount: 3 });
+  assert(!("porchStepCount" in recessed), "a recessed porch drops it");
+  // Appended after every older key: a spec carrying it still lists its older keys first.
+  const all = roofOf({ porchStepCount: 2, porchSteps: "left", type: "shed", porchOutFt: 4, pitch: 0.2 });
+  assertEquals(Object.keys(all), ["type", "pitch", "porchOutFt", "porchStepCount", "porchSteps"], "key order");
+});
+
+Deno.test("gradeFallFt / gradeFallToward: raised floors only, 0 is level, and never invented (2026-09-28)", () => {
+  const top = (extra: Record<string, unknown>) => {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, ...extra });
+    assert(r.ok, JSON.stringify(extra));
+    return (r.ok ? r.d3 : {}) as Record<string, unknown>;
+  };
+  for (const foundation of D3_RAISED_FOUNDATIONS) {
+    for (const v of D3_GRADE_FALL_TOWARD) {
+      const r = top({ foundation, floorHeightFt: 1.5, gradeFallFt: 2, gradeFallToward: v });
+      assertEquals([r.gradeFallFt, r.gradeFallToward], [2, v], `${foundation} toward ${v}`);
+    }
+  }
+  assertEquals(top({ foundation: "piers", gradeFallFt: 40 }).gradeFallFt, GRADE_FALL_FT[1], "clamps to the top");
+  assertEquals(top({ foundation: "piers", gradeFallFt: "1.25" }).gradeFallFt, 1.25, "a numeric string reads as its number");
+  for (const level of [0, -2, "0", null, "steep"]) {
+    assert(!("gradeFallFt" in top({ foundation: "piers", gradeFallFt: level })), `${JSON.stringify(level)} is level ground`);
+  }
+  // The direction is remembered with no fall, like leanToSide.
+  assertEquals(top({ foundation: "blocks", gradeFallToward: "left" }).gradeFallToward, "left", "kept with no fall");
+  for (const junk of ["front", "Back", "", 1, null]) {
+    assert(!("gradeFallToward" in top({ foundation: "piers", gradeFallFt: 1, gradeFallToward: junk })), `${JSON.stringify(junk)} is dropped`);
+  }
+  // A floor on the grade has no fall to show.
+  for (const foundation of ["skids", "slab", undefined]) {
+    const r = top({ foundation, gradeFallFt: 2, gradeFallToward: "back" });
+    assert(!("gradeFallFt" in r) && !("gradeFallToward" in r), `${String(foundation)} drops both`);
+  }
+  // Stored after floorHeightFt, so an older row keeps its order and a new one reads front-to-back.
+  assertEquals(Object.keys(top({ gradeFallToward: "right", gradeFallFt: 1, floorHeightFt: 1.2, foundation: "piers" })).slice(-4),
+    ["foundation", "floorHeightFt", "gradeFallFt", "gradeFallToward"], "key order");
+});
+
+Deno.test("⚠️ the ground's fall survives an older panel's save; the current panel sets and clears it (2026-09-28)", () => {
+  const roof = { type: "gable", pitch: 0.4 };
+  const stored = { roof, foundation: "piers", floorHeightFt: 1.5, gradeFallFt: 2.5, gradeFallToward: "left" };
+  const save = (sent: Record<string, unknown>, frame?: unknown, was: unknown = stored) => {
+    const clean = sanitizeD3Spec(sent);
+    assert(clean.ok, JSON.stringify(sent));
+    if (!clean.ok) throw new Error("unreachable");
+    carryForwardFoundation(clean.d3, sent, was, frame);
+    return clean.d3 as Record<string, unknown>;
+  };
+  // The older panel never sends either key, and its foundation can come back null, absent or "slab".
+  for (const sent of [{ roof, foundation: null }, { roof }, { roof, foundation: "slab" }, { roof, foundation: "piers", floorHeightFt: 1.5 }]) {
+    const out = save(sent);
+    assertEquals([out.foundation, out.gradeFallFt, out.gradeFallToward], ["piers", 2.5, "left"], JSON.stringify(sent));
+  }
+  // A real "skids" pick on that panel puts the floor on the grade: nothing to fall.
+  const skids = save({ roof, foundation: "skids" });
+  assert(!("gradeFallFt" in skids) && !("gradeFallToward" in skids), "skids carries no fall");
+  // A stored fall past the band is held to it on the way back in.
+  assertEquals(save({ roof }, undefined, { ...stored, gradeFallFt: 9 }).gradeFallFt, GRADE_FALL_FT[1]);
+  // The current panel (frame "front") gets exactly what it sent: it can clear the fall...
+  const cleared = save({ roof, foundation: "piers", floorHeightFt: 1.5 }, "front");
+  assert(!("gradeFallFt" in cleared) && !("gradeFallToward" in cleared), JSON.stringify(cleared));
+  // ...or change it.
+  const moved = save({ roof, foundation: "piers", gradeFallFt: 1, gradeFallToward: "back" }, "front");
+  assertEquals([moved.gradeFallFt, moved.gradeFallToward], [1, "back"]);
+  // A request that DID send a key is answered with what it sent, even without frame "front".
+  const sentOne = save({ roof, foundation: "piers", gradeFallFt: 1 });
+  assertEquals([sentOne.gradeFallFt, sentOne.gradeFallToward], [1, "left"], "only the unsent field is carried");
+  // A stored row with no fall carries none.
+  const none = save({ roof, foundation: null }, undefined, { roof, foundation: "blocks", floorHeightFt: 1 });
+  assert(!("gradeFallFt" in none) && !("gradeFallToward" in none), "nothing invented");
 });
 
 Deno.test("colors.corner and colors.fascia keep a hex, drop anything else, and are never defaulted", () => {
