@@ -520,3 +520,23 @@ Deno.test("⚠️ 'What we drew' says the porch's pitch and posts as BUILT when 
   // A readout without numbers (no porch at that size) is ignored rather than printed as NaN.
   assertEquals(F.ssDrewWords({ roof }, {}), F.ssDrewWords({ roof }));
 });
+
+// Where the wing roofs meet (roof.wingAttach, 2026-09-28) is said as BUILT once the panel hands over the
+// massing it drew (review, 2026-09-29): a distance moved down to clear the eave, a wing roof that cannot
+// reach the roof and meets the wall under it, a middle held 1 ft over the walls.
+Deno.test("'What we drew' says a wing attach as built when it has the massing, as stored without it", () => {
+  const roof = { type: "gable", front: "gable", wingSide: "both", wingWidthFt: 12, centerEaveFt: 14, wingAttach: "wall", wingAttachFt: 0.25 };
+  assertStringIncludes(F.ssDrewWords({ roof }), "meets the middle section's wall 0 ft 3 in below its eave, and the middle section's walls rise to 14 ft.");
+  const clamped = { attach: "wall", Hc: 14, wings: [{ meets: "wall", meetFt: 13 / 12 }] };
+  assertStringIncludes(F.ssDrewWords({ roof }, null, clamped), "meets the middle section's wall 1 ft 1 in below its eave, and the middle section's walls rise to 14 ft.");
+  const up = { ...roof, wingAttach: "roof", wingAttachFt: 1 };
+  const cannot = { attach: "roof", Hc: 14, wings: [{ meets: "wall", meetFt: 0.5 }] };
+  assertStringIncludes(F.ssDrewWords({ roof: up }, null, cannot), "under its own roof that meets the middle section's wall 0 ft 6 in below its eave");
+  const low = { attach: "roof", Hc: 11, wings: [{ meets: "roof", meetFt: 1 }] };
+  assertStringIncludes(F.ssDrewWords({ roof: { ...up, centerEaveFt: 10 } }, null, low), "runs up onto the middle section's roof, 1 ft above its eave, and the middle section's walls rise to 11 ft.");
+  // Without an attach, a massing changes nothing (today's sentence, the stored centre).
+  const { wingAttach: _a, wingAttachFt: _b, ...plain } = roof;
+  assertEquals(F.ssDrewWords({ roof: plain }, null, { Hc: 15, wings: [{}] }), F.ssDrewWords({ roof: plain }));
+  // A massing for another mode than the style's (a stale one) is not used.
+  assertEquals(F.ssDrewWords({ roof }, null, cannot), F.ssDrewWords({ roof }));
+});

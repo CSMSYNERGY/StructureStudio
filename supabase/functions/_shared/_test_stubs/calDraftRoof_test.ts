@@ -155,6 +155,11 @@ Deno.test("dev/score.mjs's mergeDraft clears exactly what calDraftRoof clears", 
     [{ type: "shed", highSide: "front" }, { type: "gable", front: "eave" }],
     [{ type: "gable", front: "eave", wingSide: "both", wingWidthFt: 8 }, { pitch: 0.4 }],
     [{ type: "gable", dormerWidthFt: 6, dormerRiseFt: 4, plateBand: true, overhangStyle: "notched" }, { type: "gable", front: "gable", wingSide: "both", wingWidthFt: 11 }],
+    // Where a lean-to / the wings meet the building (2026-09-28) is the builder's, but a typed draft
+    // replaces the roof: a stale attach must never override the wing pitch the draft measured.
+    [{ type: "gable", wingSide: "both", wingWidthFt: 8, wingAttach: "roof", wingAttachFt: 2 }, { type: "gable", pitch: 0.5 }],
+    [{ type: "gable", wingSide: "both", wingWidthFt: 8, wingAttach: "wall", wingAttachFt: 1 }, { type: "gable", wingSide: "both", wingWidthFt: 10, wingPitch: 0.3 }],
+    [{ type: "gable", leanToWidthFt: 8, leanToSide: "left", leanToAttach: "roof", leanToAttachFt: 1.5 }, { type: "gable" }],
   ];
   for (const [stored, drafted] of cases) {
     const scored = mergeDraft({ roof: stored }, { roof: drafted }, "video").roof;
@@ -181,6 +186,14 @@ Deno.test("⚠️ A TYPED DRAFT REPLACES THE ROOF: no stale dormer or lean-to, t
     assert(!has(out, k), `${k} survived: ${JSON.stringify(out)}`);
   }
   assertEquals([out.plateBand, out.overhangStyle, out.pitch, out.wingWidthFt], [true, "notched", 0.7, 11]);
+  // Where the lean-to and the wings met the building goes with them (2026-09-28): the draft measured
+  // its own wing pitch, and an attach left behind would override it.
+  const att = calDraftRoof({ ...stored, leanToAttach: "roof", leanToAttachFt: 1.5, wingSide: "both", wingWidthFt: 8, wingAttach: "wall", wingAttachFt: 1 },
+    { type: "gable", front: "gable", pitch: 0.7, wingSide: "both", wingWidthFt: 11, wingPitch: 0.3 });
+  for (const k of ["leanToAttach", "leanToAttachFt", "wingAttach", "wingAttachFt"]) assert(!has(att, k), `${k} survived: ${JSON.stringify(att)}`);
+  assertEquals(att.wingPitch, 0.3);
+  const noWings = calDraftRoof({ type: "gable", wingSide: "both", wingWidthFt: 8, wingAttach: "roof", wingAttachFt: 2 }, { pitch: 0.4 });
+  assertEquals([noWings.wingAttach, noWings.wingAttachFt], ["roof", 2], "an untyped draft clears nothing");
   // A draft that reports a dormer keeps its own.
   assertEquals(calDraftRoof(stored, { type: "gable", dormerWidthFt: 5 }).dormerWidthFt, 5);
 });
