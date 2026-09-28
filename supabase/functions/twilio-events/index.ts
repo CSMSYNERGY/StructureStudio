@@ -3,7 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { timingSafeEqual } from "../_shared/emailInbound.ts";
 import { normalizeBrandStatus, normalizeCampaignStatus } from "../_shared/twilioTrustHub.ts";
-import { campaignVerdictPredatesResubmit, eventOccurrenceKey, eventOccurrenceStamp } from "../_shared/twilioEventKey.ts";
+import { campaignVerdictPredatesResubmit, eventOccurrenceKey, eventOccurrenceStamp, numberEventTarget } from "../_shared/twilioEventKey.ts";
 
 // Twilio Event Streams sink for A2P compliance events.
 //
@@ -133,7 +133,7 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
     // messagingservicesid (MG…) DO match what we store.
     const brandSid = String(d.brandsid ?? d.brandSid ?? "");
     const serviceSid = String(d.messagingservicesid ?? d.messagingServiceSid ?? "");
-    const phoneNumber = String(d.phonenumber ?? d.phoneNumber ?? "");
+    const numberTarget = numberEventTarget(d);
 
     let reg: any = null;
     if (brandSid) {
@@ -198,17 +198,41 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
 
     // ── Per-number registration: the reason this function exists ─────────────────────
-    if (NUMBER_EVENTS.has(type) && phoneNumber) {
+    if (NUMBER_EVENTS.has(type) && (numberTarget.sid || numberTarget.phone)) {
       // Twilio's own vocabulary, kept verbatim on the number row.
       const external = String(d.externalstatus ?? d.externalStatus ?? "").toLowerCase();
       const status = type.endsWith(".successful") || external === "registered"
         ? "registered"
         : type.endsWith(".failed") ? "failed" : "pending_registration";
-      await admin.from("sms_numbers")
+      // ⚠️ READ WHAT MATCHED. This update used to key on Twilio's raw `phonenumber`, which has
+      // no "+", so it matched nothing and nobody knew; see numberEventTarget. SID first, the
+      // E.164 phone only if the SID finds no row.
+      const setNumber = (col: string, val: string) => admin.from("sms_numbers")
         .update({ registration_status: status })
-        .eq("client_id", reg.client_id).eq("phone_number", phoneNumber).is("released_at", null);
+        .eq("client_id", reg.client_id).eq(col, val).is("released_at", null).select("id");
+      let numRes = numberTarget.sid ? await setNumber("twilio_sid", numberTarget.sid) : null;
+      if (numberTarget.phone && !numRes?.error && !numRes?.data?.length) {
+        numRes = await setNumber("phone_number", numberTarget.phone);
+      }
+      const numberMatched = !numRes?.error && (numRes?.data?.length ?? 0) > 0;
+      if (!numberMatched) {
+        await logEdgeError({
+          fn: "twilio-events",
+          clientId: reg.client_id,
+          code: "sms_number_update_missed",
+          message: `No live sms_numbers row took ${type}${numRes?.error ? `: ${numRes.error.message}` : ""}`,
+          severity: "error",
+          context: {
+            event_id: eventId, event_type: type, status,
+            by_sid: !!numberTarget.sid, by_phone: !!numberTarget.phone,
+            pg_code: numRes?.error?.code ?? null,
+          },
+        }).catch(() => {});
+      }
 
-      if (status === "registered") {
+      // Only when the number row itself moved: smsSend checks THAT row on every send, so an
+      // "active" builder whose number still reads pending is a switch that texts nobody.
+      if (status === "registered" && numberMatched) {
         // THE MOMENT TEXTING BECOMES LEGAL for this builder. Both switches flip together:
         // sms_registrations.status gates the feature, client_settings.sms_status is what
         // smsSend reads on every send.

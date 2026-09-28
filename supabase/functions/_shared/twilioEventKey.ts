@@ -76,3 +76,23 @@ export function campaignVerdictPredatesResubmit(
   if (!Number.isFinite(copied)) return false;
   return stamp < copied - STALE_MARGIN_MS;
 }
+
+// ⚠️ TWILIO NAMES THE NUMBER WITHOUT ITS "+". A number-registration event carries
+// `phonenumber: "1XXXXXXXXXX"`, while sms_numbers.phone_number holds the E.164 "+1XXXXXXXXXX"
+// the purchase API returned. twilio-events matched the raw value, so the update hit no row and
+// said nothing: on 2026-09-28 the first number ever bought was registered by the carriers 66 s
+// after purchase, and the settings page still said "Being connected…" — while smsSend refused
+// every send, because it requires registration_status = 'registered' on that row.
+// The PN… SID is the same value stored in sms_numbers.twilio_sid and has no format to get
+// wrong, so it is the primary match; the phone, normalised to E.164, is the fallback.
+/** The sms_numbers row a number-registration event is about: its PN… SID and its E.164
+ *  phone, each null when the payload does not carry a usable one. */
+export function numberEventTarget(
+  data: Record<string, unknown> | null | undefined,
+): { sid: string | null; phone: string | null } {
+  const d = data ?? {};
+  const sid = String(d.phonenumbersid ?? d.phoneNumberSid ?? "").trim();
+  const digits = String(d.phonenumber ?? d.phoneNumber ?? "").replace(/\D/g, "");
+  const phone = /^1\d{10}$/.test(digits) ? "+" + digits : /^\d{10}$/.test(digits) ? "+1" + digits : null;
+  return { sid: /^PN[0-9a-f]{32}$/i.test(sid) ? sid : null, phone };
+}
