@@ -23,7 +23,13 @@
 //   5. the shade under the building and the deck, and the ground labels, lie on the grass
 //   6. the 3D editor frames the grass under every support's foot, its orbit target down by the
 //      DEEPEST ground (d3GradeLiftFt); and with no door placed, the 3D Views preset the direction
-//      names (B, ← L, R →), clicked, looks at the side the ground falls to, old frame and new
+//      names (B, ← L, R →), clicked, looks at the side the ground falls to, old frame and new.
+//      ⚠️ The ground stays with the building, like the roof: a door on the east wall re-homes the
+//      presets (F looks at the door's wall) and never turns the ground
+//   6b. THE SELF-CHECK'S PHONE (review, 2026-09-29): every walk camera ssSelfCheckCameras aims (the
+//      designer's own pure function) has its eye EYE_FT + FLOOR_T over the DRAWN grass under it,
+//      uphill views included -- on a 6 ft fall the pre-review eye was under the grass. With
+//      SS_SHOTS, the front (uphill) view before (SS_EYE_BEFORE, default f33a6fa) and after
 //   7. ⚠️ LEVEL GROUND IS TODAY'S, BYTE FOR BYTE: a style with no fall, one whose fall is 0, and a slab
 //      carrying a fall it cannot have, each build a scene (every node's matrix, every mesh's geometry
 //      and material) identical to the one the designer at SS_LEVEL_BASE (default 5345037, the commit
@@ -68,6 +74,31 @@ function pure() {
   return new Function(`${body}; return { D3, d3GradeFt, d3GradeAt, d3GradeFall, d3GradeFallAxis, d3GradeFallBlendFt, d3GradeMaxFt, d3GradeLiftFt, d3FrameHeightFt, d3PorchToRoot, d3PorchReadout };`)();
 }
 const PURE = pure();
+// The self-check's cameras (ssSelfCheckCameras), from this checkout or from another revision's source.
+const SELF_REGIONS = [
+  ["const D3 = {", "// The casing reveal every opening"],
+  ["const D3_STYLE_DEFAULTS = {", "// ── CLADDING ──"],
+  ["function d3RoofAxes(", "function d3FtIn("],
+  ["function ssPorchTrussWall(", "// Where a vent sits in the gable above"],
+  ["function d3DefaultOverhangStyle(", "// ── THE PROJECTING PORCH'S NUMBERS"],
+  ["function d3PorchGeom(", "function d3PorchReadout("],
+  ["function d3PorchReadout(", "// A dimensioned end-elevation of the style"],
+  ["const SS_SHOT = {", "// Render the draft the builder just paid for"],
+];
+function selfCheck(src) {
+  const lift = (a, b) => {
+    const i = src.indexOf(a), j = i < 0 ? -1 : src.indexOf(b, i);
+    if (i < 0 || j < 0) throw new Error(`gradeFall.mjs: the anchors ${a} .. ${b} moved; re-point them`);
+    return src.slice(i, j);
+  };
+  return new Function(`${SELF_REGIONS.map(([a, b]) => lift(a, b)).join("\n")}; return { ssSelfCheckCameras, SS_SHOT, D3 };`)();
+}
+const SELF = selfCheck(readFileSync(new URL("../../structure-studio.component.js", import.meta.url), "utf8"));
+// Every viewpoint the self-check can be given, all the way round.
+const WALK_MAP = {
+  front: { frame: 1, azimuthDeg: 0 }, side: { frame: 2, azimuthDeg: 90 }, corner: { frame: 3, azimuthDeg: 45 },
+  back: { frame: 4, azimuthDeg: 180 }, otherSide: { frame: 5, azimuthDeg: 270 }, eaveCorner: { frame: 6, azimuthDeg: 30 },
+};
 
 const CLADS = ["panel", "lap", "batten", "agpanel"].map((id) => ({ id, rate: 0, basis: "sqft_option", label: null, charged: false }));
 const PLAIN = { body: "#eeebe0", trim: "#686c70", roof: "#5f6266", wood: "#c4965a" };
@@ -80,9 +111,9 @@ const tri = (roof, extra) => ({ roof: { ...TRI, ...roof }, siding: "batten", col
 
 // fall: the style's gradeFallFt / toward. ramp: a door and a ramp on the EAST wall. wall: the porch's.
 const CASES = [
-  { id: "K", label: "Fall Back Piers", size: "16x24", kind: "piers", grade: 1.5, fall: 2, toward: "back", wall: "north", leanTo: true, ramp: true,
+  { id: "K", label: "Fall Back Piers", size: "16x24", kind: "piers", grade: 1.5, fall: 2, toward: "back", wall: "north", leanTo: true, ramp: true, selfCheck: true,
     d3: tri({ porchEnd: "back", porchSteps: "center" }, { gradeFallFt: 2, gradeFallToward: "back" }) },
-  { id: "Lf", label: "Fall Left Piers", size: "16x24", kind: "piers", grade: 1.5, fall: 2, toward: "left", wall: "south", leanTo: true, ramp: true,
+  { id: "Lf", label: "Fall Left Piers", size: "16x24", kind: "piers", grade: 1.5, fall: 2, toward: "left", wall: "south", leanTo: true, ramp: true, selfCheck: true,
     d3: tri({ porchEnd: "front", porchSteps: "left" }, { gradeFallFt: 2, gradeFallToward: "left" }) },
   { id: "Rt", label: "Fall Right Piers", size: "16x24", kind: "piers", grade: 1.5, fall: 2, toward: "right", wall: "south", leanTo: true,
     d3: tri({ porchEnd: "front", porchSteps: "right" }, { gradeFallFt: 2, gradeFallToward: "right" }) },
@@ -101,6 +132,10 @@ const CASES = [
   // there, but the far side still stands on piers, the runners bedded into the grade at the front.
   { id: "Th", label: "Fall Thin Front", size: "12x16", kind: "piers", grade: 0.35, fall: 2, toward: "back", wall: null, thin: true,
     d3: { roof: { type: "gable", pitch: 0.4, overhang: 0.6 }, siding: "lap", colors: PLAIN, wallHeightFt: 8, foundation: "piers", floorHeightFt: 0.3, gradeFallFt: 2 } },
+  // The sanitiser's steepest fall, to the back: the self-check's front (uphill) camera used to stand
+  // 0.6 ft under the grass here.
+  { id: "St", label: "Fall Steep Back", size: "16x24", kind: "piers", grade: 1.5, fall: 6, toward: "back", wall: null, selfCheck: true,
+    d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6 }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5, gradeFallFt: 6, gradeFallToward: "back" } },
   // No direction given: the fall is toward the back.
   { id: "D", label: "Fall Default Toward", size: "12x16", kind: "piers", grade: 1.5, fall: 1, toward: "back", wall: null,
     d3: { roof: { type: "gable", pitch: 0.4, overhang: 0.6 }, siding: "lap", colors: PLAIN, wallHeightFt: 8, foundation: "piers", floorHeightFt: 1.5, gradeFallFt: 1 } },
@@ -376,12 +411,65 @@ async function measure(page, W, L) {
   }, { W, L });
 }
 
+// The DRAWN grass (its own triangles, barycentric in x-z) under each [x, z]: measure()'s grassAt.
+async function grassUnder(page, pts) {
+  return page.evaluate((pts) => {
+    const E = window.__ss3dEngine, M = E.model, V = E.camera.position.constructor;
+    E.scene.updateMatrixWorld(true);
+    let ground = null;
+    M.root.traverse((q) => { if (!ground && q.isMesh && q.userData && q.userData.ssGround) ground = q; });
+    const pos = ground.geometry.attributes.position, idx = ground.geometry.index;
+    const wv = [];
+    for (let i = 0; i < pos.count; i++) wv.push(new V().fromBufferAttribute(pos, i).applyMatrix4(ground.matrixWorld));
+    const at = (x, z) => {
+      for (let t = 0; t < idx.count; t += 3) {
+        const a = wv[idx.getX(t)], b = wv[idx.getX(t + 1)], c = wv[idx.getX(t + 2)];
+        const d = (b.z - c.z) * (a.x - c.x) + (c.x - b.x) * (a.z - c.z);
+        if (Math.abs(d) < 1e-12) continue;
+        const l1 = ((b.z - c.z) * (x - c.x) + (c.x - b.x) * (z - c.z)) / d;
+        const l2 = ((c.z - a.z) * (x - c.x) + (a.x - c.x) * (z - c.z)) / d;
+        const l3 = 1 - l1 - l2;
+        if (l1 >= -1e-9 && l2 >= -1e-9 && l3 >= -1e-9) return l1 * a.y + l2 * b.y + l3 * c.y;
+      }
+      return NaN;
+    };
+    return pts.map(([x, z]) => at(x, z));
+  }, pts);
+}
+// A self-check camera in the editor's canvas: its eye, its aim, its 60° lens.
+async function shootCam(page, file, cam) {
+  await page.evaluate((cam) => {
+    const E = window.__ss3dEngine;
+    E.camera.fov = cam.fov;
+    E.camera.updateProjectionMatrix();
+    E.camera.position.set(...cam.eye);
+    E.controls.target.set(...cam.at);
+    E.controls.update();
+    E.camera.lookAt(...cam.at);
+    E.render();
+  }, cam);
+  await settle(page, 300);
+  await page.evaluate(() => window.__ss3dEngine.render());
+  await page.locator("canvas").last().screenshot({ path: file });
+}
+// The self-check's cameras as a revision before this fix aimed them (SS_EYE_BEFORE), or null.
+function selfCheckBefore() {
+  const rev = process.env.SS_EYE_BEFORE || "f33a6fa";
+  try {
+    return { rev, SELF: selfCheck(execFileSync("git", ["-C", REPO, "show", `${rev}:structure-studio.component.js`], { maxBuffer: 64 * 1024 * 1024 }).toString("utf8")) };
+  } catch (_e) {
+    return { rev, SELF: null };
+  }
+}
+const BEFORE = selfCheckBefore();
+
 // Shots for the eye (SS_SHOTS): the building seen ACROSS the fall, so the rows of supports read short
 // to tall; and from the corner on the downhill side, where the tall supports stand. `lift` is about
 // the middle of the ground's depth.
 async function aim(page, file, eye, at) {
   await page.evaluate(({ eye, at }) => {
     const E = window.__ss3dEngine;
+    if (E.camera.fov !== 34) { E.camera.fov = 34; E.camera.updateProjectionMatrix(); }
     E.camera.position.set(...eye);
     E.controls.target.set(...at);
     E.controls.update();
@@ -530,6 +618,47 @@ async function runCase(ctx, c, ok, shots) {
         await page.evaluate(() => window.__ss3dEngine.render());
         await page.locator("canvas").last().screenshot({ path: join(shots, `${c.id}-${c.toward}-preset.png`) });
       }
+    }
+    if (c.ramp) {
+      // ⚠️ THE GROUND STAYS WITH THE BUILDING, LIKE THE ROOF (d3RoofAxes' rule). The door on the east wall
+      // makes the east wall the customer's FRONT -- the Views presets re-home to it -- but the site the
+      // builder described does not turn: the tallest supports are still on the ${c.toward} side.
+      const tallest = S.reduce((a, t) => (hOf(t) > hOf(a) ? t : a));
+      ok(`${tag}: ⚠️ A DOOR ON THE EAST WALL DOES NOT TURN THE GROUND: the tallest support is still toward the ${c.toward}`,
+        m.gradeFall.toward === c.toward && aOf(tallest) > 0 && near(hOf(tallest), up + fall * (rows[rows.length - 1] - rows[0]) / D, 0.005),
+        `tallest at (${f3(tallest.cx)},${f3(tallest.cz)}) ${f3(hOf(tallest))}`);
+      await page.getByRole("button", { name: /Views/ }).first().click();
+      await page.getByRole("button", { name: "F", exact: true }).first().click();
+      await settle(page, 300);
+      const camF = await page.evaluate(() => { const E = window.__ss3dEngine; return [E.camera.position.x - E.controls.target.x, E.camera.position.z - E.controls.target.z]; });
+      ok(`${tag}: ...while the Views presets follow the door: F looks at the east wall`, camF[0] > 5 && Math.abs(camF[1]) < 0.01 * camF[0], `camera offset ${camF.map(f3)}`);
+    }
+    // ── 6b. the self-check's phone stands on the grass ──
+    if (c.selfCheck) {
+      const want = SELF.SS_SHOT.EYE_FT + SELF.D3.FLOOR_T;
+      const cams = SELF.ssSelfCheckCameras({ bldgW: W, bldgH: L, style3d: c.d3 }, WALK_MAP).filter((q) => q.viewpoint !== "eaveCorner");
+      const grass = await grassUnder(page, cams.map((q) => [q.eye[0], q.eye[2]]));
+      const gaps = cams.map((q, i) => ({ v: q.viewpoint, gap: q.eye[1] - grass[i] }));
+      ok(`${tag}: ⚠️ THE SELF-CHECK'S PHONE STANDS ON THE GRASS: every walk view's eye is ${f3(want)} ft over the drawn grass under it (${cams.length} views)`,
+        cams.length === 5 && gaps.every((q) => near(q.gap, want, 0.01)), gaps.map((q) => `${q.v} ${f3(q.gap)}`).join(" "));
+      // The aim is 0.45 of the way up from the DEEPEST ground: the level building's, down 0.55 x the fall.
+      const levelSpec = { ...c.d3 };
+      delete levelSpec.gradeFallFt; delete levelSpec.gradeFallToward;
+      const lvl = SELF.ssSelfCheckCameras({ bldgW: W, bldgH: L, style3d: levelSpec }, WALK_MAP).filter((q) => q.viewpoint !== "eaveCorner");
+      ok(`${tag}: ...its aim still frames from the deepest ground (the level building's aim, down 0.55 x the fall)`,
+        cams.every((q, i) => near(q.at[1], lvl[i].at[1] - 0.55 * fall, 1e-6)), cams.map((q, i) => `${f3(q.at[1])}/${f3(lvl[i].at[1])}`).join(" "));
+      // The UPHILL view: the one looking down the fall from its top, where the old eye was lowest.
+      const ax = PURE.d3GradeFallAxis(c.toward, W, L);
+      const uphill = cams.reduce((a, q) => ((q.eye[0] * ax.dir[0] + q.eye[2] * ax.dir[1]) < (a.eye[0] * ax.dir[0] + a.eye[2] * ax.dir[1]) ? q : a));
+      if (BEFORE.SELF) {
+        const olds = BEFORE.SELF.ssSelfCheckCameras({ bldgW: W, bldgH: L, style3d: c.d3 }, WALK_MAP).filter((q) => q.viewpoint !== "eaveCorner");
+        const og = await grassUnder(page, olds.map((q) => [q.eye[0], q.eye[2]]));
+        const i = olds.findIndex((q) => q.viewpoint === uphill.viewpoint);
+        ok(`${tag}: ...and the ${BEFORE.rev} designer's uphill (${uphill.viewpoint}) eye was not: ${f3(olds[i].eye[1] - og[i])} ft over the grass (this harness fails it)`,
+          i >= 0 && Math.abs(olds[i].eye[1] - og[i] - want) > fall * 0.9, olds.map((q, k) => `${q.viewpoint} ${f3(q.eye[1] - og[k])}`).join(" "));
+        if (shots && i >= 0) await shootCam(page, join(shots, `${c.id}-selfcheck-${uphill.viewpoint}-BEFORE.png`), olds[i]);
+      }
+      if (shots) await shootCam(page, join(shots, `${c.id}-selfcheck-${uphill.viewpoint}-AFTER.png`), uphill);
     }
     if (shots) {
       await cornerShot(page, join(shots, `${c.id}-${c.toward}-corner.png`), W, L, c.toward, g + fall / 2);

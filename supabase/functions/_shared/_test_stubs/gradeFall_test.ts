@@ -72,7 +72,7 @@ const F = new Function(
   `${renderBlocks.map((b) => b.cmp).join("\n")}; return { D3, D3_GRADE_FALL_TOWARD, d3GradeFt, d3GradeLiftFt, d3GradeMaxFt, d3GradeFall, d3GradeFallAxis, ` +
     `d3GradeFallBlendFt, d3GradeAt, d3FrameHeightFt, d3PorchToRoot, d3PorchStepsGradeFt, d3PorchStepsGeom, d3PorchGeom, d3PorchFraming, ` +
     `d3PorchReadout, d3ResolveStyleSpec, d3DefaultShotCamera, ssSelfCheckCameras, D3_FOUNDATIONS, d3RaisedFoundation, ` +
-    `d3FloorHeightFromFront, d3FrontGableWall };`,
+    `d3FloorHeightFromFront, d3FrontGableWall, SS_SHOT };`,
 )() as Record<string, Any>;
 const P = new Function(`${panelBlocks.map((b) => b.cmp).join("\n")}; return { ssDrewWords, ssShotSig };`)() as Record<string, Any>;
 // calDraftRoof is the roof half of the merge (calDraftRoof_test's); a plain spread stands in for it.
@@ -178,9 +178,62 @@ Deno.test("the cameras: a fall is framed as a building raised to its deepest gro
   assertEquals(F.d3FrameHeightFt(fall, W, L), F.d3FrameHeightFt(deep, W, L));
   assertEquals(JSON.stringify(F.d3DefaultShotCamera({ bldgW: W, bldgH: L, frontWall: "south", style3d: fall })),
     JSON.stringify(F.d3DefaultShotCamera({ bldgW: W, bldgH: L, frontWall: "south", style3d: deep })));
-  const frameMap = { front: { frame: 1, azimuthDeg: 0 }, back: { frame: 5, azimuthDeg: 180 } };
-  assertEquals(JSON.stringify(F.ssSelfCheckCameras({ bldgW: W, bldgH: L, style3d: fall }, frameMap)),
-    JSON.stringify(F.ssSelfCheckCameras({ bldgW: W, bldgH: L, style3d: deep }, frameMap)));
+});
+
+// The review of 2026-09-29: the self-check's eye came down by the DEEPEST ground too, so a phone
+// filming from the uphill side was drawn feet too low, and on a 6 ft fall under the grass (0.6 ft
+// below it). Its eye is the phone's: SS_SHOT.EYE_FT over y = -FLOOR_T on level ground, which is
+// EYE_FT + FLOOR_T over the grass, and on falling ground that is measured from the grass the camera
+// stands on. The framing (the aim, the base points) stays on the deepest ground.
+const WALK_MAP = {
+  front: { frame: 1, azimuthDeg: 0 }, side: { frame: 2, azimuthDeg: 90 }, corner: { frame: 3, azimuthDeg: 45 },
+  back: { frame: 4, azimuthDeg: 180 }, otherSide: { frame: 5, azimuthDeg: 270 }, eaveCorner: { frame: 6, azimuthDeg: 30 },
+};
+const eyeOverGrass = (spec: Any, w: number, l: number, c: Any) => c.eye[1] + F.d3GradeAt(spec, w, l, c.eye[0], c.eye[2]);
+
+Deno.test("the self-check's eye stands EYE_FT over the grass under it, uphill and downhill, on every fall", () => {
+  const want = F.SS_SHOT.EYE_FT + F.D3.FLOOR_T;
+  // Level ground: the numbers they always were (eye = EYE_FT - lift), EYE_FT + FLOOR_T over the grass.
+  for (const spec of [PIERS, { ...PIERS, gradeFallFt: 0, gradeFallToward: "left" }, { foundation: "slab", gradeFallFt: 3 }]) {
+    const cams = F.ssSelfCheckCameras({ bldgW: W, bldgH: L, style3d: spec }, WALK_MAP);
+    assertEquals(cams.length, 6);
+    for (const c of cams.filter((q: Any) => q.viewpoint !== "eaveCorner")) {
+      assertEquals(c.eye[1], F.SS_SHOT.EYE_FT - F.d3GradeLiftFt(spec), `${JSON.stringify(spec)} ${c.viewpoint}`);
+      assertAlmostEquals(eyeOverGrass(spec, W, L, c), want, 1e-12);
+    }
+  }
+  assertEquals(JSON.stringify(F.ssSelfCheckCameras({ bldgW: W, bldgH: L, style3d: { ...PIERS, gradeFallFt: 0 } }, WALK_MAP)),
+    JSON.stringify(F.ssSelfCheckCameras({ bldgW: W, bldgH: L, style3d: PIERS }, WALK_MAP)), "a fall of 0 is level ground, byte for byte");
+  // Falling ground, every direction, up to the sanitiser's 6 ft, on big, small and landscape footprints.
+  for (const [w, l] of [[16, 24], [8, 12], [24, 12]]) {
+    for (const toward of ["back", "left", "right"]) {
+      for (const fallFt of [0.5, 2, 4, 6]) {
+        const spec = { ...PIERS, gradeFallFt: fallFt, gradeFallToward: toward };
+        const cams = F.ssSelfCheckCameras({ bldgW: w, bldgH: l, style3d: spec }, WALK_MAP);
+        const level = F.ssSelfCheckCameras({ bldgW: w, bldgH: l, style3d: PIERS }, WALK_MAP);
+        const lf = F.d3GradeLiftFt(spec), lf0 = F.d3GradeLiftFt(PIERS);
+        const tag = `${w}x${l} ${fallFt} ft ${toward}`;
+        assertEquals(cams.length, 6, tag);
+        for (const [i, c] of cams.entries()) {
+          if (c.viewpoint === "eaveCorner") {
+            assertEquals(JSON.stringify(c), JSON.stringify(level[i]), `${tag}: the eave close-up never read the ground`);
+            continue;
+          }
+          assertAlmostEquals(eyeOverGrass(spec, w, l, c), want, 1e-5, `${tag} ${c.viewpoint}: the eye over the grass under it`);
+          // The aim is the deepest ground's: 0.45 of the way up from it, the same peak as on level ground.
+          assertAlmostEquals((c.at[1] + lf) / 0.45 - lf, (level[i].at[1] + lf0) / 0.45 - lf0, 1e-9, `${tag} ${c.viewpoint}: the same peak framed`);
+          assert(c.at[1] < level[i].at[1], `${tag} ${c.viewpoint}: aimed lower than on level ground`);
+        }
+      }
+    }
+  }
+  // The reviewer's case: 6 ft falling to the back, filmed from the front (uphill), where the eye was
+  // 0.6 ft UNDER the grass. It is the phone's height over the level ground in front now.
+  const steep = { ...PIERS, gradeFallFt: 6, gradeFallToward: "back" };
+  const front = F.ssSelfCheckCameras({ bldgW: W, bldgH: L, style3d: steep }, WALK_MAP).find((c: Any) => c.viewpoint === "front");
+  assert(front.eye[2] > L / 2 + 2, "the front camera stands past the uphill edge's blend");
+  assertAlmostEquals(front.eye[1], F.SS_SHOT.EYE_FT - (F.d3GradeAt(steep, W, L, 0, 1000) - F.D3.FLOOR_T), 1e-5);
+  assert(front.eye[1] > F.SS_SHOT.EYE_FT - F.d3GradeLiftFt(steep) + 5, "about the fall higher than the deepest ground's eye");
 });
 
 // ── THE PORCH'S FRAME AND ITS STEPS ─────────────────────────────────────────────────────────

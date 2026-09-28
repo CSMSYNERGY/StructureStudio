@@ -4843,7 +4843,9 @@ function d3GradeFt(spec) {
 // self-check) is the arithmetic it always was. Where the ground falls away (d3GradeFall, 2026-09-28)
 // it is measured to the DEEPEST ground under the building (d3GradeMaxFt): each of those cameras
 // frames the building from its grass up, and the grass that has to be in shot is under the
-// tallest supports. On level ground d3GradeMaxFt is d3GradeFt, so nothing moves.
+// tallest supports. On level ground d3GradeMaxFt is d3GradeFt, so nothing moves. The self-check's
+// walk cameras frame from it too, but their EYE is a phone held above the ground it stood on, so
+// ssSelfCheckCameras takes the eye off d3GradeAt where the camera stands.
 function d3GradeLiftFt(spec) {
   return d3GradeMaxFt(spec) - D3.FLOOR_T;
 }
@@ -10677,7 +10679,13 @@ function ssSelfCheckCameras(p, frameMap) {
   // been. The phone that filmed it was held at chest height above THAT ground, so the eye comes down
   // by the lift, and the framing's base points go down to it, so the supports are in shot. 0 on
   // every other building: every number below is the one it always was.
+  // WHERE THE GROUND FALLS AWAY (d3GradeFall, 2026-09-28) `lift` is the DEEPEST ground's, so the
+  // framing still holds the tallest supports; but the phone was held above the ground its owner stood
+  // on, uphill in front of the building and downhill past it. So each walk camera's eye is taken off
+  // d3GradeAt where it stands (level past the blend), settled in a few passes because the distance
+  // the frame needs moves a little with the eye. Level ground never enters that loop.
   const lift = d3GradeLiftFt(spec);
+  const fall = d3GradeFall(spec);
   const out = [];
   for (let i = 0; i < SS_SELFCHECK_VIEWS.length; i++) {
     const view = SS_SELFCHECK_VIEWS[i];
@@ -10693,9 +10701,17 @@ function ssSelfCheckCameras(p, frameMap) {
     const depthHalf = Math.abs(dir[0]) * W / 2 + Math.abs(dir[1]) * L / 2;
     const crossHalf = Math.abs(dir[1]) * W / 2 + Math.abs(dir[0]) * L / 2;
     const eyeY = SS_SHOT.EYE_FT - lift;
-    out.push(view === "eaveCorner"
-      ? ssEaveCamera(dir, W, L, H, peak, depthHalf, crossHalf, frame, az)
-      : ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view, lift));
+    if (view === "eaveCorner") {
+      out.push(ssEaveCamera(dir, W, L, H, peak, depthHalf, crossHalf, frame, az));
+      continue;
+    }
+    let cam = ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view, lift);
+    for (let k = 0; fall && k < 24; k++) {
+      const y = SS_SHOT.EYE_FT - (d3GradeAt(spec, W, L, cam.eye[0], cam.eye[2]) - D3.FLOOR_T);
+      if (Math.abs(y - cam.eye[1]) < 1e-7) break;
+      cam = ssWalkCamera(dir, H, peak, depthHalf, crossHalf, y, frame, az, view, lift);
+    }
+    out.push(cam);
   }
   return out;
 }
