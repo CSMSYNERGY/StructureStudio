@@ -4837,9 +4837,154 @@ function d3GradeFt(spec) {
 }
 // How much further down the ground is than it has always been: exactly 0 on every building that is
 // not raised, so each camera that subtracts it (the viewer, the docked panel, the quote shot, the
-// self-check) is the arithmetic it always was.
+// self-check) is the arithmetic it always was. Where the ground falls away (d3GradeFall, 2026-09-28)
+// it is measured to the DEEPEST ground under the building (d3GradeMaxFt): each of those cameras
+// frames the building from its grass up, and the grass that has to be in shot is under the
+// tallest supports. On level ground d3GradeMaxFt is d3GradeFt, so nothing moves. The self-check's
+// walk cameras frame from it too, but their EYE is a phone held above the ground it stood on, so
+// ssSelfCheckCameras takes the eye off d3GradeAt where the camera stands.
 function d3GradeLiftFt(spec) {
-  return d3GradeFt(spec) - D3.FLOOR_T;
+  return d3GradeMaxFt(spec) - D3.FLOOR_T;
+}
+// ── GROUND THAT FALLS AWAY (top-level gradeFallFt / gradeFallToward, 2026-09-28) ─────────────────
+// Carolyn, 09-28, on the Tri Home: "these piers are, like, deeper here", the ground falling away
+// from one side of it. floorHeightFt (d3GradeFt) stays the height at the FRONT, the uphill side, and
+// gradeFallFt is how much LOWER the ground is at the far side of the footprint, toward
+// gradeFallToward, so the supports there stand that much taller. Raised floors only, the
+// sanitiser's rule: a slab or skids sits on the grade. Absent, 0 or junk is level ground, and every
+// function below then answers exactly what d3GradeFt does.
+//
+// ⚠️ THE DIRECTIONS ARE GEOMETRY, NEVER THE DOOR: back is north (-z), left west (-x) and right east
+// (+x), as seen standing at the south wall (+z). That is the new frame's front (d3NewFrame), and the
+// wall the 3D Views presets call F on every building whose front is its south wall -- every style
+// before a door is placed, which is how a builder calibrates it -- so B, ← L and R → look at the
+// side the ground falls to. A customer dragging the door to another wall re-homes the presets, never
+// the ground: d3RoofAxes' rule, "that doesn't mean that the roof changes".
+const D3_GRADE_FALL_TOWARD = ["back", "left", "right"];
+// { fallFt, toward }, or null on level ground: held to the sanitiser's band, (0, 6], and "back" when
+// the style gives no direction.
+function d3GradeFall(spec) {
+  if (!d3RaisedFoundation(spec)) return null;
+  const f = Number(spec.gradeFallFt);
+  if (!(isFinite(f) && f > 0)) return null;
+  return { fallFt: Math.min(6, f), toward: D3_GRADE_FALL_TOWARD.indexOf(spec.gradeFallToward) >= 0 ? spec.gradeFallToward : "back" };
+}
+// The fall's direction in the building's (x, z), and the footprint's extent along it (W along x by L
+// along z): a point is x * dir[0] + z * dir[1] + ext / 2 feet down the slope from the uphill edge.
+function d3GradeFallAxis(toward, W, L) {
+  if (toward === "left") return { dir: [-1, 0], ext: W };
+  if (toward === "right") return { dir: [1, 0], ext: W };
+  return { dir: [0, -1], ext: L };
+}
+// How far past the footprint the ground takes to level off: 2 ft, shorter on a steep fall, so the
+// ease never lifts or lowers the ground by more than 3 in (fall x blend / 2 ext <= 0.25 ft).
+function d3GradeFallBlendFt(fallFt, ext) {
+  return Math.min(2, (0.5 * ext) / fallFt);
+}
+// HOW FAR BELOW THE FLOOR'S TOP THE GROUND IS AT (x, z), in the building's frame: the footprint
+// centred on the origin, W along x, L along z. d3GradeFt along the footprint's uphill edge, that plus
+// the fall along its far edge, and a straight line between. Outside the footprint the ground eases
+// level over d3GradeFallBlendFt with no crease (its slope runs smoothly down to 0), so the site is
+// level in front of the building -- a hair above the front grade, the ease's price -- and level again
+// past the far side, a hair below the far grade. On level ground it is d3GradeFt everywhere.
+function d3GradeAt(spec, W, L, x, z) {
+  const grade = d3GradeFt(spec);
+  const f = d3GradeFall(spec);
+  if (!f) return grade;
+  const ax = d3GradeFallAxis(f.toward, Number(W) || 0, Number(L) || 0);
+  const D = Math.max(1, ax.ext);
+  const B = d3GradeFallBlendFt(f.fallFt, D);
+  const d = x * ax.dir[0] + z * ax.dir[1] + D / 2;
+  const s = d <= -B ? -B / 2
+    : d < 0 ? ((d + B) * (d + B)) / (2 * B) - B / 2
+      : d <= D ? d
+        : d < D + B ? D + B / 2 - ((D + B - d) * (D + B - d)) / (2 * B)
+          : D + B / 2;
+  return grade + (f.fallFt * s) / D;
+}
+// The deepest ground under the footprint: d3GradeFt plus the fall, and d3GradeFt itself on level
+// ground. The cameras frame from it (d3GradeLiftFt).
+function d3GradeMaxFt(spec) {
+  const f = d3GradeFall(spec);
+  return d3GradeFt(spec) + (f ? f.fallFt : 0);
+}
+// A FLOOR HEIGHT READ AT THE FRONT WALL, as floorHeightFt stores it. A video draft reads the floor at
+// the middle of its front wall, where the door and the steps are (the prompt's rule, and the wall
+// d3FrontGableWall names), but floorHeightFt is the height at the fall's UPHILL edge (d3GradeAt).
+// Across a left or right fall that wall's middle stands half the fall lower, and on an old-frame end
+// wall at the downhill side the whole fall, so the reading is taken back up the slope and the door is
+// drawn at the height the video saw. Level ground, and a front wall on the uphill edge, keep the
+// reading exactly; never under the sanitiser's 0.3 (the floor meets the ground there).
+function d3FloorHeightFromFront(spec, W, L, frontFt) {
+  const f = d3GradeFall(spec);
+  const w = Number(W) || 0, l = Number(L) || 0;
+  if (!f || !(w > 0) || !(l > 0)) return frontFt;
+  const n = { south: [0, 1], north: [0, -1], east: [1, 0], west: [-1, 0] }[d3FrontGableWall(spec.roof, w, l)] || [0, 1];
+  const ax = d3GradeFallAxis(f.toward, w, l);
+  const t = ((n[0] * w * ax.dir[0] + n[1] * l * ax.dir[1]) / 2 + ax.ext / 2) / ax.ext;
+  if (!(t > 1e-9)) return frontFt;
+  return Math.max(0.3, Math.round((frontFt - f.fallFt * t) * 100) / 100);
+}
+// WHERE THE PROJECTING PORCH'S OWN FRAME LANDS IN THE BUILDING'S, for the ground under its deck and
+// steps: a function from a point in the porch's frame -- x across it, positive to the right of
+// someone standing in front of it facing it, d out from the wall's mid-plane (d3PorchStepsGeom's
+// frame) -- to the building's [x, z], or null with no projecting porch. The wall's mid-plane is the
+// footprint's edge, and the porch's middle is d3PorchSpan's centerU along it on a cap end (the
+// building's own u: x when the profile spans x, z otherwise), the wall's middle on an eave wall.
+// Pure, so the panel's readout counts the steps on the same ground the renderer builds them on;
+// tests/harness/gradeFall.mjs holds it to the placed deck's own matrices on every wall.
+function d3PorchToRoot(roofCfg, W, L) {
+  const porch = d3ProjectingPorch(roofCfg, W, L);
+  if (!porch) return null;
+  const ps = d3PorchSpan(roofCfg, W, L);
+  const n = { south: [0, 1], north: [0, -1], east: [1, 0], west: [-1, 0] }[porch.wall];
+  const r = [n[1], -n[0]];
+  const o = [(n[0] * W) / 2, (n[1] * L) / 2];
+  if (ps.onCap && ps.centerU) o[d3RoofAxes(roofCfg, W, L).uAxisIsX ? 0 : 1] += ps.centerU;
+  return (x, d) => [o[0] + n[0] * d + r[0] * x, o[1] + n[1] * d + r[1] * x];
+}
+// THE GROUND UNDER THE PORCH STEPS (2026-09-28): the gradeFt d3PorchStepsGeom climbs from. On level
+// ground d3GradeFt's, exactly. Where the ground falls away it is the deepest ground under the flight,
+// from the deck's edge out to the bottom tread and across its width, so the bottom step stands on
+// the grass and no corner of it floats. That depth sets the count and the count sets how far out
+// the flight reaches, so it walks out until the count stops changing (each step can only reach
+// deeper, so it settles). `stepsAt(gradeFt)` is the caller's own d3PorchStepsGeom call, and
+// d3PorchStepsOnGround below is the one caller: whatever it passes d3PorchStepsGeom, stepsAt passes.
+function d3PorchStepsGradeFt(spec, W, L, stepsAt) {
+  const grade = d3GradeFt(spec);
+  if (!d3GradeFall(spec)) return grade;
+  const toRoot = d3PorchToRoot(spec.roof, W, L);
+  if (!toRoot) return grade;
+  const under = (s) => {
+    let deep = -Infinity;
+    for (const x of [s.x - s.w / 2, s.x + s.w / 2]) {
+      for (const d of [s.d0, s.d0 + s.count * s.tread]) {
+        const q = toRoot(x, d);
+        deep = Math.max(deep, d3GradeAt(spec, W, L, q[0], q[1]));
+      }
+    }
+    return deep;
+  };
+  let h = grade;
+  for (let i = 0; i < 16; i++) {
+    const s = stepsAt(h);
+    if (!s) return grade;
+    const next = under(s);
+    if (next === h) break;
+    h = next;
+  }
+  return h;
+}
+// THE PORCH'S STEPS ON THE GROUND UNDER THEM: the one call the panel's readout and the renderer both
+// make, so the flight whose ground is measured and the flight that is drawn are always the same flight.
+// ⚠️ MERGE (ss/aa-steps, roof.porchStepCount): the builder's count goes to d3PorchStepsGeom through
+// `at`, the measuring calls and the drawn one alike, so a fixed count stands on the ground under its
+// own flight. d3PorchStepsGeom takes it as a fifth argument on that branch; on this one it takes four
+// and every flight is the automatic count. Resolve both call-site conflicts to this function.
+function d3PorchStepsOnGround(spec, W, L, g, D, where) {
+  const count = spec && spec.roof ? spec.roof.porchStepCount : undefined;
+  const at = (h) => d3PorchStepsGeom(g, D, where, h, count);
+  return at(d3PorchStepsGradeFt(spec, W, L, at));
 }
 // The model's real top, in feet off the floor: the ridge of the centre when there are wings, the
 // roof's own peak otherwise.
@@ -5423,7 +5568,8 @@ function d3PorchReadout(spec, sizeLabel) {
   // With porchAttachFt set it is the ATTACH height, not the wall, that decides the headroom, so the
   // panel's suggestion is where to hang the porch roof: hNeeded is a wall top, 0.2 above that.
   return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2, atMost,
-    framing, steps: d3PorchStepsGeom(g, porch.D, framing.steps, d3GradeFt(spec), roof.porchStepCount) };
+    // The steps climb from the ground under them (d3PorchStepsOnGround): d3GradeFt on level ground.
+    framing, steps: d3PorchStepsOnGround(spec, w, d, g, porch.D, framing.steps) };
 }
 
 // A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
@@ -5736,6 +5882,10 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     // and only beside blocks or piers: the key is simply absent on every other style, so their
     // resolved object is the one it always was.
     ...(D3_RAISED_FOUNDATIONS.indexOf(o.foundation) >= 0 && Number(o.floorHeightFt) > 0 ? { floorHeightFt: Number(o.floorHeightFt) } : {}),
+    // The ground falling away under it (2026-09-28, d3GradeFall): named for the same reason, beside
+    // blocks or piers only, and never defaulted, so every other style resolves to what it always did.
+    ...(D3_RAISED_FOUNDATIONS.indexOf(o.foundation) >= 0 && Number(o.gradeFallFt) > 0 ? { gradeFallFt: Number(o.gradeFallFt) } : {}),
+    ...(D3_RAISED_FOUNDATIONS.indexOf(o.foundation) >= 0 && D3_GRADE_FALL_TOWARD.indexOf(o.gradeFallToward) >= 0 ? { gradeFallToward: o.gradeFallToward } : {}),
     // LEGACY DATA, still named here on purpose. Nothing reads d3.claddingChoices any more —
     // 207 moved the offered set into style_cladding and seeded it from this key — but the
     // literal drops what it does not list, and the calibration panel round-trips through this
@@ -6516,6 +6666,55 @@ function d3MakeGroundLabel(THREE, text, hFt) {
   return m;
 }
 
+// THE GRASS WHEN THE GROUND FALLS AWAY (d3GradeAt, 2026-09-28), or null on level ground. The level
+// disc is a CircleGeometry, a centre and a rim, and cannot bend; this is the same disc of radius R,
+// cut into rows ACROSS the fall so every row is one depth, each vertex on d3GradeAt. Rows fall on
+// the footprint's uphill and far edges and eight times across each blend past them, so between two
+// rows the triangles ARE d3GradeAt's straight line wherever it is one -- under the whole building --
+// and a support built to d3GradeAt stands on the grass as drawn. Built in the level disc's own plane
+// (its x and y; z is the ground's height over -d3GradeFt), for the caller's rotation.x = -π/2 at
+// y = -d3GradeFt, with the disc's planar UVs, so the grass texture tiles exactly as it does level.
+function d3FallenGroundGeometry(THREE, spec, W, L, R) {
+  const f = d3GradeFall(spec);
+  if (!f) return null;
+  const grade = d3GradeFt(spec);
+  const ax = d3GradeFallAxis(f.toward, W, L);
+  const D = Math.max(1, ax.ext), B = d3GradeFallBlendFt(f.fallFt, D);
+  // Distances along the fall (a = x * dir[0] + z * dir[1]; the footprint spans -D/2..D/2).
+  const cuts = [-R, R];
+  for (let k = 0; k <= 8; k++) cuts.push(-D / 2 - B + (B * k) / 8, D / 2 + (B * k) / 8);
+  const nIn = Math.max(1, Math.ceil(D / 2));
+  for (let k = 1; k < nIn; k++) cuts.push(-D / 2 + (D * k) / nIn);
+  const step = Math.max(2, R / 24);
+  for (let a = D / 2 + B + step; a < R; a += step) cuts.push(a);
+  for (let a = -D / 2 - B - step; a > -R; a -= step) cuts.push(a);
+  const rows = cuts.filter((a) => a >= -R && a <= R).sort((p, q) => p - q).filter((a, i, s) => i === 0 || a - s[i - 1] > 1e-6);
+  const NC = 64, perp = [-ax.dir[1], ax.dir[0]];
+  const pos = [], uv = [], idx = [];
+  rows.forEach((a) => {
+    const half = Math.sqrt(Math.max(0, R * R - a * a));
+    for (let j = 0; j <= NC; j++) {
+      const c = -half + (2 * half * j) / NC;
+      const x = a * ax.dir[0] + c * perp[0], z = a * ax.dir[1] + c * perp[1];
+      pos.push(x, -z, grade - d3GradeAt(spec, W, L, x, z));
+      uv.push((x / R + 1) / 2, (-z / R + 1) / 2);
+    }
+  });
+  // Wound so every face looks up once the caller lays the disc flat (+z here), as the circle's do.
+  for (let i = 0; i + 1 < rows.length; i++) {
+    for (let j = 0; j < NC; j++) {
+      const p = i * (NC + 1) + j, q = p + NC + 1;
+      idx.push(p, p + 1, q, p + 1, q + 1, q);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
 // A dimension chip for the 3D view: the dark rounded badge with white bold text the PLAN
 // already draws, minted as a canvas so it can stand against a wall face. Same two inks as
 // the plan (slate normally, green when the item is centred), so a builder reading a distance
@@ -6727,6 +6926,66 @@ function buildShed3DModel(THREE, p) {
   // steps have always been.
   const GRADE = d3GradeFt(p.styleSpec);
   const RAISED = d3RaisedFoundation(p.styleSpec);
+  // GROUND THAT FALLS AWAY (d3GradeFall, 2026-09-28): null on level ground, and every branch it opens
+  // below is guarded by it, so a style without it is built by exactly the code it always was. With
+  // it GRADE is still the depth at the front, and depthAt is the depth anywhere: the grass is bent to
+  // it (d3FallenGroundGeometry); the supports, the deck's supports, a lean-to's posts, the porch
+  // steps and a ramp reach it at their own spot; the labels and the shade under the building lie on it.
+  const FALL = d3GradeFall(p.styleSpec);
+  const depthAt = (x, z) => d3GradeAt(p.styleSpec, bldgW, bldgH, x, z);
+  // The deepest ground under a footprint of +-hx by +-hz about (x, z), in a frame `toRoot` maps into the
+  // building's (none: already in it). A block's or a pier's foot goes down to it so no edge of it
+  // floats; the uphill edge is bedded into the slope, as a real footing is.
+  const depthUnder = (x, z, hx, hz, toRoot) => {
+    let deep = -Infinity;
+    for (const sx of [-1, 1]) {
+      for (const sz of [-1, 1]) {
+        const q = toRoot ? toRoot(x + sx * hx, z + sz * hz) : [x + sx * hx, z + sz * hz];
+        deep = Math.max(deep, depthAt(q[0], q[1]));
+      }
+    }
+    return deep;
+  };
+  // A flat sheet on the grass (a ground label, the shade under the building), laid flat by
+  // rotation.x = -π/2 at `lift` over -GRADE, in `holder` when it sits in a group of its own. Where the
+  // ground falls away it is re-cut every half foot and each vertex set `lift` over the ground under
+  // it. On level ground it is not touched.
+  const drapeOnGround = (m, lift, holder) => {
+    if (!FALL) return;
+    const prm = m.geometry.parameters;
+    m.geometry.dispose();
+    m.geometry = new THREE.PlaneGeometry(prm.width, prm.height, Math.max(1, Math.ceil(prm.width / 0.5)), Math.max(1, Math.ceil(prm.height / 0.5)));
+    m.updateMatrix();
+    if (holder) holder.updateMatrix();
+    const M = holder ? new THREE.Matrix4().multiplyMatrices(holder.matrix, m.matrix) : m.matrix;
+    const pos = m.geometry.attributes.position, v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.set(pos.getX(i), pos.getY(i), 0).applyMatrix4(M);
+      pos.setZ(i, -depthAt(v.x, v.z) + lift - m.position.y);
+    }
+    pos.needsUpdate = true;
+    m.geometry.computeBoundingBox();
+    m.geometry.computeBoundingSphere();
+  };
+  // A ramp off wall frame `wf` at `along`, starting `out` past the wall's line, `w` wide, where the
+  // ground falls away: [drop, run]. The level ramp's rule (drop = GRADE, run = max(3, 4 x drop)) read
+  // at the ramp's own foot, the deeper of its two corners; the foot moves with the run it sets, so the
+  // run is found by halving.
+  const rampOnGround = (wf, along, out, w) => {
+    const sx = wf.O[0] + wf.U[0] * along + wf.N[0] * out, sz = wf.O[1] + wf.U[1] * along + wf.N[1] * out;
+    const footAt = (r) => Math.max(
+      depthAt(sx + wf.N[0] * r - (wf.U[0] * w) / 2, sz + wf.N[1] * r - (wf.U[1] * w) / 2),
+      depthAt(sx + wf.N[0] * r + (wf.U[0] * w) / 2, sz + wf.N[1] * r + (wf.U[1] * w) / 2));
+    const need = (r) => Math.max(3, 4 * footAt(r));
+    let run = 3;
+    if (need(3) > 3) {
+      let lo = 3, hi = 6;
+      while (need(hi) > hi && hi < 400) { lo = hi; hi *= 2; }
+      for (let i = 0; i < 60; i++) { const mid = (lo + hi) / 2; if (need(mid) > mid) lo = mid; else hi = mid; }
+      run = hi;
+    }
+    return [footAt(run), run];
+  };
 
   // Environment: grass field to the horizon + on-ground dimension labels
   // (SmartBuild-style landscape; the "Landscape" toggle hides this group).
@@ -6735,10 +6994,12 @@ function buildShed3DModel(THREE, p) {
   const groundR = Math.max(60, R2 * 7);      // stays inside the viewer's sky dome
   const grassTex = d3MakeGrassTexture(THREE);
   if (grassTex) grassTex.repeat.set(groundR / 5, groundR / 5);
-  const ground = new THREE.Mesh(new THREE.CircleGeometry(groundR, 64),
+  // Bent to the ground's fall where the style has one (d3FallenGroundGeometry); the level disc otherwise.
+  const ground = new THREE.Mesh(FALL ? d3FallenGroundGeometry(THREE, p.styleSpec, bldgW, bldgH, groundR) : new THREE.CircleGeometry(groundR, 64),
     new THREE.MeshLambertMaterial({ color: "#9DBE77", ...(grassTex ? { map: grassTex } : {}) }));
   ground.rotation.x = -Math.PI / 2;
   ground.position.y = -GRADE;
+  ground.userData.ssGround = true;
   envGroup.add(ground);
   // Dimension labels on the grass for the FRONT and LEFT edges (same display
   // mapping the 2D labels use), plus a small N compass off the NW corner.
@@ -6758,11 +7019,12 @@ function buildShed3DModel(THREE, p) {
     else if (pos === "west") { holder.position.set(-bldgW / 2 - off, 0, 0); holder.rotation.y = Math.PI / 2; }
     else { holder.position.set(bldgW / 2 + off, 0, 0); holder.rotation.y = -Math.PI / 2; }
     lbl.position.y = -GRADE + 0.04;
+    drapeOnGround(lbl, 0.04, holder);
     holder.add(lbl);
     envGroup.add(holder);
   });
   const nLbl = d3MakeGroundLabel(THREE, "N", Math.max(1.6, lblH * 1.2));
-  if (nLbl) { nLbl.position.set(-bldgW / 2 - R2 * 0.35, -GRADE + 0.04, -bldgH / 2 - R2 * 0.35); envGroup.add(nLbl); }
+  if (nLbl) { nLbl.position.set(-bldgW / 2 - R2 * 0.35, -GRADE + 0.04, -bldgH / 2 - R2 * 0.35); drapeOnGround(nLbl, 0.04); envGroup.add(nLbl); }
   root.add(envGroup);
   // Base. A slab by default; runners when the style says so. Everything below is drawn
   // INSIDE the slab's own 0.35 ft band, on purpose: the ground plane, every ramp's rise
@@ -6830,6 +7092,7 @@ function buildShed3DModel(THREE, p) {
     const sh = new THREE.Mesh(new THREE.PlaneGeometry(w, d), sm);
     sh.rotation.x = -Math.PI / 2;
     sh.position.set(x, -GRADE + 0.02, z);
+    drapeOnGround(sh, 0.02);
     sh.userData.ssFoundationPart = "shade";
     envGroup.add(sh);
   };
@@ -6837,14 +7100,16 @@ function buildShed3DModel(THREE, p) {
   // frame, whose y is the floor's: a stack of 8x8x16 blocks, each course its share of the height and
   // a 0.02 ft joint between courses, the 16 in side along x when `longX`; or a 12 in round pier.
   // Shared by the building's runners and the projecting porch's deck, so the two never differ.
-  // Returns the courses drawn (0 for a pier, or where there is no height to fill).
+  // Returns the courses drawn (0 for a pier, or where there is no height to fill). `depth` is the
+  // ground's depth under it where the ground falls away (supportDepth); GRADE when not given.
   const concreteMat = RAISED ? mat(RAISED === "piers" ? "#9A988F" : "#9C9B95", { roughness: 0.95 }) : null;
-  const addSupport = (grp, x, z, y1, longX) => {
-    const bh = y1 + GRADE;
+  const addSupport = (grp, x, z, y1, longX, depth) => {
+    const G = depth === undefined ? GRADE : depth;
+    const bh = y1 + G;
     if (!RAISED || bh < 0.04) return 0;
     if (RAISED === "piers") {
       const pier = cyl(concreteMat, 0.5, bh);
-      pier.position.set(x, -GRADE + bh / 2, z);
+      pier.position.set(x, -G + bh / 2, z);
       pier.userData.ssFoundationPart = "pier";
       grp.add(pier);
       return 0;
@@ -6854,12 +7119,17 @@ function buildShed3DModel(THREE, p) {
     for (let c = 0; c < n; c++) {
       const hb = hc - (c < n - 1 ? JOINT : 0);
       const blk = longX ? box(concreteMat, BLOCK_L, hb, BLOCK_W) : box(concreteMat, BLOCK_W, hb, BLOCK_L);
-      blk.position.set(x, -GRADE + c * hc + hb / 2, z);
+      blk.position.set(x, -G + c * hc + hb / 2, z);
       blk.userData.ssFoundationPart = "block";
       grp.add(blk);
     }
     return n;
   };
+  // Where the ground falls away: the depth a support at (x, z) stands on, in a frame `toRoot` maps
+  // into the building's (none: already in it). The deepest ground under its own foot (depthUnder),
+  // the sizes addSupport builds: a 12 in pier, or a 16 x 8 in block, its long side along x when longX.
+  const supportDepth = (x, z, longX, toRoot) => (RAISED === "piers" ? depthUnder(x, z, 0.5, 0.5, toRoot)
+    : longX ? depthUnder(x, z, 8 / 12, 4 / 12, toRoot) : depthUnder(x, z, 4 / 12, 8 / 12, toRoot));
   if (RAISED) {
     const gap = GRADE - D3.FLOOR_T;                        // the floor band's underside to the grass
     const SKIRT = Math.min(0.5, Math.max(D3.FLOOR_T, GRADE - 0.1));
@@ -6883,14 +7153,16 @@ function buildShed3DModel(THREE, p) {
     fGroup.add(skirtBox([-bldgW / 2, -bldgH / 2], [0, 1], T / 2, bldgH - T / 2));
     fGroup.add(skirtBox([bldgW / 2, -bldgH / 2], [0, 1], T / 2, bldgH - T / 2));
     const runners = [], supports = [];
-    if (gap > 0.05) {
+    // Where the ground falls away (FALL) the far side stands on supports even when the front's gap is
+    // too thin for a runner: there the runners are 4x4s on edge, bedded into the grade at the front.
+    if (gap > 0.05 || FALL) {
       const alongX = bldgW >= bldgH;
       const across = alongX ? bldgH : bldgW, len = alongX ? bldgW : bldgH;
       const nRun = Math.max(2, Math.round(across / 4));
       const inset = Math.min(1.0, across * 0.14);
       const RUN_W = 3.5 / 12;
       // A thin gap is all runner (a shimmed skid); otherwise the runner takes about 40 % of it.
-      const RUN_H = gap < 0.25 ? gap : Math.min(0.46, Math.max(0.15, gap * 0.4));
+      const RUN_H = gap < 0.25 ? (gap > 0.05 ? gap : 0.15) : Math.min(0.46, Math.max(0.15, gap * 0.4));
       const runBot = -D3.FLOOR_T - RUN_H;
       const runMat = mat(D3_COLORS.bench);
       const END = 0.6, OC = 7;
@@ -6904,13 +7176,18 @@ function buildShed3DModel(THREE, p) {
         run.userData.ssFoundationPart = "runner";
         fGroup.add(run);
         runners.push({ at, y0: runBot, y1: -D3.FLOOR_T });
-        if (runBot + GRADE < 0.04) continue;
+        // Where the ground falls away each support reaches it at its own spot (supportDepth), so the
+        // downhill rows stand taller, a block stack a course per 8 in of ITS height, and a support
+        // with no height left to fill is not built.
+        if (!FALL && runBot + GRADE < 0.04) continue;
         for (let k = 0; k < nSup; k++) {
           const along = -len / 2 + END + (k * (len - 2 * END)) / (nSup - 1);
           const x = alongX ? along : at, z = alongX ? at : along;
+          const dep = FALL ? supportDepth(x, z, !alongX) : GRADE;
+          if (runBot + dep < 0.04) continue;
           // The block's long side ACROSS the runner: along z when the runners run along x.
-          courses = addSupport(fGroup, x, z, runBot, !alongX);
-          supports.push({ x, z, y0: -GRADE, y1: runBot });
+          courses = addSupport(fGroup, x, z, runBot, !alongX, dep);
+          supports.push(FALL ? { x, z, y0: -dep, y1: runBot, courses } : { x, z, y0: -GRADE, y1: runBot });
         }
       }
       foundationInfo = { kind: RAISED, grade: GRADE, skirt: SKIRT, runnerH: RUN_H, courses, runners, supports };
@@ -8198,11 +8475,18 @@ function buildShed3DModel(THREE, p) {
     // On a raised floor (2026-09-25) the posts stand on the lowered ground, not in the air at the
     // floor's level; 0 on every other building, as they always stood.
     const postBot = RAISED ? -GRADE : 0;
+    // Where the ground falls away (FALL) each post stands on the ground under its own foot, read in the
+    // building's frame through rg's placement below: u + uc across x and z - L/2 along it, or turned a
+    // quarter, L/2 - z and u + uc.
+    const rgRoot = (u, z) => (uAxisIsX ? [u + mass.uc, z - L / 2] : [L / 2 - z, u + mass.uc]);
     for (let i = 0; i < nPost; i++) {
       const t = nPost === 1 ? 0.5 : i / (nPost - 1);
-      const post = box(trimMat, 0.3, y1 - postBot, 0.3);
-      post.position.set(u1, (y1 + postBot) / 2, inset + t * (L - 2 * inset));
+      const pz = inset + t * (L - 2 * inset);
+      const pb = FALL ? -depthUnder(u1, pz, 0.15, 0.15, rgRoot) : postBot;
+      const post = box(trimMat, 0.3, y1 - pb, 0.3);
+      post.position.set(u1, (y1 + pb) / 2, pz);
       post.userData.ssLeanTo = true;
+      post.userData.ssLeanToPost = true;
       rg.add(post);
     }
     const hdr = box(trimMat, 0.35, 0.5, L);     // header tying the posts together
@@ -9319,10 +9603,14 @@ function buildShed3DModel(THREE, p) {
       const outer = side - POST / 2;
       const rows = [D - (RAISED === "piers" ? 0.5 : 1 / 3)];
       if (D - dWall > 7) rows.push((dWall + D) / 2);
+      // Where the ground falls away (FALL) each reaches it at its own spot, read in the building's
+      // frame through d3PorchToRoot, since the deck is only placed onto its wall further down.
+      const toRoot = FALL ? d3PorchToRoot(roofCfg, bldgW, bldgH) : null;
       rows.forEach((dz) => {
         for (let i = 0; i <= geom.bays; i++) {
           const n0 = deck.children.length;
-          addSupport(deck, -outer + (i * 2 * outer) / geom.bays, dz, top, true);
+          const px = -outer + (i * 2 * outer) / geom.bays;
+          addSupport(deck, px, dz, top, true, toRoot ? supportDepth(px, dz, true, toRoot) : undefined);
           for (let k = n0; k < deck.children.length; k++) part(deck.children[k], "deckSupport");
         }
       });
@@ -9333,9 +9621,9 @@ function buildShed3DModel(THREE, p) {
     // they sit with the floor (look-inside keeps them) and turn with the porch onto its wall;
     // tagged ssPorchPart "steps" with the side in ssPorchSteps, so anything that places things
     // against the deck's edge (the harness, a ramp on that wall) can find them. Nothing is built
-    // without the key, so every porch before it is unchanged. How many is the style's own
-    // roof.porchStepCount where it gives one (2026-09-28), the readout's count either way.
-    const stepsGeom = d3PorchStepsGeom(geom, D, framing.steps, GRADE, roofCfg.porchStepCount);
+    // without the key, so every porch before it is unchanged.
+    // They climb from the ground under the flight (d3PorchStepsOnGround): GRADE on level ground.
+    const stepsGeom = d3PorchStepsOnGround(p.styleSpec, bldgW, bldgH, geom, D, framing.steps);
     if (stepsGeom) {
       const { x: sx, w: sw, count, rise, tread, d0, grade } = stepsGeom;
       const TREAD_T = Math.min(0.09, rise * 0.6), STR_T = 0.125, RISER_T = 0.06, NOSE = 0.03, EPS = 0.005;
@@ -9958,7 +10246,13 @@ function buildShed3DModel(THREE, p) {
       // whatever it costs. The 2D plan still draws its footprint at the wall; the calibration panel's
       // floor height line says ramps are drawn longer. On a slab or skids drop is D3.FLOOR_T and the
       // run 3, exactly as before.
-      const drop = GRADE, run = Math.max(3, 4 * drop);
+      // On a projecting porch's wall it starts at the deck's edge. The deck top is the floor, so the
+      // drop is unchanged. (The 2D plan still draws it at the wall.)
+      const rampOut = porchOut && it.wall === porchOut.wall ? porchOut.D : T / 2;
+      // Where the ground falls away (FALL) the drop is the ground's depth at the ramp's own foot, and
+      // the run that depth sets (rampOnGround).
+      let drop = GRADE, run = Math.max(3, 4 * drop);
+      if (FALL) [drop, run] = rampOnGround(wf, along, rampOut, w);
       const g = new THREE.Group();
       g.userData.ssRamp = it.wall;       // porchStepsVsRamps finds the ramps on the porch wall by it
       const deck = box(mat(D3_COLORS.ramp), w, 0.12, Math.sqrt(run * run + drop * drop));
@@ -9966,9 +10260,6 @@ function buildShed3DModel(THREE, p) {
       deck.position.set(0, -drop / 2 + 0.06, run / 2);
       g.add(deck);
       g.rotation.y = Math.atan2(wf.N[0], wf.N[1]); // local +z → exterior normal
-      // On a projecting porch's wall it starts at the deck's edge. The deck top is the floor, so the
-      // drop is unchanged. (The 2D plan still draws it at the wall.)
-      const rampOut = porchOut && it.wall === porchOut.wall ? porchOut.D : T / 2;
       g.position.set(
         wf.O[0] + wf.U[0] * along + wf.N[0] * rampOut,
         0,
@@ -10051,6 +10342,9 @@ function buildShed3DModel(THREE, p) {
   // and supports as built, for tests/harness/foundation.mjs; nothing in the app reads them.
   model.grade = GRADE;
   model.foundation = foundationInfo;
+  // The ground's fall (d3GradeFall: { fallFt, toward }), null on level ground; model.grade stays the
+  // depth at the front. For tests/harness/gradeFall.mjs.
+  model.gradeFall = FALL;
   model.rebuildWalls = (names, itemsNow) => {
     names.forEach((wname) => {
       if (!WALLS[wname]) return;
@@ -10429,7 +10723,13 @@ function ssSelfCheckCameras(p, frameMap) {
   // been. The phone that filmed it was held at chest height above THAT ground, so the eye comes down
   // by the lift, and the framing's base points go down to it, so the supports are in shot. 0 on
   // every other building: every number below is the one it always was.
+  // WHERE THE GROUND FALLS AWAY (d3GradeFall, 2026-09-28) `lift` is the DEEPEST ground's, so the
+  // framing still holds the tallest supports; but the phone was held above the ground its owner stood
+  // on, uphill in front of the building and downhill past it. So each walk camera's eye is taken off
+  // d3GradeAt where it stands (level past the blend), settled in a few passes because the distance
+  // the frame needs moves a little with the eye. Level ground never enters that loop.
   const lift = d3GradeLiftFt(spec);
+  const fall = d3GradeFall(spec);
   const out = [];
   for (let i = 0; i < SS_SELFCHECK_VIEWS.length; i++) {
     const view = SS_SELFCHECK_VIEWS[i];
@@ -10445,9 +10745,17 @@ function ssSelfCheckCameras(p, frameMap) {
     const depthHalf = Math.abs(dir[0]) * W / 2 + Math.abs(dir[1]) * L / 2;
     const crossHalf = Math.abs(dir[1]) * W / 2 + Math.abs(dir[0]) * L / 2;
     const eyeY = SS_SHOT.EYE_FT - lift;
-    out.push(view === "eaveCorner"
-      ? ssEaveCamera(dir, W, L, H, peak, depthHalf, crossHalf, frame, az)
-      : ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view, lift));
+    if (view === "eaveCorner") {
+      out.push(ssEaveCamera(dir, W, L, H, peak, depthHalf, crossHalf, frame, az));
+      continue;
+    }
+    let cam = ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view, lift);
+    for (let k = 0; fall && k < 24; k++) {
+      const y = SS_SHOT.EYE_FT - (d3GradeAt(spec, W, L, cam.eye[0], cam.eye[2]) - D3.FLOOR_T);
+      if (Math.abs(y - cam.eye[1]) < 1e-7) break;
+      cam = ssWalkCamera(dir, H, peak, depthHalf, crossHalf, y, frame, az, view, lift);
+    }
+    out.push(cam);
   }
   return out;
 }
@@ -16294,6 +16602,9 @@ function ssShotSig(spec) {
     spec.foundation ?? null, spec.roofMaterial ?? null, spec.gableVent ?? null,
     // A raised floor's height (2026-09-25) moves the ground, the supports and the porch steps.
     spec.floorHeightFt ?? null,
+    // ...and so does the ground falling away under it (2026-09-28). Appended only when the style
+    // carries either key, so every signature taken before is the one it was.
+    ...(spec.gradeFallFt != null || spec.gradeFallToward != null ? [spec.gradeFallFt ?? null, spec.gradeFallToward ?? null] : []),
   ]);
 }
 
@@ -16392,9 +16703,19 @@ function ssDrewWords(spec, porchBuilt) {
   if (raisedOn) {
     const what = raisedOn === "blocks" ? "stacked concrete blocks" : "concrete piers";
     const h = Number(spec.floorHeightFt);
+    // The ground falling away under it (2026-09-28): d3GradeFall's reading, spelt out here so this
+    // stays a pure function of the spec. The floor height is the UPHILL edge's, as the panel's box
+    // says: the front, or across a left or right fall the other side.
+    const fallRaw = Number(spec.gradeFallFt);
+    const fall = isFinite(fallRaw) && fallRaw > 0 ? Math.min(6, fallRaw) : 0;
+    const toward = spec.gradeFallToward === "left" || spec.gradeFallToward === "right" ? spec.gradeFallToward : "back";
+    const at = fall > 0 && toward !== "back" ? `on the ${toward === "left" ? "right" : "left"} side` : "at the front";
     out.push(h > 0
-      ? `It stands on ${what}, its floor ${ssFtInWords(h)} off the ground at the front.`
-      : `It stands on ${what}; no floor height is given, so its floor is drawn ${ssFtInWords(raisedOn === "blocks" ? 1 : 1.5)} off the ground.`);
+      ? `It stands on ${what}, its floor ${ssFtInWords(h)} off the ground ${at}.`
+      : `It stands on ${what}; no floor height is given, so its floor is drawn ${ssFtInWords(raisedOn === "blocks" ? 1 : 1.5)} off the ground${fall > 0 ? ` ${at}` : ""}.`);
+    if (fall > 0) {
+      out.push(`The ground falls ${ssFtInWords(fall)} toward the ${toward}, so the ${raisedOn === "blocks" ? "blocks" : "piers"} on that side stand taller.`);
+    }
   }
   return out.join(" ");
 }
@@ -20346,9 +20667,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // always drawn), and the floor height belongs to blocks or piers only: leaving them deletes it,
   // as the sanitiser would on Save, so the preview never draws a height Save cannot store. A cleared
   // height box DELETES floorHeightFt and the renderer draws the kind's own default.
+  // The ground's fall (gradeFallFt / gradeFallToward, 2026-09-28) is a raised floor's too, and goes with
+  // it the same way: onto skids, a slab or "Not set", and when a video draft's foundation is not raised.
+  const CAL_RAISED_ONLY = ["floorHeightFt", "gradeFallFt", "gradeFallToward"];
   const calTidyFloor = (spec) => {
-    if (!d3RaisedFoundation(spec) && "floorHeightFt" in spec) { const out = { ...spec }; delete out.floorHeightFt; return out; }
-    return spec;
+    if (d3RaisedFoundation(spec) || !CAL_RAISED_ONLY.some((k) => k in spec)) return spec;
+    const out = { ...spec };
+    for (const k of CAL_RAISED_ONLY) delete out[k];
+    return out;
   };
   const calSetFoundation = (v) => setAdminCal((p) => {
     const spec = { ...p.spec };
@@ -20360,6 +20686,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const spec = { ...p.spec };
     if (n === null || n === undefined || !(Number(n) > 0)) delete spec.floorHeightFt;
     else spec.floorHeightFt = Number(n);
+    return { ...p, spec };
+  });
+  // A TOP-LEVEL optional key (the ground's fall, 2026-09-28): "", null or undefined DELETES it, the
+  // calSetRoofOpt rule, so a cleared box saves no key and the preview draws level ground.
+  const calSetTopOpt = (key, v) => setAdminCal((p) => {
+    const spec = { ...p.spec };
+    if (v === "" || v === null || v === undefined) delete spec[key];
+    else spec[key] = v;
     return { ...p, spec };
   });
   const calSetRoofOpt = (key, v) => setAdminCal((p) => {
@@ -20421,10 +20755,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // WHAT THE BUILDING STANDS ON, AND HOW HIGH (2026-09-25): one pair of controls, drawn in the walls
   // fix panel and in the full field grid, so the two can never offer different choices. The height
   // box shows only for blocks and piers, the two that raise the floor; blank is the kind's default.
+  // THE GROUND FALLING AWAY (2026-09-28): blocks and piers only, blank or 0 is level ground. Which way
+  // it falls shows once it falls, and says where the floor height is taken and which piers grow.
   const calFoundationFields = (idPrefix, labelStyle, inputStyle) => {
     const spec = (adminCal && adminCal.spec) || {};
     const raised = d3RaisedFoundation(spec);
     const grade = d3GradeFt(spec);
+    const fall = d3GradeFall(spec);
+    const uphill = fall && fall.toward === "left" ? "right side" : fall && fall.toward === "right" ? "left side" : "front";
+    const noteStyle = { display: "block", fontWeight: 400, marginTop: 2, fontSize: 11, color: "#64748B", lineHeight: 1.5 };
     return (
       <>
         <label style={labelStyle}>What it stands on
@@ -20438,13 +20777,34 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           </select>
         </label>
         {raised && (
-          <label style={labelStyle}>Floor height off the ground, at the front (ft)
+          <label style={labelStyle}>Floor height off the ground, {uphill === "front" ? "at the front" : `on the ${uphill}`} (ft)
             <input className="ssc-dim-in" type="number" step="0.1" min="0.3" max="6" inputMode="decimal"
               placeholder={`${D3_FLOOR_HEIGHT_DEFAULT_FT[raised]} ft`} data-ss-floor-height={idPrefix}
               {...calOptNumProps(idPrefix + "-floorHeightFt", spec.floorHeightFt, [0.3, 6], (n) => calSetFloorHeight(n))}
               style={inputStyle} />
             <span style={{ display: "block", fontWeight: 400, marginTop: 2, fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
-              Ground to the top of the floor where the door or porch is. A door is 6 ft 8 in tall, and each step up is about 7 in. Blank draws {ssFtInWords(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}. Porch steps climb the whole height, and a ramp a customer adds is drawn {grade > 0.75 ? ssFtInWords(4 * grade) : "3 ft"} long so it reaches the ground.
+              {fall ? `Ground to the top of the floor ${uphill === "front" ? "at the front" : `on the ${uphill}`}, where the ground is highest.` : "Ground to the top of the floor where the door or porch is."} A door is 6 ft 8 in tall, and each step up is about 7 in. Blank draws {ssFtInWords(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}. Porch steps climb the whole height, and a ramp a customer adds is drawn {grade > 0.75 ? ssFtInWords(4 * grade) : "3 ft"} long so it reaches the ground.
+            </span>
+          </label>
+        )}
+        {raised && (
+          <label style={labelStyle}>Ground falls away (ft)
+            <input className="ssc-dim-in" type="number" step="0.5" min="0" max="6" inputMode="decimal"
+              placeholder="blank = level" data-ss-grade-fall={idPrefix}
+              {...calOptNumProps(idPrefix + "-gradeFallFt", spec.gradeFallFt, [0, 6], (n) => calSetTopOpt("gradeFallFt", n > 0 ? n : null))}
+              style={inputStyle} />
+          </label>
+        )}
+        {fall && (
+          <label style={labelStyle}>Toward
+            <select value={fall.toward} onChange={(e) => calSetTopOpt("gradeFallToward", e.target.value)}
+              data-ss-grade-fall-toward={idPrefix} style={inputStyle}>
+              <option value="back">Back</option>
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+            </select>
+            <span style={noteStyle}>
+              Floor height is measured {uphill === "front" ? "at the front" : `on the ${uphill}`}. The {fall.toward === "back" ? "far side's" : `${fall.toward} side's`} {raised} stand this much taller.{fall.toward === "back" ? "" : " Left and right are as you face the front."}
             </span>
           </label>
         )}
@@ -20584,7 +20944,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // its FINAL spec to the spec as it stood BEFORE the generation rather than on top of the
   // first draft. Merging twice is exactly how a porch key survives its own exclusion — see
   // calPreGenRef. Same body, same rules, one caller more.
-  const calShapeMerged = (spec, d3) => calTidyFloor({
+  // A VIDEO'S FLOOR HEIGHT ACROSS A FALL (2026-09-28): the draft reads it at the front wall's middle,
+  // floorHeightFt keeps the uphill edge's (d3FloorHeightFromFront), so a builder's left or right fall
+  // kept across a regenerated draft still draws the door at the height the video saw. Only a draft
+  // that gives a height, on a building whose ground falls: every other merge is the object it was.
+  const calFloorFromFront = (m, d3) => ((d3 && Number(d3.floorHeightFt) > 0 && d3GradeFall(m))
+    ? { ...m, floorHeightFt: d3FloorHeightFromFront(m, bldgW, bldgH, Number(d3.floorHeightFt)) }
+    : m);
+  const calShapeMerged = (spec, d3) => calTidyFloor(calFloorFromFront({
     ...spec,
     roof: calDraftRoof(spec.roof, d3 && d3.roof),
     // Only the keys the model actually read — see the header. An unreported colour is absent
@@ -20608,7 +20975,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // any customer roof-type pick, so a video that read "metal" and had it dropped here
     // would show shingles on a metal building and look like the model got it wrong.
     roofMaterial: (d3 && (d3.roofMaterial === "shingle" || d3.roofMaterial === "metal")) ? d3.roofMaterial : spec.roofMaterial,
-  });
+  }, d3));
   const applyDraftedShape = (d3) => setAdminCal((p) => ({ ...p, spec: calShapeMerged(p.spec, d3) }));
   const copyCalJson = () => {
     const out = JSON.stringify({ d3: adminCal.spec, d3Photos: adminCal.photos.filter(Boolean), d3VideoFrames: calVideoFrames }, null, 2);
@@ -21883,7 +22250,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt]);
     if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps, roof.porchStepCount]);
     // What it stands on and how high (2026-09-25) are set in the walls panel, beside the wall.
-    if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt]);
+    if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt, spec.gradeFallFt, spec.gradeFallToward]);
     return JSON.stringify([spec.colors, spec.roofMaterial]);
   };
   // ⚠️ ANSWERED IS NOT AGREED. calChecksAnswered counts any non-empty answer, so "No" -- the
