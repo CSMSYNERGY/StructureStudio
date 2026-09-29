@@ -425,9 +425,11 @@ export function parseCreateContact(raw: Record<string, unknown>):
  * DRAWN, and beta hosts draw the Phone tab for everyone on the one database and the one Twilio
  * account production uses.
  *
- * ⚠️ DO NOT SET IT UNTIL portal-sms CAN ADOPT A CALLING-ONLY NUMBER (DEVIATIONS "for the
- * portal-sms owner"). Until then a number bought on the Phone tab blocks that builder's texting
- * setup, because portal-sms's buy_number refuses a second live number.
+ * The blocker this comment used to name is gone (2026-09-29): portal-sms's buy_number now
+ * ADOPTS a calling-only number (portal-sms/adoptNumber.ts) instead of refusing a second live one,
+ * so a number bought on the Phone tab no longer strands the builder's texting setup. Setting it is
+ * now only the builder-launch decision. Caller-ID registration (phone_trust_*) stays operator-only
+ * whatever this says.
  */
 export function phoneSelfServeOn(get: (name: string) => string | undefined | null): boolean {
   return String(get("PHONE_SELF_SERVE") ?? "").trim().toLowerCase() === "on";

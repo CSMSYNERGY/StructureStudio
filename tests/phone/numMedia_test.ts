@@ -64,7 +64,7 @@ Deno.test("any other error is handed back untouched — a Twilio retry (23505) i
 Deno.test("sms-inbound's handler really goes through insertInbound with NumMedia", async () => {
   // Wiring, read from the shipped source: the insert is the one place a text is stored, so a
   // refactor that went back to a bare insert would silently drop the photo count again.
-  const src = await Deno.readTextFile(new URL("../../supabase/functions/sms-inbound/index.ts", import.meta.url));
+  const src = (await Deno.readTextFile(new URL("../../supabase/functions/sms-inbound/index.ts", import.meta.url))).replace(/\r\n/g, "\n");
   assert(/parseNumMedia\(params\.NumMedia\)/.test(src), "NumMedia is not parsed from the Twilio params");
   assert(/await insertInbound\(admin,/.test(src), "the inbound row is not stored through insertInbound");
   assert(!/admin\.from\("sms_messages"\)\.insert\(/.test(src), "a bare sms_messages insert is back in the handler");

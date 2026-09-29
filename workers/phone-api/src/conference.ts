@@ -32,6 +32,10 @@
 // ── HOLD / RESUME ───────────────────────────────────────────────────────────────────────
 //   hold     from a plain Dial: the move above, nothing else. In a conference that has
 //            started: Participants API Hold=true on the customer (HoldUrl = the same music).
+//            In one that has not started, nothing, UNLESS a Resume is still on its way in
+//            (callEvents.ts resumeInFlight): its leg will start the conference when it lands
+//            and connect a customer who is only waiting, so the customer is held through the
+//            Participants API first, as keepCustomerHeld does for a warm transfer.
 //   resume   a conference that has not started: take the customer off a Participants hold if
 //            a warm transfer put one on, then redirect the agent's leg back in with
 //            startConferenceOnEnter=true, which starts it. A started one: Hold=false.
@@ -42,8 +46,10 @@
 // customer is the only one left, the customer is finished: voicemail if they were waiting (on
 // hold, or never connected), hung up if they were talking. The leg that holds the call for us
 // ending (its own status callback) is a second trigger for the same check, so a leave event
-// that was skipped or failed cannot strand the customer. A teammate who never answers a warm
-// transfer is handled the same way from their leg's status callback, always voicemail.
+// that was skipped or failed cannot strand the customer. A teammate a warm transfer is still
+// ringing is in the participant list (DEVIATIONS 45), so whoever handed the call on hanging up
+// during the ring does not leave the customer alone. A teammate who never answers is handled
+// the same way from their leg's status callback, always voicemail.
 //
 // ── HANDED OVER ON HOLD ─────────────────────────────────────────────────────────────────
 // SPEC: the one who warm-transfers hanging up leaves the customer with the teammate. When the
@@ -57,11 +63,12 @@ import {
   addCallEvent, adminClient, callById, patchCall, routeForNumber, type Admin, type CallRow, type RouteInfo,
 } from "./db";
 import { ApiError, UUID_RE } from "./http";
-import { parseIdentity, stripClientPrefix } from "./identity";
+import { parseIdentity, stripClientPrefix, toE164 } from "./identity";
 import { logFault } from "./log";
 import type { TwilioParams } from "./twilioSignature";
 import {
-  fetchCall, fetchConference, findConference, listParticipants, updateCall, updateParticipant, type TwilioParticipant,
+  fetchCall, fetchConference, findConference, listParticipants, updateCall, updateParticipant, type TwilioCall,
+  type TwilioParticipant,
 } from "./twilioRest";
 import { conference, response } from "./twiml";
 import { hook } from "./urls";
@@ -140,6 +147,30 @@ export function onTheCall(userId: string, call: Pick<CallRow, "answered_by" | "d
     || (call.transfer_state === "conference" && call.transferred_from === userId);
 }
 
+// ── Transfer legs' custom parameters ────────────────────────────────────────────────────
+
+/**
+ * What every leg a transfer rings carries (SPEC section 3, "Transfer legs' custom
+ * parameters"): the call's id, who handed it on, and the customer's own number and contact. A
+ * warm transfer's leg, and a cold transfer of an outbound call, ring From the business's own
+ * number, so without customer_e164 the teammate's app would have to look the caller up. A
+ * number that isn't a whole North American one (a withheld caller) is left out, as is a
+ * contact the call has none of. A cold transfer sends these as <Parameter>s, a warm one on the
+ * client address (the Participants API has no <Parameter>).
+ */
+export function transferParams(
+  call: Pick<CallRow, "id" | "direction" | "from_e164" | "to_e164" | "contact_id">,
+  transferredBy: string,
+): Record<string, string> {
+  const customer = toE164(call.direction === "in" ? call.from_e164 : call.to_e164);
+  return {
+    call_id: call.id,
+    transferred_by: transferredBy,
+    ...(customer ? { customer_e164: customer } : {}),
+    ...(call.contact_id ? { contact_id: call.contact_id } : {}),
+  };
+}
+
 // ── The 911 callback window ─────────────────────────────────────────────────────────────
 
 export const EMERGENCY_CALLBACK = "For an hour after a 911 call from this number, its calls can't be put on hold or transferred.";
@@ -212,7 +243,9 @@ async function handOver(env: Env, admin: Admin, row: CallRow, conferenceSid: str
  *   - only the customer: finish them. `prefer` "voicemail" always leaves a message (a warm
  *     transfer nobody took); "auto" leaves one only if they were waiting (held, or the
  *     conference never started) and otherwise hangs up, as any call ends when the other side
- *     hangs up.
+ *     hangs up. A warm transfer that was missed earlier changes nothing: the apps cleared it and
+ *     said so ("You're still on the call"), so hanging up after it is an ordinary end (SPEC
+ *     section 3). One still ringing keeps the customer company in the list (DEVIATIONS 45).
  *   - the customer on hold and only the person who now holds the call (client_call_sid,
  *     moved there when they answered a warm transfer): the transferrer has hung up mid-consult,
  *     so the customer comes off hold ("auto" only).
@@ -315,6 +348,14 @@ async function roomOf(env: Env, callId: string): Promise<Room | null> {
 }
 
 /**
+ * The app user a leg rang, from Twilio's own record of it: `to` is client:<identity>, with or
+ * without the query a warm transfer puts on it (DEVIATIONS 46). Null when it names nobody.
+ */
+function rangUser(leg: TwilioCall | null): string | null {
+  return leg ? parseIdentity(stripClientPrefix(String(leg.to ?? "")).split("?")[0])?.userId ?? null : null;
+}
+
+/**
  * Status of the teammate's leg a warm transfer dialed into the conference. Runs in waitUntil
  * after the generic status event has been recorded.
  *   answered   they now hold the call: answered_by moves to them, transferred_from keeps
@@ -322,14 +363,23 @@ async function roomOf(env: Env, callId: string): Promise<Room | null> {
  *              left its conference (ended, or cold-transferred meanwhile), they are hung up
  *              instead of being left in an empty conference. If the one who handed it on has
  *              already gone and the customer is on hold, the customer comes off hold.
- *   unanswered (no-answer, busy, failed, canceled): if the customer is now alone, voicemail.
+ *   unanswered (no-answer, busy, failed, canceled): a warm_transfer_missed event; if the
+ *              customer is now alone, voicemail; otherwise the row is touched so the realtime
+ *              broadcast tells the apps (GET /calls then shows `warm.state` "missed"). Their
+ *              leg is left out of Twilio's participant list, which may still show it.
  *   completed  after answering: the conference's leave event, or /voice/status's
  *              holderLegEnded (their leg is client_call_sid by then).
  *
  * `signed` is false when the request was accepted on ?key= alone (TWILIO_AUTH_TOKEN unset,
- * DEVIATIONS 30). The `user` in the URL is then no proof of anything, and it decides who may
- * hold and transfer the call, so the answer only counts when Twilio's own records agree: the
- * leg is live, it rang that user's identity, and it is in this call's conference.
+ * DEVIATIONS 30). The request is then no proof of anything, so each outcome only counts when
+ * Twilio's own records agree:
+ *   answered   the `user` in the URL decides who may hold and transfer the call: the leg is
+ *              live, it rang that user's identity, and it is in this call's conference.
+ *   unanswered the CallSid is left out of the participant list, so a forged one naming a leg
+ *              still in the call (the one who handed it on, talking to the customer) would
+ *              make the customer look alone and send them to voicemail mid-conversation: the
+ *              leg has ended and it rang that user. Otherwise nothing is recorded and the list
+ *              is taken as Twilio gives it (the old behaviour; holderLegEnded checks the same).
  */
 export async function warmLegStatus(env: Env, row: CallRow, p: TwilioParams, url: URL, signed = true): Promise<void> {
   const admin = adminClient(env);
@@ -347,8 +397,7 @@ export async function warmLegStatus(env: Env, row: CallRow, p: TwilioParams, url
     if (!signed) {
       room = await roomOf(env, row.id);
       const leg = await fetchCall(env, sid);
-      const rang = leg ? parseIdentity(stripClientPrefix(String(leg.to ?? "")).split("?")[0]) : null;
-      if (!leg || leg.status !== "in-progress" || rang?.userId !== user || !room?.parts.some((x) => x.call_sid === sid)) {
+      if (!leg || leg.status !== "in-progress" || rangUser(leg) !== user || !room?.parts.some((x) => x.call_sid === sid)) {
         await logFault({
           code: "warm_answer_unverified", severity: "warn", clientId: row.client_id,
           message: "An unsigned warm-transfer answer did not match Twilio's records; the call was not handed over.",
@@ -378,11 +427,38 @@ export async function warmLegStatus(env: Env, row: CallRow, p: TwilioParams, url
   }
   if (!TERMINAL.has(status) || status === "completed") return;
   if (row.transfer_state !== "conference" || row.ended_at) return;
-  await addCallEvent(admin, row.id, "warm_transfer_missed", { user: UUID_RE.test(user) ? user : null, status });
+  // Unsigned, the miss counts only when Twilio says that leg has ended and that it rang `user`.
+  // A failed read proves nothing either.
+  let confirmed = signed;
+  if (!signed && sid && UUID_RE.test(user)) {
+    const leg = await fetchCall(env, sid).catch(() => null);
+    confirmed = !!leg && TERMINAL.has(leg.status) && rangUser(leg) === user;
+  }
+  if (confirmed) {
+    // The event first: it is what GET /calls reads (callEvents.ts warmStateOf, `warm.state`
+    // "missed"), and the row write below is what tells the apps to read it.
+    await addCallEvent(admin, row.id, "warm_transfer_missed", { user: UUID_RE.test(user) ? user : null, status, sid: sid || null });
+  } else {
+    await logFault({
+      code: "warm_miss_unverified", severity: "warn", clientId: row.client_id,
+      message: "An unsigned missed warm-transfer leg did not match Twilio's records; it was not recorded or left out of the call.",
+      context: { callId: row.id },
+    });
+  }
+  let outcome: FinishOutcome | null = null;
   try {
     const conf = await findConference(env, row.id);
-    if (conf) await finishIfAlone(env, admin, row, conf.sid, "voicemail");
+    // A confirmed leg has ended whatever Twilio's list still says, so it is left out.
+    if (conf) outcome = await finishIfAlone(env, admin, row, conf.sid, "voicemail", confirmed && sid ? sid : undefined);
   } catch (e) {
     await logFault({ code: "warm_transfer_finish_failed", clientId: row.client_id, message: (e as Error).message, context: { callId: row.id } });
+  }
+  // Nothing else on the row changes when a teammate does not answer, so the realtime broadcast
+  // (an AFTER UPDATE trigger with no WHEN clause: migration 254 PART 7) would never fire and the
+  // apps would wait out their 35 s. Write transfer_state back to the value it already has; the
+  // guard keeps it from undoing anything that moved the call on meanwhile. Voicemail has
+  // already changed the row, and a miss that was not recorded has nothing to tell.
+  if (confirmed && outcome !== "voicemail") {
+    await patchCall(admin, row.id, { transfer_state: "conference" }, (q) => q.eq("transfer_state", "conference"));
   }
 }

@@ -17,10 +17,10 @@ import {
   SWITCH_WARNINGS, switchCalling, twilioCreds, voiceEnv, type Bought, type HoldResult,
 } from "../../supabase/functions/portal-settings/phoneNumber.ts";
 
-const SRC = await Deno.readTextFile(new URL("../../supabase/functions/portal-settings/index.ts", import.meta.url));
-const WORKER_URLS = await Deno.readTextFile(new URL("../../workers/phone-api/src/urls.ts", import.meta.url));
-const PORTAL_SMS = await Deno.readTextFile(new URL("../../supabase/functions/portal-sms/index.ts", import.meta.url));
-const SMS_INBOUND = await Deno.readTextFile(new URL("../../supabase/functions/sms-inbound/index.ts", import.meta.url));
+const SRC = (await Deno.readTextFile(new URL("../../supabase/functions/portal-settings/index.ts", import.meta.url))).replace(/\r\n/g, "\n");
+const WORKER_URLS = (await Deno.readTextFile(new URL("../../workers/phone-api/src/urls.ts", import.meta.url))).replace(/\r\n/g, "\n");
+const PORTAL_SMS = (await Deno.readTextFile(new URL("../../supabase/functions/portal-sms/index.ts", import.meta.url))).replace(/\r\n/g, "\n");
+const SMS_INBOUND = (await Deno.readTextFile(new URL("../../supabase/functions/sms-inbound/index.ts", import.meta.url))).replace(/\r\n/g, "\n");
 const slice = (src: string, a: string, b: string, what: string) => {
   const i = src.indexOf(a), j = src.indexOf(b, i + a.length);
   if (i < 0 || j < 0) throw new Error(`phoneNumber_test: ${what} anchors moved (start=${i}, end=${j}) — re-point them.`);
@@ -272,7 +272,7 @@ Deno.test("the three phase-6 actions are phone:edit, behind the rollout, and buy
     assert(/^if \(action === "\w+"\) \{\s*const refused = await phoneRolloutGate\(\);\s*if \(refused\) return refused;/.test(b), `${a} must refuse through phoneRolloutGate before anything else`);
   }
   assert(/const mayBuyPhoneNumber = \(\) => canEdit\("phone"\) && canEdit\("settings_billing"\) && \(!operator \|\| operator\.canBill\);/.test(SRC));
-  const buy = slice(SRC, 'if (action === "phone_buy_number") {', "// ── The Calls report", "phone_buy_number branch");
+  const buy = slice(SRC, 'if (action === "phone_buy_number") {', "// ── Plan phase 6: caller-ID trust", "phone_buy_number branch");
   assert(/if \(!mayBuyPhoneNumber\(\)\)/.test(buy));
   assert(/buyCallingNumber\(\{ clientId, wanted \}, \{/.test(buy), "the purchase is buyCallingNumber (tested above), not an inline copy");
   assert(/p_kind: "sms_number_monthly"/.test(SRC) && /hold: takeNumberHold/.test(buy), "the first month is held on portal-sms's meter");

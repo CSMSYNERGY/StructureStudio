@@ -12,7 +12,7 @@ import { ApiError, CALL_SID_RE, ok, readJson, UUID_RE } from "../http";
 import { toIdentity } from "../identity";
 import { logFault } from "../log";
 import { callIsMine, isTeamLevel, mayReadUnknownNumbers, visibleContactIds } from "../scope";
-import { nextTransferState, onTheCall, refuseEmergencyCallback } from "../conference";
+import { nextTransferState, onTheCall, refuseEmergencyCallback, transferParams } from "../conference";
 import { clientNoun, dial, response } from "../twiml";
 import { recordingMedia, TwilioError, updateCall } from "../twilioRest";
 import { hook } from "../urls";
@@ -102,7 +102,7 @@ export async function transfer(env: Env, ec: Ctx, req: Request, idParam: string)
     }, [clientNoun({
       identity: toIdentity(target, tctx.device_generation),
       statusCallback: hook(env, "/voice/status", { call: call.id, leg: "client" }),
-      params: { call_id: call.id, transferred_by: c.userId },
+      params: transferParams(call, c.userId),
     })]));
   try {
     await updateCall(env, customerLeg, { Twiml: xml });
@@ -173,6 +173,12 @@ export async function mayViewCall(c: Caller, call: CallRow): Promise<boolean> {
 }
 
 export async function voicemailAudio(env: Env, ec: Ctx, req: Request, id: string): Promise<Response> {
+  // ?access_token= stays for installed extension builds only (checked 2026-09-29). Today's
+  // apps send the header only: the extension fetches the bytes and plays them from a blob: URL,
+  // the mobile app hands the header to expo-audio, and phone-core no longer builds a URL with
+  // the token in it. Extension builds installed before 2026-09-29 still play voicemail through
+  // <audio src> with the token in the query. Drop this once those builds are gone (SPEC
+  // section 3); nothing in the code is left to change first.
   const c = await requireCaller(env, req, { allowQueryToken: true, needOn: false });
   if (!UUID_RE.test(id)) throw new ApiError("not_found", "That voicemail wasn't found.");
   const vm = must(

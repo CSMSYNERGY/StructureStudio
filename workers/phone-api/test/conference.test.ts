@@ -7,9 +7,10 @@ import {
   conferenceTwiml, EMERGENCY_CALLBACK, HOLD_MUSIC, legsOf, nextTransferState, onTheCall, type CallAction,
 } from "../src/conference";
 import type { CallRow } from "../src/db";
+import worker from "../src/index";
 import {
-  Auth, BUSINESS_NUMBER, CALL_SID, CLIENT, CUSTOMER, FakeNet, NUMBER_ID, USER_A, USER_B, USER_C,
-  appRequest, attr, call, callerCtx, filter, jsonRes, makeEnv, routeInfo, twilioPost, type Seen,
+  Auth, BUSINESS_NUMBER, CALL_SID, CLIENT, CONTACT_1, CUSTOMER, FakeCtx, FakeNet, NUMBER_ID, USER_A, USER_B, USER_C,
+  appRequest, attr, call, callerCtx, eventRows, filter, jsonRes, makeEnv, routeInfo, twilioPost, type EventFixture, type Seen,
 } from "./helpers";
 
 const CALL_ID = "00000000-0000-4000-8000-0000000ca444";
@@ -211,7 +212,7 @@ describe("/voice/after-dial with the conference", () => {
 
 // ── The app endpoints ───────────────────────────────────────────────────────────────
 
-async function appSetup(row: CallRow, t: TwilioStub = {}, opts: { claimed?: boolean; target?: unknown; targetSettings?: unknown[]; route?: unknown } = {}) {
+async function appSetup(row: CallRow, t: TwilioStub = {}, opts: { claimed?: boolean; target?: unknown; targetSettings?: unknown[]; route?: unknown; events?: EventFixture[] } = {}) {
   const net = new FakeNet().install();
   const auth = await new Auth().init();
   auth.serve(net);
@@ -221,6 +222,7 @@ async function appSetup(row: CallRow, t: TwilioStub = {}, opts: { claimed?: bool
   net.rpc("phone_route_for_number", () => opts.route ?? routeInfo());
   net.rest("PATCH", "phone_calls", () => (opts.claimed === false ? [] : [{ id: CALL_ID }]));
   net.rest("POST", "phone_call_events", () => []);
+  net.rest("GET", "phone_call_events", eventRows(opts.events ?? []));
   net.rest("POST", "app_errors", () => []);
   stubTwilio(net, t);
   return { net, token: await auth.token(USER_A) };
@@ -424,14 +426,17 @@ describe("POST /calls/:id/warm-transfer", () => {
     const { net, token } = await appSetup(liveCall());
     const { res, json } = await press(token, "warm-transfer", { to_user_id: USER_B });
     expect(res.status).toBe(200);
-    expect(json).toEqual({ ok: true, held: true, call_id: CALL_ID });
+    // Moved: the customer waits on music, not held as a participant, and is connected when the
+    // teammate answers (customer_held false).
+    expect(json).toEqual({ ok: true, held: true, call_id: CALL_ID, customer_held: false });
     expect(redirects(net)).toEqual([{ sid: MY_LEG, twiml: conferenceTwiml(env, CALL_ID, "agent"), status: null }]);
 
     const add = net.to(/\/Conferences\/[0-9a-f-]{36}\/Participants\.json$/)[0];
     expect(add.url.pathname).toContain(`/Conferences/${CALL_ID}/Participants.json`); // by name
     const form = new URLSearchParams(add.body);
     expect(form.get("From")).toBe(BUSINESS_NUMBER);
-    expect(form.get("To")).toBe(`client:u_${USER_B.replace(/-/g, "")}_g3?call_id=${CALL_ID}&transferred_by=${USER_A}`);
+    // The leg rings From the business's own number: the customer's number rides along, encoded.
+    expect(form.get("To")).toBe(`client:u_${USER_B.replace(/-/g, "")}_g3?call_id=${CALL_ID}&transferred_by=${USER_A}&customer_e164=%2B15555550142`);
     expect(form.get("StartConferenceOnEnter")).toBe("true");
     expect(form.get("EndConferenceOnExit")).toBe("false");
     expect(form.get("Timeout")).toBe("20");
@@ -454,7 +459,7 @@ describe("POST /calls/:id/warm-transfer", () => {
     const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }), { conference: { sid: CONF, friendly_name: CALL_ID, status: "init" } });
     const { res, json } = await press(token, "warm-transfer", { to_user_id: USER_B });
     expect(res.status).toBe(200);
-    expect(json).toEqual({ ok: true, held: null, call_id: CALL_ID }); // stays on hold; Resume brings them in
+    expect(json).toEqual({ ok: true, held: null, call_id: CALL_ID, customer_held: true }); // stays on hold; Resume brings them in
     expect(participantUpdates(net)).toEqual([{ sid: CALL_SID, form: { Hold: "true", HoldUrl: HOLD_MUSIC, HoldMethod: "GET" } }]);
     const held = net.seen.findIndex((s) => /\/Participants\/CA/.test(s.url.pathname));
     expect(held).toBeGreaterThanOrEqual(0);
@@ -466,12 +471,12 @@ describe("POST /calls/:id/warm-transfer", () => {
   it.each([
     ["the customer already on a Participants hold", true],
     ["you talking to the customer in the conference (after Resume): the teammate joins the two of you", false],
-  ])("a STARTED conference, %s: no hold change, just the teammate (held: null)", async (_l, hold) => {
+  ])("a STARTED conference, %s: no hold change, just the teammate (held: null), and customer_held says which", async (_l, hold) => {
     const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }), {
       conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" }, participants: [customerIn(hold)],
     });
     const { json } = await press(token, "warm-transfer", { to_user_id: USER_B });
-    expect(json).toEqual({ ok: true, held: null, call_id: CALL_ID });
+    expect(json).toEqual({ ok: true, held: null, call_id: CALL_ID, customer_held: hold });
     expect(participantUpdates(net)).toEqual([]);
     expect(redirects(net)).toEqual([]);
     expect(adds(net)).toHaveLength(1);
@@ -521,11 +526,60 @@ describe("POST /calls/:id/warm-transfer", () => {
     expect(net.to(/api\.twilio\.com/)).toEqual([]);
   });
 
-  it("if the teammate can't be rung after the move, says the customer is on hold and how to get them back", async () => {
+  it("if the teammate can't be rung after the move, says the customer is on hold and how to get them back, with held:true in the body", async () => {
     const { token } = await appSetup(liveCall(), { failAdd: true });
     const { res, json } = await press(token, "warm-transfer", { to_user_id: USER_B });
     expect(res.status).toBe(502);
-    expect(json.error.message).toBe("Your teammate couldn't be rung. The customer is on hold; press Resume to talk to them.");
+    expect(json).toEqual({
+      ok: false, held: true, call_id: CALL_ID,
+      error: { code: "twilio_error", message: "Your teammate couldn't be rung. The customer is on hold; press Resume to talk to them." },
+    });
+  });
+
+  it("if the teammate can't be rung from a conference, the body carries the hold state it found (a customer it held stays held)", async () => {
+    const init = await appSetup(liveCall({ transfer_state: "conference" }), { conference: { sid: CONF, friendly_name: CALL_ID, status: "init" }, failAdd: true });
+    const a = await press(init.token, "warm-transfer", { to_user_id: USER_B });
+    expect(a.json).toMatchObject({ ok: false, held: true, error: { message: "Your teammate couldn't be rung. You're still on the call." } });
+    const talking = await appSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" }, participants: [customerIn(false)], failAdd: true,
+    });
+    const b = await press(talking.token, "warm-transfer", { to_user_id: USER_B });
+    expect(b.json).toMatchObject({ ok: false, held: false });
+  });
+
+  it("a started conference whose participant list can't be read still rings the teammate; customer_held is null (unknown)", async () => {
+    const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }), { conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" } });
+    net.on("GET", (u) => u.pathname.endsWith("/Participants.json"), () => jsonRes({ code: 20500 }, 500));
+    const { res, json } = await press(token, "warm-transfer", { to_user_id: USER_B });
+    expect(res.status).toBe(200);
+    expect(json).toEqual({ ok: true, held: null, call_id: CALL_ID, customer_held: null });
+    expect(adds(net)).toHaveLength(1);
+  });
+
+  describe("the teammate's client address names the real caller (customer_e164, contact_id)", () => {
+    const toOf = async (row: CallRow) => {
+      const { net, token } = await appSetup(row);
+      await press(token, "warm-transfer", { to_user_id: USER_B });
+      const to = new URLSearchParams(adds(net)[0].body).get("To")!;
+      return new URLSearchParams(to.slice(to.indexOf("?") + 1));
+    };
+
+    it("an inbound call with a contact: the caller's number and the contact", async () => {
+      const q = await toOf(liveCall({ contact_id: CONTACT_1 }));
+      expect(Object.fromEntries(q)).toEqual({ call_id: CALL_ID, transferred_by: USER_A, customer_e164: CUSTOMER, contact_id: CONTACT_1 });
+    });
+
+    it("an outbound call: the number that was dialed, never the business's own", async () => {
+      const q = await toOf(outboundCall());
+      expect(q.get("customer_e164")).toBe(CUSTOMER);
+      expect(q.has("contact_id")).toBe(false);
+    });
+
+    it("a withheld caller: no customer_e164 at all (the app looks the call up instead)", async () => {
+      const q = await toOf(liveCall({ from_e164: "anonymous" }));
+      expect(q.has("customer_e164")).toBe(false);
+      expect(q.get("call_id")).toBe(CALL_ID);
+    });
   });
 });
 
@@ -538,6 +592,14 @@ describe("POST /calls/:id/transfer (cold) from the conference", () => {
     expect(claim.body).toMatchObject({ transfer_state: "transferring", transferred_from: USER_A });
     expect(claim.url).toContain("transfer_state=eq.conference");
     expect(redirects(net)[0].sid).toBe(CALL_SID);
+  });
+
+  it("the teammate's <Client> carries the real caller too (customer_e164, contact_id), as <Parameter>s", async () => {
+    const { net, token } = await appSetup(outboundCall({ contact_id: CONTACT_1, transfer_state: "conference" }));
+    await press(token, "transfer", { to_user_id: USER_B });
+    const xml = redirects(net)[0].twiml!;
+    const params = Object.fromEntries([...xml.matchAll(/<Parameter name="([^"]+)" value="([^"]*)"\/>/g)].map((m) => [m[1], m[2]]));
+    expect(params).toEqual({ call_id: CALL_ID, transferred_by: USER_A, customer_e164: CUSTOMER, contact_id: CONTACT_1 });
   });
 
   it("a failed redirect puts it back into the conference state, not null", async () => {
@@ -558,11 +620,12 @@ describe("POST /calls/:id/transfer (cold) from the conference", () => {
 
 // ── The Twilio side ─────────────────────────────────────────────────────────────────
 
-function twilioSetup(row: CallRow | null, t: TwilioStub = {}, opts: { claimed?: boolean } = {}) {
+function twilioSetup(row: CallRow | null, t: TwilioStub = {}, opts: { claimed?: boolean; events?: EventFixture[] } = {}) {
   const net = new FakeNet().install();
   net.rest("GET", "phone_calls", () => (row ? [row] : []));
   net.rest("PATCH", "phone_calls", () => (opts.claimed === false ? [] : [{ id: CALL_ID }]));
   net.rest("POST", "phone_call_events", () => []);
+  net.rest("GET", "phone_call_events", eventRows(opts.events ?? []));
   net.rest("POST", "app_errors", () => []);
   net.rpc("phone_route_for_number", () => routeInfo());
   stubTwilio(net, t);
@@ -902,5 +965,329 @@ describe("/voice/status while the call is in its conference", () => {
     expect(bodies[0]).toMatchObject({ status: "completed" });
     expect(bodies).toContainEqual({ transfer_state: null });
     expect(filter(net.reads("phone_calls")[0], "twilio_call_sid")).toBe(CALL_SID);
+  });
+});
+
+// ── Reviewer follow-ups (2026-09-29) ────────────────────────────────────────────────
+
+/** A phone_call_events row for this call, `secondsAgo` old. */
+const ev = (type: string, data: Record<string, unknown> | null, secondsAgo: number): EventFixture => ({
+  call_id: CALL_ID, type, at: new Date(Date.now() - secondsAgo * 1000).toISOString(), data,
+});
+
+describe("Hold pressed while a Resume is still landing (the conference still reads 'init')", () => {
+  // Resume redirects your leg back in with startConferenceOnEnter=true. Until it lands the
+  // conference reads 'init', and "init is already hold" would answer held:true while the
+  // conference is about to start and connect the customer.
+  const init = { conference: { sid: CONF, friendly_name: CALL_ID, status: "init" } };
+  const resumed = [ev("hold", { user: USER_A, moved: true }, 30), ev("resume", { user: USER_A }, 1)];
+  const inConference = () => liveCall({ transfer_state: "conference" });
+
+  it("holds the customer through the Participants API first, so the conference starting leaves them on hold: held:true is true", async () => {
+    const { net, token } = await appSetup(inConference(), init, { events: resumed });
+    const { res, json } = await press(token, "hold");
+    expect(res.status).toBe(200);
+    expect(json).toEqual({ ok: true, held: true, call_id: CALL_ID });
+    expect(participantUpdates(net)).toEqual([{ sid: CALL_SID, form: { Hold: "true", HoldUrl: HOLD_MUSIC, HoldMethod: "GET" } }]);
+    expect(redirects(net)).toEqual([]);
+    expect(net.writes("phone_call_events").find((s) => s.json.type === "hold")?.json.data).toEqual({ user: USER_A, moved: false, after_resume: true });
+    const read = net.reads("phone_call_events")[0];
+    expect(filter(read, "call_id")).toBe(CALL_ID);
+    expect(read.url.searchParams.get("type")).toBe("in.(hold,resume,transfer)");
+  });
+
+  it("a Resume from before a cold transfer was in the conference that ended: Hold in the new one (entered by a warm-transfer move) holds nobody through the Participants API", async () => {
+    // Conference 1 (C's): hold, resume. C cold-transfers to you. You warm-transfer to B, which
+    // moves the call into conference 2 ('init' until someone starts it), and B misses. You
+    // press Hold. Before, C's old Resume read as "still landing": the customer, on music, was
+    // Participants-held, and a 404 answered held:false although they were on hold.
+    const { net, token } = await appSetup(inConference(), { ...init, participantStatus: 404 }, {
+      events: [
+        ev("hold", { user: USER_C, moved: true }, 90), ev("resume", { user: USER_C }, 80),
+        ev("transfer", { from: USER_C, to: USER_A, dnd: false }, 60),
+        ev("warm_transfer", { from: USER_A, to: USER_B, sid: TEAMMATE_LEG, moved: true }, 30),
+        ev("warm_transfer_missed", { user: USER_B, status: "no-answer", sid: TEAMMATE_LEG }, 5),
+      ],
+    });
+    const { res, json } = await press(token, "hold");
+    expect(res.status).toBe(200);
+    expect(json).toEqual({ ok: true, held: true, call_id: CALL_ID });
+    expect(participantUpdates(net)).toEqual([]);
+    expect(net.writes("phone_call_events").find((x) => x.json.type === "hold")?.json.data).toEqual({ user: USER_A, moved: false });
+  });
+
+  it("...while a Resume in THIS conference (after the cold transfer) still counts", async () => {
+    const { net, token } = await appSetup(inConference(), init, {
+      events: [
+        ev("transfer", { from: USER_C, to: USER_A, dnd: false }, 90),
+        ev("hold", { user: USER_A, moved: true }, 30), ev("resume", { user: USER_A }, 1),
+      ],
+    });
+    await press(token, "hold");
+    expect(participantUpdates(net)).toEqual([{ sid: CALL_SID, form: { Hold: "true", HoldUrl: HOLD_MUSIC, HoldMethod: "GET" } }]);
+  });
+
+  it("a Hold since that Resume: the conference not having started IS hold, nothing more to do", async () => {
+    const { net, token } = await appSetup(inConference(), init, {
+      events: [ev("resume", { user: USER_A }, 60), ev("hold", { user: USER_A, moved: false }, 2)],
+    });
+    const { json } = await press(token, "hold");
+    expect(json).toEqual({ ok: true, held: true, call_id: CALL_ID });
+    expect(participantUpdates(net)).toEqual([]);
+  });
+
+  it("an app's own timing mark called 'resume' does not count: only the Worker's events do", async () => {
+    const { net, token } = await appSetup(inConference(), init, {
+      events: [ev("hold", { user: USER_A, moved: true }, 30), ev("resume", { source: "app", user: USER_A }, 1)],
+    });
+    await press(token, "hold");
+    expect(participantUpdates(net)).toEqual([]);
+  });
+
+  it("the customer's leg not in the conference either (404): refused, and the body says the customer is NOT held", async () => {
+    const { net, token } = await appSetup(inConference(), { ...init, participantStatus: 404 }, { events: resumed });
+    const { res, json } = await press(token, "hold");
+    expect(res.status).toBe(400);
+    expect(json).toEqual({
+      ok: false, held: false, call_id: CALL_ID,
+      error: { code: "bad_request", message: "The call is still coming off hold. Press Hold again in a moment." },
+    });
+    expect(events(net)).not.toContain("hold");
+  });
+
+  it("Twilio refusing the hold: twilio_error with held:false (the conference starts with the two of you talking)", async () => {
+    const { net, token } = await appSetup(inConference(), { ...init, participantStatus: 500 }, { events: resumed });
+    const { res, json } = await press(token, "hold");
+    expect(res.status).toBe(502);
+    expect(json).toMatchObject({ ok: false, held: false, call_id: CALL_ID, error: { code: "twilio_error", message: "Hold didn't work. You're still on the call." } });
+    expect(net.writes("app_errors").map((s) => s.json.code)).toContain("hold_failed");
+  });
+
+  it("a failed event read keeps the old answer (held, nothing touched at Twilio)", async () => {
+    const { net, token } = await appSetup(inConference(), init);
+    net.rest("GET", "phone_call_events", () => jsonRes({ message: "boom" }, 500));
+    const { res, json } = await press(token, "hold");
+    expect(res.status).toBe(200);
+    expect(json).toEqual({ ok: true, held: true, call_id: CALL_ID });
+    expect(participantUpdates(net)).toEqual([]);
+  });
+
+  it("a STARTED conference never reads the events: the Participants hold is the whole answer", async () => {
+    const { net, token } = await appSetup(inConference(), { conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" } }, { events: resumed });
+    await press(token, "hold");
+    expect(net.reads("phone_call_events")).toEqual([]);
+    expect(participantUpdates(net)).toHaveLength(1);
+  });
+});
+
+describe("Resume into a conference nobody has started", () => {
+  it("writes its event BEFORE it answers, so a Hold pressed right after sees it", async () => {
+    const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }), { conference: { sid: CONF, friendly_name: CALL_ID, status: "init" } });
+    const ctx = new FakeCtx();
+    const res = await worker.fetch(appRequest("POST", `/calls/${CALL_ID}/resume`, token, {}), env, ctx as unknown as ExecutionContext);
+    expect(res.status).toBe(200);
+    // Nothing in the background has been waited for yet.
+    expect(events(net)).toEqual(["resume"]);
+    await ctx.settle();
+  });
+});
+
+describe("a warm transfer nobody answers tells the apps at once", () => {
+  const room = (participants: { call_sid: string; hold: boolean; muted: boolean; status: string }[], status = "in-progress") =>
+    ({ conference: { sid: CONF, friendly_name: CALL_ID, status }, participants });
+  const me = { call_sid: MY_LEG, hold: false, muted: false, status: "connected" };
+  const touches = (net: FakeNet) => patches(net).filter((p) => p.body.transfer_state === "conference");
+
+  it("you are still there: the missed event (with the teammate's leg) goes in FIRST, then transfer_state is written back to 'conference', guarded, so the row's broadcast fires", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), room([customerIn(true), me], "init"));
+    await warmStatus("no-answer");
+    const missed = net.writes("phone_call_events").find((s) => s.json.type === "warm_transfer_missed")!;
+    expect(missed.json.data).toEqual({ user: USER_B, status: "no-answer", sid: TEAMMATE_LEG });
+    expect(patches(net)).toEqual([{ body: { transfer_state: "conference" }, url: expect.stringContaining("transfer_state=eq.conference") }]);
+    const touch = net.seen.findIndex((s) => s.method === "PATCH" && s.url.pathname === "/rest/v1/phone_calls");
+    expect(net.seen.indexOf(missed)).toBeLessThan(touch);
+    expect(redirects(net)).toEqual([]);
+    expect(participantUpdates(net)).toEqual([]);
+  });
+
+  it("the customer alone goes to voicemail, which changes the row by itself: no second write", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), room([customerIn()]));
+    await warmStatus("no-answer");
+    expect(patches(net).map((p) => p.body)).toEqual([{ transfer_state: null }]);
+    expect(redirects(net)[0].twiml).toContain("<Record");
+  });
+
+  it("Twilio's list still showing the teammate's leg (it has ended) does not keep the customer, alone, from voicemail", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), room([customerIn(), { call_sid: TEAMMATE_LEG, hold: false, muted: false, status: "ringing" }]));
+    await warmStatus("busy");
+    const r = redirects(net);
+    expect(r).toHaveLength(1);
+    expect(r[0].sid).toBe(CALL_SID);
+    expect(r[0].twiml).toContain("<Record");
+  });
+
+  it("no conference to be found: still touched, so the apps re-read", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), { conference: null });
+    await warmStatus("no-answer");
+    expect(touches(net)).toHaveLength(1);
+  });
+
+  it("a failure finishing the customer is logged, and the row is still touched", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }));
+    net.on("GET", (u) => u.pathname.endsWith("/Conferences.json"), () => jsonRes({ code: 20500 }, 500));
+    await warmStatus("failed");
+    expect(net.writes("app_errors").map((s) => s.json.code)).toContain("warm_transfer_finish_failed");
+    expect(touches(net)).toHaveLength(1);
+  });
+
+  it.each([
+    ["the call left its conference meanwhile", liveCall({ transfer_state: null })],
+    ["the call has ended", liveCall({ transfer_state: "conference", ended_at: new Date().toISOString() })],
+  ])("%s: nothing written at all", async (_l, row) => {
+    const net = twilioSetup(row, room([customerIn()]));
+    await warmStatus("no-answer");
+    expect(patches(net)).toEqual([]);
+    expect(events(net)).not.toContain("warm_transfer_missed");
+  });
+});
+
+describe("a customer left alone after a warm transfer is finished as any call is (SPEC section 3: after a miss, hanging up is an ordinary end)", () => {
+  // For a few hours the Worker read the call's warm transfers here and sent a customer who was
+  // talking to voicemail if the latest one had not been taken. That outlived the transfer: a
+  // miss, then Resume, then an ordinary goodbye played the greeting (DEVIATIONS 52, withdrawn).
+  const rang = ev("warm_transfer", { from: USER_A, to: USER_B, sid: TEAMMATE_LEG, moved: false }, 60);
+  const missed = ev("warm_transfer_missed", { user: USER_B, status: "no-answer", sid: TEAMMATE_LEG }, 40);
+  const talking = (holderLeg = MY_LEG) => ({
+    conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" }, participants: [customerIn(false)], callStatus: { [holderLeg]: "completed" },
+  });
+  const hungUp = [{ sid: CALL_SID, twiml: null, status: "completed" }];
+
+  it("B misses, you press Resume, finish the conversation and hang up first: the call simply ends, never the voicemail greeting", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), talking(), {
+      events: [ev("hold", { user: USER_A, moved: true }, 90), rang, missed, ev("resume", { user: USER_A }, 30)],
+    });
+    await leave(MY_LEG);
+    expect(redirects(net)).toEqual(hungUp);
+    expect(events(net)).toEqual(["conference_ended"]);
+    expect(net.reads("phone_call_events")).toEqual([]);
+  });
+
+  it("B's missed callback was lost (the transfer still reads 'ringing') and B is no longer listed: hung up, not voicemail", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), talking(), { events: [rang] });
+    await leave(MY_LEG);
+    expect(redirects(net)).toEqual(hungUp);
+  });
+
+  it("the holder's own leg ending (the backstop) after a miss: hung up the same way", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), talking(), { events: [rang, missed] });
+    await call(env, await twilioPost(env, "/voice/status", { CallSid: MY_LEG, CallStatus: "completed", AccountSid: ACCOUNT }, { call: CALL_ID, leg: "client" }));
+    expect(redirects(net)).toEqual(hungUp);
+  });
+
+  it("you hang up while B is still ringing: B is in the list, so the customer is not alone and nothing happens; B then missing sends them to voicemail", async () => {
+    const ringing = { call_sid: TEAMMATE_LEG, hold: false, muted: false, status: "ringing" };
+    const room = { ...talking(), participants: [customerIn(false), ringing] };
+    const first = twilioSetup(liveCall({ transfer_state: "conference" }), room, { events: [rang] });
+    await leave(MY_LEG);
+    expect(redirects(first)).toEqual([]);
+    expect(patches(first)).toEqual([]);
+    const then = twilioSetup(liveCall({ transfer_state: "conference" }), room, { events: [rang] });
+    await warmStatus("no-answer");
+    const r = redirects(then);
+    expect(r).toHaveLength(1);
+    expect(r[0].sid).toBe(CALL_SID);
+    expect(r[0].twiml).toContain("<Record");
+  });
+
+  it("a warm transfer the teammate TOOK: when they hang up on the customer they were talking to, the call simply ends", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference", answered_by: USER_B, transferred_from: USER_A, client_call_sid: TEAMMATE_LEG }), talking(TEAMMATE_LEG), { events: [rang] });
+    await leave(TEAMMATE_LEG);
+    expect(redirects(net)).toEqual(hungUp);
+  });
+
+  it("a customer who was waiting (held) still goes to voicemail", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), { ...talking(), participants: [customerIn(true)] }, { events: [rang, missed] });
+    await leave(MY_LEG);
+    expect(redirects(net)[0].twiml).toContain("<Record");
+    expect(net.writes("phone_call_events").find((s) => s.json.type === "conference_voicemail")?.json.data).toEqual({ prefer: "auto" });
+  });
+});
+
+describe("a missed warm leg accepted on ?key= alone (no TWILIO_AUTH_TOKEN) counts only when Twilio agrees", () => {
+  // The miss leaves its CallSid out of the participant count. Unchecked, a forged one naming a
+  // leg still in the call made the customer look alone: voicemail mid-conversation.
+  const keyOnly = makeEnv({ TWILIO_AUTH_TOKEN: undefined });
+  const unsignedMiss = async (sid: string, user: string, status = "no-answer") => call(keyOnly, await twilioPost(keyOnly, "/voice/status", {
+    CallSid: sid, CallStatus: status, AccountSid: ACCOUNT,
+  }, { call: CALL_ID, leg: "warm", user }));
+  const identity = (u: string) => `client:u_${u.replace(/-/g, "")}_g3`;
+  const inProgress = { sid: CONF, friendly_name: CALL_ID, status: "in-progress" };
+  const me = { call_sid: MY_LEG, hold: false, muted: false, status: "connected" };
+  const ringing = { call_sid: TEAMMATE_LEG, hold: false, muted: false, status: "ringing" };
+  const touched = (net: FakeNet) => patches(net).filter((p) => p.body.transfer_state === "conference");
+
+  it("B took the call and dropped; you are talking to the customer again. A forged miss naming YOUR live leg sends nobody to voicemail and records nothing", async () => {
+    // Your leg is not client_call_sid any more (B's is), so the holder backstop never sees it.
+    const net = twilioSetup(liveCall({ transfer_state: "conference", answered_by: USER_B, transferred_from: USER_A, client_call_sid: TEAMMATE_LEG }), {
+      conference: inProgress, participants: [customerIn(false), me],
+      callStatus: { [MY_LEG]: "in-progress" }, callTo: { [MY_LEG]: identity(USER_A) },
+    });
+    await unsignedMiss(MY_LEG, USER_A);
+    expect(redirects(net)).toEqual([]);
+    expect(patches(net)).toEqual([]);
+    expect(events(net)).not.toContain("warm_transfer_missed");
+    expect(net.writes("app_errors").map((s) => s.json.code)).toContain("warm_miss_unverified");
+  });
+
+  it("you hung up while B rings: a forged miss for B's leg, still ringing, does not send the customer to voicemail", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: inProgress, participants: [customerIn(false), ringing],
+      callStatus: { [TEAMMATE_LEG]: "ringing" }, callTo: { [TEAMMATE_LEG]: identity(USER_B) },
+    });
+    await unsignedMiss(TEAMMATE_LEG, USER_B);
+    expect(redirects(net)).toEqual([]);
+    expect(events(net)).not.toContain("warm_transfer_missed");
+  });
+
+  it("a leg that has ended but rang someone else is not recorded as that user's miss", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: inProgress, participants: [customerIn(false), me],
+      callStatus: { [TEAMMATE_LEG]: "no-answer" }, callTo: { [TEAMMATE_LEG]: identity(USER_C) },
+    });
+    await unsignedMiss(TEAMMATE_LEG, USER_B);
+    expect(events(net)).not.toContain("warm_transfer_missed");
+    expect(touched(net)).toEqual([]);
+  });
+
+  it("a real miss Twilio agrees with, you still there: recorded with the leg, and the row touched", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: inProgress, participants: [customerIn(true), me],
+      callStatus: { [TEAMMATE_LEG]: "no-answer" }, callTo: { [TEAMMATE_LEG]: `${identity(USER_B)}?call_id=${CALL_ID}&transferred_by=${USER_A}` },
+    });
+    await unsignedMiss(TEAMMATE_LEG, USER_B);
+    expect(net.writes("phone_call_events").find((s) => s.json.type === "warm_transfer_missed")?.json.data)
+      .toEqual({ user: USER_B, status: "no-answer", sid: TEAMMATE_LEG });
+    expect(touched(net)).toHaveLength(1);
+    expect(redirects(net)).toEqual([]);
+  });
+
+  it("a real miss with the customer alone: voicemail, even while Twilio's list still shows the ended leg", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: inProgress, participants: [customerIn(false), ringing],
+      callStatus: { [TEAMMATE_LEG]: "busy" }, callTo: { [TEAMMATE_LEG]: identity(USER_B) },
+    });
+    await unsignedMiss(TEAMMATE_LEG, USER_B, "busy");
+    const r = redirects(net);
+    expect(r).toHaveLength(1);
+    expect(r[0].sid).toBe(CALL_SID);
+    expect(r[0].twiml).toContain("<Record");
+  });
+
+  it("Twilio's record can't be read: not recorded, and the list is taken as Twilio gives it (a customer Twilio lists alone still goes to voicemail)", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), { conference: inProgress, participants: [customerIn(false)] });
+    net.on("GET", (u) => /\/Calls\/CA[0-9a-f]+\.json$/.test(u.pathname), () => jsonRes({ code: 20500 }, 500));
+    await unsignedMiss(TEAMMATE_LEG, USER_B);
+    expect(events(net)).not.toContain("warm_transfer_missed");
+    expect(redirects(net)[0].twiml).toContain("<Record");
   });
 });

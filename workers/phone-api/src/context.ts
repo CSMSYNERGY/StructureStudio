@@ -17,7 +17,7 @@ export interface Caller {
 }
 
 export interface RequireOpts {
-  /** ?access_token= is accepted (only for <audio src>, which cannot send a header). */
+  /** ?access_token= is accepted (voicemail audio only, for extension builds from before 2026-09-29 that play it through <audio src>). */
   allowQueryToken?: boolean;
   /** Refuse unless the tenant's phone switch is on. Default true. */
   needOn?: boolean;

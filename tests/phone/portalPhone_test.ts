@@ -6,8 +6,8 @@
 
 import { assert, assertEquals } from "jsr:@std/assert@1";
 
-const SALES = await Deno.readTextFile(new URL("../../portal/02-sales.jsx", import.meta.url));
-const CORE = await Deno.readTextFile(new URL("../../portal/01-core.jsx", import.meta.url));
+const SALES = (await Deno.readTextFile(new URL("../../portal/02-sales.jsx", import.meta.url))).replace(/\r\n/g, "\n");
+const CORE = (await Deno.readTextFile(new URL("../../portal/01-core.jsx", import.meta.url))).replace(/\r\n/g, "\n");
 
 const slice = (src: string, a: string, b: string, what: string) => {
   const i = src.indexOf(a), j = src.indexOf(b, i);
@@ -118,11 +118,15 @@ Deno.test("ssPhoneOffered: on for the tenant, an operator viewing, or a beta hos
   assertEquals(beta.ssPhoneOffered("off", false), true);
 });
 
-Deno.test("the extension IDs: a placeholder is inert, an injected real-shaped ID is used, junk is ignored", () => {
-  const placeholder: Win = { location: { href: "" } };
-  const h = helpers(placeholder);
-  assert(Array.isArray(placeholder.SS_PHONE_EXTENSION_IDS), "the config constant was not created");
-  assertEquals(h.ssPhoneExtensionIds(), []);
+Deno.test("the extension IDs: the unpacked dev build's stable id by default, an injected real-shaped ID wins, junk is ignored", () => {
+  const defaults: Win = { location: { href: "" } };
+  const h = helpers(defaults);
+  assert(Array.isArray(defaults.SS_PHONE_EXTENSION_IDS), "the config constant was not created");
+  // The dev build's id (a fixed manifest key keeps it stable). The store id is ADDED here, first,
+  // when SSS Phone is published; the comment above the constant says so.
+  assertEquals(defaults.SS_PHONE_EXTENSION_IDS, ["ipiccbfkkbenmiaiaoecbhbjalkbikjk"]);
+  assertEquals(h.ssPhoneExtensionIds(), ["ipiccbfkkbenmiaiaoecbhbjalkbikjk"], "a real Chrome id shape, so it IS messaged");
+  assert(/add the Chrome Web Store id to this list, FIRST/.test(CORE), "the note to add the store id is next to the constant");
   assert(!h.ssPhoneLinkReady(h.SS_PHONE_LINKS.chrome), "a placeholder store link must read as not ready");
   const injected: Win = { location: { href: "" }, SS_PHONE_EXTENSION_IDS: ["abcdefghijklmnopabcdefghijklmnop", "not-an-id", 7] };
   assertEquals(helpers(injected).ssPhoneExtensionIds(), ["abcdefghijklmnopabcdefghijklmnop"]);
@@ -192,8 +196,14 @@ Deno.test("ssPhoneE164, the emergency guard, and the app deep link", () => {
   assertEquals(h.ssPhoneE164(null), "");
   for (const n of ["911", "9-1-1", "933", "112"]) assert(h.ssPhoneIsEmergency(n), n);
   assert(!h.ssPhoneIsEmergency("(555) 555-0100"));
-  const link = h.ssPhoneDeepLink("call", { to_e164: "+15555550100", contact_id: "c1", user_id: "u1", client_id: "demo-tenant" });
-  assertEquals(link, "sssphone://call?to=%2B15555550100&contact_id=c1&user_id=u1&client_id=demo-tenant");
+  // SPEC section 7: `ts` is when the page made the link (epoch ms); the app drops one over a
+  // minute old, so a replayed link never offers a call nobody just asked for.
+  const link = h.ssPhoneDeepLink("call", { to_e164: "+15555550100", contact_id: "c1", user_id: "u1", client_id: "demo-tenant" }, 1790000000000);
+  assertEquals(link, "sssphone://call?to=%2B15555550100&contact_id=c1&user_id=u1&client_id=demo-tenant&ts=1790000000000");
+  const before = Date.now();
+  const live = new URL(h.ssPhoneDeepLink("call", { to_e164: "+15555550100" }).replace("sssphone://", "https://x/"));
+  const ts = Number(live.searchParams.get("ts"));
+  assert(/^\d{13}$/.test(String(live.searchParams.get("ts"))) && ts >= before && ts <= Date.now(), `ts is Date.now(): ${live.searchParams.get("ts")}`);
 });
 
 Deno.test("ssIsPhoneBrowser: phones and iPads yes, desktops no", () => {
@@ -207,7 +217,7 @@ Deno.test("ssIsPhoneBrowser: phones and iPads yes, desktops no", () => {
 
 // ── portal-settings: the phone GATES are what the plan says ────────────────────────────────
 Deno.test("portal-settings gates the phone actions on the phone area (edit to change, view to read)", async () => {
-  const src = await Deno.readTextFile(new URL("../../supabase/functions/portal-settings/index.ts", import.meta.url));
+  const src = (await Deno.readTextFile(new URL("../../supabase/functions/portal-settings/index.ts", import.meta.url))).replace(/\r\n/g, "\n");
   const want: Record<string, string> = {
     phone_settings_get: "view", phone_calls_report: "view",
     phone_settings_save: "edit", phone_status_set: "edit", phone_signout_user: "edit",

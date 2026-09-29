@@ -21,6 +21,7 @@ src/routes/me.ts      /settings/me, /devices, /devices/signout-all, /log, /turn,
 src/routes/push.ts    /push/text (FCM HTTP v1, APNs)
 src/cron/             sweep.ts (*/15), retention.ts and usageDebit.ts (daily, 09:00 UTC: minute debit, monthly line fee)
 src/conference.ts     the conference design: TwiML, which leg is which, the transfer_state machine, /voice/conference
+src/callEvents.ts     what phone_call_events say that the row cannot: a warm transfer's state, a Resume still landing
 src/voicemail.ts      the greeting + <Record> TwiML (and transcription)
 src/wallet.ts         the wallet floor for outbound calls
 src/jwt.ts            Supabase login check (ES256 via JWKS, cached per isolate)
@@ -100,14 +101,14 @@ App endpoints take `Authorization: Bearer <Supabase access token>` and answer `{
 | `POST /voice/voicemail` | Record action (hangs up) and recording status callback (204). Files `phone_voicemails`. |
 | `POST /voice/transcription` | `TRANSCRIBE=on` only: Twilio's transcribeCallback (204). Stores `phone_voicemails.transcript`. |
 | `POST /voice/conference` | The conference status callback (`leave`), 204. A customer left alone in the call's conference goes to voicemail (if they were waiting) or is hung up (if they were talking). The holding leg's own final status on `/voice/status` runs the same check as a backstop. |
-| `GET /voicemails/:id/audio` | Streams the MP3 from Twilio after checking the caller may see the call. Also takes `?access_token=` for `<audio>` tags. |
+| `GET /voicemails/:id/audio` | Streams the MP3 from Twilio after checking the caller may see the call. Also takes `?access_token=`, only for extension builds from before 2026-09-29 that play it through `<audio src>` (DEVIATIONS 53). |
 | `POST /calls/:id/transfer` | Cold transfer. `:id` may be the call id or the app leg's CallSid. Works from a plain call or from its conference. |
-| `POST /calls/:id/hold`, `/resume` | Hold moves the call into a conference named after it (the customer hears hold music, you hear silence), or holds the customer in one that has started; resume brings you back. Answers `{ok, held, call_id}`. |
-| `POST /calls/:id/warm-transfer` | `{to_user_id}`. Rings the teammate into the call's conference. From a plain call, when they answer all three of you talk, and you hang up when ready. From hold, the customer stays on hold while you and the teammate talk; Resume brings them in, and hanging up hands them to the teammate off hold. A teammate on DND is refused. A customer left alone because nobody answered goes to voicemail. Hold and both transfers are refused on inbound calls for an hour after a 911 call from the number. |
+| `POST /calls/:id/hold`, `/resume` | Hold moves the call into a conference named after it (the customer hears hold music, you hear silence), or holds the customer in one that has started; resume brings you back. Answers `{ok, held, call_id}`. A Hold pressed while a Resume is still landing holds the customer as a participant, or says they are not held (DEVIATIONS 50). |
+| `POST /calls/:id/warm-transfer` | `{to_user_id}`. Rings the teammate into the call's conference. From a plain call, when they answer all three of you talk, and you hang up when ready. From hold, the customer stays on hold while you and the teammate talk; Resume brings them in, and hanging up hands them to the teammate off hold. A teammate on DND is refused. Answers `customer_held` (a private consult or not); the teammate's app gets `customer_e164` and `contact_id`. A teammate who doesn't answer touches the row, so the apps hear at once and read `warm` on `GET /calls` (DEVIATIONS 47 to 51). A customer left alone because nobody answered goes to voicemail. Hold and both transfers are refused on inbound calls for an hour after a 911 call from the number. |
 | `GET /media/:messageId/:index` | An inbound photo (or other file) from a text, streamed from Twilio after the thread's scope check. Bearer header only (SPEC section 3); `?access_token=` is refused. |
 | `POST /calls/:id/events` | Client timing marks into `phone_call_events`. |
 | `POST /sms/send` | The CRM's checks, then `sendTenantSms` with `bypassQuietHours: true`, then tags the row with `client_temp_id` and `sent_via`. `media_urls` is refused: sending photos isn't built (the shared send has no media). |
-| `GET /threads`, `/threads/:key`, `/calls`, `/search`, `/team` | Contacts row scope and phone level applied. Lists return `cursor` when there is another page. |
+| `GET /threads`, `/threads/:key`, `/calls`, `/search`, `/team` | Contacts row scope and phone level applied. Lists return `cursor` when there is another page. A live call in its conference carries `warm` (how its latest warm transfer stands). |
 | `POST /settings/me`, `/devices`, `/devices/signout-all` | Sign-out-all bumps `device_generation`, forgets push tokens and ends every Auth session. |
 | `POST /push/text` | Database webhook on new inbound `sms_messages` rows. |
 | `POST /log` | App errors into `app_errors`, severity kept. |

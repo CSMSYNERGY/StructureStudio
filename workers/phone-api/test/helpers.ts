@@ -174,6 +174,31 @@ function restResponse(s: Seen, out: unknown): Response {
   return jsonRes(rows);
 }
 
+/** One phone_call_events row as the Worker reads it back. */
+export interface EventFixture {
+  call_id: string;
+  type: string;
+  at: string;
+  data: Record<string, unknown> | null;
+}
+
+/** The values an eq./in.() filter asks for, or null when there is no such filter. */
+function filterValues(v: string | null): string[] | null {
+  if (!v) return null;
+  if (v.startsWith("eq.")) return [v.slice(3)];
+  const m = /^in\.\((.*)\)$/.exec(v);
+  return m ? m[1].split(",").map((x) => x.replace(/^"|"$/g, "")) : null;
+}
+
+/** A phone_call_events GET reply that honours the call_id and type filters the Worker sends. */
+export function eventRows(rows: EventFixture[]): Reply {
+  return (s: Seen) => {
+    const ids = filterValues(s.url.searchParams.get("call_id"));
+    const types = filterValues(s.url.searchParams.get("type"));
+    return rows.filter((r) => (!ids || ids.includes(r.call_id)) && (!types || types.includes(r.type)));
+  };
+}
+
 /** A PostgREST filter value from a request, e.g. eq("id") → the id asked for. */
 export function filter(s: Seen, col: string): string | null {
   const v = s.url.searchParams.get(col);

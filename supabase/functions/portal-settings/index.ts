@@ -130,6 +130,15 @@ import {
   numberVoicemailConfig, pickedNumber, smsInboundUrl, switchCalling, twilioCreds, voiceEnv, type HoldResult, type SwitchNumber,
 } from "./phoneNumber.ts";
 import { findPurchasedNumbers, purchaseNumber, releaseNumber, searchAvailableNumbers, trustHubConfigured } from "../_shared/twilioTrustHub.ts";
+// Plan phase 6, caller-ID trust (plan §14): SHAKEN/STIR and Voice Integrity for the tenant's
+// number, OPERATOR-ONLY. The Twilio flow is the shared module's; the order and the refusals are
+// phoneTrust.ts, both driven against stubs by tests/phone/phoneTrust_test.ts.
+import { fetchCustomerProfile, fetchTrustProduct, numberOnProfile, parseVoiceIntegrityInfo, setupVoiceTrust, type VoiceIntegrityInfo } from "../_shared/twilioTrustHub.ts";
+import {
+  callerIdView, chooseTrustProfile, parseTrustProduct, runTrustSetup, runTrustStatus, TRUST_COLS, TRUST_COLUMNS, TRUST_LOCK_MS,
+  TRUST_OPERATOR_SENTENCE, trustOperatorAllowed, type TrustRow,
+} from "./phoneTrust.ts";
+import { isInternalTenant } from "../_shared/internalTenant.ts";
 import { isQboLineKind } from "../_shared/qboLineKinds.ts";
 
 // WHAT EACH ACTION REQUIRES (migration 100). resolveTenant checks this BEFORE dispatch and
@@ -493,6 +502,16 @@ const GATES: GateTable = {
   phone_search_numbers: { area: "phone", level: "edit" },
   phone_buy_number: { area: "phone", level: "edit" },
   phone_enable_number: { area: "phone", level: "edit" },
+  // Plan phase 6, caller-ID trust (plan §14): register the number for SHAKEN/STIR or Voice
+  // Integrity, and read back where Twilio's review stands. ⚠️ THESE LINES ARE THE FLOOR ONLY:
+  // both branches are OPERATOR-ONLY (phoneOperatorGate — an operator in view-as with can_write, or
+  // an app_operators member with can_write; never a support-only one), always, and
+  // PHONE_SELF_SERVE does not open them. They submit the builder's legal identity to a Twilio
+  // review, and nothing runs them automatically. Status is "edit" too, not "view" (review BE-3):
+  // it WRITES the number row (the statuses, and clears a Trust Product Twilio no longer has), and
+  // a READ-level line is where resolveTenant waves a read-only operator through.
+  phone_trust_setup: { area: "phone", level: "edit" },
+  phone_trust_status: { area: "phone", level: "edit" },
 };
 
 // Owner-facing settings endpoint for the portal (portal.html).
@@ -8384,18 +8403,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // until PHONE_SELF_SERVE=on (phone.ts). "An operator" is either an operator in view-as
   // (`operator`, resolveTenant has already required can_write for a write) or an app_operators
   // member with can_write acting on their OWN tenant — the pilot's owners — which resolveTenant
-  // does not report, so it is read here, once per request, only when asked.
-  let operatorRowMemo: Promise<boolean> | null = null;
-  const callerIsOperator = (): Promise<boolean> => {
-    if (operator) return Promise.resolve(true);
-    if (!isUuid(String(userId ?? ""))) return Promise.resolve(false);
+  // does not report, so it is read here, once per request, only when asked. A failed read is
+  // "not an operator". The same row answers the caller-ID gate below, which also asks support_only.
+  let operatorRowMemo: Promise<{ can_write: boolean; support_only: boolean } | null> | null = null;
+  const ownOperatorRow = (): Promise<{ can_write: boolean; support_only: boolean } | null> => {
+    if (!isUuid(String(userId ?? ""))) return Promise.resolve(null);
     if (!operatorRowMemo) {
       operatorRowMemo = Promise.resolve(
-        admin.from("app_operators").select("user_id, can_write").eq("user_id", userId).maybeSingle(),
-      ).then(({ data, error }: { data: { can_write?: boolean } | null; error: unknown }) => !error && !!data && data.can_write === true,
-        () => false);
+        admin.from("app_operators").select("user_id, can_write, support_only").eq("user_id", userId).maybeSingle(),
+      ).then(({ data, error }: { data: { can_write?: boolean; support_only?: boolean } | null; error: unknown }) =>
+        !error && data ? { can_write: data.can_write === true, support_only: data.support_only === true } : null,
+      () => null);
     }
     return operatorRowMemo;
+  };
+  const callerIsOperator = (): Promise<boolean> => {
+    if (operator) return Promise.resolve(true);
+    return ownOperatorRow().then((row) => !!row && row.can_write === true);
   };
   const phoneSelfServe = () => phoneSelfServeOn((k) => Deno.env.get(k));
   /** null = the rollout lets this caller through; else the 403 refusal to return. */
@@ -8413,6 +8437,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .select("id, phone_number, registration_status, voice_enabled, voice_configured_at, twilio_sid, messaging_service_sid")
       .eq("client_id", clientId).is("released_at", null)
       .order("purchased_at", { ascending: true }).limit(1);
+
+  // Plan phase 6, caller-ID trust (plan §14). OPERATOR-ONLY, always: unlike the rollout gate
+  // above, PHONE_SELF_SERVE never opens it (phoneTrust.ts's header says why). STRICTER than
+  // callerIsOperator (review BE-3): an operator in view-as needs can_write here, because
+  // resolveTenant only demands it for a write-level action, and a support-only operator is refused
+  // (phoneTrust.ts trustOperatorAllowed).
+  const callerMayManageCallerId = (): Promise<boolean> =>
+    trustOperatorAllowed({ operator: operator ?? null, ownOperatorRow });
+  const phoneOperatorGate = async (): Promise<Response | null> =>
+    (await callerMayManageCallerId()) ? null : phoneRefused(TRUST_OPERATOR_SENTENCE, 403);
+  // The number's caller-ID columns (migration 255), in their OWN select so a server without 255
+  // answers `callerId.available: false` rather than failing the number read everything else uses.
+  const trustRowOf = async (numberId: string) =>
+    await admin.from("sms_numbers").select(TRUST_COLUMNS).eq("id", numberId).eq("client_id", clientId).maybeSingle();
 
   // Phase 6: may this caller BUY a number? phone:'edit' got them through the gate; spending money
   // every month is settings_billing:'edit' everywhere else (portal-sms buy_number), and an
@@ -8583,6 +8621,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // offers "Turn calling on", Connect and Buy only where they will work. Turning calling OFF,
     // the route, and "Sign out all devices" are never behind it.
     const rolloutOpen = canEdit("phone") && (phoneSelfServe() || await callerIsOperator());
+    // Caller-ID trust (plan §14): where the number's registrations stand, for everyone on the
+    // team screen; the buttons that change it are an operator's only (canManageCallerId). A
+    // failed or not-yet-migrated read shows "not available" and never fails this screen.
+    let callerId = callerIdView(null, false);
+    if (n) {
+      const tr = await trustRowOf(n.id);
+      callerId = tr.error ? callerIdView(null, false) : callerIdView((tr.data ?? null) as TrustRow | null, true);
+    }
     return json({
       ok: true, available: true, scope: "team", phoneStatus,
       level: access.phone ?? null,
@@ -8607,6 +8653,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Buying also needs somewhere for the new number's texts to go (review SSB-3).
       numbersForSale: trustHubConfigured() && !!smsInboundUrl((k) => Deno.env.get(k)) && voiceEnv((k) => Deno.env.get(k)).ok,
       voiceSetup: voiceEnv((k) => Deno.env.get(k)).ok,
+      callerId,
+      canManageCallerId: canEdit("phone") && await callerMayManageCallerId(),
       route,
       team,
       // Plan section 7: "At setup the list starts with the owner." Offered, not saved — the
@@ -8824,13 +8872,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // an ordinary sms_numbers row, registration_status 'pending_registration' (165's word for
   // "not registered for texting" — Twilio's own externalstatus vocabulary has no other) and
   // messaging_service_sid NULL, which is what marks it calling-only. It is never attached to a
-  // messaging service here: texting adopts THIS row once its carrier registration clears, and
-  // portal-sms's buy_number refuses a second live number (its one-per-tenant count), so the
-  // texting flow cannot buy another.
+  // messaging service here: texting adopts THIS row once its carrier registration clears
+  // (portal-sms buy_number, adoptNumber.ts: into the builder's Messaging Service, its SmsUrl
+  // cleared, no second number and no second hold), so the texting flow never buys another.
   //
   // ⚠️ ROLLOUT (review SSB-1): search, buy and connect are behind phoneRolloutGate, i.e. a CSM
-  // Synergy operator, until PHONE_SELF_SERVE=on — and that must stay off until portal-sms can
-  // adopt a calling-only number, because until then buying here blocks the builder's texting.
+  // Synergy operator, until PHONE_SELF_SERVE=on. What used to hold that switch off is gone:
+  // portal-sms's buy_number now ADOPTS a calling-only number (portal-sms/adoptNumber.ts), so
+  // buying here no longer blocks the builder's texting; turning it on is the launch decision.
   //
   // MONEY: the purchase takes portal-sms's own wallet hold — meter sms_number_monthly, key
   // numberHoldKey (portal-sms's `sms_num:<client>:<number>`) — for the first month, captured once
@@ -9029,6 +9078,159 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         warning: "Your number is ready, but it isn't set up to receive texts yet. Turn calling on and press \"Connect this number for calls\" to finish, or contact Structure Studio." });
     }
     return json({ ok: true, number: { ...bought1, voiceReady: false }, ...note });
+  }
+
+  // ── Plan phase 6: caller-ID trust (plan §14, "Caller ID reputation") ───────────────────────
+  // SHAKEN/STIR: Twilio signs the builder's calls at level A only when the number is on BOTH an
+  // approved business profile and an approved SHAKEN/STIR Trust Product; the texting setup made
+  // the profile but never put the number on it. Voice Integrity: registers the number with the
+  // carriers' spam engines, which is what fights "Spam Likely". Both are built on the tenant's
+  // Secondary Customer Profile (sms_registrations.customer_profile_sid), or for an INTERNAL
+  // tenant with none, the platform's primary profile (phoneTrust.ts trustProfileFor).
+  //
+  // ⚠️ OPERATOR-ONLY, NEVER AUTOMATIC (phoneOperatorGate, before anything else). Each press
+  // submits the builder's legal identity for a Twilio review; Voice Integrity's price is to be
+  // checked before builder launch (plan §17). Nothing here spends the builder's wallet.
+  //
+  // Twilio flow: _shared/twilioTrustHub.ts setupVoiceTrust (idempotent: every assignment is
+  // listed before it is made, the Trust Product is found by FriendlyName before one is created,
+  // and one already under review is never resubmitted; a Voice Integrity resubmit carries the
+  // corrected answers onto its EndUser). Order and refusals: phoneTrust.ts runTrustSetup (one run
+  // per number at a time; the profile must be twilio-approved; the Trust Product SID is written
+  // the moment it exists). Recorded on sms_numbers (migration 255, the lock included).
+  const trustWrite = (numberId: string) => async (patch: Record<string, unknown>) => {
+    const { error } = await admin.from("sms_numbers").update(patch).eq("id", numberId).eq("client_id", clientId);
+    return error ? { ok: false as const, error } : { ok: true as const };
+  };
+
+  if (action === "phone_trust_setup") {
+    const refused = await phoneOperatorGate();
+    if (refused) return refused;
+    const kind = parseTrustProduct(payload?.product);
+    if (!kind) return json({ error: "Choose SHAKEN/STIR or Voice Integrity." }, 400);
+    let info: VoiceIntegrityInfo | null = null;
+    if (kind === "voice_integrity" && payload?.voiceIntegrity != null) {
+      const parsed = parseVoiceIntegrityInfo(payload.voiceIntegrity);
+      if (!parsed.ok) return json({ error: parsed.error }, 400);
+      info = parsed.info;
+    }
+    const creds = twilioCreds((k) => Deno.env.get(k));
+    if (!trustHubConfigured() || !creds) return phoneUnavailable("Caller ID registration isn't available on this server yet.");
+
+    const numRes = await phoneNumberRow();
+    if (numRes.error) return phoneNotReady(numRes.error) ? phoneUnavailable() : dbFail(req, clientId, "load your phone number", numRes.error);
+    // deno-lint-ignore no-explicit-any
+    const n: any = (numRes.data ?? [])[0] ?? null;
+    if (!n) return json({ error: "There's no number on this account yet. Get one first." }, 409);
+    const tr = await trustRowOf(n.id);
+    if (tr.error) {
+      return phoneNotReady(tr.error)
+        ? phoneUnavailable("Caller ID registration isn't available on this server yet.")
+        : dbFail(req, clientId, "load your number's caller ID registration", tr.error);
+    }
+    const trustRow = (tr.data ?? {}) as TrustRow;
+    const sidRes = await numberSidOf(n, creds);
+    if (!sidRes.ok) return sidRes.res;
+
+    const { data: reg, error: regErr } = await admin.from("sms_registrations")
+      .select("customer_profile_sid").eq("client_id", clientId).maybeSingle();
+    if (regErr) return dbFail(req, clientId, "load your texting registration", regErr);
+    let internal = false;
+    try { internal = await isInternalTenant(admin, clientId); } catch (e) {
+      return dbFail(req, clientId, "check this account", { message: (e as Error)?.message ?? "unknown" });
+    }
+    const primaryProfileSid = Deno.env.get("TWILIO_PRIMARY_PROFILE_SID") ?? null;
+    // Internal tenants only: a number already on the platform's primary profile stays there (a
+    // number sits on ONE business profile). FAIL CLOSED (review BE-4): a failed read is a 502
+    // and nothing is sent, never a guess that it is not there (phoneTrust.ts chooseTrustProfile).
+    const prof = await chooseTrustProfile({
+      secondaryProfileSid: (reg as { customer_profile_sid?: string | null } | null)?.customer_profile_sid ?? null,
+      internal,
+      primaryProfileSid,
+      numberSid: sidRes.sid,
+    }, { numberOnProfile: (p, num) => numberOnProfile(p, num) });
+    if (!prof.ok) {
+      if (prof.kind === "refused") return json({ error: prof.error }, prof.status);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_trust_setup_failed", severity: "error",
+        message: `${kind}: ${prof.detail}`, context: { number_id: n.id, twilio_code: prof.code, profile: "primary_check" } }).catch(() => {});
+      return filedHere(json({ error: prof.error, code: prof.code || null }, prof.status));
+    }
+
+    // ONE RUN AT A TIME PER NUMBER (review BE-2): the claim is one conditional UPDATE (the lock is
+    // taken only where it is empty or expired, and a row coming back is the claim), the pattern
+    // portal-sms's `advance` uses on advance_lock_until. Released by runTrustSetup however the run
+    // ends, and only if it is still this run's.
+    const lockUntil = new Date(Date.now() + TRUST_LOCK_MS).toISOString();
+    const out = await runTrustSetup({
+      kind, clientId, numberSid: sidRes.sid, profileSid: prof.profileSid,
+      existingSid: (trustRow[TRUST_COLS[kind].sid] as string | null | undefined) ?? null, info,
+    }, {
+      lock: {
+        claim: async () => {
+          const { data, error } = await admin.from("sms_numbers").update({ caller_id_lock_until: lockUntil })
+            .eq("id", n.id).eq("client_id", clientId)
+            .or(`caller_id_lock_until.is.null,caller_id_lock_until.lt.${new Date().toISOString()}`)
+            .select("id");
+          if (error) return { ok: false as const, busy: false as const, error };
+          return (data ?? []).length ? { ok: true as const } : { ok: false as const, busy: true as const };
+        },
+        release: async () => {
+          await admin.from("sms_numbers").update({ caller_id_lock_until: null })
+            .eq("id", n.id).eq("client_id", clientId).eq("caller_id_lock_until", lockUntil);
+        },
+      },
+      fetchProfile: (sid) => fetchCustomerProfile(sid),
+      setup: (s) => setupVoiceTrust(s),
+      write: trustWrite(n.id),
+    });
+    if (!out.ok) {
+      if (out.kind === "refused") return json({ error: out.error }, out.status);
+      if (out.kind === "db") {
+        return phoneNotReady(out.error)
+          ? phoneUnavailable("Caller ID registration isn't available on this server yet.")
+          : dbFail(req, clientId, "record the caller ID registration", out.error);
+      }
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_trust_setup_failed", severity: "error",
+        message: `${kind}: ${out.detail}`, context: { number_id: n.id, twilio_code: out.code, profile: prof.which } }).catch(() => {});
+      return filedHere(json({ error: out.error, code: out.code || null }, out.status));
+    }
+    const r0 = out.result;
+    audit("phone_trust_setup", 1,
+      `product=${kind} status=${r0.status ?? "unknown"} created=${r0.created} submitted=${r0.submitted} answers_updated=${r0.endUserUpdated} profile=${prof.which}`).catch(() => {});
+    return json({
+      ok: true, product: kind, status: r0.status, submitted: r0.submitted, created: r0.created, answersUpdated: r0.endUserUpdated, profile: prof.which,
+      callerId: callerIdView({ ...trustRow, [TRUST_COLS[kind].sid]: r0.trustProductSid, [TRUST_COLS[kind].status]: r0.status, caller_id_checked_at: new Date().toISOString() }),
+    });
+  }
+
+  if (action === "phone_trust_status") {
+    const refused = await phoneOperatorGate();
+    if (refused) return refused;
+    if (!trustHubConfigured() || !twilioCreds((k) => Deno.env.get(k))) {
+      return phoneUnavailable("Caller ID registration isn't available on this server yet.");
+    }
+    const numRes = await phoneNumberRow();
+    if (numRes.error) return phoneNotReady(numRes.error) ? phoneUnavailable() : dbFail(req, clientId, "load your phone number", numRes.error);
+    // deno-lint-ignore no-explicit-any
+    const n: any = (numRes.data ?? [])[0] ?? null;
+    if (!n) return json({ error: "There's no number on this account yet. Get one first." }, 409);
+    const tr = await trustRowOf(n.id);
+    if (tr.error) {
+      return phoneNotReady(tr.error)
+        ? phoneUnavailable("Caller ID registration isn't available on this server yet.")
+        : dbFail(req, clientId, "load your number's caller ID registration", tr.error);
+    }
+    const out = await runTrustStatus((tr.data ?? {}) as TrustRow, {
+      fetchTrustProduct: (sid) => fetchTrustProduct(sid),
+      write: trustWrite(n.id),
+    });
+    if (!out.ok) {
+      if (out.kind === "db") return dbFail(req, clientId, "record the caller ID status", out.error);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_trust_status_failed", severity: "info",
+        message: out.detail, context: { number_id: n.id, twilio_code: out.code } }).catch(() => {});
+      return filedHere(json({ error: out.error, code: out.code || null }, out.status));
+    }
+    return json({ ok: true, callerId: out.view, errorCodes: out.errorCodes });
   }
 
   // ── The Calls report ────────────────────────────────────────────────────────────────────

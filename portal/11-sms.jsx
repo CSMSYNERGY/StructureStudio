@@ -281,6 +281,13 @@ function SmsComplianceCard({ compliance, busy, onRun, readOnly, card }) {
   );
 }
 
+/** Where "Use this number for texting" is offered while a CALLING-ONLY number is still on the
+ *  account: the server's ADOPT_STATES (portal-sms/adoptNumber.ts), exactly. number_pending and
+ *  active are an adoption whose last write did not land ("Press it again to finish"); until
+ *  2026-09-29 the card showed only at campaign_approved, so after a reload that press was gone
+ *  and the number stayed "Calls only" for good (review BE-5). */
+const SMS_ADOPT_STATES = ["campaign_approved", "number_pending", "active"];
+
 /** The progress rail. Five steps, because a builder who can see where they are stops
  *  emailing to ask. `number_pending` and `active` both read as step 5 — from the outside
  *  they are "nearly there" and "there". */
@@ -548,7 +555,13 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   //
   // profile_pending STAYS in `pending`: the poll is what makes an operator-side unstick appear
   // on a builder's already-open tab within the minute.
-  const waitingOnYou = data && data.status === "profile_pending";
+  //
+  // An adoption of a calling-only number that stopped before its last write (number_pending with
+  // the row still calling-only, review BE-5) is the builder's move too: the "Finish connecting"
+  // card below is the only way on, so the "nothing for you to do" line must not sit above it.
+  const adoptUnfinished = !!data && data.status !== "campaign_approved" && SMS_ADOPT_STATES.includes(data.status)
+    && (data.numbers || []).some((n) => n.callingOnly);
+  const waitingOnYou = data && (data.status === "profile_pending" || adoptUnfinished);
   const pending = data && ["profile_pending", "brand_pending", "campaign_pending", "number_pending"].includes(data.status);
   useEffect(() => {
     if (!pending) return undefined;
@@ -1048,7 +1061,37 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
       )}
 
       {/* ── Step 5: the number ─────────────────────────────────────────────── */}
-      {status === "campaign_approved" && !readOnly && (
+      {/* SSS Phone plan phase 6: a number already bought for CALLS (Settings → Phone) is the
+          business's one number, so texting takes it over instead of buying a second one. The
+          server adopts it on buy_number with no number picked, and takes no second charge (the
+          first month was taken when it was bought). */}
+      {SMS_ADOPT_STATES.includes(status) && !readOnly && (data.numbers || []).some((n) => n.callingOnly) && (
+        <div style={card} data-ss-sms-adopt={status === "campaign_approved" ? "offer" : "finish"}>
+          {status === "campaign_approved" ? (
+            <>
+              <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Use your business number for texting</h4>
+              <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+                You already have <strong>{(data.numbers.find((n) => n.callingOnly) || {}).phoneNumber}</strong> for calls.
+                Texting uses the same number, so your customers see one number for both. No second number is bought.
+              </p>
+            </>
+          ) : (
+            <>
+              <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Finish connecting your number for texting</h4>
+              <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+                Texting was being switched on for <strong>{(data.numbers.find((n) => n.callingOnly) || {}).phoneNumber}</strong>,
+                but the last step didn&rsquo;t finish. Press below to finish it. No second number is bought and nothing is charged.
+              </p>
+            </>
+          )}
+          <button type="button" disabled={busy} data-ss-sms-adopt-button
+            onClick={() => act(() => call("buy_number", {}))}
+            style={{ background: ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", cursor: "pointer", fontWeight: 800, fontSize: 13, fontFamily: "inherit" }}>
+            {busy ? "Connecting…" : status === "campaign_approved" ? "Use this number for texting" : "Finish connecting"}
+          </button>
+        </div>
+      )}
+      {status === "campaign_approved" && !readOnly && !(data.numbers || []).some((n) => n.callingOnly) && (
         <div style={card}>
           <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Choose your number</h4>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 12 }}>
@@ -1092,7 +1135,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             <div key={n.phoneNumber} style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <div style={{ fontSize: 18, fontWeight: 800 }}>{n.phoneNumber}</div>
               <span style={{ fontSize: 12, fontWeight: 700, color: n.registrationStatus === "registered" ? "#047857" : "#B45309" }}>
-                {n.registrationStatus === "registered" ? "Ready to use" : "Being connected…"}
+                {n.registrationStatus === "registered" ? "Ready to use" : n.callingOnly ? "Calls only for now" : "Being connected…"}
               </span>
             </div>
           ))}
@@ -1137,6 +1180,23 @@ const PHONE_TIME_ZONES = [
   ["America/St_Johns", "Newfoundland"], ["America/Regina", "Saskatchewan"],
 ];
 const PHONE_LEVEL_LABEL = { none: "No phone access", own: "Own calls", view: "Team calls", edit: "Team calls + settings" };
+// Caller ID (plan §14): Twilio's TrustProduct statuses in the builder's words. The keys are
+// Twilio's enum verbatim (_shared/twilioTrustHub.ts TRUST_PRODUCT_STATUSES); a status outside it
+// reaches the page as null and reads "Status unknown".
+const PHONE_TRUST_WORDS = {
+  "draft": "Started, not submitted",
+  "pending-review": "Waiting for Twilio",
+  "in-review": "Twilio is reviewing it",
+  "twilio-rejected": "Rejected by Twilio",
+  "twilio-approved": "Approved",
+};
+// Voice Integrity's "what the business uses calls for", the ones a shed builder's calls are. Each
+// is one of Twilio's own values (_shared/twilioTrustHub.ts VOICE_INTEGRITY_USE_CASES, which the
+// server checks against; tests/phone/phoneTrust_test.ts pins that every one here is in it).
+const PHONE_VI_USE_CASES = [
+  "Customer Support", "Phone System", "Appointment Scheduling", "Order Notifications",
+  "Delivery Notifications", "Lead Management", "Click to Call", "Outbound Dialer",
+];
 
 async function phoneAction(action, body) {
   const { data: d, error } = await sb.functions.invoke("portal-settings", { body: { action, ...(body || {}) } });
@@ -1265,6 +1325,11 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const [numQ, setNumQ] = useState("");
   const [numResults, setNumResults] = useState(null);  // null = not searched yet
   const [numNote, setNumNote] = useState(null);        // { ok } | { err }
+  // Plan phase 6, caller ID (plan §14): what the last register / check said, and the Voice
+  // Integrity answers an operator fills in (opened by its button).
+  const [trustNote, setTrustNote] = useState(null);    // { ok } | { err }
+  const [viOpen, setViOpen] = useState(false);
+  const [viForm, setViForm] = useState({ useCase: "Customer Support", employeeCount: "", averageDailyCalls: "", notes: "" });
 
   const load = useCallback(async () => {
     try {
@@ -1388,10 +1453,10 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     finally { setBusy(false); }
   };
   const buyNumber = async (e164) => {
-    // Before builder launch only an operator reaches this button (the server's rollout check),
-    // and the texting setup cannot yet take over a number bought here, so the operator is told.
-    const textingCaveat = data.selfServe ? "" : "\n\nUntil texting can take over a number bought here, this account's Text Messaging setup can't get its own number.";
-    if (!window.confirm(`Get ${phoneDisplay(e164)} as your business number? It takes calls right away, and texting can use the same number once the carriers approve your business on the Text Messaging tab.${textingCaveat}`)) return;
+    // Before builder launch only an operator reaches this button (the server's rollout check).
+    // Texting takes this same number over once the carriers approve the business (portal-sms
+    // buy_number adopts a calling-only number, plan phase 6), so there is no caveat to give.
+    if (!window.confirm(`Get ${phoneDisplay(e164)} as your business number? It takes calls right away, and texting uses the same number once the carriers approve your business on the Text Messaging tab.`)) return;
     setBusy(true); setNumNote(null);
     try {
       const d = await phoneAction("phone_buy_number", { phoneNumber: e164 });
@@ -1555,6 +1620,129 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     </div>
   );
 
+  // ── Plan phase 6: caller ID (plan §14, "Caller ID reputation") ─────────────────────────
+  // Where the number's two registrations stand, for everyone on the team screen; registering
+  // and checking are a CSM Synergy operator's only (the server's phone_trust_* gate, reported as
+  // canManageCallerId). Nothing here runs on its own: each press is one request.
+  const cid = data.callerId || null;
+  const trustSetup = async (product) => {
+    const what = product === "voice_integrity" ? "carrier spam-label protection (Voice Integrity)" : "verified caller ID (SHAKEN/STIR)";
+    if (!window.confirm(`Register ${phoneDisplay(data.number.e164)} for ${what}? This sends the business details on its Twilio business profile for Twilio's review.`)) return;
+    setBusy(true); setTrustNote(null);
+    try {
+      const d = await phoneAction("phone_trust_setup", { product, ...(product === "voice_integrity" ? { voiceIntegrity: viForm } : {}) });
+      setData((x) => ({ ...x, callerId: d.callerId || x.callerId }));
+      if (product === "voice_integrity") setViOpen(false);
+      setTrustNote({ ok: d.submitted ? "Submitted. Twilio usually reviews it within one to two business days." : "It's already with Twilio, so nothing was sent again." });
+    } catch (e) { setTrustNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+  const trustCheck = async () => {
+    setBusy(true); setTrustNote(null);
+    try {
+      const d = await phoneAction("phone_trust_status");
+      setData((x) => ({ ...x, callerId: d.callerId || x.callerId }));
+      const codes = [...((d.errorCodes && d.errorCodes.shakenStir) || []), ...((d.errorCodes && d.errorCodes.voiceIntegrity) || [])];
+      setTrustNote({ ok: codes.length ? `Checked. Twilio's rejection codes: ${codes.join(", ")}.` : "Checked with Twilio just now." });
+    } catch (e) { setTrustNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+  const trustRow = (key, label, blurb, product) => {
+    const st = cid && cid[key] ? cid[key].status : null;
+    const registered = !!(cid && cid[key] && cid[key].registered);
+    // Offered while there is something to send: never registered, a draft, or a rejection to
+    // resubmit. Under review or approved, "Check status" is the only thing to press.
+    const canSend = !st || st === "draft" || st === "twilio-rejected";
+    return (
+      <div data-ss-phone-trust={product} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "8px 0", borderTop: "1px solid #F1F5F9" }}>
+        <div style={{ flex: "1 1 240px", minWidth: 200 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{label}</div>
+          <div style={{ fontSize: 12, color: "#64748B" }}>{blurb}</div>
+        </div>
+        <span data-ss-phone-trust-status={st || (registered ? "unknown" : "none")} style={{
+          fontSize: 12, fontWeight: 800, borderRadius: 999, padding: "4px 10px",
+          background: st === "twilio-approved" ? "#ECFDF5" : st === "twilio-rejected" ? "#FEF2F2" : "#F1F5F9",
+          color: st === "twilio-approved" ? "#047857" : st === "twilio-rejected" ? "#B91C1C" : "#475569",
+        }}>
+          {PHONE_TRUST_WORDS[st] || (registered ? "Status unknown" : "Not registered")}
+        </span>
+        {data.canManageCallerId && canSend && (
+          <button type="button" disabled={busy} data-ss-phone-trust-register={product}
+            onClick={() => (product === "voice_integrity" ? setViOpen((v) => !v) : trustSetup(product))}
+            style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 12px", fontSize: 12.5, opacity: busy ? 0.55 : 1 }}>
+            {st === "twilio-rejected" ? "Submit again" : st === "draft" ? "Submit" : "Register"}
+          </button>
+        )}
+      </div>
+    );
+  };
+  const viValid = !!viForm.useCase && /^\d+$/.test(String(viForm.employeeCount).trim()) && Number(viForm.employeeCount) >= 1
+    && /^\d+$/.test(String(viForm.averageDailyCalls).trim()) && Number(viForm.averageDailyCalls) >= 1;
+  const callerIdCard = data.scope === "team" && data.number ? (
+    <div style={PHONE_CARD} data-ss-phone-callerid>
+      <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Caller ID</h4>
+      <p style={{ margin: "0 0 6px", fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
+        Registering {phoneDisplay(data.number.e164)} helps customers pick up: carriers show it as verified, and it is
+        less likely to be labelled &ldquo;Spam Likely&rdquo;.
+      </p>
+      {!cid || !cid.available ? (
+        <div style={{ fontSize: 13, color: "#64748B" }}>Caller ID registration isn&rsquo;t available on this account yet.</div>
+      ) : (
+        <>
+          {trustRow("shakenStir", "Verified caller ID (SHAKEN/STIR)", "Your calls are signed at the highest trust level once Twilio approves it.", "shaken_stir")}
+          {trustRow("voiceIntegrity", "Spam-label protection (Voice Integrity)", "Registers the number with the carriers' spam filters.", "voice_integrity")}
+          {data.canManageCallerId && viOpen && (
+            <div data-ss-phone-vi-form style={{ display: "grid", gap: 8, padding: "10px 12px", margin: "6px 0", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+              <div style={{ fontSize: 12.5, color: "#475569" }}>
+                {cid.voiceIntegrity.registered
+                  ? "Twilio asks these about the business for Voice Integrity. Sending again replaces the answers it has with these."
+                  : "Twilio asks these about the business for Voice Integrity."}
+              </div>
+              <label style={{ fontSize: 12.5, color: "#1E293B" }}>What the business uses calls for{" "}
+                <select value={viForm.useCase} onChange={(e) => setViForm((f) => ({ ...f, useCase: e.target.value }))} style={{ ...S.input, width: 220 }} data-ss-phone-vi-usecase>
+                  {PHONE_VI_USE_CASES.map((u) => <option key={u} value={u}>{u}</option>)}
+                </select>
+              </label>
+              <label style={{ fontSize: 12.5, color: "#1E293B" }}>People who work there{" "}
+                <input value={viForm.employeeCount} inputMode="numeric" data-ss-phone-vi-employees
+                  onChange={(e) => setViForm((f) => ({ ...f, employeeCount: e.target.value.replace(/\D/g, "").slice(0, 7) }))} style={{ ...S.input, width: 110 }} />
+              </label>
+              <label style={{ fontSize: 12.5, color: "#1E293B" }}>Calls on a typical working day{" "}
+                <input value={viForm.averageDailyCalls} inputMode="numeric" data-ss-phone-vi-calls
+                  onChange={(e) => setViForm((f) => ({ ...f, averageDailyCalls: e.target.value.replace(/\D/g, "").slice(0, 7) }))} style={{ ...S.input, width: 110 }} />
+              </label>
+              <label style={{ fontSize: 12.5, color: "#1E293B" }}>Notes (optional){" "}
+                <input value={viForm.notes} maxLength={500} placeholder="What the calls are about"
+                  onChange={(e) => setViForm((f) => ({ ...f, notes: e.target.value }))} style={{ ...S.input, width: 320 }} />
+              </label>
+              <div>
+                <button type="button" disabled={busy || !viValid} data-ss-phone-vi-submit onClick={() => trustSetup("voice_integrity")}
+                  style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 12px", fontSize: 12.5, opacity: busy || !viValid ? 0.55 : 1 }}>
+                  {cid.voiceIntegrity.registered ? "Send again with these answers" : "Register for Voice Integrity"}
+                </button>
+              </div>
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", paddingTop: 8, borderTop: "1px solid #F1F5F9" }}>
+            <span style={{ fontSize: 12, color: "#64748B", flex: "1 1 200px" }}>
+              {data.canManageCallerId
+                ? (cid.checkedAt ? `Last checked with Twilio ${phoneWhen(cid.checkedAt) || "recently"}.` : "Not checked with Twilio yet.")
+                : "Structure Studio registers your number. Ask us if you'd like it done."}
+            </span>
+            {data.canManageCallerId && (cid.shakenStir.registered || cid.voiceIntegrity.registered) && (
+              <button type="button" disabled={busy} onClick={trustCheck} data-ss-phone-trust-check
+                style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px", fontSize: 12.5 }}>
+                Check status
+              </button>
+            )}
+          </div>
+        </>
+      )}
+      {trustNote && trustNote.ok && <div style={{ ...S.okMsg, margin: "10px 0 0" }}>{trustNote.ok}</div>}
+      {trustNote && trustNote.err && <div style={{ ...S.err, margin: "10px 0 0" }}>{trustNote.err}</div>}
+    </div>
+  ) : null;
+
   // Someone with their OWN calls only: whether it is on, which number customers see, and where
   // to get the apps. The setup is the team's business (the server did not send it).
   if (data.scope !== "team" || !form) {
@@ -1638,6 +1826,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     <div data-ss-phone-settings="team">
       {header}
       {numberCard}
+      {callerIdCard}
 
       <div style={PHONE_CARD}>
         <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Who answers</h4>

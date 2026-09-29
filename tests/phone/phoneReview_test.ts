@@ -51,8 +51,11 @@ Deno.test("rollout: turning calling ON, searching, buying and connecting all ask
 Deno.test("rollout: an operator is one in view-as, or an app_operators member with can_write on their own tenant", () => {
   const op = slice(SRC, "const callerIsOperator = (): Promise<boolean> => {", "\n  };\n", "callerIsOperator");
   assert(/if \(operator\) return Promise\.resolve\(true\);/.test(op));
-  assert(/admin\.from\("app_operators"\)\.select\("user_id, can_write"\)\.eq\("user_id", userId\)\.maybeSingle\(\)/.test(op), "a service-role read (app_operators has no policies)");
-  assert(/!error && !!data && data\.can_write === true/.test(op), "a read-only operator, or a failed read, is not an operator");
+  assert(/return ownOperatorRow\(\)\.then\(\(row\) => !!row && row\.can_write === true\);/.test(op), "a read-only operator is not an operator");
+  // The one memoised app_operators read, shared with the caller-ID gate (which also asks support_only).
+  const row = slice(SRC, "const ownOperatorRow = ", "\n  };\n", "ownOperatorRow");
+  assert(/admin\.from\("app_operators"\)\.select\("user_id, can_write, support_only"\)\.eq\("user_id", userId\)\.maybeSingle\(\)/.test(row), "a service-role read (app_operators has no policies)");
+  assert(/!error && data \? \{ can_write: data\.can_write === true, support_only: data\.support_only === true \} : null,\s*\(\) => null\);/.test(row), "a failed read is not an operator");
 });
 
 Deno.test("rollout: phone_settings_get tells the screen what the gate will accept, and the Phone tab offers only that", () => {
