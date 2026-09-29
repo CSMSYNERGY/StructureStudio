@@ -496,6 +496,8 @@ Object.defineProperty(sb, "functions", { value: __ssFunctions, configurable: tru
 
 const TAB_META = {
   designer: ["Designer", "Design a building and build a quote"],
+  // Our own account only, for now (Carolyn 2026-09-28) — see ssAdvancedOn below.
+  advanced: ["Advanced", "Design a building from scratch with every shape control"],
   accounts: ["Accounts", "Open any builder's portal — operators only"],
   admin: ["Admin", "Operator console — master catalog, builder setup, and onboarding"],
   projects: ["Projects", "Internal boards — bugs, feature requests, roadmap. Operators only"],
@@ -616,6 +618,27 @@ function ssIsBetaHost() {
 // stay clamped on production (Carolyn 2026-08-27, "Go ahead and do it, yes").
 const SS_SOON_TABS = ["rent-to-own-contracts", "reports", "self-serve-display-units"];
 
+// The Advanced page (Carolyn 2026-09-28): "an advanced tab that is only available in Structure
+// Studio for us yet", later switched on per builder as "advanced mode" in Settings. THIS IS THE
+// ONE PLACE THAT RULE LIVES — the nav item, the route clamp and the page all ask it — so the
+// later per-tenant setting is a one-line change here (e.g. `|| entitlement.advancedMode === true`,
+// or a flag read off the status call).
+//
+// Today it is "our own account", read off the signal the portal already receives: portal-billing
+// reports `reason: "internal"` for the one tenant flagged client_settings.internal_account
+// (migration 169), the same signal 03-catalog's demoView reads. NOT the slug: this repo is public
+// and _shared/internalTenant.ts explains why the literal must not appear in source.
+//
+// Pass the EFFECTIVE tenant's entitlement (the viewed one in view-as). null = not answered yet,
+// which reads as off, so the nav item can never flash for a builder who does not have it.
+//
+// This is the TENANT half. WHO on that tenant gets the page is the shell's `advancedMayRun`
+// (12-shell.jsx): whoever may run the account, the same bar setup3d — the page's only way to
+// save — already sets. It is not part of the per-tenant setting, so it stays out of here.
+function ssAdvancedOn(entitlement) {
+  return !!(entitlement && entitlement.reason === "internal");
+}
+
 // Keeps the query string (?view=<clientId> is orthogonal to the path and must survive
 // every navigation) and drops any hash.
 function ssPagePath(page, sub) {
@@ -650,6 +673,9 @@ const NONADMIN_TABS = ["designer", "designs", "contacts", "orders", "support", "
 // coming-soon teasers render no tenant data at all.
 const TAB_AREA = {
   designer: "designer",
+  // The same area as the Designer: it IS the designer, one building at a time. Whether the page
+  // exists at all for this tenant is ssAdvancedOn's question, asked by ssClampTab, not this map's.
+  advanced: "designer",
   // Back to one area each, with the 08-26 split: Pipeline is the designs list, Contacts is
   // the contacts list, and each gates on the area whose data it actually shows. The merged
   // tab needed EITHER because it showed both; a rep granted only contacts must not get the
@@ -1120,7 +1146,13 @@ function ssFallbackTab(access) {
 // this function is called from three places and one of them is a hook-order-sensitive
 // effect, so a required parameter would be a silent behaviour change at whichever call site
 // somebody missed.
-function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator) {
+// `advancedOn` (2026-09-28) says whether the Advanced page may resolve at all — the shell passes
+// ssAdvancedOn(...) for the tenant on screen. It defaults to FALSE for the same reason as
+// canProjects' default: a call site that forgets it refuses the page rather than offering it.
+function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator, advancedOn = false) {
+  // FIRST, above `if (canAdmin) return tab`: owners and operators are not an exception. A tenant
+  // without Advanced lands on the Designer (the page it grew out of), clamped like any other ask.
+  if (tab === "advanced" && !advancedOn) return ssClampTab("designer", isOperator, canAdmin, access, supportView, canProjects);
   // Teaser routes exist only where the Coming Soon group renders. Checked before the
   // role branches on purpose: an admin bookmark to /portal/reports on production should
   // land on a real page, not an unreleased teaser the sidebar no longer offers.

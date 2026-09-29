@@ -28,21 +28,21 @@ if (i < 0 || j < 0) {
 }
 const BLOCK = SRC.slice(i, j);
 
-for (const name of ["ssClampTab", "ssCanSeeTab", "ssFallbackTab", "supportView"]) {
+for (const name of ["ssClampTab", "ssCanSeeTab", "ssFallbackTab", "supportView", "ssAdvancedOn"]) {
   assert(BLOCK.includes(name), `extracted block is missing ${name}`);
 }
 
 type Access = Record<string, string>;
-type Clamp = (tab: string, isOperator: boolean, canAdmin: boolean, access: Access | null, supportView?: boolean) => string;
+type Clamp = (tab: string, isOperator: boolean, canAdmin: boolean, access: Access | null, supportView?: boolean, canProjects?: boolean, advancedOn?: boolean) => string;
 
 // `window` is injected because ssIsBetaHost reads `window.location.hostname`. Pinned to a
 // NON-beta host so the coming-soon routes behave as they do in production — that branch runs
 // before every role check, and a beta-host default would quietly skip it. (Deno 2 has no
 // `window` global, so the parameter is also what keeps the slice runnable at all.)
-const factory = new Function("window", `${BLOCK}; return { ssClampTab, ssFallbackTab };`);
-const { ssClampTab, ssFallbackTab } = factory(
+const factory = new Function("window", `${BLOCK}; return { ssClampTab, ssFallbackTab, ssAdvancedOn };`);
+const { ssClampTab, ssFallbackTab, ssAdvancedOn } = factory(
   { location: { hostname: "app.structurestudiosuite.com" } },
-) as { ssClampTab: Clamp; ssFallbackTab: (a: Access | null) => string };
+) as { ssClampTab: Clamp; ssFallbackTab: (a: Access | null) => string; ssAdvancedOn: (e: unknown) => boolean };
 
 // An owner's resolved map: edit everywhere. The support operator wears exactly this, which is
 // what makes "and yet admin/projects are still refused" a real assertion rather than a
@@ -111,4 +111,44 @@ Deno.test("coming-soon routes are refused on a production host before any role c
   for (const tab of ["reports", "rent-to-own-contracts"]) {
     assert(ssClampTab(tab, true, true, OWNER_MAP, false) !== tab);
   }
+});
+
+// ── ADVANCED (2026-09-28): our own account only, for now ──────────────────────────────────────
+// The route is refused ABOVE the canAdmin short-circuit, so an owner or an operator of any other
+// tenant cannot type their way onto it, and the refusal lands where a refused Designer would.
+
+Deno.test("Advanced resolves only when the shell says the tenant has it — owners and operators included", () => {
+  // Off: owner, operator, and the old 4-argument call shape (the default must refuse).
+  assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, false), "designer");
+  assertEquals(ssClampTab("advanced", true, true, OWNER_MAP, false, true, false), "designer");
+  assertEquals((ssClampTab as (t: string, o: boolean, c: boolean, a: Access) => string)("advanced", true, true, OWNER_MAP), "designer");
+  // On: the owner, and a team member who holds the designer area (the page's TAB_AREA).
+  assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, true), "advanced");
+  assertEquals(ssClampTab("advanced", false, false, { designer: "edit", designs: "view" }, false, false, true), "advanced");
+});
+
+Deno.test("a refused Advanced lands where a refused Designer would", () => {
+  // No designer area at all: both routes fall back to the same page, on or off.
+  const noDesigner: Access = { designs: "edit" };
+  for (const on of [false, true]) {
+    assertEquals(ssClampTab("advanced", false, false, noDesigner, false, false, on), ssFallbackTab(noDesigner));
+  }
+  assertEquals(ssClampTab("advanced", false, false, noDesigner, false, false, false), ssClampTab("designer", false, false, noDesigner));
+});
+
+Deno.test("the Advanced argument changes no other tab", () => {
+  for (const tab of ["designer", "designs", "orders", "settings", "accounts", "admin", "projects"]) {
+    for (const on of [false, true]) {
+      assertEquals(ssClampTab(tab, true, true, OWNER_MAP, false, true, on), ssClampTab(tab, true, true, OWNER_MAP, false, true));
+    }
+  }
+});
+
+Deno.test("ssAdvancedOn reads the internal-account signal and nothing else", () => {
+  // null is "not answered yet" and must read OFF, or the nav item flashes for everyone.
+  for (const e of [null, undefined, {}, { reason: "exempt" }, { reason: "never_paid" }, { reason: "active", granted: ["view_3d"] }]) {
+    assertEquals(ssAdvancedOn(e), false, JSON.stringify(e));
+  }
+  assertEquals(ssAdvancedOn({ reason: "internal" }), true);
+  assertEquals(ssAdvancedOn({ reason: "internal", exempt: true, state: "exempt" }), true);
 });

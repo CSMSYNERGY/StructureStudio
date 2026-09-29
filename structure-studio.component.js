@@ -11126,7 +11126,7 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, roOffer, placeableDoors, placeableWindows, placeableRamps, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, dormerWindowId, dormerWindowOffset, perimeterFt, showPricing, onPaintChange, onWallHeight, onDormerWindow, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, roOffer, placeableDoors, placeableWindows, placeableRamps, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, dormerWindowId, dormerWindowOffset, perimeterFt, showPricing, onPaintChange, onWallHeight, onDormerWindow, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose, draftOnly = false }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -12807,7 +12807,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         )}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 16px", background: "#0F172A" }}>
-        {/* Add-item palette: every class places with the same pipeline as 2D clicks */}
+        {/* Add-item palette: every class places with the same pipeline as 2D clicks.
+            Not on a style DRAFT (`draftOnly`, the portal's Advanced page): the building there is a
+            new style's shape, not a customer's quote, so doors, notes and lines have nowhere to go. */}
+        {!draftOnly && (
         <div style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
           <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>Add</span>
           {/* The placeable set is handed in by the parent — the SAME list the 2D tool row
@@ -12850,6 +12853,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             </button>
           )}
         </div>
+        )}
         {/* WALL HEIGHT — the SAME priced increases the 2D picker offers, and for one reason.
             This row used to be a fixed 6/7/8/9/10 ft writing sel.wallHeight, the UNPRICED
             legacy field, while clearing sel.wallHeightDeltaIn. The two were "mutually
@@ -13070,7 +13074,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           {/* Stored items (Carolyn, 2026-08-25). Its own control rather than a palette tool:
               there is nothing to aim at, so choosing one drops it on the floor and the
               customer drags it. Placing also flips to Look-inside, because the whole point is
-              seeing your mower IN the building and a prop behind a closed roof is invisible. */}
+              seeing your mower IN the building and a prop behind a closed roof is invisible.
+              Not on a style draft (`draftOnly`), for the Add row's reason. */}
+          {!draftOnly && (
           <div style={{ position: "relative" }}>
             {itemsOpen && (
               <div style={{ position: "absolute", bottom: "115%", left: "50%", transform: "translateX(-50%)", background: "#0F172A", border: "1px solid #334155", borderRadius: 10, padding: 8, display: "grid", gridTemplateColumns: "repeat(3, 104px)", gap: 6, zIndex: 5 }}>
@@ -13088,12 +13094,16 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               📦 Items {itemsOpen ? "▾" : "▴"}
             </button>
           </div>
+          )}
           <button onClick={() => setInterior((v) => !v)} disabled={phase !== "ready"} style={{ background: "#1E293B", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
           {interior ? "🏠 Show exterior" : "👁 Look inside"}
         </button>
+        {/* No quote to put a view in on a style draft (`draftOnly`). */}
+        {!draftOnly && (
         <button onClick={takeSnapshot} disabled={phase !== "ready"} style={{ background: accent, color: ssOnFill(accent), border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
           {shotTaken ? "✓ Added to quote — retake?" : "📸 Use this view in my quote"}
         </button>
+        )}
         </div>
       </div>
     </div>
@@ -17189,7 +17199,7 @@ function calTrimPhotos(list) {
     .filter((u) => typeof u === "string" && u && !Object.prototype.hasOwnProperty.call(seen, u) && (seen[u] = 1))
     .slice(0, CAL_PHOTO_MAX);
 }
-function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, onOpenOrder = null, canPushInvoice = false }) {
+function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
   //   embedded = true  → the Designer tab inside portal.html: business users building
@@ -18297,7 +18307,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Which threshold this mount measures against. `calibrationOnly` is a prop that is fixed for
   // a mount's lifetime, so the callback identity below never actually changes at runtime and
   // no observer churn happens -- the dep is there because the closure reads it.
-  const dockMinW = calibrationOnly ? SS_DOCK_MIN_CAL_W : SS_DOCK_MIN_ROW_W;
+  // The Advanced page (`advancedOnly`) is the same form-beside-a-3D row, so the same threshold.
+  const dockMinW = (calibrationOnly || advancedOnly) ? SS_DOCK_MIN_CAL_W : SS_DOCK_MIN_ROW_W;
   // Callback ref, NOT useEffect([]) — the observed row unmounts whenever the
   // full-screen 3D opens, and an effect-attached observer would keep watching a
   // detached node, freezing dockCapable after the first trip through the editor.
@@ -24147,6 +24158,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // text below says "Image N of M" rather than claiming which side of the building it shows.
   const cal3dPanel = showCal3D && (
         <div style={{ background: "#FFFBEB", borderBottom: "1px solid #FCD34D", padding: "12px 20px" }}>
+          {/* THE ADVANCED PAGE (`advancedOnly`, 2026-09-28) renders this same panel for its field
+              grid and nothing else. Every `!advancedOnly` guard in it hides a part that belongs to
+              calibrating a SAVED style: this heading and the style strip, the video, size, photos
+              and compare steps, the scan card, and the save row. The grid itself is untouched. */}
+          {!advancedOnly && (<>
           <span style={{ fontWeight: 700, fontSize: 13, color: "#92400E" }}>🧊 3D Style Calibration</span>
           <span style={{ fontSize: 11, color: "#92400E", marginLeft: 8 }}>
             {setup3d
@@ -24172,6 +24188,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </button>
             ))}
           </div>
+          </>)}
           {adminCal && (
             <div>
               {/* ── Building scan. Only in the portal: it needs the builder's own session to
@@ -24205,7 +24222,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   to generate the 3d model"), which is why its badge reads "required" and the
                   photos step's reads "optional". It stopped being the ONLY required step on
                   2026-09-19, when the size joined it — see step 2. ── */}
-              {setup3d && setup3d.onUploadPhoto && (
+              {!advancedOnly && setup3d && setup3d.onUploadPhoto && (
                 <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>🎥 Step 1 — Walk-around video</span>
@@ -24299,7 +24316,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   `data-ssc-card` is a TEST HOOK and nothing else. tests/harness/calDims.mjs
                   photographs this card in each of its states, and locating it by its heading
                   text would make a reworded heading look like a broken harness. */}
-              {setup3d && setup3d.onUploadPhoto && (
+              {!advancedOnly && setup3d && setup3d.onUploadPhoto && (
               <div data-ssc-card="dims" style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
                 <style>{SSC_CAL_CSS}</style>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -24421,6 +24438,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   session to upload with, so each slot falls back to pasting a URL there — the
                   same split calUploadPhotos / calAddPhotoUrl already make. Only the Generate button inside it
                   needs the portal's authenticated callbacks. ── */}
+              {!advancedOnly && (
               <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   {/* NO STEP NUMBER WHERE THERE ARE NO OTHER STEPS. Steps 1 and 2 are gated on
@@ -24681,6 +24699,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   </div>
                 )}
               </div>
+              )}
               {/* ── STEP 4: DOES THIS MATCH YOUR BUILDING? ────────────────────────────────
                   The builder's own frames beside our 3D of the same view, turned to face the
                   same way, and four questions that are not generic reassurance: they are the
@@ -24697,7 +24716,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   responsive rule that cannot be written inline (side-by-side on a panel,
                   stacked on a phone) is an auto-fit grid rather than a media query, so it
                   reflows on the CONTAINER and needs nothing measured in JavaScript. ── */}
-              {adminCalCheck && !adminCalBusy && adminCalCheck.step === "done" && (
+              {!advancedOnly && adminCalCheck && !adminCalBusy && adminCalCheck.step === "done" && (
                 <div data-ssc-card="compare" style={{ border: "1px solid #DDD6FE", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
                   <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontWeight: 800, fontSize: 12.5, color: "#5B21B6" }}>🔍 Step 4 — Does this match your building?</span>
@@ -25032,7 +25051,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   </div>
                 </div>
               )}
-              {setup3d && setup3d.onUploadModel && (
+              {!advancedOnly && setup3d && setup3d.onUploadModel && (
                 <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>📐 Scan of a real building</span>
@@ -25133,12 +25152,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   drawing" becomes the obvious workflow. The fitting engine already exists
                   (walk-around video / draft from photos) -- it was just undiscoverable
                   behind a wall of raw ratios. */}
+              {/* The Advanced page draws this beside its big 3D instead, so it is not drawn twice. */}
+              {!advancedOnly && (
               <div style={{ marginBottom: 8 }}>
                 <D3ElevationSVG spec={adminCal.spec} sizeLabel={sel.size} focusKey={calFocus} />
                 <div style={{ fontSize: 10, color: "#A16207", marginTop: 3 }}>
                   End elevation at {sel.size || "this size"}. Click a number below and its dimension lights up.
                 </div>
               </div>
+              )}
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof type
                   <select value={adminCal.spec.roof.type} onChange={(e) => calSetRoofType(e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
@@ -25857,6 +25879,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   );
                 })}
               </div>
+              {!advancedOnly && (<>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 {/* The sample building the preview renders on. calibrationOnly ONLY, for the
                     same reason calSetSize is: over the full designer this row sits above a
@@ -25912,6 +25935,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   {adminCalMsg.msg}
                 </div>
               )}
+              </>)}
             </div>
           )}
         </div>
@@ -25936,9 +25960,119 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={false}
           onSnapshot={() => {}}
+          draftOnly={advancedOnly}
           onClose={() => setAdminCalPreview(false)}
         />
   );
+
+  // ── ADVANCED (2026-09-28) ─────────────────────────────────────────────────────────────────────
+  // Carolyn: "an advanced tab that is only available in Structure Studio for us yet" — where a
+  // builder designs a custom building from scratch with every option. The portal mounts this
+  // component with `advancedOnly` (portal/06-3d.jsx, AdvancedTab) and renders only the return
+  // further down: a blank or copied building, the calibration panel's field grid, a big live 3D,
+  // and "Save as a new style". Nothing on it ever writes to a style that already exists.
+  //
+  // THE DRAFT IS `adminCal`, the calibration draft, with styleValue NULL. Every cal* setter in the
+  // grid writes adminCal.spec and nothing else, so the grid works here untouched, and the null is
+  // what makes it impossible for this page to save over one of the builder's styles.
+  //
+  // ⚠️ HOOKS, and they sit ABOVE both early returns (calibrationOnly just below, advancedOnly after
+  // it). A hook below either one changes the hook count between renders: React #310, a white page.
+  const [advName, setAdvName] = useState("");
+  const [advBusy, setAdvBusy] = useState(false);
+  const [advMsg, setAdvMsg] = useState(null);                    // { ok, msg } | null
+  const [advFrom, setAdvFrom] = useState("");                    // "" = blank building, else a style's value
+  const [advDims, setAdvDims] = useState({ w: "12", l: "16" });  // as typed; sel.size only takes whole feet 6..60
+  // The spec the draft was last seeded with. Every cal* setter makes a NEW spec object, so "is it
+  // still this one" is exactly "has anything been changed since".
+  const advSeedRef = useRef(null);
+  // A style this page CREATED whose hide or shape then failed to save. The next Save under the
+  // same name finishes that style, in the tenant it was made in, instead of creating a second one.
+  const advMadeRef = useRef(null);
+  const ADV_MIN_FT = 6, ADV_MAX_FT = 60;
+  const advFt = (v) => { const n = Number(v); return (String(v).trim() !== "" && Number.isInteger(n) && n >= ADV_MIN_FT && n <= ADV_MAX_FT) ? n : null; };
+  // Blank = the plain gable every style is built on (the resolver with no style); a copy = that
+  // style's 3D look, resolved exactly as openCalEditor resolves it. styleValue stays null either way.
+  const advSeed = (value) => {
+    const s = value ? (C.buildingStyles || []).find((x) => x.value === value) : null;
+    const spec = s ? d3ResolveStyleSpec(s, s.value, C.wallHeightFt || 8) : d3ResolveStyleSpec(null, "", C.wallHeightFt || 8);
+    advSeedRef.current = spec;
+    setAdminCalMsg(null);
+    setAdminCalPreview(false);
+    setAdminCal({ styleValue: null, spec, photos: [] });
+  };
+  useEffect(() => {
+    if (!advancedOnly) return;
+    advSeed("");
+    setSel((p) => ({ ...p, size: "12x16" }));
+  }, []);
+  const advStartFrom = (value) => {
+    if (adminCal && advSeedRef.current && adminCal.spec !== advSeedRef.current
+      && !window.confirm("Start again? The changes you made to this building will be lost.")) return;
+    setAdvFrom(value);
+    setAdvMsg(null);
+    advSeed(value);
+  };
+  // Width and length go straight onto sel.size, which the [sel.size] effect turns into the
+  // building the 3D draws. Only a whole number in the band is taken; anything else stays in the
+  // box until it is fixed, and leaving the box puts back the size in use.
+  const advSetDim = (k, raw) => {
+    const next = { ...advDims, [k]: raw };
+    setAdvDims(next);
+    const w = advFt(next.w), l = advFt(next.l);
+    if (w && l) setSel((p) => ({ ...p, size: `${w}x${l}` }));
+  };
+  const advDimBlur = () => {
+    const p = parseSize(sel.size);
+    if (p) setAdvDims({ w: String(p.w), l: String(p.h) });
+  };
+  // SAVE AS A NEW STYLE: create it, HIDE it, then save this shape onto it. A new style has no
+  // sizes or prices yet, so customers must never see it until the builder has added them — and
+  // create_style makes a style visible, so the hide goes straight after it (review 2026-09-29):
+  // the window a shopper could catch it in is one round trip, not three.
+  //
+  // ONE TENANT FOR ALL THREE CALLS (review 2026-09-29). onCreateStyle reads the view-as target in
+  // the click's tick and hands it back as `target`; the hide and the shape are sent to THAT tenant
+  // explicitly. Read again after the create's await, it could be another builder's (an operator
+  // pressing Back mid-save), and the shape would land on their style of the same key.
+  // Server words are shown as they come, like every other setup3d call.
+  const advSave = async () => {
+    const name = advName.trim();
+    if (!name) { setAdvMsg({ ok: false, msg: "Give the new style a name first." }); return; }
+    if (!adminCal || !setup3d || !setup3d.onCreateStyle || !setup3d.onSaveSpec || !setup3d.onSetStyleActive) {
+      setAdvMsg({ ok: false, msg: "Saving isn't available here." });
+      return;
+    }
+    const spec = adminCal.spec;   // what is on screen at the press is what gets saved
+    setAdvBusy(true);
+    setAdvMsg(null);
+    try {
+      let made = (advMadeRef.current && advMadeRef.current.name === name) ? advMadeRef.current : null;
+      if (!made) {
+        const r = await setup3d.onCreateStyle(name);
+        made = { name, key: r.key, styleId: r.styleId, target: r.target };
+        advMadeRef.current = made;
+      }
+      await setup3d.onSetStyleActive(made.styleId, false, made.key, made.target);
+      await setup3d.onSaveSpec(made.key, spec, [], undefined, made.target);
+      advMadeRef.current = null;
+      // Saved: what is on screen is in the new style now, so nothing here is unsaved any more —
+      // Start from stops asking, and the portal stops warning before an account switch.
+      advSeedRef.current = spec;
+      setAdvName("");
+      setAdvMsg({ ok: true, msg: `Saved as “${name}” — hidden from customers. Add its sizes and prices in Settings → Structures, then switch it on.` });
+    } catch (e) {
+      setAdvMsg({ ok: false, msg: (e && e.message) || "Save failed" });
+    } finally {
+      setAdvBusy(false);
+    }
+  };
+  // Unsaved work, told to the portal so switching or leaving an account can ask first (the page is
+  // remounted per account, which throws the building away): a building changed since it was seeded
+  // or last saved, or a save still going. Reported, never read back. Hooks, so above the returns.
+  const advDirty = advancedOnly && (advBusy || Boolean(adminCal && advSeedRef.current && adminCal.spec !== advSeedRef.current));
+  useEffect(() => { if (advancedOnly && onAdvancedDirty) onAdvancedDirty(advDirty); }, [advDirty]);
+  useEffect(() => () => { if (advancedOnly && onAdvancedDirty) onAdvancedDirty(false); }, []);
 
   // Settings → Designer → 3D. The calibration editor needs everything this component
   // already computes (the style list, the resolved config, the live 3D preview), so the
@@ -26007,6 +26141,126 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>
           )
           : <div style={{ fontSize: 13, color: "#64748B" }}>3D isn't turned on for this account yet.</div>}
+        {cal3dPreview}
+      </div>
+    );
+  }
+  // THE ADVANCED PAGE (portal Workspace → Advanced, 2026-09-28). Its hooks are ABOVE the
+  // calibrationOnly return, with the note that explains them. Everything here is plain JSX.
+  if (advancedOnly) {
+    // Docked beside the form on a wide screen with a mouse — the same dockOn rule, measured on the
+    // row below, as the calibration surface. Elsewhere the Preview button is the 3D, and the
+    // column is not sticky (a sticky 3D on a phone would sit on top of the form).
+    const advDock = Boolean(adminCal) && view3dOn && dockOn && calDock3D;
+    const advLbl = { display: "flex", flexDirection: "column", gap: 3, fontSize: 11, fontWeight: 700, color: "#475569" };
+    const advWBad = advFt(advDims.w) === null, advLBad = advFt(advDims.l) === null;
+    return (
+      <div style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif" }}>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 18, fontWeight: 800, color: "#0F172A" }}>Advanced</div>
+          <div style={{ fontSize: 13, color: "#64748B", marginTop: 2, lineHeight: 1.5 }}>Every shape control on one building. Nothing here changes your styles until you save it as a new one.</div>
+        </div>
+        {!(showCal3D && view3dOn)
+          ? <div style={{ fontSize: 13, color: "#64748B" }}>3D isn't turned on for this account yet.</div>
+          : !adminCal
+            ? <div style={{ fontSize: 13, color: "#64748B" }}>Setting up the building…</div>
+            : (
+              <>
+                <div data-ss-adv="bar" style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: 12, background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
+                  <label style={advLbl}>Start from
+                    <select value={advFrom} onChange={(e) => advStartFrom(e.target.value)} disabled={advBusy} style={{ ...S.sel, minWidth: 180 }}>
+                      <option value="">Blank building</option>
+                      {C.buildingStyles.map((s) => <option key={s.value} value={s.value}>Copy of {s.label}</option>)}
+                    </select>
+                  </label>
+                  <label style={advLbl}>Width (ft)
+                    <input type="number" min={ADV_MIN_FT} max={ADV_MAX_FT} step="1" value={advDims.w}
+                      onChange={(e) => advSetDim("w", e.target.value)} onBlur={advDimBlur}
+                      style={{ ...S.sel, width: 84, minWidth: 0, boxSizing: "border-box", borderColor: advWBad ? "#F59E0B" : "#CBD5E1" }} />
+                  </label>
+                  <label style={advLbl}>Length (ft)
+                    <input type="number" min={ADV_MIN_FT} max={ADV_MAX_FT} step="1" value={advDims.l}
+                      onChange={(e) => advSetDim("l", e.target.value)} onBlur={advDimBlur}
+                      style={{ ...S.sel, width: 84, minWidth: 0, boxSizing: "border-box", borderColor: advLBad ? "#F59E0B" : "#CBD5E1" }} />
+                  </label>
+                  <label style={{ ...advLbl, flex: "1 1 220px" }}>New style name
+                    <input type="text" value={advName} maxLength={60} placeholder="e.g. Tri Home with lean-to"
+                      onChange={(e) => setAdvName(e.target.value)} disabled={advBusy}
+                      onKeyDown={(e) => { if (e.key === "Enter" && !advBusy) advSave(); }}
+                      style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                  <button onClick={advSave} disabled={advBusy}
+                    style={{ ...S.btn(advBusy ? "#9CA3AF" : "#166534", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: advBusy ? "wait" : "pointer" }}>
+                    {advBusy ? "Saving…" : "Save as a new style"}
+                  </button>
+                </div>
+                {(advWBad || advLBad) && (
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: "#B45309", marginBottom: 6 }}>Width and length are whole feet, from 6 to 60.</div>
+                )}
+                {advMsg && (
+                  <div data-ss-adv="msg" style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.5, color: advMsg.ok ? "#166534" : "#DC2626", marginBottom: 8 }}>{advMsg.msg}</div>
+                )}
+                {/* TODO(advanced-sections): section tabs go HERE once the parallel lean-to / wings /
+                    steps / piers work has merged — Roof / Walls / Lean-to / Wings / Dormer /
+                    Porch & steps / Foundation / Colours, each showing its own part of the field
+                    grid in cal3dPanel. Until then the grid shows every section at once. */}
+                {/* row-reverse: the 3D is FIRST in the markup so it lands on top when the row wraps
+                    on a narrow screen, and on the right when it does not. minWidth:0 on both
+                    columns for the reason the calibration row gives (auto-fit grids overflow).
+                    DOCKED MEANS SIDE BY SIDE (review 2026-09-29). The dock switches on at a 760 px
+                    row, but two wrapping columns only sat side by side from ~872 px, and in between
+                    the sticky 3D wrapped on TOP of the form and covered it as the page scrolled
+                    (a 1366 px laptop at 125% lands there). So while docked the row never wraps: a
+                    fixed-share 3D column beside a form that takes the rest, like the calibration
+                    row, and only then is the column sticky. It is capped at the window's height and
+                    scrolls on its own, so a short screen cannot push the end view out of reach. */}
+                <div ref={canvasRowRef} style={{ display: "flex", flexDirection: "row-reverse", flexWrap: dockOn ? "nowrap" : "wrap", alignItems: "flex-start", gap: 12 }}>
+                  <div data-ss-adv="view" style={dockOn
+                    ? { flex: "0 0 clamp(340px, 48%, 760px)", minWidth: 0, position: "sticky", top: 74, maxHeight: "calc(100vh - 86px)", overflowY: "auto" }
+                    : { flex: "1 1 440px", minWidth: 0 }}>
+                    {/* The `!adminCalPreview` term sits on the render site, as on the calibration
+                        surface: the docked panel and the full-screen viewer can never hold two
+                        WebGL contexts at once. */}
+                    {!adminCalPreview && advDock && (
+                      <div style={{ height: "min(520px, 52vh)", marginBottom: 8 }}>
+                        <Structure3DPanel
+                          key={`${bldgW}x${bldgH}`}
+                          bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
+                          style3d={adminCal.spec}
+                          fitHeightFt={adminCal.spec.wallHeightFt || 0}
+                          painted={false} paintBody="" paintTrim=""
+                          roofType="" roofColorHex=""
+                          frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
+                          fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
+                          suspended={false}
+                          pal={pal}
+                          onClose={() => setCalDock3D(false)}
+                        />
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                      <button onClick={() => setAdminCalPreview(true)} title="Open the 3D at full screen"
+                        style={{ ...S.btn("#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13 }}>
+                        {dockOn ? "⛶ Full screen 3D" : "🧊 Preview in 3D"}
+                      </button>
+                      {dockOn && (
+                        <button onClick={() => setCalDock3D((v) => !v)}
+                          style={{ ...S.btn("#FFF", "#7C3AED"), border: "1px solid #DDD6FE", fontSize: 12 }}>
+                          {calDock3D ? "🧊 Hide 3D" : "🧊 Show 3D"}
+                        </button>
+                      )}
+                    </div>
+                    <div style={{ maxWidth: 360 }}>
+                      <D3ElevationSVG spec={adminCal.spec} sizeLabel={sel.size} focusKey={calFocus} />
+                      <div style={{ fontSize: 10, color: "#64748B", marginTop: 3 }}>
+                        End view at {sel.size || "this size"}. Click a number and its measurement lights up.
+                      </div>
+                    </div>
+                  </div>
+                  <div data-ss-adv="fields" style={{ flex: dockOn ? "1 1 0" : "1 1 420px", minWidth: 0 }}>{cal3dPanel}</div>
+                </div>
+              </>
+            )}
         {cal3dPreview}
       </div>
     );
@@ -28751,7 +29005,7 @@ class DesignerErrorBoundary extends Component {
 // bundle uses (multi-tenant RPC vs. legacy direct table access).
 console.log("[StructureStudio] multi-tenant build: config-loader + RPC data path");
 
-function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, onOpenOrder = null, canPushInvoice = false }) {
+function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false }) {
   // state shape: { status: "ready", config } | { status: "loading" } | { status: "error", clientId, message }
   const [state, setState] = useState(() => (
     configProp ? { status: "ready", config: configProp } : { status: "loading" }
@@ -28909,7 +29163,7 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
       </div>
     );
   }
-  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} calibrationOnly={calibrationOnly} onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} /></DesignerErrorBoundary>;
+  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} calibrationOnly={calibrationOnly} advancedOnly={advancedOnly} onAdvancedDirty={onAdvancedDirty} onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} /></DesignerErrorBoundary>;
 }
 
 // Publish for the host pages' thin mount blocks (cross-block const sharing does not
