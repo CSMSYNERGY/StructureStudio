@@ -2203,7 +2203,7 @@ Deno.test("gradeFallFt / gradeFallToward: raised floors only, 0 is level, and ne
     ["foundation", "floorHeightFt", "gradeFallFt", "gradeFallToward"], "key order");
 });
 
-Deno.test("⚠️ the ground's fall survives an older panel's save; the current panel sets and clears it (2026-09-28)", () => {
+Deno.test("⚠️ the ground's fall survives any save that omits it, whatever the frame; the current panel sets and clears it with explicit nulls (2026-09-29)", () => {
   const roof = { type: "gable", pitch: 0.4 };
   const stored = { roof, foundation: "piers", floorHeightFt: 1.5, gradeFallFt: 2.5, gradeFallToward: "left" };
   const save = (sent: Record<string, unknown>, frame?: unknown, was: unknown = stored) => {
@@ -2223,15 +2223,39 @@ Deno.test("⚠️ the ground's fall survives an older panel's save; the current 
   assert(!("gradeFallFt" in skids) && !("gradeFallToward" in skids), "skids carries no fall");
   // A stored fall past the band is held to it on the way back in.
   assertEquals(save({ roof }, undefined, { ...stored, gradeFallFt: 9 }).gradeFallFt, GRADE_FALL_FT[1]);
-  // The current panel (frame "front") gets exactly what it sent: it can clear the fall...
-  const cleared = save({ roof, foundation: "piers", floorHeightFt: 1.5 }, "front");
-  assert(!("gradeFallFt" in cleared) && !("gradeFallToward" in cleared), JSON.stringify(cleared));
+  // ⚠️ FRAME "front" DOES NOT DECIDE THE FALL (review BC-1, 2026-09-29). The beta designer built
+  // between 09-25 and 09-28 sends frame "front" (it knows blocks, piers and floorHeightFt) but drops
+  // both fall keys; an untouched save from it keeps the stored fall.
+  for (const sent of [{ roof, foundation: "piers", floorHeightFt: 1.5 }, { roof, foundation: "piers" }]) {
+    const out = save(sent, "front");
+    assertEquals([out.foundation, out.gradeFallFt, out.gradeFallToward], ["piers", 2.5, "left"], `front, no fall keys: ${JSON.stringify(sent)}`);
+  }
+  // The current panel sends BOTH keys on every save, null when there is none: an explicit null
+  // clears, with or without frame "front"...
+  for (const frame of ["front", undefined]) {
+    const cleared = save({ roof, foundation: "piers", floorHeightFt: 1.5, gradeFallFt: null, gradeFallToward: null }, frame);
+    assert(!("gradeFallFt" in cleared) && !("gradeFallToward" in cleared), `${String(frame)}: ${JSON.stringify(cleared)}`);
+  }
+  // ...and the null is never STORED: the sanitiser drops it and nothing carries a null back.
+  const nulls = save({ roof, foundation: "piers", floorHeightFt: 1.5, gradeFallFt: null, gradeFallToward: null }, "front", { roof, foundation: "blocks" });
+  assert(!JSON.stringify(nulls).includes("gradeFall"), JSON.stringify(nulls));
+  // A cleared fall keeps the direction it was sent (the box emptied, Toward remembered).
+  const keepToward = save({ roof, foundation: "piers", gradeFallFt: null, gradeFallToward: "right" }, "front");
+  assertEquals([("gradeFallFt" in keepToward), keepToward.gradeFallToward], [false, "right"]);
   // ...or change it.
   const moved = save({ roof, foundation: "piers", gradeFallFt: 1, gradeFallToward: "back" }, "front");
   assertEquals([moved.gradeFallFt, moved.gradeFallToward], [1, "back"]);
-  // A request that DID send a key is answered with what it sent, even without frame "front".
-  const sentOne = save({ roof, foundation: "piers", gradeFallFt: 1 });
-  assertEquals([sentOne.gradeFallFt, sentOne.gradeFallToward], [1, "left"], "only the unsent field is carried");
+  // A request that DID send a key is answered with what it sent, whatever its frame.
+  for (const frame of ["front", undefined]) {
+    const sentOne = save({ roof, foundation: "piers", gradeFallFt: 1 }, frame);
+    assertEquals([sentOne.gradeFallFt, sentOne.gradeFallToward], [1, "left"], `${String(frame)}: only the unsent field is carried`);
+  }
+  // Leaving the raised floor drops the fall with it, from the current panel too.
+  const toSkids = save({ roof, foundation: "skids" }, "front");
+  assert(!("gradeFallFt" in toSkids) && !("gradeFallToward" in toSkids), "skids carries no fall");
+  // And frame "front" still gets exactly the foundation it sent (only the fall is carried).
+  const slab = save({ roof, foundation: "slab" }, "front");
+  assert(slab.foundation === "slab" && !("gradeFallFt" in slab), JSON.stringify(slab));
   // A stored row with no fall carries none.
   const none = save({ roof, foundation: null }, undefined, { roof, foundation: "blocks", floorHeightFt: 1 });
   assert(!("gradeFallFt" in none) && !("gradeFallToward" in none), "nothing invented");
