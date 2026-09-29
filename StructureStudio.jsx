@@ -4674,6 +4674,18 @@ function d3ProfSpanAt(dedup, y) {
 //            ye = H at the outer wall, ya = H + w * pitch where the wing roof meets the centre }]
 //   prof     the centre's roof profile, in the centre's own u (add uc for the building's)
 //
+// EACH WING ON ITS OWN (roof.wingSides, 2026-09-29). Carolyn, 09-29, on the Advanced page: "I want this
+// wing to be like this and this wing to be like this". roof.wingSides.{left,right,front,back} (by the
+// wall the wing stands on: west, east, south, north) carries that one wing's widthFt, pitch, attach
+// ("auto" | "roof" | "wall") and attachFt, each OVERRIDING the shared key for that side (wingWidthFt,
+// wingPitch, wingAttach, wingAttachFt); roof.wingSide still says which sides have a wing, and
+// wingWidthFt is still the on switch. "auto" is Automatic for that side even under a shared wingAttach.
+// Widths asked past the room the footprint leaves (the centre keeps 4 ft) shrink in proportion. The
+// centre's eave: with no attach anywhere it is today's rule exactly; with any wing attached it is the
+// one asked (held 1 ft over the walls), and every AUTOMATIC wing still pushes it up to clear itself,
+// today's rule applied to that wing alone. ABSENT, every wing reads the shared keys and this is the
+// massing it always was, number for number (the equal widths take today's own expression).
+//
 // ONE function, read by the renderer, the per-wall tops, the vent fit, the porch span and every
 // camera, for the reason d3RoofAxes is one function. With no wing keys it returns the plain
 // building (Sc = S, uc = 0, Hc = H, no wings), and every caller then builds what it always did.
@@ -4690,19 +4702,31 @@ function d3Massing(roofCfg, W, L, H) {
     const asked = (cfg.wingSide || "both") === "both" ? [negWall, posWall] : (named[cfg.wingSide] ? [named[cfg.wingSide]] : []);
     const walls = asked.filter((w) => w === negWall || w === posWall);
     out.dropped = asked.filter((w) => walls.indexOf(w) < 0);
-    // The centre keeps at least 4 ft: a wider ask shrinks the wings, both alike.
-    const w = walls.length ? Math.min(want, (ax.S - 4) / walls.length) : 0;
     const rawP = cfg.wingPitch != null ? Number(cfg.wingPitch) : 0.25;
     const pitch = isFinite(rawP) ? Math.max(0, Math.min(1.5, rawP)) : 0.25;
-    if (w > 0.5) {
-      walls.forEach((wall) => {
-        const s = wall === negWall ? -1 : 1;
-        out.wings.push({ side: s, wall, w, pitch, u1: s * ax.S / 2, u0: s * (ax.S / 2 - w), ye: Hn, ya: Hn + w * pitch });
-      });
-      const wL = out.wings.some((g) => g.side < 0) ? w : 0, wR = out.wings.some((g) => g.side > 0) ? w : 0;
+    const shared = cfg.wingAttach === "roof" || cfg.wingAttach === "wall" ? cfg.wingAttach : null;
+    // Each wall's own numbers (roof.wingSides), else the shared ones.
+    const own = walls.map((wall) => d3WingSideCfg(cfg, wall, want, pitch, shared));
+    // The centre keeps at least 4 ft: a wider ask shrinks the wings, both alike -- in proportion when
+    // they differ, and by today's own expression when they do not.
+    const room = ax.S - 4, sum = own.reduce((t, o) => t + o.want, 0);
+    const same = own.every((o) => o.want === own[0].want);
+    const widths = own.map((o) => (same ? Math.min(o.want, room / walls.length) : sum > room ? o.want * room / sum : o.want));
+    const modes = [], fts = [];
+    walls.forEach((wall, i) => {
+      const w = widths[i];
+      if (!(w > 0.5)) return;
+      const s = wall === negWall ? -1 : 1, p = own[i].pitch;
+      out.wings.push({ side: s, wall, w, pitch: p, u1: s * ax.S / 2, u0: s * (ax.S / 2 - w), ye: Hn, ya: Hn + w * p });
+      modes.push(own[i].attach);
+      fts.push(own[i].attachFt);
+    });
+    if (out.wings.length) {
+      const gL = out.wings.find((g) => g.side < 0), gR = out.wings.find((g) => g.side > 0);
+      const wL = gL ? gL.w : 0, wR = gR ? gR.w : 0;
       out.Sc = ax.S - wL - wR;
       out.uc = (wL - wR) / 2;
-      out.ya = Hn + w * pitch;
+      out.ya = out.wings.reduce((y, g) => Math.max(y, g.ya), -Infinity);
       // The centre's eave overhangs the wing roof, falling at its own eave slope while the wing roof
       // falls at the wing pitch, and its fascia or tails hang up to 0.3 ft under the deck. It has to
       // clear the wing slab's top (ROOF_T above the line) by 0.1 ft all the way out to the overhang.
@@ -4712,7 +4736,8 @@ function d3Massing(roofCfg, W, L, H) {
       const eaveSlope = n > 1 ? Math.max(slopeAt(c[0], c[1]), slopeAt(c[n - 2], c[n - 1])) : 0;
       const ovRaw = cfg.overhang != null ? Number(cfg.overhang) : D3.OVERHANG;
       const ov = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
-      const minHc = out.ya + Math.max(1.0, D3.ROOF_T + 0.43 + Math.max(0, eaveSlope - pitch) * ov);
+      // Each AUTOMATIC wing's own floor for the centre's eave: its roof's top + 1 ft at least.
+      const minHcOf = (g) => g.ya + Math.max(1.0, D3.ROOF_T + 0.43 + Math.max(0, eaveSlope - g.pitch) * ov);
       // WHERE THE WING ROOFS MEET THE CENTRE, CHOSEN (roof.wingAttach / wingAttachFt, 2026-09-28). With
       // an attach the centre's eave is the builder's number EXACTLY and nothing below moves it: the push
       // is what Carolyn saw on the Tri Home and did not want -- "It even pushed the roof up ... they need
@@ -4720,28 +4745,52 @@ function d3Massing(roofCfg, W, L, H) {
       // just automatically switch" (09-28 @16:41). The wing roof's pitch is then WORKED OUT from where it
       // meets (d3WingsAttach), and wingPitch stays stored, unread, for the day the attach is cleared.
       // Absent, this is the rule it always was, push and all, so no stored style moves.
-      const attach = cfg.wingAttach === "roof" || cfg.wingAttach === "wall" ? cfg.wingAttach : null;
+      const attach = modes.find((a) => a) || null;
       // A BLANK middle height is 3 ft over the wing roof's top. With an attach that top is worked out, and
       // the stored wingPitch -- no longer shown, its box a readout -- must not move the building either
       // (review, 2026-09-29: a hidden 6:12 put the middle 1.5 ft higher than a hidden 3:12), so the blank
-      // reads the default 3:12 wing roof. The panel's placeholder prints the height this gives.
+      // reads the default 3:12 wing roof. The panel's placeholder prints the height this gives. An
+      // AUTOMATIC wing beside an attached one (wingSides) reads its own pitch, as it always did.
       const rawHc = Number(cfg.centerEaveFt);
-      const wantHc = isFinite(rawHc) && rawHc > 0 ? rawHc : (attach ? Hn + w * 0.25 : out.ya) + 3;
+      const wantHc = isFinite(rawHc) && rawHc > 0 ? rawHc
+        : (attach ? Hn + out.wings.reduce((t, g, i) => Math.max(t, g.w * (modes[i] ? 0.25 : g.pitch)), -Infinity) : out.ya) + 3;
+      const minHc = out.wings.reduce((t, g, i) => (modes[i] ? t : Math.max(t, minHcOf(g))), -Infinity);
       if (!attach) {
         out.Hc = Math.max(wantHc, minHc);
         out.hcRaised = out.Hc > wantHc + 1e-9;
       } else {
         // The one floor left: a centre no taller than the outside walls is not a raised centre at all,
         // and every wall and roof built from it would stand upside down. The panel says so (hcLow).
-        out.Hc = Math.max(wantHc, Hn + 1);
-        out.hcLow = out.Hc > wantHc + 1e-9;
+        const base = Math.max(wantHc, Hn + 1);
+        out.hcLow = base > wantHc + 1e-9;
+        // ...and an Automatic wing beside the attached one (wingSides) still pushes it up to clear itself.
+        out.Hc = Math.max(base, minHc);
+        out.hcRaised = out.Hc > base + 1e-9;
         out.attach = attach;
-        d3WingsAttach(out, c, cfg.wingAttachFt, ov);
+        d3WingsAttach(out, c, modes, fts, ov);
       }
     }
   }
   out.prof = d3RoofProfile(cfg, out.Sc, out.Hc, ax.tallNeg).dedup;
   return out;
+}
+// ONE WING'S OWN NUMBERS (roof.wingSides, 2026-09-29): the entry for the wall it stands on (west = left,
+// east = right, south = front, north = back), each field overriding the shared one handed in -- `want`
+// the width asked (before the room is shared out), `pitch` the clamped wingPitch, `shared` the wingAttach
+// mode or null -- and "auto" Automatic whatever wingAttach says. A missing entry or a field that is not a
+// number or a known word is the shared value, so without wingSides every wing reads exactly the shared keys.
+function d3WingSideCfg(cfg, wall, want, pitch, shared) {
+  const all = cfg && cfg.wingSides && typeof cfg.wingSides === "object" ? cfg.wingSides : null;
+  const o0 = all ? all[({ west: "left", east: "right", south: "front", north: "back" })[wall]] : null;
+  const o = o0 && typeof o0 === "object" ? o0 : {};
+  const num = (v) => (typeof v === "number" && isFinite(v) ? v : null);
+  const w = num(o.widthFt), p = num(o.pitch), ft = num(o.attachFt);
+  return {
+    want: w !== null ? Math.min(16, Math.max(0, w)) : want,
+    pitch: p !== null ? Math.max(0, Math.min(1.5, p)) : pitch,
+    attach: o.attach === "auto" ? null : o.attach === "roof" || o.attach === "wall" ? o.attach : shared,
+    attachFt: ft !== null ? ft : cfg.wingAttachFt,
+  };
 }
 // The eave at one END of a roof profile (side -1 = the -u end) and the leg of roof that rises from it:
 // { u, y } the eave point -- the TOP of a shed's plumb high edge -- k the leg's slope rising INWARD
@@ -4781,17 +4830,21 @@ function d3RoofEnd(dedup, side) {
 // centre's eave slope on that side), clamped, cuts, and meets / meetFt: where the wing roof actually
 // meets the centre ("roof" or "wall") and how far above or below its eave, for every reader that says
 // it in words. u0 stays the centre wall line the walls stand on.
-function d3WingsAttach(m, c, dRaw, ov) {
-  const d0 = Number(dRaw);
-  const ask = isFinite(d0) ? Math.max(0, Math.min(10, d0)) : 0;
+// `modes` and `dRaws` are per wing, in m.wings' order (roof.wingSides, 2026-09-29): a wing whose mode
+// is null is AUTOMATIC beside the attached ones and is left exactly as d3Massing drew it.
+function d3WingsAttach(m, c, modes, dRaws, ov) {
   const Hn = m.H, Hc = m.Hc, a = D3.ROOF_T + 0.43;
-  m.wings.forEach((g) => {
+  m.wings.forEach((g, i) => {
+    const mode = modes[i];
+    if (!mode) return;
+    const d0 = Number(dRaws[i]);
+    const ask = isFinite(d0) ? Math.max(0, Math.min(10, d0)) : 0;
     const e = d3RoofEnd(c, g.side);
     const k = Math.max(0, e.k);
     let d = ask, A, uIn = g.u0, run = g.w, clamped = false, cuts = false;
     // The least distance under the centre's eave that its eave finish clears a wing roof meeting its wall.
     const need = g.w > ov + 1e-6 ? Math.max(a, (a + k * ov - ov * (Hc - Hn) / g.w) / (1 - ov / g.w)) : a + k * ov;
-    if (m.attach === "wall") {
+    if (mode === "wall") {
       if (d < need - 1e-9) { d = need; clamped = true; }
       // Never a wing roof falling toward the centre: at the outside wall's height it is flat, and a
       // centre that low may not clear it.
@@ -4805,14 +4858,14 @@ function d3WingsAttach(m, c, dRaw, ov) {
       if (k > 0.05) { uIn = g.u0 - g.side * (d / k); run = g.w + d / k; }
     }
     let p = (A - Hn) / run;
-    if (m.attach === "roof" && p > k + 1e-9) cuts = true;
-    let meets = m.attach, meetFt = d;
-    if (m.attach === "roof" && cuts) {
+    if (mode === "roof" && p > k + 1e-9) cuts = true;
+    let meets = mode, meetFt = d;
+    if (mode === "roof" && cuts) {
       uIn = g.u0; run = g.w;
       A = Math.max(Hn, Math.min(Hn + g.w * p, Hc - need));
       p = (A - Hn) / g.w; meets = "wall"; meetFt = Hc - A;
     }
-    Object.assign(g, { pitch: p, ya: A, uIn, run, attach: m.attach, attachFt: d, k, clamped, cuts, meets, meetFt });
+    Object.assign(g, { pitch: p, ya: A, uIn, run, attach: mode, attachFt: d, k, clamped, cuts, meets, meetFt });
   });
   m.ya = m.wings.reduce((y, g) => Math.max(y, g.ya), Hn);
 }
@@ -6173,7 +6226,9 @@ function d3WingsElevation(spec, sizeLabel, focusKey, frame) {
   const X = (u) => PL + innerW / 2 + u * sc;
   const Y = (y) => PT + innerH - y * sc;
   const HL = "#B45309", DIM = "#A16207", INK = "#78350F";
-  const on = (k) => focusKey === k;
+  // A wing's own box on the Advanced page (roof.wingSides, 2026-09-29) is "wingWidthFt:left" and the like,
+  // and lights the measurement its shared key would.
+  const on = (k) => focusKey === k || (typeof focusKey === "string" && focusKey.split(":")[0] === k);
   const dimStroke = (k) => ({ stroke: on(k) ? HL : DIM, strokeWidth: on(k) ? 2 : 1 });
   // On the Advanced page's plain card the drawing is the page's main readout, so its words are a size
   // larger there (review 2026-09-29: 8 px labels at 300 px wide). Every other caller's are unchanged.
@@ -6203,7 +6258,13 @@ function d3WingsElevation(spec, sizeLabel, focusKey, frame) {
   // Where a wing roof meets the centre, as built; under each wing's own span when the two differ (an
   // off-centre ridge can land one and not the other), else once under the first (review, 2026-09-29).
   const meetWords = (g) => (g.meetFt < 1 / 24 ? "meets at the eave" : `meets the ${g.meets} ${d3FtIn(g.meetFt)} ${g.meets === "roof" ? "up" : "down"}`);
-  const meetShown = g0.attach ? (m.wings.every((g) => meetWords(g) === meetWords(g0)) ? [g0] : m.wings) : [];
+  // Each wing set on its own (roof.wingSides, 2026-09-29): only the attached ones say where they meet, and
+  // an Automatic wing beside them says nothing, as it never has.
+  const attW = m.wings.filter((g) => g.attach);
+  const meetShown = attW.length === m.wings.length && m.wings.every((g) => meetWords(g) === meetWords(g0)) ? (g0.attach ? [g0] : []) : attW;
+  // Each wing's width and pitch under it where the two differ (wingSides), else once under the first.
+  const pitchWords = (g) => (g.attach ? `wing, ${Math.round(g.pitch * 120) / 10} in 12` : `wing, ${PLAIN ? Math.round(g.pitch * 120) / 10 : Math.round(g.pitch * 12)}:12`);
+  const wingShown = m.wings.every((g) => d3FtIn(g.w) === d3FtIn(g0.w) && pitchWords(g) === pitchWords(g0)) ? [g0] : m.wings;
   return (
     <svg viewBox={`0 0 ${VW} ${VH}`} style={d3ElevFrame(frame)}>
       <line x1={PL - 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(0)} stroke="#D6D3D1" strokeWidth="1" />
@@ -6225,11 +6286,17 @@ function d3WingsElevation(spec, sizeLabel, focusKey, frame) {
       {label(VW - PR + 14, (Y(H) + Y(m.Hc)) / 2, d3FtIn(m.Hc), m.hcRaised ? "centre, raised" : (m.hcLow ? "centre, min." : "centre eave"), "centerEaveFt", "start")}
       <line x1={VW - 8} y1={Y(0)} x2={VW - 8} y2={Y(peak)} stroke={DIM} strokeWidth="1" />
       {label(VW - 12, Y(peak) + 10, d3FtIn(peak), "peak", null, "end")}
-      {/* SPAN and the first wing's WIDTH, bottom */}
+      {/* SPAN and the first wing's WIDTH, bottom (and the other's, where the two differ) */}
       <line x1={X(-s2)} y1={Y(0) + 16} x2={X(s2)} y2={Y(0) + 16} stroke={DIM} strokeWidth="1" />
       {label((X(-s2) + X(s2)) / 2, Y(0) + 29, d3FtIn(S), "span", null)}
       <line x1={X(g0.u1)} y1={Y(0) + 6} x2={X(g0.u0)} y2={Y(0) + 6} {...dimStroke("wingWidthFt")} />
-      {label((X(g0.u1) + X(g0.u0)) / 2, Y(g0.ye) + 12, d3FtIn(g0.w), g0.attach ? `wing, ${Math.round(g0.pitch * 120) / 10} in 12` : `wing, ${PLAIN ? Math.round(g0.pitch * 120) / 10 : Math.round(g0.pitch * 12)}:12`, "wingWidthFt")}
+      {label((X(g0.u1) + X(g0.u0)) / 2, Y(g0.ye) + 12, d3FtIn(g0.w), pitchWords(g0), "wingWidthFt")}
+      {wingShown.slice(1).map((g) => (
+        <g key={"ww" + g.side}>
+          <line x1={X(g.u1)} y1={Y(0) + 6} x2={X(g.u0)} y2={Y(0) + 6} {...dimStroke("wingWidthFt")} />
+          {label((X(g.u1) + X(g.u0)) / 2, Y(g.ye) + 12, d3FtIn(g.w), pitchWords(g), "wingWidthFt")}
+        </g>
+      ))}
       {/* WHERE THE WING ROOF MEETS THE CENTRE (wingAttach, 2026-09-28), a line under the wing's own */}
       {meetShown.map((g) => (
         <text key={"meet" + g.side} x={(X(g.u1) + X(g.u0)) / 2} y={Y(g.ye) + 30} textAnchor="middle" style={{ fontSize: PLAIN ? 9 : 8, fill: on("wingAttachFt") ? HL : DIM }}>
@@ -17330,10 +17397,20 @@ function ssDrewWords(spec, porchBuilt, stepBuilt, massBuilt) {
     // Two wings that meet it differently (an off-centre ridge lands one, not the other) are said one by
     // one, as built (review, 2026-09-29), each named by its wall.
     const sideOf = (g) => ({ west: "left", east: "right", north: "back", south: "front" })[g.wall] || "other";
-    const each = mb && mb.wings.length > 1 && mb.wings.some((g) => meetsOf(g.meets, g.meetFt) !== meetsOf(mb.wings[0].meets, mb.wings[0].meetFt)) ? mb.wings : null;
-    const meets = each ? "" : mb ? meetsOf(mb.wings[0].meets, mb.wings[0].meetFt) : meetsOf(roof.wingAttach, Number(roof.wingAttachFt));
-    out.push(`A lower wing ${ssFtInWords(wing)} wide runs along ${where} under its own roof${meets}${centre}.`);
-    if (each) out.push(each.map((g, i) => `${i ? "the" : "The"} ${sideOf(g)} wing has a roof${meetsOf(g.meets, g.meetFt)}`).join("; ") + ".");
+    // EACH WING SET ON ITS OWN (roof.wingSides, 2026-09-29): said wing by wing, as BUILT, where the caller
+    // has the massing -- its width, and where its roof meets the middle section or how steep it falls.
+    // Without a massing (no size yet) the sentence below reads the shared keys, the first wing's.
+    const perWing = roof.wingSides && typeof roof.wingSides === "object" && massBuilt && massBuilt.wings && massBuilt.wings.length ? massBuilt.wings : null;
+    if (perWing) {
+      const many = perWing.length > 1;
+      out.push(`${many ? "Lower wings run" : "A lower wing runs"} along ${where} under ${many ? "their" : "its"} own roof${many ? "s" : ""}, and the middle section's walls rise to ${ssFtInWords(massBuilt.Hc)}.`);
+      out.push(perWing.map((g, i) => `${i ? "the" : "The"} ${sideOf(g)} wing is ${ssFtInWords(g.w)} wide with a roof${g.attach ? meetsOf(g.meets, g.meetFt) : ` falling ${Math.round(g.pitch * 120) / 10} in 12 to its outside wall`}`).join("; ") + ".");
+    } else {
+      const each = mb && mb.wings.length > 1 && mb.wings.some((g) => meetsOf(g.meets, g.meetFt) !== meetsOf(mb.wings[0].meets, mb.wings[0].meetFt)) ? mb.wings : null;
+      const meets = each ? "" : mb ? meetsOf(mb.wings[0].meets, mb.wings[0].meetFt) : meetsOf(roof.wingAttach, Number(roof.wingAttachFt));
+      out.push(`A lower wing ${ssFtInWords(wing)} wide runs along ${where} under its own roof${meets}${centre}.`);
+      if (each) out.push(each.map((g, i) => `${i ? "the" : "The"} ${sideOf(g)} wing has a roof${meetsOf(g.meets, g.meetFt)}`).join("; ") + ".");
+    }
   }
   // A ROOF STEP (2026-09-28): where the rear roof section starts and which way its eave steps, only
   // where the style gives both keys on a roof that can carry them (the sanitiser's rule), and as
@@ -17765,6 +17842,10 @@ const SS_ADV_CSS = [
   '.ss-adv .ss-adv-more > .ss-adv-flds{padding:4px 13px 13px}',
   // The add-on panel: its own switch first, then its controls.
   '.ss-adv .ss-adv-panel{flex:0 0 100%;min-width:0;display:flex;flex-direction:column;gap:14px}',
+  // A wing's own card (roof.wingSides, 2026-09-29): its switch under the title, its fields under that. A side
+  // with no wing is a quiet card with just its switch.
+  '.ss-adv .ss-adv-wcard > .ss-adv-flds{margin-top:12px}',
+  '.ss-adv .ss-adv-wcard.is-off{background:var(--ss-surface)}',
   '.ss-adv .ss-adv-panel > .ssd-tool{align-self:flex-start}',
   '.ss-adv .ss-adv-warn{padding:9px 12px;border:1px solid #FCD34D;border-radius:4px;background:#FEF3C7;color:#92400E;font-size:12px;font-weight:600;line-height:1.45}',
   '.ss-adv .ss-adv-ok{max-width:var(--ssd-invoice-max);margin:0 0 12px;padding:10px 14px;border:1px solid #BBF7D0;border-radius:4px;background:#F0FDF4;color:#15803D;font-size:12.5px;font-weight:700;line-height:1.45}',
@@ -21682,7 +21763,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // on would make the preview draw a building that Save cannot store -- and "the new frame is
   // active" is decided by whether either frame key is PRESENT, so a stale one would turn the
   // preview's porch and front round while the saved style turned it back.
-  const CAL_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt"];
+  const CAL_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt", "wingSides"];
   const calSetRoofType = (type) => setAdminCal((p) => {
     const roof = { ...p.spec.roof, type };
     if (type === "shed") { delete roof.front; for (const k of CAL_WING_KEYS) delete roof[k]; }
@@ -21699,6 +21780,72 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (!side) { for (const k of CAL_WING_KEYS) delete roof[k]; }
     else { roof.wingSide = side; if (!((Number(roof.wingWidthFt) || 0) > 0)) roof.wingWidthFt = 4; }
     return { ...p, spec: { ...p.spec, roof } };
+  });
+  // EACH WING SET ON ITS OWN (roof.wingSides, 2026-09-29), for the Advanced page's wing cards. The sides a
+  // wing can stand on are the roof's eave sides (d3RoofAxes, the renderer's rule), left/right or front/back,
+  // and a side is on when roof.wingSide is "both" (or not chosen: drawn on both) or names it.
+  const calWingEaveSides = (roof) => (d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? ["left", "right"] : ["front", "back"]);
+  const calWingOnSides = (roof, eave) => eave.filter((s) => !roof.wingSide || roof.wingSide === "both" || roof.wingSide === s);
+  // One side's numbers as the renderer reads them (d3WingSideCfg): its own entry, else the shared key.
+  // `attach` is "" for Automatic.
+  const calWingSideNow = (roof, s) => {
+    const o0 = roof.wingSides && typeof roof.wingSides === "object" ? roof.wingSides[s] : null;
+    const o = o0 && typeof o0 === "object" ? o0 : {};
+    const num = (v) => typeof v === "number" && isFinite(v);
+    const sharedAt = roof.wingAttach === "roof" || roof.wingAttach === "wall" ? roof.wingAttach : "";
+    return {
+      widthFt: num(o.widthFt) ? o.widthFt : roof.wingWidthFt,
+      pitch: num(o.pitch) ? o.pitch : roof.wingPitch,
+      attach: o.attach === "auto" ? "" : o.attach === "roof" || o.attach === "wall" ? o.attach : sharedAt,
+      attachFt: num(o.attachFt) ? o.attachFt : roof.wingAttachFt,
+    };
+  };
+  // The shared keys follow the FIRST wing that is on (left before right, front before back): production's
+  // older designer reads only them, so it still draws something close -- both wings like the first.
+  const calWingSync = (roof) => {
+    if (!roof.wingSides || typeof roof.wingSides !== "object") return roof;
+    const on = calWingOnSides(roof, calWingEaveSides(roof));
+    const first = on.length ? roof.wingSides[on[0]] : null;
+    if (!first || typeof first !== "object") return roof;
+    if (typeof first.widthFt === "number" && first.widthFt > 0.5) roof.wingWidthFt = first.widthFt;
+    if (typeof first.pitch === "number") roof.wingPitch = first.pitch;
+    if (first.attach === "roof" || first.attach === "wall") {
+      roof.wingAttach = first.attach;
+      if (typeof first.attachFt === "number") roof.wingAttachFt = first.attachFt;
+    } else if (first.attach === "auto") { delete roof.wingAttach; delete roof.wingAttachFt; }
+    return roof;
+  };
+  // One card's edit. The first time, every eave side's numbers are written out in full from what is drawn
+  // now (a width, a pitch -- 3 in 12 where none was set -- and "auto" or the mode with its distance), so no
+  // side leans on a shared key the next edit moves; then `patch` goes on this side (null deletes a field).
+  const calSetWingSide = (side, patch) => setAdminCal((p) => {
+    const roof = { ...p.spec.roof };
+    const eave = calWingEaveSides(roof);
+    const sides = { ...(roof.wingSides && typeof roof.wingSides === "object" ? roof.wingSides : {}) };
+    eave.concat(eave.indexOf(side) < 0 ? [side] : []).forEach((s) => {
+      const e = calWingSideNow(roof, s);
+      const full = { widthFt: Number(e.widthFt) > 0.5 ? Number(e.widthFt) : 4, pitch: e.pitch != null && isFinite(Number(e.pitch)) ? Number(e.pitch) : 0.25, attach: e.attach || "auto" };
+      if (e.attach && typeof e.attachFt === "number") full.attachFt = e.attachFt;
+      sides[s] = full;
+    });
+    const cur = { ...sides[side], ...patch };
+    Object.keys(cur).forEach((k) => { if (cur[k] === null || cur[k] === undefined) delete cur[k]; });
+    sides[side] = cur;
+    roof.wingSides = sides;
+    return { ...p, spec: { ...p.spec, roof: calWingSync(roof) } };
+  });
+  // One side's switch: roof.wingSide says which sides are on ("both" when every eave side is). The last one
+  // off is the wings off (calSetWings(null)'s rule: every wing key goes). A side turned off keeps its own
+  // numbers in wingSides, so turning it back on brings the same wing back.
+  const calSetWingOn = (side, turnOn) => setAdminCal((p) => {
+    const roof = { ...p.spec.roof };
+    const eave = calWingEaveSides(roof);
+    const onNow = calWingOnSides(roof, eave);
+    const next = eave.filter((s) => (s === side ? turnOn : onNow.indexOf(s) >= 0));
+    if (!next.length) { for (const k of CAL_WING_KEYS) delete roof[k]; return { ...p, spec: { ...p.spec, roof } }; }
+    roof.wingSide = next.length === eave.length ? "both" : next[0];
+    if (!((Number(roof.wingWidthFt) || 0) > 0)) roof.wingWidthFt = 4;
+    return { ...p, spec: { ...p.spec, roof: calWingSync(roof) } };
   });
   // WHERE A LEAN-TO OR THE WINGS MEET THE BUILDING (roof.leanToAttach / wingAttach, 2026-09-28). The
   // mode and its distance travel together: picking "roof" or "wall" with no distance yet starts it at
@@ -23244,7 +23391,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const roof = spec.roof || {};
     // The 2026-09-24 keys are in the slice of the question whose panel sets them: which way the
     // building faces and the wings are the ROOF's shape, the attach height and width the PORCH's.
-    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt, roof.wingAttach, roof.wingAttachFt, roof.rearStepFt, roof.rearEaveRiseFt]);
+    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt, roof.wingAttach, roof.wingAttachFt, roof.rearStepFt, roof.rearEaveRiseFt, roof.wingSides]);
     if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps, roof.porchStepCount]);
     // What it stands on and how high (2026-09-25) are set in the walls panel, beside the wall.
     if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt, spec.gradeFallFt, spec.gradeFallToward]);
@@ -26213,7 +26360,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   // back off d3Massing at the panel's size, the numbers the 3D builds. While it is set the
                   // wing roof's pitch is WORKED OUT, so its box becomes a readout (wingPitch stays stored).
                   const wm = on && roof.wingAttach ? d3Massing(roof, bldgW, bldgH, Number(adminCal.spec.wallHeightFt) || D3.WALL_H) : null;
-                  const wg = wm && wm.attach ? wm.wings : [];
+                  const wg = wm && wm.attach ? wm.wings.filter((g) => g.attach) : [];
                   // Each wing named by its wall, where the two differ -- an off-centre ridge can land one wing roof
                   // on the middle roof and not the other (review, 2026-09-29).
                   const wSide = (g) => ({ west: "left", east: "right", north: "back", south: "front" })[g.wall] || "other";
@@ -26253,6 +26400,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           {...calOptNumProps("wingWidthFt", roof.wingWidthFt, [0, 16], (n) => (n > 0 ? calSetRoofOpt("wingWidthFt", n) : calSetWings(null)))}
                           style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                         <div style={hint}>Enclosed rooms under their own lower roof, inside the size. A lean-to is the open one on posts.</div>
+                        {/* EACH WING SET ON ITS OWN (roof.wingSides, 2026-09-29) is the Advanced page's; these controls
+                            are the shared keys, which the wing cards there override side by side. */}
+                        {on && roof.wingSides && typeof roof.wingSides === "object" && Object.keys(roof.wingSides).length > 0 && (
+                          <div data-ss-cal-wingsides="" style={{ ...hint, color: "#B45309" }}>Each wing is set separately on the Advanced page.</div>
+                        )}
                       </label>
                       {on && (
                         <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wing side
@@ -27058,7 +27210,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         </div>
       );
     };
-    const advNum = ({ k, f, label, value, min, max, step, commit, band, write, unit, ends, placeholder, fallback, disabled, note, full, children }) => {
+    // `aria` (optional): the accessible name, where the visible label alone is not unique on the page (a wing's
+    // own "Width (ft)" in its card, beside the building's).
+    const advNum = ({ k, f, label, aria, value, min, max, step, commit, band, write, unit, ends, placeholder, fallback, disabled, note, full, children }) => {
       const blank = value === null || value === undefined || value === "";
       const box = band ? calOptNumProps(k, blank ? null : value, band, write) : calNumProps(k, value, commit);
       const put = band ? (n) => write(Math.max(band[0], Math.min(band[1], n))) : commit;
@@ -27067,11 +27221,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <div key={f || k} className={"ss-adv-f" + (full ? " is-full" : "")} data-ss-adv-f={f || k}>
           <div className="ss-adv-fh">
             <span className="ssd-fld-l">{label}</span>
-            <input type="number" className="ssd-input ssd-field ss-adv-num" aria-label={label} min={min} max={max} step={step}
+            <input type="number" className="ssd-input ssd-field ss-adv-num" aria-label={aria || label} min={min} max={max} step={step}
               inputMode="decimal" placeholder={placeholder} disabled={disabled} {...box} />
             {unit ? <span className="ss-adv-unit">{unit}</span> : null}
           </div>
-          <input type="range" className="ss-adv-range" aria-label={label + ", slider"} min={min} max={max} step={step} disabled={disabled}
+          <input type="range" className="ss-adv-range" aria-label={(aria || label) + ", slider"} min={min} max={max} step={step} disabled={disabled}
             value={Math.max(min, Math.min(max, isFinite(at) ? at : min))}
             onFocus={() => { setCalFocus(k); setCalDraft(blank ? "" : String(value)); }}
             onChange={(e) => { const n = parseFloat(e.target.value); setCalFocus(k); setCalDraft(e.target.value); if (isFinite(n)) put(n); }}
@@ -27084,10 +27238,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     };
     // Segmented buttons, the Designer's .ssd-seg, under a field label. opts: [value, label, disabled?, title?]
     // `unset`: the "" option is no choice at all ("Not set", "None"), so it is drawn on but quiet.
-    const advSeg = ({ f, label, value, opts, pick, note, children, full, unset }) => (
+    const advSeg = ({ f, label, aria, value, opts, pick, note, children, full, unset }) => (
       <div key={f} className={"ss-adv-f" + (full ? " is-full" : " is-auto")} data-ss-adv-f={f}>
         <div className="ss-adv-fh"><span className="ssd-fld-l">{label}</span></div>
-        <div className="ssd-seg" role="group" aria-label={label}>
+        <div className="ssd-seg" role="group" aria-label={aria || label}>
           {opts.map(([v, l, off, why]) => (
             <button key={v || "none"} type="button" aria-pressed={value === v} disabled={!!off} title={why || undefined}
               className={(value === v ? "ssd-seg-b is-on" : "ssd-seg-b") + (unset && v === "" ? " is-unset" : "")} onClick={() => pick(v)}
@@ -27485,6 +27639,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       );
       return out;
     };
+    // EACH WING SET ON ITS OWN (roof.wingSides, 2026-09-29). Carolyn, 09-29, on this page: "I want this wing
+    // to be like this and this wing to be like this". One shared control, the middle section's wall height,
+    // then a card per side the roof can carry a wing on (its eave sides, d3RoofAxes): each with its own
+    // switch, width, where its roof meets the middle section and how far, and its pitch or the pitch that
+    // builds. Every card edit writes that side's numbers into wingSides (calSetWingSide) and keeps the
+    // shared keys equal to the first wing's, so an older designer still draws something close; the
+    // switches write wingSide. Turning the wings on writes what it always did, nothing per side.
     const wingPanel = () => {
       const on = (Number(roof.wingWidthFt) || 0) > 0;
       const out = [advSwitch("wingsOn", on, "Lower wings on", "Add lower wings", () => calSetWings(on ? null : "both"))];
@@ -27492,68 +27653,88 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         out.push(<div key="off">{advNoteEl(["Enclosed side rooms under a lower roof, inside the size.", "They stand beside a taller middle section. A lean-to is the open one on posts."], { marginTop: -6 })}</div>);
         return out;
       }
-      const eaveSides = d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? ["left", "right"] : ["front", "back"];
+      const eaveSides = calWingEaveSides(roof);
       const lost = roof.wingSide && roof.wingSide !== "both" && eaveSides.indexOf(roof.wingSide) < 0;
-      const wm = roof.wingAttach ? d3Massing(roof, bldgW, bldgH, wallH) : null;
-      const wg = wm && wm.attach ? wm.wings : [];
+      const onSides = calWingOnSides(roof, eaveSides);
+      const wm = d3Massing(roof, bldgW, bldgH, wallH);
       const wSide = (g) => ({ west: "left", east: "right", north: "back", south: "front" })[g.wall] || "other";
-      const wIn12s = wg.map((g) => String(Math.round(g.pitch * 120) / 10));
-      const wIn12 = new Set(wIn12s).size > 1 ? wg.map((g, i) => `${wSide(g)} ${wIn12s[i]}`).join(" / ") : (wIn12s[0] || "");
-      const meetLine = (g) => (g.meetFt < 1 / 24 ? "meets the middle section at its eave" : `meets the ${g.meets} ${d3FtIn(g.meetFt)} ${g.meets === "roof" ? "above" : "below"} the middle section's eave`);
-      const cap1 = (t) => t.charAt(0).toUpperCase() + t.slice(1);
-      const wMeet = !wg.length ? "" : wg.every((g) => meetLine(g) === meetLine(wg[0])) ? cap1(meetLine(wg[0]))
-        : wg.map((g, i) => `${i ? wSide(g) : cap1(wSide(g))} wing ${meetLine(g)}`).join("; ");
-      const cutW = wg.filter((g) => g.cuts);
-      const cutWho = cutW.length === wg.length ? (wg.length > 1 ? ["the wing roofs", "they meet"] : ["the wing roof", "it meets"]) : [`the ${cutW.length ? wSide(cutW[0]) : ""} wing roof`, "it meets"];
+      const gOf = (s) => wm.wings.find((g) => wSide(g) === s) || null;
       const blankHc = d3Massing({ ...roof, centerEaveFt: null }, bldgW, bldgH, wallH).Hc;
-      const wDc = wg.length ? d3DormerCovered(spec, sel.size) : null;
+      const wDc = wm.wings.length ? d3DormerCovered(spec, sel.size) : null;
       const wDcWords = wDc && wDc.by === "wing" ? d3DormerCoveredWords(wDc, false) : null;
-      const reachHc = wg.filter((g) => g.cuts).reduce((h, g) => Math.min(h, wm.H + g.k * g.w), Infinity);
-      const wWarn = !wg.length ? null
-        : wm.hcLow ? `The middle section must stand at least 1 ft above the outside walls, so it is drawn at ${d3FtIn(wm.Hc)}.`
-          : cutW.length ? (wm.attach === "roof"
-            ? (reachHc >= wm.H + 1
-              ? `The middle section is too tall for ${cutWho[0]} to reach its roof, so ${cutWho[1]} its wall. Bring its walls down to ${d3FtIn(Math.floor(reachHc * 12 + 1e-6) / 12)} or lower, or pick "On the wall".`
-              : `The middle roof is too flat for ${cutWho[0]} to run up onto it, so ${cutWho[1]} its wall. Pick "On the wall".`)
-            : "The middle section is too low for its roof edge to clear the wing roof — raise its wall height.")
-            : wg.some((g) => g.clamped) ? (wm.attach === "roof"
-              ? `The middle roof only goes ${d3FtIn(Math.min(...wg.map((g) => g.attachFt)))} up, so the wing roof meets there.`
-              : `Moved down to ${d3FtIn(Math.max(...wg.map((g) => g.attachFt)))} so the middle roof's edge clears the wing roof.`)
-              : null;
-      const sideOff = (v) => v !== "both" && eaveSides.indexOf(v) < 0 && roof.wingSide !== v;
       const hc = roof.centerEaveFt;
+      const cap1 = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+      // The Automatic wing (or wings) with the tallest roof is the one that pushes the middle section up.
+      const autoTop = wm.wings.filter((g) => !g.attach).reduce((y, g) => Math.max(y, g.ya), -Infinity);
+      const pusher = wm.hcRaised ? wm.wings.find((g) => !g.attach && g.ya === autoTop) : null;
       out.push(
-        <div key="wg" className="ss-adv-flds">
-          {advNum({ k: "wingWidthFt", label: "Wing width, each (ft)", value: roof.wingWidthFt, min: 1, max: 16, step: 0.5, band: [0, 16],
-            write: (n) => (n > 0 ? calSetRoofOpt("wingWidthFt", n) : calSetWings(null)), fallback: 4 })}
-          {advSeg({ f: "wingSide", label: "Wing side", value: roof.wingSide || "", pick: (v) => calSetRoofOpt("wingSide", v), full: true,
-            opts: [["both", "Both sides"], ...[["left", "Left"], ["right", "Right"], ["front", "Front"], ["back", "Back"]].map(([v, l]) => [v, l, sideOff(v), sideOff(v) ? "This roof has no eave on that side" : undefined])],
-            children: advSay(!roof.wingSide
-              ? "Not chosen yet, so it is drawn on both sides. Pick the side the wing is on."
-              : lost
-                ? `On this roof a wing can only run along the ${eaveSides[0] === "left" ? "left or right side" : "front or back"} — the walls under the roof edge — so a wing on the ${roof.wingSide === "left" || roof.wingSide === "right" ? roof.wingSide + " side" : roof.wingSide} is not drawn.`
-                : "Runs the full depth, along the wall under the roof edge.", lost || !roof.wingSide) })}
-          {advSeg({ f: "wingAttach", label: "Meets the middle section", value: roof.wingAttach || "", pick: (v) => calSetAttach("wingAttach", "wingAttachFt", v), full: true,
-            opts: [["", "Automatic"], ["wall", "On the wall"], ["roof", "On the roof"]],
-            note: roof.wingAttach ? "The middle keeps its wall height; the wing slope follows." : ["Hung under the middle section's eave.", "A steep wing roof pushes the middle section up to fit."] })}
-          {roof.wingAttach && advNum({ k: "wingAttachFt", label: roof.wingAttach === "roof" ? "How far up its roof (ft)" : "How far down its wall (ft)",
-            value: roof.wingAttachFt, min: 0, max: 10, step: 0.25, band: [0, 10], write: (n) => calSetRoofOpt("wingAttachFt", n), placeholder: "0", fallback: 0, full: true,
-            children: <>{wg.length > 0 && advSay(wMeet, false, { "data-ss-adv-readout": "wings" })}{advSay(wWarn, true)}{wDcWords && advSay(wDcWords, true, { "data-ss-dormer-covered": "" })}</> })}
-          {roof.wingAttach
-            ? <div key="wpRead" className="ss-adv-f" data-ss-adv-f="wingPitch"><div className="ss-adv-fh"><span className="ssd-fld-l">Wing roof pitch</span></div>
-              {advSay(wg.length ? `Builds ${wIn12} in 12` : "Worked out from where it meets", false)}{advNoteEl("Set by where the wing roof meets the middle section.")}</div>
-            : advNum({ k: "wingPitch", label: "Wing roof pitch", unit: "in 12", value: roof.wingPitch == null ? null : Math.round(Number(roof.wingPitch) * 1200) / 100,
-              min: 0, max: 18, step: 0.5, band: [0, 18], write: (n) => calSetRoofOpt("wingPitch", n == null ? null : n / 12), placeholder: "3", fallback: 3,
-              note: "Slopes down to the outside wall. Blank is 3 in 12." })}
+        <div key="wgc" className="ss-adv-flds">
+          {lost ? advSay(`This roof's edges are on the ${eaveSides[0] === "left" ? "left and right sides" : "front and back"}, so the wing on the ${roof.wingSide === "left" || roof.wingSide === "right" ? roof.wingSide + " side" : roof.wingSide} is not drawn. Turn one on below.`, true) : null}
           {advNum({ k: "centerEaveFt", label: "Middle section wall height (ft)", value: hc, min: 6, max: 26, step: 0.5, band: [6, 26],
-            write: (n) => calSetRoofOpt("centerEaveFt", n), placeholder: "Auto", fallback: blankHc != null ? blankHc : wallH + 3,
-            note: `Floor to the top of the tall middle walls. Auto draws ${d3FtIn(blankHc != null ? blankHc : wallH + 3)}.`,
+            write: (n) => calSetRoofOpt("centerEaveFt", n), placeholder: "Auto", fallback: blankHc != null ? blankHc : wallH + 3, full: true,
+            note: `Floor to the top of the tall middle walls, shared by every wing. Auto draws ${d3FtIn(blankHc != null ? blankHc : wallH + 3)}.`,
             children: (
-              <div className="ss-adv-chips">
-                <button type="button" aria-pressed={hc == null || hc === ""} onClick={() => calSetRoofOpt("centerEaveFt", null)}
-                  className={hc == null || hc === "" ? "ssd-chip is-on" : "ssd-chip"} style={advPill}>Auto</button>
-              </div>
+              <>
+                <div className="ss-adv-chips">
+                  <button type="button" aria-pressed={hc == null || hc === ""} onClick={() => calSetRoofOpt("centerEaveFt", null)}
+                    className={hc == null || hc === "" ? "ssd-chip is-on" : "ssd-chip"} style={advPill}>Auto</button>
+                </div>
+                {wm.hcLow && advSay(`The middle section must stand at least 1 ft above the outside walls, so it is drawn at ${d3FtIn(wm.Hc)}.`, true)}
+                {pusher && advSay(`Drawn at ${d3FtIn(wm.Hc)}: the ${wSide(pusher)} wing's roof, set to Automatic, pushes it up to fit.`, true, { "data-ss-adv-readout": "wings-push" })}
+              </>
             ) })}
+        </div>,
+      );
+      out.push(
+        <div key="wgcards" className="ss-adv-cards ss-adv-top">
+          {eaveSides.map((s) => {
+            const isOn = onSides.indexOf(s) >= 0;
+            const e = calWingSideNow(roof, s);
+            const g = isOn ? gOf(s) : null;
+            const Cap = cap1(s);
+            const body = [];
+            if (isOn) {
+              const meetLine = g && g.attach ? (g.meetFt < 1 / 24 ? "Meets the middle section at its eave" : `Meets the ${g.meets} ${d3FtIn(g.meetFt)} ${g.meets === "roof" ? "above" : "below"} the middle section's eave`) : null;
+              const warn = !g || !g.attach ? null
+                : g.cuts ? (g.attach === "roof"
+                  ? (wm.H + g.k * g.w >= wm.H + 1
+                    ? `The middle section is too tall for this wing's roof to reach its roof, so it meets its wall. Bring the middle walls down to ${d3FtIn(Math.floor((wm.H + g.k * g.w) * 12 + 1e-6) / 12)} or lower, or pick "On the wall".`
+                    : "The middle roof is too flat for this wing's roof to run up onto it, so it meets its wall. Pick \"On the wall\".")
+                  : "The middle section is too low for its roof edge to clear this wing's roof — raise its wall height.")
+                  : g.clamped ? (g.attach === "roof"
+                    ? `The middle roof only goes ${d3FtIn(g.attachFt)} up, so this wing's roof meets there.`
+                    : `Moved down to ${d3FtIn(g.attachFt)} so the middle roof's edge clears this wing's roof.`)
+                    : null;
+              body.push(advNum({ k: "wingWidthFt:" + s, f: "wingWidthFt-" + s, label: "Width (ft)", aria: `${Cap} wing width (ft)`, value: e.widthFt, min: 1, max: 16, step: 0.5, band: [0, 16],
+                write: (n) => { if (n == null) return; if (n > 0.5) calSetWingSide(s, { widthFt: n }); else calSetWingOn(s, false); }, fallback: 4, full: true,
+                note: g && Math.abs(g.w - Number(e.widthFt)) > 1e-6 ? `Drawn ${d3FtIn(g.w)} wide: the middle section keeps at least 4 ft.` : null }));
+              body.push(advSeg({ f: "wingAttach-" + s, label: "Meets the middle section", aria: `${Cap} wing meets the middle section`, value: e.attach, full: true,
+                pick: (v) => calSetWingSide(s, v ? { attach: v, attachFt: typeof e.attachFt === "number" ? e.attachFt : 1 } : { attach: "auto", attachFt: null }),
+                opts: [["", "Automatic"], ["wall", "On the wall"], ["roof", "On the roof"]],
+                note: e.attach ? "The middle keeps its wall height; this wing's slope follows." : ["Hung under the middle section's eave.", "A steep wing roof set to Automatic pushes the middle section up to fit."] }));
+              if (e.attach) {
+                body.push(advNum({ k: "wingAttachFt:" + s, f: "wingAttachFt-" + s, label: e.attach === "roof" ? "How far up its roof (ft)" : "How far down its wall (ft)", aria: `${Cap} wing: ${e.attach === "roof" ? "how far up the middle roof (ft)" : "how far down the middle wall (ft)"}`,
+                  value: e.attachFt, min: 0, max: 10, step: 0.25, band: [0, 10], write: (n) => calSetWingSide(s, { attachFt: n == null ? 0 : n }), placeholder: "0", fallback: 0, full: true,
+                  children: <>{meetLine && advSay(meetLine, false, { "data-ss-adv-readout": "wing-" + s })}{advSay(warn, true)}{wDcWords && wDc.dir === (g && g.side) && advSay(wDcWords, true, { "data-ss-dormer-covered": "" })}</> }));
+                body.push(
+                  <div key={"wpRead-" + s} className="ss-adv-f" data-ss-adv-f={"wingPitch-" + s}><div className="ss-adv-fh"><span className="ssd-fld-l">Roof pitch</span></div>
+                    {advSay(g ? `Builds ${Math.round(g.pitch * 120) / 10} in 12` : "Worked out from where it meets", false)}{advNoteEl("Set by where this wing's roof meets the middle section.")}</div>,
+                );
+              } else {
+                body.push(advNum({ k: "wingPitch:" + s, f: "wingPitch-" + s, label: "Roof pitch", aria: `${Cap} wing roof pitch`, unit: "in 12",
+                  value: e.pitch == null ? null : Math.round(Number(e.pitch) * 1200) / 100,
+                  min: 0, max: 18, step: 0.5, band: [0, 18], write: (n) => calSetWingSide(s, { pitch: n == null ? 0.25 : n / 12 }), placeholder: "3", fallback: 3,
+                  note: "Slopes down to the outside wall. Blank is 3 in 12." }));
+              }
+            }
+            return (
+              <div key={s} className={"ssd-card ss-adv-wcard" + (isOn ? "" : " is-off")} data-ss-adv-wing={s}>
+                <span className="ssd-card-t">{Cap} wing</span>
+                {advSwitch("wingOn-" + s, isOn, `${Cap} wing on`, `Add a ${s} wing`, () => calSetWingOn(s, !isOn))}
+                {isOn ? <div className="ss-adv-flds">{body}</div> : advNoteEl(`No wing on the ${s === "front" || s === "back" ? s : s + " side"}.`)}
+              </div>
+            );
+          })}
         </div>,
       );
       return out;

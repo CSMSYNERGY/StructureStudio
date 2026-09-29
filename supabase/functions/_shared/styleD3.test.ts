@@ -2148,6 +2148,33 @@ Deno.test("wingAttach / wingAttachFt round-trip on a ridge, clamp, and go with t
   assert(!("wingAttach" in roofOf({ type: "gable", wingWidthFt: 12 })), "absent stays absent: today's pushed-up centre");
 });
 
+import { D3_WING_SIDE_ATTACH } from "./styleD3.ts";
+// deno-lint-ignore no-explicit-any
+type Any = any;
+// EACH WING SET ON ITS OWN (roof.wingSides, 2026-09-29): one entry per side, each field held to its shared
+// key's band, "auto" kept, junk dropped field by field, and the whole object absent unless an entry is left.
+Deno.test("wingSides: each side's width, pitch, attach and distance round-trip, clamp, and go with the wing set on a shed (2026-09-29)", () => {
+  const sides = { left: { widthFt: 6, pitch: 0.25, attach: "wall", attachFt: 1 }, right: { widthFt: 10, pitch: 0.5, attach: "auto" } };
+  for (const type of ["gable", "gambrel"]) {
+    const r = roofOf({ type, wingSide: "both", wingWidthFt: 6, wingSides: sides });
+    assertEquals(r.wingSides, sides, `${type} keeps each side's numbers`);
+  }
+  assertEquals([...D3_WING_SIDE_ATTACH], ["auto", "roof", "wall"]);
+  for (const v of D3_WING_SIDE_ATTACH) assertEquals((roofOf({ type: "gable", wingSides: { front: { attach: v } } }).wingSides as Any).front.attach, v);
+  const clamp = roofOf({ type: "gable", wingSides: { left: { widthFt: 40, pitch: -1, attachFt: 30 }, back: { widthFt: "4.5", pitch: 9, attachFt: -2 } } }).wingSides as Any;
+  assertEquals(clamp.left, { widthFt: 16, pitch: 0, attachFt: 10 }, "held to wingWidthFt / wingPitch / wingAttachFt's bands");
+  assertEquals(clamp.back, { widthFt: 4.5, pitch: 1.5, attachFt: 0 }, "a numeric string reads as its number");
+  const junk = roofOf({ type: "gable", wingSides: { left: { widthFt: "wide", attach: "ROOF", colour: "red" }, right: { attach: "roof", note: 1 }, middle: { widthFt: 4 }, front: null, back: [1] } }).wingSides as Any;
+  assertEquals(junk, { right: { attach: "roof" } }, "junk fields, empty entries and unknown sides are dropped");
+  for (const bad of [null, "both", 4, [], [{ widthFt: 4 }], {}, { left: {} }, { up: { widthFt: 4 } }]) {
+    assert(!("wingSides" in roofOf({ type: "gable", wingWidthFt: 8, wingSides: bad })), `${JSON.stringify(bad)} stores nothing`);
+  }
+  // Kept with the wings off, like wingSide, so turning them back on remembers each side.
+  assertEquals((roofOf({ type: "gable", wingWidthFt: 0, wingSides: sides }).wingSides as Any).right.widthFt, 10);
+  assert(!("wingSides" in roofOf({ type: "shed", pitch: 0.25, wingWidthFt: 6, wingSides: sides })), "a shed drops it with the wing set");
+  assert(!("wingSides" in roofOf({ type: "gable", wingWidthFt: 12, wingSide: "both" })), "absent stays absent: every wing reads the shared keys");
+});
+
 Deno.test("porchStepCount rounds, clamps, and exists only with a projecting porch's steps (2026-09-28)", () => {
   const on = (extra: Record<string, unknown>) => roofOf({ type: "shed", pitch: 0.23, porchOutFt: 4, porchSteps: "center", ...extra });
   assertEquals(on({ porchStepCount: 3 }).porchStepCount, 3, "a count passes through");
