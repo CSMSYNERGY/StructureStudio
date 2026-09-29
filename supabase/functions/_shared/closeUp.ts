@@ -51,18 +51,30 @@ export function untilAborted<T>(p: Promise<T>, signal: AbortSignal): Promise<T> 
 }
 
 // The image library, loaded on the first cut. Its first failure on a worker is logged (the note above).
+//
+// ⚠️ LOADED ONCE PER WORKER, AND EVERY CALLER AWAITS THAT ONE LOAD (2026-09-30). The roof-step and
+// overhang close-ups cut in parallel, and live, the first draft that needed both failed the overhang's
+// with "Cannot access 'Image' before initialization": two import() calls started together, the
+// library's modules await their WebAssembly while they evaluate, and the second import handed back
+// the namespace before that evaluation had finished. The step's close-up, alone on the worker the day
+// before, never met it. So the load is one promise per loader, shared by every cut on the worker: a
+// second caller waits for the first load to FINISH. A load that failed stays failed for the worker's
+// life (the runtime caches a failed import anyway), and its failure is logged once.
 export const loadImageLibrary = () => import("https://deno.land/x/imagescript@1.3.0/mod.ts");
 let libraryFailureLogged = false;
-async function imageLibrary(load: typeof loadImageLibrary) {
-  try {
-    return await load();
-  } catch (e) {
-    if (!libraryFailureLogged) {
+const libraryLoads = new WeakMap<typeof loadImageLibrary, ReturnType<typeof loadImageLibrary>>();
+function imageLibrary(load: typeof loadImageLibrary): ReturnType<typeof loadImageLibrary> {
+  let loading = libraryLoads.get(load);
+  if (!loading) {
+    loading = load();
+    libraryLoads.set(load, loading);
+    loading.catch((e) => {
+      if (libraryFailureLogged) return;
       libraryFailureLogged = true;
       console.error(`closeUp: the image library did not load, so every close-up on this worker fails until it is recycled: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
-    }
-    throw e;
+    });
   }
+  return loading;
 }
 
 // Decodes a frame's JPEG bytes once and cuts every window `place` gives for the frame's real size,

@@ -167,6 +167,26 @@ Deno.test("cutCloseUps: a load that stalls is waited for only until the draft's 
   assertEquals([(err as DOMException).message, loads], ["Signal timed out.", 1]);
 });
 
+Deno.test("cutCloseUps: cuts that start together share ONE load of the image library (the live 'before initialization' failure)", async () => {
+  // Two import() calls of a module that awaits its WebAssembly while it evaluates can hand the second
+  // caller a namespace that is not ready. Every cut must wait for the same, single load instead.
+  let loads = 0;
+  let release = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  const marker = new Error("decoded by the one shared load");
+  const lib = { decode: () => { throw marker; }, Image: class {} };
+  const slow = (() => { loads++; return gate.then(() => lib); }) as unknown as typeof loadImageLibrary;
+  const signal = new AbortController().signal;
+  const cuts = [0, 1, 2].map(() => cutCloseUps(new Uint8Array([1]), () => [], 6, signal, slow).then(() => null, (e) => e));
+  await new Promise((r) => setTimeout(r, 5));
+  assertEquals(loads, 1, "a second load was started while the first was still loading");
+  release();
+  assertEquals(await Promise.all(cuts), [marker, marker, marker]);
+  // A later cut on the same worker reuses the finished load.
+  await cutCloseUps(new Uint8Array([1]), () => [], 6, signal, slow).catch(() => {});
+  assertEquals(loads, 1);
+});
+
 Deno.test("cutCloseUps: a load that fails is logged once for the worker, and every cut still says why", async () => {
   // A fresh copy of the module, so whatever another test did to its once-per-worker flag is not seen.
   const fresh = (await import("./closeUp.ts?log-once")) as typeof import("./closeUp.ts");
