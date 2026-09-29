@@ -17483,7 +17483,43 @@ function calTrimPhotos(list) {
 // THE ADVANCED PAGE'S SECTIONS (2026-09-29), in the order the field grid lists them. Carolyn, 09-28
 // @32:17: "think about the layout ... how are you going to organize all of the things there that have
 // to do with roof". Wings and Dormer need a ridge, so a shed roof shows them as unavailable.
-const CAL_ADV_SECTIONS = [["roof", "Roof"], ["walls", "Walls & foundation"], ["leanto", "Lean-to"], ["wings", "Wings"], ["dormer", "Dormer"], ["porch", "Porch & steps"], ["colours", "Colours"]];
+// "Colors", US spelling, as the fields under it say (review 2026-09-29); the key stays "colours".
+const CAL_ADV_SECTIONS = [["roof", "Roof"], ["walls", "Walls & foundation"], ["leanto", "Lean-to"], ["wings", "Wings"], ["dormer", "Dormer"], ["porch", "Porch & steps"], ["colours", "Colors"]];
+// WHAT THE ADVANCED PAGE MADE, per account, for as long as this browser tab is open (review ADV-1 and
+// ADV-2, 2026-09-29). Module scope on purpose: the page is remounted whenever an operator switches
+// account, and a ref inside it forgot a style it had CREATED whose hide or shape then failed. The next
+// Save made a second style, and the first stayed visible to customers, since create_style makes a
+// style visible. Keyed by the account the page designs for (C.clientId).
+//   made   { styleId, key, name, target, hidden }: a style created here whose Save stopped part-way.
+//          Remembered by its id, never matched by name: the next Save, WHATEVER name it is given,
+//          finishes this style (hide it, rename it, shape it) and creates nothing while it is here.
+//   names  the lower-cased names saved from this page. A hidden style is not in the customer config
+//          (C.buildingStyles), so this is how the page knows the ones it has just made.
+const SS_ADV_MADE = new Map();
+function ssAdvMemo(clientId) {
+  const k = clientId || "";
+  if (!SS_ADV_MADE.has(k)) SS_ADV_MADE.set(k, { made: null, names: new Set() });
+  return SS_ADV_MADE.get(k);
+}
+// What to tell the builder about a style the page made and has not finished. `step` is the call that
+// failed ("hide", "rename" or "shape"), or "" for one left over from an earlier visit to the page;
+// `wanted` is the name typed for the Save that failed; `why` is the server's own words.
+function ssAdvUnfinished(m, step, why, wanted) {
+  const tail = why ? ` (${why})` : "";
+  if (!m.hidden) {
+    return { ok: false, msg: `“${m.name}” was made, but hiding it didn't work, so customers can see it now. Press Save again to hide it and finish it, or hide it yourself: Settings → Structures → Hide.${tail}` };
+  }
+  if (step === "rename") {
+    return { ok: false, msg: `“${m.name}” is made and hidden from customers, but renaming it “${wanted}” didn't work. Press Save again to try again, or save it as “${m.name}”.${tail}` };
+  }
+  return { ok: false, msg: `“${m.name}” is made and hidden from customers, but this building didn't save onto it. Press Save again to finish it. That won't make another style.${tail}` };
+}
+// THE GROUND'S FALL GOES ON EVERY SAVE, null included (review BC-1, 2026-09-29): the operator page's
+// twin of the portal's ssD3WithFall (12-shell.jsx), which says why. The draft itself is left alone.
+function calSpecToSend(spec) {
+  if (!spec || typeof spec !== "object") return spec;
+  return { ...spec, gradeFallFt: spec.gradeFallFt != null ? spec.gradeFallFt : null, gradeFallToward: spec.gradeFallToward != null ? spec.gradeFallToward : null };
+}
 function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
@@ -23288,8 +23324,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // every operator "Save to config" wipe the builder's walk-around. Omitting the key is
         // what tells the server to leave the column as it found it.
         // `frame: "front"` (2026-09-25): this editor knows blocks, piers and floorHeightFt, so the
-        // server applies what it sends rather than carrying a stored raised floor forward.
-        body: { adminPassword: adminPwd, clientId: C.clientId, action: "save_style_d3", styleValue: adminCal.styleValue, d3: adminCal.spec, d3Photos: adminCal.photos.filter(Boolean), frame: "front" },
+        // server applies what it sends rather than carrying a stored raised floor forward. The
+        // ground's fall goes as two explicit keys, null included (calSpecToSend).
+        body: { adminPassword: adminPwd, clientId: C.clientId, action: "save_style_d3", styleValue: adminCal.styleValue, d3: calSpecToSend(adminCal.spec), d3Photos: adminCal.photos.filter(Boolean), frame: "front" },
       });
       if (error) throw new Error(error.message || "Save failed");
       if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");
@@ -26336,15 +26373,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // it). A hook below either one changes the hook count between renders: React #310, a white page.
   const [advName, setAdvName] = useState("");
   const [advBusy, setAdvBusy] = useState(false);
-  const [advMsg, setAdvMsg] = useState(null);                    // { ok, msg } | null
+  // { ok, msg } | null. Opens on a style this page made on an earlier visit and never finished
+  // (SS_ADV_MADE), so a builder who left after a failed Save is told again what state it is in.
+  const [advMsg, setAdvMsg] = useState(() => {
+    const m = advancedOnly ? ssAdvMemo(C.clientId).made : null;
+    return m ? ssAdvUnfinished(m, "", "", m.name) : null;
+  });
   const [advFrom, setAdvFrom] = useState("");                    // "" = blank building, else a style's value
   const [advDims, setAdvDims] = useState({ w: "12", l: "16" });  // as typed; sel.size only takes whole feet 6..60
   // The spec the draft was last seeded with. Every cal* setter makes a NEW spec object, so "is it
   // still this one" is exactly "has anything been changed since".
   const advSeedRef = useRef(null);
-  // A style this page CREATED whose hide or shape then failed to save. The next Save under the
-  // same name finishes that style, in the tenant it was made in, instead of creating a second one.
-  const advMadeRef = useRef(null);
   const ADV_MIN_FT = 6, ADV_MAX_FT = 60;
   const advFt = (v) => { const n = Number(v); return (String(v).trim() !== "" && Number.isInteger(n) && n >= ADV_MIN_FT && n <= ADV_MAX_FT) ? n : null; };
   // Blank = the plain gable every style is built on (the resolver with no style); a copy = that
@@ -26392,6 +26431,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // explicitly. Read again after the create's await, it could be another builder's (an operator
   // pressing Back mid-save), and the shape would land on their style of the same key.
   // Server words are shown as they come, like every other setup3d call.
+  //
+  // A SAVE THAT STOPS PART-WAY IS FINISHED, NEVER REPEATED (review ADV-1, 2026-09-29). The style it
+  // made is remembered by id in SS_ADV_MADE, per account, for the life of the tab, and the next Save
+  // (whatever the name) hides that style if it is still showing, renames it if the name changed
+  // (update_style, the rename Settings → Structures uses), then saves the shape onto it. A hide that
+  // fails says in plain words that customers can see the style and where to hide it by hand.
+  //
+  // A NAME ALREADY IN USE IS REFUSED (review ADV-2): the pricing import rejects a sheet row that more
+  // than one style answers to, so two styles called "Tri Home" would block the very next step the
+  // success message sends the builder to. Checked, trimmed and case-blind, against every style in the
+  // config and every name this page has saved; the unfinished style's own name is still its own.
   const advSave = async () => {
     const name = advName.trim();
     if (!name) { setAdvMsg({ ok: false, msg: "Give the new style a name first." }); return; }
@@ -26399,26 +26449,49 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setAdvMsg({ ok: false, msg: "Saving isn't available here." });
       return;
     }
+    const memo = ssAdvMemo(C.clientId);
+    const lc = name.toLowerCase();
+    const same = (v) => typeof v === "string" && v.trim().toLowerCase() === lc;
+    const ownName = Boolean(memo.made && memo.made.name.toLowerCase() === lc);
+    if (!ownName && (memo.names.has(lc) || (C.buildingStyles || []).some((s) => same(s.label) || same(s.value)))) {
+      setAdvMsg({ ok: false, msg: `There's already a style called “${name}”. Give this one a different name.` });
+      return;
+    }
     const spec = adminCal.spec;   // what is on screen at the press is what gets saved
     setAdvBusy(true);
     setAdvMsg(null);
+    let made = memo.made, step = "create";
     try {
-      let made = (advMadeRef.current && advMadeRef.current.name === name) ? advMadeRef.current : null;
       if (!made) {
         const r = await setup3d.onCreateStyle(name);
-        made = { name, key: r.key, styleId: r.styleId, target: r.target };
-        advMadeRef.current = made;
+        made = { name, key: r.key, styleId: r.styleId, target: r.target, hidden: false };
+        memo.made = made;
       }
-      await setup3d.onSetStyleActive(made.styleId, false, made.key, made.target);
+      if (!made.hidden) {
+        step = "hide";
+        await setup3d.onSetStyleActive(made.styleId, false, made.key, made.target);
+        made.hidden = true;
+      }
+      // A new name for the unfinished style lands on it. Without the rename call it keeps the first
+      // name, and the message says so.
+      if (made.name !== name && setup3d.onRenameStyle) {
+        step = "rename";
+        await setup3d.onRenameStyle(made.styleId, name, made.key, made.target);
+        made.name = name;
+      }
+      step = "shape";
       await setup3d.onSaveSpec(made.key, spec, [], undefined, made.target);
-      advMadeRef.current = null;
+      memo.made = null;
+      memo.names.add(made.name.toLowerCase());
       // Saved: what is on screen is in the new style now, so nothing here is unsaved any more —
       // Start from stops asking, and the portal stops warning before an account switch.
       advSeedRef.current = spec;
       setAdvName("");
-      setAdvMsg({ ok: true, msg: `Saved as “${name}” — hidden from customers. Add its sizes and prices in Settings → Structures, then switch it on.` });
+      setAdvMsg({ ok: true, msg: `Saved as “${made.name}”. Hidden from customers — add its sizes and prices in Settings → Structures, then press Show.`
+        + (made.name !== name ? " It kept its first name; rename it there if you like." : "") });
     } catch (e) {
-      setAdvMsg({ ok: false, msg: (e && e.message) || "Save failed" });
+      const why = (e && e.message) || "Save failed";
+      setAdvMsg(made ? ssAdvUnfinished(made, step, why, name) : { ok: false, msg: why });
     } finally {
       setAdvBusy(false);
     }
@@ -26619,7 +26692,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <div style={{ maxWidth: 360 }}>
                       <D3ElevationSVG spec={adminCal.spec} sizeLabel={sel.size} focusKey={calFocus} />
                       <div style={{ fontSize: 10, color: "#64748B", marginTop: 3 }}>
-                        End view at {sel.size || "this size"}. Click a number and its measurement lights up.
+                        End view at {sel.size || "this size"}. Click into a number box and its measurement lights up here.
                       </div>
                     </div>
                   </div>

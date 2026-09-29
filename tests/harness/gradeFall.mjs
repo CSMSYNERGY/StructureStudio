@@ -34,11 +34,12 @@
 //      carrying a fall it cannot have, each build a scene (every node's matrix, every mesh's geometry
 //      and material) identical to the one the designer at SS_LEVEL_BASE (default 5345037, the commit
 //      before this) builds from the same style, and the same camera
-//   8. THE PANEL (?admin=1): blocks and piers show "Ground falls away (ft)"; an untouched style saves
-//      no fall keys, and a style storing a fall saves it back exactly; a typed fall saves, "Toward"
-//      appears with its hint and saves its word; the height box's hint says where the height is
-//      taken (the uphill side); a cleared box deletes gradeFallFt; leaving blocks or piers deletes
-//      both keys; the preview draws the typed fall
+//   8. THE PANEL (?admin=1): blocks and piers show "Ground falls away (ft)"; an untouched level style
+//      saves no fall (both keys sent as an explicit null, review BC-1 2026-09-29), and a style storing
+//      a fall saves it back exactly; a typed fall saves, "Toward" appears with its hint and saves its
+//      word; the height box's hint says where the height is taken (the uphill side); a cleared box
+//      sends gradeFallFt null; leaving blocks or piers sends both as null; the preview draws the
+//      typed fall
 //   9. zero page errors
 //
 //   python -m http.server 8142 --bind 127.0.0.1 --directory <repo root>
@@ -726,6 +727,11 @@ async function runPanel(ctx, ok, shots) {
   await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
   const calls = await stubSupabase(page, { config: PANEL_CONFIG, fixtures: { ramp: FIXTURES.ramp, items: [], windowColors: [] } });
   const has = (o, k) => !!o && Object.prototype.hasOwnProperty.call(o, k);
+  // THE PANEL SENDS BOTH FALL KEYS ON EVERY SAVE, null when there is none (review BC-1, 2026-09-29).
+  // The server carries a stored fall over any save that OMITS the keys (a designer built between
+  // 09-25 and 09-28 sends frame "front" and drops them), so this panel's "no fall" is an explicit
+  // null, which the sanitiser drops and never stores.
+  const sentNull = (o, k) => has(o, k) && o[k] === null;
   const saves = () => calls.filter((c) => c.path && c.path.endsWith("/functions/v1/admin-save-settings") && c.body && c.body.action === "save_style_d3");
   const save = async () => {
     const before = saves().length;
@@ -767,7 +773,7 @@ async function runPanel(ctx, ok, shots) {
     const label = (await fallBox().locator("xpath=..").innerText()).replace(/\s+/g, " ").trim();
     ok("panel: ...labelled in plain words", /^Ground falls away \(ft\)/.test(label), label);
     let body = await save();
-    ok("panel: ⚠️ AN UNTOUCHED STYLE SAVES NO FALL KEYS", !has(body.d3, "gradeFallFt") && !has(body.d3, "gradeFallToward") && body.d3.foundation === "piers" && body.d3.floorHeightFt === 1.5,
+    ok("panel: ⚠️ AN UNTOUCHED LEVEL STYLE SAVES NO FALL: both keys sent as an explicit null, nothing else", sentNull(body.d3, "gradeFallFt") && sentNull(body.d3, "gradeFallToward") && body.d3.foundation === "piers" && body.d3.floorHeightFt === 1.5,
       JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
     await typeFall(2);
     ok("panel: a typed fall shows 'Toward', on Back", (await toward().count()) === 1 && (await toward().inputValue()) === "back");
@@ -779,7 +785,7 @@ async function runPanel(ctx, ok, shots) {
     const fhBack = (await page.locator('input[data-ss-floor-height="ss-grid"]').locator("xpath=..").innerText()).replace(/\s+/g, " ");
     ok("panel: ...and the height box's hint: at the front, where the ground is highest", fhBack.includes("Ground to the top of the floor at the front, where the ground is highest."), fhBack);
     body = await save();
-    ok("panel: a typed 2 saves gradeFallFt 2 and no direction (back is what absent draws)", body.d3.gradeFallFt === 2 && !has(body.d3, "gradeFallToward"), JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
+    ok("panel: a typed 2 saves gradeFallFt 2 and no direction (null; back is what absent draws)", body.d3.gradeFallFt === 2 && sentNull(body.d3, "gradeFallToward"), JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
     await toward().selectOption("left");
     await settle(page);
     const hintL = (await toward().locator("xpath=..").innerText()).replace(/\s+/g, " ");
@@ -798,16 +804,16 @@ async function runPanel(ctx, ok, shots) {
     await typeFall("");
     ok("panel: a cleared box hides 'Toward'", (await toward().count()) === 0);
     body = await save();
-    ok("panel: ⚠️ A CLEARED BOX DELETES gradeFallFt (the direction is remembered, as the sanitiser does)", !has(body.d3, "gradeFallFt") && body.d3.gradeFallToward === "left", JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
+    ok("panel: ⚠️ A CLEARED BOX SENDS gradeFallFt null, an explicit clear (the direction is remembered, as the sanitiser does)", sentNull(body.d3, "gradeFallFt") && body.d3.gradeFallToward === "left", JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
     await typeFall(0);
     body = await save();
-    ok("panel: 0 is level too: no gradeFallFt", !has(body.d3, "gradeFallFt"), String(body.d3.gradeFallFt));
+    ok("panel: 0 is level too: gradeFallFt null", sentNull(body.d3, "gradeFallFt"), String(body.d3.gradeFallFt));
     await typeFall(1.5);
     await select().selectOption("skids");
     await settle(page);
     ok("panel: skids hides the fall box", (await fallBox().count()) === 0 && (await toward().count()) === 0);
     body = await save();
-    ok("panel: ⚠️ LEAVING PIERS DELETES BOTH FALL KEYS", body.d3.foundation === "skids" && !has(body.d3, "gradeFallFt") && !has(body.d3, "gradeFallToward"), JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
+    ok("panel: ⚠️ LEAVING PIERS CLEARS BOTH FALL KEYS (sent as null)", body.d3.foundation === "skids" && sentNull(body.d3, "gradeFallFt") && sentNull(body.d3, "gradeFallToward"), JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
 
     await openStyle("Harness Fall Tri");
     ok("panel: a style storing a fall opens with it: 2 ft, toward Left", (await fallBox().inputValue()) === "2" && (await toward().inputValue()) === "left");
