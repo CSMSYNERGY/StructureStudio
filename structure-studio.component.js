@@ -17483,6 +17483,10 @@ function calTrimPhotos(list) {
     .filter((u) => typeof u === "string" && u && !Object.prototype.hasOwnProperty.call(seen, u) && (seen[u] = 1))
     .slice(0, CAL_PHOTO_MAX);
 }
+// THE ADVANCED PAGE'S SECTIONS (2026-09-29), in the order the field grid lists them. Carolyn, 09-28
+// @32:17: "think about the layout ... how are you going to organize all of the things there that have
+// to do with roof". Wings and Dormer need a ridge, so a shed roof shows them as unavailable.
+const CAL_ADV_SECTIONS = [["roof", "Roof"], ["walls", "Walls & foundation"], ["leanto", "Lean-to"], ["wings", "Wings"], ["dormer", "Dormer"], ["porch", "Porch & steps"], ["colours", "Colours"]];
 function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
@@ -24445,6 +24449,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // an imported video still lands in them.
   // calPhotoLabel is gone with the four named slots. A flat list numbers itself, and the alt
   // text below says "Image N of M" rather than claiming which side of the building it shows.
+  // Which section of the field grid the Advanced page shows (CAL_ADV_SECTIONS). A hook, so it sits
+  // here, above every early return. The calibration panel itself (advancedOnly false) shows every
+  // field as it always has: calAdvShow is true for every section there. Wings and Dormer need a
+  // ridge, so on a shed roof the page falls back to Roof rather than showing an empty section.
+  const [calAdvSec, setCalAdvSec] = useState("roof");
+  const calAdvNoRidge = Boolean(adminCal && adminCal.spec && adminCal.spec.roof && adminCal.spec.roof.type === "shed");
+  const calAdvSecOn = calAdvNoRidge && (calAdvSec === "wings" || calAdvSec === "dormer") ? "roof" : calAdvSec;
+  const calAdvShow = (k) => !advancedOnly || calAdvSecOn === k;
   const cal3dPanel = showCal3D && (
         <div style={{ background: "#FFFBEB", borderBottom: "1px solid #FCD34D", padding: "12px 20px" }}>
           {/* THE ADVANCED PAGE (`advancedOnly`, 2026-09-28) renders this same panel for its field
@@ -25451,6 +25463,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
               )}
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
+                {calAdvShow("roof") && (<>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof type
                   <select value={adminCal.spec.roof.type} onChange={(e) => calSetRoofType(e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
                     {/* "Single slant" is what ShedPro and Carolyn both call a shed roof.
@@ -25531,11 +25544,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <span style={{ display: "block", fontWeight: 400, marginTop: 2 }}>Used when a customer picks a metal roof. The preview shows it once Roof material is Metal.</span>
                   )}
                 </label>
+                </>)}
                 {/* WHAT IT STANDS ON (2026-09-25). A top-level key with NO control until today: the
                     generator could set skids or a slab and nothing on screen could change it. Blocks
                     and piers raise the floor off the ground; the same pair of controls is in the
                     walls fix panel (calFoundationFields). */}
-                {calFoundationFields("ss-grid", { fontSize: 11, color: "#92400E", fontWeight: 700 }, { ...S.sel, width: "100%", boxSizing: "border-box" })}
+                {calAdvShow("walls") && calFoundationFields("ss-grid", { fontSize: 11, color: "#92400E", fontWeight: 700 }, { ...S.sel, width: "100%", boxSizing: "border-box" })}
+                {calAdvShow("roof") && (<>
                 {/* PITCH IS ENTERED AS THE RISE, which is the only way a builder states a
                     roof. Carolyn, 2026-08-28 @44:17-46:36: she typed 10 expecting a 10:12,
                     and the drawing came back "120:12" with a 76'6" peak, because this field
@@ -25651,6 +25666,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     </>
                   );
                 })()}
+                </>)}
+                {calAdvShow("walls") && (<>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height (ft)
                   <input type="number" step="0.5" {...calNumProps("wallHeightFt", adminCal.spec.wallHeightFt || 8, (n) => calSet({ wallHeightFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
@@ -25676,6 +25693,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     onChange={(e) => calSetPlateBand(e.target.checked)} />
                   Trim band across both gable ends at the top of the wall
                 </label>
+                </>)}
               </div>
               {/* THE "Cladding this style offers the customer" CHECKBOX GRID WAS HERE, and it
                   is gone on purpose (Carolyn 2026-09-07) — do not put it back. It wrote
@@ -25695,6 +25713,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   their own row rather than the main grid -- a builder who wants neither
                   should not have to read four controls to establish that. */}
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
+                {calAdvShow("leanto") && (<>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Lean-to width (ft, 0 = none)
                   <input type="number" step="0.5" min="0" {...calNumProps("leanToWidthFt", adminCal.spec.roof.leanToWidthFt != null ? adminCal.spec.roof.leanToWidthFt : 0, (n) => calSetRoof({ leanToWidthFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
@@ -25765,6 +25784,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     </>
                   );
                 })()}
+                </>)}
+                {calAdvShow("wings") && (<>
                 {/* LOWER WINGS (2026-09-24), the Tri Home's shape: ENCLOSED single-storey rooms along
                     the eave sides, INSIDE the footprint, each under its own roof falling away from
                     a taller middle section. Not a lean-to, which is open on posts and sits outside.
@@ -25873,6 +25894,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     </>
                   );
                 })()}
+                </>)}
+                {calAdvShow("dormer") && (<>
                 {adminCal.spec.roof.type !== "shed" && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer width (ft, 0 = none)
                     <input type="number" step="0.5" min="0" {...calNumProps("dormerWidthFt", adminCal.spec.roof.dormerWidthFt != null ? adminCal.spec.roof.dormerWidthFt : 0, (n) => calSetRoof({ dormerWidthFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
@@ -25920,6 +25943,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <input type="number" step="0.05" {...calNumProps("dormerOffsetU", adminCal.spec.roof.dormerOffsetU != null ? adminCal.spec.roof.dormerOffsetU : 0.45, (n) => calSetRoof({ dormerOffsetU: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                 )}
+                </>)}
+                {calAdvShow("porch") && (<>
                 {/* THE PORCH (2026-09-17): None, Recessed or Projecting, one select, because a style has
                     one kind or the other and calSetPorch deletes the key of the one that is off.
 
@@ -26119,8 +26144,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     </>
                   );
                 })()}
+                </>)}
               </div>
-              {adminCal.spec.roof.type === "gambrel" && (
+              {adminCal.spec.roof.type === "gambrel" && calAdvShow("roof") && (
                 <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Gambrel knee position (0–1)
                     <input type="number" step="0.05" {...calNumProps("kneeU", adminCal.spec.roof.kneeU != null ? adminCal.spec.roof.kneeU : 0.55, (n) => calSetRoof({ kneeU: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
@@ -26133,6 +26159,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   </label>
                 </div>
               )}
+              {calAdvShow("colours") && (
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
                 {/* Carolyn, 2026-08-24: "this body color and trim color and roof color needs to
                     go with the colors that are in THEIR database ... it's going to be so much
@@ -26209,6 +26236,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   );
                 })}
               </div>
+              )}
               {!advancedOnly && (<>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 {/* The sample building the preview renders on. calibrationOnly ONLY, for the
@@ -26530,10 +26558,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {advMsg && (
                   <div data-ss-adv="msg" style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.5, color: advMsg.ok ? "#166534" : "#DC2626", marginBottom: 8 }}>{advMsg.msg}</div>
                 )}
-                {/* TODO(advanced-sections): section tabs go HERE once the parallel lean-to / wings /
-                    steps / piers work has merged — Roof / Walls / Lean-to / Wings / Dormer /
-                    Porch & steps / Foundation / Colours, each showing its own part of the field
-                    grid in cal3dPanel. Until then the grid shows every section at once. */}
+                {/* THE SECTIONS (2026-09-29): one part of the field grid at a time (calAdvShow). */}
+                <div data-ss-adv="sections" role="tablist" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                  {CAL_ADV_SECTIONS.map(([k, label]) => {
+                    const off = calAdvNoRidge && (k === "wings" || k === "dormer");
+                    const on = calAdvSecOn === k;
+                    return (
+                      <button key={k} type="button" role="tab" aria-selected={on} data-ss-adv-sec={k} disabled={off}
+                        title={off ? "Needs a gable or gambrel roof" : undefined} onClick={() => setCalAdvSec(k)}
+                        style={{ ...S.btn(on ? "#92400E" : "#FFF", on ? "#FFF" : "#92400E"), border: "1px solid #FCD34D", fontSize: 12.5, padding: "6px 12px", opacity: off ? 0.45 : 1, cursor: off ? "not-allowed" : "pointer" }}>
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
                 {/* row-reverse: the 3D is FIRST in the markup so it lands on top when the row wraps
                     on a narrow screen, and on the right when it does not. minWidth:0 on both
                     columns for the reason the calibration row gives (auto-fit grids overflow).
