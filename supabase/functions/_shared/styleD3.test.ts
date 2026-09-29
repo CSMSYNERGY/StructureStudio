@@ -7066,6 +7066,7 @@ Deno.test("applySelfCheck: the overhang lock lets go when the same answer turns 
   assert(s.ok, "buildable");
   if (!s.ok) return;
   assertEquals([s.d3.roof.overhang, s.dropped], [0.3, []]);
+});
 
 // ═══ AS MANY LEAN-TOS AS THEY WANT, EACH WHERE THEY WANT (roof.leanTos, 2026-09-29) ═══════════════════
 // Carolyn, 09-29: "they can add a lean-to and specify where they want it, and add another one and specify
