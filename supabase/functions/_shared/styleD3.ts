@@ -189,7 +189,44 @@ export const D3_SHED_HIGH_SIDES = ["front", "back", "left", "right"] as const;
 // renderer, not here, because the sanitiser cannot know which way a later edit will turn the roof.
 export const D3_WING_SIDES = ["both", "left", "right", "front", "back"] as const;
 // The keys that only mean something with a ridge. Dropped as a set on a shed.
-const D3_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt"] as const;
+const D3_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt", "wingSides"] as const;
+// ── EACH WING SET ON ITS OWN (roof.wingSides, 2026-09-29) ─────────────────────────────────────────
+// Carolyn, 09-29, on the Advanced page: "I want this wing to be like this and this wing to be like
+// this". { left?, right?, front?, back? }, one entry per wall a wing can stand on, each OVERRIDING the
+// shared key for that one wing: widthFt (wingWidthFt's band), pitch (wingPitch's), attach ("auto" is
+// Automatic whatever wingAttach says, "roof"/"wall" as wingAttach) and attachFt (wingAttachFt's).
+// roof.wingSide still says which sides carry a wing and wingWidthFt is still the on switch. ABSENT is
+// today's render: every wing reads the shared keys. An older renderer never reads it (an unknown roof
+// key), and the Advanced page keeps the shared keys equal to the first wing's so it still draws
+// something close. A field that is not a number or a known word is dropped, an empty entry is dropped,
+// and an object with no entry left is not stored. A wing key: a shed drops it with the rest.
+export const D3_WING_SIDE_KEYS = ["left", "right", "front", "back"] as const;
+export const D3_WING_SIDE_ATTACH = ["auto", "roof", "wall"] as const;
+const D3_WING_SIDE_CLAMPS: Record<string, [number, number]> = { widthFt: [0, 16], pitch: [0, 1.5], attachFt: [0, 10] };
+function sanitizeWingSides(raw: unknown): Record<string, Record<string, unknown>> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const src = raw as Record<string, unknown>;
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const side of D3_WING_SIDE_KEYS) {
+    const o = src[side];
+    if (!o || typeof o !== "object" || Array.isArray(o)) continue;
+    const e = o as Record<string, unknown>;
+    // In the contract's order: widthFt, pitch, attach, attachFt.
+    const clean: Record<string, unknown> = {};
+    for (const k of ["widthFt", "pitch", "attach", "attachFt"]) {
+      if (k === "attach") {
+        if ((D3_WING_SIDE_ATTACH as readonly string[]).includes(String(e.attach))) clean.attach = String(e.attach);
+        continue;
+      }
+      // A blank box is no number at all, not 0 (review, 2026-09-30: Number("") stored widthFt 0).
+      if (typeof e[k] === "string" && (e[k] as string).trim() === "") continue;
+      const n = num(e[k]);
+      if (n !== null) clean[k] =Math.min(D3_WING_SIDE_CLAMPS[k][1], Math.max(D3_WING_SIDE_CLAMPS[k][0], n));
+    }
+    if (Object.keys(clean).length) out[side] = clean;
+  }
+  return Object.keys(out).length ? out : null;
+}
 // roof.porchSteps (2026-09-25): where a set of steps leaves the projecting porch's deck, along its
 // FRONT edge, as seen standing in front of the porch facing it (left is the viewer's left, the
 // frame every left/right here is read in). Absent = no steps, which is every porch before today.
@@ -446,6 +483,10 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   if ((D3_ATTACH as readonly string[]).includes(String(rawRoof.wingAttach))) {
     roof.wingAttach = String(rawRoof.wingAttach);
   }
+  // Each wing's own numbers (roof.wingSides, 2026-09-29): stored whether or not a side is on right now,
+  // like wingSide, so turning a wing back on brings the same wing back. A wing key: gone on a shed below.
+  const wingSides = sanitizeWingSides(rawRoof.wingSides);
+  if (wingSides) roof.wingSides = wingSides;
   // Wings need a ridge to stand either side of. On a shed the whole set goes, numbers included —
   // after the numeric loop, which is where the numbers were written.
   if (type === "shed") {

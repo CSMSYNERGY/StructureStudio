@@ -54,7 +54,7 @@ type Any = any;
 const F = new Function(
   `const isVentItem = (it) => !!(it && it.isVent);\n${blocks.map((b) => b.cmp).join("\n")}; return { D3, d3RoofAxes, d3Massing, d3MassingTopAt, d3WallTops, d3WallTopFt, d3CeilingFt, ` +
     `d3PorchSpanWings, d3PorchSpan, d3PorchWallTopFt, d3ModelTopFt, d3FrameHeightFt, d3DefaultShotCamera, ssSelfCheckCameras, ssGableVentFit, SS_SHOT, ` +
-    `d3DormerFaceFt, d3DormerReadout, d3TransomDormerGeom, d3MakeProfYAt, d3RoofProfile, d3DormerWindowFit, d3RoofEnd, d3LeanToGeom, d3DormerCovered, d3DormerCoveredWords };`,
+    `d3DormerFaceFt, d3DormerReadout, d3TransomDormerGeom, d3MakeProfYAt, d3RoofProfile, d3DormerWindowFit, d3RoofEnd, d3LeanToGeom, d3DormerCovered, d3DormerCoveredWords, d3WingHcFloor };`,
 )() as Record<string, Any>;
 
 // The Tri Home, as the task drew it: 24 wide across the gable end, 28 deep, 9 ft outer walls, 8 ft
@@ -734,4 +734,151 @@ Deno.test("⚠️ a dormer under a lean-to or wing roof run up onto its roof is 
   assertEquals(F.d3DormerCoveredWords({ dir: -1, by: "wing", clearAt: -0.1 }, false),
     `The dormer is under this roof. Move it up the roof with Dormer position (between -0.1 and 0), or pick "On the wall".`);
   assertEquals(F.d3DormerCoveredWords(null, true), null);
+});
+
+// ── EACH WING SET ON ITS OWN (roof.wingSides, 2026-09-29) ────────────────────────────────────────────
+// Carolyn, 09-29, on the Advanced page: "I want this wing to be like this and this wing to be like this".
+// roof.wingSides.{left,right,front,back} carries that one wing's widthFt / pitch / attach / attachFt, each
+// overriding the shared key for that side. Absent, every wing reads the shared keys: today's massing.
+
+Deno.test("⚠️ no wingSides, an empty one or one with nothing usable: today's massing, number for number", () => {
+  const roofs: Any[] = [TRI, { ...TRI, wingSide: "left" }, { ...TRI, centerEaveFt: 11.5 }, { ...TRI, wingAttach: "wall", wingAttachFt: 2 },
+    { ...TRI, centerEaveFt: 11, wingAttach: "roof", wingAttachFt: 1 }, { ...TRI, wingWidthFt: 16 }, { type: "gambrel", wingSide: "both", wingWidthFt: 7, wingPitch: 0.3 },
+    { ...TRI, pitch: 1, wingAttach: "wall", wingAttachFt: 0.3 }];
+  const empties = [undefined, null, {}, { left: {} }, { left: { widthFt: "wide", attach: "ROOF" } }, "both", { middle: { widthFt: 3 } }];
+  for (const roof of roofs) {
+    for (const [W, L, H] of [[24, 28, 9], [37, 22, 10], [16, 20, 8], [28, 20, 9]]) {
+      const today = JSON.stringify(F.d3Massing(roof, W, L, H));
+      for (const wingSides of empties) {
+        assertEquals(JSON.stringify(F.d3Massing({ ...roof, wingSides }, W, L, H)), today, `${JSON.stringify(roof)} ${W}x${L} wingSides ${JSON.stringify(wingSides)}`);
+      }
+      // Entries that repeat the shared keys exactly build the same wings too (the Advanced page's first write).
+      const m0 = F.d3Massing(roof, W, L, H);
+      if (m0.wings.length) {
+        const same = { widthFt: roof.wingWidthFt, pitch: roof.wingPitch ?? 0.25, attach: roof.wingAttach || "auto", ...(roof.wingAttach ? { attachFt: roof.wingAttachFt } : {}) };
+        const m1 = F.d3Massing({ ...roof, wingSides: { left: same, right: same, front: same, back: same } }, W, L, H);
+        assertEquals(JSON.stringify(m1), today, `${JSON.stringify(roof)} ${W}x${L}: shared keys repeated per side`);
+      }
+    }
+  }
+});
+
+Deno.test("two widths and two pitches: each wing its own, the centre between them, pushed by the steeper", () => {
+  const roof = { ...TRI, centerEaveFt: 14.5, wingSides: { left: { widthFt: 6 }, right: { widthFt: 10, pitch: 0.5 } } };
+  const m = F.d3Massing(roof, 24, 28, 9);
+  const [L, R] = m.wings;
+  assertEquals([L.side, L.w, L.pitch, L.u0, L.ya], [-1, 6, 0.25, -6, 10.5]);
+  assertEquals([R.side, R.w, R.pitch, R.u0, R.ya], [1, 10, 0.5, 2, 14]);
+  assertEquals([m.Sc, m.uc, m.ya], [8, -2, 14]);
+  // The steeper right wing (top 14) needs the centre at 15; the left one alone would have allowed 11.5.
+  assertEquals([m.Hc, m.hcRaised, m.attach], [15, true, undefined]);
+  // The outline and the walls follow each wing's own line.
+  assertAlmostEquals(F.d3MassingTopAt(m, -9), 9 + 3 * 0.25, 1e-12);
+  assertAlmostEquals(F.d3MassingTopAt(m, 7), 9 + 5 * 0.5, 1e-12);
+  const T = F.D3.WALL_T;
+  const t = F.d3WallTops(roof, 24, 28, 9, "south");
+  assertEquals(t.map((p: Any) => p[2]), [9, 15, 9]);
+  assertAlmostEquals(t[0][1], 6 - T / 2, 1e-12);
+  assertAlmostEquals(t[1][1], 14 + T / 2, 1e-12);
+  // The porch hook and the ceiling see the off-centre middle.
+  assertEquals(F.d3PorchSpanWings(roof, 24, 28, 9), { span: 8, centerU: -2, wallTopFt: 15 });
+  assertEquals(F.d3CeilingFt(roof, 24, 28, 9, -2, 0), 15);
+  assertEquals(F.d3CeilingFt(roof, 24, 28, 9, 4, 0), 9);
+});
+
+Deno.test("one wing on the wall, the other Automatic: the automatic one still pushes, the attached one follows", () => {
+  const roof = { ...TRI, centerEaveFt: 14, wingSides: { left: { widthFt: 8, attach: "wall", attachFt: 1 }, right: { widthFt: 6, pitch: 0.75, attach: "auto" } } };
+  const m = F.d3Massing(roof, 24, 28, 9);
+  const [L, R] = m.wings;
+  // The 9:12 right wing tops out at 13.5: the centre goes to 14.5 to clear it.
+  assertEquals([m.Hc, m.hcRaised, m.hcLow, m.attach], [14.5, true, false, "wall"]);
+  assertEquals([R.w, R.pitch, R.ya, R.attach, R.uIn], [6, 0.75, 13.5, undefined, undefined], "Automatic: today's wing, untouched");
+  // The left wing meets that centre's wall 1 ft down, its pitch worked out.
+  assertEquals([L.w, L.attach, L.ya, L.uIn, L.run, L.clamped, L.cuts, L.meets, L.meetFt], [8, "wall", 13.5, -4, 8, false, false, "wall", 1]);
+  assertAlmostEquals(L.pitch, 4.5 / 8, 1e-12);
+  assertEquals([m.Sc, m.uc], [10, 1]);
+  // Lower the automatic wing and the centre is the 14 asked; the attached wing follows it down.
+  const flat = F.d3Massing({ ...roof, wingSides: { ...roof.wingSides, right: { widthFt: 6, pitch: 0.25, attach: "auto" } } }, 24, 28, 9);
+  assertEquals([flat.Hc, flat.hcRaised, flat.wings[0].ya], [14, false, 13]);
+  // A blank centre: 3 ft over the taller of an attached wing's default 3:12 top and an automatic wing's own.
+  const { centerEaveFt: _c, ...blank } = roof;
+  assertAlmostEquals(F.d3Massing(blank, 24, 28, 9).Hc, 9 + Math.max(8 * 0.25, 6 * 0.75) + 3, 1e-12);
+});
+
+Deno.test("\"auto\" is Automatic for that side even under a shared wingAttach, and a side's own mode beats the shared one", () => {
+  const m = F.d3Massing({ ...TRI, centerEaveFt: 14, wingAttach: "wall", wingAttachFt: 1, wingSides: { right: { attach: "auto" } } }, 24, 28, 9);
+  assertEquals(m.wings.map((g: Any) => g.attach), ["wall", undefined]);
+  assertEquals(m.wings[0].ya, 13, "the left reads the shared wall 1 ft");
+  assertEquals(m.wings[1].ya, 11, "the right is today's 8 ft at 3:12");
+  const r = F.d3Massing({ ...TRI, centerEaveFt: 12, wingAttach: "wall", wingAttachFt: 1, wingSides: { left: { attach: "roof", attachFt: 0.5 } } }, 24, 28, 9);
+  assertEquals(r.wings.map((g: Any) => [g.attach, g.attachFt]), [["roof", 0.5], ["wall", 1]]);
+  assertEquals(r.attach, "roof", "the massing's attach is the first attached wing's");
+});
+
+Deno.test("one on the roof, one on the wall: the centre exactly as asked, each wing where it says", () => {
+  const roof = { ...TRI, centerEaveFt: 12, wingSides: { left: { widthFt: 7, attach: "roof", attachFt: 1 }, right: { widthFt: 8, attach: "wall", attachFt: 1 } } };
+  const m = F.d3Massing(roof, 24, 28, 9);
+  const [L, R] = m.wings;
+  assertEquals([m.Hc, m.hcRaised, m.Sc, m.uc], [12, false, 9, -0.5]);
+  // Left: 1 ft up the 6:12 centre roof, 2 ft in from its wall at -5.
+  assertEquals([L.attach, L.ya, L.uIn, L.run, L.cuts, L.meets], ["roof", 13, -3, 9, false, "roof"]);
+  assertAlmostEquals(L.pitch, 4 / 9, 1e-12);
+  assertEquals([R.attach, R.ya, R.uIn, R.run, R.pitch, R.meets], ["wall", 11, 4, 8, 0.25, "wall"]);
+  assertAlmostEquals(F.d3MassingTopAt(m, -4), 9 + 8 * (4 / 9), 1e-12, "over the centre's eave: the left wing roof");
+  assertAlmostEquals(F.d3MassingTopAt(m, 6), 9 + 6 * 0.25, 1e-12);
+});
+
+Deno.test("widths past the room the footprint leaves shrink in proportion; the centre keeps 4 ft", () => {
+  const m = F.d3Massing({ ...TRI, centerEaveFt: 14, wingSides: { left: { widthFt: 12 }, right: { widthFt: 8 } } }, 16, 20, 8);
+  assertAlmostEquals(m.wings[0].w, 7.2, 1e-12);
+  assertAlmostEquals(m.wings[1].w, 4.8, 1e-12);
+  assertAlmostEquals(m.Sc, 4, 1e-12);
+  // Room enough: as asked.
+  assertEquals(F.d3Massing({ ...TRI, wingSides: { left: { widthFt: 5 }, right: { widthFt: 9 } } }, 24, 28, 9).wings.map((g: Any) => g.w), [5, 9]);
+  // A side's own 0 is no wing on that side; the other stands.
+  const one = F.d3Massing({ ...TRI, wingSides: { left: { widthFt: 0 } } }, 24, 28, 9);
+  assertEquals(one.wings.map((g: Any) => [g.wall, g.w]), [["east", 8]]);
+  assertEquals([one.Sc, one.uc], [16, -4]);
+});
+
+Deno.test("front and back wings on a building whose front is an eave wall read wingSides.front / .back", () => {
+  const roof = { type: "gable", front: "eave", pitch: 0.5, overhang: 1, wingSide: "both", wingWidthFt: 6, wingPitch: 0.25, centerEaveFt: 13,
+    wingSides: { back: { widthFt: 4 }, front: { widthFt: 7, pitch: 0.4 } } };
+  const m = F.d3Massing(roof, 28, 20, 9);
+  assertEquals(m.uAxisIsX, false);
+  assertEquals(m.wings.map((g: Any) => [g.wall, g.w, g.pitch]), [["north", 4, 0.25], ["south", 7, 0.4]]);
+  // left / right entries describe walls that are gable ends here: ignored.
+  assertEquals(JSON.stringify(F.d3Massing({ ...roof, wingSides: { left: { widthFt: 2 }, right: { widthFt: 3 } } }, 28, 20, 9)),
+    JSON.stringify(F.d3Massing({ ...roof, wingSides: undefined }, 28, 20, 9)));
+});
+
+Deno.test("a side stored at 0.5 ft or less takes no share of the room: the other wing is not cut for it (review, 2026-09-30)", () => {
+  const at = (right: number) => F.d3Massing({ ...TRI, centerEaveFt: 12, wingSides: { left: { widthFt: 8 }, right: { widthFt: right } } }, 12, 16, 8);
+  for (const r of [0, 0.4, 0.5]) {
+    const m = at(r);
+    assertEquals(m.wings.map((g: Any) => [g.wall, g.w]), [["west", 8]], `right ${r}`);
+    assertEquals([m.Sc, m.uc], [4, 4]);
+  }
+  // Just over the line it is a wing again, and the two share the room in proportion.
+  const both = at(0.6);
+  assertEquals(both.wings.length, 2);
+  assertAlmostEquals(both.wings[0].w, 8 * 8 / 8.6, 1e-12);
+});
+
+Deno.test("d3WingHcFloor is the renderer's own push: the Automatic wing(s) whose floor set the pushed centre (review, 2026-09-30)", () => {
+  const who = (roof: Any, W = 24, L = 28, H = 9) => {
+    const m = F.d3Massing(roof, W, L, H);
+    const f = F.d3WingHcFloor(roof, m.Sc, m.tallNeg);
+    return { m, pushers: m.wings.filter((g: Any) => !g.attach && f(g) >= m.Hc - 1e-6).map((g: Any) => g.wall), floors: m.wings.map((g: Any) => f(g)) };
+  };
+  // Twin Automatic wings, no wingSides: both push, so the page says "the wing roofs".
+  const tie = who({ ...TRI, centerEaveFt: 11.5 });
+  assertEquals([tie.m.hcRaised, tie.pushers], [true, ["west", "east"]]);
+  assertAlmostEquals(tie.m.Hc, Math.max(...tie.floors), 1e-12, "the pushed centre is the highest floor");
+  // Two widths and two pitches: only the steeper right wing pushes.
+  const two = who({ ...TRI, centerEaveFt: 14.5, wingSides: { left: { widthFt: 6 }, right: { widthFt: 10, pitch: 0.5 } } });
+  assertEquals([two.m.Hc, two.pushers], [15, ["east"]]);
+  // One wing on the wall asked below the walls + 1 ft, the other Automatic: the Automatic one sets it, over the 1 ft floor.
+  const low = who({ ...TRI, centerEaveFt: 8.5, wingSides: { left: { attach: "wall", attachFt: 1 }, right: { widthFt: 6 } } });
+  assertEquals([low.m.Hc, low.m.hcLow, low.m.hcRaised, low.pushers], [11.5, true, true, ["east"]]);
 });

@@ -209,11 +209,12 @@ try {
   // 2 ── each add-on tab shows only its own controls; the rest of the page is always there ─────────
   const OWN = {
     leanto: ["leanToOn", "leanToWidthFt", "leanToDropFt", "leanToSide", "leanToAttach", "leanToAttachFt"],
-    wings: ["wingsOn", "wingWidthFt", "wingSide", "wingAttach", "wingAttachFt", "wingPitch", "centerEaveFt"],
+    // Each wing set on its own (roof.wingSides, 2026-09-29): the shared middle height, then a card per eave side.
+    wings: ["wingsOn", "centerEaveFt", ...["left", "right", "front", "back"].flatMap((s) => ["wingOn", "wingWidthFt", "wingAttach", "wingAttachFt", "wingPitch"].map((f) => `${f}-${s}`))],
     dormer: ["dormerOn", "dormerType", "dormerWidthFt", "dormerRiseFt", "dormerOffsetU"],
     porch: ["porchKind", "porchDepth", "porchEnd", "porchTruss", "porchWidthFt", "porchAttachFt", "porchPitch", "porchPosts", "porchSteps", "porchStepCount", "wood"],
   };
-  const MUST = { leanto: ["leanToWidthFt", "leanToSide"], wings: ["wingWidthFt", "wingSide"], dormer: ["dormerWidthFt", "dormerType"], porch: ["porchKind"] };
+  const MUST = { leanto: ["leanToWidthFt", "leanToSide"], wings: ["centerEaveFt", "wingOn-left", "wingWidthFt-left", "wingOn-right", "wingWidthFt-right"], dormer: ["dormerWidthFt", "dormerType"], porch: ["porchKind"] };
   const others = (k) => Object.entries(OWN).filter(([o]) => o !== k).flatMap(([, v]) => v);
   for (const k of Object.keys(OWN)) {
     await tab(page, k).click();
