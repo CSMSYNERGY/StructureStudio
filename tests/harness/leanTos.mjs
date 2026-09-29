@@ -24,13 +24,18 @@
 //      there and reads back; ✕ removes that one only; six is the most; Save sends the list and none of
 //      the single lean-to's keys; a copied style with the single lean-to shows it as card 1 and the first
 //      edit turns it into the list's first entry, same wall, same drop.
+//   C  CONVERTING THE SINGLE LEAN-TO KEEPS IT WHERE IT WAS (review, 2026-09-30): on a shed's HIGH side and on
+//      the centre's own wall beside a single wing, where the eave stands above the plate, the single lean-to
+//      hangs at wall height; the card says "At wall height" and "meets the wall N below the eave", and the
+//      first edit (the same width typed again) builds the list's entry with the same slab, posts and header
+//      to 1/1000 ft. Every card's boxes are named for a screen reader by their card ("Lean-to 2 width (ft)").
 //   P  THE CALIBRATION PANEL (?admin=1): a style with a list says "This style has 2 lean-tos, set on the
 //      Advanced page." instead of the single lean-to's boxes, and saves the list untouched; a style with
 //      the single lean-to still shows its boxes.
 //   and zero page errors.
 //
 //   python -m http.server 8321 --bind 127.0.0.1 --directory <repo root>
-//   SS_BASE=http://127.0.0.1:8321 SS_SHOTS=<dir> node tests/harness/leanTos.mjs     (SS_CASES=S,U,P for a subset)
+//   SS_BASE=http://127.0.0.1:8321 SS_SHOTS=<dir> node tests/harness/leanTos.mjs     (SS_CASES=S,U,C,P for a subset)
 //
 // Exit 0 = every assertion held.
 import { readFileSync } from "node:fs";
@@ -41,7 +46,7 @@ import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
 const SHOTS = shotsDir("leanTos");
-const CASES = (process.env.SS_CASES || "S,U,P").split(",");
+const CASES = (process.env.SS_CASES || "S,U,C,P").split(",");
 const want = (k) => CASES.includes(k);
 const settle = (page, ms = 400) => page.waitForTimeout(ms);
 const near = (a, b, tol = 0.02) => Math.abs(a - b) <= tol;
@@ -292,10 +297,16 @@ const SESSION = {
   token_type: "bearer", expires_in: 999999999, expires_at: EXP, refresh_token: "r", user: USER,
 };
 const SINGLE_D3 = { roof: { type: "gable", pitch: 0.4, overhang: 0.6, leanToWidthFt: 7, leanToDropFt: 2, leanToSide: "left" }, siding: "batten", colors: { body: "#9B2F2F", trim: "#F4F1EA", roof: "#3E434A" }, wallHeightFt: 8 };
+// The single lean-to where the eave stands above the plate: a shed's high side, and the centre's own wall
+// beside a single wing (the lean-to on the side without the wing).
+const SHED_HIGH_D3 = { roof: { type: "shed", highSide: "left", pitch: 0.25, overhang: 0.5, leanToWidthFt: 8, leanToDropFt: 1.5, leanToSide: "left" }, siding: "batten", colors: { body: "#9B2F2F", trim: "#F4F1EA", roof: "#3E434A" }, wallHeightFt: 8 };
+const ONE_WING_D3 = { roof: { type: "gable", front: "gable", pitch: 0.5, overhang: 0.6, wingSide: "left", wingWidthFt: 6, wingPitch: 0.25, leanToWidthFt: 6, leanToDropFt: 1, leanToSide: "right" }, siding: "lap", colors: { body: "#9B2F2F", trim: "#F4F1EA", roof: "#3E434A" }, wallHeightFt: 8 };
 const PCONFIG = {
   branding: { companyName: "Harness Internal", accentColor: "#3D3672", headerBg: "#FFFFFF" },
   contactFields: [{ key: "name", label: "Name", required: true }],
-  buildingStyles: [{ value: "hlean", label: "Harness Lean Cabin", sizes: [{ label: "12x16", w: 12, h: 16, price: 5000 }], d3: SINGLE_D3 }],
+  buildingStyles: [{ value: "hlean", label: "Harness Lean Cabin", sizes: [{ label: "12x16", w: 12, h: 16, price: 5000 }], d3: SINGLE_D3 },
+    { value: "hshed", label: "Harness Shed High", sizes: [{ label: "12x16", w: 12, h: 16, price: 5000 }], d3: SHED_HIGH_D3 },
+    { value: "hwing", label: "Harness One Wing", sizes: [{ label: "24x16", w: 24, h: 16, price: 5000 }], d3: ONE_WING_D3 }],
   defaultSizes: [], options: [], wallHeightFt: 8,
   layoutItems: { door: { label: "Door", icon: "D", color: "#8B4513", width: 40, height: 12, shortLabel: "D" } },
 };
@@ -366,8 +377,10 @@ async function panelWait(page, src, timeout = 60000) {
   }, src, { timeout });
 }
 const card = (page, i) => page.locator(`[data-ss-adv-lt="${i}"]`);
-const inCard = (page, i, label) => card(page, i).getByLabel(label, { exact: true });
-const segIn = (page, i, group, name) => card(page, i).getByRole("group", { name: group, exact: true }).getByRole("button", { name, exact: true });
+// Every card's boxes are named by their card for a screen reader (review, 2026-09-30): "Lean-to 2 width (ft)".
+const ltAria = (n, label) => `Lean-to ${n} ${label.replace(/^Lean-to /, "").replace(/^./, (c) => c.toLowerCase())}`;
+const inCard = (page, i, label) => card(page, i).getByLabel(ltAria(i + 1, label), { exact: true });
+const segIn = (page, i, group, name) => card(page, i).getByRole("group", { name: ltAria(i + 1, group), exact: true }).getByRole("button", { name, exact: true });
 const typeIn = async (page, i, label, v) => { const b = inCard(page, i, label); await b.fill(String(v)); await b.press("Tab"); await settle(page, 250); };
 // Aim the docked 3D: the direction asked, as far back as its controls allow (they hold the camera inside
 // maxDistance), rendered now; returns where it ended up.
@@ -397,6 +410,7 @@ if (want("U")) {
     await panelWait(page, "(M) => !!(M.leanTos && M.leanTos.length === 2)");
     q = await list(page);
     ok("U: another goes on the LEFT wall, the next free one", q[1].wall === "left" && q[1].u1 < -6, JSON.stringify(q.map((x) => x.wall)));
+    ok("U: a side wall's card says so, and not that it is the long one", /A side wall, under the roof's edge\./.test(await card(page, 0).innerText()) && !/A long wall/.test(await card(page, 0).innerText()));
     // Card 2: the front wall, 6 ft wide, part of it, 6 ft long, 2 ft toward the right, enclosed.
     await segIn(page, 1, "Wall", "Front").click();
     await settle(page, 300);
@@ -446,6 +460,29 @@ if (want("U")) {
     await settle(page, 300);
     await page.evaluate(() => window.__ss3dPanel.render());
     await page.screenshot({ path: join(SHOTS, "u-advanced-six-leantos.png") });
+    // The End view with lean-tos on both of its sides (review, 2026-09-30): no two of its words overlap, and
+    // no lean-to's name crosses a post line.
+    const elev = await page.evaluate(() => {
+      const svg = [...document.querySelectorAll("svg")].find((v) => v.querySelector("[data-ss-elev-leanto]"));
+      if (!svg) return null;
+      // A label is its main words and the small line under them (one <g>): those two may touch each other.
+      const texts = [...svg.querySelectorAll("text")].filter((t) => (t.textContent || "").trim()).map((t) => { const r = t.getBoundingClientRect(); return { g: t.parentNode, t: t.textContent.trim(), l: r.left, r: r.right, top: r.top, b: r.bottom }; });
+      const hits = [];
+      for (let i = 0; i < texts.length; i++) for (let j = i + 1; j < texts.length; j++) {
+        const A = texts[i], B = texts[j];
+        if (A.g === B.g) continue;
+        if (Math.min(A.r, B.r) - Math.max(A.l, B.l) > 0.5 && Math.min(A.b, B.b) - Math.max(A.top, B.top) > 0.5) hits.push([A.t, B.t]);
+      }
+      const posts = [...svg.querySelectorAll("[data-ss-elev-leanto] line")].map((l) => { const r = l.getBoundingClientRect(); return { x: (r.left + r.right) / 2, top: r.top, b: r.bottom }; });
+      const names = [...svg.querySelectorAll("[data-ss-elev-leanto-name] text")].map((t) => { const r = t.getBoundingClientRect(); return { t: t.textContent.trim(), l: r.left, r: r.right, top: r.top, b: r.bottom }; });
+      const crossed = names.filter((n) => posts.some((p) => p.x > n.l && p.x < n.r && Math.min(p.b, n.b) - Math.max(p.top, n.top) > 0.5)).map((n) => n.t);
+      return { n: texts.length, hits, crossed, names: names.map((n) => n.t), words: texts.map((x) => x.t) };
+    });
+    ok("U: the End view with lean-tos on both sides: no two labels overlap, and no lean-to name crosses a post line",
+      !!elev && elev.hits.length === 0 && elev.crossed.length === 0 && elev.names.length >= 2, JSON.stringify(elev));
+    ok("U: every card's boxes carry their card's name for a screen reader (Lean-to 3 width (ft), Lean-to 6 sides)",
+      (await card(page, 2).getByLabel("Lean-to 3 width (ft)", { exact: true }).count()) === 1 && (await card(page, 5).getByRole("group", { name: "Lean-to 6 sides", exact: true }).count()) === 1
+        && (await page.getByLabel("Lean-to width (ft)", { exact: true }).count()) === 0);
     // Save: the list, and none of the single lean-to's keys.
     await page.getByLabel("New style name").fill("Harness Six Lean-tos");
     await page.getByRole("button", { name: "Save as a new style" }).click();
@@ -456,6 +493,9 @@ if (want("U")) {
     ok("U: Save sends roof.leanTos with all six, and no leanToWidthFt / leanToSide / leanToDropFt", !!roof && Array.isArray(roof.leanTos) && roof.leanTos.length === 6
       && ["leanToWidthFt", "leanToSide", "leanToDropFt", "leanToAttach", "leanToAttachFt"].every((k) => !(k in roof)) && roof.leanTos[0].wall === "front" && roof.leanTos[0].enclosed === true,
       roof && JSON.stringify(roof.leanTos && roof.leanTos.slice(0, 2)));
+    // Without a front wall picked the roof turns with the size: the tab says each lean-to keeps its wall.
+    const frameNote = await page.locator("[data-ss-leanto-frame]").count();
+    ok("U: the \"stays on its wall at every size\" note shows exactly when no front wall is picked", frameNote === (roof && !roof.front && !roof.highSide ? 1 : 0), JSON.stringify({ frameNote, front: roof && roof.front }));
     // A copied style with the single lean-to: card 1, and the first edit makes it the list's first entry.
     page.on("dialog", (d) => d.accept());
     await page.locator('[data-ss-adv="start"] [data-ss-style="hlean"]').click();
@@ -483,6 +523,77 @@ if (want("U")) {
       r2 && JSON.stringify({ leanTos: r2.leanTos, w: r2.leanToWidthFt, s: r2.leanToSide }));
     ok("U: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
   } catch (e) { ok("U: ran", false, e && e.stack); await page.screenshot({ path: join(SHOTS, "u-failure.png") }).catch(() => {}); }
+  await c.close();
+}
+
+// ── C · CONVERTING THE SINGLE LEAN-TO WHERE THE EAVE STANDS ABOVE THE PLATE ─────────────────────────
+// The docked 3D's lean-to members for one tag, in world feet to 1/1000: slab, posts, header.
+const dockMembers = (page, tag) => page.evaluate((tag) => {
+  const M = window.__ss3dPanel.model;
+  M.root.updateMatrixWorld(true);
+  const r3 = (v) => Math.round(v * 1000) / 1000;
+  const out = { slab: null, posts: [], header: null, n: 0 };
+  M.root.traverse((o) => {
+    if (!o.isMesh || !o.userData || o.userData.ssLeanTo !== tag) return;
+    o.geometry.computeBoundingBox();
+    const b = o.geometry.boundingBox.clone().applyMatrix4(o.matrixWorld);
+    const bx = [b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z].map(r3);
+    const P = o.geometry.parameters || {};
+    out.n++;
+    if (o.userData.ssLeanToPost) out.posts.push(bx);
+    else if (o.geometry.type === "BoxGeometry" && Math.abs(P.height - 0.2) < 1e-9) out.slab = bx;
+    else if (o.geometry.type === "BoxGeometry") out.header = bx;
+  });
+  out.posts.sort((a, b) => a[2] - b[2] || a[0] - b[0]);
+  return out;
+}, tag);
+const singleCount = "(M) => { let n = 0; M.root.traverse((o) => { if (o.isMesh && o.userData && o.userData.ssLeanTo === true) n++; }); return n > 0 && !M.leanTos; }";
+if (want("C")) {
+  const { c, page, errors } = await openPortal("/portal/advanced");
+  try {
+    await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
+    page.on("dialog", (d) => d.accept());
+    // [style, where, width to type (the width it has), building width, the eave's height over the plate]
+    for (const [value, what, width, bldgW, gap] of [["hshed", "a shed's high side", 8, null, 3], ["hwing", "the centre's own wall beside a single wing", 6, 24, null]]) {
+      await page.locator(`[data-ss-adv="start"] [data-ss-style="${value}"]`).click();
+      await settle(page, 1500);
+      if (bldgW) {
+        const wBox = page.getByLabel("Width (ft)", { exact: true });
+        await wBox.fill(String(bldgW));
+        await wBox.press("Tab");
+        await settle(page, 1500);
+      }
+      await page.locator('[data-ss-adv-sec="leanto"]').click();
+      await panelWait(page, singleCount);
+      await settle(page, 800);
+      const before = await dockMembers(page, true);
+      const pressed = (await card(page, 0).getByRole("group", { name: ltAria(1, "Meets the building"), exact: true }).locator('[aria-pressed="true"]').innerText()).trim();
+      const say = (await card(page, 0).locator('[data-ss-adv-readout="leanTo"]').innerText()).replace(/ /g, " ").trim();
+      ok(`C: on ${what} the single lean-to's card says "At wall height" and where it meets under the eave`,
+        pressed === "At wall height" && /meets the wall \d+' \d+" below the eave$/.test(say) && (gap == null || say.endsWith(`meets the wall ${gap}' 0" below the eave`)), JSON.stringify({ pressed, say }));
+      await card(page, 0).scrollIntoViewIfNeeded();
+      await settle(page, 300);
+      await page.evaluate(() => window.__ss3dPanel.render());
+      await page.screenshot({ path: join(SHOTS, `c-single-${value}.png`) });
+      // The first edit converts it; a box only commits a change, so a half foot more and then back.
+      await typeIn(page, 0, "Lean-to width (ft)", width + 0.5);
+      await typeIn(page, 0, "Lean-to width (ft)", width);
+      await panelWait(page, `(M) => !!(M.leanTos && M.leanTos.length === 1 && M.leanTos[0].w === ${width})`);
+      await settle(page, 800);
+      const after = await dockMembers(page, 0);
+      const single = await dockMembers(page, true);
+      const q = await list(page);
+      ok(`C: …the first edit makes it the list's entry and nothing moves: the same slab, posts and header to 1/1000 ft (${what})`,
+        single.n === 0 && !!before.slab && JSON.stringify(after.slab) === JSON.stringify(before.slab) && JSON.stringify(after.posts) === JSON.stringify(before.posts)
+          && JSON.stringify(after.header) === JSON.stringify(before.header) && before.posts.length > 0,
+        JSON.stringify({ before: [before.slab, before.posts.map((p) => p[4])], after: [after.slab, after.posts.map((p) => p[4])], q: q && q.map((x) => [x.wall, x.E, x.ya, x.y1]) }));
+      ok(`C: …it hangs at the 8 ft plate, under an eave that stands higher (${what})`, !!q && q[0].ya === 8 && q[0].E > 8.01 && q[0].mode === null,
+        JSON.stringify(q && q.map((x) => [x.E, x.ya, x.y1, x.mode])));
+      await page.evaluate(() => window.__ss3dPanel.render());
+      await page.screenshot({ path: join(SHOTS, `c-converted-${value}.png`) });
+    }
+    ok("C: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
+  } catch (e) { ok("C: ran", false, e && e.stack); await page.screenshot({ path: join(SHOTS, "c-failure.png") }).catch(() => {}); }
   await c.close();
 }
 

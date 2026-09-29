@@ -6909,7 +6909,9 @@ Deno.test("roof.leanTos: every wall and every key round-trips, in order, and not
 Deno.test("roof.leanTos: bands clamp, junk entries and junk keys are dropped, six at most", () => {
   const one = (e: Record<string, unknown>) => sanitizeLeanTos([{ wall: "left", widthFt: 8, ...e }])![0];
   assertEquals(one({ widthFt: 40 }).widthFt, 16, "width clamps to 16");
-  assertEquals(one({ widthFt: 0.1 }).widthFt, 0.5, "and to 0.5");
+  // Half a foot or less is no lean-to (the renderer draws only over 0.5 ft): dropped, never clamped up.
+  for (const w of [0.5, 0.1, 0, -3]) assertEquals(sanitizeLeanTos([{ wall: "left", widthFt: w }]), null, `width ${w}: no lean-to, no list`);
+  assertEquals(one({ widthFt: 0.51 }).widthFt, 0.51, "just over half a foot is kept");
   assertEquals(one({ widthFt: "6.5" }).widthFt, 6.5, "a numeric string reads as its number");
   assertEquals(one({ dropFt: 9 }).dropFt, 6, "drop clamps to 6");
   assertEquals(one({ dropFt: -1 }).dropFt, 0, "and to 0");
@@ -6943,6 +6945,12 @@ Deno.test("roof.leanTos REPLACES the single lean-to; without it the single lean-
     const after = roofOf({ type: "gable", pitch: 0.4, ...single, leanTos: v });
     assertEquals(JSON.stringify(after), JSON.stringify(before), `${JSON.stringify(v)}: byte-identical`);
   }
+  // Review, 2026-09-30: a list of nothing the 3D draws (half a foot or less) is no list, so it neither
+  // deletes the single lean-to nor stands in for it; the stored roof is the single lean-to's, byte for byte.
+  for (const v of [[{ wall: "left", widthFt: 0.1 }], [{ wall: "left", widthFt: 0.5 }, { wall: "front", widthFt: 0 }]]) {
+    const after = roofOf({ type: "gable", pitch: 0.4, ...single, leanTos: v });
+    assertEquals(JSON.stringify(after), JSON.stringify(before), `${JSON.stringify(v)}: the single lean-to stays`);
+  }
 });
 
 Deno.test("roof.leanTos: the roof step is refused beside any lean-to, the list's as the single one's", () => {
@@ -6952,4 +6960,6 @@ Deno.test("roof.leanTos: the roof step is refused beside any lean-to, the list's
   assert(!("rearStepFt" in r) && !("rearEaveRiseFt" in r), "beside a listed lean-to, both step keys go");
   assertEquals(roofStepAtSize(step, 14, 40)!.drawn!.stepFt, 12, "the server's mirror draws it alone");
   assertEquals(roofStepAtSize({ ...step, leanTos: [{ wall: "left", widthFt: 6 }] }, 14, 40), null, "and not beside a listed lean-to");
+  // A list with nothing drawable in it (half a foot wide) is no lean-to: the step stays, as the renderer draws it.
+  assertEquals(roofOf({ ...step, leanTos: [{ wall: "back", widthFt: 0.5 }] }).rearStepFt, 12, "a 6 in lean-to does not refuse the step");
 });

@@ -138,8 +138,8 @@ Deno.test("a run: the whole wall, or lengthFt centred offsetFt from the middle a
 
 Deno.test("on an eave wall a listed lean-to is the single lean-to's geometry exactly, whatever its attach", () => {
   for (const [side, wall] of [["left", "left"], ["right", "right"]]) {
-    for (const att of [{}, { attach: "wall", attachFt: 1 }, { attach: "roof", attachFt: 1.5 }]) {
-      const legacy = F.d3LeanToGeom({ ...GABLE, leanToWidthFt: 8, leanToDropFt: 2, leanToSide: side, leanToAttach: (att as Any).attach || "wall", leanToAttachFt: (att as Any).attachFt || 0 }, 12, 16, H);
+    for (const att of [{ attach: "wall", attachFt: 1 }, { attach: "roof", attachFt: 1.5 }]) {
+      const legacy = F.d3LeanToGeom({ ...GABLE, leanToWidthFt: 8, leanToDropFt: 2, leanToSide: side, leanToAttach: (att as Any).attach, leanToAttachFt: (att as Any).attachFt }, 12, 16, H);
       const q = F.d3LeanTosGeom({ ...GABLE, leanTos: [{ wall, widthFt: 8, dropFt: 2, ...att }] }, 12, 16, H)[0];
       for (const k of ["dir", "u0", "u1", "ua", "ya", "y1", "E", "k", "drop", "d", "at", "mode", "pitch", "clamped", "flat", "noRoof", "cuts"]) assertEquals(q[k], legacy[k], `${wall} ${JSON.stringify(att)} ${k}`);
       assertEquals([q.kind, q.a0, q.a1, q.whole, q.attach], ["eave", 0, 16, true, (att as Any).attach || null]);
@@ -149,6 +149,41 @@ Deno.test("on an eave wall a listed lean-to is the single lean-to's geometry exa
   const q = F.d3LeanTosGeom({ ...GABLE, leanTos: [{ wall: "left", widthFt: 8 }] }, 12, 16, H)[0];
   assertEquals([q.ua, q.ya, q.y1, q.at], [-6, 8, 7, 0]);
   assertAlmostEquals(q.pitch, 1 / 8, 1e-12);
+});
+
+// Review, 2026-09-30: converting a style's single lean-to into the list moved it 3 ft up on a shed's high
+// side (and 8 ft beside a single wing), because an absent attach was read as "on the wall, 0 ft below the
+// EAVE" while the single lean-to hangs at the PLATE. Absent attach is now the single lean-to's own lines.
+Deno.test("with no attach it hangs at wall height, line for line the single lean-to without one, wherever the eave is", () => {
+  // buildShed3DModel's lines for the single lean-to without an attach: from the wall line at the plate H, its
+  // outer edge the drop under that, the drop held to H - 1.5 and never lifted to a sliver of slope.
+  const lines = (roof: Any, W: number, L: number, dropFt: number, side: string) => {
+    const m = F.d3Massing(roof, W, L, H);
+    const dir = side === "left" ? -1 : 1;
+    const drop = Math.min(dropFt, H - 1.5);
+    return { u0: dir * (m.S / 2), ya: H, y1: H - drop };
+  };
+  const cases: Array<[string, Any, number, number, string, number, number | null]> = [
+    ["a plain gable", { ...GABLE }, 12, 16, "left", 2, 0],
+    ["a shed's high side", { type: "shed", highSide: "left", pitch: 0.25 }, 12, 16, "left", 1.5, 3],
+    ["the centre's own wall beside a single wing", { ...GABLE, front: "gable", pitch: 0.5, wingSide: "left", wingWidthFt: 6, wingPitch: 0.25 }, 24, 16, "right", 1, null],
+    ["a drop past the cap", { ...GABLE }, 12, 16, "right", 9, 0],
+    ["no drop at all", { ...GABLE }, 12, 16, "left", 0, 0],
+  ];
+  for (const [what, roof, W, L, side, drop, gap] of cases) {
+    const q = F.d3LeanTosGeom({ ...roof, leanTos: [{ wall: side, widthFt: 8, dropFt: drop }] }, W, L, H)[0];
+    const want = lines(roof, W, L, drop, side);
+    assertEquals([q.kind, q.u0, q.ua, q.ya, q.y1, q.mode, q.flat, q.cuts, q.clamped], ["eave", want.u0, want.u0, want.ya, want.y1, null, false, false, false], what);
+    assertAlmostEquals(q.pitch, (want.ya - want.y1) / 8, 1e-12, what);
+    // `at` is how far under the eave it meets, what the card and the End view print.
+    assertAlmostEquals(q.at, q.E - H, 1e-12, what);
+    if (gap !== null) assertAlmostEquals(q.at, gap, 1e-9, what);
+    else assert(q.E > H + 0.01, `${what}: the eave stands above the plate (${q.E})`);
+  }
+  // Its card reads it the same way: no roof-edge warning where it always hung (the single lean-to had none).
+  const r = F.d3LeanTosReadout({ roof: { type: "shed", highSide: "left", pitch: 0.25, leanTos: [{ wall: "left", widthFt: 8, dropFt: 1.5 }] }, wallHeightFt: H }, "12x16")[0];
+  assertEquals([r.mode, r.fasciaCuts, r.openTop, r.ya], [null, false, null, H]);
+  assertAlmostEquals(r.at, 3, 1e-9);
 });
 
 Deno.test("off a wing: it hangs from the wing's outer wall at its eave -- a wing on a wing", () => {

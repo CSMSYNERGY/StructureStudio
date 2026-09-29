@@ -229,7 +229,8 @@ const navOrder = (page) => page.evaluate(() => [...document.querySelectorAll(".s
 // strip: an add-on's controls are reached by clicking its tab, and a lean-to's by adding one (the Lean-to
 // tab is a list of lean-to cards since 2026-09-29, roof.leanTos; one card is one lean-to).
 const sec = async (page, k) => { if (["leanto", "wings", "dormer", "porch"].includes(k)) await page.locator(`[data-ss-adv-sec="${k}"]`).click(); };
-const leanBox = (page) => page.getByLabel("Lean-to width (ft)", { exact: true });
+// Each card's boxes are named by their card (review, 2026-09-30); the first card's width box.
+const leanBox = (page) => page.getByLabel("Lean-to 1 width (ft)", { exact: true });
 const leanSwitch = (page) => page.locator('[data-ss-adv-f="leanToAdd"]');
 const leanCards = (page) => page.locator("[data-ss-adv-lt]").count();
 async function leanWidth(page, v) {

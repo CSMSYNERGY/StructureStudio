@@ -241,8 +241,12 @@ export function sanitizeLeanTos(raw: unknown): Record<string, unknown>[] | null 
       const [lo, hi] = LEANTO_BANDS[k];
       return Math.min(hi, Math.max(lo, n));
     };
-    const widthFt = band("widthFt");
-    if (widthFt === null) continue;
+    // Over half a foot wide or it is no lean-to: the renderer's rule (d3LeanToList, and the single
+    // lean-to's leanToWidthFt > 0.5), so a list the 3D would draw nothing of never deletes the single
+    // lean-to's keys or the roof step (review, 2026-09-30). Clamped only from above.
+    const w0 = num(src.widthFt);
+    if (w0 === null || !(w0 > 0.5)) continue;
+    const widthFt = Math.min(LEANTO_BANDS.widthFt[1], w0);
     const lt: Record<string, unknown> = { wall: String(src.wall), widthFt };
     const dropFt = band("dropFt");
     if (dropFt !== null) lt.dropFt = dropFt;

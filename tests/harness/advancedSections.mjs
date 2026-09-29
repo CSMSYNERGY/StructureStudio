@@ -266,9 +266,10 @@ try {
   // 3 ── the three 3D asks ────────────────────────────────────────────────────────────────────
   await tab(page, "leanto").click();
   await switchOn(page);
-  await byLabel(page, "Lean-to width (ft)").fill("8");
-  await segBtn(page, "Meets the building", "On the roof").click();
-  await byLabel(page, "How far up the roof (ft)").fill("2");
+  // Each card's boxes are named by their card (review, 2026-09-30).
+  await byLabel(page, "Lean-to 1 width (ft)").fill("8");
+  await segBtn(page, "Lean-to 1 meets the building", "On the roof").click();
+  await byLabel(page, "Lean-to 1 how far up the roof (ft)").fill("2");
   await page.keyboard.press("Tab");
   await panelModel(page, (M) => !!(M.leanTos && M.leanTos[0] && M.leanTos[0].mode === "roof" && Math.abs(M.leanTos[0].d - 2) < 1e-6));
   const lt = await page.evaluate(() => { const L = window.__ss3dPanel.model.leanTos[0]; return { mode: L.mode, d: L.d, ya: L.ya, E: L.E }; });

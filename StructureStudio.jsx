@@ -4892,8 +4892,9 @@ function d3LeanToGeom(roofCfg, W, L, H) {
 //
 // Two kinds of wall:
 //   eave   a wall the roof's edge runs along (parallel to the ridge; a shed's high or low wall). The
-//          lean-to is today's, from d3LeanToGeom: at the eave, or "On the wall" / "On the roof" d feet
-//          from it, hung off a WING's outer wall where a wing is on that side -- which is how a wing goes
+//          lean-to is today's, from d3LeanToGeom: at wall height without an attach (the eave, unless
+//          the eave stands above the plate), or "On the wall" / "On the roof" d feet from the eave,
+//          hung off a WING's outer wall where a wing is on that side -- which is how a wing goes
 //          on a wing: an enclosed lean-to off a wing.
 //   gable  an end wall. It meets the wall at wall height (the plate, H), or "On the wall" d feet under
 //          it. "On the roof" means nothing there (the roof's edge is a rake, above a triangle of wall)
@@ -4905,6 +4906,8 @@ const D3_LEANTO_WALLS = ["left", "right", "front", "back"];
 const D3_LEANTOS_MAX = 6;
 // The drawn entries, each with its index in roof.leanTos (the mesh tag and the panel's card), or null
 // when there is no list or nothing in it can be drawn -- and then the single lean-to's keys apply.
+// Drawn means over half a foot wide, the single lean-to's own rule, and sanitizeLeanTos keeps exactly
+// those entries: a list of nothing drawable is no list there either (review, 2026-09-30).
 function d3LeanToList(roofCfg) {
   const a = roofCfg && Array.isArray(roofCfg.leanTos) ? roofCfg.leanTos : null;
   if (!a) return null;
@@ -4967,12 +4970,20 @@ function d3LeanTosGeom(roofCfg, W, L, H) {
     const base = { i, wall: e.wall, kind: f.kind, enclosed: e.enclosed === true, attach, w, len: run.len, off: run.off, whole: run.whole, offHeld: !!run.offHeld };
     const mid = f.along * run.off;
     if (f.kind === "eave") {
-      // Absent attach is at the eave: "On the wall" 0 below it, the same line today's lean-to hangs from
-      // wherever the eave is the plate, and the eave itself on a shed's high side.
       const g = d3LeanToGeom({ ...cfg, leanTos: null, leanToWidthFt: w, leanToDropFt: e.dropFt, leanToSide: f.dir < 0 ? "left" : "right",
         leanToAttach: attach || "wall", leanToAttachFt: attach ? e.attachFt : 0 }, W, L, Hn);
       const zc = ax.L / 2 + mid;
-      return { ...g, ...base, a0: zc - run.len / 2, a1: zc + run.len / 2, roofIgnored: false };
+      const at = { ...base, a0: zc - run.len / 2, a1: zc + run.len / 2, roofIgnored: false };
+      if (attach) return { ...g, ...at };
+      // Absent attach hangs at WALL HEIGHT, the plate H, line for line the single lean-to without an attach
+      // (review, 2026-09-30): from the wall line at H, its outer edge drop under it, the drop held to
+      // H - 1.5 and never lifted to a sliver of pitch. That is the eave wherever the eave is the plate; on
+      // a shed's high side, or the centre's own wall beside a single wing, the eave stands higher and it
+      // hangs E - H below it, as it always did, so converting a single lean-to into the list never moves it.
+      const drop = Math.min(e.dropFt != null ? Number(e.dropFt) : 1, Hn - 1.5);
+      const y1 = Hn - drop;
+      return { ...g, ...at, ua: g.u0, ya: Hn, y1, drop, d: Math.max(0, g.E - Hn), at: Math.max(0, g.E - Hn), mode: null,
+        pitch: (Hn - y1) / Math.abs(g.u1 - g.u0), clamped: false, flat: false, noRoof: false, cuts: false };
     }
     const E = Hn;
     const drop = Math.min(e.dropFt != null ? Number(e.dropFt) : 1, E - 1.5);
@@ -6170,8 +6181,10 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey, frame }) {
   const roofPts = [eaveL].concat(dedup, [eaveR]).map((p) => X(p[0]) + "," + Y(p[1])).join(" ");
   // The eave the overhang is dimensioned at: the left one, or the right when a lean-to drawn on the
   // left (roof.leanToAttach) would run through its label, which then sits inside the wall under it.
+  // With listed lean-tos on BOTH sides neither eave is clear under it, so it stays at the left eave and its
+  // label above the eave line, where the drawing without a lean-to puts it (review, 2026-09-30).
   const ltLeft = (LT && LT.dir < 0) || ltL > 0;
-  const ovAt = ltLeft ? [eaveR, S / 2] : [eaveL, -S / 2];
+  const ovAt = ltLeft && !(ltR > 0) ? [eaveR, S / 2] : [eaveL, -S / 2];
   const WX = ltLeft ? X(-S / 2) + 14 : PL - 22;
 
   const HL = "#B45309", DIM = "#A16207", INK = "#78350F";
@@ -6315,9 +6328,11 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey, frame }) {
 }
 // THE LEAN-TO LIST in an end view (roof.leanTos, 2026-09-29): each one on an eave wall the view shows, its
 // roof from where it meets the building out past its edge by the overhang, its posts' line (or, enclosed,
-// its walls) to the ground. Several on one side are drawn over each other and named once under that
-// side, "lean-to 2" or "lean-tos 2, 5, 6", with the slope when they share one. Lit while a box of one of
-// their cards has the focus (calFocus "lt<i>-...").
+// its walls) to the ground. Several on one side are drawn over each other and named once for that side,
+// "lean-to 2" or "lean-tos 2, 5, 6", with the slope when they share one: just under the ground line,
+// running OUTWARD from the building's wall, where no post line, eave or wall label is drawn (review,
+// 2026-09-30: centred under the roof, a long name ran into the eave's label and across the posts). Lit
+// while a box of one of their cards has the focus (calFocus "lt<i>-...").
 function d3LeanTosElev(LTS, X, Y, OV, focusKey, label) {
   if (!LTS || !LTS.length) return null;
   const INK = "#78350F", HL = "#B45309";
@@ -6341,13 +6356,12 @@ function d3LeanTosElev(LTS, X, Y, OV, focusKey, label) {
   const names = [-1, 1].map((dir) => {
     const side = LTS.filter((q) => q.dir === dir);
     if (!side.length) return null;
-    const wide = side.reduce((a, q) => (q.w > a.w ? q : a), side[0]);
     const slopes = side.map((q) => Math.round(q.pitch * 120) / 10);
     const lit = side.find(litOf);
     return (
-      <g key={"ltName" + dir}>
-        {label(X((wide.u0 + wide.u1) / 2), Y(Math.max(...side.map((q) => q.y1))) + 22, side.length > 1 ? `lean-tos ${side.map((q) => q.i + 1).join(", ")}` : `lean-to ${side[0].i + 1}`,
-          slopes.every((v) => v === slopes[0]) ? `${slopes[0]} in 12` : null, lit ? focusKey : null)}
+      <g key={"ltName" + dir} data-ss-elev-leanto-name={dir}>
+        {label(X(side[0].u0) + dir * 8, Y(0) + 13, side.length > 1 ? `lean-tos ${side.map((q) => q.i + 1).join(", ")}` : `lean-to ${side[0].i + 1}`,
+          slopes.every((v) => v === slopes[0]) ? `${slopes[0]} in 12` : null, lit ? focusKey : null, dir > 0 ? "start" : "end")}
       </g>
     );
   });
@@ -27437,7 +27451,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         </div>
       );
     };
-    const advNum = ({ k, f, label, value, min, max, step, commit, band, write, unit, ends, placeholder, fallback, disabled, note, full, children }) => {
+    // `aria` names the box and its slider for a screen reader where several share one label (the lean-to cards).
+    const advNum = ({ k, f, label, aria, value, min, max, step, commit, band, write, unit, ends, placeholder, fallback, disabled, note, full, children }) => {
       const blank = value === null || value === undefined || value === "";
       const box = band ? calOptNumProps(k, blank ? null : value, band, write) : calNumProps(k, value, commit);
       const put = band ? (n) => write(Math.max(band[0], Math.min(band[1], n))) : commit;
@@ -27446,11 +27461,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <div key={f || k} className={"ss-adv-f" + (full ? " is-full" : "")} data-ss-adv-f={f || k}>
           <div className="ss-adv-fh">
             <span className="ssd-fld-l">{label}</span>
-            <input type="number" className="ssd-input ssd-field ss-adv-num" aria-label={label} min={min} max={max} step={step}
+            <input type="number" className="ssd-input ssd-field ss-adv-num" aria-label={aria || label} min={min} max={max} step={step}
               inputMode="decimal" placeholder={placeholder} disabled={disabled} {...box} />
             {unit ? <span className="ss-adv-unit">{unit}</span> : null}
           </div>
-          <input type="range" className="ss-adv-range" aria-label={label + ", slider"} min={min} max={max} step={step} disabled={disabled}
+          <input type="range" className="ss-adv-range" aria-label={(aria || label) + ", slider"} min={min} max={max} step={step} disabled={disabled}
             value={Math.max(min, Math.min(max, isFinite(at) ? at : min))}
             onFocus={() => { setCalFocus(k); setCalDraft(blank ? "" : String(value)); }}
             onChange={(e) => { const n = parseFloat(e.target.value); setCalFocus(k); setCalDraft(e.target.value); if (isFinite(n)) put(n); }}
@@ -27463,10 +27478,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     };
     // Segmented buttons, the Designer's .ssd-seg, under a field label. opts: [value, label, disabled?, title?]
     // `unset`: the "" option is no choice at all ("Not set", "None"), so it is drawn on but quiet.
-    const advSeg = ({ f, label, value, opts, pick, note, children, full, unset }) => (
+    const advSeg = ({ f, label, aria, value, opts, pick, note, children, full, unset }) => (
       <div key={f} className={"ss-adv-f" + (full ? " is-full" : " is-auto")} data-ss-adv-f={f}>
         <div className="ss-adv-fh"><span className="ssd-fld-l">{label}</span></div>
-        <div className="ssd-seg" role="group" aria-label={label}>
+        <div className="ssd-seg" role="group" aria-label={aria || label}>
           {opts.map(([v, l, off, why]) => (
             <button key={v || "none"} type="button" aria-pressed={value === v} disabled={!!off} title={why || undefined}
               className={(value === v ? "ssd-seg-b is-on" : "ssd-seg-b") + (unset && v === "" ? " is-unset" : "")} onClick={() => pick(v)}
@@ -27826,6 +27841,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const dc = rds.some((r) => r.kind === "eave" && r.mode === "roof") ? d3DormerCovered({ ...spec, roof: { ...roof, leanTos: list } }, sel.size) : null;
       const out = [];
       if (!list.length) out.push(<div key="off">{advNoteEl(["An open roof on posts, outside the building's size.", "Add as many as you like, each on the wall you pick: a side, the front or the back, all of it or part."], { marginTop: 0 })}</div>);
+      // THE OLD FRAME (no front wall or high side picked): the roof turns with the size, its ridge the long
+      // way, so a size the other way round makes a side wall an end wall. Each lean-to keeps its wall, so it
+      // is said, never turned with the roof (review, 2026-09-30: a copied single lean-to became a fixed wall).
+      else if (!d3NewFrame(roof)) {
+        out.push(<div key="frame" data-ss-leanto-frame="">{advNoteEl([`Each lean-to stays on its wall at every size.`,
+          `No ${isShed ? "high side" : "front wall"} is picked in Shape, so the roof runs the long way and turns on a size the other way round. A lean-to on a side wall then stands on an end wall. Pick ${isShed ? "a high side" : "a front wall"} to fix which way the roof runs at every size.`], { marginTop: 0 })}</div>);
+      }
       list.forEach((e, i) => {
         const r = rds.find((x) => x.i === i) || null;
         const gable = gableWalls.indexOf(e.wall) >= 0;
@@ -27834,6 +27856,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         const len = wallLen(e.wall);
         const run = d3LeanToRun(e, len);
         const attach = e.attach === "wall" || (e.attach === "roof" && !gable) ? e.attach : "";
+        // Every card's boxes share their visible labels, so each is named for a screen reader by its card:
+        // "Lean-to 2 width (ft)", "Lean-to 2 meets the building".
+        const ltAria = (label) => `Lean-to ${n} ${label.replace(/^Lean-to /, "").replace(/^./, (c) => c.toLowerCase())}`;
+        // With no attach it hangs at wall height (d3LeanTosGeom), which is the eave unless the eave stands
+        // higher: a shed's high side, or the centre's own wall beside a single wing. It is then named for
+        // what it is, the single lean-to panel's words (review, 2026-09-30).
+        const eaveGap = !gable && r && r.kind === "eave" ? r.E - ((spec && spec.wallHeightFt) || D3.WALL_H) : 0;
+        const underEave = eaveGap > 0.01;
         // "On the wall" starts at half the drop, the single lean-to's rule (calLeanWallSeed), and on an eave
         // wall where the roof edge above needs it lower, at that clearance; "On the roof" at 1 ft.
         const pickAttach = (v) => {
@@ -27883,18 +27913,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 onClick={() => calEditLeanTos((l) => l.filter((_, j) => j !== i))}>✕</button>
             </div>
             <div className="ss-adv-flds">
-              {advSeg({ f: "leanToWall", label: "Wall", value: e.wall, pick: pickWall, full: true,
+              {advSeg({ f: "leanToWall", label: "Wall", aria: ltAria("Wall"), value: e.wall, pick: pickWall, full: true,
                 opts: [["left", "Left"], ["right", "Right"], ["front", "Front"], ["back", "Back"]],
-                note: gable ? "An end wall, under the peak." : "A long wall, under the roof's edge." })}
-              {advNum({ k: `lt${i}-widthFt`, f: "leanToWidthFt", label: "Lean-to width (ft)", value: e.widthFt, min: 1, max: 16, step: 0.5,
-                commit: (v) => set({ widthFt: Math.max(0.5, Math.min(16, v)) }) })}
-              {advNum({ k: `lt${i}-dropFt`, f: "leanToDropFt", label: "Outer edge drop (ft)", value: e.dropFt != null ? e.dropFt : 1, min: 0, max: 6, step: 0.25,
+                note: gable ? (isShed ? "An end wall, under the slope." : "An end wall, under the peak.") : "A side wall, under the roof's edge." })}
+              {advNum({ k: `lt${i}-widthFt`, f: "leanToWidthFt", label: "Lean-to width (ft)", aria: ltAria("Lean-to width (ft)"), value: e.widthFt, min: 1, max: 16, step: 0.5,
+                commit: (v) => set({ widthFt: Math.max(1, Math.min(16, v)) }) })}
+              {advNum({ k: `lt${i}-dropFt`, f: "leanToDropFt", label: "Outer edge drop (ft)", aria: ltAria("Outer edge drop (ft)"), value: e.dropFt != null ? e.dropFt : 1, min: 0, max: 6, step: 0.25,
                 commit: (v) => set({ dropFt: Math.max(0, Math.min(6, v)) }), note: "How much lower the outer edge is than where it meets." })}
-              {advSeg({ f: "leanToAttach", label: "Meets the building", value: attach, pick: pickAttach, full: true,
-                opts: [["", gable ? "At wall height" : "At the eave"], ["wall", "On the wall"],
+              {advSeg({ f: "leanToAttach", label: "Meets the building", aria: ltAria("Meets the building"), value: attach, pick: pickAttach, full: true,
+                opts: [["", gable || underEave ? "At wall height" : "At the eave"], ["wall", "On the wall"],
                   ["roof", "On the roof", gable, gable ? "An end wall has no roof edge to meet, so it meets the wall" : undefined]],
                 note: attach ? "The outer edge keeps its drop; the slope follows."
-                  : gable ? "Hangs at the top of the wall." : "Hangs at the eave, the way a lean-to usually does.",
+                  : gable ? "Hangs at the top of the wall."
+                    : underEave ? `Hangs at the top of the wall, ${d3FtIn(eaveGap)} below the eave.` : "Hangs at the eave, the way a lean-to usually does.",
                 children: !attach && r ? (
                   <>
                     {advSay(`Builds ${Math.round(r.pitch * 120) / 10} in 12 · ${meets}`, false, { "data-ss-adv-readout": "leanTo" })}
@@ -27902,6 +27933,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   </>
                 ) : null })}
               {attach && advNum({ k: `lt${i}-attachFt`, f: "leanToAttachFt", label: attach === "roof" ? "How far up the roof (ft)" : "How far down the wall (ft)",
+                aria: ltAria(attach === "roof" ? "How far up the roof (ft)" : "How far down the wall (ft)"),
                 value: e.attachFt, min: 0, max: 8, step: 0.25, band: [0, 8], write: (v) => set({ attachFt: v }), placeholder: "0", fallback: 0, full: true,
                 children: r ? (
                   <>
@@ -27921,13 +27953,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </div>
                 {advNoteEl(run.whole ? `All ${d3FtIn(len)} of the ${e.wall} wall.` : `${d3FtIn(run.len)} of the ${d3FtIn(len)} ${e.wall} wall.`)}
               </div>
-              {!run.whole && advNum({ k: `lt${i}-lengthFt`, f: "leanToLengthFt", label: "Length along the wall (ft)", value: run.len, min: 2, max: len, step: 0.5,
+              {!run.whole && advNum({ k: `lt${i}-lengthFt`, f: "leanToLengthFt", label: "Length along the wall (ft)", aria: ltAria("Length along the wall (ft)"), value: run.len, min: 2, max: len, step: 0.5,
                 commit: (v) => set({ lengthFt: Math.max(2, Math.min(60, v)) }) })}
-              {!run.whole && advNum({ k: `lt${i}-offsetFt`, f: "leanToOffsetFt", label: "Position from the middle (ft)", value: run.off,
+              {!run.whole && advNum({ k: `lt${i}-offsetFt`, f: "leanToOffsetFt", label: "Position from the middle (ft)", aria: ltAria("Position from the middle (ft)"), value: run.off,
                 min: -Math.floor(run.room * 2) / 2, max: Math.floor(run.room * 2) / 2, step: 0.5, disabled: !(run.room > 0.25),
                 commit: (v) => set({ offsetFt: Math.max(-30, Math.min(30, v)) || null }),
                 ends: e.wall === "front" || e.wall === "back" ? ["toward the left", "toward the right"] : ["toward the back", "toward the front"] })}
-              {advSeg({ f: "leanToEnclosed", label: "Sides", value: e.enclosed === true ? "enclosed" : "open", pick: (v) => set({ enclosed: v === "enclosed" ? true : null }), full: true,
+              {advSeg({ f: "leanToEnclosed", label: "Sides", aria: ltAria("Sides"), value: e.enclosed === true ? "enclosed" : "open", pick: (v) => set({ enclosed: v === "enclosed" ? true : null }), full: true,
                 opts: [["open", "Open on posts"], ["enclosed", "Enclosed"]],
                 note: e.enclosed === true ? "Walled in with this building's siding." : "A roof on posts." })}
               {clash.length > 0 && <div key="clash" className="ss-adv-f is-full">{clash.map((t, k) => <div key={k}>{advSay(t, true, { "data-ss-leanto-clash": "" })}</div>)}</div>}
