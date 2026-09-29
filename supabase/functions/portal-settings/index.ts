@@ -118,6 +118,18 @@ import { draftIdemKey } from "../_shared/styleD3.ts";
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
 // client this function builds is the SERVICE ROLE and the service role is BYPASSRLS.
 import { ownContactsOnly, type GateTable } from "../_shared/access.ts";
+// ownPhoneOnly is the phone area's twin of ownContactsOnly: RANK scores 'own' and 'view' the
+// same, so it is the only thing that can tell "my calls" from "the team's calls". Every Team
+// read below (the Calls report's team scope, the setup screen) asks it for the LITERAL level.
+import { ownPhoneOnly } from "../_shared/access.ts";
+import { buildCallsReport, bumpDeviceGeneration, createContactRefusal, isUuid, keepForOwnScope, parseCreateContact, parseRoute, phoneLevelOf, phoneRolloutRefusal, phoneSelfServeOn, signoutPlan, type ReportCall, type ReportText } from "./phone.ts";
+// Plan phase 6: a number for calls, bought with portal-sms's own purchase helper (one purchase
+// path, one reconciliation rule) and connected to the phone-api Worker by phoneNumber.ts.
+import {
+  areaCodeOf, applyNumberVoice, buyCallingNumber, callingOnlyNumberRow, fallbackUrlOf, findNumberSid, numberSmsConfig, numberVoiceConfig,
+  numberVoicemailConfig, pickedNumber, smsInboundUrl, switchCalling, twilioCreds, voiceEnv, type HoldResult, type SwitchNumber,
+} from "./phoneNumber.ts";
+import { findPurchasedNumbers, purchaseNumber, releaseNumber, searchAvailableNumbers, trustHubConfigured } from "../_shared/twilioTrustHub.ts";
 import { isQboLineKind } from "../_shared/qboLineKinds.ts";
 
 // WHAT EACH ACTION REQUIRES (migration 100). resolveTenant checks this BEFORE dispatch and
@@ -333,6 +345,10 @@ const GATES: GateTable = {
   crm_save_activity:     { area: "contacts", level: "edit" },
   crm_complete_activity: { area: "contacts", level: "edit" },
   crm_save_contact:      { area: "contacts", level: "edit" },
+  // SSS Phone's "Save as contact" for an unknown number (plan section 6). Creating a customer
+  // is the same altitude as editing one; CONTACT_ROW_SCOPE marks it `creates`, and the branch
+  // makes a caller limited to their own customers the new contact's owner.
+  crm_create_contact:    { area: "contacts", level: "edit" },
   crm_send_sms:          { area: "contacts", level: "edit" },
   // Recording that a customer gave permission is a claim about them, so it sits at the
   // same level as texting them — the people who talk to customers, not everyone.
@@ -445,6 +461,38 @@ const GATES: GateTable = {
   // the approve area: attesting is part of raising a change, not part of allowing one, and
   // Carolyn asked for those to be separate switches.
   attest_change_order: { area: "change_orders", level: "edit" },
+
+  // ── SSS Phone (calling settings + the Calls report) ──────────────────────────────────
+  // The `phone` area (none/own/view/edit), which _shared/access.ts and area_level_for carry.
+  // Plan section 7: making and taking calls needs any read level; changing phone settings
+  // needs edit. ⚠️ `view` here is the FLOOR, and RANK lets 'own' through it: the two reads
+  // below answer an 'own' caller with their own slice only (their status, their number,
+  // their own calls) and ask ownPhoneOnly() before handing over anything team-wide.
+  phone_settings_get: { area: "phone", level: "view" },
+  phone_calls_report: { area: "phone", level: "view" },
+  // Who answers the number, ring order, hours, forwarding, greeting. Owners and admins hold
+  // phone:edit by preset.
+  phone_settings_save: { area: "phone", level: "edit" },
+  // The per-tenant switch (client_settings.phone_status, plan D9). Same altitude as the setup
+  // it switches on. ⚠️ phone:'edit' IS THE FLOOR, NOT THE RULE, until builder launch: turning
+  // calling ON (and the three number actions below) also needs a CSM Synergy operator unless
+  // PHONE_SELF_SERVE=on — the branch asks phoneRolloutRefusal (phone.ts). Turning it OFF never
+  // needs more than this line; the switch is also the safety control.
+  phone_status_set: { area: "phone", level: "edit" },
+  // "Sign out all devices" for ONE team member (a lost phone, someone leaving). It retires
+  // every SSS Phone device they have by bumping their device generation. Ending their
+  // Structure Studio sign-ins as well is refused for a CSM Synergy operator's team row unless
+  // the caller is an operator too (signoutPlan in phone.ts).
+  phone_signout_user: { area: "phone", level: "edit" },
+  // Plan phase 6, the owner's self-serve number for calls. Searching spends nothing. BUYING
+  // spends money every month, so the branch ALSO asks settings_billing:'edit' (the level
+  // portal-sms's buy_number is gated on) and an operator's canBill, and takes portal-sms's
+  // sms_number_monthly wallet hold; phone:'edit' here is the floor. Connecting a number points
+  // its voice webhooks at the Worker and buys nothing. All three are behind the same rollout
+  // check as turning calling on.
+  phone_search_numbers: { area: "phone", level: "edit" },
+  phone_buy_number: { area: "phone", level: "edit" },
+  phone_enable_number: { area: "phone", level: "edit" },
 };
 
 // Owner-facing settings endpoint for the portal (portal.html).
@@ -1024,6 +1072,16 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // the version of this filter that forgets it empties the owner's own dashboard.
   const ownContacts = ownContactsOnly(access);
 
+  // WHAT THIS CALLER MAY SEE OF THE PHONE, for the calls in a record's timeline (review SSB-5).
+  // The record page's gate is contacts or designs and says nothing about calls; crmFeed applies
+  // this the way the phone-api Worker applies it to the same rows: no phone access, no calls;
+  // phone:'own', only their own (crmFeed callVisibleToOwn); literal view/edit, all of them.
+  const phoneFeedScope = (contactOwner: string | null) => ({
+    level: (!canRead("phone") ? "none" : ownPhoneOnly(access) ? "own" : "team") as "none" | "own" | "team",
+    userId: isUuid(String(userId ?? "")) ? String(userId).toLowerCase() : null,
+    contactOwner,
+  });
+
   /**
    * Which of these contact ids may this caller see? Returns null when the check itself
    * failed — callers must dbFail on null and MUST NOT fall back to "show everything",
@@ -1164,8 +1222,14 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     codeKeys?: string[];
     /** Not per-contact at all — refuse a narrowed caller outright. See set_opt_out's twin. */
     tenantWide?: boolean;
+    /** Makes a NEW contact, so there is no existing row to check. A narrowed caller is let
+     *  through because the branch makes THEM the owner of what it creates (owner_user_id =
+     *  the caller), so the row is theirs by construction. The branch must keep doing that;
+     *  it is the whole of this rule's safety. */
+    creates?: boolean;
   }> = {
     crm_save_contact:      { contactKeys: ["id"] },
+    crm_create_contact:    { creates: true },
     crm_save_note:         { rowTable: "crm_notes",      contactKeys: ["contactId"], codeKeys: ["shortCode"] },
     crm_delete_note:       { rowTable: "crm_notes" },
     crm_save_activity:     { rowTable: "crm_activities", contactKeys: ["contactId"], codeKeys: ["shortCode"] },
@@ -1195,6 +1259,8 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (rule.tenantWide) {
       return json({ error: "That list covers the whole business, and you only have access to your own customers." }, 403);
     }
+    // A new row cannot be somebody else's customer yet; the branch assigns it to the caller.
+    if (rule.creates) return null;
 
     const ids: string[] = [];
     const codes: string[] = [];
@@ -1392,6 +1458,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data: loginPref, error: loginPrefErr } = canRead("settings_crm")
       ? await admin.from("client_settings").select("customer_login_default").eq("client_id", clientId).maybeSingle()
       : { data: null, error: null };
+    // Is SSS Phone switched on for this tenant (client_settings.phone_status, plan D9)? The
+    // shell needs it to decide whether Call is offered on a contact and whether the Calls page
+    // is in the rail. ITS OWN READ, AND TOLERANT, for the same reason as the one above: naming
+    // phone_status in the main select would black out every tenant's portal if this deploys
+    // before migration 254. A failed read answers null ("not known"), which the browser treats
+    // as off. Asked only of people with some phone access — nobody else has a use for it.
+    const { data: phoneRow, error: phoneRowErr } = canRead("phone")
+      ? await admin.from("client_settings").select("phone_status").eq("client_id", clientId).maybeSingle()
+      : { data: null, error: null };
+    const phoneStatus: "on" | "off" | null = canRead("phone") && !phoneRowErr
+      ? ((phoneRow as { phone_status?: string } | null)?.phone_status === "on" ? "on" : "off")
+      : null;
     // STATUS FIELD FILTER. This action is "open" in GATES because it is the shell's
     // bootstrap: every role needs clientId/role/branding/business identity to render the
     // portal at all, so denying it would black out the app rather than close one card. The
@@ -1477,6 +1555,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // both wrong and a small information leak.
       prefs: myPrefs,
       ...crm,
+      // "on" | "off" | null (no phone access, or not readable yet). See the read above.
+      phoneStatus,
       businessName: data?.business_name ?? null,
       businessPhone: data?.business_phone ?? null,
       businessWebsite: data?.business_website ?? null,
@@ -7220,7 +7300,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the first THROW, and none of these throws — a failed read comes back on `.error` and is
     // turned into `undefined` by the same line that always did it.
     const [feed, focusRows, ordersOut, buildOut, delivery, repairs, sms, peopleOut] = await Promise.all([
-      buildCrmFeed(admin, clientId, { codes, contactId: contact?.id ?? null, isAdmin: true }),
+      buildCrmFeed(admin, clientId, { codes, contactId: contact?.id ?? null, isAdmin: true, phone: phoneFeedScope(contact?.owner_user_id ?? null) }),
       // Focus = open activities, soonest first. This is the crm_activities_focus index.
       admin.from("crm_activities")
         .select("id, kind, subject, due_at, assignee_user_id, short_code")
@@ -7513,7 +7593,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const seen = await visibleContactIds([rawContactId]);
     if (!seen) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
     const contactId = rawContactId && seen.has(rawContactId) ? rawContactId : null;
-    const feed = await buildCrmFeed(admin, clientId, { codes, contactId, isAdmin: true });
+    // Whose a missed call is depends on the contact's owner, for a phone:'own' viewer only.
+    let contactOwner: string | null = null;
+    const scope0 = phoneFeedScope(null);
+    if (contactId && scope0.level === "own") {
+      const { data: oc, error: ocErr } = await admin.from("crm_contacts").select("owner_user_id")
+        .eq("client_id", clientId).eq("id", contactId).maybeSingle();
+      if (ocErr) return dbFail(req, clientId, "check who this customer is assigned to", ocErr);
+      contactOwner = (oc as { owner_user_id?: string | null } | null)?.owner_user_id ?? null;
+    }
+    const feed = await buildCrmFeed(admin, clientId, { codes, contactId, isAdmin: true, phone: { ...scope0, contactOwner } });
     return json({ ok: true, feed });
   }
 
@@ -8259,6 +8348,798 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).in("short_code", codes);
 
     return json({ ok: true, designs: dRes.data ?? [], versions: vRes.data ?? [], estimates, invoiceSends: sends ?? [] });
+  }
+
+  // ══ SSS PHONE — calling settings and the Calls report (2026-09-29) ═══════════════════════
+  //
+  // The build contract is structure-studio-phone/docs/SPEC.md; the why is the plan's sections
+  // 6, 7 and 12. The CALL PATH does not come through here — calls are placed and answered by the
+  // extension and the app against the phone-api Worker, which is the whole point of that
+  // Worker. These are the not-time-critical surfaces the plan puts in portal-settings: the
+  // owner's one-time setup, the on/off switch, "Sign out all devices", and the report.
+  //
+  // ⚠️ EVERY TABLE HERE ARRIVES WITH MIGRATION 254, and this function is deployed on its own
+  // schedule. A read that meets a missing table or column answers `available: false` — the
+  // Phone tab then says calling is not set up yet — instead of logging a fault per page load
+  // across every tenant. Writes refuse with the same sentence. Real database errors still go
+  // through dbFail.
+  const PHONE_NOT_READY = new Set(["42P01", "42703", "PGRST204", "PGRST205"]);
+  const phoneNotReady = (e: unknown) => PHONE_NOT_READY.has(String((e as { code?: string } | null)?.code ?? ""));
+  // A 503 that declares itself a REFUSAL (x-ss-refusal), exposed so the browser can read it —
+  // the same shape the email-sending not_active answer uses. Without the mark every press on a
+  // server that has not had 254 applied would file as a fault.
+  const phoneRefused = (sentence: string, status: number) => {
+    const r = json({ error: sentence }, status);
+    r.headers.set(SS_REFUSAL_HEADER, "1");
+    r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
+    return r;
+  };
+  const phoneUnavailable = (sentence = "Calling isn't set up on this server yet.") => phoneRefused(sentence, 503);
+
+  // ── THE ROLLOUT, ON THE SERVER (plan D9, review SSB-1) ───────────────────────────────────
+  // The browser's ssPhoneOffered() only decides what is DRAWN, and it draws the Phone tab on
+  // every beta host — which shares this database, these functions and the Twilio account with
+  // production. So the server is where "builders stay out until launch" is enforced: turning
+  // calling on, connecting a number and searching for / buying one need a CSM Synergy operator
+  // until PHONE_SELF_SERVE=on (phone.ts). "An operator" is either an operator in view-as
+  // (`operator`, resolveTenant has already required can_write for a write) or an app_operators
+  // member with can_write acting on their OWN tenant — the pilot's owners — which resolveTenant
+  // does not report, so it is read here, once per request, only when asked.
+  let operatorRowMemo: Promise<boolean> | null = null;
+  const callerIsOperator = (): Promise<boolean> => {
+    if (operator) return Promise.resolve(true);
+    if (!isUuid(String(userId ?? ""))) return Promise.resolve(false);
+    if (!operatorRowMemo) {
+      operatorRowMemo = Promise.resolve(
+        admin.from("app_operators").select("user_id, can_write").eq("user_id", userId).maybeSingle(),
+      ).then(({ data, error }: { data: { can_write?: boolean } | null; error: unknown }) => !error && !!data && data.can_write === true,
+        () => false);
+    }
+    return operatorRowMemo;
+  };
+  const phoneSelfServe = () => phoneSelfServeOn((k) => Deno.env.get(k));
+  /** null = the rollout lets this caller through; else the 403 refusal to return. */
+  const phoneRolloutGate = async (): Promise<Response | null> => {
+    const why = phoneRolloutRefusal({ selfServe: phoneSelfServe(), operator: phoneSelfServe() ? false : await callerIsOperator() });
+    return why ? phoneRefused(why, 403) : null;
+  };
+
+  // The tenant's calling number: its ONE live sms_numbers row (plan D6 — one number per builder
+  // for calls and texts, and the repo allows one live number). Bought on the Text Messaging tab
+  // (calls and texts), or, since phase 6, as a calling-only number on the Phone tab: the row with
+  // no messaging_service_sid, which texting adopts once its registration clears.
+  const phoneNumberRow = async () =>
+    await admin.from("sms_numbers")
+      .select("id, phone_number, registration_status, voice_enabled, voice_configured_at, twilio_sid, messaging_service_sid")
+      .eq("client_id", clientId).is("released_at", null)
+      .order("purchased_at", { ascending: true }).limit(1);
+
+  // Phase 6: may this caller BUY a number? phone:'edit' got them through the gate; spending money
+  // every month is settings_billing:'edit' everywhere else (portal-sms buy_number), and an
+  // operator needs canBill. Asked by the purchase and reported by phone_settings_get so the
+  // screen offers the button only to people it will work for.
+  const mayBuyPhoneNumber = () => canEdit("phone") && canEdit("settings_billing") && (!operator || operator.canBill);
+
+  // A 5xx whose app_errors row the branch already wrote, so withErrorLog does not file it twice.
+  const filedHere = (res: Response) => { filedAtReturnSite.add(res); return res; };
+
+  type PhoneNum = { id: string; phone_number: string; twilio_sid: string | null; messaging_service_sid?: string | null };
+
+  // The number's PN… sid: the row's own, or found by its E.164 for a number recorded without one
+  // (a number bought by hand in the console, like the pilot's).
+  const numberSidOf = async (n: PhoneNum, creds: NonNullable<ReturnType<typeof twilioCreds>>):
+    Promise<{ ok: true; sid: string } | { ok: false; res: Response }> => {
+    if (n.twilio_sid) return { ok: true, sid: n.twilio_sid };
+    const found = await findNumberSid({ creds, e164: n.phone_number });
+    if (!found.ok) return { ok: false, res: json({ error: "Couldn't reach the phone company just now. Try again in a minute." }, 502) };
+    if (!found.sid) return { ok: false, res: json({ error: "That number isn't on Structure Studio's phone account, so it can't be connected from here." }, 409) };
+    return { ok: true, sid: found.sid };
+  };
+
+  // Point a number's voice webhooks at the phone-api Worker (VoiceUrl, StatusCallback,
+  // VoiceFallbackUrl; phoneNumber.ts numberVoiceConfig), then record voice_enabled. Used by the
+  // purchase below when calling is on, by the switch turning calling back on for a number it moved
+  // to voicemail, and by the owner's "Connect this number for calls" for a number that texting
+  // bought, or one bought while calling was off.
+  //
+  // A CALLING-ONLY number (no messaging service) gets its SmsUrl in the same POST (review SSB-3):
+  // its texts reach sms-inbound only through the number's own webhook, so Connect also repairs a
+  // number whose purchase-time setting did not land.
+  const connectNumberForCalls = async (n: PhoneNum):
+    Promise<{ ok: true } | { ok: false; res: Response }> => {
+    const ve = voiceEnv((k) => Deno.env.get(k));
+    if (!ve.ok) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_voice_env_missing",
+        message: `Connecting a number for calls needs ${ve.missing.join(", ")}`, severity: "info" }).catch(() => {});
+      return { ok: false, res: phoneUnavailable("Connecting numbers for calls isn't set up on this server yet.") };
+    }
+    const creds = twilioCreds((k) => Deno.env.get(k));
+    if (!creds) return { ok: false, res: phoneUnavailable("Connecting numbers for calls isn't set up on this server yet.") };
+    const sidRes = await numberSidOf(n, creds);
+    if (!sidRes.ok) return sidRes;
+    const sid = sidRes.sid;
+    const smsUrl = !n.messaging_service_sid ? smsInboundUrl((k) => Deno.env.get(k)) : null;
+    const config = { ...numberVoiceConfig(ve.env), ...(smsUrl ? numberSmsConfig(smsUrl) : {}) };
+    const applied = await applyNumberVoice({ creds, numberSid: sid, config });
+    if (!applied.ok) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_voice_config_failed",
+        message: `Setting the number's voice URL failed (HTTP ${applied.status}, code ${applied.code})`, severity: "error",
+        context: { number_id: n.id } }).catch(() => {});
+      return { ok: false, res: filedHere(json({ error: "The phone company didn't accept the change. Try again in a minute." }, 502)) };
+    }
+    const { error: vErr } = await admin.from("sms_numbers")
+      .update({ voice_enabled: true, voice_configured_at: new Date().toISOString(), ...(n.twilio_sid ? {} : { twilio_sid: sid }) })
+      .eq("id", n.id).eq("client_id", clientId);
+    if (vErr) return { ok: false, res: phoneNotReady(vErr) ? phoneUnavailable() : dbFail(req, clientId, "record that the number takes calls", vErr) };
+    return { ok: true };
+  };
+
+  // THE REVERSE, for the switch going OFF (review SSB-2): point the number at the voicemail Bin
+  // (numberVoicemailConfig) and record voice_enabled = false. The Worker answers a tenant that is
+  // off with "this number can't take calls right now" and hangs up before writing anything, so
+  // a number left pointed at it dropped every customer's call without a trace; the Bin takes a
+  // message, and the Worker's recording sweep files it as a call and a voicemail on the tenant.
+  // voice_configured_at is kept: it is how turning calling back on knows to reconnect.
+  // Never throws; false (logged at `error`) means callers still hear "can't take calls".
+  const numberToVoicemail = async (n: PhoneNum): Promise<boolean> => {
+    const fail = (why: string, context: Record<string, unknown> = {}) => {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_voicemail_config_failed", severity: "error",
+        message: `Calling is off but the number still points at SSS Phone: ${why}`, context: { number_id: n.id, ...context } }).catch(() => {});
+      return false;
+    };
+    try {
+      // Only the voicemail Bin is needed here, not the Worker's secret: a number connected by hand
+      // (the pilot's) must still be movable off the Worker.
+      const fallbackUrl = fallbackUrlOf((k) => Deno.env.get(k));
+      if (!fallbackUrl) return fail("PHONE_FALLBACK_URL is not set");
+      const creds = twilioCreds((k) => Deno.env.get(k));
+      if (!creds) return fail("Twilio credentials are not set");
+      const sidRes = await numberSidOf(n, creds);
+      if (!sidRes.ok) return fail("its sid could not be found");
+      const applied = await applyNumberVoice({ creds, numberSid: sidRes.sid, config: numberVoicemailConfig({ fallbackUrl }) });
+      if (!applied.ok) return fail(`Twilio answered HTTP ${applied.status}, code ${applied.code}`);
+      const { error } = await admin.from("sms_numbers").update({ voice_enabled: false })
+        .eq("id", n.id).eq("client_id", clientId);
+      if (error) return fail(`the row did not update (${(error as { code?: string }).code ?? "?"})`);
+      return true;
+    } catch (e) {
+      return fail((e as Error)?.message ?? "unknown");
+    }
+  };
+
+  // The team, each with their RESOLVED phone level (preset + overrides, owners absolute) —
+  // through access.ts, never a second copy of the presets.
+  const phoneTeam = async () => {
+    const { data, error } = await admin.from("client_users")
+      .select("user_id, full_name, role, title, access").eq("client_id", clientId)
+      .order("full_name", { ascending: true }).limit(200);
+    if (error) return { error, team: [] as { userId: string; name: string | null; title: string | null; role: string | null; phoneLevel: string }[] };
+    // deno-lint-ignore no-explicit-any
+    const team = (data ?? []).map((u: any) => ({
+      userId: String(u.user_id).toLowerCase(),
+      name: (u.full_name as string | null) ?? null,
+      title: (u.title as string | null) ?? null,
+      role: (u.role as string | null) ?? null,
+      phoneLevel: phoneLevelOf(u),
+    }));
+    return { error: null, team };
+  };
+
+  // deno-lint-ignore no-explicit-any
+  const routeOut = (r: any) => r ? {
+    mode: r.mode, members: r.members ?? [], ringSeconds: r.ring_seconds, noAnswer: r.no_answer,
+    forwardTo: r.forward_to ?? null, businessHours: r.business_hours ?? null, timeZone: r.time_zone,
+    afterHours: r.after_hours, greetingUrl: r.greeting_url ?? null, updatedAt: r.updated_at ?? null,
+  } : null;
+
+  if (action === "phone_settings_get") {
+    const { data: cs, error: csErr } = await admin.from("client_settings")
+      .select("phone_status").eq("client_id", clientId).maybeSingle();
+    if (csErr) return phoneNotReady(csErr) ? json({ ok: true, available: false }) : dbFail(req, clientId, "load your phone settings", csErr);
+    const phoneStatus = (cs as { phone_status?: string } | null)?.phone_status === "on" ? "on" : "off";
+
+    const numRes = await phoneNumberRow();
+    if (numRes.error) return phoneNotReady(numRes.error) ? json({ ok: true, available: false }) : dbFail(req, clientId, "load your phone number", numRes.error);
+    // deno-lint-ignore no-explicit-any
+    const n: any = (numRes.data ?? [])[0] ?? null;
+
+    // AN 'own' CALLER GETS THEIR OWN SLICE. The gate let them in on `view` because RANK scores
+    // own == view; the setup — who answers, when, where calls forward — is the team's business
+    // and needs the LITERAL level (plan section 7). They still learn whether calling is on and
+    // which number customers see, which is what they need to use the apps at all.
+    if (ownPhoneOnly(access)) {
+      return json({
+        ok: true, available: true, scope: "own", phoneStatus, level: "own", canEdit: false,
+        number: n ? { e164: n.phone_number } : null,
+      });
+    }
+
+    const [teamOut, routeRes, devRes] = await Promise.all([
+      phoneTeam(),
+      n
+        ? admin.from("phone_routes")
+            .select("mode, members, ring_seconds, no_answer, forward_to, business_hours, time_zone, after_hours, greeting_url, updated_at")
+            .eq("client_id", clientId).eq("number_id", n.id).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+      // Which devices each person has signed in on, for the "Sign out all devices" row. A
+      // courtesy: a failed read shows no devices rather than failing the screen.
+      admin.from("phone_devices")
+        .select("user_id, platform, app_version, last_seen_at").eq("client_id", clientId)
+        .order("last_seen_at", { ascending: false }).limit(500),
+    ]);
+    if (teamOut.error) return dbFail(req, clientId, "load your team", teamOut.error);
+    if (routeRes.error) return phoneNotReady(routeRes.error) ? json({ ok: true, available: false }) : dbFail(req, clientId, "load your phone settings", routeRes.error);
+    const devicesBy = new Map<string, { platform: string; appVersion: string | null; lastSeenAt: string | null }[]>();
+    // deno-lint-ignore no-explicit-any
+    for (const d of ((devRes as any).error ? [] : ((devRes as any).data ?? [])) as any[]) {
+      const k = String(d.user_id).toLowerCase();
+      const list = devicesBy.get(k) ?? [];
+      list.push({ platform: d.platform, appVersion: d.app_version ?? null, lastSeenAt: d.last_seen_at ?? null });
+      devicesBy.set(k, list);
+    }
+    const team = teamOut.team.map((t) => ({ ...t, devices: devicesBy.get(t.userId) ?? [] }));
+    const route = routeOut(routeRes.data);
+    // What the rollout lets this caller do (the same check the three writes make), so the screen
+    // offers "Turn calling on", Connect and Buy only where they will work. Turning calling OFF,
+    // the route, and "Sign out all devices" are never behind it.
+    const rolloutOpen = canEdit("phone") && (phoneSelfServe() || await callerIsOperator());
+    return json({
+      ok: true, available: true, scope: "team", phoneStatus,
+      level: access.phone ?? null,
+      canEdit: canEdit("phone"),
+      canSwitchOn: rolloutOpen,
+      canConnect: rolloutOpen,
+      selfServe: phoneSelfServe(),
+      number: n ? {
+        id: n.id, e164: n.phone_number,
+        // The TEXTING state, shown beside the number. Calling never waits on it (plan D6).
+        textingStatus: n.registration_status ?? null,
+        voiceReady: n.voice_enabled === true,
+        // Bought for calls on this tab and not yet attached to a texting registration.
+        callingOnly: !n.messaging_service_sid,
+      } : null,
+      // Phase 6, what the owner may do about the number from here. `canBuyNumber` is the
+      // purchase's own check (mayBuyPhoneNumber), so the button is offered exactly where it
+      // works; `numbersForSale` is Twilio being configured on this server at all; `voiceSetup`
+      // is whether "Connect this number for calls" has the Worker settings it needs (booleans
+      // only, never the values).
+      canBuyNumber: rolloutOpen && mayBuyPhoneNumber(),
+      // Buying also needs somewhere for the new number's texts to go (review SSB-3).
+      numbersForSale: trustHubConfigured() && !!smsInboundUrl((k) => Deno.env.get(k)) && voiceEnv((k) => Deno.env.get(k)).ok,
+      voiceSetup: voiceEnv((k) => Deno.env.get(k)).ok,
+      route,
+      team,
+      // Plan section 7: "At setup the list starts with the owner." Offered, not saved — the
+      // route row does not exist until the owner presses Save.
+      suggestedMembers: route ? null : team.filter((t) => t.role === "owner" && t.phoneLevel !== "none").map((t) => t.userId),
+    });
+  }
+
+  if (action === "phone_settings_save") {
+    const numRes = await phoneNumberRow();
+    if (numRes.error) return phoneNotReady(numRes.error) ? phoneUnavailable() : dbFail(req, clientId, "load your phone number", numRes.error);
+    // deno-lint-ignore no-explicit-any
+    const n: any = (numRes.data ?? [])[0] ?? null;
+    if (!n) {
+      return json({ error: "Get a number on the Text Messaging tab first, then choose who answers it." }, 409);
+    }
+    const teamOut = await phoneTeam();
+    if (teamOut.error) return dbFail(req, clientId, "load your team", teamOut.error);
+    const eligible = new Set(teamOut.team.filter((t) => t.phoneLevel !== "none").map((t) => t.userId));
+    const names = new Map(teamOut.team.map((t) => [t.userId, t.name] as [string, string | null]));
+    const parsed = parseRoute((payload ?? {}) as Record<string, unknown>, eligible, names);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+
+    const { data: saved, error } = await admin.from("phone_routes")
+      .upsert({ client_id: clientId, number_id: n.id, ...parsed.row, updated_at: new Date().toISOString() }, { onConflict: "number_id" })
+      .select("mode, members, ring_seconds, no_answer, forward_to, business_hours, time_zone, after_hours, greeting_url, updated_at")
+      .maybeSingle();
+    if (error) return phoneNotReady(error) ? phoneUnavailable() : dbFail(req, clientId, "save your phone settings", error);
+    return json({ ok: true, route: routeOut(saved) });
+  }
+
+  // THE SWITCH, and what it does to the number (phoneNumber.ts switchCalling). ON is behind the
+  // rollout until builder launch (review SSB-1); OFF never is. OFF also moves a connected number
+  // to voicemail (review SSB-2) — the Worker hangs up on a tenant that is off without writing
+  // anything — and ON puts back a number the switch moved. Calling it OFF while already off
+  // retries a move that failed, which is what the Phone tab's "Send calls to voicemail" does.
+  if (action === "phone_status_set") {
+    if (typeof payload?.on !== "boolean") return json({ error: "Say whether calling should be on or off." }, 400);
+    const on = payload.on === true;
+    if (on) {
+      const refused = await phoneRolloutGate();
+      if (refused) return refused;
+    }
+    const out = await switchCalling(on, {
+      writeStatus: async (v) => {
+        const { data, error } = await admin.from("client_settings")
+          .update({ phone_status: v ? "on" : "off" }).eq("client_id", clientId).select("phone_status");
+        if (error) return { ok: false, error };
+        // An update that matched nothing is not a success: the switch would read "on" in the
+        // browser and "off" everywhere that matters.
+        return data && data.length ? { ok: true } : { ok: false, noRow: true };
+      },
+      readNumber: async () => {
+        const numRes = await phoneNumberRow();
+        return numRes.error ? { error: numRes.error } : { row: ((numRes.data ?? [])[0] ?? null) as SwitchNumber | null };
+      },
+      toVoicemail: (n) => numberToVoicemail(n),
+      connect: async (n) => (await connectNumberForCalls(n)).ok,
+    });
+    if (!out.ok) {
+      if ("noRow" in out) {
+        return json({ error: "This account has no settings saved yet. Save your business details under Company first." }, 409);
+      }
+      return phoneNotReady(out.error) ? phoneUnavailable() : dbFail(req, clientId, on ? "switch calling on" : "switch calling off", out.error);
+    }
+    audit(on ? "phone_status_on" : "phone_status_off", 1, out.number ? `voiceReady=${out.number.voiceReady}` : null).catch(() => {});
+    return json({ ok: true, phoneStatus: out.phoneStatus, number: out.number, ...(out.warning ? { warning: out.warning } : {}) });
+  }
+
+  // ── "Sign out all devices" for one person ──────────────────────────────────────────────
+  // Plan section 14: a lost phone, or someone leaving. Bumping phone_user_settings'
+  // device_generation retires every Twilio identity they hold at once — the Worker refuses an
+  // identity whose g number is older than the current one on /token and /voice/outbound, and
+  // the route stops ringing it. A compare-and-swap on the old value, so two owners pressing it
+  // together bump it twice rather than both writing the same number.
+  //
+  // ⚠️ THE OTHER HALF IS ENDING THEIR SUPABASE SIGN-INS, so a lost phone cannot simply fetch a
+  // fresh token on the new generation. supabase-js has no admin "sign out user X" (its
+  // auth.admin.signOut needs THAT user's own JWT), so migration 254 PART 6B adds a service-role
+  // SQL function, phone_end_user_sessions, that deletes their auth.sessions rows (refresh tokens
+  // cascade). That signs them out of Structure Studio EVERYWHERE, which is the point for a lost
+  // phone and is what the confirm on the Phone tab says. Reported back as `sessionsEnded`; on a
+  // database without 254's function the answer is false and the screen says so plainly rather
+  // than claiming more. Their push tokens are forgotten too, as the Worker's own
+  // /devices/signout-all does, so text alerts stop reaching the lost phone.
+  if (action === "phone_signout_user") {
+    const target = String(payload?.userId ?? "").toLowerCase();
+    if (!isUuid(target)) return json({ error: "Which person?" }, 400);
+    const { data: member, error: mErr } = await admin.from("client_users")
+      .select("user_id, full_name, role").eq("client_id", clientId).eq("user_id", target).maybeSingle();
+    if (mErr) return dbFail(req, clientId, "find that team member", mErr);
+    if (!member) return json({ error: "That person isn't on your team." }, 404);
+    // Who may do this to whom, and whether it may end their Structure Studio sign-ins as well
+    // (phone.ts signoutPlan): an admin never signs out the owner; a CSM Synergy operator's team
+    // row gets its SSS Phone devices retired but its sessions kept unless the caller is an
+    // operator too (review SSB-9) — those sessions cover every tenant they support.
+    const [callerOp, targetOp] = await Promise.all([
+      callerIsOperator(),
+      admin.from("app_operators").select("user_id").eq("user_id", target).maybeSingle()
+        .then(({ data, error }: { data: unknown; error: unknown }) => ({ is: !!data, error }), (error: unknown) => ({ is: false, error })),
+    ]);
+    // Fail closed: if we cannot tell whether they are an operator, their sessions are not ended.
+    const plan = signoutPlan({
+      targetRole: (member as { role?: string }).role ?? null, callerRole: role,
+      callerIsOperator: callerOp, targetIsOperator: targetOp.is || !!targetOp.error,
+    });
+    if (!plan.ok) return json({ error: plan.error }, plan.status);
+
+    const now = new Date().toISOString();
+    const bumped = await bumpDeviceGeneration({
+      read: async () => {
+        const { data, error } = await admin.from("phone_user_settings")
+          .select("device_generation").eq("user_id", target).maybeSingle();
+        return { gen: data ? (Number((data as { device_generation?: number }).device_generation) || 1) : null, error };
+      },
+      insert: async (gen) => {
+        const { error } = await admin.from("phone_user_settings")
+          .insert({ user_id: target, client_id: clientId, device_generation: gen, updated_at: now });
+        return { error };
+      },
+      update: async (from, to) => {
+        const { data, error } = await admin.from("phone_user_settings")
+          .update({ device_generation: to, client_id: clientId, updated_at: now })
+          .eq("user_id", target).eq("device_generation", from).select("device_generation");
+        return { swapped: !!(data && data.length), error };
+      },
+    });
+    if ("error" in bumped) {
+      return phoneNotReady(bumped.error) ? phoneUnavailable() : dbFail(req, clientId, "sign them out of SSS Phone", bumped.error);
+    }
+    if ("conflict" in bumped) {
+      return json({ error: "Their phone settings changed at the same moment. Press it again." }, 409);
+    }
+    const generation = bumped.generation;
+
+    let sessionsEnded = false;
+    let sessionCount: number | null = null;
+    if (plan.endSessions) {
+      const { data: ended, error: endErr } = await admin.rpc("phone_end_user_sessions", { p_user_id: target });
+      if (!endErr) {
+        sessionsEnded = true;
+        sessionCount = Number(ended ?? 0) || 0;
+      } else if (!["PGRST202", "42883"].includes(String(endErr.code))) {
+        // The function exists and failed: worth seeing. Missing is the state of a database
+        // without 254, and is not logged, or every press would file a row.
+        logEdgeError({
+          fn: "portal-settings", req, clientId, code: String(endErr.code ?? "phone_end_sessions_failed"),
+          message: `phone_end_user_sessions failed: ${endErr.message ?? "unknown"}`, severity: "info",
+        }).catch(() => {});
+      }
+    }
+    // Forget their registered devices (push tokens). Best-effort: the generation bump above is
+    // what retires the lines, and a failure here only leaves a device listed until it is seen.
+    await admin.from("phone_devices").delete().eq("client_id", clientId).eq("user_id", target)
+      .then(() => {}, () => {});
+    audit("phone_signout_user", 1, `user=${target} generation=${generation} sessions=${sessionsEnded ? sessionCount : "n/a"}`).catch(() => {});
+    return json({
+      ok: true, generation, sessionsEnded, sessionCount, name: (member as { full_name?: string | null }).full_name ?? null,
+      // A CSM Synergy operator's sign-ins were deliberately left alone (review SSB-9).
+      ...(plan.endSessions ? {} : { sessionsKept: "operator" }),
+    });
+  }
+
+  // ── "Save as contact" (SSS Phone) ───────────────────────────────────────────────────────
+  // Plan section 6: calls and texts from a number that matches no contact show as their own
+  // thread, and "Save as contact" creates the CRM contact (source "phone") and links that
+  // number's earlier calls and texts to it. The extension and the app call exactly this, with
+  // {name, phone: "<E.164>", source: "phone"}, and read `id` (or `contactId`) back.
+  //
+  // Gated like crm_save_contact (contacts:'edit', and the CRM subscription through the crm_
+  // prefix). The work is ONE database call, crm_create_contact (migration 254 PART 9B), so the
+  // new row and the re-link land together or not at all.
+  //
+  // OWNER: a caller limited to their own customers (contacts:'own') becomes the owner, or the
+  // contact they just saved would be somebody else's to assign; CONTACT_ROW_SCOPE lets them in
+  // on exactly that promise (`creates`). Everyone else leaves it unassigned, as a design
+  // submission does (crm_ensure_contact assigns nobody).
+  //
+  // RE-LINK SCOPE (review SSB-6) lives in the SQL, keyed on p_actor: a narrowed saver moves only
+  // the calls they were on and the texts they sent, and no call moves away from a teammate who
+  // could not see the new contact. `creates: true` is therefore safe: it lets them create the
+  // row, not take other people's history with it.
+  //
+  // Here, below the phone block's helpers, rather than beside crm_save_contact: it answers a
+  // database without 254 with phoneUnavailable, a const declared above.
+  if (action === "crm_create_contact") {
+    const parsed = parseCreateContact((payload ?? {}) as Record<string, unknown>);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const me = String(userId ?? "").toLowerCase();
+    if (ownContacts && !isUuid(me)) return json({ error: "Sign in again to save a contact." }, 401);
+    const { data: made, error } = await admin.rpc("crm_create_contact", {
+      p_client_id: clientId,
+      p_name: parsed.name,
+      p_phone: parsed.phone,
+      p_owner: ownContacts ? me : null,
+      p_actor: isUuid(me) ? me : null,
+      p_source: "phone",
+    });
+    if (error) {
+      // The known refusals (a duplicate number is crm_save_contact's own sentence, from the one
+      // copy both share), mapped in phone.ts createContactRefusal so a test runs them.
+      const refusal = createContactRefusal(error);
+      if (!refusal) return dbFail(req, clientId, "save that contact", error);
+      return refusal.refusal ? phoneRefused(refusal.error, refusal.status) : json({ error: refusal.error }, refusal.status);
+    }
+    const out = (made ?? {}) as { id?: string; relinked?: { calls?: number; sms?: number } };
+    if (!out.id) return dbFail(req, clientId, "save that contact", { message: "crm_create_contact returned no id" });
+    audit("crm_create_contact", 1, `contact=${out.id} calls=${out.relinked?.calls ?? 0} sms=${out.relinked?.sms ?? 0} owner=${ownContacts ? "caller" : "none"}`).catch(() => {});
+    return json({ ok: true, id: out.id, contactId: out.id, relinked: { calls: out.relinked?.calls ?? 0, sms: out.relinked?.sms ?? 0 } });
+  }
+
+  // ── Plan phase 6: a number for calls, self-serve ────────────────────────────────────────
+  // D6: one number per builder for calls AND texts, and calling never waits on text
+  // registration. So a builder with no number can get one here for calls straight away; it is
+  // an ordinary sms_numbers row, registration_status 'pending_registration' (165's word for
+  // "not registered for texting" — Twilio's own externalstatus vocabulary has no other) and
+  // messaging_service_sid NULL, which is what marks it calling-only. It is never attached to a
+  // messaging service here: texting adopts THIS row once its carrier registration clears, and
+  // portal-sms's buy_number refuses a second live number (its one-per-tenant count), so the
+  // texting flow cannot buy another.
+  //
+  // ⚠️ ROLLOUT (review SSB-1): search, buy and connect are behind phoneRolloutGate, i.e. a CSM
+  // Synergy operator, until PHONE_SELF_SERVE=on — and that must stay off until portal-sms can
+  // adopt a calling-only number, because until then buying here blocks the builder's texting.
+  //
+  // MONEY: the purchase takes portal-sms's own wallet hold — meter sms_number_monthly, key
+  // numberHoldKey (portal-sms's `sms_num:<client>:<number>`) — for the first month, captured once
+  // the number is recorded and released if it is not (phoneNumber.ts buyCallingNumber). The
+  // meter's `active` flag is the arming rail exactly as it is for texting.
+  //
+  // TEXTS (review SSB-3): the new number's own SmsUrl points at sms-inbound in the same Twilio
+  // update that sets its voice settings, so a customer who texts back the number they were
+  // called from lands in sms_messages under this tenant.
+  //
+  // client_settings.sms_number is NOT set: that column is the texting number sendTenantSms
+  // sends from, and a calling-only number must not look like one. phone_caller_context picks
+  // the tenant's live row regardless.
+
+  // portal-sms's takeHold, with 248's `hold_replayed` answered as "already paid for this exact
+  // number" (a retry of a purchase whose hold was captured) rather than as a refusal.
+  const takeNumberHold = async (idem: string): Promise<HoldResult> => {
+    const { data: hold, error } = await admin
+      .rpc("wallet_hold", { p_client_id: clientId, p_kind: "sms_number_monthly", p_idem: idem, p_user: userId ?? null })
+      .maybeSingle() as { data: { err?: string | null; hold_id?: number | null; price_cents?: number; balance_after?: number } | null; error: { message?: string } | null };
+    if (error) {
+      // The meter is unreachable. REFUSE rather than spend real money at Twilio with no record
+      // that we ever meant to charge for it (portal-sms's rule).
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_hold_failed",
+        message: `Wallet hold failed, refusing the number purchase: ${error.message ?? "unknown"}` }).catch(() => {});
+      return { ok: false, status: 503, body: { error: "The billing meter is unavailable right now. Try again shortly." } };
+    }
+    const err = hold?.err ?? null;
+    if (err === "insufficient_funds") {
+      return { ok: false, status: 402, body: {
+        error: `This number costs $${((hold?.price_cents ?? 0) / 100).toFixed(2)} a month and your wallet has $${((hold?.balance_after ?? 0) / 100).toFixed(2)}. Add funds in Settings → Billing, then try again.`,
+        code: "insufficient_funds", priceCents: hold?.price_cents ?? null, balanceCents: hold?.balance_after ?? null,
+      } };
+    }
+    if (err === "hold_in_flight") {
+      return { ok: false, status: 409, body: { error: "A charge for this account is already being processed. Give it a moment." } };
+    }
+    if (err === "meter_unknown") {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_meter_missing", message: "usage_prices has no sms_number_monthly row" }).catch(() => {});
+      return { ok: false, status: 503, body: { error: "The billing meter is unavailable right now. Try again shortly." } };
+    }
+    // No error, `meter_inactive` (the arming rail) or `hold_replayed` (paid already): proceed.
+    return { ok: true, holdId: err ? null : (hold?.hold_id ?? null) };
+  };
+
+  if (action === "phone_search_numbers") {
+    const refused = await phoneRolloutGate();
+    if (refused) return refused;
+    if (!trustHubConfigured()) return phoneUnavailable("Buying numbers isn't available on this server yet.");
+    const results = await searchAvailableNumbers({ areaCode: areaCodeOf(payload?.areaCode) ?? undefined, limit: 10 })
+      .catch((e: unknown) => ({ failed: e }));
+    if (!Array.isArray(results)) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_search_failed",
+        message: `Twilio number search failed: ${(results.failed as Error)?.message ?? "unknown"}`, severity: "info" }).catch(() => {});
+      return filedHere(json({ error: "Couldn't look up numbers just now. Try again in a minute." }, 502));
+    }
+    return json({ ok: true, numbers: results.map((n) => ({ e164: n.phoneNumber, locality: n.locality, region: n.region })) });
+  }
+
+  if (action === "phone_enable_number") {
+    const refused = await phoneRolloutGate();
+    if (refused) return refused;
+    const numRes = await phoneNumberRow();
+    if (numRes.error) return phoneNotReady(numRes.error) ? phoneUnavailable() : dbFail(req, clientId, "load your phone number", numRes.error);
+    // deno-lint-ignore no-explicit-any
+    const n: any = (numRes.data ?? [])[0] ?? null;
+    if (!n) return json({ error: "There's no number on this account yet. Get one first." }, 409);
+    // Same rule the purchase follows: a number points at the Worker only while calling is on
+    // for the tenant, because the Worker answers "not in service" for a tenant that is off.
+    const { data: cs, error: csErr } = await admin.from("client_settings")
+      .select("phone_status").eq("client_id", clientId).maybeSingle();
+    if (csErr) return phoneNotReady(csErr) ? phoneUnavailable() : dbFail(req, clientId, "load your phone settings", csErr);
+    if ((cs as { phone_status?: string } | null)?.phone_status !== "on") {
+      return json({ error: "Turn calling on first, then connect the number." }, 409);
+    }
+    const done = await connectNumberForCalls(n);
+    if (!done.ok) return done.res;
+    audit("phone_enable_number", 1, `number=${n.id}`).catch(() => {});
+    return json({ ok: true, number: { id: n.id, e164: n.phone_number, voiceReady: true } });
+  }
+
+  if (action === "phone_buy_number") {
+    const refused = await phoneRolloutGate();
+    if (refused) return refused;
+    if (!mayBuyPhoneNumber()) {
+      return json({ error: operator && !operator.canBill
+        ? "This operator account cannot change billing."
+        : "Buying a number is for the account owner, or someone they've given Billing access." }, 403);
+    }
+    if (!trustHubConfigured()) return phoneUnavailable("Buying numbers isn't available on this server yet.");
+    // Everything the new number needs, BEFORE any money moves: somewhere for its texts to go
+    // (review SSB-3), and the voice settings it is given either way (the Worker when calling is
+    // on, the voicemail Bin when it is off).
+    const smsUrl = smsInboundUrl((k) => Deno.env.get(k));
+    const ve = voiceEnv((k) => Deno.env.get(k));
+    const creds = twilioCreds((k) => Deno.env.get(k));
+    if (!smsUrl || !ve.ok || !creds) {
+      const missing = [!smsUrl ? "SMS_INBOUND_SECRET" : null, ...(ve.ok ? [] : ve.missing), !creds ? "Twilio credentials" : null].filter(Boolean);
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_env_missing", severity: "info",
+        message: `Buying a number for calls needs ${missing.join(", ")}` }).catch(() => {});
+      return phoneUnavailable("Buying numbers isn't available on this server yet.");
+    }
+    const wanted = pickedNumber(payload?.phoneNumber);
+    if (!wanted) return json({ error: "Choose a number from the search results." }, 400);
+
+    // ONE LIVE NUMBER PER TENANT (plan D6), the same read-then-act count portal-sms's
+    // buy_number uses, and the same caveat: nothing in the schema enforces it.
+    const { count, error: cErr } = await admin.from("sms_numbers")
+      .select("id", { count: "exact", head: true })
+      .eq("client_id", clientId).is("released_at", null);
+    if (cErr) return dbFail(req, clientId, "check your numbers", cErr);
+    if ((count ?? 0) >= 1) {
+      return json({ error: "This account already has a number. Connect it for calls instead of buying another." }, 409);
+    }
+    const { data: cs, error: csErr } = await admin.from("client_settings")
+      .select("phone_status").eq("client_id", clientId).maybeSingle();
+    if (csErr) return phoneNotReady(csErr) ? phoneUnavailable() : dbFail(req, clientId, "load your phone settings", csErr);
+    const phoneOn = (cs as { phone_status?: string } | null)?.phone_status === "on";
+
+    const out = await buyCallingNumber({ clientId, wanted }, {
+      findPurchasedNumbers, purchaseNumber, releaseNumber,
+      hold: takeNumberHold,
+      capture: async (holdId, b) => {
+        const { error } = await admin.rpc("wallet_capture", {
+          p_hold_id: holdId, p_cost_cents: null, p_usage: { phone_number: b.phoneNumber, calling_only: true }, p_ref_id: b.sid,
+        });
+        if (error) {
+          logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_capture_failed",
+            message: `Hold ${holdId} not captured after a number purchase: ${error.message ?? "unknown"}` }).catch(() => {});
+        }
+      },
+      releaseHold: async (holdId, reason) => {
+        const { error } = await admin.rpc("wallet_release", { p_hold_id: holdId, p_reason: reason });
+        if (error) {
+          logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_release_failed",
+            message: `Could not release hold ${holdId}: ${error.message ?? "unknown"}` }).catch(() => {});
+        }
+      },
+      record: async (b) => {
+        const { data, error } = await admin.from("sms_numbers")
+          .insert(callingOnlyNumberRow(clientId, b))
+          .select("id, phone_number, twilio_sid").single();
+        return error || !data ? { ok: false, error: error ?? { message: "no row returned" } } : { ok: true, row: data };
+      },
+    });
+    if (!out.ok) {
+      if (out.kind === "refused") return json(out.body, out.status);
+      if (out.kind === "lookup_failed") {
+        logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_reconcile_failed", severity: "error",
+          message: `Listing this tenant's numbers before a purchase failed: ${(out.error as Error)?.message ?? "unknown"}` }).catch(() => {});
+        return filedHere(json({ error: "Couldn't reach the phone company just now. Try again in a minute." }, 502));
+      }
+      if (out.kind === "purchase_failed") {
+        logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_purchase_failed",
+          message: `Buying ${wanted} failed: ${(out.error as Error)?.message ?? "unknown"}`, severity: "error" }).catch(() => {});
+        return filedHere(json({ error: "That number couldn't be bought. It may have just been taken. Search again and pick another." }, 502));
+      }
+      // Bought (or adopted) and not recorded. A fresh purchase was released at Twilio and its hold
+      // let go; if the release failed too, the number is still ours under FriendlyName=client_id
+      // and the next press adopts it instead of buying another (buyCallingNumber).
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_record_failed", severity: "error",
+        message: `${out.bought.phoneNumber} was bought but its sms_numbers row failed; released at Twilio: ${out.releasedAtTwilio}`,
+        context: { sid: out.bought.sid, error: (out.error as { code?: string } | null)?.code ?? null } }).catch(() => {});
+      return filedHere(json({ error: "Your number couldn't be saved just now, so nothing was kept. Try again in a minute." }, 500));
+    }
+    const { row, bought } = out;
+    audit("phone_buy_number", 1, `number=${bought.phoneNumber} reconciled=${out.reconciled}${out.adoptedInstead ? " adopted_instead_of=" + wanted : ""}`).catch(() => {});
+    const bought1 = { id: String(row.id), e164: String(row.phone_number) };
+    // An earlier press had already bought a number that was never recorded; that one was kept
+    // and nothing new was rented. Said, so the builder is not surprised by a different number.
+    const note = out.adoptedInstead
+      ? { note: `An earlier try had already got ${bought.phoneNumber} for this account, so that number was kept instead of buying another.` }
+      : {};
+
+    // The number's settings, in ONE Twilio update: texts to sms-inbound always; calls to the Worker
+    // while calling is on (recorded as voice_enabled by connectNumberForCalls), otherwise to the
+    // voicemail Bin, so a customer who calls it before calling is on can still leave a message.
+    if (phoneOn) {
+      const done = await connectNumberForCalls({ ...row, messaging_service_sid: null });
+      if (!done.ok) {
+        // The number is bought and recorded either way; say what is left instead of failing a
+        // purchase that succeeded.
+        return json({ ok: true, number: { ...bought1, voiceReady: false }, ...note,
+          warning: "Your number is ready, but connecting it for calls didn't finish. Press \"Connect this number for calls\" to try again." });
+      }
+      return json({ ok: true, number: { ...bought1, voiceReady: true }, ...note });
+    }
+    const applied = await applyNumberVoice({
+      creds, numberSid: bought.sid, config: { ...numberVoicemailConfig(ve.env), ...numberSmsConfig(smsUrl) },
+    });
+    if (!applied.ok) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_number_webhooks_failed", severity: "error",
+        message: `A new calling-only number's text and voicemail settings did not apply (HTTP ${applied.status}, code ${applied.code}); its texts are not reaching sms-inbound`,
+        context: { number_id: row.id } }).catch(() => {});
+      return json({ ok: true, number: { ...bought1, voiceReady: false }, ...note,
+        warning: "Your number is ready, but it isn't set up to receive texts yet. Turn calling on and press \"Connect this number for calls\" to finish, or contact Structure Studio." });
+    }
+    return json({ ok: true, number: { ...bought1, voiceReady: false }, ...note });
+  }
+
+  // ── The Calls report ────────────────────────────────────────────────────────────────────
+  // Carolyn, 08-27: "the reporting is inside Structure Studio ... so it's in one place", and
+  // "My most annoying thing about GHL is you can't see just your calls" — so MY is the default
+  // and TEAM needs the literal view/edit level (ownPhoneOnly), exactly like the apps' Team tab.
+  //
+  // ROW SCOPE. A caller limited to their own customers (contacts:'own') is narrowed here by
+  // hand, because this function is service-role and BYPASSRLS: a call or text about a customer
+  // they cannot see is left out of every number, the way it is left out of every list (plan
+  // section 7). See keepForOwnScope for the unknown-number rule.
+  if (action === "phone_calls_report") {
+    const wantTeam = payload?.scope === "team";
+    if (wantTeam && ownPhoneOnly(access)) {
+      return json({ error: "Your phone access covers your own calls. Ask an owner or admin if you need to see the team's." }, 403);
+    }
+    const rawDays = Number(payload?.days ?? 30);
+    const days = Number.isFinite(rawDays) ? Math.min(366, Math.max(1, Math.round(rawDays))) : 30;
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    const me = String(userId ?? "").toLowerCase();
+
+    // PostgREST answers at most 1000 rows a request, so read in pages. A cap keeps one huge
+    // tenant from turning a report into a timeout; hitting it is reported, never hidden.
+    const PAGE = 1000, CAP = 20000;
+    // deno-lint-ignore no-explicit-any
+    const pageAll = async (build: (from: number, to: number) => any): Promise<{ rows: any[]; truncated: boolean; error: any }> => {
+      // deno-lint-ignore no-explicit-any
+      const rows: any[] = [];
+      for (let from = 0; from < CAP; from += PAGE) {
+        const { data, error } = await build(from, from + PAGE - 1);
+        if (error) return { rows, truncated: false, error };
+        const got = data ?? [];
+        rows.push(...got);
+        if (got.length < PAGE) return { rows, truncated: false, error: null };
+      }
+      return { rows, truncated: true, error: null };
+    };
+
+    const mineFilter = isUuid(me) ? `placed_by.eq.${me},answered_by.eq.${me},rang_user_ids.cs.{${me}}` : null;
+    if (!wantTeam && !mineFilter) return json({ error: "Sign in again to see your calls." }, 401);
+    const [callsOut, textsOut, vmOut, teamOut] = await Promise.all([
+      pageAll((from, to) => {
+        let q = admin.from("phone_calls")
+          .select("id, direction, status, placed_by, answered_by, rang_user_ids, duration_s, answered_at, contact_id")
+          .eq("client_id", clientId).gte("started_at", since);
+        if (!wantTeam) q = q.or(mineFilter!);
+        return q.order("started_at", { ascending: false }).order("id", { ascending: true }).range(from, to);
+      }),
+      pageAll((from, to) => admin.from("sms_messages")
+        .select("id, direction, sent_by, contact_id")
+        .eq("client_id", clientId).gte("created_at", since)
+        .order("created_at", { ascending: false }).order("id", { ascending: true }).range(from, to)),
+      pageAll((from, to) => admin.from("phone_voicemails")
+        .select("call_id").eq("client_id", clientId).gte("created_at", since)
+        .order("call_id", { ascending: true }).range(from, to)),
+      phoneTeam(),
+    ]);
+    for (const r of [callsOut, vmOut]) {
+      if (r.error) return phoneNotReady(r.error) ? json({ ok: true, available: false, lines: [], totals: null }) : dbFail(req, clientId, "load your calls", r.error);
+    }
+    if (textsOut.error) return dbFail(req, clientId, "load your texts", textsOut.error);
+    if (teamOut.error) return dbFail(req, clientId, "load your team", teamOut.error);
+
+    let calls = callsOut.rows as ReportCall[];
+    // Texts on "mine" are the caller's own sends plus inbound texts on customers assigned to
+    // them; the aggregation decides which is which, so both directions are read here.
+    let texts = textsOut.rows as (ReportText & { id: string })[];
+    const idsOf = (rows: { contact_id: string | null }[]) => rows.map((r) => r.contact_id).filter((v): v is string => !!v);
+
+    if (ownContacts) {
+      const vis = await visibleContactIds([...idsOf(calls), ...idsOf(texts)]);
+      if (!vis) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
+      calls = calls.filter((c) => keepForOwnScope(c.contact_id, vis,
+        c.placed_by === me || c.answered_by === me || (c.rang_user_ids ?? []).includes(me)));
+      texts = texts.filter((t) => keepForOwnScope(t.contact_id, vis, t.sent_by === me));
+    }
+
+    // Who is each inbound text's customer assigned to? One read per 150 ids, so the URL stays
+    // well inside PostgREST's limit however many customers texted in.
+    const contactOwner = new Map<string, string | null>();
+    const inboundIds = [...new Set(idsOf(texts.filter((t) => t.direction === "in")))];
+    for (let i = 0; i < inboundIds.length; i += 150) {
+      const { data: owners, error: oErr } = await admin.from("crm_contacts")
+        .select("id, owner_user_id").eq("client_id", clientId).in("id", inboundIds.slice(i, i + 150));
+      if (oErr) return dbFail(req, clientId, "load who your customers are assigned to", oErr);
+      // deno-lint-ignore no-explicit-any
+      for (const o of (owners ?? []) as any[]) contactOwner.set(String(o.id), o.owner_user_id ? String(o.owner_user_id).toLowerCase() : null);
+    }
+
+    const nameBy = new Map(teamOut.team.map((t) => [t.userId, t.name] as [string, string | null]));
+    const people = wantTeam
+      ? teamOut.team.filter((t) => t.phoneLevel !== "none").map((t) => ({ userId: t.userId, name: t.name || "Unnamed team member" }))
+      : [{ userId: me, name: nameBy.get(me) || "You" }];
+    const report = buildCallsReport({
+      calls,
+      texts,
+      voicemailCallIds: new Set(vmOut.rows.map((v: { call_id: string }) => String(v.call_id))),
+      contactOwner,
+      people,
+      includeOthers: wantTeam,
+      nameOf: (uid) => nameBy.get(uid) || (nameBy.has(uid) ? "Unnamed team member" : "Former team member"),
+    });
+    return json({
+      ok: true, available: true, scope: wantTeam ? "team" : "mine", days, since,
+      lines: report.lines,
+      // On "mine" the totals ARE your line: the texts read above cover the whole business, and
+      // a total built from them would describe everyone's texting under your name.
+      totals: wantTeam ? report.totals : report.lines[0],
+      truncated: callsOut.truncated || textsOut.truncated || vmOut.truncated,
+      narrowed: ownContacts,
+    });
   }
 
   // ── QuickBooks Online ─────────────────────────────────────────────────────────────

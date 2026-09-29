@@ -64,6 +64,16 @@ export const CRM_FEED_TYPES = {
   //
   // WhatsApp remains not a feature, and nothing here reserves a slot for it.
   message: ["sms", "sms_in"],
+  // CALLS (SSS Phone, 2026-09-29). Carolyn, 2026-08-26 27:02: "and we have calls." Three types
+  // under one chip, for the reason email and message are one chip each — a conversation split
+  // across filters is not a conversation:
+  //   call        — a call that connected (either direction), or an outbound one that did not
+  //                 (no answer / busy): the builder placed it, so it is theirs to see as a call;
+  //   call_missed — an inbound call nobody answered and no message was left;
+  //   voicemail   — an inbound call nobody answered where the customer left a message.
+  // Read from phone_calls (migration 254) with the voicemail embedded; see the slot-14 read.
+  // Mirrors CRM_CHIPS' "calls" in portal/02-sales.jsx; keep the two identical.
+  call: ["call", "call_missed", "voicemail"],
   // DOCUMENTS ARE HISTORY, NOT AN ACTION. Carolyn, 2026-08-26 24:01, having found the same
   // documents listed in two places: "the top part is about things to do. The bottom part is
   // about history … instead of in two places." So the record page's Documents TAB is gone
@@ -125,8 +135,23 @@ const humanSize = (n: number): string =>
 export async function buildCrmFeed(
   admin: any,
   clientId: string,
-  opts: { codes: string[]; contactId?: string | null; limit?: number; isAdmin?: boolean },
+  opts: {
+    codes: string[]; contactId?: string | null; limit?: number; isAdmin?: boolean;
+    /**
+     * WHO IS LOOKING, for the calls (review SSB-5). The record page's gate is contacts:view or
+     * designs:view and says nothing about the PHONE area, so without this every call on the
+     * contact — who placed it, who answered, missed calls, the full voicemail transcript — went
+     * to anyone who could open the record. The same rule the phone-api Worker applies to the
+     * same rows (routes/calls.ts mayViewCall):
+     *   "none" (or absent: fails closed) → no call events at all, and phone_calls is not read;
+     *   "own"                            → only calls that are theirs (callVisibleToOwn);
+     *   "team"                           → every call on the contact (literal view or edit).
+     * `contactOwner` is the contact's owner_user_id, which decides whose a missed call is.
+     */
+    phone?: { level: "none" | "own" | "team"; userId: string | null; contactOwner?: string | null };
+  },
 ): Promise<FeedEvent[]> {
+  const phoneScope = opts.phone?.level ?? "none";
   // A code is hand-joined into a PostgREST `or=` string in three of the reads below, where a
   // comma or a paren is GRAMMAR, not data: one crafted entry closes the `in.(...)` list and
   // appends a clause of the caller's choosing, and `contact_id.not.is.null` widens the read to
@@ -154,8 +179,8 @@ export async function buildCrmFeed(
   //   1 designs        2 design_versions  3 email_sends   4 design_acceptances
   //   5 change_orders  6 invoice_sends    7 captured_leads 8 crm_notes
   //   9 crm_activities 10 email_inbound   11 crm_files    12 sms_messages
-  //  13 crm_field_changes
-  const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts, inbound, custFiles, texts, fieldChanges] = await Promise.all([
+  //  13 crm_field_changes                14 phone_calls (+ its voicemail)
+  const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts, inbound, custFiles, texts, fieldChanges, calls] = await Promise.all([
     codes.length ? q(admin.from("designs").select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, accepted_at, contact").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("design_versions").select("short_code, version, created_at, selections").in("short_code", codes).eq("client_id", clientId).order("version", { ascending: false }).limit(120)) : Promise.resolve([]),
     // Email is the conversation channel, so this read has to cover BOTH scopes: document
@@ -228,6 +253,22 @@ export async function buildCrmFeed(
           .select("id, field, old_value, new_value, changed_by, created_at")
           .eq("client_id", clientId).eq("contact_id", opts.contactId)
           .order("created_at", { ascending: false }).limit(80))
+      : Promise.resolve([]),
+    // SLOT 14 — CALLS (SSS Phone). Contact-scoped only, like texts' person half: phone_calls is
+    // keyed on the contact matched from the caller's number, never on a design, so a design
+    // record with no contact linked has no calls to show. The voicemail rides along as an
+    // embed (phone_voicemails.call_id is a unique FK), which keeps this one round trip.
+    //
+    // ⚠️ `q` swallows the error, and that is the right answer here: until migration 254 is
+    // applied the table does not exist, and "no calls" is the truth of a tenant that cannot
+    // have any. It must never be merged into the sms_messages read above — a missing column
+    // there would empty the whole texting history instead.
+    // Not read at all for someone with no phone access (opts.phone, review SSB-5).
+    opts.contactId && phoneScope !== "none"
+      ? q(admin.from("phone_calls")
+          .select("id, direction, status, from_e164, to_e164, started_at, answered_at, duration_s, placed_by, answered_by, transferred_from, rang_user_ids, phone_voicemails(id, duration_s, transcript, listened_at, deleted_at)")
+          .eq("client_id", clientId).eq("contact_id", opts.contactId)
+          .order("started_at", { ascending: false }).limit(80))
       : Promise.resolve([]),
   ]);
 
@@ -429,19 +470,25 @@ export async function buildCrmFeed(
   // has since left the tenant; a row with no full_name is one of the users who predate
   // migration 060. Those are different facts and the line says which.
   const ownerRows = (fieldChanges as any[]).filter((f) => f.field === "owner");
+  // Scoped to what this viewer may see of the phone (opts.phone) BEFORE anything is read or
+  // rendered from them, so a hidden call's people are not even looked up.
+  const callRows = scopeCallRows(calls as any[], opts.phone);
   const knownUsers = new Set<string>();
   const nameByUser = new Map<string, string>();
-  if (ownerRows.length) {
-    const ids = Array.from(new Set(
-      ownerRows.flatMap((f) => [f.old_value, f.new_value])
-        .filter((v: unknown): v is string => typeof v === "string" && !!v),
-    ));
-    if (ids.length) {
-      const users = await q(admin.from("client_users").select("user_id, full_name").in("user_id", ids));
-      for (const u of users as any[]) {
-        knownUsers.add(u.user_id);
-        if (u.full_name) nameByUser.set(u.user_id, u.full_name);
-      }
+  // ONE read of client_users for every person this feed names: owners on either side of an
+  // owner change, and whoever placed or answered a call. Made only when there is someone to
+  // resolve, so a record with neither costs nothing extra.
+  const peopleIds = Array.from(new Set(
+    [
+      ...ownerRows.flatMap((f) => [f.old_value, f.new_value]),
+      ...callRows.flatMap((c) => [c.placed_by, c.answered_by]),
+    ].filter((v: unknown): v is string => typeof v === "string" && !!v),
+  ));
+  if (peopleIds.length) {
+    const users = await q(admin.from("client_users").select("user_id, full_name").in("user_id", peopleIds));
+    for (const u of users as any[]) {
+      knownUsers.add(u.user_id);
+      if (u.full_name) nameByUser.set(u.user_id, u.full_name);
     }
   }
   const whoIs = (v: string | null): string =>
@@ -488,8 +535,120 @@ export async function buildCrmFeed(
     });
   }
 
+  // CALLS. Rendered by a pure function (below) so the wording is unit-tested; the names are
+  // the same resolution the owner-change lines use. A person with no client_users row any more
+  // is "a former team member", the same fact the owner line states.
+  const callerName = (v: string) =>
+    nameByUser.get(v) ?? (knownUsers.has(v) ? "a team member" : "a former team member");
+  for (const e of callFeedEvents(callRows, callerName)) push(e);
+
   out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   return out.slice(0, opts.limit || 200);
+}
+
+/**
+ * Is this call one a phone:'own' person may see? The phone-api Worker's rule for the same rows,
+ * restated (workers/phone-api/src/scope.ts callIsMine, plus routes/calls.ts mayViewCall's
+ * transferred_from clause) because the Worker is a separate deploy:
+ *   placed it or answered it                                  → yes
+ *   handed it on (transferred_from)                           → yes
+ *   unanswered (missed / voicemail / ringing): the contact's owner when it has one, otherwise
+ *   everyone the number rang                                  → yes
+ *   anything else                                             → no
+ * Keep the two identical: a voicemail shown here that the Worker then refuses plays nothing.
+ */
+// deno-lint-ignore no-explicit-any
+export function callVisibleToOwn(userId: string | null, c: any, contactOwner: string | null): boolean {
+  if (!userId || !c) return false;
+  if (c.placed_by === userId || c.answered_by === userId || c.transferred_from === userId) return true;
+  const status = String(c.status ?? "");
+  if (status !== "missed" && status !== "voicemail" && status !== "ringing") return false;
+  if (contactOwner) return contactOwner === userId;
+  return Array.isArray(c.rang_user_ids) && c.rang_user_ids.includes(userId);
+}
+
+/** The phone_calls rows this viewer may see (buildCrmFeed's opts.phone). Fails closed: no scope
+ *  given is "none". */
+// deno-lint-ignore no-explicit-any
+export function scopeCallRows(rows: any[], phone?: { level: "none" | "own" | "team"; userId: string | null; contactOwner?: string | null }): any[] {
+  const level = phone?.level ?? "none";
+  if (level === "team") return rows || [];
+  if (level !== "own") return [];
+  return (rows || []).filter((c) => callVisibleToOwn(phone?.userId ?? null, c, phone?.contactOwner ?? null));
+}
+
+/** 42 → "42s", 192 → "3m 12s", 3720 → "1h 2m". A call length, as a person says it. */
+export function fmtCallLength(seconds: unknown): string {
+  const s = Math.max(0, Math.round(Number(seconds) || 0));
+  if (s < 60) return `${s}s`;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  if (h) return `${h}h ${m}m`;
+  return r ? `${m}m ${r}s` : `${m}m`;
+}
+
+/**
+ * phone_calls rows (with their phone_voicemails embed) → timeline events.
+ *
+ * WHICH TYPE, in this order (plan section 7's outcomes, from the customer's side of the line):
+ *   outbound, any outcome          → `call`. The builder placed it; "no answer" is how it went,
+ *                                    not a missed call — a MISSED call is one the customer made.
+ *   inbound, somebody answered     → `call`.
+ *   inbound, still ringing/on-line → `call`, said as such (the feed can be opened mid-call).
+ *   inbound, a message was left    → `voicemail` (the embed, or status 'voicemail').
+ *   inbound, anything else         → `call_missed`.
+ *
+ * The number is shown as the stored E.164, the same way the texting lines show theirs.
+ */
+// deno-lint-ignore no-explicit-any
+export function callFeedEvents(rows: any[], nameOf: (userId: string) => string): FeedEvent[] {
+  const out: FeedEvent[] = [];
+  for (const c of rows || []) {
+    if (!c || !c.id) continue;
+    // PostgREST embeds a one-to-one as an object and a one-to-many as an array; call_id is
+    // UNIQUE, so it should be the object, and either shape is accepted rather than trusted.
+    const vm = Array.isArray(c.phone_voicemails) ? (c.phone_voicemails[0] ?? null) : (c.phone_voicemails ?? null);
+    const status = String(c.status ?? "");
+    const live = status === "ringing" || status === "in_progress";
+    const dur = Number(c.duration_s) || 0;
+    const base = {
+      id: `pc:${c.id}`,
+      at: iso(c.started_at),
+      meta: {
+        callId: c.id, direction: c.direction, status: status || null, durationS: dur || null,
+        voicemailId: vm?.id ?? null, listened: !!vm?.listened_at,
+        // The portal plays a voicemail from the Worker (/voicemails/:id/audio) only while the
+        // recording still exists at Twilio; a deleted one keeps its line but has nothing to play.
+        voicemailDeleted: !!vm?.deleted_at,
+      } as Record<string, unknown>,
+    };
+    if (c.direction === "out") {
+      const num = c.to_e164 || "an unknown number";
+      const outcome = live ? "In progress"
+        : c.answered_at && dur > 0 ? `Talked ${fmtCallLength(dur)}`
+        : status === "busy" ? "Busy"
+        : status === "failed" ? "Didn't connect"
+        : "No answer";
+      const by = c.placed_by ? `by ${nameOf(c.placed_by)}` : null;
+      out.push({ ...base, type: "call", icon: "call", title: `Call to ${num}`, body: [outcome, by].filter(Boolean).join(" · "), actor: c.placed_by ?? null });
+      continue;
+    }
+    const num = c.from_e164 || "an unknown number";
+    if (c.answered_by || (c.answered_at && !live)) {
+      const who = c.answered_by ? `Answered by ${nameOf(c.answered_by)}` : "Answered";
+      out.push({ ...base, type: "call", icon: "call", title: `Call from ${num}`, body: dur > 0 ? `${who} · talked ${fmtCallLength(dur)}` : who, actor: c.answered_by ?? null });
+    } else if (live) {
+      out.push({ ...base, type: "call", icon: "call", title: `Call from ${num}`, body: status === "ringing" ? "Ringing" : "On the line now" });
+    } else if (vm || status === "voicemail") {
+      const len = vm && Number(vm.duration_s) > 0 ? `${fmtCallLength(vm.duration_s)} message` : "Left a message";
+      const body = vm?.deleted_at ? "The message was deleted."
+        : vm?.transcript ? String(vm.transcript)
+        : `${len}${vm && !vm.listened_at ? " · not listened to yet" : ""}`;
+      out.push({ ...base, type: "voicemail", icon: "voicemail", title: `Voicemail from ${num}`, body });
+    } else {
+      out.push({ ...base, type: "call_missed", icon: "call_missed", title: `Missed call from ${num}`, body: "Nobody answered" });
+    }
+  }
+  return out;
 }
 
 function labelKind(k: string): string {

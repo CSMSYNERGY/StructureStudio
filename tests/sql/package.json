@@ -1,0 +1,11 @@
+{
+  "name": "structurestudio-sql-tests",
+  "private": true,
+  "description": "Migration behaviour tests run against PGlite (Postgres in WASM, in memory; no network, no Supabase). Kept out of the root package.json so the deploy and preflight install nothing new. Install with: npm install --prefix tests/sql. Run with: node tests/sql/migration254.test.cjs",
+  "scripts": {
+    "test": "node migration254.test.cjs"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.8"
+  }
+}

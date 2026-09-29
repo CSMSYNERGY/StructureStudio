@@ -1,0 +1,86 @@
+// SSS Phone: the phone-api Worker (Twilio call webhooks, access tokens, texting and the apps'
+// read endpoints). Code in src/, contract in the phone repo's docs/SPEC.md, runbook in SETUP.md.
+//
+// DEPLOYS ARE MANUAL: `npx wrangler deploy` from THIS directory. Unlike the three static
+// workers at the repo root, this one is not connected to Workers Builds, and it must never be
+// deployed from the repo root (the root wrangler*.jsonc files are the static portal workers).
+//
+// ⚠️ THIS REPO IS PUBLIC. Nothing secret, and no client identifier, goes in this file: every
+// credential is a `wrangler secret` (the full list is in README.md). The vars below are
+// non-secret switches only.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "phone-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "account_id": "7e50b16eb8fa53548348c37dbd71df00",
+
+  // The shared texting rules (supabase/functions/_shared/smsSend.ts and logError.ts) are
+  // written for Deno and import supabase-js as `jsr:@supabase/supabase-js@2`. Workers cannot
+  // resolve jsr:, so the bundler maps it to the npm package installed here. src/env.ts shims
+  // Deno.env.get over the Worker's env so those files read the same secret names.
+  "alias": {
+    "jsr:@supabase/supabase-js@2": "@supabase/supabase-js"
+  },
+
+  "vars": {
+    // Every Twilio webhook URL, Dial action and status callback is built from this. Until the
+    // phone. routes exist, set it to the workers.dev URL (SETUP.md step 4).
+    "PUBLIC_BASE_URL": "https://phone.structurestudiosuite.com",
+    // 911, 933 and 112 are refused with "call 911 from your cell phone" while this is "block".
+    // "allow" is the phase 6 path (section 14 of the plan) and needs registered emergency
+    // addresses first. Anything other than exactly "allow" blocks.
+    "EMERGENCY_MODE": "block",
+    // Outbound minutes per builder per UTC day, counted from phone_calls (rounded up per call,
+    // the way Twilio bills). Toll-fraud brake, not a billing limit.
+    "DAILY_MINUTE_CAP": "600",
+    // Chrome extension ids (or full chrome-extension:// origins), comma separated. Empty until
+    // the listing is published; the unpacked dev build's id goes here for local testing.
+    "EXTENSION_ORIGINS": "",
+    // Release 2. The daily minute debit and the monthly line fee run only when this is "on"
+    // AND their usage_prices meter is armed (active and priced). Both rails, the way
+    // taxMeter.ts is armed.
+    "PHONE_USAGE_METERS": "off",
+    // Days a voicemail recording is kept at Twilio before the daily job deletes it.
+    "VOICEMAIL_RETENTION_DAYS": "365",
+    // Release 2. "on" adds Twilio transcription to voicemail (<Record transcribe>, about
+    // $0.05/minute, English, 2 s to 2 min). Anything else: off.
+    "TRANSCRIBE": "off",
+    // Outbound calls are refused below this wallet balance (cents), but ONLY while the
+    // voice_minute meter is active and priced. Inbound calls and 911 are never refused.
+    "WALLET_FLOOR_CENTS": "500"
+  },
+
+  // Runs the Worker next to Supabase (us-east-1). Measured 2026-09-29 on real Twilio calls:
+  // without it the Worker ran wherever Twilio's request landed and paid ~950 ms to reach the
+  // database; with it a warm DB read is ~70 ms and the inbound webhook p50 was 183 ms.
+  "placement": { "region": "aws:us-east-1" },
+
+  "triggers": {
+    // ONE tick (the account's free plan has 5 cron triggers and 4 are taken): keep-warm every
+    // minute, the recording sweep every 15 minutes, retention and the debits at 09:00 UTC.
+    "crons": ["* * * * *"]
+  },
+
+  // /health reports the deployed version id.
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+
+  "observability": { "enabled": true },
+
+  // supabase-js is most of the bundle; minifying it cuts what a cold isolate parses to about a third.
+  // Source maps go up with it so a stack trace in the logs still names our lines.
+  "minify": true,
+  "upload_source_maps": true,
+
+  // No routes until SETUP.md step 4. Both lines are needed, because the zone's tenant
+  // wildcard route (*.structurestudiosuite.com/*) outranks a custom domain: a custom domain
+  // alone would serve the portal's 404 page instead of this Worker. That is what broke
+  // beta-2-0 and www before. Keep `phone` off the list of subdomains a tenant can take.
+  // "routes": [
+  //   { "pattern": "phone.structurestudiosuite.com", "custom_domain": true },
+  //   { "pattern": "phone.structurestudiosuite.com/*", "zone_name": "structurestudiosuite.com" }
+  // ],
+
+  "workers_dev": true,
+  "preview_urls": false
+}
