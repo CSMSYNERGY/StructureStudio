@@ -27754,17 +27754,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         }))}
         <div className="ssd-card" data-ss-adv-f="color-boards">
           <span className="ssd-card-t">Trim boards</span>
-          {[["corner", "Corner boards", "body", "Same as walls"], ["fascia", "Fascia and rake boards", "roof", "Same as roof"]].map(([k, l, from, fromLbl]) => {
+          {[["corner", "Corner boards", "body", "As walls", "Same as walls"], ["fascia", "Fascia and rake boards", "roof", "As roof", "Same as roof"]].map(([k, l, from, fromLbl, fromName]) => {
             const own = cols[k] || "";
             const mode = !own ? "trim" : cols[from] && own === cols[from] ? "from" : "custom";
             return (
               <div key={k} className="ss-adv-trow" data-ss-adv-f={"color-" + k}>
                 {advSeg({ f: k + "-mode", label: l, value: mode, full: true,
                   pick: (v) => calSetOptColor(k, v === "trim" ? "" : v === "from" ? cols[from] : (own && mode === "custom" ? own : (cols.trim || D3_COLORS.trim))),
-                  opts: [["trim", "Same as trim"], ["from", fromLbl, !cols[from], !cols[from] ? `Pick a ${from} color first` : undefined], ["custom", "Custom"]] })}
+                  opts: [["trim", "As trim"], ["from", fromLbl, !cols[from], !cols[from] ? `Pick a ${from === "body" ? "body" : "roof"} color first` : undefined], ["custom", "Custom"]] })}
                 <div style={{ marginTop: mode === "custom" ? 8 : 0 }}>
                   {advSwatches({ f: "color-" + k, label: l, value: own, pool: mode === "custom" ? poolOf("trim") : [], pick: (v) => calSetOptColor(k, v),
-                    blankName: "Same as trim", blankCss: cols.trim || D3_COLORS.trim, name: mode === "from" ? fromLbl : null, hex: mode === "custom", pickRow: mode === "custom" })}
+                    blankName: "Same as trim", blankCss: cols.trim || D3_COLORS.trim, name: mode === "from" ? fromName : null, hex: mode === "custom", pickRow: mode === "custom" })}
                 </div>
               </div>
             );
