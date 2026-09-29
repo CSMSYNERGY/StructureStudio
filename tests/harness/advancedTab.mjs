@@ -320,8 +320,10 @@ try {
     ok("A: the end view sits beside the 3D, not inside the form", await page.locator('[data-ss-adv="view"] svg').count() >= 1 && await page.locator('[data-ss-adv="fields"] svg[viewBox="0 0 360 210"]').count() === 0);
     // The drawing has no click handler: only a number box lights a measurement (review UX6).
     const cap = await page.locator('[data-ss-adv="view"]').innerText();
-    ok("A: the end view's caption points at the number boxes, not at the drawing",
-      /End view at 12x16\. Click into a number box or move a slider and its measurement lights up here\./.test(cap) && !/Click a number and/.test(cap), cap.split("\n").filter((l) => /End view/.test(l)).join(" "));
+    // One line since the review of 2026-09-29: the size is the card's header (12 × 16 ft), not the caption.
+    ok("A: the end view's caption points at the sliders and number boxes, not at the drawing, under a header with the size",
+      /Move a slider or click a box: its measurement lights up here\./.test(cap) && /END VIEW|End view/.test(cap) && /12 × 16 ft/.test(cap) && !/Click a number and/.test(cap),
+      cap.split("\n").filter((l) => /End view|END VIEW|lights up/.test(l)).join(" "));
 
     // Width / Length move the building.
     const w = page.getByLabel("Width (ft)", { exact: true }), l = page.getByLabel("Length (ft)", { exact: true });
@@ -753,7 +755,9 @@ try {
   // ── L: a Save that stops part-way is finished, never repeated (review ADV-1) ──────────────────
   {
     const entFor = (t) => (t === OURS ? ent("internal") : ent("exempt"));
-    const S = { own: OPS, operator: true, entFor, failOnce: { set_style_active: 1 } };
+    // A long entitlement hold (review 2026-09-29): under load the default 8 s could run out, the cold
+    // /portal/advanced fell back to the Designer, and the account switch then asked to discard a design.
+    const S = { own: OPS, operator: true, entFor, failOnce: { set_style_active: 1 }, holdMs: 60000 };
     const { ctx, page, calls, errors } = await open(S, `/portal/advanced?view=${OURS}`);
     const dialogs = [];
     page.on("dialog", (d) => { dialogs.push(d.message()); d.accept(); });
