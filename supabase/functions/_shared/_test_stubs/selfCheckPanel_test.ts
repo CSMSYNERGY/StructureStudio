@@ -528,15 +528,65 @@ Deno.test("'What we drew' says a wing attach as built when it has the massing, a
   const roof = { type: "gable", front: "gable", wingSide: "both", wingWidthFt: 12, centerEaveFt: 14, wingAttach: "wall", wingAttachFt: 0.25 };
   assertStringIncludes(F.ssDrewWords({ roof }), "meets the middle section's wall 0 ft 3 in below its eave, and the middle section's walls rise to 14 ft.");
   const clamped = { attach: "wall", Hc: 14, wings: [{ meets: "wall", meetFt: 13 / 12 }] };
-  assertStringIncludes(F.ssDrewWords({ roof }, null, clamped), "meets the middle section's wall 1 ft 1 in below its eave, and the middle section's walls rise to 14 ft.");
+  assertStringIncludes(F.ssDrewWords({ roof }, null, undefined, clamped), "meets the middle section's wall 1 ft 1 in below its eave, and the middle section's walls rise to 14 ft.");
   const up = { ...roof, wingAttach: "roof", wingAttachFt: 1 };
   const cannot = { attach: "roof", Hc: 14, wings: [{ meets: "wall", meetFt: 0.5 }] };
-  assertStringIncludes(F.ssDrewWords({ roof: up }, null, cannot), "under its own roof that meets the middle section's wall 0 ft 6 in below its eave");
+  assertStringIncludes(F.ssDrewWords({ roof: up }, null, undefined, cannot), "under its own roof that meets the middle section's wall 0 ft 6 in below its eave");
   const low = { attach: "roof", Hc: 11, wings: [{ meets: "roof", meetFt: 1 }] };
-  assertStringIncludes(F.ssDrewWords({ roof: { ...up, centerEaveFt: 10 } }, null, low), "runs up onto the middle section's roof, 1 ft above its eave, and the middle section's walls rise to 11 ft.");
+  assertStringIncludes(F.ssDrewWords({ roof: { ...up, centerEaveFt: 10 } }, null, undefined, low), "runs up onto the middle section's roof, 1 ft above its eave, and the middle section's walls rise to 11 ft.");
   // Without an attach, a massing changes nothing (today's sentence, the stored centre).
   const { wingAttach: _a, wingAttachFt: _b, ...plain } = roof;
-  assertEquals(F.ssDrewWords({ roof: plain }, null, { Hc: 15, wings: [{}] }), F.ssDrewWords({ roof: plain }));
+  assertEquals(F.ssDrewWords({ roof: plain }, null, undefined, { Hc: 15, wings: [{}] }), F.ssDrewWords({ roof: plain }));
   // A massing for another mode than the style's (a stale one) is not used.
-  assertEquals(F.ssDrewWords({ roof }, null, cannot), F.ssDrewWords({ roof }));
+  assertEquals(F.ssDrewWords({ roof }, null, undefined, cannot), F.ssDrewWords({ roof }));
+});
+
+// ── The roof step (2026-09-28), in words ──────────────────────────────────────────────────
+
+Deno.test("the roof step reads in the words of its panel controls, and 'What we drew' says it", () => {
+  assertEquals(F.ssChangeLine({ field: "roof.rearStepFt", from: null, to: 12, why: "" }).text, "not set → 12 ft");
+  assertEquals(F.ssChangeLine({ field: "roof.rearEaveRiseFt", from: 0.42, to: -0.25, why: "" }).text, "5 in → 3 in lower");
+  for (const k of ["roof.rearStepFt", "roof.rearEaveRiseFt"]) {
+    const line = F.ssChangeLine({ field: k, from: null, to: null, why: "" });
+    assert(line.label !== k && !/[a-z][A-Z]/.test(line.label), `${k} is shown as ${line.label}`);
+  }
+  const cabin = F.ssDrewWords({ roof: { type: "gable", front: "gable", rearStepFt: 12, rearEaveRiseFt: 0.42 } });
+  assertStringIncludes(cabin, "The roof steps 12 ft from the back wall: behind the step its edge sits 5 in higher, and the two ridges line up.");
+  assertStringIncludes(F.ssDrewWords({ roof: { type: "gable", rearStepFt: 9, rearEaveRiseFt: -0.5 } }), "its edge sits 6 in lower");
+  // Only what the renderer can draw: never on a shed, a gambrel or an eave front, never with one key.
+  for (const roof of [
+    { type: "shed", rearStepFt: 12, rearEaveRiseFt: 0.42 },
+    { type: "gambrel", rearStepFt: 12, rearEaveRiseFt: 0.42 },
+    { type: "gable", front: "eave", rearStepFt: 12, rearEaveRiseFt: 0.42 },
+    { type: "gable", rearStepFt: 12 },
+    { type: "gable", rearStepFt: 0, rearEaveRiseFt: 0.42 },
+  ]) {
+    assert(!/steps/.test(F.ssDrewWords({ roof })), JSON.stringify(roof));
+  }
+  assert(!/0\.\d/.test(cabin), "no ratio reaches the line");
+});
+
+// ⚠️ A "No" ON THE ROOF IS CLEARED BY FIXING THE STEP. calQuestionSig is the slice of the spec each
+// question is about: a "No" whose slice has not moved since it was given is named under Save as
+// unfixed. The step is set in the roof's fields, so its two keys are in the ROOF's slice; left out,
+// a builder who answered the roof "No" and fixed only the step would still be told nothing had
+// changed. Lifted from StructureStudioInner (both twins, byte-identical) and run on a stub adminCal.
+Deno.test("⚠️ the roof question's slice holds the roof step: an edit to the step alone clears an unfixed roof 'No'", () => {
+  const [a, b] = ["  const calQuestionSig = (key) => {", "  // ⚠️ ANSWERED IS NOT AGREED."];
+  const cmp = lift(CMP, "structure-studio.component.js", a, b), jsx = lift(JSX, "StructureStudio.jsx", a, b);
+  assertEquals(jsx, cmp, "the two twins' calQuestionSig");
+  const sigFor = new Function("adminCal", `${cmp}; return calQuestionSig;`) as (cal: unknown) => (key: string) => string;
+  const sig = (spec: Record<string, unknown>, key: string) => sigFor({ spec })(key);
+  const roof = { type: "gable", front: "gable", pitch: 0.41, overhang: 1.3, eave: "fascia", porchDepthFt: 6, porchEnd: "front" };
+  const base = { roof, wallHeightFt: 7.75, colors: { body: "#3a3d3f" }, roofMaterial: "metal" };
+  const stepped = { ...base, roof: { ...roof, rearStepFt: 12, rearEaveRiseFt: 0.5 } };
+  for (const [what, from, to] of [
+    ["a step added", base, stepped],
+    ["the joint moved", stepped, { ...base, roof: { ...roof, rearStepFt: 14, rearEaveRiseFt: 0.5 } }],
+    ["the rise changed", stepped, { ...base, roof: { ...roof, rearStepFt: 12, rearEaveRiseFt: -0.25 } }],
+    ["the step taken off", stepped, base],
+  ] as const) {
+    assert(sig(from, "roof") !== sig(to, "roof"), `${what}: the roof's slice moves, so its "No" is no longer unfixed`);
+    for (const k of ["porch", "walls", "colours"]) assertEquals(sig(from, k), sig(to, k), `${what}: the ${k} question's slice does not`);
+  }
 });

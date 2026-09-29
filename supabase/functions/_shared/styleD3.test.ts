@@ -1761,7 +1761,8 @@ Deno.test("v2 asks for the pixel points a gable's pitch is read from, in a measu
   // gable's (the next test), so the gable's line now ends in a comma.
   const MEASURE_SCHEMA = '  "measure": {\n' +
     '    "pitch": { "frame": <1-based index of the image you read the gable\'s slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] },\n' +
-    '    "wing": { "frame": <1-based index of the image you read the wing roofs\' slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] }\n' +
+    '    "wing": { "frame": <1-based index of the image you read the wing roofs\' slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] },\n' +
+    '    "step": { "frame": <1-based index of the image you marked the roof step in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "backBase": [<x>, <y>], "jointBase": [<x>, <y>], "frontBase": [<x>, <y>], "frontFascia": [<x>, <y>], "jointFront": [<x>, <y>], "jointRear": [<x>, <y>] }\n' +
     '  },\n  "roof": {\n';
   for (const [name, p] of V2) {
     const open = p.indexOf('\n{\n  "measure": {\n'), measure = p.indexOf('  "measure": {'), roof = p.indexOf('  "roof": {');
@@ -1770,7 +1771,8 @@ Deno.test("v2 asks for the pixel points a gable's pitch is read from, in a measu
     assert(p.indexOf('  "frameMap": {') > roof, `${name}: the frame map is after the roof, as before`);
     assert(p.includes('"otherSide": { "frame": <the image most square-on to the side wall OPPOSITE the one you gave for side>, "azimuthDeg": <as above> }\n  }\n}'),
       `${name}: and closes the object`);
-    // The block holds the gable's pitch and the wing roofs' points and nothing else, word for word.
+    // The block holds the gable's pitch, the wing roofs' points and the roof step's (2026-09-28) and
+    // nothing else, word for word.
     assert(p.includes(MEASURE_SCHEMA), `${name}: the measure block is the gable's pitch and the wings' points alone`);
     for (const gone of ['"porchPitch": {', '"tallTop"', '"shortTop"', '"wall": [', '"edge": [', '"postTop"', '"postBottom"', '"size": <as above>']) {
       assert(!p.includes(gone), `${name}: no ${gone} is asked for`);
@@ -1819,7 +1821,8 @@ Deno.test("v2 asks for the wing roofs' four points in the measure block, only on
   // Live, the model's own wingPitch read a raised centre's wing roofs low (0.10 to 0.14 against a
   // measured 0.20); the server now works it out from four points (wingPitchFromMeasure, whose tests
   // are with the other measured pitches below).
-  const WING_LINE = '    "wing": { "frame": <1-based index of the image you read the wing roofs\' slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] }\n  },\n  "roof": {\n';
+  // Since 2026-09-28 the roof step's line follows it and closes the block.
+  const WING_LINE = '    "wing": { "frame": <1-based index of the image you read the wing roofs\' slope in>, "size": [<that image\'s width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] },\n    "step": { "frame":';
   const WING_POINTS = "WING POINTS, measure.wing, only for a building with enclosed side wings on BOTH sides, the left and the right: " +
     "the points the wing roofs' slope is worked out from. Use the frame most square-on to the FRONT, give that image's own size as above, " +
     "and give four points, two on each wing roof's sloping top edge along the front of the building: leftOuter, where the left wing's top " +
@@ -1963,11 +1966,13 @@ Deno.test("⚠️ every roof key the v2 schema asks for survives the sanitiser",
     dormerWidthFt: 4, dormerRiseFt: 2, dormerOffsetU: 0.5,
     porchDepthFt: 6, porchEnd: "front", porchTruss: true, porchOutFt: 6, porchAttachFt: 8, porchWidthFt: 10,
     porchPosts: 3, porchPitch: 0.2, porchSteps: "right",
+    rearStepFt: 12, rearEaveRiseFt: 0.42,
   };
   assertEquals([...asked].sort(), Object.keys(SAMPLE).sort(), "this test covers exactly the keys the schema asks for");
   for (const k of asked) {
     const roof: Record<string, unknown> = { type: k === "highSide" ? "shed" : "gable", [k]: SAMPLE[k] };
     if (["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"].includes(k)) roof.porchOutFt = 6;   // projecting porch only
+    if (k === "rearStepFt" || k === "rearEaveRiseFt") Object.assign(roof, { rearStepFt: 12, rearEaveRiseFt: 0.42 });   // both or neither
     const r = parseModelSpec(JSON.stringify({ roof }), DIMS);
     assert(r.ok, `a reply carrying ${k} parses`);
     const stored = k === "overhangIn" ? "overhang" : k;                     // inches fold to feet
@@ -3206,7 +3211,9 @@ Deno.test("⚠️ every field the prompt names is on the allow-list, and nothing
                  "roof.centerEaveFt", "roof.porchEnd", "roof.porchAttachFt", "roof.porchWidthFt",
                  "roof.leanToWidthFt",
                  // 2026-09-25: the porch's own framing, and a raised floor's height.
-                 "roof.porchPosts", "roof.porchPitch", "roof.porchSteps", "floorHeightFt"];
+                 "roof.porchPosts", "roof.porchPitch", "roof.porchSteps", "floorHeightFt",
+                 // 2026-09-28: the roof step.
+                 "roof.rearStepFt", "roof.rearEaveRiseFt"];
   const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
   for (const f of named) {
     assert((SELF_CHECK_ALLOW as readonly string[]).includes(f), `${f} is named in the prompt`);
@@ -3390,14 +3397,15 @@ Deno.test("⚠️ v2: every new ROOF key is correctable, and no new colour is", 
   const allow = SELF_CHECK_ALLOW as readonly string[];
   for (const f of ["roof.front", "roof.highSide", "roof.porchAttachFt", "roof.porchWidthFt",
                    "roof.wingSide", "roof.wingWidthFt", "roof.wingPitch", "roof.centerEaveFt",
-                   "roof.porchPosts", "roof.porchPitch", "roof.porchSteps"]) {
+                   "roof.porchPosts", "roof.porchPitch", "roof.porchSteps",
+                   "roof.rearStepFt", "roof.rearEaveRiseFt"]) {
     assert(allow.includes(f), `${f} is on the allow-list`);
   }
   for (const f of ["colors.corner", "colors.fascia", "colors", "wallHeightFt"]) {
     assert(!allow.includes(f), `${f} must never be applicable`);
   }
   assert(allow.includes("floorHeightFt") && allow.includes("foundation"), "a raised floor's height and kind are correctable");
-  assertEquals(allow.length, 34, "22 before v2, eight roof keys after, the porch's three framing keys and floorHeightFt (2026-09-25)");
+  assertEquals(allow.length, 36, "22 before v2, eight roof keys after, the porch's three framing keys and floorHeightFt (2026-09-25), the roof step's two (2026-09-28)");
   assertEquals(new Set(allow).size, allow.length, "and no path is listed twice");
 });
 
@@ -6177,6 +6185,8 @@ const ATTACH_AT_8FE5D30 = " Work it out against the ruler.";
 // ...and the wing roofs' slope (2026-09-26), corrected by the difference as well.
 const WING_NOW = /the slope of the wing roofs \(roof\.wingPitch, rise over run:\n[\s\S]*?roof\.wingWidthFt, to its current value\), and/;
 const WING_AT_8FE5D30 = "the slope of the wing roofs (roof.wingPitch, rise over run), and";
+// ...and the roof step's bullet (2026-09-28), which 8fe5d30 did not have at all: taken out whole.
+const STEP_NOW = /\n     \* The roof step - currently [\s\S]*?a step the frames do not, set roof\.rearStepFt to 0, which removes it\./;
 const BAND_AT_8FE5D30 = "render. If the band's share differs by a quarter or more (a band as tall as half the\n" +
   "       outer wall in the frame and a quarter of it in the render, say), correct\n" +
   "       roof.centerEaveFt to where the wing roof meets the centre wall plus the band you\n" +
@@ -6212,11 +6222,12 @@ Deno.test("⛔ without the lock, the v2 check prompt and its request body are 8f
       const plain = k === "body" ? out[k].replace(/\\n/g, "\n") : out[k];
       const m = plain.match(/on a (\S+) ft wall is about|times the (\S+) ft wall, to its/);
       const wall = m ? (m[1] ?? m[2]) : "";
+      assert(STEP_NOW.test(plain), `${k}: today's roof-step bullet is there to take out`);
       if (OVERHANG_NOW.test(plain)) {
-        const back = plain.replace(OVERHANG_NOW, OVERHANG_AT_8FE5D30(wall)).replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30);
+        const back = plain.replace(OVERHANG_NOW, OVERHANG_AT_8FE5D30(wall)).replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30).replace(STEP_NOW, "");
         out[k] = k === "body" ? back.replace(/\n/g, "\\n") : back;
       } else {
-        const back = plain.replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30);
+        const back = plain.replace(ATTACH_NOW, ATTACH_AT_8FE5D30).replace(WING_NOW, WING_AT_8FE5D30).replace(STEP_NOW, "");
         out[k] = k === "body" ? back.replace(/\n/g, "\\n") : back;
       }
     }
@@ -6355,4 +6366,475 @@ Deno.test("⚠️ applySelfCheck with the lock drops a pitch correction and keep
   if (!measured.ok) return;
   assertEquals(measured.dropped, ["roof.pitch", "roof.overhang"], "both measured fields dropped");
   assertEquals(measured.changed.map((c) => c.field), ["roof.eave"], "and the rest lands");
+});
+
+// ═══ THE ROOF STEP (roof.rearStepFt / roof.rearEaveRiseFt, 2026-09-28) ═══════════════════════════
+// A gable built in two sections: the rear section's roof starts at a joint rearStepFt from the BACK
+// wall, its eave stands rearEaveRiseFt higher (negative: lower) than the front's, and the ridges stay
+// level. What is pinned here, server side: the sanitiser keeps the two keys together or not at all,
+// clamps them, and keeps them only on a gable whose front is a gable end, never beside wings, a
+// lean-to or a porch at the back; the v2 prompt asks for them in plain words with generic numbers
+// (never the Black Cabin's own); the self-check may add, move or remove a step (and only the v2
+// check); and the reads' consensus votes a step's presence and takes its numbers' medians from the
+// reads that drew one. The renderer's side is _test_stubs/roofStep_test.ts and
+// tests/harness/roofStep.mjs.
+import * as RS from "./styleD3.ts";
+
+const stepRoof = (roof: Record<string, unknown> = {}) => ({ type: "gable", front: "gable", pitch: 0.4, overhang: 1, ...roof });
+const sanitisedRoof = (roof: Record<string, unknown>): Record<string, unknown> => {
+  const r = RS.sanitizeD3Spec({ roof });
+  if (!r.ok) throw new Error(r.error);
+  return r.d3.roof;
+};
+const hasKey = (o: Record<string, unknown>, k: string) => Object.prototype.hasOwnProperty.call(o, k);
+
+Deno.test("roof step: both keys on a gable-front gable are kept as given", () => {
+  const roof = sanitisedRoof(stepRoof({ rearStepFt: 12, rearEaveRiseFt: 0.42 }));
+  assertEquals(roof.rearStepFt, 12);
+  assertEquals(roof.rearEaveRiseFt, 0.42);
+  // A lower rear eave is a negative rise, and it is kept as negative.
+  assertEquals(sanitisedRoof(stepRoof({ rearStepFt: 9, rearEaveRiseFt: -0.5 })).rearEaveRiseFt, -0.5);
+  // No front at all (an old-frame style) keeps them: only the size can say which way its ridge
+  // runs, so the renderer decides (d3RoofStep).
+  const old = sanitisedRoof({ type: "gable", pitch: 0.4, rearStepFt: 12, rearEaveRiseFt: 0.42 });
+  assert(old.rearStepFt === 12 && old.rearEaveRiseFt === 0.42, JSON.stringify(old));
+  // Numbers in strings are numbers, as everywhere in the sanitiser; junk is dropped with its pair.
+  assertEquals(sanitisedRoof(stepRoof({ rearStepFt: "12", rearEaveRiseFt: "0.5" })).rearStepFt, 12);
+  assert(!hasKey(sanitisedRoof(stepRoof({ rearStepFt: "twelve", rearEaveRiseFt: 0.5 })), "rearEaveRiseFt"), "junk takes its pair with it");
+});
+
+Deno.test("roof step: the clamps (4..56 ft from the back, -1.5..1.5 ft of rise)", () => {
+  assertEquals(sanitisedRoof(stepRoof({ rearStepFt: 2, rearEaveRiseFt: 0.5 })).rearStepFt, 4, "a step under 4 ft is pulled up to 4");
+  assertEquals(sanitisedRoof(stepRoof({ rearStepFt: 80, rearEaveRiseFt: 0.5 })).rearStepFt, 56);
+  assertEquals(sanitisedRoof(stepRoof({ rearStepFt: 10, rearEaveRiseFt: 3 })).rearEaveRiseFt, 1.5);
+  assertEquals(sanitisedRoof(stepRoof({ rearStepFt: 10, rearEaveRiseFt: -4 })).rearEaveRiseFt, -1.5);
+});
+
+Deno.test("⚠️ roof step: one key without the other is dropped, and so is an off step or a zero rise", () => {
+  for (const [what, keys] of [
+    ["the step alone", { rearStepFt: 12 }],
+    ["the rise alone", { rearEaveRiseFt: 0.5 }],
+    ["a step of 0", { rearStepFt: 0, rearEaveRiseFt: 0.5 }],
+    ["a step of half a foot", { rearStepFt: 0.5, rearEaveRiseFt: 0.5 }],
+    ["a zero rise", { rearStepFt: 12, rearEaveRiseFt: 0 }],
+    ["a rise under 0.01 ft", { rearStepFt: 12, rearEaveRiseFt: -0.005 }],
+    ["a null rise", { rearStepFt: 12, rearEaveRiseFt: null }],
+  ] as const) {
+    const roof = sanitisedRoof(stepRoof(keys));
+    assert(!hasKey(roof, "rearStepFt") && !hasKey(roof, "rearEaveRiseFt"), `${what}: ${JSON.stringify(roof)}`);
+  }
+});
+
+Deno.test("⚠️ roof step: dropped on a shed, a gambrel and an eave front, kept beside a front porch and a dormer", () => {
+  const both = { rearStepFt: 12, rearEaveRiseFt: 0.5 };
+  for (const [what, roof] of [
+    ["a shed", { type: "shed", highSide: "front", pitch: 0.25, ...both }],
+    ["a gambrel", { type: "gambrel", front: "gable", ...both }],
+    ["an eave front", stepRoof({ front: "eave", ...both })],
+    ["wings", stepRoof({ wingSide: "both", wingWidthFt: 6, ...both })],
+    ["a lean-to", stepRoof({ leanToWidthFt: 8, leanToSide: "left", ...both })],
+    ["a recessed porch at the back", stepRoof({ porchDepthFt: 6, porchEnd: "back", ...both })],
+    ["a projecting porch at the back", stepRoof({ porchOutFt: 6, porchEnd: "back", ...both })],
+  ] as const) {
+    const out = sanitisedRoof(roof as Record<string, unknown>);
+    assert(!hasKey(out, "rearStepFt") && !hasKey(out, "rearEaveRiseFt"), `${what} keeps no step: ${JSON.stringify(out)}`);
+  }
+  for (const [what, roof] of [
+    ["a recessed porch at the front", stepRoof({ porchDepthFt: 6, porchEnd: "front", porchTruss: true, ...both })],
+    ["a projecting porch at the front", stepRoof({ porchOutFt: 6, ...both })],
+    ["a porch end of back with no porch", stepRoof({ porchEnd: "back", ...both })],
+    ["a dormer", stepRoof({ dormerWidthFt: 5, ...both })],
+    ["wings switched off", stepRoof({ wingSide: "both", wingWidthFt: 0, ...both })],
+    ["a lean-to switched off", stepRoof({ leanToWidthFt: 0, ...both })],
+  ] as const) {
+    const out = sanitisedRoof(roof as Record<string, unknown>);
+    assert(out.rearStepFt === 12 && out.rearEaveRiseFt === 0.5, `${what} keeps the step: ${JSON.stringify(out)}`);
+  }
+});
+
+Deno.test("⚠️ roof step: a spec without the keys sanitises exactly as it did, key for key", () => {
+  // Every row stored before today: the new rule deletes keys that were never there and writes none.
+  const raw = { roof: { type: "gable", front: "gable", pitch: 0.41, overhang: 1.3, eave: "fascia", porchDepthFt: 6, porchEnd: "front", porchTruss: true }, siding: "batten", colors: { body: "#3a3d3f" }, wallHeightFt: 7.75 };
+  const r = RS.sanitizeD3Spec(raw);
+  assert(r.ok, "parses");
+  if (r.ok) {
+    assertEquals(Object.keys(r.d3.roof), ["type", "pitch", "overhang", "porchDepthFt", "porchEnd", "porchTruss", "eave", "front"]);
+    assert(!JSON.stringify(r.d3).includes("rear"), "no step key written");
+  }
+});
+
+Deno.test("roof step: a model reply carrying both keys reaches the spec; the legacy prompts never ask", () => {
+  const r = RS.parseModelSpec(JSON.stringify({ roof: stepRoof({ rearStepFt: 12, rearEaveRiseFt: 0.42 }) }), { widthFt: 16, lengthFt: 30, wallHeightFt: 8 });
+  assert(r.ok && r.d3.roof.rearStepFt === 12 && r.d3.roof.rearEaveRiseFt === 0.42, JSON.stringify(r));
+  for (const p of [RS.VIDEO_SHAPE_PROMPT, RS.SPEC_PROMPT, RS.videoShapePrompt({ widthFt: 16, lengthFt: 30, wallHeightFt: 8 }, false), RS.combinedShapePrompt(8, 4)]) {
+    assert(!p.includes("rearStepFt") && !p.includes("ROOF STEP"), "a legacy prompt asks nothing about a step");
+  }
+});
+
+// The paragraph the v2 prompt carries, read out of the prompt itself.
+const STEP_V2 = RS.videoShapePrompt({ widthFt: 16, lengthFt: 30, wallHeightFt: 8 }, true);
+const STEP_PARA = (() => {
+  const i = STEP_V2.indexOf("ROOF STEP:");
+  return i < 0 ? "" : STEP_V2.slice(i, STEP_V2.indexOf("\n", i));
+})();
+
+Deno.test("the v2 prompt asks for the roof step: the schema lines and a ROOF STEP paragraph", () => {
+  assert(STEP_V2.includes('    "rearStepFt": <only if the roof is built in TWO SECTIONS with a step where they meet: feet from the BACK wall to that joint>,\n'), "the step's schema line");
+  assert(STEP_V2.includes('    "rearEaveRiseFt": <with rearStepFt: how much HIGHER the rear section\'s eave sits than the front section\'s, in feet; negative when it sits lower>,\n'), "the rise's schema line");
+  assert(STEP_PARA.length > 400, "the paragraph is there");
+  for (const [why, re] of [
+    ["how to recognise it: a joint across the roof", /a joint runs up the roof from the eave to the ridge/],
+    ["the rear eave higher or lower", /HIGHER than the front section's, or sometimes lower/],
+    ["the wedge, deepest at the eave", /wedge-shaped step[^.]*deepest at the eave, closing to nothing at the ridge/],
+    ["the ridges level", /The two ridges line up/],
+    ["on BOTH long sides", /BOTH long sides/],
+    ["the distance from the BACK wall", /how far the joint is from the BACK wall/],
+    ["counted in battens or measured against the depth", /count the battens, grooves or panels[^.]*or measure it as a share of the building's known depth/],
+    ["the rise against the known wall height, inches to feet", /read the step in inches against the known wall height, then divide by 12/],
+    ["a lower rear eave is negative", /negative number when the rear section's eave is the lower one/],
+    ["both or neither", /Give both keys or neither/],
+    ["left out when there is no step", /Leave both out when the roof runs unbroken/],
+  ] as const) {
+    assert(re.test(STEP_PARA), `the paragraph says ${why}`);
+  }
+  // It sits with the other roof appendages, after the dormer and before the colours.
+  assert(STEP_V2.indexOf("DORMER:") < STEP_V2.indexOf("ROOF STEP:") && STEP_V2.indexOf("ROOF STEP:") < STEP_V2.indexOf("COLOURS matter here"), "placed after DORMER");
+});
+
+Deno.test("⚠️ the roof step's examples are generic, never the Black Cabin's own numbers", () => {
+  // The building this was written for: 14 ft from the back, about 0.6 ft higher, 40 ft deep. A
+  // prompt that shows the model the answer teaches it to give that answer to every building.
+  const nums = [...STEP_PARA.matchAll(/\d+(\.\d+)?/g)].map((m) => m[0]);
+  assert(nums.length >= 3, "the paragraph has a worked example");
+  // 0.41 is its 5:12 pitch, the number a model is likeliest to copy across as a rise.
+  for (const bad of ["14", "0.6", "40", "7.75", "8.25", "0.34", "0.41"]) assert(!nums.includes(bad), `the example uses ${bad}`);
+  // The worked example is self-consistent: 5 in over 12 is 0.42.
+  assert(/a step of 5 inches is 0\.42/.test(STEP_PARA) && /rearStepFt 12 and rearEaveRiseFt 0\.42/.test(STEP_PARA), "5 in / 12 = 0.42");
+});
+
+const STEP_DIMS: KnownDims = { widthFt: 16, lengthFt: 30, wallHeightFt: 8 };
+const STEP_DRAFT: D3Spec = cleanSpec({ roof: stepRoof({ eave: "fascia" }), siding: "batten", colors: { body: "#555555" }, wallHeightFt: 8 });
+const STEPPED_DRAFT: D3Spec = cleanSpec({ roof: stepRoof({ eave: "fascia", rearStepFt: 12, rearEaveRiseFt: 0.42 }), siding: "batten", colors: { body: "#555555" }, wallHeightFt: 8 });
+const checkRead = (corrections: Record<string, unknown>, fields: string[]) => ({
+  verdict: "corrections" as const,
+  corrections,
+  changed: fields.map((field) => ({ field, from: null, to: null, why: "the frames show it" })),
+  checked: {},
+  note: "",
+});
+
+Deno.test("the v2 self-check compares the roof step, and may correct it; the legacy check may not", () => {
+  assert((RS.SELF_CHECK_ALLOW as readonly string[]).includes("roof.rearStepFt") && (RS.SELF_CHECK_ALLOW as readonly string[]).includes("roof.rearEaveRiseFt"), "on the v2 allow-list");
+  assert(!(RS.SELF_CHECK_LEGACY_ALLOW as readonly string[]).includes("roof.rearStepFt"), "never on the legacy one");
+  const none = lf(RS.selfCheckPrompt({ dims: STEP_DIMS, draft: STEP_DRAFT, viewpoints: RS.SELF_CHECK_VIEWPOINTS }));
+  assert(none.includes("* The roof step - currently none, which draws one roof from the front to the back."), "a draft without a step is said as one roof");
+  assert(/give BOTH in one answer: roof\.rearStepFt \(feet from\n\s+the BACK wall to the joint/.test(none), "both keys, from the back wall");
+  assert(/measured against the 30 ft\n\s+depth/.test(none), "against the known depth");
+  assert(none.includes("read in inches against\n       the 8 ft wall and divided by 12"), "the rise against the known wall");
+  assert(none.includes("set roof.rearStepFt to 0, which removes it."), "and how to take one off");
+  const stepped = lf(RS.selfCheckPrompt({ dims: STEP_DIMS, draft: STEPPED_DRAFT, viewpoints: RS.SELF_CHECK_VIEWPOINTS }));
+  assert(stepped.includes("currently roof.rearStepFt 12 ft and roof.rearEaveRiseFt 0.42 ft: the joint 12 ft from the back wall, the rear eave 5 in higher."), "a drawn step is said as drawn");
+  const legacy = lf(RS.legacySelfCheckPrompt({ dims: STEP_DIMS, draft: STEP_DRAFT, viewpoints: ["front", "side", "eaveCorner", "corner"] }));
+  assert(!legacy.includes("roof step") && !legacy.includes("rearStepFt"), "the legacy prompt is untouched");
+});
+
+Deno.test("⚠️ applySelfCheck: a step is added with both keys, moved with one, and a step of 0 takes it off", () => {
+  const added = RS.applySelfCheck(STEP_DRAFT, checkRead({ roof: { rearStepFt: 12, rearEaveRiseFt: 0.42 } }, ["roof.rearStepFt", "roof.rearEaveRiseFt"]), STEP_DIMS, "v2");
+  assert(added.ok && added.verdict === "corrections" && added.d3.roof.rearStepFt === 12 && added.d3.roof.rearEaveRiseFt === 0.42, JSON.stringify(added));
+  if (added.ok) assertEquals(added.changed.map((c) => c.field).sort(), ["roof.rearEaveRiseFt", "roof.rearStepFt"]);
+  // One key with no step to join is dropped, and said so.
+  const half = RS.applySelfCheck(STEP_DRAFT, checkRead({ roof: { rearStepFt: 12 } }, ["roof.rearStepFt"]), STEP_DIMS, "v2");
+  assert(half.ok && half.verdict === "matches" && !hasKey(half.d3.roof, "rearStepFt") && half.dropped.includes("roof.rearStepFt"), JSON.stringify(half));
+  // On a stepped draft one key moves it.
+  const moved = RS.applySelfCheck(STEPPED_DRAFT, checkRead({ roof: { rearStepFt: 10 } }, ["roof.rearStepFt"]), STEP_DIMS, "v2");
+  assert(moved.ok && moved.d3.roof.rearStepFt === 10 && moved.d3.roof.rearEaveRiseFt === 0.42, JSON.stringify(moved));
+  // 0 TAKES IT OFF: both keys go, both are reported, and the destructive pass cannot put them back.
+  const off = RS.applySelfCheck(STEPPED_DRAFT, checkRead({ roof: { rearStepFt: 0 } }, ["roof.rearStepFt"]), STEP_DIMS, "v2");
+  assert(off.ok && off.verdict === "corrections" && !hasKey(off.d3.roof, "rearStepFt") && !hasKey(off.d3.roof, "rearEaveRiseFt"), JSON.stringify(off));
+  if (off.ok) {
+    assertEquals(off.changed.map((c) => [c.field, c.from, c.to]).sort(), [["roof.rearEaveRiseFt", 0.42, null], ["roof.rearStepFt", 12, null]]);
+    assert(!off.dropped.length, "nothing reported as not applied");
+  }
+  // An unreadable step is not a 0: the draft's step stands.
+  const junk = RS.applySelfCheck(STEPPED_DRAFT, checkRead({ roof: { rearStepFt: "somewhere" } }, ["roof.rearStepFt"]), STEP_DIMS, "v2");
+  assert(junk.ok && junk.d3.roof.rearStepFt === 12 && junk.d3.roof.rearEaveRiseFt === 0.42, JSON.stringify(junk));
+  // The legacy check cannot touch it, in either direction.
+  const legacy = RS.applySelfCheck(STEP_DRAFT, checkRead({ roof: { rearStepFt: 12, rearEaveRiseFt: 0.42 } }, ["roof.rearStepFt", "roof.rearEaveRiseFt"]), STEP_DIMS, "legacy");
+  assert(legacy.ok && !hasKey(legacy.d3.roof, "rearStepFt") && legacy.dropped.includes("roof.rearStepFt"), JSON.stringify(legacy));
+  const legacyOff = RS.applySelfCheck(STEPPED_DRAFT, checkRead({ roof: { rearStepFt: 0 } }, ["roof.rearStepFt"]), STEP_DIMS, "legacy");
+  assert(legacyOff.ok && legacyOff.d3.roof.rearStepFt === 12, JSON.stringify(legacyOff));
+});
+
+// A gable cabin with a recessed porch, as a v2 read reports it. Generic numbers only.
+const CABIN_READ = { type: "gable", front: "gable", pitch: 0.4, overhang: 1, eave: "fascia", porchDepthFt: 6, porchEnd: "front" };
+const stepRead = (roof: Record<string, unknown>, porch = "recessed"): RS.ConsensusDraft => ({
+  d3: cleanSpec({ roof: { ...CABIN_READ, ...roof }, siding: "batten", colors: { body: "#555555" }, wallHeightFt: 8 }),
+  observed: { roofNote: "gable cabin", porch, wings: "none", confidence: "medium" },
+  frameMap: null,
+});
+
+Deno.test("consensus: a step in 2 of 3 reads is drawn, its joint and rise the medians of those two", () => {
+  const r = RS.consensusDrafts([
+    stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }),
+    stepRead({}),
+    stepRead({ rearStepFt: 11, rearEaveRiseFt: 0.5 }),
+  ]);
+  assertEquals(r.report.discreteAgreement.roofStep, "2/3");
+  assertEquals(r.d3.roof.rearStepFt, 11.5);
+  assertEquals(r.d3.roof.rearEaveRiseFt, 0.45);
+  // Three of five: the median read of the three.
+  const five = RS.consensusDrafts([
+    stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }), stepRead({}), stepRead({ rearStepFt: 13, rearEaveRiseFt: 0.6 }),
+    stepRead({}), stepRead({ rearStepFt: 11, rearEaveRiseFt: 0.5 }),
+  ]);
+  assertEquals(five.report.discreteAgreement.roofStep, "3/5");
+  assert(five.d3.roof.rearStepFt === 12 && five.d3.roof.rearEaveRiseFt === 0.5, JSON.stringify(five.d3.roof));
+});
+
+Deno.test("consensus: a step in 1 of 3 reads is not drawn, and leaves neither key behind", () => {
+  const r = RS.consensusDrafts([stepRead({}), stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }), stepRead({})]);
+  assertEquals(r.report.discreteAgreement.roofStep, "2/3");
+  assert(!hasKey(r.d3.roof, "rearStepFt") && !hasKey(r.d3.roof, "rearEaveRiseFt"), JSON.stringify(r.d3.roof));
+  // Even when the one stepped read is the medoid: it is the base, and the vote still takes it off.
+  const m = RS.consensusDrafts([stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }), stepRead({}), stepRead({})]);
+  assert(!hasKey(m.d3.roof, "rearStepFt") && !hasKey(m.d3.roof, "rearEaveRiseFt"), JSON.stringify(m.d3.roof));
+});
+
+Deno.test("consensus: the step is voted among the reads of the chosen roof type, and a split is said", () => {
+  // A gambrel read has no step to give; with a gable chosen it abstains rather than voting "no".
+  const gambrel: RS.ConsensusDraft = { ...stepRead({}), d3: cleanSpec({ roof: { type: "gambrel", front: "gable", overhang: 1, porchDepthFt: 6 }, siding: "batten", colors: { body: "#555555" }, wallHeightFt: 8 }) };
+  const r = RS.consensusDrafts([stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }), gambrel, stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 })]);
+  assertEquals(r.d3.roof.type, "gable");
+  assertEquals(r.report.discreteAgreement.roofStep, "2/2");
+  assert(r.d3.roof.rearStepFt === 12 && r.d3.roof.rearEaveRiseFt === 0.4, JSON.stringify(r.d3.roof));
+  // Two reads that disagree: the builder is told, in words.
+  const split = RS.consensusDrafts([stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }), stepRead({})]);
+  assertEquals(split.report.discreteAgreement.roofStep, "1/2");
+  const warn = RS.consensusSplitWarning(split.report) ?? "";
+  assert(warn.includes("the step in the roof"), warn);
+});
+
+// ⚠️ THE RISE IS SIGNED, so its direction is voted before any number is taken (the dormer offset's
+// rule). A plain median over both signs cancels them out: 0.5, 0.6, -0.5 and -0.6 give 0, which the
+// sanitiser then drops, so a step four of five reads saw was not drawn at all; 0.6 and -0.4 give
+// 0.1, a step no read saw.
+Deno.test("⚠️ consensus: a 2-2 split on which way the roof steps keeps the step, at a rise one side gave", () => {
+  const five = RS.consensusDrafts([
+    stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.5 }), stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.6 }),
+    stepRead({ rearStepFt: 12, rearEaveRiseFt: -0.5 }), stepRead({ rearStepFt: 12, rearEaveRiseFt: -0.6 }),
+    stepRead({}),
+  ]);
+  assertEquals(five.report.discreteAgreement.roofStep, "4/5");
+  assertEquals(five.report.discreteAgreement.roofStepDir, "2/4");
+  // The tie goes to the best-ranked read that gave a tied answer: every stepped read is 3 apart from
+  // the others, so the first one sent, which stepped up.
+  assertEquals(five.medoid, 0);
+  assert(five.d3.roof.rearStepFt === 12 && five.d3.roof.rearEaveRiseFt === 0.55, `the step is drawn, 0.55 higher: ${JSON.stringify(five.d3.roof)}`);
+  assertEquals(five.report.spread.rearEaveRiseFt, [0.5, 0.6], "the spread is of the reads that were counted");
+  const warn = RS.consensusSplitWarning(five.report) ?? "";
+  assert(warn.includes("whether the back of the roof steps up or down"), warn);
+  assert(!warn.includes("the step in the roof"), `4 of 5 saw a step: ${warn}`);
+  // Four reads, every one stepped, split two and two: the same.
+  const four = RS.consensusDrafts([
+    stepRead({ rearStepFt: 12, rearEaveRiseFt: -0.5 }), stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.5 }),
+    stepRead({ rearStepFt: 12, rearEaveRiseFt: -0.6 }), stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.6 }),
+  ]);
+  assertEquals(four.report.discreteAgreement.roofStepDir, "2/4");
+  assert(four.d3.roof.rearStepFt === 12 && four.d3.roof.rearEaveRiseFt === -0.55, `the first read stepped down: ${JSON.stringify(four.d3.roof)}`);
+});
+
+Deno.test("⚠️ consensus: two reads that step opposite ways keep one read's own rise, never their midpoint", () => {
+  const pair = RS.consensusDrafts([stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.6 }), stepRead({ rearStepFt: 12, rearEaveRiseFt: -0.4 })]);
+  assertEquals(pair.report.discreteAgreement.roofStep, "2/2");
+  assertEquals(pair.report.discreteAgreement.roofStepDir, "1/2");
+  assert(pair.d3.roof.rearStepFt === 12 && pair.d3.roof.rearEaveRiseFt === 0.6, `the medoid's 0.6, not 0.1: ${JSON.stringify(pair.d3.roof)}`);
+  assert(!("rearEaveRiseFt" in pair.report.spread), "one read counted, so nothing wandered");
+  assert((RS.consensusSplitWarning(pair.report) ?? "").includes("whether the back of the roof steps up or down"), "the builder is told");
+  // Sent the other way round, the other read's own -0.4.
+  const back = RS.consensusDrafts([stepRead({ rearStepFt: 12, rearEaveRiseFt: -0.4 }), stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.6 })]);
+  assertEquals(back.d3.roof.rearEaveRiseFt, -0.4);
+});
+
+Deno.test("consensus: the joint is the median of the reads that stepped the chosen way only", () => {
+  const r = RS.consensusDrafts([
+    stepRead({ rearStepFt: 10, rearEaveRiseFt: 0.5 }), stepRead({ rearStepFt: 20, rearEaveRiseFt: -0.5 }), stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.6 }),
+  ]);
+  assertEquals(r.report.discreteAgreement.roofStepDir, "2/3");
+  assert(r.d3.roof.rearStepFt === 11 && r.d3.roof.rearEaveRiseFt === 0.55, `10 and 12, not the 12 of all three: ${JSON.stringify(r.d3.roof)}`);
+  assertEquals(RS.consensusSplitWarning(r.report), null, "2 of 3 is a majority, and says nothing");
+  // All one way: no split to say, and the numbers are every read's.
+  const same = RS.consensusDrafts([stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.4 }), stepRead({ rearStepFt: 13, rearEaveRiseFt: 0.5 }), stepRead({ rearStepFt: 11, rearEaveRiseFt: 0.6 })]);
+  assertEquals(same.report.discreteAgreement.roofStepDir, "3/3");
+  assert(same.d3.roof.rearStepFt === 12 && same.d3.roof.rearEaveRiseFt === 0.5, JSON.stringify(same.d3.roof));
+});
+
+Deno.test("consensus: with a non-gable roof chosen, gable reads that split on a step are not voted, and nothing is said", () => {
+  const gambrel = (): RS.ConsensusDraft => ({ ...stepRead({}), d3: cleanSpec({ roof: { type: "gambrel", front: "gable", overhang: 1, porchDepthFt: 6, porchEnd: "front" }, siding: "batten", colors: { body: "#555555" }, wallHeightFt: 8 }) });
+  const r = RS.consensusDrafts([gambrel(), stepRead({ rearStepFt: 12, rearEaveRiseFt: 0.5 }), gambrel(), stepRead({}), gambrel()]);
+  assertEquals(r.d3.roof.type, "gambrel");
+  assertEquals(r.report.discreteAgreement.type, "3/5");
+  assert(!("roofStep" in r.report.discreteAgreement) && !("roofStepDir" in r.report.discreteAgreement), JSON.stringify(r.report.discreteAgreement));
+  assert(!hasKey(r.d3.roof, "rearStepFt") && !hasKey(r.d3.roof, "rearEaveRiseFt"), JSON.stringify(r.d3.roof));
+  assertEquals(RS.consensusSplitWarning(r.report), null, "the gable reads' disagreement is about a roof that is not drawn");
+});
+
+Deno.test("⚠️ applySelfCheck: declaring BOTH step keys 0 takes the step off, and reports nothing as not applied", () => {
+  const off = RS.applySelfCheck(STEPPED_DRAFT, checkRead({ roof: { rearStepFt: 0, rearEaveRiseFt: 0 } }, ["roof.rearStepFt", "roof.rearEaveRiseFt"]), STEP_DIMS, "v2");
+  assert(off.ok && off.verdict === "corrections" && !hasKey(off.d3.roof, "rearStepFt") && !hasKey(off.d3.roof, "rearEaveRiseFt"), JSON.stringify(off));
+  if (off.ok) {
+    assertEquals(off.dropped, [], "a rise of 0 beside a step of 0 is part of taking it off, not a refused correction");
+    assertEquals(off.changed.map((c) => [c.field, c.from, c.to]).sort(), [["roof.rearEaveRiseFt", 0.42, null], ["roof.rearStepFt", 12, null]]);
+  }
+});
+
+// The porch pitch's trap again (porchPitchNow): the renderer holds a step to what the size can carry
+// (d3RoofStep), so a check told only the stored numbers "corrects" them toward a render that is drawn
+// otherwise and moves nothing. roofStepAtSize is the renderer's arithmetic, run beside it in
+// _test_stubs/roofStep_test.ts.
+Deno.test("⚠️ the v2 self-check says the roof step as DRAWN at the renders' size where that differs from the stored one", () => {
+  const prompt = (roof: Record<string, unknown>, widthFt: number, lengthFt: number) =>
+    lf(RS.selfCheckPrompt({ dims: { widthFt, lengthFt, wallHeightFt: 8 }, draft: cleanSpec({ roof, siding: "batten", colors: { body: "#555555" }, wallHeightFt: 8 }), viewpoints: RS.SELF_CHECK_VIEWPOINTS }));
+  const porch = { porchDepthFt: 6, porchEnd: "front" };
+  // 56 ft behind a 6 ft recessed porch on a 40 ft deep cabin: drawn 30 ft from the back.
+  assert(prompt(stepRoof({ ...porch, rearStepFt: 56, rearEaveRiseFt: 1.5 }), 14, 40).includes(
+    "currently roof.rearStepFt 56 ft and roof.rearEaveRiseFt 1.5 ft: the joint 56 ft from the back wall, the rear eave 18 in higher, but DRAWN WITH the joint 30 ft from the back wall, the rear eave 18 in higher (this size leaves at most 30 ft behind the joint), so the render's step is not the one these numbers say and pushing them further changes nothing in it."), "56 ft on a 14x40 with a porch");
+  // 12 ft on a 12x16 with the same porch: 6.
+  assert(prompt(stepRoof({ ...porch, rearStepFt: 12, rearEaveRiseFt: 0.5 }), 12, 16).includes("but DRAWN WITH the joint 6 ft from the back wall, the rear eave 6 in higher (this size leaves at most 6 ft behind the joint)"), "12 ft on a 12x16");
+  // A rise the pitch cannot carry.
+  assert(prompt(stepRoof({ pitch: 0.1, rearStepFt: 10, rearEaveRiseFt: 1 }), 14, 30).includes("but DRAWN WITH the joint 10 ft from the back wall, the rear eave 6.7 in higher (the roof is too flat for a bigger step)"), "a flat roof");
+  // None drawn: an old-frame style on a landscape footprint, and a building too short for a joint.
+  const old = prompt({ type: "gable", pitch: 0.4, overhang: 1, rearStepFt: 10, rearEaveRiseFt: 0.5 }, 40, 14);
+  assert(old.includes("the rear eave 6 in higher, but NOT DRAWN (on this footprint its ridge runs from side to side, so the back wall is not a gable end), so the render shows one roof from the front to the back and changing these two numbers changes nothing in it."), "old frame, landscape");
+  assert(prompt(stepRoof({ ...porch, rearStepFt: 8, rearEaveRiseFt: 0.5 }), 14, 10).includes("but NOT DRAWN (the building is too short to leave 4 ft each side of the joint)"), "too short");
+  // Drawn as stored: exactly the sentence it always was, and no step says what it always said.
+  const asStored = prompt(stepRoof({ ...porch, rearStepFt: 14, rearEaveRiseFt: 0.6 }), 14, 40);
+  assert(asStored.includes("currently roof.rearStepFt 14 ft and roof.rearEaveRiseFt 0.6 ft: the joint 14 ft from the back wall, the rear eave 7.2 in higher.") && !/but DRAWN WITH|NOT DRAWN \(/.test(asStored), "as stored");
+  assert(prompt(stepRoof(porch), 12, 16).includes("* The roof step - currently none, which draws one roof from the front to the back."), "no step");
+});
+
+// ─── The roof step from points (2026-09-28) ─────────────────────────────────────────────────
+// A pinhole camera looking at one long side of an L ft deep building (x from the BACK corner, y up,
+// the wall in the plane z = 0), turned `yawDeg` about the vertical, `distFt` out from the wall and
+// `camXFt` along it. Returns the six measure.step points as they land in a 1600 by 900 frame.
+type StepScene = { L: number; S: number; H: number; rise: number; yawDeg: number; distFt: number; camXFt: number; camYFt?: number; backOnRight?: boolean };
+const stepShot = (sc: StepScene) => {
+  const W = 1600, Hpx = 900, f = 900, cy = sc.camYFt ?? 5;
+  const yaw = sc.yawDeg * Math.PI / 180;
+  // The back corner on the right of the frame: the camera sees x running right to left.
+  const sx = sc.backOnRight ? -1 : 1;
+  const proj = (x: number, y: number): [number, number] => {
+    const X = sx * (x - sc.camXFt), Y = y - cy, Z = sc.distFt;
+    const xc = X * Math.cos(yaw) + Z * Math.sin(yaw), zc = Z * Math.cos(yaw) - X * Math.sin(yaw);
+    return [Math.round((W / 2 + f * xc / zc) * 10) / 10, Math.round((Hpx / 2 - f * Y / zc) * 10) / 10];
+  };
+  // The frame is centred on the side (a shifted principal point, which is a crop of a wider frame:
+  // it moves every point alike, so no ratio changes).
+  const dx = W / 2 - (proj(0, 0)[0] + proj(sc.L, 0)[0]) / 2;
+  const at = (x: number, y: number): [number, number] => {
+    const [u, v] = proj(x, y);
+    return [Math.round((u + dx) * 10) / 10, v];
+  };
+  return {
+    size: [W, Hpx] as [number, number],
+    backBase: at(0, 0), jointBase: at(sc.S, 0), frontBase: at(sc.L, 0),
+    frontFascia: at(sc.L, sc.H), jointFront: at(sc.S + 0.05, sc.H), jointRear: at(sc.S - 0.05, sc.H + sc.rise),
+  };
+};
+const CABIN: StepScene = { L: 40, S: 14, H: 7.75, rise: 0.6, yawDeg: 0, distFt: 30, camXFt: 20 };
+
+Deno.test("stepFromMeasure: a square-on side gives the joint's place and the rise exactly", () => {
+  assertEquals(RS.stepFromMeasure(stepShot(CABIN), 40, 7.75), { atFt: 14, riseFt: 0.6 });
+  // The back corner on the right of the frame reads the same.
+  assertEquals(RS.stepFromMeasure(stepShot({ ...CABIN, backOnRight: true }), 40, 7.75), { atFt: 14, riseFt: 0.6 });
+});
+
+Deno.test("stepFromMeasure: an angled side is undone by the vanishing point, where a plain share is feet out", () => {
+  for (const yawDeg of [-30, -15, 15, 30]) {
+    for (const backOnRight of [false, true]) {
+      const m = stepShot({ ...CABIN, yawDeg, camXFt: 26, distFt: 45, backOnRight });
+      const r = RS.stepFromMeasure(m, 40, 7.75);
+      const what = `yaw ${yawDeg}${backOnRight ? " mirrored" : ""}`;
+      assert(r !== null, what);
+      // Within a hundredth: the two fascia points stand a hair either side of the joint, at two depths.
+      assert(r!.riseFt !== null && Math.abs(r!.riseFt - 0.6) <= 0.011, `${what}: rise ${r!.riseFt}`);
+      assert(r!.atFt !== null && Math.abs(r!.atFt - 14) <= 0.5, `${what}: ${r!.atFt}`);
+      // What a plain share of the base line would have said: the live error.
+      const plain = 40 * Math.abs(m.jointBase[0] - m.backBase[0]) / Math.abs(m.frontBase[0] - m.backBase[0]);
+      if (Math.abs(yawDeg) === 30) assert(Math.abs(plain - 14) > 2, `${what}: a plain share is ${plain.toFixed(1)} ft`);
+    }
+  }
+});
+
+Deno.test("stepFromMeasure: the rise's SIGN is the fascias' order in the frame, the thing the eye got wrong live", () => {
+  assertEquals(RS.stepFromMeasure(stepShot({ ...CABIN, rise: -0.4 }), 40, 7.75), { atFt: 14, riseFt: -0.4 });
+  assertEquals(RS.stepFromMeasure(stepShot({ ...CABIN, yawDeg: 20, camXFt: 26 }), 40, 7.75)?.riseFt, 0.6);
+});
+
+Deno.test("stepFromMeasure: each number stands or falls on its own points", () => {
+  const m = stepShot(CABIN);
+  // No depth known: the rise alone. No wall height: the place alone.
+  assertEquals(RS.stepFromMeasure(m, null, 7.75), { atFt: null, riseFt: 0.6 });
+  assertEquals(RS.stepFromMeasure(m, 40, null), { atFt: 14, riseFt: null });
+  // A step too small to draw is no rise.
+  assertEquals(RS.stepFromMeasure(stepShot({ ...CABIN, rise: 0.02 }), 40, 7.75), { atFt: 14, riseFt: null });
+  // The joint's points off its vertical: no rise.
+  assertEquals(RS.stepFromMeasure({ ...m, jointRear: [m.jointRear[0] + 200, m.jointRear[1]] }, 40, 7.75), { atFt: 14, riseFt: null });
+  // A fascia gap of more than a quarter of the wall is not a step.
+  const wall = m.jointBase[1] - m.jointFront[1];
+  assertEquals(RS.stepFromMeasure({ ...m, jointRear: [m.jointRear[0], m.jointFront[1] - 0.3 * wall] }, 40, 7.75), { atFt: 14, riseFt: null });
+  // The joint outside the corners, or a front fascia below the base line: no place.
+  assertEquals(RS.stepFromMeasure({ ...m, jointBase: [m.backBase[0] - 20, m.backBase[1]] }, 40, 7.75)?.atFt ?? null, null);
+  assertEquals(RS.stepFromMeasure({ ...m, frontFascia: [m.frontFascia[0], m.frontBase[1] + 30] }, 40, 7.75)?.atFt ?? null, null);
+  // A vanishing point between the corners is no camera's: no place. (A front fascia 60 px above the
+  // base at the joint and 205 px above it at the front meets the base line between the corners.)
+  assertEquals(RS.stepFromMeasure({ ...m, jointFront: [m.jointFront[0], m.jointBase[1] - 60] }, 40, 7.75)?.atFt ?? null, null);
+  // Points outside the given size, or a missing point, are no measure at all.
+  assertEquals(RS.stepFromMeasure({ ...m, jointRear: [1700, 300] }, 40, 7.75), null);
+  const { jointRear: _gone, ...five } = m;
+  assertEquals(RS.stepFromMeasure(five, 40, 7.75), null);
+});
+
+const STEP_REPLY = (roof: Record<string, unknown>, step?: unknown) => JSON.stringify({
+  ...(step ? { measure: { step } } : {}),
+  roof: { type: "gable", front: "gable", pitch: 0.4, overhangIn: 12, eave: "fascia", ...roof },
+  siding: "batten", colors: { body: "#555555" },
+});
+const CABIN_DIMS: KnownDims = { widthFt: 14, lengthFt: 40, wallHeightFt: 7.75 };
+const specOf = (text: string): D3Spec => {
+  const r = RS.parseModelSpec(text, CABIN_DIMS);
+  if (!r.ok) throw new Error(r.error);
+  return r.d3;
+};
+
+Deno.test("applyMeasuredPitches: a read's roof step takes its points' numbers and says so; points never make a step", () => {
+  const pts = stepShot({ ...CABIN, yawDeg: 20, camXFt: 26, distFt: 34 });
+  const text = STEP_REPLY({ rearStepFt: 11, rearEaveRiseFt: -0.25 }, pts);
+  const r = RS.applyMeasuredPitches(specOf(text), text, 40);
+  assertEquals([r.d3.roof.rearStepFt, r.d3.roof.rearEaveRiseFt], [14, 0.6], "the live misread, set right by its points");
+  assertEquals([r.sources.stepSource, r.sources.modelStep], ["points", [11, -0.25]]);
+  // readDraftReply's measured reading is the same, and draft_tokens records where it came from.
+  const body = JSON.stringify({ content: [{ type: "text", text }], stop_reason: "end_turn" });
+  const reading = RS.readDraftReply(body, CABIN_DIMS, true);
+  assertEquals([reading.d3?.roof.rearStepFt, reading.d3?.roof.rearEaveRiseFt], [14, 0.6]);
+  assertEquals(RS.draftReadSample(reading)?.stepSource, "points");
+  // No step given: the points are ignored and nothing about a step is recorded.
+  const none = STEP_REPLY({}, pts);
+  const n = RS.applyMeasuredPitches(specOf(none), none, 40);
+  assertEquals(n.d3.roof.rearStepFt, undefined);
+  assert(!("stepSource" in n.sources), "no step, no step source");
+  // Points that fail keep the model's pair and say so; no points at all is plain "model".
+  const bad = STEP_REPLY({ rearStepFt: 11, rearEaveRiseFt: -0.25 }, { ...pts, jointBase: [pts.backBase[0] - 20, pts.backBase[1]], jointRear: [pts.jointRear[0] + 400, pts.jointRear[1]] });
+  const b = RS.applyMeasuredPitches(specOf(bad), bad, 40);
+  assertEquals([b.d3.roof.rearStepFt, b.d3.roof.rearEaveRiseFt, b.sources.stepSource, b.sources.stepRejected], [11, -0.25, "model", true]);
+  const plain = STEP_REPLY({ rearStepFt: 11, rearEaveRiseFt: -0.25 });
+  const p = RS.applyMeasuredPitches(specOf(plain), plain, 40);
+  assertEquals([p.sources.stepSource, "stepRejected" in p.sources], ["model", false]);
+});
+
+Deno.test("v2 prompt: the roof step asks for its six points and names which fascia is higher by the face at the joint", () => {
+  const p = RS.videoShapePrompt({ widthFt: 16, lengthFt: 30, wallHeightFt: 8 }, true);
+  assert(p.includes('"step": { "frame":'), "the schema's measure block has the step");
+  for (const k of ["backBase", "jointBase", "frontBase", "frontFascia", "jointFront", "jointRear"]) assert(p.includes(`"${k}": [<x>, <y>]`), k);
+  assert(p.includes("STEP POINTS, measure.step, only when you give rearStepFt"), "asked for only with a step");
+  assert(p.includes("the HIGHER section's roof ends there in a narrow wedge-shaped face"), "the direction's tell");
 });

@@ -86,6 +86,7 @@ import { parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfChec
 // 2026-09-24): the check is gated on `frame` like the draft, and a legacy request is d3ab404's.
 import { selfCheckMode, selfCheckRequest, frameKeyWarning } from "../_shared/styleD3.ts";
 import { aiDraftCostCents, aiModelFields } from "../_shared/styleD3.ts";
+import { runStepZoom } from "../_shared/stepZoom.ts";
 // Consensus drafting (2026-09-25): the v2 draft reads the video several times (five since
 // 2026-09-26, DRAFT_CONSENSUS_CALLS) and combines the reads.
 import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftCallsUsage, consensusSplitWarning, DRAFT_CONSENSUS_GRACE_MS } from "../_shared/styleD3.ts";
@@ -4228,6 +4229,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // What EVERY call used, for draft_tokens and the capture. Null on a single call, whose usage is
     // recorded exactly as it always has been, at each exit below.
     const callsUsage = draftCalls > 1 ? draftCallsUsage(aiModelFields(v2Prompt).model, calls, lead, consensus) : null;
+    // ── WHICH WAY THE ROOF STEPS, READ FROM A CLOSE-UP (2026-09-29, v2 consensus only) ──────────
+    // The reads find a roof step but misread its direction, a few inches in a 1280 px frame; the
+    // same joint enlarged 8 times is read right (_shared/stepZoom.ts has the numbers). So when the
+    // consensus draws a step, the joint is cropped out of the frame the reads marked it in and
+    // enlarged, STEP_ZOOM_ASKS asks go in parallel, and the majority's direction (with the height
+    // the same answers measure) replaces the consensus's rearEaveRiseFt. Anything that fails leaves
+    // the consensus exactly as it was. What it did is recorded in draft_tokens.stepZoom, and its
+    // tokens join the draft's usage, so the capture's cost basis includes them.
+    // (No type annotations in this block: the draft wiring tests run it as plain JavaScript.)
+    const stepRoof = consensus ? consensus.d3.roof : null;
+    if (consensus && callsUsage && v2Prompt && dims && stepRoof && typeof stepRoof.rearStepFt === "number" && typeof stepRoof.rearEaveRiseFt === "number") {
+      const zoom = await runStepZoom({
+        blocks: calls.map((c) => c.reading?.stepPoints ?? null), photoUrls, rise0: stepRoof.rearEaveRiseFt,
+        wallFt: dims.wallHeightFt, leftMs: t0 + draftAbortMs - Date.now(), apiKey, model: aiModelFields(true), signal: aiSignal,
+      });
+      if (zoom.record) {
+        callsUsage.usage.input_tokens = (callsUsage.usage.input_tokens ?? 0) + zoom.input;
+        callsUsage.usage.output_tokens = (callsUsage.usage.output_tokens ?? 0) + zoom.output;
+        callsUsage.tokens.stepZoom = zoom.record;
+      }
+      if (zoom.riseFt !== null) {
+        const clean = sanitizeD3Spec({ ...consensus.d3, roof: { ...stepRoof, rearEaveRiseFt: zoom.riseFt } });
+        if (clean.ok) consensus.d3 = clean.d3;
+      }
+    }
     // THE API FAILED THE DRAFT (2026-09-26): the two exits below, after their hold release. One coded
     // row with the raw status and body, and the builder's plain sentence (draftUpstreamFailure),
     // marked filed so the error wrapper adds no copy, streamed or not.

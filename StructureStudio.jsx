@@ -1290,8 +1290,12 @@ function ssGableVentFit(roofCfg, bldgW, bldgH, wall, wallHeightFt, it, alongFt, 
   // uc across the end. Every number below is measured in that gable, and `u` is handed back in the
   // building's own frame. Without wings H is the wall, uc is 0 and nothing moves.
   const mass = d3Massing(roofCfg, bldgW, bldgH, Hw);
-  const H = mass.Hc, uc = mass.uc;
-  const dedup = d3RoofProfile(roofCfg, mass.Sc, H, ax.tallNeg).dedup;
+  // A ROOF STEP (d3RoofStep): the BACK gable is the rear section's, standing on its own plate under
+  // its own roof line, so a vent there is fitted to that triangle. Null on every other building.
+  const step = d3RoofStep(roofCfg, bldgW, bldgH, Hw);
+  const rearGable = !!step && wall === "north";
+  const H = rearGable ? step.Hb : mass.Hc, uc = mass.uc;
+  const dedup = d3RoofProfile(rearGable ? step.rearCfg : roofCfg, mass.Sc, H, ax.tallNeg).dedup;
   const wIn = Number(it && it.widthIn), hIn = Number(it && it.heightIn);
   const w = Number(it && it.widthFt) > 0 ? Number(it.widthFt) : (wIn > 0 ? wIn / 12 : 1);
   const h = hIn > 0 ? hIn / 12 : 1;
@@ -4860,9 +4864,60 @@ function d3LeanToGeom(roofCfg, W, L, H) {
   const pitch = (ya - y1) / Math.abs(u1 - ua);
   return { dir, u0, u1, ua, ya, y1, E, k, drop, d, mode, pitch, clamped, flat, noRoof, cuts: mode === "roof" && !noRoof && pitch > k + 1e-9 };
 }
+// ── THE ROOF STEP (roof.rearStepFt / roof.rearEaveRiseFt, 2026-09-28) ───────────────────────────────
+// A gable building whose roof is TWO SECTIONS along the ridge. The rear section covers the last
+// rearStepFt feet, measured from the BACK wall to the joint, and its eave (the wall plate and the
+// fascia on it) sits rearEaveRiseFt higher than the front section's, or lower when negative, while
+// the two RIDGES STAY LEVEL. So the rear section's pitch is whatever brings its ridge to the front's
+// (the pitch less the rise over the half-span), and its long walls and the back gable wall stand the
+// rise taller: one flush plane with the front walls, the siding carrying straight on. At the joint
+// each long side shows a thin wedge between the two roof edges, deepest at the eave and closing to
+// nothing at the ridge. The Black Cabin walk-around is the building this was written for.
+//
+// Null, and every caller then builds exactly what it always did, unless ALL of these hold (the
+// sanitiser's own rules, plus the ones only a size can settle):
+//   * a gable roof whose ridge runs FRONT TO BACK: roof.front "gable", or no front on a style whose
+//     footprint puts the ridge along z by the old rule (d3RoofAxes' uAxisIsX). The back is then the
+//     NORTH wall, local z 0 in the renderer's roof group, and the joint is local z = stepFt.
+//   * both keys, a step over half a foot, and a rise of at least 0.01 ft either way
+//   * no wings and no lean-to: both run the length of an eave wall at one eave height, and the
+//     sanitiser refuses the step beside them for that reason
+//   * no porch at the BACK, where the rear section would stand over its opening
+// The joint is held to leave at least 4 ft of building each side of it (4 ft of enclosed room in
+// front of it where a recessed porch takes the front), and the rise to -1.5..1.5 ft and to what
+// leaves the rear roof a pitch of at least 0.02.
+//   stepFt  feet from the back wall to the joint      rise    the rear eave over the front's, feet
+//   Hf, Hb  the front and the rear eave (wall tops)   pitchB  the rear section's own pitch
+//   rearCfg the roof as the rear section's profile reads it: d3RoofProfile(rearCfg, S, Hb, ...)
+function d3RoofStep(roofCfg, W, L, H) {
+  const cfg = roofCfg || {};
+  if (cfg.type !== "gable" || cfg.rearStepFt == null || cfg.rearEaveRiseFt == null) return null;
+  const want = Number(cfg.rearStepFt), rise0 = Number(cfg.rearEaveRiseFt);
+  if (!(want > 0.5) || !(Math.abs(rise0) >= 0.01)) return null;
+  if (d3FrontKind(cfg) === "eave" || Number(cfg.wingWidthFt) > 0.5 || Number(cfg.leanToWidthFt) > 0.5) return null;
+  const ax = d3RoofAxes(cfg, W, L);
+  if (!ax.uAxisIsX) return null;
+  const porchOut = d3ProjectingPorch(cfg, W, L);
+  if ((cfg.porchEnd || "front") === "back" && (porchOut || Number(cfg.porchDepthFt) > 0.5)) return null;
+  // A recessed porch at the front, clamped the way buildShed3DModel clamps it.
+  const porchIn = porchOut ? 0 : Math.max(0, Math.min(Number(cfg.porchDepthFt) || 0, ax.L - 4));
+  const room = ax.L - (porchIn > 0.5 ? porchIn : 0) - 4;
+  if (!(room >= 4)) return null;
+  const stepFt = Math.max(4, Math.min(room, want));
+  const Hf = Number(H) > 0 ? Number(H) : D3.WALL_H;
+  const pitch = cfg.pitch || 0.4;
+  const half = ax.S / 2;
+  const rise = Math.max(-1.5, Math.min(1.5, Math.max(0, (pitch - 0.02) * half), rise0));
+  if (!(Math.abs(rise) >= 0.01)) return null;
+  const pitchB = pitch - rise / half;
+  return { stepFt, rise, Hf, Hb: Hf + rise, pitch, pitchB, rearCfg: { ...cfg, pitch: pitchB } };
+}
 // PER-WALL TOPS: how tall wall `wall` stands along its length, as [[a0, a1, top], ...] in the PLAN's
 // along-frame (feet from its west or north end), or null when it is one height, H, end to end —
-// which is every wall of every building without wings or a new-frame shed, so none of them changes.
+// which is every wall of every building without wings, a new-frame shed or a roof step, so none of
+// them changes.
+//   · a ROOF STEP (d3RoofStep): the back gable wall stands at the rear eave end to end, and each
+//     long wall at the rear eave from the back wall to the joint and at H in front of it.
 // ONE model for every wall that stands above H (2026-09-24, the two renderer branches unified):
 //   · a new-frame shed's HIGH eave wall (d3ShedHighWall) is one run at the high eave, H + S x pitch:
 //     a real clad wall where there used to be a wall to H with a band of roof prism above it.
@@ -4882,7 +4937,13 @@ function d3WallTops(roofCfg, W, L, H, wall, setBack) {
     return [[0, ax.L, H + ax.S * ((roofCfg && roofCfg.pitch) || 0.25)]];
   }
   const m = d3Massing(roofCfg, W, L, H);
-  if (!m.wings.length) return null;
+  if (!m.wings.length) {
+    const st = d3RoofStep(roofCfg, W, L, H);
+    if (!st) return null;
+    if (wall === "north") return setBack ? null : [[0, m.S, st.Hb]];
+    if (wall === "west" || wall === "east") return [[0, st.stepFt, st.Hb], [st.stepFt, m.L, st.Hf]];
+    return null;
+  }
   const ends = m.uAxisIsX ? ["north", "south"] : ["west", "east"];
   if (ends.indexOf(wall) < 0) {
     const s = wall === (m.uAxisIsX ? "west" : "north") ? -1 : 1;
@@ -4926,10 +4987,14 @@ function d3PorchWallTopFt(roofCfg, W, L, H) {
   return d3WallTopFt(roofCfg, W, L, H, porch.wall, mid, mid);
 }
 // The local CEILING over a floor point (world feet): the centre's plate under the centre, the outer
-// plate everywhere else. A ceiling light or fan hangs from it.
+// plate everywhere else. A ceiling light or fan hangs from it. Under a roof step's rear section
+// (d3RoofStep: the back rearStepFt feet, world z from the north wall) it is that section's plate.
 function d3CeilingFt(roofCfg, W, L, H, x, z) {
   const m = d3Massing(roofCfg, W, L, H);
-  if (!m.wings.length) return H;
+  if (!m.wings.length) {
+    const st = d3RoofStep(roofCfg, W, L, H);
+    return st && z < -L / 2 + st.stepFt ? st.Hb : H;
+  }
   const u = m.uAxisIsX ? x : z;
   return Math.abs(u - m.uc) <= m.Sc / 2 + 1e-6 ? m.Hc : H;
 }
@@ -5243,7 +5308,29 @@ function d3RoofLands(roofCfg, m, W, L, H) {
 }
 function d3DormerRoof(roof, wFt, dFt, H) {
   const m = d3Massing(roof, wFt, dFt, H);
-  return { S: m.Sc, profYAt: d3MakeProfYAt(m.prof, m.Hc), lands: d3RoofLands(roof, m, wFt, dFt, H) };
+  const own = d3MakeProfYAt(m.prof, m.Hc);
+  // Where a lean-to or wing roof lands on this roof (d3RoofLands, 2026-09-28): a transom dormer
+  // stops short of it. Null without a roof attach, which is every building a roof step allows.
+  const lands = d3RoofLands(roof, m, wFt, dFt, H);
+  // A ROOF STEP (d3RoofStep, 2026-09-28): the dormer sits on the roof under it, the rear section's
+  // behind the joint (d3DormerSeatYAt), exactly as buildShed3DModel seats it. Null on every other
+  // building, which keeps the one profile it always had.
+  const st = d3RoofStep(roof, wFt, dFt, H);
+  if (!st) return { S: m.Sc, profYAt: own, lands };
+  const rear = d3MakeProfYAt(d3RoofProfile(st.rearCfg, m.S, st.Hb, m.tallNeg).dedup, st.Hb);
+  return { S: m.Sc, profYAt: d3DormerSeatYAt(own, rear, m.L, (roof && roof.dormerWidthFt) || 0, st.stepFt), lands };
+}
+// WHICH ROOF A DORMER SITS ON when the roof steps (d3RoofStep): the dormer is centred at L/2 and
+// dormW long along the ridge, local z 0 the back wall and the joint at stepFt. Wholly behind the
+// joint it sits on the rear section's roof (rearYAt), wholly in front of it on the front section's
+// (frontYAt). Straddling the joint it takes the LOWER of the two, so no part of it floats above a
+// roof (the higher roof's slab passes through its box, as every dormer's slab does). With no rear
+// section it is frontYAt itself. (Taking the lower roof wherever the dormer reached behind the
+// joint seated one standing wholly on a higher rear roof on the front plane, buried in its slab.)
+function d3DormerSeatYAt(frontYAt, rearYAt, L, dormW, stepFt) {
+  if (!rearYAt || L / 2 - dormW / 2 >= stepFt) return frontYAt;
+  if (L / 2 + dormW / 2 <= stepFt) return rearYAt;
+  return (u) => Math.min(frontYAt(u), rearYAt(u));
 }
 function d3DormerFaceFt(spec, wFt, dFt) {
   const roof = (spec && spec.roof) || {};
@@ -7463,6 +7550,11 @@ function buildShed3DModel(THREE, p) {
   // top — and ssPorchTrussWall says the same for the truss.
   const mass = d3Massing(roofCfg, bldgW, bldgH, H);
   const porchOn = porchDepth > 0.5 && !mass.wings.length;
+  // THE ROOF STEP (d3RoofStep, 2026-09-28): two roof sections along the ridge, the rear one's eave
+  // higher or lower, the ridges level. Null on every other building, and every branch it opens
+  // below is guarded by it, so without both keys the model is built by exactly the code it was.
+  // The walls need nothing here: d3WallTops already stands the rear section's walls at its eave.
+  const STEP = d3RoofStep(roofCfg, bldgW, bldgH, H);
   // "FRONT" IS SOUTH for a gable or gambrel roof on a portrait footprint (2026-09-14) — the
   // footprints whose gable ends are north/south. A shed roof swaps the axes in d3RoofAxes, so it
   // takes the landscape branch below whatever its shape; that is unchanged. It was north, which put the porch on
@@ -8409,7 +8501,10 @@ function buildShed3DModel(THREE, p) {
   // than painting the soffit with cladding — which would look like the very defect this
   // fixes, with a false green light.
   const gableMat = mat(bodyColor);
-  const gableGeom = new THREE.ExtrudeGeometry(shape, { depth: L, bevelEnabled: false });
+  // A ROOF STEP makes this the FRONT section's prism, from the joint (local z = STEP.stepFt) to the
+  // front; the rear section's is built beside profYAt below. Without one it is the whole length.
+  const gableGeom = new THREE.ExtrudeGeometry(shape, { depth: STEP ? L - STEP.stepFt : L, bevelEnabled: false });
+  if (STEP) gableGeom.translate(0, 0, STEP.stepFt);
   // U-PHASE. ExtrudeGeometry's WorldUVGenerator gives the caps UVs in profile-space feet,
   // which is the same unit wallBox uses -- but a DIFFERENT ORIGIN. The wall's u runs 0..S
   // from the wall origin; the cap's runs -S/2..+S/2 from the building centre. So the two
@@ -8558,6 +8653,35 @@ function buildShed3DModel(THREE, p) {
   // Lifted to module scope so the calibration panel's dormer readout walks the SAME profile
   // this renderer does — see d3MakeProfYAt.
   const profYAt = d3MakeProfYAt(dedup, Hr);
+  // ── THE ROOF STEP: THE REAR SECTION'S PRISM (d3RoofStep, 2026-09-28) ─────────────────────────────
+  // Local z 0 is the BACK wall (a step needs uAxisIsX, see d3RoofStep), so the rear section runs
+  // from 0 to the joint at STEP.stepFt on its own profile: the same span and ridge, its eave at
+  // STEP.Hb. Built like the front prism above: clad caps in phase with the wall below, the back cap
+  // moved flush with the back wall's face (capOut0), and the cap at the joint left on the joint
+  // plane, where the front prism's cap meets it back to back and the wedge trim covers what shows.
+  // Its slopes are a section of their own in the slab loop below (buildSlope). Null without a step.
+  const rearProf = (() => {
+    if (!STEP) return null;
+    const rp = d3RoofProfile(STEP.rearCfg, S, STEP.Hb, tallNeg);
+    const rshape = new THREE.Shape();
+    rp.dedup.forEach((pt, i) => (i === 0 ? rshape.moveTo(pt[0], pt[1]) : rshape.lineTo(pt[0], pt[1])));
+    const rgeo = new THREE.ExtrudeGeometry(rshape, { depth: STEP.stepFt, bevelEnabled: false });
+    const ruv = rgeo.attributes.uv;
+    if (ruv) { for (let i = 0; i < ruv.count; i++) ruv.setX(i, ruv.getX(i) + (mass.S / 2 + mass.uc)); ruv.needsUpdate = true; }
+    const rcap = rgeo.groups && rgeo.groups.length === 2 ? rgeo.groups[0] : null;
+    if (rcap && capOut0 > 0) {
+      const rpos = rgeo.attributes.position;
+      for (let i = rcap.start; i < rcap.start + rcap.count; i++) if (Math.abs(rpos.getZ(i)) < 1e-6) rpos.setZ(i, -capOut0);
+      rpos.needsUpdate = true;
+      rgeo.computeBoundingBox(); rgeo.computeBoundingSphere();
+    }
+    const rmesh = new THREE.Mesh(rgeo, rcap ? [wallMat, gableMat] : gableMat);
+    rmesh.userData.ssRoofStep = "rear";
+    rg.add(rmesh);
+    let peak = -Infinity;
+    rp.dedup.forEach((pt) => { if (pt[1] > peak) peak = pt[1]; });
+    return { H: STEP.Hb, dedup: rp.dedup, slopes: rp.slopes, yAt: d3MakeProfYAt(rp.dedup, STEP.Hb), peak };
+  })();
 
   // ── THE GABLE END'S DEPTH LADDER (2026-09-15) ──────────────────────────────────────────
   // Carolyn, 2026-09-14, drawing on the porch gable of her Cabin (12x32, king-post truss): the
@@ -8605,15 +8729,17 @@ function buildShed3DModel(THREE, p) {
   // ── The style's louvered gable vent: laid out once, drawn on both ends further down ────────
   // Laid out up here (it used to live inside the drawing block) only so the truss can ask
   // whether there IS a vent before either is drawn. Null = no vent on this building.
-  const styleVent = (() => {
+  // Laid out by a function of the gable it sits in (its profile and its plate) since the roof step
+  // (2026-09-28): the back cap of a stepped roof is the rear section's gable, on its own plate.
+  const layStyleVent = (vDedup, vPlate) => {
     const gv = (p.styleSpec && p.styleSpec.gableVent) || null;
     if (!(gv && gv.widthFrac > 0)) return null;
     let peak = -Infinity;
-    dedup.forEach((pt) => { if (pt[1] > peak) peak = pt[1]; });
-    if (!(peak > Hr + 0.9)) return null;
+    vDedup.forEach((pt) => { if (pt[1] > peak) peak = pt[1]; });
+    if (!(peak > vPlate + 0.9)) return null;
     // Horizontal extent of the gable polygon at height y — module scope since 2026-09-15
     // (d3ProfSpanAt), because a placed gable vent is fitted to the same triangle in 2D.
-    const profSpanAt = (y) => d3ProfSpanAt(dedup, y);
+    const profSpanAt = (y) => d3ProfSpanAt(vDedup, y);
     const F = 0.12;                                      // trim board width
     // The vent sits LOW in the triangle, on a short sill above the plate — not centred
     // in it. That is what the walk-around shows, and on a shallow pitch it is the whole
@@ -8633,19 +8759,23 @@ function buildShed3DModel(THREE, p) {
     const VENT_SILL = roofCfg.plateBand === true ? Math.max(VENT_SILL0, SS_PLATE_BAND_TOP + 0.1 + F) : VENT_SILL0;
     let vW = S * Math.min(0.6, Math.max(0.05, gv.widthFrac));
     let vH = vW / 2;                                     // 2:1 wide-to-tall, as measured
-    let vCy = Hr + VENT_SILL + vH / 2;
+    let vCy = vPlate + VENT_SILL + vH / 2;
     // Shrink to fit. The TOP corners are the tight point, and the passes converge because
     // a narrower vent is also shorter and therefore has more room above it.
     for (let k = 0; k < 3; k++) {
       const sp = profSpanAt(vCy + vH / 2);
       const avail = sp ? (sp[1] - sp[0]) - 0.5 : 0;      // keep 3 in clear of each rake
       if (vW <= avail) break;
-      vW = Math.max(0, avail); vH = vW / 2; vCy = Hr + VENT_SILL + vH / 2;
+      vW = Math.max(0, avail); vH = vW / 2; vCy = vPlate + VENT_SILL + vH / 2;
     }
     const spC = profSpanAt(vCy);
     const vCu = spC ? (spC[0] + spC[1]) / 2 : 0;         // centred even on a skewed ridge
     return (vW >= 0.8 && vH >= 0.35) ? { vW, vH, vCy, vCu, F } : null;
-  })();
+  };
+  const styleVent = layStyleVent(dedup, Hr);
+  // A ROOF STEP's back cap: the same vent laid out in the rear section's own gable (null when that
+  // gable has no room for one). Without a step it IS styleVent.
+  const styleVentBack = rearProf ? layStyleVent(rearProf.dedup, rearProf.H) : styleVent;
   // ── Vents the CUSTOMER placed in the gable (2026-09-15) ──
   // Each on the cap end above its wall: local z = 0 is world -Z (north) for a portrait footprint
   // and world +X (east) for a landscape one, because rg turns a quarter circle in the second case
@@ -8917,6 +9047,10 @@ function buildShed3DModel(THREE, p) {
   // Absent means gable, so every saved style renders exactly as it did.
   const dormW = roofCfg.dormerWidthFt || 0;
   const dormerIsTransom = roofCfg.dormerType === "transom";
+  // THE ROOF STEP: the dormer is seated on the roof UNDER it, chosen by what it covers along the
+  // ridge (d3DormerSeatYAt, which the panel's dormer readouts share). The seat, the transom's
+  // geometry and its cheeks all read this one profile. The one roof, everywhere else.
+  const dormerYAt = d3DormerSeatYAt(profYAt, rearProf ? rearProf.yAt : null, L, dormW, STEP ? STEP.stepFt : 0);
 
   // ── THE DORMER'S WINDOW — the customer's, not the renderer's (2026-09-07) ──────────────
   // A per-DESIGN value threaded in like p.wallHeightFt, NOT a style field: the style says
@@ -9010,7 +9144,7 @@ function buildShed3DModel(THREE, p) {
     // the ridge and the eave so the dormer cannot overhang either edge.
     const fr = Math.max(-0.85, Math.min(0.85, roofCfg.dormerOffsetU != null ? roofCfg.dormerOffsetU : 0.45));
     const dU = (S / 2) * fr;
-    const baseY = profYAt(dU);
+    const baseY = dormerYAt(dU);
     const dDepth = 2.0;
     const dormMat = mat(bodyColor);
     const body = box(dormMat, dDepth, dRise, dormW);
@@ -9059,7 +9193,7 @@ function buildShed3DModel(THREE, p) {
     // builder what their rise number will really build and the two must be the same code.
     // Read that function for why the run is derived and why the main slope is measured off
     // the profile rather than read from roofCfg.pitch.
-    const dg = d3TransomDormerGeom(roofCfg, S, profYAt, d3RoofLands(roofCfg, mass, bldgW, bldgH, H));
+    const dg = d3TransomDormerGeom(roofCfg, S, dormerYAt, d3RoofLands(roofCfg, mass, bldgW, bldgH, H));
     const { uTop, yTop, dirU, run, uOut, yOut, yBase, face } = dg;
     if (run > 0.8) {
       const du = uOut - uTop, dy = yOut - yTop;
@@ -9107,7 +9241,7 @@ function buildShed3DModel(THREE, p) {
       const CH_STEPS = 8;
       for (let i = CH_STEPS - 1; i >= 1; i--) {
         const uu = uOut + (uTop - uOut) * (i / CH_STEPS);
-        cheek.lineTo(uu, profYAt(uu));
+        cheek.lineTo(uu, dormerYAt(uu));
       }
       cheek.closePath();
       const cheekOpts = { depth: T, bevelEnabled: false };
@@ -9189,22 +9323,29 @@ function buildShed3DModel(THREE, p) {
     // or just under the roof line — never through it — at every u, on every roof type.
     // Stepped from the WALL ORIGIN across the whole end (mass.S), in the centre's own u (less uc):
     // only the strips over the centre's gable reach above its plate. Without wings, S and 0.
+    // A ROOF STEP's back cap (local z 0) is the rear section's gable, so its strips run from THAT
+    // plate up to THAT roof line (rearProf); without a step both ends read the one profile.
+    const clipTop = (u, yAt, dd) => {
+      let yTop = Math.min(yAt(u - halfW), yAt(u), yAt(u + halfW));
+      for (let i = 0; i < dd.length; i++) {
+        const vx = dd[i][0];
+        if (vx > u - halfW && vx < u + halfW) yTop = Math.min(yTop, yAt(vx));
+      }
+      return yTop;
+    };
     for (let k = 1; k * bs < mass.S; k++) {
       const u = k * bs - mass.S / 2 - mass.uc;
-      let yTop = Math.min(profYAt(u - halfW), profYAt(u), profYAt(u + halfW));
-      for (let i = 0; i < dedup.length; i++) {
-        const vx = dedup[i][0];
-        if (vx > u - halfW && vx < u + halfW) yTop = Math.min(yTop, profYAt(vx));
-      }
-      if (yTop <= Hr + 0.05) continue;           // below the plate: the wall already has it
+      const yTop = clipTop(u, profYAt, dedup);
+      const yTop0 = rearProf ? clipTop(u, rearProf.yAt, rearProf.dedup) : yTop, plate0 = rearProf ? rearProf.H : Hr;
+      if (yTop <= Hr + 0.05 && yTop0 <= plate0 + 0.05) continue;           // below the plate: the wall already has it
       // Depth: capStripOut, beside the ladder above the lean-to — the rake clamp and the flush rule
       // are written there, because the vent frame and the porch truss now read the same number.
       // STOP AT THE VENT, like a wall batten stops at a window. A strip crossing the vent's frame
       // is split into the run below it and the run above it; a strip clear of it is unchanged.
       // Every vent on the cap cuts the strip it crosses, one after another, so two vents stacked
       // on one strip leave three runs. With one vent this is exactly the old two-run split.
-      const spansFor = (rects) => {
-        let spans = [[Hr, yTop]];
+      const spansFor = (rects, lo, hi) => {
+        let spans = [[lo, hi]];
         (rects || []).forEach((r) => {
           if (!(u + halfW > r.u0 && u - halfW < r.u1)) return;
           const cut = [];
@@ -9216,8 +9357,9 @@ function buildShed3DModel(THREE, p) {
         });
         return spans;
       };
-      [[-capStripOut(capOut0), rects0], [L + capStripOut(capOutL), rectsL]].forEach(([z, rects]) => {
-        spansFor(rects).forEach((sp) => {
+      [[-capStripOut(capOut0), rects0, plate0, yTop0], [L + capStripOut(capOutL), rectsL, Hr, yTop]].forEach(([z, rects, lo, hi]) => {
+        if (hi <= lo + 0.05) return;
+        spansFor(rects, lo, hi).forEach((sp) => {
           if (sp[1] - sp[0] < 0.05) return;
           const st = box(reliefMat, halfW * 2, sp[1] - sp[0], depth);
           st.position.set(u, (sp[0] + sp[1]) / 2, z);
@@ -9289,9 +9431,11 @@ function buildShed3DModel(THREE, p) {
   };
   // A slope's endpoint is an INTERIOR JOINT when another slope shares it: a gable ridge,
   // or a gambrel knee. Everything else is a free edge that should really overhang.
-  const jointPartnerAt = (pt, self) => slopes.find((o) => o !== self
+  // `list` is one roof section's slopes (the roof step's rear section has its own; see buildSlope).
+  const jointPartnerIn = (list) => (pt, self) => list.find((o) => o !== self
     && ((Math.abs(o[0][0] - pt[0]) < 1e-6 && Math.abs(o[0][1] - pt[1]) < 1e-6)
      || (Math.abs(o[1][0] - pt[0]) < 1e-6 && Math.abs(o[1][1] - pt[1]) < 1e-6))) || null;
+  const jointPartnerAt = jointPartnerIn(slopes);
   // ── WINGS (d3Massing, 2026-09-24): each wing's body and its roof line ──────────────────────────
   // Built in rg's local frame like everything else here, so a wing's u is the building's less uc.
   // A wing is a solid prism under its roof — its CAPS are the wing's gable-end triangles, clad and
@@ -9363,7 +9507,13 @@ function buildShed3DModel(THREE, p) {
     sl.wingInExt = onRoof ? 0 : (D3.ROOF_T + 0.02) * g.pitch + 0.005;  // the slab's top edge reaches the face
     wingSlopes.push(sl);
   });
-  slopes.concat(wingSlopes).forEach((sl) => {
+  // ONE SLOPE OF ONE SECTION OF ROOF (the roof step, 2026-09-28). `sec` is the section: the eave its
+  // slopes overhang (Hr), its peak (for the ridge cap), which of its slopes meet (joint), and the run
+  // of ridge it covers, z0..z1, with the gable overhang past each end that IS a gable end (end0 at
+  // local z 0, the back; endL at z = L, the front). The slab, fascia, soffit and ridge cap span
+  // zLen centred on zMid, the rakes and fly rafters stand only at a gable end, and the rafter tails
+  // are laid across z0..z1. Called for every slope below, once per section.
+  const buildSlope = (sl, sec) => {
     const nWing0 = rg.children.length;
     const A = sl[0], B = sl[1];
     const du = B[0] - A[0], dy = B[1] - A[1];
@@ -9388,7 +9538,7 @@ function buildShed3DModel(THREE, p) {
     // Verified numerically against both profiles before landing (audit 2026-08-19).
     const t = D3.ROOF_T / 2 + 0.02;
     const jointExt = (P, dirInX, dirInY) => {
-      const o = jointPartnerAt(P, sl);
+      const o = sec.joint(P, sl);
       if (!o) {
         if (sl.wingIn === P) return sl.wingInExt;   // a wing's inner end stops at the wall
         // The centre's eave under a wing roof that lands on it (wingAttach "roof"): cut back to the landing.
@@ -9404,14 +9554,14 @@ function buildShed3DModel(THREE, p) {
     };
     const extA = jointExt(A, -ux, -uy);      // the slab extends beyond A along -u
     const extB = jointExt(B, ux, uy);
-    const slab = box(roofMat, slen + extA + extB, D3.ROOF_T, L + OV * 2);
+    const slab = box(roofMat, slen + extA + extB, D3.ROOF_T, sec.zLen);
     d3RoofSlabUVs(slab);
     slab.rotation.z = Math.atan2(dy, du);
     const shift = (extB - extA) / 2;   // recentre: the ends no longer extend equally
     slab.position.set(
       (A[0] + B[0]) / 2 + ux * shift + nx * t,
       (A[1] + B[1]) / 2 + uy * shift + ny * t,
-      L / 2
+      sec.zMid
     );
     rg.add(slab);
     // Eave fascia: a trim board hung on the slab's LOW edge, the finish
@@ -9420,7 +9570,7 @@ function buildShed3DModel(THREE, p) {
     // detached at some angles. Only slopes that reach the wall plate get one
     // (a gambrel's upper legs do not).
     const lowEnd = A[1] <= B[1] ? A : B;
-    if (lowEnd[1] <= Hr + 0.01 && (sl.wing || wingLandsAt(lowEnd) == null)) {
+    if (lowEnd[1] <= sec.Hr + 0.01 && (sl.wing || wingLandsAt(lowEnd) == null)) {
       const towardLow = lowEnd === A ? -1 : 1;
       // The eave end ON the slope line. Every eave detail registers against this point:
       // at a free edge jointExt returns OV, so the slab's end face is the plane through
@@ -9450,8 +9600,8 @@ function buildShed3DModel(THREE, p) {
         const finishY = eaveY - d3EaveFinishDrop(roofCfg, ny); // the lowest the eave finishes
         const fasTop = edgeY + 0.06;                           // just under the deck's top face
         const fasH = OV_NOTCHED ? Math.max(0.08, fasTop - finishY) : D3_EAVE.FASCIA_H;
-        const fascia = box(fasciaMat, D3_EAVE.FASCIA_T, fasH, L + OV * 2);
-        fascia.position.set(edgeU, OV_NOTCHED ? fasTop - fasH / 2 : edgeY - 0.14, L / 2);
+        const fascia = box(fasciaMat, D3_EAVE.FASCIA_T, fasH, sec.zLen);
+        fascia.position.set(edgeU, OV_NOTCHED ? fasTop - fasH / 2 : edgeY - 0.14, sec.zMid);
         rg.add(fascia);
         eaveHangY = Math.min(eaveHangY, OV_NOTCHED ? finishY : edgeY - 0.14 - 0.2);   // the board's bottom edge
         noteEaveHang(lowEnd[0], OV_NOTCHED ? finishY : edgeY - 0.14 - 0.2);
@@ -9463,9 +9613,14 @@ function buildShed3DModel(THREE, p) {
           const wallU = lowEnd[0];
           const soffitW = Math.abs(edgeU - wallU);
           if (soffitW > 0.06) {
-            const soffit = box(fasciaMat, soffitW, D3_EAVE.SOFFIT_T, L + OV * 2);
-            soffit.position.set((wallU + edgeU) / 2, deckBotY - D3_EAVE.SOFFIT_T / 2, L / 2);
+            const soffit = box(fasciaMat, soffitW, D3_EAVE.SOFFIT_T, sec.zLen);
+            soffit.position.set((wallU + edgeU) / 2, deckBotY - D3_EAVE.SOFFIT_T / 2, sec.zMid);
             rg.add(soffit);
+            // A roof step's section keeps its boxed eave's outline (the wall, the corner where the
+            // soffit meets the deck's underside, and that underside's slope), so the joint can close
+            // the lower section's box where it ends (the end cap beside the wedge). Only a stepped
+            // roof's sections carry `boxes`; the whole roof records nothing.
+            if (sec.boxes) sec.boxes.push({ wallU, cornerU: eaveU + nx * D3_EAVE.DECK_N, soffitY: deckBotY, slope: uy / ux });
           }
         }
       } else {
@@ -9506,12 +9661,15 @@ function buildShed3DModel(THREE, p) {
         // and rounded to whole bays, so both gable walls always carry an end rafter and
         // no stub bay is left over. An 8x8 at 24 o.c. gives 4 bays and 5 tails, which is
         // exactly what the walk-around video shows.
-        const tailStep = L / Math.max(1, Math.round(L / Math.max(0.5, (roofCfg.tailSpacingIn || 24) / 12)));
-        for (let z = 0; z <= L + 1e-6; z += tailStep) addTail(Math.min(z, L));
+        // Across the section's own run. A section that ends at the joint (the roof step's rear one)
+        // leaves the tail AT the joint to the section in front of it, so no two tails share a place.
+        const tRun = sec.z1 - sec.z0;
+        const tailStep = tRun / Math.max(1, Math.round(tRun / Math.max(0.5, (roofCfg.tailSpacingIn || 24) / 12)));
+        for (let z = sec.z0; z <= sec.z1 + 1e-6; z += tailStep) if (sec.endL || z < sec.z1 - 1e-6) addTail(Math.min(z, sec.z1));
         // Fly-rafter tails, one under each rake about 10 in outboard of the gable wall.
-        // Skipped when the overhang is too shallow to hold one.
+        // Skipped when the overhang is too shallow to hold one, and at a joint, which has no rake.
         const flyOut = Math.min(OV - 0.1, 10 / 12);
-        if (flyOut > 0.15) { addTail(-flyOut); addTail(L + flyOut); }
+        if (flyOut > 0.15) { if (sec.end0) addTail(-flyOut); if (sec.endL) addTail(L + flyOut); }
       }
     }
     // ── THE SHED'S HIGH EAVE (new frame, 2026-09-24) ──
@@ -9524,7 +9682,8 @@ function buildShed3DModel(THREE, p) {
     //           LEVEL soffit that boxes back to the high wall at its top. Level, whatever the
     //           framing choice: the deck RISES away from this wall, so a soffit hung off the deck's
     //           outer edge the way the low eave's is would pass up through the roof at the wall.
-    // Outside the new frame the high edge is exactly what it was.
+    // Outside the new frame the high edge is exactly what it was. A shed is never a stepped roof
+    // (d3RoofStep is gable only), so this always runs over the whole-roof section: 0..L.
     const highEave = A[1] >= B[1] ? A : B;
     if (NEW_FRAME && roofCfg.type === "shed" && highEave[1] > H + 0.01 && !jointPartnerAt(highEave, sl)) {
       const towardHigh = highEave === A ? -1 : 1;
@@ -9574,19 +9733,19 @@ function buildShed3DModel(THREE, p) {
     // (both halves of a gable, the upper legs of a gambrel) — a flat box can
     // never seat on the V of two pitches, which is why the first cut floated.
     const highEnd = A[1] >= B[1] ? A : B;
-    if (roofCfg.type !== "shed" && highEnd[1] >= profPeak - 0.01) {
+    if (roofCfg.type !== "shed" && highEnd[1] >= sec.peak - 0.01) {
       const towardHigh = highEnd === A ? -1 : 1;
       const CAPW = 0.55;
       // Same rewrite as the slabs: a standing-seam ridge cap really does carry its seams
       // across it, and without this the cap keeps stock 0..1 UVs and reads as flat colour
       // beside a correctly tiled roof.
-      const capBoard = box(roofMat, CAPW, 0.06, L + OV * 2);
+      const capBoard = box(roofMat, CAPW, 0.06, sec.zLen);
       d3RoofSlabUVs(capBoard);
       capBoard.rotation.z = Math.atan2(dy, du);
       capBoard.position.set(
         highEnd[0] - towardHigh * ux * (CAPW / 2 - 0.06) + nx * (D3.ROOF_T + 0.05),
         highEnd[1] - towardHigh * uy * (CAPW / 2 - 0.06) + ny * (D3.ROOF_T + 0.05),
-        L / 2
+        sec.zMid
       );
       rg.add(capBoard);
     }
@@ -9602,7 +9761,7 @@ function buildShed3DModel(THREE, p) {
     // rake, plain to see wherever the fascia and roof colours differ. Every other style keeps the
     // plane it has always had (the byte-for-byte rule for stored styles).
     const rakeProud = (NEW_FRAME || mass.wings.length) ? 0.01 : 0;
-    [-OV + 0.05 - rakeProud, L + OV - 0.05 + rakeProud].forEach((z) => {
+    [-OV + 0.05 - rakeProud, L + OV - 0.05 + rakeProud].filter((z, i) => (i ? sec.endL : sec.end0)).forEach((z) => {
       const rake = box(fasciaMat, slen + extA + extB, 0.32, 0.1);
       rake.rotation.z = Math.atan2(dy, du);
       rake.position.set(
@@ -9614,7 +9773,95 @@ function buildShed3DModel(THREE, p) {
     });
     // A wing's slab, eave finish and rakes carry its side, for the porch scan and the harness.
     if (sl.wing) for (let k = nWing0; k < rg.children.length; k++) rg.children[k].userData.ssWing = sl.wing;
-  });
+  };
+  // THE SECTIONS. Without a step there is ONE, the whole roof, and every number it hands buildSlope
+  // is the expression the loop has always used, so the roof is built exactly as it was. With one
+  // (d3RoofStep) the front section runs from the joint to the front and the rear section from the
+  // back to the joint on its own profile; neither overhangs the joint, and the wedge below closes
+  // what shows between them.
+  // `stepSecs` keeps the two sections of a stepped roof for the joint's trim below; null without one.
+  let stepSecs = null;
+  if (!STEP) {
+    const whole = { Hr, peak: profPeak, joint: jointPartnerAt, zLen: L + OV * 2, zMid: L / 2, z0: 0, z1: L, end0: true, endL: true };
+    slopes.concat(wingSlopes).forEach((sl) => buildSlope(sl, whole));
+  } else {
+    const zJ = STEP.stepFt;
+    const front = { Hr, peak: profPeak, joint: jointPartnerAt, zLen: L - zJ + OV, zMid: (zJ + L + OV) / 2, z0: zJ, z1: L, end0: false, endL: true, boxes: [] };
+    slopes.concat(wingSlopes).forEach((sl) => buildSlope(sl, front));
+    const rear = { Hr: rearProf.H, peak: rearProf.peak, joint: jointPartnerIn(rearProf.slopes), zLen: zJ + OV, zMid: (zJ - OV) / 2, z0: 0, z1: zJ, end0: true, endL: false, boxes: [] };
+    rearProf.slopes.forEach((sl) => buildSlope(sl, rear));
+    stepSecs = { front, rear };
+  }
+  // ── THE ROOF STEP: THE WEDGE AT THE JOINT (d3RoofStep, 2026-09-28) ───────────────────────────────
+  // Where the two sections meet, the higher one's roof stands above the lower one's by the rise at
+  // the eave and by nothing at the ridge, so on each long side a thin wedge of the higher section
+  // shows: the end of its slab and fascia, its clad cap and, under it, the top of its taller wall.
+  // It is closed with ONE fascia-coloured board per side, as the real joint is trimmed: from the
+  // lower roof's top surface (sunk 0.03 ft into it, so no line of light shows along it) up to the
+  // higher roof's, from the ridge out to the higher eave's outermost edge (its fascia's face, or the
+  // slab's corner on an open eave). It stands 0.06 ft into the LOWER section's side of the joint, so
+  // it covers the higher section's end faces from in front and shares no plane it faces with them
+  // (they sit on the joint plane facing the other way). userData.ssRoofStep "wedge", per side.
+  if (STEP) {
+    const T2 = D3.ROOF_T + 0.02;          // a slab's top face, off its slope line (buildSlope)
+    const zJ = STEP.stepFt, TW = 0.06, SINK = 0.03;
+    const hiRear = STEP.rise > 0;
+    // One section's slope on side s (its eave at u = s S/2), as its slab's top-surface line y(u),
+    // the ridge's u, and how far out its eave reaches.
+    const topLine = (list, s) => {
+      const q = list.find((one) => one.some((pt) => Math.abs(pt[0] - s * S / 2) < 1e-6));
+      if (!q) return null;
+      const E = Math.abs(q[0][0] - s * S / 2) < 1e-6 ? q[0] : q[1], Rg = E === q[0] ? q[1] : q[0];
+      const len = Math.hypot(E[0] - Rg[0], E[1] - Rg[1]) || 1;
+      const dx = (E[0] - Rg[0]) / len, dy = (E[1] - Rg[1]) / len;
+      const nx = s > 0 ? -dy : dy, ny = s > 0 ? dx : -dx;       // up and out, the slab's own normal
+      const u0 = Rg[0] + nx * T2, y0 = Rg[1] + ny * T2;
+      const eU = E[0] + dx * OV;                                // the slab's end, on the slope line
+      const slabOut = eU + nx * T2;
+      const fasOut = EAVE_OPEN ? slabOut : eU + nx * (D3.ROOF_T / 2 + 0.02) + s * D3_EAVE.FASCIA_T / 2;
+      return { yAt: (u) => y0 + (u - u0) * (dy / dx), ridgeU: Rg[0], out: s > 0 ? Math.max(slabOut, fasOut) : Math.min(slabOut, fasOut) };
+    };
+    [-1, 1].forEach((s) => {
+      const hi = topLine(hiRear ? rearProf.slopes : slopes, s), lo = topLine(hiRear ? slopes : rearProf.slopes, s);
+      if (!hi || !lo) return;
+      const gap = (u) => hi.yAt(u) - (lo.yAt(u) - SINK);
+      const uOut = hi.out, uR = hi.ridgeU, gOut = gap(uOut), gR = gap(uR);
+      if (!(gOut > 0.01)) return;
+      // From the ridge, or from where the two surfaces cross when that is short of it.
+      const uStart = gR > 0 ? uR : uR + (uOut - uR) * (-gR / (gOut - gR));
+      const pts = [[uStart, lo.yAt(uStart) - SINK], [uOut, lo.yAt(uOut) - SINK], [uOut, hi.yAt(uOut)]];
+      if (gR > 0) pts.push([uStart, hi.yAt(uStart)]);
+      const wsh = new THREE.Shape();
+      pts.forEach((pt, i) => (i === 0 ? wsh.moveTo(pt[0], pt[1]) : wsh.lineTo(pt[0], pt[1])));
+      const wedge = new THREE.Mesh(new THREE.ExtrudeGeometry(wsh, { depth: TW, bevelEnabled: false }), fasciaMat);
+      wedge.position.z = hiRear ? zJ : zJ - TW;
+      wedge.userData.ssRoofStep = "wedge";
+      wedge.userData.ssRoofStepSide = s;
+      rg.add(wedge);
+    });
+    // ── AND THE LOWER SECTION'S BOXED EAVE, CLOSED AT THE JOINT ──
+    // A notched fascia eave is a box: the level soffit, the fascia and, over them, the deck's
+    // underside rising back to the wall. The lower section's box ends open at the joint, and seen
+    // from the HIGHER side, under the higher eave, the triangle between its soffit and its deck
+    // showed the soffit's lit top face. It is closed with a thin fascia-coloured end cap on the joint
+    // plane, on the higher section's side: from the soffit's underside up to the deck's underside,
+    // from the wall out to the corner where the two meet (inside the fascia). The wedge stands on
+    // the other side of the plane and above the lower deck's top face, so the two never share a
+    // face. No soffit (an open or extended eave) leaves nothing to close. userData "eaveCap".
+    const TC = 0.04;
+    (hiRear ? stepSecs.front : stepSecs.rear).boxes.forEach((b) => {
+      const yWall = b.soffitY + (b.wallU - b.cornerU) * b.slope;   // the deck's underside over the wall
+      if (!(yWall - b.soffitY > 0.01)) return;
+      const bot = b.soffitY - D3_EAVE.SOFFIT_T;
+      const csh = new THREE.Shape();
+      [[b.wallU, bot], [b.cornerU, bot], [b.cornerU, b.soffitY], [b.wallU, yWall]].forEach((pt, i) => (i === 0 ? csh.moveTo(pt[0], pt[1]) : csh.lineTo(pt[0], pt[1])));
+      const cap = new THREE.Mesh(new THREE.ExtrudeGeometry(csh, { depth: TC, bevelEnabled: false }), fasciaMat);
+      cap.position.z = hiRear ? zJ - TC : zJ;
+      cap.userData.ssRoofStep = "eaveCap";
+      cap.userData.ssRoofStepSide = Math.sign(b.wallU);
+      rg.add(cap);
+    });
+  }
   // ── PROJECTING PORCH (roof.porchOutFt, 2026-09-17) ──────────────────────────────────────────
   // A deck, posts and a low roof of its own IN FRONT of one gable end, as on the Barnstead
   // walk-around: a 16x24 gambrel with a 6.5 ft porch across its front end. The recessed porch above
@@ -9980,7 +10227,8 @@ function buildShed3DModel(THREE, p) {
       // the point, not a gap. The band sits at the centre's eave with wings (Hr = Hc).
       const drop = porchGeom && porchCapZ === z0 && !(Number(roofCfg.porchAttachFt) > 0) && !mass.wings.length ? Math.max(0, Hr - 0.2 - porchGeom.yHigh) : 0;
       const band = box(trimMat, S + 2 * (trimFace + 0.01), 0.3 + drop, face - back);
-      band.position.set(0, Hr + SS_PLATE_BAND_TOP - 0.15 - drop / 2, z0 + s * (back + face) / 2);
+      // A ROOF STEP's back cap stands on the rear section's plate.
+      band.position.set(0, (z0 === 0 && rearProf ? rearProf.H : Hr) + SS_PLATE_BAND_TOP - 0.15 - drop / 2, z0 + s * (back + face) / 2);
       band.userData.ssPorch = "band";
       rg.add(band);
     });
@@ -10043,7 +10291,15 @@ function buildShed3DModel(THREE, p) {
     // nobody builds, and the priced one is the one that has to be there. The other end keeps its.
     const ends = [END0, ENDL].filter((end) => !(end === END0 ? gableVentAt0 : gableVentAtL));
     const ventMat = ends.length ? louverMat(vH) : null;
-    ends.forEach((end) => drawCapVent(rg, end, vCu, vCy, vW, vH, F, trimMat, ventMat));
+    ends.forEach((end) => {
+      // A ROOF STEP's back cap is the rear section's gable, with the vent laid out in it (or none).
+      if (end === END0 && rearProf) {
+        const b = styleVentBack;
+        if (b) drawCapVent(rg, end, b.vCu, b.vCy, b.vW, b.vH, b.F, trimMat, louverMat(b.vH));
+        return;
+      }
+      drawCapVent(rg, end, vCu, vCy, vW, vH, F, trimMat, ventMat);
+    });
   }
   // A PLACED gable vent: the same drawCapVent, in its own group so it is PICKABLE. The pick raycasts
   // openingsGroup and interiorGroup only (rg is neither), so it goes into openingsGroup with rg's
@@ -10151,7 +10407,8 @@ function buildShed3DModel(THREE, p) {
     let cTop = cH;
     if (cH > H + 1e-9) {
       const uc = (uAxisIsX ? c[0] : c[1]) - mass.uc;   // in rg's u: the centre's, with wings
-      cTop = Math.max(H, Math.min(cH, profYAt(uc - Math.sign(uc) * half)));
+      // Under the roof over THAT corner: a roof step's rear section at the back (north) corners.
+      cTop = Math.max(H, Math.min(cH, (rearProf && c[1] < 0 ? rearProf.yAt : profYAt)(uc - Math.sign(uc) * half)));
     }
     // On a raised floor (2026-09-25) the board runs on down over the siding's skirt to its bottom
     // edge, as the cladding does; 0 on every other building, where it stands on the floor.
@@ -10244,7 +10501,7 @@ function buildShed3DModel(THREE, p) {
         // the centre's fascia and soffit hang below its wall top, and a lamp at wTop - 0.75 sat in them.
         const ownHang = eaveHangBy[it.wall] != null ? eaveHangBy[it.wall] - 0.45 : Infinity;
         const EAVE_CAP = wTop > H + 0.01 ? Math.min(wTop - 0.75, ownHang) : Math.min(H - 0.75, eaveHangY - 0.45);
-        let top = gableEnd ? Math.max(EAVE_CAP, (mass.wings.length ? d3MassingTopAt(mass, u) : profYAt(u)) - 0.5) : EAVE_CAP;
+        let top = gableEnd ? Math.max(EAVE_CAP, (mass.wings.length ? d3MassingTopAt(mass, u) : (rearProf && it.wall === "north" ? rearProf.yAt : profYAt)(u)) - 0.5) : EAVE_CAP;
         // On a projecting porch's wall it hangs under the porch ceiling, the way it hangs under an
         // eave: rising into the gable would put it behind the porch roof.
         if (porchGeom && it.wall === porchOut.wall) top = Math.min(top, porchGeom.ceilWall - 0.45);
@@ -10619,6 +10876,8 @@ function buildShed3DModel(THREE, p) {
   // Where the lean-to meets the building as built (d3LeanToGeom), or null without an attach: for
   // tests/harness/attach.mjs; nothing in the app reads it.
   model.leanTo = leanAt;
+  // The roof step as built (d3RoofStep), for tests/harness/roofStep.mjs; absent without one.
+  if (STEP) model.roofStep = { stepFt: STEP.stepFt, rise: STEP.rise, Hf: STEP.Hf, Hb: STEP.Hb, pitch: STEP.pitch, pitchB: STEP.pitchB, rearPeak: rearProf.peak };
   // The ground's depth below the floor's top (d3GradeFt) and, on blocks or piers, the skirt, runners
   // and supports as built, for tests/harness/foundation.mjs; nothing in the app reads them.
   model.grade = GRADE;
@@ -16939,11 +17198,15 @@ function ssRoofInFeet(roof, spanFt, centre) {
 // 12 porch roof on 7 ft walls is built at 0.6 in 12, and a line saying "3 in 12" beside it sent
 // the builder to check a roof that is not on screen. With the readout the posts and pitch are the
 // built ones, and a lowered pitch says so; without it (no size yet) they are the spec's.
+// The ROOF STEP the same way (2026-09-28): `stepBuilt` is the panel's d3RoofStep of this spec at
+// that size, and the step is said as DRAWN there. A 56 ft step on a 14x40 cabin behind a 6 ft porch
+// is drawn at 30 ft, a 12 ft one on a 12x16 at 6, and beside wings or on an old-frame landscape size
+// there is no step at all (null), so nothing is said. Undefined (no size yet) says the spec's own.
 // `massBuilt` (optional) is d3Massing of the spec at that size: with a wing attach (roof.wingAttach,
 // 2026-09-28) where the wing roof meets and how tall the middle stands are said as BUILT -- a distance
 // moved down to clear the eave, held short of the ridge, or a wing roof that cannot reach the roof and
 // meets the wall under it, and a middle held 1 ft over the walls.
-function ssDrewWords(spec, porchBuilt, massBuilt) {
+function ssDrewWords(spec, porchBuilt, stepBuilt, massBuilt) {
   const roof = (spec && spec.roof) || {};
   const raisedOn = spec && (spec.foundation === "blocks" || spec.foundation === "piers") ? spec.foundation : null;
   const type = roof.type || "gable";
@@ -16966,6 +17229,23 @@ function ssDrewWords(spec, porchBuilt, massBuilt) {
     const meets = place === "roof" ? ` that runs up onto the middle section's roof${by ? `, ${by} above its eave` : ""}`
       : place === "wall" ? ` that meets the middle section's wall ${by ? `${by} below its eave` : "at its eave"}` : "";
     out.push(`A lower wing ${ssFtInWords(wing)} wide runs along ${where} under its own roof${meets}${centre}.`);
+  }
+  // A ROOF STEP (2026-09-28): where the rear roof section starts and which way its eave steps, only
+  // where the style gives both keys on a roof that can carry them (the sanitiser's rule), and as
+  // DRAWN where the panel hands over d3RoofStep at its size (`stepBuilt`). A number the renderer
+  // held back is said as drawn, with the one given beside it, the porch pitch's way.
+  const stepAt = Number(roof.rearStepFt) || 0, stepRise = Number(roof.rearEaveRiseFt) || 0;
+  if (type === "gable" && roof.front !== "eave" && stepAt > 0.5 && Math.abs(stepRise) >= 0.01) {
+    const sb = stepBuilt === undefined ? { stepFt: stepAt, rise: stepRise }
+      : stepBuilt && isFinite(Number(stepBuilt.stepFt)) && isFinite(Number(stepBuilt.rise)) ? stepBuilt : null;
+    if (sb) {
+      const inches = (ft) => Math.round(Math.abs(Number(ft)) * 12);
+      const atNote = ssFtInWords(Number(sb.stepFt)) === ssFtInWords(stepAt) ? ""
+        : Number(sb.stepFt) < stepAt ? ` (held there from ${ssFtInWords(stepAt)} to leave 4 ft of room in front of it)`
+        : ` (moved out from ${ssFtInWords(stepAt)}: a step is never drawn nearer than 4 ft to the back wall)`;
+      const riseNote = inches(sb.rise) < inches(stepRise) ? ` (lowered from ${inches(stepRise)} in: the roof is too flat for more)` : "";
+      out.push(`The roof steps ${ssFtInWords(Number(sb.stepFt))} from the back wall${atNote}: behind the step its edge sits ${inches(sb.rise)} in ${Number(sb.rise) > 0 ? "higher" : "lower"}${riseNote}, and the two ridges line up.`);
+    }
   }
   // "wall" in the new frame, where the front can be a long side; "end" on every older style,
   // where the porch was only ever on a gable end and the panel has always called it that.
@@ -17067,6 +17347,10 @@ const SS_CHANGE_WORDS = {
   "roof.porchPosts": ["How many posts the porch has", (v) => `${Math.round(Number(v))} posts`],
   "roof.porchPitch": ["How steep the porch roof is", (v) => `${Math.round(Number(v) * 120) / 10} in 12`],
   "roof.porchSteps": ["Where the porch steps are", (v) => ({ left: "on the left", center: "in the middle", right: "on the right" })[String(v)] || String(v)],
+  // The roof step (2026-09-28), in the words its panel controls use: feet from the back wall, and the
+  // rear roof edge's rise in inches (a lower one says so).
+  "roof.rearStepFt": ["Where the roof steps, from the back wall", (v) => (Number(v) > 0.5 ? ssFtInWords(Number(v)) : "no step")],
+  "roof.rearEaveRiseFt": ["How much higher the rear roof edge is", (v) => (Number(v) < 0 ? `${Math.round(-Number(v) * 12)} in lower` : `${Math.round(Number(v) * 12)} in`)],
   gableVent: ["The vent in the gable", (v) => (v && v.widthFrac > 0 ? "there" : "not there")],
   foundation: ["What it sits on", (v) => ({ skids: "runners", blocks: "concrete blocks", piers: "concrete piers" })[String(v)] || "a slab"],
   // A raised floor's height (2026-09-25), top-level beside foundation, in the panel's own words.
@@ -21033,6 +21317,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const roof = { ...p.spec.roof, type };
     if (type === "shed") { delete roof.front; for (const k of CAL_WING_KEYS) delete roof[k]; }
     else delete roof.highSide;
+    // The roof step (2026-09-28) is a gable's only: the sanitiser drops both keys on anything else.
+    if (type !== "gable") { delete roof.rearStepFt; delete roof.rearEaveRiseFt; }
     return { ...p, spec: { ...p.spec, roof } };
   });
   // The wings on and off. Off deletes all four keys: a builder who says "no wings" has said
@@ -22551,6 +22837,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // The porch "What we drew" describes, as BUILT at that same size (ssDrewWords): the renderer's
   // own numbers, so a lowered porch pitch or a capped post count is said as drawn.
   const calDrewPorch = calReadoutMass ? d3PorchReadout(adminCal.spec, `${calReadoutW}x${calReadoutL}`) : null;
+  // ...and the roof step as DRAWN at that size (d3RoofStep): null where the renderer draws none there,
+  // so the line says nothing about a step that is not on screen.
+  const calDrewStep = calReadoutMass ? d3RoofStep(adminCal.spec.roof, calReadoutW, calReadoutL, Number(adminCal.spec.wallHeightFt) || D3.WALL_H) : undefined;
   const calChecksAnswered = SS_CHECKS.filter(([k]) => adminCalAnswers[k]).length;
   // ⚠️ THE ONE SLICE EACH QUESTION IS ABOUT, so a "No" can be told from a "No, fixed". Cheap
   // and exact: every fix panel writes adminCal.spec, so comparing the slice at answer time
@@ -22562,7 +22851,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const roof = spec.roof || {};
     // The 2026-09-24 keys are in the slice of the question whose panel sets them: which way the
     // building faces and the wings are the ROOF's shape, the attach height and width the PORCH's.
-    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt, roof.wingAttach, roof.wingAttachFt]);
+    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt, roof.wingAttach, roof.wingAttachFt, roof.rearStepFt, roof.rearEaveRiseFt]);
     if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps, roof.porchStepCount]);
     // What it stands on and how high (2026-09-25) are set in the walls panel, beside the wall.
     if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt, spec.gradeFallFt, spec.gradeFallToward]);
@@ -24967,7 +25256,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       are true at once, so the number stays a ratio on the wire and becomes
                       feet here. */}
                   <div style={{ marginTop: 10, fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
-                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec, calDrewPorch, calReadoutMass)}
+                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec, calDrewPorch, calDrewStep, calReadoutMass)}
                   </div>
                   {/* ── THE FOUR QUESTIONS ───────────────────────────────────────────────
                       ONLY WHERE THERE IS SOMETHING TO ANSWER THEM AGAINST, which is the same
@@ -25319,6 +25608,47 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge offset (−0.35…0.35)
                   <input type="number" step="0.05" {...calNumProps("ridgeOffset", adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0, (n) => calSetRoof({ ridgeOffset: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
+                {/* THE ROOF STEP (2026-09-28): a gable built in two sections, the rear one's roof edge
+                    higher (or lower) than the front's while the two ridges line up. Offered on a gable
+                    whose front is not a long side, the only roof Save keeps it on; both numbers or
+                    neither, and a cleared box deletes its key (calOptNumProps). The step is typed in
+                    feet from the BACK wall like every length here, the rise in INCHES because that is
+                    the size it comes in (7 in is 0.58 ft). The line under the rise is d3RoofStep's own
+                    answer at this size, so it says what the preview draws, or why it draws no step. */}
+                {adminCal.spec.roof.type === "gable" && adminCal.spec.roof.front !== "eave" && (() => {
+                  const roof = adminCal.spec.roof;
+                  const hint = { display: "block", fontWeight: 400, marginTop: 2 };
+                  const hasStep = roof.rearStepFt != null && roof.rearStepFt !== "";
+                  const hasRise = roof.rearEaveRiseFt != null && roof.rearEaveRiseFt !== "";
+                  const st = d3RoofStep(roof, bldgW, bldgH, Number(adminCal.spec.wallHeightFt) || D3.WALL_H);
+                  const riseIn = (ft) => Math.round(Math.abs(ft) * 120) / 10;
+                  const why = !hasStep && !hasRise ? "Blank: one roof from the front to the back."
+                    : !(hasStep && hasRise) ? "Give both numbers. One without the other is not drawn or saved."
+                    : st ? `Drawn: the back ${ssFtInWords(st.stepFt)} has its own roof, its edge ${riseIn(st.rise)} in ${st.rise > 0 ? "higher" : "lower"} at ${Math.round(st.pitchB * 120) / 10} in 12, so the ridges line up.`
+                    : !(Number(roof.rearStepFt) > 0.5) ? "A step of 0 is no step."
+                    : !(Math.abs(Number(roof.rearEaveRiseFt)) >= 0.01) ? "A rise of 0 draws no step."
+                    : (Number(roof.wingWidthFt) || 0) > 0.5 ? "Not drawn with lower wings: they run the length of the building at one height."
+                    : (Number(roof.leanToWidthFt) || 0) > 0.5 ? "Not drawn with a lean-to: it runs the length of the building at one height."
+                    : roof.porchEnd === "back" && ((Number(roof.porchDepthFt) || 0) > 0.5 || (Number(roof.porchOutFt) || 0) > 0.5) ? "Not drawn with the porch at the back."
+                    : !d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? `Not drawn on ${sel.size || "this size"}: its ridge runs side to side. Set the front wall to a gable end.`
+                    : `Not drawn: ${sel.size || "this size"} is too short to leave 4 ft each side of the step.`;
+                  return (
+                    <>
+                      <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof step from back (ft)
+                        <input type="number" step="0.5" min="0" max="56" placeholder="blank = no step" data-ss-roof-step="at"
+                          {...calOptNumProps("rearStepFt", roof.rearStepFt, [0, 56], (n) => calSetRoofOpt("rearStepFt", n))}
+                          style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                        <span style={hint}>Where the rear section's own roof starts, measured from the back wall.</span>
+                      </label>
+                      <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Rear roof edge higher by (in)
+                        <input type="number" step="0.5" min="-18" max="18" placeholder="negative = lower" data-ss-roof-step="rise"
+                          {...calOptNumProps("rearEaveRiseIn", roof.rearEaveRiseFt == null || roof.rearEaveRiseFt === "" ? null : Math.round(Number(roof.rearEaveRiseFt) * 1200) / 100, [-18, 18], (n) => calSetRoofOpt("rearEaveRiseFt", n == null ? null : n / 12))}
+                          style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                        <span style={hint} data-ss-roof-step="why">{why}</span>
+                      </label>
+                    </>
+                  );
+                })()}
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height (ft)
                   <input type="number" step="0.5" {...calNumProps("wallHeightFt", adminCal.spec.wallHeightFt || 8, (n) => calSet({ wallHeightFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
