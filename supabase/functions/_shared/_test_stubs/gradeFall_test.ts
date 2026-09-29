@@ -658,6 +658,28 @@ Deno.test("d3GradeAt on four corners: eased level outside the footprint, no crea
   for (const d of [-5, -1, -0.3, 0, 2, 7.5, 16, 16.4, 17, 30]) assertAlmostEquals(F.d3GradeEaseFt(d, 16, 2) + F.d3GradeEaseFt(16 - d, 16, 2), 16, 1e-12, String(d));
 });
 
+Deno.test("corners: past the footprint the ground stays within 3 in of the highest and the deepest corner, even on a saddle", () => {
+  // Review 2026-09-30: the two eases compounded past a corner, ~0.55 ft over the zero corner on a saddle,
+  // through a floor at its lowest height. Held to the fall's own bound; every sample, 3000 random corners.
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const low = { ...PIERS, floorHeightFt: 0.3 };
+  for (let i = 0; i < 3000; i++) {
+    const c = { fl: rnd() * 6, fr: rnd() * 6, bl: rnd() * 6, br: rnd() * 6 };
+    if (i % 3 === 0) Object.assign(c, { fl: 0, br: 0, fr: 6, bl: 6 });
+    const spec = { ...low, gradeCornersFt: c };
+    const g0 = F.d3GradeFt(spec), deep = F.d3GradeMaxFt(spec);
+    for (const [x, z] of [[-W, -L], [W, L], [-W, L], [W, -L], [0, -L], [W, 0], [-W / 2 - 1, L / 2 + 1], [7, -18]]) {
+      const y = F.d3GradeAt(spec, W, L, x, z);
+      assert(y >= g0 - 0.25 - 1e-6 && y <= deep + 0.25 + 1e-6, `${JSON.stringify(c)} at ${x},${z}: ${y} not in [${g0 - 0.25}, ${deep + 0.25}]`);
+      assert(y > 0, `the grass stays under the floor's top: ${JSON.stringify(c)} at ${x},${z}: ${y}`);
+    }
+  }
+  // Inside the footprint nothing is clamped: a bilinear surface is between its corners.
+  const sad = { ...low, gradeCornersFt: { fl: 0, fr: 6, bl: 6, br: 0 } };
+  assertAlmostEquals(F.d3GradeAt(sad, W, L, 0, 0), 0.35 + 3, 1e-12);
+});
+
 Deno.test("corners: the steps, the floor read at the front and the self-check's eye all follow the corners", () => {
   // A back porch; the ground lowest at the back-right corner. Its steps stand on the deepest ground under the
   // flight. "left" is the left of someone facing the porch from behind the building: the back-right (east) end.

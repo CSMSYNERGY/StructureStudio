@@ -5159,6 +5159,11 @@ function d3GradeEaseFt(d, D, B) {
 // d3GradeFallBlendFt of the steepest change along it, so the site levels off a hair past the drops at
 // the edges. Each axis is measured from its HIGHER side, so a fall read as corners is the number the
 // single-plane fall always gave, to the last bit.
+// HELD TO 3 IN PAST THE HIGHEST AND THE DEEPEST CORNER (review, 2026-09-30). The two eases compound
+// past a corner, and on twisted corners (a saddle: 0, 6, 6, 0) the grass rose ~0.55 ft over the zero
+// corner, through a floor at the lowest height. A fall never passes 3 in either side (the blend's
+// own bound), so it is never clamped and stays the old plane exactly; the hair of slack keeps its
+// rounding out of the clamp.
 function d3GradeDropAt(c, W, L, x, z) {
   const Dx = Math.max(1, W), Dz = Math.max(1, L);
   const dx = Math.max(Math.abs(c.fr - c.fl), Math.abs(c.br - c.bl));
@@ -5170,7 +5175,9 @@ function d3GradeDropAt(c, W, L, x, z) {
   const front = row(c.fl, c.fr), back = row(c.bl, c.br);
   const fromBack = c.fl + c.fr > c.bl + c.br;
   const sz = d3GradeEaseFt(fromBack ? z + Dz / 2 : Dz / 2 - z, Dz, Bz);
-  return fromBack ? back + ((front - back) * sz) / Dz : front + ((back - front) * sz) / Dz;
+  const v = fromBack ? back + ((front - back) * sz) / Dz : front + ((back - front) * sz) / Dz;
+  const deep = Math.max(c.fl, c.fr, c.bl, c.br);
+  return Math.min(deep + 0.25 + 1e-9, Math.max(-0.25 - 1e-9, v));
 }
 // HOW FAR BELOW THE FLOOR'S TOP THE GROUND IS AT (x, z), in the building's frame: the footprint
 // centred on the origin, W along x, L along z. d3GradeFt at the highest corner, and the ground
@@ -27535,7 +27542,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const raised = spec ? d3RaisedFoundation(spec) : null;
     // THE GROUND AT EACH CORNER (2026-09-29). Carolyn, on this page: "we need to be able to put in where
     // the zero is ... put in four corners." A top view of the footprint, drawn to its width and length
-    // with FRONT (the door side) on its front edge, and a number box at each corner: how many feet lower
+    // with FRONT on its south edge (where the 3D's ground label puts FRONT, the corners' own frame) and a
+    // small bar on the wall the style calls its front (d3FrontGableWall: the porch end on an old-frame
+    // building, which can be a side or the back; review 2026-09-30), and a number box at each corner: how many feet lower
     // the ground is there, blank or 0 the highest. Each box says what it draws ("1' 6" lower",
     // "highest"), the plan shades the ground darker where it is lower with an arrow down the slope, and
     // the floor height is measured at the highest corner. A style storing a fall (2026-09-28) opens with
@@ -27545,6 +27554,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const grade = spec ? d3GradeFt(spec) : 0;
     const fdCur = spec && D3_FOUNDATIONS.indexOf(spec.foundation) >= 0 ? spec.foundation : "";
     const gcSay = (k) => (!fall ? "level" : fall[k] > 0 ? `${d3FtIn(fall[k])} lower` : "highest");
+    // The plan's side the style's front end is on, when it is not the south edge marked FRONT.
+    const gcFrontSide = spec && raised ? ({ north: "back", west: "left", east: "right" })[d3FrontGableWall(roof, bldgW, bldgH)] || null : null;
     const gcCell = (k, name, cls) => (
       <div key={k} className={"ss-adv-gc-c " + cls} data-ss-adv-corner={k}>
         <span className="ssd-fld-l">{name}</span>
@@ -27584,7 +27595,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const porch = d3ProjectingPorch(roof, W, L);
       const pd = porch ? Math.min(M - 3, Math.max(4, porch.D * s)) : 0;
       const porchRect = porch && ({ north: [x0, y0 - pd, pw, pd], south: [x0, y1, pw, pd], west: [x0 - pd, y0, pd, ph], east: [x1, y0, pd, ph] })[porch.wall];
-      const dw = Math.max(7, Math.min(pw * 0.3, 3 * s));
+      const doorWall = d3FrontGableWall(roof, W, L);
+      const dw = Math.max(7, Math.min((doorWall === "west" || doorWall === "east" ? ph : pw) * 0.3, 3 * s));
+      const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+      const door = ({ north: [mx - dw / 2, y0 - 2, dw, 4], west: [x0 - 2, my - dw / 2, 4, dw], east: [x1 - 2, my - dw / 2, 4, dw] })[doorWall] || [mx - dw / 2, y1 - 2, dw, 4];
       const pts = { bl: [x0, y0], br: [x1, y0], fl: [x0, y1], fr: [x1, y1] };
       return (
         <svg viewBox={`0 0 ${pw + 2 * M} ${ph + 2 * M}`} role="img" data-ss-adv-corner-plan=""
@@ -27594,7 +27608,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {cells}
           {porchRect && <rect x={porchRect[0]} y={porchRect[1]} width={porchRect[2]} height={porchRect[3]} style={{ fill: "none", stroke: "var(--ss-subtle)" }} strokeWidth={1} strokeDasharray="3 2" />}
           <rect x={x0} y={y0} width={pw} height={ph} style={{ fill: "none", stroke: "var(--ss-ink)" }} strokeWidth={1.5} />
-          <rect x={(x0 + x1) / 2 - dw / 2} y={y1 - 2} width={dw} height={4} rx={1} style={{ fill: "var(--ss-accent-fill)" }} />
+          <rect x={door[0]} y={door[1]} width={door[2]} height={door[3]} rx={1} style={{ fill: "var(--ss-accent-fill)" }} data-ss-adv-corner-door={doorWall} />
           <text x={(x0 + x1) / 2} y={y1 - 6} textAnchor="middle" fontSize={8.5} fontWeight={800} letterSpacing={0.6} style={{ fill: "var(--ss-ink)" }}>FRONT</text>
           <text x={(x0 + x1) / 2} y={y0 + 11} textAnchor="middle" fontSize={7.5} fontWeight={700} letterSpacing={0.5} style={{ fill: "var(--ss-subtle)" }}>BACK</text>
           {gn > 1e-9 && (
@@ -27654,8 +27668,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   {gcCell("fl", "Front left", "is-fl")}
                   {gcCell("fr", "Front right", "is-fr is-r")}
                 </div>
-                {advNoteEl(["0 is the highest corner.",
-                  `Floor height is measured there. Type how many feet lower the ground is at each corner: 1.5 is 18", 2 is two feet. Blank or 0 is the highest ground. The ${raised} stand taller where it is lower, and porch steps and a customer's ramp reach down to the ground where they stand. FRONT is the door side; left and right are as you face it, the sides the 3D's Views menu calls L and R${calPorchKind(roof) !== "none" ? ", wherever the porch is." : "."}`])}
+                {advNoteEl(["0 is the highest corner. Floor height is taken there.",
+                  `Floor height is measured at the highest corner. Type how many feet lower the ground is at each corner: 1.5 is 18", 2 is two feet. Blank or 0 is the highest ground. The ${raised} stand taller where it is lower, and porch steps and a customer's ramp reach down to the ground where they stand. FRONT is the side the 3D marks FRONT on the ground, the one its Views menu calls F; left and right are as you face it, L and R${calPorchKind(roof) !== "none" ? ", wherever the porch is." : "."}${gcFrontSide ? ` This style's front end (the small bar) is the ${gcFrontSide} side of the plan.` : ""}`])}
               </div>
             )}
           </div>

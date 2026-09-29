@@ -277,6 +277,8 @@ export type D3Spec = {
 // The four corners of a gradeCornersFt value, each held to GRADE_FALL_FT (anything that is not a
 // number above 0 is 0), or null when it is not an object or no corner is above 0. The sanitiser's
 // reading and the carry-forward's, so a stored value is re-held exactly as a sent one.
+// Whether a sent gradeCornersFt overrides the fall: the renderer's own test (d3GradeFall), any object.
+const cornersObject = (v: unknown): boolean => !!v && typeof v === "object";
 function gradeCorners(v: unknown): { fl: number; fr: number; bl: number; br: number } | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
   const src = v as Record<string, unknown>;
@@ -566,9 +568,12 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     }
     // The ground at each corner (2026-09-29): all four, when some corner is lower than 0 ft, in place
     // of the fall. An explicit null (the current panels' "level ground") or all zeros stores nothing.
+    // ANY corners OBJECT drops the fall, all zeros too (review, 2026-09-30): the renderer's d3GradeFall
+    // ignores the fall beside any gradeCornersFt object and draws level ground, so what is stored is
+    // what was previewed. null (or no key) leaves the fall to its own keys.
     const gc = gradeCorners(src.gradeCornersFt);
-    if (gc) {
-      d3.gradeCornersFt = gc;
+    if (gc) d3.gradeCornersFt = gc;
+    if (cornersObject(src.gradeCornersFt)) {
       delete d3.gradeFallFt;
       delete d3.gradeFallToward;
     }
@@ -652,7 +657,7 @@ export function carryForwardFoundation(clean: D3Spec, sent: unknown, stored: unk
     const gc = gradeCorners(was.gradeCornersFt);
     if (gc) clean.gradeCornersFt = gc;
   }
-  if (clean.gradeCornersFt) {
+  if (clean.gradeCornersFt || cornersObject(s.gradeCornersFt)) {
     delete clean.gradeFallFt;
     delete clean.gradeFallToward;
     return;

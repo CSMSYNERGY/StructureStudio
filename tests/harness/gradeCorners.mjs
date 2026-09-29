@@ -8,7 +8,8 @@
 //      fall's "Ground falls away" and "Toward": a top view of the footprint drawn to its width and length
 //      (FRONT on its front edge, with the door mark, BACK at the top), a number box at each corner and a
 //      readout under each ("level" on level ground); "Level ground" is off until there is a slope; the
-//      one-line hint "0 is the highest corner. Floor height is measured there."
+//      one-line hint "0 is the highest corner. Floor height is taken there." (the brief's "measured"
+//      did not fit the card's one line at 1440, review 2026-09-30)
 //   2  typed corners read out live ("highest", 1' 6" lower, 2' 0" lower); the plan shades the low ground
 //      and its arrow points down the slope; the Floor height box says it is at the highest corner
 //   3  ⚠️ the 3D beside it: model.gradeCorners is the typed corners; every pier's foot is at the ground
@@ -19,6 +20,9 @@
 //      sends gradeCornersFt null
 //   6  a style storing a FALL, started from, opens with the fall's corners in the boxes; an edited corner
 //      saves corners in place of the fall
+//   6b an old-frame gable wider than long with a porch (its front end is the WEST wall): the door mark sits
+//      on the west edge beside the porch, FRONT stays on the corners' south edge, and the (i) says the
+//      style's front end is the left side (review 2026-09-30: it used to call FRONT "the door side")
 //   7  at a phone's width the control fits: no sideways page scroll, the four boxes and the plan on screen
 //   8  zero page errors
 //
@@ -71,6 +75,10 @@ const CONFIG = {
     // A style that stores the ground as a FALL (2026-09-28): 2 ft to the back.
     { value: "hfall", label: "Harness Hillside", sizes: [{ label: "12x16", w: 12, h: 16, price: 5000 }],
       d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6 }, siding: "batten", colors: COLORS, wallHeightFt: 8, foundation: "piers", floorHeightFt: 1.5, gradeFallFt: 2, gradeFallToward: "back" } },
+    // An OLD-FRAME gable wider than long with a porch (review 2026-09-30): its gable ends are west and east,
+    // so the style's front end, and its porch, are on the WEST wall, not under the plan's FRONT.
+    { value: "hwide", label: "Harness Wide Porch", sizes: [{ label: "16x12", w: 16, h: 12, price: 5000 }],
+      d3: { roof: { type: "gable", pitch: 0.4, overhang: 0.6, porchOutFt: 6 }, siding: "batten", colors: COLORS, wallHeightFt: 8, foundation: "piers", floorHeightFt: 1.5 } },
   ],
   defaultSizes: [],
   options: [],
@@ -227,13 +235,21 @@ try {
       words: svg ? [...svg.querySelectorAll("text")].map((t) => t.textContent) : [],
       ratio: outline ? Number(outline.getAttribute("width")) / Number(outline.getAttribute("height")) : null,
       note: el ? el.querySelector(".ss-adv-note").firstChild.textContent : "",
+      noteH: el ? Math.round(el.querySelector(".ss-adv-note").getBoundingClientRect().height) : null,
+      noteW: el ? Math.round(el.querySelector(".ss-adv-note").getBoundingClientRect().width) : null,
+      noteTextW: el ? (() => { const r = document.createRange(); r.selectNodeContents(el.querySelector(".ss-adv-note").firstChild); return Math.round(r.getBoundingClientRect().width); })() : null,
+      more: el ? el.querySelector(".ss-adv-note .ss-adv-why-t").textContent : "",
+      door: svg ? (svg.querySelector("[data-ss-adv-corner-door]") || { getAttribute: () => null }).getAttribute("data-ss-adv-corner-door") : null,
       level: el ? el.querySelector('[data-ss-adv-f="groundLevel"]').disabled : null,
       fall: !!document.querySelector('[data-ss-adv-f="gradeFallFt"],[data-ss-adv-f="gradeFallToward"]'),
     };
   });
   ok("1: piers show 'Ground at each corner' with a box at each of the four corners", f.head === "Ground at each corner" && f.boxes === 4, JSON.stringify(f));
   ok("1: ...around a top view drawn to the footprint (12 x 16), FRONT on its front edge and BACK at the top", near(f.ratio, W / L, 1e-6) && f.words.includes("FRONT") && f.words.includes("BACK"), JSON.stringify(f));
-  ok("1: ...the one-line hint, and 'Level ground' off while the ground is level", f.note === "0 is the highest corner." && f.level === true, JSON.stringify(f));
+  ok("1: ...the one-line hint, both sentences on one visible line, and 'Level ground' off while the ground is level",
+    f.note === "0 is the highest corner. Floor height is taken there." && f.noteH <= 20 && f.level === true, JSON.stringify(f));
+  ok("1: ...the door mark on the south edge under FRONT (this style's front end), and the (i) never calls FRONT 'the door side'",
+    f.door === "south" && !/door side/.test(f.more) && /the 3D marks FRONT on the ground/.test(f.more) && !/front end \(the small bar\)/.test(f.more), JSON.stringify({ door: f.door, more: f.more }));
   ok("1: ...every corner reads 'level' and no box has a number; the fall's two controls are gone",
     same(await says(page), { fl: "level", fr: "level", bl: "level", br: "level" }) && same(await values(page), { fl: "", fr: "", bl: "", br: "" }) && !f.fall);
 
@@ -327,6 +343,35 @@ try {
   ok("6: ⚠️ ...and saves the four corners with the fall's keys null",
     sd && same(sd.body.d3.gradeCornersFt, { fl: 0, fr: 0.5, bl: 2, br: 2 }) && sd.body.d3.gradeFallFt === null && sd.body.d3.gradeFallToward === null,
     sd && JSON.stringify({ c: sd.body.d3.gradeCornersFt, f: sd.body.d3.gradeFallFt, t: sd.body.d3.gradeFallToward }));
+  // 6b ── an old-frame building whose front end is a side (review 2026-09-30) ──
+  await page.locator('[data-ss-adv="start"] [data-ss-style="hwide"]').click();
+  await settle(page, 1200);
+  // The page keeps its own Width x Length: 16 wide by 12 long, so the gable ends are west and east.
+  const wBox = page.getByLabel("Width (ft)", { exact: true }), lBox = page.getByLabel("Length (ft)", { exact: true });
+  await wBox.fill("16"); await lBox.fill("12"); await lBox.blur();
+  await settle(page, 1200);
+  await page.locator("#ss-step-adv-walls").scrollIntoViewIfNeeded();
+  const wide = await page.evaluate(() => {
+    const el = document.querySelector('[data-ss-adv-f="gradeCornersFt"]');
+    const svg = el && el.querySelector("svg[data-ss-adv-corner-plan]");
+    const outline = svg && [...svg.querySelectorAll("rect")].find((r) => (r.style.stroke || "").includes("--ss-ink"));
+    const porch = svg && svg.querySelector('rect[stroke-dasharray]');
+    const door = svg && svg.querySelector("[data-ss-adv-corner-door]");
+    const n = (r, a) => (r ? Number(r.getAttribute(a)) : NaN);
+    return svg ? { wall: door && door.getAttribute("data-ss-adv-corner-door"), x0: n(outline, "x"), w: n(outline, "width"),
+      doorX: n(door, "x"), doorW: n(door, "width"), doorH: n(door, "height"), porchX: n(porch, "x"), porchW: n(porch, "width"),
+      words: [...svg.querySelectorAll("text")].map((t) => t.textContent), more: el.querySelector(".ss-adv-note .ss-adv-why-t").textContent } : null;
+  });
+  ok("6b: ⚠️ on an old-frame 16 x 12 gable with a porch, the door mark sits on the WEST edge beside the porch, not under FRONT",
+    wide && wide.wall === "west" && wide.doorH > wide.doorW && Math.abs(wide.doorX + wide.doorW / 2 - wide.x0) < 0.01 && wide.porchX + wide.porchW <= wide.x0 + 0.01, JSON.stringify(wide));
+  ok("6b: ...FRONT still marks the corners' own front (south) edge, and the (i) says the style's front end is the left side",
+    wide && wide.words.includes("FRONT") && /This style's front end \(the small bar\) is the left side of the plan\./.test(wide.more) && !/door side/.test(wide.more), wide && wide.more);
+  await page.evaluate(() => { const el = document.querySelector('[data-ss-adv-f="gradeCornersFt"]'); window.scrollBy(0, el.getBoundingClientRect().top - 330); });
+  await settle(page, 400);
+  await field(page).screenshot({ path: join(SHOTS, "advanced-corners-oldwide-control.png") });
+  await aimPanel(page, [-20, 26, 18], [0, 1, 0]);
+  await settle(page, 300);
+  await page.screenshot({ path: join(SHOTS, "advanced-corners-oldwide-1440.png") });
   ok("8: zero page errors (1440)", errors.length === 0, errors.slice(0, 3).join(" | "));
   await ctx.close();
 

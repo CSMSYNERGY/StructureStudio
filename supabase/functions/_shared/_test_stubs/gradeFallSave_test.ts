@@ -137,9 +137,19 @@ Deno.test("⚠️ end to end: corners saved, kept by an older designer's save, c
   const skids = land({ ...LEVEL, foundation: "skids" }, STORED, "front");
   assert(!("gradeCornersFt" in skids), JSON.stringify(skids));
   // The sanitiser: all zeros, junk, or no raised floor stores nothing; a sent corner object replaces a sent fall.
-  for (const junk of [null, {}, { fl: 0, fr: 0, bl: 0, br: 0 }, [1, 2], "2", { fl: -3, fr: "x" }]) {
+  // null and a non-object leave the fall to its own keys.
+  for (const junk of [null, "2"]) {
     const r = sanitizeD3Spec({ ...FALLING, gradeCornersFt: junk });
     assert(r.ok && !("gradeCornersFt" in r.d3) && r.d3.gradeFallFt === 2, JSON.stringify(junk));
+  }
+  // Any corners OBJECT, even one that stores nothing, drops the fall, as the renderer's d3GradeFall ignores
+  // the fall beside it and draws level ground (review 2026-09-30: the preview and the stored row disagreed).
+  for (const junk of [{}, { fl: 0, fr: 0, bl: 0, br: 0 }, [1, 2], { fl: -3, fr: "x" }]) {
+    const r = sanitizeD3Spec({ ...FALLING, gradeCornersFt: junk });
+    assert(r.ok && !("gradeCornersFt" in r.d3) && !("gradeFallFt" in r.d3) && !("gradeFallToward" in r.d3), JSON.stringify([junk, r]));
+    // ...and the carry-forward does not bring a stored fall back beside it.
+    const kept = land({ ...LEVEL, gradeCornersFt: junk }, FALLING, "front");
+    assert(!("gradeFallFt" in kept) && !("gradeFallToward" in kept) && !("gradeCornersFt" in kept), `carry: ${JSON.stringify([junk, kept])}`);
   }
   const both = sanitizeD3Spec({ ...FALLING, gradeCornersFt: { fl: "1", br: 7 } });
   assert(both.ok && JSON.stringify(both.d3.gradeCornersFt) === JSON.stringify({ fl: 1, fr: 0, bl: 0, br: 6 }) && !("gradeFallFt" in both.d3) && !("gradeFallToward" in both.d3), JSON.stringify(both));
