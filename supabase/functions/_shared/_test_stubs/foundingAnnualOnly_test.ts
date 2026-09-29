@@ -304,6 +304,20 @@ Deno.test("annual is allowed: a comped (billing_exempt, not internal) tenant is 
   assertEquals(r.status, 402, JSON.stringify(r.body));
 });
 
+Deno.test("monthly is refused for every pricing group the browser also refuses: comped, Free-until and discounted", async () => {
+  // The browser rule has no exception for any of these (setInterval_ refuses monthly before it
+  // looks at who is buying), so the server must not grow one either.
+  const future = new Date(Date.now() + 60 * 86400000).toISOString();
+  for (const settings of [
+    { billing_exempt: true, internal_account: false, discount_percent: 0 },
+    { billing_exempt: false, billing_exempt_until: future, internal_account: false, discount_percent: 0 },
+    { billing_exempt: false, internal_account: false, discount_percent: 25 },
+  ]) {
+    const r = await drive(subscribe(["simple_layout_monthly"], { paymentToken: "harness-token" }), { vault: null, settings });
+    assertRefusedUntouched(r, ["simple_layout_monthly"]);
+  }
+});
+
 Deno.test("our own internal account still gets its existing 409 first, monthly or annual", async () => {
   const internal = { settings: { billing_exempt: true, internal_account: true, discount_percent: 0 }, vault: "harness-vault", tenant: "harness-internal" };
   for (const ids of [["simple_layout_monthly"], ["simple_layout_annual"]]) {

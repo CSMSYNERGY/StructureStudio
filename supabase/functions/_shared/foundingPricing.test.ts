@@ -108,6 +108,14 @@ Deno.test({
     const body = src.slice(at, src.indexOf("\n  };", at));
     assert(body.includes('if (FOUNDING_ANNUAL_ONLY && iv === "monthly") return;'),
       "setInterval_ no longer refuses exactly `monthly` while FOUNDING_ANNUAL_ONLY — monthlyPlansRefused must change with it");
+    // And nothing runs ahead of the refusal but the tile guard that refuses EVERY interval, so no
+    // exception (a group allowed monthly, an early setSel) can slip in before it unnoticed: the
+    // statements are exactly guard, founding refusal, setSel.
+    const lines = body.split("\n").map((l) => l.trim()).filter(Boolean);
+    assert(lines.length === 4, `setInterval_ is no longer header, guard, refusal, setSel: ${JSON.stringify(lines)}`);
+    assert(lines[1].startsWith("if (comped || ") && lines[1].endsWith(") return;"), `the first statement is not the tile guard: ${lines[1]}`);
+    assert(lines[2] === 'if (FOUNDING_ANNUAL_ONLY && iv === "monthly") return;', `the founding refusal is not the second statement: ${lines[2]}`);
+    assert(lines[3].startsWith("setSel("), `the refusal is not followed straight by the cart write: ${lines[3]}`);
     // Every default that seeds the cart writes "annual", so nothing else can put monthly in it.
     const seeds = [...src.matchAll(/(?:simple_layout|\[f\.feature\]|n\.simple_layout|n\[f\.feature\])\s*[:=]\s*"(monthly|annual)"/g)].map((m) => m[1]);
     assert(seeds.length >= 3 && seeds.every((s) => s === "annual"), `a cart default writes something other than "annual": ${JSON.stringify(seeds)}`);
