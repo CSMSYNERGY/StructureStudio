@@ -491,6 +491,18 @@ function ssStyleSaveKey(styleValue, target = ssTargetClientId) {
   return `${target || ""}|${styleValue}`;
 }
 
+// THE GROUND'S FALL GOES ON EVERY STYLE SAVE, null included (review BC-1, 2026-09-29). The server
+// carries a stored gradeFallFt / gradeFallToward forward over any save that OMITS them
+// (carryForwardFoundation in _shared/styleD3.ts): a designer built between 09-25 and 09-28 sends
+// frame "front" but drops both keys, and must not erase a fall it has never heard of. So this panel's
+// "no fall" has to be said out loud, as null, or it would never land. The sanitiser drops the null,
+// so nothing ever stores it, and a style with no fall is written exactly as before.
+// The operator page's save (saveCalSpec in the designer twins) sends the same two keys the same way.
+function ssD3WithFall(d3) {
+  if (!d3 || typeof d3 !== "object") return d3;
+  return { ...d3, gradeFallFt: d3.gradeFallFt != null ? d3.gradeFallFt : null, gradeFallToward: d3.gradeFallToward != null ? d3.gradeFallToward : null };
+}
+
 function ssQueueStyleSave(key, run) {
   const next = (ssStyleSaveTail.get(key) || Promise.resolve()).then(run);
   ssStyleSaveTail.set(key, next.then(() => {}, () => {}));
@@ -1168,15 +1180,34 @@ function Dashboard({ session }) {
   // tenant's URL, and ssPagePath then rode the stale ?view= onto every later navigation
   // (audit 2026-08-20). Restoring an entry with ?view= re-enters view-as exactly as a
   // reload of that URL would (the boot effect above); an entry without it exits.
+  //
+  // UNSAVED WORK ON THE ADVANCED PAGE (review ADV-3, 2026-09-29). Crossing a view-as boundary remounts
+  // that page (its key is the tenant), so Back or Forward over one asks first, with the words
+  // openAccount / exitAccount use. By the time popstate fires the address bar has already moved, so
+  // the address this page was on is kept after every render (lastAddrRef), and a No puts it back
+  // with pushState before anything here changes: the page, the tenant and the building all stay.
+  const lastAddrRef = useRef(null);
+  useEffect(() => { lastAddrRef.current = { url: window.location.pathname + window.location.search + window.location.hash, state: window.history.state }; });
   useEffect(() => {
     const onPop = () => {
       const p = ssParsePath();
+      const v = (new URLSearchParams(window.location.search).get("view") || "").trim().toLowerCase();
+      const urlView = (isOperator && v && /^[a-z0-9][a-z0-9-]*$/.test(v)) ? v : null;
+      const crosses = urlView !== (viewing ? viewing.clientId : null);
+      if (crosses && advancedDirtyRef.current) {
+        const lose = designerOpened ? "the design you have open in the Designer tab and the building you haven't saved on the Advanced page" : "the building you haven't saved on the Advanced page";
+        const ask = urlView ? `Opening another account will discard ${lose}. Continue?`
+          : "Leaving this account will discard the building you haven't saved on the Advanced page. Continue?";
+        if (!window.confirm(ask)) {
+          const back = lastAddrRef.current;
+          if (back) { try { window.history.pushState(back.state, "", back.url); } catch (_e) { /* history unavailable */ } }
+          return;
+        }
+      }
       wanted.current = p.page && TAB_META[p.page] ? p.page : null;
       setTab(p.page && TAB_META[p.page] ? p.page : "designs");
       setSub(p.sub || null);
-      const v = (new URLSearchParams(window.location.search).get("view") || "").trim().toLowerCase();
-      const urlView = (isOperator && v && /^[a-z0-9][a-z0-9-]*$/.test(v)) ? v : null;
-      if (urlView !== (viewing ? viewing.clientId : null)) {
+      if (crosses) {
         setOpenDesign(null);                    // same replay guard as openAccount/exitAccount
         ssTargetClientId = urlView;             // same tick as the pop, before the re-render
         // Seeded with the slug; viewingFetch backfills the real company name, exactly as
@@ -1186,7 +1217,7 @@ function Dashboard({ session }) {
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [isOperator, viewing]);
+  }, [isOperator, viewing, designerOpened]);
 
   // Keep the transport override in lockstep with `viewing`. Assigned during RENDER, not in
   // an effect: React runs CHILD effects before PARENT effects on mount, so an effect here
@@ -1595,7 +1626,8 @@ function Dashboard({ session }) {
         // `frame: "front"` (2026-09-25) says this designer knows the raised-floor keys: without it
         // the server carries a stored blocks/piers foundation and its floor height forward over the
         // null an older panel sends (carryForwardFoundation), and with it this save can clear them.
-        const body = { action: "save_style_d3", styleValue, d3, d3Photos, frame: "front" };
+        // The ground's fall is not in that promise: it rides as two explicit keys (ssD3WithFall).
+        const body = { action: "save_style_d3", styleValue, d3: ssD3WithFall(d3), d3Photos, frame: "front" };
         if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
         // ALWAYS PRESENT, null included (review wf_5199a3e0-d65, high). 01-core's wrapper injects
         // the view-as target whenever this key is absent, and it reads the target when the call
@@ -1640,6 +1672,22 @@ function Dashboard({ session }) {
       const body = { action: "set_style_active", styleId, active: active !== false, targetClientId: target || null };
       const run = async () => {
         const r = await ssStyleSaveCall(body, "show or hide a style");
+        if (r.error || !r.data || !r.data.ok) throw ssStyleSaveError(r);
+        return r.data;
+      };
+      return styleValue ? ssQueueStyleSave(ssStyleSaveKey(styleValue, target), run) : run();
+    },
+    // Rename one style: portal-settings' own update_style (Settings → Structures' Edit uses it), with
+    // only `label` in the body, so the image, the code and the key are left as they are. The Advanced
+    // page uses it when a Save that stopped part-way is finished under a different name (review
+    // ADV-1, 2026-09-29): the name lands on the style already made instead of a second one. Setting a
+    // label is idempotent, so it goes through the style-save call (deadline, side door) and, given
+    // the key, waits in that style's queue. `pinnedTarget` as onSaveSpec's.
+    onRenameStyle: (styleId, label, styleValue, pinnedTarget) => {
+      const target = pinnedTarget !== undefined ? pinnedTarget : ssTargetClientId;
+      const body = { action: "update_style", styleId, label, targetClientId: target || null };
+      const run = async () => {
+        const r = await ssStyleSaveCall(body, "rename a style");
         if (r.error || !r.data || !r.data.ok) throw ssStyleSaveError(r);
         return r.data;
       };

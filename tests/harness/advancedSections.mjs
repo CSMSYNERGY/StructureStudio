@@ -3,7 +3,7 @@
 // Carolyn, 09-28 @32:17: "think about the layout ... how are you going to organize all of the things
 // there that have to do with roof". The Advanced page shows the calibration field grid one section at
 // a time (CAL_ADV_SECTIONS, calAdvShow in both designer twins). This proves:
-//   1  the tab strip: Roof, Walls & foundation, Lean-to, Wings, Dormer, Porch & steps, Colours, in
+//   1  the tab strip: Roof, Walls & foundation, Lean-to, Wings, Dormer, Porch & steps, Colors, in
 //      that order, Roof first and selected;
 //   2  each tab shows its own fields and none of another's;
 //   3  the three 3D asks of the same call work from their tabs on one building: a lean-to that meets
@@ -128,7 +128,9 @@ try {
   // 1 ── the strip ────────────────────────────────────────────────────────────────────────────
   const tabs = await page.$$eval('[data-ss-adv="sections"] [data-ss-adv-sec]', (b) => b.map((x) => [x.dataset.ssAdvSec, x.innerText.trim(), x.getAttribute("aria-selected")]));
   ok("1: seven section tabs, in the grid's order",
-    JSON.stringify(tabs.map((t) => t[1])) === JSON.stringify(["Roof", "Walls & foundation", "Lean-to", "Wings", "Dormer", "Porch & steps", "Colours"]), JSON.stringify(tabs));
+    JSON.stringify(tabs.map((t) => t[1])) === JSON.stringify(["Roof", "Walls & foundation", "Lean-to", "Wings", "Dormer", "Porch & steps", "Colors"]), JSON.stringify(tabs));
+  // US spelling, as the fields under it say ("Body Color"), review 2026-09-29.
+  ok("1: no tab says Colours", !tabs.some((t) => /Colours/.test(t[1])), JSON.stringify(tabs));
   ok("1: Roof is selected first", tabs[0] && tabs[0][2] === "true" && tabs.slice(1).every((t) => t[2] === "false"));
 
   // 2 ── each tab shows its own fields ──────────────────────────────────────────────────────────

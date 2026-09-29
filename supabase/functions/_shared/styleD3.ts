@@ -580,26 +580,32 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
 // Mutates `clean` (the sanitised spec about to be written). The stored height is held to the
 // sanitiser's band again, because this is the one place a stored value is written back unread.
 export function carryForwardFoundation(clean: D3Spec, sent: unknown, stored: unknown, frame: unknown): void {
-  if (frame === PROMPT_FRAME_FRONT) return;
   if (!sent || typeof sent !== "object") return;
   const was = (stored && typeof stored === "object") ? stored as Record<string, unknown> : null;
   if (!was || !isRaisedFoundation(was.foundation)) return;
-  const incoming = (sent as Record<string, unknown>).foundation;
-  if (incoming === undefined || incoming === null || incoming === "slab") {
-    clean.foundation = was.foundation as string;
-    const fh = num(was.floorHeightFt);
-    if (fh !== null && fh > 0 && fh <= FLOOR_HEIGHT_ACCEPT_FT) {
-      clean.floorHeightFt = Math.min(FLOOR_HEIGHT_FT[1], Math.max(FLOOR_HEIGHT_FT[0], fh));
-    } else {
-      delete clean.floorHeightFt;
+  const s = sent as Record<string, unknown>;
+  if (frame !== PROMPT_FRAME_FRONT) {
+    const incoming = s.foundation;
+    if (incoming === undefined || incoming === null || incoming === "slab") {
+      clean.foundation = was.foundation as string;
+      const fh = num(was.floorHeightFt);
+      if (fh !== null && fh > 0 && fh <= FLOOR_HEIGHT_ACCEPT_FT) {
+        clean.floorHeightFt = Math.min(FLOOR_HEIGHT_FT[1], Math.max(FLOOR_HEIGHT_FT[0], fh));
+      } else {
+        delete clean.floorHeightFt;
+      }
     }
   }
-  // The ground's fall (2026-09-28) rides with a raised floor that is still raised. No panel before
-  // today can send it at all -- its d3ResolveStyleSpec names every top-level key it keeps -- so from
-  // those requests ABSENCE means "never heard of it", not "cleared". Only the fields the request
-  // did not send are carried, each re-held to its band, and only onto a floor that is raised.
+  // The ground's fall (2026-09-28) rides with a raised floor that is still raised, and FRAME DOES
+  // NOT DECIDE IT (review BC-1, 2026-09-29). frame "front" only says a designer knows blocks, piers
+  // and floorHeightFt, and every designer built from 09-25 up to the fall's merge sends it while its
+  // d3ResolveStyleSpec drops gradeFallFt / gradeFallToward (it names every top-level key it keeps).
+  // So ABSENCE means "this client has never heard of it", for every frame, and the stored value is
+  // carried. The panel that knows the fall ALWAYS sends both keys, null when there is none (12-shell's
+  // onSaveSpec and the operator page's save), so its clear is an explicit null and lands. Only the
+  // fields the request did not send are carried, each re-held to its band, and only onto a floor
+  // that is raised. The sanitiser never stores the null itself.
   if (!isRaisedFoundation(clean.foundation)) return;
-  const s = sent as Record<string, unknown>;
   const gf = num(was.gradeFallFt);
   if (!("gradeFallFt" in s) && gf !== null && gf > 0) clean.gradeFallFt = Math.min(GRADE_FALL_FT[1], gf);
   if (!("gradeFallToward" in s) && (D3_GRADE_FALL_TOWARD as readonly unknown[]).includes(was.gradeFallToward)) {
