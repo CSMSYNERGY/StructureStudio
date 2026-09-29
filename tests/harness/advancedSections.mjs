@@ -119,11 +119,19 @@ const byLabel = (page, name) => page.getByLabel(name, { exact: true });
 const tab = (page, k) => page.locator(`[data-ss-adv-sec="${k}"]`);
 const radio = (page, group, name) => page.getByRole("radiogroup", { name: group, exact: true }).getByRole("radio", { name, exact: true });
 const segBtn = (page, group, name) => page.getByRole("group", { name: group, exact: true }).getByRole("button", { name, exact: true });
-// The add-on panel's own switch ("Add a lean-to" / "✓ Lean-to on").
+// The add-on panel's own switch ("Add lower wings" / "✓ Lower wings on"). The Lean-to tab is a list of
+// lean-to cards since 2026-09-29 (roof.leanTos): "on" is adding one, "off" is its card's remove cross.
 const addOnSwitch = (page) => page.locator("[data-ss-adv-panel] .ss-adv-panel > button.ssd-tool").first();
+const isLeanTab = (page) => page.locator('[data-ss-adv-panel="leanto"]').count();
 async function switchOn(page) {
-  if (await addOnSwitch(page).getAttribute("aria-pressed") !== "true") await addOnSwitch(page).click();
+  if (await isLeanTab(page)) {
+    if (!(await page.locator("[data-ss-adv-lt]").count())) await page.locator('[data-ss-adv-f="leanToAdd"]').click();
+  } else if (await addOnSwitch(page).getAttribute("aria-pressed") !== "true") await addOnSwitch(page).click();
   await page.waitForTimeout(150);
+}
+async function switchOff(page) {
+  if (await isLeanTab(page)) { while (await page.locator("[data-ss-adv-lt]").count()) await page.locator("[data-ss-adv-lt] .ss-adv-lt-x").first().click(); }
+  else await addOnSwitch(page).click();
 }
 const fieldsIn = (page, sel) => page.evaluate((sel) => [...document.querySelectorAll(`${sel} [data-ss-adv-f]`)].filter((e) => e.offsetParent !== null).map((e) => e.dataset.ssAdvF), sel);
 async function panelModel(page, test, timeout = 60000) {
@@ -208,12 +216,12 @@ try {
 
   // 2 ── each add-on tab shows only its own controls; the rest of the page is always there ─────────
   const OWN = {
-    leanto: ["leanToOn", "leanToWidthFt", "leanToDropFt", "leanToSide", "leanToAttach", "leanToAttachFt"],
+    leanto: ["leanToAdd", "leanToWall", "leanToWidthFt", "leanToDropFt", "leanToAttach", "leanToAttachFt", "leanToLength", "leanToLengthFt", "leanToOffsetFt", "leanToEnclosed"],
     wings: ["wingsOn", "wingWidthFt", "wingSide", "wingAttach", "wingAttachFt", "wingPitch", "centerEaveFt"],
     dormer: ["dormerOn", "dormerType", "dormerWidthFt", "dormerRiseFt", "dormerOffsetU"],
     porch: ["porchKind", "porchDepth", "porchEnd", "porchTruss", "porchWidthFt", "porchAttachFt", "porchPitch", "porchPosts", "porchSteps", "porchStepCount", "wood"],
   };
-  const MUST = { leanto: ["leanToWidthFt", "leanToSide"], wings: ["wingWidthFt", "wingSide"], dormer: ["dormerWidthFt", "dormerType"], porch: ["porchKind"] };
+  const MUST = { leanto: ["leanToWall", "leanToWidthFt", "leanToEnclosed"], wings: ["wingWidthFt", "wingSide"], dormer: ["dormerWidthFt", "dormerType"], porch: ["porchKind"] };
   const others = (k) => Object.entries(OWN).filter(([o]) => o !== k).flatMap(([, v]) => v);
   for (const k of Object.keys(OWN)) {
     await tab(page, k).click();
@@ -228,7 +236,7 @@ try {
     await page.locator("#ss-step-adv-addons").scrollIntoViewIfNeeded();
     await shot(page, `sec-${k}.png`);
     // Off again, so the next tab starts from the building as it was.
-    if (k !== "porch") await addOnSwitch(page).click();
+    if (k !== "porch") await switchOff(page);
   }
   // A slider: arrow keys on the pitch slider move the box and light the end view's pitch label
   // (D3ElevationSVG draws the focused measurement in its highlight colour, #B45309).
@@ -262,8 +270,8 @@ try {
   await segBtn(page, "Meets the building", "On the roof").click();
   await byLabel(page, "How far up the roof (ft)").fill("2");
   await page.keyboard.press("Tab");
-  await panelModel(page, (M) => !!(M.leanTo && M.leanTo.mode === "roof" && Math.abs(M.leanTo.d - 2) < 1e-6));
-  const lt = await page.evaluate(() => { const L = window.__ss3dPanel.model.leanTo; return { mode: L.mode, d: L.d, ya: L.ya, E: L.E }; });
+  await panelModel(page, (M) => !!(M.leanTos && M.leanTos[0] && M.leanTos[0].mode === "roof" && Math.abs(M.leanTos[0].d - 2) < 1e-6));
+  const lt = await page.evaluate(() => { const L = window.__ss3dPanel.model.leanTos[0]; return { mode: L.mode, d: L.d, ya: L.ya, E: L.E }; });
   ok("3: the lean-to meets the roof 2 ft above the eave", lt.mode === "roof" && Math.abs(lt.d - 2) < 1e-6 && lt.ya > lt.E + 2, JSON.stringify(lt));
   const ltSay = await page.locator('[data-ss-adv-readout="leanTo"]').innerText().catch(() => "");
   ok("3: …and the panel reads it back (Builds x in 12 · meets the roof 2' 0\" above the eave)", /^Builds [\d.]+ in 12 · meets the roof 2' 0" above the eave$/.test(ltSay.trim()), JSON.stringify(ltSay));

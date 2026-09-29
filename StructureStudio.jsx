@@ -4852,6 +4852,8 @@ function d3LeanToGeom(roofCfg, W, L, H) {
   const leanW = cfg.leanToWidthFt || 0;
   const mode = cfg.leanToAttach === "roof" || cfg.leanToAttach === "wall" ? cfg.leanToAttach : null;
   if (!(leanW > 0.5) || !mode) return null;
+  // A lean-to LIST (roof.leanTos, 2026-09-29) replaces the single lean-to: its keys describe nothing then.
+  if (d3HasLeanTos(cfg)) return null;
   const m = d3Massing(cfg, W, L, H);
   const dir = cfg.leanToSide === "left" ? -1 : 1;
   const u0 = dir * (m.S / 2), u1 = u0 + dir * leanW;
@@ -4878,6 +4880,112 @@ function d3LeanToGeom(roofCfg, W, L, H) {
   // a flat attach is moved up to hold its sliver of pitch, so a 3 ft ask under a 1 ft drop is built 11 in
   // down, and the readout and the drawing had said 3' 0" beside it.
   return { dir, u0, u1, ua, ya, y1, E, k, drop, d, at: mode === "wall" ? E - ya : d, mode, pitch, clamped, flat, noRoof, cuts: mode === "roof" && !noRoof && pitch > k + 1e-9 };
+}
+// ── AS MANY LEAN-TOS AS THEY WANT, EACH WHERE THEY WANT (roof.leanTos, 2026-09-29) ─────────────────
+// Carolyn, 09-29: "they start with a core building, then they can add a lean-to and specify where they
+// want it, and add another one and specify where they want it ... as many lean-tos ... wherever they
+// want." roof.leanTos is a list of up to six, each { wall, widthFt, dropFt, attach, attachFt, lengthFt,
+// offsetFt, enclosed } (styleD3.ts sanitizeLeanTos has the bands). `wall` is a building wall as seen
+// standing in front of the FRONT wall -- the renderer's frame, front south (+z), left west (-x) -- never
+// the roof's own u, so "left" means the same wall on every roof. A non-empty list REPLACES the single
+// lean-to (leanToWidthFt ...), and absent every line of today's lean-to is built as it always was.
+//
+// Two kinds of wall:
+//   eave   a wall the roof's edge runs along (parallel to the ridge; a shed's high or low wall). The
+//          lean-to is today's, from d3LeanToGeom: at the eave, or "On the wall" / "On the roof" d feet
+//          from it, hung off a WING's outer wall where a wing is on that side -- which is how a wing goes
+//          on a wing: an enclosed lean-to off a wing.
+//   gable  an end wall. It meets the wall at wall height (the plate, H), or "On the wall" d feet under
+//          it. "On the roof" means nothing there (the roof's edge is a rake, above a triangle of wall)
+//          and is ignored, never switched: the panel does not offer it.
+// A lean-to runs the whole wall, or lengthFt of it centred offsetFt from the wall's middle (toward the
+// RIGHT on the front and back walls, toward the FRONT on the left and right ones), held inside the wall.
+// Two on one wall that overlap, or one in front of a porch, are drawn as asked and said, never moved.
+const D3_LEANTO_WALLS = ["left", "right", "front", "back"];
+const D3_LEANTOS_MAX = 6;
+// The drawn entries, each with its index in roof.leanTos (the mesh tag and the panel's card), or null
+// when there is no list or nothing in it can be drawn -- and then the single lean-to's keys apply.
+function d3LeanToList(roofCfg) {
+  const a = roofCfg && Array.isArray(roofCfg.leanTos) ? roofCfg.leanTos : null;
+  if (!a) return null;
+  const out = [];
+  a.slice(0, D3_LEANTOS_MAX).forEach((e, i) => {
+    if (e && D3_LEANTO_WALLS.indexOf(e.wall) >= 0 && Number(e.widthFt) > 0.5) out.push({ e, i });
+  });
+  return out.length ? out : null;
+}
+function d3HasLeanTos(roofCfg) {
+  return !!d3LeanToList(roofCfg);
+}
+// Any lean-to at all, the list or the single one: what the roof step, the porch readout and the tab dot ask.
+function d3AnyLeanTo(roofCfg) {
+  return d3HasLeanTos(roofCfg) || (Number(roofCfg && roofCfg.leanToWidthFt) || 0) > 0.5;
+}
+// A building wall in the roof's frame (d3RoofAxes): an EAVE wall is the profile's end at dir = -1 or 1,
+// running along the ridge (local z, ax.L long); a GABLE wall is the extrusion's end at z = 0 or z = L
+// (atL), sz its outward sign, running across the span (u, ax.S long). `along` turns the wall's own
+// offset (toward the right, or toward the front) into that axis: world x = u (+ uc) on a gable end when
+// the span runs along x, and world x = L/2 - z on an eave wall when it does not.
+function d3LeanToWall(ax, wall) {
+  const ux = ax.uAxisIsX;
+  if (ux ? (wall === "left" || wall === "right") : (wall === "front" || wall === "back")) {
+    return { kind: "eave", dir: wall === "left" || wall === "back" ? -1 : 1, along: ux ? 1 : -1, wallLen: ax.L };
+  }
+  const atL = ux ? wall === "front" : wall === "left";
+  return { kind: "gable", atL, sz: atL ? 1 : -1, along: 1, wallLen: ax.S };
+}
+// How much of its wall a lean-to runs along, and where: the whole wall without lengthFt, else lengthFt
+// (at least 2 ft, at most the wall) with its middle offsetFt from the wall's, slid back inside the wall.
+function d3LeanToRun(e, wallLen) {
+  const want = Number(e && e.lengthFt);
+  if (!(want > 0) || want >= wallLen - 1e-9) return { whole: true, len: wallLen, off: 0, room: 0 };
+  const len = Math.max(Math.min(2, wallLen), want);
+  const room = Math.max(0, (wallLen - len) / 2);
+  const off0 = Number(e.offsetFt) || 0;
+  return { whole: false, len, off: Math.max(-room, Math.min(room, off0)), room, offHeld: Math.abs(off0) > room + 1e-9 };
+}
+// Every drawn lean-to at a size, in the building's own profile u (the renderer takes uc off) and the roof
+// group's z (0..L along the ridge), or null without a list. Each is d3LeanToGeom's record on an eave wall
+// (u0 the wall line, u1 the outer edge, ua / ya where it meets, y1 the outer edge's height, E the eave,
+// k the roof leg's slope, pitch, and its flags), plus:
+//   i, wall, kind, enclosed, attach   its index, wall, "eave" | "gable", walled in, the attach it asked
+//   w, len, off, whole                width, how much of the wall, where, and whether it is all of it
+//   a0, a1                            its run along the wall: z on an eave wall, building u on a gable end
+//   zW, zO, sz                        a gable end's wall line, outer edge and outward sign
+//   roofIgnored                       "On the roof" asked on a gable end, built at wall height
+function d3LeanTosGeom(roofCfg, W, L, H) {
+  const list = d3LeanToList(roofCfg);
+  if (!list) return null;
+  const cfg = roofCfg || {};
+  const ax = d3RoofAxes(cfg, W, L);
+  const Hn = Number(H) > 0 ? Number(H) : D3.WALL_H;
+  return list.map(({ e, i }) => {
+    const f = d3LeanToWall(ax, e.wall);
+    const w = Math.min(16, Number(e.widthFt));
+    const run = d3LeanToRun(e, f.wallLen);
+    const attach = e.attach === "roof" || e.attach === "wall" ? e.attach : null;
+    const base = { i, wall: e.wall, kind: f.kind, enclosed: e.enclosed === true, attach, w, len: run.len, off: run.off, whole: run.whole, offHeld: !!run.offHeld };
+    const mid = f.along * run.off;
+    if (f.kind === "eave") {
+      // Absent attach is at the eave: "On the wall" 0 below it, the same line today's lean-to hangs from
+      // wherever the eave is the plate, and the eave itself on a shed's high side.
+      const g = d3LeanToGeom({ ...cfg, leanTos: null, leanToWidthFt: w, leanToDropFt: e.dropFt, leanToSide: f.dir < 0 ? "left" : "right",
+        leanToAttach: attach || "wall", leanToAttachFt: attach ? e.attachFt : 0 }, W, L, Hn);
+      const zc = ax.L / 2 + mid;
+      return { ...g, ...base, a0: zc - run.len / 2, a1: zc + run.len / 2, roofIgnored: false };
+    }
+    const E = Hn;
+    const drop = Math.min(e.dropFt != null ? Number(e.dropFt) : 1, E - 1.5);
+    const y1 = E - drop;
+    const d0 = Number(e.attachFt);
+    const d = attach === "wall" && isFinite(d0) ? Math.max(0, Math.min(8, d0)) : 0;
+    let ya = E - d;
+    const flat = ya < y1 + 0.05;
+    if (flat) ya = y1 + 0.05;
+    const zW = f.atL ? ax.L : 0;
+    return { ...base, dir: 0, E, k: 0, drop, d, y1, ya, at: E - ya, mode: attach === "wall" ? "wall" : null, pitch: (ya - y1) / w, clamped: false, flat, noRoof: false, cuts: false,
+      roofIgnored: attach === "roof", atL: f.atL, sz: f.sz, zW, zO: zW + f.sz * w, a0: mid - run.len / 2, a1: mid + run.len / 2 };
+  });
 }
 // ── THE ROOF STEP (roof.rearStepFt / roof.rearEaveRiseFt, 2026-09-28) ───────────────────────────────
 // A gable building whose roof is TWO SECTIONS along the ridge. The rear section covers the last
@@ -4909,7 +5017,7 @@ function d3RoofStep(roofCfg, W, L, H) {
   if (cfg.type !== "gable" || cfg.rearStepFt == null || cfg.rearEaveRiseFt == null) return null;
   const want = Number(cfg.rearStepFt), rise0 = Number(cfg.rearEaveRiseFt);
   if (!(want > 0.5) || !(Math.abs(rise0) >= 0.01)) return null;
-  if (d3FrontKind(cfg) === "eave" || Number(cfg.wingWidthFt) > 0.5 || Number(cfg.leanToWidthFt) > 0.5) return null;
+  if (d3FrontKind(cfg) === "eave" || Number(cfg.wingWidthFt) > 0.5 || Number(cfg.leanToWidthFt) > 0.5 || d3HasLeanTos(cfg)) return null;
   const ax = d3RoofAxes(cfg, W, L);
   if (!ax.uAxisIsX) return null;
   const porchOut = d3ProjectingPorch(cfg, W, L);
@@ -5319,6 +5427,17 @@ function d3RoofLands(roofCfg, m, W, L, H) {
   m.wings.forEach((g) => { if (g.attach === "roof" && !g.cuts) (out = out || {})[g.side] = g.uIn - m.uc; });
   const lt = d3LeanToGeom(roofCfg, W, L, H);
   if (lt && lt.mode === "roof" && !lt.noRoof && !lt.cuts && !m.wings.some((g) => g.side === lt.dir)) (out = out || {})[lt.dir] = lt.ua - m.uc;
+  // THE LEAN-TO LIST (roof.leanTos, 2026-09-29): each one up the roof of an eave wall covers that eave
+  // along its own run, so it covers a dormer (centred on the ridge's middle, dormerWidthFt long) only
+  // where the two runs overlap. The one landing highest up the roof on a side is the one that counts.
+  const dormW = Number(roofCfg && roofCfg.dormerWidthFt) || 0;
+  (d3LeanTosGeom(roofCfg, W, L, H) || []).forEach((q) => {
+    if (q.kind !== "eave" || q.mode !== "roof" || q.noRoof || q.cuts || m.wings.some((g) => g.side === q.dir)) return;
+    if (q.a1 <= m.L / 2 - dormW / 2 + 1e-9 || q.a0 >= m.L / 2 + dormW / 2 - 1e-9) return;
+    const u = q.ua - m.uc;
+    out = out || {};
+    if (out[q.dir] == null || q.dir * u < q.dir * out[q.dir]) out[q.dir] = u;
+  });
   return out;
 }
 function d3DormerRoof(roof, wFt, dFt, H) {
@@ -5865,7 +5984,7 @@ function d3PorchReadout(spec, sizeLabel) {
   const g = d3PorchGeom(S, top, porch.D, trimFace, d3PorchCapFt(roof, w, d, H, trimFace), attachFt, framing);
   const ovRaw = roof.overhang != null ? Number(roof.overhang) : D3.OVERHANG;
   const onCap = d3PorchSpan(roof, w, d).onCap;
-  const atMost = onCap ? (isFinite(ovRaw) ? ovRaw : D3.OVERHANG) > D3.WALL_T / 2 + 0.005 : (Number(roof.leanToWidthFt) || 0) > 0.5;
+  const atMost = onCap ? (isFinite(ovRaw) ? ovRaw : D3.OVERHANG) > D3.WALL_T / 2 + 0.005 : d3AnyLeanTo(roof);
   // With porchAttachFt set it is the ATTACH height, not the wall, that decides the headroom, so the
   // panel's suggestion is where to hang the porch roof: hNeeded is a wall top, 0.2 above that.
   return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2, atMost,
@@ -5904,6 +6023,11 @@ function d3LeanToReadout(spec, sizeLabel) {
   const w = mm ? parseFloat(mm[1]) : 12, d = mm ? parseFloat(mm[2]) : 16;
   const g = d3LeanToGeom(roof, w, d, (spec && spec.wallHeightFt) || D3.WALL_H);
   if (!g) return null;
+  return d3LeanToFascia(roof, g);
+}
+// d3LeanToReadout's numbers for one lean-to record `g` on an EAVE wall (d3LeanToGeom's shape), shared by
+// the single lean-to and each one in the list (d3LeanTosReadout).
+function d3LeanToFascia(roof, g) {
   const ovRaw = roof.overhang != null ? Number(roof.overhang) : D3.OVERHANG;
   const OV = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
   const ny = 1 / Math.sqrt(1 + g.k * g.k);
@@ -5918,6 +6042,44 @@ function d3LeanToReadout(spec, sizeLabel) {
   const dropMax = g.k > 0.05 ? g.k * wLt - seat : null;
   const widthMin = g.k > 0.05 ? (g.drop + seat) / g.k : null;
   return { ...g, fasciaNeed, fasciaAt, dropMax, widthMin, fasciaCuts: (g.mode === "wall" || g.noRoof) && g.E - g.ya < fasciaNeed - 1e-9 };
+}
+// EVERY LEAN-TO IN THE LIST (roof.leanTos, 2026-09-29) for a spec and a size label, for the Advanced page's
+// cards: d3LeanTosGeom at that size -- what the 3D builds -- in stored order, one per drawn entry, each
+// with d3LeanToFascia's numbers on an eave wall, and what it runs into, said and never moved:
+//   overlaps   the indexes of the others on the same wall whose runs overlap this one's
+//   porch      "projecting" | "recessed" when a porch stands on this wall where the lean-to runs
+//   openTop    met on the wall below the eave or the plate: how high doors and windows on that wall can
+//              go, 0.2 ft under its roof line (the designer's rule under a wall's top), else null
+// Null without a list.
+function d3LeanTosReadout(spec, sizeLabel) {
+  const roof = (spec && spec.roof) || {};
+  const mm = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
+  const w = mm ? parseFloat(mm[1]) : 12, d = mm ? parseFloat(mm[2]) : 16;
+  const gs = d3LeanTosGeom(roof, w, d, (spec && spec.wallHeightFt) || D3.WALL_H);
+  if (!gs) return null;
+  // The porch on each wall, in the lean-to's own run coordinates: a projecting porch's span (d3PorchSpan:
+  // building u on a gable end, down the ridge on an eave wall), a recessed one across its whole end.
+  const compass = { south: "front", north: "back", west: "left", east: "right" };
+  const ax = d3RoofAxes(roof, w, d);
+  const pj = d3ProjectingPorch(roof, w, d);
+  let porch = null;
+  if (pj) {
+    const P = d3PorchSpan(roof, w, d);
+    porch = P.onCap ? { wall: compass[pj.wall], kind: "projecting", a0: P.centerU - P.span / 2, a1: P.centerU + P.span / 2 }
+      : { wall: compass[pj.wall], kind: "projecting", a0: ax.L / 2 - P.span / 2, a1: ax.L / 2 + P.span / 2 };
+  } else if ((Number(roof.porchDepthFt) || 0) > 0.5 && !d3Massing(roof, w, d, D3.WALL_H).wings.length) {
+    const front = (roof.porchEnd || "front") !== "back";
+    const pw = d3NewFrame(roof) ? (front ? "south" : "north") : ax.uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
+    porch = { wall: compass[pw], kind: "recessed", a0: -Infinity, a1: Infinity };
+  }
+  const hit = (a, b) => Math.min(a.a1, b.a1) - Math.max(a.a0, b.a0) > 0.01;
+  return gs.map((g) => {
+    const r = g.kind === "eave" ? d3LeanToFascia(roof, g) : { ...g, fasciaCuts: false, fasciaAt: null, dropMax: null, widthMin: null };
+    const overlaps = gs.filter((o) => o !== g && o.wall === g.wall && hit(o, g)).map((o) => o.i);
+    const onPorch = porch && porch.wall === g.wall && hit(porch, g) ? porch.kind : null;
+    const openTop = g.mode === "wall" && g.at >= 1 / 24 ? Math.floor((g.ya - 0.2) * 12 + 1e-6) / 12 : null;
+    return { ...r, overlaps, porch: onPorch, openTop };
+  });
 }
 
 // A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
@@ -5983,7 +6145,12 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey, frame }) {
   // drawn from d3LeanToGeom, the numbers the 3D builds it from, with the drawing widened and slid over to
   // hold it. Without an attach every number below is the drawing it always was.
   const LT = d3LeanToGeom(roof, w, d, H);
-  const ltW = LT ? Math.abs(LT.u1 - LT.u0) : 0, ltC = LT ? LT.dir * ltW / 2 : 0;
+  // THE LEAN-TO LIST (roof.leanTos, 2026-09-29): every one on the two walls this end view shows, the eave
+  // walls at its left and right, the drawing widened for the widest on each side. Without a list both
+  // widths are 0 and every number below is the drawing it was.
+  const LTS = (d3LeanTosGeom(roof, w, d, H) || []).filter((q) => q.kind === "eave");
+  const ltL = LTS.reduce((a, q) => (q.dir < 0 ? Math.max(a, q.w) : a), 0), ltR = LTS.reduce((a, q) => (q.dir > 0 ? Math.max(a, q.w) : a), 0);
+  const ltW = LT ? Math.abs(LT.u1 - LT.u0) : ltL + ltR, ltC = LT ? LT.dir * ltW / 2 : (ltR - ltL) / 2;
   const VW = 360, VH = 210, PL = 54, PR = 54, PT = 14, PB = 34;
   const innerW = VW - PL - PR, innerH = VH - PT - PB;
   const sc = Math.min(innerW / Math.max(S + OV * 2 + ltW, 1), innerH / Math.max(peak, 1));
@@ -6003,8 +6170,9 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey, frame }) {
   const roofPts = [eaveL].concat(dedup, [eaveR]).map((p) => X(p[0]) + "," + Y(p[1])).join(" ");
   // The eave the overhang is dimensioned at: the left one, or the right when a lean-to drawn on the
   // left (roof.leanToAttach) would run through its label, which then sits inside the wall under it.
-  const ovAt = LT && LT.dir < 0 ? [eaveR, S / 2] : [eaveL, -S / 2];
-  const WX = LT && LT.dir < 0 ? X(-S / 2) + 14 : PL - 22;
+  const ltLeft = (LT && LT.dir < 0) || ltL > 0;
+  const ovAt = ltLeft ? [eaveR, S / 2] : [eaveL, -S / 2];
+  const WX = ltLeft ? X(-S / 2) + 14 : PL - 22;
 
   const HL = "#B45309", DIM = "#A16207", INK = "#78350F";
   const on = (k) => focusKey === k;
@@ -6044,13 +6212,14 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey, frame }) {
           {label(X((LT.u0 + LT.u1) / 2), Y(LT.y1) + 22, LT.noRoof || LT.at < 1 / 24 ? "at the eave" : `${d3FtIn(LT.at)} ${LT.mode === "roof" ? "up the roof" : "down the wall"}`, `lean-to, ${Math.round(LT.pitch * 120) / 10} in 12`, "leanToAttachFt")}
         </g>
       )}
+      {d3LeanTosElev(LTS, X, Y, OV, focusKey, label)}
 
       {/* WALL HEIGHT, left -- or, with a lean-to drawn on the left (roof.leanToAttach), just inside the
           building's own left wall, so it measures that wall and not the lean-to's shorter posts. */}
       {tick(WX, Y(0), Y(H), "wallHeightFt")}
       <line x1={WX - 4} y1={Y(H)} x2={WX + 4} y2={Y(H)} {...dimStroke("wallHeightFt")} />
       <line x1={WX - 4} y1={Y(0)} x2={WX + 4} y2={Y(0)} {...dimStroke("wallHeightFt")} />
-      {LT && LT.dir < 0
+      {ltLeft
         ? label(WX + 6, (Y(0) + Y(H)) / 2, d3FtIn(H), "wall", "wallHeightFt", "start")
         : label(PL - 30, (Y(0) + Y(H)) / 2, d3FtIn(H), "wall", "wallHeightFt", "end")}
 
@@ -6144,6 +6313,46 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey, frame }) {
     </svg>
   );
 }
+// THE LEAN-TO LIST in an end view (roof.leanTos, 2026-09-29): each one on an eave wall the view shows, its
+// roof from where it meets the building out past its edge by the overhang, its posts' line (or, enclosed,
+// its walls) to the ground. Several on one side are drawn over each other and named once under that
+// side, "lean-to 2" or "lean-tos 2, 5, 6", with the slope when they share one. Lit while a box of one of
+// their cards has the focus (calFocus "lt<i>-...").
+function d3LeanTosElev(LTS, X, Y, OV, focusKey, label) {
+  if (!LTS || !LTS.length) return null;
+  const INK = "#78350F", HL = "#B45309";
+  const litOf = (q) => String(focusKey || "").indexOf("lt" + q.i + "-") === 0;
+  const lines = LTS.map((q) => {
+    const lit = litOf(q);
+    const top = q.mode === "roof" && !q.noRoof ? q.E + q.d : q.ya;
+    const lineAt = (u) => q.ya + (q.y1 - q.ya) * ((u - q.ua) / ((q.u1 - q.ua) || 1));
+    return (
+      <g key={"lt" + q.i} data-ss-elev-leanto={q.i}>
+        {q.enclosed && (
+          <polygon points={[[q.u0, 0], [q.u1, 0], [q.u1, q.y1], [q.u0, lineAt(q.u0)]].map((p) => X(p[0]) + "," + Y(p[1])).join(" ")}
+            fill="#FEF3C7" stroke={lit ? HL : INK} strokeWidth="1.2" />
+        )}
+        <polyline points={[[q.ua, top], [q.u1 + q.dir * OV, q.y1 - OV * q.pitch]].map((p) => X(p[0]) + "," + Y(p[1])).join(" ")}
+          fill="none" stroke={lit ? HL : INK} strokeWidth="2" />
+        {!q.enclosed && <line x1={X(q.u1)} y1={Y(q.y1)} x2={X(q.u1)} y2={Y(0)} stroke={lit ? HL : INK} strokeWidth="1.2" />}
+      </g>
+    );
+  });
+  const names = [-1, 1].map((dir) => {
+    const side = LTS.filter((q) => q.dir === dir);
+    if (!side.length) return null;
+    const wide = side.reduce((a, q) => (q.w > a.w ? q : a), side[0]);
+    const slopes = side.map((q) => Math.round(q.pitch * 120) / 10);
+    const lit = side.find(litOf);
+    return (
+      <g key={"ltName" + dir}>
+        {label(X((wide.u0 + wide.u1) / 2), Y(Math.max(...side.map((q) => q.y1))) + 22, side.length > 1 ? `lean-tos ${side.map((q) => q.i + 1).join(", ")}` : `lean-to ${side[0].i + 1}`,
+          slopes.every((v) => v === slopes[0]) ? `${slopes[0]} in 12` : null, lit ? focusKey : null)}
+      </g>
+    );
+  });
+  return lines.concat(names);
+}
 // THE END ELEVATION WITH WINGS (2026-09-24), or null when the style has none: the stepped outline
 // the 3D builds, read off d3Massing — the lower storey across the whole span, the centre's walls
 // up to its eave, each wing's single-slope roof from its outer eave to the centre wall, and the
@@ -6169,8 +6378,12 @@ function d3WingsElevation(spec, sizeLabel, focusKey, frame) {
   // Wider on the right than the plain drawing: two heights are dimensioned there, not one.
   const VW = 360, VH = 210, PL = 54, PR = 78, PT = 14, PB = 34;
   const innerW = VW - PL - PR, innerH = VH - PT - PB;
-  const sc = Math.min(innerW / Math.max(S + OV * 2, 1), innerH / Math.max(peak, 1));
-  const X = (u) => PL + innerW / 2 + u * sc;
+  // THE LEAN-TO LIST (roof.leanTos, 2026-09-29) off the wings' outer walls, drawn as the plain view draws
+  // them; the drawing widens for the widest each side. Without a list it is the drawing it was.
+  const LTS = (d3LeanTosGeom(roof, w, d, H) || []).filter((q) => q.kind === "eave");
+  const ltL = LTS.reduce((a, q) => (q.dir < 0 ? Math.max(a, q.w) : a), 0), ltR = LTS.reduce((a, q) => (q.dir > 0 ? Math.max(a, q.w) : a), 0);
+  const sc = LTS.length ? Math.min(innerW / Math.max(S + OV * 2 + ltL + ltR, 1), innerH / Math.max(peak, 1)) : Math.min(innerW / Math.max(S + OV * 2, 1), innerH / Math.max(peak, 1));
+  const X = LTS.length ? (u) => PL + innerW / 2 + (u - (ltR - ltL) / 2) * sc : (u) => PL + innerW / 2 + u * sc;
   const Y = (y) => PT + innerH - y * sc;
   const HL = "#B45309", DIM = "#A16207", INK = "#78350F";
   const on = (k) => focusKey === k;
@@ -6216,6 +6429,7 @@ function d3WingsElevation(spec, sizeLabel, focusKey, frame) {
           fill="none" stroke={on("wingPitch") || on("wingWidthFt") ? HL : INK} strokeWidth="2" strokeLinejoin="round" />
       ))}
       <polyline points={pts(centreRoof)} fill="none" stroke={INK} strokeWidth="2" strokeLinejoin="round" />
+      {d3LeanTosElev(LTS, X, Y, OV, focusKey, label)}
 
       {/* WALL HEIGHT (the outer walls), left */}
       <line x1={PL - 22} y1={Y(0)} x2={PL - 22} y2={Y(H)} {...dimStroke("wallHeightFt")} />
@@ -8907,75 +9121,186 @@ function buildShed3DModel(THREE, p) {
   // wall below the eave or up the roof above it, and its outer edge. Null without an attach, and then
   // every line below is the lean-to it always was, hung at the plate.
   const leanAt = leanW > 0.5 ? d3LeanToGeom(roofCfg, bldgW, bldgH, H) : null;
-  if (leanW > 0.5) {
-    const drop = Math.min(roofCfg.leanToDropFt != null ? roofCfg.leanToDropFt : 1, H - 1.5);
-    const dir = roofCfg.leanToSide === "left" ? -1 : 1;   // which eave it hangs off
-    const uW = dir * (mass.S / 2) - mass.uc, u1 = uW + dir * leanW;   // the OUTER eave wall, wings or not
-    const u0 = leanAt ? leanAt.ua - mass.uc : uW;
-    const y0 = leanAt ? leanAt.ya : H, y1 = leanAt ? leanAt.y1 : H - drop;
+  // THE LEAN-TO LIST (roof.leanTos, 2026-09-29): up to six, each on the wall the builder picked, built by the
+  // same hands as the single lean-to below. Null without a list, and then only the single lean-to is built,
+  // line for line what it always was; with one, the single lean-to's keys describe nothing.
+  const LEANTOS = d3LeanTosGeom(roofCfg, bldgW, bldgH, H);
+  // Where the ground falls away (FALL) each post stands on the ground under its own foot, read in the
+  // building's frame through rg's placement below: u + uc across x and z - L/2 along it, or turned a
+  // quarter, L/2 - z and u + uc.
+  const rgRoot = (u, z) => (uAxisIsX ? [u + mass.uc, z - L / 2] : [L / 2 - z, u + mass.uc]);
+  // On a raised floor (2026-09-25) the posts stand on the lowered ground, not in the air at the
+  // floor's level; 0 on every other building, as they always stood.
+  const postBot = RAISED ? -GRADE : 0;
+  // AN ENCLOSED LEAN-TO's walls (roof.leanTos[i].enclosed): the outer wall under its low edge and the two
+  // end walls up to its roof line, in the building's own siding (wallMat, its cladding in feet like every
+  // wall) T thick, with a corner board at each outer corner; no openings. They stand on the ground under
+  // them -- the deepest of it where it falls away, bedded into the slope like a footing.
+  const ltWalls = (tag, kind, o) => {
+    const wallPiece = (pts, place) => {
+      const sh = new THREE.Shape();
+      pts.forEach((pt, k) => (k ? sh.lineTo(pt[0], pt[1]) : sh.moveTo(pt[0], pt[1])));
+      const geo = new THREE.ExtrudeGeometry(sh, { depth: T, bevelEnabled: false });
+      const mesh = new THREE.Mesh(geo, geo.groups && geo.groups.length === 2 ? [wallMat, trimMat] : wallMat);
+      place(mesh);
+      mesh.userData.ssLeanTo = tag;
+      mesh.userData.ssLeanToWall = true;
+      mesh.userData.ssLeanToStand = true;
+      rg.add(mesh);
+    };
+    const corner = (x, z, top, bot) => {
+      const cb = box(cornerMat, 0.36, top - bot, 0.36);
+      cb.position.set(x, (top + bot) / 2, z);
+      cb.userData.ssLeanTo = tag;
+      cb.userData.ssLeanToStand = true;
+      rg.add(cb);
+    };
+    if (kind === "eave") {
+      const { dir, uW, u0, u1, y0, y1, z0, z1 } = o;
+      const bot = FALL ? -depthUnder((uW + u1) / 2, (z0 + z1) / 2, Math.abs(u1 - uW) / 2, (z1 - z0) / 2, rgRoot) : postBot;
+      const lineAt = (u) => y0 + (y1 - y0) * ((u - u0) / ((u1 - u0) || 1));
+      const uS = uW + dir * T / 2, uE = u1 + dir * T / 2;
+      // Outer wall, drawn in the (z, y) plane and turned onto u = u1.
+      wallPiece([[z0, bot], [z1, bot], [z1, y1], [z0, y1]], (m) => { m.rotation.y = -Math.PI / 2; m.position.set(u1 + T / 2, 0, 0); });
+      // End walls, in the (u, y) plane at each end of the run.
+      const endPts = [[uS, bot], [uE, bot], [uE, lineAt(uE)], [uS, lineAt(uS)]];
+      wallPiece(endPts, (m) => { m.position.z = z0; });
+      wallPiece(endPts, (m) => { m.position.z = z1 - T; });
+      corner(u1, z0 + T / 2, y1, bot);
+      corner(u1, z1 - T / 2, y1, bot);
+      return;
+    }
+    const { uA, uB, zW, zO, sz, y0, y1 } = o;
+    const bot = FALL ? -depthUnder((uA + uB) / 2, (zW + zO) / 2, (uB - uA) / 2, Math.abs(zO - zW) / 2, rgRoot) : postBot;
+    const lineAt = (z) => y0 + (y1 - y0) * ((z - zW) / ((zO - zW) || 1));
+    const zS = zW + sz * T / 2, zE = zO + sz * T / 2;
+    // Outer wall, in the (u, y) plane at z = zO.
+    wallPiece([[uA, bot], [uB, bot], [uB, y1], [uA, y1]], (m) => { m.position.z = zO - T / 2; });
+    // End walls, drawn in the (z, y) plane and turned onto u = uA and u = uB.
+    const endPts = [[zS, bot], [zE, bot], [zE, lineAt(zE)], [zS, lineAt(zS)]];
+    wallPiece(endPts, (m) => { m.rotation.y = -Math.PI / 2; m.position.set(uA + T, 0, 0); });
+    wallPiece(endPts, (m) => { m.rotation.y = -Math.PI / 2; m.position.set(uB, 0, 0); });
+    corner(uA + T / 2, zO, y1, bot);
+    corner(uB - T / 2, zO, y1, bot);
+  };
+  // A lean-to off an EAVE wall, in rg's frame: its roof from (u0, y0) out to (u1, y1), uW the wall line,
+  // local z0..z1 along the wall; nPost posts under the outer edge; `at` its d3LeanToGeom record when it
+  // has one (the roof-attach filler reads it), else null. `tag` goes on every member (userData.ssLeanTo:
+  // true for the single lean-to, its index in the list otherwise). Enclosed, walls stand where the posts
+  // and the header would.
+  const addEaveLeanTo = (tag, dir, uW, u0, u1, y0, y1, z0, z1, nPost, at, enclosed) => {
+    const len = z1 - z0;
     const du = u1 - u0, dy = y1 - y0;
     const slen = Math.sqrt(du * du + dy * dy) || 1;
     const ux = du / slen, uy = dy / slen;
     // One slab, running from the main wall out past the free edge by the eave overhang.
-    const lslab = box(roofMat, slen + OV, D3.ROOF_T, L + OV * 2);
+    const lslab = box(roofMat, slen + OV, D3.ROOF_T, len + OV * 2);
     d3RoofSlabUVs(lslab);
     lslab.rotation.z = Math.atan2(dy, du);
     lslab.position.set((u0 + u1) / 2 + ux * OV / 2,
                        (y0 + y1) / 2 + uy * OV / 2 + D3.ROOF_T / 2,
-                       L / 2);
+                       (z0 + z1) / 2);
     // userData.ssLeanTo on every member: the projecting porch's clearance scan below measures a
     // lean-to by what hangs over the porch, not by its box.
-    lslab.userData.ssLeanTo = true;
+    lslab.userData.ssLeanTo = tag;
     rg.add(lslab);
-    // Posts at the free edge. Two is what a shed lot actually builds under 12 ft; longer
-    // runs get a third rather than an unsupported header.
-    const nPost = L > 12 ? 3 : 2;
-    const inset = Math.min(0.8, L * 0.08);
-    // On a raised floor (2026-09-25) the posts stand on the lowered ground, not in the air at the
-    // floor's level; 0 on every other building, as they always stood.
-    const postBot = RAISED ? -GRADE : 0;
-    // Where the ground falls away (FALL) each post stands on the ground under its own foot, read in the
-    // building's frame through rg's placement below: u + uc across x and z - L/2 along it, or turned a
-    // quarter, L/2 - z and u + uc.
-    const rgRoot = (u, z) => (uAxisIsX ? [u + mass.uc, z - L / 2] : [L / 2 - z, u + mass.uc]);
-    for (let i = 0; i < nPost; i++) {
-      const t = nPost === 1 ? 0.5 : i / (nPost - 1);
-      const pz = inset + t * (L - 2 * inset);
-      const pb = FALL ? -depthUnder(u1, pz, 0.15, 0.15, rgRoot) : postBot;
-      const post = box(trimMat, 0.3, y1 - pb, 0.3);
-      post.position.set(u1, (y1 + pb) / 2, pz);
-      post.userData.ssLeanTo = true;
-      post.userData.ssLeanToPost = true;
-      rg.add(post);
+    if (enclosed) ltWalls(tag, "eave", { dir, uW, u0, u1, y0, y1, z0, z1 });
+    else {
+      // Posts at the free edge. Two is what a shed lot actually builds under 12 ft; longer
+      // runs get a third rather than an unsupported header (a list's lean-to: one at least every 8 ft).
+      const inset = Math.min(0.8, len * 0.08);
+      for (let i = 0; i < nPost; i++) {
+        const t = nPost === 1 ? 0.5 : i / (nPost - 1);
+        const pz = z0 + inset + t * (len - 2 * inset);
+        const pb = FALL ? -depthUnder(u1, pz, 0.15, 0.15, rgRoot) : postBot;
+        const post = box(trimMat, 0.3, y1 - pb, 0.3);
+        post.position.set(u1, (y1 + pb) / 2, pz);
+        post.userData.ssLeanTo = tag;
+        post.userData.ssLeanToPost = true;
+        // A list's posts and walls stand on the ground: the porch's clearance scan below skips them, so
+        // a lean-to over a porch (said in its card) lowers the porch roof under its ROOF, not to the grass.
+        if (tag !== true) post.userData.ssLeanToStand = true;
+        rg.add(post);
+      }
+      const hdr = box(trimMat, 0.35, 0.5, len);     // header tying the posts together
+      hdr.position.set(u1, y1 - 0.25, (z0 + z1) / 2);
+      hdr.userData.ssLeanTo = tag;
+      rg.add(hdr);
     }
-    const hdr = box(trimMat, 0.35, 0.5, L);     // header tying the posts together
-    hdr.position.set(u1, y1 - 0.25, L / 2);
-    hdr.userData.ssLeanTo = true;
-    rg.add(hdr);
     // UP THE ROOF (leanToAttach "roof"), each gable end is closed between the roof and the lean-to's
     // roof over it -- the triangle a builder sides in -- in the wall's own cladding, flush with the wall
     // face like the roof's own caps. The main roof's eave and rake run on under it, as they do built.
-    if (leanAt && leanAt.mode === "roof" && !leanAt.noRoof && !leanAt.cuts) {
+    // A list's lean-to that stops short of a gable end is closed the same way at its own end.
+    if (at && at.mode === "roof" && !at.noRoof && !at.cuts) {
       const yW = y0 + (y1 - y0) * ((uW - u0) / (u1 - u0));   // the lean-to's line over the wall
       const sh = new THREE.Shape();
-      sh.moveTo(uW, leanAt.E); sh.lineTo(u0, leanAt.E + leanAt.d); sh.lineTo(u0, y0); sh.lineTo(uW, yW); sh.lineTo(uW, leanAt.E);
-      const fgeo = new THREE.ExtrudeGeometry(sh, { depth: L, bevelEnabled: false });
+      sh.moveTo(uW, at.E); sh.lineTo(u0, at.E + at.d); sh.lineTo(u0, y0); sh.lineTo(uW, yW); sh.lineTo(uW, at.E);
+      const fgeo = new THREE.ExtrudeGeometry(sh, { depth: len, bevelEnabled: false });
       const fuv = fgeo.attributes.uv;
       if (fuv) { for (let i = 0; i < fuv.count; i++) fuv.setX(i, fuv.getX(i) + (mass.S / 2 + mass.uc)); fuv.needsUpdate = true; }
       const fpos = fgeo.attributes.position, fcap = fgeo.groups && fgeo.groups.length === 2 ? fgeo.groups[0] : null;
       if (fcap) {
         for (let i = fcap.start; i < fcap.start + fcap.count; i++) {
           const z = fpos.getZ(i);
-          if (Math.abs(z) < 1e-6) fpos.setZ(i, -capOut0);
-          else if (Math.abs(z - L) < 1e-6) fpos.setZ(i, L + capOutL);
+          if (Math.abs(z) < 1e-6) { if (z0 === 0) fpos.setZ(i, -capOut0); }
+          else if (Math.abs(z - len) < 1e-6) { if (z1 === L) fpos.setZ(i, len + capOutL); }
         }
         fpos.needsUpdate = true;
         fgeo.computeBoundingBox(); fgeo.computeBoundingSphere();
       }
       const filler = new THREE.Mesh(fgeo, fcap ? [wallMat, gableMat] : gableMat);
-      filler.userData.ssLeanTo = true;
+      if (z0 !== 0) filler.position.z = z0;
+      filler.userData.ssLeanTo = tag;
       rg.add(filler);
     }
+  };
+  // A lean-to off a GABLE END (the list only): its roof falls along z, away from the end wall at zW, from ya
+  // at the wall to y1 at zO, across its run uA..uB in rg's u; posts under the outer edge at least every 8 ft.
+  const addGableLeanTo = (q) => {
+    const uA = q.a0 - mass.uc, uB = q.a1 - mass.uc, len = uB - uA;
+    const dz = q.zO - q.zW, dy = q.y1 - q.ya;
+    const slen = Math.sqrt(dz * dz + dy * dy) || 1;
+    const uz = dz / slen, uy = dy / slen;
+    // The slab's length runs along x here and its fall along z (d3RoofSlabUVsT, the dormer cap's axes).
+    const lslab = box(roofMat, len + OV * 2, D3.ROOF_T, slen + OV);
+    d3RoofSlabUVsT(lslab);
+    lslab.rotation.x = Math.atan2(-dy, dz);
+    lslab.position.set((uA + uB) / 2, (q.ya + q.y1) / 2 + uy * OV / 2 + D3.ROOF_T / 2, (q.zW + q.zO) / 2 + uz * OV / 2);
+    lslab.userData.ssLeanTo = q.i;
+    rg.add(lslab);
+    if (q.enclosed) { ltWalls(q.i, "gable", { uA, uB, zW: q.zW, zO: q.zO, sz: q.sz, y0: q.ya, y1: q.y1 }); return; }
+    const inset = Math.min(0.8, len * 0.08);
+    const nPost = Math.max(2, Math.ceil((len - 2 * inset) / 8 - 1e-9) + 1);
+    for (let k = 0; k < nPost; k++) {
+      const pu = uA + inset + (k / (nPost - 1)) * (len - 2 * inset);
+      const pb = FALL ? -depthUnder(pu, q.zO, 0.15, 0.15, rgRoot) : postBot;
+      const post = box(trimMat, 0.3, q.y1 - pb, 0.3);
+      post.position.set(pu, (q.y1 + pb) / 2, q.zO);
+      post.userData.ssLeanTo = q.i;
+      post.userData.ssLeanToPost = true;
+      post.userData.ssLeanToStand = true;
+      rg.add(post);
+    }
+    const hdr = box(trimMat, len, 0.5, 0.35);
+    hdr.position.set((uA + uB) / 2, q.y1 - 0.25, q.zO);
+    hdr.userData.ssLeanTo = q.i;
+    rg.add(hdr);
+  };
+  if (LEANTOS) {
+    LEANTOS.forEach((q) => {
+      if (q.kind === "gable") { addGableLeanTo(q); return; }
+      const uW = q.dir * (mass.S / 2) - mass.uc;
+      const inset = Math.min(0.8, q.len * 0.08);
+      addEaveLeanTo(q.i, q.dir, uW, q.ua - mass.uc, q.u1 - mass.uc, q.ya, q.y1, q.a0, q.a1,
+        Math.max(2, Math.ceil((q.len - 2 * inset) / 8 - 1e-9) + 1), q, q.enclosed);
+    });
+  } else if (leanW > 0.5) {
+    const drop = Math.min(roofCfg.leanToDropFt != null ? roofCfg.leanToDropFt : 1, H - 1.5);
+    const dir = roofCfg.leanToSide === "left" ? -1 : 1;   // which eave it hangs off
+    const uW = dir * (mass.S / 2) - mass.uc, u1 = uW + dir * leanW;   // the OUTER eave wall, wings or not
+    const u0 = leanAt ? leanAt.ua - mass.uc : uW;
+    const y0 = leanAt ? leanAt.ya : H, y1 = leanAt ? leanAt.y1 : H - drop;
+    addEaveLeanTo(true, dir, uW, u0, u1, y0, y1, 0, L, L > 12 ? 3 : 2, leanAt, false);
   }
 
   // ── RECESSED PORCH: what stands in the opening ────────────────────────────────────────
@@ -10057,6 +10382,9 @@ function buildShed3DModel(THREE, p) {
     const bb = new THREE.Box3();
     rg.children.forEach((o) => {
       if (!o.isMesh || (o.userData && o.userData.ssPorch)) return;
+      // A listed lean-to's posts and walls (roof.leanTos, ssLeanToStand) stand on the ground: its roof is
+      // what the porch goes under. Nothing else carries the tag.
+      if (o.userData && o.userData.ssLeanToStand) return;
       bb.setFromObject(o);                                     // also brings o.matrixWorld up to date
       if (!onCap) {
         if (eaveS * (eaveS > 0 ? bb.max.x : bb.min.x) <= uOut + g0.dWall + 0.005) return;
@@ -10071,7 +10399,7 @@ function buildShed3DModel(THREE, p) {
       // gable down at the plate. Without either key, the box, as it always was. A wing
       // (userData.ssWing, 2026-09-24) is measured the lean-to's way too: only its inner strip is over
       // a centre porch, and its box's lowest corner is the wing's OUTER eave, feet away to the side.
-      capY = Math.min(capY, ((o.userData && (o.userData.ssLeanTo || o.userData.ssWing)) || attachFt > 0 || Number(roofCfg.porchWidthFt) > 0 ? lowestOverPorch(o) : bb.min.y) - 0.03);
+      capY = Math.min(capY, ((o.userData && (o.userData.ssLeanTo != null || o.userData.ssWing)) || attachFt > 0 || Number(roofCfg.porchWidthFt) > 0 ? lowestOverPorch(o) : bb.min.y) - 0.03);
     });
     // And under the ceiling the building itself sets (d3PorchCapFt, which the panel's readout reads
     // too): the outline in the wall's own plane, which nothing above measures on a flush roof, and on
@@ -10974,6 +11302,8 @@ function buildShed3DModel(THREE, p) {
   // Where the lean-to meets the building as built (d3LeanToGeom), or null without an attach: for
   // tests/harness/attach.mjs; nothing in the app reads it.
   model.leanTo = leanAt;
+  // The lean-to list as built (d3LeanTosGeom), or null without one.
+  model.leanTos = LEANTOS;
   // The roof step as built (d3RoofStep), for tests/harness/roofStep.mjs; absent without one.
   if (STEP) model.roofStep = { stepFt: STEP.stepFt, rise: STEP.rise, Hf: STEP.Hf, Hb: STEP.Hb, pitch: STEP.pitch, pitchB: STEP.pitchB, rearPeak: rearProf.peak };
   // The ground's depth below the floor's top (d3GradeFt) and, on blocks or piers, the skirt, runners
@@ -17804,6 +18134,12 @@ const SS_ADV_CSS = [
   '.ss-adv .ss-adv-float > button:hover{border-color:var(--ss-accent-fill);background:var(--ss-accent-fill);color:var(--ss-on-accent);filter:brightness(1.1)}',
   '.ss-adv .ss-adv-cards > .ssd-plan{flex:1 1 100%}',
   '.ss-adv .ss-adv-cards > .ssd-plan .ss-adv-elev{max-width:440px;margin:4px auto 0}',
+  // THE LEAN-TO CARDS (roof.leanTos, 2026-09-29): one card per lean-to, its name and a remove cross on one row.
+  '.ss-adv .ss-adv-lt{background:var(--ss-surface)}',
+  '.ss-adv .ss-adv-lt-h{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 9px}',
+  '.ss-adv .ss-adv-lt-h > .ssd-card-t{margin:0}',
+  '.ss-adv .ss-adv-lt-x{font-family:inherit;flex:0 0 auto;width:26px;height:26px;margin:0;padding:0;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);color:var(--ss-muted);font-size:12px;font-weight:700;line-height:1;cursor:pointer}',
+  '.ss-adv .ss-adv-lt-x:hover{border-color:#DC2626;color:#DC2626;background:#FEF2F2}',
 ].join("\n");
 
 // "Blank building", the first tile of Start from: SSStyleStrip draws every tile as an <img>, so a
@@ -21718,6 +22054,38 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     return ft;
   };
+  // THE LEAN-TO LIST (roof.leanTos, 2026-09-29), edited from the Advanced page's lean-to cards. A style that
+  // still has the single lean-to shows it as the first card, and becomes the list's first entry on the first
+  // edit: the same lean-to on the same wall (its side read through the roof's axes at the size in use, so a
+  // "left" eave that is the back wall on this footprint is the back wall), with its width, drop and attach.
+  // Its keys go then, since the list replaces them (the sanitiser's rule too). An empty list deletes the
+  // key: no lean-to at all.
+  const CAL_LEANTO_KEYS = ["leanToWidthFt", "leanToDropFt", "leanToSide", "leanToAttach", "leanToAttachFt"];
+  const calLeanToFromSingle = (roof) => {
+    if (!((Number(roof && roof.leanToWidthFt) || 0) > 0.5)) return [];
+    const left = roof.leanToSide === "left";
+    const e = { wall: d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? (left ? "left" : "right") : (left ? "back" : "front"), widthFt: Math.min(16, Number(roof.leanToWidthFt)) };
+    if (roof.leanToDropFt != null && isFinite(Number(roof.leanToDropFt))) e.dropFt = Number(roof.leanToDropFt);
+    if (roof.leanToAttach === "roof" || roof.leanToAttach === "wall") e.attach = roof.leanToAttach;
+    if (typeof roof.leanToAttachFt === "number") e.attachFt = roof.leanToAttachFt;
+    return [e];
+  };
+  const calLeanToList = (roof) => (Array.isArray(roof && roof.leanTos) && roof.leanTos.length ? roof.leanTos : calLeanToFromSingle(roof));
+  const calEditLeanTos = (edit) => setAdminCal((p) => {
+    const roof = { ...p.spec.roof };
+    const next = edit(calLeanToList(roof).map((e) => ({ ...e }))).filter(Boolean).slice(0, D3_LEANTOS_MAX);
+    for (const k of CAL_LEANTO_KEYS) delete roof[k];
+    if (next.length) roof.leanTos = next;
+    else delete roof.leanTos;
+    return { ...p, spec: { ...p.spec, roof } };
+  });
+  // One lean-to's keys: "", null or undefined DELETES a key (absent is its default), the calSetRoofOpt rule.
+  const calSetLeanTo = (i, patch) => calEditLeanTos((list) => list.map((e, j) => {
+    if (j !== i) return e;
+    const o = { ...e };
+    Object.keys(patch).forEach((k) => { const v = patch[k]; if (v === "" || v === null || v === undefined) delete o[k]; else o[k] = v; });
+    return o;
+  }));
   const calSetAttach = (modeKey, ftKey, v) => setAdminCal((p) => {
     const roof = { ...p.spec.roof };
     if (v === "roof" || v === "wall") { roof[modeKey] = v; if (typeof roof[ftKey] !== "number") roof[ftKey] = modeKey === "leanToAttach" && v === "wall" ? calLeanWallSeed(p.spec, roof) : 1; }
@@ -26036,7 +26404,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     : !(Number(roof.rearStepFt) > 0.5) ? "A step of 0 is no step."
                     : !(Math.abs(Number(roof.rearEaveRiseFt)) >= 0.01) ? "A rise of 0 draws no step."
                     : (Number(roof.wingWidthFt) || 0) > 0.5 ? "Not drawn with lower wings: they run the length of the building at one height."
-                    : (Number(roof.leanToWidthFt) || 0) > 0.5 ? "Not drawn with a lean-to: it runs the length of the building at one height."
+                    : d3AnyLeanTo(roof) ? "Not drawn with a lean-to: it runs the length of the building at one height."
                     : roof.porchEnd === "back" && ((Number(roof.porchDepthFt) || 0) > 0.5 || (Number(roof.porchOutFt) || 0) > 0.5) ? "Not drawn with the porch at the back."
                     : !d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? `Not drawn on ${sel.size || "this size"}: its ridge runs side to side. Set the front wall to a gable end.`
                     : `Not drawn: ${sel.size || "this size"} is too short to leave 4 ft each side of the step.`;
@@ -26104,7 +26472,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   their own row rather than the main grid -- a builder who wants neither
                   should not have to read four controls to establish that. */}
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
-                {calAdvShow("leanto") && (<>
+                {/* A STYLE WITH A LEAN-TO LIST (roof.leanTos, 2026-09-29) was set on the Advanced page, where
+                    each lean-to has its own wall, run and walls. The single lean-to's controls would edit keys
+                    the list replaces, so they are not shown; the list itself is saved as it came. */}
+                {calAdvShow("leanto") && d3HasLeanTos(adminCal.spec.roof) && (() => {
+                  const n = d3LeanToList(adminCal.spec.roof).length;
+                  return (
+                    <div data-ss-leantos-note="" style={{ gridColumn: "1 / -1", fontSize: 11, color: "#92400E", fontWeight: 700 }}>
+                      {`This style has ${n} lean-to${n === 1 ? "" : "s"}, set on the Advanced page.`}
+                    </div>
+                  );
+                })()}
+                {calAdvShow("leanto") && !d3HasLeanTos(adminCal.spec.roof) && (<>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Lean-to width (ft, 0 = none)
                   <input type="number" step="0.5" min="0" {...calNumProps("leanToWidthFt", adminCal.spec.roof.leanToWidthFt != null ? adminCal.spec.roof.leanToWidthFt : 0, (n) => calSetRoof({ leanToWidthFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
@@ -27258,7 +27637,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             : !(Number(roof.rearStepFt) > 0.5) ? "A step of 0 is no step."
               : !(Math.abs(Number(roof.rearEaveRiseFt)) >= 0.01) ? "A rise of 0 draws no step."
                 : (Number(roof.wingWidthFt) || 0) > 0.5 ? "Not drawn with lower wings: they run the length of the building at one height."
-                  : (Number(roof.leanToWidthFt) || 0) > 0.5 ? "Not drawn with a lean-to: it runs the length of the building at one height."
+                  : d3AnyLeanTo(roof) ? "Not drawn with a lean-to: it runs the length of the building at one height."
                     : roof.porchEnd === "back" && ((Number(roof.porchDepthFt) || 0) > 0.5 || (Number(roof.porchOutFt) || 0) > 0.5) ? "Not drawn with the porch at the back."
                       : !d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? `Not drawn on ${sizeWords}: its ridge runs side to side. Set the front wall to a gable end.`
                         : `Not drawn: ${sizeWords} is too short to leave 4' 0" each side of the step.`;
@@ -27428,59 +27807,143 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const addOnTabs = CAL_ADV_SECTIONS.filter(([k]) => k === "leanto" || k === "wings" || k === "dormer" || k === "porch");
     const addOnOff = (k) => isShed && (k === "wings" || k === "dormer");
     const addOn = addOnOff(advAddOn) ? "leanto" : advAddOn;
+    // THE LEAN-TOS (roof.leanTos, 2026-09-29). Carolyn, 09-29: "they start with a core building, then they
+    // can add a lean-to and specify where they want it, and add another one and specify where they want it
+    // ... as many lean-tos ... wherever they want." One card per lean-to, in the list's order: which wall,
+    // how wide, how far its outer edge drops, where it meets the building, how much of the wall it runs
+    // along and where, open or walled in, and what it builds -- read back from d3LeanTosReadout, the numbers
+    // the 3D builds it from. A style that still has the single lean-to shows it as the first card, and the
+    // first edit makes it the list's first entry (calEditLeanTos). Nothing here moves one to make it fit:
+    // an overlap, a porch behind it or a roof it cuts is said on its card.
     const leanPanel = () => {
-      const on = (roof.leanToWidthFt || 0) > 0.5;
-      const out = [advSwitch("leanToOn", on, "Lean-to on", "Add a lean-to", () => calSetRoof({ leanToWidthFt: on ? 0 : 8 }))];
-      if (!on) {
-        out.push(<div key="off">{advNoteEl("An open roof on posts, outside the building's size.", { marginTop: -6 })}</div>);
-        return out;
-      }
-      // WHERE IT MEETS THE BUILDING, read back from d3LeanToReadout, the numbers the 3D builds it from.
-      const lr = roof.leanToAttach ? d3LeanToReadout(spec, sel.size) : null;
+      const list = calLeanToList(roof);
+      const ax = d3RoofAxes(roof, bldgW, bldgH);
+      const rds = list.length ? (d3LeanTosReadout({ ...spec, roof: { ...roof, leanTos: list } }, sel.size) || []) : [];
+      const eaveWalls = ax.uAxisIsX ? ["right", "left"] : ["front", "back"];
+      const gableWalls = ax.uAxisIsX ? ["front", "back"] : ["right", "left"];
+      const wallLen = (wall) => (wall === "front" || wall === "back" ? bldgW : bldgH);
       const upIn = (ft) => Math.ceil(ft * 12 - 1e-6) / 12, downIn = (ft) => Math.floor(ft * 12 + 1e-6) / 12;
-      const cutFix = lr && lr.cuts ? [
-        lr.dropMax != null && lr.dropMax >= 0 ? `set the lean-to drop to ${d3FtIn(downIn(lr.dropMax))} or less` : null,
-        lr.widthMin != null && lr.widthMin <= 16 ? `make it at least ${d3FtIn(upIn(lr.widthMin))} wide` : null,
-      ].filter(Boolean).join(", or ") : "";
-      const at0 = d3LeanToReadout({ ...spec, roof: { ...roof, leanToAttach: "wall", leanToAttachFt: 0 } }, sel.size);
-      const underEave = at0 ? at0.E - (spec.wallHeightFt || D3.WALL_H) : 0;
-      const fasciaFix = lr && lr.fasciaCuts ? (lr.fasciaAt != null
-        ? `The roof edge above hangs into the lean-to — ${lr.noRoof ? "pick \"On the wall\" and meet it" : "meet the wall"} at least ${d3FtIn(upIn(lr.fasciaAt))} below the eave.`
-        : (lr.noRoof ? "The roof edge above hangs into the lean-to — give it more drop and pick \"On the wall\"." : "The roof edge above hangs into the lean-to — give it more drop, or meet it on the roof.")) : null;
-      const warn = !lr ? null
-        : lr.noRoof ? `This is the roof's high side, with no roof above it to meet, so it meets at the eave.${fasciaFix ? " " + fasciaFix : ""}`
-          : lr.cuts ? `The lean-to is steeper than the roof it sits on, so the main roof's edge pokes through it. ${cutFix ? cutFix.charAt(0).toUpperCase() + cutFix.slice(1) + "." : "Pick \"On the wall\"."}`
-            : lr.fasciaCuts ? fasciaFix
-              : lr.flat ? `Its outer edge is only ${d3FtIn(lr.drop)} below the eave, so it can't meet the wall lower than ${d3FtIn(lr.at)} — drawn there, nearly flat. Give it more drop or meet the wall higher.`
-                : lr.clamped ? `This roof only goes ${d3FtIn(lr.d)} up from here, so it meets there.`
-                  : null;
-      const ltAx = d3RoofAxes(roof, bldgW, bldgH);
-      const ltWall = lr ? (ltAx.uAxisIsX ? (lr.dir < 0 ? "left" : "right") : (lr.dir < 0 ? "back" : "front")) : null;
-      const openTop = lr && lr.mode === "wall" && lr.at >= 1 / 24 ? downIn(lr.ya - 0.2) : null;
-      const ltDc = lr ? d3DormerCovered(spec, sel.size) : null;
-      const ltDcWords = ltDc && ltDc.by === "lean-to" ? d3DormerCoveredWords(ltDc, false) : null;
+      const dc = rds.some((r) => r.kind === "eave" && r.mode === "roof") ? d3DormerCovered({ ...spec, roof: { ...roof, leanTos: list } }, sel.size) : null;
+      const out = [];
+      if (!list.length) out.push(<div key="off">{advNoteEl(["An open roof on posts, outside the building's size.", "Add as many as you like, each on the wall you pick: a side, the front or the back, all of it or part."], { marginTop: 0 })}</div>);
+      list.forEach((e, i) => {
+        const r = rds.find((x) => x.i === i) || null;
+        const gable = gableWalls.indexOf(e.wall) >= 0;
+        const set = (patch) => calSetLeanTo(i, patch);
+        const n = i + 1;
+        const len = wallLen(e.wall);
+        const run = d3LeanToRun(e, len);
+        const attach = e.attach === "wall" || (e.attach === "roof" && !gable) ? e.attach : "";
+        // "On the wall" starts at half the drop, the single lean-to's rule (calLeanWallSeed), and on an eave
+        // wall where the roof edge above needs it lower, at that clearance; "On the roof" at 1 ft.
+        const pickAttach = (v) => {
+          if (v === "roof" || v === "wall") {
+            let ft = typeof e.attachFt === "number" ? e.attachFt : 1;
+            if (typeof e.attachFt !== "number" && v === "wall") {
+              ft = gable ? Math.floor(Math.max(0, e.dropFt != null ? Number(e.dropFt) : 1) * 2) / 4
+                : calLeanWallSeed(spec, { ...roof, leanTos: null, leanToWidthFt: e.widthFt, leanToDropFt: e.dropFt, leanToSide: r && r.dir < 0 ? "left" : "right" });
+            }
+            set({ attach: v, attachFt: ft });
+          } else set({ attach: null, attachFt: null });
+        };
+        const pickWall = (v) => {
+          // "On the roof" means nothing on an end wall: moved to one, the lean-to meets at wall height.
+          const toGable = gableWalls.indexOf(v) >= 0;
+          set(toGable && e.attach === "roof" ? { wall: v, attach: null, attachFt: null } : { wall: v });
+        };
+        const cutFix = r && r.cuts ? [
+          r.dropMax != null && r.dropMax >= 0 ? `set the drop to ${d3FtIn(downIn(r.dropMax))} or less` : null,
+          r.widthMin != null && r.widthMin <= 16 ? `make it at least ${d3FtIn(upIn(r.widthMin))} wide` : null,
+        ].filter(Boolean).join(", or ") : "";
+        // At the eave (no attach) it hangs where a lean-to always has, under the roof's edge, and the single
+        // lean-to's panel never warned about that edge there; only a place the builder picked is checked.
+        const fasciaFix = r && r.fasciaCuts && attach ? (r.fasciaAt != null
+          ? `The roof edge above hangs into it — ${r.noRoof ? "pick \"On the wall\" and meet it" : "meet the wall"} at least ${d3FtIn(upIn(r.fasciaAt))} below the eave.`
+          : (r.noRoof ? "The roof edge above hangs into it — give it more drop and pick \"On the wall\"." : "The roof edge above hangs into it — give it more drop, or meet it on the roof.")) : null;
+        const warn = !r ? null
+          : r.noRoof && attach === "roof" ? `This is the roof's high side, with no roof above it to meet, so it meets at the eave.${fasciaFix ? " " + fasciaFix : ""}`
+            : r.cuts ? `It is steeper than the roof it sits on, so the main roof's edge pokes through it. ${cutFix ? cutFix.charAt(0).toUpperCase() + cutFix.slice(1) + "." : "Pick \"On the wall\"."}`
+              : fasciaFix ? fasciaFix
+                : r.flat ? `Its outer edge is only ${d3FtIn(r.drop)} below ${gable ? "the top of the wall" : "the eave"}, so it can't meet the wall lower than ${d3FtIn(r.at)} — drawn there, nearly flat. Give it more drop or meet the wall higher.`
+                  : r.clamped ? `This roof only goes ${d3FtIn(r.d)} up from here, so it meets there.`
+                    : null;
+        const meets = !r ? "" : r.noRoof || r.at < 1 / 24 ? (gable ? "meets the wall at its top" : "meets at the eave")
+          : `meets the ${r.mode === "roof" ? "roof" : "wall"} ${d3FtIn(r.at)} ${r.mode === "roof" ? "above" : "below"} ${gable ? "the top of the wall" : "the eave"}`;
+        const clash = r ? [
+          ...r.overlaps.map((j) => `It overlaps lean-to ${j + 1} on the ${e.wall} wall. Shorten one or slide it along.`),
+          r.porch ? `It runs in front of the ${r.porch === "recessed" ? "porch cut into" : "porch on"} this wall; the porch is drawn under it.` : null,
+        ].filter(Boolean) : [];
+        const dcWords = dc && dc.by === "lean-to" && r && r.kind === "eave" && r.mode === "roof" && r.dir === dc.dir ? d3DormerCoveredWords(dc, false) : null;
+        const half = Math.max(2, Math.round(len / 2));
+        out.push(
+          <div key={"lt" + i} className="ssd-card ss-adv-lt" data-ss-adv-lt={i}>
+            <div className="ss-adv-lt-h">
+              <span className="ssd-card-t">Lean-to {n}</span>
+              <button type="button" className="ss-adv-lt-x" aria-label={`Remove lean-to ${n}`} title="Remove this lean-to"
+                onClick={() => calEditLeanTos((l) => l.filter((_, j) => j !== i))}>✕</button>
+            </div>
+            <div className="ss-adv-flds">
+              {advSeg({ f: "leanToWall", label: "Wall", value: e.wall, pick: pickWall, full: true,
+                opts: [["left", "Left"], ["right", "Right"], ["front", "Front"], ["back", "Back"]],
+                note: gable ? "An end wall, under the peak." : "A long wall, under the roof's edge." })}
+              {advNum({ k: `lt${i}-widthFt`, f: "leanToWidthFt", label: "Lean-to width (ft)", value: e.widthFt, min: 1, max: 16, step: 0.5,
+                commit: (v) => set({ widthFt: Math.max(0.5, Math.min(16, v)) }) })}
+              {advNum({ k: `lt${i}-dropFt`, f: "leanToDropFt", label: "Outer edge drop (ft)", value: e.dropFt != null ? e.dropFt : 1, min: 0, max: 6, step: 0.25,
+                commit: (v) => set({ dropFt: Math.max(0, Math.min(6, v)) }), note: "How much lower the outer edge is than where it meets." })}
+              {advSeg({ f: "leanToAttach", label: "Meets the building", value: attach, pick: pickAttach, full: true,
+                opts: [["", gable ? "At wall height" : "At the eave"], ["wall", "On the wall"],
+                  ["roof", "On the roof", gable, gable ? "An end wall has no roof edge to meet, so it meets the wall" : undefined]],
+                note: attach ? "The outer edge keeps its drop; the slope follows."
+                  : gable ? "Hangs at the top of the wall." : "Hangs at the eave, the way a lean-to usually does.",
+                children: !attach && r ? (
+                  <>
+                    {advSay(`Builds ${Math.round(r.pitch * 120) / 10} in 12 · ${meets}`, false, { "data-ss-adv-readout": "leanTo" })}
+                    {advSay(warn, true)}
+                  </>
+                ) : null })}
+              {attach && advNum({ k: `lt${i}-attachFt`, f: "leanToAttachFt", label: attach === "roof" ? "How far up the roof (ft)" : "How far down the wall (ft)",
+                value: e.attachFt, min: 0, max: 8, step: 0.25, band: [0, 8], write: (v) => set({ attachFt: v }), placeholder: "0", fallback: 0, full: true,
+                children: r ? (
+                  <>
+                    {advSay(`Builds ${Math.round(r.pitch * 120) / 10} in 12 · ${meets}`, false, { "data-ss-adv-readout": "leanTo" })}
+                    {advSay(warn, true)}
+                    {r.openTop != null && advSay(`Keep ${e.wall}-wall doors and windows under ${d3FtIn(r.openTop)}, below the lean-to.`, r.openTop < 80 / 12, { "data-ss-leanto-openings": "" })}
+                    {dcWords && advSay(dcWords, true, { "data-ss-dormer-covered": "" })}
+                  </>
+                ) : null })}
+              <div key="len" className="ss-adv-f is-full" data-ss-adv-f="leanToLength">
+                <div className="ss-adv-fh"><span className="ssd-fld-l">Along the wall</span></div>
+                <div className="ss-adv-chips" role="group" aria-label={`Lean-to ${n} length`} style={{ marginTop: 0 }}>
+                  <button type="button" aria-pressed={run.whole} className={run.whole ? "ssd-chip is-on" : "ssd-chip"} style={advPill}
+                    onClick={() => set({ lengthFt: null, offsetFt: null })}>Whole wall</button>
+                  <button type="button" aria-pressed={!run.whole} className={!run.whole ? "ssd-chip is-on" : "ssd-chip"} style={advPill}
+                    onClick={() => { if (run.whole) set({ lengthFt: Math.min(len - 0.5, half) }); }}>Part of it</button>
+                </div>
+                {advNoteEl(run.whole ? `All ${d3FtIn(len)} of the ${e.wall} wall.` : `${d3FtIn(run.len)} of the ${d3FtIn(len)} ${e.wall} wall.`)}
+              </div>
+              {!run.whole && advNum({ k: `lt${i}-lengthFt`, f: "leanToLengthFt", label: "Length along the wall (ft)", value: run.len, min: 2, max: len, step: 0.5,
+                commit: (v) => set({ lengthFt: Math.max(2, Math.min(60, v)) }) })}
+              {!run.whole && advNum({ k: `lt${i}-offsetFt`, f: "leanToOffsetFt", label: "Position from the middle (ft)", value: run.off,
+                min: -Math.floor(run.room * 2) / 2, max: Math.floor(run.room * 2) / 2, step: 0.5, disabled: !(run.room > 0.25),
+                commit: (v) => set({ offsetFt: Math.max(-30, Math.min(30, v)) || null }),
+                ends: e.wall === "front" || e.wall === "back" ? ["toward the left", "toward the right"] : ["toward the back", "toward the front"] })}
+              {advSeg({ f: "leanToEnclosed", label: "Sides", value: e.enclosed === true ? "enclosed" : "open", pick: (v) => set({ enclosed: v === "enclosed" ? true : null }), full: true,
+                opts: [["open", "Open on posts"], ["enclosed", "Enclosed"]],
+                note: e.enclosed === true ? "Walled in with this building's siding." : "A roof on posts." })}
+              {clash.length > 0 && <div key="clash" className="ss-adv-f is-full">{clash.map((t, k) => <div key={k}>{advSay(t, true, { "data-ss-leanto-clash": "" })}</div>)}</div>}
+            </div>
+          </div>,
+        );
+      });
       out.push(
-        <div key="lt" className="ss-adv-flds">
-          {advNum({ k: "leanToWidthFt", label: "Lean-to width (ft)", value: roof.leanToWidthFt != null ? roof.leanToWidthFt : 0, min: 1, max: 20, step: 0.5,
-            commit: (n) => calSetRoof({ leanToWidthFt: n }) })}
-          {advNum({ k: "leanToDropFt", label: "Outer edge drop (ft)", value: roof.leanToDropFt != null ? roof.leanToDropFt : 1, min: 0, max: 6, step: 0.25,
-            commit: (n) => calSetRoof({ leanToDropFt: n }), note: "How much lower the outer edge is than where it meets." })}
-          {advSeg({ f: "leanToSide", label: "Lean-to side", value: roof.leanToSide || "right", pick: (v) => calSetRoof({ leanToSide: v }),
-            opts: [["left", "Left eave"], ["right", "Right eave"]] })}
-          {advSeg({ f: "leanToAttach", label: "Meets the building", value: roof.leanToAttach || "", pick: (v) => calSetAttach("leanToAttach", "leanToAttachFt", v), full: true,
-            opts: [["", underEave > 0.01 ? "At wall height" : "At the eave"], ["wall", "On the wall"], ["roof", "On the roof"]],
-            note: roof.leanToAttach ? "The outer edge keeps its drop; the slope follows."
-              : underEave > 0.01 ? `Hangs at wall height, ${d3FtIn(underEave)} below the eave.` : "Hangs at the eave, the way a lean-to usually does." })}
-          {roof.leanToAttach && advNum({ k: "leanToAttachFt", label: roof.leanToAttach === "roof" ? "How far up the roof (ft)" : "How far down the wall (ft)",
-            value: roof.leanToAttachFt, min: 0, max: 8, step: 0.25, band: [0, 8], write: (n) => calSetRoofOpt("leanToAttachFt", n), placeholder: "0", fallback: 0, full: true,
-            children: lr ? (
-              <>
-                {advSay(`Builds ${Math.round(lr.pitch * 120) / 10} in 12 · ${lr.noRoof || lr.at < 1 / 24 ? "meets at the eave" : `meets the ${lr.mode === "roof" ? "roof" : "wall"} ${d3FtIn(lr.at)} ${lr.mode === "roof" ? "above" : "below"} the eave`}`, false, { "data-ss-adv-readout": "leanTo" })}
-                {advSay(warn, true)}
-                {openTop != null && advSay(`Keep ${ltWall}-wall doors and windows under ${d3FtIn(openTop)}, below the lean-to.`, openTop < 80 / 12, { "data-ss-leanto-openings": "" })}
-                {ltDcWords && advSay(ltDcWords, true, { "data-ss-dormer-covered": "" })}
-              </>
-            ) : null })}
+        <div key="add" className="ss-adv-f is-full">
+          <button type="button" data-ss-adv-f="leanToAdd" className="ssd-tool" disabled={list.length >= D3_LEANTOS_MAX}
+            onClick={() => calEditLeanTos((l) => {
+              const used = l.map((x) => x.wall);
+              const wall = eaveWalls.concat(gableWalls).find((w) => used.indexOf(w) < 0) || eaveWalls[0];
+              return l.concat([{ wall, widthFt: 8 }]);
+            })}>{list.length ? "+ Add another lean-to" : "+ Add a lean-to"}</button>
+          {list.length >= D3_LEANTOS_MAX && advNoteEl(`Up to ${D3_LEANTOS_MAX} on one building.`)}
         </div>,
       );
       return out;
@@ -27707,7 +28170,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {addOnTabs.map(([k, label]) => {
                 const off = addOnOff(k);
                 const on = addOn === k;
-                const has = k === "leanto" ? (roof.leanToWidthFt || 0) > 0.5 : k === "wings" ? (Number(roof.wingWidthFt) || 0) > 0
+                const has = k === "leanto" ? d3AnyLeanTo(roof) : k === "wings" ? (Number(roof.wingWidthFt) || 0) > 0
                   : k === "dormer" ? (roof.dormerWidthFt || 0) > 0.5 : calPorchKind(roof) !== "none";
                 return (
                   <button key={k} type="button" role="tab" aria-selected={on} data-ss-adv-sec={k} disabled={off}

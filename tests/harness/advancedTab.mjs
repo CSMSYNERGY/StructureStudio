@@ -226,13 +226,15 @@ async function open(S, path) {
 const navOrder = (page) => page.evaluate(() => [...document.querySelectorAll(".ss-ws-nav .ss-nav a")].map((a) => new URL(a.href).pathname));
 // The Advanced page (rebuilt in the Designer's look, 2026-09-29) shows Size & roof, Walls & foundation
 // and Colors all at once, and the add-ons (Lean-to, Wings, Dormer, Porch & steps) one at a time on a tab
-// strip: an add-on's controls are reached by clicking its tab, and a lean-to's by turning it on.
+// strip: an add-on's controls are reached by clicking its tab, and a lean-to's by adding one (the Lean-to
+// tab is a list of lean-to cards since 2026-09-29, roof.leanTos; one card is one lean-to).
 const sec = async (page, k) => { if (["leanto", "wings", "dormer", "porch"].includes(k)) await page.locator(`[data-ss-adv-sec="${k}"]`).click(); };
 const leanBox = (page) => page.getByLabel("Lean-to width (ft)", { exact: true });
-const leanSwitch = (page) => page.locator('[data-ss-adv-f="leanToOn"]');
+const leanSwitch = (page) => page.locator('[data-ss-adv-f="leanToAdd"]');
+const leanCards = (page) => page.locator("[data-ss-adv-lt]").count();
 async function leanWidth(page, v) {
   await sec(page, "leanto");
-  if (await leanSwitch(page).getAttribute("aria-pressed") !== "true") await leanSwitch(page).click();
+  if (!(await leanCards(page))) await leanSwitch(page).click();
   await leanBox(page).fill(v);
   await leanBox(page).blur();
 }
@@ -271,7 +273,7 @@ const measure = (page) => page.evaluate(() => {
   };
   let leanTo = 0;
   const ltBoxes = [];
-  M.root.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssLeanTo === true) { leanTo++; ltBoxes.push(bb(q)); } });
+  M.root.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssLeanTo !== undefined) { leanTo++; ltBoxes.push(bb(q)); } });
   const ltBox = ltBoxes.length ? { mn: [0, 1, 2].map((k) => Math.min(...ltBoxes.map((b) => b.mn[k]))), mx: [0, 1, 2].map((k) => Math.max(...ltBoxes.map((b) => b.mx[k]))) } : null;
   return { leanTo, ltBox, walls: bb(M.wallsGroup), roofKids: M.roofGroup.children.length, inPage: !!P.renderer.domElement.closest('[data-ss-adv="view"]') };
 });
@@ -344,7 +346,7 @@ try {
     await leanSwitch(page).click();
     const lean = leanBox(page);
     await lean.fill("8");
-    await page.waitForFunction(() => { let n = 0; window.__ss3dPanel.model.root.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssLeanTo === true) n++; }); return n > 0; }, null, { timeout: 30000 }).catch(() => {});
+    await page.waitForFunction(() => { let n = 0; window.__ss3dPanel.model.root.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssLeanTo !== undefined) n++; }); return n > 0; }, null, { timeout: 30000 }).catch(() => {});
     const m2 = await measure(page);
     ok("A: Lean-to width 8 puts a lean-to in the 3D (ssLeanTo meshes)", m2.leanTo > 0, `${m2.leanTo} meshes`);
     ok("A: …on the side the panel says (Right eave = +x, outside the 16 ft wall)", !!m2.ltBox && m2.ltBox.mn[0] >= 8 - 0.5 && m2.ltBox.mx[0] <= 8 + 8 + 1.5, JSON.stringify(m2.ltBox && [m2.ltBox.mn[0].toFixed(2), m2.ltBox.mx[0].toFixed(2)]));
@@ -384,8 +386,8 @@ try {
     ok("A: create_style carries the typed name, for our own tenant (targetClientId null)", cs && cs.body.label === "Harness Custom Barn" && cs.body.targetClientId === null, cs && JSON.stringify(cs.body));
     ok("A: save_style_d3 goes to the NEW style's key", sd && sd.body.styleValue === "harness-custom-barn", sd && sd.body.styleValue);
     const d3 = sd && sd.body.d3;
-    ok("A: …with the draft on screen: a gable, lean-to 8, 8 ft walls, the new frame",
-      d3 && d3.roof && d3.roof.type === "gable" && d3.roof.leanToWidthFt === 8 && d3.wallHeightFt === 8 && sd.body.frame === "front", d3 && JSON.stringify(d3.roof));
+    ok("A: …with the draft on screen: a gable, lean-to 8 (the lean-to list, roof.leanTos), 8 ft walls, the new frame",
+      d3 && d3.roof && d3.roof.type === "gable" && Array.isArray(d3.roof.leanTos) && d3.roof.leanTos.length === 1 && d3.roof.leanTos[0].widthFt === 8 && !("leanToWidthFt" in d3.roof) && d3.wallHeightFt === 8 && sd.body.frame === "front", d3 && JSON.stringify(d3.roof));
     ok("A: …and no photos or video frames are claimed", sd && Array.isArray(sd.body.d3Photos) && sd.body.d3Photos.length === 0 && !("d3VideoFrames" in sd.body));
     // Review BC-1: the server carries a stored fall over any save that OMITS it, so this panel says
     // "no fall" out loud. The sanitiser drops the null; nothing stores it.
@@ -420,11 +422,11 @@ try {
     ok("A: …and the Harness Barn tile is the one picked", await page.locator('[data-ss-adv="start"] [data-ss-style="hbarn"]').getAttribute("aria-pressed") === "true");
     const wall = await page.getByLabel("Wall height (ft)", { exact: true }).inputValue();
     await sec(page, "leanto");
-    const ltv = await leanSwitch(page).getAttribute("aria-pressed");
+    const ltv = String((await leanCards(page)) > 0);
     const tv = await roofType(page);
     ok("A: Copy of Harness Barn seeds that style's roof (gambrel), wall (9) and no lean-to", tv === "gambrel" && wall === "9" && ltv === "false", `${tv} / wall ${wall} / lean-to on ${ltv}`);
     await advPanel(page);
-    await page.waitForFunction(() => { let n = 0; window.__ss3dPanel.model.root.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssLeanTo === true) n++; }); return n === 0; }, null, { timeout: 20000 }).catch(() => {});
+    await page.waitForFunction(() => { let n = 0; window.__ss3dPanel.model.root.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssLeanTo !== undefined) n++; }); return n === 0; }, null, { timeout: 20000 }).catch(() => {});
     ok("A: …and the 3D follows (no lean-to left)", (await measure(page)).leanTo === 0);
     // A change, then a new start point: asked first.
     await leanWidth(page, "4");
@@ -525,7 +527,7 @@ try {
     await page.getByRole("button", { name: /Preview in 3D/ }).click();
     await page.waitForFunction(() => { const E = window.__ss3dEngine; return !!(E && E.model && E.model.roofGroup && E.model.roofGroup.children.length); }, null, { timeout: 90000 });
     await settle(page, 1200);
-    const lt = await page.evaluate(() => { let n = 0; window.__ss3dEngine.model.root.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssLeanTo === true) n++; }); return n; });
+    const lt = await page.evaluate(() => { let n = 0; window.__ss3dEngine.model.root.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssLeanTo !== undefined) n++; }); return n; });
     ok("D: Preview in 3D opens the full-screen viewer on the draft (lean-to 6 is in it)", lt > 0, `${lt} lean-to meshes`);
     // A style draft is not a quote (review 2026-09-29): no Add row, no Items, no "Use this view
     // in my quote". The viewer's own view controls stay.
