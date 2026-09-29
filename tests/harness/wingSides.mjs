@@ -23,10 +23,15 @@
 //      and pitch. Driven: a 10 ft right wing beside a 4 ft left one on the wall builds two different
 //      wings in the page's own 3D; turning the right wing off leaves the left; Save carries wingSides
 //      and the shared keys equal to the first wing's.
+//   R  THE REVIEW FIXES (2026-09-30): twin Automatic wings that push the middle up are named together;
+//      a middle both under the 1 ft rule and pushed gives the push alone; a front/back building's cards
+//      run Back then Front, as the End view draws them, and no "Auto draws" when no wing is drawn; at
+//      390 px each card's "Meets the middle section" is one row of three.
+//   cal the calibration panel keeps its wing controls and says each wing is set on the Advanced page.
 //
 //   python -m http.server 8311 --bind 127.0.0.1 --directory <repo root>
 //   SS_BASE=http://127.0.0.1:8311 node tests/harness/wingSides.mjs     (SS_SHOTS=<dir> for the PNGs)
-//   SS_CASES=D,S,A                                                     (a subset)
+//   SS_CASES=D,S,A,R,cal                                               (a subset)
 //
 // Exit 0 = every assertion held.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
@@ -336,8 +341,8 @@ const ENT = { reason: "internal", status: "active", granted: ["view_3d"], featur
 const H = { "access-control-allow-origin": "*", "access-control-expose-headers": "*" };
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", headers: H, body: JSON.stringify(body) });
 
-async function openAdvanced(browser) {
-  const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 }, serviceWorkers: "block" });
+async function openAdvanced(browser, viewport = { width: 1440, height: 1000 }) {
+  const ctx = await browser.newContext({ viewport, serviceWorkers: "block" });
   await ctx.addInitScript(([ref, s]) => {
     try { localStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(s)); } catch (_e) { /* storage blocked */ }
     window.__SS3D_DEBUG = true;
@@ -546,6 +551,125 @@ async function advancedCheck(browser, ok, shots) {
   } finally { await ctx.close(); }
 }
 
+// THE REVIEW FIXES (2026-09-30), on the page itself.
+//   R1 twin Automatic wings pushing the middle up: the page says "the wing roofs", not one of them.
+//   R2 one wing on the wall with the middle asked under walls + 1 ft, the other Automatic and pushing: ONE
+//      warning, the push, naming the Automatic wing -- not the 1 ft rule as well, which gave the wrong reason.
+//   R3 a building whose front is a long side (28 x 20): the cards run Back then Front, the way the End view
+//      beside them draws the walls; and with the wing on a side the roof no longer has, the middle-height
+//      note does not claim what Auto draws.
+//   R4 at phone width the wing card's "Meets the middle section" is ONE row of three buttons.
+const setSize = async (page, W, L) => {
+  for (const [lab, v] of [["Width (ft)", W], ["Length (ft)", L]]) {
+    const b = page.getByLabel(lab, { exact: true }).first();
+    await b.fill(String(v)); await b.blur(); await settle(page, 300);
+  }
+};
+const wingsOn = async (page) => {
+  await page.locator('[data-ss-adv-sec="wings"]').click();
+  await settle(page, 300);
+  const sw = page.locator('[data-ss-adv-f="wingsOn"]');
+  if (await sw.getAttribute("aria-pressed") !== "true") await sw.click();
+  await settle(page, 500);
+};
+const hcText = (page) => page.locator('[data-ss-adv-f="centerEaveFt"]').innerText().then(sp).catch(() => "");
+const pushText = (page) => page.locator('[data-ss-adv-readout="wings-push"]').innerText().then(sp).catch(() => "");
+async function reviewCheck(browser, ok, shots) {
+  {
+    const { ctx, page, errors } = await openAdvanced(browser);
+    try {
+      await setSize(page, 24, 28);
+      await wingsOn(page);
+      await advModel(page, (M) => M.massing.wings.length === 2);
+      // R1: two 4 ft Automatic wings at 3:12 under a middle asked at 6 ft: both push it up alike.
+      await typeBox(page, page.getByLabel("Middle section wall height (ft)", { exact: true }), 6);
+      await advModel(page, (M) => M.massing.hcRaised === true && M.massing.wings.length === 2);
+      const m1 = (await measure(page, panelEngine)).massing;
+      const p1 = await pushText(page);
+      console.log(`   R1: Hc ${f3(m1.Hc)} raised ${m1.hcRaised}; "${p1}"`);
+      ok("R1: twin Automatic wings push the middle up together, and the page says \"the wing roofs\"",
+        m1.hcRaised && /the wing roofs, set to Automatic, push it up to fit/.test(p1) && !/left wing|right wing/.test(p1), p1);
+      await advShot(page, "adv-review-twin-push-end.png", shots, "end");
+      // R2: the left wing on the wall; the right one, Automatic, still pushes over the 1 ft floor.
+      await card(page, "left").getByRole("button", { name: "On the wall", exact: true }).click();
+      await settle(page, 400);
+      await advModel(page, (M) => M.massing.wings.some((g) => g.side < 0 && g.attach === "wall") && M.massing.hcRaised === true);
+      const m2 = (await measure(page, panelEngine)).massing;
+      const t2 = await hcText(page), p2 = await pushText(page);
+      console.log(`   R2: Hc ${f3(m2.Hc)} low ${m2.hcLow} raised ${m2.hcRaised}; "${p2}"`);
+      ok("R2: one wing on the wall under a 6 ft middle, the other Automatic: the massing is both low and pushed", m2.hcLow === true && m2.hcRaised === true, JSON.stringify({ Hc: m2.Hc, low: m2.hcLow, raised: m2.hcRaised }));
+      ok("R2: …the page gives the push, naming the right wing", /the right wing's roof, set to Automatic, pushes it up to fit/.test(p2), p2);
+      ok("R2: …and not the 1 ft rule as well", !/must stand at least 1 ft above the outside walls/.test(t2), t2);
+      // R3: only the left wing on, then the footprint turned so the long sides are front and back.
+      await card(page, "right").locator('[data-ss-adv-f="wingOn-right"]').click();
+      await settle(page, 400);
+      await advModel(page, (M) => M.massing.wings.length === 1);
+      await setSize(page, 28, 20);
+      await advModel(page, (M) => M.massing.wings.length === 0);
+      const ax = await page.evaluate(() => window.__ss3dPanel.model.massing.uAxisIsX);
+      const order = await page.$$eval("[data-ss-adv-wing]", (c) => c.map((x) => x.dataset.ssAdvWing));
+      const t3 = await hcText(page);
+      console.log(`   R3: uAxisIsX ${ax}; cards ${JSON.stringify(order)}; "${t3.slice(0, 160)}"`);
+      ok("R3: on a 28 x 20 the long sides are the eave walls, and the cards run Back then Front, as the End view draws them",
+        ax === false && JSON.stringify(order) === JSON.stringify(["back", "front"]), `${ax} ${JSON.stringify(order)}`);
+      ok("R3: …with the left wing on a side this roof has no wing on, no \"Auto draws\" for a middle that is not drawn", !/Auto draws/.test(t3) && /not drawn/.test(await page.locator("[data-ss-adv-panel]").innerText()), t3);
+      // Both on: two wings along the front and back, and the note is back.
+      await card(page, "back").locator('[data-ss-adv-f="wingOn-back"]').click();
+      await settle(page, 400);
+      await card(page, "front").locator('[data-ss-adv-f="wingOn-front"]').click();
+      await settle(page, 400);
+      await typeBox(page, boxIn(page, "front", "wingWidthFt"), 6);
+      await advModel(page, (M) => M.massing.wings.length === 2 && M.massing.wings.some((g) => g.wall === "south" && Math.abs(g.w - 6) < 1e-6));
+      const m3 = (await measure(page, panelEngine)).massing;
+      ok("R3: …both on, the back wing stands on the north wall and the 6 ft front wing on the south", m3.wings.map((g) => g.wall).join() === "north,south"
+        && Math.abs(m3.wings.find((g) => g.wall === "south").w - 6) < 1e-6, JSON.stringify(m3.wings.map((g) => [g.wall, g.w])));
+      ok("R3: …and the middle-height note says what Auto draws again", /Auto draws/.test(await hcText(page)));
+      // The middle back on Auto, so the shot shows it standing over both wings.
+      await page.locator('[data-ss-adv-f="centerEaveFt"]').getByRole("button", { name: "Auto", exact: true }).click();
+      await settle(page, 400);
+      await advModel(page, (M) => M.massing.Hc > 12);
+      await advShot(page, "adv-review-back-front-end.png", shots, "end");
+      await advShot(page, "adv-review-back-front-corner.png", shots, "corner");
+      if (shots) {
+        await page.locator("[data-ss-adv-panel]").scrollIntoViewIfNeeded();
+        await settle(page, 300);
+        await page.locator("[data-ss-adv-panel]").screenshot({ path: join(shots, "adv-review-back-front-cards.png") }).catch(() => {});
+      }
+      ok("R1-3: no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
+    } finally { await ctx.close(); }
+  }
+  {
+    // R4: a phone.
+    const { ctx, page, errors } = await openAdvanced(browser, { width: 390, height: 844 });
+    try {
+      await setSize(page, 24, 28);
+      await wingsOn(page);
+      // A phone has no docked 3D (the page offers it full screen): the cards are what this measures.
+      await page.waitForFunction(() => document.querySelectorAll("[data-ss-adv-wing] .ssd-seg").length === 2, null, { timeout: 30000 });
+      const segs = await page.evaluate(() => ({
+        bp: (document.querySelector(".ssd-frame") || { dataset: {} }).dataset.ssdBp,
+        sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth,
+        segs: [...document.querySelectorAll("[data-ss-adv-wing] .ssd-seg")].map((s) => {
+          const r = s.getBoundingClientRect();
+          const bs = [...s.querySelectorAll("button")];
+          return { w: Math.round(r.width), h: Math.round(r.height), tops: new Set(bs.map((b) => Math.round(b.getBoundingClientRect().top))).size, n: bs.length,
+            clipped: bs.some((b) => b.scrollWidth > b.clientWidth + 1) };
+        }),
+      }));
+      console.log(`   R4: ${JSON.stringify(segs)}`);
+      ok("R4: at 390 px each wing card's \"Meets the middle section\" is one row of three buttons", segs.segs.length === 2 && segs.segs.every((x) => x.n === 3 && x.tops === 1 && !x.clipped), JSON.stringify(segs.segs));
+      ok("R4: …and the page does not scroll sideways", segs.sw <= segs.cw, `${segs.sw} / ${segs.cw}`);
+      if (shots) {
+        await card(page, "left").scrollIntoViewIfNeeded();
+        await settle(page, 300);
+        await page.screenshot({ path: join(shots, "adv-review-phone-390-cards.png"), fullPage: false });
+        await page.locator("[data-ss-adv-panel]").screenshot({ path: join(shots, "adv-review-phone-390-panel.png") }).catch(() => {});
+      }
+      ok("R4: no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
+    } finally { await ctx.close(); }
+  }
+}
+
 // The calibration panel (?admin=1) keeps its own controls, and says the wings are set on the Advanced page.
 async function calNote(ctx, ok) {
   const roof = { ...TRI, wingSides: { left: { widthFt: 6 }, right: { widthFt: 10 } } };
@@ -584,6 +708,7 @@ try {
     }
     if (want("A")) { try { await advancedCheck(browser, ok, shots); } catch (e) { ok("A: ran", false, e && e.message); } }
     if (want("cal")) { try { await calNote(ctx, ok); } catch (e) { ok("cal: ran", false, e && e.message); } }
+    if (want("R")) { try { await reviewCheck(browser, ok, shots); } catch (e) { ok("R: ran", false, e && e.message); } }
   }
   if (digests) writeFileSync(process.env.SS_WINGSIDES_DIGEST, JSON.stringify(digests, null, 1));
 } finally {

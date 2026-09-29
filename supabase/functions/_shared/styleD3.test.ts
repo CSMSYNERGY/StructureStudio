@@ -2173,6 +2173,10 @@ Deno.test("wingSides: each side's width, pitch, attach and distance round-trip, 
   assertEquals((roofOf({ type: "gable", wingWidthFt: 0, wingSides: sides }).wingSides as Any).right.widthFt, 10);
   assert(!("wingSides" in roofOf({ type: "shed", pitch: 0.25, wingWidthFt: 6, wingSides: sides })), "a shed drops it with the wing set");
   assert(!("wingSides" in roofOf({ type: "gable", wingWidthFt: 12, wingSide: "both" })), "absent stays absent: every wing reads the shared keys");
+  // A blank box is no number (review, 2026-09-30): Number("") is 0, and a stored widthFt 0 drew no wing.
+  assertEquals((roofOf({ type: "gable", wingWidthFt: 8, wingSides: { left: { widthFt: "", pitch: "  ", attach: "wall", attachFt: "" } } }).wingSides as Any).left, { attach: "wall" });
+  assert(!("wingSides" in roofOf({ type: "gable", wingWidthFt: 8, wingSides: { left: { widthFt: "", pitch: "" } } })), "an entry of blanks stores nothing");
+  assertEquals((roofOf({ type: "gable", wingWidthFt: 8, wingSides: { left: { widthFt: 0 } } }).wingSides as Any).left.widthFt, 0, "a typed 0 is still a number");
 });
 
 Deno.test("porchStepCount rounds, clamps, and exists only with a projecting porch's steps (2026-09-28)", () => {

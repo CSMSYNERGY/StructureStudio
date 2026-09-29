@@ -218,8 +218,10 @@ function sanitizeWingSides(raw: unknown): Record<string, Record<string, unknown>
         if ((D3_WING_SIDE_ATTACH as readonly string[]).includes(String(e.attach))) clean.attach = String(e.attach);
         continue;
       }
+      // A blank box is no number at all, not 0 (review, 2026-09-30: Number("") stored widthFt 0).
+      if (typeof e[k] === "string" && (e[k] as string).trim() === "") continue;
       const n = num(e[k]);
-      if (n !== null) clean[k] = Math.min(D3_WING_SIDE_CLAMPS[k][1], Math.max(D3_WING_SIDE_CLAMPS[k][0], n));
+      if (n !== null) clean[k] =Math.min(D3_WING_SIDE_CLAMPS[k][1], Math.max(D3_WING_SIDE_CLAMPS[k][0], n));
     }
     if (Object.keys(clean).length) out[side] = clean;
   }

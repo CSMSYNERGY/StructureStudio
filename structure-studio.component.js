@@ -4708,21 +4708,23 @@ function d3Massing(roofCfg, W, L, H) {
     const rawP = cfg.wingPitch != null ? Number(cfg.wingPitch) : 0.25;
     const pitch = isFinite(rawP) ? Math.max(0, Math.min(1.5, rawP)) : 0.25;
     const shared = cfg.wingAttach === "roof" || cfg.wingAttach === "wall" ? cfg.wingAttach : null;
-    // Each wall's own numbers (roof.wingSides), else the shared ones.
-    const own = walls.map((wall) => d3WingSideCfg(cfg, wall, want, pitch, shared));
+    // Each wall's own numbers (roof.wingSides), else the shared ones. A side whose own width is 0.5 ft
+    // or less draws no wing, so it takes no share of the room either (review, 2026-09-30: a stored 0.4
+    // cut the other wing for nothing). Without wingSides every side asks `want`, over 0.5 here.
+    const own = walls.map((wall) => ({ wall, ...d3WingSideCfg(cfg, wall, want, pitch, shared) })).filter((o) => o.want > 0.5);
     // The centre keeps at least 4 ft: a wider ask shrinks the wings, both alike -- in proportion when
     // they differ, and by today's own expression when they do not.
     const room = ax.S - 4, sum = own.reduce((t, o) => t + o.want, 0);
     const same = own.every((o) => o.want === own[0].want);
-    const widths = own.map((o) => (same ? Math.min(o.want, room / walls.length) : sum > room ? o.want * room / sum : o.want));
+    const widths = own.map((o) => (same ? Math.min(o.want, room / own.length) : sum > room ? o.want * room / sum : o.want));
     const modes = [], fts = [];
-    walls.forEach((wall, i) => {
-      const w = widths[i];
+    own.forEach((o, i) => {
+      const w = widths[i], wall = o.wall;
       if (!(w > 0.5)) return;
-      const s = wall === negWall ? -1 : 1, p = own[i].pitch;
+      const s = wall === negWall ? -1 : 1, p = o.pitch;
       out.wings.push({ side: s, wall, w, pitch: p, u1: s * ax.S / 2, u0: s * (ax.S / 2 - w), ye: Hn, ya: Hn + w * p });
-      modes.push(own[i].attach);
-      fts.push(own[i].attachFt);
+      modes.push(o.attach);
+      fts.push(o.attachFt);
     });
     if (out.wings.length) {
       const gL = out.wings.find((g) => g.side < 0), gR = out.wings.find((g) => g.side > 0);
@@ -4730,17 +4732,11 @@ function d3Massing(roofCfg, W, L, H) {
       out.Sc = ax.S - wL - wR;
       out.uc = (wL - wR) / 2;
       out.ya = out.wings.reduce((y, g) => Math.max(y, g.ya), -Infinity);
-      // The centre's eave overhangs the wing roof, falling at its own eave slope while the wing roof
-      // falls at the wing pitch, and its fascia or tails hang up to 0.3 ft under the deck. It has to
-      // clear the wing slab's top (ROOF_T above the line) by 0.1 ft all the way out to the overhang.
       const c = d3RoofProfile(cfg, out.Sc, 0, ax.tallNeg).dedup;
-      const n = c.length;
-      const slopeAt = (a, b) => (Math.abs(b[0] - a[0]) > 1e-9 ? Math.abs((b[1] - a[1]) / (b[0] - a[0])) : 0);
-      const eaveSlope = n > 1 ? Math.max(slopeAt(c[0], c[1]), slopeAt(c[n - 2], c[n - 1])) : 0;
       const ovRaw = cfg.overhang != null ? Number(cfg.overhang) : D3.OVERHANG;
       const ov = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
       // Each AUTOMATIC wing's own floor for the centre's eave: its roof's top + 1 ft at least.
-      const minHcOf = (g) => g.ya + Math.max(1.0, D3.ROOF_T + 0.43 + Math.max(0, eaveSlope - g.pitch) * ov);
+      const minHcOf = d3WingHcFloor(cfg, out.Sc, ax.tallNeg);
       // WHERE THE WING ROOFS MEET THE CENTRE, CHOSEN (roof.wingAttach / wingAttachFt, 2026-09-28). With
       // an attach the centre's eave is the builder's number EXACTLY and nothing below moves it: the push
       // is what Carolyn saw on the Tri Home and did not want -- "It even pushed the roof up ... they need
@@ -4776,6 +4772,21 @@ function d3Massing(roofCfg, W, L, H) {
   }
   out.prof = d3RoofProfile(cfg, out.Sc, out.Hc, ax.tallNeg).dedup;
   return out;
+}
+// ONE AUTOMATIC WING'S FLOOR FOR THE CENTRE'S EAVE, as a function of the wing (its ya and pitch). The
+// centre's eave overhangs the wing roof, falling at its own eave slope while the wing roof falls at the
+// wing pitch, and its fascia or tails hang up to 0.3 ft under the deck. It has to clear the wing slab's
+// top (ROOF_T above the line) by 0.1 ft all the way out to the overhang, and it stands 1 ft over the wing
+// roof's top at least. d3Massing pushes the centre up to the highest of these; the Advanced page reads
+// the same floors to name the wing, or wings, that did the pushing (review, 2026-09-30).
+function d3WingHcFloor(cfg, Sc, tallNeg) {
+  const c = d3RoofProfile(cfg, Sc, 0, tallNeg).dedup;
+  const n = c.length;
+  const slopeAt = (a, b) => (Math.abs(b[0] - a[0]) > 1e-9 ? Math.abs((b[1] - a[1]) / (b[0] - a[0])) : 0);
+  const eaveSlope = n > 1 ? Math.max(slopeAt(c[0], c[1]), slopeAt(c[n - 2], c[n - 1])) : 0;
+  const ovRaw = cfg.overhang != null ? Number(cfg.overhang) : D3.OVERHANG;
+  const ov = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
+  return (g) => g.ya + Math.max(1.0, D3.ROOF_T + 0.43 + Math.max(0, eaveSlope - g.pitch) * ov);
 }
 // ONE WING'S OWN NUMBERS (roof.wingSides, 2026-09-29): the entry for the wall it stands on (west = left,
 // east = right, south = front, north = back), each field overriding the shared one handed in -- `want`
@@ -17849,6 +17860,11 @@ const SS_ADV_CSS = [
   // with no wing is a quiet card with just its switch.
   '.ss-adv .ss-adv-wcard > .ss-adv-flds{margin-top:12px}',
   '.ss-adv .ss-adv-wcard.is-off{background:var(--ss-surface)}',
+  // On a phone the card's padding leaves its three-way "Meets the middle section" too narrow for one row
+  // of natural-width buttons (review, 2026-09-30: "On the roof" wrapped alone): three equal columns, the
+  // lean-to row's rule, so the words wrap inside their own button if they must.
+  '.ss-adv .ssd-frame[data-ssd-bp="xs"] .ss-adv-wcard .ssd-seg,.ss-adv .ssd-frame[data-ssd-bp="sm"] .ss-adv-wcard .ssd-seg{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%}',
+  '.ss-adv .ssd-frame[data-ssd-bp="xs"] .ss-adv-wcard .ssd-seg-b,.ss-adv .ssd-frame[data-ssd-bp="sm"] .ss-adv-wcard .ssd-seg-b{height:auto;min-height:calc(var(--ssd-chip-h) - 2px);padding:3px 6px;white-space:normal;line-height:1.15;text-align:center}',
   '.ss-adv .ss-adv-panel > .ssd-tool{align-self:flex-start}',
   '.ss-adv .ss-adv-warn{padding:9px 12px;border:1px solid #FCD34D;border-radius:4px;background:#FEF3C7;color:#92400E;font-size:12px;font-weight:600;line-height:1.45}',
   '.ss-adv .ss-adv-ok{max-width:var(--ssd-invoice-max);margin:0 0 12px;padding:10px 14px;border:1px solid #BBF7D0;border-radius:4px;background:#F0FDF4;color:#15803D;font-size:12.5px;font-weight:700;line-height:1.45}',
@@ -21787,7 +21803,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // wing can stand on are the roof's eave sides (d3RoofAxes, the renderer's rule), left/right or front/back,
   // and a side is on when roof.wingSide is "both" (or not chosen: drawn on both) or names it.
   const calWingEaveSides = (roof) => (d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? ["left", "right"] : ["front", "back"]);
-  const calWingOnSides = (roof, eave) => eave.filter((s) => !roof.wingSide || roof.wingSide === "both" || roof.wingSide === s);
+  // A side whose own width is 0.5 ft or less draws nothing (d3Massing), so it is off here too (review,
+  // 2026-09-30): the page never writes one, but a stored 0 must not show a "Left wing on" card with no wing.
+  const calWingZero = (roof, s) => {
+    const o = roof.wingSides && typeof roof.wingSides === "object" ? roof.wingSides[s] : null;
+    return !!(o && typeof o === "object" && typeof o.widthFt === "number" && !(o.widthFt > 0.5));
+  };
+  const calWingOnSides = (roof, eave) => eave.filter((s) => (!roof.wingSide || roof.wingSide === "both" || roof.wingSide === s) && !calWingZero(roof, s));
   // One side's numbers as the renderer reads them (d3WingSideCfg): its own entry, else the shared key.
   // `attach` is "" for Automatic.
   const calWingSideNow = (roof, s) => {
@@ -21847,6 +21869,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (!next.length) { for (const k of CAL_WING_KEYS) delete roof[k]; return { ...p, spec: { ...p.spec, roof } }; }
     roof.wingSide = next.length === eave.length ? "both" : next[0];
     if (!((Number(roof.wingWidthFt) || 0) > 0)) roof.wingWidthFt = 4;
+    // A side switched on over a stored width of 0.5 ft or less starts at 4 ft, the calSetWings rule.
+    if (turnOn && calWingZero(roof, side)) roof.wingSides = { ...roof.wingSides, [side]: { ...roof.wingSides[side], widthFt: 4 } };
     return { ...p, spec: { ...p.spec, roof: calWingSync(roof) } };
   });
   // WHERE A LEAN-TO OR THE WINGS MEET THE BUILDING (roof.leanToAttach / wingAttach, 2026-09-28). The
@@ -23536,6 +23560,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     value={String(Number(roof.wingWidthFt) || 0)}
                     onChange={(e) => { const n = parseFloat(e.target.value); if (isFinite(n) && n > 0) calSetRoofOpt("wingWidthFt", Math.min(16, n)); }}
                     style={{ ...S.sel, fontSize: undefined, width: 100, display: "block" }} />
+                  {/* EACH WING SET ON ITS OWN (roof.wingSides, 2026-09-29): this box is the shared width, which a
+                      wing card on the Advanced page overrides for its side (review, 2026-09-30). */}
+                  {roof.wingSides && typeof roof.wingSides === "object" && Object.keys(roof.wingSides).length > 0 && (
+                    <span data-ss-cal-wingsides-fix="" style={{ display: "block", marginTop: 4, fontSize: 11, fontWeight: 600, color: "#B45309" }}>Each wing is set separately on the Advanced page.</span>
+                  )}
                 </label>
               )}
             </div>
@@ -27666,30 +27695,35 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const wDcWords = wDc && wDc.by === "wing" ? d3DormerCoveredWords(wDc, false) : null;
       const hc = roof.centerEaveFt;
       const cap1 = (t) => t.charAt(0).toUpperCase() + t.slice(1);
-      // The Automatic wing (or wings) with the tallest roof is the one that pushes the middle section up.
-      const autoTop = wm.wings.filter((g) => !g.attach).reduce((y, g) => Math.max(y, g.ya), -Infinity);
-      const pusher = wm.hcRaised ? wm.wings.find((g) => !g.attach && g.ya === autoTop) : null;
+      // The Automatic wing, or wings, whose own floor (d3WingHcFloor, the renderer's) set the middle
+      // section's height when it was pushed up: named when it is one, "the wing roofs" when they tie.
+      const floorOf = wm.hcRaised ? d3WingHcFloor(roof, wm.Sc, wm.tallNeg) : null;
+      const pushers = floorOf ? wm.wings.filter((g) => !g.attach && floorOf(g) >= wm.Hc - 1e-6) : [];
+      const pushWho = !wm.hcRaised ? null : pushers.length === 1 ? `the ${wSide(pushers[0])} wing's roof, set to Automatic, pushes` : "the wing roofs, set to Automatic, push";
+      // The cards run in the order the End view beside them draws the walls: the -u wall on the left
+      // (d3Massing's negWall), so front/back roofs read Back then Front (review, 2026-09-30).
+      const cardSides = wm.uAxisIsX ? eaveSides : eaveSides.slice().reverse();
       out.push(
         <div key="wgc" className="ss-adv-flds">
           {lost ? advSay(`This roof's edges are on the ${eaveSides[0] === "left" ? "left and right sides" : "front and back"}, so the wing on the ${roof.wingSide === "left" || roof.wingSide === "right" ? roof.wingSide + " side" : roof.wingSide} is not drawn. Turn one on below.`, true) : null}
           {advNum({ k: "centerEaveFt", label: "Middle section wall height (ft)", value: hc, min: 6, max: 26, step: 0.5, band: [6, 26],
             write: (n) => calSetRoofOpt("centerEaveFt", n), placeholder: "Auto", fallback: blankHc != null ? blankHc : wallH + 3, full: true,
-            note: `Floor to the top of the tall middle walls, shared by every wing. Auto draws ${d3FtIn(blankHc != null ? blankHc : wallH + 3)}.`,
+            note: wm.wings.length ? `Floor to the top of the tall middle walls, shared by every wing. Auto draws ${d3FtIn(blankHc != null ? blankHc : wallH + 3)}.` : "Floor to the top of the tall middle walls, shared by every wing.",
             children: (
               <>
                 <div className="ss-adv-chips">
                   <button type="button" aria-pressed={hc == null || hc === ""} onClick={() => calSetRoofOpt("centerEaveFt", null)}
                     className={hc == null || hc === "" ? "ssd-chip is-on" : "ssd-chip"} style={advPill}>Auto</button>
                 </div>
-                {wm.hcLow && advSay(`The middle section must stand at least 1 ft above the outside walls, so it is drawn at ${d3FtIn(wm.Hc)}.`, true)}
-                {pusher && advSay(`Drawn at ${d3FtIn(wm.Hc)}: the ${wSide(pusher)} wing's roof, set to Automatic, pushes it up to fit.`, true, { "data-ss-adv-readout": "wings-push" })}
+                {wm.hcLow && !wm.hcRaised && advSay(`The middle section must stand at least 1 ft above the outside walls, so it is drawn at ${d3FtIn(wm.Hc)}.`, true)}
+                {pushWho && advSay(`Drawn at ${d3FtIn(wm.Hc)}: ${pushWho} it up to fit.`, true, { "data-ss-adv-readout": "wings-push" })}
               </>
             ) })}
         </div>,
       );
       out.push(
         <div key="wgcards" className="ss-adv-cards ss-adv-top">
-          {eaveSides.map((s) => {
+          {cardSides.map((s) => {
             const isOn = onSides.indexOf(s) >= 0;
             const e = calWingSideNow(roof, s);
             const g = isOn ? gOf(s) : null;

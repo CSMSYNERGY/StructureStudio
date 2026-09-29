@@ -54,7 +54,7 @@ type Any = any;
 const F = new Function(
   `const isVentItem = (it) => !!(it && it.isVent);\n${blocks.map((b) => b.cmp).join("\n")}; return { D3, d3RoofAxes, d3Massing, d3MassingTopAt, d3WallTops, d3WallTopFt, d3CeilingFt, ` +
     `d3PorchSpanWings, d3PorchSpan, d3PorchWallTopFt, d3ModelTopFt, d3FrameHeightFt, d3DefaultShotCamera, ssSelfCheckCameras, ssGableVentFit, SS_SHOT, ` +
-    `d3DormerFaceFt, d3DormerReadout, d3TransomDormerGeom, d3MakeProfYAt, d3RoofProfile, d3DormerWindowFit, d3RoofEnd, d3LeanToGeom, d3DormerCovered, d3DormerCoveredWords };`,
+    `d3DormerFaceFt, d3DormerReadout, d3TransomDormerGeom, d3MakeProfYAt, d3RoofProfile, d3DormerWindowFit, d3RoofEnd, d3LeanToGeom, d3DormerCovered, d3DormerCoveredWords, d3WingHcFloor };`,
 )() as Record<string, Any>;
 
 // The Tri Home, as the task drew it: 24 wide across the gable end, 28 deep, 9 ft outer walls, 8 ft
@@ -850,4 +850,35 @@ Deno.test("front and back wings on a building whose front is an eave wall read w
   // left / right entries describe walls that are gable ends here: ignored.
   assertEquals(JSON.stringify(F.d3Massing({ ...roof, wingSides: { left: { widthFt: 2 }, right: { widthFt: 3 } } }, 28, 20, 9)),
     JSON.stringify(F.d3Massing({ ...roof, wingSides: undefined }, 28, 20, 9)));
+});
+
+Deno.test("a side stored at 0.5 ft or less takes no share of the room: the other wing is not cut for it (review, 2026-09-30)", () => {
+  const at = (right: number) => F.d3Massing({ ...TRI, centerEaveFt: 12, wingSides: { left: { widthFt: 8 }, right: { widthFt: right } } }, 12, 16, 8);
+  for (const r of [0, 0.4, 0.5]) {
+    const m = at(r);
+    assertEquals(m.wings.map((g: Any) => [g.wall, g.w]), [["west", 8]], `right ${r}`);
+    assertEquals([m.Sc, m.uc], [4, 4]);
+  }
+  // Just over the line it is a wing again, and the two share the room in proportion.
+  const both = at(0.6);
+  assertEquals(both.wings.length, 2);
+  assertAlmostEquals(both.wings[0].w, 8 * 8 / 8.6, 1e-12);
+});
+
+Deno.test("d3WingHcFloor is the renderer's own push: the Automatic wing(s) whose floor set the pushed centre (review, 2026-09-30)", () => {
+  const who = (roof: Any, W = 24, L = 28, H = 9) => {
+    const m = F.d3Massing(roof, W, L, H);
+    const f = F.d3WingHcFloor(roof, m.Sc, m.tallNeg);
+    return { m, pushers: m.wings.filter((g: Any) => !g.attach && f(g) >= m.Hc - 1e-6).map((g: Any) => g.wall), floors: m.wings.map((g: Any) => f(g)) };
+  };
+  // Twin Automatic wings, no wingSides: both push, so the page says "the wing roofs".
+  const tie = who({ ...TRI, centerEaveFt: 11.5 });
+  assertEquals([tie.m.hcRaised, tie.pushers], [true, ["west", "east"]]);
+  assertAlmostEquals(tie.m.Hc, Math.max(...tie.floors), 1e-12, "the pushed centre is the highest floor");
+  // Two widths and two pitches: only the steeper right wing pushes.
+  const two = who({ ...TRI, centerEaveFt: 14.5, wingSides: { left: { widthFt: 6 }, right: { widthFt: 10, pitch: 0.5 } } });
+  assertEquals([two.m.Hc, two.pushers], [15, ["east"]]);
+  // One wing on the wall asked below the walls + 1 ft, the other Automatic: the Automatic one sets it, over the 1 ft floor.
+  const low = who({ ...TRI, centerEaveFt: 8.5, wingSides: { left: { attach: "wall", attachFt: 1 }, right: { widthFt: 6 } } });
+  assertEquals([low.m.Hc, low.m.hcLow, low.m.hcRaised, low.pushers], [11.5, true, true, ["east"]]);
 });
