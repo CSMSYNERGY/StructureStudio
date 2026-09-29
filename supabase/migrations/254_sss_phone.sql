@@ -195,14 +195,13 @@
 --
 -- ── ROLLBACK ─────────────────────────────────────────────────────────────────────────────
 -- Panic button, no schema change:  update public.client_settings set phone_status = 'off';
--- That stops every broadcast, every token and every outbound call. ⚠️ IT DOES NOT SEND
--- CUSTOMERS' CALLS ANYWHERE USEFUL: a number already connected for calls (voice_enabled) still
--- points at the Worker, and the Worker answers a tenant that is off with "Sorry, this number
--- can't take calls right now" and hangs up, with no voicemail and no phone_calls row (review
--- SSB-2). For ONE builder, use the Phone tab's switch (portal-settings phone_status_set), which
--- also moves the number to the voicemail Bin; the Worker's recording sweep files those
--- messages. After the SQL panic button, the connected numbers are these, and each needs its
--- Voice URL pointed at the fallback Bin by hand (or phone_status_set off per tenant):
+-- That stops every broadcast, every token and every outbound call. A number already connected
+-- for calls (voice_enabled) still points at the Worker; since 2026-09-29 the Worker answers a
+-- tenant that is off by taking a VOICEMAIL and writing the phone_calls row (nobody's app rings),
+-- so no caller is dropped (review SSB-2). For ONE builder, prefer the Phone tab's switch
+-- (portal-settings phone_status_set), which also moves the number to the voicemail Bin. To take
+-- the Worker out of the path entirely after the SQL panic button, point each connected number's
+-- Voice URL at the fallback Bin by hand (or phone_status_set off per tenant):
 --   select client_id, phone_number from public.sms_numbers where voice_enabled and released_at is null;
 -- The full removal is at the bottom of this file, after the commit, in the order it has to run.
 -- ═════════════════════════════════════════════════════════════════════════════════════════
