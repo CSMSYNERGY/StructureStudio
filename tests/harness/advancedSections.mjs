@@ -9,13 +9,17 @@
 //   0  the page is inside the Designer's frame (.ssd-frame); at a 1440 window the frame reaches xl and
 //      shows the numbered step rail (and no progress bar), at 1100 the sticky progress bar instead,
 //      stuck under the portal's topbar; the rail follows the scroll and a click on a step brings its
-//      section up;
+//      section up; the sticky 3D column is no scroll box of its own and all of it (3D, buttons on one
+//      line, End view) is on screen above the portal's Feedback pill, at 1440 and at 1100;
 //   1  the add-on strip: Lean-to, Wings, Dormer, Porch & steps, in that order, Lean-to first;
 //   2  each add-on tab shows only its own controls (and none of another's anywhere), while the shape,
 //      walls and colour sections are always on screen; a slider moves its box and lights the end view;
 //   3  the three 3D asks of the same call work on one building: a lean-to that meets the ROOF 2 ft up,
 //      a porch with FOUR steps, and piers on ground that falls 2 ft to the back;
-//   4  a shed roof greys out Wings and Dormer (they need a ridge);
+//      3b: on Auto, the steps' and posts' −/+ step from the count Auto draws, and the posts' Auto chip
+//      keeps saying what Auto draws once a number is typed;
+//   4  a shed roof greys out Wings and Dormer (they need a ridge); 4b: at a phone's width the Save
+//      footer spans the width and the add-on tabs stay one row with no sideways page scroll;
 //   5  the calibration panel in Settings > Designer still shows every field at once and no tab strip.
 //
 //   python -m http.server 8146 --bind 127.0.0.1 --directory <repo root>
@@ -149,6 +153,21 @@ try {
   const cur3 = await railCur(page);
   ok("0: a click on the rail's Walls step brings that section up under the topbar and marks it current", went >= 55 && went <= 80 && /^Step 3 of 6: Walls & foundation/.test(cur3), `${went} ${cur3}`);
   await shot(page, "frame-rail-1440.png");
+  // The 3D column is not a scroll box of its own (a second scrollbar on Windows), and all of it -- the
+  // 3D, its toolbar and the End view -- is on screen above the portal's Feedback pill.
+  const col = async () => page.evaluate(() => {
+    const v = document.querySelector('[data-ss-adv="view"]');
+    const plan = v.querySelector(".ssd-plan").getBoundingClientRect();
+    const fb = [...document.querySelectorAll("button,a")].find((b) => /Feedback/.test(b.innerText || ""));
+    const pill = fb ? fb.getBoundingClientRect() : null;
+    const cs = getComputedStyle(v);
+    return { scrollBox: /auto|scroll/.test(cs.overflowY) || v.scrollHeight > v.clientHeight + 1, planBottom: Math.round(plan.bottom),
+      pillTop: pill ? Math.round(pill.top) : null, vh: innerHeight, has3d: !!v.querySelector("canvas"),
+      oneLine: new Set([...v.querySelectorAll(".ssd-tb button")].map((b) => Math.round(b.getBoundingClientRect().top))).size === 1 };
+  });
+  const c1440 = await col();
+  ok("0: the 3D column has no scroll of its own", !c1440.scrollBox, JSON.stringify(c1440));
+  ok("0: …the 3D, its buttons (on one line) and the End view all sit above the Feedback pill", c1440.has3d && c1440.oneLine && c1440.pillTop != null && c1440.planBottom <= c1440.pillTop, JSON.stringify(c1440));
   await page.mouse.move(700, 500);
   await page.mouse.wheel(0, -6000);
   await page.waitForTimeout(1200);
@@ -166,6 +185,9 @@ try {
   await page.waitForTimeout(900);
   const barTop = await page.evaluate(() => Math.round(document.querySelector(".ss-adv .ssd-progress").getBoundingClientRect().top));
   ok("0: …and scrolled, the bar sticks just under the portal's topbar", barTop >= 58 && barTop <= 64, String(barTop));
+  const c1100 = await col();
+  ok("0: at 1100 too, the whole 3D column is on screen above the Feedback pill, with no scroll of its own",
+    !c1100.scrollBox && c1100.oneLine && c1100.pillTop != null && c1100.planBottom <= c1100.pillTop, JSON.stringify(c1100));
   await page.screenshot({ path: join(SHOTS, "progress-1100.png") });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.mouse.wheel(0, -6000);
@@ -234,7 +256,8 @@ try {
   const lt = await page.evaluate(() => { const L = window.__ss3dPanel.model.leanTo; return { mode: L.mode, d: L.d, ya: L.ya, E: L.E }; });
   ok("3: the lean-to meets the roof 2 ft above the eave", lt.mode === "roof" && Math.abs(lt.d - 2) < 1e-6 && lt.ya > lt.E + 2, JSON.stringify(lt));
   const ltSay = await page.locator('[data-ss-adv-readout="leanTo"]').innerText().catch(() => "");
-  ok("3: …and the panel reads it back (Builds x in 12 · meets the roof 2' 0\" above the eave)", /^Builds [\d.]+ in 12 · meets the roof 2' 0" above the eave$/.test(ltSay.trim()), ltSay);
+  ok("3: …and the panel reads it back (Builds x in 12 · meets the roof 2' 0\" above the eave)", /^Builds [\d.]+ in 12 · meets the roof 2' 0" above the eave$/.test(ltSay.trim()), JSON.stringify(ltSay));
+  // …with its measurements held together by no-break spaces, so "2' 0"" and "in 12" never split across a line.
   await page.locator("#ss-step-adv-addons").scrollIntoViewIfNeeded();
   await shot(page, "ask-leanto-roof.png");
 
@@ -274,6 +297,37 @@ try {
   await page.locator("#ss-step-adv-walls").scrollIntoViewIfNeeded();
   await shot(page, "ask-piers-falling-ground.png");
 
+  // 3b ── on Auto, −/+ step from the count Auto draws (review 2026-09-29: they stepped from the bottom of
+  // the band, so "one more" could LOWER it), and the posts' Auto chip keeps reading what Auto draws once a
+  // number is typed. Auto is the same .ssd-chip as "Whole wall".
+  const autoChip = (f) => page.locator(`[data-ss-adv-f="${f}"] button.ssd-chip`);
+  const autoOf = async (f) => Number((/\((\d+)\)/.exec(await autoChip(f).innerText()) || [])[1]);
+  await page.locator('[data-ss-adv-f="porchStepCount"]').scrollIntoViewIfNeeded();
+  await autoChip("porchStepCount").click();
+  await page.waitForTimeout(150);
+  const autoSteps = await autoOf("porchStepCount");
+  await page.getByRole("button", { name: "Number of steps: one more", exact: true }).click();
+  await page.waitForTimeout(150);
+  const stepsUp = Number(await byLabel(page, "Number of steps").inputValue());
+  await autoChip("porchStepCount").click();
+  await page.waitForTimeout(150);
+  await page.getByRole("button", { name: "Number of steps: one fewer", exact: true }).click();
+  await page.waitForTimeout(150);
+  const stepsDown = Number(await byLabel(page, "Number of steps").inputValue());
+  ok("3b: from Auto, + gives one step more than Auto draws and − one fewer",
+    autoSteps >= 2 && stepsUp === Math.min(12, autoSteps + 1) && stepsDown === Math.min(12, autoSteps - 1), `Auto ${autoSteps} → + ${stepsUp}, − ${stepsDown}`);
+  await autoChip("porchStepCount").click();
+  await autoChip("porchPosts").click();
+  await page.waitForTimeout(150);
+  const autoPosts = await autoOf("porchPosts");
+  await page.getByRole("button", { name: "Porch posts: one more", exact: true }).click();
+  await page.waitForTimeout(150);
+  const postsUp = Number(await byLabel(page, "Porch posts").inputValue());
+  const postsChip = await autoChip("porchPosts").innerText();
+  ok("3b: from Auto, + gives one post more than Auto draws", autoPosts >= 2 && postsUp === Math.min(8, autoPosts + 1), `Auto ${autoPosts} → ${postsUp}`);
+  ok("3b: …and the chip still says what Auto draws, not the number typed", postsChip.trim() === `Auto (${autoPosts})` && await autoChip("porchPosts").getAttribute("aria-pressed") === "false", postsChip);
+  await autoChip("porchPosts").click();
+
   // 4 ── a shed greys out Wings and Dormer ─────────────────────────────────────────────────────
   await radio(page, "Roof type", "One slant").click();
   await page.waitForTimeout(150);
@@ -284,6 +338,25 @@ try {
   await radio(page, "Roof type", "Two slopes").click();
   await page.waitForTimeout(150);
   ok("4: back on a gable, Wings is available again", !(await tab(page, "wings").isDisabled()));
+
+  // 4b ── a phone's width: the Save footer uses the whole width (no 128 px pill clearance), and the add-on
+  // tabs stay on one line (scrolling sideways) instead of leaving one alone on a second line.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForTimeout(800);
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await page.waitForTimeout(600);
+  const xs = await page.evaluate(() => {
+    const r = (s) => { const e = document.querySelector(s); return e ? e.getBoundingClientRect() : null; };
+    const ft = r(".ss-adv-foot .ssd-ft"), nm = r(".ss-adv-name input"), cta = r(".ss-adv-foot .ssd-ft-cta");
+    const tabs = [...document.querySelectorAll("[data-ss-adv-sec]")].map((t) => Math.round(t.getBoundingClientRect().top));
+    return { bp: document.querySelector(".ss-adv .ssd-frame").getAttribute("data-ssd-bp"), ft: ft && Math.round(ft.width), nm: nm && Math.round(nm.width), cta: cta && Math.round(cta.width),
+      tabRows: new Set(tabs).size, sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth };
+  });
+  ok("4b: at a phone's width the name box and the Save button span the footer", xs.bp === "xs" && xs.nm >= xs.ft - 2 && xs.cta >= xs.ft - 2, JSON.stringify(xs));
+  ok("4b: …the add-on tabs are one row, and the page never scrolls sideways", xs.tabRows === 1 && !xs.sideways, JSON.stringify(xs));
+  await page.screenshot({ path: join(SHOTS, "phone-footer-390.png") });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.waitForTimeout(500);
 
   ok("no page errors on the Advanced page", errors.length === 0, errors.join(" | "));
   await ctx.close();

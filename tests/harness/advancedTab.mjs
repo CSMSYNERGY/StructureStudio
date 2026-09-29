@@ -787,6 +787,11 @@ try {
     ok("L: switched away and back (the page remounted), it still says the style is showing and how to hide it",
       msg === "“Tri Home” was made, but hiding it didn't work, so customers can see it now. Press Save again to hide it and finish it, or hide it yourself: Settings → Structures → Hide.", msg);
     await page.locator('[data-ss-adv="save"]').screenshot({ path: join(SHOTS, "advpage-hide-failed-after-remount.png") }).catch(() => {});
+    // …and says it at the TOP of the page as well, where a builder coming back sees it without scrolling
+    // 2,000 px down to Save.
+    const top = await page.locator('[data-ss-adv="msg-top"]').innerText().catch(() => "(none)");
+    const topY = await page.locator('[data-ss-adv="msg-top"]').evaluate((e) => e.getBoundingClientRect().top + scrollY).catch(() => 1e9);
+    ok("L: …also at the top of the page, under Start from", top === msg && topY < 400, `${Math.round(topY)} ${top}`);
     // 3. Saved again under ANOTHER name: the same style is hidden, renamed and shaped; nothing is created.
     from = calls.length;
     await save("Tri Home 2");
