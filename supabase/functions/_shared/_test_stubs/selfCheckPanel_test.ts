@@ -541,6 +541,28 @@ Deno.test("'What we drew' says a wing attach as built when it has the massing, a
   assertEquals(F.ssDrewWords({ roof }, null, undefined, cannot), F.ssDrewWords({ roof }));
 });
 
+// (review, 2026-09-29) On the roof at 0 the wing roof meets the middle section AT its eave -- it does not run
+// up onto its roof -- and two wings that meet it differently (an off-centre ridge) are said one by one.
+Deno.test("'What we drew' says a wing roof at 0 meets the middle at its eave, and two different wings each", () => {
+  const up = { type: "gable", wingSide: "both", wingWidthFt: 6, centerEaveFt: 10, wingAttach: "roof", wingAttachFt: 0 };
+  const at0 = F.ssDrewWords({ roof: up });
+  assertStringIncludes(at0, "A lower wing 6 ft wide runs along each side under its own roof that meets the middle section at its eave, and the middle section's walls rise to 10 ft.");
+  assert(!/runs up onto/.test(at0), at0);
+  const built0 = { attach: "roof", Hc: 10, wings: [{ wall: "west", meets: "roof", meetFt: 0 }, { wall: "east", meets: "roof", meetFt: 0 }] };
+  assertEquals(F.ssDrewWords({ roof: up }, null, undefined, built0), at0);
+  // The wall at 0 keeps its own words.
+  assertStringIncludes(F.ssDrewWords({ roof: { ...up, wingAttach: "wall" } }), "meets the middle section's wall at its eave");
+  // Two wings built differently: the one sentence, then each by its wall.
+  const odd = { attach: "roof", Hc: 10, wings: [{ wall: "west", meets: "roof", meetFt: 2.5 }, { wall: "east", meets: "wall", meetFt: 1 / 12 }] };
+  const two = F.ssDrewWords({ roof: { ...up, wingAttachFt: 2.5 } }, null, undefined, odd);
+  assertStringIncludes(two, "A lower wing 6 ft wide runs along each side under its own roof, and the middle section's walls rise to 10 ft. " +
+    "The left wing has a roof that runs up onto the middle section's roof, 2 ft 6 in above its eave; the right wing has a roof that meets the middle section's wall 0 ft 1 in below its eave.");
+  // Two wings built alike are one sentence, as before.
+  const same = { attach: "roof", Hc: 10, wings: [{ wall: "west", meets: "roof", meetFt: 2.5 }, { wall: "east", meets: "roof", meetFt: 2.5 }] };
+  assertStringIncludes(F.ssDrewWords({ roof: { ...up, wingAttachFt: 2.5 } }, null, undefined, same), "under its own roof that runs up onto the middle section's roof, 2 ft 6 in above its eave, and the middle section's walls rise to 10 ft.");
+  assert(!/The left wing/.test(F.ssDrewWords({ roof: { ...up, wingAttachFt: 2.5 } }, null, undefined, same)));
+});
+
 // ── The roof step (2026-09-28), in words ──────────────────────────────────────────────────
 
 Deno.test("the roof step reads in the words of its panel controls, and 'What we drew' says it", () => {
