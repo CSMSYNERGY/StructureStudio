@@ -7,8 +7,8 @@
 //
 // What this proves, per scenario (one fresh browser context each, so nothing cached leaks):
 //   A  OUR ACCOUNT, clicked. The item sits directly under Designer; clicking it opens the page; the
-//      3D mounts beside the calibration panel's field grid (and none of the calibration's own
-//      steps); Width/Length move the building; Lean-to width 8 puts ssLeanTo meshes in the scene;
+//      3D mounts beside the page's own form, in the Designer's frame (and none of the calibration's
+//      own steps); Width/Length move the building; Lean-to width 8 puts ssLeanTo meshes in the scene;
 //      the page stays mounted across a trip to another page; an empty name is refused without a
 //      call; and Save posts create_style, then set_style_active false, then save_style_d3 with
 //      the draft spec under the new key — in that order (hidden straight after it is made, review
@@ -45,8 +45,8 @@
 //   J  UNSAVED WORK AND ACCOUNT SWITCHES. An operator with a changed building is asked before Exit
 //      or a switch throws it away (No keeps them there); after Save, Exit does not ask.
 //   Review fixes, 2026-09-29 (second round):
-//   A  also: the grid is shown a section at a time (each field is reached through its tab); the end
-//      view's caption points at the number boxes, not the drawing; the success message names the
+//   A  also: the add-ons are shown one at a time (each reached through its tab, its switch turned
+//      on); the end view's caption points at the number boxes and sliders, not the drawing; the success message names the
 //      real control (Show); the save carries the ground's fall as two explicit nulls; and a name
 //      already in use (a style's name or key, or a name saved here, trimmed and case-blind) is
 //      refused before any call.
@@ -224,9 +224,22 @@ async function open(S, path) {
 }
 
 const navOrder = (page) => page.evaluate(() => [...document.querySelectorAll(".ss-ws-nav .ss-nav a")].map((a) => new URL(a.href).pathname));
-// The Advanced page shows one section of the field grid at a time (the section tabs, 2026-09-29): a
-// field is reached by clicking its section's tab first.
-const sec = (page, k) => page.locator(`[data-ss-adv-sec="${k}"]`).click();
+// The Advanced page (rebuilt in the Designer's look, 2026-09-29) shows Size & roof, Walls & foundation
+// and Colors all at once, and the add-ons (Lean-to, Wings, Dormer, Porch & steps) one at a time on a tab
+// strip: an add-on's controls are reached by clicking its tab, and a lean-to's by turning it on.
+const sec = async (page, k) => { if (["leanto", "wings", "dormer", "porch"].includes(k)) await page.locator(`[data-ss-adv-sec="${k}"]`).click(); };
+const leanBox = (page) => page.getByLabel("Lean-to width (ft)", { exact: true });
+const leanSwitch = (page) => page.locator('[data-ss-adv-f="leanToOn"]');
+async function leanWidth(page, v) {
+  await sec(page, "leanto");
+  if (await leanSwitch(page).getAttribute("aria-pressed") !== "true") await leanSwitch(page).click();
+  await leanBox(page).fill(v);
+  await leanBox(page).blur();
+}
+// Start from is the Designer's style strip: a "Blank building" tile ("") and one per style.
+const startFrom = (page, v) => page.locator(`[data-ss-adv="start"] [data-ss-style="${v}"]`).click();
+// Roof type is a group of picture tiles (role radio); the picked one's data-ss-adv-tile is the type.
+const roofType = (page) => page.getByRole("radiogroup", { name: "Roof type", exact: true }).locator('[aria-checked="true"]').getAttribute("data-ss-adv-tile");
 const seen = (page) => page.evaluate(() => ({ ...window.__advSeen, paths: window.__paths.slice() }));
 const here = (page) => page.evaluate(() => location.pathname);
 const writes = (calls) => calls.filter((c) => c.fn === "portal-settings" && ["create_style", "save_style_d3", "set_style_active", "update_style", "save_style_media", "save"].includes(c.action));
@@ -290,21 +303,25 @@ try {
       `${(m0.walls.mx[0] - m0.walls.mn[0]).toFixed(2)} x ${(m0.walls.mx[2] - m0.walls.mn[2]).toFixed(2)}`);
     // One section at a time since 2026-09-29: each section's own fields, reached through its tab.
     // advancedSections.mjs holds every tab to its own fields and none of another's.
-    const grid = {};
-    for (const [k, re] of [["roof", /Roof type/], ["walls", /Wall height/i], ["leanto", /Lean-to width/], ["porch", /Porch/i], ["colours", /Body/i]]) {
-      await sec(page, k);
-      await settle(page, 150);
-      grid[k] = re.test(await page.locator('[data-ss-adv="fields"]').innerText());
-    }
-    await sec(page, "roof");
-    ok("A: the calibration field grid is there, a section at a time (roof, walls, lean-to, porch, colors)", Object.values(grid).every(Boolean), JSON.stringify(grid));
+    const grid = {
+      frame: await page.locator('[data-ss-adv="fields"]').evaluate((el) => !!el.closest(".ssd-frame")),
+      roof: await page.getByRole("radiogroup", { name: "Roof type", exact: true }).count() === 1,
+      walls: await page.getByLabel("Wall height (ft)", { exact: true }).count() === 1 && await page.getByRole("radiogroup", { name: "What it stands on", exact: true }).count() === 1,
+      colors: /Body color/i.test(await page.locator('[data-ss-adv="fields"]').innerText()),
+    };
+    await sec(page, "leanto");
+    grid.leanto = await leanSwitch(page).count() === 1;
+    await sec(page, "porch");
+    grid.porch = await page.getByRole("radiogroup", { name: "Porch", exact: true }).count() === 1;
+    await sec(page, "leanto");
+    ok("A: the form is there, in the Designer's frame: roof, walls, colors, and the lean-to and porch tabs", Object.values(grid).every(Boolean), JSON.stringify(grid));
     ok("A: …and none of calibration's own steps (style strip, video, photos, scan, Save 3D look)",
       !/3D Style Calibration|Walk-around video|Photos of the same building|Scan of a real building|Save 3D look|Save to config/.test(await page.locator(".ss-body").innerText()));
     ok("A: the end view sits beside the 3D, not inside the form", await page.locator('[data-ss-adv="view"] svg').count() >= 1 && await page.locator('[data-ss-adv="fields"] svg[viewBox="0 0 360 210"]').count() === 0);
     // The drawing has no click handler: only a number box lights a measurement (review UX6).
     const cap = await page.locator('[data-ss-adv="view"]').innerText();
     ok("A: the end view's caption points at the number boxes, not at the drawing",
-      /End view at 12x16\. Click into a number box and its measurement lights up here\./.test(cap) && !/Click a number and/.test(cap), cap.split("\n").filter((l) => /End view/.test(l)).join(" "));
+      /End view at 12x16\. Click into a number box or move a slider and its measurement lights up here\./.test(cap) && !/Click a number and/.test(cap), cap.split("\n").filter((l) => /End view/.test(l)).join(" "));
 
     // Width / Length move the building.
     const w = page.getByLabel("Width (ft)", { exact: true }), l = page.getByLabel("Length (ft)", { exact: true });
@@ -322,7 +339,8 @@ try {
 
     // Lean-to width 8 → ssLeanTo meshes.
     await sec(page, "leanto");
-    const lean = page.getByLabel(/Lean-to width/);
+    await leanSwitch(page).click();
+    const lean = leanBox(page);
     await lean.fill("8");
     await page.waitForFunction(() => { let n = 0; window.__ss3dPanel.model.root.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssLeanTo === true) n++; }); return n > 0; }, null, { timeout: 30000 }).catch(() => {});
     const m2 = await measure(page);
@@ -385,7 +403,7 @@ try {
       const m = await page.locator('[data-ss-adv="msg"]').innerText();
       ok(`A: "${taken}" is refused as a name already in use, in words, with no call`,
         m === `There's already a style called “${taken.trim()}”. Give this one a different name.` && writes(calls).length === n0, m);
-      if (taken === "Harness Barn") await page.locator('[data-ss-adv="bar"]').screenshot({ path: join(SHOTS, "advpage-name-in-use.png") }).catch(() => {});
+      if (taken === "Harness Barn") await page.locator('[data-ss-adv="save"]').screenshot({ path: join(SHOTS, "advpage-name-in-use.png") }).catch(() => {});
     }
     await page.getByLabel("New style name").fill("");
 
@@ -394,29 +412,24 @@ try {
     let asked = null;
     const onDialog = (d) => { asked = d.message(); d.accept(); };
     page.on("dialog", onDialog);
-    await page.getByLabel("Start from").selectOption("hbarn");
+    await startFrom(page, "hbarn");
     await settle(page, 1500);
     ok("A: right after a save, switching the start point does not ask (nothing is unsaved)", asked === null, String(asked));
-    const typeSel = page.getByLabel("Roof type");
-    await sec(page, "walls");
+    ok("A: …and the Harness Barn tile is the one picked", await page.locator('[data-ss-adv="start"] [data-ss-style="hbarn"]').getAttribute("aria-pressed") === "true");
     const wall = await page.getByLabel("Wall height (ft)", { exact: true }).inputValue();
     await sec(page, "leanto");
-    const ltv = await page.getByLabel(/Lean-to width/).inputValue();
-    await sec(page, "roof");
-    const tv = await typeSel.inputValue();
-    ok("A: Copy of Harness Barn seeds that style's roof (gambrel), wall (9) and no lean-to", tv === "gambrel" && wall === "9" && ltv === "0", `${tv} / wall ${wall} / lean-to ${ltv}`);
+    const ltv = await leanSwitch(page).getAttribute("aria-pressed");
+    const tv = await roofType(page);
+    ok("A: Copy of Harness Barn seeds that style's roof (gambrel), wall (9) and no lean-to", tv === "gambrel" && wall === "9" && ltv === "false", `${tv} / wall ${wall} / lean-to on ${ltv}`);
     await advPanel(page);
     await page.waitForFunction(() => { let n = 0; window.__ss3dPanel.model.root.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssLeanTo === true) n++; }); return n === 0; }, null, { timeout: 20000 }).catch(() => {});
     ok("A: …and the 3D follows (no lean-to left)", (await measure(page)).leanTo === 0);
     // A change, then a new start point: asked first.
-    await sec(page, "leanto");
-    await page.getByLabel(/Lean-to width/).fill("4");
-    await page.getByLabel(/Lean-to width/).blur();
-    await page.getByLabel("Start from").selectOption("");
+    await leanWidth(page, "4");
+    await startFrom(page, "");
     await settle(page, 1000);
     ok("A: after a change, switching the start point asks before throwing work away", asked === "Start again? The changes you made to this building will be lost.", String(asked));
-    await sec(page, "roof");
-    ok("A: …and Blank building is a gable again", (await typeSel.inputValue()) === "gable", await typeSel.inputValue());
+    ok("A: …and Blank building is a gable again", (await roofType(page)) === "gable", await roofType(page));
     page.off("dialog", onDialog);
     ok("A: no page errors", errors.length === 0, errors.join(" | "));
     await ctx.close();
@@ -506,9 +519,7 @@ try {
     ok("D: no sideways page scroll at 390 px", wide.sw <= wide.cw + 1, `${wide.sw} vs ${wide.cw}`);
     ok("D: the 3D is not docked beside (or on top of) the form", await page.evaluate(() => !(window.__ss3dPanel && window.__ss3dPanel.renderer.domElement.isConnected)));
     ok("D: the view column is not sticky", await page.locator('[data-ss-adv="view"]').evaluate((el) => getComputedStyle(el).position !== "sticky"));
-    await sec(page, "leanto");
-    await page.getByLabel(/Lean-to width/).fill("6");
-    await page.getByLabel(/Lean-to width/).blur();
+    await leanWidth(page, "6");
     await page.getByRole("button", { name: /Preview in 3D/ }).click();
     await page.waitForFunction(() => { const E = window.__ss3dEngine; return !!(E && E.model && E.model.roofGroup && E.model.roofGroup.children.length); }, null, { timeout: 90000 });
     await settle(page, 1200);
@@ -626,26 +637,23 @@ try {
       g.rowW >= 720 && g.rowW < 872 && g.pos === "sticky", JSON.stringify({ rowW: g.rowW, pos: g.pos }));
     ok("H: …BESIDE the form (to its right, same top), not above it", g.v[0] >= g.f[1] - 1 && Math.abs(g.v[2] - g.f[2]) < 2, JSON.stringify({ v: g.v.map(Math.round), f: g.f.map(Math.round) }));
     ok("H: no sideways page scroll", g.sw <= g.cw + 1, `${g.sw} vs ${g.cw}`);
-    await sec(page, "leanto");
-    await page.getByLabel(/Lean-to width/).fill("8");
-    await page.getByLabel(/Lean-to width/).blur();
+    await leanWidth(page, "8");
+    // Scrolled down the WINDOW (the page scrolls under the portal's topbar) until the Lean-to width
+    // field sits mid-screen.
     await page.evaluate(() => {
-      const f = document.querySelector('[data-ss-adv="fields"]');
-      let el = f.parentElement;
-      while (el && el !== document.body) { const st = getComputedStyle(el); if (/(auto|scroll)/.test(st.overflowY) && el.scrollHeight > el.clientHeight) break; el = el.parentElement; }
-      (el && el !== document.body ? el : document.scrollingElement).scrollTop += 700;
+      const f = document.querySelector('[data-ss-adv-f="leanToWidthFt"]');
+      window.scrollBy(0, f.getBoundingClientRect().top - 400);
     });
     await settle(page, 800);
     const hit = await page.evaluate(() => {
-      const v = document.querySelector('[data-ss-adv="view"]').getBoundingClientRect();
-      // The Lean-to tab's own field: one section is on screen at a time (the Porch field is on its own tab).
-      const lab = [...document.querySelectorAll('[data-ss-adv="fields"] label')].find((l) => /^Lean-to/.test(l.innerText.trim()));
-      const lr = lab.getBoundingClientRect();
+      const card = document.querySelector('[data-ss-adv="view"] .ss-adv-3d').getBoundingClientRect();
+      const bar = document.querySelector(".ss-adv .ssd-progress").getBoundingClientRect();
+      const lr = document.querySelector('[data-ss-adv-f="leanToWidthFt"]').getBoundingClientRect();
       const el = document.elementFromPoint(lr.left + 20, lr.top + lr.height / 2);
-      return { vTop: Math.round(v.top), porchY: Math.round(lr.top), formUnder: !!(el && el.closest('[data-ss-adv="fields"]')) };
+      return { card3dTop: Math.round(card.top), barBottom: Math.round(bar.bottom), fieldY: Math.round(lr.top), scrolled: Math.round(window.scrollY), formUnder: !!(el && el.closest('[data-ss-adv="fields"]')) };
     });
-    ok("H: scrolled down, the form is what is under the mouse at its Lean-to field (the 3D does not cover it)", hit.formUnder, JSON.stringify(hit));
-    ok("H: …and the 3D has stayed in view beside it", hit.vTop >= 60 && hit.vTop <= 90, JSON.stringify(hit));
+    ok("H: scrolled down, the form is what is under the mouse at its Lean-to field (the 3D does not cover it)", hit.formUnder && hit.scrolled > 300, JSON.stringify(hit));
+    ok("H: …and the 3D has stayed in view beside it, just under the sticky progress bar", hit.card3dTop >= hit.barBottom && hit.card3dTop <= hit.barBottom + 24, JSON.stringify(hit));
     await aim(page, [40, 19, 38], [4, 2.5, 0]).catch(() => {});
     await settle(page, 400);
     await page.screenshot({ path: join(SHOTS, "advpage-1100-scrolled-after.png") });
@@ -675,16 +683,14 @@ try {
     await settle(page, 1000);
     const dialogs = [];
     page.on("dialog", (d) => { dialogs.push(d.message()); d.dismiss(); });
-    await sec(page, "leanto");
-    await page.getByLabel(/Lean-to width/).fill("6");
-    await page.getByLabel(/Lean-to width/).blur();
+    await leanWidth(page, "6");
     await settle(page, 400);
     await page.locator(".ss-topbar button", { hasText: "Exit" }).click();
     await settle(page, 600);
     const where = () => page.evaluate(() => location.pathname + location.search);
     ok("J: Exit with a changed building asks first, naming the Advanced page",
       dialogs[0] === "Leaving this account will discard the building you haven't saved on the Advanced page. Continue?", String(dialogs[0]));
-    ok("J: …and No keeps you in the account with the building", (await where()) === `/portal/advanced?view=${OURS}` && (await page.getByLabel(/Lean-to width/).inputValue()) === "6", await where());
+    ok("J: …and No keeps you in the account with the building", (await where()) === `/portal/advanced?view=${OURS}` && (await leanBox(page).inputValue()) === "6", await where());
     await page.locator(".ss-switch").click();
     await page.locator('.ss-switch-menu button[role="option"]', { hasText: "Harness Builder" }).click();
     await settle(page, 600);
@@ -718,9 +724,7 @@ try {
     await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/portal/advanced"]'), null, { timeout: 30000 });
     await page.locator('.ss-nav a[href^="/portal/advanced"]').first().click();
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 });
-    await sec(page, "leanto");
-    await page.getByLabel(/Lean-to width/).fill("6");
-    await page.getByLabel(/Lean-to width/).blur();
+    await leanWidth(page, "6");
     await settle(page, 400);
     const n0 = dialogs.length;
     await page.goBack();
@@ -734,7 +738,7 @@ try {
     ok("K: …and No keeps the account and puts the address back", (await where()) === `/portal/designs?view=${OURS}`, await where());
     await page.locator('.ss-nav a[href^="/portal/advanced"]').first().click();
     await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 20000 });
-    ok("K: …with the building still there (lean-to 6)", (await page.getByLabel(/Lean-to width/).inputValue()) === "6", await page.getByLabel(/Lean-to width/).inputValue());
+    ok("K: …with the building still there (lean-to 6)", (await leanBox(page).inputValue()) === "6", await leanBox(page).inputValue());
     await page.screenshot({ path: join(SHOTS, "advpage-back-said-no.png") });
     answer = true;
     await page.goBack();
@@ -768,7 +772,7 @@ try {
     ok("L: a hide that fails says the style is showing to customers, and how to hide it",
       msg === "“Tri Home” was made, but hiding it didn't work, so customers can see it now. Press Save again to hide it and finish it, or hide it yourself: Settings → Structures → Hide. (Something went wrong on our side.)", msg);
     ok("L: …after one create and the failed hide", writes(calls.slice(from)).map((c) => c.action).join(",") === "create_style,set_style_active", writes(calls.slice(from)).map((c) => c.action).join(","));
-    await page.locator('[data-ss-adv="bar"]').locator("xpath=..").screenshot({ path: join(SHOTS, "advpage-hide-failed.png") }).catch(() => {});
+    await page.locator('[data-ss-adv="save"]').screenshot({ path: join(SHOTS, "advpage-hide-failed.png") }).catch(() => {});
     // 2. An account switch remounts the page; back again, it still knows.
     await page.locator(".ss-switch").click();
     await page.locator('.ss-switch-menu button[role="option"]', { hasText: "Harness Builder" }).click();
@@ -782,7 +786,7 @@ try {
     msg = await page.locator('[data-ss-adv="msg"]').innerText().catch(() => "(no message)");
     ok("L: switched away and back (the page remounted), it still says the style is showing and how to hide it",
       msg === "“Tri Home” was made, but hiding it didn't work, so customers can see it now. Press Save again to hide it and finish it, or hide it yourself: Settings → Structures → Hide.", msg);
-    await page.locator('[data-ss-adv="bar"]').locator("xpath=..").screenshot({ path: join(SHOTS, "advpage-hide-failed-after-remount.png") }).catch(() => {});
+    await page.locator('[data-ss-adv="save"]').screenshot({ path: join(SHOTS, "advpage-hide-failed-after-remount.png") }).catch(() => {});
     // 3. Saved again under ANOTHER name: the same style is hidden, renamed and shaped; nothing is created.
     from = calls.length;
     await save("Tri Home 2");

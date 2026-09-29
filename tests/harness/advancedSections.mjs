@@ -1,13 +1,20 @@
-// THE ADVANCED PAGE'S SECTIONS (2026-09-29), driven on the COMPILED portal.
+// THE ADVANCED PAGE'S SECTIONS, driven on the COMPILED portal.
 //
 // Carolyn, 09-28 @32:17: "think about the layout ... how are you going to organize all of the things
-// there that have to do with roof". The Advanced page shows the calibration field grid one section at
-// a time (CAL_ADV_SECTIONS, calAdvShow in both designer twins). This proves:
-//   1  the tab strip: Roof, Walls & foundation, Lean-to, Wings, Dormer, Porch & steps, Colors, in
-//      that order, Roof first and selected;
-//   2  each tab shows its own fields and none of another's;
-//   3  the three 3D asks of the same call work from their tabs on one building: a lean-to that meets
-//      the ROOF 2 ft up, a porch with FOUR steps, and piers on ground that falls 2 ft to the back;
+// there that have to do with roof". Ahsan, 09-29: "can you see the designer tab how organised and good
+// looking it is i want same in the advance tab". Since 2026-09-29 the page is the Designer's own frame:
+// numbered sections (Start from, Size & roof, Walls & foundation, Add-ons, Colors, Save) on the
+// Designer's step rail, with the add-ons (Lean-to, Wings, Dormer, Porch & steps) one at a time on a
+// Designer option tab strip. This proves:
+//   0  the page is inside the Designer's frame (.ssd-frame); at a 1440 window the frame reaches xl and
+//      shows the numbered step rail (and no progress bar), at 1100 the sticky progress bar instead,
+//      stuck under the portal's topbar; the rail follows the scroll and a click on a step brings its
+//      section up;
+//   1  the add-on strip: Lean-to, Wings, Dormer, Porch & steps, in that order, Lean-to first;
+//   2  each add-on tab shows only its own controls (and none of another's anywhere), while the shape,
+//      walls and colour sections are always on screen; a slider moves its box and lights the end view;
+//   3  the three 3D asks of the same call work on one building: a lean-to that meets the ROOF 2 ft up,
+//      a porch with FOUR steps, and piers on ground that falls 2 ft to the back;
 //   4  a shed roof greys out Wings and Dormer (they need a ridge);
 //   5  the calibration panel in Settings > Designer still shows every field at once and no tab strip.
 //
@@ -96,22 +103,17 @@ async function open(path) {
   return { ctx, page, errors };
 }
 
-const FIELDS = '[data-ss-adv="fields"]';
-// Which of the grid's field labels are on screen, by their first line of text.
-const shownLabels = (page, root) => page.evaluate((root) => [...document.querySelectorAll(`${root} label`)]
-  .filter((l) => l.offsetParent !== null)
-  .map((l) => l.innerText.trim().split("\n")[0].trim()), root);
-const has = (labels, re) => labels.some((t) => re.test(t));
-// The grid label whose FIRST visible line matches: a label's text also holds its options and hints.
-async function field(page, re) {
-  const i = await page.evaluate(({ root, src, flags }) => {
-    const rx = new RegExp(src, flags);
-    return [...document.querySelectorAll(`${root} label`)].findIndex((l) => l.offsetParent !== null && rx.test(l.innerText.trim().split("\n")[0].trim()));
-  }, { root: FIELDS, src: re.source, flags: re.flags });
-  if (i < 0) throw new Error(`no field ${re} on screen`);
-  return page.locator(`${FIELDS} label`).nth(i);
-}
+const byLabel = (page, name) => page.getByLabel(name, { exact: true });
 const tab = (page, k) => page.locator(`[data-ss-adv-sec="${k}"]`);
+const radio = (page, group, name) => page.getByRole("radiogroup", { name: group, exact: true }).getByRole("radio", { name, exact: true });
+const segBtn = (page, group, name) => page.getByRole("group", { name: group, exact: true }).getByRole("button", { name, exact: true });
+// The add-on panel's own switch ("Add a lean-to" / "✓ Lean-to on").
+const addOnSwitch = (page) => page.locator("[data-ss-adv-panel] .ss-adv-panel > button.ssd-tool").first();
+async function switchOn(page) {
+  if (await addOnSwitch(page).getAttribute("aria-pressed") !== "true") await addOnSwitch(page).click();
+  await page.waitForTimeout(150);
+}
+const fieldsIn = (page, sel) => page.evaluate((sel) => [...document.querySelectorAll(`${sel} [data-ss-adv-f]`)].filter((e) => e.offsetParent !== null).map((e) => e.dataset.ssAdvF), sel);
 async function panelModel(page, test, timeout = 60000) {
   await page.waitForFunction((src) => {
     const P = window.__ss3dPanel;
@@ -120,66 +122,136 @@ async function panelModel(page, test, timeout = 60000) {
   }, test.toString(), { timeout });
 }
 const shot = async (page, name) => page.screenshot({ path: join(SHOTS, name), fullPage: false });
+const railCur = (page) => page.evaluate(() => { const b = document.querySelector(".ss-adv .ssd-rail .ssd-step.is-current"); return b ? b.getAttribute("aria-label") : ""; });
 
 try {
   const { ctx, page, errors } = await open("/portal/advanced");
   await page.waitForSelector('[data-ss-adv="sections"]', { timeout: 60000 });
+  await page.waitForTimeout(600);
 
-  // 1 ── the strip ────────────────────────────────────────────────────────────────────────────
+  // 0 ── the Designer's frame, rail and progress bar ────────────────────────────────────────────
+  const fr = await page.evaluate(() => {
+    const f = document.querySelector('[data-ss-adv="fields"]').closest(".ssd-frame");
+    const vis = (el) => !!el && el.offsetParent !== null && el.getBoundingClientRect().width > 0;
+    return {
+      inFrame: !!f, bp: f && f.getAttribute("data-ssd-bp"), view: !!document.querySelector('[data-ss-adv="view"]').closest(".ssd-frame"),
+      rail: f ? [...f.querySelectorAll(".ssd-rail .ssd-step")].filter(vis).map((b) => b.getAttribute("aria-label")) : [],
+      bar: f ? vis(f.querySelector(".ssd-progress")) : null,
+    };
+  });
+  ok("0: the page is inside the Designer's frame (.ssd-frame), the 3D column too", fr.inFrame && fr.view, JSON.stringify(fr));
+  ok("0: at a 1440 window the frame is at xl and shows the numbered step rail (six steps)", fr.bp === "xl" && fr.rail.length === 6, JSON.stringify(fr));
+  ok("0: …Start from first, Save last", /^Step 1 of 6: Start from/.test(fr.rail[0] || "") && /^Step 6 of 6: Name & save/.test(fr.rail[5] || ""), JSON.stringify(fr.rail));
+  ok("0: …and no progress bar at xl", fr.bar === false);
+  await page.locator('.ss-adv .ssd-rail .ssd-step[aria-label^="Step 3 of 6"]').click();
+  await page.waitForTimeout(1200);
+  const went = await page.evaluate(() => Math.round(document.getElementById("ss-step-adv-walls").getBoundingClientRect().top));
+  const cur3 = await railCur(page);
+  ok("0: a click on the rail's Walls step brings that section up under the topbar and marks it current", went >= 55 && went <= 80 && /^Step 3 of 6: Walls & foundation/.test(cur3), `${went} ${cur3}`);
+  await shot(page, "frame-rail-1440.png");
+  await page.mouse.move(700, 500);
+  await page.mouse.wheel(0, -6000);
+  await page.waitForTimeout(1200);
+  const cur1 = await railCur(page);
+  ok("0: scrolled back to the top, the rail follows (Start from is current)", /^Step 1 of 6: Start from/.test(cur1), cur1);
+  await page.setViewportSize({ width: 1100, height: 900 });
+  await page.waitForTimeout(700);
+  const md = await page.evaluate(() => {
+    const f = document.querySelector(".ss-adv .ssd-frame");
+    const bar = f.querySelector(".ssd-progress");
+    return { bp: f.getAttribute("data-ssd-bp"), bar: bar.offsetParent !== null && bar.getBoundingClientRect().height > 0, rail: [...f.querySelectorAll(".ssd-rail")].some((r) => r.getBoundingClientRect().width > 0) };
+  });
+  ok("0: at 1100 the rail gives way to the sticky progress bar, like the Designer", md.bp !== "xl" && md.bar && !md.rail, JSON.stringify(md));
+  await page.mouse.wheel(0, 1400);
+  await page.waitForTimeout(900);
+  const barTop = await page.evaluate(() => Math.round(document.querySelector(".ss-adv .ssd-progress").getBoundingClientRect().top));
+  ok("0: …and scrolled, the bar sticks just under the portal's topbar", barTop >= 58 && barTop <= 64, String(barTop));
+  await page.screenshot({ path: join(SHOTS, "progress-1100.png") });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.mouse.wheel(0, -6000);
+  await page.waitForTimeout(700);
+
+  // 1 ── the add-on strip ─────────────────────────────────────────────────────────────────────
   const tabs = await page.$$eval('[data-ss-adv="sections"] [data-ss-adv-sec]', (b) => b.map((x) => [x.dataset.ssAdvSec, x.innerText.trim(), x.getAttribute("aria-selected")]));
-  ok("1: seven section tabs, in the grid's order",
-    JSON.stringify(tabs.map((t) => t[1])) === JSON.stringify(["Roof", "Walls & foundation", "Lean-to", "Wings", "Dormer", "Porch & steps", "Colors"]), JSON.stringify(tabs));
-  // US spelling, as the fields under it say ("Body Color"), review 2026-09-29.
-  ok("1: no tab says Colours", !tabs.some((t) => /Colours/.test(t[1])), JSON.stringify(tabs));
-  ok("1: Roof is selected first", tabs[0] && tabs[0][2] === "true" && tabs.slice(1).every((t) => t[2] === "false"));
+  ok("1: four add-on tabs, in order", JSON.stringify(tabs.map((t) => t[1])) === JSON.stringify(["Lean-to", "Wings", "Dormer", "Porch & steps"]), JSON.stringify(tabs));
+  ok("1: Lean-to is selected first", tabs[0] && tabs[0][2] === "true" && tabs.slice(1).every((t) => t[2] === "false"));
 
-  // 2 ── each tab shows its own fields ──────────────────────────────────────────────────────────
-  const EXPECT = {
-    roof: { must: [/^Roof type/, /^Pitch/, /^Overhang \(ft\)/], never: [/^Wall height/, /^Lean-to width/, /^Lower wings/, /^Dormer width/, /^Porch$/, /^Body Color/] },
-    walls: { must: [/^Wall height/, /^Siding/, /^What it stands on/], never: [/^Roof type/, /^Pitch/, /^Lean-to width/, /^Body Color/] },
-    leanto: { must: [/^Lean-to width/], never: [/^Roof type/, /^Wall height/, /^Lower wings/, /^Dormer width/] },
-    wings: { must: [/^Lower wings/], never: [/^Roof type/, /^Lean-to width/, /^Dormer width/] },
-    dormer: { must: [/^Dormer width/], never: [/^Roof type/, /^Lean-to width/, /^Lower wings/] },
-    porch: { must: [/^Porch$/], never: [/^Roof type/, /^Lean-to width/, /^Dormer width/, /^Body Color/] },
-    colours: { must: [/^Body Color/, /^Trim Color/, /^Roof Color/], never: [/^Roof type/, /^Lean-to width/, /^Wall height/] },
+  // 2 ── each add-on tab shows only its own controls; the rest of the page is always there ─────────
+  const OWN = {
+    leanto: ["leanToOn", "leanToWidthFt", "leanToDropFt", "leanToSide", "leanToAttach", "leanToAttachFt"],
+    wings: ["wingsOn", "wingWidthFt", "wingSide", "wingAttach", "wingAttachFt", "wingPitch", "centerEaveFt"],
+    dormer: ["dormerOn", "dormerType", "dormerWidthFt", "dormerRiseFt", "dormerOffsetU"],
+    porch: ["porchKind", "porchDepth", "porchEnd", "porchTruss", "porchWidthFt", "porchAttachFt", "porchPitch", "porchPosts", "porchSteps", "porchStepCount", "wood"],
   };
-  for (const [k, e] of Object.entries(EXPECT)) {
+  const MUST = { leanto: ["leanToWidthFt", "leanToSide"], wings: ["wingWidthFt", "wingSide"], dormer: ["dormerWidthFt", "dormerType"], porch: ["porchKind"] };
+  const others = (k) => Object.entries(OWN).filter(([o]) => o !== k).flatMap(([, v]) => v);
+  for (const k of Object.keys(OWN)) {
     await tab(page, k).click();
     await page.waitForTimeout(150);
-    const labels = await shownLabels(page, FIELDS);
-    ok(`2: ${k} shows its own fields`, e.must.every((re) => has(labels, re)), JSON.stringify(labels));
-    ok(`2: ${k} shows none of another section's`, !e.never.some((re) => has(labels, re)), JSON.stringify(labels));
+    if (k !== "porch") await switchOn(page);
+    const inPanel = await fieldsIn(page, "[data-ss-adv-panel]");
+    const all = await fieldsIn(page, ".ss-adv");
+    ok(`2: ${k} shows its own controls`, MUST[k].every((f) => inPanel.includes(f)), JSON.stringify(inPanel));
+    ok(`2: ${k} shows nothing but its own controls, and no other add-on's anywhere`, inPanel.every((f) => OWN[k].includes(f)) && !all.some((f) => others(k).includes(f)), JSON.stringify(inPanel));
     ok(`2: ${k} is the selected tab`, await tab(page, k).getAttribute("aria-selected") === "true");
+    ok(`2: ${k}: the shape, walls and colour sections are still on screen`, ["roofType", "wallHeightFt", "foundation", "siding", "color-body", "color-trim", "color-roof"].every((f) => all.includes(f)), JSON.stringify(all));
+    await page.locator("#ss-step-adv-addons").scrollIntoViewIfNeeded();
     await shot(page, `sec-${k}.png`);
+    // Off again, so the next tab starts from the building as it was.
+    if (k !== "porch") await addOnSwitch(page).click();
   }
+  // A slider: arrow keys on the pitch slider move the box and light the end view's pitch label
+  // (D3ElevationSVG draws the focused measurement in its highlight colour, #B45309).
+  const hl = () => page.evaluate(() => [...document.querySelectorAll('[data-ss-adv="view"] svg text')]
+    .filter((t) => /^[\d.]+:12$/.test(t.textContent.trim())).map((t) => getComputedStyle(t).fill).join(","));
+  const pitchBox = byLabel(page, "Pitch");
+  await pitchBox.fill("5");
+  await pitchBox.blur();
+  await page.waitForTimeout(200);
+  const hl0 = await hl();
+  const p0 = Number(await pitchBox.inputValue());
+  await page.getByLabel("Pitch, slider", { exact: true }).focus();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(300);
+  const p1 = Number(await pitchBox.inputValue());
+  const hl1 = await hl();
+  ok("2: two steps of the pitch slider make it 1 in 12 steeper, in the box beside it", Math.abs(p1 - p0 - 1) < 1e-6, `${p0} → ${p1}`);
+  ok("2: …and while the slider is held, the end view lights the pitch", /180, 83, 9/.test(hl1) && !/180, 83, 9/.test(hl0), `${hl0} → ${hl1}`);
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowLeft");
+  await pitchBox.focus();
+  await pitchBox.blur();
 
-  // 3 ── the three 3D asks, each from its own tab ──────────────────────────────────────────────
+  // 3 ── the three 3D asks ────────────────────────────────────────────────────────────────────
   await tab(page, "leanto").click();
-  await (await field(page, /^Lean-to width/)).locator("input").fill("8");
-  await (await field(page, /^Lean-to meets the building/)).locator("select").selectOption("roof");
-  await (await field(page, /^How far \(ft\)/)).locator("input").fill("2");
+  await switchOn(page);
+  await byLabel(page, "Lean-to width (ft)").fill("8");
+  await segBtn(page, "Meets the building", "On the roof").click();
+  await byLabel(page, "How far up the roof (ft)").fill("2");
   await page.keyboard.press("Tab");
   await panelModel(page, (M) => !!(M.leanTo && M.leanTo.mode === "roof" && Math.abs(M.leanTo.d - 2) < 1e-6));
   const lt = await page.evaluate(() => { const L = window.__ss3dPanel.model.leanTo; return { mode: L.mode, d: L.d, ya: L.ya, E: L.E }; });
   ok("3: the lean-to meets the roof 2 ft above the eave", lt.mode === "roof" && Math.abs(lt.d - 2) < 1e-6 && lt.ya > lt.E + 2, JSON.stringify(lt));
+  const ltSay = await page.locator('[data-ss-adv-readout="leanTo"]').innerText().catch(() => "");
+  ok("3: …and the panel reads it back (Builds x in 12 · meets the roof 2' 0\" above the eave)", /^Builds [\d.]+ in 12 · meets the roof 2' 0" above the eave$/.test(ltSay.trim()), ltSay);
+  await page.locator("#ss-step-adv-addons").scrollIntoViewIfNeeded();
   await shot(page, "ask-leanto-roof.png");
 
   await tab(page, "porch").click();
-  {
-    const porch = (await field(page, /^Porch$/)).locator("select");
-    const opts = await porch.locator("option").allInnerTexts();
-    await porch.selectOption({ label: opts.find((o) => /Projecting/.test(o)) });
-  }
-  await (await field(page, /^Porch steps/)).locator("select").selectOption("center");
-  await (await field(page, /^Number of steps/)).locator("input").fill("4");
+  await radio(page, "Porch", "Projecting").click();
+  await segBtn(page, "Porch steps", "Center").click();
+  await byLabel(page, "Number of steps").fill("4");
+  await page.keyboard.press("Tab");
   await panelModel(page, (M) => { let n = 0; M.root.traverse((q) => { if (q.userData && q.userData.ssPorchPart === "stepTread") n++; }); return n === 4; });
   ok("3: the porch has the four steps typed", true);
+  await page.locator("#ss-step-adv-addons").scrollIntoViewIfNeeded();
   await shot(page, "ask-porch-4-steps.png");
 
-  await tab(page, "walls").click();
-  await (await field(page, /^What it stands on/)).locator("select").selectOption("piers");
-  await (await field(page, /^Ground falls away/)).locator("input").fill("2");
-  await (await field(page, /^Toward/)).locator("select").selectOption("back");
+  await radio(page, "What it stands on", "Piers").click();
+  await byLabel(page, "Ground falls away (ft)").fill("2");
+  await page.keyboard.press("Tab");
+  await segBtn(page, "Toward", "Back").click();
   await panelModel(page, (M) => !!(M.gradeFall && M.gradeFall.fallFt === 2 && M.gradeFall.toward === "back" && M.foundation && M.foundation.kind === "piers"));
   const pier = await page.evaluate(() => {
     const P = window.__ss3dPanel, M = P.model, V = P.camera.position.constructor;
@@ -199,16 +271,17 @@ try {
   ok("3: the back row stands taller than the front row (the ground falls to the back)", pier.n > 0 && pier.back.h > pier.front.h + 1, JSON.stringify(pier));
   await page.evaluate(() => { const P = window.__ss3dPanel; P.camera.position.set(26, 2, 0); P.controls.target.set(0, 1, 0); P.controls.update(); P.render(); });
   await page.waitForTimeout(200);
+  await page.locator("#ss-step-adv-walls").scrollIntoViewIfNeeded();
   await shot(page, "ask-piers-falling-ground.png");
 
   // 4 ── a shed greys out Wings and Dormer ─────────────────────────────────────────────────────
-  await tab(page, "roof").click();
-  await (await field(page, /^Roof type/)).locator("select").selectOption("shed");
+  await radio(page, "Roof type", "One slant").click();
   await page.waitForTimeout(150);
   ok("4: on a shed, Wings is unavailable", await tab(page, "wings").isDisabled());
   ok("4: on a shed, Dormer is unavailable", await tab(page, "dormer").isDisabled());
+  ok("4: …and says why", (await tab(page, "wings").getAttribute("title")) === "Needs a two-slope or barn roof");
   ok("4: …and Lean-to is not", !(await tab(page, "leanto").isDisabled()));
-  await (await field(page, /^Roof type/)).locator("select").selectOption("gable");
+  await radio(page, "Roof type", "Two slopes").click();
   await page.waitForTimeout(150);
   ok("4: back on a gable, Wings is available again", !(await tab(page, "wings").isDisabled()));
 
@@ -221,10 +294,12 @@ try {
     await p2.waitForFunction(() => document.body.innerText.includes("3D Style Calibration"), null, { timeout: 60000 });
     await p2.getByRole("button", { name: "Harness Cabin", exact: true }).first().click().catch(() => {});
     await p2.waitForFunction(() => [...document.querySelectorAll("label")].some((l) => /^Roof type/.test(l.innerText.trim())), null, { timeout: 30000 });
-    const labels = await shownLabels(p2, "body");
+    const labels = await p2.evaluate(() => [...document.querySelectorAll("body label")].filter((l) => l.offsetParent !== null).map((l) => l.innerText.trim().split("\n")[0].trim()));
+    const has = (re) => labels.some((t) => re.test(t));
     ok("5: the calibration panel still shows roof, walls, lean-to, dormer, porch and colours together",
-      [/^Roof type/, /^Wall height/, /^Lean-to width/, /^Dormer width/, /^Porch$/, /^Body Color/].every((re) => has(labels, re)), JSON.stringify(labels));
+      [/^Roof type/, /^Wall height/, /^Lean-to width/, /^Dormer width/, /^Porch$/, /^Body Color/].every(has), JSON.stringify(labels));
     ok("5: …and no section tabs", await p2.locator('[data-ss-adv="sections"]').count() === 0);
+    ok("5: …and none of the Advanced page's frame", await p2.locator(".ss-adv").count() === 0);
     ok("5: no page errors", e2.length === 0, e2.join(" | "));
     await c2.close();
   }

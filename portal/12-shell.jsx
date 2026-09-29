@@ -2847,6 +2847,11 @@ function Dashboard({ session }) {
         /* Projects owns its scroll the way the designer does: the shell takes the viewport
            height and the board's table scrolls inside it under a pinned header. */
         + (activeTab === "projects" ? " ss-projects-active" : "")
+        /* The Advanced page is full-bleed like the Designer (no .ss-body padding), so at a 1440 px
+           window its frame reaches the Designer's xl width and shows the same step rail. The page
+           still scrolls the window: no fixed-height shell, which is what keeps its 3D sticky. Only
+           while the page itself shows -- "Checking your account…" keeps the padded body. */
+        + (activeTab === "advanced" && advancedOn && !gateLocked ? " ss-advanced-active" : "")
         + (viewing ? " ss-viewing" : "")}>
         <div className="ss-topbar">
           {/* Title AND description, both on the gradient — this is the one header, so there

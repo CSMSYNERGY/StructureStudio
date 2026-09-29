@@ -5937,9 +5937,11 @@ function d3LeanToReadout(spec, sizeLabel) {
 // Deliberately SVG and not a second 3D view: the preview beside it is a perspective
 // three-quarter shot, where dimension lines are unreadable, and it is a shared WebGL
 // context that should not grow overlay complexity.
-function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
+// `frame` "plain" (the Advanced page, 2026-09-29) draws it bare, for a card that is already the frame;
+// anything else is the amber panel every other caller has always had.
+function D3ElevationSVG({ spec, sizeLabel, focusKey, frame }) {
   // WINGS (d3Massing, 2026-09-24): a raised centre draws the stepped end the 3D builds instead.
-  const winged = d3WingsElevation(spec, sizeLabel, focusKey);
+  const winged = d3WingsElevation(spec, sizeLabel, focusKey, frame);
   if (winged) return winged;
   const roof = (spec && spec.roof) || {};
   const m = /^(\d+(?:\.\d+)?)\s*[xX\u00d7]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
@@ -6023,7 +6025,7 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
   const pitch = roof.pitch != null ? roof.pitch : (roof.type === "shed" ? 0.25 : 0.4);
 
   return (
-    <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: "auto", background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 8 }}>
+    <svg viewBox={`0 0 ${VW} ${VH}`} style={d3ElevFrame(frame)}>
       {/* ground + wall box */}
       <line x1={PL - 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(0)} stroke="#D6D3D1" strokeWidth="1" />
       <rect x={X(-s2)} y={Y(H)} width={s2 * 2 * sc} height={H * sc} fill="#FEF3C7" stroke={INK} strokeWidth="1.2" />
@@ -6138,7 +6140,12 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
 // up to its eave, each wing's single-slope roof from its outer eave to the centre wall, and the
 // centre's own roof over them — dimensioned in feet like the plain drawing beside it. A plain
 // function returning JSX (no hooks), so D3ElevationSVG can hand over with one early return.
-function d3WingsElevation(spec, sizeLabel, focusKey) {
+function d3ElevFrame(frame) {
+  return frame === "plain"
+    ? { width: "100%", height: "auto", display: "block" }
+    : { width: "100%", height: "auto", background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 8 };
+}
+function d3WingsElevation(spec, sizeLabel, focusKey, frame) {
   const roof = (spec && spec.roof) || {};
   const mm = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
   const w = mm ? parseFloat(mm[1]) : 12, d = mm ? parseFloat(mm[2]) : 16;
@@ -6186,7 +6193,7 @@ function d3WingsElevation(spec, sizeLabel, focusKey) {
   const meetWords = (g) => (g.meetFt < 1 / 24 ? "meets at the eave" : `meets the ${g.meets} ${d3FtIn(g.meetFt)} ${g.meets === "roof" ? "up" : "down"}`);
   const meetShown = g0.attach ? (m.wings.every((g) => meetWords(g) === meetWords(g0)) ? [g0] : m.wings) : [];
   return (
-    <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: "auto", background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 8 }}>
+    <svg viewBox={`0 0 ${VW} ${VH}`} style={d3ElevFrame(frame)}>
       <line x1={PL - 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(0)} stroke="#D6D3D1" strokeWidth="1" />
       {/* the lower storey across the whole span, and the centre's walls up to its eave */}
       <rect x={X(-s2)} y={Y(H)} width={S * sc} height={H * sc} fill="#FEF3C7" stroke={INK} strokeWidth="1.2" />
@@ -17614,6 +17621,148 @@ function calSpecToSend(spec) {
   if (!spec || typeof spec !== "object") return spec;
   return { ...spec, gradeFallFt: spec.gradeFallFt != null ? spec.gradeFallFt : null, gradeFallToward: spec.gradeFallToward != null ? spec.gradeFallToward : null };
 }
+// ─── THE ADVANCED PAGE'S LOOK (2026-09-29) ────────────────────────────────────────────────────
+// Ahsan: "can you see the designer tab how organised and good looking it is i want same in the advance
+// tab". So the page is built from the Designer's own kit -- SSDesignerFrame, the step rail, cards,
+// segmented buttons, tiles, the option tab strip, the footer CTA -- and this sheet only adds what the kit
+// has no piece for: the two-column row with its sticky 3D, sliders, the −/+ stepper and swatches. Every
+// class is `ss-adv-` so nothing collides with SSD_CSS (one global designer stylesheet), and every rule
+// is under `.ss-adv`, the page's own wrapper.
+//
+// ⚠️ THE PAGE SCROLLS THE WINDOW, under the portal's sticky topbar (62 px, 58 px at a phone's width),
+// not a scroll box of its own like the Designer's host. So the frame's --ssd-sticky-top and the progress
+// bar's top are moved down by the topbar here. Literal pixels on purpose: ssdScrollToSection and
+// SSStepWatcher read --ssd-sticky-top with parseFloat, and a calc() there reads as 0.
+// THE 3D COLUMN is sticky under all of that, 12 px down, like the Designer's docked 3D. Its top padding
+// lines its first card up with the first section's heading, so the sticky top takes that padding off.
+const SS_ADV_CSS = [
+  '.ss-adv .ssd-frame[data-ssd-bp]{--ssd-sticky-top:106px}',
+  '.ss-adv .ssd-frame[data-ssd-bp="xl"]{--ssd-sticky-top:62px}',
+  '.ss-adv .ssd-progress{top:62px}',
+  '@media (max-width:560px){.ss-adv .ssd-frame[data-ssd-bp]{--ssd-sticky-top:102px}.ss-adv .ssd-frame[data-ssd-bp="xl"]{--ssd-sticky-top:58px}.ss-adv .ssd-progress{top:58px}}',
+  // The row: the 3D is FIRST in the markup so it lands on top when the row stacks, and on the right
+  // when it does not (row-reverse). Docked, it never wraps (review 2026-09-29: two wrapping columns
+  // sat side by side only from ~872 px, and in between the sticky 3D covered the form).
+  '.ss-adv .ss-adv-cols{display:flex;flex-direction:row-reverse;align-items:flex-start}',
+  '.ss-adv .ss-adv-cols.is-docked{flex-wrap:nowrap}',
+  '.ss-adv .ss-adv-cols.is-stacked{flex-wrap:wrap}',
+  '.ss-adv .ss-adv-fields{flex:1 1 0px;min-width:0}',
+  '.ss-adv .ss-adv-view{--ss-adv-pt:22px;flex:0 0 clamp(340px,40%,600px);min-width:0;box-sizing:border-box;padding:22px 24px 12px 0;position:sticky;top:calc(var(--ssd-sticky-top) + 12px - var(--ss-adv-pt));max-height:calc(100vh - var(--ssd-sticky-top) - 12px + var(--ss-adv-pt));overflow-y:auto}',
+  '.ss-adv .ssd-frame[data-ssd-bp="lg"] .ss-adv-view{--ss-adv-pt:20px;padding:20px 20px 12px 0}',
+  '.ss-adv .ssd-frame[data-ssd-bp="md"] .ss-adv-view{--ss-adv-pt:18px;padding:18px 16px 12px 0}',
+  '.ss-adv .ss-adv-cols.is-stacked .ss-adv-fields{flex:1 1 100%}',
+  '.ss-adv .ss-adv-cols.is-stacked .ss-adv-view{flex:1 1 100%;position:static;max-height:none;overflow:visible;padding:16px 16px 0}',
+  '.ss-adv .ssd-frame[data-ssd-bp="xl"] .ss-adv-cols.is-stacked .ss-adv-view{padding:22px 24px 0 86px}',
+  '.ss-adv .ss-adv-3d{height:min(520px,52vh);min-height:300px}',
+  '.ss-adv .ss-adv-view .ssd-tb{margin-top:8px}',
+  '.ss-adv .ss-adv-view .ssd-plan{margin-top:8px}',
+  '.ss-adv .ss-adv-elev{max-width:380px;margin:4px auto 0}',
+  // Cards in a row that wraps, like section 02's.
+  '.ss-adv .ss-adv-cards{display:flex;flex-wrap:wrap;gap:12px;align-items:stretch}',
+  '.ss-adv .ss-adv-cards > .ssd-card{flex:1 1 270px}',
+  '.ss-adv .ss-adv-cards > .ssd-card.is-wide{flex-basis:100%}',
+  '.ss-adv .ss-adv-cards > .ssd-card.is-mid{flex-basis:300px}',
+  '.ss-adv .ss-adv-f .ssd-seg-b{padding:0 10px}',
+  '.ss-adv .ss-adv-flds{display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 18px;min-width:0}',
+  '.ss-adv .ss-adv-f{display:block;flex:1 1 210px;min-width:0}',
+  '.ss-adv .ss-adv-f.is-full{flex-basis:100%}',
+  '.ss-adv .ss-adv-f.is-auto{flex:0 1 auto}',
+  '.ss-adv .ss-adv-fh{display:flex;align-items:center;gap:6px;min-height:26px;margin:0 0 3px}',
+  '.ss-adv .ss-adv-fh > .ssd-fld-l{flex:1 1 auto;margin:0;white-space:normal}',
+  '.ss-adv .ssd-input.ss-adv-num{width:66px;flex:0 0 66px;text-align:right;padding:0 6px}',
+  '.ss-adv .ss-adv-unit{flex:0 0 auto;font-size:11px;font-weight:600;color:var(--ss-subtle);white-space:nowrap}',
+  '.ss-adv .ss-adv-range{display:block;width:100%;height:20px;margin:0;accent-color:var(--ss-accent-fill);cursor:pointer}',
+  '.ss-adv .ss-adv-range:disabled{cursor:not-allowed;opacity:.5}',
+  '.ss-adv .ss-adv-ends{display:flex;justify-content:space-between;gap:8px;font-size:10px;font-weight:600;line-height:1.3;color:var(--ss-subtle)}',
+  '.ss-adv .ss-adv-note{display:block;margin:5px 0 0;font-size:11px;font-weight:400;line-height:1.45;color:var(--ss-muted);white-space:normal}',
+  '.ss-adv .ss-adv-say{display:block;margin:5px 0 0;white-space:normal;line-height:1.45}',
+  '.ss-adv .ss-adv-f .ssd-seg{flex-wrap:wrap;overflow:visible}',
+  '.ss-adv .ss-adv-chips{display:flex;flex-wrap:wrap;gap:5px;margin:6px 0 0}',
+  // −/+ stepper around a number box (whole feet; the number of steps and posts).
+  '.ss-adv .ss-adv-step{display:inline-flex;align-items:stretch;height:32px;box-sizing:border-box;border:1px solid var(--ss-line);border-radius:4px;overflow:hidden;background:var(--ss-surface)}',
+  '.ss-adv .ss-adv-step.is-bad{border-color:#F59E0B;box-shadow:0 0 0 1px #F59E0B}',
+  '.ss-adv .ss-adv-step > button{font-family:inherit;flex:0 0 32px;margin:0;padding:0;border:0;background:var(--ss-surface);color:var(--ss-ink);font-size:16px;font-weight:700;line-height:1;cursor:pointer;transition:background-color .15s ease}',
+  '.ss-adv .ss-adv-step > button:hover{background:var(--ss-primary-faint);color:var(--ss-primary)}',
+  '.ss-adv .ss-adv-step > button:disabled{color:var(--ss-placeholder);background:var(--ss-surface);cursor:not-allowed}',
+  '.ss-adv .ss-adv-step > .ssd-input{width:58px;height:100%;border:0;border-left:1px solid var(--ss-line);border-right:1px solid var(--ss-line);border-radius:0;text-align:center;font-weight:600}',
+  // Picture tiles (roof type, siding, foundation, porch): the kit's .ssd-tile on a button.
+  '.ss-adv .ss-adv-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(74px,1fr));gap:8px}',
+  '.ss-adv .ss-adv-tile{font-family:inherit;display:block;width:100%;margin:0;padding:0;text-align:center;color:inherit}',
+  '.ss-adv .ss-adv-tile > .ssd-tile-art{height:52px;display:flex;align-items:center;justify-content:center}',
+  '.ss-adv .ss-adv-tile:disabled{opacity:.45;cursor:not-allowed}',
+  // Swatches: the tile's border, hover and accent ring at swatch size.
+  '.ss-adv .ss-adv-sws{display:flex;flex-wrap:wrap;align-items:center;gap:7px;padding:2px}',
+  '.ss-adv .ss-adv-sw{flex:0 0 auto;width:26px;height:26px;box-sizing:border-box;margin:0;padding:0;border-width:1px;border-style:solid;border-radius:4px;cursor:pointer}',
+  '.ss-adv .ss-adv-sw.is-none{background:repeating-linear-gradient(135deg,var(--ss-surface) 0 5px,var(--ss-line-faint) 5px 10px)}',
+  '.ss-adv .ss-adv-hex{display:flex;align-items:center;gap:6px;margin:8px 0 0}',
+  '.ss-adv .ss-adv-hex > .ssd-input{width:96px;flex:0 0 96px}',
+  '.ss-adv .ss-adv-hex > input[type="color"]{flex:0 0 32px;width:32px;height:26px;padding:0 2px;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);cursor:pointer}',
+  '.ss-adv .ss-adv-pick{display:flex;align-items:center;gap:8px;margin:0 0 8px;min-width:0}',
+  '.ss-adv .ss-adv-pick > .ssd-cs-swatch{flex:0 0 auto;width:18px;height:18px}',
+  '.ss-adv .ss-adv-pick > .ssd-tb-read{white-space:normal}',
+  // "More roof settings": a disclosure, closed until asked for.
+  '.ss-adv .ss-adv-more{margin:12px 0 0;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface)}',
+  '.ss-adv .ss-adv-more > summary{display:flex;align-items:center;gap:8px;padding:9px 13px;cursor:pointer;list-style:none;font-size:12.5px;font-weight:700;color:var(--ss-primary)}',
+  '.ss-adv .ss-adv-more > summary::-webkit-details-marker{display:none}',
+  '.ss-adv .ss-adv-more > summary::before{content:"\\25B8";font-size:11px;transition:transform .15s ease}',
+  '.ss-adv .ss-adv-more[open] > summary::before{transform:rotate(90deg)}',
+  '.ss-adv .ss-adv-more > summary:hover{background:var(--ss-primary-faint)}',
+  '.ss-adv .ss-adv-more > .ss-adv-flds{padding:4px 13px 13px}',
+  // The add-on panel: its own switch first, then its controls.
+  '.ss-adv .ss-adv-panel{flex:0 0 100%;min-width:0;display:flex;flex-direction:column;gap:14px}',
+  '.ss-adv .ss-adv-panel > .ssd-tool{align-self:flex-start}',
+  '.ss-adv .ss-adv-warn{padding:9px 12px;border:1px solid #FCD34D;border-radius:4px;background:#FEF3C7;color:#92400E;font-size:12px;font-weight:600;line-height:1.45}',
+  '.ss-adv .ss-adv-ok{max-width:var(--ssd-invoice-max);margin:0 0 12px;padding:10px 14px;border:1px solid #BBF7D0;border-radius:4px;background:#F0FDF4;color:#15803D;font-size:12.5px;font-weight:700;line-height:1.45}',
+  '.ss-adv .ss-adv-name{display:flex;flex-direction:column;min-width:0;flex:1 1 240px;max-width:360px}',
+  '.ss-adv .ss-adv-name > .ssd-input{height:var(--ssd-cta-h);font-size:14px}',
+  '.ss-adv .ss-adv-foot .ssd-ft-btns{align-items:flex-end;flex:1 1 380px}',
+  '.ss-adv .ssd-frame[data-ssd-bp="xs"] .ss-adv-name{max-width:none;flex-basis:100%}',
+].join("\n");
+
+// "Blank building", the first tile of Start from: SSStyleStrip draws every tile as an <img>, so a
+// plain gable shed in the palette's own muted inks, as an SVG data URI. Cached per palette.
+const SS_ADV_BLANK = new Map();
+function ssAdvBlankImg(pal) {
+  const key = [pal.muted, pal.subtle, pal.lineCard, pal.surface].join("|");
+  if (SS_ADV_BLANK.has(key)) return SS_ADV_BLANK.get(key);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 100">`
+    + `<line x1="10" y1="86" x2="150" y2="86" stroke="${pal.lineCard}" stroke-width="2"/>`
+    + `<polygon points="44,44 80,20 116,44 116,86 44,86" fill="${pal.surface}" stroke="${pal.muted}" stroke-width="2.5" stroke-linejoin="round"/>`
+    + `<polyline points="38,48 80,18 122,48" fill="none" stroke="${pal.muted}" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>`
+    + `<rect x="70" y="56" width="20" height="30" fill="none" stroke="${pal.subtle}" stroke-width="2"/>`
+    + `<line x1="80" y1="56" x2="80" y2="86" stroke="${pal.subtle}" stroke-width="1.5"/>`
+    + `</svg>`;
+  const uri = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+  SS_ADV_BLANK.set(key, uri);
+  return uri;
+}
+
+// The small line drawings on the Advanced page's picture tiles. currentColor, so a picked tile's
+// drawing turns the accent with its ring. No hooks: safe to render anywhere.
+function SSAdvArt({ kind }) {
+  const p = { fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinejoin: "round", strokeLinecap: "round" };
+  const t = { fill: "none", stroke: "currentColor", strokeWidth: 1.2, strokeLinecap: "round" };
+  const ground = <line x1="4" y1="34" x2="52" y2="34" {...t} />;
+  const box = (y) => <rect x="14" y={y} width="28" height={34 - y} {...p} />;
+  const art = {
+    gable: <>{ground}{box(18)}<polyline points="10,20 28,6 46,20" {...p} /></>,
+    shed: <>{ground}<polygon points="14,12 42,20 42,34 14,34" {...p} /><line x1="10" y1="11" x2="46" y2="21" {...p} /></>,
+    gambrel: <>{ground}{box(20)}<polyline points="10,22 16,11 28,5 40,11 46,22" {...p} /></>,
+    panel: <><rect x="12" y="6" width="32" height="26" {...p} />{[20, 28, 36].map((x) => <line key={x} x1={x} y1="6" x2={x} y2="32" {...t} />)}</>,
+    lap: <><rect x="12" y="6" width="32" height="26" {...p} />{[11, 16, 21, 26].map((y) => <line key={y} x1="12" y1={y} x2="44" y2={y} {...t} />)}</>,
+    batten: <><rect x="12" y="6" width="32" height="26" {...p} />{[17, 22, 27, 32, 37].map((x) => <line key={x} x1={x} y1="6" x2={x} y2="32" stroke="currentColor" strokeWidth="2.4" />)}</>,
+    agpanel: <><rect x="12" y="6" width="32" height="26" {...p} />{[16, 24, 32, 40].map((x) => <polyline key={x} points={`${x - 2},6 ${x},6 ${x},32 ${x - 2},32`} {...t} />)}</>,
+    slab: <><rect x="16" y="10" width="24" height="18" {...p} /><rect x="12" y="28" width="32" height="4" fill="currentColor" stroke="none" opacity=".45" />{ground}</>,
+    skids: <><rect x="16" y="8" width="24" height="18" {...p} /><rect x="16" y="27" width="24" height="3" fill="currentColor" stroke="none" /><rect x="16" y="31" width="24" height="3" fill="currentColor" stroke="none" opacity=".5" />{ground}</>,
+    blocks: <><rect x="16" y="6" width="24" height="18" {...p} />{[16, 25, 34].map((x) => <rect key={x} x={x} y="26" width="6" height="7" fill="currentColor" stroke="none" opacity=".6" />)}{ground}</>,
+    piers: <><rect x="16" y="4" width="24" height="17" {...p} />{[18, 27, 36].map((x) => <line key={x} x1={x} y1="21" x2={x} y2="34" stroke="currentColor" strokeWidth="2.5" />)}{ground}</>,
+    none: <>{ground}{box(18)}<polyline points="10,20 28,6 46,20" {...p} /></>,
+    recessed: <>{ground}<polyline points="14,34 14,18 42,18 42,34" {...p} /><polyline points="10,20 28,6 46,20" {...p} /><rect x="30" y="22" width="12" height="12" fill="currentColor" stroke="none" opacity=".25" /></>,
+    projecting: <>{ground}<rect x="8" y="18" width="24" height="16" {...p} /><polyline points="4,20 20,8 36,20" {...p} /><polyline points="32,22 50,26" {...p} /><line x1="48" y1="26" x2="48" y2="34" {...p} /></>,
+  };
+  return <svg viewBox="0 0 56 38" width="56" height="38" aria-hidden="true" focusable="false" style={{ display: "block" }}>{art[kind] || null}</svg>;
+}
+
 function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
@@ -26546,6 +26695,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   });
   const [advFrom, setAdvFrom] = useState("");                    // "" = blank building, else a style's value
   const [advDims, setAdvDims] = useState({ w: "12", l: "16" });  // as typed; sel.size only takes whole feet 6..60
+  // Which add-on the Advanced page's tab strip shows (Lean-to, Wings, Dormer, Porch & steps).
+  const [advAddOn, setAdvAddOn] = useState("leanto");
   // The spec the draft was last seeded with. Every cal* setter makes a NEW spec object, so "is it
   // still this one" is exactly "has anything been changed since".
   const advSeedRef = useRef(null);
@@ -26741,130 +26892,803 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   }
   // THE ADVANCED PAGE (portal Workspace → Advanced, 2026-09-28). Its hooks are ABOVE the
   // calibrationOnly return, with the note that explains them. Everything here is plain JSX.
+  //
+  // REBUILT IN THE DESIGNER'S LOOK (2026-09-29). Ahsan: "can you see the designer tab how organised and
+  // good looking it is i want same in the advance tab it is looking ugly right now fix it and make it
+  // user interactive". The page is the Designer's frame (SSDesignerFrame: its step rail at xl, its
+  // sticky progress bar below), numbered sections of cards, picture tiles, segmented buttons, sliders
+  // beside number boxes, and the Designer's footer. It is its OWN form, not cal3dPanel: that grid is
+  // Settings → Designer → 3D's too, and stays exactly as it was. Every control here calls the same cal*
+  // setters and reads the same d3* readouts, so both pages build the same building from the same keys.
+  // Step keys are adv-*, never the Designer's: the portal keeps the Designer mounted (hidden) beside this
+  // page, and its rows would answer an ss-step-style lookup first.
   if (advancedOnly) {
-    // Docked beside the form on a wide screen with a mouse — the same dockOn rule, measured on the
-    // row below, as the calibration surface. Elsewhere the Preview button is the 3D, and the
-    // column is not sticky (a sticky 3D on a phone would sit on top of the form).
+    // Docked beside the form on a wide screen with a mouse -- the same dockOn rule, measured on the
+    // row below, as the calibration surface. Elsewhere the Preview button is the 3D, and the column
+    // is not sticky (a sticky 3D on a phone would sit on top of the form).
     const advDock = Boolean(adminCal) && view3dOn && dockOn && calDock3D;
-    const advLbl = { display: "flex", flexDirection: "column", gap: 3, fontSize: 11, fontWeight: 700, color: "#475569" };
     const advWBad = advFt(advDims.w) === null, advLBad = advFt(advDims.l) === null;
-    return (
-      <div style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif" }}>
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 18, fontWeight: 800, color: "#0F172A" }}>Advanced</div>
-          <div style={{ fontSize: 13, color: "#64748B", marginTop: 2, lineHeight: 1.5 }}>Every shape control on one building. Nothing here changes your styles until you save it as a new one.</div>
+    // ── the steps ──
+    const advStepDefs = [
+      ["adv-start", "Start from", "Start"],
+      ["adv-shape", "Size & roof", "Size & roof"],
+      ["adv-walls", "Walls & foundation", "Walls"],
+      ["adv-addons", "Add-ons", "Add-ons"],
+      ["adv-colors", "Colors", "Colors"],
+      ["adv-save", "Name & save", "Save"],
+    ];
+    const advKeys = advStepDefs.map((d) => d[0]);
+    const advCur = advKeys.indexOf(ssStepCur) !== -1 ? ssStepCur : advKeys[0];
+    const advAt = advKeys.indexOf(advCur);
+    // Nothing on this page is required, so "done" is simply "above where you are": the rail and the
+    // bar fill in as the builder works down the page, like the Designer's.
+    const advSteps = advStepDefs.map(([key, label, short], i) => ({ key, label, short, title: label, n: i + 1, done: i < advAt }));
+    const advGo = (k) => { const el = document.getElementById("ss-step-" + k); if (!el) return; ssdHoldStep(k); setSsStepCur(k); ssdScrollToSection(el); };
+    const advRow = (k) => {
+      const s = advSteps.find((x) => x.key === k) || advSteps[0];
+      return { stepKey: k, step: s.n, total: advSteps.length, label: s.label, short: s.short, done: s.done, current: advCur === k,
+        first: s.n === 1, last: s.n === advSteps.length, onGo: () => advGo(k) };
+    };
+    const advHead = (k) => { const s = advSteps.find((x) => x.key === k) || advSteps[0]; return `${String(s.n).padStart(2, "0")} · ${s.title}`; };
+    const advIdle = !(showCal3D && view3dOn) || !adminCal;
+    // ── the pieces every section is made of ──
+    // A number with a slider under it: the box takes an exact value (calNumProps, or calOptNumProps for a
+    // key a blank box clears), the slider drags it, and both set calFocus to `k` while in use, so the end
+    // view lights the measurement being changed. While the slider is held the box shows the slider's
+    // value through the same draft the box itself types into.
+    const advNum = ({ k, f, label, value, min, max, step, commit, band, write, unit, ends, placeholder, fallback, disabled, note, full, children }) => {
+      const blank = value === null || value === undefined || value === "";
+      const box = band ? calOptNumProps(k, blank ? null : value, band, write) : calNumProps(k, value, commit);
+      const put = band ? (n) => write(Math.max(band[0], Math.min(band[1], n))) : commit;
+      const at = blank ? (fallback != null ? Number(fallback) : min) : Number(value);
+      return (
+        <div key={f || k} className={"ss-adv-f" + (full ? " is-full" : "")} data-ss-adv-f={f || k}>
+          <div className="ss-adv-fh">
+            <span className="ssd-fld-l">{label}</span>
+            <input type="number" className="ssd-input ssd-field ss-adv-num" aria-label={label} min={min} max={max} step={step}
+              inputMode="decimal" placeholder={placeholder} disabled={disabled} {...box} />
+            {unit ? <span className="ss-adv-unit">{unit}</span> : null}
+          </div>
+          <input type="range" className="ss-adv-range" aria-label={label + ", slider"} min={min} max={max} step={step} disabled={disabled}
+            value={Math.max(min, Math.min(max, isFinite(at) ? at : min))}
+            onFocus={() => { setCalFocus(k); setCalDraft(blank ? "" : String(value)); }}
+            onChange={(e) => { const n = parseFloat(e.target.value); setCalFocus(k); setCalDraft(e.target.value); if (isFinite(n)) put(n); }}
+            onBlur={() => { setCalFocus(null); setCalDraft(""); }} />
+          {ends ? <div className="ss-adv-ends" aria-hidden="true"><span>{ends[0]}</span><span>{ends[1]}</span></div> : null}
+          {children}
+          {note ? <span className="ss-adv-note">{note}</span> : null}
         </div>
-        {!(showCal3D && view3dOn)
-          ? <div style={{ fontSize: 13, color: "#64748B" }}>3D isn't turned on for this account yet.</div>
-          : !adminCal
-            ? <div style={{ fontSize: 13, color: "#64748B" }}>Setting up the building…</div>
-            : (
+      );
+    };
+    // Segmented buttons, the Designer's .ssd-seg, under a field label. opts: [value, label, disabled?, title?]
+    const advSeg = ({ f, label, value, opts, pick, note, children, full }) => (
+      <div key={f} className={"ss-adv-f" + (full ? " is-full" : " is-auto")} data-ss-adv-f={f}>
+        <div className="ss-adv-fh"><span className="ssd-fld-l">{label}</span></div>
+        <div className="ssd-seg" role="group" aria-label={label}>
+          {opts.map(([v, l, off, why]) => (
+            <button key={v || "none"} type="button" aria-pressed={value === v} disabled={!!off} title={why || undefined}
+              className={value === v ? "ssd-seg-b is-on" : "ssd-seg-b"} onClick={() => pick(v)}
+              style={off ? { opacity: 0.45, cursor: "not-allowed" } : undefined}>{l}</button>
+          ))}
+        </div>
+        {children}
+        {note ? <span className="ss-adv-note">{note}</span> : null}
+      </div>
+    );
+    // Picture tiles as one radio group (getByRole("radio") / getByLabel(group) in the harnesses).
+    // opts: [value, label, art kind]
+    const advTiles = ({ f, label, value, opts, pick, disabled, note }) => (
+      <div key={f} className="ss-adv-f is-full" data-ss-adv-f={f}>
+        <div className="ss-adv-fh"><span className="ssd-fld-l">{label}</span></div>
+        <div className="ss-adv-tiles" role="radiogroup" aria-label={label}>
+          {opts.map(([v, l, art]) => {
+            const on = value === v;
+            return (
+              <button key={v || "none"} type="button" role="radio" aria-checked={on} aria-label={l} data-ss-adv-tile={v || "none"}
+                disabled={disabled} onClick={() => { if (!on) pick(v); }}
+                className={"ssd-tile ss-adv-tile" + (on ? " is-on" : "")} style={S.card}>
+                <div className="ssd-tile-art" style={{ color: on ? pal.accentDeep : pal.muted }}>
+                  <SSAdvArt kind={art} />
+                  {on && <div style={{ ...S.check, width: 18, height: 18, fontSize: 10 }}>✓</div>}
+                </div>
+                <div style={S.cardLabel(on)}>{l}</div>
+              </button>
+            );
+          })}
+        </div>
+        {note ? <span className="ss-adv-note">{note}</span> : null}
+      </div>
+    );
+    const advPill = { ...S.pill, padding: "4px 9px", fontSize: 11.5, lineHeight: "14px" };
+    // A readout: the accent line the Designer's toolbar uses, amber when it is a warning.
+    const advSay = (text, warn, attrs) => (text ? <span className={(warn ? "ssd-tb-warn" : "ssd-tb-hint") + " ss-adv-say"} {...(attrs || {})}>{text}</span> : null);
+    // A small count with −/+ and an Auto chip (a blank key): the number of steps, the porch's posts.
+    const advCount = ({ f, label, value, band, write, autoLabel, autoN }) => {
+      const n = Number(value) >= band[0] ? Math.round(Number(value)) : null;
+      const box = calOptNumProps(f, n, band, (x) => write(x == null ? null : Math.round(x)));
+      return (
+        <div key={f} className="ss-adv-f is-auto" data-ss-adv-f={f}>
+          <div className="ss-adv-fh"><span className="ssd-fld-l">{label}</span></div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <div className="ss-adv-step">
+              <button type="button" aria-label={label + ": one fewer"} disabled={n != null && n <= band[0]}
+                onClick={() => write(n == null ? band[0] : Math.max(band[0], n - 1))}>−</button>
+              <input type="number" className="ssd-input ssd-field" aria-label={label} min={band[0]} max={band[1]} step="1" inputMode="numeric" placeholder={autoN != null ? String(autoN) : "–"} {...box} />
+              <button type="button" aria-label={label + ": one more"} disabled={n != null && n >= band[1]}
+                onClick={() => write(n == null ? band[0] + 1 : Math.min(band[1], n + 1))}>+</button>
+            </div>
+            <button type="button" aria-pressed={n == null} className={n == null ? "ssd-tool is-on" : "ssd-tool"} onClick={() => write(null)}>{autoLabel}</button>
+          </div>
+        </div>
+      );
+    };
+    // A switch-style toggle, the Designer's tool button: "✓ Lean-to on" / "Add a lean-to".
+    const advSwitch = (f, on, onText, offText, flip, disabled, title) => (
+      <button key={f} type="button" data-ss-adv-f={f} aria-pressed={on} disabled={disabled} title={title}
+        className={on ? "ssd-tool is-on" : "ssd-tool"} onClick={flip}>{on ? "✓ " + onText : offText}</button>
+    );
+    // Colour swatches with the chosen name read out, and a Custom hex box (and the browser's picker).
+    const advHexOk = (v) => /^#[0-9a-f]{6}$/i.test(String(v || "").trim());
+    const advColor = ({ f, label, value, pool, pick, blankName, blankCss, extra, name: named, wide }) => {
+      const cur = String(value || "").trim();
+      const hit = cur ? pool.find((c) => String(c.hex).toLowerCase() === cur.toLowerCase()) : null;
+      const name = named || (!cur ? blankName : hit ? hit.label : `Custom ${cur}`);
+      return (
+        <div key={f} className={wide ? "ssd-card is-mid" : "ssd-card"} data-ss-adv-f={f}>
+          <span className="ssd-card-t">{label}</span>
+          <div className="ss-adv-pick">
+            <span className="ssd-cs-swatch" style={{ background: cur || blankCss || "#EEE" }} />
+            <span className="ssd-tb-read" data-ss-adv-color-name={f}>{name}</span>
+          </div>
+          {extra || null}
+          {pool.length > 0 && (
+            <div className="ss-adv-sws" role="group" aria-label={label + " colors"}>
+              {pool.map((c) => {
+                const on = Boolean(hit) && hit.label === c.label;
+                return (
+                  <button key={c.label} type="button" title={c.label} aria-label={c.label} aria-pressed={on} onClick={() => pick(c.hex)}
+                    className={"ssd-tile ss-adv-sw" + (on ? " is-on" : "")} style={{ background: c.hex }} />
+                );
+              })}
+            </div>
+          )}
+          <div className="ss-adv-hex">
+            <span className="ssd-fld-l" style={{ margin: 0 }}>Custom</span>
+            <input type="text" className="ssd-input ssd-field" aria-label={label + " hex"} placeholder="#hex" value={cur}
+              maxLength={7} spellCheck={false} onChange={(e) => pick(e.target.value)} />
+            <input type="color" aria-label={label + " color picker"} value={advHexOk(cur) ? cur : (advHexOk(blankCss) ? blankCss : "#cccccc")}
+              onChange={(e) => pick(e.target.value)} />
+          </div>
+        </div>
+      );
+    };
+
+    // ── the building, as the sections read it ──
+    const spec = adminCal ? adminCal.spec : null;
+    const roof = (spec && spec.roof) || {};
+    const wallH = (spec && Number(spec.wallHeightFt)) || D3.WALL_H;
+    const sizeWords = sel.size || "this size";
+
+    // 02 · SIZE & ROOF ─────────────────────────────────────────────────────────────────────────
+    const advStepper = (k, label) => {
+      const raw = advDims[k], bad = k === "w" ? advWBad : advLBad;
+      const cur = advFt(raw) != null ? advFt(raw) : (k === "w" ? bldgW : bldgH);
+      const bump = (d) => advSetDim(k, String(Math.max(ADV_MIN_FT, Math.min(ADV_MAX_FT, Math.round(Number(cur) || ADV_MIN_FT) + d))));
+      return (
+        <div className="ss-adv-f is-auto" data-ss-adv-f={k === "w" ? "width" : "length"}>
+          <div className="ss-adv-fh"><span className="ssd-fld-l">{label}</span></div>
+          <div className={"ss-adv-step" + (bad ? " is-bad" : "")}>
+            <button type="button" aria-label={label + ": one foot less"} disabled={!bad && cur <= ADV_MIN_FT} onClick={() => bump(-1)}>−</button>
+            <input type="number" className="ssd-input ssd-field" aria-label={label} min={ADV_MIN_FT} max={ADV_MAX_FT} step="1" inputMode="numeric"
+              value={raw} onChange={(e) => advSetDim(k, e.target.value)} onBlur={advDimBlur} />
+            <button type="button" aria-label={label + ": one foot more"} disabled={!bad && cur >= ADV_MAX_FT} onClick={() => bump(1)}>+</button>
+          </div>
+        </div>
+      );
+    };
+    const isShed = roof.type === "shed", isGam = roof.type === "gambrel";
+    // The span the roof sentences describe, as the calibration readout reads it (d3Massing / d3RoofAxes).
+    const advMass = spec ? d3Massing(roof, bldgW, bldgH, wallH) : null;
+    const advCentre = !!(advMass && advMass.wings.length);
+    const advSpan = advMass ? ((advCentre ? advMass.Sc : d3RoofAxes(roof, bldgW, bldgH).S) || bldgW) : bldgW;
+    const gamSl = ssGambrelSliders(roof);
+    const ohLive = d3OverhangStyleApplies(roof);
+    const ohIn = Math.round((roof.overhang != null ? roof.overhang : 0.6) * 1200) / 100;
+    const roofStepWhy = (() => {
+      if (!(roof.type === "gable" && roof.front !== "eave")) return null;
+      const hasStep = roof.rearStepFt != null && roof.rearStepFt !== "";
+      const hasRise = roof.rearEaveRiseFt != null && roof.rearEaveRiseFt !== "";
+      const st = d3RoofStep(roof, bldgW, bldgH, wallH);
+      const riseIn = (ft) => Math.round(Math.abs(ft) * 120) / 10;
+      return !hasStep && !hasRise ? "Blank: one roof from the front to the back."
+        : !(hasStep && hasRise) ? "Give both numbers. One without the other is not drawn or saved."
+          : st ? `Drawn: the back ${ssFtInWords(st.stepFt)} has its own roof, its edge ${riseIn(st.rise)} in ${st.rise > 0 ? "higher" : "lower"} at ${Math.round(st.pitchB * 120) / 10} in 12, so the ridges line up.`
+            : !(Number(roof.rearStepFt) > 0.5) ? "A step of 0 is no step."
+              : !(Math.abs(Number(roof.rearEaveRiseFt)) >= 0.01) ? "A rise of 0 draws no step."
+                : (Number(roof.wingWidthFt) || 0) > 0.5 ? "Not drawn with lower wings: they run the length of the building at one height."
+                  : (Number(roof.leanToWidthFt) || 0) > 0.5 ? "Not drawn with a lean-to: it runs the length of the building at one height."
+                    : roof.porchEnd === "back" && ((Number(roof.porchDepthFt) || 0) > 0.5 || (Number(roof.porchOutFt) || 0) > 0.5) ? "Not drawn with the porch at the back."
+                      : !d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? `Not drawn on ${sizeWords}: its ridge runs side to side. Set the front wall to a gable end.`
+                        : `Not drawn: ${sizeWords} is too short to leave 4 ft each side of the step.`;
+    })();
+    const secShape = spec && (
+      <div className="ss-adv-cards">
+        <div className="ssd-card" data-ss-adv="bar">
+          <span className="ssd-card-t">Building size</span>
+          <div className="ss-adv-flds">
+            {advStepper("w", "Width (ft)")}
+            {advStepper("l", "Length (ft)")}
+            {advNum({ k: "wallHeightFt", label: "Wall height (ft)", value: spec.wallHeightFt || 8, min: 5, max: 20, step: 0.5,
+              commit: (n) => calSet({ wallHeightFt: n }), full: true })}
+          </div>
+          {(advWBad || advLBad)
+            ? <span className="ssd-tb-warn ss-adv-say">Width and length are whole feet, from 6 to 60.</span>
+            : <span className="ssd-plan-meta" style={{ display: "block", marginTop: 8 }}>{bldgW} × {bldgH} ft · {bldgW * bldgH} sq ft</span>}
+        </div>
+        <div className="ssd-card">
+          <span className="ssd-card-t">Roof shape</span>
+          <div className="ss-adv-flds">
+            {advTiles({ f: "roofType", label: "Roof type", value: roof.type || "gable", pick: calSetRoofType,
+              opts: [["gable", "Two slopes", "gable"], ["shed", "One slant", "shed"], ["gambrel", "Barn", "gambrel"]] })}
+            {isGam ? (
               <>
-                <div data-ss-adv="bar" style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: 12, background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
-                  <label style={advLbl}>Start from
-                    <select value={advFrom} onChange={(e) => advStartFrom(e.target.value)} disabled={advBusy} style={{ ...S.sel, minWidth: 180 }}>
-                      <option value="">Blank building</option>
-                      {C.buildingStyles.map((s) => <option key={s.value} value={s.value}>Copy of {s.label}</option>)}
-                    </select>
-                  </label>
-                  <label style={advLbl}>Width (ft)
-                    <input type="number" min={ADV_MIN_FT} max={ADV_MAX_FT} step="1" value={advDims.w}
-                      onChange={(e) => advSetDim("w", e.target.value)} onBlur={advDimBlur}
-                      style={{ ...S.sel, width: 84, minWidth: 0, boxSizing: "border-box", borderColor: advWBad ? "#F59E0B" : "#CBD5E1" }} />
-                  </label>
-                  <label style={advLbl}>Length (ft)
-                    <input type="number" min={ADV_MIN_FT} max={ADV_MAX_FT} step="1" value={advDims.l}
-                      onChange={(e) => advSetDim("l", e.target.value)} onBlur={advDimBlur}
-                      style={{ ...S.sel, width: 84, minWidth: 0, boxSizing: "border-box", borderColor: advLBad ? "#F59E0B" : "#CBD5E1" }} />
-                  </label>
-                  <label style={{ ...advLbl, flex: "1 1 220px" }}>New style name
-                    <input type="text" value={advName} maxLength={60} placeholder="e.g. Tri Home with lean-to"
-                      onChange={(e) => setAdvName(e.target.value)} disabled={advBusy}
-                      onKeyDown={(e) => { if (e.key === "Enter" && !advBusy) advSave(); }}
-                      style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                  </label>
-                  <button onClick={advSave} disabled={advBusy}
-                    style={{ ...S.btn(advBusy ? "#9CA3AF" : "#166534", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: advBusy ? "wait" : "pointer" }}>
-                    {advBusy ? "Saving…" : "Save as a new style"}
+                {/* The fix panel's two plain sliders (ssGambrelFromSliders): the third number is worked out,
+                    so no pair of positions can make a barn roof that reads as a plain gable. */}
+                <div key="gamBend" className="ss-adv-f" data-ss-adv-f="gambrelBend">
+                  <div className="ss-adv-fh"><span className="ssd-fld-l">Where the bend sits</span></div>
+                  <input type="range" className="ss-adv-range" aria-label="Where the bend sits" min="0" max="100" step="1" value={gamSl.bendPct}
+                    onFocus={() => setCalFocus("kneeU")} onBlur={() => setCalFocus(null)}
+                    onChange={(e) => calSetRoof(ssGambrelFromSliders(e.target.value, gamSl.steepPct))} />
+                  <div className="ss-adv-ends" aria-hidden="true"><span>near the peak</span><span>near the wall</span></div>
+                </div>
+                <div key="gamSteep" className="ss-adv-f" data-ss-adv-f="gambrelSteep">
+                  <div className="ss-adv-fh"><span className="ssd-fld-l">How steep the bottom part is</span></div>
+                  <input type="range" className="ss-adv-range" aria-label="How steep the bottom part is" min="0" max="100" step="1" value={gamSl.steepPct}
+                    onFocus={() => setCalFocus("kneeU")} onBlur={() => setCalFocus(null)}
+                    onChange={(e) => calSetRoof(ssGambrelFromSliders(gamSl.bendPct, e.target.value))} />
+                  <div className="ss-adv-ends" aria-hidden="true"><span>shallow</span><span>steep</span></div>
+                </div>
+                <div key="gamSay" className="ss-adv-f is-full">{advSay(ssRoofInFeet(roof, advSpan, advCentre))}</div>
+              </>
+            ) : advNum({ k: "pitch", label: "Pitch", unit: "in 12", value: Math.round((roof.pitch != null ? roof.pitch : 0.4) * 1200) / 100,
+              min: 0, max: 12, step: 0.5, commit: (n) => calSetRoof({ pitch: n / 12 }), ends: ["flat", "steep"], full: true,
+              children: advSay(ssRoofInFeet(roof, advSpan, advCentre)) })}
+            {/* WHICH WAY THE BUILDING FACES (2026-09-24): the front is the porch or door wall. One control or
+                the other, never both -- the sanitiser keeps front on a gable or gambrel, highSide on a shed. */}
+            {isShed
+              ? advSeg({ f: "highSide", label: "High side", value: roof.highSide || "", pick: (v) => calSetRoofOpt("highSide", v), full: true,
+                opts: [["", "Not set"], ["front", "Front"], ["back", "Back"], ["left", "Left"], ["right", "Right"]],
+                note: roof.highSide ? null : "Not set, it falls the long way, as before." })
+              : advSeg({ f: "front", label: "Front wall (porch or door side)", value: roof.front || "", pick: (v) => calSetRoofOpt("front", v), full: true,
+                opts: [["", "Not set"], ["gable", "Gable end"], ["eave", "Long side"]],
+                note: roof.front === "gable" ? "The roof triangle faces you." : roof.front === "eave" ? "The roof edge faces you." : "Not set, the ridge runs the long way, as before." })}
+          </div>
+        </div>
+        <div className="ssd-card is-wide">
+          <span className="ssd-card-t">Roof finish</span>
+          <div className="ss-adv-flds">
+            {advSeg({ f: "roofMaterial", label: "Material", value: spec.roofMaterial || "", pick: (v) => calSet({ roofMaterial: v || null }),
+              opts: [["", "Not set"], ["shingle", "Shingle"], ["metal", "Metal"]],
+              note: spec.roofMaterial ? null : "Not set, the customer chooses." })}
+            {spec.roofMaterial === "metal" && advSeg({ f: "roofProfile", label: "Metal profile", value: d3NormalizeRoofProfile(spec.roofProfile),
+              pick: (v) => calSet({ roofProfile: v === "standingseam" ? "standingseam" : null }),
+              opts: [["agpanel", "AG Panel"], ["standingseam", "Standing seam"]] })}
+            {advSeg({ f: "eave", label: "Roof edge", value: roof.eave === "open" ? "open" : "fascia", pick: (v) => calSetRoofOpt("eave", v === "open" ? "open" : null),
+              opts: [["fascia", "Boxed in"], ["open", "Rafter tails"]] })}
+            {advNum({ k: "overhang", label: "Overhang", unit: "in", value: ohIn, min: 0, max: 24, step: 1,
+              commit: (n) => calSetRoof({ overhang: Math.round((n / 12) * 10000) / 10000 }), full: true,
+              children: (
+                <div className="ss-adv-chips" role="group" aria-label="Overhang presets">
+                  {[[0, "Flush"], [2, "2″"], [6, "6″"], [12, "12″"], [16, "16″"]].map(([n, l]) => (
+                    <button key={n} type="button" aria-pressed={Math.abs(ohIn - n) < 0.01} onClick={() => calSetRoof({ overhang: Math.round((n / 12) * 10000) / 10000 })}
+                      className={Math.abs(ohIn - n) < 0.01 ? "ssd-chip is-on" : "ssd-chip"} style={advPill}>{l}</button>
+                  ))}
+                </div>
+              ) })}
+            {/* OFF ON AN OPEN EAVE (d3OverhangStyleApplies): the same predicate the renderer gates on, so the
+                control is inert exactly where the drawing ignores it. Disabled, not hidden, with the reason. */}
+            {advSeg({ f: "overhangStyle", label: "Overhang style", value: d3OverhangStyle(roof), full: true,
+              pick: (v) => calSetRoof({ overhangStyle: v === d3DefaultOverhangStyle(roof) ? null : v }),
+              opts: [["notched", "Notched", !ohLive, ohLive ? undefined : "Rafter tails have no soffit to notch"], ["extended", "Extended", !ohLive, ohLive ? undefined : "Rafter tails have no soffit to notch"]],
+              note: ohLive
+                ? "Notched keeps one straight roof plane and steps the underside back; extended carries the whole rafter out. Left alone, over 6 in is notched."
+                : "Off with rafter tails: the tails are the finished edge, so there is nothing to notch. Box the edge in and it comes back." })}
+          </div>
+          <details className="ss-adv-more" data-ss-adv-f="more">
+            <summary>More roof settings</summary>
+            <div className="ss-adv-flds">
+              {advNum({ k: "ridgeOffset", label: "Ridge offset", value: roof.ridgeOffset != null ? roof.ridgeOffset : 0, min: -0.35, max: 0.35, step: 0.05,
+                commit: (n) => calSetRoof({ ridgeOffset: n }), ends: ["toward one side", "toward the other"],
+                note: "Moves the peak off the middle, as a share of the span. 0 is centred." })}
+              {roofStepWhy != null && advNum({ k: "rearStepFt", label: "Roof step from back (ft)", value: roof.rearStepFt, min: 0, max: 56, step: 0.5,
+                band: [0, 56], write: (n) => calSetRoofOpt("rearStepFt", n), placeholder: "none", fallback: 0,
+                note: "Where the rear section's own roof starts, measured from the back wall." })}
+              {roofStepWhy != null && advNum({ k: "rearEaveRiseIn", label: "Rear roof edge higher by (in)",
+                value: roof.rearEaveRiseFt == null || roof.rearEaveRiseFt === "" ? null : Math.round(Number(roof.rearEaveRiseFt) * 1200) / 100,
+                min: -18, max: 18, step: 0.5, band: [-18, 18], write: (n) => calSetRoofOpt("rearEaveRiseFt", n == null ? null : n / 12), placeholder: "none", fallback: 0,
+                ends: ["lower", "higher"] })}
+              {roofStepWhy != null && <div key="stepWhy" className="ss-adv-f is-full">{advSay(roofStepWhy, false, { "data-ss-adv-roof-step": "why" })}</div>}
+            </div>
+          </details>
+        </div>
+      </div>
+    );
+
+    // 03 · WALLS & FOUNDATION ──────────────────────────────────────────────────────────────────
+    const raised = spec ? d3RaisedFoundation(spec) : null;
+    const fall = spec ? d3GradeFall(spec) : null;
+    const grade = spec ? d3GradeFt(spec) : 0;
+    const uphill = fall && fall.toward === "left" ? "right side" : fall && fall.toward === "right" ? "left side" : "front";
+    const fdCur = spec && D3_FOUNDATIONS.indexOf(spec.foundation) >= 0 ? spec.foundation : "";
+    const secWalls = spec && (
+      <div className="ss-adv-cards">
+        <div className="ssd-card">
+          <span className="ssd-card-t">Siding</span>
+          <div className="ss-adv-flds">
+            {advTiles({ f: "siding", label: "Siding", value: d3NormalizeCladding(spec.siding), pick: (v) => calSet({ siding: v }),
+              opts: [["panel", "Panel", "panel"], ["lap", "Lap", "lap"], ["batten", "Board & batten", "batten"], ["agpanel", "AG Panel", "agpanel"]],
+              note: "This style's own standard: what the walls look like when a customer keeps the builder's standard." })}
+            <div key="plateBand" className="ss-adv-f is-full">
+              {advSwitch("plateBand", roof.plateBand === true, "Trim band at the top of the gable walls", "Trim band at the top of the gable walls", () => calSetPlateBand(roof.plateBand !== true))}
+              <span className="ss-adv-note">A trim board across both gable ends where the wall meets the roof.</span>
+            </div>
+          </div>
+        </div>
+        <div className="ssd-card">
+          <span className="ssd-card-t">Foundation</span>
+          <div className="ss-adv-flds">
+            {/* "Not set" draws a slab on the ground, so the Slab tile reads as picked until something else is. */}
+            {advTiles({ f: "foundation", label: "What it stands on", value: fdCur || "slab", pick: calSetFoundation,
+              opts: [["slab", "Slab", "slab"], ["skids", "Skids", "skids"], ["blocks", "Blocks", "blocks"], ["piers", "Piers", "piers"]] })}
+            {raised && advNum({ k: "adv-floorHeightFt", f: "floorHeightFt", label: "Floor height (ft)", value: spec.floorHeightFt, min: 0.3, max: 6, step: 0.1,
+              band: [0.3, 6], write: (n) => calSetFloorHeight(n), fallback: D3_FLOOR_HEIGHT_DEFAULT_FT[raised], placeholder: String(D3_FLOOR_HEIGHT_DEFAULT_FT[raised]), full: true,
+              note: `${fall ? `Ground to the top of the floor ${uphill === "front" ? "at the front" : `on the ${uphill}`}, where the ground is highest.` : "Ground to the top of the floor where the door or porch is."} A door is 6 ft 8 in tall, and each step up is about 7 in. Blank draws ${ssFtInWords(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}.${fall
+                ? " Porch steps and any ramp a customer adds reach down to the ground where they stand, so on the low side they are taller and longer: a ramp runs 4 ft for every foot it drops."
+                : ` Porch steps climb the whole height, and a ramp a customer adds is drawn ${grade > 0.75 ? ssFtInWords(4 * grade) : "3 ft"} long so it reaches the ground.`}` })}
+            {raised && advNum({ k: "adv-gradeFallFt", f: "gradeFallFt", label: "Ground falls away (ft)", value: spec.gradeFallFt, min: 0, max: 6, step: 0.5,
+              band: [0, 6], write: (n) => calSetTopOpt("gradeFallFt", n > 0 ? n : null), fallback: 0, placeholder: "0", ends: ["level", "6 ft"] })}
+            {fall && advSeg({ f: "gradeFallToward", label: "Toward", value: fall.toward, pick: (v) => calSetTopOpt("gradeFallToward", v),
+              opts: [["back", "Back"], ["left", "Left"], ["right", "Right"]], full: true,
+              note: `Floor height is measured ${uphill === "front" ? "at the front" : `on the ${uphill}`}. The ${fall.toward === "back" ? "far side's" : `${fall.toward} side's`} ${raised} stand this much taller. Front, back, left and right are the sides the 3D's Views menu calls F, B, L and R${calPorchKind(roof) !== "none" ? ", wherever the porch is." : "."}` })}
+          </div>
+        </div>
+      </div>
+    );
+
+    // 04 · ADD-ONS ─────────────────────────────────────────────────────────────────────────────
+    // Wings and Dormer need a ridge: on a single slant they are off, and the page shows the lean-to.
+    const addOnTabs = CAL_ADV_SECTIONS.filter(([k]) => k === "leanto" || k === "wings" || k === "dormer" || k === "porch");
+    const addOnOff = (k) => isShed && (k === "wings" || k === "dormer");
+    const addOn = addOnOff(advAddOn) ? "leanto" : advAddOn;
+    const leanPanel = () => {
+      const on = (roof.leanToWidthFt || 0) > 0.5;
+      const out = [advSwitch("leanToOn", on, "Lean-to on", "Add a lean-to", () => calSetRoof({ leanToWidthFt: on ? 0 : 8 }))];
+      if (!on) {
+        out.push(<span key="off" className="ss-adv-note" style={{ marginTop: -6 }}>An open roof on posts along one long side, outside the building's size.</span>);
+        return out;
+      }
+      // WHERE IT MEETS THE BUILDING, read back from d3LeanToReadout, the numbers the 3D builds it from.
+      const lr = roof.leanToAttach ? d3LeanToReadout(spec, sel.size) : null;
+      const upIn = (ft) => Math.ceil(ft * 12 - 1e-6) / 12, downIn = (ft) => Math.floor(ft * 12 + 1e-6) / 12;
+      const cutFix = lr && lr.cuts ? [
+        lr.dropMax != null && lr.dropMax >= 0 ? `set the lean-to drop to ${d3FtIn(downIn(lr.dropMax))} or less` : null,
+        lr.widthMin != null && lr.widthMin <= 16 ? `make it at least ${d3FtIn(upIn(lr.widthMin))} wide` : null,
+      ].filter(Boolean).join(", or ") : "";
+      const at0 = d3LeanToReadout({ ...spec, roof: { ...roof, leanToAttach: "wall", leanToAttachFt: 0 } }, sel.size);
+      const underEave = at0 ? at0.E - (spec.wallHeightFt || D3.WALL_H) : 0;
+      const fasciaFix = lr && lr.fasciaCuts ? (lr.fasciaAt != null
+        ? `The roof edge above hangs into the lean-to — ${lr.noRoof ? "pick \"On the wall\" and meet it" : "meet the wall"} at least ${d3FtIn(upIn(lr.fasciaAt))} below the eave.`
+        : (lr.noRoof ? "The roof edge above hangs into the lean-to — give it more drop and pick \"On the wall\"." : "The roof edge above hangs into the lean-to — give it more drop, or meet it on the roof.")) : null;
+      const warn = !lr ? null
+        : lr.noRoof ? `This is the roof's high side, with no roof above it to meet, so it meets at the eave.${fasciaFix ? " " + fasciaFix : ""}`
+          : lr.cuts ? `The lean-to is steeper than the roof it sits on, so the main roof's edge pokes through it. ${cutFix ? cutFix.charAt(0).toUpperCase() + cutFix.slice(1) + "." : "Pick \"On the wall\"."}`
+            : lr.fasciaCuts ? fasciaFix
+              : lr.flat ? `Its outer edge is only ${d3FtIn(lr.drop)} below the eave, so it can't meet the wall lower than ${d3FtIn(lr.at)} — drawn there, nearly flat. Give it more drop or meet the wall higher.`
+                : lr.clamped ? `This roof only goes ${d3FtIn(lr.d)} up from here, so it meets there.`
+                  : null;
+      const ltAx = d3RoofAxes(roof, bldgW, bldgH);
+      const ltWall = lr ? (ltAx.uAxisIsX ? (lr.dir < 0 ? "left" : "right") : (lr.dir < 0 ? "back" : "front")) : null;
+      const openTop = lr && lr.mode === "wall" && lr.at >= 1 / 24 ? downIn(lr.ya - 0.2) : null;
+      const ltDc = lr ? d3DormerCovered(spec, sel.size) : null;
+      const ltDcWords = ltDc && ltDc.by === "lean-to" ? d3DormerCoveredWords(ltDc, false) : null;
+      out.push(
+        <div key="lt" className="ss-adv-flds">
+          {advNum({ k: "leanToWidthFt", label: "Lean-to width (ft)", value: roof.leanToWidthFt != null ? roof.leanToWidthFt : 0, min: 1, max: 20, step: 0.5,
+            commit: (n) => calSetRoof({ leanToWidthFt: n }) })}
+          {advNum({ k: "leanToDropFt", label: "Outer edge drop (ft)", value: roof.leanToDropFt != null ? roof.leanToDropFt : 1, min: 0, max: 6, step: 0.25,
+            commit: (n) => calSetRoof({ leanToDropFt: n }), note: "How much lower its outer edge is than where it meets the building." })}
+          {advSeg({ f: "leanToSide", label: "Lean-to side", value: roof.leanToSide || "right", pick: (v) => calSetRoof({ leanToSide: v }),
+            opts: [["left", "Left eave"], ["right", "Right eave"]] })}
+          {advSeg({ f: "leanToAttach", label: "Meets the building", value: roof.leanToAttach || "", pick: (v) => calSetAttach("leanToAttach", "leanToAttachFt", v), full: true,
+            opts: [["", underEave > 0.01 ? "At wall height" : "At the eave"], ["wall", "On the wall"], ["roof", "On the roof"]],
+            note: roof.leanToAttach ? "The outer edge keeps its drop; the slope follows."
+              : underEave > 0.01 ? `Hangs at wall height, ${d3FtIn(underEave)} below the eave.` : "Hangs at the eave, the way a lean-to usually does." })}
+          {roof.leanToAttach && advNum({ k: "leanToAttachFt", label: roof.leanToAttach === "roof" ? "How far up the roof (ft)" : "How far down the wall (ft)",
+            value: roof.leanToAttachFt, min: 0, max: 8, step: 0.25, band: [0, 8], write: (n) => calSetRoofOpt("leanToAttachFt", n), placeholder: "0", fallback: 0, full: true,
+            children: lr ? (
+              <>
+                {advSay(`Builds ${Math.round(lr.pitch * 120) / 10} in 12 · ${lr.noRoof || lr.at < 1 / 24 ? "meets at the eave" : `meets the ${lr.mode === "roof" ? "roof" : "wall"} ${d3FtIn(lr.at)} ${lr.mode === "roof" ? "above" : "below"} the eave`}`, false, { "data-ss-adv-readout": "leanTo" })}
+                {advSay(warn, true)}
+                {openTop != null && advSay(`Doors and windows on the ${ltWall} wall need to stay under ${d3FtIn(openTop)} from the floor, or the lean-to roof crosses them.`, openTop < 80 / 12, { "data-ss-leanto-openings": "" })}
+                {ltDcWords && advSay(ltDcWords, true, { "data-ss-dormer-covered": "" })}
+              </>
+            ) : null })}
+        </div>,
+      );
+      return out;
+    };
+    const wingPanel = () => {
+      const on = (Number(roof.wingWidthFt) || 0) > 0;
+      const out = [advSwitch("wingsOn", on, "Lower wings on", "Add lower wings", () => calSetWings(on ? null : "both"))];
+      if (!on) {
+        out.push(<span key="off" className="ss-adv-note" style={{ marginTop: -6 }}>Enclosed rooms under their own lower roof, inside the size, beside a taller middle section. A lean-to is the open one on posts.</span>);
+        return out;
+      }
+      const eaveSides = d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? ["left", "right"] : ["front", "back"];
+      const lost = roof.wingSide && roof.wingSide !== "both" && eaveSides.indexOf(roof.wingSide) < 0;
+      const wm = roof.wingAttach ? d3Massing(roof, bldgW, bldgH, wallH) : null;
+      const wg = wm && wm.attach ? wm.wings : [];
+      const wSide = (g) => ({ west: "left", east: "right", north: "back", south: "front" })[g.wall] || "other";
+      const wIn12s = wg.map((g) => String(Math.round(g.pitch * 120) / 10));
+      const wIn12 = new Set(wIn12s).size > 1 ? wg.map((g, i) => `${wSide(g)} ${wIn12s[i]}`).join(" / ") : (wIn12s[0] || "");
+      const meetLine = (g) => (g.meetFt < 1 / 24 ? "meets the middle section at its eave" : `meets the ${g.meets} ${d3FtIn(g.meetFt)} ${g.meets === "roof" ? "above" : "below"} the middle section's eave`);
+      const cap1 = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+      const wMeet = !wg.length ? "" : wg.every((g) => meetLine(g) === meetLine(wg[0])) ? cap1(meetLine(wg[0]))
+        : wg.map((g, i) => `${i ? wSide(g) : cap1(wSide(g))} wing ${meetLine(g)}`).join("; ");
+      const cutW = wg.filter((g) => g.cuts);
+      const cutWho = cutW.length === wg.length ? (wg.length > 1 ? ["the wing roofs", "they meet"] : ["the wing roof", "it meets"]) : [`the ${cutW.length ? wSide(cutW[0]) : ""} wing roof`, "it meets"];
+      const blankHc = d3Massing({ ...roof, centerEaveFt: null }, bldgW, bldgH, wallH).Hc;
+      const wDc = wg.length ? d3DormerCovered(spec, sel.size) : null;
+      const wDcWords = wDc && wDc.by === "wing" ? d3DormerCoveredWords(wDc, false) : null;
+      const reachHc = wg.filter((g) => g.cuts).reduce((h, g) => Math.min(h, wm.H + g.k * g.w), Infinity);
+      const wWarn = !wg.length ? null
+        : wm.hcLow ? `The middle section must stand at least 1 ft above the outside walls, so it is drawn at ${d3FtIn(wm.Hc)}.`
+          : cutW.length ? (wm.attach === "roof"
+            ? (reachHc >= wm.H + 1
+              ? `The middle section is too tall for ${cutWho[0]} to reach its roof, so ${cutWho[1]} its wall. Bring its walls down to ${d3FtIn(Math.floor(reachHc * 12 + 1e-6) / 12)} or lower, or pick "On the wall".`
+              : `The middle roof is too flat for ${cutWho[0]} to run up onto it, so ${cutWho[1]} its wall. Pick "On the wall".`)
+            : "The middle section is too low for its roof edge to clear the wing roof — raise its wall height.")
+            : wg.some((g) => g.clamped) ? (wm.attach === "roof"
+              ? `The middle roof only goes ${d3FtIn(Math.min(...wg.map((g) => g.attachFt)))} up, so the wing roof meets there.`
+              : `Moved down to ${d3FtIn(Math.max(...wg.map((g) => g.attachFt)))} so the middle roof's edge clears the wing roof.`)
+              : null;
+      const sideOff = (v) => v !== "both" && eaveSides.indexOf(v) < 0 && roof.wingSide !== v;
+      const hc = roof.centerEaveFt;
+      out.push(
+        <div key="wg" className="ss-adv-flds">
+          {advNum({ k: "wingWidthFt", label: "Wing width, each (ft)", value: roof.wingWidthFt, min: 1, max: 16, step: 0.5, band: [0, 16],
+            write: (n) => (n > 0 ? calSetRoofOpt("wingWidthFt", n) : calSetWings(null)), fallback: 4 })}
+          {advSeg({ f: "wingSide", label: "Wing side", value: roof.wingSide || "", pick: (v) => calSetRoofOpt("wingSide", v), full: true,
+            opts: [["both", "Both sides"], ...[["left", "Left"], ["right", "Right"], ["front", "Front"], ["back", "Back"]].map(([v, l]) => [v, l, sideOff(v), sideOff(v) ? "This roof has no eave on that side" : undefined])],
+            children: advSay(!roof.wingSide
+              ? "Not chosen yet, so it is drawn on both sides. Pick the side the wing is on."
+              : lost
+                ? `On this roof a wing can only run along the ${eaveSides[0] === "left" ? "left or right side" : "front or back"} — the walls under the roof edge — so a wing on the ${roof.wingSide === "left" || roof.wingSide === "right" ? roof.wingSide + " side" : roof.wingSide} is not drawn.`
+                : "Runs the full depth, along the wall under the roof edge.", lost || !roof.wingSide) })}
+          {advSeg({ f: "wingAttach", label: "Meets the middle section", value: roof.wingAttach || "", pick: (v) => calSetAttach("wingAttach", "wingAttachFt", v), full: true,
+            opts: [["", "Automatic"], ["wall", "On the wall"], ["roof", "On the roof"]],
+            note: roof.wingAttach ? "The middle section stays at its wall height; the wing roof's slope follows." : "Hung under the middle section's eave, pushing it up if the wing roof is steep." })}
+          {roof.wingAttach && advNum({ k: "wingAttachFt", label: roof.wingAttach === "roof" ? "How far up its roof (ft)" : "How far down its wall (ft)",
+            value: roof.wingAttachFt, min: 0, max: 10, step: 0.25, band: [0, 10], write: (n) => calSetRoofOpt("wingAttachFt", n), placeholder: "0", fallback: 0, full: true,
+            children: <>{wg.length > 0 && advSay(wMeet, false, { "data-ss-adv-readout": "wings" })}{advSay(wWarn, true)}{wDcWords && advSay(wDcWords, true, { "data-ss-dormer-covered": "" })}</> })}
+          {roof.wingAttach
+            ? <div key="wpRead" className="ss-adv-f" data-ss-adv-f="wingPitch"><div className="ss-adv-fh"><span className="ssd-fld-l">Wing roof pitch</span></div>
+              {advSay(wg.length ? `Builds ${wIn12} in 12` : "Worked out from where it meets", false)}<span className="ss-adv-note">Set by where the wing roof meets the middle section.</span></div>
+            : advNum({ k: "wingPitch", label: "Wing roof pitch", unit: "in 12", value: roof.wingPitch == null ? null : Math.round(Number(roof.wingPitch) * 1200) / 100,
+              min: 0, max: 18, step: 0.5, band: [0, 18], write: (n) => calSetRoofOpt("wingPitch", n == null ? null : n / 12), placeholder: "3", fallback: 3,
+              note: "Falls away from the middle, down to the outside wall. Blank is 3 in 12." })}
+          {advNum({ k: "centerEaveFt", label: "Middle section wall height (ft)", value: hc, min: 6, max: 26, step: 0.5, band: [6, 26],
+            write: (n) => calSetRoofOpt("centerEaveFt", n), placeholder: "Auto", fallback: blankHc != null ? blankHc : wallH + 3,
+            note: `Floor to the top of the tall middle walls. Auto draws ${d3FtIn(blankHc != null ? blankHc : wallH + 3)}.`,
+            children: (
+              <div className="ss-adv-chips">
+                <button type="button" aria-pressed={hc == null || hc === ""} onClick={() => calSetRoofOpt("centerEaveFt", null)}
+                  className={hc == null || hc === "" ? "ssd-chip is-on" : "ssd-chip"} style={advPill}>Auto</button>
+              </div>
+            ) })}
+        </div>,
+      );
+      return out;
+    };
+    const dormerPanel = () => {
+      const on = (roof.dormerWidthFt || 0) > 0.5;
+      const out = [advSwitch("dormerOn", on, "Dormer on", "Add a dormer", () => calSetRoof({ dormerWidthFt: on ? 0 : 4 }))];
+      if (!on) {
+        out.push(<span key="off" className="ss-adv-note" style={{ marginTop: -6 }}>A window box standing up out of the roof.</span>);
+        return out;
+      }
+      const dg = d3DormerReadout(spec, sel.size);
+      const dc = d3DormerCovered(spec, sel.size);
+      out.push(
+        <div key="dm" className="ss-adv-flds">
+          {advSeg({ f: "dormerType", label: "Dormer type", value: roof.dormerType === "transom" ? "transom" : "gable", pick: (v) => calSetRoof({ dormerType: v }), full: true,
+            opts: [["gable", "Gable"], ["transom", "Transom"]],
+            note: roof.dormerType === "transom" ? "A lean-to off the roof." : "Its own little roof, the pitch running across." })}
+          {advNum({ k: "dormerWidthFt", label: "Dormer width (ft)", value: roof.dormerWidthFt != null ? roof.dormerWidthFt : 0, min: 1, max: 16, step: 0.5,
+            commit: (n) => calSetRoof({ dormerWidthFt: n }) })}
+          {advNum({ k: "dormerRiseFt", label: "Dormer rise (ft)", value: roof.dormerRiseFt != null ? roof.dormerRiseFt : 2.5, min: 0.5, max: 6, step: 0.25,
+            commit: (n) => calSetRoof({ dormerRiseFt: n }),
+            children: dg ? advSay(dg.clamped ? `Builds ${d3FtIn(dg.face)} on ${sizeWords} — this roof runs out at ${d3FtIn(dg.maxFace)}` : `Builds ${d3FtIn(dg.face)} on ${sizeWords}`, dg.clamped) : null })}
+          {advNum({ k: "dormerOffsetU", label: "Dormer position", value: roof.dormerOffsetU != null ? roof.dormerOffsetU : 0.45, min: -1, max: 1, step: 0.05,
+            commit: (n) => calSetRoof({ dormerOffsetU: n }), ends: ["one eave", "the other eave"], full: true,
+            children: dc ? advSay(d3DormerCoveredWords(dc, true), true, { "data-ss-dormer-covered": "" }) : null })}
+        </div>,
+      );
+      return out;
+    };
+    const porchPanel = () => {
+      const kind = calPorchKind(roof);
+      const key = kind === "projecting" ? "porchOutFt" : "porchDepthFt";
+      const pr = kind === "projecting" ? d3PorchReadout(spec, sel.size) : null;
+      const warn = !!(pr && (pr.short || pr.pitchClamped));
+      const recessedLost = kind === "recessed" && d3Massing(roof, bldgW, bldgH, spec.wallHeightFt || D3.WALL_H).wings.length > 0;
+      const newFrame = roof.front != null || roof.highSide != null;
+      const out = [advTiles({ f: "porchKind", label: "Porch", value: kind, pick: (v) => calSetPorch(v),
+        opts: [["none", "None", "none"], ["recessed", "Recessed", "recessed"], ["projecting", "Projecting", "projecting"]],
+        note: kind === "recessed" ? "Cut into the end, under the main roof." : kind === "projecting" ? "A deck and its own roof in front of the end." : "No porch." })];
+      if (kind === "none") return out;
+      const prWords = pr ? (() => {
+        const in12 = (p) => `${Math.round(p * 12 * 10) / 10}:12`;
+        const want = in12(pr.pitchWant || 2 / 12);
+        const lowered = pr.pitchWant && pr.pitchClamped && !pr.short;
+        const built = (pr.framing.posts || pr.framing.pitch || pr.framing.steps === "center") ? `. ${pr.posts} posts, porch roof ${in12(pr.pitch)}` : "";
+        return warn
+          ? (lowered
+            ? `Porch roof lowered to ${in12(pr.pitch)} from ${want}, to keep ${d3FtIn(pr.postH)} under the beam. ${pr.posts} posts`
+            : pr.attachFt != null
+              ? `Hung at ${d3FtIn(pr.attachFt)}, the porch roof leaves ${d3FtIn(pr.postH)} under the beam. About ${d3FtIn(pr.attachNeeded)} up gives a door's height at ${want}`
+              : `Walls this short leave ${d3FtIn(pr.postH)} under the porch beam. About ${d3FtIn(pr.hNeeded)} walls give a door's height at ${want}`)
+          : `Posts ${d3FtIn(pr.postH)} clear, porch roof meets the wall at ${d3FtIn(pr.yHigh)} on ${sizeWords}${pr.atMost ? ", or a little lower where the main roof's edge reaches over the porch" : ""}${built}`;
+      })() : null;
+      const autoSteps = kind === "projecting" && roof.porchSteps ? d3PorchBlankStepCount(spec, sel.size) : null;
+      const st = pr && pr.steps;
+      const riseIn = st ? Math.round(st.rise * 120) / 10 : null;
+      const steep = riseIn != null && riseIn > 8 && st.count < 12;
+      const shallow = riseIn != null && riseIn < 4 && st.count > 1;
+      const pastBox = autoSteps != null && autoSteps > 12 && !(Number(roof.porchStepCount) >= 1);
+      const woods = [["", "Natural", D3_COLORS.wood], ["#8A5A36", "Cedar stain", "#8A5A36"], ["#5C4033", "Walnut stain", "#5C4033"], ["#8C8C84", "Weathered gray", "#8C8C84"], ["#F2F1EA", "Painted white", "#F2F1EA"]];
+      const wood = String(spec.colors.wood || "");
+      const porchW = Math.max(bldgW, bldgH);
+      out.push(
+        <div key="pc" className="ss-adv-flds">
+          {advNum({ k: key, f: "porchDepth", label: "Depth (ft)", value: roof[key], min: 1, max: 16, step: 0.5,
+            commit: (n) => { if (n > 0.5) calSetPorch(kind, n); },
+            children: <>
+              {kind === "recessed"
+                ? advSay(recessedLost
+                  ? "Not drawn with lower wings: a recessed porch needs the main roof's edge over it. Use a projecting porch in front of the middle section."
+                  : `Comes out of the building, not off it ${String.fromCharCode(0x2014)} the roof and the footprint do not move.`, recessedLost)
+                : <span className="ss-adv-note">Stands in front of the building. The size and the price do not change.</span>}
+              {prWords && advSay(prWords, warn, { "data-ss-adv-readout": "porch" })}
+            </> })}
+          {advSeg({ f: "porchEnd", label: "Porch end", value: roof.porchEnd === "back" ? "back" : "front", pick: (v) => calSetRoof({ porchEnd: v }),
+            opts: [["front", newFrame ? "Front wall" : "Front gable end"], ["back", newFrame ? "Back wall" : "Back gable end"]] })}
+          {kind === "recessed" && (roof.type || "gable") === "gable" && (
+            <div key="truss" className="ss-adv-f is-full">{advSwitch("porchTruss", !!roof.porchTruss, "Timber truss in the porch gable", "Timber truss in the porch gable", () => calSetRoof({ porchTruss: !roof.porchTruss }))}</div>
+          )}
+          {kind === "projecting" && advNum({ k: "porchWidthFt", label: "Porch width (ft)", value: roof.porchWidthFt, min: 4, max: Math.max(4, Math.min(60, porchW)), step: 0.5, band: [4, 60],
+            write: (n) => calSetRoofOpt("porchWidthFt", n), placeholder: "Whole", fallback: porchW,
+            note: "Along its wall, centred on it.",
+            children: (
+              <div className="ss-adv-chips">
+                <button type="button" aria-pressed={roof.porchWidthFt == null} onClick={() => calSetRoofOpt("porchWidthFt", null)}
+                  className={roof.porchWidthFt == null ? "ssd-chip is-on" : "ssd-chip"} style={advPill}>Whole wall</button>
+              </div>
+            ) })}
+          {kind === "projecting" && advNum({ k: "porchAttachFt", label: "Roof meets the wall at (ft up)", value: roof.porchAttachFt, min: 6, max: 24, step: 0.25, band: [6, 24],
+            write: (n) => calSetRoofOpt("porchAttachFt", n), placeholder: "Auto", fallback: pr ? pr.yHigh : wallH,
+            note: "Floor to the top of the porch roof, where it meets the wall. Auto is just under the eave.",
+            children: (
+              <div className="ss-adv-chips">
+                <button type="button" aria-pressed={roof.porchAttachFt == null} onClick={() => calSetRoofOpt("porchAttachFt", null)}
+                  className={roof.porchAttachFt == null ? "ssd-chip is-on" : "ssd-chip"} style={advPill}>Just under the eave</button>
+              </div>
+            ) })}
+          {kind === "projecting" && advNum({ k: "porchPitch", label: "Porch roof pitch", unit: "in 12", value: roof.porchPitch == null ? null : Math.round(Number(roof.porchPitch) * 1200) / 100,
+            min: 0.6, max: 6, step: 0.25, band: [0.6, 6], write: (n) => calSetRoofOpt("porchPitch", n == null ? null : n / 12), placeholder: "2", fallback: 2,
+            note: "Blank is 2 in 12. Lowered only where it would leave less than 6 ft under the beam." })}
+          {kind === "projecting" && advCount({ f: "porchPosts", label: "Porch posts", value: roof.porchPosts, band: [2, 8],
+            write: (n) => calSetRoofOpt("porchPosts", n), autoLabel: pr ? `Auto (${pr.posts})` : "Auto", autoN: pr ? pr.posts : null })}
+          {kind === "projecting" && advSeg({ f: "porchSteps", label: "Porch steps", value: roof.porchSteps || "", pick: calSetPorchSteps, full: true,
+            opts: [["", "None"], ["left", "Left"], ["center", "Center"], ["right", "Right"]],
+            note: "Off the deck's front edge, as seen standing in front of the porch." })}
+          {kind === "projecting" && roof.porchSteps && (
+            <div key="stepCount" className="ss-adv-f is-full">
+              {advCount({ f: "porchStepCount", label: "Number of steps", value: roof.porchStepCount, band: [1, 12],
+                write: (n) => calSetRoofOpt("porchStepCount", n), autoLabel: `Auto (${autoSteps})`, autoN: autoSteps })}
+              {riseIn != null && advSay(`Each step rises ${riseIn} in.${steep ? " More steps would make them easier to climb." : shallow ? " Fewer steps would make them easier to climb." : ""}${pastBox ? ` Left on Auto, it draws ${autoSteps} steps; a number typed here can be 12 at most.` : ""}`,
+                steep || shallow, { "data-ss-step-rise": "adv" })}
+            </div>
+          )}
+          {kind === "projecting" && (
+            <div key="wood" className="ss-adv-f is-full" data-ss-adv-f="wood">
+              <div className="ss-adv-fh"><span className="ssd-fld-l">Wood color (posts, deck, ceiling)</span></div>
+              <div className="ss-adv-sws" role="group" aria-label="Wood color">
+                {woods.map(([v, l, css]) => {
+                  const onW = v ? wood.toLowerCase() === v.toLowerCase() : !wood;
+                  return <button key={l} type="button" title={l} aria-label={l} aria-pressed={onW} onClick={() => calSetWood(v)}
+                    className={"ssd-tile ss-adv-sw" + (onW ? " is-on" : "")} style={{ background: css }} />;
+                })}
+                <span className="ssd-tb-read" style={{ marginLeft: 4 }}>{!wood ? "Natural wood" : (woods.find((w) => w[0] && w[0].toLowerCase() === wood.toLowerCase()) || [0, `Custom ${wood}`])[1]}</span>
+              </div>
+              <div className="ss-adv-hex">
+                <span className="ssd-fld-l" style={{ margin: 0 }}>Custom</span>
+                <input type="text" className="ssd-input ssd-field" aria-label="Wood color hex" placeholder={D3_COLORS.wood} value={wood} maxLength={7} spellCheck={false}
+                  onChange={(e) => calSetWood(e.target.value)} />
+                <input type="color" aria-label="Wood color picker" value={advHexOk(wood) ? wood : D3_COLORS.wood} onChange={(e) => calSetWood(e.target.value)} />
+              </div>
+            </div>
+          )}
+        </div>,
+      );
+      return out;
+    };
+    const addOnBody = { leanto: leanPanel, wings: wingPanel, dormer: dormerPanel, porch: porchPanel };
+    const secAddOns = spec && (
+      <div className="ssd-op" data-ssd-opn="1" style={{ "--ssd-opn": 1 }}>
+        <div className="ssd-opc is-focus">
+          <div className="ssd-oph">
+            <span className="ssd-oph-t">Add to the building</span>
+            <div className="ssd-oph-tabs" role="tablist" aria-label="Add-ons" data-ss-adv="sections" style={{ flexWrap: "wrap" }}>
+              {addOnTabs.map(([k, label]) => {
+                const off = addOnOff(k);
+                const on = addOn === k;
+                const has = k === "leanto" ? (roof.leanToWidthFt || 0) > 0.5 : k === "wings" ? (Number(roof.wingWidthFt) || 0) > 0
+                  : k === "dormer" ? (roof.dormerWidthFt || 0) > 0.5 : calPorchKind(roof) !== "none";
+                return (
+                  <button key={k} type="button" role="tab" aria-selected={on} data-ss-adv-sec={k} disabled={off}
+                    title={off ? "Needs a two-slope or barn roof" : undefined} onClick={() => setAdvAddOn(k)}
+                    className={on ? "ssd-optab is-on" : "ssd-optab"} style={off ? { opacity: 0.45, cursor: "not-allowed" } : undefined}>
+                    {label}{has && !off ? <span aria-hidden="true" style={{ marginLeft: 5, color: pal.accentText }}>●</span> : null}
                   </button>
-                </div>
-                {(advWBad || advLBad) && (
-                  <div style={{ fontSize: 11.5, fontWeight: 600, color: "#B45309", marginBottom: 6 }}>Width and length are whole feet, from 6 to 60.</div>
-                )}
-                {advMsg && (
-                  <div data-ss-adv="msg" style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.5, color: advMsg.ok ? "#166534" : "#DC2626", marginBottom: 8 }}>{advMsg.msg}</div>
-                )}
-                {/* THE SECTIONS (2026-09-29): one part of the field grid at a time (calAdvShow). */}
-                <div data-ss-adv="sections" role="tablist" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
-                  {CAL_ADV_SECTIONS.map(([k, label]) => {
-                    const off = calAdvNoRidge && (k === "wings" || k === "dormer");
-                    const on = calAdvSecOn === k;
-                    return (
-                      <button key={k} type="button" role="tab" aria-selected={on} data-ss-adv-sec={k} disabled={off}
-                        title={off ? "Needs a gable or gambrel roof" : undefined} onClick={() => setCalAdvSec(k)}
-                        style={{ ...S.btn(on ? "#92400E" : "#FFF", on ? "#FFF" : "#92400E"), border: "1px solid #FCD34D", fontSize: 12.5, padding: "6px 12px", opacity: off ? 0.45 : 1, cursor: off ? "not-allowed" : "pointer" }}>
-                        {label}
-                      </button>
-                    );
-                  })}
-                </div>
-                {/* row-reverse: the 3D is FIRST in the markup so it lands on top when the row wraps
-                    on a narrow screen, and on the right when it does not. minWidth:0 on both
-                    columns for the reason the calibration row gives (auto-fit grids overflow).
-                    DOCKED MEANS SIDE BY SIDE (review 2026-09-29). The dock switches on at a 760 px
-                    row, but two wrapping columns only sat side by side from ~872 px, and in between
-                    the sticky 3D wrapped on TOP of the form and covered it as the page scrolled
-                    (a 1366 px laptop at 125% lands there). So while docked the row never wraps: a
-                    fixed-share 3D column beside a form that takes the rest, like the calibration
-                    row, and only then is the column sticky. It is capped at the window's height and
-                    scrolls on its own, so a short screen cannot push the end view out of reach. */}
-                <div ref={canvasRowRef} style={{ display: "flex", flexDirection: "row-reverse", flexWrap: dockOn ? "nowrap" : "wrap", alignItems: "flex-start", gap: 12 }}>
-                  <div data-ss-adv="view" style={dockOn
-                    ? { flex: "0 0 clamp(340px, 48%, 760px)", minWidth: 0, position: "sticky", top: 74, maxHeight: "calc(100vh - 86px)", overflowY: "auto" }
-                    : { flex: "1 1 440px", minWidth: 0 }}>
-                    {/* The `!adminCalPreview` term sits on the render site, as on the calibration
-                        surface: the docked panel and the full-screen viewer can never hold two
-                        WebGL contexts at once. */}
-                    {!adminCalPreview && advDock && (
-                      <div style={{ height: "min(520px, 52vh)", marginBottom: 8 }}>
-                        <Structure3DPanel
-                          key={`${bldgW}x${bldgH}`}
-                          bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
-                          style3d={adminCal.spec}
-                          fitHeightFt={adminCal.spec.wallHeightFt || 0}
-                          painted={false} paintBody="" paintTrim=""
-                          roofType="" roofColorHex=""
-                          frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
-                          fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
-                          suspended={false}
-                          pal={pal}
-                          onClose={() => setCalDock3D(false)}
-                        />
-                      </div>
-                    )}
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-                      <button onClick={() => setAdminCalPreview(true)} title="Open the 3D at full screen"
-                        style={{ ...S.btn("#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13 }}>
-                        {dockOn ? "⛶ Full screen 3D" : "🧊 Preview in 3D"}
-                      </button>
-                      {dockOn && (
-                        <button onClick={() => setCalDock3D((v) => !v)}
-                          style={{ ...S.btn("#FFF", "#7C3AED"), border: "1px solid #DDD6FE", fontSize: 12 }}>
-                          {calDock3D ? "🧊 Hide 3D" : "🧊 Show 3D"}
-                        </button>
-                      )}
+                );
+              })}
+            </div>
+          </div>
+          <div className="ssd-ogc ssd-opp" role="tabpanel" aria-label={(addOnTabs.find(([k]) => k === addOn) || ["", ""])[1]} data-ss-adv-panel={addOn}>
+            <div className="ssd-ogc-b"><div className="ss-adv-panel">{addOnBody[addOn]()}</div></div>
+          </div>
+        </div>
+      </div>
+    );
+
+    // 05 · COLORS ──────────────────────────────────────────────────────────────────────────────
+    // The tenant's own colour rows, filtered the way the calibration grid filters them: siding rows for
+    // the body, trim rows for the trim, and roofing rows narrowed to the material this style sells.
+    // With none on file, the nine built-in swatches (D3_SWATCHES) so the section still has something
+    // to pick; the hex box is always there for a colour nobody has on file.
+    const roofMat = spec && spec.roofMaterial;
+    const roofRow = (c) => roofMat === "metal" ? c.metal : roofMat === "shingle" ? c.shingle : (c.shingle || c.metal);
+    const poolOf = (k) => {
+      const own = (Array.isArray(C.colors) ? C.colors : []).filter((c) => (k === "body" ? c.siding : k === "trim" ? c.trim : roofRow(c)) && c.hex && !c.allowCustom);
+      return own.length ? own : D3_SWATCHES.map((s) => ({ label: s.label, hex: s.css }));
+    };
+    const cols = (spec && spec.colors) || {};
+    const secColors = spec && (
+      <div className="ss-adv-cards">
+        {[["body", "Body color", D3_COLORS.body], ["trim", "Trim color", D3_COLORS.trim], ["roof", "Roof color", D3_COLORS.roof]].map(([k, l, dflt]) => advColor({
+          f: "color-" + k, label: l, value: cols[k], pool: poolOf(k), pick: (v) => calSetColor(k, v), blankName: "Not set: natural", blankCss: dflt,
+        }))}
+        {[["corner", "Corner boards", "body", "Same as walls"], ["fascia", "Fascia and rake boards", "roof", "Same as roof"]].map(([k, l, from, fromLbl]) => {
+          const own = cols[k] || "";
+          const mode = !own ? "trim" : cols[from] && own === cols[from] ? "from" : "custom";
+          return advColor({
+            f: "color-" + k, label: l, value: own, pool: mode === "custom" ? poolOf("trim") : [], pick: (v) => calSetOptColor(k, v),
+            blankName: "Same as trim", blankCss: cols.trim || D3_COLORS.trim, name: mode === "from" ? fromLbl : null, wide: true,
+            extra: advSeg({ f: k + "-mode", label: l + " color", value: mode,
+              pick: (v) => calSetOptColor(k, v === "trim" ? "" : v === "from" ? cols[from] : (own && mode === "custom" ? own : (cols.trim || D3_COLORS.trim))),
+              opts: [["trim", "Same as trim"], ["from", fromLbl, !cols[from], !cols[from] ? `Pick a ${from} color first` : undefined], ["custom", "Custom"]] }),
+          });
+        })}
+      </div>
+    );
+
+    // ── the 3D column ──
+    const advView = spec && (
+      <>
+        {/* The `!adminCalPreview` term sits on the render site, as on the calibration surface: the docked
+            panel and the full-screen viewer can never hold two WebGL contexts at once. */}
+        {!adminCalPreview && advDock && (
+          <div className="ss-adv-3d">
+            <Structure3DPanel
+              key={`${bldgW}x${bldgH}`}
+              bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
+              style3d={adminCal.spec}
+              fitHeightFt={adminCal.spec.wallHeightFt || 0}
+              painted={false} paintBody="" paintTrim=""
+              roofType="" roofColorHex=""
+              frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
+              fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
+              suspended={false}
+              pal={pal}
+              onClose={() => setCalDock3D(false)}
+            />
+          </div>
+        )}
+        <div className="ssd-tb">
+          <span className="ssd-tb-hint">{advDock ? "Drag to turn it · scroll to zoom" : dockOn ? "The 3D is hidden" : "See it from every side"}</span>
+          <div className="ssd-tb-r">
+            <button type="button" onClick={() => setAdminCalPreview(true)} title="Open the 3D at full screen"
+              className={dockOn ? "ssd-tb-btn is-soft" : "ssd-tb-btn is-primary"}>{dockOn ? "⛶ Full screen 3D" : "🧊 Preview in 3D"}</button>
+            {dockOn && (
+              <button type="button" onClick={() => setCalDock3D((v) => !v)} className="ssd-tb-btn is-primary">{calDock3D ? "Hide 3D" : "Show 3D"}</button>
+            )}
+          </div>
+        </div>
+        <div className="ssd-plan">
+          <div className="ssd-plan-head">
+            <span className="ssd-plan-t">End view</span>
+            <span className="ssd-plan-meta">{bldgW} × {bldgH} ft</span>
+          </div>
+          <div className="ss-adv-elev">
+            <D3ElevationSVG spec={adminCal.spec} sizeLabel={sel.size} focusKey={calFocus} frame="plain" />
+          </div>
+          <span className="ss-adv-note" style={{ textAlign: "center" }}>
+            End view at {sel.size || "this size"}. Click into a number box or move a slider and its measurement lights up here.
+          </span>
+        </div>
+      </>
+    );
+
+    return (
+      <div className="ss-adv" style={{ background: pal.surface }}>
+        <style>{SS_ADV_CSS}</style>
+        <SSDesignerFrame pal={pal} embedded>
+          {!advIdle && <SSProgressBar steps={advSteps} current={advCur} onGo={advGo} />}
+          {!advIdle && <SSStepWatcher ids={advKeys} onChange={setSsStepCur} />}
+          <SSRow>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", columnGap: 12, rowGap: 2 }}>
+              <div style={{ fontFamily: SSD_DISPLAY_FONT, fontSize: 19, fontWeight: 700, lineHeight: 1.25, color: pal.ink }}>Advanced</div>
+              <div style={{ fontSize: 12.5, lineHeight: 1.4, color: pal.muted }}>Every shape control on one building. Nothing here changes your styles until you save it as a new one.</div>
+            </div>
+          </SSRow>
+          {!(showCal3D && view3dOn)
+            ? <SSRow><div className="ssd-dt-lock" style={{ fontSize: 13, color: pal.muted, marginBottom: 20 }}>3D isn't turned on for this account yet.</div></SSRow>
+            : !adminCal
+              ? <SSRow><div style={{ fontSize: 13, color: pal.muted, marginBottom: 20 }}>Setting up the building…</div></SSRow>
+              : (
+                <>
+                  <SSRow {...advRow("adv-start")}>
+                    <SSSecHead text={advHead("adv-start")} />
+                    <div role="group" aria-label="Start from" data-ss-adv="start">
+                      <SSStyleStrip styles={[{ value: "", label: "Blank building", img: ssAdvBlankImg(pal) }, ...(C.buildingStyles || [])]}
+                        value={advFrom} perRow={C.branding.stylesPerRow} S={S} disabled={advBusy}
+                        onPick={(v) => { if (advBusy || (v === advFrom && !advDirty)) return; advStartFrom(v); }} />
                     </div>
-                    <div style={{ maxWidth: 360 }}>
-                      <D3ElevationSVG spec={adminCal.spec} sizeLabel={sel.size} focusKey={calFocus} />
-                      <div style={{ fontSize: 10, color: "#64748B", marginTop: 3 }}>
-                        End view at {sel.size || "this size"}. Click into a number box and its measurement lights up here.
-                      </div>
+                  </SSRow>
+                  {/* THE ROW WHOSE WIDTH DECIDES THE DOCK (canvasRowRef, the 760 px calibration threshold with 40 px
+                      of hysteresis): the numbered sections on the left, the 3D on the right. */}
+                  <div ref={canvasRowRef} className={"ss-adv-cols " + (dockOn ? "is-docked" : "is-stacked")}>
+                    <div data-ss-adv="view" className="ss-adv-view">{advView}</div>
+                    <div data-ss-adv="fields" className="ss-adv-fields">
+                      <SSRow {...advRow("adv-shape")}><SSSecHead text={advHead("adv-shape")} />{secShape}</SSRow>
+                      <SSRow {...advRow("adv-walls")}><SSSecHead text={advHead("adv-walls")} />{secWalls}</SSRow>
+                      <SSRow {...advRow("adv-addons")}><SSSecHead text={advHead("adv-addons")} />{secAddOns}</SSRow>
+                      <SSRow {...advRow("adv-colors")}><SSSecHead text={advHead("adv-colors")} />{secColors}</SSRow>
                     </div>
                   </div>
-                  <div data-ss-adv="fields" style={{ flex: dockOn ? "1 1 0" : "1 1 420px", minWidth: 0 }}>{cal3dPanel}</div>
-                </div>
-              </>
-            )}
+                  <SSRow {...advRow("adv-save")} mainClass="ssd-foot ss-adv-foot">
+                    <div data-ss-adv="save">
+                      {advMsg && (
+                        <div data-ss-adv="msg" className={advMsg.ok ? "ss-adv-ok" : "ssd-ft-err"} role={advMsg.ok ? "status" : "alert"}>{advMsg.msg}</div>
+                      )}
+                      <div className="ssd-ft">
+                        <p className="ssd-ft-hint">Saves as a <strong>new style</strong>, hidden from customers until you add its sizes and prices.</p>
+                        <div className="ssd-ft-btns">
+                          <label className="ss-adv-name">
+                            <span className="ssd-fld-l">New style name</span>
+                            <input type="text" className="ssd-input ssd-field" value={advName} maxLength={60} placeholder="e.g. Tri Home with lean-to"
+                              onChange={(e) => setAdvName(e.target.value)} disabled={advBusy}
+                              onKeyDown={(e) => { if (e.key === "Enter" && !advBusy) advSave(); }} />
+                          </label>
+                          <button type="button" className="ssd-ft-cta" onClick={advSave} disabled={advBusy}>{advBusy ? "Saving…" : "Save as a new style"}</button>
+                        </div>
+                      </div>
+                    </div>
+                  </SSRow>
+                </>
+              )}
+        </SSDesignerFrame>
         {cal3dPreview}
       </div>
     );
