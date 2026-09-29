@@ -5715,7 +5715,8 @@ function d3PorchFraming(roofCfg) {
 }
 // How many steps the renderer builds off a deck gradeFt above the grass when the style does not
 // say: one for every 7.5 in of height, at least one (d3PorchStepsGeom's own rule, below). The
-// calibration panel's "blank = N" is this number, so the blank says what is drawn.
+// calibration panel's "blank = N" is this number at the height the flight really climbs, the ground
+// under it (d3PorchBlankStepCount), so the blank says what is drawn.
 function d3PorchAutoStepCount(gradeFt) {
   const h = gradeFt > 0 ? gradeFt : D3.FLOOR_T;
   return Math.max(1, Math.ceil(h / 0.625 - 1e-9));
@@ -5873,6 +5874,18 @@ function d3PorchReadout(spec, sizeLabel) {
   return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2, atMost,
     // The steps climb from the ground under them (d3PorchStepsOnGround): d3GradeFt on level ground.
     framing, steps: d3PorchStepsOnGround(spec, w, d, g, porch.D, framing.steps) };
+}
+// THE COUNT A BLANK STEP BOX DRAWS (review, 2026-09-29): the readout's own flight with the builder's
+// count left out, so it is counted on the ground under that flight (d3PorchStepsOnGround), the way the
+// renderer counts it. Both "blank = N" placeholders say this number. d3PorchAutoStepCount at the
+// front's height, the placeholder's old number, is the same on level ground but short on the downhill
+// side of a fall: a back porch over 2 ft of fall said "blank = 3" beside six drawn steps. It can pass
+// the box's 12: on a steep fall the automatic flight is longer than a typed count may be. Without a
+// projecting porch with steps, d3PorchAutoStepCount at the front's height, as before.
+function d3PorchBlankStepCount(spec, sizeLabel) {
+  const roof = (spec && spec.roof) || {};
+  const r = d3PorchReadout({ ...spec, roof: { ...roof, porchStepCount: undefined } }, sizeLabel);
+  return r && r.steps ? r.steps.count : d3PorchAutoStepCount(d3GradeFt(spec));
 }
 
 // The lean-to's attach for a SPEC and a size LABEL, for the calibration panel (2026-09-28): d3LeanToGeom
@@ -17374,7 +17387,15 @@ function ssDrewWords(spec, porchBuilt, stepBuilt, massBuilt) {
       ? `It stands on ${what}, its floor ${ssFtInWords(h)} off the ground ${at}.`
       : `It stands on ${what}; no floor height is given, so its floor is drawn ${ssFtInWords(raisedOn === "blocks" ? 1 : 1.5)} off the ground${fall > 0 ? ` ${at}` : ""}.`);
     if (fall > 0) {
-      out.push(`The ground falls ${ssFtInWords(fall)} toward the ${toward}, so the ${raisedOn === "blocks" ? "blocks" : "piers"} on that side stand taller.`);
+      // Back, left and right are the building's geometry (d3GradeFall), never the porch's, so where
+      // the porch as built (d3PorchReadout's wall) stands on the side the ground falls toward, or on
+      // the side it falls away from, the sentence says so: on an old-frame landscape building the
+      // porch's "front end" is the side a fall toward the left falls to (review, 2026-09-29).
+      const fallWall = { back: "north", left: "west", right: "east" }[toward];
+      const opposite = { north: "south", west: "east", east: "west" }[fallWall];
+      const pw = porchBuilt && porchBuilt.wall;
+      const rel = pw === fallWall ? ", where the porch is," : pw === opposite ? ", away from the porch," : ",";
+      out.push(`The ground falls ${ssFtInWords(fall)} toward the ${toward}${rel} so the ${raisedOn === "blocks" ? "blocks" : "piers"} on that side stand taller.`);
     }
   }
   return out.join(" ");
@@ -21477,7 +21498,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {...calOptNumProps(idPrefix + "-floorHeightFt", spec.floorHeightFt, [0.3, 6], (n) => calSetFloorHeight(n))}
               style={inputStyle} />
             <span style={{ display: "block", fontWeight: 400, marginTop: 2, fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
-              {fall ? `Ground to the top of the floor ${uphill === "front" ? "at the front" : `on the ${uphill}`}, where the ground is highest.` : "Ground to the top of the floor where the door or porch is."} A door is 6 ft 8 in tall, and each step up is about 7 in. Blank draws {ssFtInWords(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}. Porch steps climb the whole height, and a ramp a customer adds is drawn {grade > 0.75 ? ssFtInWords(4 * grade) : "3 ft"} long so it reaches the ground.
+              {fall ? `Ground to the top of the floor ${uphill === "front" ? "at the front" : `on the ${uphill}`}, where the ground is highest.` : "Ground to the top of the floor where the door or porch is."} A door is 6 ft 8 in tall, and each step up is about 7 in. Blank draws {ssFtInWords(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}.{fall
+                // With a fall the steps and a ramp run down to the ground where they stand (the
+                // renderer's d3PorchStepsOnGround and rampOnGround), not to this height, so no one
+                // length is right and the hint gives the rule instead (review, 2026-09-29). Level ground keeps its sentence.
+                ? " Porch steps and any ramp a customer adds reach down to the ground where they stand, so on the low side they are taller and longer: a ramp runs 4 ft for every foot it drops."
+                : ` Porch steps climb the whole height, and a ramp a customer adds is drawn ${grade > 0.75 ? ssFtInWords(4 * grade) : "3 ft"} long so it reaches the ground.`}
             </span>
           </label>
         )}
@@ -21498,7 +21524,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <option value="right">Right</option>
             </select>
             <span style={noteStyle}>
-              Floor height is measured {uphill === "front" ? "at the front" : `on the ${uphill}`}. The {fall.toward === "back" ? "far side's" : `${fall.toward} side's`} {raised} stand this much taller.{fall.toward === "back" ? "" : " Left and right are as you face the front."}
+              Floor height is measured {uphill === "front" ? "at the front" : `on the ${uphill}`}. The {fall.toward === "back" ? "far side's" : `${fall.toward} side's`} {raised} stand this much taller.{/* The
+                  directions are the building's own, the sides the 3D's Views menu names (d3GradeFall),
+                  never the porch's: on an old-frame building wider than it is long the porch's
+                  "front end" is the left side here (review, 2026-09-29). */}
+              {` Front, back, left and right are the sides the 3D's Views menu calls F, B, L and R${calPorchKind(spec.roof) !== "none" ? ", wherever the porch is." : "."}`}
             </span>
           </label>
         )}
@@ -23209,11 +23239,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </select>
               </label>
               {/* HOW MANY STEPS (2026-09-28), only with steps to count. Blank is the renderer's own
-                  count for this floor height, which the placeholder says, and is stored as nothing. */}
+                  count, which the placeholder says, and is stored as nothing: counted on the ground
+                  under the flight (d3PorchBlankStepCount) at the size "What we drew" describes, so
+                  over falling ground it is the count that line and the 3D give (review, 2026-09-29). */}
               {roof.porchSteps && (
                 <label style={calFixLabel}>How many steps
                   <input className="ssc-dim-in" type="number" step="1" min="1" max="12" inputMode="numeric" data-ss-step-count="ss-fix"
-                    placeholder={`blank = ${d3PorchAutoStepCount(d3GradeFt(adminCal && adminCal.spec))}`}
+                    placeholder={`blank = ${d3PorchBlankStepCount(adminCal && adminCal.spec, `${calReadoutW}x${calReadoutL}`)}`}
                     {...calOptNumProps("ssc-fix-porchStepCount", roof.porchStepCount, [1, 12], (n) => calSetRoofOpt("porchStepCount", n == null ? null : Math.round(n)))}
                     style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
                 </label>
@@ -26228,13 +26260,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           count whether the builder typed it or left it blank: the rule's own count
                           can come out shallow (0.75 ft of floor is two 3 in steps), and typing a
                           number is the fix either way. Judged on the inches the hint shows, so it
-                          never says "4 in" and "less than 4 in" at once. It refuses nothing. */}
+                          never says "4 in" and "less than 4 in" at once. It refuses nothing.
+                          The placeholder's count is the one drawn, counted on the ground under the
+                          flight (d3PorchBlankStepCount; review, 2026-09-29): over falling ground it
+                          is more than the floor height alone gives, and on a steep fall more than
+                          the 12 a typed count may be, which the hint then says. */}
                       {kind === "projecting" && roof.porchSteps && (() => {
-                        const autoSteps = d3PorchAutoStepCount(d3GradeFt(adminCal.spec));
+                        const autoSteps = d3PorchBlankStepCount(adminCal.spec, sel.size);
                         const st = pr && pr.steps;
                         const riseIn = st ? Math.round(st.rise * 120) / 10 : null;
                         const steep = riseIn != null && riseIn > 8 && st.count < 12;
                         const shallow = riseIn != null && riseIn < 4 && st.count > 1;
+                        const pastBox = autoSteps > 12 && !(Number(roof.porchStepCount) >= 1);
                         return (
                           <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Number of steps
                             <input type="number" step="1" min="1" max="12" placeholder={`blank = ${autoSteps}`} data-ss-step-count="ss-grid"
@@ -26242,7 +26279,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                               style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                             {riseIn != null && (
                               <div data-ss-step-rise="ss-grid" style={{ ...hint, color: steep || shallow ? "#B45309" : "#A16207" }}>
-                                {`Each step rises ${riseIn} in.${steep ? " More steps would make them easier to climb." : shallow ? " Fewer steps would make them easier to climb." : ""}`}
+                                {`Each step rises ${riseIn} in.${steep ? " More steps would make them easier to climb." : shallow ? " Fewer steps would make them easier to climb." : ""}${pastBox ? ` Left blank, it draws ${autoSteps} steps; a number typed here can be 12 at most.` : ""}`}
                               </div>
                             )}
                           </label>

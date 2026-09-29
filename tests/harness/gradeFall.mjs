@@ -38,12 +38,18 @@
 //      no fall keys, and a style storing a fall saves it back exactly; a typed fall saves, "Toward"
 //      appears with its hint and saves its word; the height box's hint says where the height is
 //      taken (the uphill side); a cleared box deletes gradeFallFt; leaving blocks or piers deletes
-//      both keys; the preview draws the typed fall
+//      both keys; the preview draws the typed fall. With a fall the height box's hint gives the
+//      ramp's rule, not the level sentence's one length, and Toward says every direction is the 3D
+//      Views menu's (review, 2026-09-29)
+//   8b. THE STEP BOX OVER FALLING GROUND (review, 2026-09-29): case K's back porch in the panel.
+//      "Number of steps" says "blank = 6", the count drawn down to the lower ground, not the front's
+//      3; on a 6 ft fall "blank = 13" and the rise hint says a typed count stops at 12; the preview
+//      draws the placeholder's number (SS_CASES=panelSteps runs it alone)
 //   9. zero page errors
 //
 //   python -m http.server 8142 --bind 127.0.0.1 --directory <repo root>
 //   SS_BASE=http://127.0.0.1:8142 node tests/harness/gradeFall.mjs
-//   SS_CASES=K,level,panel ...        (a subset)        SS_SHOTS=<dir>  (side views, before and after)
+//   SS_CASES=K,level,panel,panelSteps ...   (a subset)  SS_SHOTS=<dir>  (side views, before and after)
 //
 // Exit 0 = every assertion held.
 import { execFileSync } from "node:child_process";
@@ -707,6 +713,8 @@ async function runLevel(ctx, c, ok, base, shots) {
 const PANEL_STYLES = [
   { value: "cabin", label: "Harness Fall Cabin", d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.8 }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
   { value: "tri", label: "Harness Fall Tri", d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 1 }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5, gradeFallFt: 2, gradeFallToward: "left" } },
+  // Case K's porch in the panel (runPanelSteps): the back porch's steps over 2 ft of fall to the back.
+  { value: "porch", label: "Harness Fall Porch", d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 1, porchOutFt: 6, porchEnd: "back", porchSteps: "center" }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5, gradeFallFt: 2, gradeFallToward: "back" } },
 ].map((s) => ({ ...s, img: null, sizes: ["16x24"], sizeInclusions: {}, sizeInclusionQty: {} }));
 const PANEL_CONFIG = {
   clientId: "harness-gradefall-panel",
@@ -762,6 +770,8 @@ async function runPanel(ctx, ok, shots) {
     await openStyle("Harness Fall Cabin");
     const fhLevel = (await page.locator('input[data-ss-floor-height="ss-grid"]').locator("xpath=..").innerText()).replace(/\s+/g, " ");
     ok("panel: level ground keeps the height box's hint it always had", fhLevel.includes("Ground to the top of the floor where the door or porch is. A door is 6 ft 8 in tall"), fhLevel);
+    ok("panel: ...its ramp sentence and number too (4 x the 1.5 ft floor)",
+      fhLevel.includes("Blank draws 1 ft 6 in. Porch steps climb the whole height, and a ramp a customer adds is drawn 6 ft long so it reaches the ground.") && !fhLevel.includes("4 ft for every foot"), fhLevel);
     ok("panel: piers show 'Ground falls away (ft)', blank = level, and no 'Toward' without a fall",
       (await fallBox().count()) === 1 && (await fallBox().inputValue()) === "" && (await fallBox().getAttribute("placeholder")) === "blank = level" && (await toward().count()) === 0);
     const label = (await fallBox().locator("xpath=..").innerText()).replace(/\s+/g, " ").trim();
@@ -775,9 +785,18 @@ async function runPanel(ctx, ok, shots) {
     ok("panel: ...offering Back, Left and Right", JSON.stringify(opts) === JSON.stringify(["Back", "Left", "Right"]), JSON.stringify(opts));
     const hint = (await toward().locator("xpath=..").innerText()).replace(/\s+/g, " ");
     ok("panel: ...with the hint: floor height at the front, the far side's piers this much taller",
-      hint.includes("Floor height is measured at the front. The far side's piers stand this much taller.") && !hint.includes("Left and right"), hint);
+      hint.includes("Floor height is measured at the front. The far side's piers stand this much taller."), hint);
+    // Review, 2026-09-29 (UX7): the directions are the building's, the 3D Views menu's, for every
+    // direction; with no porch there is no porch to mention.
+    ok("panel: ...and which sides front, back, left and right are: the 3D's Views (no porch here)",
+      hint.includes("stand this much taller. Front, back, left and right are the sides the 3D's Views menu calls F, B, L and R.") && !hint.includes("wherever the porch is") && !hint.includes("as you face the front"), hint);
     const fhBack = (await page.locator('input[data-ss-floor-height="ss-grid"]').locator("xpath=..").innerText()).replace(/\s+/g, " ");
     ok("panel: ...and the height box's hint: at the front, where the ground is highest", fhBack.includes("Ground to the top of the floor at the front, where the ground is highest."), fhBack);
+    // Review, 2026-09-29 (UX3, F2): with a fall the steps and a ramp reach the ground where they stand,
+    // so the level sentence's one length ("drawn 6 ft long") is no longer promised.
+    ok("panel: ⚠️ ...WITH A FALL IT NO LONGER PROMISES ONE RAMP LENGTH: the ramp's rule instead",
+      fhBack.includes("Blank draws 1 ft 6 in. Porch steps and any ramp a customer adds reach down to the ground where they stand, so on the low side they are taller and longer: a ramp runs 4 ft for every foot it drops.")
+      && !fhBack.includes("drawn 6 ft long") && !fhBack.includes("climb the whole height"), fhBack);
     body = await save();
     ok("panel: a typed 2 saves gradeFallFt 2 and no direction (back is what absent draws)", body.d3.gradeFallFt === 2 && !has(body.d3, "gradeFallToward"), JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
     await toward().selectOption("left");
@@ -789,7 +808,7 @@ async function runPanel(ctx, ok, shots) {
     ok("panel: ...and the floor height box says on the right side", /^Floor height off the ground, on the right side \(ft\)/.test(fhLabel), fhLabel.slice(0, 60));
     ok("panel: ...its hint says the height is taken there, where the ground is highest (not 'where the door or porch is')",
       fhLabel.includes("Ground to the top of the floor on the right side, where the ground is highest.") && !fhLabel.includes("where the door or porch is"), fhLabel);
-    ok("panel: ...and Toward says which way left is", hintL.includes("Left and right are as you face the front."), hintL);
+    ok("panel: ...and Toward says which way left is: the 3D's Views", hintL.includes("Front, back, left and right are the sides the 3D's Views menu calls F, B, L and R."), hintL);
     body = await save();
     ok("panel: Left saves gradeFallToward \"left\"", body.d3.gradeFallFt === 2 && body.d3.gradeFallToward === "left", JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
     await typeFall(9);
@@ -835,6 +854,109 @@ async function runPanel(ctx, ok, shots) {
   }
 }
 
+// ── 8b. THE STEP BOX OVER FALLING GROUND (review, 2026-09-29) ──────────────────────────────────
+// "Number of steps" said "blank = 3", the count at the FRONT's 1.5 ft, beside a back porch whose
+// flight is drawn with 6 steps down to the lower ground (case K). Blank now says the drawn count, the
+// rise hint under it agrees, and on the sanitiser's steepest fall (13 drawn) the hint says a typed
+// count stops at 12. The 3D preview draws the placeholder's number.
+async function runPanelSteps(ctx, ok, shots) {
+  const page = await ctx.newPage();
+  const errors = collectErrors(page);
+  await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
+  const calls = await stubSupabase(page, { config: PANEL_CONFIG, fixtures: { ramp: FIXTURES.ramp, items: [], windowColors: [] } });
+  const has = (o, k) => !!o && Object.prototype.hasOwnProperty.call(o, k);
+  const saves = () => calls.filter((c) => c.path && c.path.endsWith("/functions/v1/admin-save-settings") && c.body && c.body.action === "save_style_d3");
+  const save = async () => {
+    const before = saves().length;
+    await page.getByRole("button", { name: "Save to config" }).click();
+    const t0 = Date.now();
+    while (saves().length === before) {
+      if (Date.now() - t0 > 15000) throw new Error("Save sent no admin-save-settings call");
+      await settle(page, 100);
+    }
+    await page.getByText("Saved — reload the page to see it live.").waitFor({ state: "visible", timeout: 15000 });
+    return saves()[saves().length - 1].body;
+  };
+  const count = () => page.locator('input[data-ss-step-count="ss-grid"]');
+  const rise = async () => (await page.locator('div[data-ss-step-rise="ss-grid"]').innerText()).replace(/\s+/g, " ").trim();
+  const fallBox = () => page.locator('input[data-ss-grade-fall="ss-grid"]');
+  const fill = async (loc, v) => { await loc.click(); await loc.fill(String(v)); await page.keyboard.press("Tab"); await settle(page, 300); };
+  const spec = PANEL_STYLES.find((s) => s.value === "porch").d3;
+  // The count the drawn flight has with the box blank, from the designer's own readout at the style's size.
+  const drawnAt = (fall) => PURE.d3PorchReadout({ ...spec, gradeFallFt: fall }, "16x24").steps.count;
+  const tag = "panel steps";
+  try {
+    await page.goto(`${BASE}/?client=${encodeURIComponent(PANEL_CONFIG.clientId)}&admin=1`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function", null, { timeout: 60000 });
+    await page.getByText("3D Style Calibration").first().waitFor({ state: "visible", timeout: 30000 });
+    await page.getByPlaceholder("Admin password").fill("harness");
+    const btn = page.getByRole("button", { name: "Harness Fall Porch", exact: true });
+    await btn.first().waitFor({ state: "visible", timeout: 30000 });
+    await btn.first().click();
+    await count().waitFor({ state: "visible", timeout: 15000 });
+    await settle(page, 400);
+    ok(`${tag}: the readout draws 6 steps over the 2 ft fall (3 at the front's own 1.5 ft)`, drawnAt(2) === 6, String(drawnAt(2)));
+    ok(`${tag}: ⚠️ THE BLANK SAYS THE DRAWN COUNT: "blank = 6", not the front's 3`,
+      (await count().inputValue()) === "" && (await count().getAttribute("placeholder")) === `blank = ${drawnAt(2)}`, await count().getAttribute("placeholder"));
+    let r = await rise();
+    ok(`${tag}: ...and the rise hint under it is of that flight, with nothing about the box's 12`, /^Each step rises 6\.\d in\.$/.test(r), r);
+    const fh = (await page.locator('input[data-ss-floor-height="ss-grid"]').locator("xpath=..").innerText()).replace(/\s+/g, " ");
+    ok(`${tag}: the height box's hint gives the ramp's rule over the fall, not one length`,
+      fh.includes("a ramp runs 4 ft for every foot it drops.") && !fh.includes("drawn 6 ft long"), fh);
+    const note = (await page.locator('select[data-ss-grade-fall-toward="ss-grid"]').locator("xpath=..").innerText()).replace(/\s+/g, " ");
+    ok(`${tag}: Toward says the directions are the 3D Views', wherever the porch is`,
+      note.includes("Front, back, left and right are the sides the 3D's Views menu calls F, B, L and R, wherever the porch is."), note);
+    if (shots) await count().locator("xpath=../..").screenshot({ path: join(shots, "panel-steps-fall2.png") }).catch(() => {});
+    let body = await save();
+    ok(`${tag}: ⚠️ SAVED UNTOUCHED, NO COUNT IS SENT (the placeholder is only words)`, !has(body.d3.roof, "porchStepCount") && body.d3.gradeFallFt === 2, JSON.stringify(body.d3.roof));
+
+    // The sanitiser's steepest fall: blank draws 13, past the 12 a typed count may be.
+    await fill(fallBox(), 6);
+    ok(`${tag}: a 6 ft fall: "blank = 13", the drawn count`, drawnAt(6) === 13 && (await count().getAttribute("placeholder")) === "blank = 13", await count().getAttribute("placeholder"));
+    r = await rise();
+    ok(`${tag}: ⚠️ ...AND THE HINT SAYS BLANK DRAWS 13 WHILE A TYPED COUNT STOPS AT 12`,
+      /^Each step rises \d+(\.\d)? in\. Left blank, it draws 13 steps; a number typed here can be 12 at most\.$/.test(r), r);
+    if (shots) await count().locator("xpath=../..").screenshot({ path: join(shots, "panel-steps-fall6.png") }).catch(() => {});
+    await fill(count(), 12);
+    r = await rise();
+    ok(`${tag}: a typed 12 drops that sentence (the box is not blank)`, !r.includes("Left blank") && /^Each step rises/.test(r), r);
+    ok(`${tag}: ...and the placeholder still says what blank would draw`, (await count().getAttribute("placeholder")) === "blank = 13", await count().getAttribute("placeholder"));
+    body = await save();
+    ok(`${tag}: ...and saves 12`, body.d3.roof.porchStepCount === 12, String(body.d3.roof.porchStepCount));
+    await fill(count(), "");
+    r = await rise();
+    ok(`${tag}: cleared, the sentence is back`, r.includes("Left blank, it draws 13 steps"), r);
+    body = await save();
+    ok(`${tag}: ⚠️ ...AND THE KEY IS DELETED`, !has(body.d3.roof, "porchStepCount"), JSON.stringify(body.d3.roof));
+
+    // Back to 2 ft; the 3D preview draws the placeholder's number.
+    await fill(fallBox(), 2);
+    const ph = await count().getAttribute("placeholder");
+    await page.getByRole("button", { name: /Preview in 3D/ }).first().click();
+    await page.waitForFunction(() => { const E = window.__ss3dEngine; return !!(E && E.model && E.model.porch && E.model.porch.steps && E.model.gradeFall); }, null, { timeout: 90000 });
+    await settle(page, 800);
+    const m = await page.evaluate(() => {
+      const M = window.__ss3dEngine.model;
+      let treads = 0;
+      M.root.traverse((q) => { if (q.userData && q.userData.ssPorchPart === "stepTread") treads++; });
+      return { treads, count: M.porch.steps.count, wall: M.porch.wall, fall: M.gradeFall };
+    });
+    ok(`${tag}: ⚠️ THE 3D PREVIEW DRAWS THE PLACEHOLDER'S NUMBER (${ph})`,
+      ph === `blank = ${m.count}` && m.treads === m.count && m.wall === "north" && m.fall && m.fall.fallFt === 2, JSON.stringify({ ph, ...m }));
+    if (shots) {
+      await page.evaluate(() => { const E = window.__ss3dEngine; E.camera.position.set(30, 4, -34); E.controls.target.set(0, -1.5, -14); E.controls.update(); E.render(); });
+      await settle(page, 300);
+      await page.evaluate(() => window.__ss3dEngine.render());
+      await page.locator("canvas").last().screenshot({ path: join(shots, "panel-steps-preview.png") }).catch(() => {});
+    }
+    ok(`${tag}: zero page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  } catch (e) {
+    ok(`${tag}: ran to the end`, false, e && e.message ? e.message.split("\n")[0] : String(e));
+  } finally {
+    await page.close();
+  }
+}
+
 const { ok, failed } = reporter();
 const only = process.env.SS_CASES ? process.env.SS_CASES.split(",") : null;
 const todo = CASES.filter((c) => !only || only.includes(c.id));
@@ -849,6 +971,7 @@ try {
     else console.log(`SKIP  level ground against ${base.rev}: that revision is not in this repository (set SS_LEVEL_BASE)`);
   }
   if (!only || only.includes("panel")) q.push(() => runPanel(ctx, ok, shots));
+  if (!only || only.includes("panel") || only.includes("panelSteps")) q.push(() => runPanelSteps(ctx, ok, shots));
   await Promise.all(Array.from({ length: N }, async () => { while (q.length) await q.shift()(); }));
 } finally {
   await browser.close();
