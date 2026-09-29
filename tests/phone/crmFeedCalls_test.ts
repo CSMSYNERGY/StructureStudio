@@ -119,7 +119,7 @@ Deno.test("no contact, no calls: a design record never reads phone_calls", async
 });
 
 Deno.test("the Calls chip asks for exactly the call types the server emits", async () => {
-  const src = await Deno.readTextFile(new URL("../../portal/02-sales.jsx", import.meta.url));
+  const src = (await Deno.readTextFile(new URL("../../portal/02-sales.jsx", import.meta.url))).replace(/\r\n/g, "\n");
   const i = src.indexOf("const CRM_CHIPS = [");
   const j = src.indexOf("];", i);
   assert(i >= 0 && j > i, "CRM_CHIPS moved — re-point this test");
@@ -164,7 +164,7 @@ Deno.test("callVisibleToOwn is the Worker's callIsMine + transferred_from, claus
   assertEquals(vis("rang-them"), false, "a voicemail that rang only a teammate");
   assertEquals(callVisibleToOwn(null, teamCalls()[0], null), false, "no user, nothing");
   // The Worker's own copy, so the two cannot drift silently.
-  return Deno.readTextFile(new URL("../../workers/phone-api/src/scope.ts", import.meta.url)).then((w) => {
+  return Deno.readTextFile(new URL("../../workers/phone-api/src/scope.ts", import.meta.url)).then((t) => t.replace(/\r\n/g, "\n")).then((w) => {
     assert(w.includes('if (c.placed_by === userId || c.answered_by === userId) return true;'), "Worker callIsMine changed; update crmFeed callVisibleToOwn");
     assert(w.includes('const unanswered = c.status === "missed" || c.status === "voicemail" || c.status === "ringing";'));
     assert(w.includes("if (c.contact_owner) return c.contact_owner === userId;"));
@@ -196,7 +196,7 @@ Deno.test("buildCrmFeed: phone:'none' gets no calls and phone_calls is never rea
 });
 
 Deno.test("portal-settings passes WHO IS LOOKING to both feeds, from the literal phone level", async () => {
-  const SRC = await Deno.readTextFile(new URL("../../supabase/functions/portal-settings/index.ts", import.meta.url));
+  const SRC = (await Deno.readTextFile(new URL("../../supabase/functions/portal-settings/index.ts", import.meta.url))).replace(/\r\n/g, "\n");
   assert(/level: \(!canRead\("phone"\) \? "none" : ownPhoneOnly\(access\) \? "own" : "team"\)/.test(SRC), "the scope comes from canRead + ownPhoneOnly");
   assert(/buildCrmFeed\(admin, clientId, \{ codes, contactId: contact\?\.id \?\? null, isAdmin: true, phone: phoneFeedScope\(contact\?\.owner_user_id \?\? null\) \}\)/.test(SRC), "crm_record passes the scope and the contact's owner");
   assert(/buildCrmFeed\(admin, clientId, \{ codes, contactId, isAdmin: true, phone: \{ \.\.\.scope0, contactOwner \} \}\)/.test(SRC), "crm_feed passes it too");

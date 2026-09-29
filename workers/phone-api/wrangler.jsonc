@@ -36,7 +36,7 @@
     "DAILY_MINUTE_CAP": "600",
     // Chrome extension ids (or full chrome-extension:// origins), comma separated. Empty until
     // the listing is published; the unpacked dev build's id goes here for local testing.
-    "EXTENSION_ORIGINS": "",
+    "EXTENSION_ORIGINS": "ipiccbfkkbenmiaiaoecbhbjalkbikjk",
     // Release 2. The daily minute debit and the monthly line fee run only when this is "on"
     // AND their usage_prices meter is armed (active and priced). Both rails, the way
     // taxMeter.ts is armed.
@@ -76,10 +76,10 @@
   // wildcard route (*.structurestudiosuite.com/*) outranks a custom domain: a custom domain
   // alone would serve the portal's 404 page instead of this Worker. That is what broke
   // beta-2-0 and www before. Keep `phone` off the list of subdomains a tenant can take.
-  // "routes": [
-  //   { "pattern": "phone.structurestudiosuite.com", "custom_domain": true },
-  //   { "pattern": "phone.structurestudiosuite.com/*", "zone_name": "structurestudiosuite.com" }
-  // ],
+  "routes": [
+    { "pattern": "phone.structurestudiosuite.com", "custom_domain": true },
+    { "pattern": "phone.structurestudiosuite.com/*", "zone_name": "structurestudiosuite.com" }
+  ],
 
   "workers_dev": true,
   "preview_urls": false

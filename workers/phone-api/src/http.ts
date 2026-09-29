@@ -63,15 +63,22 @@ const STATUS: Record<ErrorCode, number> = {
   internal: 500,
 };
 
-/** Thrown by handlers for a deliberate refusal; the router turns it into the JSON error. */
+/**
+ * Thrown by handlers for a deliberate refusal; the router turns it into the JSON error.
+ * `extra` rides beside `error` in the body, for facts that stay true whatever the refusal says
+ * (hold and warm transfer send `held` and `call_id`: phone-core's refusalHeld reads them). It
+ * can never replace `ok` or `error`.
+ */
 export class ApiError extends Error {
   readonly code: ErrorCode;
   readonly status: number;
-  constructor(code: ErrorCode, message?: string, status?: number) {
+  readonly extra: Record<string, unknown> | null;
+  constructor(code: ErrorCode, message?: string, status?: number, extra?: Record<string, unknown>) {
     super(message ?? ERROR_TEXT[code]);
     this.name = "ApiError";
     this.code = code;
     this.status = status ?? STATUS[code];
+    this.extra = extra ?? null;
   }
 }
 
@@ -87,7 +94,7 @@ export function ok(body: Record<string, unknown> = {}): Response {
 }
 
 export function errorResponse(e: ApiError): Response {
-  return json({ ok: false, error: { code: e.code, message: e.message } }, e.status);
+  return json({ ...(e.extra ?? {}), ok: false, error: { code: e.code, message: e.message } }, e.status);
 }
 
 export function twiml(xml: string, status = 200): Response {

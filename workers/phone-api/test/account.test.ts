@@ -228,7 +228,7 @@ describe("GET /voicemails/:id/audio", () => {
     return s;
   }
 
-  it("streams the recording with the Worker's own Twilio credentials (?access_token= for <audio>) and marks it heard", async () => {
+  it("streams the recording with the Worker's own Twilio credentials (?access_token=, still taken for extension builds from before 2026-09-29) and marks it heard", async () => {
     const { net, token, env } = await vmSetup({});
     const { res, text } = await call(env, new Request(`${BASE}/voicemails/${VM_ID}/audio?access_token=${token}`));
     expect(res.status).toBe(200);

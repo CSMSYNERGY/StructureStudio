@@ -26,6 +26,14 @@
 //      calling on sees no switch, no Connect and no Buy, and is told why; and turning calling off
 //      with a connected number moves it to voicemail, with "Send calls to voicemail" when that
 //      move did not finish (review SSB-2).
+//   N. Settings -> Phone, Caller ID (plan section 14, phase 6): everyone on the team screen sees
+//      where SHAKEN/STIR and Voice Integrity stand; only an operator (canManageCallerId) gets
+//      Register / Check status, and they send phone_trust_setup / phone_trust_status (STUBS; no
+//      Twilio). Before migration 255 the card says it is not available.
+//   O. Settings -> Text Messaging at "pick your number" with a CALLING-ONLY number: it offers to
+//      use that number instead of a search, and buy_number goes out with no number picked (the
+//      server adopts it; portal-sms is a STUB here). At number_pending / active with the number
+//      still calling-only (an adoption whose last write failed, review BE-5), it offers to FINISH.
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine) — the shape
 // crmContactDeal.mjs uses. The extension is stubbed as window.chrome.runtime before the app
@@ -117,6 +125,11 @@ async function scenario(browser, opts) {
     // What the server's rollout check lets this caller do (phone_settings_get canSwitchOn /
     // canConnect / canBuyNumber). true = an operator, or after builder launch.
     rolloutOpen = true, numberOverride = null, moveFails = false,
+    // Caller ID (N): whether phone_settings_get says this caller may register (an operator), and
+    // whether migration 255 is there (callerId.available).
+    trustOperator = false, trustAvailable = true,
+    // Text Messaging (O): the portal-sms status the SMS tab loads, or null for the default stub.
+    smsStatus = null,
   } = opts;
   const ctx = await browser.newContext({ viewport, ...(userAgent ? { userAgent, isMobile: true, hasTouch: true } : {}) });
   await ctx.addInitScript(([ref, s]) => {
@@ -155,6 +168,8 @@ async function scenario(browser, opts) {
   const calls = [];
   const state = {
     phoneStatus, route: null,
+    callerId: { available: trustAvailable, shakenStir: { registered: false, status: null }, voiceIntegrity: { registered: false, status: null }, checkedAt: null },
+    sms: smsStatus,
     number: opts.noNumber ? null : (numberOverride ?? { id: "num-1", e164: "+15555550199", textingStatus: "registered", voiceReady: false, callingOnly: false }),
   };
   await page.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href), (route) => route.abort());
@@ -186,6 +201,18 @@ async function scenario(browser, opts) {
       return json(route, { configured: true, hasCard: false, plans: [], subscriptions: [], entitlement: { granted: [], features: { crm: true }, status: "active" }, wallet: null, clientId: body.targetClientId || CLIENT });
     }
     if (url.includes("/operator-portal")) return json(route, { ok: true, clientId: VIEWED, companyName: "Demo Builder", designs: [{ ...LIST_ROW, selections: DESIGN.selections }], versions: [], capturedLeads: [] });
+    if (url.includes("/portal-sms")) {
+      if (!state.sms) return json(route, { ok: true });
+      calls.push({ fn: "portal-sms", ...body });
+      if (body.action === "buy_number") {
+        // What the server answers after adopting (SSS Phone phase 6): the number joins the
+        // Messaging Service, the registration moves to number_pending. A STUB: nothing at Twilio.
+        if (body.phoneNumber) return json(route, { error: "This stub only adopts." }, 400);
+        state.sms = { ...state.sms, status: "number_pending", numbers: state.sms.numbers.map((n) => ({ ...n, callingOnly: false })) };
+        return json(route, { ok: true, adopted: true, ...state.sms });
+      }
+      return json(route, { ok: true, ...state.sms });
+    }
     if (!url.includes("/portal-settings")) return json(route, { ok: true });
     calls.push(body);
     const clientId = body.targetClientId || CLIENT;
@@ -203,7 +230,22 @@ async function scenario(browser, opts) {
         return json(route, { ok: true, available: true, scope: "team", phoneStatus: state.phoneStatus, level: "edit", canEdit: true,
           number: state.number, canBuyNumber: rolloutOpen, numbersForSale: true, voiceSetup: true,
           canSwitchOn: rolloutOpen, canConnect: rolloutOpen, selfServe: false,
+          callerId: state.callerId, canManageCallerId: trustOperator,
           route: state.route, team: TEAM, suggestedMembers: state.route ? null : [USER.id] });
+      // Plan phase 6, caller ID. STUBS: nothing reaches Twilio. The server refuses non-operators;
+      // the stub does too, so a button shown to the wrong person would fail a check.
+      case "phone_trust_setup": {
+        if (!trustOperator) return json(route, { error: "Caller ID registration is set up by Structure Studio. Ask us and we'll register your number." }, 403);
+        const key = body.product === "voice_integrity" ? "voiceIntegrity" : "shakenStir";
+        state.callerId = { ...state.callerId, [key]: { registered: true, status: "pending-review" }, checkedAt: new Date().toISOString() };
+        return json(route, { ok: true, product: body.product || "shaken_stir", status: "pending-review", submitted: true, created: true, profile: "secondary", callerId: state.callerId });
+      }
+      case "phone_trust_status": {
+        if (!trustOperator) return json(route, { error: "Caller ID registration is set up by Structure Studio. Ask us and we'll register your number." }, 403);
+        const approve = (x) => (x.registered ? { registered: true, status: "twilio-approved" } : x);
+        state.callerId = { ...state.callerId, shakenStir: approve(state.callerId.shakenStir), voiceIntegrity: approve(state.callerId.voiceIntegrity), checkedAt: new Date().toISOString() };
+        return json(route, { ok: true, callerId: state.callerId, errorCodes: { shakenStir: [], voiceIntegrity: [] } });
+      }
       // Plan phase 6. STUBS: nothing is searched, bought or configured anywhere.
       case "phone_enable_number":
         if (state.phoneStatus !== "on") return json(route, { error: "Turn calling on first, then connect the number." }, 409);
@@ -613,6 +655,118 @@ try {
     await s.ctx.close();
   }
 
+  // ── N. Caller ID on the Phone tab (plan §14, phase 6; STUBS, nothing reaches Twilio) ────────
+  {
+    const s = await scenario(browser, { name: "N1", trustOperator: true });
+    await s.go("/portal/settings/phone");
+    await s.page.waitForSelector("[data-ss-phone-callerid]", { timeout: 15000 }).catch(() => {});
+    const card = s.page.locator("[data-ss-phone-callerid]");
+    const shown = ok("N1 the Caller ID card is on the team screen, under the number", (await card.count()) === 1);
+    if (shown) {
+      ok("N2 both registrations read 'Not registered' at first",
+        (await s.page.locator('[data-ss-phone-trust-status="none"]').count()) === 2, await card.innerText());
+      await tap(s.page.locator('[data-ss-phone-trust-register="shaken_stir"]'));
+      await s.page.waitForSelector('[data-ss-phone-trust="shaken_stir"] [data-ss-phone-trust-status="pending-review"]', { timeout: 8000 }).catch(() => {});
+      const setup = s.calls.filter((c) => c.action === "phone_trust_setup").pop();
+      ok("N3 an operator's Register sends phone_trust_setup for SHAKEN/STIR", !!setup && setup.product === "shaken_stir" && !("voiceIntegrity" in setup), JSON.stringify(setup));
+      ok("N4 and the row now reads 'Waiting for Twilio'", /Waiting for Twilio/.test(await s.page.locator('[data-ss-phone-trust="shaken_stir"]').innerText()));
+      // Voice Integrity asks its questions first; the button stays off until they are answered.
+      await tap(s.page.locator('[data-ss-phone-trust-register="voice_integrity"]'));
+      await s.page.waitForSelector("[data-ss-phone-vi-form]", { timeout: 5000 }).catch(() => {});
+      ok("N5 Voice Integrity opens its questions, and cannot be sent empty",
+        (await s.page.locator("[data-ss-phone-vi-form]").count()) === 1 && await s.page.locator("[data-ss-phone-vi-submit]").isDisabled());
+      await s.page.locator("[data-ss-phone-vi-employees]").fill("6");
+      await s.page.locator("[data-ss-phone-vi-calls]").fill("40");
+      await s.page.screenshot({ path: join(shots, "N-caller-id-form.png"), fullPage: true });
+      await tap(s.page.locator("[data-ss-phone-vi-submit]"));
+      await s.page.waitForSelector('[data-ss-phone-trust="voice_integrity"] [data-ss-phone-trust-status="pending-review"]', { timeout: 8000 }).catch(() => {});
+      const vi = s.calls.filter((c) => c.action === "phone_trust_setup").pop();
+      ok("N6 it sends the product and the answers", !!vi && vi.product === "voice_integrity" && vi.voiceIntegrity
+        && vi.voiceIntegrity.useCase === "Customer Support" && vi.voiceIntegrity.employeeCount === "6" && vi.voiceIntegrity.averageDailyCalls === "40", JSON.stringify(vi));
+      await tap(s.page.locator("[data-ss-phone-trust-check]"));
+      await s.page.waitForSelector('[data-ss-phone-trust-status="twilio-approved"]', { timeout: 8000 }).catch(() => {});
+      ok("N7 Check status asks phone_trust_status and shows what Twilio said",
+        s.calls.some((c) => c.action === "phone_trust_status") && (await s.page.locator('[data-ss-phone-trust-status="twilio-approved"]').count()) === 2);
+      ok("N8 once approved, there is nothing to Register", (await s.page.locator("[data-ss-phone-trust-register]").count()) === 0);
+      await s.page.screenshot({ path: join(shots, "N-caller-id-operator.png"), fullPage: true });
+    }
+    await s.ctx.close();
+  }
+  {
+    const s = await scenario(browser, { name: "N9", trustOperator: false });
+    await s.go("/portal/settings/phone");
+    await s.page.waitForSelector("[data-ss-phone-callerid]", { timeout: 15000 }).catch(() => {});
+    const text = await s.page.locator("[data-ss-phone-callerid]").innerText().catch(() => "");
+    ok("N9 a builder's owner sees where it stands, and no buttons", /Not registered/.test(text)
+      && (await s.page.locator("[data-ss-phone-trust-register], [data-ss-phone-trust-check]").count()) === 0
+      && /Structure Studio registers your number/.test(text), text.slice(0, 200));
+    ok("N10 and nothing was sent to the caller-ID actions", !s.calls.some((c) => /^phone_trust_/.test(c.action || "")));
+    await s.page.screenshot({ path: join(shots, "N-caller-id-owner.png"), fullPage: true });
+    await s.ctx.close();
+  }
+  {
+    const s = await scenario(browser, { name: "N11", trustOperator: true, trustAvailable: false });
+    await s.go("/portal/settings/phone");
+    await s.page.waitForSelector("[data-ss-phone-callerid]", { timeout: 15000 }).catch(() => {});
+    ok("N11 before migration 255 the card says it isn't available, with no buttons",
+      /isn.t available on this account yet/.test(await s.page.locator("[data-ss-phone-callerid]").innerText().catch(() => ""))
+        && (await s.page.locator("[data-ss-phone-trust-register]").count()) === 0);
+    await s.ctx.close();
+  }
+
+  // ── O. Text Messaging adopts the calling-only number (portal-sms is a STUB) ───────────────
+  {
+    const smsStatus = {
+      status: "campaign_approved", brandTier: "low_volume_standard", needsAttention: false, attentionNote: null,
+      brandStatus: "APPROVED", campaignStatus: "APPROVED", errors: [], brandUpdatesLeft: 3, campaignRetriesLeft: 3, mockBrand: false,
+      intake: { legalBusinessName: "Demo Tenant LLC", einLast4: "6789", websiteUrl: "https://demo.example.test", privacyPolicyUrl: "https://demo.example.test/privacy", termsUrl: "https://demo.example.test/terms" },
+      copy: { description: "", messageFlow: "", messageSamples: ["", ""] }, aupAcceptedAt: "2026-09-01T00:00:00Z", aupText: "I confirm.",
+      numbers: [{ phoneNumber: "+15555550199", registrationStatus: "pending_registration", purchasedAt: "2026-09-20T00:00:00Z", callingOnly: true }],
+      businessTypes: ["Limited Liability Corporation"], jobPositions: ["CEO"], configured: true,
+      optInDisclosureUrl: "https://demo.example.test/opt-in", compliance: { checkedAt: null, checks: [] },
+    };
+    const s = await scenario(browser, { name: "O", smsStatus });
+    await s.go("/portal/settings/sms");
+    await s.page.waitForSelector("[data-ss-sms-adopt]", { timeout: 15000 }).catch(() => {});
+    const offered = ok("O1 at 'pick your number' with a calling-only number, the tab offers to use it", (await s.page.locator("[data-ss-sms-adopt]").count()) === 1
+      && /\+15555550199/.test(await s.page.locator("[data-ss-sms-adopt]").innerText()));
+    if (offered) {
+      ok("O2 and no number search is offered beside it", !/Choose your number/.test(await s.page.locator("body").innerText()));
+      await s.page.screenshot({ path: join(shots, "O-sms-adopt.png"), fullPage: true });
+      await tap(s.page.locator("[data-ss-sms-adopt-button]"));
+      await s.page.waitForFunction(() => !document.querySelector("[data-ss-sms-adopt]"), null, { timeout: 8000 }).catch(() => {});
+      const buy = s.calls.filter((c) => c.fn === "portal-sms" && c.action === "buy_number").pop();
+      ok("O3 'Use this number for texting' sends buy_number with NO number picked (the server adopts)", !!buy && !("phoneNumber" in buy), JSON.stringify(buy));
+      ok("O4 the tab moves on to connecting the number", (await s.page.locator("[data-ss-sms-adopt]").count()) === 0
+        && /Being connected/.test(await s.page.locator("body").innerText()));
+    }
+    await s.ctx.close();
+
+    // Review BE-5: an adoption whose LAST write failed left the registration at number_pending
+    // with the row still calling-only. After a reload the press must still be there (the server
+    // accepts it in number_pending and active), offered as a finish.
+    for (const st of ["number_pending", "active"]) {
+      const s2 = await scenario(browser, { name: `O5-${st}`, smsStatus: { ...smsStatus, status: st } });
+      await s2.go("/portal/settings/sms");
+      await s2.page.waitForSelector("[data-ss-sms-adopt]", { timeout: 15000 }).catch(() => {});
+      const card = s2.page.locator('[data-ss-sms-adopt="finish"]');
+      const offered2 = ok(`O5 at ${st} with a calling-only number still on the account, the tab offers to FINISH connecting it`,
+        (await card.count()) === 1 && /Finish connecting/.test(await card.innerText()) && /\+15555550199/.test(await card.innerText()),
+        (await s2.page.locator("body").innerText()).slice(0, 300));
+      if (offered2) {
+        ok(`O5 at ${st}, and the status card does not say there is nothing to do`,
+          !/Nothing for you to do/.test(await s2.page.locator("body").innerText()));
+        if (st === "number_pending") await s2.page.screenshot({ path: join(shots, "O5-sms-adopt-finish.png"), fullPage: true });
+        await tap(s2.page.locator("[data-ss-sms-adopt-button]"));
+        await s2.page.waitForFunction(() => !document.querySelector("[data-ss-sms-adopt]"), null, { timeout: 8000 }).catch(() => {});
+        const buy2 = s2.calls.filter((c) => c.fn === "portal-sms" && c.action === "buy_number").pop();
+        ok(`O6 at ${st}, the finish sends buy_number with NO number picked, and the card goes once the row is adopted`,
+          !!buy2 && !("phoneNumber" in buy2) && (await s2.page.locator("[data-ss-sms-adopt]").count()) === 0, JSON.stringify(buy2));
+      }
+      await s2.ctx.close();
+    }
+  }
+
   // ── H. The Calls page ────────────────────────────────────────────────────────────────────
   {
     const s = await scenario(browser, { name: "H" });
@@ -659,7 +813,12 @@ try {
     ok("I2 with the app links (not the Chrome extension)", (await s.page.locator('[data-ss-phone-install="mobile"]').count()) === 1
       && !/Chrome extension/.test(await s.page.locator('[data-ss-phone-install="mobile"]').innerText()));
     const deep = navs.find((u) => u.startsWith("sssphone://"));
-    ok("I3 the app link carries the four fields", deep === `sssphone://call?to=%2B15555550142&contact_id=${CONTACT_ID}&user_id=${USER.id}&client_id=${CLIENT}`, deep || `navigations seen: ${JSON.stringify(navs)}`);
+    // SPEC section 7: the four fields, then `ts` (when the page made the link; the app drops one
+    // more than a minute old).
+    const want = `sssphone://call?to=%2B15555550142&contact_id=${CONTACT_ID}&user_id=${USER.id}&client_id=${CLIENT}&ts=`;
+    const ts = deep && deep.startsWith(want) ? Number(deep.slice(want.length)) : NaN;
+    ok("I3 the app link carries the four fields and ts, the moment it was made", Number.isInteger(ts) && Math.abs(Date.now() - ts) < 60000,
+      deep || `navigations seen: ${JSON.stringify(navs)}`);
     await s.page.screenshot({ path: join(shots, "I-phone-browser.png") });
     await s.ctx.close();
   }

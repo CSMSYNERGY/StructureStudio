@@ -10,6 +10,7 @@
 // Texts follow the contacts area, as they always have; "mine" narrows the thread LIST only.
 
 import type { Env } from "../env";
+import { warmStates, type WarmInfo } from "../callEvents";
 import { requireCaller, type Caller } from "../context";
 import { CALL_COLUMNS, must, type CallRow } from "../db";
 import { ApiError, ok, pathParam, UUID_RE } from "../http";
@@ -48,7 +49,13 @@ const one = <T>(v: T | T[] | null | undefined): T | null => (Array.isArray(v) ? 
 const VM_SELECT = "phone_voicemails(id, duration_s, listened_at, deleted_at, transcript)";
 const CALL_SELECT = `${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${VM_SELECT}`;
 
-export function callSummary(r: CallWithJoins) {
+/**
+ * One call as the apps see it. `warm` (only on a live call in its conference that a warm
+ * transfer rang someone into) is how the latest warm transfer stands: callEvents.ts WarmInfo.
+ * A teammate who does not answer changes nothing else on the row, so this is the only way an
+ * app waiting on one learns it is over before its own ring limit.
+ */
+export function callSummary(r: CallWithJoins, warm?: WarmInfo | null) {
   const contact = one(r.crm_contacts);
   const vm = one(r.phone_voicemails);
   return {
@@ -64,7 +71,21 @@ export function callSummary(r: CallWithJoins) {
     voicemail: vm && !vm.deleted_at
       ? { id: vm.id, duration_s: vm.duration_s, listened: !!vm.listened_at, transcript: vm.transcript ?? null }
       : null,
+    ...(warm ? { warm } : {}),
   };
+}
+
+/**
+ * The summaries, with `warm` read (one events query) for the calls it can apply to: live, in
+ * their conference. Most pages have none and cost nothing more. A failed read leaves `warm`
+ * off: the apps still have their ring limit.
+ */
+async function summaries(c: Caller, rows: CallWithJoins[]) {
+  const live = rows.filter((r) => r.transfer_state === "conference" && r.status === "in_progress" && !r.ended_at);
+  const warm = live.length
+    ? await warmStates(c.admin, live).catch(() => new Map<string, WarmInfo>())
+    : new Map<string, WarmInfo>();
+  return rows.map((r) => callSummary(r, warm.get(r.id)));
 }
 
 function involvesMe(userId: string, r: CallRow): boolean {
@@ -124,7 +145,7 @@ export async function listCalls(env: Env, req: Request): Promise<Response> {
 
   let rows = await scopeCalls(c, fetched);
   if (!team) rows = rows.filter((r) => isMineCall(me, r));
-  return ok({ calls: rows.map(callSummary), ...(nextCursor ? { cursor: nextCursor } : {}) });
+  return ok({ calls: await summaries(c, rows), ...(nextCursor ? { cursor: nextCursor } : {}) });
 }
 
 // ── threads ─────────────────────────────────────────────────────────────────────────
@@ -286,7 +307,7 @@ export async function getThread(env: Env, req: Request, rawKey: string): Promise
       client_temp_id: r.client_temp_id ?? null,
       num_media: Number(r.num_media ?? 0) || 0,
     })),
-    calls: cr.map(callSummary),
+    calls: await summaries(c, cr),
   });
 }
 

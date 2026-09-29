@@ -26,6 +26,10 @@ import {
   searchAvailableNumbers,
   purchaseNumber,
   findPurchasedNumbers,
+  attachNumberToService,
+  numberInService,
+  findIncomingNumberSid,
+  clearNumberSmsUrl,
   normalizeBrandStatus,
   normalizeCampaignStatus,
   validateCampaignCopy,
@@ -34,6 +38,8 @@ import {
   JOB_POSITIONS,
   type BuilderIntake,
 } from "../_shared/twilioTrustHub.ts";
+// SSS Phone plan phase 6: buy_number ADOPTS a calling-only number instead of buying a second.
+import { adoptBranch, buyPlanFromRead, numberRowWritten, type LiveNumber } from "./adoptNumber.ts";
 
 // Self-serve SMS onboarding: the builder's own A2P 10DLC registration and their own number.
 //
@@ -343,6 +349,9 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       phoneNumber: n.phone_number,
       registrationStatus: n.registration_status,
       purchasedAt: n.purchased_at,
+      // Bought for calls on the Phone tab and not in a Messaging Service yet: buy_number adopts
+      // it (SSS Phone plan phase 6), so the number step offers "use it" instead of a search.
+      callingOnly: !n.messaging_service_sid,
     })),
     businessTypes: BUSINESS_TYPES,
     jobPositions: JOB_POSITIONS,
@@ -377,7 +386,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
 
   const numbersOf = async () => {
     const { data } = await admin.from("sms_numbers")
-      .select("phone_number, registration_status, purchased_at")
+      .select("phone_number, registration_status, purchased_at, messaging_service_sid")
       .eq("client_id", clientId).is("released_at", null).order("purchased_at");
     return data ?? [];
   };
@@ -843,10 +852,75 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         if (!reg.messaging_service_sid || reg.status === "none") {
           return json({ error: "Finish the carrier registration before buying a number." }, 409);
         }
+
+        // ⚠️ ONE LIVE NUMBER PER TENANT, AND THIS READ IS THE ONLY THING ENFORCING IT (the
+        // warning below is still true of it). It is a read of the rows rather than a count since
+        // SSS Phone phase 6, because ONE kind of existing number is not a refusal: a CALLING-ONLY
+        // number the Phone tab bought (messaging_service_sid NULL) is the builder's number, and
+        // texting ADOPTS it (adoptNumber.ts) instead of buying a second one. A failed read now
+        // refuses; it used to read as "no numbers" and go on to buy.
+        const liveRead = await admin.from("sms_numbers")
+          .select("id, phone_number, twilio_sid, messaging_service_sid")
+          .eq("client_id", clientId).is("released_at", null)
+          .order("purchased_at", { ascending: true });
+        const plan = buyPlanFromRead({ data: (liveRead.data ?? null) as LiveNumber[] | null, error: liveRead.error });
+        if (plan.kind === "read_failed") {
+          await logEdgeError({
+            fn: "portal-sms", clientId, code: "sms_numbers_read_failed",
+            message: `buy_number could not read this tenant's numbers: ${(plan.error as { message?: string } | null)?.message ?? "unknown"}`,
+          }).catch(() => {});
+          return json({ error: "Couldn't check your numbers just now. Try again in a minute." }, 503);
+        }
+        if (plan.kind === "has_number") {
+          return json({ error: "This account already has a texting number." }, 409);
+        }
+
+        // ── ADOPT the calling-only number (SSS Phone plan phase 6) ─────────────────────────
+        // No search, no purchase and NO WALLET HOLD: the Phone tab held the first month under
+        // this function's own key (sms_num:<client>:<number>) when it bought the number. Every
+        // step is safe to repeat; adoptNumber.ts has the order and why, and adoptBranch the
+        // refusals and what the builder is told (driven against stubs by adoptNumber_test.ts).
+        if (plan.kind === "adopt") {
+          const reply = await adoptBranch(
+            { serviceSid: reg.messaging_service_sid, number: plan.number, registrationStatus: reg.status },
+            {
+              findNumberSid: (e164) => findIncomingNumberSid(e164),
+              inService: (serviceSid, numberSid) => numberInService(serviceSid, numberSid),
+              attach: (serviceSid, numberSid) => attachNumberToService(serviceSid, numberSid),
+              clearSmsUrl: (numberSid) => clearNumberSmsUrl(numberSid),
+              setSmsNumber: async (e164) => {
+                const { error } = await admin.from("client_settings").update({ sms_number: e164 }).eq("client_id", clientId);
+                return { error: error ?? null };
+              },
+              toNumberPending: async () => {
+                const { error } = await admin.from("sms_registrations").update({
+                  status: "number_pending", next_poll_at: null, updated_at: new Date().toISOString(),
+                }).eq("client_id", clientId).eq("status", "campaign_approved");
+                return { error: error ?? null };
+              },
+              // An update that matched nothing (the row was released meanwhile) is not an
+              // adoption: numberRowWritten says so rather than answer "done" over a number
+              // nobody holds.
+              recordNumber: async (patch) => numberRowWritten(
+                await admin.from("sms_numbers").update(patch)
+                  .eq("id", plan.number.id).eq("client_id", clientId).is("released_at", null).select("id"),
+              ),
+            },
+          );
+          if (!reply.ok) {
+            if (reply.log) await logEdgeError({ fn: "portal-sms", clientId, ...reply.log }).catch(() => {});
+            return json({ error: reply.error }, reply.status);
+          }
+          await note("number_adopted", { phoneNumber: plan.number.phone_number, attached: reply.attached });
+          return json({ ok: true, adopted: true, ...view(await load(), await numbersOf()) });
+        }
+
         const wanted = String(p.phoneNumber ?? "").trim();
         if (!/^\+1\d{10}$/.test(wanted)) return json({ error: "Choose a number from the search results." }, 400);
 
-        // ⚠️ ONE LIVE NUMBER PER TENANT, AND THIS COUNT IS THE ONLY THING ENFORCING IT.
+        // ⚠️ ONE LIVE NUMBER PER TENANT, AND THE READ ABOVE (buyPlan: "buy" only when the
+        // tenant has NO live number) IS THE ONLY THING ENFORCING IT. It was a count here until
+        // SSS Phone phase 6 moved it up so a calling-only number could be adopted instead.
         // This comment used to claim a partial unique index backed it up. It does not.
         // 165_sms_registration.sql has sms_numbers_live_unique on (phone_number) — one TENANT
         // per number, which is what stops two builders sharing an inbound number — and
@@ -860,12 +934,6 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         // hold AND the just-purchased number at Twilio — otherwise a duplicate rental becomes
         // an orphaned one.
         // The inbound webhook resolves the tenant from the To number and nothing else.
-        const { count } = await admin.from("sms_numbers")
-          .select("id", { count: "exact", head: true })
-          .eq("client_id", clientId).is("released_at", null);
-        if ((count ?? 0) >= 1) {
-          return json({ error: "This account already has a texting number." }, 409);
-        }
 
         // Reconcile BEFORE buying: a previous attempt may have succeeded with its response
         // lost in flight, and buying again would silently rent a second number forever.

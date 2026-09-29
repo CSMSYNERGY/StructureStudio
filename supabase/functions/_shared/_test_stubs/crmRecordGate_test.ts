@@ -171,12 +171,22 @@ Deno.test("Invoice is Simple Layout, not CRM, and survives the lock", () => {
   assertEquals(t.enabled(c), true, "invoice must stay enabled without the CRM");
 });
 
-Deno.test("the tabs that were never built stay off for a reason of their own", () => {
+Deno.test("Scheduler (never built) and Call (SSS Phone) answer to their own rules, never the CRM subscription", () => {
   const c = ctxFor();
+  assertEquals(tab("scheduler").enabled(c), false);
+  assert(/calendar integration/i.test(hintOf(tab("scheduler"), c)), "the scheduler is unbuilt, and says so");
+  // Call is BUILT since 2026-09-29 (SSS Phone): it is off in this fixture only because the fixture
+  // carries no phone access and no calling switch, and it says that in phone terms.
+  assertEquals(tab("call").enabled(c), false);
+  assert(/permission to make calls/i.test(hintOf(tab("call"), c)), hintOf(tab("call"), c));
   for (const key of ["scheduler", "call"]) {
-    assertEquals(tab(key).enabled(c), false);
-    assert(!/subscription/i.test(hintOf(tab(key), c)), `${key} is unbuilt, not unpaid`);
+    assert(!/subscription/i.test(hintOf(tab(key), c)), `${key} is not gated on the CRM subscription`);
   }
+  // The CRM lock neither opens nor closes Call: with phone access and calling on, a locked tenant
+  // can still call (it writes nothing through a crm_ action).
+  const callable = { canCall: true, phone: { on: true } };
+  assertEquals(tab("call").enabled(ctxFor(callable)), true);
+  assertEquals(tab("call").enabled(ctxFor({ ...callable, canEdit: false, crmUnlocked: false })), true);
 });
 
 Deno.test("locking removes no tab from the strip — they grey, they do not vanish", () => {
@@ -209,7 +219,8 @@ Deno.test("on a contact with no deal picked, exactly the five writable tabs clos
   for (const key of CRM_ONLY) {
     assertEquals(tab(key).enabled(c), false, `${key} must be disabled until a deal is picked`);
   }
-  // Nothing ELSE moves. scheduler/call were already off for their own reasons, and invoice is
+  // Nothing ELSE moves. scheduler and call are off here for their own reasons (the scheduler is
+  // unbuilt; this fixture gives Call no phone access), and invoice is
   // a design-only tab that never sees a contact — a picker must not quietly change either.
   for (const t of tabsFor(c)) {
     if (CRM_ONLY.indexOf(t.key) === -1) {

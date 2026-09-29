@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   Auth, BUSINESS_NUMBER, CLIENT, CONTACT_1, CONTACT_2, CUSTOMER, FakeNet, USER_A, USER_B, USER_C,
-  appRequest, call, callerCtx, filter, makeEnv,
+  appRequest, call, callerCtx, eventRows, filter, jsonRes, makeEnv,
 } from "./helpers";
 
 const T = (min: number) => new Date(Date.UTC(2026, 8, 29, 12, 0) - min * 60_000).toISOString();
@@ -71,6 +71,84 @@ describe("GET /calls", () => {
     const { json } = await call(env, appRequest("GET", "/calls?scope=team", token));
     expect(ids(json.calls)).toEqual(["s1", "s4"]);
     expect(net.rpcCalls("crm_visible_contact_ids")[0].json).toEqual({ p_client_id: CLIENT, p_user_id: USER_A, p_ids: [CONTACT_1, CONTACT_2] });
+  });
+
+  describe("where a warm transfer stands (warm, on live calls in their conference)", () => {
+    const leg = (n: number) => "CA" + "0".repeat(31) + String(n);
+    const live = (id: string, over: Record<string, unknown> = {}) =>
+      callRow(id, { status: "in_progress", transfer_state: "conference", answered_by: USER_A, ...over });
+    const wev = (call_id: string, type: string, data: Record<string, unknown>, min: number) => ({ call_id, type, at: T(min), data });
+
+    it("ringing, missed and answered, from the Worker's own events, in ONE read for the live conference calls only", async () => {
+      const { net, token, env } = await setup(callerCtx({ phone_level: "view" }));
+      net.rest("GET", "phone_calls", () => [
+        live("w1"), live("w2"), live("w3", { answered_by: USER_B, transferred_from: USER_A }), live("w4"),
+        live("plain", { transfer_state: null }),
+        callRow("done", { status: "completed", transfer_state: null }),
+      ]);
+      net.rest("GET", "phone_call_events", eventRows([
+        wev("w1", "warm_transfer", { from: USER_A, to: USER_B, sid: leg(1) }, 1),
+        // The app's own timing mark (POST /calls/:id/events) is newer, and never counts.
+        wev("w1", "warm_transfer", { to_user_id: USER_C, source: "app", user: USER_A }, 0.5),
+        // A decline written before the warm_transfer event itself: the leg ties them together.
+        wev("w2", "warm_transfer_missed", { user: USER_B, status: "busy", sid: leg(2) }, 2),
+        wev("w2", "warm_transfer", { from: USER_A, to: USER_B, sid: leg(2) }, 1),
+        wev("w3", "warm_transfer", { from: USER_A, to: USER_B, sid: leg(3) }, 1),
+        // Missed, then a second try to someone else: that one is ringing.
+        wev("w4", "warm_transfer", { from: USER_A, to: USER_B, sid: leg(4) }, 5),
+        wev("w4", "warm_transfer_missed", { user: USER_B, status: "no-answer", sid: leg(4) }, 4),
+        wev("w4", "warm_transfer", { from: USER_A, to: USER_C, sid: leg(5) }, 1),
+      ]));
+      const { json } = await call(env, appRequest("GET", "/calls?scope=team", token));
+      const byId = Object.fromEntries(json.calls.map((r: { id: string }) => [r.id, r]));
+      expect(byId.w1.warm).toEqual({ to_user_id: USER_B, state: "ringing", at: T(1) });
+      expect(byId.w2.warm).toEqual({ to_user_id: USER_B, state: "missed", at: T(1) });
+      expect(byId.w3.warm).toEqual({ to_user_id: USER_B, state: "answered", at: T(1) });
+      expect(byId.w4.warm).toEqual({ to_user_id: USER_C, state: "ringing", at: T(1) });
+      expect(byId.plain).not.toHaveProperty("warm");
+      expect(byId.done).not.toHaveProperty("warm");
+      const reads = net.reads("phone_call_events");
+      expect(reads).toHaveLength(1);
+      expect(reads[0].url.searchParams.get("call_id")).toBe("in.(w1,w2,w3,w4)");
+      expect(reads[0].url.searchParams.get("type")).toBe("in.(warm_transfer,warm_transfer_missed,transfer)");
+    });
+
+    it("a warm transfer from before a cold transfer was in a conference that is over: not reported for the new one", async () => {
+      const { net, token, env } = await setup(callerCtx({ phone_level: "view" }));
+      // B took a warm transfer, then cold-transferred the call to C, who pressed Hold: the call
+      // is in a NEW conference under the same name. B's warm transfer is not this one's.
+      net.rest("GET", "phone_calls", () => [live("w6", { answered_by: USER_C, transferred_from: USER_B }), live("w7", { answered_by: USER_C })]);
+      net.rest("GET", "phone_call_events", eventRows([
+        wev("w6", "warm_transfer", { from: USER_A, to: USER_B, sid: leg(6) }, 9),
+        wev("w6", "transfer", { from: USER_B, to: USER_C, dnd: false }, 5),
+        wev("w6", "hold", { user: USER_C, moved: true }, 2),
+        // An app's own mark called 'transfer' is not a cold transfer.
+        wev("w7", "warm_transfer", { from: USER_A, to: USER_B, sid: leg(7) }, 9),
+        wev("w7", "warm_transfer_missed", { user: USER_B, status: "busy", sid: leg(7) }, 8),
+        wev("w7", "transfer", { source: "app", user: USER_A }, 5),
+      ]));
+      const { json } = await call(env, appRequest("GET", "/calls?scope=team", token));
+      const byId = Object.fromEntries(json.calls.map((r: { id: string }) => [r.id, r]));
+      expect(byId.w6).not.toHaveProperty("warm");
+      expect(byId.w7.warm).toEqual({ to_user_id: USER_B, state: "missed", at: T(9) });
+    });
+
+    it("a page with no live conference call reads no events", async () => {
+      const { net, token, env } = await setup(callerCtx({ phone_level: "view" }));
+      net.rest("GET", "phone_calls", () => [callRow("a"), callRow("b", { status: "in_progress" })]);
+      const { json } = await call(env, appRequest("GET", "/calls?scope=team", token));
+      expect(ids(json.calls)).toEqual(["a", "b"]);
+      expect(net.reads("phone_call_events")).toEqual([]);
+    });
+
+    it("a failed events read leaves warm off; the list still loads", async () => {
+      const { net, token, env } = await setup(callerCtx({ phone_level: "view" }));
+      net.rest("GET", "phone_calls", () => [live("w1")]);
+      net.rest("GET", "phone_call_events", () => jsonRes({ message: "boom" }, 500));
+      const { res, json } = await call(env, appRequest("GET", "/calls?scope=team", token));
+      expect(res.status).toBe(200);
+      expect(json.calls[0]).not.toHaveProperty("warm");
+    });
   });
 
   it("pages with a started_at cursor", async () => {

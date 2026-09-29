@@ -828,13 +828,17 @@ function ssPhoneOffered(phoneStatus, operatorViewing) {
   return phoneStatus === "on" || !!operatorViewing || ssIsBetaHost();
 }
 
-// The Chrome extension IDs allowed to answer. A PLACEHOLDER until SSS Phone is published —
-// the real IDs replace it here (dev and store builds may both be listed). Only a real Chrome
-// extension ID shape (32 letters a-p) is ever messaged, so the placeholder is inert rather
-// than an error. `window.` so the config is one line to find and so the harness can inject a
-// test ID before the app runs; a value already there wins.
+// The Chrome extension IDs allowed to answer, asked in LIST ORDER (the first that answers
+// wins, ssPhonePing). Today that is the UNPACKED DEV BUILD's id: stable because that build is
+// made with a fixed manifest `key` (the SSS Phone repo's EXTENSION_KEY, docs/extension-dev.md
+// "Keeping the extension ID stable"), so every developer and the pilot load it under one id. ⚠️ WHEN SSS PHONE IS PUBLISHED, add the Chrome Web Store id to this list, FIRST, so a store
+// install beats a dev build on the same computer (and update SS_PHONE_LINKS.chrome below). The
+// extension checks this page's origin against its own allow-list either way (SPEC section 5), so
+// listing an id grants it nothing. Only a real Chrome extension ID shape (32 letters a-p) is ever
+// messaged. `window.` so the config is one line to find and so the harness can inject a test ID
+// before the app runs; a value already there wins.
 if (!Array.isArray(window.SS_PHONE_EXTENSION_IDS)) {
-  window.SS_PHONE_EXTENSION_IDS = ["PLACEHOLDER_SSS_PHONE_EXTENSION_ID"];
+  window.SS_PHONE_EXTENSION_IDS = ["ipiccbfkkbenmiaiaoecbhbjalkbikjk"];
 }
 // PHONE_API_BASE: the phone-api Worker's public address (SPEC section 1), which serves
 // voicemail audio to the contact timeline (GET /voicemails/:id/audio, SPEC section 3). Same
@@ -885,8 +889,8 @@ async function ssPhoneFetchVoicemail(voicemailId, accessToken, fetchImpl) {
   const blob = await res.blob();
   return URL.createObjectURL(blob);
 }
-// Store links, PLACEHOLDERS for the same reason. A link still carrying PLACEHOLDER is shown as
-// "coming soon" rather than as a button to a page that does not exist.
+// Store links, PLACEHOLDERS until the listings are published. A link still carrying PLACEHOLDER
+// is shown as "coming soon" rather than as a button to a page that does not exist.
 const SS_PHONE_LINKS = {
   chrome: "https://chromewebstore.google.com/detail/PLACEHOLDER_SSS_PHONE_EXTENSION_ID",
   ios: "https://apps.apple.com/app/PLACEHOLDER_SSS_PHONE_IOS",
@@ -993,15 +997,20 @@ function ssPhoneIsEmergency(raw) {
   return d === "911" || d === "933" || d === "112";
 }
 
-// The SSS Phone app's deep link — a PLACEHOLDER scheme until the mobile app registers it.
-// Carries the same four fields the extension message does (SPEC section 5), so the app can
-// refuse a different signed-in person the same way the extension does.
-function ssPhoneDeepLink(kind, p) {
+// The SSS Phone app's deep link (SPEC section 7, "Call link"):
+//   sssphone://call?to=<E.164>&contact_id=<uuid>&user_id=<uuid>&client_id=<slug>&ts=<epoch ms>
+// The same four fields the extension message carries (SPEC section 5), so the app refuses a
+// different signed-in person the same way the extension does, plus `ts`, when this page made the
+// link: a custom scheme has no sender, so the app drops a link more than a minute old (or ahead)
+// by it, which is what stops a link replayed later (Android reopening the app from Recents, a
+// link copied into a text) from offering a call nobody just asked for. `now` is for tests only.
+function ssPhoneDeepLink(kind, p, now) {
   const q = new URLSearchParams();
   q.set("to", p.to_e164 || "");
   if (p.contact_id) q.set("contact_id", p.contact_id);
   if (p.user_id) q.set("user_id", p.user_id);
   if (p.client_id) q.set("client_id", p.client_id);
+  q.set("ts", String(Math.floor(Number.isFinite(now) ? now : Date.now())));
   return "sssphone://" + kind + "?" + q.toString();
 }
 

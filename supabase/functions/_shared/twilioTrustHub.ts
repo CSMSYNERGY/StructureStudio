@@ -840,9 +840,427 @@ export async function purchaseNumber(opts: {
   const r = await call("POST", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers.json`, form);
   const sid = String(r?.sid ?? "");
   if (opts.messagingServiceSid && sid) {
-    await call("POST", `${MESSAGING}/Services/${opts.messagingServiceSid}/PhoneNumbers`, { PhoneNumberSid: sid });
+    await attachNumberToService(opts.messagingServiceSid, sid);
   }
   return { sid, phoneNumber: String(r?.phone_number ?? opts.phoneNumber) };
+}
+
+/**
+ * The transport every helper below takes as its LAST argument, defaulting to `call` (the
+ * credentials, the 1-per-second throttle and TrustHubError). Injectable so the unit tests drive
+ * each flow against a stub that answers like Twilio, with no network, no env and no throttle
+ * wait. Same contract as `call`: it resolves with the parsed JSON body or throws TrustHubError.
+ */
+export type TrustHubHttp = (
+  method: "GET" | "POST" | "DELETE",
+  url: string,
+  form?: Record<string, string>,
+) => Promise<any>;
+const viaCall: TrustHubHttp = (method, url, form) => call(method, url, form);
+
+const SID = {
+  service: /^MG[0-9a-f]{32}$/i,
+  number: /^PN[0-9a-f]{32}$/i,
+  bundle: /^BU[0-9a-f]{32}$/i,
+  account: /^AC[0-9a-f]{32}$/i,
+  endUser: /^IT[0-9a-f]{32}$/i,
+};
+function badInput(message: string): TrustHubError {
+  return new TrustHubError({ message, status: 400, code: 0, permanent: true });
+}
+
+/**
+ * Put a number into a Messaging Service (POST Services/{MG}/PhoneNumbers {PhoneNumberSid}).
+ * purchaseNumber's own attach step, and the adoption of a calling-only number (portal-sms
+ * buy_number, SSS Phone plan phase 6). One copy, so both attach the same way.
+ * https://www.twilio.com/docs/messaging/api/phonenumber-resource
+ */
+export async function attachNumberToService(serviceSid: string, numberSid: string, http: TrustHubHttp = viaCall): Promise<void> {
+  if (!SID.service.test(serviceSid) || !SID.number.test(numberSid)) throw badInput("A Messaging Service or number SID is malformed.");
+  await http("POST", `${MESSAGING}/Services/${serviceSid}/PhoneNumbers`, { PhoneNumberSid: numberSid });
+}
+
+/**
+ * Is this number already in this Messaging Service? The service's PhoneNumber resource is keyed
+ * by the number's own PN… SID (the docs' `sid` pattern is ^PN…), so a fetch answers 404 when it
+ * is not there. Read before attaching, so a retry after a lost response (attached at Twilio,
+ * not yet recorded here) does not POST a second time into an error.
+ * https://www.twilio.com/docs/messaging/api/phonenumber-resource ("Fetch a PhoneNumber resource")
+ */
+export async function numberInService(serviceSid: string, numberSid: string, http: TrustHubHttp = viaCall): Promise<boolean> {
+  if (!SID.service.test(serviceSid) || !SID.number.test(numberSid)) throw badInput("A Messaging Service or number SID is malformed.");
+  try {
+    await http("GET", `${MESSAGING}/Services/${serviceSid}/PhoneNumbers/${numberSid}`);
+    return true;
+  } catch (e) {
+    if (e instanceof TrustHubError && e.status === 404) return false;
+    throw e;
+  }
+}
+
+/** A number's PN… SID by its E.164, for a row recorded without one. null = not on this account. */
+export async function findIncomingNumberSid(e164: string, http: TrustHubHttp = viaCall, acct: string | null = accountSid()): Promise<string | null> {
+  if (!acct || !SID.account.test(acct)) throw badInput("TWILIO_ACCOUNT_SID is not configured.");
+  const r = await http("GET", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers.json?PhoneNumber=${encodeURIComponent(e164)}&PageSize=5`);
+  const list = Array.isArray(r?.incoming_phone_numbers) ? r.incoming_phone_numbers : [];
+  const hit = list.find((n: any) => String(n?.phone_number ?? "") === e164);
+  return hit && SID.number.test(String(hit.sid ?? "")) ? String(hit.sid) : null;
+}
+
+/**
+ * Clear a number's own SmsUrl (Twilio clears a URL given as ""). Used when a calling-only number
+ * joins a Messaging Service: its texts were routed by the number's SmsUrl to sms-inbound
+ * (portal-settings, review SSB-3); from now on the service's inbound URL, which is sms-inbound
+ * too, takes them, and a stale per-number URL is one more place a secret lives.
+ */
+export async function clearNumberSmsUrl(numberSid: string, http: TrustHubHttp = viaCall, acct: string | null = accountSid()): Promise<void> {
+  if (!acct || !SID.account.test(acct)) throw badInput("TWILIO_ACCOUNT_SID is not configured.");
+  if (!SID.number.test(numberSid)) throw badInput("The number SID is malformed.");
+  await http("POST", `https://api.twilio.com/2010-04-01/Accounts/${acct}/IncomingPhoneNumbers/${numberSid}.json`, { SmsUrl: "" });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Caller ID trust — SHAKEN/STIR and Voice Integrity (SSS Phone, plan §14, phase 6)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Two Trust Products per builder number, both built on the business profile the texting
+// registration already created (stage 1 above), and both OPERATOR-ONLY: portal-settings'
+// phone_trust_setup is the one caller, behind an app_operators check, and nothing runs this on
+// a timer or a webhook.
+//
+//   SHAKEN/STIR       Twilio signs the builder's outbound calls at attestation level A only
+//                     when the number is on BOTH an approved business profile and an approved
+//                     SHAKEN/STIR Trust Product.
+//   Voice Integrity   registers the number with the carriers' spam engines (T-Mobile, Verizon,
+//                     AT&T), which is what fights "Spam Likely". Level A alone does not.
+//
+// The flow, verbatim from Twilio's ISV guides (checked 2026-09-29; the Voice Integrity one says
+// "The API flow for Voice Integrity Private Beta is subject to change"):
+//   https://www.twilio.com/docs/voice/trusted-calling-with-shakenstir/shakenstir-onboarding/shaken-stir-trust-hub-api-isvs-single-project
+//   https://www.twilio.com/docs/voice/spam-monitoring-with-voiceintegrity/voice-integrity-onboarding/voice-integrity-trust-hub-api-isvs-single-project
+//   1. POST CustomerProfiles/{BU}/ChannelEndpointAssignments {ChannelEndpointType: phone-number,
+//      ChannelEndpointSid: PN…} — "Only those phone numbers already assigned to your Secondary
+//      Business Profile are eligible" for the Trust Product.
+//   2. POST TrustProducts {FriendlyName, Email, PolicySid} — the policy SID is "a static value
+//      that will stay the same across all accounts".
+//   3. Voice Integrity only: POST EndUsers {Type: voice_integrity_information, Attributes:
+//      {use_case, business_employee_count, average_business_day_call_volume, notes}}, then
+//      POST TrustProducts/{BU}/EntityAssignments {ObjectSid: IT…}.
+//   4. POST TrustProducts/{BU}/EntityAssignments {ObjectSid: <the business profile's BU…>}.
+//   5. POST TrustProducts/{BU}/ChannelEndpointAssignments {ChannelEndpointType: phone-number,
+//      ChannelEndpointSid: PN…} — "before or after submitting".
+//   6. POST TrustProducts/{BU} {Status: pending-review}.
+// Neither guide runs an Evaluation for these two products, so neither does this.
+//
+// EVERY STEP IS READ FIRST (list, then create only what is missing), for the same reason the
+// Messaging Service SID is written down before anything else can throw: a response lost after
+// Twilio acted must not become a second Trust Product. The Trust Product is also FOUND by its
+// FriendlyName (`<client_id> — SHAKEN/STIR`), the FriendlyName=client_id trick purchaseNumber
+// uses, and one made in the Console under the same profile is found by its entity assignment.
+
+/** Twilio's SHAKEN/STIR Trust Product policy (the ISV guide's step 1, "Do not change"). */
+export const POLICY_SHAKEN_STIR_TRUST_PRODUCT = "RN7a97559effdf62d00f4298208492a5ea";
+/** Twilio's Voice Integrity Trust Product policy (the Voice Integrity ISV guide, same wording). */
+export const POLICY_VOICE_INTEGRITY_TRUST_PRODUCT = "RN5b3660f9598883b1df4e77f77acefba0";
+
+export type VoiceTrustKind = "shaken_stir" | "voice_integrity";
+export const VOICE_TRUST_POLICY: Record<VoiceTrustKind, string> = {
+  shaken_stir: POLICY_SHAKEN_STIR_TRUST_PRODUCT,
+  voice_integrity: POLICY_VOICE_INTEGRITY_TRUST_PRODUCT,
+};
+/** The FriendlyName suffix each product is created with, after the client_id. */
+export const VOICE_TRUST_NAME: Record<VoiceTrustKind, string> = {
+  shaken_stir: "SHAKEN/STIR",
+  voice_integrity: "Voice Integrity",
+};
+export function voiceTrustFriendlyName(clientId: string, kind: VoiceTrustKind): string {
+  return `${clientId} — ${VOICE_TRUST_NAME[kind]}`;
+}
+
+/** The TrustProduct (and CustomerProfile) `status` enum, from the TrustProduct resource's
+ *  OpenAPI definition (https://www.twilio.com/docs/trust-hub/trusthub-rest-api/trust-products). */
+export const TRUST_PRODUCT_STATUSES = ["draft", "pending-review", "in-review", "twilio-rejected", "twilio-approved"] as const;
+export type TrustProductStatus = typeof TRUST_PRODUCT_STATUSES[number];
+/** A status Twilio sent, or null for anything outside the enum — never guessed into "approved". */
+export function trustProductStatus(raw: unknown): TrustProductStatus | null {
+  const v = String(raw ?? "").trim().toLowerCase();
+  return (TRUST_PRODUCT_STATUSES as readonly string[]).includes(v) ? v as TrustProductStatus : null;
+}
+
+/** voice_integrity_information `use_case`, the guide's "Possible Values", verbatim. */
+export const VOICE_INTEGRITY_USE_CASES = [
+  "Identify & Verification", "Asset Management", "Lead Generation", "Intelligent Routing",
+  "Appointment Scheduling", "Customer Support", "Self-Service", "Automated Support",
+  "Appointment Reminders", "Employee Notifications", "Delivery Notifications", "Emergency Notifications",
+  "Contactless Delivery", "Order Notifications", "Service Alerts", "Purchase Confirmation", "Mass Alerts",
+  "Fraud Alerts", "Contact Tracing", "Lead Management", "Lead Nurturing", "Telemarketing",
+  "Marketing Events", "Rewards Program", "Lead Alerts", "Lead Distribution", "Abandoned Cart",
+  "Call Tracking", "Outbound Dialer", "Click to Call", "Phone System", "Meetings/Collaboration",
+  "Telehealth", "Distance Learning", "Shift Management", "Field Notifications", "Dating/Social",
+  "Remote appointments", "Group Messaging", "Exam Proctoring", "Tutoring", "Therapy (Individual+Group)",
+  "Pharmacy", "First Responder", "Survey/Research",
+] as const;
+
+export type VoiceIntegrityInfo = {
+  useCase: typeof VOICE_INTEGRITY_USE_CASES[number];
+  employeeCount: number;
+  averageDailyCalls: number;
+  notes: string;
+};
+
+/** The operator's Voice Integrity answers → the EndUser's fields, or a sentence. The numbers are
+ *  whole and positive because Twilio reviews them against the business; a 0 reads as a typo. */
+export function parseVoiceIntegrityInfo(raw: unknown): { ok: true; info: VoiceIntegrityInfo } | { ok: false; error: string } {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const useCase = String(r.useCase ?? "").trim();
+  if (!(VOICE_INTEGRITY_USE_CASES as readonly string[]).includes(useCase)) {
+    return { ok: false, error: "Choose what the business uses calls for from the list." };
+  }
+  const whole = (v: unknown) => {
+    const n = Number(String(v ?? "").replace(/[,\s]/g, ""));
+    return Number.isInteger(n) && n >= 1 && n <= 1_000_000 ? n : null;
+  };
+  const employeeCount = whole(r.employeeCount);
+  if (employeeCount === null) return { ok: false, error: "Enter how many people work for the business, as a whole number." };
+  const averageDailyCalls = whole(r.averageDailyCalls);
+  if (averageDailyCalls === null) return { ok: false, error: "Enter about how many calls the business makes on a working day, as a whole number." };
+  const notes = String(r.notes ?? "").replace(/\s+/g, " ").trim().slice(0, 500);
+  return { ok: true, info: { useCase: useCase as VoiceIntegrityInfo["useCase"], employeeCount, averageDailyCalls, notes } };
+}
+
+/** Thrown by setupVoiceTrust when a Voice Integrity product still needs its EndUser and the
+ *  caller sent no answers for it. Matched by message, so it can be told apart from Twilio's. */
+export const VOICE_INTEGRITY_INFO_REQUIRED = "voice_integrity_info_required";
+
+/** The EndUser type Voice Integrity's policy asks for (the ISV guide's step 2). */
+const VOICE_INTEGRITY_END_USER_TYPE = "voice_integrity_information";
+
+/** The four attributes, as the guide names them. One copy, so creating the EndUser and
+ *  correcting it on a resubmit send exactly the same shape. */
+function voiceIntegrityAttributes(vi: VoiceIntegrityInfo): string {
+  return JSON.stringify({
+    use_case: vi.useCase,
+    business_employee_count: String(vi.employeeCount),
+    average_business_day_call_volume: String(vi.averageDailyCalls),
+    notes: vi.notes,
+  });
+}
+
+/** A Trust Product we may (re)submit: never sent, or sent back by Twilio. Under review or
+ *  approved, nothing on it is changed and nothing is sent again. */
+function resubmittable(status: TrustProductStatus | null): boolean {
+  return status === "draft" || status === "twilio-rejected";
+}
+
+async function listResults(http: TrustHubHttp, url: string): Promise<any[]> {
+  const r = await http("GET", url);
+  return Array.isArray(r?.results) ? r.results : [];
+}
+
+/** Is this number already assigned to this business profile (its ChannelEndpointAssignments,
+ *  filtered by ChannelEndpointSid)? A number sits on ONE business profile, so a number an
+ *  operator put on the platform's primary profile by hand must stay there. */
+export async function numberOnProfile(profileSid: string, numberSid: string, http: TrustHubHttp = viaCall): Promise<boolean> {
+  if (!SID.bundle.test(profileSid) || !SID.number.test(numberSid)) throw badInput("A business profile or number SID is malformed.");
+  const rows = await listResults(http,
+    `${TRUSTHUB}/CustomerProfiles/${profileSid}/ChannelEndpointAssignments?ChannelEndpointSid=${numberSid}&PageSize=20`);
+  return rows.some((a) => String(a?.channel_endpoint_sid ?? "") === numberSid);
+}
+
+/** A business profile's review state and notification email (GET CustomerProfiles/{BU}). */
+export async function fetchCustomerProfile(profileSid: string, http: TrustHubHttp = viaCall):
+  Promise<{ status: TrustProductStatus | null; email: string }> {
+  if (!SID.bundle.test(profileSid)) throw badInput("The business profile SID is malformed.");
+  const p = await http("GET", `${TRUSTHUB}/CustomerProfiles/${profileSid}`);
+  return { status: trustProductStatus(p?.status), email: String(p?.email ?? "").trim() };
+}
+
+/** One Trust Product's review state. `errors` are Twilio's rejection CODES only: the objects can
+ *  carry field values, and no Twilio text reaches a browser (this file's header rule). */
+export async function fetchTrustProduct(trustProductSid: string, http: TrustHubHttp = viaCall):
+  Promise<{ status: TrustProductStatus | null; policySid: string; errorCodes: number[] }> {
+  if (!SID.bundle.test(trustProductSid)) throw badInput("The Trust Product SID is malformed.");
+  const t = await http("GET", `${TRUSTHUB}/TrustProducts/${trustProductSid}`);
+  const errorCodes = (Array.isArray(t?.errors) ? t.errors : [])
+    .map((e: any) => Number(e?.code)).filter((n: number) => Number.isInteger(n) && n > 0);
+  return { status: trustProductStatus(t?.status), policySid: String(t?.policy_sid ?? ""), errorCodes };
+}
+
+export type VoiceTrustSetup = {
+  kind: VoiceTrustKind;
+  /** The BU… business profile the number goes on: the builder's Secondary Customer Profile, or
+   *  (the internal tenant only) the platform's primary profile. */
+  profileSid: string;
+  /** The number's PN… SID. */
+  numberSid: string;
+  /** Where Twilio sends status emails (TrustProducts' required Email). */
+  email: string;
+  friendlyName: string;
+  /** The SID recorded on the number row by an earlier run, if any. */
+  existingSid?: string | null;
+  /** Voice Integrity's EndUser answers. Required when that EndUser does not exist yet. When it
+   *  does and the product is draft or twilio-rejected, they REPLACE its attributes before the
+   *  product is resubmitted (an operator's "Submit again" sends corrected answers). */
+  voiceIntegrity?: VoiceIntegrityInfo | null;
+  /** Called with the Trust Product the moment it is known (found or created), BEFORE any later
+   *  step can throw, so the caller writes it down and a retry reuses it. */
+  onTrustProduct?: (sid: string, status: TrustProductStatus | null) => Promise<void>;
+};
+
+export type VoiceTrustResult = {
+  trustProductSid: string;
+  status: TrustProductStatus | null;
+  /** What this run had to do; each false means it was already done. */
+  created: boolean;
+  numberOnProfile: boolean;
+  profileLinked: boolean;
+  endUserCreated: boolean;
+  /** Voice Integrity only: the existing EndUser was given the answers this run sent. */
+  endUserUpdated: boolean;
+  numberLinked: boolean;
+  submitted: boolean;
+};
+
+/** An existing Trust Product for this kind and this profile, or null. By FriendlyName first (an
+ *  earlier run whose response was lost), then one made elsewhere (the Console) that already
+ *  carries this business profile. Ours for OTHER builders carry the same suffix under their own
+ *  client_id, so they are skipped rather than read one by one. */
+async function findTrustProduct(o: VoiceTrustSetup, policy: string, http: TrustHubHttp):
+  Promise<{ sid: string; status: TrustProductStatus | null } | null> {
+  const named = await listResults(http,
+    `${TRUSTHUB}/TrustProducts?PolicySid=${policy}&FriendlyName=${encodeURIComponent(o.friendlyName)}&PageSize=20`);
+  const byName = named.find((t) => String(t?.policy_sid ?? "") === policy && String(t?.friendly_name ?? "") === o.friendlyName
+    && SID.bundle.test(String(t?.sid ?? "")));
+  if (byName) return { sid: String(byName.sid), status: trustProductStatus(byName.status) };
+
+  const suffix = ` — ${VOICE_TRUST_NAME[o.kind]}`;
+  const all = await listResults(http, `${TRUSTHUB}/TrustProducts?PolicySid=${policy}&PageSize=50`);
+  const others = all.filter((t) => String(t?.policy_sid ?? "") === policy && SID.bundle.test(String(t?.sid ?? ""))
+    && !String(t?.friendly_name ?? "").endsWith(suffix)).slice(0, 10);
+  for (const t of others) {
+    const ents = await listResults(http, `${TRUSTHUB}/TrustProducts/${t.sid}/EntityAssignments?PageSize=50`);
+    if (ents.some((e) => String(e?.object_sid ?? "") === o.profileSid)) {
+      return { sid: String(t.sid), status: trustProductStatus(t.status) };
+    }
+  }
+  return null;
+}
+
+/**
+ * Create (or finish, or reuse) one caller-ID Trust Product for one number, and submit it for
+ * review. Idempotent: every assignment is listed before it is made, the Trust Product is found
+ * before it is created, and a product already under review (or approved) is never resubmitted.
+ * A `draft` or `twilio-rejected` one is (re)submitted, which is what an operator pressing the
+ * button again after fixing a rejection wants. For Voice Integrity that press carries the
+ * questions form again, and those answers are written onto the product's existing
+ * voice_integrity_information EndUser (POST EndUsers/{IT} Attributes) BEFORE the resubmit, so
+ * Twilio re-reviews what the operator just answered, not the first answers (review BE-1).
+ */
+export async function setupVoiceTrust(o: VoiceTrustSetup, http: TrustHubHttp = viaCall): Promise<VoiceTrustResult> {
+  if (!SID.bundle.test(o.profileSid)) throw badInput("The business profile SID is malformed.");
+  if (!SID.number.test(o.numberSid)) throw badInput("The number SID is malformed.");
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(o.email)) throw badInput("The business profile has no notification email.");
+  const policy = VOICE_TRUST_POLICY[o.kind];
+  const out: VoiceTrustResult = {
+    trustProductSid: "", status: null, created: false, numberOnProfile: false,
+    profileLinked: false, endUserCreated: false, endUserUpdated: false, numberLinked: false, submitted: false,
+  };
+
+  // 1. The number on the business profile.
+  if (!(await numberOnProfile(o.profileSid, o.numberSid, http))) {
+    await http("POST", `${TRUSTHUB}/CustomerProfiles/${o.profileSid}/ChannelEndpointAssignments`, {
+      ChannelEndpointType: "phone-number", ChannelEndpointSid: o.numberSid,
+    });
+    out.numberOnProfile = true;
+  }
+
+  // 2. The Trust Product: the recorded one (if it is really this kind), else found, else created.
+  let tp: { sid: string; status: TrustProductStatus | null } | null = null;
+  if (o.existingSid && SID.bundle.test(o.existingSid)) {
+    try {
+      const t = await fetchTrustProduct(o.existingSid, http);
+      if (t.policySid === policy) tp = { sid: o.existingSid, status: t.status };
+    } catch (e) {
+      // Deleted in the Console since: find or create a fresh one. Anything else is a real fault.
+      if (!(e instanceof TrustHubError && e.status === 404)) throw e;
+    }
+  }
+  if (!tp) tp = await findTrustProduct(o, policy, http);
+  if (!tp) {
+    const made = await http("POST", `${TRUSTHUB}/TrustProducts`, {
+      FriendlyName: o.friendlyName, Email: o.email, PolicySid: policy,
+    });
+    const sid = String(made?.sid ?? "");
+    if (!SID.bundle.test(sid)) {
+      throw new TrustHubError({ message: "Twilio created a Trust Product but returned no SID.", status: 502, code: 0, permanent: false });
+    }
+    tp = { sid, status: trustProductStatus(made?.status) ?? "draft" };
+    out.created = true;
+  }
+  out.trustProductSid = tp.sid;
+  out.status = tp.status;
+  if (o.onTrustProduct) await o.onTrustProduct(tp.sid, tp.status);
+
+  // 3 + 4. What the product carries: Voice Integrity's EndUser, and the business profile.
+  const ents = await listResults(http, `${TRUSTHUB}/TrustProducts/${tp.sid}/EntityAssignments?PageSize=50`);
+  const objects = ents.map((e) => String(e?.object_sid ?? ""));
+  if (o.kind === "voice_integrity") {
+    const vi = o.voiceIntegrity ?? null;
+    const linked = objects.filter((s) => SID.endUser.test(s));
+    // Answers sent for a product that already carries EndUsers, and that is going to be
+    // (re)submitted: find ITS voice_integrity_information one (read, so another kind of EndUser
+    // a Console-made product may carry is never overwritten with these fields) and replace its
+    // attributes. Under review or approved, nothing is changed: step 6 sends nothing either.
+    let viEndUser: string | null = null;
+    const correcting = !!vi && linked.length > 0 && resubmittable(out.status);
+    if (correcting) {
+      for (const s of linked.slice(0, 5)) {
+        const eu = await http("GET", `${TRUSTHUB}/EndUsers/${s}`);
+        if (String(eu?.type ?? "") === VOICE_INTEGRITY_END_USER_TYPE) { viEndUser = s; break; }
+      }
+    }
+    if (viEndUser) {
+      await http("POST", `${TRUSTHUB}/EndUsers/${viEndUser}`, { Attributes: voiceIntegrityAttributes(vi!) });
+      out.endUserUpdated = true;
+    } else if (!linked.length || correcting) {
+      // None yet (or, correcting, none of the right type): create it and assign it.
+      if (!vi) throw badInput(VOICE_INTEGRITY_INFO_REQUIRED);
+      const eu = await http("POST", `${TRUSTHUB}/EndUsers`, {
+        FriendlyName: `${o.friendlyName} information`,
+        Type: VOICE_INTEGRITY_END_USER_TYPE,
+        Attributes: voiceIntegrityAttributes(vi),
+      });
+      const euSid = String(eu?.sid ?? "");
+      if (!SID.endUser.test(euSid)) {
+        throw new TrustHubError({ message: "Twilio created an EndUser but returned no SID.", status: 502, code: 0, permanent: false });
+      }
+      await http("POST", `${TRUSTHUB}/TrustProducts/${tp.sid}/EntityAssignments`, { ObjectSid: euSid });
+      out.endUserCreated = true;
+    }
+  }
+  if (!objects.includes(o.profileSid)) {
+    await http("POST", `${TRUSTHUB}/TrustProducts/${tp.sid}/EntityAssignments`, { ObjectSid: o.profileSid });
+    out.profileLinked = true;
+  }
+
+  // 5. The number on the Trust Product.
+  const onProduct = await listResults(http,
+    `${TRUSTHUB}/TrustProducts/${tp.sid}/ChannelEndpointAssignments?ChannelEndpointSid=${o.numberSid}&PageSize=20`);
+  if (!onProduct.some((a) => String(a?.channel_endpoint_sid ?? "") === o.numberSid)) {
+    await http("POST", `${TRUSTHUB}/TrustProducts/${tp.sid}/ChannelEndpointAssignments`, {
+      ChannelEndpointType: "phone-number", ChannelEndpointSid: o.numberSid,
+    });
+    out.numberLinked = true;
+  }
+
+  // 6. Submit, unless it is already with Twilio or approved. A status outside Twilio's enum is
+  //    left alone: submitting something we cannot read is a guess.
+  if (resubmittable(out.status)) {
+    const sub = await http("POST", `${TRUSTHUB}/TrustProducts/${tp.sid}`, { Status: "pending-review" });
+    out.status = trustProductStatus(sub?.status) ?? "pending-review";
+    out.submitted = true;
+  }
+  return out;
 }
 
 /** Reconcile a purchase whose response we never saw. */
