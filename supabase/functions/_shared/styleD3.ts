@@ -3010,7 +3010,14 @@ export function selfCheckPrompt(opts: {
   if (hasWings) {
     const ya = wallN + (num(roof.wingWidthFt) ?? 0) * (num(roof.wingPitch) ?? 0.25);
     const c = num(roof.centerEaveFt);
-    eaveWalls.push(`about ${about(c !== null ? Math.max(c, ya + 1) : ya + 3)} ft for the centre section's eave`);
+    // With a wing attach (roof.wingAttach, 2026-09-28) the renderer's d3Massing takes the centre's eave
+    // as asked, held only 1 ft over the walls, and a blank one is 3 ft over a 3:12 wing roof: the
+    // stored wingPitch is unread while an attach is set. The ruler says what that renderer draws.
+    const attach = roof.wingAttach === "roof" || roof.wingAttach === "wall";
+    const centre = attach
+      ? (c !== null ? Math.max(c, wallN + 1) : wallN + (num(roof.wingWidthFt) ?? 0) * 0.25 + 3)
+      : (c !== null ? Math.max(c, ya + 1) : ya + 3);
+    eaveWalls.push(`about ${about(centre)} ft for the centre section's eave`);
   }
   const eaveRuler = eaveWalls.length
     ? `

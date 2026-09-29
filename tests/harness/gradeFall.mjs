@@ -34,26 +34,18 @@
 //      carrying a fall it cannot have, each build a scene (every node's matrix, every mesh's geometry
 //      and material) identical to the one the designer at SS_LEVEL_BASE (default 5345037, the commit
 //      before this) builds from the same style, and the same camera
-<<<<<<< HEAD
-//   8. THE PANEL (?admin=1): blocks and piers show "Ground falls away (ft)"; an untouched style saves
-//      no fall keys, and a style storing a fall saves it back exactly; a typed fall saves, "Toward"
-//      appears with its hint and saves its word; the height box's hint says where the height is
-//      taken (the uphill side); a cleared box deletes gradeFallFt; leaving blocks or piers deletes
-//      both keys; the preview draws the typed fall. With a fall the height box's hint gives the
+//   8. THE PANEL (?admin=1): blocks and piers show "Ground falls away (ft)"; an untouched level style
+//      saves no fall (both keys sent as an explicit null, review BC-1 2026-09-29), and a style storing
+//      a fall saves it back exactly; a typed fall saves, "Toward" appears with its hint and saves its
+//      word; the height box's hint says where the height is taken (the uphill side); a cleared box
+//      sends gradeFallFt null; leaving blocks or piers sends both as null; the preview draws the
+//      typed fall. With a fall the height box's hint gives the
 //      ramp's rule, not the level sentence's one length, and Toward says every direction is the 3D
 //      Views menu's (review, 2026-09-29)
 //   8b. THE STEP BOX OVER FALLING GROUND (review, 2026-09-29): case K's back porch in the panel.
 //      "Number of steps" says "blank = 6", the count drawn down to the lower ground, not the front's
 //      3; on a 6 ft fall "blank = 13" and the rise hint says a typed count stops at 12; the preview
 //      draws the placeholder's number (SS_CASES=panelSteps runs it alone)
-=======
-//   8. THE PANEL (?admin=1): blocks and piers show "Ground falls away (ft)"; an untouched level style
-//      saves no fall (both keys sent as an explicit null, review BC-1 2026-09-29), and a style storing
-//      a fall saves it back exactly; a typed fall saves, "Toward" appears with its hint and saves its
-//      word; the height box's hint says where the height is taken (the uphill side); a cleared box
-//      sends gradeFallFt null; leaving blocks or piers sends both as null; the preview draws the
-//      typed fall
->>>>>>> ss/aa-fixadv
 //   9. zero page errors
 //
 //   python -m http.server 8142 --bind 127.0.0.1 --directory <repo root>

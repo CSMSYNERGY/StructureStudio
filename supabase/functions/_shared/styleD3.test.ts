@@ -4060,6 +4060,21 @@ Deno.test("v2 check: the overhang is measured against the wall under THAT eave",
   // A raised centre: the wings' outer eave is the ruler, the centre's stands above it.
   const w = selfCheckPrompt({ dims: CHECK_DIMS, draft: WINGED, viewpoints: SELF_CHECK_VIEWPOINTS });
   assert(w.includes("Measure against the wall directly under THAT eave: 9 ft for a wing's outer eave; about 16 ft for the centre section's eave."), "the centre's own eave");
+  // With a wing attach (2026-09-28) the ruler follows the renderer: a blank centre is 3 ft over a 3:12
+  // wing roof whatever wingPitch is stored, and an asked centre is kept, held only 1 ft over the walls.
+  {
+    const wr = (WINGED.roof || {}) as Record<string, unknown>;
+    const wallN = Number(WINGED.wallHeightFt ?? CHECK_DIMS.wallHeightFt), ww = Number(wr.wingWidthFt);
+    const ruler = (roof: Record<string, unknown>) => selfCheckPrompt({ dims: CHECK_DIMS, draft: cleanSpec({ ...WINGED, roof }), viewpoints: SELF_CHECK_VIEWPOINTS });
+    const { centerEaveFt: _c, ...blankCentre } = wr;
+    const blank = Math.round((wallN + ww * 0.25 + 3) * 10) / 10;
+    for (const wingPitch of [0.25, 0.333, 0.5]) {
+      assert(ruler({ ...blankCentre, wingPitch, wingAttach: "wall", wingAttachFt: 1 }).includes(`about ${blank} ft for the centre section's eave`),
+        `attach, blank centre, stored pitch ${wingPitch}: ${wallN} + ${ww} x 0.25 + 3`);
+    }
+    assert(ruler({ ...wr, wingAttach: "roof", wingAttachFt: 1, centerEaveFt: wallN + 0.5 }).includes(`about ${wallN + 1} ft for the centre section's eave`),
+      "an asked centre under the walls' height + 1 is held there");
+  }
   // A plain gable has one eave height and is told nothing new.
   assert(!selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS }).includes("THAT eave"), "nothing added on a plain building");
   // A builder-measured eave is not re-measured at all, so no ruler either.
