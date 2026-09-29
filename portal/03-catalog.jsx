@@ -1157,6 +1157,20 @@ const SYNERGY_TEAL = "#1B7895";
 // maxTopupCents) so there is exactly one definition and the UI cannot drift from it.
 const TOPUP_PRESETS = [10000, 25000, 50000];
 
+// FOUNDING PRICING IS YEARLY ONLY (Carolyn 2026-09-24): "Everybody that comes in has to pay for
+// the full year on whichever selections they make ... leave month so that month is still
+// showing but when they click on it, it doesn't do anything." Founding members are backing the
+// platform, so they prepay the year.
+//
+// This is the ONE switch. Set it to false and the Monthly buttons work again, the tile copy goes
+// back to "Pick monthly or yearly", and the transition banner (12-shell) quotes /mo again.
+// Nothing else was taken apart to do this: the _monthly billing_plans rows, the interval maths
+// and portal-billing's subscribe all still handle monthly. ⚠️ So this is enforced in the BROWSER
+// only — the server still sells a monthly plan to anyone who asks for one directly. That was
+// deliberate while it lived on beta alone: the live site's older frontend still offered Monthly,
+// and a server refusal would have broken its checkout. Add the server refusal when this goes live.
+const FOUNDING_ANNUAL_ONLY = true;
+
 // ─── Billing (per-feature subscriptions via portal-billing; Deposyt/NMI gateway) ───
 // Each feature (Simple Layout, RealTime Pricing, …) is its own recurring
 // subscription, chosen monthly or yearly independently. Simple Layout is the
@@ -1185,6 +1199,7 @@ function BillingView({ viewingLabel = null, section = "all" }) {
   const [msg, setMsg] = useState(null);      // { ok } | { err }
   const [sel, setSel] = useState({});        // feature -> "monthly" | "annual"
   const [crmIv, setCrmIv] = useState({});    // Synergy CRM tier -> "monthly" | "annual" (display only)
+  const [demoNote, setDemoNote] = useState(false); // our own account pressed checkout — see demoView
   // Wallet top-up (migration 164). `topupSel` is a preset in cents; `topupCustom` is the raw
   // DOLLARS string from the Other field. Exactly one is ever set -- picking a preset clears
   // the field and typing clears the preset -- so there is never an ambiguous "which did they
@@ -1221,7 +1236,22 @@ function BillingView({ viewingLabel = null, section = "all" }) {
   // Subscribe buttons for things it already has, and can put a real charge through for them.
   // Deliberately keyed on entitlement.exempt rather than on `features`: this asks "is this
   // account billable", which is a different question from "may it use X".
-  const comped = !!(data && data.entitlement && data.entitlement.exempt);
+  //
+  // OUR OWN ACCOUNT IS THE EXCEPTION (Carolyn 2026-09-24): "I am using Structure Studio to do
+  // demos and I need that billing tab to ... just show it as it would when they get signed up
+  // as a new builder." The comped view took the founding-price pitch off the very screen she
+  // sells from. So an INTERNAL account (client_settings.internal_account, migration 169 — "this
+  // tenant is us", never a customer) sees what a prospect sees: the banner, the prices, tiles
+  // that select. It is still comped in every way that matters; this is only the page it shows.
+  // portal-billing reports it as reason "internal" (it outranks "exempt" there), so this needs
+  // no new field and no client id in code. Every other comped account keeps the comped view.
+  //
+  // ⚠️ THE PROSPECT VIEW MUST NOT BE ABLE TO BUY. That account has a real card on file, and an
+  // owner with a card is charged by subscribe() with no confirm step — one demo click would
+  // put a real yearly charge through. subscribe() stops at its first line for demoView, and
+  // portal-billing refuses subscribe for an internal account as well.
+  const demoView = !!(data && data.entitlement && data.entitlement.reason === "internal");
+  const comped = !!(data && data.entitlement && data.entitlement.exempt) && !demoView;
 
   // The Structure Studio Suite bundles everything except Self Serve Displays. When it's chosen
   // (in the cart) or already live, its member features are covered — shown "Included" and not
@@ -1444,10 +1474,16 @@ This charges the card they have on file.`)) { setBusy(false); return; }
   };
   const setInterval_ = (f, iv) => {
     if (comped || f.availability !== "available" || liveFeatures[f.feature] || busy || memberCovered(f.feature)) return;
+    // The only way a tile ever reaches monthly — every default (preselect, toggle-on, the Suite
+    // deselect re-seed) already writes "annual" — so refusing it here keeps monthly out of the cart.
+    if (FOUNDING_ANNUAL_ONLY && iv === "monthly") return;
     setSel((p) => ({ ...p, [f.feature]: iv }));
   };
 
   const subscribe = async () => {
+    // Our own account shows the prospect view but must never buy (see demoView). First line, so
+    // it stops the view-as confirm, the Collect.js lightbox and the request alike.
+    if (demoView) { setDemoNote(true); return; }
     const planIds = cartPlans.map((p) => p.id);
     if (planIds.length === 0) { setMsg({ err: "Select at least one feature." }); return; }
     setMsg(null); setBusy(true);
@@ -1863,7 +1899,9 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
         <div style={S.card}>
           <div style={S.h2}>{liveSubs.length > 0 ? "Add features" : "Choose your features"}</div>
           <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
-            Pick monthly or yearly for each feature — yearly is 10× monthly (2 months free). Cancel any feature anytime.
+            {FOUNDING_ANNUAL_ONLY
+              ? "Founding members pay yearly — 10× the monthly rate, so 2 months free. Cancel any feature anytime."
+              : "Pick monthly or yearly for each feature — yearly is 10× monthly (2 months free). Cancel any feature anytime."}
           </p>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 12 }}>
             {features.filter((f) => !liveFeatures[f.feature]).map((f) => {
@@ -1894,12 +1932,20 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                     </div>
                     {!veiled && (
                       <div onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 20, overflow: "hidden", marginBottom: 8 }}>
-                        {["monthly", "annual"].map((k) => (
-                          <button key={k} type="button" onClick={() => setInterval_(f, k)}
-                            style={{ background: (iv || "annual") === k ? ACCENT : "transparent", color: (iv || "annual") === k ? "#FFF" : "#64748B", border: "none", padding: "4px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
-                            {k === "annual" ? "Yearly" : "Monthly"}
-                          </button>
-                        ))}
+                        {["monthly", "annual"].map((k) => {
+                          // Monthly stays on the tile while founding pricing is yearly-only, but
+                          // does nothing (setInterval_ refuses it). aria-disabled, not `disabled`:
+                          // a disabled button gets no hover events, so the title would never show.
+                          const shut = FOUNDING_ANNUAL_ONLY && k === "monthly";
+                          return (
+                            <button key={k} type="button" onClick={() => setInterval_(f, k)} data-plan-interval={k}
+                              aria-disabled={shut ? "true" : undefined}
+                              title={shut ? "Annual billing only during founding pricing" : undefined}
+                              style={{ background: (iv || "annual") === k ? ACCENT : "transparent", color: (iv || "annual") === k ? "#FFF" : "#64748B", border: "none", padding: "4px 12px", fontSize: 11, fontWeight: 700, cursor: shut ? "not-allowed" : "pointer", opacity: shut ? 0.45 : 1 }}>
+                              {k === "annual" ? "Yearly" : "Monthly"}
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                     {/* Features whose price isn't published yet show no number at all —
@@ -1980,10 +2026,18 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                   themselves — ask them to add a card, then you can change their plan from here.
                 </p>
               ) : (
+                <>
                 <button type="button" onClick={subscribe} disabled={busy || cart.length === 0}
                   style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: busy || cart.length === 0 ? 0.6 : 1 }}>
-                  {busy ? "Working…" : (viewingLabel ? `Subscribe ${viewingLabel} with card on file` : (data.hasCard ? "Subscribe with card on file" : "Continue to secure card entry"))}
+                  {/* Our own account reads as a brand-new builder: no card on file, nobody viewing-as. */}
+                  {busy ? "Working…" : demoView ? "Continue to secure card entry" : (viewingLabel ? `Subscribe ${viewingLabel} with card on file` : (data.hasCard ? "Subscribe with card on file" : "Continue to secure card entry"))}
                 </button>
+                {demoView && demoNote && (
+                  <p style={{ fontSize: 12.5, color: "#1E3A8A", background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 8, padding: "8px 12px", marginTop: 10, fontWeight: 600 }}>
+                    Demo account. Checkout is off on Structure Studio's own account, so nothing was charged.
+                  </p>
+                )}
+                </>
               )) : (
                 <p style={{ fontSize: 12, color: "#64748B", marginTop: 12, fontWeight: 600 }}>
                   Online checkout opens here soon — contact CSM Synergy to activate your features today.

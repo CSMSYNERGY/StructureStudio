@@ -16,9 +16,14 @@
  * window is applied rather than waving the message through, because an unknown number is
  * exactly the case where guessing wrong is least defensible.
  *
- * ⚠️ A DIRECT HUMAN REPLY IS NOT SUBJECT TO THIS. A builder answering a customer who just
- * texted them at 9:15pm is a conversation, not a campaign. smsSend passes bypassQuietHours
- * for that path. Automation never gets the bypass.
+ * ⚠️ A PERSON PRESSING SEND ON ONE TEXT TO ONE CUSTOMER IS NOT SUBJECT TO THIS. A builder
+ * answering a customer at 9:15pm is a conversation, not a campaign. Both manual send buttons
+ * (the record page's Send, text_sign_link) pass bypassQuietHours to smsSend; automation never
+ * does (pinned by _test_stubs/smsQuietHoursWiring_test.ts).
+ * What the law exempts is the CONTENT, not the button: the federal and state windows cover
+ * sales solicitations only (checked 2026-09-29). A promotion typed into Send at 8:30pm to a
+ * Florida or Maryland number is still a solicitation, and this campaign is registered as
+ * non-marketing anyway.
  */
 
 /** Area code → IANA-ish UTC offset in hours (standard time) and whether the state observes

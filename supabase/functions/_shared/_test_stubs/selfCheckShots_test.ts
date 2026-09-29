@@ -165,11 +165,16 @@ Deno.test("⚠️ porchEnd 'back' puts the azimuth-0 camera on the opposite side
 // ── TWO: which cameras exist ──────────────────────────────────────────────────────────────
 
 const SPEC = { bldgW: 16, bldgH: 24, style3d: { roof: { type: "gambrel" }, wallHeightFt: 9 } };
+// SIX since 2026-09-24: `back` and `otherSide` joined, appended after the original four so every
+// pairing that already worked kept its place. A twelve-frame lap, labelled the way the prompt
+// asks: back about front + 180, otherSide about side + 180.
 const FULL_MAP = {
   front: { frame: 1, azimuthDeg: 0 },
   side: { frame: 3, azimuthDeg: 90 },
   eaveCorner: { frame: 5, azimuthDeg: 270 },
   corner: { frame: 7, azimuthDeg: 315 },
+  back: { frame: 9, azimuthDeg: 180 },
+  otherSide: { frame: 11, azimuthDeg: 270 },
 };
 
 Deno.test("no frame map means no cameras, and therefore no check", () => {
@@ -182,11 +187,40 @@ Deno.test("no frame map means no cameras, and therefore no check", () => {
 Deno.test("one camera per labelled viewpoint, in the order the pairs are shown", () => {
   const all = F.ssSelfCheckCameras(SPEC, FULL_MAP);
   assertEquals(all.map((c: Any) => c.viewpoint), F.SS_SELFCHECK_VIEWS);
-  assertEquals(all.map((c: Any) => c.frame), [1, 3, 5, 7]);
-  assertEquals(all.map((c: Any) => c.azimuthDeg), [0, 90, 270, 315]);
+  assertEquals(all.map((c: Any) => c.frame), [1, 3, 5, 7, 9, 11]);
+  assertEquals(all.map((c: Any) => c.azimuthDeg), [0, 90, 270, 315, 180, 270]);
   // A partial map is a partial set, not a padded one.
   const two = F.ssSelfCheckCameras(SPEC, { side: FULL_MAP.side, corner: FULL_MAP.corner });
   assertEquals(two.map((c: Any) => c.viewpoint), ["side", "corner"]);
+});
+
+Deno.test("⚠️ the six viewpoints, in order: the original four first, then back and otherSide", () => {
+  // Appended, never interleaved. The order is the order the pairs are shown in and the order the
+  // request is built in, and a builder who has seen this card before should find the front where
+  // it always was. The server's SELF_CHECK_VIEWPOINTS holds the same six.
+  assertEquals(F.SS_SELFCHECK_VIEWS, ["front", "side", "eaveCorner", "corner", "back", "otherSide"]);
+});
+
+Deno.test("back and otherSide are WIDE views, aimed at the angle the model gave THEIR frame", () => {
+  // The camera follows the label. A back frame the model put at 180 is shot from the north on a
+  // portrait gambrel (whose front gable end is south), and an otherSide at 270 from the west --
+  // the mirror of the front and side cameras, because on a symmetric building that is what half
+  // a lap is. Nothing derives one view's angle from another's: a back labelled 200 is shot at 200.
+  const cams = F.ssSelfCheckCameras(SPEC, FULL_MAP);
+  const by = (v: string) => cams.find((c: Any) => c.viewpoint === v);
+  const front = by("front"), side = by("side"), back = by("back"), other = by("otherSide");
+  for (const c of [back, other]) {
+    assertEquals(c.fov, 60, c.viewpoint);
+    assertEquals(c.eye[1], 5.3, c.viewpoint);
+  }
+  assert(back.eye[2] < 0, `back stands north (-z), got ${back.eye[2]}`);
+  assertAlmostEquals(back.eye[2], -front.eye[2], 1e-6);
+  assertAlmostEquals(back.eye[0], -front.eye[0], 1e-6);
+  assert(other.eye[0] < 0, `otherSide stands west (-x), got ${other.eye[0]}`);
+  assertAlmostEquals(other.eye[0], -side.eye[0], 1e-6);
+  const skew = F.ssSelfCheckCameras(SPEC, { back: { frame: 9, azimuthDeg: 200 } })[0];
+  assertEquals(skew.azimuthDeg, 200);
+  assert(Math.abs(skew.eye[0] - back.eye[0]) > 1, "a back frame at 200 is not shot at 180");
 });
 
 Deno.test("a half-answer is dropped whole rather than half-rendered", () => {

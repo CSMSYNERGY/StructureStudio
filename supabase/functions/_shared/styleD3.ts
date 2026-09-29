@@ -28,6 +28,11 @@ export const D3_ROOF_TYPES = ["shed", "gable", "gambrel"] as const;
 // so widening this list changes nothing for a style nobody re-saves.
 export const D3_SIDING_VALUES = ["panel", "lap", "batten", "agpanel"] as const;
 
+// The tallest wall the renderer draws, in feet (was 14 until 2026-09-24). Exported so the one
+// other server copy that must agree — knownDimsNote's sentence below — reads it rather than a
+// literal. The bottom stays 5. See the wall-height block in sanitizeD3Spec for the lock-step list.
+export const WALL_HEIGHT_MAX_FT = 20;
+
 // Room for a genuinely steep roof and a deep overhang, but not for the values that
 // make the renderer produce nonsense (a "pitch" of 40 draws a spike through the sky).
 const CLAMPS: Record<string, [number, number]> = {
@@ -82,6 +87,51 @@ const CLAMPS: Record<string, [number, number]> = {
   // the wall 6 ft back INTO the building. Absent means no porch, and 0.5 or less is off, the
   // same "0 is the off switch" rule as the keys above.
   porchOutFt: [0, 12],
+
+  // ── THE v2 VOCABULARY (2026-09-24, "video → exact 3D") ────────────────────────────────────
+  // Every key below is ADDITIVE and ABSENT MEANS TODAY'S RENDER, for the reason the lean-to
+  // block above gives: one table serves beta and production, and the production renderer simply
+  // does not read a key it has never heard of. None of them ever gets a default written here.
+  //
+  // Where the projecting porch's roof meets its wall: floor to the TOP of the porch roof, in
+  // feet. Absent is today's "just under the top of the wall". 6 is a door's height, which no
+  // porch roof starts below; 24 is past the tallest centre section the renderer draws.
+  // Projecting porch only — dropped below unless porchOutFt is on.
+  porchAttachFt: [6, 24],
+  // The porch's width along its wall, centred on that wall (or on the centre section when the
+  // building has side wings). Absent is the full wall, or the full centre section. Projecting
+  // porch only, like porchAttachFt.
+  porchWidthFt: [4, 60],
+  // ENCLOSED lower wings along the eave sides, carved out of the footprint (a monitor barn, a
+  // raised-centre house). Width is each wing's, measured in from its outer wall; 0 is the off
+  // switch, exactly leanToWidthFt's rule. Gable and gambrel only — dropped below on a shed.
+  wingWidthFt: [0, 16],
+  // The wing roof's rise over run, falling AWAY from the centre. Absent is the renderer's 0.25.
+  wingPitch: [0, 1.5],
+  // Floor to the top of the CENTRE section's walls, where its own roof starts. Absent with wings
+  // is the renderer's "wing roof top + 3 ft". 26 clears a two-storey centre over a 20 ft wall.
+  centerEaveFt: [6, 26],
+  // ── THE PORCH'S OWN FRAMING (2026-09-25) ── Projecting porch only, like porchAttachFt, and
+  // absent is today's porch exactly.
+  // How many posts stand along the porch's front edge, the two corner posts included. Absent is
+  // the renderer's rule (one every 8.5 ft or less). A WHOLE number: the sanitiser rounds it after
+  // clamping. 2 is the two corners; 8 is past any porch a portable building carries.
+  porchPosts: [2, 8],
+  // The porch roof's own rise over run. Absent is the renderer's solver (2:12, lowered only to keep
+  // a door's height under the header). Given, it is still lowered where the wall is too short for
+  // it, and the panel says so. 0.05 is the solver's own floor; 0.5 (6:12) is steeper than any
+  // porch roof hung under a main roof's eave.
+  porchPitch: [0.05, 0.5],
+  // ── THE ROOF STEP (2026-09-28) ── A gable built in two sections, the Black Cabin's roof: the rear
+  // section's own roof starts at a joint rearStepFt from the BACK wall, and its eave (wall plate and
+  // fascia) stands rearEaveRiseFt higher than the front section's, or lower when negative, while the
+  // two ridges stay level. Both keys or neither, gable with a gable-end front only (the rules below
+  // sanitizeD3Spec's enums), and half a foot or less is off, the rule every appendage width follows.
+  // 56 leaves the renderer's 4 ft in front of a joint on a 60 ft building, the longest porchWidthFt
+  // allows for; the renderer holds the step to the size it draws (d3RoofStep in both twins). A rise
+  // past a foot and a half is a second storey, not a step.
+  rearStepFt: [0, 56],
+  rearEaveRiseFt: [-1.5, 1.5],
 };
 
 // Which eave the lean-to hangs off. Not a clamp, so it is checked separately.
@@ -102,6 +152,51 @@ const D3_DORMER_TYPES = ["gable", "transom"] as const;
 // render and styleD3.test.ts's deep-equal on `roof` keeps passing. Emitting a default here
 // would write it into every tenant's column the first time anyone saved the panel.
 const D3_PORCH_ENDS = ["front", "back"] as const;
+// ── THE FRONT, and the frame every left/right/front/back is read in (2026-09-24) ─────────────
+// FRONT is the wall you walk up to: the one carrying the porch, or the main door when there is
+// no porch. The builder's size "WxL" is W = that wall's length, L = the depth front to back.
+// Either of the next two keys switches the renderer into that frame; with neither, EVERYTHING
+// renders exactly as today (the portrait/landscape rule, porchEnd's old south/west rule, the
+// shed's fixed high end). That is the whole back-compat story, so neither is ever defaulted.
+//
+// roof.front: is the FRONT wall a gable end ("gable": the ridge runs front to back) or a long
+// eave wall ("eave": the ridge runs side to side)? Gable and gambrel only — a shed has no ridge.
+export const D3_ROOF_FRONTS = ["gable", "eave"] as const;
+// roof.highSide: which wall of a SHED is the tall one. front/back make the slope run front to
+// back; left/right make it run across the front wall. Shed only. Geometric, never door-relative:
+// the FRONT is fixed by the porch or the main door, so moving a window cannot rotate the roof.
+export const D3_SHED_HIGH_SIDES = ["front", "back", "left", "right"] as const;
+// roof.wingSide: which EAVE sides carry an enclosed lower wing. "front"/"back" exist for a
+// building whose front is an eave wall; a side that is not an eave side is dropped by the
+// renderer, not here, because the sanitiser cannot know which way a later edit will turn the roof.
+export const D3_WING_SIDES = ["both", "left", "right", "front", "back"] as const;
+// The keys that only mean something with a ridge. Dropped as a set on a shed.
+const D3_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt"] as const;
+// roof.porchSteps (2026-09-25): where a set of steps leaves the projecting porch's deck, along its
+// FRONT edge, as seen standing in front of the porch facing it (left is the viewer's left, the
+// frame every left/right here is read in). Absent = no steps, which is every porch before today.
+export const D3_PORCH_STEPS = ["left", "center", "right"] as const;
+// ── WHAT THE BUILDING STANDS ON (top-level `foundation`; blocks and piers 2026-09-25) ──────────
+// "slab" and "skids" draw at grade, as they always have. "blocks" (stacked 8x8x16 concrete blocks
+// under the runners) and "piers" (round concrete piers) RAISE THE FLOOR off the ground: every
+// building filmed so far sits up like that, and drawn at grade its porch steps came out as one
+// 2-inch step and the building looked planted. Absent is still the slab every row has always drawn.
+//
+// ⚠️ PRODUCTION'S OLDER DESIGNER CANNOT HOLD THE TWO NEW VALUES. Its d3ResolveStyleSpec and its draft
+// merge rewrite anything but skids/slab to null, and its renderer draws a slab for them (which is the
+// honest fallback). So a save from that panel would ERASE a stored "blocks" or "piers" and the
+// floor height with it. carryForwardFoundation below is the save paths' answer, the roofProfile
+// precedent.
+export const D3_FOUNDATIONS = ["skids", "slab", "blocks", "piers"] as const;
+export const D3_RAISED_FOUNDATIONS = ["blocks", "piers"] as const;
+// floorHeightFt: feet from the GROUND to the TOP OF THE FLOOR, at the FRONT (a site can slope; the
+// front is where a builder measures and where the steps are). Kept only with blocks or piers.
+// 0.3 is a floor sitting almost on the grass; 6 is a building on tall piers over a slope. A reading
+// up to FLOOR_HEIGHT_ACCEPT_FT is pulled into that band (a 7 ft reading is someone's tall pier, not
+// a unit error); anything past it is inches or a hallucination and is dropped, wallHeightFt's rule.
+export const FLOOR_HEIGHT_FT: readonly [number, number] = [0.3, 6];
+const FLOOR_HEIGHT_ACCEPT_FT = 8;
+const isRaisedFoundation = (v: unknown): boolean => (D3_RAISED_FOUNDATIONS as readonly unknown[]).includes(v);
 
 const num = (v: unknown): number | null => {
   const n = typeof v === "string" ? Number(v) : v;
@@ -127,6 +222,7 @@ export type D3Spec = {
   roofProfile?: string;
   gableVent?: { widthFrac: number };
   foundation?: string;
+  floorHeightFt?: number;
   claddingChoices?: string[];
 };
 
@@ -145,10 +241,18 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // which looks to a builder exactly like "the save didn't work". Add to both.
   for (const k of ["pitch", "ridgeOffset", "overhang", "kneeU", "kneeRise", "ridgeRise", "tailSpacingIn",
                    "leanToWidthFt", "leanToDropFt", "dormerWidthFt", "dormerRiseFt", "dormerOffsetU",
-                   "porchDepthFt", "porchOutFt"]) {
+                   "porchDepthFt", "porchOutFt",
+                   // v2 (2026-09-24). APPENDED, so every existing spec keeps its key order.
+                   "porchAttachFt", "porchWidthFt", "wingWidthFt", "wingPitch", "centerEaveFt",
+                   // 2026-09-25, appended for the same reason.
+                   "porchPosts", "porchPitch",
+                   // 2026-09-28, the roof step, appended for the same reason.
+                   "rearStepFt", "rearEaveRiseFt"]) {
     const v = clamped(k, rawRoof[k]);
     if (v !== null) roof[k] = v;
   }
+  // A post count is a count. Rounded AFTER the clamp, so it stays inside 2..8 either way.
+  if (typeof roof.porchPosts === "number") roof.porchPosts = Math.round(roof.porchPosts);
   // Which eave the lean-to hangs off. Only meaningful when leanToWidthFt > 0; stored
   // regardless so toggling the width back up remembers the side.
   if ((D3_LEANTO_SIDES as readonly string[]).includes(String(rawRoof.leanToSide))) {
@@ -233,6 +337,68 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   if (typeof roof.porchOutFt === "number" && roof.porchOutFt > 0.5) {
     delete roof.porchDepthFt;
     delete roof.porchTruss;
+  } else {
+    // The mirror image (2026-09-24): the attach height and the width describe a PROJECTING
+    // porch's own roof, so without one they describe nothing. Dropped rather than stored for
+    // later, unlike porchEnd, because a recessed porch has no roof of its own for them to move
+    // and a renderer that one day reads them there would be reading a leftover.
+    delete roof.porchAttachFt;
+    delete roof.porchWidthFt;
+    // The porch's posts and its roof's pitch (2026-09-25) are that roof's too.
+    delete roof.porchPosts;
+    delete roof.porchPitch;
+  }
+
+  // ── v2 ENUMS AND THE ROOF-TYPE RULES (2026-09-24) ──────────────────────────────────────────
+  // Each enum follows leanToSide: a known word is stored, anything else is dropped without an
+  // error, and absence is never filled in. Each is then held to the roof types it can describe,
+  // because a stored key the renderer must ignore is a trap for the next edit: flip a shed with a
+  // stale `front` on it to a gable and the building silently turns sideways.
+  if ((D3_ROOF_FRONTS as readonly string[]).includes(String(rawRoof.front)) && type !== "shed") {
+    roof.front = String(rawRoof.front);
+  }
+  if ((D3_SHED_HIGH_SIDES as readonly string[]).includes(String(rawRoof.highSide)) && type === "shed") {
+    roof.highSide = String(rawRoof.highSide);
+  }
+  // Which sides carry a wing. Stored whether or not wingWidthFt is currently above zero, like
+  // leanToSide, so turning the width back up remembers the side.
+  if ((D3_WING_SIDES as readonly string[]).includes(String(rawRoof.wingSide))) {
+    roof.wingSide = String(rawRoof.wingSide);
+  }
+  // Wings need a ridge to stand either side of. On a shed the whole set goes, numbers included —
+  // after the numeric loop, which is where the numbers were written.
+  if (type === "shed") {
+    for (const k of D3_WING_KEYS) delete roof[k];
+  }
+  // Where the porch's steps leave its deck (2026-09-25). The enum posture above, and the porch
+  // rule porchAttachFt follows: steps come off a PROJECTING porch's deck, so without one they
+  // describe nothing and are dropped rather than stored for later.
+  if ((D3_PORCH_STEPS as readonly string[]).includes(String(rawRoof.porchSteps))
+      && typeof roof.porchOutFt === "number" && roof.porchOutFt > 0.5) {
+    roof.porchSteps = String(rawRoof.porchSteps);
+  }
+  // ── THE ROOF STEP (2026-09-28) ─────────────────────────────────────────────────────────────────
+  // rearStepFt and rearEaveRiseFt describe ONE thing, the rear roof section, so they are kept
+  // together or not at all: one without the other is dropped, and so is a step of half a foot or
+  // less (the off switch) or a rise under 0.01 ft either way, a joint with nothing to see. A step
+  // under 4 ft is pulled up to 4, the least building the renderer leaves behind a joint; the room
+  // in front of it depends on the size, so the renderer holds that end.
+  // Only where the renderer can draw it: a GABLE (a gambrel's knee and a shed's one slope have no
+  // level ridge to keep) whose ridge runs front to back, so the back wall is a gable wall. On an
+  // "eave" front both keys go; with no front they stay, because the old frame runs a portrait
+  // footprint's ridge front to back and only the size can say which (the renderer asks it). Never
+  // beside wings or a lean-to, which run the length of an eave wall at ONE eave height, and never
+  // with a porch at the back, which the rear section would stand over. Dropped rather than stored
+  // for later, the porch attach height's rule: an inert key is a trap for the next edit.
+  const stepAt = num(roof.rearStepFt), stepRise = num(roof.rearEaveRiseFt);
+  const roofOn = (k: string) => (num(roof[k]) ?? 0) > 0.5;
+  if (stepAt !== null && stepAt > 0.5 && stepRise !== null && Math.abs(stepRise) >= 0.01
+      && type === "gable" && roof.front !== "eave" && !roofOn("wingWidthFt") && !roofOn("leanToWidthFt")
+      && !(roof.porchEnd === "back" && (roofOn("porchDepthFt") || roofOn("porchOutFt")))) {
+    roof.rearStepFt = Math.max(4, stepAt);
+  } else {
+    delete roof.rearStepFt;
+    delete roof.rearEaveRiseFt;
   }
 
   // Anything that is not a renderable cladding means "unset", which the renderer
@@ -246,7 +412,12 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   const rawColors = (src.colors && typeof src.colors === "object") ? src.colors : {};
   // `wood` (2026-09-17) is the natural lumber of a projecting porch: posts, deck, rafters and
   // ceiling. Absent means the renderer's own fallback, which is never written here.
-  for (const k of ["body", "trim", "roof", "wood"]) {
+  //
+  // `corner` and `fascia` (2026-09-24): the corner boards, and the fascia and rake boards along
+  // the roof edges. A real building often has corners in the BODY colour and a fascia in the
+  // ROOF colour while only the window casings are white, and one `trim` cannot say that. Absent
+  // means `trim`, which is what every row saved before today draws; the server never writes it.
+  for (const k of ["body", "trim", "roof", "wood", "corner", "fascia"]) {
     const c = hex(rawColors[k]);
     if (c) colors[k] = c;
   }
@@ -255,12 +426,18 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // Wall height is CLAMPED into range rather than dropped, but only from a plausible band.
   // Dropping a 4.5 threw away a good near-miss and left the style default (often 8) standing,
   // which is further from the truth than the bound would have been. Clamping everything is
-  // the opposite mistake: a model that answers in INCHES returns 96, and clamping that to 14
-  // draws a two-storey wall on a garden shed. So anything a human could plausibly have meant
-  // in feet gets pulled to the nearest bound, and anything outside that is a different unit
-  // or a hallucination and is dropped, leaving the builder's own value alone.
+  // the opposite mistake: a model that answers in INCHES returns 96, and clamping that to the
+  // top would draw a two-storey wall on a garden shed. So anything a human could plausibly have
+  // meant in feet gets pulled to the nearest bound, and anything outside that is a different
+  // unit or a hallucination and is dropped, leaving the builder's own value alone.
+  //
+  // The TOP moved from 14 to 20 on 2026-09-24, and now coincides with the accept band's: a two-
+  // storey centre section or a tall cabin front is a real wall, and a builder who measured 16
+  // was being drawn at 14. ⚠️ LOCK-STEP: the same 5..WALL_HEIGHT_MAX_FT lives in knownDimsNote
+  // below, submit-estimate's upgrade clamp, d3WallHeightFromDelta in both designer twins, and
+  // wallHeight_test. Change one, change all five.
   const wh = num(src.wallHeightFt);
-  if (wh !== null && wh >= 3 && wh <= 20) d3.wallHeightFt = Math.min(14, Math.max(5, wh));
+  if (wh !== null && wh >= 3 && wh <= 20) d3.wallHeightFt = Math.min(WALL_HEIGHT_MAX_FT, Math.max(5, wh));
   // The style's default roof MATERIAL (2026-08-15): the renderer textures the
   // roof with it before any customer roof-type pick. Same posture as siding —
   // anything unknown means "unset".
@@ -285,8 +462,19 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
 
   // What the building sits on. "skids" draws runners under a thin deck — the shadow gap
   // that says a building is portable rather than poured. Absent means the slab the
-  // renderer has always drawn, so no existing row moves.
-  if (src.foundation === "skids" || src.foundation === "slab") d3.foundation = src.foundation;
+  // renderer has always drawn, so no existing row moves. "blocks" and "piers" (2026-09-25) raise
+  // the floor off the ground (see D3_FOUNDATIONS); anything else is still dropped.
+  if ((D3_FOUNDATIONS as readonly unknown[]).includes(src.foundation)) d3.foundation = src.foundation;
+  // How high that raised floor stands, grade to floor top at the front. Only a raised foundation
+  // has one: on a slab or skids the floor is at grade by definition, and the key is dropped rather
+  // than carried where nothing reads it. Absent is the renderer's own default for the kind, and is
+  // never written here.
+  if (isRaisedFoundation(d3.foundation)) {
+    const fh = num(src.floorHeightFt);
+    if (fh !== null && fh > 0 && fh <= FLOOR_HEIGHT_ACCEPT_FT) {
+      d3.floorHeightFt = Math.min(FLOOR_HEIGHT_FT[1], Math.max(FLOOR_HEIGHT_FT[0], fh));
+    }
+  }
 
   // Which claddings THIS style offers the customer (2026-08-25). Absent means all four,
   // which is what every existing row says by omission.
@@ -313,6 +501,38 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   return { ok: true, d3 };
 }
 
+// ── A RAISED FOUNDATION SURVIVES AN OLDER PANEL'S SAVE (2026-09-25) ────────────────────────────
+// The save paths' carry-forward for `foundation` "blocks"/"piers" and `floorHeightFt`, shared by
+// portal-settings and admin-save-settings so the two cannot disagree (the roofProfile precedent,
+// which each of them inlines for a key that absence alone could erase).
+//
+// ABSENCE IS NOT ENOUGH HERE. Production's designer resolves any foundation but skids/slab to
+// null and SENDS `foundation: null`, and its draft merge can hand on a legacy draft's "slab"; it
+// never sends floorHeightFt at all. So from a request WITHOUT frame "front" -- that older panel, and
+// anything else that has not been taught the new values -- a foundation that is absent, null or
+// "slab" while the row stores blocks or piers keeps the stored foundation, and its stored floor
+// height with it. "skids" is still honoured: that panel's select offers it, so it is a real pick.
+// The current panel sends frame "front" on every save (12-shell's onSaveSpec, the operator page's
+// save), and gets exactly what it sent: it can set both keys, change them and clear them.
+//
+// Mutates `clean` (the sanitised spec about to be written). The stored height is held to the
+// sanitiser's band again, because this is the one place a stored value is written back unread.
+export function carryForwardFoundation(clean: D3Spec, sent: unknown, stored: unknown, frame: unknown): void {
+  if (frame === PROMPT_FRAME_FRONT) return;
+  if (!sent || typeof sent !== "object") return;
+  const was = (stored && typeof stored === "object") ? stored as Record<string, unknown> : null;
+  if (!was || !isRaisedFoundation(was.foundation)) return;
+  const incoming = (sent as Record<string, unknown>).foundation;
+  if (!(incoming === undefined || incoming === null || incoming === "slab")) return;
+  clean.foundation = was.foundation as string;
+  const fh = num(was.floorHeightFt);
+  if (fh !== null && fh > 0 && fh <= FLOOR_HEIGHT_ACCEPT_FT) {
+    clean.floorHeightFt = Math.min(FLOOR_HEIGHT_FT[1], Math.max(FLOOR_HEIGHT_FT[0], fh));
+  } else {
+    delete clean.floorHeightFt;
+  }
+}
+
 // Reference photos for a spec: http(s) only, capped in both count and length. These are
 // handed to the vision model AND rendered as thumbnails in the editor.
 //
@@ -327,10 +547,19 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
 // so a builder could add eight photos, watch a generation read all of them, press Save, and
 // lose four with an HTTP 200 and no warning. Both `save_style_d3` writers now pass 12
 // explicitly, matching the editor: four LABELLED views as a floor, twelve as the ceiling.
-// The walk-around path passes 8 (SS_VID_FRAMES) into its own column.
+// The walk-around path passes WALK_FRAME_MAX (SS_VID_FRAMES) into its own column.
 //
 // The 12 in the slice below is a hard ceiling on top of `max` and is pinned by styleD3.test.ts:
 // no caller can raise it, whatever it asks for.
+//
+// WALK_FRAME_MAX went from 8 to 12 on 2026-09-24: eight frames of a lap gave one look at each
+// side, and a building with a wing on BOTH sides, or a porch on its long front, needs the back
+// and the far side seen too. It is the cap for EVERY place a walk's frames are kept or read —
+// the generation's `video` source, and the d3_video_frames column both save paths write —
+// because the self-check pairs a frame with a render only if the style STORES that frame, so a
+// save that kept eight of twelve would quietly leave four views with nothing to compare.
+// ⚠️ SHIP WITH THE BROWSER: the designer's SS_VID_FRAMES may only rise once this is deployed.
+export const WALK_FRAME_MAX = 12;
 export function sanitizePhotoUrls(raw: unknown, max = 4): string[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -401,6 +630,13 @@ Colors are the dominant UNPAINTED material colors. Estimate conservatively and u
 // ⚠️ THE BASE, not the export. `videoShapePrompt(dims)` below is what callers use, and
 // `VIDEO_SHAPE_PROMPT` is literally `videoShapePrompt(null)` — see that function's header for
 // why the no-dims prompt has to remain the same string object it always was.
+//
+// ⛔ FROZEN SINCE 2026-09-24. This is now ONLY the prompt of the LEGACY paths — a request without
+// the builder's measurements, and (with the old ruler spliced in, legacyDimsPrompt) one with dims
+// but without `frame: "front"` — and styleD3.test.ts pins both by hash. Every word the generator
+// learns from here on goes into VIDEO_SHAPE_V2 below, which is what the rollout gate
+// (wantsV2Prompt) sends the new designer, whose every request carries dims and the frame. Editing
+// this string changes production's legacy paths and nothing else, so there is no reason left to.
 const VIDEO_SHAPE_BASE = `These images are frames from ONE continuous walk-around video of ONE portable building (a shed or barn). They are in walk order, so consecutive frames are adjacent viewpoints of the same building.
 
 Your job is the SHAPE of that building. Its size, its colours and its materials are settings the customer picks later — do not spend effort on them.
@@ -490,6 +726,224 @@ AZIMUTH: for each image you name, where the camera was standing, as an angle aro
 
 Where the frames genuinely do not settle something, say so in observed and OMIT the key. Omitting a key leaves the builder's existing setting alone, which is better than a typical value they then have to find and undo. Do not fill a field with the middle of its stated range.`;
 
+// ─── THE v2 SHAPE PROMPT: "video → exact 3D" (2026-09-24) ─────────────────────────────────
+// What every request WITH the builder's measurements gets. Two real buildings drove it, and each
+// failed on something the base prompt had no words for:
+//
+//   * FARMSTAND, a one-slope cabin whose HIGH wall is its long FRONT, carrying a full-width porch
+//     whose own roof meets that wall two feet below the main eave, with body-coloured corner
+//     boards and roof-coloured fascia. The base could say none of that: its shed always slopes the
+//     long way with the high end fixed, every porch sits at a gable end just under the top of the
+//     wall, and one `trim` paints every board. It came back a gable with a recessed porch.
+//   * TRI HOME, a raised-centre house: a two-storey gable centre whose ridge runs front to back,
+//     an ENCLOSED single-storey wing down each side under its own lower roof, and a porch in front
+//     of the centre only. The base has only the open, posts-carried lean-to, one side at a time,
+//     and a wall clamped at 14 ft. It came back a 14 ft box.
+//
+// So it teaches, on top of everything the base already reads correctly (kept word for word where
+// the tests pin it, and reworded only where "gable end" or "long side" stopped being true): the
+// FRONT as the single frame every front/back/left/right is read in; `roof.front` and
+// `roof.highSide`, the two keys that switch the renderer into that frame, as REQUIRED decisions;
+// the porch on the front wall whichever kind of wall it is, with its attach height and width;
+// SIDE WINGS against the lean-to, with their own REQUIRED decision beside the porch's; and colours
+// as the paint looks in even daylight, including corner, fascia and porch wood.
+//
+// THE FIRST PROXY RUNS (2026-09-24, three per building on the app's own twelve frames) failed in
+// four places, and the paragraphs below now teach a PROCEDURE for each rather than a definition:
+// the shed's high side came back front, back and left for one cabin (one run read the porch's own
+// lower roof as the main roof), so SHED HIGH SIDE reads the tall edge of the sloping end walls off
+// the MAIN roof; the raised-centre house came back with ONE wing in two runs of three although
+// the rear frames show both, so the WINGS DECISION looks at both sides and says "one" only on a
+// named frame; one run called a posted, decked porch "recessed"; and one read the porch rafters
+// as the main eave's finish. The worked examples use generic numbers, never the two test
+// buildings' own, so an evaluation on those two measures reading rather than copying.
+//
+// THE REPLY IS KEPT SHORT ON PURPOSE. Thinking and the answer share one max_tokens, and a reply
+// cut off anywhere loses the spec, the notes and the frame map together (one JSON object). Every
+// new key is a short number or word; the prose lives in `observed`, capped at one phrase each.
+//
+// THE POINTS BEHIND THE PITCH (2026-09-26). Live three-read drafts put a raised centre's gable at
+// 0.45 to 0.8 against a measured 0.41. In an offline run on the app's own frames, every stand-in read
+// that came out close had written pixel coordinates down first, so the model was judging the slope
+// rather than measuring it. The reply now carries `measure`: the pixel points a GABLE's pitch is read
+// from, and the SERVER works the slope out from them (pitchFromMeasure, below), per read and before
+// the consensus. roof.pitch stays in the schema and is what is drawn when a read gives no points or
+// its points fail the checks. `measure` never reaches the stored spec: sanitizeD3Spec rebuilds from
+// known keys, like frameMap. It is the FIRST key of the schema, ahead of roof, so the points are
+// written down before the pitch rather than fitted to it afterwards; the sentence on not
+// re-measuring says so, so it does not read as forbidding that. Only a gable is asked for points. A
+// shed's wall edges and a porch roof levelled by its corner post were asked for too, and both read
+// far off in a camera simulation (pitchFromMeasure's header has the numbers), so the paragraph now
+// says to leave measure out on a shed; and a gambrel's pitch is never computed, so on a gambrel too.
+//
+// THE WING ROOFS' POINTS (2026-09-26, the same day). Live, Opus 5.5 read the wing roofs of a
+// raised-centre building low (its own wingPitch 0.10 to 0.14 on many reads against a measured 0.20),
+// while a probe asking for the four corners of the two wing roofs' top edges in the square-on front
+// frame read them close. So `measure` also carries `wing`, asked for only on a building with wings on
+// both sides, and the server works the wing pitch out from it (wingPitchFromMeasure) the way it does
+// the gable's. The paragraph's "leave it out" sentences now name measure.pitch and measure.wing, so a
+// gambrel centre with wings is not told to leave its wing points out. Its example is generic (a 0.3).
+//
+// THE ROOF STEP'S POINTS (2026-09-28). Live, three five-read drafts of a building whose rear roof
+// section stands 0.6 ft HIGHER, 14 ft from the back wall, all found the step and all gave it as
+// LOWER (-0.2 to -0.3 in 15 reads of 15) and 10 to 12 ft from the back. The frames are not in doubt:
+// both long sides show the rear fascia above the front's, with the rear section's end face at the
+// joint and the front roof running in under it. The distance is perspective: read off the one frame
+// that shows a whole side as a plain share of its length it comes out near 9 ft, because the camera
+// stood nearer the front. So the ROOF STEP paragraph now asks for `measure.step`, six points in one
+// side frame, and the server works both numbers out (stepFromMeasure, below): the rise from the
+// three points on the joint's own vertical, where perspective scales them all alike, and the
+// distance by a cross-ratio against the side's vanishing point.
+//
+// ⚠️ THE TESTS PIN, ACROSS BOTH PROMPTS: the schema lines for pitch, overhangIn and the three
+// gambrel numbers, and the whole GAMBREL NUMBERS paragraph, are byte-identical to the base (the
+// gambrel ratios measurably work — see the test); `wallHeightFt` appears nowhere in here; and
+// the opening paragraph ends at the first blank line, because videoShapePrompt inserts the ruler
+// there and combinedShapePrompt replaces everything above it.
+const VIDEO_SHAPE_V2 = `These images are frames from ONE continuous walk-around video of ONE portable building (a shed, barn, cabin or small house). They are in walk order, so consecutive frames are adjacent viewpoints of the same building.
+
+Your job is to describe this building exactly enough that a 3D model drawn from your answer looks like the video: its shape first, then its colours. Both matter. The builder is about to see your drawing beside these frames, and anything you got wrong is something they must find and fix by hand.
+
+Return ONLY a JSON object with this exact shape (no prose, no markdown fence). Keep every observed string to one short phrase, under 20 words: your reasoning and this reply share one length limit, and a reply that runs out before its end is lost whole. Settle each REQUIRED decision once, from the frames named for it, and do not go back to re-measure a number once you have given it. The measure block comes first on purpose: write its points down, then give the pitches they show; that is measuring each pitch once, not twice.
+{
+  "measure": {
+    "pitch": { "frame": <1-based index of the image you read the gable's slope in>, "size": [<that image's width in pixels>, <its height in pixels>], "left": [<x>, <y>], "peak": [<x>, <y>], "right": [<x>, <y>] },
+    "wing": { "frame": <1-based index of the image you read the wing roofs' slope in>, "size": [<that image's width in pixels>, <its height in pixels>], "leftOuter": [<x>, <y>], "leftInner": [<x>, <y>], "rightInner": [<x>, <y>], "rightOuter": [<x>, <y>] },
+    "step": { "frame": <1-based index of the image you marked the roof step in>, "size": [<that image's width in pixels>, <its height in pixels>], "backBase": [<x>, <y>], "jointBase": [<x>, <y>], "frontBase": [<x>, <y>], "frontFascia": [<x>, <y>], "jointFront": [<x>, <y>], "jointRear": [<x>, <y>] }
+  },
+  "roof": {
+    "type": "shed" | "gable" | "gambrel",
+    "front": "gable" | "eave",
+    "highSide": "front" | "back" | "left" | "right",
+    "pitch": <rise over run of one slope, e.g. 0.42 for 5:12>,
+    "ridgeOffset": <-0.35..0.35, gable only: how far the ridge sits off the centreline toward one eave for a saltbox look, as a fraction of the FULL width under that roof (the whole building's, or the centre section's on a building with side wings), not of the half-span; 0 if centred>,
+    "overhangIn": <inches the roof projects past the wall, 0 to 36; 0 means a flush eave>,
+    "kneeU": <gambrel only, 0..1: how far the knee (where the steep lower slope meets the shallow upper one) sits out from the CENTRELINE under the ridge, as a fraction of the half-span -- NOT measured in from the eave. 1 would put the knee directly above the wall; a typical barn knee sits near the wall, about 0.7-0.85>,
+    "kneeRise": <gambrel only, 0..1: height of the knee above the TOP OF THE WALL, as a fraction of the half-span>,
+    "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the TOP OF THE WALL, as a fraction of the half-span -- the same datum kneeRise uses, NOT measured up from the knee>,
+    "eave": "open" | "fascia",
+    "tailSpacingIn": <only when eave is "open": inches on centre between the rafter tails, typically 16 or 24>,
+    "leanToWidthFt": <only if an OPEN lean-to on posts runs along one side wall: how far it projects, in feet>,
+    "leanToDropFt": <how far the lean-to's outer edge sits below the main eave, in feet, typically 1-2>,
+    "leanToSide": "left" | "right",
+    "wingSide": "both" | "left" | "right" | "front" | "back",
+    "wingWidthFt": <only if ENCLOSED lower wings flank a taller centre section: each wing's width in feet, from its outer wall in to the centre section's wall>,
+    "wingPitch": <the wing roof's rise over run, falling away from the centre>,
+    "centerEaveFt": <feet from the floor to the top of the centre section's walls, where its own roof starts>,
+    "rearStepFt": <only if the roof is built in TWO SECTIONS with a step where they meet: feet from the BACK wall to that joint>,
+    "rearEaveRiseFt": <with rearStepFt: how much HIGHER the rear section's eave sits than the front section's, in feet; negative when it sits lower>,
+    "dormerWidthFt": <only if a dormer sits on a roof slope: its width in feet>,
+    "dormerRiseFt": <how far the dormer stands above the slope, in feet>,
+    "dormerOffsetU": <-0.85..0.85: how far the dormer sits from the ridge line toward one eave, as a fraction of the half-span. This is a SIDEWAYS position across the roof, not a distance up the slope: 0 puts it on the ridge, 0.5 halfway out to the eave, and the sign picks the side as the DORMER paragraph says>,
+    "porchDepthFt": <only if a covered porch is recessed into the front of the building under the main roof: how many feet of the building's depth it takes up>,
+    "porchEnd": "front" | "back",
+    "porchTruss": <true only if decorative timber beams fill the gable ABOVE the porch opening>,
+    "porchOutFt": <only if a porch STANDS OUT in front of the FRONT wall under its own lower roof: how many feet its deck and posts project past that wall>,
+    "porchAttachFt": <projecting porch only: feet from the floor to the TOP of the porch roof where it meets the wall>,
+    "porchWidthFt": <projecting porch only, and only when it is narrower than its wall, or than the centre section on a building with side wings: its width along the wall, in feet>,
+    "porchPosts": <projecting porch only: how many posts stand along the porch's front edge, the corner posts included>,
+    "porchPitch": <projecting porch only: the porch roof's own rise over run>,
+    "porchSteps": "left" | "center" | "right"
+  },
+  "gableVent": { "widthFrac": <vent width as a fraction of the width of the gable wall it sits in, e.g. 0.25 for a 2 ft vent on an 8 ft wall> },
+  "foundation": "skids" | "slab" | "blocks" | "piers",
+  "floorHeightFt": <blocks or piers only: feet from the ground up to the TOP of the floor, at the FRONT>,
+  "roofMaterial": "shingle" | "metal",
+  "colors": { "body": "#rrggbb", "trim": "#rrggbb", "roof": "#rrggbb", "corner": "#rrggbb", "fascia": "#rrggbb", "wood": "#rrggbb" },
+  "observed": {
+    "roofNote": "<one short sentence: how you read the roof and which way it runs, and any doubt>",
+    "porch": "projecting" | "recessed" | "none",
+    "wings": "both" | "one" | "none",
+    "eave": "<exposed rafter tails, a plain fascia board, a boxed soffit, or unclear>",
+    "doors": "<how many, on which wall (front, back, left, right), single or double>",
+    "windows": "<how many and on which walls, or 'none'>",
+    "vents": "<gable vents, ridge vent, or none>",
+    "confidence": "high" | "medium" | "low"
+  },
+  "frameMap": {
+    "front": { "frame": <1-based index of the image that looks most square-on at the FRONT wall>, "azimuthDeg": <where you were standing for that image, to the nearest 45 degrees> },
+    "side": { "frame": <the image most square-on to the right-hand side wall, or failing that the left-hand one>, "azimuthDeg": <as above> },
+    "eaveCorner": { "frame": <the image where the roof edge along an eave reads most clearly against the sky>, "azimuthDeg": <as above> },
+    "corner": { "frame": <an image showing the FRONT wall and one side wall at once, three-quarters on>, "azimuthDeg": <as above> },
+    "back": { "frame": <the image most square-on to the BACK wall, the one opposite the front>, "azimuthDeg": <as above> },
+    "otherSide": { "frame": <the image most square-on to the side wall OPPOSITE the one you gave for side>, "azimuthDeg": <as above> }
+  }
+}
+
+How to read it:
+
+THE FRONT, which every front, back, left and right in this reply is read from. The FRONT is the wall you would walk up to: the one carrying a ROOFED porch, or the main door when there is no porch. An open deck, a stair or a ramp with no roof of its own over it does not decide the front. Left and right are as seen standing outside in front of it, facing it. The FRONT can be a gable end (the wall with the roof's triangle above it) or a long eave wall (the wall the roof edge runs level along). Both are common, so read it off the frames and never assume the front is the shorter wall.
+
+ROOF TYPE, from the silhouette at a corner: one slope = "shed"; two slopes meeting at a ridge = "gable"; four slopes with a break partway down each side = "gambrel". A real gambrel is a barn roof: a STEEP lower slope from the wall up to the knee, then a SHALLOW upper slope from the knee to the ridge. If the roof is actually a HIP (slopes on all four sides, no vertical gable triangle) or FLAT, none of the three fit — return the closest, "gable" for a hip and "shed" for a flat, and say plainly in observed.roofNote that it is really a hip or flat and the shape will not match.
+
+ROOF DIRECTION, REQUIRED on a two-slope or gambrel roof: roof.front says which kind of wall the FRONT is. "gable" when the front wall is a gable end: from the front you see the roof's triangle (or the barn's five-sided outline) and the ridge runs straight away from you, front to back. "eave" when the front wall is a long wall with the roof edge running level along its top: from the front you look up at a roof slope and the ridge runs side to side, parallel to the front wall. Settle it from the frame square to the front: a peak above the front wall is "gable", a level roof edge along it is "eave". Give it on every two-slope or gambrel building, even when the door is off to one side, and leave it out on a shed.
+
+SHED HIGH SIDE, REQUIRED on a one-slope roof: roof.highSide says which wall is the HIGH one. The high wall is the tallest wall of the building: the MAIN roof starts along its top and falls away from it to the low wall opposite. Settle it in three steps, from the walls themselves:
+1. Find the MAIN roof: the highest roof edge on the building. A porch's own lower roof, hung on a wall below the main roof's edge, is NOT the main roof. Never read the slope, or the high side, off a porch roof.
+2. Find the two walls whose top edge SLOPES under the main roof, and the frames most square-on to each of them. Each of those walls is a trapezoid: one of its two vertical edges is plainly taller than the other, and the TALL vertical edge stands at the high wall. Read both if you can; they must agree.
+3. Name it relative to the FRONT. "front" when the tall edges stand at the front: the front wall itself is the tall one, and the roof falls away from you toward the back. "back" when they stand at the far end: the roof rises away from you and the back wall is the tallest. "left" or "right" when the two sloping walls are the front and the back themselves: the front wall's top edge climbs toward that side.
+Leave it out on anything that is not a shed.
+
+PITCH: find the frame looking most squarely at a gable end, the one where its two eave corners stand level and the gable looks widest, and measure the slope of its roof edge against the sky: how far the peak rises above the eave corners, compared with HALF the distance between those corners. A roof that rises half as much as it runs is 0.5. Never read it from a corner or angled view: there the gable's width is squeezed while its height is not, so the roof looks STEEPER than it is (a 6:12 roof seen from 45 degrees looks like 8.5:12). When the gable's width is known in feet (the front wall on a gable-front building, the centre section on a building with wings), check the answer in feet as well: the peak's height above the eave, read against a known height in the same frame such as the wall height, divided by half that width. A shed has no gable end: read its one slope from a frame square to one of the two walls whose top edge runs diagonally, along the MAIN roof's edge and never a porch roof's, or work it out from the walls, as the high wall's height minus the low wall's, divided by the distance between them. A 12 ft deep shed whose high wall stands 10 ft and whose low wall stands 8 ft is (10 - 8) / 12 = 0.17.
+
+GAMBREL NUMBERS, only for a gambrel, from that same frame straight at a gable end. Measure all three from the CENTRELINE under the ridge and the TOP OF THE WALL, and divide each by the distance from the centreline to the wall: kneeU is how far the knee sits out from the centreline, kneeRise is how high the knee sits above the wall, ridgeRise is how high the ridge sits above the wall. Example: a 12 ft wide barn with its knee 1.5 ft in from each wall and 4.3 ft above it, and the ridge 6.2 ft above the wall, is kneeU 0.75, kneeRise 0.72, ridgeRise 1.03. Check before you answer: kneeRise / (1 - kneeU) is the steepness of the lower slope and (ridgeRise - kneeRise) / kneeU is the upper; the lower must come out clearly larger, or you measured from the wrong point.
+
+OVERHANG: how far the roof edge stands out past the wall below it, in INCHES, judged against a door for scale. Read it from a frame looking along an eave wall, where the roof edge and the wall below it are both in view. 0 is a real answer and an ordinary one: a flush eave is the wall running straight up into the roof edge, with no shadow under it and nothing to see from below, and a building built that way is as common as one with a deep eave. 2 inches and 16 inches are both common answers and they look nothing alike, so give the one this building shows. Some styles are sold on a deliberately wide eave, so this number carries the look.
+
+WALL HEIGHT: already known — the builder measured it and it is stated above. Do not estimate it, do not report it, and do not bend the other numbers to fit some other wall height. It is the LOW wall on a one-slope roof, and the wings' outer walls on a building with side wings; every taller wall is yours to give, through the pitch or centerEaveFt, measured against it.
+
+EAVE FINISH, from a frame looking along an eave wall at the underside of the roof edge. There are two possibilities and they look nothing alike once you know to look: a continuous painted board running the whole length, level and unbroken, is "fascia"; a repeating row of raw unpainted wood blocks projecting below the roof with gaps of open air between them is "open" — exposed rafter tails, which give the bottom of the roof a sawtooth outline rather than a straight line. If it is "open", count the blocks along a run you can measure against the wall and give the spacing in inches — 24 is the common one, 16 the next. If you cannot see under the eave in any frame, omit both keys rather than guessing; omitting them means the fascia we already draw. On a shed, the high eave is usually the one whose underside you can see best. Judge it on the MAIN roof's own eaves: a porch roof often shows exposed rafters under it while the main roof above it has a plain fascia board, and the porch's rafters are not the main roof's eave finish.
+
+GABLE VENT: a louvered opening set in the gable triangle, above the top of the wall. Give its width as a fraction of the width of the gable wall it sits in, not of the triangle; on a building with side wings that is the CENTRE section's width, not the whole front. Omit the whole gableVent object if the gable ends carry no vent — that is common and is not a failure to see one.
+
+ROOF MATERIAL: asphalt shingles are laid in overlapping courses, so the slope carries a horizontal line every few inches and the surface looks granular. Metal is long continuous panels running UP the slope with raised ribs a foot or so apart, and it catches light in hard streaks rather than evenly. Judge it from the frame where the roof fills most of the picture; on an overcast day the giveaway is the direction of the lines — across the slope means shingle, up it means metal.
+
+LEAN-TO: an OPEN roofed section running along one side wall, its outer edge carried on posts rather than a wall — an equipment bay, or a carport down the side. Only report one if the posts are actually there; a deep eave overhang is not a lean-to. Give how far it projects from the wall in feet, how far its outer edge drops below the main eave, and which side it is on as seen standing in front of the FRONT wall. ⚠️ A lean-to is OPEN underneath and stands OUTSIDE the walls. A covered area in front of the FRONT wall is a PORCH, never a lean-to, whether the front is a gable end or an eave wall; it has its own fields below, and reporting it as a lean-to draws a lump on the wrong side of the wrong wall. And a lower section with WALLS of its own — siding, windows, closed in — is a SIDE WING, below, however much its roof looks like a lean-to's. A lean-to can only be drawn along a wall the main roof's edge runs level along: give the lean-to keys only on a two-slope building whose front is a gable end, or on a shed whose high side is left or right. On any other building leave all three lean-to keys out and say in observed.roofNote which wall the lean-to is on.
+
+SIDE WINGS, on a monitor or raised-centre building: a taller CENTRE section with its own roof, flanked along its sides by lower ENCLOSED rooms. Each wing is a real room — walls with siding and often windows, closed in from the front of the building to the back — under its own one-slope roof that falls AWAY from the centre to a lower outer wall. Above the wing roofs the centre section's own side walls carry on up, as a band of siding or a row of small windows, to the centre roof's eave. The wings are inside the size the builder measured: the FRONT wall's length includes them. Give wingSide, which sides carry a wing: "both", or "left" or "right" for one (on a building whose front is an eave wall, wings along the front and back walls are "front" or "back"). Give wingWidthFt, each wing's width from its outer wall in to the centre section's wall, measured against the front wall's known length, which the centre and the wings make up between them. Give wingPitch, the wing roof's rise over run, read from the frame where the wing roof is seen edge-on (square to the front for wings along the sides, square to a side for wings along the front and back): the height where it meets the centre wall, minus the outer wall's height, divided by wingWidthFt. Give centerEaveFt, from the floor to the top of the centre section's walls where its own roof starts, measured against the known wall height, which is the height of the wings' outer walls. Build it from two parts rather than reading it in one guess: first where the wing roof meets the centre wall (the outer wall plus wingWidthFt times wingPitch), then the BAND of centre wall that shows above the wing roof up to the centre's eave, measured in a frame square to the front or the back against the outer wall's height in the same frame (a band half as tall as the outer wall adds half that wall's height). A band holding a row of upper windows needs at least about 4 ft of wall. centerEaveFt is the two added together. Report the centre section's own roof — its type, pitch and front — exactly as you would a building's. Omit all four wing keys on an ordinary building.
+
+WINGS DECISION, REQUIRED: observed.wings must carry one of exactly three answers on EVERY building — "both" for enclosed wings along both sides of a taller centre section, "one" for a single enclosed wing, "none" for a building with no side wings, which is the common case. An open lean-to on posts is "none" here. LOOK AT BOTH SIDES before you answer: the frames square to each side wall, and the back view, where the far wing often shows best. A raised centre with a wing on only one side is uncommon, so answer "one" only when a frame shows the other side's wall running straight up to the centre section's eave with no lower roof against it, and name that frame in observed.roofNote. Answer it even when the answer is "none", and answer it even when you are unsure; say the doubt in observed.roofNote instead of leaving the key out. "both" or "one" obliges you to give wingSide and wingWidthFt.
+
+PORCH ON THE FRONT WALL: a porch decides which wall is the FRONT, so porchEnd is "front" for every porch, and the front wall can be either kind — a gable end, or a long eave wall. A cabin with a porch across its long front is an ordinary case of the second, and everything below applies to both.
+
+PORCH TRUSS: with a porch, look at the TRIANGLE of gable wall directly above the porch opening. If heavy timber beams are fixed across it in a decorative pattern — typically an upright post running from the horizontal header up to the peak, with two diagonal braces angling up to meet it, so the triangle reads as a timber frame rather than as flat siding — set porchTruss true. It is usually raw or stained wood against a painted gable, so it stands out clearly. A plain gable above the porch, even one with a vent in it, is porchTruss false.
+
+PORCH: a covered area recessed INTO the front of the building. The main roof does not change at all: it simply carries on over the porch, and the outer corners are held up by posts instead of walls, on a gable front usually with a decorative timber truss filling the gable above them. Look for the wall with the door standing BACK from the edge of the roof rather than flush with it, so the front of the building is open air under the same roof for the first few feet. Give porchDepthFt as how far the porch eats INTO the building's depth — a 12x24 with an 8 ft porch is still a 12x24, with 16 ft of enclosed room and 8 ft of porch. Typical depths are 4 to 8 feet. If instead the front wall runs full height with the door in it, and the porch stands in front of that wall under a separate lower roof, it is a PROJECTING PORCH, below, and porchDepthFt stays out. A deck with posts along its outer edge, standing in front of a wall that runs full height with the door in it, is PROJECTING, never recessed, however low its roof and however open its sides: recessed means the WALL itself stands back under the main roof. Omit both keys if the building has no porch.
+
+PROJECTING PORCH: a porch built IN FRONT of the front wall instead of cut into it. The wall runs full height behind it, with the door in it, and the main roof stops at that wall exactly as it would with no porch. In front of the wall stands a deck at floor level with posts along its outer edge, covered by its own separate roof: a low, nearly flat slope that starts on the wall and falls away over the posts. From the front you see TWO roof edges, the main roof's and the porch's lower one below it. Three things settle it from the ground, and all three survive a walk-around: the wall runs UNBROKEN from the floor up behind the porch roof, with nothing cut out of it; the porch ceiling is nearly level while the main roof above it is a separate plane; and from the side the porch sticks out PAST the front of the building instead of sitting inside it. Give porchOutFt as how far the posts stand out from the wall, in feet, typically 4 to 8; a porch never changes the building's size. A porch is one kind or the other: if you give porchOutFt, leave porchDepthFt and porchTruss out.
+
+PORCH ROOF HEIGHT, porchAttachFt: where the projecting porch's roof meets the wall, as the height in feet from the floor to the TOP of the porch roof at that wall. Leave it out only when the porch roof starts just under the top of a wall whose top is the known wall height, which is the usual build on a gable end. Give it whenever the wall behind the porch is taller than that — the high wall of a shed, or the centre section of a building with side wings — and whenever a band of wall shows between the porch roof and the main roof's edge above it. Measure it on the wall itself, with a ruler you can trust: the door is 6 ft 8 in tall, so a porch roof meeting the wall about a foot above the top of the door is at about 7.7 ft; or count the siding courses or battens up the wall against the known wall height. On a building with side wings, measure it on the centre section's wall the same way.
+
+PORCH WIDTH, porchWidthFt: give it only when the porch is clearly narrower than the stretch of wall it could cover. That stretch is the whole front wall on an ordinary building, and the CENTRE section alone on a building with side wings. Leave it out when the porch runs the whole front wall, which is the common case, and leave it out when a porch on a winged building runs exactly from one wing to the other, because that is what is drawn without it. Give it when the porch covers only part of that stretch, measured against the front wall's known length; it is drawn centred on that stretch.
+
+PORCH POSTS, porchPosts: count the posts standing along the porch's FRONT edge, the edge farthest from the wall, from the frame most square-on to the front, and include the posts at both corners. A porch with a post at each corner and one in the middle is 3. One at each corner and three between them is 5. Posts that stand beside the door or at the top of the steps count like any other. Count them one by one along the edge before answering. Count posts only, never the wall's corner boards or a handrail's newel. Leave it out when no frame shows the whole front edge.
+
+PORCH ROOF PITCH, porchPitch: the porch roof's OWN slope as rise over run, never the main roof's. Read it from a side frame, where the porch roof's edge is seen square-on: it runs from where the roof meets the wall down to its front edge, so compare how far it drops with how far it runs out from the wall. A porch roof that drops 1 ft over 5 ft of run is 0.2. Build it from two heights rather than judging the angle by eye: the drop is porchAttachFt minus the height of the porch roof's FRONT edge above the floor (read that edge against the posts and the known wall height in the same frame), and the run is porchOutFt, so porchPitch is the drop divided by porchOutFt. A porch roof that meets the wall at 9 ft and whose front edge is 8 ft up, 5 ft out, is (9 - 8) / 5 = 0.2. Leave it out when no frame shows that edge square-on.
+
+PORCH STEPS, porchSteps: where a set of steps leaves the porch's deck along its FRONT edge, as seen standing in front of the porch facing it: "left", "center" or "right", with left and right read the same way as everywhere else in this reply. Decide it in the frame most square-on to the front, by where the MIDDLE of the steps falls between the porch's two front corner posts: in the left third of that span is "left", the middle third "center", the right third "right". When a post stands at the middle of the front edge (an odd number of posts), the steps are never "center": answer "left" or "right" for the side of that middle post they are on. Judge it against the corner posts, never against the door or the middle of the building; steps in front of an off-centre door are still read by the thirds. Leave it out when the porch has no steps, and when its steps leave the deck from one of its sides rather than its front edge.
+
+PORCH DECISION, REQUIRED: observed.porch must carry one of exactly three answers on EVERY building — "projecting" for a porch standing out in front of the front wall under its own lower roof, "recessed" for one cut into the building under the main roof, "none" for a building with no porch. Answer it even when the answer is "none", and answer it even when you are unsure; say the doubt in observed.roofNote instead of leaving the key out. Naming a porch obliges you to give its field: "projecting" means porchOutFt, "recessed" means porchDepthFt and porchEnd. Do not report a porch here and leave its number out of the roof.
+
+DORMER: a small roofed box sitting ON one of the main roof slopes, breaking its line. Give its width, how far it stands above the slope, and how far ACROSS the roof it sits -- measured sideways from the ridge line toward one eave, as a fraction of the half-span, negative for the left side and positive for the right as seen standing in front of the FRONT wall. When the front is an eave wall the two slopes face front and back instead: negative for the back slope, positive for the front one. Omit all three keys if the roof is unbroken, which is the common case.
+
+ROOF STEP: some gable buildings are built in two sections, and the roof shows it. Seen from a long side, a joint runs up the roof from the eave to the ridge, and behind it the rear section's roof edge, its fascia, sits a few inches HIGHER than the front section's, or sometimes lower. The two ridges line up and only the eaves differ, so at the joint there is a small wedge-shaped step between the two roof edges: deepest at the eave, closing to nothing at the ridge. The walls below usually carry straight on, the siding unbroken. A real step shows on BOTH long sides at the same place, so look at the other side before you give it; a step seen on one side only is not a step. Give rearStepFt, how far the joint is from the BACK wall, in feet: count the battens, grooves or panels along the side wall from the back corner to the joint and multiply by their spacing, or measure it as a share of the building's known depth along that wall. Give rearEaveRiseFt, how much higher the rear section's eave is than the front section's, measured at the joint in a frame square to that side: read the step in inches against the known wall height, then divide by 12, so a step of 5 inches is 0.42. Give it as a negative number when the rear section's eave is the lower one. Which one is higher is plain at the joint: the HIGHER section's roof ends there in a narrow wedge-shaped face, and the lower section's roof runs in underneath that face; the higher fascia is the one higher in the frame. For example, a 30 ft deep cabin whose joint stands 12 ft in from the back wall, with the rear eave 5 inches higher, is rearStepFt 12 and rearEaveRiseFt 0.42. Give both keys or neither, and only on a two-slope roof whose front is a gable end. Leave both out when the roof runs unbroken from the front to the back, which is the common case. STEP POINTS, measure.step, only when you give rearStepFt: we work the step's place and height out from these points, so mark them rather than judge. Use ONE frame that shows a whole long side, from its back corner to its front corner, with the joint in view; the more square-on to that side the better. Give that image's own size as size, [width, height], and six points in pixels, x to the RIGHT and y DOWN from the top-left corner: backBase, the foot of that side wall at the BACK corner, where the siding meets the foundation or the ground; frontBase, the foot of the same side at the FRONT corner, the corner of the front wall or, when a porch is recessed under the main roof, the foot of its corner post; jointBase, the foot of the side wall straight below the joint; jointFront, the bottom edge of the FRONT section's fascia right at the joint; jointRear, the bottom edge of the REAR section's fascia right at the joint, so those two sit either side of the joint, one a little above the other; and frontFascia, the bottom edge of the fascia straight above frontBase. Put each on what you see: the higher fascia has the smaller y, whichever section it belongs to. For example, a side in a 1600 by 900 image might read backBase [1420, 610], jointBase [1130, 618], frontBase [260, 650], frontFascia [250, 318], jointFront [1128, 342], jointRear [1134, 334].
+
+COLOURS matter here: the builder compares your drawing with these frames. Give each colour as the paint looks in EVEN daylight: not the side in shadow, which reads darker and bluer than the paint is, and not a face in hard sun, glare or a reflection of the sky, which reads paler. When those are the only faces you have, the paint lies between them, and dark paint stays dark: never report a dark wall's sun-bleached reading as its colour. body is the main wall colour; trim is the window and door casings (the boards framing them, not shutters); roof is the roofing. corner is the vertical boards at the building's corners, and fascia is the boards along the roof edges — along the eaves, up the rakes, and round the porch roof. Look at those two on their own rather than assuming they match the casings, and ALWAYS give both: repeat trim's value only when they really are the casings' colour. They often differ: on board-and-batten and panel siding the corner boards are usually the wall colour, and the fascia is often the roof colour. Leaving corner out draws the corners in the trim colour, which on a dark building with white window casings is a white stripe down every corner. wood is the natural or stained lumber of a porch — posts, deck and rafters — and only when there is a porch. Give each as the #rrggbb you see, not the name of a paint.
+
+FOUNDATION: look at the very bottom of the building, all the way round. "slab" means the walls meet the ground with no gap. "skids" means it sits low on wooden runners lying on the ground or on thin shims, with only a narrow shadow gap under the floor — the normal look for a building that was delivered on a trailer and set down. "blocks" means its runners or beams rest on stacked grey concrete blocks, with a clear gap under the building. "piers" means it stands on concrete piers (round or square concrete posts, often with a wooden beam across their tops), with a clear gap under the building. Omit if the bottom is never visible.
+
+FLOOR HEIGHT, floorHeightFt, with "blocks" or "piers" only: how many feet the TOP of the floor stands above the ground, at the FRONT. The ground often slopes, so read it at the front wall, where the door, the porch and its steps are, and report that. Read it against something whose size you know: a door opening is 6 ft 8 in tall, so compare the gap under the building with the door; a porch deck is at floor level, and each porch or entry step rises about 7 in, so count the risers from the ground up to the deck. Leave it out for "skids" or "slab", and when the bottom of the front wall is never visible.
+
+Ignore every OTHER building in the frames. On a sales lot the subject is usually the one that stays roughly centred as the camera moves around it; neighbours drift past in the background and are often a different model entirely.
+
+FRAME MAP: which image goes with which view of the building. Number the images in the order you were given them, starting at 1, and name the ONE image that best shows each of the six views in frameMap. Count only the walk-around frames and never one of the builder's own photographs, which were taken separately and are not part of the lap. The same image may serve two views. A view you have no good image for should be LEFT OUT: naming an image that does not show it is worse than saying nothing, because that image is about to be put beside a drawing of that view and the builder asked to say whether the two match.
+
+AZIMUTH: for each image you name, where the camera was standing, as an angle around the building to the nearest 45 degrees. 0 is square in front of the FRONT wall. Going from there around the building toward its RIGHT side, 90 is square to the right-hand side wall, 180 is square to the back wall, and 270 is square to the left-hand side wall. Right and left are as seen standing in front of the FRONT wall, facing it, the same way leanToSide, wingSide and dormerOffsetU are read. Answer 0, 45, 90, 135, 180, 225, 270 or 315 and nothing in between -- this is a coarse note of where you stood, not a survey.
+
+MEASURE, measure: the points a gable roof's pitch is worked out from, and the FIRST thing in the reply. Before you settle roof.pitch on a gable, find the frame named for it and write down where the roof's edges are in that image; we work the slope out from these points, so measure them rather than judge the angle. Coordinates are pixels in that one image: x counts to the RIGHT and y counts DOWN, both from the image's top-left corner, so a point higher in the picture has a SMALLER y. Give that image's own size in pixels as size, [width, height]. Put every point on a clear landmark you can see, such as the corner where a rake board meets the eave or the tip of the peak, never where you expect an edge to be. For pitch on a gable roof, use the frame most square-on to a gable end, the one the PITCH paragraph picks, and give three points on the TOP edge of the roof's outline against the sky, the sloping edge of the rake board: left, the outer tip where that sloping edge ends on the left, the last point of the roof's top edge before it turns down; peak, the highest point of that outline at the ridge; right, the same outer tip on the right. Each end is the TIP of the sloping top edge, never the lower corner of the eave, the fascia, the soffit or an eave return below it: those sit lower and make the roof look steeper than it is. Left and right are as they appear in the image. On a building with side wings the gable is the centre section's: its left and right are where the centre roof's rakes meet the centre section's own eaves, never the wing roofs below them. For example, a gable end in a 1600 by 900 image might read left [400, 560], peak [800, 428], right [1200, 562]. Leave measure.pitch out on a one-slope (shed) roof, and on a gambrel, whose shape is the GAMBREL NUMBERS rather than one slope. Leave it out too when no frame shows a gable end square-on. Give roof.pitch as usual either way. WING POINTS, measure.wing, only for a building with enclosed side wings on BOTH sides, the left and the right: the points the wing roofs' slope is worked out from. Use the frame most square-on to the FRONT, give that image's own size as above, and give four points, two on each wing roof's sloping top edge along the front of the building: leftOuter, where the left wing's top edge ends at the building's left outer corner, the outer tip of that edge; leftInner, where that same edge meets the centre section's wall; then rightInner and rightOuter, the same two points on the right wing. They are pixels in that image, x to the RIGHT and y DOWN, like every point above. For example, the wings in a 1600 by 900 image might read leftOuter [300, 560], leftInner [560, 482], rightInner [1040, 480], rightOuter [1300, 559]. Leave measure.wing out on any other building, and give roof.wingPitch as usual either way.
+
+Where the frames genuinely do not settle something, say so in observed and OMIT the key. Omitting a key leaves the builder's existing setting alone, which is better than a typical value they then have to find and undo. Do not fill a field with the middle of its stated range. The exceptions are the decisions marked REQUIRED above: give your best reading of each and put the doubt in observed.roofNote.`;
+
 // ─── The three numbers the builder measured (2026-09-19) ──────────────────────────────────
 // Wall height came back 7 in 74 % of every recorded generation and was never once above 8, on
 // buildings whose walls measure 9. That is not a model reading a wall badly; it is a model with
@@ -522,9 +976,9 @@ export type KnownDims = {
 // to spend $20 telling the model a lie, or to state it in the prompt and then have the sanitiser
 // silently drop it so the spec keeps a value the prompt contradicted.
 //
-// WALL HEIGHT's band is `sanitizeD3Spec`'s OWN accept band (3..20), not its 5..14 clamp, and the
-// gap between the two is deliberate: inside 3..20 the existing clamp does the whole job, exactly
-// as it already does for a model-drafted wall, so there is one clamp rather than two that can
+// WALL HEIGHT's band is `sanitizeD3Spec`'s OWN accept band (3..20), not its 5..20 clamp (5..14
+// until 2026-09-24), and the gap between the two is deliberate: inside 3..20 the existing clamp
+// does the whole job, exactly as it already does for a model-drafted wall, so there is one clamp rather than two that can
 // drift apart. Outside it the sanitiser would DROP the value — the prompt would say 30 ft and
 // the spec would quietly keep the style's old wall — so it is refused here, before any cost.
 const DIM_BANDS: Record<string, [number, number]> = {
@@ -604,28 +1058,377 @@ const dimFt = (n: number): string => String(Math.round(n * 100) / 100);
 // only job is to say so. That identity is what makes this commit deployable while production runs
 // an older browser bundle that cannot send dims: production's requests carry no `dims`, so they
 // take this branch and get byte-for-byte the prompt they got yesterday. Nothing about the no-dims
-// path is re-derived, re-templated or re-worded here; it is returned.
+// path is re-derived, re-templated or re-worded here; it is returned. (Since 2026-09-24 a second
+// test also pins that string's BYTES by hash, because identity alone would pass on an edited base.)
 //
 // WHERE THE BLOCK GOES, and it is not cosmetic: immediately after the FIRST BLANK LINE, inside
 // the body `combinedShapePrompt` inherits. That function replaces everything up to the first
 // blank line and keeps the rest, so a preamble placed above it would be eaten on every combined
 // generation — silently, with a prompt that still reads perfectly well. A test pins it.
 //
-// The wall height is removed from the schema by REPLACEMENT of two exact strings rather than by a
-// regex over the shape. If a future edit rewords either one, the replacement becomes a no-op and
-// the dims prompt would both state the wall as a fact and ask for it as a guess. That is the one
-// failure here that is invisible from the outside, so it is the one the tests assert hardest:
-// they check the dims variant does not contain `wallHeightFt` at all.
+// WITH DIMS AND `v2` (the rollout gate below), THE v2 PROMPT (2026-09-24). The legacy dims path
+// (legacyDimsPrompt) takes the base and cuts the wall height out of it by replacing two exact
+// strings. The v2 prompt is WRITTEN without them — it has no `wallHeightFt` schema line and its
+// WALL HEIGHT paragraph already says the wall is known — so there is nothing left to replace, and
+// the old failure (a reworded line turning the replacement into a no-op) cannot happen there. The
+// tests still assert neither dims prompt names `wallHeightFt`.
+//
+// THE RULER IS IN THE NEW FRAME: W is the FRONT wall (the side with the porch or main door), L the
+// depth front to back, and the wall height is the OUTSIDE walls at the eave — on a one-slope roof
+// the LOW side, with side wings the wings' outer walls. The designer's dimensions card asks for
+// the three in exactly those words, which is what makes them one ruler rather than two.
+export function knownDimsParagraph(dims: KnownDims): string {
+  return `KNOWN DIMENSIONS, MEASURED BY THE BUILDER. The FRONT wall (the side with the porch or main door) is ${dimFt(dims.widthFt)} ft long, the building is ${dimFt(dims.lengthFt)} ft deep front to back, and its outside walls are ${dimFt(dims.wallHeightFt)} ft tall at the eave (on a one-slope roof, the LOW side; with side wings, the wings' outer walls). Those three are facts, not estimates, and they are your ruler: read every proportion you report against them and never against a scale of your own. Where one of them already answers a question, do not re-estimate it from a door, a person or a typical building.`;
+}
+
+// ─── THE ROLLOUT GATE (2026-09-24) ───────────────────────────────────────────────────────────
+// Beta and production share ONE set of edge functions, and production runs an OLDER browser
+// bundle that already sends dims — read in the OLD frame: its dimensions card says the width is
+// "across the gable end". Handing that bundle the v2 prompt would state a builder's numbers in a
+// frame they were not typed in. So v2 is chosen by the REQUEST, not by the deploy: only a caller
+// that says `frame: "front"` (the new designer, whose dimensions card asks for the FRONT wall) AND
+// sends dims gets it. Every other request keeps exactly the path it had before this change —
+// the legacy prompt with no dims, and with dims the legacy prompt with the old ruler spliced in
+// (legacyDimsPrompt below, frozen and pinned by hash).
+export const PROMPT_FRAME_FRONT = "front";
+export function wantsV2Prompt(frame: unknown, dims: KnownDims | null | undefined): boolean {
+  return frame === PROMPT_FRAME_FRONT && !!dims;
+}
+
+// ─── THE STREAMED DRAFT (2026-09-25) ─────────────────────────────────────────────────────────
+// Whether calibrate_style_ai answers this request behind a heartbeat (heartbeatJson.ts), so its
+// draft can run past the gateway's 150 s of silence and its reads can think at effort "high".
+// Decided from the request alone and BEFORE the branch runs, because the 200 has to go out before
+// the work starts, and decided with the functions the branch itself uses for the same questions:
+//   * `stream: true`, a real boolean: the new portal shell's opt-in. Production's older shell never
+//     sends it, so every request it makes is answered exactly as before.
+//   * not `lean: true`: the one automatic retry after a cut-off or timed-out read is a single,
+//     shallow read that fits the old budget, and it keeps that budget.
+//   * the v2 prompt: a shape-first source (video, combined) whose dims parse, with frame "front"
+//     (wantsV2Prompt above). A request whose dims do not parse is refused with a 400 before anything
+//     slow runs, so it is not streamed.
+// aiDraftStreamWiring_test runs this against the branch's own v2Prompt and lean over a grid of
+// requests, so the two cannot disagree about which requests stream.
+export function wantsStreamedDraft(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const p = payload as Record<string, unknown>;
+  if (p.stream !== true || p.lean === true) return false;
+  if (p.source !== "video" && p.source !== "combined") return false;
+  const dims = parseKnownDims(p.dims);
+  return dims.ok && wantsV2Prompt(p.frame, dims.dims);
+}
+
+// ─── THE PLATFORM'S WALL CLOCK IS A WORKER'S, NOT A REQUEST'S (fix, 2026-09-26) ──────────────
+// 400 s is how long a WORKER lives on the paid plan (Supabase's limits page), and one worker serves
+// many requests. edge-runtime's per_worker supervisor (strategy_per_worker.rs) retires a worker at
+// HALF its wall clock, 200 s, after which the pool (pool.rs) routes no new request to it, and ends it
+// at 400 s (ShutdownReason::WallClockTime) whether or not a request is still in flight. So a request
+// that lands on a worker A seconds old (0 <= A < 200) is killed 400 - A seconds after it arrived. A
+// streamed draft usually lands on a warm worker: the designer calls portal-settings just before
+// every press (style_photo_upload_url, save_style_media). The live probe of 2026-09-25 that ran
+// 220 s and answered whole ran on a fresh one.
+//
+// Until this fix every streamed clock counted from the request alone, as if the request had the
+// whole 400 s, so a press on a worker 100 s old could be killed mid-read: its body cut off after
+// the 200 had gone out, its ledger row left without draft_ms, and the pickup saying "lost" only at
+// the end of its wait. Nothing here can move the 400 s. Every streamed clock now stops inside BOTH
+// the request's own budget and its worker's life (streamedDraftBudgetMs, streamedDraftDeadlineMs).
+export const EDGE_WALL_CLOCK_MS = 400_000;
+
+// ─── HOW LONG A STREAMED ANSWER MAY STAY OPEN (2026-09-25; 360 s since the reads got 300 s) ──
+// Measured from the request's arrival (portal-settings' requestStartMs), and never later than 40 s
+// before the worker's end (streamedDraftDeadlineMs below arms the watchdog with both). The reads get
+// at most min(300 s, 330 s - set-up) and, unless their 60 s floor decides (only after a set-up over
+// 65 s, see streamedDraftBudgetMs), end at least 75 s before the worker does: done by 330 s after
+// the request and 35 s or more before the watchdog. The capture, the ledger write and the answer
+// normally take seconds after that, which leaves 30 s of room for a slow database. Past this the
+// answer is closed with heartbeatJson's `stream_deadline` body and the work runs on behind it, with
+// 40 s more before its worker's wall clock (EDGE_WALL_CLOCK_MS) stops it for good. It was 300 s
+// while the reads had 230 s of 260 s; live on 2026-09-25 the reads needed more (8 presses in 12 had
+// a read cut at 230 s), and this moved with them.
+export const DRAFT_STREAM_DEADLINE_MS = 360_000;
+
+// ─── THE STREAMED CLOCKS, FROM THE REQUEST AND FROM THE WORKER (fix, 2026-09-26) ─────────────
+// Pure, so they are tested on their own (workerClock.test.ts), and portal-settings only hands them
+// its clocks: `requestStartMs` (the handler's first line), `t0` or `now`, and `workerBornMs`, its
+// WORKER_BORN_MS, read once when the module is evaluated. That is a moment after the worker's own
+// clock started (the isolate's boot, ~2.5 s cold); the margins below are tens of seconds.
+//
+// THE READS' BUDGET, from t0 (where the model's clock starts):
+//   max(60 s, min(300 s, 330 s - set-up, the worker's end - 75 s - t0))
+// The first three terms are the rule of 2026-09-25, unchanged. The fourth ends the reads 75 s before
+// the worker does: room for the consensus, the capture, the ledger writes and the answer. On a fresh
+// worker after an ordinary set-up (under 25 s) it takes nothing away: 300 s, as before. On a warm
+// worker it cuts the reads short, and a read cut short is an abort the draft already handles (the
+// consensus goes on with the reads that finished; with none, the press answers a retryable timeout
+// and releases its hold), where a worker killed mid-read loses the whole answer.
+// The 60 s floor never beats the worker term in practice: a routed worker is under 200 s old when the
+// request arrives, so at t0 the worker term is over 125 s less the set-up, and the floor decides only
+// after a set-up over 65 s. Nothing before t0 takes that long (its slowest step, the auto top-up,
+// stops at nmiPost's 30 s).
+export const STREAMED_READS_WORKER_MARGIN_MS = 75_000;
+export function streamedDraftBudgetMs(at: { t0: number; requestStartMs: number; workerBornMs: number }): number {
+  return Math.max(60_000, Math.min(
+    300_000,
+    330_000 - (at.t0 - at.requestStartMs),
+    at.workerBornMs + EDGE_WALL_CLOCK_MS - STREAMED_READS_WORKER_MARGIN_MS - at.t0,
+  ));
+}
+
+// THE ANSWER'S WATCHDOG, from `now` (when draftAnswer arms it):
+//   min(DRAFT_STREAM_DEADLINE_MS - time since the request, the worker's end - 40 s - now)
+// and never under STREAMED_DEADLINE_FLOOR_MS. The worker term closes the answer with its whole
+// `stream_deadline` body 40 s before the worker ends, so the browser goes to the pickup instead of
+// reading a body cut off mid-space. A worker is never born after a request it serves arrived, so the
+// worker term is never the larger: on a fresh worker the two are the same 360 s, and on a warm one
+// the worker's decides. The floor is for a clock that says the worker is already past its end (a
+// routed one cannot be); a watchdog of a second still answers with a whole body.
+export const STREAMED_DEADLINE_WORKER_MARGIN_MS = 40_000;
+export const STREAMED_DEADLINE_FLOOR_MS = 1_000;
+export function streamedDraftDeadlineMs(at: { now: number; requestStartMs: number; workerBornMs: number }): number {
+  return Math.max(STREAMED_DEADLINE_FLOOR_MS, Math.min(
+    DRAFT_STREAM_DEADLINE_MS - (at.now - at.requestStartMs),
+    at.workerBornMs + EDGE_WALL_CLOCK_MS - STREAMED_DEADLINE_WORKER_MARGIN_MS - at.now,
+  ));
+}
+
+// ─── ONE PRESS'S KEY, CUT ONE WAY (253, 2026-09-25) ──────────────────────────────────────────
+// The browser mints one idempotency key per press (calIdemRef) and sends it with the press.
+// calibrate_style_ai files the wallet hold under it (wallet_hold's p_idem) and, since 253, writes it
+// onto the press's ledger row (ai_style_calls.idem_key), and calibrate_style_ai_recover finds that
+// row and that hold by it. Three readers, so one function: a key cut two ways would find nothing.
+// Exactly the expression the hold always used: String(), the first 120 characters, empty is none.
+export function draftIdemKey(raw: unknown): string | null {
+  return String(raw ?? "").slice(0, 120) || null;
+}
+
+// ─── PICKING A STREAMED DRAFT UP AFTER THE CONNECTION DROPPED (2026-09-25, BY KEY SINCE 253) ──
+// A streamed draft runs up to five and a half minutes, and a phone that backgrounds the tab, or a
+// network that blinks, drops the answer while the server is still working (or after it has finished
+// and charged). Asking again under the same key cannot help: with the meter off (today) it runs the
+// model a second time, and with it on the hold refuses it (hold_in_flight; already_charged only
+// once 248 is applied). But the server writes what it drafted onto the ledger row (226), so the
+// browser reads it back: calibrate_style_ai_recover.
+//
+// ⚠️ THE PRESS IS FOUND BY ITS KEY, NEVER BY TIME. The first cut matched "the newest row of this
+// tenant, user and style since the press began" and guessed the money from timing, and a review
+// confirmed all four ways that goes wrong (253's header): a drop noticed after the budget never
+// asked; a slow poll's clock correction started the window after the row; a captured hold could be
+// told "not charged"; and a LATER press on another tab could be returned. So there is no `since`,
+// no clock and no window any more. The browser mints ONE idempotency key per press (calIdemRef) and
+// sends it with the press; the ledger row carries it (253's idem_key) and wallet_hold files the hold
+// under it (128's idempotency_key). The recover action reads THAT press's rows and THAT press's
+// money, both by the key, both scoped to the tenant and user the server resolved itself.
+
+// How long a row with no draft is still worth waiting on WHEN THE WALLET HAS NO WORD ON IT (the
+// meter is inactive, which is every tenant today): the platform's 400 s wall clock, counted from
+// the row's called_at, which is never before the request arrived. That clock is the WORKER's, and a
+// worker is ended 400 s after its birth, which was no later than the request's arrival: so no worker
+// serving the press is still running 400 s after called_at. The work runs on past its answer's
+// deadline, but a row still without draft_ms by then will never get a draft: its worker was ended
+// under it (recoverDraftAnswer's `stale`, an error row since 2026-09-26). A healthy draft writes
+// draft_ms when its reads end, by 330 s, well inside.
+// ⚠️ THE WALL CLOCK ITSELF, NOT THE DEADLINE PLUS SOMETHING: it was written as the deadline plus
+// 100 s while those added up to 400 s, and moving the deadline to 360 s must not stretch it past a
+// limit no worker can outlive.
+export const DRAFT_RECOVER_PENDING_MS = EDGE_WALL_CLOCK_MS;
+// How long a draft may trail the write that says the work is over. NOT a money decision: the
+// sentence about money always comes from the wallet's own state. It only decides whether to keep
+// waiting. On a success the usage write (draft_ms, started without await) and the capture land a
+// moment before `drafted` (one or two round trips), so a row caught in between has finished and
+// is about to show its draft. Every failure exit writes draft_ms and never writes `drafted`, and
+// releases its hold.
+export const DRAFT_RECOVER_SETTLE_MS = 90_000;
+// A key owns one row per attempt: the press, the builder's own retry of a press that failed (the
+// key is kept until a draft lands), the lean retry. More than this under one key is not a press
+// being picked up.
+export const DRAFT_RECOVER_MAX_ROWS = 20;
+
+// The ledger rows calibrate_style_ai_recover reads (select these columns, nothing else).
+export const DRAFT_RECOVER_COLUMNS = "id, called_at, source, drafted, observed, frames, video_count, dims, draft_ms, frame_map";
+export type DraftRecoverRow = {
+  id: string;
+  called_at: string;
+  source: unknown;
+  drafted: unknown;
+  observed: unknown;
+  frames: unknown;
+  video_count: unknown;
+  dims: unknown;
+  draft_ms: unknown;
+  frame_map: unknown;
+};
+// And the press's wallet rows (wallet_transactions under the same key).
+export const DRAFT_RECOVER_MONEY_COLUMNS = "state, posted_at";
+export type DraftRecoverMoneyRow = { state: unknown; posted_at: unknown };
+
+const hasDraft = (r: DraftRecoverRow) => r.drafted !== null && r.drafted !== undefined;
+const calledMsOf = (r: DraftRecoverRow) => {
+  const ms = Date.parse(String(r.called_at ?? ""));
+  return Number.isFinite(ms) ? ms : -Infinity;
+};
+
+// Which of the key's rows answers: the NEWEST, drafted or not. A key can own several (a failed
+// attempt, then the retry of the same intent), and the newest is the attempt the browser is
+// waiting on. Sorted here rather than trusted from the query's order, so the choice is this
+// function's.
+export function pickRecoverRow(rows: DraftRecoverRow[] | null | undefined): DraftRecoverRow | null {
+  const list = (Array.isArray(rows) ? rows : []).filter((r) => r && typeof r === "object");
+  if (!list.length) return null;
+  return [...list].sort((a, b) => calledMsOf(b) - calledMsOf(a))[0];
+}
+
+// Whether the answer will be a recovered draft: the row's `drafted` is our own sanitised spec,
+// read back. When it is not (no row, no draft yet, or a value that is not a spec) the answer is
+// about money, so the handler reads the wallet exactly when this is false.
+export function isRecoverableDraft(row: DraftRecoverRow | null): boolean {
+  if (!row || !hasDraft(row)) return false;
+  const d3 = row.drafted;
+  return typeof d3 === "object" && !Array.isArray(d3) && sanitizeD3Spec(d3).ok;
+}
+
+// What the press's money is doing, from its own wallet rows (128: a hold is a 'held' debit, a
+// capture turns it 'posted', a release 'released'; after 248 a key can own several released rows
+// and at most one that is not). Captured beats held beats released, because one row per attempt
+// and only the latest attempt can still be running. No rows at all is the meter being inactive
+// (every tenant today) or a press refused before its hold. Any other state is not ours to guess.
+export type DraftMoney =
+  | { kind: "captured"; postedMs: number | null }
+  | { kind: "held" }
+  | { kind: "released" }
+  | { kind: "none" }
+  | { kind: "unknown" };
+export function draftMoneyState(rows: DraftRecoverMoneyRow[] | null | undefined): DraftMoney {
+  const list = Array.isArray(rows) ? rows.filter((r) => r && typeof r === "object") : [];
+  if (!list.length) return { kind: "none" };
+  const posted = list.filter((r) => r.state === "posted");
+  if (posted.length) {
+    const times = posted.map((r) => Date.parse(String(r.posted_at ?? ""))).filter((ms) => Number.isFinite(ms));
+    return { kind: "captured", postedMs: times.length ? Math.max(...times) : null };
+  }
+  if (list.some((r) => r.state === "held")) return { kind: "held" };
+  if (list.every((r) => r.state === "released")) return { kind: "released" };
+  return { kind: "unknown" };
+}
+
+export type DraftRecoverAnswer =
+  | { kind: "draft"; code: string; severity: "info"; body: Record<string, unknown> }
+  | { kind: "pending"; body: { ok: true; pending: true } }
+  | {
+    kind: "lost";
+    code: string;
+    severity: "info" | "error";
+    why: string;
+    body: { ok: true; pending: false; reason: string; message: string };
+  };
+
+// The three sentences a builder can be given, each true for the money state it is chosen by.
+const RECOVER_NOT_CHARGED = "We could not pick the draft up from the server: that generation did not finish, so you are not charged for it. Press Generate to try again.";
+const RECOVER_CHARGED_LOST = "That generation finished and was charged once, but its draft could not be saved for pickup, so it is gone. You have not been charged twice. Reload this page before pressing Generate again; the next press will be a new charge.";
+const RECOVER_UNSURE = "We could not pick the draft up from the server. A generation is only ever charged once, never twice. Reload this page before pressing Generate again.";
+function lostSentence(money: DraftMoney): { message: string; severity: "info" | "error" } {
+  if (money.kind === "captured") return { message: RECOVER_CHARGED_LOST, severity: "error" };
+  if (money.kind === "released" || money.kind === "none") return { message: RECOVER_NOT_CHARGED, severity: "info" };
+  return { message: RECOVER_UNSURE, severity: "error" };
+}
+
+// The frame map read back off the row, through the parser that made it: the same six viewpoints,
+// the same integer frames bounded by the walk frames that request sent (all of them on "video";
+// the leading `video_count` on "combined", whose trailing images are the builder's photographs),
+// the same azimuths. Our own write, so this changes nothing, but a row is data and is checked.
+function frameMapOfRow(row: DraftRecoverRow): FrameMap | null {
+  const raw = row.frame_map;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const bound = row.source === "combined" ? num(row.video_count) : num(row.frames);
+  return parseFrameMap(JSON.stringify({ frameMap: raw }), bound ?? 0);
+}
+
+// What the recover action answers, for the row pickRecoverRow chose (null: the key has none) and
+// the money draftMoneyState read under the same key.
+//   * DRAFTED: the body calibrate_style_ai's success answered with, rebuilt from the row, field for
+//     field and in the same order, plus `recovered: true`. `frameMap` is the row's own (253), so the
+//     free self-check RUNS on a recovered draft exactly as on a live answer; it is null on a row
+//     written before 253, when the reply carried no map, and on a row older than the check's claim
+//     window (SELF_CHECK_CLAIM_WINDOW_MS, whose claim would refuse it), and then the designer skips
+//     the check and says why. `dropped` is null (the browser knows what it sent) and `balanceCents`
+//     null, as a response that took no money back to the browser always has. Money is not read.
+//   * NO DRAFT, by what the money says:
+//       captured  charged. Pending for DRAFT_RECOVER_SETTLE_MS after the capture (the draft is
+//                 written a moment after it), then "charged once, and lost" -- an error row.
+//       held      the work is still running: pending.
+//       released  the draft failed and its hold went back: not charged.
+//       none      nothing was held (the meter is inactive, or the press was refused), so "not
+//                 charged" is true whatever happened, and only the ledger says whether to wait:
+//                 draft_ms written means the work ended (pending for the settle window, then
+//                 failed); no draft_ms is pending until the 400 s wall clock, then lost as
+//                 `stale`: the reads never ended, so the worker was ended under them, and that
+//                 is filed as an ERROR row (2026-09-26; it was info until then). The builder's
+//                 sentence is still the money's: nothing was held, so "not charged" stays true.
+//   * NO ROW for the key: `reason: "no_row"`. Not an answer the shell acts on at once: its press's
+//     insert may not have landed, so it keeps asking for 90 s from the press. The sentence is
+//     chosen by the money like any other.
+//   Every `lost` body carries `reason` (why) beside its sentence.
+export function recoverDraftAnswer(row: DraftRecoverRow | null, money: DraftMoney, nowMs: number): DraftRecoverAnswer {
+  const lost = (why: string, said = lostSentence(money)): DraftRecoverAnswer => ({
+    kind: "lost", code: "ai_draft_recover_none", severity: said.severity, why,
+    body: { ok: true, pending: false, reason: why, message: said.message },
+  });
+  const pending: DraftRecoverAnswer = { kind: "pending", body: { ok: true, pending: true } };
+  if (!row) return lost("no_row");
+  if (isRecoverableDraft(row)) {
+    const dims = parseKnownDims(row.dims);
+    const checkable = nowMs - calledMsOf(row) < SELF_CHECK_CLAIM_WINDOW_MS;
+    return {
+      kind: "draft", code: "ai_draft_recovered", severity: "info",
+      body: {
+        ok: true,
+        d3: row.drafted,
+        frames: typeof row.frames === "number" ? row.frames : null,
+        dropped: null,
+        observed: row.observed ?? null,
+        balanceCents: null,
+        dims: dims.ok ? dims.dims : null,
+        frameMap: checkable ? frameMapOfRow(row) : null,
+        checkId: row.id,
+        recovered: true,
+      },
+    };
+  }
+  // A draft that is not our own sanitised write is a fault, never a draft to apply.
+  if (hasDraft(row)) {
+    const said = lostSentence(money);
+    return lost("unreadable", { message: said.message, severity: "error" });
+  }
+  if (money.kind === "captured") {
+    // Charged, and the draft has not reached the row. A moment behind the capture on a success;
+    // past the settle window the capture ran and the 226 write did not (ai_style_result_log_failed).
+    const settled = money.postedMs === null || nowMs - money.postedMs > DRAFT_RECOVER_SETTLE_MS;
+    return settled ? lost("charged_unsaved") : pending;
+  }
+  if (money.kind === "held") return pending;
+  if (money.kind === "released") return lost("failed");
+  if (money.kind === "unknown") return lost("money_unknown");
+  // Nothing held under this key: the ledger alone says whether a draft can still come.
+  const calledMs = calledMsOf(row);
+  const ageMs = Number.isFinite(calledMs) ? nowMs - calledMs : Infinity;
+  const draftMs = typeof row.draft_ms === "number" && Number.isFinite(row.draft_ms) ? row.draft_ms : null;
+  if (draftMs !== null) return ageMs > draftMs + DRAFT_RECOVER_SETTLE_MS ? lost("failed") : pending;
+  if (ageMs < DRAFT_RECOVER_PENDING_MS) return pending;
+  // Past the wall clock with no draft_ms: the worker was ended under the reads. A fault, filed as
+  // an error; the sentence stays the one the money chooses.
+  return lost("stale", { message: lostSentence(money).message, severity: "error" });
+}
+
+// THE LEGACY RULER, EXACTLY AS IT SHIPPED ON 2026-09-19 (d3ab404), for callers the gate keeps on
+// the old path. Frozen: the ruler speaks the old frame ("wide across the gable end") because that
+// is the frame the old dimensions card asked in, and the wall height is cut out of the legacy
+// schema by replacing two exact strings. styleD3.test.ts pins the output by SHA-256 and asserts
+// neither replacement has become a no-op, which is the one failure here invisible from outside.
 const WALL_HEIGHT_SCHEMA_LINE = `  "wallHeightFt": <wall height at the eave, typically 6-10; a door is about 6 ft 8 in, use it for scale>,\n`;
 const WALL_HEIGHT_PARAGRAPH = `WALL HEIGHT: the wall at the eave, not at the peak.`;
-
-export function videoShapePrompt(dims?: KnownDims | null): string {
-  if (!dims) return VIDEO_SHAPE_BASE;
+function legacyDimsPrompt(dims: KnownDims): string {
   const known = `KNOWN DIMENSIONS, MEASURED BY THE BUILDER. This building is ${dimFt(dims.widthFt)} ft wide across the gable end, ${dimFt(dims.lengthFt)} ft long down the side, and its wall is ${dimFt(dims.wallHeightFt)} ft high at the eave. Those three are facts, not estimates, and they are your ruler: read every proportion you report against them and never against a scale of your own. Where one of them already answers a question, do not re-estimate it from a door, a person or a typical building.`;
   const cut = VIDEO_SHAPE_BASE.indexOf("\n\n");
-  // Defensive only: the base opens with a paragraph and a blank line, and has since it was
-  // written. Returning the base unchanged is the safe direction if that ever stops being true —
-  // a prompt with no ruler is the behaviour we have today, not a new failure.
   if (cut < 0) return VIDEO_SHAPE_BASE;
   const withKnown = `${VIDEO_SHAPE_BASE.slice(0, cut)}\n\n${known}${VIDEO_SHAPE_BASE.slice(cut)}`;
   return withKnown
@@ -634,6 +1437,18 @@ export function videoShapePrompt(dims?: KnownDims | null): string {
       WALL_HEIGHT_PARAGRAPH,
       "WALL HEIGHT: already known — the builder measured it and it is stated above. Do not estimate it, do not report it, and do not bend the other numbers to fit some other wall height.",
     );
+}
+
+// `v2` is wantsV2Prompt's answer for the request. With no dims it cannot matter: the legacy base.
+export function videoShapePrompt(dims?: KnownDims | null, v2 = false): string {
+  if (!dims) return VIDEO_SHAPE_BASE;
+  if (!v2) return legacyDimsPrompt(dims);
+  const cut = VIDEO_SHAPE_V2.indexOf("\n\n");
+  // Defensive only: v2 opens with a paragraph and a blank line, and a test pins it. If that ever
+  // stopped being true, the ruler would have nowhere safe to go, and a v2 prompt whose WALL HEIGHT
+  // paragraph says "stated above" over nothing is worse than the legacy prompt, which asks.
+  if (cut < 0) return VIDEO_SHAPE_BASE;
+  return `${VIDEO_SHAPE_V2.slice(0, cut)}\n\n${knownDimsParagraph(dims)}${VIDEO_SHAPE_V2.slice(cut)}`;
 }
 
 // The constant every existing caller and every existing test still imports. Same name, same
@@ -678,20 +1493,22 @@ export function applyKnownDims(raw: unknown, dims?: KnownDims | null): unknown {
 
 // The one thing a builder's own number can still lose to, said out loud.
 //
-// `sanitizeD3Spec` clamps a wall to 5..14 ft because that is what the renderer can draw. Inside
-// parseKnownDims's 3..20 band there is room to type a 16 that comes back as a 14, and a silent
-// clamp on a number the builder MEASURED is the worst kind: they typed it, they can see the
-// preview is wrong, and nothing on screen connects the two. Composed into `roofNote` beside the
-// gambrel and porch warnings, so it reaches production's older panel with no browser change.
+// `sanitizeD3Spec` clamps a wall to 5..WALL_HEIGHT_MAX_FT because that is what the renderer can
+// draw. Inside parseKnownDims's 3..20 band there is room to type a number that comes back
+// different (until 2026-09-24 a 16 came back as a 14; since the top rose to 20, only a wall under
+// 5 ft still can), and a silent clamp on a number the builder MEASURED is the worst kind: they
+// typed it, they can see the preview is wrong, and nothing on screen connects the two. Composed
+// into `roofNote` beside the gambrel and porch warnings, so it reaches production's older panel
+// with no browser change.
 //
 // Only the wall height can clamp. Width and length are never stored, and `overhangIn`'s 0..36
 // band divides into exactly CLAMPS.overhang's 0..3 ft.
 export function knownDimsNote(dims?: KnownDims | null): string | null {
   if (!dims) return null;
   const h = dims.wallHeightFt;
-  const drawn = Math.min(14, Math.max(5, h));
+  const drawn = Math.min(WALL_HEIGHT_MAX_FT, Math.max(5, h));
   if (drawn === h) return null;
-  return `Check the wall height before saving: you gave ${dimFt(h)} ft, and the 3D can only draw a wall between 5 and 14 ft, so it has been drawn at ${dimFt(drawn)} ft.`;
+  return `Check the wall height before saving: you gave ${dimFt(h)} ft, and the 3D can only draw a wall between 5 and ${WALL_HEIGHT_MAX_FT} ft, so it has been drawn at ${dimFt(drawn)} ft.`;
 }
 
 // A combined set is NOT what VIDEO_SHAPE_PROMPT describes, and saying so matters. That prompt
@@ -712,10 +1529,10 @@ export function knownDimsNote(dims?: KnownDims | null): string | null {
 // the part of the body that starts there, so the ruler survives the splice for free and there is
 // no second copy of it to write. A TWO-ARGUMENT CALL IS BYTE-IDENTICAL TO TODAY, which is what
 // lets this deploy while production's browser bundle has never heard of dims.
-export function combinedShapePrompt(videoCount: number, photoCount: number, dims?: KnownDims | null): string {
+export function combinedShapePrompt(videoCount: number, photoCount: number, dims?: KnownDims | null, v2 = false): string {
   const v = Math.max(0, Math.floor(videoCount || 0));
   const p = Math.max(0, Math.floor(photoCount || 0));
-  const base = videoShapePrompt(dims);
+  const base = videoShapePrompt(dims, v2);
   if (!v) return base;
   const cut = base.indexOf("\n\n");
   if (cut < 0) return base;
@@ -725,7 +1542,11 @@ export function combinedShapePrompt(videoCount: number, photoCount: number, dims
   const tail = p
     ? ` The REMAINING ${p} ${shots} the builder took deliberately, standing back from one side at a time. They are sharper and better framed than the video frames, so prefer them wherever the two disagree - but they are NOT part of the walk and are not in walk order.`
     : "";
-  return `These images are all of ONE portable building (a shed or barn), from two sources.\n\nThe FIRST ${v} ${frames} cut out of one continuous walk-around video, in walk order, so consecutive frames are adjacent viewpoints.${tail}${rest}`;
+  // The v2 body names its subject more widely (a raised-centre HOUSE is one of the two buildings
+  // it was built for, and "a shed or barn" primes barn answers for it), so its combined opening
+  // does too. Only where the v2 body is what follows: the legacy opening is pinned by hash.
+  const subject = v2 && dims ? "a shed, barn, cabin or small house" : "a shed or barn";
+  return `These images are all of ONE portable building (${subject}), from two sources.\n\nThe FIRST ${v} ${frames} cut out of one continuous walk-around video, in walk order, so consecutive frames are adjacent viewpoints.${tail}${rest}`;
 }
 
 // ─── overhangIn: the prompt asks in inches, the renderer stores feet (2026-09-19) ─────────
@@ -773,12 +1594,18 @@ export function foldOverhangInches(raw: unknown): unknown {
 // beat a measured one, and moving either after the sanitiser would mean a second set of clamps.
 // With no `dims` the middle step is the identity by reference, so an old caller's spec is the
 // same object it has always been.
-export function parseModelSpec(text: string, dims?: KnownDims | null): { ok: true; d3: D3Spec } | { ok: false; error: string } {
+//
+// `measure` (2026-09-26) is the v2 draft's: the sanitised spec then takes the gable pitch the reply's
+// own points give (applyMeasuredPitches), exactly as readDraftReply's reading of the same text does.
+// Off, which is every other caller, this is the function it always was.
+export function parseModelSpec(text: string, dims?: KnownDims | null, measure = false): { ok: true; d3: D3Spec } | { ok: false; error: string } {
   const m = String(text || "").match(/\{[\s\S]*\}/);
   if (!m) return { ok: false, error: "The model did not return a spec." };
   let parsed: unknown;
   try { parsed = JSON.parse(m[0]); } catch { return { ok: false, error: "The model returned malformed JSON." }; }
-  return sanitizeD3Spec(applyKnownDims(foldOverhangInches(parsed), dims));
+  const clean = sanitizeD3Spec(applyKnownDims(foldOverhangInches(parsed), dims));
+  if (!measure || !clean.ok) return clean;
+  return { ok: true, d3: applyMeasuredPitches(clean.d3, text, dims?.lengthFt).d3 };
 }
 
 // ─── Reading a Messages API reply (2026-09-17) ───────────────────────────────────────────
@@ -836,13 +1663,19 @@ export function modelReplyText(data: unknown): ModelReply {
 // in the same sense as the rest — nothing is stored from it and sanitizeD3Spec drops the whole
 // block — but it is held to a three-word vocabulary, exactly as `confidence` is, so a model
 // that answers in a sentence cannot be mistaken for one that answered the question.
-const OBSERVED_KEYS = ["roofNote", "porch", "eave", "doors", "windows", "vents", "confidence"] as const;
+// `wings` (2026-09-24) is the second key read back the same way: the v2 prompt forces it to one of
+// three words and wingsAgreementWarning checks it against the wing keys the same reply drafted.
+const OBSERVED_KEYS = ["roofNote", "porch", "wings", "eave", "doors", "windows", "vents", "confidence"] as const;
 export type ObservedNotes = Partial<Record<typeof OBSERVED_KEYS[number], string>>;
 
 // The three answers the prompt forces observed.porch to, and the only three the agreement
 // check understands. Exported because the same vocabulary has to appear in the prompt test.
 export const OBSERVED_PORCH_KINDS = ["projecting", "recessed", "none"] as const;
 export type PorchKind = typeof OBSERVED_PORCH_KINDS[number];
+// The same for observed.wings. "one" rather than a side: WHICH side is the roof's business
+// (roof.wingSide) and the note is only the headcount the geometry can be checked against.
+export const OBSERVED_WING_KINDS = ["both", "one", "none"] as const;
+export type WingKind = typeof OBSERVED_WING_KINDS[number];
 
 export function parseObservedNotes(text: string): ObservedNotes | null {
   const m = String(text || "").match(/\{[\s\S]*\}/);
@@ -867,6 +1700,12 @@ export function parseObservedNotes(text: string): ObservedNotes | null {
     const p = out.porch.toLowerCase();
     if ((OBSERVED_PORCH_KINDS as readonly string[]).includes(p)) out.porch = p;
     else delete out.porch;
+  }
+  // The same rule for the wings answer, for the same reason: a sentence is not one of three words.
+  if (out.wings) {
+    const w = out.wings.toLowerCase();
+    if ((OBSERVED_WING_KINDS as readonly string[]).includes(w)) out.wings = w;
+    else delete out.wings;
   }
   return Object.keys(out).length ? out : null;
 }
@@ -902,7 +1741,18 @@ export function parseObservedNotes(text: string): ObservedNotes | null {
 // this is a handful of small integers — and NEVER stored in `d3`: sanitizeD3Spec rebuilds from
 // known keys, so a `frameMap` in a model reply is dropped on the way to the column and
 // production's older renderer cannot see it. No additive-key rule is touched.
-export const FRAME_MAP_VIEWPOINTS = ["front", "side", "eaveCorner", "corner"] as const;
+//
+// SIX, NOT FOUR (v2, 2026-09-24). The four originals see the front and ONE side, so the far
+// side and the back were never compared -- and that is exactly where the two buildings v2 was
+// built for differ from their drafts: the Tri Home's second wing is on the far side, and a
+// shed's tall wall is as often the back as the front. `back` looks square at the wall opposite
+// the front (azimuth front + 180) and `otherSide` square at the side wall opposite `side`.
+// APPENDED, never interleaved: this order is the canonical order selfCheckPairs presents pairs
+// in, and an older browser that only knows the first four must keep getting them in the order
+// it always has. The v2 first-pass prompt's frameMap schema names all six (VIDEO_SHAPE_V2; the
+// legacy VIDEO_SHAPE_BASE is frozen byte-for-byte with the original four, and a legacy reply simply
+// has no back/otherSide to pair). styleD3.test.ts pins both against this list.
+export const FRAME_MAP_VIEWPOINTS = ["front", "side", "eaveCorner", "corner", "back", "otherSide"] as const;
 export type FrameMapViewpoint = typeof FRAME_MAP_VIEWPOINTS[number];
 export type FramePick = { frame: number; azimuthDeg: number };
 export type FrameMap = Partial<Record<FrameMapViewpoint, FramePick>>;
@@ -943,6 +1793,411 @@ export function parseFrameMap(text: string, videoCount: number): FrameMap | null
     out[k] = { frame, azimuthDeg: (Math.round(norm / 45) * 45) % AZIMUTH_LAP };
   }
   return Object.keys(out).length ? out : null;
+}
+
+// ─── A gable's pitch, worked out from the reply's own points (2026-09-26) ────────────────────
+// The v2 prompt asks for `measure`, first in the reply: the image a gable's pitch was read in, that
+// image's size, and three pixel points along the top of the roof (x to the right, y DOWN from the
+// top-left corner). The slope is then arithmetic done here, not a judgement made by the model,
+// which is what it was doing when live reads put a 0.41 gable at 0.45 to 0.8 (VIDEO_SHAPE_V2's
+// header has the numbers).
+//
+// NOTHING HERE IS REPAIRED. pitchFromMeasure answers a pitch or null, and null means "keep the
+// model's own number", which is what every draft did before this. So every check leans to
+// refusing: a read whose points cannot vouch for a slope keeps exactly the pitch it had.
+//
+// ONLY A GABLE. A pinhole-camera simulation of walk-around frames (2026-09-26) settled which points
+// hold up. A gable's rise over half-span, read square-on or within 20 degrees of it, comes out
+// within about 6% (it reads steep by 1/cos of the camera's yaw), and a 45-degree view reads 13 to
+// 46% steep, no worse than the judged reads it replaces. Two other kinds of points were tried and
+// taken out. A shed's slope from its end wall's two vertical edges: the edges stand at different
+// depths, so the 10 degrees of yaw normal for the nearest walk-around frame put it 23% low to 41%
+// high, and the model's own shed pitch was already close live. A porch roof's slope levelled by its
+// corner post: a camera tipped up with the post off centre leans the post by keystone, not roll,
+// and square-on frames read up to 32% steep. So a shed's pitch and every porch pitch are the model's.
+//
+//   * Coordinates are real, finite JSON numbers. A string "412" is not a coordinate the model gave.
+//   * `size`, when given, is two positive numbers and every point lies inside it.
+//   * The pitch (left, peak, right, on the top edge of the rakes) is the peak's height above the
+//     EAVE LINE from left to right, over half that line's length. That is the PITCH paragraph's
+//     definition and the renderer's (rise over half-span), and it holds however the camera was
+//     rolled, because it is measured across the line the two eave ends make, not against the
+//     image's own horizontal: real reads of one gable came back with that line tilted by 3 to 5
+//     degrees, which a test of the two rakes against each other took for an off-axis frame and
+//     refused every time. It also leaves a saltbox (ridgeOffset) at its rise over half-span, where
+//     the mean of two unlike rakes was not. Checks: the eave line runs left to right within
+//     MEASURE_GABLE_MAX_TILT_DEG of level (steeper is a corner view or a badly rolled frame, and
+//     pointing leftward is left and right swapped); it is at least MEASURE_GABLE_MIN_SPAN of the
+//     width when `size` is given; the peak is on its SKY side (a smaller y, which is where the y-up
+//     mistake fails); the peak's foot on the line falls strictly inside MEASURE_GABLE_PEAK_T of the
+//     way along it, so a peak at or past either end is refused; and the peak stands at least
+//     MEASURE_GABLE_MIN_RISE of the image's height above the line, or MEASURE_GABLE_MIN_RISE_PX
+//     when no `size` is given. That last is the RISE FLOOR: a distant gable's peak is placed to a
+//     few pixels, and on a short rise those pixels are the slope (in the simulation, 5 px on a
+//     33 px rise was 15%). The real reads in the tests rise about 80 px in a 720 px frame and
+//     139 px in another, well clear of it.
+//   * Any roof.type but "gable" is never computed: a shed (above), and a gambrel, which
+//     d3RoofProfile draws from kneeU, kneeRise and ridgeRise, so a rake-to-peak slope would be a
+//     different number stored under a key that means something else.
+//   * The answer is rounded to two places and must be above 0 and inside the sanitiser's own pitch
+//     CLAMPS. Outside them it is null, never clamped: a clamped slope is one nobody read.
+export const MEASURE_GABLE_MAX_TILT_DEG = 12;
+export const MEASURE_GABLE_MIN_SPAN = 0.12;
+export const MEASURE_GABLE_PEAK_T: readonly [number, number] = [0.05, 0.95];
+export const MEASURE_GABLE_MIN_RISE = 0.08;
+export const MEASURE_GABLE_MIN_RISE_PX = 50;
+
+type MeasureXY = [number, number];
+const isCoord = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const measureObject = (v: unknown): Record<string, unknown> | null =>
+  (v && typeof v === "object" && !Array.isArray(v)) ? v as Record<string, unknown> : null;
+const measureXY = (v: unknown): MeasureXY | null =>
+  (Array.isArray(v) && v.length === 2 && isCoord(v[0]) && isCoord(v[1])) ? [v[0], v[1]] : null;
+
+// Every named point of one block, each inside the block's size when it gives one, or null. `size`
+// is the block's [width, height], null when it gave none.
+function measurePoints(block: unknown, keys: readonly string[]): { pts: MeasureXY[]; size: MeasureXY | null } | null {
+  const b = measureObject(block);
+  if (!b) return null;
+  let size: MeasureXY | null = null;
+  if (b.size !== undefined) {
+    size = measureXY(b.size);
+    if (!size || size[0] <= 0 || size[1] <= 0) return null;
+  }
+  const pts: MeasureXY[] = [];
+  for (const k of keys) {
+    const p = measureXY(b[k]);
+    if (!p) return null;
+    if (size && (p[0] < 0 || p[0] > size[0] || p[1] < 0 || p[1] > size[1])) return null;
+    pts.push(p);
+  }
+  return { pts, size };
+}
+
+// The main roof's pitch from `measure.pitch`, for a read whose roof.type is `roofType`: the gable
+// points on a gable, and nothing on any other roof.
+export function pitchFromMeasure(block: unknown, roofType: unknown): number | null {
+  if (roofType !== "gable") return null;
+  const m = measurePoints(block, ["left", "peak", "right"]);
+  if (!m) return null;
+  const [[lx, ly], [px, py], [rx, ry]] = m.pts;
+  // e, the eave line from left to right; d, from its left end to the peak.
+  const ex = rx - lx, ey = ry - ly, dx = px - lx, dy = py - ly;
+  const span2 = ex * ex + ey * ey;
+  const span = Math.sqrt(span2);
+  if (!(span > 0) || (m.size && span < MEASURE_GABLE_MIN_SPAN * m.size[0])) return null;
+  // Its tilt: atan2 is 0 for a level line running to the RIGHT and near 180 degrees for one
+  // running left, so this also refuses left and right swapped. A hair of room for float rounding.
+  if (Math.abs(Math.atan2(ey, ex)) * 180 / Math.PI > MEASURE_GABLE_MAX_TILT_DEG + 1e-9) return null;
+  // The peak's foot on the line, as a share of the way from left to right.
+  const t = (ex * dx + ey * dy) / span2;
+  if (!(t > MEASURE_GABLE_PEAK_T[0] && t < MEASURE_GABLE_PEAK_T[1])) return null;
+  // Its height off the line. With y DOWN and the line running right, a peak on the sky side
+  // makes the cross product e x d negative, so the height is its negative over the length.
+  const rise = -(ex * dy - ey * dx) / span;
+  if (!(rise > 0)) return null;
+  // The rise floor: a share of the image's SHORTER side, or a fixed number of pixels without a size.
+  // The shorter side, not the height: frames are cut with the long edge at 1280 whichever way the
+  // phone was held, so a portrait 720 x 1280 frame has the same pixel scale as a landscape
+  // 1280 x 720 one, and a landmark is placed to the same few pixels in both.
+  if (rise < (m.size ? MEASURE_GABLE_MIN_RISE * Math.min(m.size[0], m.size[1]) : MEASURE_GABLE_MIN_RISE_PX)) return null;
+  const pitch = Math.round(rise / (span / 2) * 100) / 100;
+  const [lo, hi] = CLAMPS.pitch;
+  return pitch > 0 && pitch >= lo && pitch <= hi ? pitch : null;
+}
+
+// ─── The wing roofs' slope, worked out from the reply's own points (2026-09-26) ──────────────────
+// Live on Opus 5.5 the WING roofs of a raised-centre building came back low: the model's own
+// wingPitch read 0.10 to 0.14 on many reads against a measured 0.20. A probe on the full v2 prompt
+// asked instead for the four corners of the two wing roofs' sloping top edges in the square-on front
+// frame, and six reads of them gave 0.11 to 0.24 (median about 0.22) where the same reads' own
+// numbers were 0.13 to 0.25. So `measure.wing` carries those four points, and the slope is worked
+// out here, per read and before the consensus, exactly as pitchFromMeasure does for the gable.
+//
+// THE MEAN ANGLE, NOT EITHER WING. The left wing's top edge rises to the right and the right wing's
+// falls to the right, so a camera rolled by some angle adds it to one wing's slope angle and takes it
+// from the other's. The mean of the two ANGLES cancels the roll exactly, which is why the answer is
+// tan(mean(atan(sL), atan(sR))) and not the mean of the two slopes.
+//
+// IT DOES NOT CANCEL YAW. In the live reads the left wing alone read up to 0.30 and the right alone
+// down to 0.12, but that was mostly the camera's ANGLE to the front, not its roll: the left run was
+// 160-182 px against the right's 386-390 (2.2x), which a pinhole simulation reproduces at about 30
+// degrees of yaw, while a roll of a few degrees moves that ratio by only ~3%. A yawed frame reads the
+// wings steep, by about 1/cos(yaw) plus perspective: about +5% at 20 degrees, +11-16% at 30, +25-32%
+// at 40 (so the live median of ~0.215 against a measured 0.20 is mostly that). The gap gate below is
+// therefore NOT a roll allowance: most of a live gap is perspective.
+//
+// NOTHING HERE IS REPAIRED, pitchFromMeasure's rule: null means "keep the model's own wingPitch".
+//   * Only a read whose roof.wingSide is "both": the four points are two wings, one each side. A read
+//     whose roof.front is "eave" is refused too: its "both" is the front and back walls, and the frame
+//     square to the front looks at a wing roof's face, not along its edge.
+//   * Coordinates are finite JSON numbers, and inside `size` when it is given (measurePoints).
+//   * leftOuter, leftInner, rightInner and rightOuter run strictly left to right in the image.
+//   * The two wings' angles SUM above 0, with y DOWN: the roofs fall toward their outer walls. The
+//     y-up mistake makes both negative and the sum too. Per wing a slope may dip to 0 or below: a
+//     shallow wing in a rolled frame does (a 0.06 wing rolled 4 degrees), and the mean angle still
+//     gives its pitch exactly.
+//   * With `size`, each wing's horizontal run is at least MEASURE_WING_MIN_RUN of the image's width:
+//     over a shorter run a few pixels of placement are the slope.
+//   * The two wings' angles differ by at most MEASURE_WING_MAX_GAP_DEG. A roll moves them apart by
+//     twice its angle and yaw's perspective moves them apart too (above); a larger gap is a bad read
+//     or a frame too far off the front. The six live reads differ by 1.1 to 8.4 degrees.
+//   * The answer is rounded to two places and must be above 0 and inside the sanitiser's wingPitch
+//     CLAMPS. Outside them it is null, never clamped.
+export const MEASURE_WING_MIN_RUN = 0.05;
+export const MEASURE_WING_MAX_GAP_DEG = 15;
+
+// The wing roofs' pitch from `measure.wing`, for a read whose sanitised roof is `roof`.
+export function wingPitchFromMeasure(block: unknown, roof: unknown): number | null {
+  const r = measureObject(roof);
+  if (!r || r.wingSide !== "both" || r.front === "eave") return null;
+  const m = measurePoints(block, ["leftOuter", "leftInner", "rightInner", "rightOuter"]);
+  if (!m) return null;
+  const [[lox, loy], [lix, liy], [rix, riy], [rox, roy]] = m.pts;
+  if (!(lox < lix && lix < rix && rix < rox)) return null;
+  const runL = lix - lox, runR = rox - rix;
+  if (m.size && (runL < MEASURE_WING_MIN_RUN * m.size[0] || runR < MEASURE_WING_MIN_RUN * m.size[0])) return null;
+  // Each wing's fall toward its outer wall over its run, y DOWN: the outer end is LOWER, a larger y.
+  const sL = (loy - liy) / runL, sR = (roy - riy) / runR;
+  const aL = Math.atan(sL), aR = Math.atan(sR);
+  if (!(aL + aR > 0)) return null;
+  // A hair of room for float rounding, as in pitchFromMeasure's tilt check.
+  if (Math.abs(aL - aR) * 180 / Math.PI > MEASURE_WING_MAX_GAP_DEG + 1e-9) return null;
+  const pitch = Math.round(Math.tan((aL + aR) / 2) * 100) / 100;
+  const [lo, hi] = CLAMPS.wingPitch;
+  return pitch > 0 && pitch >= lo && pitch <= hi ? pitch : null;
+}
+
+// ─── The roof step from points (2026-09-28) ─────────────────────────────────────────────────
+// `measure.step` is six points in ONE frame of a long side (the ROOF STEP paragraph): the foot of
+// the wall at the back corner, below the joint and at the front corner (backBase, jointBase,
+// frontBase), the two fascias' bottom edges either side of the joint (jointFront, jointRear) and the
+// fascia's bottom edge above the front corner (frontFascia).
+//
+// THE RISE comes from the joint's own vertical. jointBase, jointFront and jointRear stand at one
+// place along the wall, so perspective scales them alike and the ratio of the fascia gap to the wall
+// below it is the real one: rise = (jointFront.y - jointRear.y) / (jointBase.y - jointFront.y) x the
+// wall height. y is DOWN, so a rear fascia higher in the frame is a positive rise. Its SIGN is the
+// thing the model's eye got wrong live (15 reads of 15), and the points carry it.
+//
+// THE DISTANCE is a cross-ratio. The base line (backBase to frontBase) and the front fascia's line
+// (jointFront to frontFascia) are parallel on the building, so in the frame they meet at the side's
+// vanishing point, u_v along the base line. With the back corner at u = 0, the front corner at u1 and
+// the joint at uJ, and the building L ft deep:
+//     L / (L - S) = (u1 (u_v - uJ)) / ((u1 - uJ) u_v)
+// which gives S, the joint's feet from the back. Lines that do not meet (a square-on frame) are the
+// limit u_v -> infinity, a plain share: S = L uJ / u1.
+//
+// NOTHING HERE IS REPAIRED, pitchFromMeasure's rule: each number is null ("keep the model's own")
+// when its points fail a check. The checks:
+//   * RISE: the joint's three points are on one vertical (each within MEASURE_STEP_MAX_LEAN of the
+//     wall's height in the frame from jointBase's x); the wall below the front fascia is at least
+//     MEASURE_STEP_MIN_WALL of the image's height (MEASURE_STEP_MIN_WALL_PX without a size); the
+//     fascia gap is at most MEASURE_STEP_MAX_GAP of that wall; and the rise is at least
+//     MEASURE_STEP_MIN_RISE_FT, since a step that small is no step to draw.
+//   * DISTANCE: the base line spans at least MEASURE_STEP_MIN_SPAN of the image's width; jointBase
+//     lies between the corners (strictly inside MEASURE_STEP_JOINT_T of the way) and within
+//     MEASURE_STEP_MAX_LEAN of the wall's height off the base line; both fascia points are above the
+//     base line; the vanishing point, when the lines meet, lies OUTSIDE the two corners (between
+//     them is not a perspective any camera makes); and S lies strictly inside MEASURE_STEP_JOINT_T
+//     of L.
+export const MEASURE_STEP_MIN_WALL = 0.08;
+export const MEASURE_STEP_MIN_WALL_PX = 40;
+export const MEASURE_STEP_MAX_LEAN = 0.25;
+export const MEASURE_STEP_MAX_GAP = 0.25;
+export const MEASURE_STEP_MIN_RISE_FT = 0.05;
+export const MEASURE_STEP_MIN_SPAN = 0.25;
+export const MEASURE_STEP_JOINT_T: readonly [number, number] = [0.03, 0.97];
+export type StepMeasure = { atFt: number | null; riseFt: number | null };
+export function stepFromMeasure(block: unknown, lengthFt: unknown, wallFt: unknown): StepMeasure | null {
+  const m = measurePoints(block, ["backBase", "jointBase", "frontBase", "frontFascia", "jointFront", "jointRear"]);
+  if (!m) return null;
+  const [b0, bJ, b1, fF, jF, jR] = m.pts;
+  const wallPx = bJ[1] - jF[1];
+  const minWall = m.size ? MEASURE_STEP_MIN_WALL * m.size[1] : MEASURE_STEP_MIN_WALL_PX;
+  let riseFt: number | null = null;
+  const H = num(wallFt);
+  if (H !== null && H > 0 && wallPx >= minWall
+    && Math.abs(jF[0] - bJ[0]) <= MEASURE_STEP_MAX_LEAN * wallPx
+    && Math.abs(jR[0] - bJ[0]) <= MEASURE_STEP_MAX_LEAN * wallPx
+    && jR[1] < bJ[1]) {
+    const gap = jF[1] - jR[1];
+    if (Math.abs(gap) <= MEASURE_STEP_MAX_GAP * wallPx) {
+      const rise = Math.round(gap / wallPx * H * 100) / 100;
+      const [lo, hi] = CLAMPS.rearEaveRiseFt;
+      if (Math.abs(rise) >= MEASURE_STEP_MIN_RISE_FT && rise >= lo && rise <= hi) riseFt = rise;
+    }
+  }
+  let atFt: number | null = null;
+  const L = num(lengthFt);
+  const dx = b1[0] - b0[0], dy = b1[1] - b0[1];
+  const span = Math.hypot(dx, dy);
+  const minSpan = m.size ? MEASURE_STEP_MIN_SPAN * m.size[0] : 0;
+  if (L !== null && L > 0 && span > 0 && span >= minSpan && wallPx > 0) {
+    const ux = dx / span, uy = dy / span;
+    const along = (p: MeasureXY) => (p[0] - b0[0]) * ux + (p[1] - b0[1]) * uy;
+    // Signed distance off the base line, positive DOWN the frame (y down), whichever way the side
+    // runs (the back corner may be on either side): points above the line are negative.
+    const off = (p: MeasureXY) => ((p[1] - b0[1]) * ux - (p[0] - b0[0]) * uy) * Math.sign(ux);
+    const uJ = along(bJ), u1 = span;
+    const inJoint = uJ > MEASURE_STEP_JOINT_T[0] * u1 && uJ < MEASURE_STEP_JOINT_T[1] * u1;
+    // A side seen from a long side runs across the frame: a base line steeper than 45 degrees is not one.
+    if (Math.abs(ux) >= Math.SQRT1_2 && inJoint && Math.abs(off(bJ)) <= MEASURE_STEP_MAX_LEAN * wallPx && off(jF) < 0 && off(fF) < 0) {
+      // Where the front fascia's line crosses the base line, as u along it: the vanishing point.
+      const ex = fF[0] - jF[0], ey = fF[1] - jF[1];
+      const denom = ux * ey - uy * ex;
+      let share: number | null = null;
+      if (Math.abs(denom) < 1e-9 * Math.hypot(ex, ey)) {
+        share = uJ / u1;
+      } else {
+        const t = ((jF[0] - b0[0]) * ey - (jF[1] - b0[1]) * ex) / denom;
+        const uv = t;
+        if (uv < 0 || uv > u1) {
+          const R = (u1 * (uv - uJ)) / ((u1 - uJ) * uv);
+          if (Number.isFinite(R) && R > 1) share = 1 - 1 / R;
+        }
+      }
+      if (share !== null && share > MEASURE_STEP_JOINT_T[0] && share < MEASURE_STEP_JOINT_T[1]) {
+        const at = Math.round(share * L * 2) / 2;
+        const [lo, hi] = CLAMPS.rearStepFt;
+        if (at > lo && at <= hi) atFt = at;
+      }
+    }
+  }
+  return atFt === null && riseFt === null ? null : { atFt, riseFt };
+}
+
+// The reply's `measure` blocks, read the way parseFrameMap reads its map: out of the first {...} in
+// the text, never stored. `pitch` is the gable's points and `wing` the wing roofs' (2026-09-26); each
+// is there only when the reply gave it as an object. Null when the reply has neither, which is every
+// legacy reply.
+export type MeasureBlocks = { pitch?: Record<string, unknown>; wing?: Record<string, unknown>; step?: Record<string, unknown> };
+export function parseMeasure(text: string): MeasureBlocks | null {
+  const m = String(text || "").match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(m[0]); } catch { return null; }
+  const top = measureObject(parsed);
+  const src = top ? measureObject(top.measure) : null;
+  const pitch = src ? measureObject(src.pitch) : null;
+  const wing = src ? measureObject(src.wing) : null;
+  const step = src ? measureObject(src.step) : null;
+  if (!pitch && !wing && !step) return null;
+  return { ...(pitch ? { pitch } : {}), ...(wing ? { wing } : {}), ...(step ? { step } : {}) };
+}
+
+// Where one read's pitch came from, recorded per read in draft_tokens (draftReadSample) so a query
+// can set the points' number beside the model's own. `pitchSource` is on every measured read.
+// `modelPitch` is the model's own number when the points replaced it (null when it gave none).
+// `pitchRejected` marks a gable read whose points were given and failed the checks above, so "the
+// model gave no points" and "its points did not hold up" are two different answers in SQL. Points
+// on any other roof were never a question, so they are never rejected.
+//
+// The wing roofs' three (2026-09-26) are the same, for roof.wingPitch: `wingPitchSource` is on every
+// measured read whose roof names a wingSide, and on no other, so a read with no wings records exactly
+// what it did before. `modelWingPitch` is the model's own number when the points replaced it.
+// `wingPitchRejected` marks a read with wings on both sides whose wing points were given and refused;
+// wing points on a one-sided or eave-front read were never a question, so they are never rejected.
+export type PitchSources = {
+  pitchSource: "points" | "model";
+  modelPitch?: number | null;
+  pitchRejected?: true;
+  wingPitchSource?: "points" | "model";
+  modelWingPitch?: number | null;
+  wingPitchRejected?: true;
+  // The roof step's (2026-09-28), on a read that gave a step only: "points" when either of its two
+  // numbers came from measure.step, with the model's own pair beside them; `stepRejected` when the
+  // points were given and neither number held up.
+  stepSource?: "points" | "model";
+  modelStep?: [number | null, number | null];
+  stepRejected?: true;
+};
+// The wing half of PitchSources, which a read with no wings leaves out altogether.
+type WingSources = Pick<PitchSources, "wingPitchSource" | "modelWingPitch" | "wingPitchRejected">;
+
+// One read's spec with its pitches worked out from its own points: the main roof's on a gable only
+// (pitchFromMeasure), and the wing roofs' on a read with wings on both sides (wingPitchFromMeasure).
+// roof.porchPitch is always the model's own. The result goes back through sanitizeD3Spec, so key
+// order and every other rule stay the sanitiser's. With nothing replaced, the spec comes back as
+// the very object it went in as.
+export function applyMeasuredPitches(d3: D3Spec, text: string, lengthFt?: number | null): { d3: D3Spec; sources: PitchSources } {
+  const roof = d3.roof || {};
+  const blocks = parseMeasure(text);
+  // The roof step's two numbers (2026-09-28), only on a read that gave a step: points never make one.
+  const stepGiven = num(roof.rearStepFt) !== null && num(roof.rearEaveRiseFt) !== null;
+  const stepBlock = stepGiven ? blocks?.step ?? null : null;
+  const step = stepBlock ? stepFromMeasure(stepBlock, lengthFt, d3.wallHeightFt) : null;
+  const stepSrc: Pick<PitchSources, "stepSource" | "modelStep" | "stepRejected"> = !stepGiven ? {}
+    : step ? { stepSource: "points", modelStep: [num(roof.rearStepFt), num(roof.rearEaveRiseFt)] }
+    : stepBlock ? { stepSource: "model", stepRejected: true } : { stepSource: "model" };
+  const stepKeys = step ? { ...(step.atFt !== null ? { rearStepFt: step.atFt } : {}), ...(step.riseFt !== null ? { rearEaveRiseFt: step.riseFt } : {}) } : {};
+  const block = blocks?.pitch ?? null;
+  const pitch = pitchFromMeasure(block, roof.type);
+  const kept: PitchSources = block && roof.type === "gable" ? { pitchSource: "model", pitchRejected: true } : { pitchSource: "model" };
+  const wingBlock = blocks?.wing ?? null;
+  const wingPitch = wingPitchFromMeasure(wingBlock, roof);
+  const hasWings = typeof roof.wingSide === "string";
+  const wingAsked = roof.wingSide === "both" && roof.front !== "eave";
+  const wingKept: WingSources = !hasWings ? {}
+    : wingBlock && wingAsked ? { wingPitchSource: "model", wingPitchRejected: true } : { wingPitchSource: "model" };
+  const stepFallback = stepGiven ? (stepBlock ? { stepSource: "model" as const, stepRejected: true as const } : { stepSource: "model" as const }) : {};
+  if (pitch === null && wingPitch === null && !step) return { d3, sources: { ...kept, ...wingKept, ...stepSrc } };
+  const clean = sanitizeD3Spec({
+    ...d3,
+    roof: { ...roof, ...(pitch !== null ? { pitch } : {}), ...(wingPitch !== null ? { wingPitch } : {}), ...stepKeys },
+  });
+  // Unreachable with the checks above (each number is inside its CLAMPS), and if it ever were
+  // reached, the read keeps the spec it came with rather than losing its draft.
+  if (!clean.ok) return { d3, sources: { ...kept, ...wingKept, ...stepFallback } };
+  const gable: PitchSources = pitch !== null ? { pitchSource: "points", modelPitch: num(roof.pitch) } : kept;
+  const wing: WingSources = wingPitch !== null ? { wingPitchSource: "points", modelWingPitch: num(roof.wingPitch) } : wingKept;
+  return { d3: clean.d3, sources: { ...gable, ...wing, ...stepSrc } };
+}
+
+// ─── A measured gable pitch is locked in the self-check (2026-09-26) ─────────────────────────
+// Live, a three-read draft of a 0.41 gable came out at 0.415 (two reads measured 0.41 and 0.40
+// from their points), and the v2 self-check's first round then moved it to 0.7 because "the centre
+// gable's peak rises nearly as much as its half-span". The check judges by eye; the draft measured.
+// So a pitch the reads MEASURED is treated like a builder-measured eave: selfCheckPrompt says it is
+// not the check's to change, and applySelfCheck drops a correction to it.
+//
+// True only when all of these hold, read off the ledger row (draft_tokens and drafted), so the
+// answer is the same for every round of one generation:
+//   * draft_tokens.samples has at least MEASURED_PITCH_LOCK_MIN_READS gable reads whose pitch came
+//     from their points (pitchSource "points", a finite pitch). One read is one set of points, and
+//     one set can be a lucky frame.
+//   * the drafted spec is a gable with a finite pitch;
+//   * and that pitch is within MEASURED_PITCH_LOCK_TOLERANCE of at least one of those measured
+//     pitches. A consensus that settled on a judged read's number is not a measured one.
+// Anything else, including anything malformed, is false: the check goes on exactly as before.
+//
+// TWO, AND STILL TWO WITH FIVE READS (2026-09-26). The rule counts independent sets of points, not a
+// share of the reads: two frames that each measured the slope are the same evidence whether they sit
+// among three reads or five, and the second clause already makes the draft agree with one of them.
+// More reads make that draft sturdier, not weaker: its pitch is the median of up to five, so it
+// leaves the measured numbers only when most of the reads put the slope somewhere else, and then
+// nothing measured is within 0.03 and the lock is off anyway. Raising it to three
+// would unlock exactly the case the lock was built for -- a draft whose reads measured 0.41 and 0.40
+// being moved to 0.7 by eye -- on every row where only two reads' points held (a read gives none, or
+// has them refused, often enough: two of three on the live draft that started this), on every
+// three-read row already in the ledger, and on a five-read press that lost reads to the quorum.
+export const MEASURED_PITCH_LOCK_MIN_READS = 2;
+export const MEASURED_PITCH_LOCK_TOLERANCE = 0.03;
+export function measuredPitchLock(draftTokens: unknown, drafted: unknown): boolean {
+  const tokens = measureObject(draftTokens);
+  const spec = measureObject(drafted);
+  const roof = spec ? measureObject(spec.roof) : null;
+  if (!tokens || !Array.isArray(tokens.samples) || !roof || roof.type !== "gable") return false;
+  const pitch = roof.pitch;
+  if (!isCoord(pitch)) return false;
+  const measured: number[] = [];
+  for (const s of tokens.samples) {
+    const read = measureObject(s);
+    if (read && read.pitchSource === "points" && read.type === "gable" && isCoord(read.pitch)) measured.push(read.pitch);
+  }
+  if (measured.length < MEASURED_PITCH_LOCK_MIN_READS) return false;
+  // A hair of room for float rounding, so 0.41 against 0.44 is "within 0.03".
+  return measured.some((p) => Math.abs(p - pitch) <= MEASURED_PITCH_LOCK_TOLERANCE + 1e-9);
 }
 
 // ─── A drafted gambrel that cannot look like one (2026-09-16) ─────────────────────────────
@@ -1039,6 +2294,76 @@ export function porchAgreementWarning(
   return `Check the porch before saving: the video reading says this building has ${PORCH_IN_WORDS[said as PorchKind]}, but it has been drawn with ${PORCH_IN_WORDS[drafted]}. One of those is wrong and only the building settles which — compare the end of the building with the preview, then set the porch below to match.`;
 }
 
+// ─── the wings nobody drew (2026-09-24) ───────────────────────────────────────────────────
+// Modelled on porchAgreementWarning, line for line, because it is the same failure one room
+// over: the v2 prompt forces `observed.wings` to one of three words, and a reply can say "both"
+// in its notes while handing back a roof with no wing keys — which draws a raised-centre house as
+// a plain box, the exact result this vocabulary exists to end. Same two sentences (no answer /
+// a contradiction), same FLAG-NEVER-REPAIR posture, same place in `roofNote`.
+//
+// ⚠️ CALL IT ONLY FOR A v2 GENERATION (the rollout gate's v2Prompt: frame "front" AND dims). The
+// legacy prompts never ask the question, so on those paths "the reading never said" would fire on
+// every single generation and force every draft to low confidence. portal-settings gates the call
+// on v2Prompt for exactly that reason.
+//
+// What the DRAFT says, read the way the renderer draws it: a wing exists only when wingWidthFt is
+// above zero on a gable or gambrel (the sanitiser drops wing keys on a shed, and this reads the
+// same way so an unsanitised roof cannot disagree with a sanitised one). A width with no side
+// reads as "both" — the monitor-barn form the key exists for. ⚠️ The renderer has to read an
+// absent wingSide the same way, or this check and the drawing disagree about a spec they share.
+export function draftWingKind(roof: Record<string, unknown> | null | undefined): WingKind {
+  if (!roof || roof.type === "shed") return "none";
+  if ((num(roof.wingWidthFt) ?? 0) <= 0) return "none";
+  const side = roof.wingSide;
+  if (side === "left" || side === "right" || side === "front" || side === "back") return "one";
+  return "both";
+}
+
+// Builder's words. "wingWidthFt" means nothing to someone holding a phone.
+const WINGS_IN_WORDS: Record<WingKind, string> = {
+  both: "enclosed lower wings along both sides",
+  one: "an enclosed lower wing along one side",
+  none: "no side wings",
+};
+
+export function wingsAgreementWarning(
+  roof: Record<string, unknown> | null | undefined,
+  observed: ObservedNotes | null | undefined,
+): string | null {
+  const drafted = draftWingKind(roof);
+  const said = observed?.wings;
+  if (!said || !(OBSERVED_WING_KINDS as readonly string[]).includes(said)) {
+    return `Check the side wings before saving: the video reading never said whether this building has enclosed wings along its sides, so there was nothing to check the drawing against. It has been drawn with ${WINGS_IN_WORDS[drafted]}.`;
+  }
+  if (said === drafted) return null;
+  return `Check the side wings before saving: the video reading says this building has ${WINGS_IN_WORDS[said as WingKind]}, but it has been drawn with ${WINGS_IN_WORDS[drafted]}. One of those is wrong and only the building settles which — compare the sides of the building with the preview, then set the wings below to match.`;
+}
+
+// ─── the front nobody named (fix, 2026-09-24) ─────────────────────────────────────────────
+// The v2 prompt marks roof.front (gable, gambrel) and roof.highSide (shed) REQUIRED, and nothing
+// enforced it. A draft without them renders in the OLD frame -- the ridge, or the shed's slope,
+// along the footprint's longer walls, and a porch on the old gable end -- and the designer drops
+// any stored front when a draft omits it. On a building whose front is its long wall that is the
+// building turned round, with nothing on screen saying why. The lean retry, at effort "low", is
+// the reply most likely to drop the key.
+//
+// So it is flagged in `roofNote` like the porch and the wings (FLAG, NEVER REPAIR: which way the
+// building faces is exactly what the server cannot guess), and flagObservedNotes drops the
+// confidence to low. ⚠️ v2 ONLY: the legacy prompts never ask for either key, so on those paths
+// this would fire on every draft. portal-settings gates it on v2Prompt, beside the wings check.
+// Read the way the sanitiser keeps them: front only on a two-slope roof, highSide only on a shed.
+export function frameKeyWarning(roof: Record<string, unknown> | null | undefined): string | null {
+  if (!roof) return null;
+  const type = roof.type;
+  if ((type === "gable" || type === "gambrel") && !(D3_ROOF_FRONTS as readonly string[]).includes(String(roof.front))) {
+    return "Check which way the building faces before saving: the video reading did not say whether the front wall is a gable end or a long side, so the roof has been drawn the old way, with its ridge along the longer walls. Compare the preview with the video, then set Front wall below.";
+  }
+  if (type === "shed" && !(D3_SHED_HIGH_SIDES as readonly string[]).includes(String(roof.highSide))) {
+    return "Check which wall is the high one before saving: the video reading did not say which wall of this single-slope roof is the tall one, so it has been drawn the old way, sloping along the longer walls. Compare the preview with the video, then set High side below.";
+  }
+  return null;
+}
+
 // Puts a roof warning where the builder already looks: `roofNote` in the "What the model saw"
 // panel, with confidence forced to "low", which that panel already renders in amber with
 // "check the roof numbers below against the building". No browser change is needed for the
@@ -1070,6 +2395,11 @@ export function flagObservedNotes(
 // one narrow question: where does YOUR DRAFT not match THEIR BUILDING? That second call is
 // FREE and it is single-use — a conditional claim on the ledger row that already paid.
 //
+// v2 (2026-09-24): up to SELF_CHECK_MAX_ROUNDS rounds, each its own single-use claim. The claim
+// is a compare-and-swap on the row's round counter, a later round is claimable only after the
+// round before it applied corrections, and every round judges the spec the ROW holds
+// (`self_check_after ?? drafted`) -- never one the browser sends.
+//
 // Everything below is the pure half: the prompt, the reading of the reply, and the three gates
 // a correction has to pass before it can touch a spec a customer will be quoted against. The
 // claim, the model call and the ledger writes live in portal-settings, because they are I/O.
@@ -1080,10 +2410,10 @@ export function flagObservedNotes(
 // lists. A design where the browser posts the draft JSON and the image URLs would be a free,
 // caller-controlled vision call with caller-controlled text spliced into the prompt — one $20
 // generation buying unlimited inference on any twelve images on the internet. The only thing
-// the caller supplies that reaches the model is the RENDER BYTES, and those are held to four
-// JPEGs it cannot make bigger than the cap.
+// the caller supplies that reaches the model is the RENDER BYTES, and those are held to six
+// JPEGs (four before v2) it cannot make bigger than the cap.
 
-// The four the first pass labels, in the order the content array presents them. Reusing
+// The six the first pass labels (four before v2), in the order the content array presents them. Reusing
 // FRAME_MAP_VIEWPOINTS rather than restating the list: the pairing is only meaningful if both
 // halves agree on the vocabulary, and two lists is one drift away from a render captioned as
 // the wrong view.
@@ -1093,28 +2423,92 @@ export const SELF_CHECK_VIEWPOINTS = FRAME_MAP_VIEWPOINTS;
 // close-up viewpoint" and "the side viewpoint"; nothing else in the request would tell the
 // model which image that is, and a check that reads the eave off the wrong image is worse than
 // no check, because it answers confidently.
+//
+// In the v2 FRAME OF REFERENCE (CONTRACT §0): the FRONT is the wall with the porch, or the main
+// door when there is no porch -- a gable end on one building and a long eave wall on another,
+// which is why `front` and `side` no longer say "end" and "long wall". Left and right are as
+// seen standing in front of it.
 const SELF_CHECK_VIEW_WORDS: Record<FrameMapViewpoint, string> = {
-  front: "head-on at the end the door is on",
-  side: "square to a long wall",
+  front: "head-on at the front, the wall with the porch or the main door",
+  side: "square to one side wall",
   eaveCorner: "the close-up of the roof edge against the sky",
   corner: "a three-quarter view",
+  back: "head-on at the back, the wall opposite the front",
+  otherSide: "square to the other side wall, opposite the side view",
 };
 
 // THE RENDER CAPS. `portal-settings` already caps `logoBase64` at 2 MB and `imageBase64` at
 // 3 MB; this is the same shape with a tighter number, because these are 896x672 JPEGs at
 // quality 0.80 and the measured size is 25-35 KB each. 400 KB is more than ten times what a
 // real one weighs, which leaves room for a slower device's encoder and none for a payload.
-export const SELF_CHECK_MAX_RENDERS = 4;
+//
+// SIX RENDERS AND 1.8 MB (v2): one per viewpoint, and the total raised in proportion (1.2 MB for
+// four is 300 KB a view; so is 1.8 MB for six). The per-render cap does not move -- a render is
+// the same 896x672 JPEG it always was.
+export const SELF_CHECK_MAX_RENDERS = 6;
 export const SELF_CHECK_MAX_RENDER_BYTES = 400_000;
-export const SELF_CHECK_TOTAL_RENDER_BYTES = 1_200_000;
+export const SELF_CHECK_TOTAL_RENDER_BYTES = 1_800_000;
 
-// At most six fields. More than that is not a check, it is a second draft — and a second draft
-// is a second charge. Counted over what the model DECLARES in `changed`, not over what survives
-// the allow-list: the cap is reading the model's own statement of how much of the draft it
-// wants to rewrite, and a reply that wants to rewrite fifteen fields is not a reply to take
-// four corrections from. (Undeclared corrections cannot rewrite anything at all — see the
-// both-lists gate below — so counting them would refuse over fields that have no effect.)
-export const SELF_CHECK_MAX_FIELDS = 6;
+// At most EIGHT fields per round (six until v2). More than that is not a check, it is a second
+// draft — and a second draft is a second charge. Counted over what the model DECLARES in
+// `changed`, not over what survives the allow-list: the cap is reading the model's own statement
+// of how much of the draft it wants to rewrite, and a reply that wants to rewrite fifteen fields
+// is not a reply to take four corrections from. (Undeclared corrections cannot rewrite anything
+// at all — see the both-lists gate below — so counting them would refuse over fields that have
+// no effect.)
+//
+// WHY EIGHT. The allow-list grew from 22 paths to 30, and the two v2 features are MULTI-KEY:
+// wings are side + width + pitch + centre eave, and porch placement is end + attach height +
+// width on top of the porch's own number. The Tri Home drafted without its wings, with its front
+// read the wrong way and a full-width porch is ONE visible correction to a person and seven
+// fields here (front, wingSide, wingWidthFt, centerEaveFt, wingPitch, porchWidthFt,
+// porchAttachFt) -- and the cap is all-or-nothing, so six would have thrown the whole of it
+// away. Eight still refuses a reply that is rewriting the building (nine or more of thirty), and
+// the extra rounds are NOT a reason to keep six: a refused round ends the loop, it does not
+// split the correction across the next one.
+export const SELF_CHECK_MAX_FIELDS = 8;
+
+// At most THREE rounds per paid generation (v2). Round 0 is the check that has always run; each
+// further round judges the renders of the spec the round before it produced. The limit lives
+// HERE and is enforced twice in portal-settings: parseSelfCheckRound refuses a round past it
+// before any database call, and the claim is a compare-and-swap on `self_check_round`, so the
+// counter itself cannot pass it either.
+export const SELF_CHECK_MAX_ROUNDS = 3;
+
+// How young a generation must be for calibrate_style_check to claim it (`called_at` newer than
+// now minus this). One constant, because recoverDraftAnswer reads it too: a draft picked up after
+// this has no frame map, so the designer skips the check instead of asking for one the claim refuses.
+export const SELF_CHECK_CLAIM_WINDOW_MS = 15 * 60_000;
+
+// Which round a request is for. ABSENT MEANS ROUND 0, and that is the whole backwards-
+// compatibility story: production's older browser sends no `round`, so it keeps exactly the
+// single-use check it has always had (round 0 also requires `self_check_at` to be null, so its
+// second request is still a 409). A round past the limit is refused the same way a spent claim
+// is, with the same 409 code, so a browser needs only one rule for "stop asking".
+//
+// `max` (fix, 2026-09-24) is the caller's mode's limit: SELF_CHECK_MAX_ROUNDS for the v2 check,
+// and 1 for the LEGACY check (selfCheckMode), which is d3ab404's single-use check -- an older
+// designer never sends `round`, and a request without frame "front" that asks for a round past 0
+// is asking for something that check never had. Same 409 and code as a spent claim.
+export function parseSelfCheckRound(raw: unknown, max: number = SELF_CHECK_MAX_ROUNDS):
+  | { ok: true; round: number }
+  | { ok: false; status: 400 | 409; error: string; code?: string } {
+  if (raw === undefined || raw === null) return { ok: true, round: 0 };
+  // `num` would read "" as 0. An empty string is not "no round", it is a malformed one.
+  const n = typeof raw === "string" && !raw.trim() ? null : num(raw);
+  if (n === null || !Number.isInteger(n) || n < 0) {
+    return { ok: false, status: 400, error: "round must be a whole number, starting at 0." };
+  }
+  if (n >= max) {
+    return {
+      ok: false, status: 409, code: "check_unavailable",
+      error: max === 1
+        ? "That generation has already had its check."
+        : `That generation has already had all ${max} of its checks.`,
+    };
+  }
+  return { ok: true, round: n };
+}
 
 // ── WHAT A CORRECTION IS ALLOWED TO TOUCH ─────────────────────────────────────────────────
 // Dotted paths, matching the `changed[].field` the prompt asks for. Shape only.
@@ -1130,6 +2524,13 @@ export const SELF_CHECK_MAX_FIELDS = 6;
 // `siding` is absent because no prompt in this pipeline asks about cladding AND sanitizeD3Spec
 // always emits the key, so letting it through would reset a builder's choice to plain on every
 // check — the exact defect applyDraftedShape was written to stop.
+//
+// v2 adds every new ROOF key and none of the new colours (`colors.corner`, `colors.fascia`
+// stay off for the reason `colors` does). They are the massing and placement keys the
+// numbered steps of the prompt now ask about: which way the front faces (gable/gambrel), which
+// wall is tall (shed), the enclosed wings, and where the porch meets its wall and how wide it
+// runs. Each of them is still held to sanitizeD3Spec's validity rules on the way out, so a
+// highSide on a gable, or a porch attach height with no projecting porch, cannot land.
 export const SELF_CHECK_ALLOW = [
   "roof.type", "roof.pitch", "roof.ridgeOffset", "roof.overhang",
   "roof.kneeU", "roof.kneeRise", "roof.ridgeRise",
@@ -1138,10 +2539,133 @@ export const SELF_CHECK_ALLOW = [
   "roof.leanToWidthFt", "roof.leanToDropFt", "roof.leanToSide",
   "roof.dormerWidthFt", "roof.dormerRiseFt", "roof.dormerOffsetU",
   "gableVent", "foundation", "roofMaterial",
+  "roof.front", "roof.highSide",
+  "roof.porchAttachFt", "roof.porchWidthFt",
+  "roof.wingSide", "roof.wingWidthFt", "roof.wingPitch", "roof.centerEaveFt",
+  // The porch's own framing (2026-09-25): its posts, its roof's pitch, and where its steps leave
+  // the deck. Projecting porch only, which sanitizeD3Spec holds them to on the way out.
+  "roof.porchPosts", "roof.porchPitch", "roof.porchSteps",
+  // How high a raised floor stands (2026-09-25), top-level beside foundation, which is already on
+  // the list and now takes "blocks" and "piers" too. Blocks or piers only, which sanitizeD3Spec
+  // holds it to on the way out.
+  "floorHeightFt",
+  // The roof step (2026-09-28): where the rear roof section starts and how much higher its eave is.
+  // Both or neither, gable with a gable-end front only, which sanitizeD3Spec holds them to on the
+  // way out; a step of 0 takes it off (applySelfCheck).
+  "roof.rearStepFt", "roof.rearEaveRiseFt",
 ] as const;
 
-const SELF_CHECK_CHECKED_KEYS = ["overhang", "porch", "roofProfile", "eave"] as const;
+// `massing` (v2) is the answer to the new first step: which way the building faces, which wall
+// is tall, and whether it has wings. Additive -- a reply without it parses exactly as before.
+const SELF_CHECK_CHECKED_KEYS = ["overhang", "porch", "roofProfile", "eave", "massing"] as const;
 const SELF_CHECK_CHECKED_WORDS = ["ok", "changed", "unclear"] as const;
+
+// ── THE ROLLOUT GATE, FOR THE CHECK TOO (fix, 2026-09-24) ─────────────────────────────────────
+// The draft has been gated since v2 (wantsV2Prompt): only a request that says `frame: "front"`
+// gets the v2 prompt. The CHECK was not, and production's older designer -- which sends no frame
+// and no round -- was being handed the whole v2 check: a new-frame ruler ("the FRONT wall is W ft
+// long") over dims its card typed "across the gable end", a massing step that asks for roof.front
+// and the wings, and a 30-path allow-list that let those keys into a spec the old renderer cannot
+// draw and the old panel can neither show nor clear. Saved, they would switch on the day the new
+// renderer is promoted: a style turned 90 degrees, or grown a raised centre, that no builder saw.
+//
+// So the check is gated exactly like the draft, ON THE REQUEST: the new designer sends
+// `frame: "front"` on every check (12-shell onSelfCheck) and gets "v2". Everything else gets
+// "legacy", which is d3ab404's check VERBATIM -- the frozen prompt (legacySelfCheckPrompt, pinned
+// by SHA-256), its 22-path allow-list, six fields, the four viewpoints in their old words, four
+// renders and 1.2 MB, the old `checked` keys, and its 4000-token / 45 s budget. Only the claim is
+// shared: round 0 of the multi-round claim IS d3ab404's single-use claim, and a legacy request
+// cannot ask for a later round (parseSelfCheckRound's `max`).
+export type SelfCheckMode = "v2" | "legacy";
+export function selfCheckMode(frame: unknown): SelfCheckMode {
+  return frame === PROMPT_FRAME_FRONT ? "v2" : "legacy";
+}
+
+// ⛔ FROZEN at d3ab404, every one of them. styleD3.test.ts pins each against the value it had.
+export const SELF_CHECK_LEGACY_VIEWPOINTS: readonly FrameMapViewpoint[] = ["front", "side", "eaveCorner", "corner"];
+const SELF_CHECK_LEGACY_VIEW_WORDS: Record<string, string> = {
+  front: "head-on at the end the door is on",
+  side: "square to a long wall",
+  eaveCorner: "the close-up of the roof edge against the sky",
+  corner: "a three-quarter view",
+};
+export const SELF_CHECK_LEGACY_MAX_RENDERS = 4;
+export const SELF_CHECK_LEGACY_TOTAL_RENDER_BYTES = 1_200_000;
+export const SELF_CHECK_LEGACY_MAX_FIELDS = 6;
+export const SELF_CHECK_LEGACY_ALLOW = [
+  "roof.type", "roof.pitch", "roof.ridgeOffset", "roof.overhang",
+  "roof.kneeU", "roof.kneeRise", "roof.ridgeRise",
+  "roof.eave", "roof.tailSpacingIn",
+  "roof.porchOutFt", "roof.porchDepthFt", "roof.porchEnd", "roof.porchTruss",
+  "roof.leanToWidthFt", "roof.leanToDropFt", "roof.leanToSide",
+  "roof.dormerWidthFt", "roof.dormerRiseFt", "roof.dormerOffsetU",
+  "gableVent", "foundation", "roofMaterial",
+] as const;
+const SELF_CHECK_LEGACY_CHECKED_KEYS = ["overhang", "porch", "roofProfile", "eave"] as const;
+
+// The rules each mode's gates run on, in one place so no gate can read one mode's list and
+// another gate the other's.
+type SelfCheckRules = {
+  viewpoints: readonly FrameMapViewpoint[];
+  maxRenders: number;
+  totalRenderBytes: number;
+  maxFields: number;
+  allow: readonly string[];
+  checkedKeys: readonly string[];
+};
+function selfCheckRules(mode: SelfCheckMode): SelfCheckRules {
+  return mode === "legacy"
+    ? {
+      viewpoints: SELF_CHECK_LEGACY_VIEWPOINTS, maxRenders: SELF_CHECK_LEGACY_MAX_RENDERS,
+      totalRenderBytes: SELF_CHECK_LEGACY_TOTAL_RENDER_BYTES, maxFields: SELF_CHECK_LEGACY_MAX_FIELDS,
+      allow: SELF_CHECK_LEGACY_ALLOW, checkedKeys: SELF_CHECK_LEGACY_CHECKED_KEYS,
+    }
+    : {
+      viewpoints: SELF_CHECK_VIEWPOINTS, maxRenders: SELF_CHECK_MAX_RENDERS,
+      totalRenderBytes: SELF_CHECK_TOTAL_RENDER_BYTES, maxFields: SELF_CHECK_MAX_FIELDS,
+      allow: SELF_CHECK_ALLOW, checkedKeys: SELF_CHECK_CHECKED_KEYS,
+    };
+}
+
+// THE CALL'S BUDGET, per mode: output tokens, the server's abort, and how hard it thinks
+// (output_config.effort; thinking stays adaptive in both). Legacy is d3ab404's 4000 tokens, 45 s
+// and "medium", byte for byte (styleD3.test.ts hashes its whole body).
+//
+// v2 was 8000 tokens and 90 s at "medium" (fix, 2026-09-24): the v2 check carries up to six
+// frame+render pairs (twelve images, six fetched by URL) and a longer prompt with the massing
+// step, and at the ~78 tokens/s measured on 09-21, 45 s was ~3,500 tokens including the time to the
+// first one. A timeout ENDS the rounds, so the massing corrections v2 depends on (round 0 turning
+// the building, round 1 refining widths) were the ones cut off.
+//
+// v2 IS 12000 TOKENS AND 125 s AT "high" SINCE 2026-09-26. Live on Opus 5.5 a round at "medium"
+// took 18-37 s end to end and was not consistent: with the draft's centre eave at 12.5-12.8 ft
+// against a true 14.8, it corrected it by the measured difference in 5 runs of 6 and in the sixth
+// answered "matches" on everything. "high" makes every round think before it answers.
+//   * 125 s because the check is NOT streamed: the Supabase gateway ends a request that has sent
+//     nothing for 150 s, so the answer must be out inside that. 125 s leaves the handler's set-up
+//     (the kill-switch read, the style read and the claim, a second or two) and its ledger writes
+//     after the call well inside 150 s. It is the non-streamed draft's 125 s for the same reason.
+//   * 12000 is room, not a target. At the ~70 output tokens/s Opus streamed on 09-25, 125 s buys
+//     roughly 8,000 tokens once the twelve images are read, so a round that thinks that long
+//     normally meets the abort before it meets max_tokens: at these rates the clock binds first.
+//     If app_errors shows ai_selfcheck_timeout rows, or self_check_ms / self_check_rounds[].ms sit
+//     near 125000, it is the clock that needs moving (a timed-out round writes no self_check_tokens).
+//   * THE WORKER'S LIFE needs no term of its own here. The platform's 400 s is the WORKER's
+//     (EDGE_WALL_CLOCK_MS), not the request's, and a worker is routed no new request once it is
+//     200 s old. So a check that lands on a worker up to 199 s old and then runs its call the whole
+//     125 s ends by 324 s of that worker's life: 76 s before the kill, which is the 75 s margin the
+//     streamed reads keep (STREAMED_READS_WORKER_MARGIN_MS) and a second over, for the set-up
+//     before the call and the ledger writes after it. And because it is not streamed, the gateway
+//     closes the answer 150 s after the request arrived in any case, by 349 s of the oldest worker's
+//     life. workerClock.test.ts pins the sum; a longer abort must pass it again or get a worker term
+//     like streamedDraftBudgetMs.
+// ⚠️ The browser's own abort on this call has to sit above the server's (the designer's SS_CHECK_MS
+// and 12-shell's onSelfCheck signal, 140 s, pinned against this by selfCheckPanel_test), or it cuts
+// the server off.
+export const SELF_CHECK_BUDGET: Record<SelfCheckMode, { maxTokens: number; abortMs: number; effort: "medium" | "high" }> = {
+  legacy: { maxTokens: 4000, abortMs: 45_000, effort: "medium" },
+  v2: { maxTokens: 12000, abortMs: 125_000, effort: "high" },
+};
 
 export type SelfCheckChange = { field: string; from: unknown; to: unknown; why: string };
 export type SelfCheckChecked = Partial<Record<typeof SELF_CHECK_CHECKED_KEYS[number], string>>;
@@ -1153,6 +2677,79 @@ export type SelfCheckRead = {
   note: string;
 };
 
+// ── HOW STEEP THE RENDER CAN DRAW THE STYLE'S PORCH PITCH (fix, 2026-09-25) ─────────────────
+// The renderer (d3PorchGeom, in both designer twins) builds a GIVEN porchPitch only as steep as
+// leaves 6 ft under the porch beam, lowering it as far as it must. The check was told "currently
+// 0.25" beside a render drawn at 0.05, so it "corrected" the pitch upward: a change that draws
+// nothing, costs a round, and is listed to the builder as a change.
+//
+// The porch roof's high edge sits AT porchAttachFt or lower (the renderer also holds it under the
+// building's own outline and the eave over it), so with porchAttachFt set this is an UPPER bound on
+// the pitch the render shows: when even it is under the stored pitch, the render is certainly
+// flatter, and the prompt says so. Without porchAttachFt, or without a porchPitch, null: the
+// server does not know the wall top the renderer hangs the porch from, and says nothing it cannot
+// stand behind. The member sizes and the bisection are d3PorchGeom's exactly; porchGeom_test runs
+// the two side by side.
+export function porchPitchDrawable(roof: Record<string, unknown> | null | undefined): number | null {
+  const want = num(roof?.porchPitch), attach = num(roof?.porchAttachFt), out = num(roof?.porchOutFt);
+  if (want === null || !(want > 0) || attach === null || !(attach > 0) || out === null || !(out > 0.5)) return null;
+  const D = Math.min(12, out);
+  const POST = 0.46, HDR_H = 0.62, HDR_D = 0.29, PR_T = 0.12, SHEATH = 0.04, WALL_T = 0.3, CLEAR_FLOOR = 6.0;
+  const WANT = Math.max(0.05, Math.min(0.5, want));
+  const dWall = WALL_T / 2, dPost = D - POST / 2;
+  const run = Math.max(0.1, dPost - HDR_D / 2 - dWall);
+  const stack = (p: number) => (PR_T + SHEATH) * Math.sqrt(1 + p * p);
+  const clearAt = (p: number) => attach - p * run - stack(p) - HDR_H;
+  if (clearAt(WANT) >= CLEAR_FLOOR) return WANT;
+  if (clearAt(0.05) < CLEAR_FLOOR) return 0.05;
+  let lo = 0.05, hi = WANT;
+  for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (clearAt(mid) >= CLEAR_FLOOR) lo = mid; else hi = mid; }
+  return lo;
+}
+
+// ── THE ROOF STEP THE RENDER DRAWS AT A SIZE (2026-09-28) ───────────────────────────────────
+// The renderer (d3RoofStep, in both designer twins) holds a stored step to what the building can
+// carry: the joint to leave 4 ft of room in front of it (in front of a recessed front porch too),
+// the rise to what leaves the rear roof a pitch of at least 0.02, and no step at all where the
+// ridge runs side to side (an old-frame style on a footprint wider than it is deep) or the building
+// is too short for 4 ft each side of a joint. The check was told the stored numbers beside a render
+// drawn otherwise, the porch pitch's trap: a "correction" toward the render that moves nothing.
+//   null                  no step asked for: fewer than both keys, an off step or rise, or a roof
+//                         the sanitiser keeps none on (d3RoofStep is null there too)
+//   { drawn: null, why }  asked for, and the render at this size draws none; `why` in words
+//   { drawn, why }        drawn at drawn.stepFt / drawn.rise; `why` says what was held back, and is
+//                         null when both are drawn as stored
+// The arithmetic is d3RoofStep's exactly, at the size the renders were drawn (the known width and
+// depth); roofStep_test runs the two side by side.
+export type RoofStepAtSize = { drawn: { stepFt: number; rise: number } | null; why: string | null };
+export function roofStepAtSize(roof: Record<string, unknown> | null | undefined, widthFt: number, lengthFt: number): RoofStepAtSize | null {
+  const cfg = roof ?? {};
+  const want = num(cfg.rearStepFt), rise0 = num(cfg.rearEaveRiseFt);
+  if (cfg.type !== "gable" || want === null || rise0 === null || !(want > 0.5) || !(Math.abs(rise0) >= 0.01)) return null;
+  const front = cfg.front === "gable" || cfg.front === "eave" ? cfg.front : null;
+  if (front === "eave" || (num(cfg.wingWidthFt) ?? 0) > 0.5 || (num(cfg.leanToWidthFt) ?? 0) > 0.5) return null;
+  const porchOut = Math.min(12, num(cfg.porchOutFt) ?? 0) > 0.5;
+  if (cfg.porchEnd === "back" && (porchOut || (num(cfg.porchDepthFt) ?? 0) > 0.5)) return null;
+  // d3RoofAxes: a gable front runs the ridge front to back; without a front, a portrait footprint does.
+  if (!(front === "gable" || lengthFt >= widthFt)) {
+    return { drawn: null, why: "on this footprint its ridge runs from side to side, so the back wall is not a gable end" };
+  }
+  const S = widthFt, L = lengthFt;
+  const porchIn = porchOut ? 0 : Math.max(0, Math.min(num(cfg.porchDepthFt) ?? 0, L - 4));
+  const room = L - (porchIn > 0.5 ? porchIn : 0) - 4;
+  if (!(room >= 4)) return { drawn: null, why: "the building is too short to leave 4 ft each side of the joint" };
+  const stepFt = Math.max(4, Math.min(room, want));
+  const pitch = num(cfg.pitch) || 0.4;
+  const half = S / 2;
+  const rise = Math.max(-1.5, Math.min(1.5, Math.max(0, (pitch - 0.02) * half), rise0));
+  if (!(Math.abs(rise) >= 0.01)) return { drawn: null, why: "the roof is too flat to raise its rear eave" };
+  const why: string[] = [];
+  if (stepFt < want) why.push(`this size leaves at most ${dimFt(room)} ft behind the joint`);
+  if (stepFt > want) why.push("a joint is never drawn nearer than 4 ft to the back wall");
+  if (rise0 > 0 && rise < Math.min(1.5, rise0)) why.push("the roof is too flat for a bigger step");
+  return { drawn: { stepFt, rise }, why: why.length ? why.join(", and ") : null };
+}
+
 // ── THE PROMPT ────────────────────────────────────────────────────────────────────────────
 // Built as a template because the draft and the builder's measurements are interpolated per
 // generation. The refusal path is kept VERBATIM and stated three separate times — "it matches"
@@ -1161,17 +2758,439 @@ export type SelfCheckRead = {
 // thing this prompt does is give the model permission to change nothing.
 //
 // The dimensions are REQUIRED here, and that is a real restriction rather than a convenience:
-// every instruction in step 1 reads a length as a fraction of a wall whose height is known. A
-// check run against a wall the model itself guessed would measure the eave against a number
-// the baseline says is wrong in 74 % of generations, and would be wrong in the same direction
-// every time. The caller refuses the check rather than run it blind.
+// every measuring instruction (the eave in step 2, the porch attach height and the wings'
+// widths) reads a length as a fraction of a wall whose height is known. A check run against a
+// wall the model itself guessed would measure the eave against a number the baseline says is
+// wrong in 74 % of generations, and would be wrong in the same direction every time. The
+// caller refuses the check rather than run it blind.
+//
+// v2 STEP ORDER. The massing comes FIRST (which way the front faces, which wall is tall, the
+// wings) because it is the error that makes every other comparison meaningless: an eave
+// measured on a building drawn the wrong way round is measured on the wrong wall. The
+// "it matches" discipline is unchanged and still stated three times, and the new step ends,
+// like the profile step, by telling the model to leave all of it alone when the outlines agree.
+//
+// ROOF TYPE FIRST, INSIDE THE MASSING (fix, 2026-09-24). A front-high shed drafted as a gable has a
+// valid-looking answer to "is the front a gable end or an eave wall?" -- a level edge runs along
+// it -- so with the type left to a last "only if plainly wrong" step the massing passed and the
+// shed's highSide, dropped by the sanitiser on a gable, never landed. The type is now the first
+// question, and changing it brings its frame key in the same answer. This is the v2 check ONLY:
+// production's older designer gets legacySelfCheckPrompt, below, frozen at d3ab404.
 export function selfCheckPrompt(opts: {
+  dims: KnownDims;
+  draft: D3Spec;
+  viewpoints: readonly FrameMapViewpoint[];
+  // v2: which round this is (0-based; absent = 0), and the fields the rounds before it changed.
+  // Both are read off the LEDGER ROW by the caller, never off the request. Round 0 -- and every
+  // caller that passes neither -- gets the single check that has always run.
+  round?: number;
+  earlier?: readonly string[];
+  // measuredPitchLock's answer for the row, read by the caller (2026-09-26). True says the draft's
+  // gable pitch was worked out from the reads' own points: step 5 says it is not the check's to
+  // change and the rules list it beside the other measured fields. Absent or false, the prompt is
+  // byte for byte the one every check sent before this.
+  pitchLocked?: boolean;
+}): string {
+  const { dims, draft } = opts;
+  const pitchLocked = opts.pitchLocked === true;
+  const views = SELF_CHECK_VIEWPOINTS.filter((v) => opts.viewpoints.includes(v));
+  const roof = (draft.roof ?? {}) as Record<string, unknown>;
+  const overhang = num(roof["overhang"]);
+  const eave = overhang === null ? "not set" : `${dimFt(overhang)} ft`;
+  // ⚠️ THE WALL THE RENDER WAS DRAWN AT, NOT THE ONE THAT WAS TYPED. parseKnownDims accepts a
+  // measured wall of 3..20 ft and sanitizeD3Spec then CLAMPS it to the band the renderer can
+  // draw, so a builder who measured a wall outside that band has a draft -- and therefore a set
+  // of renders -- with a different wall in them. Stating the typed number here would tell the
+  // model that "every render you are shown was drawn at exactly these dimensions" over pictures
+  // of a wall that is not that height, and step 2 turns a fraction of that wall into feet: every
+  // length it read off a render would be off by the same ratio, in the same direction, on
+  // roof.overhang -- the field this whole pass was first built to fix. Step 4 is worse still,
+  // because it asks whether the gambrel rises are absorbing a wall difference, and the clamp is
+  // exactly such a difference.
+  //
+  // Width and length never clamp -- they are the ruler for this reading and are never stored --
+  // so they stay as typed. The builder is told about the clamp separately, by knownDimsNote.
+  const wall = dimFt(num(draft.wallHeightFt) ?? dims.wallHeightFt);
+  // ⚠️ AND THE EAVE, WHERE THE BUILDER MEASURED IT. `overhangIn` is an optional chip on the
+  // dimensions card: null means "read it off the video", and a number means they went and
+  // looked. applyKnownDims has already written it into the draft, so asking the model to
+  // re-measure it from a photograph is asking it to overwrite a tape measure with a guess --
+  // on the field this prompt spends one of its longest steps on, and with nothing on the panel
+  // reconciling the two afterwards (the chip goes on reading "16 in" while the spec says 2, and
+  // pressing the chip again does nothing). applySelfCheck drops roof.overhang from the
+  // allow-list for the same generation, so a correction would be thrown away in any case; this
+  // is what stops the model spending its effort on a field that cannot land.
+  const measuredEave = dims.overhangIn === undefined || dims.overhangIn === null ? null : dims.overhangIn;
+  const present = views.length
+    ? views.map((v) => `${v} (${SELF_CHECK_VIEW_WORDS[v]})`).join(", ")
+    : "none";
+  // The draft's own value, for the "currently" in each v2 step. Words are quoted exactly as the
+  // model would write them back; feet are feet. Absent is said as absent, never as a default.
+  const said = (k: string) => (typeof roof[k] === "string" ? `"${roof[k]}"` : "not set");
+  const feet = (k: string) => {
+    const n = num(roof[k]);
+    return n === null ? "not set" : `${dimFt(n)} ft`;
+  };
+  const wingsNow = (num(roof.wingWidthFt) ?? 0) > 0
+    ? `wingSide ${said("wingSide")}, wingWidthFt ${feet("wingWidthFt")}`
+    : "none";
+  // WHERE ABSENT DRAWS SOMETHING, SAY WHAT. A bare "not set" on a key the renderer defaults
+  // invites the model to "correct" it to the very value already drawn -- a change that moves
+  // nothing on screen, is reported to the builder as one, and counts against "it matches".
+  const porchEndNow = roof.porchEnd === "back" ? '"back"' : `"front"${roof.porchEnd === undefined ? " (not set, which means the front)" : ""}`;
+  const attachNow = num(roof.porchAttachFt) === null ? "not set, which draws it just under the top of the wall" : feet("porchAttachFt");
+  // The porch's own framing (2026-09-25), each said as what absent DRAWS, for the reason above.
+  const postsNow = num(roof.porchPosts) === null
+    ? "not set, which draws a post at each corner and one every 8.5 ft or less between them"
+    : String(num(roof.porchPosts));
+  // …and where the render cannot draw the stored pitch at this attach height, the number the
+  // render DOES show, and why (porchPitchDrawable, 2026-09-25).
+  const pitchDrawn = porchPitchDrawable(roof);
+  const pitchStored = num(roof.porchPitch);
+  const porchPitchNow = pitchStored === null
+    ? "not set, which draws a 2 in 12 porch roof, lower where the wall is too short for it"
+    : pitchDrawn !== null && pitchDrawn < Math.min(0.5, pitchStored) - 1e-6
+    ? `${pitchStored} but DRAWN AT ${Math.round(pitchDrawn * 100) / 100} (hung at porchAttachFt ${feet("porchAttachFt")}, anything steeper leaves less than 6 ft under the porch beam, so the render's porch roof is flatter than this number and raising the number changes nothing; if the frame's porch roof meets the wall higher, correct roof.porchAttachFt)`
+    : String(pitchStored);
+  const stepsNow = typeof roof.porchSteps === "string" ? said("porchSteps") : "not set, which draws no steps";
+  const hasWings = (num(roof.wingWidthFt) ?? 0) > 0;
+  // The roof step (2026-09-28), said as what the render draws: none, or where the joint is and which
+  // way the rear eave steps. sanitizeD3Spec keeps the two keys together or not at all.
+  // …and where the render cannot draw the stored step at this size, what it DOES draw, and why
+  // (roofStepAtSize, the renderer's d3RoofStep): a step held nearer the back wall, a smaller rise, or
+  // none at all. A step drawn as stored reads exactly as it always did.
+  const stepAt = num(roof.rearStepFt), stepRise = num(roof.rearEaveRiseFt);
+  const stepSaid = (at: number, rise: number) =>
+    `the joint ${dimFt(at)} ft from the back wall, the rear eave ${dimFt(Math.round(Math.abs(rise) * 120) / 10)} in ${rise > 0 ? "higher" : "lower"}`;
+  const stepSize = roofStepAtSize(roof, dims.widthFt, dims.lengthFt);
+  const stepDrawn = !stepSize ? ""
+    : !stepSize.drawn ? `, but NOT DRAWN (${stepSize.why}), so the render shows one roof from the front to the back and changing these two numbers changes nothing in it`
+    : stepSize.why ? `, but DRAWN WITH ${stepSaid(stepSize.drawn.stepFt, stepSize.drawn.rise)} (${stepSize.why}), so the render's step is not the one these numbers say and pushing them further changes nothing in it`
+    : "";
+  const stepNow = stepAt !== null && stepRise !== null
+    ? `roof.rearStepFt ${dimFt(stepAt)} ft and roof.rearEaveRiseFt ${dimFt(stepRise)} ft: ${stepSaid(stepAt, stepRise)}${stepDrawn}`
+    : "none, which draws one roof from the front to the back";
+  // The centre's default is only a thing the renderer DRAWS when there are wings to stand it on.
+  const centreNow = num(roof.centerEaveFt) !== null
+    ? feet("centerEaveFt")
+    : hasWings ? "not set, which draws it 3 ft above the top of the wing roofs" : "not set";
+  // What the building stands on (2026-09-25), each said as what the render DRAWS: absent is a slab
+  // at grade, and a raised foundation with no height is drawn at the renderer's default for it
+  // (d3GradeFt in the designer: 1 ft on blocks, 1.5 ft on piers).
+  const raised = isRaisedFoundation(draft.foundation);
+  const foundationNow = typeof draft.foundation === "string"
+    ? `"${draft.foundation}"`
+    : "not set, which draws a slab on the ground";
+  const floorNow = !raised ? "not set, and drawn only with blocks or piers"
+    : num(draft.floorHeightFt) !== null ? `${dimFt(num(draft.floorHeightFt) as number)} ft`
+    : `not set, which draws the floor ${draft.foundation === "piers" ? "1.5 ft" : "1 ft"} up`;
+  // ⚠️ AND THE TWO FRAME KEYS (fix, 2026-09-24). A draft without roof.front / roof.highSide is
+  // drawn in the OLD frame (d3RoofAxes' portrait/landscape rule): a two-slope roof's ridge along
+  // the footprint's longer walls, with a porch on the gable end at the WEST (left) when the front
+  // is the longer wall; a shed sloping along the longer walls, tall at the west (left) when the
+  // front is longer and at the north (back) otherwise. A bare "not set" read to the model as
+  // "nothing drawn yet", so on a long-fronted building it compared a front that was the short
+  // end, found the same KIND of wall, and passed it. Saying what the render actually shows is
+  // what lets it see the building is turned round -- and the fix is always to give the key.
+  // Said only for the key the draft's OWN roof type carries; the other one is a plain "not set",
+  // because it draws nothing on this roof.
+  const W = dims.widthFt, D = dims.lengthFt;
+  const wideFront = W > D;
+  const twoSlope = roof.type === "gable" || roof.type === "gambrel";
+  const frontNow = typeof roof.front === "string"
+    ? said("front")
+    : !twoSlope ? "not set"
+    : `not set, which draws the roof by the old rule: the ridge runs along the building's longer walls, so ${wideFront
+      ? `the ${dimFt(W)} ft front is drawn as a long eave wall and a porch is put on the ${dimFt(D)} ft LEFT end instead`
+      : "the front is drawn as a gable end"}. If it is not set, ALWAYS give it`;
+  const highNow = typeof roof.highSide === "string"
+    ? said("highSide")
+    : roof.type !== "shed" ? "not set"
+    : `not set, which draws it by the old rule: the roof slopes along the building's longer walls, tall at the ${wideFront ? "LEFT" : "BACK"} wall. If it is not set, ALWAYS give it`;
+  // Same KIND of wall is not enough: the old frame's front on a long-fronted gable is a gable end,
+  // just the wrong (short) one. The width is what tells them apart.
+  const frontWidth = twoSlope && W !== D
+    ? ` AND the same wall: the FRONT is the ${dimFt(W)} ft wall, so if the render's front is plainly the ${dimFt(D)} ft wall instead, roof.front is wrong or missing - fix that before anything else`
+    : "";
+  // THE WALL UNDER EACH EAVE (fix, 2026-09-24). The overhang is read as a fraction of the wall
+  // under the eave in view, and the first pass steers the close-up to a shed's HIGH eave, which
+  // stands a whole rise above the known (low) wall; the same goes for a centre section's eave
+  // over wings. Stated per eave, only where the draft has one, so a fraction read off a 9.5 ft
+  // wall is not multiplied by 7. Figures are the draft's own, drawn the way the renderer draws
+  // them (the old frame's shed slopes along the longer walls).
+  const wallN = num(draft.wallHeightFt) ?? dims.wallHeightFt;
+  const eaveWalls: string[] = [];
+  const about = (n: number) => dimFt(Math.round(n * 10) / 10);   // "about", so a tenth of a foot
+  const pitchN = num(roof.pitch);
+  if (roof.type === "shed" && pitchN !== null && pitchN > 0) {
+    const hs = roof.highSide;
+    const run = hs === "front" || hs === "back" ? D : hs === "left" || hs === "right" ? W : Math.max(W, D);
+    eaveWalls.push(`about ${about(wallN + run * pitchN)} ft for this shed's HIGH eave`);
+  }
+  if (hasWings) {
+    const ya = wallN + (num(roof.wingWidthFt) ?? 0) * (num(roof.wingPitch) ?? 0.25);
+    const c = num(roof.centerEaveFt);
+    eaveWalls.push(`about ${about(c !== null ? Math.max(c, ya + 1) : ya + 3)} ft for the centre section's eave`);
+  }
+  const eaveRuler = eaveWalls.length
+    ? `
+   Measure against the wall directly under THAT eave: ${wall} ft for ${roof.type === "shed" ? "the LOW eave" : "a wing's outer eave"}; ${eaveWalls.join("; ")}.`
+    : "";
+  // ── A MEASURED GABLE PITCH (2026-09-26, measuredPitchLock) ──
+  // With the lock, step 5 keeps its gambrel sentence and says the pitch was measured, in place of
+  // asking for it to be judged by eye, which is what moved a measured 0.415 to 0.7 live.
+  // applySelfCheck drops a correction to it for the same row, so this only stops the model
+  // spending its effort on a field that cannot land, as step 2 does for a measured eave.
+  const pitchNow = num(roof.pitch) === null ? "not set" : String(num(roof.pitch));
+  // ── THE ROUND (v2) ──
+  // A later round judges renders of the spec the round before it PRODUCED, and says so. Without
+  // this the model reads "YOUR DRAFT" as its own first answer and a correction an earlier round
+  // made as its own mistake -- which is how a check flips a field back and forth for three
+  // rounds. Only allow-listed field NAMES are interpolated: they come off our own ledger row, but
+  // nothing that reached a column as model prose is spliced back into a prompt.
+  const round = Math.max(0, Math.floor(num(opts.round) ?? 0));
+  const earlier = (opts.earlier ?? []).filter((f) => (SELF_CHECK_ALLOW as readonly string[]).includes(f));
+  const roundNote = round > 0
+    ? `
+
+THIS IS CHECK ROUND ${round + 1} OF ${SELF_CHECK_MAX_ROUNDS}. The draft above already carries what the
+earlier round${round > 1 ? "s" : ""} corrected${earlier.length ? ` (${earlier.join(", ")})` : ""}, and every render below was drawn from it.
+Judge the pictures as they are NOW. A field an earlier round corrected is right unless these
+pictures plainly show otherwise - changing it straight back is almost always a mistake. If
+everything now matches, that is the answer: say so and stop.`
+    : "";
+  return `You drafted a 3D spec for a portable building from a walk-around video. We rendered your
+draft and are showing you the result beside the builder's own frames. Your job now is
+narrow: find the places where YOUR DRAFT does not match THEIR BUILDING, and correct only
+those.
+
+This is a check, not a second draft. Most fields will already be right. "It matches" is a
+correct and expected answer, and it is the answer we expect most often. Do not change a
+field to show you are working - a wrong correction is worse than no correction, because it
+overwrites a number that was already good.
+
+THE BUILDER HAS MEASURED THESE. They are facts, not your estimates, and you must not change
+them or argue with them:
+  building size: ${dimFt(dims.widthFt)} ft wide by ${dimFt(dims.lengthFt)} ft long - the FRONT wall is ${dimFt(dims.widthFt)} ft long,
+    and the building runs ${dimFt(dims.lengthFt)} ft from the front to the back
+  wall height at the eave: ${wall} ft - the OUTSIDE walls (on a one-slope roof, the LOW side;
+    with wings, the wings' outer walls)${measuredEave === null ? "" : `
+  eave overhang: ${dimFt(measuredEave)} in past the wall`}
+Use them as your ruler. Every render you are shown was drawn at exactly these dimensions, so
+anything in a render can be measured against a wall you know the height of.
+
+THE FRONT is the wall with the roofed porch on it, or the main door when there is no porch (an
+open deck or stair does not count). Left and right are as seen standing in front of it, facing
+the building.
+
+YOUR DRAFT, as rendered:
+${JSON.stringify(draft, null, 2)}${roundNote}
+
+THE IMAGES. Each viewpoint gives you two images in a row: first the builder's own frame,
+then our render of your draft from the same angle. Compare them as SHAPES. Ignore the
+background, the grass, the sky, the lighting, the sharpness, the neighbouring buildings, and
+any door, window or vent - the render deliberately does not draw the openings, and their
+absence is not a mistake to report.
+
+THE VIEWPOINTS IN THIS REQUEST, in the order they appear below: ${present}. Those are the only
+ones here. Where a step below names a viewpoint you were not given, answer it from what you do
+have or mark it unclear - never read one view as though it were another.
+
+CHECK EXACTLY THESE, IN THIS ORDER. For each one, say whether it matches or give a
+correction. These first four are the ones this pass gets wrong most often, so spend your
+effort here.
+
+1. THE MASSING: what kind of roof it is, which way the building faces, and what blocks it
+   is made of. Check the OUTLINE before anything else - a building drawn the wrong way round
+   makes every other comparison meaningless. The back and otherSide viewpoints, where you
+   have them, are there for this: a far wing or a tall back wall can only be seen from there.
+     * roof.type FIRST, currently ${said("type")}. One slope ("shed"), two slopes meeting at a
+       ridge ("gable"), or a barn's two-pitch slopes ("gambrel")? Read it from the side and
+       back views. A wrong type makes every other answer here meaningless: correct it HERE,
+       and give roof.highSide (shed) or roof.front (gable, gambrel) in the same answer.
+     * Two-slope roofs (gable, gambrel) - roof.front, currently ${frontNow}. Is the front
+       wall a GABLE END - it rises to a triangle under the peak and the ridge runs away from
+       you ("gable") - or an EAVE WALL - a level roof edge runs along its top and the ridge
+       runs across in front of you ("eave")? The render's front must be the same kind${frontWidth}.
+     * One-slope roofs (shed) - roof.highSide, currently ${highNow}. Which wall is
+       the TALL one in the frames: "front", "back", "left" or "right"? Judge it by the MAIN
+       roof, never by a porch's own lower roof: on the two walls whose top edge slopes, the
+       taller vertical edge stands at the high wall. The same wall must be the tall one in
+       the render.
+     * Wings - currently ${wingsNow}. A wing is an ENCLOSED lower room, with walls and often
+       windows, running the full depth along a side the main roof slopes down to, under its
+       own lower one-slope roof that falls away from the centre; the taller centre section's
+       walls rise above it to their own eave. A roof carried on OPEN posts is a lean-to, not
+       a wing - if the draft drew a lean-to where the frames show a wing, set
+       roof.leanToWidthFt to 0 and give the wing. Do the frames show wings, and on both sides
+       or one (roof.wingSide: "both", or "left", "right", "front" or "back")? Look at BOTH
+       sides before you answer: a raised centre with a wing on one side only is uncommon.
+       Does the render? If the frames show wings and the render has none, ADD them in ONE
+       answer: roof.wingSide; roof.wingWidthFt (each wing's width, from its outer wall in to
+       the centre section's wall); roof.wingPitch (the wing roof's rise over that width); and
+       roof.centerEaveFt (feet from the floor to the top of the centre walls) - all measured
+       against the ${wall} ft outer walls.
+       Where both show wings, compare each wing's width against the ruler (roof.wingWidthFt;
+       0 removes the wings), the slope of the wing roofs (roof.wingPitch, rise over run:
+       in the front viewpoint, compare how far a wing roof rises from its outer eave to where it
+       meets the centre wall, as a share of the outer wall's height, in the frame and in the
+       render; if the two differ by a tenth of the wall or more, correct roof.wingPitch BY THE
+       DIFFERENCE: add the frame's share minus the render's, times ${wall} ft, divided by
+       roof.wingWidthFt, to its current value), and
+       the CENTRE section's eave (roof.centerEaveFt, currently ${centreNow}: feet
+       from the floor to the top of the centre walls). Measure it, do not eyeball it: in a
+       frame square to the front or the back, compare the BAND of centre wall showing above the
+       wing roof with the height of the wing's outer wall below it, then do the same in the
+       render, at the same viewpoint. If the two shares differ by a tenth of the outer wall
+       or more, correct roof.centerEaveFt BY THE DIFFERENCE: add the frame's share minus the
+       render's share, times the ${wall} ft outer wall, to its current value. A band half as
+       tall as the outer wall in the frame and a quarter of it in the render adds a quarter of
+       ${wall} ft. Correct it by the difference, never rebuild it from the wing roof: the render
+       already draws the wing roof's own depth above its wall, which a rebuilt number leaves out.
+     * The roof step - currently ${stepNow}. Some gable buildings are built in two sections: on
+       BOTH long sides a joint runs up the roof, the rear section's eave sits higher (or lower)
+       than the front's, and the two ridges line up, so the roof edges show a small wedge-shaped
+       step at the joint, deepest at the eave. Compare the side and otherSide viewpoints. If the
+       frames show a step the render lacks, give BOTH in one answer: roof.rearStepFt (feet from
+       the BACK wall to the joint, counted in battens or measured against the ${dimFt(D)} ft
+       depth) and roof.rearEaveRiseFt (how much higher the rear eave is, read in inches against
+       the ${wall} ft wall and divided by 12; negative when it is lower). Where both show one,
+       correct the joint's place or the rise only where they plainly differ. If the render shows
+       a step the frames do not, set roof.rearStepFt to 0, which removes it.
+   If the render and the frames trace the same outline from every viewpoint you have, leave
+   all of these alone.
+
+${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave}). THE BUILDER MEASURED THIS ONE TOO
+   and it is already in the draft. It is not yours to change: a correction to roof.overhang
+   will be thrown away. Mark "overhang" as "ok" and spend the effort on the porch below.` : `2. THE EAVE OVERHANG (roof.overhang, currently ${eave}). Look at the close-up
+   viewpoint, where the roof edge is seen in profile against the sky with the wall below it.
+   Measure how far the roof stands out past the wall as a FRACTION OF THE WALL HEIGHT you
+   were given, in the frame and in the render, and convert: a roof that projects a
+   twentieth of the wall's height on a ${wall} ft wall is about
+   ${wall}/20 ft. Buildings with a tight, trimmed eave are common and read as
+   almost no projection at all - values near 0.15 ft are real. Do not settle on 1.0 ft
+   because it is typical; report what this eave actually does.${eaveRuler}`}
+
+3. THE PORCH, AND WHICH KIND (roof.porchOutFt / roof.porchDepthFt). There are two kinds and
+   they are not interchangeable:
+     * RECESSED (porchDepthFt): the porch wall is set BACK into the building, the main roof
+       carries straight over the gap, and nothing sticks out past the end of the roof.
+     * PROJECTING (porchOutFt): the porch wall runs full height with the door in it, and a
+       deck with posts and its OWN lower roof stands OUT in front of that wall.
+   The side viewpoint settles it: if the porch roof sticks out past the building, it is
+   projecting. If that face of the building is one flat plane, it is recessed. Getting
+   this wrong is the single most visible error on the whole building, so check it even when
+   the two pictures look broadly alike. If you change the kind, give the new key and leave
+   the other one out entirely.
+   Then, where both show a porch, WHERE IT IS, HOW BIG AND HOW IT IS BUILT:
+     * roof.porchEnd, currently ${porchEndNow}: always "front" on this building, because the
+       porch is what defines the front. If the render's porch is on a different wall from the
+       frame's, the fault is roof.front or roof.highSide (step 1): correct that instead. The
+       only correction roof.porchEnd itself can take is to "front".
+     * roof.porchAttachFt, projecting porches only, currently ${attachNow}: feet
+       from the floor to the TOP of the porch roof where it meets the wall. Look at what shows
+       between the porch roof and the top of that wall: a band of siding in the frame and none
+       in the render, or the reverse, means this is wrong. Correct it BY THE DIFFERENCE: in the
+       front viewpoint, compare the height of the porch roof's top where it meets the wall, above
+       the floor, as a share of the ${wall} ft wall, in the frame and in the render, and add the
+       frame's share minus the render's, times ${wall} ft, to its current value.
+     * roof.porchWidthFt, projecting porches only, currently ${feet("porchWidthFt")}: how far
+       the porch runs along its wall. "not set" means the whole wall, or the centre section
+       when there are wings. Correct it only where the frame shows plain wall beyond the
+       porch's ends.
+     * roof.porchPosts, projecting porches only, currently ${postsNow}: how many posts stand
+       along the porch's front edge, the corner posts included. Count them in the front
+       viewpoint, in the frame and in the render, and correct it only where the counts differ.
+     * roof.porchPitch, projecting porches only, currently ${porchPitchNow}: the porch
+       roof's own rise over run, from a side viewpoint where its edge is seen square-on. Correct
+       it only where the porch roof plainly falls more steeply, or less, than the render's. The
+       render never draws a porch roof so steep that less than 6 ft stands under its beam, so a
+       porch roof that meets the wall low is drawn flatter than porchPitch says; where that is
+       why the render's is flatter, correct roof.porchAttachFt, never porchPitch.
+     * roof.porchSteps, projecting porches only, currently ${stepsNow}: where steps leave the
+       porch's front edge, "left", "center" or "right" as seen standing in front of it, by
+       which third of the span between the two front corner posts the MIDDLE of the steps
+       falls in (never judged against the door; with a post at the middle of the front edge,
+       never "center", only the side of that post). Give it
+       where the frame shows steps the render lacks, or shows them at a different place. Give
+       "none" where the render shows steps the frame does not, or where the frame's steps leave
+       the deck from one of its sides rather than its front edge: "none" removes them.
+
+4. THE WALL, AS DRAWN (not the number). You cannot change wallHeightFt - it is measured. But
+   if the render's walls look plainly shorter or taller than the frame's at the same angle
+   while the roof matches, something else is absorbing the difference: say so in \`note\` and
+   check whether the gambrel rises below are carrying it.
+
+THEN THESE, only if the pictures disagree:
+${pitchLocked ? `5. ROOF PROFILE. For a gambrel: kneeU, kneeRise, ridgeRise, measured from the CENTRELINE and
+   the TOP OF THE WALL, each divided by the half-span. THE PITCH (roof.pitch, currently ${pitchNow})
+   WAS MEASURED: it was worked out from points marked on the builder's own frames, not judged
+   by eye. It is not yours to change: a correction to roof.pitch will be thrown away. Leave it
+   alone even where the peak looks higher or lower in a frame than in the render - a gable seen
+   from an angle looks steeper than a square-on one. On a gable there is nothing else in this
+   step: mark "roofProfile" as "ok".` : `5. ROOF PROFILE. For a gambrel: kneeU, kneeRise, ridgeRise, measured from the CENTRELINE and
+   the TOP OF THE WALL, each divided by the half-span. For a gable or shed: pitch. Check the
+   silhouette at the head-on viewpoint. For a gable, compare how far the peak rises above the
+   eave corners with half the gable's width, in the frame and in the render; where one of the
+   two is seen more from an angle, remember an angled gable looks steeper than a square-on one.
+   If the render's roof and the frame's roof trace the same outline, leave all of these alone.`}
+6. roof.eave - "open" (a sawtooth row of rafter tails with gaps of sky between them) or
+   "fascia" (one unbroken board). Only from a viewpoint that actually shows under the eave.
+7. roofMaterial, foundation, gableVent - only if plainly wrong. (roof.type is step 1's.)
+   foundation, currently ${foundationNow}: "slab" (the walls meet the ground), "skids" (low
+   runners on the ground, a narrow shadow gap), "blocks" (stacked concrete blocks under the
+   runners, a clear gap) or "piers" (concrete piers, a clear gap). With blocks or piers,
+   floorHeightFt, currently ${floorNow}: feet from the ground to the TOP of the floor at the
+   FRONT. Judge the gap under the building against the door (6 ft 8 in tall), or count the
+   porch steps' risers (about 7 in each) from the ground up to the deck. Correct it only where
+   the render's building plainly stands higher or lower off the ground than the frame's.
+
+RETURN ONLY this JSON object, no prose and no markdown fence:
+{
+  "verdict": "matches" | "corrections",
+  "corrections": { ... only the fields you are changing, in the same shape as the draft ... },
+  "changed": [
+    { "field": "roof.overhang", "from": 1.0, "to": 0.2,
+      "why": "<one sentence naming what in which image made you change it>" }
+  ],
+  "checked": {
+    "massing": "ok" | "changed" | "unclear",
+    "overhang": "ok" | "changed" | "unclear",
+    "porch": "ok" | "changed" | "unclear",
+    "roofProfile": "ok" | "changed" | "unclear",
+    "eave": "ok" | "changed" | "unclear"
+  },
+  "note": "<one sentence for the builder, or an empty string>"
+}
+
+RULES FOR THE ANSWER:
+  * If nothing needs changing, return "verdict": "matches" with "corrections": {} and
+    "changed": []. That is a complete, correct answer. Stop there.
+  * Every field in "corrections" must also appear in "changed". Anything not in both is
+    ignored.
+  * Never return wallHeightFt, sizeFt, colors or siding${measuredEave === null ? "" : " or roof.overhang"}${pitchLocked ? " or roof.pitch" : ""}. They are not yours to change here.
+  * Change at most ${SELF_CHECK_MAX_FIELDS} fields. If you believe more than ${SELF_CHECK_MAX_FIELDS} are wrong, the draft is
+    not worth patching: return the ${SELF_CHECK_MAX_FIELDS} that matter most and say so in "note".
+  * "unclear" is better than a guess. A field the frames genuinely do not settle should be
+    left alone and marked unclear, not corrected to a typical value.`;
+}
+
+// ── THE LEGACY CHECK PROMPT: d3ab404's selfCheckPrompt, VERBATIM (fix, 2026-09-24) ──────────
+// ⛔ FROZEN. What every check request WITHOUT frame "front" gets (selfCheckMode "legacy") --
+// production's older designer, whose dimensions card typed W "across the gable end" and whose
+// renderer and panel know none of the v2 keys. Lifted character for character from the function
+// as it shipped at d3ab404 (only its name and the names of the frozen constants it reads were
+// changed), and styleD3.test.ts pins its output by SHA-256 against what d3ab404 produced for the
+// same inputs. Every word the check learns goes into selfCheckPrompt above; editing this one
+// changes production's older designer and nothing else, so there is no reason left to. (Its
+// inner comments are d3ab404's too, clamp numbers included.)
+export function legacySelfCheckPrompt(opts: {
   dims: KnownDims;
   draft: D3Spec;
   viewpoints: readonly FrameMapViewpoint[];
 }): string {
   const { dims, draft } = opts;
-  const views = SELF_CHECK_VIEWPOINTS.filter((v) => opts.viewpoints.includes(v));
+  const views = SELF_CHECK_LEGACY_VIEWPOINTS.filter((v) => opts.viewpoints.includes(v));
   const overhang = num((draft.roof ?? {})["overhang"]);
   const eave = overhang === null ? "not set" : `${dimFt(overhang)} ft`;
   // ⚠️ THE WALL THE RENDER WAS DRAWN AT, NOT THE ONE THAT WAS TYPED. parseKnownDims accepts a
@@ -1198,7 +3217,7 @@ export function selfCheckPrompt(opts: {
   // is what stops the model spending its effort on a field that cannot land.
   const measuredEave = dims.overhangIn === undefined || dims.overhangIn === null ? null : dims.overhangIn;
   const present = views.length
-    ? views.map((v) => `${v} (${SELF_CHECK_VIEW_WORDS[v]})`).join(", ")
+    ? views.map((v) => `${v} (${SELF_CHECK_LEGACY_VIEW_WORDS[v]})`).join(", ")
     : "none";
   return `You drafted a 3D spec for a portable building from a walk-around video. We rendered your
 draft and are showing you the result beside the builder's own frames. Your job now is
@@ -1295,8 +3314,8 @@ RULES FOR THE ANSWER:
   * Every field in "corrections" must also appear in "changed". Anything not in both is
     ignored.
   * Never return wallHeightFt, sizeFt, colors or siding${measuredEave === null ? "" : " or roof.overhang"}. They are not yours to change here.
-  * Change at most ${SELF_CHECK_MAX_FIELDS} fields. If you believe more than ${SELF_CHECK_MAX_FIELDS} are wrong, the draft is
-    not worth patching: return the ${SELF_CHECK_MAX_FIELDS} that matter most and say so in "note".
+  * Change at most ${SELF_CHECK_LEGACY_MAX_FIELDS} fields. If you believe more than ${SELF_CHECK_LEGACY_MAX_FIELDS} are wrong, the draft is
+    not worth patching: return the ${SELF_CHECK_LEGACY_MAX_FIELDS} that matter most and say so in "note".
   * "unclear" is better than a guess. A field the frames genuinely do not settle should be
     left alone and marked unclear, not corrected to a typical value.`;
 }
@@ -1310,7 +3329,9 @@ RULES FOR THE ANSWER:
 // one stray brace, and reading that as a clean pass would inflate the single statistic this
 // whole feature is judged on — how often the check leaves an already-good draft alone.
 // "matches" has to be something the model SAID.
-export function parseSelfCheck(text: string): SelfCheckRead | null {
+// `mode` (fix, 2026-09-24): the legacy check keeps d3ab404's four `checked` keys, so an older
+// designer is handed exactly what it always was.
+export function parseSelfCheck(text: string, mode: SelfCheckMode = "v2"): SelfCheckRead | null {
   const m = String(text || "").match(/\{[\s\S]*\}/);
   if (!m) return null;
   // deno-lint-ignore no-explicit-any
@@ -1341,9 +3362,11 @@ export function parseSelfCheck(text: string): SelfCheckRead | null {
   const checked: SelfCheckChecked = {};
   if (parsed.checked && typeof parsed.checked === "object" && !Array.isArray(parsed.checked)) {
     const src = parsed.checked as Record<string, unknown>;
-    for (const k of SELF_CHECK_CHECKED_KEYS) {
+    for (const k of selfCheckRules(mode).checkedKeys) {
       const v = src[k];
-      if (typeof v === "string" && (SELF_CHECK_CHECKED_WORDS as readonly string[]).includes(v)) checked[k] = v;
+      if (typeof v === "string" && (SELF_CHECK_CHECKED_WORDS as readonly string[]).includes(v)) {
+        checked[k as keyof SelfCheckChecked] = v;
+      }
     }
   }
 
@@ -1376,7 +3399,16 @@ export function parseSelfCheck(text: string): SelfCheckRead | null {
 // reason -- a field the builder measured is not the check's to re-measure from a photograph.
 // Absent (every existing caller, and production's older bundle, which sends no dims at all)
 // means the list is unchanged.
-export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: KnownDims | null):
+//
+// `mode` (fix, 2026-09-24) picks the allow-list and the cap: "legacy" is d3ab404's gate exactly
+// (22 paths, six fields, and no v2 consequence report), so no v2 key can land from a check an
+// older designer ran. Absent is "v2", which is every call this file's tests already make.
+//
+// `pitchLocked` (2026-09-26) is measuredPitchLock's answer for the row: the draft's gable pitch was
+// worked out from the reads' own points, so roof.pitch comes off the allow-list for this generation
+// the way roof.overhang does for a measured eave, and a correction to it lands in `dropped`. The
+// caller passes it on a v2 check only. Absent (every existing caller) is false: the list is unchanged.
+export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: KnownDims | null, mode: SelfCheckMode = "v2", pitchLocked = false):
   | { ok: false; error: string }
   | {
     ok: true;
@@ -1394,16 +3426,25 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
 
   // Deduplicated, in the order the model listed them. A model naming the same field twice is
   // asking for one change, not two, and must not be pushed over the cap by its own repetition.
+  const rules = selfCheckRules(mode);
   const declared: string[] = [];
   for (const c of read.changed) if (!declared.includes(c.field)) declared.push(c.field);
-  if (declared.length > SELF_CHECK_MAX_FIELDS) {
+  if (declared.length > rules.maxFields) {
     return { ok: true, verdict: "rejected_too_many", d3: base.d3, changed: [], dropped: declared.slice() };
   }
 
   const measuredEave = !!dims && dims.overhangIn !== undefined && dims.overhangIn !== null;
-  const allow = measuredEave
-    ? (SELF_CHECK_ALLOW as readonly string[]).filter((f) => f !== "roof.overhang")
-    : (SELF_CHECK_ALLOW as readonly string[]);
+  // The lock holds only while the roof IS a gable. A measured pitch is a gable's rise over its
+  // HALF-span; the moment this answer turns the roof into a shed (whose pitch runs the full depth)
+  // or anything else, that number means something else and the new type's own pitch must land.
+  const roofNow = (base.d3 as { roof?: { type?: unknown } }).roof;
+  const typeWanted = declared.includes("roof.type")
+    ? ((read.corrections as { roof?: { type?: unknown } }).roof ?? {}).type
+    : undefined;
+  const lockPitch = pitchLocked && roofNow?.type === "gable" && (typeWanted === undefined || typeWanted === "gable");
+  const allow = measuredEave || lockPitch
+    ? rules.allow.filter((f) => !(measuredEave && f === "roof.overhang") && !(lockPitch && f === "roof.pitch"))
+    : rules.allow;
   const dropped: string[] = [];
   // The value the model wants at each allowed path. Read out of `corrections`, never out of the
   // `to` in `changed`: that one is prose about the change, and the prompt says a field has to be
@@ -1439,6 +3480,40 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
     dropped.push(field);
     wanted.delete(field);
   }
+  // AN OLDER DESIGNER'S CHECK KEEPS ITS OLD FOUNDATION WORDS (2026-09-25). The sanitiser now keeps
+  // "blocks" and "piers", which that designer can neither draw nor show, so a legacy correction to
+  // either is dropped as it always was (and the destructive pass never sees it). Its prompt, frozen,
+  // names neither.
+  if (mode === "legacy" && wanted.has("foundation") && !["skids", "slab"].includes(String(wanted.get("foundation")))) {
+    dropped.push("foundation");
+    wanted.delete("foundation");
+  }
+
+  // "none" TAKES THE PORCH STEPS OFF (v2, fix 2026-09-25). No steps is an ABSENT roof.porchSteps,
+  // and absent is the one value a correction could not say: null, "none" and "" were all dropped by
+  // the sanitiser, and the destructive pass below then put the draft's steps back. A first pass that
+  // invented steps, or put a side stair on the front edge, could never be corrected in three rounds.
+  // So an explicit "none" (the word the prompt offers) CLEARS the key: build() deletes it, and it is
+  // never in `wanted`, so the destructive pass cannot restore it. Any other unreadable word still
+  // leaves the draft's steps standing. Legacy never had the key on its allow-list.
+  const cleared = new Set<string>();
+  if (mode === "v2" && wanted.has("roof.porchSteps")
+      && String(wanted.get("roof.porchSteps")).trim().toLowerCase() === "none") {
+    wanted.delete("roof.porchSteps");
+    cleared.add("roof.porchSteps");
+  }
+  // A STEP OF 0 TAKES THE ROOF STEP OFF (v2, 2026-09-28), for the porch steps' reason: no step is
+  // an ABSENT rearStepFt and rearEaveRiseFt, a step of 0 is exactly what the sanitiser drops, and
+  // the destructive pass below would then put the draft's step straight back, so a step the render
+  // drew wrongly could never be taken off. A declared roof.rearStepFt of half a foot or less (the
+  // prompt offers 0) CLEARS BOTH keys; neither is in `wanted`, so nothing can restore them. An
+  // unreadable value is not a 0 and leaves the draft's step standing.
+  if (mode === "v2" && wanted.has("roof.rearStepFt") && !((num(wanted.get("roof.rearStepFt")) ?? 1) > 0.5)) {
+    wanted.delete("roof.rearStepFt");
+    wanted.delete("roof.rearEaveRiseFt");
+    cleared.add("roof.rearStepFt");
+    cleared.add("roof.rearEaveRiseFt");
+  }
 
   // WHICH KEYS THE PORCH EXCLUSION TOOK OUT, recorded by build() rather than inferred by the
   // two passes that need it. They need it for opposite reasons and both were wrong without it:
@@ -1454,6 +3529,7 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
       if (field.startsWith("roof.")) roof[field.slice(5)] = value;
       else merged[field] = value;
     }
+    for (const field of cleared) delete roof[field.slice(5)];
     // THE PORCH EXCLUSION, which is calDraftRoof's rule and has to run HERE rather than be left
     // to the sanitiser. sanitizeD3Spec drops porchDepthFt when porchOutFt is above 0.5 — the
     // projecting-wins direction — so a correction changing a PROJECTING porch to a RECESSED one
@@ -1521,7 +3597,7 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   const report = declared.slice();
   for (const f of excluded) if (!report.includes(f)) report.push(f);
   for (const field of report) {
-    const proposed = wanted.has(field);
+    const proposed = wanted.has(field) || cleared.has(field);
     if (!proposed && !excluded.has(field)) continue;
     const before = readSpecPath(base.d3, field);
     const after = readSpecPath(finalSpec.d3, field);
@@ -1533,6 +3609,23 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
     }
     const why = read.changed.find((c) => c.field === field)?.why ?? "";
     applied.push({ field, from: before ?? null, to: after ?? null, why });
+  }
+  // ⚠️ AND WHAT THE SANITISER'S OWN VALIDITY RULES TOOK WITH IT (v2). The porch exclusion above
+  // is no longer the only rule that removes a key the model never named: roof.front exists only
+  // on a two-slope roof and roof.highSide only on a shed, the wing keys only on gable/gambrel,
+  // and a porch's attach height and width only while it projects. So a correction of roof.type
+  // from gable to shed quietly takes roof.front and the wings with it, and a correction to a
+  // recessed porch takes the attach height and width. Same rule as the exclusion: the list has
+  // to be true line by line AND complete, so every allow-listed path that moved is on it. These
+  // carry no `why` -- nobody asked for them; they are what the asked-for change cost.
+  // v2 only: d3ab404 had no such pass, and the legacy check is d3ab404's (none of its 22 paths
+  // can be taken by a validity rule the porch exclusion does not already report).
+  for (const field of (mode === "v2" ? SELF_CHECK_ALLOW : []) as readonly string[]) {
+    if (applied.some((c) => c.field === field)) continue;
+    const before = readSpecPath(base.d3, field);
+    const after = readSpecPath(finalSpec.d3, field);
+    if (JSON.stringify(before ?? null) === JSON.stringify(after ?? null)) continue;
+    applied.push({ field, from: before ?? null, to: after ?? null, why: "" });
   }
   // Nothing survived the gates. "matches" is the design's own answer for that — the draft stands
   // untouched, which is exactly what the builder sees — and `dropped` is what says the model
@@ -1547,6 +3640,79 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   };
 }
 
+// ── WHAT THE WHOLE CHECK CHANGED, ACROSS ROUNDS (v2) ──────────────────────────────────────
+// applySelfCheck reports ONE round: `from` is the spec that round judged, which after round 0
+// is the previous round's output. What the builder reads, and what `self_check_changed` records,
+// is the net effect against the FIRST DRAFT, so every line runs from `drafted` to the final spec
+// and the list stays true line by line however many rounds produced it.
+//
+//  * A field a later round moved BACK to the draft's value is not a change any more and is not
+//    listed. That is also how a flip-flop is seen: see selfCheckReverted.
+//  * `earlier` is the row's own `self_check_changed` from the round before. It is read for its
+//    ORDER and its `why` only, and only for allow-listed paths; every from/to is recomputed off
+//    the two specs, exactly as applySelfCheck does, so nothing in that column is trusted as data.
+//  * `why` is the latest round's that touched the field, else the earlier round's, else "".
+//
+// Round 0 comes out IDENTICAL to applySelfCheck's own list (same paths, order, values and why),
+// which styleD3.test.ts pins -- so the single check an older browser runs records exactly what
+// it always has.
+export function selfCheckTotalChanges(
+  first: D3Spec,
+  final: D3Spec,
+  earlier: unknown,
+  latest: readonly SelfCheckChange[],
+): SelfCheckChange[] {
+  const allow = SELF_CHECK_ALLOW as readonly string[];
+  const prior: { field: string; why: string }[] = [];
+  if (Array.isArray(earlier)) {
+    for (const e of earlier) {
+      if (!e || typeof e !== "object" || Array.isArray(e)) continue;
+      const r = e as Record<string, unknown>;
+      if (typeof r.field !== "string" || !allow.includes(r.field)) continue;
+      prior.push({ field: r.field, why: typeof r.why === "string" ? r.why.slice(0, 240) : "" });
+    }
+  }
+  const order: string[] = [];
+  for (const f of [...prior.map((p) => p.field), ...latest.map((c) => c.field)]) {
+    if (allow.includes(f) && !order.includes(f)) order.push(f);
+  }
+  for (const f of allow) if (!order.includes(f)) order.push(f);
+  const out: SelfCheckChange[] = [];
+  for (const field of order) {
+    const from = readSpecPath(first, field);
+    const to = readSpecPath(final, field);
+    if (JSON.stringify(from ?? null) === JSON.stringify(to ?? null)) continue;
+    const mine = latest.find((c) => c.field === field);
+    const why = mine ? mine.why : (prior.find((p) => p.field === field)?.why ?? "");
+    out.push({ field, from: from ?? null, to: to ?? null, why });
+  }
+  return out;
+}
+
+// The fields THIS round moved straight back to where the first draft had them: an earlier round
+// changed them and this one undid it. That is the flip-flop a multi-round check has to stop on,
+// and the browser is told which fields rather than left to diff three specs to find out.
+export function selfCheckReverted(
+  total: readonly SelfCheckChange[],
+  latest: readonly SelfCheckChange[],
+): string[] {
+  return latest.filter((c) => !total.some((t) => t.field === c.field)).map((c) => c.field);
+}
+
+// The allow-listed field NAMES from a row's `self_check_changed`, for the round note in
+// selfCheckPrompt. Names only: the `why` in that column is model prose, and nothing a model wrote
+// is spliced back into a prompt.
+export function selfCheckChangedFields(changed: unknown): string[] {
+  if (!Array.isArray(changed)) return [];
+  const allow = SELF_CHECK_ALLOW as readonly string[];
+  const out: string[] = [];
+  for (const e of changed) {
+    const f = e && typeof e === "object" && !Array.isArray(e) ? (e as Record<string, unknown>).field : null;
+    if (typeof f === "string" && allow.includes(f) && !out.includes(f)) out.push(f);
+  }
+  return out;
+}
+
 // One level of dotting, which is all the allow-list has. Returns undefined for an absent key, so
 // "absent" and "null" stay distinguishable at the call site.
 function readSpecPath(spec: D3Spec, field: string): unknown {
@@ -1559,10 +3725,10 @@ function readSpecPath(spec: D3Spec, field: string): unknown {
 }
 
 // ── THE RENDERS ───────────────────────────────────────────────────────────────────────────
-// Four JPEGs at most, 400 KB each at most, 1.2 MB in total at most, and JPEG is proved from the
+// Six JPEGs at most, 400 KB each at most, 1.8 MB in total at most, and JPEG is proved from the
 // BYTES rather than believed from a header the caller wrote. Everything here REFUSES rather than
 // drops: a render that is the wrong size or the wrong type is a fault in the half of this
-// feature we ship alongside it, and silently comparing three views instead of four would hide
+// feature we ship alongside it, and silently comparing five views instead of six would hide
 // that while making the check quietly worse.
 //
 // `frame` is a 1-based index into the array of images the FIRST call was given, which is what
@@ -1574,11 +3740,14 @@ export type SelfCheckRender = { viewpoint: FrameMapViewpoint; frame: number; bas
 const JPEG_DATA_PREFIX = /^data:image\/jpe?g;base64,/i;
 const ANY_DATA_PREFIX = /^data:/i;
 
-export function parseSelfCheckRenders(raw: unknown, frameCount: number):
+// `mode` (fix, 2026-09-24): the legacy check takes d3ab404's four viewpoints, four renders and
+// 1.2 MB, refused in d3ab404's words; absent is "v2".
+export function parseSelfCheckRenders(raw: unknown, frameCount: number, mode: SelfCheckMode = "v2"):
   { ok: true; renders: SelfCheckRender[] } | { ok: false; error: string } {
+  const rules = selfCheckRules(mode);
   if (!Array.isArray(raw) || raw.length === 0) return { ok: false, error: "The check needs at least one render." };
-  if (raw.length > SELF_CHECK_MAX_RENDERS) {
-    return { ok: false, error: `A check compares at most ${SELF_CHECK_MAX_RENDERS} views, and ${raw.length} were sent.` };
+  if (raw.length > rules.maxRenders) {
+    return { ok: false, error: `A check compares at most ${rules.maxRenders} views, and ${raw.length} were sent.` };
   }
   const bound = Math.floor(num(frameCount) ?? 0);
   const renders: SelfCheckRender[] = [];
@@ -1590,7 +3759,7 @@ export function parseSelfCheckRenders(raw: unknown, frameCount: number):
     }
     const e = entry as Record<string, unknown>;
     const viewpoint = String(e.viewpoint ?? "");
-    if (!(SELF_CHECK_VIEWPOINTS as readonly string[]).includes(viewpoint)) {
+    if (!(rules.viewpoints as readonly string[]).includes(viewpoint)) {
       return { ok: false, error: `"${viewpoint.slice(0, 40)}" is not a viewpoint this check knows.` };
     }
     // One render per viewpoint. Two renders labelled `side` would put two pictures of the same
@@ -1628,8 +3797,8 @@ export function parseSelfCheckRenders(raw: unknown, frameCount: number):
       return { ok: false, error: `The ${viewpoint} render is not a JPEG.` };
     }
     total += bytes.length;
-    if (total > SELF_CHECK_TOTAL_RENDER_BYTES) {
-      return { ok: false, error: `Those renders come to more than the ${Math.round(SELF_CHECK_TOTAL_RENDER_BYTES / 1000)} KB a check allows.` };
+    if (total > rules.totalRenderBytes) {
+      return { ok: false, error: `Those renders come to more than the ${Math.round(rules.totalRenderBytes / 1000)} KB a check allows.` };
     }
     renders.push({ viewpoint: viewpoint as FrameMapViewpoint, frame, base64: b64, bytes: bytes.length });
   }
@@ -1671,6 +3840,907 @@ export function selfCheckPairs(
 
 // The one line each pair is introduced with, so the model is never guessing which of two
 // adjacent images is the photograph and which is ours.
-export function selfCheckPairLabel(viewpoint: FrameMapViewpoint): string {
-  return `VIEWPOINT "${viewpoint}" - ${SELF_CHECK_VIEW_WORDS[viewpoint]}. The builder's own frame comes first, then our render of your draft from the same angle.`;
+// The legacy check labels its pairs in d3ab404's words ("the end the door is on", "a long wall").
+export function selfCheckPairLabel(viewpoint: FrameMapViewpoint, mode: SelfCheckMode = "v2"): string {
+  const words = mode === "legacy"
+    ? (SELF_CHECK_LEGACY_VIEW_WORDS[viewpoint] ?? SELF_CHECK_VIEW_WORDS[viewpoint])
+    : SELF_CHECK_VIEW_WORDS[viewpoint];
+  return `VIEWPOINT "${viewpoint}" - ${words}. The builder's own frame comes first, then our render of your draft from the same angle.`;
+}
+
+// ── WHICH MODEL READS THE FRAMES (2026-09-24) ────────────────────────────────────────────────
+// The v2 path (the new designer, frame "front") runs Opus; the legacy path keeps Sonnet, byte for
+// byte, so production's older designer sees no change in its requests or its timing.
+//
+// MEASURED, not assumed. The same 12 walk-around frames and the same v2 prompts, three runs per
+// building, scored against tape-and-batten truth: Sonnet's first pass got the shed's high side
+// right 2/3, the porch kind 1/3 and the raised centre's wings 2/3, and its self-check approved a
+// roof sloping the wrong way; Opus's first pass passed 6/6 (five at 100%) and its check corrected
+// every one of Sonnet's wrong drafts in one round. The 2026-09 note that "a bigger model would not
+// help" was about fields the old vocabulary could express; the discrete massing reads added since
+// (which wall is high, both wings, porch in front of the wall) are where the model is the limit.
+//
+// 2026-09-26: v2 moves from claude-opus-5 to claude-opus-5-5, the draft and its self-check alike
+// (both take the model from aiModelFields). Measured live on the same Tri Home frames with a
+// focused pitch prompt, true pitch 0.41: claude-opus-5 read 0.38 to 0.78, 1 read of 9 within 0.04
+// of the truth; claude-opus-5-5 read 0.37 to 0.44, 7 of 7 within 0.04; claude-fable-5-1 read 0.48
+// to 0.58. Opus 5.5 is also cheaper per token ($4/$20 per million against $5/$25). The request
+// shape carries over as it is: every v2 body sends thinking {type: "adaptive"} with an explicit
+// output_config.effort and no tool_choice. Opus 5.5 refuses thinking disabled, budget_tokens and a
+// forced tool_choice, and its default effort is "medium" rather than Opus 5's "high", so the
+// explicit effort matters. The effort levels (portal-settings' draftEffort; the check's, "medium" at
+// the switch and "high" for v2 since 2026-09-26, SELF_CHECK_BUDGET) were tuned on Opus 5, and Opus 5.5 tends to think more at the same level: after the switch, watch
+// draft_ms and draft_tokens.calls[].stopReason for the draft, and for the check the app_errors rows
+// coded ai_selfcheck_truncated / ai_selfcheck_timeout (self_check_tokens holds only {input, output}).
+//
+// A refusal is handled exactly as before on both paths (ai_spec_refused / the check's refused
+// verdict): the hold is released and the builder is told plainly. Opus 5.5 adds "bio" and
+// "reasoning_extraction" to the refusal categories that ai_spec_refused records.
+export const AI_MODEL_LEGACY = "claude-sonnet-5";
+export const AI_MODEL_V2 = "claude-opus-5-5";
+// The model field of a request body for one path: spread into the body, never mutated.
+export function aiModelFields(v2: boolean): Record<string, unknown> {
+  return { model: v2 ? AI_MODEL_V2 : AI_MODEL_LEGACY };
+}
+// ── WHAT A DRAFT COSTS US, BY MODEL (fix, 2026-09-25) ────────────────────────────────────────
+// List prices in US dollars per million tokens, input and output: the two models above, and
+// claude-opus-5, which v2 ran until 2026-09-26.
+export const AI_MODEL_LIST_USD_PER_MTOK: Readonly<Record<string, { input: number; output: number }>> = {
+  [AI_MODEL_LEGACY]: { input: 2, output: 10 },
+  // v2's model until 2026-09-26. KEPT: draft_tokens rows written before the switch say
+  // "claude-opus-5", and re-pricing those rows needs this price.
+  "claude-opus-5": { input: 5, output: 25 },
+  [AI_MODEL_V2]: { input: 4, output: 20 },
+};
+// The cost basis a metered draft's capture records (wallet_transactions.cost_cents, OUR gross
+// margin figure, never a tenant-facing price), in cents. Picked with the SAME flag as
+// aiModelFields, so it is the model the request actually ran.
+//   v2      the list price of AI_MODEL_V2 above. Until 2026-09-25 every capture used one hardcoded
+//           Sonnet rate, $3/$15, so each Opus draft recorded about 60% of what it cost. From
+//           2026-09-26 that is Opus 5.5's $4/$20; captures before then used Opus 5's $5/$25.
+//   legacy  FROZEN at that $3/$15, the number every capture has recorded since the meter was
+//           built, so production's older designer records exactly what it always has. Sonnet 5
+//           lists at $2/$10, so this over-states it by half; the raw tokens are stored and
+//           `draft_tokens.model` says which model ran, so a correction can be applied later.
+export function aiDraftCostCents(v2: boolean, inputTokens: number, outputTokens: number): number {
+  if (!v2) return Math.round((inputTokens * 0.0003 + outputTokens * 0.0015) * 100) / 100;
+  const rate = AI_MODEL_LIST_USD_PER_MTOK[AI_MODEL_V2];
+  // Dollars per million tokens to cents per token: x 100 / 1,000,000.
+  return Math.round((inputTokens * rate.input / 10_000 + outputTokens * rate.output / 10_000) * 100) / 100;
+}
+
+// ── THE WHOLE REQUEST, IN ONE PURE FUNCTION (fix, 2026-09-24) ────────────────────────────────
+// The prompt, the labelled pairs, the model, the budget (tokens and effort) and the abort --
+// everything the check sends -- built here rather than inline in portal-settings, so "an older
+// designer's check is d3ab404's check" is a test on the BYTES of the request (styleD3.test.ts
+// hashes the legacy body against what d3ab404's handler built for the same row) rather than a
+// claim about a handler.
+// The caller only adds the headers and the signal, and reads `abortMs` for the latter.
+export type SelfCheckPair = { viewpoint: FrameMapViewpoint; frameUrl: string; base64: string };
+export function selfCheckRequest(opts: {
+  mode: SelfCheckMode;
+  dims: KnownDims;
+  draft: D3Spec;
+  pairs: readonly SelfCheckPair[];
+  // v2 only, and read off the ledger row by the caller (see selfCheckPrompt).
+  round?: number;
+  earlier?: readonly string[];
+  // v2 only (measuredPitchLock, 2026-09-26). The legacy prompt is frozen and never sees it.
+  pitchLocked?: boolean;
+}): { abortMs: number; body: Record<string, unknown> } {
+  const viewpoints = opts.pairs.map((p) => p.viewpoint);
+  const text = opts.mode === "legacy"
+    ? legacySelfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints })
+    : selfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints, round: opts.round, earlier: opts.earlier, pitchLocked: opts.pitchLocked });
+  const content: unknown[] = [{ type: "text", text }];
+  for (const p of opts.pairs) {
+    content.push({ type: "text", text: selfCheckPairLabel(p.viewpoint, opts.mode) });
+    content.push({ type: "image", source: { type: "url", url: p.frameUrl } });
+    content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: p.base64 } });
+  }
+  const budget = SELF_CHECK_BUDGET[opts.mode];
+  return {
+    abortMs: budget.abortMs,
+    body: {
+      ...aiModelFields(opts.mode !== "legacy"),
+      max_tokens: budget.maxTokens,
+      thinking: { type: "adaptive" },
+      output_config: { effort: budget.effort },
+      messages: [{ role: "user", content }],
+    },
+  };
+}
+
+// ═══ CONSENSUS DRAFTING (2026-09-25) ═══════════════════════════════════════════════════════════
+// Live v2 runs of ONE video give the same SHAPE every time and wandering NUMBERS: a raised centre's
+// eave read 15, then 14, then 12.5 ft; the pitch anywhere from 0.37 to 0.7; 3 porch posts one run and
+// 4 the next; the steps in the centre, then on the right. Each read is a fair sample of what the
+// frames support, so several independent reads combined take out most of that scatter. The v2 draft
+// (and only it: see draftCallCount) therefore sends the SAME request DRAFT_CONSENSUS_CALLS times in
+// parallel, and combines what comes back here.
+//
+// The half in this file is pure (runDraftCalls takes its fetch as an argument). portal-settings'
+// calibrate_style_ai owns the wiring, the hold, the ledger and the money, and
+// aiDraftConsensusWiring_test runs that wiring.
+
+// FIVE READS, QUORUM THREE (2026-09-26; three reads with a quorum of two until then). On Opus 5.5 a
+// read takes ~30-80 s, and with three reads one odd read still sometimes decided a number (a shed
+// drafted at 0.28 against a true 0.22): two reads on the same wrong side ARE the median of three, and
+// when one read is cut off the midpoint of the other two gives an odd read half the say. The median
+// of five moves only when three reads sit on the wrong side, and a discrete field needs three of five
+// for a majority. Ahsan approved the cost (two more reads a press; aiDraftCostCents and the pins in
+// aiDraftStreamWiring_test).
+//
+// The quorum stays "a majority of the calls sent": once three have DRAFTED, the other two get the
+// grace and are then cut off, and the answer is the consensus of whatever drafted by then (any count
+// from one to five; consensusDrafts is written for every one of them). The grace is a latency bound,
+// not a quality one. It was 20 s until 2026-09-25, and live runs showed what that cost: the straggler
+// is usually the read that THOUGHT (3,400-5,400 tokens, 56-106 s) while the quick ones had barely
+// thought at all, so a 20 s grace kept the shallow reads and threw the careful one away. At effort
+// "high" every read thinks; 60 s lets the slowest of them in within the draft budget, which still
+// bounds all five together (the deadline in runDraftCalls).
+export const DRAFT_CONSENSUS_CALLS = 5;
+export const DRAFT_CONSENSUS_QUORUM = 3;
+export const DRAFT_CONSENSUS_GRACE_MS = 60_000;
+
+// How many calls a draft makes. DRAFT_CONSENSUS_CALLS on every v2 draft, streamed (effort "high",
+// 300 s) or not (effort "medium", 125 s): no current browser sends a v2 press without the stream, so
+// the unstreamed one is a stale tab's, and it gains the most from more reads -- its shallow reads
+// scatter more, and with five in flight a press is less likely to have none drafted inside its 125 s
+// (a timeout, then the lean retry). ONE on every legacy request (production's older designer: its
+// request, its timing and its cost stay exactly what they were) and on the lean retry (a retry after
+// a cut-off or timed-out reply is already short of time, and more parallel reads would not make the
+// reply that ran out of room any shorter).
+export function draftCallCount(v2: boolean, lean: boolean): number {
+  return v2 && !lean ? DRAFT_CONSENSUS_CALLS : 1;
+}
+
+// One reply body, read the way calibrate_style_ai reads it: every text block joined (modelReplyText),
+// a refusal is never a draft, and the spec is parseModelSpec's (the builder's dims over the model's
+// numbers, then the sanitiser). Never throws: a body that is not JSON reads as no reply at all.
+//
+// `measure` (2026-09-26, the v2 draft only): a gable read's pitch is worked out from its own points
+// HERE, before the consensus sees the read, so the median is taken over the measured numbers. The
+// reading then carries `pitch`, where its pitch came from, which draft_tokens records per read
+// (draftReadSample). Without it the reading is exactly what it was, with no `pitch` key.
+export type DraftReading = {
+  // deno-lint-ignore no-explicit-any
+  data: Record<string, any> | null;
+  reply: ModelReply;
+  d3: D3Spec | null;
+  drafted: boolean;
+  pitch?: PitchSources;
+  // The read's measure.step block (2026-09-29), on a read that gave a roof step and marked it: the
+  // draft crops the joint out of the frame these points name (_shared/stepZoom.ts).
+  stepPoints?: Record<string, unknown>;
+};
+export function readDraftReply(body: string, dims?: KnownDims | null, measure = false): DraftReading {
+  // deno-lint-ignore no-explicit-any
+  let data: any = null;
+  try { data = JSON.parse(body); } catch { data = null; }
+  if (!data || typeof data !== "object" || Array.isArray(data)) data = null;
+  const reply = modelReplyText(data);
+  const spec = reply.stopReason === "refusal" ? null : parseModelSpec(reply.text, dims);
+  const d3 = spec && spec.ok ? spec.d3 : null;
+  if (!measure || !d3) return { data, reply, d3, drafted: d3 !== null };
+  const measured = applyMeasuredPitches(d3, reply.text, dims?.lengthFt);
+  const stepPoints = measured.sources.stepSource ? parseMeasure(reply.text)?.step : undefined;
+  return { data, reply, d3: measured.d3, drafted: true, pitch: measured.sources, ...(stepPoints ? { stepPoints } : {}) };
+}
+
+// One read as draft_tokens keeps it: its sanitised roof, plus where its pitch came from on a
+// measured (v2) read. Null for a read that did not draft. A reading with no `pitch` gives its roof
+// exactly as before, the same object.
+export function draftReadSample(reading: DraftReading | null | undefined): Record<string, unknown> | null {
+  if (!reading || !reading.d3) return null;
+  return reading.pitch ? { ...reading.d3.roof, ...reading.pitch } : reading.d3.roof;
+}
+
+// ─── The calls ─────────────────────────────────────────────────────────────────────────────────
+// Which clock stopped a call that threw, read the moment it threw: "deadline" is the draft's one
+// abort budget (draftAbortMs, shared by every call), "quorum" the straggler cut-off below.
+export type DraftCallAbort = "deadline" | "quorum";
+// `attempts` (2026-09-26): how many times this read was SENT. 1 unless the API could not serve it
+// and it was sent again (DRAFT_READ_RETRY, below); 0 for a read the draft stopped before its
+// staggered first send. The rest of the result is its LAST attempt's, and `ms` runs from its first
+// send to that last answer.
+export type DraftCall<R> = { index: number; ms: number; attempts: number } & (
+  // fetch, or the body read, threw: no reply. `replied` is true when the reply's headers had arrived
+  // and its BODY broke off while being read (optional: absent reads as false).
+  | { threw: true; error: unknown; aborted: DraftCallAbort | null; status: null; httpOk: false; body: ""; reading: null; replied?: boolean }
+  // a reply that was not 2xx (a 429, a 529): its body is the error text
+  | { threw: false; error: null; aborted: null; status: number; httpOk: false; body: string; reading: null }
+  // a 2xx reply, read
+  | { threw: false; error: null; aborted: null; status: number; httpOk: true; body: string; reading: R }
+);
+
+// ─── A read the API could not serve, and the stagger (2026-09-26) ──────────────────────────────
+// LIVE, 2026-09-26: a v2 press failed about 7 s after Generate with Anthropic's 400 "The request
+// timed out while trying to download the file". Anthropic fetches every image URL itself, from our
+// public storage bucket, and the five parallel reads fetched the same twelve frames five times over,
+// all at once. The builder saw the raw JSON under the panel, and nothing retried: nothing said it
+// could. So, on the v2 consensus draft only (several reads; a lone call is never touched, below):
+//
+//   * THE STAGGER. Read i's first send waits i x staggerMs; the first goes at once. Sixty downloads
+//     no longer start in the same instant, and five reads are all out a little over a second in.
+//   * THE RETRY. A read whose answer is a TRANSIENT upstream failure (transientUpstream: a 429, 500,
+//     502, 503 or 529, or a 400 saying the file download timed out or could not be fetched), or
+//     whose send threw with no reply that was not our own abort (the network), is sent again: at
+//     most delaysMs.length more times, after delaysMs[k] plus up to jitterMs, drawn per read so
+//     reads that failed together do not come back together. Only while neither the deadline nor
+//     the quorum cut-off has fired, and only when the retry would still START with minLeftMs of its
+//     budget left: until the draft's deadline, or until the grace ends once three have drafted. A
+//     read takes ~30-80 s on Opus 5.5, so a retry that starts with less than 40 s left would mostly
+//     be cut off before it drafted, and would only have spent the builder's wait.
+//   * NOTHING ELSE IS RETRIED. A body that broke off after a reply arrived may have been billed; a
+//     refusal, a cut-off or an unparseable reply is an answer; a real invalid_request_error would
+//     fail the same way again.
+//
+// What a retry costs: the API bills none of the failures retried here (a 429, a 5xx, a 529, or a
+// request it gave up on before reading). A send that threw had no reply we could read, and is the one
+// case where the API may, rarely, have done work we cannot see.
+//
+// `attempts` on each call (and in draft_tokens.calls, draftCallsUsage) says how many sends it took.
+export type DraftReadRetry = {
+  delaysMs: readonly number[];
+  jitterMs: number;
+  minLeftMs: number;
+  staggerMs: number;
+};
+export const DRAFT_READ_RETRY: Readonly<DraftReadRetry> = Object.freeze({
+  delaysMs: Object.freeze([1_500, 4_000]),
+  jitterMs: 400,
+  minLeftMs: 40_000,
+  staggerMs: 300,
+});
+
+// Which upstream failures are worth sending again, and why each one failed (what the builder is told,
+// draftUpstreamFailure). "download" is the API's own failure to fetch one of our image URLs, the live
+// 400 above. Its pattern is tight on purpose: the message has to name a download or a fetch AND say it
+// timed out, failed or could not happen, so a real invalid_request_error (a bad field, an image the API
+// could not decode) is never resent. Everything that is not JSON is read as the raw text.
+export type DraftUpstreamKind = "download" | "overloaded" | "upstream";
+const TRANSIENT_UPSTREAM_STATUS: Record<number, DraftUpstreamKind> = {
+  429: "overloaded", 503: "overloaded", 529: "overloaded", 500: "upstream", 502: "upstream",
+};
+export function transientUpstream(status: number, body: string): DraftUpstreamKind | null {
+  const kind = TRANSIENT_UPSTREAM_STATUS[status];
+  if (kind) return kind;
+  if (status !== 400) return null;
+  let message = "";
+  try {
+    const data = JSON.parse(body);
+    message = typeof data?.error?.message === "string" ? data.error.message : "";
+  } catch {
+    message = String(body ?? "").slice(0, 500);
+  }
+  return /\b(download|fetch)/i.test(message) && /\b(timed out|timeout|could not|couldn't|failed)\b/i.test(message) ? "download" : null;
+}
+
+// Waits `ms`, or less when `signal` fires first. True when the wait ran its course. Never rejects, and
+// leaves no timer or listener behind.
+function pauseUnlessAborted(ms: number, signal: AbortSignal): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve(false);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, Math.max(0, ms));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+// Sends `count` calls in parallel and settles every one of them; never rejects.
+//
+//   * ONE call is sent on the deadline signal ITSELF, so a single call is the request today's
+//     handler sent, on the signal it sent it on, classified the way it classified it.
+//   * Several calls each get their own signal, aborted by the shared deadline (one budget for all,
+//     never one each) or by the quorum cut-off: once DRAFT_CONSENSUS_QUORUM of them have DRAFTED
+//     (a 2xx reply that `read` says parses), the rest get `graceMs` more and are then aborted. Until
+//     then nothing is cut: with two drafted and two failed, the fifth is waited for (the deadline
+//     still bounds it), because it can still make the quorum. With the quorum at least `count`,
+//     there is no cut-off at all.
+//   * A failed call is simply one more result: the caller decides what the failures mean.
+//   * With several calls and `retry` (the handler passes DRAFT_READ_RETRY and when its deadline
+//     fires), the reads' first sends are staggered and a read the API could not serve is sent again
+//     (see DRAFT_READ_RETRY). A lone call never is, whatever `retry` says: every legacy request and
+//     the lean retry send exactly what they sent, once, at once.
+//
+// The results come back in SEND order (index), not in arrival order, so "the first call" is always
+// the same call whichever one the network happened to answer first.
+export async function runDraftCalls<R extends { drafted: boolean }>(opts: {
+  count: number;
+  deadline: AbortSignal;
+  graceMs: number;
+  send: (signal: AbortSignal) => Promise<Response>;
+  read: (body: string) => R;
+  // `deadlineAt` is when `deadline` fires (epoch ms). `random` draws the jitter: Math.random unless a
+  // test fixes it.
+  retry?: (DraftReadRetry & { deadlineAt: number; random?: () => number }) | null;
+}): Promise<DraftCall<R>[]> {
+  const count = Math.max(1, Math.floor(opts.count) || 1);
+  const quorum = Math.min(DRAFT_CONSENSUS_QUORUM, count);
+  const policy = count > 1 && opts.retry ? opts.retry : null;
+  const cutoff = new AbortController();
+  let drafted = 0;
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  // When the grace ends, once the quorum has drafted: a retry after that has only the grace left.
+  let graceEndsAt = Infinity;
+  const one = async (index: number): Promise<DraftCall<R>> => {
+    let started = Date.now();
+    let signal = opts.deadline;
+    let unlink = () => {};
+    if (count > 1) {
+      const own = new AbortController();
+      const stop = () => own.abort();
+      opts.deadline.addEventListener("abort", stop);
+      cutoff.signal.addEventListener("abort", stop);
+      unlink = () => {
+        opts.deadline.removeEventListener("abort", stop);
+        cutoff.signal.removeEventListener("abort", stop);
+      };
+      if (opts.deadline.aborted || cutoff.signal.aborted) own.abort();
+      signal = own.signal;
+    }
+    const abortedNow = (): DraftCallAbort | null => opts.deadline.aborted ? "deadline" : cutoff.signal.aborted ? "quorum" : null;
+    // One send, classified exactly as the single call always was, plus whether it may go again.
+    const attempt = async (attempts: number): Promise<{ call: DraftCall<R>; again: boolean }> => {
+      let replied = false;
+      try {
+        const res = await opts.send(signal);
+        replied = true;
+        const body = await res.text();
+        const ms = Date.now() - started;
+        if (!res.ok) {
+          return {
+            call: { index, ms, attempts, threw: false, error: null, aborted: null, status: res.status, httpOk: false, body, reading: null },
+            again: transientUpstream(res.status, body) !== null,
+          };
+        }
+        const reading = opts.read(body);
+        if (reading.drafted && count > 1 && ++drafted === quorum && quorum < count) {
+          graceEndsAt = Date.now() + Math.max(0, opts.graceMs);
+          graceTimer = setTimeout(() => cutoff.abort(), Math.max(0, opts.graceMs));
+        }
+        return { call: { index, ms, attempts, threw: false, error: null, aborted: null, status: res.status, httpOk: true, body, reading }, again: false };
+      } catch (error) {
+        const aborted = abortedNow();
+        return {
+          call: { index, ms: Date.now() - started, attempts, threw: true, error, aborted, status: null, httpOk: false, body: "", reading: null, ...(replied ? { replied: true } : {}) },
+          // The network, before any reply: never our own abort, and never a body that broke off.
+          again: !replied && aborted === null,
+        };
+      }
+    };
+    try {
+      if (policy && index > 0 && policy.staggerMs > 0 && !(await pauseUnlessAborted(index * policy.staggerMs, signal))) {
+        // The deadline (or the cut-off) fired before this read's turn came: it was never sent.
+        const error = new DOMException("The draft stopped before this read was sent.", "AbortError");
+        return { index, ms: Date.now() - started, attempts: 0, threw: true, error, aborted: abortedNow(), status: null, httpOk: false, body: "", reading: null };
+      }
+      started = Date.now();
+      for (let attempts = 1;; attempts++) {
+        const { call, again } = await attempt(attempts);
+        if (!policy || !again || attempts > policy.delaysMs.length) return call;
+        const jitter = Math.floor((policy.random ?? Math.random)() * Math.max(0, policy.jitterMs));
+        const wait = Math.max(0, policy.delaysMs[attempts - 1]) + jitter;
+        if (signal.aborted || Math.min(policy.deadlineAt, graceEndsAt) - (Date.now() + wait) < policy.minLeftMs) return call;
+        // The deadline or the cut-off during the wait: the last failure stands.
+        if (!(await pauseUnlessAborted(wait, signal))) return call;
+      }
+    } finally {
+      unlink();
+    }
+  };
+  try {
+    return await Promise.all(Array.from({ length: count }, (_, i) => one(i)));
+  } finally {
+    if (graceTimer !== undefined) clearTimeout(graceTimer);
+  }
+}
+
+// ─── What the builder is told when the API failed the draft (2026-09-26) ───────────────────────
+// Until this, a draft whose reads the API all failed answered `AI service returned 400: {"type":
+// "error",...}`, the API's own JSON, which the designer showed under the panel word for word, and a
+// send that threw answered `Could not reach the AI service: <the runtime's error>`. Neither said what
+// to do, and neither was retryable. Now the answer is a plain sentence, and the raw status and body go
+// into ONE coded app_errors row instead: the handler files it and marks the answer filed, so the error
+// wrapper adds no copy.
+//
+//   * TRANSIENT (transientUpstream's statuses and download failures, and a send that threw on its
+//     own): `retryable: true`, code ai_upstream_transient, 503 when the API was busy and 502
+//     otherwise. The hold is released by then, so the new designer sends the press again once by
+//     itself, lean (calGenerate), and an older one shows the sentence.
+//   * ANYTHING ELSE (a real invalid_request_error, a 401, a 404): not retryable, because it would
+//     fail the same way; code ai_upstream_error, 502, and a sentence that asks the builder to tell us
+//     if it keeps happening.
+//
+// EVERY draft answers this way, a lone call included: the lean retry is the builder's last automatic
+// try and must not end in raw JSON either. Its request, its one send and its hold are untouched. The
+// handler never passes a lead the deadline stopped: a timeout keeps its own retryable answer.
+export const DRAFT_UPSTREAM_SENTENCES = {
+  download: "The AI service couldn't load your views just now - please press Generate again.",
+  overloaded: "The AI service is busy right now - please press Generate again.",
+  upstream: "The AI service had a problem just now - please press Generate again.",
+  network: "We couldn't reach the AI service just now - please press Generate again.",
+  broken: "The AI's answer was cut off on its way back - please press Generate again.",
+  refused: "The AI service could not take this request. Please press Generate again, and if it keeps happening, tell CSM Synergy.",
+} as const;
+export type DraftUpstreamFailure = {
+  transient: boolean;
+  kind: keyof typeof DRAFT_UPSTREAM_SENTENCES;
+  status: 502 | 503;
+  code: "ai_upstream_transient" | "ai_upstream_error";
+  // The builder's answer: never the API's own text.
+  answer: { error: string; code: "ai_upstream_transient" | "ai_upstream_error"; retryable?: true };
+  // The app_errors row's message and context: the raw status and body, and how every read went.
+  message: string;
+  context: Record<string, unknown>;
+};
+export function draftUpstreamFailure(lead: DraftCall<unknown>, calls: readonly DraftCall<unknown>[] = [lead]): DraftUpstreamFailure {
+  // A reply whose BODY broke off after its headers arrived is NOT transient: a non-streaming reply only
+  // sends its headers once the model has finished, so that read was almost certainly billed, which is
+  // why runDraftCalls does not send it again. The builder is told plainly and presses again themself;
+  // nothing resends it automatically (no `retryable`, so no lean retry either).
+  const kind: DraftUpstreamFailure["kind"] = lead.threw
+    ? ("replied" in lead && lead.replied ? "broken" : "network")
+    : transientUpstream(lead.status, lead.body) ?? "refused";
+  const transient = kind !== "refused" && kind !== "broken";
+  const code = transient ? "ai_upstream_transient" : "ai_upstream_error";
+  const message = lead.threw
+    ? `${kind === "broken" ? "The AI service's reply broke off" : "Could not reach the AI service"}: ${lead.error instanceof Error ? lead.error.message : String(lead.error)}`
+    : `AI service returned ${lead.status}: ${lead.body.slice(0, 2000)}`;
+  return {
+    transient,
+    kind,
+    status: kind === "overloaded" ? 503 : 502,
+    code,
+    answer: transient ? { error: DRAFT_UPSTREAM_SENTENCES[kind], code, retryable: true } : { error: DRAFT_UPSTREAM_SENTENCES[kind], code },
+    message,
+    context: {
+      status: lead.status,
+      kind,
+      attempts: lead.attempts,
+      reads: calls.map((c) => ({ status: c.status, threw: c.threw, aborted: c.aborted, attempts: c.attempts })),
+    },
+  };
+}
+
+// ─── Combining the reads ───────────────────────────────────────────────────────────────────────
+// THE BASE IS THE MEDOID: the read that disagrees least, in total, with the others over the
+// discrete fields below. Every field this does not decide (and the builder-facing `observed` notes
+// and the frame map, which are prose and picks that cannot be averaged) is the medoid's own.
+//
+// DISCRETE FIELDS GO BY MAJORITY (strictly, the answer the most voters gave); a tie goes to the
+// best-ranked read that gave a tied answer, the medoid's when it is one of them, so a 2-2 split of
+// four reads or a 2-2-1 of five is decided the same way every time. Only reads that GAVE an answer
+// vote, and a field that belongs to a structure (which end the porch is on, which side the wings are
+// on) is voted only by the reads that chose that structure: a read that saw no porch has no opinion
+// on where its steps are. Where leaving a key out is itself an answer, it votes as one: no steps, a
+// porch across the whole wall (porchWidthFt left out), a porch roof hung at the wall top
+// (porchAttachFt left out), no wings, no lean-to, no dormer, no roof step, no gable vent. Presence is
+// read the way the renderer draws it (a porch, lean-to, dormer or wing over half a foot; a roof step,
+// 2026-09-28, is a gable's with both of its keys, voted among the reads of the chosen roof type; which
+// way it steps is voted among the reads that drew one, and its joint and rise are the medians of the
+// reads that stepped that way).
+//
+// NUMBERS ARE THE MEDIAN over the reads that agree with the structure chosen for them: the porch's
+// numbers from the reads with the chosen porch kind, the wings' from the reads with wings, the pitch
+// and the gambrel ratios from the reads of the chosen roof type, the tail spacing from the reads with
+// an open eave. An even count (two reads, or four) gives the midpoint of its middle two; porchPosts is
+// rounded to a whole post. A dormer's offset is signed (the sign is the slope it sits on), so the
+// slope is voted first and only the reads on that slope are averaged; the midpoint of -0.5 and 0.5
+// would put it on the ridge. The roof step's rise is signed the same way (the sign says whether the
+// rear eave is higher or lower), so its direction is voted first, roofStepDir, and only the reads
+// that stepped that way give the rise and the joint: a median over both signs of 0.5, 0.6, -0.5 and
+// -0.6 is 0, which the sanitiser drops, and of 0.6 and -0.4 is 0.1, a step no read saw.
+//
+// COLOURS: per key, the median of each channel over the reads that gave the key. An odd count's
+// median is a reading's own value, channel by channel. An even count's is the midpoint of its middle
+// two, and two middles far apart (a channel more than CONSENSUS_COLOR_BLEND_MAX apart: the two
+// readings of a pair, or a 2-2 split of four) are a split read, not noise; their midpoint would be a
+// third colour no read saw, so the medoid's reading (or the best-ranked read that gave one) is kept
+// instead.
+//
+// The result goes back through sanitizeD3Spec. One read comes back exactly as it went in.
+export type ConsensusDraft = { d3: D3Spec; observed: ObservedNotes | null; frameMap: FrameMap | null };
+export type ConsensusReport = {
+  n: number;
+  // The medoid's position in the drafts given.
+  medoid: number;
+  // Per discrete field: how many of the reads that voted gave the chosen answer, "k/n".
+  discreteAgreement: Record<string, string>;
+  // Per number the reads did NOT agree on: the lowest and highest read. A number every read gave
+  // alike has no entry, which keeps the report to the fields that wandered.
+  spread: Record<string, [number, number]>;
+};
+export type ConsensusResult = {
+  d3: D3Spec;
+  observed: ObservedNotes | null;
+  frameMap: FrameMap | null;
+  medoid: number;
+  report: ConsensusReport;
+};
+
+export const CONSENSUS_COLOR_BLEND_MAX = 64;
+
+type ConsensusRoof = Record<string, unknown>;
+const cRoof = (d: D3Spec): ConsensusRoof => (d.roof || {}) as ConsensusRoof;
+const cOn = (v: unknown): boolean => (num(v) ?? 0) > 0.5;
+const cStr = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+// The porch as the renderer and the panel read it (d3ProjectingPorch, calPorchKind): over half a foot.
+function consensusPorchKind(roof: ConsensusRoof): PorchKind {
+  if (cOn(roof.porchOutFt)) return "projecting";
+  if (cOn(roof.porchDepthFt)) return "recessed";
+  return "none";
+}
+const cWings = (r: ConsensusRoof) => r.type !== "shed" && cOn(r.wingWidthFt);
+const cLeanTo = (r: ConsensusRoof) => cOn(r.leanToWidthFt);
+const cDormer = (r: ConsensusRoof) => r.type !== "shed" && cOn(r.dormerWidthFt);
+// The roof step as the sanitiser keeps it: a gable's, with both keys and a rise of 0.01 ft or more
+// either way (the sanitiser drops a smaller one, so a stored read never has it).
+const cStep = (r: ConsensusRoof) => r.type === "gable" && cOn(r.rearStepFt) && Math.abs(num(r.rearEaveRiseFt) ?? 0) >= 0.01;
+// Which way it steps: the rear section's eave higher than the front's, or lower (a negative rise).
+const cStepDir = (r: ConsensusRoof) => ((num(r.rearEaveRiseFt) ?? 0) < 0 ? "lower" : "higher");
+// Absent is the renderer's 0.45, which is on the right-hand (positive) slope.
+const cDormerSide = (r: ConsensusRoof) => {
+  const u = num(r.dormerOffsetU) ?? 0.45;
+  return u < 0 ? "left" : u > 0 ? "right" : "ridge";
+};
+
+type ConsensusField = {
+  name: string;
+  // Voted only among the reads whose answer to this field matches the one chosen for it.
+  parent?: string;
+  // This read's answer, or null when it gave none (or the field does not apply to it).
+  key: (d: D3Spec) => string | null;
+  // Writes the chosen answer into the result, copied from `rep` (the best-ranked read that gave it);
+  // `rep` null means nobody voted, so the key goes. Fields without one are carried by the numbers.
+  apply?: (out: D3Spec, rep: D3Spec | null) => void;
+};
+const copyRoofKey = (k: string) => (out: D3Spec, rep: D3Spec | null) => {
+  const from = rep ? cRoof(rep) : null;
+  if (from && k in from) out.roof[k] = from[k];
+  else delete out.roof[k];
+};
+const copySpecKey = (k: "roofMaterial" | "foundation") => (out: D3Spec, rep: D3Spec | null) => {
+  if (rep && rep[k] !== undefined) out[k] = rep[k];
+  else delete out[k];
+};
+const CONSENSUS_FIELDS: readonly ConsensusField[] = [
+  { name: "type", key: (d) => cStr(cRoof(d).type), apply: copyRoofKey("type") },
+  { name: "front", parent: "type", key: (d) => (cRoof(d).type !== "shed" ? cStr(cRoof(d).front) : null), apply: copyRoofKey("front") },
+  { name: "highSide", parent: "type", key: (d) => (cRoof(d).type === "shed" ? cStr(cRoof(d).highSide) : null), apply: copyRoofKey("highSide") },
+  { name: "eave", key: (d) => cStr(cRoof(d).eave), apply: copyRoofKey("eave") },
+  { name: "porch", key: (d) => consensusPorchKind(cRoof(d)) },
+  { name: "porchEnd", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) !== "none" ? cStr(cRoof(d).porchEnd) : null), apply: copyRoofKey("porchEnd") },
+  { name: "porchTruss", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "recessed" ? String(cRoof(d).porchTruss === true) : null), apply: copyRoofKey("porchTruss") },
+  { name: "porchSteps", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "projecting" ? (cStr(cRoof(d).porchSteps) ?? "none") : null), apply: copyRoofKey("porchSteps") },
+  { name: "porchAttach", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "projecting" ? (num(cRoof(d).porchAttachFt) !== null ? "given" : "wall top") : null) },
+  { name: "porchWidth", parent: "porch", key: (d) => (consensusPorchKind(cRoof(d)) === "projecting" ? (num(cRoof(d).porchWidthFt) !== null ? "part" : "full") : null) },
+  { name: "wings", key: (d) => (cWings(cRoof(d)) ? "yes" : "no") },
+  { name: "wingSide", parent: "wings", key: (d) => (cWings(cRoof(d)) ? (cStr(cRoof(d).wingSide) ?? "both") : null), apply: copyRoofKey("wingSide") },
+  { name: "roofStep", parent: "type", key: (d) => (cRoof(d).type === "gable" ? (cStep(cRoof(d)) ? "yes" : "no") : null) },
+  { name: "roofStepDir", parent: "roofStep", key: (d) => (cStep(cRoof(d)) ? cStepDir(cRoof(d)) : null) },
+  { name: "leanTo", key: (d) => (cLeanTo(cRoof(d)) ? "yes" : "no") },
+  { name: "leanToSide", parent: "leanTo", key: (d) => (cLeanTo(cRoof(d)) ? (cStr(cRoof(d).leanToSide) ?? "right") : null), apply: copyRoofKey("leanToSide") },
+  { name: "dormer", key: (d) => (cDormer(cRoof(d)) ? "yes" : "no") },
+  { name: "dormerType", parent: "dormer", key: (d) => (cDormer(cRoof(d)) ? (cStr(cRoof(d).dormerType) ?? "gable") : null), apply: copyRoofKey("dormerType") },
+  { name: "dormerSide", parent: "dormer", key: (d) => (cDormer(cRoof(d)) ? cDormerSide(cRoof(d)) : null) },
+  { name: "roofMaterial", key: (d) => cStr(d.roofMaterial), apply: copySpecKey("roofMaterial") },
+  { name: "foundation", key: (d) => cStr(d.foundation), apply: copySpecKey("foundation") },
+  { name: "gableVent", key: (d) => (d.gableVent ? "yes" : "no") },
+];
+
+type ConsensusNumber = {
+  name: string;
+  get: (d: D3Spec) => number | null;
+  set: (out: D3Spec, v: number | null) => void;
+  // Whether this read's value counts, given the answers already chosen.
+  counts: (d: D3Spec, chosen: Record<string, string | null>) => boolean;
+  whole?: boolean;
+};
+const roofNumber = (k: string, counts: ConsensusNumber["counts"], whole = false): ConsensusNumber => ({
+  name: k,
+  get: (d) => num(cRoof(d)[k]),
+  set: (out, v) => { if (v === null) delete out.roof[k]; else out.roof[k] = v; },
+  counts,
+  whole,
+});
+const sameType = (d: D3Spec, c: Record<string, string | null>) => cRoof(d).type === c.type;
+const always = () => true;
+const porchIs = (kind: PorchKind) => (d: D3Spec, c: Record<string, string | null>) => c.porch === kind && consensusPorchKind(cRoof(d)) === kind;
+const CONSENSUS_NUMBERS: readonly ConsensusNumber[] = [
+  roofNumber("pitch", sameType),
+  roofNumber("ridgeOffset", sameType),
+  roofNumber("overhang", always),
+  roofNumber("kneeU", sameType),
+  roofNumber("kneeRise", sameType),
+  roofNumber("ridgeRise", sameType),
+  roofNumber("tailSpacingIn", (d, c) => c.eave === "open" && cRoof(d).eave === "open"),
+  roofNumber("leanToWidthFt", (d, c) => c.leanTo === "yes" && cLeanTo(cRoof(d))),
+  roofNumber("leanToDropFt", (d, c) => c.leanTo === "yes" && cLeanTo(cRoof(d))),
+  roofNumber("dormerWidthFt", (d, c) => c.dormer === "yes" && cDormer(cRoof(d))),
+  roofNumber("dormerRiseFt", (d, c) => c.dormer === "yes" && cDormer(cRoof(d))),
+  roofNumber("dormerOffsetU", (d, c) => c.dormer === "yes" && cDormer(cRoof(d)) && cDormerSide(cRoof(d)) === c.dormerSide),
+  roofNumber("porchDepthFt", porchIs("recessed")),
+  roofNumber("porchOutFt", porchIs("projecting")),
+  roofNumber("porchAttachFt", (d, c) => c.porchAttach === "given" && porchIs("projecting")(d, c)),
+  roofNumber("porchWidthFt", (d, c) => c.porchWidth === "part" && porchIs("projecting")(d, c)),
+  roofNumber("porchPosts", porchIs("projecting"), true),
+  roofNumber("porchPitch", porchIs("projecting")),
+  roofNumber("wingWidthFt", (d, c) => c.wings === "yes" && cWings(cRoof(d))),
+  roofNumber("wingPitch", (d, c) => c.wings === "yes" && cWings(cRoof(d))),
+  roofNumber("centerEaveFt", (d, c) => c.wings === "yes" && cWings(cRoof(d))),
+  roofNumber("rearStepFt", (d, c) => c.roofStep === "yes" && cStep(cRoof(d)) && cStepDir(cRoof(d)) === c.roofStepDir),
+  roofNumber("rearEaveRiseFt", (d, c) => c.roofStep === "yes" && cStep(cRoof(d)) && cStepDir(cRoof(d)) === c.roofStepDir),
+  {
+    name: "wallHeightFt",
+    get: (d) => num(d.wallHeightFt),
+    set: (out, v) => { if (v === null) delete out.wallHeightFt; else out.wallHeightFt = v; },
+    counts: always,
+  },
+  {
+    name: "gableVent.widthFrac",
+    get: (d) => (d.gableVent ? num(d.gableVent.widthFrac) : null),
+    set: (out, v) => { if (v === null) delete out.gableVent; else out.gableVent = { widthFrac: v }; },
+    counts: (d, c) => c.gableVent === "yes" && !!d.gableVent,
+  },
+];
+const CONSENSUS_COLOR_KEYS = ["body", "trim", "roof", "wood", "corner", "fascia"] as const;
+
+// The median; two values give their midpoint, held to four places so a float sum cannot leave
+// 0.5349999999999999 in a customer's column. One value is returned exactly.
+function consensusMedian(values: number[]): number {
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  if (s.length % 2) return s[mid];
+  return Math.round(((s[mid - 1] + s[mid]) / 2) * 10_000) / 10_000;
+}
+
+function hexRgb(v: string): [number, number, number] | null {
+  const h = v.trim().replace(/^#/, "");
+  const full = h.length === 3 || h.length === 4 ? h.slice(0, 3).split("").map((c) => c + c).join("")
+    : h.length === 6 || h.length === 8 ? h.slice(0, 6) : null;
+  if (!full || !/^[0-9a-fA-F]{6}$/.test(full)) return null;
+  return [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16)) as [number, number, number];
+}
+const rgbHex = (c: number[]) => "#" + c.map((x) => Math.round(x).toString(16).padStart(2, "0")).join("");
+
+// How many of a read's OWN checks it fails (the ones portal-settings shows the builder): a read that
+// contradicts itself is the worse base when the disagreement count ties, which with two reads it
+// always does.
+function consensusSelfDoubts(d: ConsensusDraft): number {
+  const roof = cRoof(d.d3);
+  return [frameKeyWarning(roof), gambrelRoofWarning(roof), porchAgreementWarning(roof, d.observed), wingsAgreementWarning(roof, d.observed)]
+    .filter((w) => w !== null).length;
+}
+const CONFIDENCE_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
+
+export function consensusDrafts(drafts: readonly ConsensusDraft[]): ConsensusResult {
+  const n = drafts.length;
+  if (n === 0) throw new Error("consensusDrafts needs at least one draft");
+  const fieldAt = new Map(CONSENSUS_FIELDS.map((f, i) => [f.name, i]));
+  const keys = drafts.map((d) => CONSENSUS_FIELDS.map((f) => f.key(d.d3)));
+
+  // Pairwise disagreement: a field counts when both reads answered it and, for a field that belongs
+  // to a structure, when both chose the same structure (a porch-kind split is counted once, on the
+  // porch, not again on every porch detail).
+  const apart = (a: number, b: number) => {
+    let d = 0;
+    CONSENSUS_FIELDS.forEach((f, i) => {
+      const ka = keys[a][i], kb = keys[b][i];
+      if (ka === null || kb === null) return;
+      if (f.parent) {
+        const p = fieldAt.get(f.parent)!;
+        if (keys[a][p] !== keys[b][p]) return;
+      }
+      if (ka !== kb) d++;
+    });
+    return d;
+  };
+  const score = drafts.map((_, a) => drafts.reduce((s, __, b) => (a === b ? s : s + apart(a, b)), 0));
+  const doubts = drafts.map(consensusSelfDoubts);
+  const conf = drafts.map((d) => CONFIDENCE_RANK[d.observed?.confidence ?? ""] ?? 1);
+  // Best first: least disagreement, then fewest self-contradictions, then the read's own confidence,
+  // then send order. rank[0] is the medoid, and every tie below goes to the best-ranked read.
+  const rank = drafts.map((_, i) => i).sort((a, b) => score[a] - score[b] || doubts[a] - doubts[b] || conf[a] - conf[b] || a - b);
+  const medoid = rank[0];
+
+  const out = JSON.parse(JSON.stringify(drafts[medoid].d3)) as D3Spec;
+  const chosen: Record<string, string | null> = {};
+  const discreteAgreement: Record<string, string> = {};
+  CONSENSUS_FIELDS.forEach((f, i) => {
+    const p = f.parent ? fieldAt.get(f.parent)! : -1;
+    const voters = rank.filter((d) => keys[d][i] !== null && (p < 0 || keys[d][p] === chosen[f.parent!]));
+    if (!voters.length) {
+      chosen[f.name] = null;
+      f.apply?.(out, null);
+      return;
+    }
+    const tally = new Map<string, number>();
+    for (const d of voters) tally.set(keys[d][i]!, (tally.get(keys[d][i]!) ?? 0) + 1);
+    const top = Math.max(...tally.values());
+    // `voters` is in rank order, so the first one holding a top-count answer is the tie-break.
+    const rep = voters.find((d) => tally.get(keys[d][i]!) === top)!;
+    chosen[f.name] = keys[rep][i];
+    discreteAgreement[f.name] = `${top}/${voters.length}`;
+    f.apply?.(out, drafts[rep].d3);
+  });
+
+  const spread: Record<string, [number, number]> = {};
+  for (const f of CONSENSUS_NUMBERS) {
+    const values = drafts.filter((d) => f.counts(d.d3, chosen)).map((d) => f.get(d.d3)).filter((v): v is number => v !== null);
+    if (!values.length) { f.set(out, null); continue; }
+    const m = consensusMedian(values);
+    f.set(out, f.whole ? Math.round(m) : m);
+    const lo = Math.min(...values), hi = Math.max(...values);
+    if (lo < hi) spread[f.name] = [lo, hi];
+  }
+
+  const colors: Record<string, string> = {};
+  for (const k of CONSENSUS_COLOR_KEYS) {
+    const givers = rank.filter((d) => typeof drafts[d].d3.colors?.[k] === "string");
+    if (!givers.length) continue;
+    const given = givers.map((d) => drafts[d].d3.colors[k]);
+    if (given.every((v) => v === given[0])) { colors[k] = given[0]; continue; }
+    const rgb = given.map(hexRgb).filter((c): c is [number, number, number] => c !== null);
+    if (!rgb.length) { colors[k] = given[0]; continue; }
+    // An even count's middle two, per channel: for a pair this is the pair itself, as it always was.
+    const middlesApart = rgb.length % 2 === 0 && [0, 1, 2].some((ch) => {
+      const s = rgb.map((c) => c[ch]).sort((a, b) => a - b);
+      return s[s.length / 2] - s[s.length / 2 - 1] > CONSENSUS_COLOR_BLEND_MAX;
+    });
+    if (middlesApart) {
+      colors[k] = given[0];
+      continue;
+    }
+    colors[k] = rgbHex([0, 1, 2].map((ch) => consensusMedian(rgb.map((c) => c[ch]))));
+  }
+  out.colors = colors;
+
+  const clean = sanitizeD3Spec(out);
+  return {
+    d3: clean.ok ? clean.d3 : drafts[medoid].d3,
+    observed: drafts[medoid].observed,
+    frameMap: drafts[medoid].frameMap,
+    medoid,
+    report: { n, medoid, discreteAgreement, spread },
+  };
+}
+
+// The consensus of every call that drafted, with the medoid's CALL index (`call`) so the handler can
+// answer from that call's own reply: its `observed` notes and its frame map are the consensus's.
+// Null when no call drafted, which is the handler's cue to fail exactly as a single call would.
+export function consensusOfCalls(
+  calls: readonly DraftCall<DraftReading>[],
+  walkFrames: number,
+): (ConsensusResult & { call: number }) | null {
+  const usable: { call: number; draft: ConsensusDraft }[] = [];
+  calls.forEach((c, call) => {
+    if (!c.reading || !c.reading.d3) return;
+    const text = c.reading.reply.text;
+    usable.push({ call, draft: { d3: c.reading.d3, observed: parseObservedNotes(text), frameMap: parseFrameMap(text, walkFrames) } });
+  });
+  if (!usable.length) return null;
+  const result = consensusDrafts(usable.map((u) => u.draft));
+  return { ...result, call: usable[result.medoid].call };
+}
+
+// Builder's words for each discrete field, for the split warning below.
+const CONSENSUS_FIELD_WORDS: Record<string, string> = {
+  type: "the roof type",
+  front: "which wall is the front",
+  highSide: "which wall is the high one",
+  eave: "the eave finish",
+  porch: "the porch",
+  porchEnd: "which end the porch is on",
+  porchTruss: "the porch truss",
+  porchSteps: "where the porch steps are",
+  porchAttach: "where the porch roof meets the wall",
+  porchWidth: "how wide the porch is",
+  wings: "the side wings",
+  wingSide: "which sides have wings",
+  roofStep: "the step in the roof",
+  roofStepDir: "whether the back of the roof steps up or down",
+  leanTo: "the lean-to",
+  leanToSide: "which side the lean-to is on",
+  dormer: "the dormer",
+  dormerType: "the dormer's shape",
+  dormerSide: "which slope the dormer is on",
+  roofMaterial: "the roof material",
+  foundation: "the foundation",
+  gableVent: "the gable vent",
+};
+
+// Where the reads SPLIT, said to the builder: any discrete field whose chosen answer did not have
+// MORE THAN HALF of the reads that voted on it -- 1 of 2, 1 of 3, 2 of 4 (a 2-2 tie), 2 of 5 (a 2-2-1
+// or a 2-1-1-1). A majority (2 of 3, 3 of 4, 3 of 5) is a consensus and says nothing. Up to three
+// voters this is exactly the rule it replaced (2026-09-26), "no two reads agreed": five reads only
+// add the pluralities that rule could not see. Composed into roofNote by flagObservedNotes beside the
+// porch and wings checks, which also drops the confidence to low.
+const CONSENSUS_TIMES: Record<number, string> = { 2: "twice", 3: "three times", 4: "four times", 5: "five times" };
+export function consensusSplitWarning(report: ConsensusReport | null | undefined): string | null {
+  if (!report || report.n < 2) return null;
+  const split = Object.entries(report.discreteAgreement)
+    .filter(([, a]) => {
+      const [k, n] = a.split("/").map(Number);
+      return n >= 2 && k * 2 <= n;
+    })
+    .map(([f]) => CONSENSUS_FIELD_WORDS[f] ?? f);
+  if (!split.length) return null;
+  const list = split.length === 1 ? split[0] : `${split.slice(0, -1).join(", ")} and ${split[split.length - 1]}`;
+  const times = CONSENSUS_TIMES[report.n] ?? `${report.n} times`;
+  // "Given most often, or on a tie...": with five reads a split can still have a leader (2 of 5
+  // against 1, 1, 1), and the drawing takes it; a true tie goes to the best-ranked read.
+  return `Check ${list} before saving: we read the video ${times} and the readings did not agree on ${split.length === 1 ? "it" : "them"}, so the drawing follows the answer given most often, or on a tie the reading that agreed best with the others. Compare the preview with the video.`;
+}
+
+// What the calls used, for a draft that made more than one (a single call records exactly what it
+// always has, in the handler). `tokens` is the draft_tokens jsonb: the SUM of every call's usage
+// under today's keys, the lead reply's shapes (the medoid's, or the first call's when none drafted),
+// one entry per call, the sanitised roof of every read that drafted (for later analysis of how far
+// reads wander; since 2026-09-26 with pitchSource and the model's own pitch beside it, see
+// PitchSources), and the agreement report. `usage` is the same sum under Anthropic's own keys, for
+// the capture: every call that answered cost money, so all of them are the cost basis. A call with
+// no usage block (aborted, a 529) adds nothing, and a sum no call reported is null, never 0.
+export function draftCallsUsage(
+  // aiModelFields(v2).model, stored as the single call's record stores it.
+  model: unknown,
+  calls: readonly DraftCall<DraftReading>[],
+  lead: DraftCall<DraftReading>,
+  consensus: ConsensusResult | null,
+): { tokens: Record<string, unknown>; usage: Record<string, number | null> } {
+  const count = (c: DraftCall<DraftReading>, key: string): number | null => {
+    const v = c.reading?.data?.usage?.[key];
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  };
+  const sum = (key: string): number | null =>
+    calls.reduce<number | null>((s, c) => {
+      const v = count(c, key);
+      return v === null ? s : (s ?? 0) + v;
+    }, null);
+  const usage = {
+    input_tokens: sum("input_tokens"),
+    output_tokens: sum("output_tokens"),
+    cache_read_input_tokens: sum("cache_read_input_tokens"),
+    cache_creation_input_tokens: sum("cache_creation_input_tokens"),
+    calls: calls.length,
+  };
+  const reply = lead.reading?.reply ?? null;
+  const tokens: Record<string, unknown> = {
+    model,
+    input: usage.input_tokens,
+    output: usage.output_tokens,
+    cache_read: usage.cache_read_input_tokens,
+    cache_creation: usage.cache_creation_input_tokens,
+    stopReason: reply ? reply.stopReason : null,
+    textChars: reply ? reply.text.length : 0,
+    blockTypes: reply ? reply.blockTypes : [],
+    calls: calls.map((c) => ({
+      model,
+      output: count(c, "output_tokens"),
+      stopReason: c.reading ? c.reading.reply.stopReason : null,
+      ms: c.ms,
+      ok: !!c.reading?.drafted,
+      aborted: c.aborted,
+      // How many sends this read took (2026-09-26): more than 1 only when the API could not serve it
+      // and it was sent again (DRAFT_READ_RETRY); 0 when the draft stopped before its turn.
+      attempts: c.attempts,
+    })),
+    // Each read's roof; on a measured read also where its pitch came from (draftReadSample).
+    samples: calls.flatMap((c) => {
+      const s = draftReadSample(c.reading);
+      return s ? [s] : [];
+    }),
+    agreement: consensus ? consensus.report : null,
+  };
+  return { tokens, usage };
 }

@@ -14,6 +14,11 @@ export const stubAuth: { user: any; error: any } = { user: null, error: null };
  *  test can lean on a database it never built. Reset it to null when the test is done. */
 export const stubDb: { from: ((table: string) => any) | null } = { from: null };
 
+/** The same opt-in for createClient(...).rpc(...), for a test that drives a handler which calls a
+ *  database function (aiDraftStreamWiring_test.ts: calibrate_style_ai's wallet_hold / release /
+ *  capture). Left null, rpc() throws, like from(). Reset it to null when the test is done. */
+export const stubRpc: { rpc: ((fn: string, args?: any) => any) | null } = { rpc: null };
+
 export function createClient(_url: string, _key: string, _opts?: any) {
   return {
     auth: {
@@ -29,6 +34,10 @@ export function createClient(_url: string, _key: string, _opts?: any) {
     from: (_table: string): any => {
       if (stubDb.from) return stubDb.from(_table);
       throw new Error("supabase_stub createClient().from() is type-only — hand-roll a fake client for data paths (see makeAdmin in resolveTenant_test.ts)");
+    },
+    rpc: (_fn: string, _args?: any): any => {
+      if (stubRpc.rpc) return stubRpc.rpc(_fn, _args);
+      throw new Error("supabase_stub createClient().rpc() has no fake installed — set stubRpc.rpc for the test that needs it");
     },
   };
 }

@@ -208,6 +208,12 @@ async function main() {
   r.ok("the paid call is on the wire and being held open", heldAt > 0, `${genCalls.length} call(s)`);
 
   const cabinTab = tab("Cabin");
+  // SCROLLED TO FIRST (2026-09-24). Clicking Generate scrolls it into view, and once the
+  // dimensions card grew (its labels now say what each number IS in the new frame) that pushed
+  // the tabs above the top of this 1000 px window -- where elementFromPoint answers null and the
+  // tab read as "covered". A builder scrolls; the question here is whether anything is ON TOP of
+  // the tab or disables it, and that is measured with it in view.
+  await cabinTab.scrollIntoViewIfNeeded();
   const reachable = await cabinTab.evaluate((el) => {
     const b = el.getBoundingClientRect();
     const at = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);

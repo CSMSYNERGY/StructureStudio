@@ -1206,10 +1206,15 @@ function ssPorchTrussWall(roofCfg, bldgW, bldgH) {
   const cfg = roofCfg || {};
   if (!cfg.porchTruss || (cfg.type || "gable") !== "gable") return null;
   if (d3ProjectingPorch(cfg, bldgW, bldgH)) return null;
+  // Wings (d3Massing) switch the recessed porch off in the renderer, and its truss with it.
+  if (d3Massing(cfg, bldgW, bldgH, D3.WALL_H).wings.length) return null;
   const ax = d3RoofAxes(cfg, bldgW, bldgH);
   const depth = Math.max(0, Math.min(Number(cfg.porchDepthFt) || 0, (ax.uAxisIsX ? bldgH : bldgW) - 4));
   if (!(depth > 0.5)) return null;
   const front = (cfg.porchEnd || "front") !== "back";
+  // THE NEW FRAME: the porch is on the FRONT (south) or back (north) wall whatever that wall is.
+  // The truss stands in a gable, so on a building whose front is an EAVE wall there is none.
+  if (d3NewFrame(cfg)) return ax.uAxisIsX ? (front ? "south" : "north") : null;
   return ax.uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
 }
 // The PROJECTING porch (roof.porchOutFt, 2026-09-17), or null: a deck, posts and a low roof of its
@@ -1226,8 +1231,44 @@ function d3ProjectingPorch(roofCfg, bldgW, bldgH) {
   const D = Math.max(0, Math.min(12, Number(cfg.porchOutFt) || 0));
   if (!(D > 0.5)) return null;
   const front = (cfg.porchEnd || "front") !== "back";
-  const wall = d3RoofAxes(cfg, bldgW, bldgH).uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
+  // THE NEW FRAME (d3NewFrame): "front" is the SOUTH wall and "back" the north, whether that wall
+  // is a gable end or an eave wall; d3PorchSpan says which it is. Outside it, today's rule.
+  const wall = d3NewFrame(cfg) ? (front ? "south" : "north")
+    : d3RoofAxes(cfg, bldgW, bldgH).uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
   return { D, wall };
+}
+// WHERE ALONG ITS WALL THE PROJECTING PORCH STANDS, or null with no projecting porch:
+//   onCap    the porch wall is a cap end of the roof extrusion (a gable end, or a shed's sloped
+//            end wall), which is the only kind there was before the new frame. False = an EAVE
+//            wall, where the porch runs along the ridge instead of across the profile.
+//   full     the whole wall it can take: the profile span S on a cap end, the extrusion length L
+//            on an eave wall.
+//   span     the porch's own width: roof.porchWidthFt (4..60, the sanitizer's range) clamped to
+//            the wall, else the whole wall -- which is today's porch exactly.
+//   centerU  where its middle sits, in feet from the middle of the wall along the porch's own
+//            across axis (profile u on a cap end, in the BUILDING's u -- the renderer's rg holds
+//            the centre section, so it places the porch at centerU - uc). 0 without wings.
+// WINGS (d3PorchSpanWings): a porch on a gable end stands in front of the CENTRE section. Without
+// porchWidthFt it is the centre's span, centred on the centre; with it, it is that wide, still
+// centred on the centre, and slid only as far as keeps it on the wall. An eave-wall porch runs
+// down the ridge and wings do not move it (its wall is the outer one, H or Hc, whole length).
+// One function, read by the renderer and the panel readout, so the drawn porch and the numbers
+// beside the input are the same porch (d3PorchGeom's rule).
+function d3PorchSpan(roofCfg, bldgW, bldgH) {
+  const porch = d3ProjectingPorch(roofCfg, bldgW, bldgH);
+  if (!porch) return null;
+  const ax = d3RoofAxes(roofCfg, bldgW, bldgH);
+  const ns = porch.wall === "south" || porch.wall === "north";
+  const onCap = ax.uAxisIsX === ns;
+  const full = onCap ? ax.S : ax.L;
+  const want = Number(roofCfg && roofCfg.porchWidthFt);
+  // Span and offset do not depend on the wall height, so any H serves here.
+  const wings = onCap ? d3PorchSpanWings(roofCfg, bldgW, bldgH, D3.WALL_H) : null;
+  if (wings && !(want > 0)) return { span: wings.span, centerU: wings.centerU, onCap, full };
+  const span = want > 0 ? Math.max(Math.min(4, full), Math.min(full, want)) : full;
+  const room = (full - span) / 2;
+  const centerU = wings ? Math.max(-room, Math.min(room, wings.centerU)) : 0;
+  return { span, centerU, onCap, full };
 }
 // Where a vent sits in the gable above `wall`, or NULL when it cannot.
 //
@@ -1245,10 +1286,19 @@ function d3ProjectingPorch(roofCfg, bldgW, bldgH) {
 // profile's u shifted by half the span: world x on north/south, world z on west/east.
 function ssGableVentFit(roofCfg, bldgW, bldgH, wall, wallHeightFt, it, alongFt, riseFt) {
   if (ssGableEndWalls(roofCfg, bldgW, bldgH).indexOf(wall) < 0) return null;
-  const H = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
+  const Hw = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
   const ax = d3RoofAxes(roofCfg, bldgW, bldgH);
   const S = ax.S;
-  const dedup = d3RoofProfile(roofCfg, S, H, ax.tallNeg).dedup;
+  // WINGS (d3Massing): the gable is the CENTRE's, standing on the centre wall at Hc and shifted by
+  // uc across the end. Every number below is measured in that gable, and `u` is handed back in the
+  // building's own frame. Without wings H is the wall, uc is 0 and nothing moves.
+  const mass = d3Massing(roofCfg, bldgW, bldgH, Hw);
+  // A ROOF STEP (d3RoofStep): the BACK gable is the rear section's, standing on its own plate under
+  // its own roof line, so a vent there is fitted to that triangle. Null on every other building.
+  const step = d3RoofStep(roofCfg, bldgW, bldgH, Hw);
+  const rearGable = !!step && wall === "north";
+  const H = rearGable ? step.Hb : mass.Hc, uc = mass.uc;
+  const dedup = d3RoofProfile(rearGable ? step.rearCfg : roofCfg, mass.Sc, H, ax.tallNeg).dedup;
   const wIn = Number(it && it.widthIn), hIn = Number(it && it.heightIn);
   const w = Number(it && it.widthFt) > 0 ? Number(it.widthFt) : (wIn > 0 ? wIn / 12 : 1);
   const h = hIn > 0 ? hIn / 12 : 1;
@@ -1278,8 +1328,8 @@ function ssGableVentFit(roofCfg, bldgW, bldgH, wall, wallHeightFt, it, alongFt, 
   const mid = d3ProfSpanAt(dedup, H + rise + h / 2);
   const centre = mid ? (mid[0] + mid[1]) / 2 : 0;       // under the ridge, even a skewed one
   const a0 = alongFt != null ? Number(alongFt) : NaN;
-  const u = Math.max(rg[0], Math.min(Number.isFinite(a0) ? a0 - S / 2 : centre, rg[1]));
-  return { alongFt: u + S / 2, riseFt: rise, u, y0: H + rise, y1: H + rise + h, w, h, F };
+  const u = Math.max(rg[0], Math.min(Number.isFinite(a0) ? a0 - S / 2 - uc : centre, rg[1]));
+  return { alongFt: u + uc + S / 2, riseFt: rise, u: u + uc, y0: H + rise, y1: H + rise + h, w, h, F };
 }
 // The patch that puts a vent snapped at `sn` into the gable above its wall: the fit's along
 // written back into x or y, plus the zone and rise. Null when that wall has no room for it.
@@ -2014,7 +2064,7 @@ function ssAllowedOrigin(origin) {
 // style's own standard; a legacy absolute pick (the 3D footer, which predates 172) still works
 // on a style that offers no increases. The two are mutually exclusive — picking one clears the
 // other — so "last thing the customer touched" always wins instead of one silently shadowing
-// the other. Clamped to the same 5-14 ft band _shared/styleD3.ts enforces server-side.
+// the other. Clamped to the same 5-20 ft band _shared/styleD3.ts enforces server-side.
 // The style's STANDARD wall height, before any customer increase — the fallback chain the spec
 // resolver already walked, lifted out because the 3D footer needs the SAME number to turn a
 // delta back into the absolute height the engine renders at. Two copies would drift.
@@ -2025,8 +2075,10 @@ function d3BaseWallHeightFt(C, styleCfg) {
 // Delta inches -> absolute feet, clamped to the range styleD3.ts enforces on the column. ONE
 // clamp: the footer and the spec resolver must agree to the inch, or the 3D renders a height
 // the estimate did not price.
+// 5-20 ft since 2026-09-24 (was 5-14): a two-storey wall is a real building now (the raised centre
+// of a monitor, a tall eave wall), and the renderer, the cameras and the column all take it.
 function d3WallHeightFromDelta(baseFt, deltaIn) {
-  return Math.max(5, Math.min(14, (Number(baseFt) || 8) + (Number(deltaIn) || 0) / 12));
+  return Math.max(5, Math.min(20, (Number(baseFt) || 8) + (Number(deltaIn) || 0) / 12));
 }
 // The wall height anything priced BY WALL AREA must use — cladding and insulation both.
 //
@@ -4466,9 +4518,26 @@ function d3NormalizeRoofProfile(v) {
 // and before this existed the two disagreed the moment a door was placed.
 function d3RoofAxes(roofCfg, wFt, lFt) {
   const wideIsZ = lFt >= wFt;               // portrait footprint: the length runs north<->south
+  const isShed = (roofCfg && roofCfg.type) === "shed";
+  // THE NEW FRAME (2026-09-24, see d3NewFrame): the style NAMES its orientation instead of the
+  // footprint's shape picking one. FRONT is the south wall, W along x. A gable or gambrel says
+  // whether that wall is a gable end ("gable": the profile spans W, the ridge runs north-south)
+  // or an eave wall ("eave": the profile spans L, the ridge runs east-west). A shed says which
+  // wall is the HIGH one: front/back put the slope across the depth, left/right across W, and
+  // tallNeg says which end of the profile is up (-u is west when uAxisIsX, north otherwise).
+  const hs = d3HighSide(roofCfg), fr = d3FrontKind(roofCfg);
+  if (hs || fr) {
+    const ux = hs ? (hs === "left" || hs === "right") : fr === "gable";
+    return {
+      uAxisIsX: ux,
+      S: ux ? wFt : lFt,
+      L: ux ? lFt : wFt,
+      tallNeg: hs ? (hs === "back" || hs === "left") : true,
+    };
+  }
   // For gable/gambrel the ridge is perpendicular to the span; for the shed the SLOPE runs
   // the long way, so the axes swap. Unchanged from the pre-fix door-less default.
-  const uAxisIsX = (roofCfg && roofCfg.type) === "shed" ? !wideIsZ : wideIsZ;
+  const uAxisIsX = isShed ? !wideIsZ : wideIsZ;
   return {
     uAxisIsX,
     S: uAxisIsX ? wFt : lFt,   // profile span
@@ -4477,9 +4546,43 @@ function d3RoofAxes(roofCfg, wFt, lFt) {
     // is a fixed convention rather than a derivation -- and it is the end BOTH branches of
     // the old door-less fallback already produced, so no door-less design moves. A real
     // per-style control belongs in the d3.roof spec, and would need a styleD3.ts whitelist
-    // entry or it is silently dropped on save.
+    // entry or it is silently dropped on save. (It is one now: roof.highSide, above.)
     tallNeg: true,
   };
+}
+// ── THE NEW FRAME OF REFERENCE (2026-09-24) ─────────────────────────────────────────────────
+// FRONT is the wall you walk up to: the one with the porch, or the main door. The size label WxL
+// is the FRONT wall's length by the depth, and the front is the SOUTH wall (+z), W along x. Left
+// and right are as seen standing in front: west and east.
+//
+// The frame is ON when the style carries roof.front (gable/gambrel) or roof.highSide (shed), and
+// only then. With neither, every rule below falls through to the one it replaced -- the
+// portrait/landscape axes, porchEnd's south/west ends, tallNeg true -- so no stored style moves.
+// The keys are read by VALUE and by ROOF TYPE, the sanitizer's own validity rules: roof.front
+// means nothing on a shed and roof.highSide nothing on anything else, so a key the sanitizer would
+// have dropped counts as absent here too and cannot flip the frame on its own.
+//
+// Module scope, between d3RoofAxes and d3RoofProfile on purpose: every test that lifts the region
+// starting at "function d3RoofAxes(" gets these with it.
+function d3FrontKind(roofCfg) {
+  const v = roofCfg && roofCfg.front;
+  return (v === "gable" || v === "eave") && roofCfg.type !== "shed" ? v : null;
+}
+function d3HighSide(roofCfg) {
+  const v = roofCfg && roofCfg.highSide;
+  return (v === "front" || v === "back" || v === "left" || v === "right") && roofCfg.type === "shed" ? v : null;
+}
+function d3NewFrame(roofCfg) {
+  return !!(d3FrontKind(roofCfg) || d3HighSide(roofCfg));
+}
+// The world wall that is the shed's HIGH eave wall, or null: a shed's two eave walls are the ones
+// at the ends of its profile (u = +-S/2), and tallNeg says which of the two is up. Null on every
+// other roof, and on a shed outside the new frame, where the band above the plate stays a band
+// (the byte-for-byte rule) rather than becoming a wall of its own.
+function d3ShedHighWall(roofCfg, wFt, lFt) {
+  if ((roofCfg && roofCfg.type) !== "shed" || !d3HighSide(roofCfg)) return null;
+  const ax = d3RoofAxes(roofCfg, wFt, lFt);
+  return ax.uAxisIsX ? (ax.tallNeg ? "west" : "east") : (ax.tallNeg ? "north" : "south");
 }
 
 // The roof's cross-section: a polyline of [u, y] points running eave -> ridge -> eave,
@@ -4553,6 +4656,308 @@ function d3ProfSpanAt(dedup, y) {
   }
   return hi > lo ? [lo, hi] : null;
 }
+// ── WINGS: THE RAISED-CENTRE ("MONITOR") MASSING (roof.wingSide / wingWidthFt, 2026-09-24) ──
+// A two-storey centre under the style's own gable or gambrel, with an ENCLOSED single-storey wing
+// down one or both eave sides, each under its own single-slope roof falling AWAY from the centre,
+// and the centre's side walls carried on up above the wing roofs (the clerestory band). The Tri
+// Home walk-around is the building this was written for.
+//
+// INSIDE THE FOOTPRINT, never added to it: the size label is the whole building and the wings are
+// carved out of it, so the plan, the quote and the outer walls stay exactly what is being sold.
+// Everything below is in the roof profile's own frame (d3RoofAxes): u across the span, -u = west
+// (uAxisIsX) or north. A wing runs the full length L along an EAVE side; a side that is a gable end
+// is dropped and reported in `dropped`, never drawn somewhere else.
+//
+//   S, L     the full span and the extrusion length, from d3RoofAxes
+//   Sc, uc   the centre section's span and where its middle sits in u (S - wL - wR, (wL - wR)/2)
+//   Hc       the centre's eave: centerEaveFt, else the wing roof's top + 3 ft; never under that top
+//            + 1 ft, and raised further when the centre's own eave finish would otherwise land on
+//            the wing roof under it (hcRaised says so)
+//   wings    [{ side -1|1, wall, w, pitch, u1 = the outer wall line, u0 = the centre wall line,
+//            ye = H at the outer wall, ya = H + w * pitch where the wing roof meets the centre }]
+//   prof     the centre's roof profile, in the centre's own u (add uc for the building's)
+//
+// ONE function, read by the renderer, the per-wall tops, the vent fit, the porch span and every
+// camera, for the reason d3RoofAxes is one function. With no wing keys it returns the plain
+// building (Sc = S, uc = 0, Hc = H, no wings), and every caller then builds what it always did.
+function d3Massing(roofCfg, W, L, H) {
+  const cfg = roofCfg || {};
+  const ax = d3RoofAxes(cfg, W, L);
+  const Hn = Number(H) > 0 ? Number(H) : 8;
+  const out = { uAxisIsX: ax.uAxisIsX, S: ax.S, L: ax.L, tallNeg: ax.tallNeg, H: Hn, Sc: ax.S, uc: 0, Hc: Hn, ya: Hn, wings: [], dropped: [], hcRaised: false, prof: null };
+  const type = cfg.type || "gable";
+  const want = Math.min(16, Number(cfg.wingWidthFt) || 0);
+  if ((type === "gable" || type === "gambrel") && want > 0.5) {
+    const negWall = ax.uAxisIsX ? "west" : "north", posWall = ax.uAxisIsX ? "east" : "south";
+    const named = { left: "west", right: "east", front: "south", back: "north" };
+    const asked = (cfg.wingSide || "both") === "both" ? [negWall, posWall] : (named[cfg.wingSide] ? [named[cfg.wingSide]] : []);
+    const walls = asked.filter((w) => w === negWall || w === posWall);
+    out.dropped = asked.filter((w) => walls.indexOf(w) < 0);
+    // The centre keeps at least 4 ft: a wider ask shrinks the wings, both alike.
+    const w = walls.length ? Math.min(want, (ax.S - 4) / walls.length) : 0;
+    const rawP = cfg.wingPitch != null ? Number(cfg.wingPitch) : 0.25;
+    const pitch = isFinite(rawP) ? Math.max(0, Math.min(1.5, rawP)) : 0.25;
+    if (w > 0.5) {
+      walls.forEach((wall) => {
+        const s = wall === negWall ? -1 : 1;
+        out.wings.push({ side: s, wall, w, pitch, u1: s * ax.S / 2, u0: s * (ax.S / 2 - w), ye: Hn, ya: Hn + w * pitch });
+      });
+      const wL = out.wings.some((g) => g.side < 0) ? w : 0, wR = out.wings.some((g) => g.side > 0) ? w : 0;
+      out.Sc = ax.S - wL - wR;
+      out.uc = (wL - wR) / 2;
+      out.ya = Hn + w * pitch;
+      // The centre's eave overhangs the wing roof, falling at its own eave slope while the wing roof
+      // falls at the wing pitch, and its fascia or tails hang up to 0.3 ft under the deck. It has to
+      // clear the wing slab's top (ROOF_T above the line) by 0.1 ft all the way out to the overhang.
+      const c = d3RoofProfile(cfg, out.Sc, 0, ax.tallNeg).dedup;
+      const n = c.length;
+      const slopeAt = (a, b) => (Math.abs(b[0] - a[0]) > 1e-9 ? Math.abs((b[1] - a[1]) / (b[0] - a[0])) : 0);
+      const eaveSlope = n > 1 ? Math.max(slopeAt(c[0], c[1]), slopeAt(c[n - 2], c[n - 1])) : 0;
+      const ovRaw = cfg.overhang != null ? Number(cfg.overhang) : D3.OVERHANG;
+      const ov = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
+      const minHc = out.ya + Math.max(1.0, D3.ROOF_T + 0.43 + Math.max(0, eaveSlope - pitch) * ov);
+      const rawHc = Number(cfg.centerEaveFt);
+      const wantHc = isFinite(rawHc) && rawHc > 0 ? rawHc : out.ya + 3;
+      out.Hc = Math.max(wantHc, minHc);
+      out.hcRaised = out.Hc > wantHc + 1e-9;
+    }
+  }
+  out.prof = d3RoofProfile(cfg, out.Sc, out.Hc, ax.tallNeg).dedup;
+  return out;
+}
+// The top of the massing's outline at the building's own u: the centre's roof over the centre, the
+// wing roof's line over a wing. Null-safe on u outside the span (the nearest end's answer).
+function d3MassingTopAt(m, u) {
+  for (let i = 0; i < m.wings.length; i++) {
+    const g = m.wings[i];
+    if ((u - g.u0) * g.side > 0) return g.ye + Math.min(g.w, Math.abs(u - g.u1)) * g.pitch;
+  }
+  return d3MakeProfYAt(m.prof, m.Hc)(u - m.uc);
+}
+// ── THE ROOF STEP (roof.rearStepFt / roof.rearEaveRiseFt, 2026-09-28) ───────────────────────────────
+// A gable building whose roof is TWO SECTIONS along the ridge. The rear section covers the last
+// rearStepFt feet, measured from the BACK wall to the joint, and its eave (the wall plate and the
+// fascia on it) sits rearEaveRiseFt higher than the front section's, or lower when negative, while
+// the two RIDGES STAY LEVEL. So the rear section's pitch is whatever brings its ridge to the front's
+// (the pitch less the rise over the half-span), and its long walls and the back gable wall stand the
+// rise taller: one flush plane with the front walls, the siding carrying straight on. At the joint
+// each long side shows a thin wedge between the two roof edges, deepest at the eave and closing to
+// nothing at the ridge. The Black Cabin walk-around is the building this was written for.
+//
+// Null, and every caller then builds exactly what it always did, unless ALL of these hold (the
+// sanitiser's own rules, plus the ones only a size can settle):
+//   * a gable roof whose ridge runs FRONT TO BACK: roof.front "gable", or no front on a style whose
+//     footprint puts the ridge along z by the old rule (d3RoofAxes' uAxisIsX). The back is then the
+//     NORTH wall, local z 0 in the renderer's roof group, and the joint is local z = stepFt.
+//   * both keys, a step over half a foot, and a rise of at least 0.01 ft either way
+//   * no wings and no lean-to: both run the length of an eave wall at one eave height, and the
+//     sanitiser refuses the step beside them for that reason
+//   * no porch at the BACK, where the rear section would stand over its opening
+// The joint is held to leave at least 4 ft of building each side of it (4 ft of enclosed room in
+// front of it where a recessed porch takes the front), and the rise to -1.5..1.5 ft and to what
+// leaves the rear roof a pitch of at least 0.02.
+//   stepFt  feet from the back wall to the joint      rise    the rear eave over the front's, feet
+//   Hf, Hb  the front and the rear eave (wall tops)   pitchB  the rear section's own pitch
+//   rearCfg the roof as the rear section's profile reads it: d3RoofProfile(rearCfg, S, Hb, ...)
+function d3RoofStep(roofCfg, W, L, H) {
+  const cfg = roofCfg || {};
+  if (cfg.type !== "gable" || cfg.rearStepFt == null || cfg.rearEaveRiseFt == null) return null;
+  const want = Number(cfg.rearStepFt), rise0 = Number(cfg.rearEaveRiseFt);
+  if (!(want > 0.5) || !(Math.abs(rise0) >= 0.01)) return null;
+  if (d3FrontKind(cfg) === "eave" || Number(cfg.wingWidthFt) > 0.5 || Number(cfg.leanToWidthFt) > 0.5) return null;
+  const ax = d3RoofAxes(cfg, W, L);
+  if (!ax.uAxisIsX) return null;
+  const porchOut = d3ProjectingPorch(cfg, W, L);
+  if ((cfg.porchEnd || "front") === "back" && (porchOut || Number(cfg.porchDepthFt) > 0.5)) return null;
+  // A recessed porch at the front, clamped the way buildShed3DModel clamps it.
+  const porchIn = porchOut ? 0 : Math.max(0, Math.min(Number(cfg.porchDepthFt) || 0, ax.L - 4));
+  const room = ax.L - (porchIn > 0.5 ? porchIn : 0) - 4;
+  if (!(room >= 4)) return null;
+  const stepFt = Math.max(4, Math.min(room, want));
+  const Hf = Number(H) > 0 ? Number(H) : D3.WALL_H;
+  const pitch = cfg.pitch || 0.4;
+  const half = ax.S / 2;
+  const rise = Math.max(-1.5, Math.min(1.5, Math.max(0, (pitch - 0.02) * half), rise0));
+  if (!(Math.abs(rise) >= 0.01)) return null;
+  const pitchB = pitch - rise / half;
+  return { stepFt, rise, Hf, Hb: Hf + rise, pitch, pitchB, rearCfg: { ...cfg, pitch: pitchB } };
+}
+// PER-WALL TOPS: how tall wall `wall` stands along its length, as [[a0, a1, top], ...] in the PLAN's
+// along-frame (feet from its west or north end), or null when it is one height, H, end to end —
+// which is every wall of every building without wings, a new-frame shed or a roof step, so none of
+// them changes.
+//   · a ROOF STEP (d3RoofStep): the back gable wall stands at the rear eave end to end, and each
+//     long wall at the rear eave from the back wall to the joint and at H in front of it.
+// ONE model for every wall that stands above H (2026-09-24, the two renderer branches unified):
+//   · a new-frame shed's HIGH eave wall (d3ShedHighWall) is one run at the high eave, H + S x pitch:
+//     a real clad wall where there used to be a wall to H with a band of roof prism above it.
+//     `setBack` true = a recessed porch has moved that wall in, under the roof; it then stops at H
+//     (null) and the prism's own face closes the opening above it.
+//   · a wing's outer eave wall is H, like any eave wall (null)
+//   · the eave side WITHOUT a wing, when the other side has one, is the centre's own wall: Hc
+//   · a gable end steps: H under each wing, Hc across the centre. The centre piece reaches the
+//     clerestory's OUTER face, so it closes the corner the way a wall box does at the footprint.
+// The 3D walls and their relief, the corner boards, the opening clamps, the viewer's drag and the
+// panel's porch readout all read it, so none of them can disagree about a wall's height.
+function d3WallTops(roofCfg, W, L, H, wall, setBack) {
+  const hi = d3ShedHighWall(roofCfg, W, L);
+  if (hi) {
+    if (setBack || wall !== hi) return null;
+    const ax = d3RoofAxes(roofCfg, W, L);
+    return [[0, ax.L, H + ax.S * ((roofCfg && roofCfg.pitch) || 0.25)]];
+  }
+  const m = d3Massing(roofCfg, W, L, H);
+  if (!m.wings.length) {
+    const st = d3RoofStep(roofCfg, W, L, H);
+    if (!st) return null;
+    if (wall === "north") return setBack ? null : [[0, m.S, st.Hb]];
+    if (wall === "west" || wall === "east") return [[0, st.stepFt, st.Hb], [st.stepFt, m.L, st.Hf]];
+    return null;
+  }
+  const ends = m.uAxisIsX ? ["north", "south"] : ["west", "east"];
+  if (ends.indexOf(wall) < 0) {
+    const s = wall === (m.uAxisIsX ? "west" : "north") ? -1 : 1;
+    return m.wings.some((g) => g.side === s) ? null : [[0, m.L, m.Hc]];
+  }
+  const T = D3.WALL_T, half = m.S / 2;
+  const gL = m.wings.find((g) => g.side < 0), gR = m.wings.find((g) => g.side > 0);
+  const c0 = gL ? gL.u0 - T / 2 + half : 0;
+  const c1 = gR ? gR.u0 + T / 2 + half : m.S;
+  const out = [];
+  if (gL) out.push([0, c0, m.H]);
+  out.push([c0, c1, m.Hc]);
+  if (gR) out.push([c1, m.S, m.H]);
+  return out;
+}
+// The LOWEST top over [a0, a1] of `wall`: what an opening spanning that run may reach, less the
+// header (a0 === a1 is a point: the piece it stands in). With no run at all, the wall's TALLEST top:
+// what its box and its corner boards reach. H when the wall is one height, so a building without
+// wings or a new-frame shed answers exactly as before.
+function d3WallTopFt(roofCfg, W, L, H, wall, a0, a1, setBack) {
+  const tops = d3WallTops(roofCfg, W, L, H, wall, setBack);
+  if (!tops) return H;
+  if (a0 == null) return tops.reduce((m, p) => Math.max(m, p[2]), -Infinity);
+  const b1 = a1 == null ? a0 : a1;
+  let t = Infinity;
+  tops.forEach((p) => { if (p[1] > a0 + 1e-6 && p[0] < b1 - 1e-6) t = Math.min(t, p[2]); });
+  if (!isFinite(t)) tops.forEach((p) => { if (p[0] <= a0 + 1e-6 && a0 <= p[1] + 1e-6) t = Math.min(t, p[2]); });
+  return isFinite(t) ? t : H;
+}
+// The top of the wall a PROJECTING porch stands on, at the porch's middle (d3PorchSpan): H, the high
+// eave on a new-frame shed's tall wall, Hc on a raised centre's gable end. What "just under the top
+// of the wall" means when roof.porchAttachFt is absent — for the renderer and the panel's readout
+// alike. Null without a projecting porch.
+function d3PorchWallTopFt(roofCfg, W, L, H) {
+  const porch = d3ProjectingPorch(roofCfg, W, L);
+  if (!porch) return null;
+  const P = d3PorchSpan(roofCfg, W, L);
+  const ax = d3RoofAxes(roofCfg, W, L);
+  // Along the wall from its west/north end: across the profile on a cap end, down the ridge on an eave wall.
+  const mid = P.onCap ? ax.S / 2 + P.centerU : ax.L / 2;
+  return d3WallTopFt(roofCfg, W, L, H, porch.wall, mid, mid);
+}
+// The local CEILING over a floor point (world feet): the centre's plate under the centre, the outer
+// plate everywhere else. A ceiling light or fan hangs from it. Under a roof step's rear section
+// (d3RoofStep: the back rearStepFt feet, world z from the north wall) it is that section's plate.
+function d3CeilingFt(roofCfg, W, L, H, x, z) {
+  const m = d3Massing(roofCfg, W, L, H);
+  if (!m.wings.length) {
+    const st = d3RoofStep(roofCfg, W, L, H);
+    return st && z < -L / 2 + st.stepFt ? st.Hb : H;
+  }
+  const u = m.uAxisIsX ? x : z;
+  return Math.abs(u - m.uc) <= m.Sc / 2 + 1e-6 ? m.Hc : H;
+}
+// ⚠️ MERGE HOOK FOR THE PROJECTING PORCH (2026-09-24). With wings a porch on a gable end stands in
+// front of the CENTRE only: this returns that span, where its middle sits in profile u, and the
+// centre wall's top — or null when the style has no wings. d3PorchSpan (the porch-width branch)
+// must return { span, centerU } from here when it answers non-null and no porchWidthFt narrows it.
+function d3PorchSpanWings(roofCfg, W, L, H) {
+  const m = d3Massing(roofCfg, W, L, H);
+  return m.wings.length ? { span: m.Sc, centerU: m.uc, wallTopFt: m.Hc } : null;
+}
+// ── WHAT THE BUILDING STANDS ON: A RAISED FLOOR (foundation "blocks" | "piers", 2026-09-25) ──────
+// Every building filmed so far sits up off the ground on concrete blocks or piers, and drawn at
+// grade its porch steps came out as one 2-inch step and the building looked planted.
+//
+// THE FLOOR STAYS AT y = 0 AND THE GROUND GOES DOWN. Doors, windows, electrical heights, the drag
+// planes, every interior item, ramps' tops and the porch deck are all measured from the floor, so
+// raising the building instead would move every one of them. d3GradeFt is how far below the floor's
+// top the ground is drawn: D3.FLOOR_T on a slab, on skids and with no foundation at all -- where the
+// ground has always been, so nothing about those buildings moves -- and with blocks or piers the
+// style's floorHeightFt (grade to the floor's top, at the front), else the kind's own default. Never
+// less than the floor band itself. Held to the sanitiser's band, so raw data outside it draws what
+// Save would store.
+// Every value a style's `foundation` can hold (the sanitiser's D3_FOUNDATIONS), and the raised two.
+const D3_FOUNDATIONS = ["skids", "slab", "blocks", "piers"];
+const D3_RAISED_FOUNDATIONS = ["blocks", "piers"];
+const D3_FLOOR_HEIGHT_DEFAULT_FT = { blocks: 1, piers: 1.5 };
+function d3RaisedFoundation(spec) {
+  const f = spec && spec.foundation;
+  return D3_RAISED_FOUNDATIONS.indexOf(f) >= 0 ? f : null;
+}
+function d3GradeFt(spec) {
+  const f = d3RaisedFoundation(spec);
+  if (!f) return D3.FLOOR_T;
+  const h = Number(spec.floorHeightFt);
+  const v = isFinite(h) && h > 0 && h <= 8 ? Math.max(0.3, Math.min(6, h)) : D3_FLOOR_HEIGHT_DEFAULT_FT[f];
+  return Math.max(D3.FLOOR_T, v);
+}
+// How much further down the ground is than it has always been: exactly 0 on every building that is
+// not raised, so each camera that subtracts it (the viewer, the docked panel, the quote shot, the
+// self-check) is the arithmetic it always was.
+function d3GradeLiftFt(spec) {
+  return d3GradeFt(spec) - D3.FLOOR_T;
+}
+// The model's real top, in feet off the floor: the ridge of the centre when there are wings, the
+// roof's own peak otherwise.
+function d3ModelTopFt(spec, W, L) {
+  const roof = (spec && spec.roof) || {};
+  const m = d3Massing(roof, W, L, Number(spec && spec.wallHeightFt) || D3.WALL_H);
+  let top = m.Hc;
+  m.prof.forEach((p) => { if (p[1] > top) top = p[1]; });
+  return top;
+}
+// THE HEIGHT THE ORBIT CAMERAS FRAME FOR, in place of the fixed D3.WALL_H the viewer, the docked
+// panel and the quote shot have always used (R = half the footprint + this, aim at 0.45 of it).
+// It IS D3.WALL_H — every number those cameras produce unchanged — whenever that old framing
+// already holds the whole building, and grows only when the top would leave the 34° frame: a
+// raised centre on a small footprint, a 20 ft wall. Conservative on purpose (the top is tested at
+// the footprint's nearest AND farthest reach — below the eye it is the far end that rises toward
+// the frame's edge), so a building it passes is in frame. Of the shapes that stored styles can
+// have, only a 14 ft wall under a 12:12 or gambrel roof on a 12 ft or smaller footprint moves, and
+// those were the ones the old frame clipped at the far ridge.
+//
+// A RAISED FLOOR (d3GradeLiftFt, 2026-09-25) is framed FROM ITS GROUND: the answer is in the frame
+// whose zero is the lowered grade, so the top it has to hold is the model's top plus the lift, the
+// frame it starts from is D3.WALL_H plus the lift (it IS a building that much taller, grass to
+// peak, and framed at the bare D3.WALL_H a deep porch on tall piers ran off the side of the docked
+// panel's narrow frame), and every caller lowers its eye and its target by the same lift. The
+// building, its supports and the ground they stand on are then framed as a building of that total
+// height at grade. The lift is 0 on every other building, so nothing else moves.
+function d3FrameHeightFt(spec, W, L) {
+  const w = Number(W), l = Number(L);
+  if (!spec || !(w > 0) || !(l > 0)) return D3.WALL_H;
+  // The profile's peak plus what is built on it (slab, ridge cap), out to the overhang past the ends.
+  const lift = d3GradeLiftFt(spec);
+  const top = d3ModelTopFt(spec, w, l) + 0.4 + lift;
+  const ovRaw = Number(spec.roof && spec.roof.overhang);
+  const ov = isFinite(ovRaw) && ovRaw > 0 ? ovRaw : D3.OVERHANG;
+  const M = Math.max(w, l) * 0.5;
+  const half = (17 * Math.PI) / 180;
+  const fits = (fH) => {
+    const dist = (M + fH) * 3.66, eyeY = dist * 0.5, near = Math.max(0.5, dist - M - ov);
+    const axis = Math.atan2(eyeY - fH * 0.45, dist);
+    const up = Math.max(Math.atan2(top - eyeY, near), Math.atan2(top - eyeY, dist + M + ov));
+    return axis + up <= half && axis - Math.atan2(eyeY, near) >= -half;
+  };
+  const base = D3.WALL_H + lift;
+  if (fits(base)) return base;
+  let lo = base, hi = Math.max(2 * base, 2 * top);
+  for (let i = 0; i < 20 && !fits(hi); i++) hi *= 1.5;
+  for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (fits(mid)) hi = mid; else lo = mid; }
+  return hi;
+}
 // Everything about a transom dormer that depends on the roof it sits on.
 //
 // ⚠️ ONE COPY, deliberately, and it is why this is module scope rather than inline in the
@@ -4603,13 +5008,41 @@ function d3TransomDormerGeom(roofCfg, S, profYAt) {
 //
 // Sibling of d3DormerReadout, which takes a size LABEL because the calibration panel has no live
 // footprint to read; this one takes the real feet the customer is buying.
+//
+// WITH WINGS THE DORMER IS ON THE CENTRE (2026-09-24 review): the renderer builds it on the centre's
+// roof, span Sc at eave Hc (d3Massing), so the face is measured there too. Measured across the full
+// span, a Tri Home-sized building's face came out 2.50 ft where the 3D's is 1.31, and a 30x36 in
+// window was offered and PRICED on a dormer that could not draw it. d3DormerRoof is that one profile,
+// for both functions; without wings it is exactly the span and wall the two always used.
+function d3DormerRoof(roof, wFt, dFt, H) {
+  const m = d3Massing(roof, wFt, dFt, H);
+  const own = d3MakeProfYAt(m.prof, m.Hc);
+  // A ROOF STEP (d3RoofStep, 2026-09-28): the dormer sits on the roof under it, the rear section's
+  // behind the joint (d3DormerSeatYAt), exactly as buildShed3DModel seats it. Null on every other
+  // building, which keeps the one profile it always had.
+  const st = d3RoofStep(roof, wFt, dFt, H);
+  if (!st) return { S: m.Sc, profYAt: own };
+  const rear = d3MakeProfYAt(d3RoofProfile(st.rearCfg, m.S, st.Hb, m.tallNeg).dedup, st.Hb);
+  return { S: m.Sc, profYAt: d3DormerSeatYAt(own, rear, m.L, (roof && roof.dormerWidthFt) || 0, st.stepFt) };
+}
+// WHICH ROOF A DORMER SITS ON when the roof steps (d3RoofStep): the dormer is centred at L/2 and
+// dormW long along the ridge, local z 0 the back wall and the joint at stepFt. Wholly behind the
+// joint it sits on the rear section's roof (rearYAt), wholly in front of it on the front section's
+// (frontYAt). Straddling the joint it takes the LOWER of the two, so no part of it floats above a
+// roof (the higher roof's slab passes through its box, as every dormer's slab does). With no rear
+// section it is frontYAt itself. (Taking the lower roof wherever the dormer reached behind the
+// joint seated one standing wholly on a higher rear roof on the front plane, buried in its slab.)
+function d3DormerSeatYAt(frontYAt, rearYAt, L, dormW, stepFt) {
+  if (!rearYAt || L / 2 - dormW / 2 >= stepFt) return frontYAt;
+  if (L / 2 + dormW / 2 <= stepFt) return rearYAt;
+  return (u) => Math.min(frontYAt(u), rearYAt(u));
+}
 function d3DormerFaceFt(spec, wFt, dFt) {
   const roof = (spec && spec.roof) || {};
   if (roof.type === "shed" || !((roof.dormerWidthFt || 0) > 0.5)) return 0;
   if (roof.dormerType !== "transom") return Math.max(0.3, roof.dormerRiseFt != null ? roof.dormerRiseFt : 2.5);
-  const S = d3RoofAxes(roof, Number(wFt) || 12, Number(dFt) || 16).S;
-  const H = (spec && spec.wallHeightFt) || 8;
-  return d3TransomDormerGeom(roof, S, d3MakeProfYAt(d3RoofProfile(roof, S, H, true).dedup, H)).face;
+  const r = d3DormerRoof(roof, Number(wFt) || 12, Number(dFt) || 16, (spec && spec.wallHeightFt) || 8);
+  return d3TransomDormerGeom(roof, r.S, r.profYAt).face;
 }
 
 // WHERE THE CUSTOMER'S CHOSEN WINDOW SITS ON A DORMER FACE, and whether it fits there at all.
@@ -4672,9 +5105,8 @@ function d3DormerReadout(spec, sizeLabel) {
   if (roof.type === "shed" || roof.dormerType !== "transom" || !((roof.dormerWidthFt || 0) > 0.5)) return null;
   const m = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
   const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
-  const S = d3RoofAxes(roof, w, d).S;
-  const H = (spec && spec.wallHeightFt) || 8;
-  return d3TransomDormerGeom(roof, S, d3MakeProfYAt(d3RoofProfile(roof, S, H, true).dedup, H));
+  const r = d3DormerRoof(roof, w, d, (spec && spec.wallHeightFt) || 8);
+  return d3TransomDormerGeom(roof, r.S, r.profYAt);
 }
 
 // Feet as a builder writes them: 4' 7" rather than 0.55 x half-span. This is the whole
@@ -4804,9 +5236,11 @@ function d3EaveFinishDrop(roofCfg, ny) {
 //   H         the wall height
 //   D         the projection, from d3ProjectingPorch
 //   trimFace  the cladding's proudest face: the posts' outer faces stand flush with the corner boards
-//   capY      the highest the porch roof may meet the wall. The renderer measures it off the main
-//             roof it has already built (a rake or fascia on a deep overhang, open-eave tails);
-//             the readout has no roof to measure and passes Infinity, so its yHigh is "at most".
+//   capY      the highest the porch roof may meet the wall: d3PorchCapFt's ceiling (the building's
+//             outline in the wall's own plane, and the eave hanging over an eave-wall porch), and
+//             in the renderer also whatever it measures off the main roof it has already built (a
+//             rake or fascia past a gable wall, open-eave fly rafters, a lean-to). The readout has
+//             only d3PorchCapFt, and says "at most" where the renderer can measure more.
 //
 // Frame: d = feet OUT from the gable wall's mid-plane (the footprint line), y = up from the floor.
 //   · The high edge sits at H - 0.2, just under a plate band (SS_PLATE_BAND_TOP - 0.3), and
@@ -4818,10 +5252,30 @@ function d3EaveFinishDrop(roofCfg, ny) {
 //     wall ledger and the header instead of sitting on it.
 //   · A post at each corner and one every 8.5 ft or less between, counted off the SPAN S. Counted
 //     off the post-to-post width it changed with the cladding, and an 8 ft porch drew 3 posts.
-//     8 ft gets 2, 10-17 ft get 3, 18-24 ft get 4.
+//     8 ft gets 2, 10-17 ft get 3, 18-24 ft get 4 -- one bay more where that count is even and the
+//     steps are "center" (fix, 2026-09-25), so no post stands at the top of centred steps.
 //   · hNeeded is the wall height at which the 2:12 roof clears 6'8" when nothing on the main roof
 //     pushes it down: what the panel suggests when a wall is too short.
-function d3PorchGeom(S, H, D, trimFace, capY) {
+//   · attachFt (roof.porchAttachFt, 2026-09-24): floor to the TOP of the porch roof where it meets
+//     the wall, when the style says so -- a porch roof a few feet under the eave with siding
+//     showing between. It replaces H - 0.2 and is still held under capY. Absent = today.
+//     S is the porch's own width (d3PorchSpan), which is the whole span unless porchWidthFt says.
+//   · framing (d3PorchFraming, 2026-09-25): the style's own post count and porch-roof pitch, each
+//     null when the style does not say, which is today's porch exactly.
+//       posts  that many posts, evenly spaced corner to corner, in place of the 8.5 ft rule -- but
+//              never so many that two would stand closer than a post's width apart (a 4 ft porch
+//              takes at most 5). `posts` is what is BUILT.
+//       pitch  asked for in place of 2:12, and still LOWERED, only as far as it must be, where it
+//              would leave less than 6 ft under the header (CLEAR_FLOOR: a given pitch is the
+//              builder's measured porch; the solver's own 2:12 still aims for 6'8"): solved
+//              exactly here, because a given pitch runs up to 0.5, past where stack() may be
+//              read at 0.15. pitchClamped then says it was lowered, `short` says 0.05 was not
+//              enough, and hNeeded is the wall at which THAT pitch clears 6'8". pitchWant is
+//              added only when the style gives a pitch, so a porch without one returns exactly
+//              the keys it always did. (The server's porchPitchDrawable mirrors this solve, so
+//              the self-check is told the pitch the render shows; porchGeom_test runs both.)
+function d3PorchGeom(S, H, D, trimFace, capY, attachFt, framing) {
+  const fr = framing || {};
   // Member sizes in feet: 6x6 posts, a doubled 2x8 header, 2x6 rafters, the roof sheet, the
   // ceiling boards, the roof's overhang past the posts and past each side, the sided cheek and
   // the board over the rafter tails.
@@ -4830,34 +5284,192 @@ function d3PorchGeom(S, H, D, trimFace, capY) {
     OVP: 0.3, SIDE_OV: 0.08, CHEEK_T: 0.1, FAS_T: 0.1,
   };
   const { POST, HDR_H, HDR_D, RAF_D, PR_T, SHEATH, OVP } = sizes;
-  const MIN_CLEAR = 6.67, WANT = 2 / 12, POST_SPAN = 8.5, RAF_OC = 2;
+  const MIN_CLEAR = 6.67, POST_SPAN = 8.5, RAF_OC = 2;
+  const WANT = fr.pitch > 0 ? fr.pitch : 2 / 12;
+  // A pitch the style GIVES (read off the builder's own video) is honoured down to 6 ft under the
+  // header, because real porches are built lower than the 6'8" the solver aims for: Farmstand's
+  // measured 3:12 porch roof leaves about 6'5", and holding it to 6'8" drew it nearly flat beside
+  // a frame that plainly slopes. Without a given pitch the solver's 6'8" stands, unchanged.
+  const CLEAR_FLOOR = fr.pitch > 0 ? 6.0 : MIN_CLEAR;
   const dWall = D3.WALL_T / 2;                              // the gable wall's outer face
   const dPost = D - POST / 2;                               // post centres: outer faces on the deck edge
   const dEnd = D + OVP;                                     // the porch roof's front edge
   const side = S / 2 + trimFace;                            // outer post faces, flush with the corner boards
   const run = Math.max(0.1, dPost - HDR_D / 2 - dWall);     // wall face to the header's inner face
-  const yHigh = Math.min(H - 0.2, capY);
+  const yHigh = Math.min(attachFt > 0 ? attachFt : H - 0.2, capY);
   const stack = (p) => (PR_T + SHEATH) * Math.sqrt(1 + p * p);   // roof sheet + ceiling, measured plumb
   const clearAt = (p) => yHigh - p * run - stack(p) - HDR_H;
   let pitch = WANT;
-  // stack() barely moves over the pitches this solves for (0.160 to 0.162), so it is read at 0.15.
-  if (clearAt(pitch) < MIN_CLEAR) pitch = Math.max(0.05, Math.min(pitch, (yHigh - stack(0.15) - HDR_H - MIN_CLEAR) / run));
+  if (clearAt(pitch) < CLEAR_FLOOR) {
+    if (fr.pitch > 0) {
+      // The steepest pitch at or under the style's that still clears: clearAt falls as the pitch
+      // rises, so bisect between the floor and the ask.
+      if (clearAt(0.05) < CLEAR_FLOOR) pitch = 0.05;
+      else {
+        let lo = 0.05, hi = WANT;
+        for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; if (clearAt(mid) >= CLEAR_FLOOR) lo = mid; else hi = mid; }
+        pitch = lo;
+      }
+    } else {
+      // stack() barely moves over the pitches this solves for (0.160 to 0.162), so it is read at 0.15.
+      pitch = Math.max(0.05, Math.min(pitch, (yHigh - stack(0.15) - HDR_H - MIN_CLEAR) / run));
+    }
+  }
   const hdrTop = yHigh - pitch * run - stack(pitch);
   const postH = Math.max(1, hdrTop - HDR_H);
-  const bays = Math.max(1, Math.ceil(S / POST_SPAN - 1e-6));
+  const postsMax = Math.max(2, 1 + Math.floor((2 * side - POST) / (2 * POST) + 1e-9));
+  const ruleBays = Math.max(1, Math.ceil(S / POST_SPAN - 1e-6));
+  // CENTRE STEPS NEED A BAY IN THE MIDDLE (fix, 2026-09-25). The 8.5 ft rule gives 2 bays to any
+  // porch 8.5 to 17 ft wide, which stands a post at x = 0: at the top of centred steps, the common
+  // case of steps in front of a centred door, and not a porch anyone builds. With steps "center"
+  // and NO porchPosts the rule takes one bay more, so the middle is a bay. A porchPosts the style
+  // gives is the builder's own count and is never second-guessed.
+  const bays = fr.posts >= 2 ? Math.min(Math.round(fr.posts), postsMax) - 1
+    : fr.steps === "center" && ruleBays % 2 === 0 ? Math.min(ruleBays + 1, postsMax - 1) : ruleBays;
   return {
     pitch, pitchClamped: pitch < WANT - 1e-9, yHigh, postH, hdrTop,
     ceilWall: yHigh - (PR_T + SHEATH + RAF_D) * Math.sqrt(1 + pitch * pitch),   // rafter bottoms at the wall
     bays, posts: bays + 1,
     nRaf: Math.max(2, Math.round((2 * side) / RAF_OC) + 1),
     side, dWall, dPost, dEnd,
-    short: postH < 6.66,
+    // Short against the floor in force: 6'8" for the solver's own pitch, as always; 6 ft for a pitch
+    // the style gives, which is the builder's measured porch, not a porch we are proposing.
+    short: postH < (fr.pitch > 0 ? CLEAR_FLOOR - 0.01 : 6.66),
     hNeeded: MIN_CLEAR + HDR_H + stack(WANT) + WANT * run + 0.2,
     sizes,
+    ...(fr.pitch > 0 ? { pitchWant: WANT } : {}),
   };
 }
+// THE PORCH'S OWN FRAMING, AS THE STYLE GIVES IT (roof.porchPosts / porchPitch / porchSteps,
+// 2026-09-25), read once for the renderer and the panel's readout alike. Each is null when the
+// style does not say, and null is today's porch: the 8.5 ft post rule, the 2:12 solver, no steps.
+// Held to the sanitiser's bands here too, so raw data outside them draws what Save would store.
+const D3_PORCH_STEP_SIDES = ["left", "center", "right"];
+function d3PorchFraming(roofCfg) {
+  const cfg = roofCfg || {};
+  const n = Math.round(Number(cfg.porchPosts));
+  const k = Number(cfg.porchPitch);
+  return {
+    posts: isFinite(n) && n >= 2 ? Math.min(8, n) : null,
+    pitch: isFinite(k) && k > 0 ? Math.max(0.05, Math.min(0.5, k)) : null,
+    steps: D3_PORCH_STEP_SIDES.indexOf(cfg.porchSteps) >= 0 ? cfg.porchSteps : null,
+  };
+}
+// THE PORCH'S STEPS (roof.porchSteps, 2026-09-25), in the porch's own frame, or null without them:
+// x across the porch from its middle, POSITIVE to the right of someone standing in front of the
+// porch facing it (the frame the porch groups are built in: its z runs out toward that person, so
+// their right is +x whichever wall the porch is on); d out from the wall's mid-plane.
+//   where   left / center / right along the deck's FRONT edge (d = D, the posts' outer faces).
+//           Left and right are centred in the outermost bay on that side, between two posts; with
+//           a single bay they stand against that corner post instead. Center is the porch's
+//           middle, which is the middle bay's when there is one. Without porchPosts the post rule
+//           takes an odd number of bays for centre steps (d3PorchGeom), so there always is; only a
+//           porchPosts the style gives can put a post there, and that is the builder's own count.
+//   w       3.5 ft, or the clear gap between two posts where that is narrower.
+//   count   ceil(deck height above grade / 7.5 in), at least 1: the number of STEPS (treads). The
+//           climb from grade to the deck is count + 1 risers, each h / (count + 1), so no riser
+//           tops 7.5 in. The deck is the floor (y 0) and grade is -gradeFt: d3GradeFt's, which is
+//           D3.FLOOR_T at grade, so a porch on a slab or skids gets one step, 2.1 in up, then 2.1 in
+//           onto the deck. On a raised floor (blocks or piers, 2026-09-25) the steps climb the whole
+//           height: 1.1 ft is two steps and three 4.4 in risers, 1.5 ft three steps and four 4.5 in
+//           risers, landing on the lowered grass.
+//   tread   11 in deep, the treads running out from the deck's edge.
+function d3PorchStepsGeom(g, D, where, gradeFt) {
+  if (!g || D3_PORCH_STEP_SIDES.indexOf(where) < 0) return null;
+  const POST = g.sizes.POST;
+  const h = gradeFt > 0 ? gradeFt : D3.FLOOR_T;             // deck top (the floor, y 0) above grade
+  const count = Math.max(1, Math.ceil(h / 0.625 - 1e-9));
+  const rise = h / (count + 1);
+  const tread = 11 / 12;
+  const outer = g.side - POST / 2;                          // the corner posts' centres
+  const pitchX = (2 * outer) / g.bays;                      // post centre to post centre
+  const w = Math.min(3.5, pitchX - POST);
+  const s = where === "left" ? -1 : 1;
+  const x = where === "center" ? 0 : g.bays > 1 ? s * (outer - pitchX / 2) : s * (g.side - POST - w / 2);
+  return { where, x, w, count, rise, tread, d0: D, grade: -h };
+}
+// THE CEILING THE BUILDING ITSELF PUTS OVER A PROJECTING PORCH'S ROOF (2026-09-24 review), in feet off
+// the floor, or Infinity with no projecting porch. ONE function, read by buildShed3DModel and by the
+// panel's readout, so a porch the style hangs high (porchAttachFt) is held down the same way in both.
+//
+// The renderer's own clearance scan only sees members that reach PAST the wall's face, so on a flush
+// roof (overhang 0) nothing held the porch roof at all: an attach height above the wall top floated it
+// over the eave, or ran it into the main roof on a shed's low wall. And the readout, with no roof to
+// measure, was feet off on every eave-wall porch and under every pair of wings. Two parts:
+//   · THE WALL'S OWN OUTLINE across the porch sheet's width (its posts' outer faces plus the sheet's
+//     side overhang), less the 0.2 ft of "just under the top of the wall": on an eave wall that wall's
+//     top; on a cap end the massing's outline (d3MassingTopAt) -- the gable, a shed's slope, and with
+//     wings the wing roofs a centre porch's sheet reaches under. Straight between its corners, so its
+//     lowest point over the width is at an end or a corner, read exactly there; where two corners
+//     share a u (a wing roof meeting the centre wall) the lower one is the outline.
+//   · ON AN EAVE WALL, THE EAVE OVER IT, less the scan's 0.03: the eave finish's lowest point out at
+//     the overhang (d3EaveFinishDrop: fascia, soffit or open tails), and the rake board's bottom corner
+//     when the porch runs out to a gable end; on a new-frame shed's HIGH wall, the level soffit, or
+//     the open tails where they cross the wall face. A lower bound of what the scan measures, so the
+//     renderer and the readout take the same number.
+// With no porchAttachFt and no porchWidthFt this is exactly H - 0.2 on every stored style, whose
+// porch spans the whole gable end, so none of them moves (d3PorchGeom already sits there).
+function d3PorchCapFt(roofCfg, W, L, H, trimFace) {
+  const cfg = roofCfg || {};
+  const porch = d3ProjectingPorch(cfg, W, L);
+  if (!porch) return Infinity;
+  const P = d3PorchSpan(cfg, W, L);
+  const m = d3Massing(cfg, W, L, H);
+  const top = d3PorchWallTopFt(cfg, W, L, H);
+  const reach = P.span / 2 + trimFace + 0.08;          // d3PorchGeom's side + sizes.SIDE_OV
+  if (P.onCap) {
+    const corners = m.prof.map((c) => [c[0] + m.uc, c[1]]);
+    m.wings.forEach((g) => { corners.push([g.u1, g.ye], [g.u0, g.ya]); });
+    const outline = (u) => {
+      const at = corners.filter((c) => Math.abs(c[0] - u) < 1e-9);
+      return at.length ? Math.min(...at.map((c) => c[1])) : d3MassingTopAt(m, u);
+    };
+    const lo = Math.max(-m.S / 2, P.centerU - reach), hi = Math.min(m.S / 2, P.centerU + reach);
+    let y = Math.min(outline(lo), outline(hi));
+    corners.forEach((c) => { if (c[0] > lo + 1e-9 && c[0] < hi - 1e-9) y = Math.min(y, outline(c[0])); });
+    return y - 0.2;
+  }
+  const cap = top - 0.2;
+  const ovRaw = cfg.overhang != null ? Number(cfg.overhang) : D3.OVERHANG;
+  const OV = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
+  // The scan's wall face (d3PorchGeom's dWall + 0.005), less a hundredth: a member whose outermost
+  // point might pass it counts, so this never sits above what the scan measures.
+  const face = D3.WALL_T / 2 + 0.005 - 0.01;
+  const s = porch.wall === "south" || porch.wall === "east" ? 1 : -1;
+  if (porch.wall === d3ShedHighWall(cfg, W, L)) {
+    const k = cfg.pitch || 0.25, ny = 1 / Math.sqrt(1 + k * k);
+    if (cfg.eave === "open") {
+      // Tails rise outward from the wall: lowest where they cross its face, if they reach it at all.
+      if (OV * ny + 0.3 * k * ny <= face) return cap;
+      return Math.min(cap, top + k * (face + 0.01) - (D3_EAVE.TAIL_DROP - D3_EAVE.DECK_N) / ny - 0.03);
+    }
+    return Math.min(cap, top - 0.005 - D3_EAVE.SOFFIT_T - 0.03);
+  }
+  // The slope that ends at this wall: a wing's, or the centre's own end leg.
+  let k = 0;
+  const wing = m.wings.find((g) => g.side === s);
+  if (wing) k = wing.pitch;
+  else {
+    const pr = s > 0 ? m.prof.slice().reverse() : m.prof;
+    for (let i = 1; i < pr.length; i++) {
+      const du = Math.abs(pr[i][0] - pr[0][0]);
+      if (du > 1e-9) { k = Math.abs(pr[i][1] - pr[0][1]) / du; break; }
+    }
+  }
+  const ny = 1 / Math.sqrt(1 + k * k);
+  // Nothing of the eave reaches past the wall face (a flush roof): the outline above is all there is.
+  if (OV * ny + 0.12 * k * ny + D3_EAVE.FASCIA_T / 2 <= face) return cap;
+  const eaveY = top - OV * k * ny;                       // the slope line OV out along the slope
+  let drop = d3EaveFinishDrop(cfg, ny);
+  // The rake board's bottom corner at the eave, when the porch runs out to a gable end.
+  if (reach > m.L / 2 + OV - 0.1) drop = Math.max(drop, (0.16 - (D3.ROOF_T / 2 - 0.08)) * ny);
+  return Math.min(cap, eaveY - drop - 0.03);
+}
 // The projecting porch for a SPEC and a size LABEL, for the calibration panel: the size parsed the
-// way d3DormerReadout parses it, then d3PorchGeom with no main roof to measure (capY Infinity).
+// way d3DormerReadout parses it, then d3PorchGeom under d3PorchCapFt, the ceiling the renderer holds
+// it under too. `atMost` says the renderer may still build it lower: on a gable end whose roof reaches
+// past the wall (a rake or eave board, a lean-to), which only the renderer can measure, and on an
+// eave wall a lean-to hangs off.
 // Null when the style has no projecting porch. trimFace is the panel cladding's; it moves only
 // `side` and the rafter count, and none of what the panel prints (clearance, pitch, posts, where
 // the porch roof meets the wall) reads either.
@@ -4867,9 +5479,25 @@ function d3PorchReadout(spec, sizeLabel) {
   const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
   const porch = d3ProjectingPorch(roof, w, d);
   if (!porch) return null;
-  const S = d3RoofAxes(roof, w, d).S;
+  // The porch's own width and the height of the wall it stands on (a shed's high eave wall in the
+  // new frame is taller than H, a raised centre's gable end is Hc), exactly as buildShed3DModel reads them. Outside the new frame and
+  // without porchWidthFt / porchAttachFt these are S, H and H - 0.2: today's readout.
+  const S = d3PorchSpan(roof, w, d).span;
   const H = (spec && spec.wallHeightFt) || D3.WALL_H;
-  return { ...d3PorchGeom(S, H, porch.D, D3.WALL_T / 2 + 0.03, Infinity), D: porch.D, wall: porch.wall, S, H };
+  const top = d3PorchWallTopFt(roof, w, d, H);
+  const attachFt = Number(roof.porchAttachFt) || 0;
+  const trimFace = D3.WALL_T / 2 + 0.03;
+  // The style's post count, porch-roof pitch and steps (2026-09-25), exactly as the renderer reads
+  // them, so `posts` and `pitch` below are the ones built.
+  const framing = d3PorchFraming(roof);
+  const g = d3PorchGeom(S, top, porch.D, trimFace, d3PorchCapFt(roof, w, d, H, trimFace), attachFt, framing);
+  const ovRaw = roof.overhang != null ? Number(roof.overhang) : D3.OVERHANG;
+  const onCap = d3PorchSpan(roof, w, d).onCap;
+  const atMost = onCap ? (isFinite(ovRaw) ? ovRaw : D3.OVERHANG) > D3.WALL_T / 2 + 0.005 : (Number(roof.leanToWidthFt) || 0) > 0.5;
+  // With porchAttachFt set it is the ATTACH height, not the wall, that decides the headroom, so the
+  // panel's suggestion is where to hang the porch roof: hNeeded is a wall top, 0.2 above that.
+  return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2, atMost,
+    framing, steps: d3PorchStepsGeom(g, porch.D, framing.steps, d3GradeFt(spec)) };
 }
 
 // A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
@@ -4890,14 +5518,21 @@ function d3PorchReadout(spec, sizeLabel) {
 // three-quarter shot, where dimension lines are unreadable, and it is a shared WebGL
 // context that should not grow overlay complexity.
 function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
+  // WINGS (d3Massing, 2026-09-24): a raised centre draws the stepped end the 3D builds instead.
+  const winged = d3WingsElevation(spec, sizeLabel, focusKey);
+  if (winged) return winged;
   const roof = (spec && spec.roof) || {};
   const m = /^(\d+(?:\.\d+)?)\s*[xX\u00d7]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
   const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
   // Shares d3RoofAxes with buildShed3DModel -- the SAME rule, always, doors or not. Until
   // 2026-09-01 this drawing used pure geometry while the 3D used the door, so the two
   // silently disagreed the moment a customer placed one. tallNeg is true, so the shed's
-  // high end is always on the left here.
-  const S = d3RoofAxes(roof, w, d).S;
+  // high end is always on the left here -- outside the NEW FRAME (d3NewFrame). In it the drawing
+  // takes the axes' own tallNeg, so a shed's high side lands where roof.highSide put it, and it
+  // names the two ends (front/back or left/right) under the span.
+  const ax = d3RoofAxes(roof, w, d);
+  const S = ax.S;
+  const NEW_FRAME = d3NewFrame(roof);
   const H = (spec && spec.wallHeightFt) || 8;
   const OV = roof.overhang != null ? roof.overhang : 0.6;
   // THE DRAWING LEARNS THE EAVE FINISH TOO -- from d3EaveFinishDrop, the same function the 3D
@@ -4909,9 +5544,18 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
   // open tails in the 3D. The notch is a FASCIA-eave distinction and stops at that gate.
   const EAVE_OPEN = roof.eave === "open";
   const OV_NOTCHED = !EAVE_OPEN && d3OverhangStyle(roof) === "notched";
-  const dedup = d3RoofProfile(roof, S, H, true).dedup;
+  const dedup = d3RoofProfile(roof, S, H, NEW_FRAME ? ax.tallNeg : true).dedup;
   let peak = H;
   dedup.forEach((p) => { if (p[1] > peak) peak = p[1]; });
+  // THE SHED'S HIGH EAVE, in the new frame only: the 3D runs the slab OV past the high wall and
+  // finishes it (buildShed3DModel's high-eave branch), so the drawing extends the slope past its
+  // high point the same horizontal OV and hangs the same finish. Null everywhere else, which is
+  // exactly the drawing this was before.
+  const HIGH_EAVE = (NEW_FRAME && roof.type === "shed" && dedup.length === 3) ? (() => {
+    const hi = dedup[1], lo = ax.tallNeg ? dedup[2] : dedup[0];
+    const dx = hi[0] - lo[0], dy = hi[1] - lo[1], k = OV / (Math.abs(dx) || 1);
+    return { hi, ext: [hi[0] + dx * k, hi[1] + dy * k], ny: Math.abs(dx) / (Math.hypot(dx, dy) || 1) };
+  })() : null;
 
   const VW = 360, VH = 210, PL = 54, PR = 54, PT = 14, PB = 34;
   const innerW = VW - PL - PR, innerH = VH - PT - PB;
@@ -4990,6 +5634,30 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
         );
       })}
 
+      {/* THE SHED'S HIGH EAVE (new frame only): the slope carried OV past the high wall, then the
+          3D's finish -- open tails at the same drop the low eave's take, or a fascia down to a
+          LEVEL soffit at the top of the high wall, boxed back to it. */}
+      {HIGH_EAVE && (
+        <g>
+          <line x1={X(HIGH_EAVE.hi[0])} y1={Y(HIGH_EAVE.hi[1])} x2={X(HIGH_EAVE.ext[0])} y2={Y(HIGH_EAVE.ext[1])} stroke={INK} strokeWidth="2" />
+          {EAVE_OPEN
+            ? <line x1={X(HIGH_EAVE.ext[0])} y1={Y(HIGH_EAVE.ext[1])} x2={X(HIGH_EAVE.ext[0])} y2={Y(HIGH_EAVE.ext[1] - d3EaveFinishDrop(roof, HIGH_EAVE.ny))} stroke={INK} strokeWidth="1.4" />
+            : (
+              <g>
+                <line x1={X(HIGH_EAVE.ext[0])} y1={Y(HIGH_EAVE.ext[1])} x2={X(HIGH_EAVE.ext[0])} y2={Y(HIGH_EAVE.hi[1] - D3_EAVE.SOFFIT_T)} stroke={INK} strokeWidth="1.4" />
+                <line x1={X(HIGH_EAVE.ext[0])} y1={Y(HIGH_EAVE.hi[1] - D3_EAVE.SOFFIT_T)} x2={X(HIGH_EAVE.hi[0])} y2={Y(HIGH_EAVE.hi[1] - D3_EAVE.SOFFIT_T)} stroke={INK} strokeWidth="1" />
+              </g>
+            )}
+        </g>
+      )}
+      {/* WHICH END IS WHICH, new frame only: -u is north (back) or west (left). */}
+      {NEW_FRAME && (
+        <g>
+          <text x={X(-s2)} y={Y(0) + 12} textAnchor="start" style={{ fontSize: 8, fill: DIM }}>{ax.uAxisIsX ? "left" : "back"}</text>
+          <text x={X(s2)} y={Y(0) + 12} textAnchor="end" style={{ fontSize: 8, fill: DIM }}>{ax.uAxisIsX ? "right" : "front"}</text>
+        </g>
+      )}
+
       {/* OVERHANG, at the left eave */}
       <line x1={X(eaveL[0])} y1={Y(eaveL[1]) - 9} x2={X(-s2)} y2={Y(eaveL[1]) - 9} {...dimStroke("overhang")} />
       {label((X(eaveL[0]) + X(-s2)) / 2, Y(eaveL[1]) - 12, d3FtIn(OV), EAVE_OPEN ? "eave, open" : (OV_NOTCHED ? "eave, notched" : "eave, extended"), "overhang")}
@@ -5017,6 +5685,78 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
           {label(X(0) - 20, (Y(H) + Y(rY)) / 2, d3FtIn(rY - H), "ridge up", "ridgeRise", "end")}
         </g>
       )}
+    </svg>
+  );
+}
+// THE END ELEVATION WITH WINGS (2026-09-24), or null when the style has none: the stepped outline
+// the 3D builds, read off d3Massing — the lower storey across the whole span, the centre's walls
+// up to its eave, each wing's single-slope roof from its outer eave to the centre wall, and the
+// centre's own roof over them — dimensioned in feet like the plain drawing beside it. A plain
+// function returning JSX (no hooks), so D3ElevationSVG can hand over with one early return.
+function d3WingsElevation(spec, sizeLabel, focusKey) {
+  const roof = (spec && spec.roof) || {};
+  const mm = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
+  const w = mm ? parseFloat(mm[1]) : 12, d = mm ? parseFloat(mm[2]) : 16;
+  const H = (spec && spec.wallHeightFt) || 8;
+  const m = d3Massing(roof, w, d, H);
+  if (!m.wings.length) return null;
+  const OV = roof.overhang != null ? Number(roof.overhang) || 0 : D3.OVERHANG;
+  const S = m.S, s2 = S / 2;
+  const cp = m.prof.map((p) => [p[0] + m.uc, p[1]]);
+  let peak = m.Hc;
+  cp.forEach((p) => { if (p[1] > peak) peak = p[1]; });
+  // Wider on the right than the plain drawing: two heights are dimensioned there, not one.
+  const VW = 360, VH = 210, PL = 54, PR = 78, PT = 14, PB = 34;
+  const innerW = VW - PL - PR, innerH = VH - PT - PB;
+  const sc = Math.min(innerW / Math.max(S + OV * 2, 1), innerH / Math.max(peak, 1));
+  const X = (u) => PL + innerW / 2 + u * sc;
+  const Y = (y) => PT + innerH - y * sc;
+  const HL = "#B45309", DIM = "#A16207", INK = "#78350F";
+  const on = (k) => focusKey === k;
+  const dimStroke = (k) => ({ stroke: on(k) ? HL : DIM, strokeWidth: on(k) ? 2 : 1 });
+  const label = (x, y, main, sub, k, anchor) => (
+    <g>
+      <text x={x} y={y} textAnchor={anchor || "middle"} style={{ fontSize: 10, fontWeight: 800, fill: on(k) ? HL : INK }}>{main}</text>
+      {sub ? <text x={x} y={y + 9} textAnchor={anchor || "middle"} style={{ fontSize: 8, fill: DIM }}>{sub}</text> : null}
+    </g>
+  );
+  // The centre's roof, out past each eave by the overhang as the renderer extends it.
+  const ext = (far, near) => {
+    const dx = near[0] - far[0], dy = near[1] - far[1];
+    if (Math.abs(dx) < 1e-6) return near;
+    const k = OV / Math.abs(dx);
+    return [near[0] + dx * k, near[1] + dy * k];
+  };
+  const centreRoof = [ext(cp[1], cp[0])].concat(cp, [ext(cp[cp.length - 2], cp[cp.length - 1])]);
+  const pts = (arr) => arr.map((p) => X(p[0]) + "," + Y(p[1])).join(" ");
+  const cL = cp[0][0], cR = cp[cp.length - 1][0];
+  const g0 = m.wings[0];
+  return (
+    <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: "auto", background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 8 }}>
+      <line x1={PL - 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(0)} stroke="#D6D3D1" strokeWidth="1" />
+      {/* the lower storey across the whole span, and the centre's walls up to its eave */}
+      <rect x={X(-s2)} y={Y(H)} width={S * sc} height={H * sc} fill="#FEF3C7" stroke={INK} strokeWidth="1.2" />
+      <rect x={X(cL)} y={Y(m.Hc)} width={(cR - cL) * sc} height={(m.Hc - H) * sc} fill="#FEF3C7" stroke={INK} strokeWidth="1.2" />
+      {/* each wing's roof: from its outer eave (out past the wall by the overhang) up to the centre wall */}
+      {m.wings.map((g) => (
+        <polyline key={"wing" + g.side} points={pts([[g.u1 + g.side * OV, g.ye - OV * g.pitch], [g.u1, g.ye], [g.u0, g.ya]])}
+          fill="none" stroke={on("wingPitch") || on("wingWidthFt") ? HL : INK} strokeWidth="2" strokeLinejoin="round" />
+      ))}
+      <polyline points={pts(centreRoof)} fill="none" stroke={INK} strokeWidth="2" strokeLinejoin="round" />
+
+      {/* WALL HEIGHT (the outer walls), left */}
+      <line x1={PL - 22} y1={Y(0)} x2={PL - 22} y2={Y(H)} {...dimStroke("wallHeightFt")} />
+      {label(PL - 26, (Y(0) + Y(H)) / 2, d3FtIn(H), "wall", "wallHeightFt", "end")}
+      {/* THE CENTRE'S EAVE and the PEAK, right */}
+      <line x1={VW - PR + 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(m.Hc)} {...dimStroke("centerEaveFt")} />
+      {label(VW - PR + 14, (Y(H) + Y(m.Hc)) / 2, d3FtIn(m.Hc), m.hcRaised ? "centre, raised" : "centre eave", "centerEaveFt", "start")}
+      <line x1={VW - 8} y1={Y(0)} x2={VW - 8} y2={Y(peak)} stroke={DIM} strokeWidth="1" />
+      {label(VW - 12, Y(peak) + 10, d3FtIn(peak), "peak", null, "end")}
+      {/* SPAN and the first wing's WIDTH, bottom */}
+      <line x1={X(-s2)} y1={Y(0) + 16} x2={X(s2)} y2={Y(0) + 16} stroke={DIM} strokeWidth="1" />
+      {label((X(-s2) + X(s2)) / 2, Y(0) + 29, d3FtIn(S), "span", null)}
+      <line x1={X(g0.u1)} y1={Y(0) + 6} x2={X(g0.u0)} y2={Y(0) + 6} {...dimStroke("wingWidthFt")} />
+      {label((X(g0.u1) + X(g0.u0)) / 2, Y(g0.ye) + 12, d3FtIn(g0.w), `wing, ${Math.round(g0.pitch * 12)}:12`, "wingWidthFt")}
     </svg>
   );
 }
@@ -5060,8 +5800,14 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     // erased from the column the first time a builder opens and saves the panel.
     gableVent: (o.gableVent && o.gableVent.widthFrac > 0) ? o.gableVent : (base.gableVent || null),
     // Named for the same reason gableVent is: the literal drops what it does not list,
-    // and the calibration panel round-trips through this resolver.
-    foundation: (o.foundation === "skids" || o.foundation === "slab") ? o.foundation : (base.foundation || null),
+    // and the calibration panel round-trips through this resolver. "blocks" and "piers" since
+    // 2026-09-25 (a raised floor): production's older resolver still rewrites them to null, which
+    // is why both save paths carry a stored raised foundation forward (carryForwardFoundation).
+    foundation: D3_FOUNDATIONS.indexOf(o.foundation) >= 0 ? o.foundation : (base.foundation || null),
+    // How high a raised floor stands (grade to floor top at the front), named for the same reason,
+    // and only beside blocks or piers: the key is simply absent on every other style, so their
+    // resolved object is the one it always was.
+    ...(D3_RAISED_FOUNDATIONS.indexOf(o.foundation) >= 0 && Number(o.floorHeightFt) > 0 ? { floorHeightFt: Number(o.floorHeightFt) } : {}),
     // LEGACY DATA, still named here on purpose. Nothing reads d3.claddingChoices any more —
     // 207 moved the offered set into style_cladding and seeded it from this key — but the
     // literal drops what it does not list, and the calibration panel round-trips through this
@@ -5890,6 +6636,18 @@ function d3TimedBuild(fn) {
 // one of them was adjusted. 'rollup' is the odd one and is drawn by rollUpCurtain instead — it
 // has no stiles, no hinges and no latch, so it is not a plank leaf with a different field.
 const D3_DOOR_STYLES = { plank: true, zbrace: true, xbrace: true, rollup: true };
+// WHICH LIVE COLOUR A TRIM KEY FOLLOWS (colors.corner / colors.fascia, 2026-09-24).
+// Absent means the trim colour, exactly today. A hex equal to the style's own body, trim or roof
+// colour means THAT role -- Farmstand's corner boards are its body brown and its fascia is its roof
+// colour -- so a customer who paints the body or picks a trim swatch moves the boards with it, the
+// way the building would be painted. Any other hex is a fixed colour of its own.
+function d3TrimKeyRole(colors, key) {
+  const c = colors || {};
+  const v = typeof c[key] === "string" ? c[key].trim().toLowerCase() : "";
+  if (!/^#[0-9a-f]{6}$/.test(v)) return "trim";
+  const same = (k) => typeof c[k] === "string" && c[k].trim().toLowerCase() === v;
+  return same("body") ? "body" : same("trim") ? "trim" : same("roof") ? "roof" : "fixed";
+}
 function buildShed3DModel(THREE, p) {
   const { bldgW, bldgH, items, itemTypes, bodyColor, trimColor, frontWall, scale, mgX, mgY } = p;
   // Wall height: config-driven when the tenant sets it (per-style wallHeightFt
@@ -5911,6 +6669,19 @@ function buildShed3DModel(THREE, p) {
   // ghost every opening casing, which is a visible change nobody asked for.
   const battenMat = mat(trimColor);
   const roofMat = mat(p.roofColor || D3_COLORS.roof);
+  // CORNER BOARDS AND FASCIA TAKE THEIR OWN COLOURS (colors.corner / colors.fascia, 2026-09-24).
+  // Farmstand's corners are its body brown and its fascia and rakes its roof charcoal; only the
+  // window casings are white. Both are PLAIN materials, never wallMat or roofMat: the boxes keep
+  // 0..1 UVs, so the cladding's world-feet texture would streak down a corner board, and the roof's
+  // rib texture and sky belong on the roof. Absent = the trim colour, as a material of its own so the
+  // live recolour can move it with the trim (d3TrimKeyRole); the look is today's to the pixel.
+  const trimKeyColor = (key) => {
+    const role = d3TrimKeyRole(p.styleSpec && p.styleSpec.colors, key);
+    return role === "body" ? bodyColor : role === "roof" ? (p.roofColor || D3_COLORS.roof)
+      : role === "fixed" ? p.styleSpec.colors[key].trim() : trimColor;
+  };
+  const cornerMat = mat(trimKeyColor("corner"));
+  const fasciaMat = mat(trimKeyColor("fascia"));
   // Catalog fixture photos. Resolved LIVE from the catalog by fixtureItemId
   // rather than stamped on the item at placement (unlike price/name, which must
   // not move under a saved quote): re-uploading a better photo improves designs
@@ -5986,6 +6757,16 @@ function buildShed3DModel(THREE, p) {
   // a projecting porch (d3ProjectingPorch, 2026-09-17) moves the label on its wall out past the deck.
   const roofCfg = (p.styleSpec && p.styleSpec.roof) || D3_DEFAULT_ROOF;
   const porchOut = d3ProjectingPorch(roofCfg, bldgW, bldgH);
+  // THE NEW FRAME (d3NewFrame, 2026-09-24): the style names its front (roof.front) or its shed high
+  // side (roof.highSide). Every branch it opens below is guarded by this, so with neither key the
+  // model is built by exactly the code it always was.
+  const NEW_FRAME = d3NewFrame(roofCfg);
+  // A RAISED FLOOR (d3GradeFt, 2026-09-25): how far below the floor's top the ground is drawn, and
+  // which raised foundation stands in the gap. GRADE is D3.FLOOR_T and RAISED null on every building
+  // that is not on blocks or piers, where the ground, the labels on it, a ramp's drop and the porch
+  // steps have always been.
+  const GRADE = d3GradeFt(p.styleSpec);
+  const RAISED = d3RaisedFoundation(p.styleSpec);
 
   // Environment: grass field to the horizon + on-ground dimension labels
   // (SmartBuild-style landscape; the "Landscape" toggle hides this group).
@@ -5997,7 +6778,7 @@ function buildShed3DModel(THREE, p) {
   const ground = new THREE.Mesh(new THREE.CircleGeometry(groundR, 64),
     new THREE.MeshLambertMaterial({ color: "#9DBE77", ...(grassTex ? { map: grassTex } : {}) }));
   ground.rotation.x = -Math.PI / 2;
-  ground.position.y = -D3.FLOOR_T;
+  ground.position.y = -GRADE;
   envGroup.add(ground);
   // Dimension labels on the grass for the FRONT and LEFT edges (same display
   // mapping the 2D labels use), plus a small N compass off the NW corner.
@@ -6016,12 +6797,12 @@ function buildShed3DModel(THREE, p) {
     else if (pos === "south") { holder.position.set(0, 0, bldgH / 2 + off); }
     else if (pos === "west") { holder.position.set(-bldgW / 2 - off, 0, 0); holder.rotation.y = Math.PI / 2; }
     else { holder.position.set(bldgW / 2 + off, 0, 0); holder.rotation.y = -Math.PI / 2; }
-    lbl.position.y = -D3.FLOOR_T + 0.04;
+    lbl.position.y = -GRADE + 0.04;
     holder.add(lbl);
     envGroup.add(holder);
   });
   const nLbl = d3MakeGroundLabel(THREE, "N", Math.max(1.6, lblH * 1.2));
-  if (nLbl) { nLbl.position.set(-bldgW / 2 - R2 * 0.35, -D3.FLOOR_T + 0.04, -bldgH / 2 - R2 * 0.35); envGroup.add(nLbl); }
+  if (nLbl) { nLbl.position.set(-bldgW / 2 - R2 * 0.35, -GRADE + 0.04, -bldgH / 2 - R2 * 0.35); envGroup.add(nLbl); }
   root.add(envGroup);
   // Base. A slab by default; runners when the style says so. Everything below is drawn
   // INSIDE the slab's own 0.35 ft band, on purpose: the ground plane, every ramp's rise
@@ -6062,6 +6843,129 @@ function buildShed3DModel(THREE, p) {
       root.add(sk);
     }
   }
+  // ── A RAISED FLOOR: skirt, runners, and the blocks or piers under them (2026-09-25) ─────────────
+  // On blocks or piers the floor band above is the slab's, as on any building, and the ground is
+  // GRADE below the floor's top instead of the band's depth. What fills the gap, top down:
+  //   skirt     the siding carried down over the floor band's edge to about half a foot under the
+  //             floor, as the real buildings are clad to the bottom of their floor framing: wallMat
+  //             (so live paint follows it), on each wall's own plane and thickness, with the walls'
+  //             world-feet UVs (wallBox's rewrite, repeated here because the walls' frames are built
+  //             further down). It follows the FOOTPRINT, not a recessed porch's set-back wall: under
+  //             the porch opening it is the floor's rim board.
+  //   runners   the skids' rule (along the long axis, one every 4 ft or less across, inset from the
+  //             long walls), under the floor band instead of inside it: 4x lumber, as deep as the
+  //             gap allows, up to a 4x6 on edge.
+  //   supports  a row under every runner, one near each end and one every 7 ft or less between, from
+  //             the runner's underside down to the grass: stacked 8x8x16 concrete blocks, their long
+  //             side across the runner as the Farmstand's sit, a course per 8 in of height (each
+  //             course its share of it, so the stack meets the grass and the runner exactly); or
+  //             round concrete piers 12 in across.
+  // Every number is recorded on the model (model.foundation) for tests/harness/foundation.mjs.
+  // Nothing here reads an item, so only a full build draws it, and nothing is built without the key.
+  let foundationInfo = null;
+  // A translucent dark sheet on the grass, centred at (x, z), w along x by d along z: see "THE SHADE
+  // UNDER IT" below. The projecting porch's deck gets one too, once it is placed.
+  const addUnderShade = (x, z, w, d) => {
+    const sm = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.5, depthWrite: false });
+    const sh = new THREE.Mesh(new THREE.PlaneGeometry(w, d), sm);
+    sh.rotation.x = -Math.PI / 2;
+    sh.position.set(x, -GRADE + 0.02, z);
+    sh.userData.ssFoundationPart = "shade";
+    envGroup.add(sh);
+  };
+  // ONE SUPPORT, from `y1` (the underside of what it carries) down to the grass at (x, z) in `grp`'s
+  // frame, whose y is the floor's: a stack of 8x8x16 blocks, each course its share of the height and
+  // a 0.02 ft joint between courses, the 16 in side along x when `longX`; or a 12 in round pier.
+  // Shared by the building's runners and the projecting porch's deck, so the two never differ.
+  // Returns the courses drawn (0 for a pier, or where there is no height to fill).
+  const concreteMat = RAISED ? mat(RAISED === "piers" ? "#9A988F" : "#9C9B95", { roughness: 0.95 }) : null;
+  const addSupport = (grp, x, z, y1, longX) => {
+    const bh = y1 + GRADE;
+    if (!RAISED || bh < 0.04) return 0;
+    if (RAISED === "piers") {
+      const pier = cyl(concreteMat, 0.5, bh);
+      pier.position.set(x, -GRADE + bh / 2, z);
+      pier.userData.ssFoundationPart = "pier";
+      grp.add(pier);
+      return 0;
+    }
+    const BLOCK_L = 16 / 12, BLOCK_W = 8 / 12, JOINT = 0.02;
+    const n = Math.max(1, Math.round(bh / (8 / 12))), hc = bh / n;
+    for (let c = 0; c < n; c++) {
+      const hb = hc - (c < n - 1 ? JOINT : 0);
+      const blk = longX ? box(concreteMat, BLOCK_L, hb, BLOCK_W) : box(concreteMat, BLOCK_W, hb, BLOCK_L);
+      blk.position.set(x, -GRADE + c * hc + hb / 2, z);
+      blk.userData.ssFoundationPart = "block";
+      grp.add(blk);
+    }
+    return n;
+  };
+  if (RAISED) {
+    const gap = GRADE - D3.FLOOR_T;                        // the floor band's underside to the grass
+    const SKIRT = Math.min(0.5, Math.max(D3.FLOOR_T, GRADE - 0.1));
+    const fGroup = new THREE.Group();
+    fGroup.userData.ssFoundation = RAISED;
+    const skirtBox = (O, U, a0, a1) => {
+      const b = box(wallMat, a1 - a0, SKIRT, T);
+      const uvA = b.geometry.attributes.uv, posA = b.geometry.attributes.position;
+      const cu = (a0 + a1) / 2, cv = -SKIRT / 2;
+      for (let i = 0; i < uvA.count; i++) uvA.setXY(i, posA.getX(i) + cu, posA.getY(i) + cv);
+      uvA.needsUpdate = true;
+      b.position.set(O[0] + U[0] * cu, cv, O[1] + U[1] * cu);
+      if (U[0] === 0) b.rotation.y = Math.PI / 2;
+      b.userData.ssFoundationPart = "skirt";
+      return b;
+    };
+    // North and south run corner to corner over the walls' ends; west and east stop between them,
+    // so no two skirt faces share a plane.
+    fGroup.add(skirtBox([-bldgW / 2, -bldgH / 2], [1, 0], -T / 2, bldgW + T / 2));
+    fGroup.add(skirtBox([-bldgW / 2, bldgH / 2], [1, 0], -T / 2, bldgW + T / 2));
+    fGroup.add(skirtBox([-bldgW / 2, -bldgH / 2], [0, 1], T / 2, bldgH - T / 2));
+    fGroup.add(skirtBox([bldgW / 2, -bldgH / 2], [0, 1], T / 2, bldgH - T / 2));
+    const runners = [], supports = [];
+    if (gap > 0.05) {
+      const alongX = bldgW >= bldgH;
+      const across = alongX ? bldgH : bldgW, len = alongX ? bldgW : bldgH;
+      const nRun = Math.max(2, Math.round(across / 4));
+      const inset = Math.min(1.0, across * 0.14);
+      const RUN_W = 3.5 / 12;
+      // A thin gap is all runner (a shimmed skid); otherwise the runner takes about 40 % of it.
+      const RUN_H = gap < 0.25 ? gap : Math.min(0.46, Math.max(0.15, gap * 0.4));
+      const runBot = -D3.FLOOR_T - RUN_H;
+      const runMat = mat(D3_COLORS.bench);
+      const END = 0.6, OC = 7;
+      const nSup = Math.max(2, Math.ceil((len - 2 * END) / OC - 1e-9) + 1);
+      let courses = 0;
+      for (let i = 0; i < nRun; i++) {
+        const t = i / (nRun - 1);
+        const at = -across / 2 + inset + t * (across - 2 * inset);
+        const run = alongX ? box(runMat, bldgW + 0.2, RUN_H, RUN_W) : box(runMat, RUN_W, RUN_H, bldgH + 0.2);
+        run.position.set(alongX ? 0 : at, -D3.FLOOR_T - RUN_H / 2, alongX ? at : 0);
+        run.userData.ssFoundationPart = "runner";
+        fGroup.add(run);
+        runners.push({ at, y0: runBot, y1: -D3.FLOOR_T });
+        if (runBot + GRADE < 0.04) continue;
+        for (let k = 0; k < nSup; k++) {
+          const along = -len / 2 + END + (k * (len - 2 * END)) / (nSup - 1);
+          const x = alongX ? along : at, z = alongX ? at : along;
+          // The block's long side ACROSS the runner: along z when the runners run along x.
+          courses = addSupport(fGroup, x, z, runBot, !alongX);
+          supports.push({ x, z, y0: -GRADE, y1: runBot });
+        }
+      }
+      foundationInfo = { kind: RAISED, grade: GRADE, skirt: SKIRT, runnerH: RUN_H, courses, runners, supports };
+    } else {
+      foundationInfo = { kind: RAISED, grade: GRADE, skirt: SKIRT, runnerH: 0, courses: 0, runners, supports };
+    }
+    root.add(fGroup);
+    // THE SHADE UNDER IT. A raised building is dark underneath -- it shuts out the sky, not only the
+    // sun -- and that dark band between the blocks is most of what says "raised" in every frame of
+    // the real buildings. The renderer has no ambient occlusion, so without this the gap showed grass
+    // lit straight through. A translucent black sheet over the grass under the footprint out to the
+    // walls' outer faces (where a projecting porch's deck, and its own sheet, begins), in the
+    // ENVIRONMENT group so it hides with the grass (the Landscape toggle), a hair above it.
+    addUnderShade(0, 0, bldgW + T, bldgH + T);
+  }
 
   // Wall frames: O = the wall's along=0 end (in x/z), U = unit vector along the
   // wall, N = exterior normal. `along` runs west→east on N/S walls and
@@ -6088,11 +6992,23 @@ function buildShed3DModel(THREE, p) {
   // Depth is clamped to leave four feet of building behind it. Deeper than that is a carport,
   // and a wall clamped to zero length is a crash rather than a shape.
   const porchAxes = d3RoofAxes(roofCfg, bldgW, bldgH);
-  const porchRun = porchAxes.uAxisIsX ? bldgH : bldgW;        // the run a porch eats into
+  // THE NEW FRAME puts a porch on the front (south) or back (north) wall whatever that wall is, so
+  // the run it eats into is the depth; outside it, the gable end's rule below.
+  const porchRun = (NEW_FRAME || porchAxes.uAxisIsX) ? bldgH : bldgW;        // the run a porch eats into
   // A projecting porch wins over a recessed one. The sanitizer never stores both; raw data holding
   // both draws the projecting porch and no set-back, and ssPorchTrussWall drops the truss to match.
   const porchDepth = porchOut ? 0 : Math.max(0, Math.min(Number(roofCfg.porchDepthFt) || 0, porchRun - 4));
-  const porchOn = porchDepth > 0.5;
+  // WINGS (d3Massing, 2026-09-24): the raised centre and its enclosed side wings, read once here
+  // because the walls, the roof and the corner boards all build from it. With wings the recessed
+  // porch is off — its posts and header would stand under a cap that is no longer at the wall's
+  // top — and ssPorchTrussWall says the same for the truss.
+  const mass = d3Massing(roofCfg, bldgW, bldgH, H);
+  const porchOn = porchDepth > 0.5 && !mass.wings.length;
+  // THE ROOF STEP (d3RoofStep, 2026-09-28): two roof sections along the ridge, the rear one's eave
+  // higher or lower, the ridges level. Null on every other building, and every branch it opens
+  // below is guarded by it, so without both keys the model is built by exactly the code it was.
+  // The walls need nothing here: d3WallTops already stands the rear section's walls at its eave.
+  const STEP = d3RoofStep(roofCfg, bldgW, bldgH, H);
   // "FRONT" IS SOUTH for a gable or gambrel roof on a portrait footprint (2026-09-14) — the
   // footprints whose gable ends are north/south. A shed roof swaps the axes in d3RoofAxes, so it
   // takes the landscape branch below whatever its shape; that is unchanged. It was north, which put the porch on
@@ -6114,10 +7030,15 @@ function buildShed3DModel(THREE, p) {
   // carried a porch when this changed (checked across every tenant), so nothing stored moved.
   const porchFront = (roofCfg.porchEnd || "front") !== "back";
   const porchWall = !porchOn ? null
-    : porchAxes.uAxisIsX ? (porchFront ? "south" : "north") : (porchFront ? "west" : "east");
+    : (NEW_FRAME || porchAxes.uAxisIsX) ? (porchFront ? "south" : "north") : (porchFront ? "west" : "east");
   // The name the recessed-porch block below resolves its local end from. Derived from the WALL
   // now rather than from porchEnd, so the set-back and the posts can never pick different ends.
   const porchAtNeg = porchWall === "north" || porchWall === "west";
+  // IN THE NEW FRAME the front can be an EAVE wall (roof.front "eave", a shed's front/back high
+  // side). A porch recessed into an eave wall sets that wall back under the roof exactly like one
+  // at a gable end -- the WALLS table below is the same arithmetic -- but the cap ends do not move
+  // and the posts stand along the eave line instead of across a cap (the recessed-porch block).
+  const porchOnEave = porchOn && NEW_FRAME && !porchAxes.uAxisIsX;
   // How far each wall's ORIGIN travels, and how much length it loses. Every one of these is
   // zero without a porch, so a style that has never had one builds byte-for-byte what it did.
   const pN = porchWall === "north" ? porchDepth : 0;
@@ -6133,6 +7054,49 @@ function buildShed3DModel(THREE, p) {
     west:  { len: bldgH - pN - pS, O: [-bldgW / 2 + pW, -bldgH / 2 + pN], U: [0, 1], N: [-1, 0], a0Ft: pN },
     east:  { len: bldgH - pN - pS, O: [bldgW / 2 - pE, -bldgH / 2 + pN],  U: [0, 1], N: [1, 0],  a0Ft: pN },
   };
+  // ── EACH WALL'S OWN TOP (d3WallTops, 2026-09-24) ──
+  // A wall with `tops` ([[a0, a1, top]] in its own frame) is built to its LOCAL top: a new-frame
+  // shed's HIGH eave wall is a real clad wall up to the high eave -- battens in phase to its top, no
+  // seam at H -- where it used to be a wall to H with the roof prism's vertical side standing in as
+  // the rest (that side is still there, inside this wall's box at the wall's mid-plane, and so
+  // hidden); a gable end steps up across a raised centre; the centre's own eave wall stands at Hc.
+  // A wall a recessed porch has set back stops at H under the roof, and the prism's side closes the
+  // opening over it. A wall without `tops` is H end to end, which is every wall of every building
+  // without wings or a new-frame shed. `top` is the wall's tallest (model.frame reads it).
+  Object.keys(WALLS).forEach((n) => {
+    const t = d3WallTops(roofCfg, bldgW, bldgH, H, n, porchWall === n);
+    if (t) WALLS[n].tops = t.map((p) => [p[0] - (WALLS[n].a0Ft || 0), p[1] - (WALLS[n].a0Ft || 0), p[2]]);
+    WALLS[n].top = t ? t.reduce((m, p) => Math.max(m, p[2]), -Infinity) : H;
+  });
+  // Where the centre's gable CAP ends along each gable-end wall, in that wall's own frame (wings
+  // only): buildOneWall splits the stepped wall's centre piece there, so its top edge meets the
+  // cap's bottom edge end to end (see upTo).
+  if (mass.wings.length) {
+    (mass.uAxisIsX ? ["north", "south"] : ["west", "east"]).forEach((n) => {
+      const c = mass.S / 2 + mass.uc - (WALLS[n].a0Ft || 0);
+      WALLS[n].capCuts = [c - mass.Sc / 2, c + mass.Sc / 2];
+    });
+  }
+  // CLERESTORY holds the centre's side walls above each wing roof — from just under the wing slab
+  // up to Hc, clad like any wall and ghosted with them — built by the same buildOneWall with no
+  // items, and never pickable (no `wall` name: nothing can be placed on them).
+  const CLERESTORY = {};
+  mass.wings.forEach((g) => {
+    const u0 = g.u0, bot = Math.max(H, g.ya - (T / 2) * g.pitch - 0.3);
+    CLERESTORY[g.side < 0 ? "clerestoryNeg" : "clerestoryPos"] = mass.uAxisIsX
+      ? { len: mass.L, O: [u0, -mass.L / 2], U: [0, 1], N: [g.side, 0], a0Ft: 0, bot, tops: [[0, mass.L, mass.Hc]], clerestory: g.side }
+      : { len: mass.L, O: [-mass.L / 2, u0], U: [1, 0], N: [0, g.side], a0Ft: 0, bot, tops: [[0, mass.L, mass.Hc]], clerestory: g.side };
+  });
+  // The pieces of wall `wf`'s top over [a0, a1], clipped to it, and the lowest of them.
+  const topsOf = (wf, a0, a1) => {
+    if (!wf.tops) return [[a0, a1, H]];
+    const out = [];
+    wf.tops.forEach((p) => { const lo = Math.max(a0, p[0]), hi = Math.min(a1, p[1]); if (hi > lo + 1e-6) out.push([lo, hi, p[2]]); });
+    // A single point (an electrical device) takes the piece it stands in.
+    if (!out.length) wf.tops.forEach((p) => { if (p[0] <= a0 + 1e-6 && a0 <= p[1] + 1e-6) out.push([a0, a1, p[2]]); });
+    return out.length ? out : [[a0, a1, H]];
+  };
+  const topOver = (wf, a0, a1) => topsOf(wf, a0, a1).reduce((m, p) => Math.min(m, p[2]), Infinity);
   // ── Vents placed IN THE GABLE (ventZone, 2026-09-15 — see ssVentSpan) ──
   // Resolved here, above both builders that need the answer: buildOneWall must NOT cut a hole in
   // the wall for one, and the roof builder draws it on the end cap. It is the SAME ssGableVentFit
@@ -6373,9 +7337,13 @@ function buildShed3DModel(THREE, p) {
   // Everything is clamped to leave a header strip under the plate: the customer
   // can pick 6 ft walls in this very modal, and an unclamped 6'8" door would
   // push its casing into the roof and silently skip the header segment.
-  const openingSpan = (it) => {
+  // `Ht` is the wall's LOCAL top over the opening (topOver, 2026-09-24): H on every wall of an
+  // ordinary building, Hc across a raised centre, the high eave on a new-frame shed's tall wall, so an
+  // upper-floor window stays under its own plate and a door on a wing's end wall stays under the wing's.
+  const openingSpan = (it, Ht) => {
     const inchesFt = (v) => (Number(v) > 0 ? Number(v) / 12 : null);
-    const maxTop = H - 0.2;
+    const Hl = Ht != null ? Ht : H;
+    const maxTop = Hl - 0.2;
     // A vent hangs just under the plate, and how high is NOT a customer choice: the catalog row
     // has no sill column at all (portal-settings forces the whole swing/operation/trim/sill group
     // off for a non-door, non-window category), so there is nothing to read and nothing to slide.
@@ -6387,7 +7355,7 @@ function buildShed3DModel(THREE, p) {
     // already reaches 0.17 ft above the opening.
     // Only a gable vent that no longer fits its gable reaches here (buildOneWall skips the ones the
     // roof draws), so its zone is dropped: it is cut into the wall at today's under-plate spot.
-    if (isVentItem(it)) return ssVentSpan(it.ventZone === "gable" ? { ...it, ventZone: null } : it, H);
+    if (isVentItem(it)) return ssVentSpan(it.ventZone === "gable" ? { ...it, ventZone: null } : it, Hl);
     if (it.type === "window") {
       const wh = Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.WINDOW_H, maxTop - 0.35);
       let s0 = it.sillFt != null ? it.sillFt : D3.WINDOW_SILL;
@@ -6568,7 +7536,9 @@ function buildShed3DModel(THREE, p) {
   // the returned model) — same code as the full build, so a partial rebuild's
   // output is identical to a full one by construction.
   const buildOneWall = (wname, itemsNow) => {
-    const wf = WALLS[wname];
+    // A clerestory wall (wings) is built here too, with no items: it has no plan wall of its own.
+    const wf = WALLS[wname] || CLERESTORY[wname];
+    const yB = wf.bot || 0;
     const ops = itemsNow
       // A vent the roof draws in the gable is not an opening in this wall (gableVentFitOf).
       .filter((it) => { const c = itemTypes[it.type]; return c && c.wallOnly && it.wall === wname && !gableVentFitOf(it); })
@@ -6584,7 +7554,7 @@ function buildShed3DModel(THREE, p) {
         // move the plan does not show, and it is the known cost of a 3D-only porch — the
         // same limit the dormer and the lean-to carry.
         const a = Math.max(w / 2, Math.min(along, wf.len - w / 2));
-        const span = openingSpan(it);
+        const span = openingSpan(it, topOver(wf, a - w / 2, a + w / 2));
         return { it, a, a0: a - w / 2, a1: a + w / 2, y0: span[0], y1: span[1] };
       })
       .sort((q, r) => q.a0 - r.a0);
@@ -6608,15 +7578,33 @@ function buildShed3DModel(THREE, p) {
     // tagged with the wall name so the 3D palette can place new items by
     // clicking a wall.
     const wg = new THREE.Group();
-    wg.userData = { wall: wname };
+    wg.userData = wf.clerestory ? { clerestory: wf.clerestory } : { wall: wname };
+    // UP TO THE LOCAL TOP (topsOf, wings): one box to the lowest top across the run, then one box
+    // per piece that stands higher, so no seam runs down the wall under the step. Without `tops`
+    // that is exactly the one box to H this has always built.
+    // A piece that stands higher is split where the gable CAP above it ends (wf.capCuts, wings):
+    // the centre piece reaches the clerestory's outer face, T/2 past each end of the cap, and a
+    // top edge whose ends are not the cap's own leaves sub-pixel cracks along the plate line
+    // between the two coplanar faces. Without capCuts (every other wall) one box, as before.
+    const cutsIn = (s0, s1) => {
+      const at = [s0];
+      (wf.capCuts || []).forEach((c) => { if (c > s0 + 0.01 && c < s1 - 0.01) at.push(c); });
+      at.push(s1);
+      return at.slice(1).map((c, i) => [at[i], c]);
+    };
+    const upTo = (a0, a1, y0) => {
+      const ps = topsOf(wf, a0, a1), mn = ps.reduce((m, p) => Math.min(m, p[2]), Infinity);
+      if (mn - 0.01 > y0) wg.add(wallBox(wallMat, wf, a0, a1, y0, mn));
+      ps.forEach((p) => { const b = Math.max(mn, y0); if (p[2] > b + 0.01) cutsIn(p[0], p[1]).forEach(([s0, s1]) => wg.add(wallBox(wallMat, wf, s0, s1, b, p[2]))); });
+    };
     let cursor = 0;
     ranges.forEach((rg) => {
-      if (rg.a0 > cursor + 0.01) wg.add(wallBox(wallMat, wf, cursor, rg.a0, 0, H));
+      if (rg.a0 > cursor + 0.01) upTo(cursor, rg.a0, yB);
       if (rg.y0 > 0.01) wg.add(wallBox(wallMat, wf, rg.a0, rg.a1, 0, rg.y0));
-      if (rg.y1 < H - 0.01) wg.add(wallBox(wallMat, wf, rg.a0, rg.a1, rg.y1, H));
+      upTo(rg.a0, rg.a1, rg.y1);
       cursor = rg.a1;
     });
-    if (cursor < wf.len - 0.01) wg.add(wallBox(wallMat, wf, cursor, wf.len, 0, H));
+    if (cursor < wf.len - 0.01) upTo(cursor, wf.len, yB);
     // Cladding relief on the exterior of the full-height segments (strips break at
     // openings, like real cladding). Real geometry on top of the texture, so the material
     // still reads at a grazing angle where a flat map flattens out.
@@ -6628,8 +7616,11 @@ function buildShed3DModel(THREE, p) {
     if (clad.relief) {
       // yLo/yHi bound the strip VERTICALLY. They default to the whole wall, and are passed
       // explicitly for the sill and header panels around an opening — see the loop below.
-      const relief = (b0, b1, yLo, yHi) => {
-        const lo = yLo || 0, hi = yHi != null ? yHi : H;
+      // Ht is the wall's top over [b0, b1] (H without wings); m0/m1 how far a batten keeps off each
+      // end (0.2 at a wall end or an opening, less at a step in the top); lapLo, when set, is where
+      // lap courses start instead of lo, so a course is not lost where a taller piece continues.
+      const reliefIn = (b0, b1, yLo, yHi, Ht, m0, m1, lapLo) => {
+        const lo = yLo != null ? yLo : yB, hi = yHi != null ? yHi : Ht;
         if (b1 - b0 < 0.3 || hi - lo < 0.25) return;
         if (clad.relief === "batten" || clad.relief === "rib") {
           const bs = clad.stepFt;
@@ -6639,7 +7630,7 @@ function buildShed3DModel(THREE, p) {
           // `a` steps through MULTIPLES OF bs measured from the wall origin, never from b0,
           // so every span lands on the same global phase. That is what lets the battens over
           // a window line up with the ones beside it instead of starting a new rhythm.
-          for (let a = Math.ceil((b0 + 0.2) / bs) * bs; a < b1 - 0.2; a += bs) {
+          for (let a = Math.ceil((b0 + m0) / bs) * bs; a < b1 - m1; a += bs) {
             wg.add(wallBox(reliefMat, wf, a - halfW, a + halfW, lo, hi, CLAD_RELIEF_OUT, depth));
           }
         } else {
@@ -6653,11 +7644,25 @@ function buildShed3DModel(THREE, p) {
           // the BAND filters it, rather than restarting the courses inside the band. A lap
           // course that restarted above a window would step out of line with the wall beside
           // it, which is the exact fault this block exists to avoid.
-          for (let y = clad.stepFt; y < H - 0.15; y += clad.stepFt) {
-            if (y < lo + 0.04 || y > hi - 0.04) continue;
+          const cLo = lapLo != null ? lapLo : lo;
+          for (let y = clad.stepFt; y < Ht - 0.15; y += clad.stepFt) {
+            if (y < cLo + 0.04 || y > hi - 0.04) continue;
             wg.add(wallBox(wallMat, wf, s0, s1, y - 0.04, y + 0.04, CLAD_RELIEF_OUT, 0.1));
           }
         }
+      };
+      // Over the whole run to its LOWEST top, then over each piece that stands higher (wings): the
+      // battens carry on up in the same phase, and a lap course stops at the step, where the
+      // clerestory's corner board stands. Without `tops` this is the single call it always was.
+      const relief = (b0, b1, yLo, yHi) => {
+        const ps = topsOf(wf, b0, b1), mn = ps.reduce((m, p) => Math.min(m, p[2]), Infinity);
+        reliefIn(b0, b1, yLo, yHi != null ? Math.min(yHi, mn) : mn, mn, 0.2, 0.2);
+        const hw = (clad.relief === "rib" ? 0.05 : 0.07) + 0.01;
+        ps.forEach((p) => {
+          if (!(p[2] > mn + 0.01)) return;
+          const lo2 = Math.max(yLo != null ? yLo : yB, mn), hi2 = yHi != null ? Math.min(yHi, p[2]) : p[2];
+          if (hi2 > lo2) reliefIn(p[0], p[1], lo2, hi2, p[2], p[0] > b0 + 1e-6 ? hw : 0.2, p[1] < b1 - 1e-6 ? hw : 0.2, lo2 > mn + 1e-6 ? lo2 : mn - 0.19);
+        });
       };
       // ⚠️ CLADDING DOES NOT STOP AT A WINDOW — IT STOPS AT THE HOLE.
       //
@@ -6678,7 +7683,8 @@ function buildShed3DModel(THREE, p) {
       ranges.forEach((rg) => {
         if (rg.a0 > bc + 0.01) relief(bc, rg.a0);
         if (rg.y0 > 0.01) relief(rg.a0, rg.a1, 0, rg.y0);          // under the sill
-        if (rg.y1 < H - 0.01) relief(rg.a0, rg.a1, rg.y1, H);      // over the head
+        // over the head, to the wall's own top there (H without wings)
+        if (rg.y1 < topsOf(wf, rg.a0, rg.a1).reduce((m, p) => Math.max(m, p[2]), -Infinity) - 0.01) relief(rg.a0, rg.a1, rg.y1);
         bc = rg.a1;
       });
       if (bc < wf.len - 0.01) relief(bc, wf.len);
@@ -6880,6 +7886,8 @@ function buildShed3DModel(THREE, p) {
     wallsGroup.add(built.wg);
     built.ogs.forEach((og) => openingsGroup.add(og));
   });
+  // The clerestory walls (wings): in wallsGroup, so "look inside" ghosts them with the rest.
+  Object.keys(CLERESTORY).forEach((n) => wallsGroup.add(buildOneWall(n, []).wg));
 
   // ── Roof (plan §4.2): a solid extruded profile in body color (its caps ARE
   // the gable/gambrel end walls) with roof-colored overhanging slope slabs on
@@ -6910,9 +7918,14 @@ function buildShed3DModel(THREE, p) {
   // ⚠️ GEOMETRY, NOT THE DOOR. `frontWall` used to decide the ridge axis here, which is why
   // moving a door rotated the roof. It now reaches only the ground labels and builtFrontWall.
   // See d3RoofAxes for the rule and the reason.
-  const { uAxisIsX, S, L, tallNeg } = d3RoofAxes(roofCfg, bldgW, bldgH);
+  // ⚠️ WITH WINGS THIS WHOLE ROOF IS THE CENTRE'S (d3Massing, 2026-09-24): S is the centre's span
+  // Sc and Hr its eave Hc, and rg is shifted by uc when it is placed at the bottom, so the style's
+  // roof, its vents, strips, dormer and projecting porch all land on the raised centre. Without
+  // wings S is the span, Hr is H and uc is 0 — the same numbers this read from d3RoofAxes.
+  const { uAxisIsX, L, tallNeg } = mass;
+  const S = mass.Sc, Hr = mass.Hc;
   // One profile builder, shared with the calibration panel's elevation drawing.
-  const _rp = d3RoofProfile(roofCfg, S, H, tallNeg);
+  const _rp = d3RoofProfile(roofCfg, S, Hr, tallNeg);
   const prof = _rp.prof;      // profile polygon points [u, y], eave→ridge→eave
   const slopes = _rp.slopes;  // top edges [[A,B], …] that get roof slabs
   const dedup = _rp.dedup;
@@ -6938,7 +7951,10 @@ function buildShed3DModel(THREE, p) {
   // than painting the soffit with cladding — which would look like the very defect this
   // fixes, with a false green light.
   const gableMat = mat(bodyColor);
-  const gableGeom = new THREE.ExtrudeGeometry(shape, { depth: L, bevelEnabled: false });
+  // A ROOF STEP makes this the FRONT section's prism, from the joint (local z = STEP.stepFt) to the
+  // front; the rear section's is built beside profYAt below. Without one it is the whole length.
+  const gableGeom = new THREE.ExtrudeGeometry(shape, { depth: STEP ? L - STEP.stepFt : L, bevelEnabled: false });
+  if (STEP) gableGeom.translate(0, 0, STEP.stepFt);
   // U-PHASE. ExtrudeGeometry's WorldUVGenerator gives the caps UVs in profile-space feet,
   // which is the same unit wallBox uses -- but a DIFFERENT ORIGIN. The wall's u runs 0..S
   // from the wall origin; the cap's runs -S/2..+S/2 from the building centre. So the two
@@ -6950,7 +7966,8 @@ function buildShed3DModel(THREE, p) {
   {
     const guv = gableGeom.attributes.uv;
     if (guv) {
-      for (let i = 0; i < guv.count; i++) guv.setX(i, guv.getX(i) + S / 2);
+      // From the wall ORIGIN: the building's half-span plus the centre's offset (0 without wings).
+      for (let i = 0; i < guv.count; i++) guv.setX(i, guv.getX(i) + (mass.S / 2 + mass.uc));
       guv.needsUpdate = true;
     }
   }
@@ -6969,7 +7986,8 @@ function buildShed3DModel(THREE, p) {
   //    so there is no face to meet, and the truss is placed proud of the cap as it stands.
   //  * A shallow overhang: the rake board's inner face sits at OV - 0.1 from the cap plane, so the
   //    cap moves out only as far as that allows and can never stand in front of its own trim.
-  const capPorchEnd = porchOn ? ((uAxisIsX ? porchAtNeg : !porchAtNeg) ? 0 : L) : null;
+  // A porch recessed into an EAVE wall (new frame) leaves both caps over walls: neither is a porch end.
+  const capPorchEnd = (porchOn && !porchOnEave) ? ((uAxisIsX ? porchAtNeg : !porchAtNeg) ? 0 : L) : null;
   const capFlush = Math.max(0, Math.min(T / 2, OV - 0.1));
   const capOut0 = capPorchEnd === 0 ? 0 : capFlush;
   const capOutL = capPorchEnd === L ? 0 : capFlush;
@@ -7023,11 +8041,20 @@ function buildShed3DModel(THREE, p) {
   // are built only on the two CAP faces, so this band gets the texture but not the 3D ribs.
   // The texture is what reads as "the siding stops"; the strips are a separate pass and
   // adding them here without seeing it would be guessing at a second thing.
+  //
+  // IN THE NEW FRAME the high side is whichever end roof.highSide names (tallNeg false puts it at
+  // u = +S/2: the south or east wall), so the plane is read off tallNeg rather than fixed at -S/2.
+  // Outside it tallNeg is always true and the test is the one it always was. The UV mapping above
+  // holds for the other end as well: the east wall runs north->south like the west one, and the
+  // south wall west->east like the north one. Over a new-frame high wall this band sits inside the
+  // wall's own box (buildOneWall draws that wall to its top), and shows only where a recessed porch
+  // has set the wall back.
   if ((roofCfg && roofCfg.type) === "shed" && gableGeom.groups && gableGeom.groups.length === 2) {
     const gpos = gableGeom.attributes.position, guv2 = gableGeom.attributes.uv;
     const caps = gableGeom.groups[0], sides = gableGeom.groups[1];
     if (gpos && guv2 && caps && sides) {
-      const inTallPlane = (i) => Math.abs(gpos.getX(i) + S / 2) < 1e-4;
+      const tallU = tallNeg ? -S / 2 : S / 2;
+      const inTallPlane = (i) => Math.abs(gpos.getX(i) - tallU) < 1e-4;
       // Non-indexed geometry: walk the side range three vertices at a time.
       const triTall = [];
       for (let t = 0; t < sides.count; t += 3) {
@@ -7075,7 +8102,36 @@ function buildShed3DModel(THREE, p) {
 
   // Lifted to module scope so the calibration panel's dormer readout walks the SAME profile
   // this renderer does — see d3MakeProfYAt.
-  const profYAt = d3MakeProfYAt(dedup, H);
+  const profYAt = d3MakeProfYAt(dedup, Hr);
+  // ── THE ROOF STEP: THE REAR SECTION'S PRISM (d3RoofStep, 2026-09-28) ─────────────────────────────
+  // Local z 0 is the BACK wall (a step needs uAxisIsX, see d3RoofStep), so the rear section runs
+  // from 0 to the joint at STEP.stepFt on its own profile: the same span and ridge, its eave at
+  // STEP.Hb. Built like the front prism above: clad caps in phase with the wall below, the back cap
+  // moved flush with the back wall's face (capOut0), and the cap at the joint left on the joint
+  // plane, where the front prism's cap meets it back to back and the wedge trim covers what shows.
+  // Its slopes are a section of their own in the slab loop below (buildSlope). Null without a step.
+  const rearProf = (() => {
+    if (!STEP) return null;
+    const rp = d3RoofProfile(STEP.rearCfg, S, STEP.Hb, tallNeg);
+    const rshape = new THREE.Shape();
+    rp.dedup.forEach((pt, i) => (i === 0 ? rshape.moveTo(pt[0], pt[1]) : rshape.lineTo(pt[0], pt[1])));
+    const rgeo = new THREE.ExtrudeGeometry(rshape, { depth: STEP.stepFt, bevelEnabled: false });
+    const ruv = rgeo.attributes.uv;
+    if (ruv) { for (let i = 0; i < ruv.count; i++) ruv.setX(i, ruv.getX(i) + (mass.S / 2 + mass.uc)); ruv.needsUpdate = true; }
+    const rcap = rgeo.groups && rgeo.groups.length === 2 ? rgeo.groups[0] : null;
+    if (rcap && capOut0 > 0) {
+      const rpos = rgeo.attributes.position;
+      for (let i = rcap.start; i < rcap.start + rcap.count; i++) if (Math.abs(rpos.getZ(i)) < 1e-6) rpos.setZ(i, -capOut0);
+      rpos.needsUpdate = true;
+      rgeo.computeBoundingBox(); rgeo.computeBoundingSphere();
+    }
+    const rmesh = new THREE.Mesh(rgeo, rcap ? [wallMat, gableMat] : gableMat);
+    rmesh.userData.ssRoofStep = "rear";
+    rg.add(rmesh);
+    let peak = -Infinity;
+    rp.dedup.forEach((pt) => { if (pt[1] > peak) peak = pt[1]; });
+    return { H: STEP.Hb, dedup: rp.dedup, slopes: rp.slopes, yAt: d3MakeProfYAt(rp.dedup, STEP.Hb), peak };
+  })();
 
   // ── THE GABLE END'S DEPTH LADDER (2026-09-15) ──────────────────────────────────────────
   // Carolyn, 2026-09-14, drawing on the porch gable of her Cabin (12x32, king-post truss): the
@@ -7117,21 +8173,23 @@ function buildShed3DModel(THREE, p) {
   // Decided HERE, not inside the porch block, because the two need each other: the vent's sill
   // has to clear the truss's brace feet, and the truss has to stand in front of the vent's frame.
   // The same test the porch block used to apply inline.
-  const porchTrussOn = porchOn && !!roofCfg.porchTruss && (roofCfg.type || "gable") === "gable";
+  const porchTrussOn = porchOn && !porchOnEave && !!roofCfg.porchTruss && (roofCfg.type || "gable") === "gable";
   const TRUSS_FOOT = H + 0.2;                    // brace feet, sitting on the header beside the king post
 
   // ── The style's louvered gable vent: laid out once, drawn on both ends further down ────────
   // Laid out up here (it used to live inside the drawing block) only so the truss can ask
   // whether there IS a vent before either is drawn. Null = no vent on this building.
-  const styleVent = (() => {
+  // Laid out by a function of the gable it sits in (its profile and its plate) since the roof step
+  // (2026-09-28): the back cap of a stepped roof is the rear section's gable, on its own plate.
+  const layStyleVent = (vDedup, vPlate) => {
     const gv = (p.styleSpec && p.styleSpec.gableVent) || null;
     if (!(gv && gv.widthFrac > 0)) return null;
     let peak = -Infinity;
-    dedup.forEach((pt) => { if (pt[1] > peak) peak = pt[1]; });
-    if (!(peak > H + 0.9)) return null;
+    vDedup.forEach((pt) => { if (pt[1] > peak) peak = pt[1]; });
+    if (!(peak > vPlate + 0.9)) return null;
     // Horizontal extent of the gable polygon at height y — module scope since 2026-09-15
     // (d3ProfSpanAt), because a placed gable vent is fitted to the same triangle in 2D.
-    const profSpanAt = (y) => d3ProfSpanAt(dedup, y);
+    const profSpanAt = (y) => d3ProfSpanAt(vDedup, y);
     const F = 0.12;                                      // trim board width
     // The vent sits LOW in the triangle, on a short sill above the plate — not centred
     // in it. That is what the walk-around shows, and on a shallow pitch it is the whole
@@ -7151,19 +8209,23 @@ function buildShed3DModel(THREE, p) {
     const VENT_SILL = roofCfg.plateBand === true ? Math.max(VENT_SILL0, SS_PLATE_BAND_TOP + 0.1 + F) : VENT_SILL0;
     let vW = S * Math.min(0.6, Math.max(0.05, gv.widthFrac));
     let vH = vW / 2;                                     // 2:1 wide-to-tall, as measured
-    let vCy = H + VENT_SILL + vH / 2;
+    let vCy = vPlate + VENT_SILL + vH / 2;
     // Shrink to fit. The TOP corners are the tight point, and the passes converge because
     // a narrower vent is also shorter and therefore has more room above it.
     for (let k = 0; k < 3; k++) {
       const sp = profSpanAt(vCy + vH / 2);
       const avail = sp ? (sp[1] - sp[0]) - 0.5 : 0;      // keep 3 in clear of each rake
       if (vW <= avail) break;
-      vW = Math.max(0, avail); vH = vW / 2; vCy = H + VENT_SILL + vH / 2;
+      vW = Math.max(0, avail); vH = vW / 2; vCy = vPlate + VENT_SILL + vH / 2;
     }
     const spC = profSpanAt(vCy);
     const vCu = spC ? (spC[0] + spC[1]) / 2 : 0;         // centred even on a skewed ridge
     return (vW >= 0.8 && vH >= 0.35) ? { vW, vH, vCy, vCu, F } : null;
-  })();
+  };
+  const styleVent = layStyleVent(dedup, Hr);
+  // A ROOF STEP's back cap: the same vent laid out in the rear section's own gable (null when that
+  // gable has no room for one). Without a step it IS styleVent.
+  const styleVentBack = rearProf ? layStyleVent(rearProf.dedup, rearProf.H) : styleVent;
   // ── Vents the CUSTOMER placed in the gable (2026-09-15) ──
   // Each on the cap end above its wall: local z = 0 is world -Z (north) for a portrait footprint
   // and world +X (east) for a landscape one, because rg turns a quarter circle in the second case
@@ -7196,7 +8258,7 @@ function buildShed3DModel(THREE, p) {
   if (leanW > 0.5) {
     const drop = Math.min(roofCfg.leanToDropFt != null ? roofCfg.leanToDropFt : 1, H - 1.5);
     const dir = roofCfg.leanToSide === "left" ? -1 : 1;   // which eave it hangs off
-    const u0 = dir * (S / 2), u1 = u0 + dir * leanW;
+    const u0 = dir * (mass.S / 2) - mass.uc, u1 = u0 + dir * leanW;   // the OUTER eave wall, wings or not
     const y0 = H, y1 = H - drop;
     const du = u1 - u0, dy = y1 - y0;
     const slen = Math.sqrt(du * du + dy * dy) || 1;
@@ -7216,10 +8278,13 @@ function buildShed3DModel(THREE, p) {
     // runs get a third rather than an unsupported header.
     const nPost = L > 12 ? 3 : 2;
     const inset = Math.min(0.8, L * 0.08);
+    // On a raised floor (2026-09-25) the posts stand on the lowered ground, not in the air at the
+    // floor's level; 0 on every other building, as they always stood.
+    const postBot = RAISED ? -GRADE : 0;
     for (let i = 0; i < nPost; i++) {
       const t = nPost === 1 ? 0.5 : i / (nPost - 1);
-      const post = box(trimMat, 0.3, y1, 0.3);
-      post.position.set(u1, y1 / 2, inset + t * (L - 2 * inset));
+      const post = box(trimMat, 0.3, y1 - postBot, 0.3);
+      post.position.set(u1, (y1 + postBot) / 2, inset + t * (L - 2 * inset));
       post.userData.ssLeanTo = true;
       rg.add(post);
     }
@@ -7244,7 +8309,29 @@ function buildShed3DModel(THREE, p) {
   // Two posts, never three. The lean-to adds a middle one past 12 ft because it is a carport
   // and nobody walks through the centre of it; a porch has a door behind it, and a post in the
   // doorway is a defect rather than support.
-  if (porchOn) {
+  // ON AN EAVE WALL (new frame, roof.front "eave" or a shed's front/back side): the wall has set
+  // back under the roof exactly as it does at a gable end, so what stands in the opening is the same
+  // posts and header, along the eave line instead of across a cap. Posts every 10 ft or less: an
+  // eave porch is the building's whole length, and two posts 24 ft apart hold nothing up. Over the
+  // header the roof prism's own face closes the opening -- the shed's tall band, clad, or the gable
+  // prism's underside -- because the wall behind it stops at H (d3WallTopFt's setBack).
+  if (porchOnEave) {
+    const uIn = (porchWall === "south" ? 1 : -1) * (S / 2 - 0.21);   // south is +u here (u = world z)
+    const POST = 0.32, INSET = 0.4;
+    const bays = Math.max(1, Math.ceil(L / 10 - 1e-6));
+    const za = INSET + POST / 2, zb = L - INSET - POST / 2;
+    for (let i = 0; i <= bays; i++) {
+      const post = box(trimMat, POST, H, POST);
+      post.position.set(uIn, H / 2, za + ((zb - za) * i) / bays);
+      post.userData.ssRecessedEave = "post";
+      rg.add(post);
+    }
+    const ehdr = box(trimMat, 0.4, 0.5, L);
+    ehdr.position.set(uIn, H - 0.25, L / 2);
+    ehdr.userData.ssRecessedEave = "header";
+    rg.add(ehdr);
+  }
+  if (porchOn && !porchOnEave) {
     // local z = 0 is world -Z for a portrait footprint but world +X for a landscape one,
     // because rg turns a quarter circle in the second case. So the end is resolved through the
     // SAME uAxisIsX the wall set-back used, not assumed.
@@ -7374,6 +8461,10 @@ function buildShed3DModel(THREE, p) {
   // Absent means gable, so every saved style renders exactly as it did.
   const dormW = roofCfg.dormerWidthFt || 0;
   const dormerIsTransom = roofCfg.dormerType === "transom";
+  // THE ROOF STEP: the dormer is seated on the roof UNDER it, chosen by what it covers along the
+  // ridge (d3DormerSeatYAt, which the panel's dormer readouts share). The seat, the transom's
+  // geometry and its cheeks all read this one profile. The one roof, everywhere else.
+  const dormerYAt = d3DormerSeatYAt(profYAt, rearProf ? rearProf.yAt : null, L, dormW, STEP ? STEP.stepFt : 0);
 
   // ── THE DORMER'S WINDOW — the customer's, not the renderer's (2026-09-07) ──────────────
   // A per-DESIGN value threaded in like p.wallHeightFt, NOT a style field: the style says
@@ -7467,7 +8558,7 @@ function buildShed3DModel(THREE, p) {
     // the ridge and the eave so the dormer cannot overhang either edge.
     const fr = Math.max(-0.85, Math.min(0.85, roofCfg.dormerOffsetU != null ? roofCfg.dormerOffsetU : 0.45));
     const dU = (S / 2) * fr;
-    const baseY = profYAt(dU);
+    const baseY = dormerYAt(dU);
     const dDepth = 2.0;
     const dormMat = mat(bodyColor);
     const body = box(dormMat, dDepth, dRise, dormW);
@@ -7516,7 +8607,7 @@ function buildShed3DModel(THREE, p) {
     // builder what their rise number will really build and the two must be the same code.
     // Read that function for why the run is derived and why the main slope is measured off
     // the profile rather than read from roofCfg.pitch.
-    const dg = d3TransomDormerGeom(roofCfg, S, profYAt);
+    const dg = d3TransomDormerGeom(roofCfg, S, dormerYAt);
     const { uTop, yTop, dirU, run, uOut, yOut, yBase, face } = dg;
     if (run > 0.8) {
       const du = uOut - uTop, dy = yOut - yTop;
@@ -7564,7 +8655,7 @@ function buildShed3DModel(THREE, p) {
       const CH_STEPS = 8;
       for (let i = CH_STEPS - 1; i >= 1; i--) {
         const uu = uOut + (uTop - uOut) * (i / CH_STEPS);
-        cheek.lineTo(uu, profYAt(uu));
+        cheek.lineTo(uu, dormerYAt(uu));
       }
       cheek.closePath();
       const cheekOpts = { depth: T, bevelEnabled: false };
@@ -7644,22 +8735,31 @@ function buildShed3DModel(THREE, p) {
     // a strip, where both edges read lower than the middle. So every profile vertex falling
     // within the strip is sampled too, and the minimum wins. The strip then always stops ON
     // or just under the roof line — never through it — at every u, on every roof type.
-    for (let k = 1; k * bs < S; k++) {
-      const u = k * bs - S / 2;
-      let yTop = Math.min(profYAt(u - halfW), profYAt(u), profYAt(u + halfW));
-      for (let i = 0; i < dedup.length; i++) {
-        const vx = dedup[i][0];
-        if (vx > u - halfW && vx < u + halfW) yTop = Math.min(yTop, profYAt(vx));
+    // Stepped from the WALL ORIGIN across the whole end (mass.S), in the centre's own u (less uc):
+    // only the strips over the centre's gable reach above its plate. Without wings, S and 0.
+    // A ROOF STEP's back cap (local z 0) is the rear section's gable, so its strips run from THAT
+    // plate up to THAT roof line (rearProf); without a step both ends read the one profile.
+    const clipTop = (u, yAt, dd) => {
+      let yTop = Math.min(yAt(u - halfW), yAt(u), yAt(u + halfW));
+      for (let i = 0; i < dd.length; i++) {
+        const vx = dd[i][0];
+        if (vx > u - halfW && vx < u + halfW) yTop = Math.min(yTop, yAt(vx));
       }
-      if (yTop <= H + 0.05) continue;            // below the plate: the wall already has it
+      return yTop;
+    };
+    for (let k = 1; k * bs < mass.S; k++) {
+      const u = k * bs - mass.S / 2 - mass.uc;
+      const yTop = clipTop(u, profYAt, dedup);
+      const yTop0 = rearProf ? clipTop(u, rearProf.yAt, rearProf.dedup) : yTop, plate0 = rearProf ? rearProf.H : Hr;
+      if (yTop <= Hr + 0.05 && yTop0 <= plate0 + 0.05) continue;           // below the plate: the wall already has it
       // Depth: capStripOut, beside the ladder above the lean-to — the rake clamp and the flush rule
       // are written there, because the vent frame and the porch truss now read the same number.
       // STOP AT THE VENT, like a wall batten stops at a window. A strip crossing the vent's frame
       // is split into the run below it and the run above it; a strip clear of it is unchanged.
       // Every vent on the cap cuts the strip it crosses, one after another, so two vents stacked
       // on one strip leave three runs. With one vent this is exactly the old two-run split.
-      const spansFor = (rects) => {
-        let spans = [[H, yTop]];
+      const spansFor = (rects, lo, hi) => {
+        let spans = [[lo, hi]];
         (rects || []).forEach((r) => {
           if (!(u + halfW > r.u0 && u - halfW < r.u1)) return;
           const cut = [];
@@ -7671,8 +8771,9 @@ function buildShed3DModel(THREE, p) {
         });
         return spans;
       };
-      [[-capStripOut(capOut0), rects0], [L + capStripOut(capOutL), rectsL]].forEach(([z, rects]) => {
-        spansFor(rects).forEach((sp) => {
+      [[-capStripOut(capOut0), rects0, plate0, yTop0], [L + capStripOut(capOutL), rectsL, Hr, yTop]].forEach(([z, rects, lo, hi]) => {
+        if (hi <= lo + 0.05) return;
+        spansFor(rects, lo, hi).forEach((sp) => {
           if (sp[1] - sp[0] < 0.05) return;
           const st = box(reliefMat, halfW * 2, sp[1] - sp[0], depth);
           st.position.set(u, (sp[0] + sp[1]) / 2, z);
@@ -7731,12 +8832,85 @@ function buildShed3DModel(THREE, p) {
   // fixed "under the plate" cap vanished behind the fascia, whose drop grows with pitch and
   // overhang. One number from the geometry that was actually built, not a second copy of it.
   let eaveHangY = H;
+  // THE SAME, PER EAVE WALL (2026-09-24 review): a raised centre's own eave wall stands above H, and
+  // eaveHangY above is the LOWEST eave of all -- a wing's -- which says nothing about the centre's
+  // eave 6 ft higher. So each finish is also noted against the wall it overhangs ("north" ...), and
+  // a lamp on a wall above H reads its own. A slope end's local u says which wall: with the centre
+  // shifted by uc, u + uc is the building's u, -u = west (uAxisIsX) or north.
+  const eaveHangBy = {};
+  const noteEaveHang = (uLocal, y) => {
+    const ub = uLocal + mass.uc;
+    const wall = mass.uAxisIsX ? (ub < 0 ? "west" : "east") : (ub < 0 ? "north" : "south");
+    eaveHangBy[wall] = Math.min(eaveHangBy[wall] != null ? eaveHangBy[wall] : Infinity, y);
+  };
   // A slope's endpoint is an INTERIOR JOINT when another slope shares it: a gable ridge,
   // or a gambrel knee. Everything else is a free edge that should really overhang.
-  const jointPartnerAt = (pt, self) => slopes.find((o) => o !== self
+  // `list` is one roof section's slopes (the roof step's rear section has its own; see buildSlope).
+  const jointPartnerIn = (list) => (pt, self) => list.find((o) => o !== self
     && ((Math.abs(o[0][0] - pt[0]) < 1e-6 && Math.abs(o[0][1] - pt[1]) < 1e-6)
      || (Math.abs(o[1][0] - pt[0]) < 1e-6 && Math.abs(o[1][1] - pt[1]) < 1e-6))) || null;
-  slopes.forEach((sl) => {
+  const jointPartnerAt = jointPartnerIn(slopes);
+  // ── WINGS (d3Massing, 2026-09-24): each wing's body and its roof line ──────────────────────────
+  // Built in rg's local frame like everything else here, so a wing's u is the building's less uc.
+  // A wing is a solid prism under its roof — its CAPS are the wing's gable-end triangles, clad and
+  // flush with the wall below exactly as the centre's are — from the outer wall's top (H) rising
+  // to the clerestory's outer face, where a roof-coloured flashing strip covers the joint. Its
+  // slope joins the loop below (wingSlopes, never `slopes`: jointPartnerAt must not see it) for
+  // the same slab, eave finish and rake boards the main roof gets, with the inner end stopped at
+  // the clerestory face and no ridge cap. Every mesh is tagged userData.ssWing (the side, -1 or 1),
+  // and the projecting porch's clearance scan measures a wing by what hangs over the porch.
+  const wingSlopes = [];
+  mass.wings.forEach((g) => {
+    // `face` is the clerestory's OUTER face, the wing's side of the centre wall line.
+    const s = g.side, lu1 = g.u1 - mass.uc, face = g.u0 + s * (T / 2) - mass.uc;
+    const yFace = H + (g.w - T / 2) * g.pitch;
+    if (yFace - H > 0.02) {
+      const sh = new THREE.Shape();
+      sh.moveTo(lu1, H); sh.lineTo(face, H); sh.lineTo(face, yFace); sh.lineTo(lu1, H);
+      const wgeo = new THREE.ExtrudeGeometry(sh, { depth: L, bevelEnabled: false });
+      const wuv = wgeo.attributes.uv;
+      if (wuv) { for (let i = 0; i < wuv.count; i++) wuv.setX(i, wuv.getX(i) + (mass.S / 2 + mass.uc)); wuv.needsUpdate = true; }
+      // The caps flush with the wall face, as moveCapsFlush does for the centre's.
+      const wpos = wgeo.attributes.position, wcap = wgeo.groups && wgeo.groups.length === 2 ? wgeo.groups[0] : null;
+      if (wcap) {
+        for (let i = wcap.start; i < wcap.start + wcap.count; i++) {
+          const z = wpos.getZ(i);
+          if (Math.abs(z) < 1e-6) wpos.setZ(i, -capOut0);
+          else if (Math.abs(z - L) < 1e-6) wpos.setZ(i, L + capOutL);
+        }
+        wpos.needsUpdate = true;
+        wgeo.computeBoundingBox(); wgeo.computeBoundingSphere();
+      }
+      const body = new THREE.Mesh(wgeo, wcap ? [wallMat, gableMat] : gableMat);
+      body.userData.ssWing = s;
+      rg.add(body);
+    }
+    // The flashing where the wing roof meets the clerestory, from the slab's top up 0.3 ft, standing
+    // just clear of the clerestory's own relief and between its corner boards.
+    const slabTop = yFace + (D3.ROOF_T + 0.02) * Math.sqrt(1 + g.pitch * g.pitch);
+    const fT = Math.max(0.03, cladReach - T / 2 + 0.02), fLen = L - 2 * trimFace;
+    if (fLen > 0.5) {
+      const fl = box(roofMat, fT, 0.38, fLen);
+      d3RoofSlabUVs(fl);
+      fl.position.set(face + s * fT / 2, slabTop + 0.14, L / 2);
+      fl.userData.ssWing = s;
+      rg.add(fl);
+    }
+    const outer = [lu1, H], inner = [face, yFace];
+    const sl = s < 0 ? [outer, inner] : [inner, outer];   // left to right, so the slab's normal points up
+    sl.wing = s;
+    sl.wingIn = inner;
+    sl.wingInExt = (D3.ROOF_T + 0.02) * g.pitch + 0.005;  // the slab's top edge reaches the face
+    wingSlopes.push(sl);
+  });
+  // ONE SLOPE OF ONE SECTION OF ROOF (the roof step, 2026-09-28). `sec` is the section: the eave its
+  // slopes overhang (Hr), its peak (for the ridge cap), which of its slopes meet (joint), and the run
+  // of ridge it covers, z0..z1, with the gable overhang past each end that IS a gable end (end0 at
+  // local z 0, the back; endL at z = L, the front). The slab, fascia, soffit and ridge cap span
+  // zLen centred on zMid, the rakes and fly rafters stand only at a gable end, and the rafter tails
+  // are laid across z0..z1. Called for every slope below, once per section.
+  const buildSlope = (sl, sec) => {
+    const nWing0 = rg.children.length;
     const A = sl[0], B = sl[1];
     const du = B[0] - A[0], dy = B[1] - A[1];
     const slen = Math.sqrt(du * du + dy * dy);
@@ -7760,8 +8934,8 @@ function buildShed3DModel(THREE, p) {
     // Verified numerically against both profiles before landing (audit 2026-08-19).
     const t = D3.ROOF_T / 2 + 0.02;
     const jointExt = (P, dirInX, dirInY) => {
-      const o = jointPartnerAt(P, sl);
-      if (!o) return OV;                     // free edge: the real eave overhang
+      const o = sec.joint(P, sl);
+      if (!o) return sl.wingIn === P ? sl.wingInExt : OV;   // free edge: the real eave overhang (a wing's inner end stops at the wall)
       const odu = o[1][0] - o[0][0], ody = o[1][1] - o[0][1];
       const olen = Math.sqrt(odu * odu + ody * ody) || 1;
       const onx = -ody / olen, ony = odu / olen;
@@ -7771,14 +8945,14 @@ function buildShed3DModel(THREE, p) {
     };
     const extA = jointExt(A, -ux, -uy);      // the slab extends beyond A along -u
     const extB = jointExt(B, ux, uy);
-    const slab = box(roofMat, slen + extA + extB, D3.ROOF_T, L + OV * 2);
+    const slab = box(roofMat, slen + extA + extB, D3.ROOF_T, sec.zLen);
     d3RoofSlabUVs(slab);
     slab.rotation.z = Math.atan2(dy, du);
     const shift = (extB - extA) / 2;   // recentre: the ends no longer extend equally
     slab.position.set(
       (A[0] + B[0]) / 2 + ux * shift + nx * t,
       (A[1] + B[1]) / 2 + uy * shift + ny * t,
-      L / 2
+      sec.zMid
     );
     rg.add(slab);
     // Eave fascia: a trim board hung on the slab's LOW edge, the finish
@@ -7787,7 +8961,7 @@ function buildShed3DModel(THREE, p) {
     // detached at some angles. Only slopes that reach the wall plate get one
     // (a gambrel's upper legs do not).
     const lowEnd = A[1] <= B[1] ? A : B;
-    if (lowEnd[1] <= H + 0.01) {
+    if (lowEnd[1] <= sec.Hr + 0.01) {
       const towardLow = lowEnd === A ? -1 : 1;
       // The eave end ON the slope line. Every eave detail registers against this point:
       // at a free edge jointExt returns OV, so the slab's end face is the plane through
@@ -7817,10 +8991,11 @@ function buildShed3DModel(THREE, p) {
         const finishY = eaveY - d3EaveFinishDrop(roofCfg, ny); // the lowest the eave finishes
         const fasTop = edgeY + 0.06;                           // just under the deck's top face
         const fasH = OV_NOTCHED ? Math.max(0.08, fasTop - finishY) : D3_EAVE.FASCIA_H;
-        const fascia = box(trimMat, D3_EAVE.FASCIA_T, fasH, L + OV * 2);
-        fascia.position.set(edgeU, OV_NOTCHED ? fasTop - fasH / 2 : edgeY - 0.14, L / 2);
+        const fascia = box(fasciaMat, D3_EAVE.FASCIA_T, fasH, sec.zLen);
+        fascia.position.set(edgeU, OV_NOTCHED ? fasTop - fasH / 2 : edgeY - 0.14, sec.zMid);
         rg.add(fascia);
         eaveHangY = Math.min(eaveHangY, OV_NOTCHED ? finishY : edgeY - 0.14 - 0.2);   // the board's bottom edge
+        noteEaveHang(lowEnd[0], OV_NOTCHED ? finishY : edgeY - 0.14 - 0.2);
         if (OV_NOTCHED) {
           // The level soffit, hung DIRECTLY on the deck's underside -- that IS the cut-back. It
           // runs level from the fascia toward the wall and, because the deck rises away from the
@@ -7829,9 +9004,14 @@ function buildShed3DModel(THREE, p) {
           const wallU = lowEnd[0];
           const soffitW = Math.abs(edgeU - wallU);
           if (soffitW > 0.06) {
-            const soffit = box(trimMat, soffitW, D3_EAVE.SOFFIT_T, L + OV * 2);
-            soffit.position.set((wallU + edgeU) / 2, deckBotY - D3_EAVE.SOFFIT_T / 2, L / 2);
+            const soffit = box(fasciaMat, soffitW, D3_EAVE.SOFFIT_T, sec.zLen);
+            soffit.position.set((wallU + edgeU) / 2, deckBotY - D3_EAVE.SOFFIT_T / 2, sec.zMid);
             rg.add(soffit);
+            // A roof step's section keeps its boxed eave's outline (the wall, the corner where the
+            // soffit meets the deck's underside, and that underside's slope), so the joint can close
+            // the lower section's box where it ends (the end cap beside the wedge). Only a stepped
+            // roof's sections carry `boxes`; the whole roof records nothing.
+            if (sec.boxes) sec.boxes.push({ wallU, cornerU: eaveU + nx * D3_EAVE.DECK_N, soffitY: deckBotY, slope: uy / ux });
           }
         }
       } else {
@@ -7856,6 +9036,7 @@ function buildShed3DModel(THREE, p) {
         // between tail and deck.
         const tailN = 0.02 - TAIL_DROP + TAIL_H / 2;
         eaveHangY = Math.min(eaveHangY, eaveY - d3EaveFinishDrop(roofCfg, ny));   // tails' outboard bottom
+        noteEaveHang(lowEnd[0], eaveY - d3EaveFinishDrop(roofCfg, ny));
         const tailLen = OV + 0.5;             // outboard face flush with the slab end,
                                               // inboard end buried behind the wall
         const tailU = eaveU - towardLow * ux * (tailLen / 2) + nx * tailN;
@@ -7871,31 +9052,91 @@ function buildShed3DModel(THREE, p) {
         // and rounded to whole bays, so both gable walls always carry an end rafter and
         // no stub bay is left over. An 8x8 at 24 o.c. gives 4 bays and 5 tails, which is
         // exactly what the walk-around video shows.
-        const tailStep = L / Math.max(1, Math.round(L / Math.max(0.5, (roofCfg.tailSpacingIn || 24) / 12)));
-        for (let z = 0; z <= L + 1e-6; z += tailStep) addTail(Math.min(z, L));
+        // Across the section's own run. A section that ends at the joint (the roof step's rear one)
+        // leaves the tail AT the joint to the section in front of it, so no two tails share a place.
+        const tRun = sec.z1 - sec.z0;
+        const tailStep = tRun / Math.max(1, Math.round(tRun / Math.max(0.5, (roofCfg.tailSpacingIn || 24) / 12)));
+        for (let z = sec.z0; z <= sec.z1 + 1e-6; z += tailStep) if (sec.endL || z < sec.z1 - 1e-6) addTail(Math.min(z, sec.z1));
         // Fly-rafter tails, one under each rake about 10 in outboard of the gable wall.
-        // Skipped when the overhang is too shallow to hold one.
+        // Skipped when the overhang is too shallow to hold one, and at a joint, which has no rake.
         const flyOut = Math.min(OV - 0.1, 10 / 12);
-        if (flyOut > 0.15) { addTail(-flyOut); addTail(L + flyOut); }
+        if (flyOut > 0.15) { if (sec.end0) addTail(-flyOut); if (sec.endL) addTail(L + flyOut); }
+      }
+    }
+    // ── THE SHED'S HIGH EAVE (new frame, 2026-09-24) ──
+    // The slab has always run OV past the high wall (jointExt: a free edge), and that edge had no
+    // finish at all -- a raw slab end over a band of prism. On Farmstand it is the most visible edge
+    // of the building: the dark boxed eave right over the porch. So in the new frame it gets the
+    // finish roof.eave asks for, on the same members the low eave uses:
+    //   open    the same rafter tails at the same measured drop, running up to the slab's end
+    //   fascia  a plumb board at the slab's end, from just under the deck's top face down to a
+    //           LEVEL soffit that boxes back to the high wall at its top. Level, whatever the
+    //           framing choice: the deck RISES away from this wall, so a soffit hung off the deck's
+    //           outer edge the way the low eave's is would pass up through the roof at the wall.
+    // Outside the new frame the high edge is exactly what it was. A shed is never a stepped roof
+    // (d3RoofStep is gable only), so this always runs over the whole-roof section: 0..L.
+    const highEave = A[1] >= B[1] ? A : B;
+    if (NEW_FRAME && roofCfg.type === "shed" && highEave[1] > H + 0.01 && !jointPartnerAt(highEave, sl)) {
+      const towardHigh = highEave === A ? -1 : 1;
+      const hiU = highEave[0] + towardHigh * ux * OV;       // the slab's end, on the slope line
+      const hiY = highEave[1] + towardHigh * uy * OV;
+      const wallTopY = highEave[1];                         // the high wall's top (d3WallTopFt)
+      if (!EAVE_OPEN) {
+        const edgeU = hiU + nx * (D3.ROOF_T / 2 + 0.02);
+        const edgeY = hiY + ny * (D3.ROOF_T / 2 + 0.02);
+        const sofBot = wallTopY - 0.005 - D3_EAVE.SOFFIT_T;
+        noteEaveHang(highEave[0], sofBot);
+        const fasTop = edgeY + 0.06;                        // just under the deck's top face
+        const fasH = Math.max(0.08, fasTop - sofBot);
+        const hfas = box(fasciaMat, D3_EAVE.FASCIA_T, fasH, L + OV * 2);
+        hfas.position.set(edgeU, fasTop - fasH / 2, L / 2);
+        hfas.userData.ssHighEave = "fascia";
+        rg.add(hfas);
+        const sofIn = highEave[0], sofOut = edgeU - towardHigh * D3_EAVE.FASCIA_T / 2;
+        if (Math.abs(sofOut - sofIn) > 0.06) {
+          const hsof = box(fasciaMat, Math.abs(sofOut - sofIn), D3_EAVE.SOFFIT_T, L + OV * 2);
+          hsof.position.set((sofIn + sofOut) / 2, sofBot + D3_EAVE.SOFFIT_T / 2, L / 2);
+          hsof.userData.ssHighEave = "soffit";
+          rg.add(hsof);
+        }
+      } else {
+        const TAIL_W = D3_EAVE.TAIL_W, TAIL_H = D3_EAVE.TAIL_H;
+        const tailN = 0.02 - D3_EAVE.TAIL_DROP + TAIL_H / 2;
+        const tailLen = OV + 0.5;
+        // The tails' bottom edge where it crosses the wall line; it rises outward from there.
+        noteEaveHang(highEave[0], wallTopY + (0.02 - D3_EAVE.TAIL_DROP) / Math.max(1e-6, ny));
+        const tailU = hiU - towardHigh * ux * (tailLen / 2) + nx * tailN;
+        const tailY = hiY - towardHigh * uy * (tailLen / 2) + ny * tailN;
+        const addHiTail = (z) => {
+          const tl = box(tailMat(), tailLen, TAIL_H, TAIL_W);
+          tl.rotation.z = Math.atan2(dy, du);
+          tl.position.set(tailU, tailY, z);
+          tl.userData.ssHighEave = "tail";
+          rg.add(tl);
+        };
+        const tailStep = L / Math.max(1, Math.round(L / Math.max(0.5, (roofCfg.tailSpacingIn || 24) / 12)));
+        for (let z = 0; z <= L + 1e-6; z += tailStep) addHiTail(Math.min(z, L));
+        const flyOut = Math.min(OV - 0.1, 10 / 12);
+        if (flyOut > 0.15) { addHiTail(-flyOut); addHiTail(L + flyOut); }
       }
     }
     // Ridge cap: one angled board LYING ON each slope that reaches the peak
     // (both halves of a gable, the upper legs of a gambrel) — a flat box can
     // never seat on the V of two pitches, which is why the first cut floated.
     const highEnd = A[1] >= B[1] ? A : B;
-    if (roofCfg.type !== "shed" && highEnd[1] >= profPeak - 0.01) {
+    if (roofCfg.type !== "shed" && highEnd[1] >= sec.peak - 0.01) {
       const towardHigh = highEnd === A ? -1 : 1;
       const CAPW = 0.55;
       // Same rewrite as the slabs: a standing-seam ridge cap really does carry its seams
       // across it, and without this the cap keeps stock 0..1 UVs and reads as flat colour
       // beside a correctly tiled roof.
-      const capBoard = box(roofMat, CAPW, 0.06, L + OV * 2);
+      const capBoard = box(roofMat, CAPW, 0.06, sec.zLen);
       d3RoofSlabUVs(capBoard);
       capBoard.rotation.z = Math.atan2(dy, du);
       capBoard.position.set(
         highEnd[0] - towardHigh * ux * (CAPW / 2 - 0.06) + nx * (D3.ROOF_T + 0.05),
         highEnd[1] - towardHigh * uy * (CAPW / 2 - 0.06) + ny * (D3.ROOF_T + 0.05),
-        L / 2
+        sec.zMid
       );
       rg.add(capBoard);
     }
@@ -7906,8 +9147,13 @@ function buildShed3DModel(THREE, p) {
     // symmetric `slen + OV*2` when the slab got its miter (052c79d), so two trim boards
     // crossed 0.6 ft past the ridge at every gable end -- the exact crossed-blades look
     // the miter had just removed, reintroduced in trim color (audit 2026-08-19).
-    [-OV + 0.05, L + OV - 0.05].forEach((z) => {
-      const rake = box(trimMat, slen + extA + extB, 0.32, 0.1);
+    // In the new frame and with wings the board stands 0.01 ft proud of the slab's end: flush, its
+    // outer face and the slab's end face are one plane and trade pixels in a stipple along every
+    // rake, plain to see wherever the fascia and roof colours differ. Every other style keeps the
+    // plane it has always had (the byte-for-byte rule for stored styles).
+    const rakeProud = (NEW_FRAME || mass.wings.length) ? 0.01 : 0;
+    [-OV + 0.05 - rakeProud, L + OV - 0.05 + rakeProud].filter((z, i) => (i ? sec.endL : sec.end0)).forEach((z) => {
+      const rake = box(fasciaMat, slen + extA + extB, 0.32, 0.1);
       rake.rotation.z = Math.atan2(dy, du);
       rake.position.set(
         (A[0] + B[0]) / 2 + ux * shift + nx * (D3.ROOF_T / 2 - 0.08),
@@ -7916,7 +9162,97 @@ function buildShed3DModel(THREE, p) {
       );
       rg.add(rake);
     });
-  });
+    // A wing's slab, eave finish and rakes carry its side, for the porch scan and the harness.
+    if (sl.wing) for (let k = nWing0; k < rg.children.length; k++) rg.children[k].userData.ssWing = sl.wing;
+  };
+  // THE SECTIONS. Without a step there is ONE, the whole roof, and every number it hands buildSlope
+  // is the expression the loop has always used, so the roof is built exactly as it was. With one
+  // (d3RoofStep) the front section runs from the joint to the front and the rear section from the
+  // back to the joint on its own profile; neither overhangs the joint, and the wedge below closes
+  // what shows between them.
+  // `stepSecs` keeps the two sections of a stepped roof for the joint's trim below; null without one.
+  let stepSecs = null;
+  if (!STEP) {
+    const whole = { Hr, peak: profPeak, joint: jointPartnerAt, zLen: L + OV * 2, zMid: L / 2, z0: 0, z1: L, end0: true, endL: true };
+    slopes.concat(wingSlopes).forEach((sl) => buildSlope(sl, whole));
+  } else {
+    const zJ = STEP.stepFt;
+    const front = { Hr, peak: profPeak, joint: jointPartnerAt, zLen: L - zJ + OV, zMid: (zJ + L + OV) / 2, z0: zJ, z1: L, end0: false, endL: true, boxes: [] };
+    slopes.concat(wingSlopes).forEach((sl) => buildSlope(sl, front));
+    const rear = { Hr: rearProf.H, peak: rearProf.peak, joint: jointPartnerIn(rearProf.slopes), zLen: zJ + OV, zMid: (zJ - OV) / 2, z0: 0, z1: zJ, end0: true, endL: false, boxes: [] };
+    rearProf.slopes.forEach((sl) => buildSlope(sl, rear));
+    stepSecs = { front, rear };
+  }
+  // ── THE ROOF STEP: THE WEDGE AT THE JOINT (d3RoofStep, 2026-09-28) ───────────────────────────────
+  // Where the two sections meet, the higher one's roof stands above the lower one's by the rise at
+  // the eave and by nothing at the ridge, so on each long side a thin wedge of the higher section
+  // shows: the end of its slab and fascia, its clad cap and, under it, the top of its taller wall.
+  // It is closed with ONE fascia-coloured board per side, as the real joint is trimmed: from the
+  // lower roof's top surface (sunk 0.03 ft into it, so no line of light shows along it) up to the
+  // higher roof's, from the ridge out to the higher eave's outermost edge (its fascia's face, or the
+  // slab's corner on an open eave). It stands 0.06 ft into the LOWER section's side of the joint, so
+  // it covers the higher section's end faces from in front and shares no plane it faces with them
+  // (they sit on the joint plane facing the other way). userData.ssRoofStep "wedge", per side.
+  if (STEP) {
+    const T2 = D3.ROOF_T + 0.02;          // a slab's top face, off its slope line (buildSlope)
+    const zJ = STEP.stepFt, TW = 0.06, SINK = 0.03;
+    const hiRear = STEP.rise > 0;
+    // One section's slope on side s (its eave at u = s S/2), as its slab's top-surface line y(u),
+    // the ridge's u, and how far out its eave reaches.
+    const topLine = (list, s) => {
+      const q = list.find((one) => one.some((pt) => Math.abs(pt[0] - s * S / 2) < 1e-6));
+      if (!q) return null;
+      const E = Math.abs(q[0][0] - s * S / 2) < 1e-6 ? q[0] : q[1], Rg = E === q[0] ? q[1] : q[0];
+      const len = Math.hypot(E[0] - Rg[0], E[1] - Rg[1]) || 1;
+      const dx = (E[0] - Rg[0]) / len, dy = (E[1] - Rg[1]) / len;
+      const nx = s > 0 ? -dy : dy, ny = s > 0 ? dx : -dx;       // up and out, the slab's own normal
+      const u0 = Rg[0] + nx * T2, y0 = Rg[1] + ny * T2;
+      const eU = E[0] + dx * OV;                                // the slab's end, on the slope line
+      const slabOut = eU + nx * T2;
+      const fasOut = EAVE_OPEN ? slabOut : eU + nx * (D3.ROOF_T / 2 + 0.02) + s * D3_EAVE.FASCIA_T / 2;
+      return { yAt: (u) => y0 + (u - u0) * (dy / dx), ridgeU: Rg[0], out: s > 0 ? Math.max(slabOut, fasOut) : Math.min(slabOut, fasOut) };
+    };
+    [-1, 1].forEach((s) => {
+      const hi = topLine(hiRear ? rearProf.slopes : slopes, s), lo = topLine(hiRear ? slopes : rearProf.slopes, s);
+      if (!hi || !lo) return;
+      const gap = (u) => hi.yAt(u) - (lo.yAt(u) - SINK);
+      const uOut = hi.out, uR = hi.ridgeU, gOut = gap(uOut), gR = gap(uR);
+      if (!(gOut > 0.01)) return;
+      // From the ridge, or from where the two surfaces cross when that is short of it.
+      const uStart = gR > 0 ? uR : uR + (uOut - uR) * (-gR / (gOut - gR));
+      const pts = [[uStart, lo.yAt(uStart) - SINK], [uOut, lo.yAt(uOut) - SINK], [uOut, hi.yAt(uOut)]];
+      if (gR > 0) pts.push([uStart, hi.yAt(uStart)]);
+      const wsh = new THREE.Shape();
+      pts.forEach((pt, i) => (i === 0 ? wsh.moveTo(pt[0], pt[1]) : wsh.lineTo(pt[0], pt[1])));
+      const wedge = new THREE.Mesh(new THREE.ExtrudeGeometry(wsh, { depth: TW, bevelEnabled: false }), fasciaMat);
+      wedge.position.z = hiRear ? zJ : zJ - TW;
+      wedge.userData.ssRoofStep = "wedge";
+      wedge.userData.ssRoofStepSide = s;
+      rg.add(wedge);
+    });
+    // ── AND THE LOWER SECTION'S BOXED EAVE, CLOSED AT THE JOINT ──
+    // A notched fascia eave is a box: the level soffit, the fascia and, over them, the deck's
+    // underside rising back to the wall. The lower section's box ends open at the joint, and seen
+    // from the HIGHER side, under the higher eave, the triangle between its soffit and its deck
+    // showed the soffit's lit top face. It is closed with a thin fascia-coloured end cap on the joint
+    // plane, on the higher section's side: from the soffit's underside up to the deck's underside,
+    // from the wall out to the corner where the two meet (inside the fascia). The wedge stands on
+    // the other side of the plane and above the lower deck's top face, so the two never share a
+    // face. No soffit (an open or extended eave) leaves nothing to close. userData "eaveCap".
+    const TC = 0.04;
+    (hiRear ? stepSecs.front : stepSecs.rear).boxes.forEach((b) => {
+      const yWall = b.soffitY + (b.wallU - b.cornerU) * b.slope;   // the deck's underside over the wall
+      if (!(yWall - b.soffitY > 0.01)) return;
+      const bot = b.soffitY - D3_EAVE.SOFFIT_T;
+      const csh = new THREE.Shape();
+      [[b.wallU, bot], [b.cornerU, bot], [b.cornerU, b.soffitY], [b.wallU, yWall]].forEach((pt, i) => (i === 0 ? csh.moveTo(pt[0], pt[1]) : csh.lineTo(pt[0], pt[1])));
+      const cap = new THREE.Mesh(new THREE.ExtrudeGeometry(csh, { depth: TC, bevelEnabled: false }), fasciaMat);
+      cap.position.z = hiRear ? zJ - TC : zJ;
+      cap.userData.ssRoofStep = "eaveCap";
+      cap.userData.ssRoofStepSide = Math.sign(b.wallU);
+      rg.add(cap);
+    });
+  }
   // ── PROJECTING PORCH (roof.porchOutFt, 2026-09-17) ──────────────────────────────────────────
   // A deck, posts and a low roof of its own IN FRONT of one gable end, as on the Barnstead
   // walk-around: a 16x24 gambrel with a 6.5 ft porch across its front end. The recessed porch above
@@ -7935,7 +9271,8 @@ function buildShed3DModel(THREE, p) {
   // bottom instead of tucking it against it. The porch reads no items, so only the full build draws
   // it; a porch, band or wood change reaches it through the spec, which forces a full build.
   // porchCapZ: the cap end the porch stands off (local z 0 or L), for the plate band below.
-  let porchDeckGroup = null, porchCapZ = null;
+  // porchStepsGroup: the steps' group when the porch has steps, so a ramp built later can find it.
+  let porchDeckGroup = null, porchCapZ = null, porchStepsGroup = null;
   const porchGeom = (() => {
     if (!porchOut) return null;
     const D = porchOut.D;
@@ -7955,10 +9292,40 @@ function buildShed3DModel(THREE, p) {
     // "short" warning and a plate band grown into a tall dark slab. Only the lean-to's inner strip is
     // over the porch, so a lean-to member counts by the lowest point of its triangles clipped to the
     // porch's footprint. The main roof keeps its box: there it costs 0 to 0.31 ft, measured.
-    const g0 = d3PorchGeom(S, H, D, trimFace, Infinity);
+    //
+    // ── ON AN EAVE WALL (new frame, 2026-09-24) ── Farmstand's porch runs the length of its high
+    // front wall, under the high eave: the same porch, turned a quarter so its along-wall axis runs
+    // down the ridge (local z) and its depth out across the profile (u), standing on the OUTER wall
+    // at u = eaveS x uOut. Its width is d3PorchSpan's (the whole wall, or roof.porchWidthFt), and it
+    // meets the wall at roof.porchAttachFt when the style says so, else just under THAT wall's top
+    // (d3PorchWallTopFt: the high wall's on a shed, Hc on a raised centre's gable end). Everything
+    // the main roof hangs out over the porch on that side -- the eave finish, open tails, a rake -- is
+    // measured by what is really over the porch: every member's triangles clipped to the porch's
+    // footprint past the wall face, the lean-to's rule, because the box of a sloped slab or rake over
+    // an eave is its far low corner.
+    //
+    // ── WITH WINGS (d3Massing) ── rg holds the CENTRE, its u shifted by uc, so every position here is
+    // in the centre's u: a cap-end porch stands at centerU - uc (in front of the centre section, or
+    // centred on it when porchWidthFt sizes it), and an eave-wall porch on the OUTER wall, which sits
+    // at uOut = S/2 - eaveS x uc from the centre's middle (the wing's outer wall, or the centre's own
+    // eave wall on a side with no wing). Without wings uc is 0 and uOut is S/2: nothing moves.
+    const PSPAN = d3PorchSpan(roofCfg, bldgW, bldgH);
+    const onCap = PSPAN.onCap, span = PSPAN.span;
+    const eaveS = porchOut.wall === "south" || porchOut.wall === "east" ? 1 : -1;
+    const zMid = L / 2 + (onCap ? 0 : PSPAN.centerU);          // the porch's middle along the ridge (eave wall)
+    const cxU = onCap ? PSPAN.centerU - mass.uc : 0;           // the porch's middle across the cap, in rg's u
+    const uOut = mass.S / 2 - eaveS * mass.uc;                 // the outer eave wall's line, in rg's u
+    const topH = d3PorchWallTopFt(roofCfg, bldgW, bldgH, H);
+    const attachFt = Number(roofCfg.porchAttachFt) || 0;
+    // The style's post count, porch-roof pitch and steps (d3PorchFraming, 2026-09-25): all null on
+    // every style that does not give them, which builds today's porch exactly.
+    const framing = d3PorchFraming(roofCfg);
+    const g0 = d3PorchGeom(span, topH, D, trimFace, Infinity, attachFt, framing);
     const reach = g0.side + g0.sizes.SIDE_OV;
     const zFace = atZero ? -(g0.dWall + 0.005) : L + g0.dWall + 0.005;
-    const overPorch = [(v) => v.x + reach, (v) => reach - v.x, (v) => (atZero ? zFace - v.z : v.z - zFace)];
+    const overPorch = onCap
+      ? [(v) => (v.x - cxU) + reach, (v) => reach - (v.x - cxU), (v) => (atZero ? zFace - v.z : v.z - zFace)]
+      : [(v) => v.z - (zMid - reach), (v) => (zMid + reach) - v.z, (v) => eaveS * v.x - (uOut + g0.dWall + 0.005)];
     const lowestOverPorch = (o) => {
       const pos = o.geometry.attributes.position, idx = o.geometry.index;
       const n = idx ? idx.count : pos.count;
@@ -7984,11 +9351,25 @@ function buildShed3DModel(THREE, p) {
     rg.children.forEach((o) => {
       if (!o.isMesh || (o.userData && o.userData.ssPorch)) return;
       bb.setFromObject(o);                                     // also brings o.matrixWorld up to date
+      if (!onCap) {
+        if (eaveS * (eaveS > 0 ? bb.max.x : bb.min.x) <= uOut + g0.dWall + 0.005) return;
+        capY = Math.min(capY, lowestOverPorch(o) - 0.03);
+        return;
+      }
       const past = atZero ? -bb.min.z : bb.max.z - L;
-      if (past <= g0.dWall + 0.005 || bb.max.x < -reach || bb.min.x > reach) return;
-      capY = Math.min(capY, (o.userData && o.userData.ssLeanTo ? lowestOverPorch(o) : bb.min.y) - 0.03);
+      if (past <= g0.dWall + 0.005 || bb.max.x < cxU - reach || bb.min.x > cxU + reach) return;
+      // A porch the style has SIZED (porchWidthFt) or HUNG (porchAttachFt) is measured by what is
+      // really over it, like the lean-to: a rake's box is its eave corner, which a narrow porch in the
+      // middle of a wide gable never reaches, and which would hold a porch the style hangs up in the
+      // gable down at the plate. Without either key, the box, as it always was. A wing
+      // (userData.ssWing, 2026-09-24) is measured the lean-to's way too: only its inner strip is over
+      // a centre porch, and its box's lowest corner is the wing's OUTER eave, feet away to the side.
+      capY = Math.min(capY, ((o.userData && (o.userData.ssLeanTo || o.userData.ssWing)) || attachFt > 0 || Number(roofCfg.porchWidthFt) > 0 ? lowestOverPorch(o) : bb.min.y) - 0.03);
     });
-    const geom = d3PorchGeom(S, H, D, trimFace, capY);
+    // And under the ceiling the building itself sets (d3PorchCapFt, which the panel's readout reads
+    // too): the outline in the wall's own plane, which nothing above measures on a flush roof, and on
+    // an eave wall the eave over it. On every stored style that is H - 0.2, where the porch already is.
+    const geom = d3PorchGeom(span, topH, D, trimFace, Math.min(capY, d3PorchCapFt(roofCfg, bldgW, bldgH, H, trimFace)), attachFt, framing);
     const { POST, HDR_H, HDR_D, RAF_W, RAF_D, PR_T, SHEATH, SIDE_OV, CHEEK_T, FAS_T } = geom.sizes;
     const { pitch, yHigh, side, dWall, dPost, dEnd } = geom;
     const ang = Math.atan(pitch), cosA = Math.cos(ang), sinA = Math.sin(ang);
@@ -8035,7 +9416,7 @@ function buildShed3DModel(THREE, p) {
     pg.add(part(hdr, "header"));
     // Posts, evenly spaced, the outer two flush with the corner boards. A centre post may stand in
     // front of a door: posts are a rule, not item-aware, because items move in scoped rebuilds that
-    // never rebuild the roof.
+    // never rebuild the roof. How many is geom.bays + 1: the 8.5 ft rule, or roof.porchPosts.
     for (let i = 0; i <= geom.bays; i++) {
       const post = box(woodMat, POST, geom.postH, POST);
       post.position.set(-(side - POST / 2) + (i * 2 * (side - POST / 2)) / geom.bays, geom.postH / 2, dPost);
@@ -8074,7 +9455,9 @@ function buildShed3DModel(THREE, p) {
         pg.add(part(fill, "cornerFill"));
       }
       // The rake trim along the porch roof's side edge.
-      pg.add(part(onSlope(trimMat, dWall, dEnd, s * (side + SIDE_OV - 0.04), 0.08, 0.28, -0.06), "rake"));
+      // 0.005 ft proud of the sheet's side face in the new frame and with wings, for the main rake's
+      // reason (coplanar faces stipple); every other porch keeps its plane.
+      pg.add(part(onSlope(fasciaMat, dWall, dEnd, s * (side + SIDE_OV - 0.04 + ((NEW_FRAME || mass.wings.length) ? 0.005 : 0)), 0.08, 0.28, -0.06), "rake"));
     }
     // The board and the dark trim face in front of it, both the roof's full width, which closes the
     // corners past the cheeks and rake trims.
@@ -8090,19 +9473,24 @@ function buildShed3DModel(THREE, p) {
     pg.add(part(board, "board"));
     const FASCIA_WOOD = 0.15, dripTop = yTop(dEnd) + 0.02;
     const dripH = Math.max(0.16, dripTop - (boardBot + FASCIA_WOOD));
-    const drip = box(trimMat, 2 * (side + SIDE_OV), dripH, 0.05);
+    const drip = box(fasciaMat, 2 * (side + SIDE_OV), dripH, 0.05);
     drip.position.set(0, dripTop - dripH / 2, dEnd + 0.025);
     pg.add(part(drip, "drip"));
     // The ledger on the wall under the rafters: 0.04 ft proud of any casing (casings face at
     // trimFace), its ends buried in the corner boards.
     const LED_H = 0.3, ledFace = trimFace + 0.04;
-    const ledger = box(trimMat, S, LED_H + RAF_D, ledFace);
+    // In the new frame it is porch framing, stained like the rafters it carries (Farmstand's ledger is
+    // wood; a trim-white board there read as a stripe across the wall). Outside it, trim as it was.
+    const ledger = box(NEW_FRAME ? woodMat : trimMat, span, LED_H + RAF_D, ledFace);
     ledger.position.set(0, geom.ceilWall + RAF_D - (LED_H + RAF_D) / 2, ledFace / 2);
     pg.add(part(ledger, "ledger"));
     // DECK at floor level: boards parallel to the wall with 0.03 ft gaps, a rim on the three open
-    // sides, and a dark plane under the gaps so they do not show grass. The floor is never raised,
-    // so the rim is the 0.23 ft left inside the slab's band, not the real building's 0.6 ft board.
-    const DECK_T = 0.09, BOARD = 0.46, GAP = 0.03, RIM_T = 0.12, RIM_H = Math.max(0.1, D3.FLOOR_T - DECK_T - 0.03);
+    // sides, and a dark plane under the gaps so they do not show grass. At grade the rim is the
+    // 0.23 ft left inside the slab's band, not the real building's 0.6 ft board. On a RAISED floor
+    // (blocks or piers, 2026-09-25) there is room under it: the rim is a real band board, up to half
+    // a foot deep, and the deck gets supports of its own below.
+    const DECK_T = 0.09, BOARD = 0.46, GAP = 0.03, RIM_T = 0.12;
+    const RIM_H = RAISED ? Math.max(0.1, Math.min(0.5, GRADE - DECK_T - 0.2)) : Math.max(0.1, D3.FLOOR_T - DECK_T - 0.03);
     const nB = Math.max(1, Math.round((D - dWall) / (BOARD + GAP)));
     const boardStep = (D - dWall) / nB;
     for (let i = 0; i < nB; i++) {
@@ -8121,13 +9509,87 @@ function buildShed3DModel(THREE, p) {
     const under = box(mat("#3B3024", { roughness: 1 }), 2 * side - 2 * RIM_T, 0.02, D - dWall - RIM_T);
     under.position.set(0, -DECK_T - 0.06, (dWall + D - RIM_T) / 2);
     deck.add(part(under, "deckVoid"));
-    [pg, deck].forEach((grp) => { grp.position.z = atZero ? 0 : L; grp.rotation.y = atZero ? Math.PI : 0; });
+    // THE DECK'S OWN SUPPORTS on a raised floor (2026-09-25): the building's blocks or piers
+    // (addSupport), from the rim's underside down to the grass, one under every post along the
+    // front rim with its outer face at the rim's, and a second row across the middle of a deck more
+    // than 7 ft deep. The wall side rides on the building's ledger. Tagged "deckSupport"; none are
+    // built at grade.
+    if (RAISED) {
+      const top = -DECK_T - RIM_H;
+      const outer = side - POST / 2;
+      const rows = [D - (RAISED === "piers" ? 0.5 : 1 / 3)];
+      if (D - dWall > 7) rows.push((dWall + D) / 2);
+      rows.forEach((dz) => {
+        for (let i = 0; i <= geom.bays; i++) {
+          const n0 = deck.children.length;
+          addSupport(deck, -outer + (i * 2 * outer) / geom.bays, dz, top, true);
+          for (let k = n0; k < deck.children.length; k++) part(deck.children[k], "deckSupport");
+        }
+      });
+    }
+    // STEPS (roof.porchSteps, 2026-09-25): off the deck's FRONT edge, standing on the grass, every
+    // number d3PorchStepsGeom's. Lumber like the deck: a tread per step, a closed riser under each,
+    // and a stringer either side cut to the steps' outline. Their own group in the deck group, so
+    // they sit with the floor (look-inside keeps them) and turn with the porch onto its wall;
+    // tagged ssPorchPart "steps" with the side in ssPorchSteps, so anything that places things
+    // against the deck's edge (the harness, a ramp on that wall) can find them. Nothing is built
+    // without the key, so every porch before it is unchanged.
+    const stepsGeom = d3PorchStepsGeom(geom, D, framing.steps, GRADE);
+    if (stepsGeom) {
+      const { x: sx, w: sw, count, rise, tread, d0, grade } = stepsGeom;
+      const TREAD_T = Math.min(0.09, rise * 0.6), STR_T = 0.125, RISER_T = 0.06, NOSE = 0.03, EPS = 0.005;
+      const topOf = (k) => grade + (count + 1 - k) * rise;          // k = 1 is the step next to the deck
+      const frontOf = (k) => d0 + EPS + k * tread;                  // its front edge, out from the wall
+      const st = new THREE.Group();
+      st.userData.ssPorchPart = "steps";
+      st.userData.ssPorchSteps = stepsGeom.where;
+      // The risers a shade darker than the treads, as they are in daylight under the tread's nose;
+      // in one flat colour a flight of steps read as a single block.
+      const riserMat = woodMat.clone();
+      riserMat.color.multiplyScalar(0.72);
+      for (let k = 1; k <= count; k++) {
+        const t = box(woodMat, sw, TREAD_T, tread);
+        t.position.set(sx, topOf(k) - TREAD_T / 2, frontOf(k) - tread / 2);
+        st.add(part(t, "stepTread"));
+        const rh = topOf(k) - TREAD_T - grade;
+        if (rh > 0.005) {
+          const r = box(riserMat, sw - 2 * STR_T - 0.02, rh, RISER_T);
+          r.position.set(sx, grade + rh / 2, frontOf(k) - NOSE - RISER_T / 2);
+          st.add(part(r, "stepRiser"));
+        }
+      }
+      // The stringer's outline, shape x = d and y = up: along the grass to the bottom step's riser,
+      // then up and back under each tread in turn to the deck's edge.
+      const sh = new THREE.Shape();
+      sh.moveTo(d0 + EPS, grade);
+      sh.lineTo(frontOf(count) - NOSE, grade);
+      for (let k = count; k >= 1; k--) {
+        sh.lineTo(frontOf(k) - NOSE, topOf(k) - TREAD_T);
+        sh.lineTo(k > 1 ? frontOf(k - 1) - NOSE : d0 + EPS, topOf(k) - TREAD_T);
+      }
+      const sg = new THREE.ExtrudeGeometry(sh, { depth: STR_T, bevelEnabled: false });
+      for (const s of [-1, 1]) {
+        const str = new THREE.Mesh(s > 0 ? sg : sg.clone(), woodMat);
+        str.rotation.y = -Math.PI / 2;                    // shape x -> d, extrusion -> -x
+        // Outer faces 0.01 inside the treads' ends, so the two never share a plane.
+        str.position.x = s > 0 ? sx + sw / 2 - 0.01 : sx - sw / 2 + 0.01 + STR_T;
+        st.add(part(str, "stringer"));
+      }
+      deck.add(st);
+      porchStepsGroup = st;
+      geom.steps = stepsGeom;
+    }
+    // A cap end: out along local z from z = 0 or L, centred at cxU across it (centerU in rg's u). An
+    // eave wall: out along u from the outer wall at u = eaveS x uOut, a quarter turn so the porch's
+    // across axis runs down the ridge, centred at zMid.
+    if (onCap) [pg, deck].forEach((grp) => { grp.position.z = atZero ? 0 : L; grp.rotation.y = atZero ? Math.PI : 0; if (cxU) grp.position.x = cxU; });
+    else [pg, deck].forEach((grp) => { grp.position.set(eaveS * uOut, 0, zMid); grp.rotation.y = eaveS * Math.PI / 2; });
     pg.userData.ssPorch = "roof";
     rg.add(pg);
     porchDeckGroup = new THREE.Group();
     porchDeckGroup.userData.ssPorch = "deck";
     porchDeckGroup.add(deck);
-    porchCapZ = atZero ? 0 : L;
+    porchCapZ = onCap ? (atZero ? 0 : L) : null;
     return geom;
   })();
   // ── PLATE BAND (roof.plateBand, 2026-09-17) ──
@@ -8146,9 +9608,13 @@ function buildShed3DModel(THREE, p) {
     [[0, -1, capOut0], [L, 1, capOutL]].forEach(([z0, s, co]) => {
       if (capPorchEnd === z0) return;
       const back = Math.min(co, T / 2) - 0.01, face = Math.max(trimFace, capReliefFace(co)) + 0.03;
-      const drop = porchGeom && porchCapZ === z0 ? Math.max(0, H - 0.2 - porchGeom.yHigh) : 0;
+      // ...unless the style sets where the porch roof meets the wall (roof.porchAttachFt), or wings
+      // hold the porch roof down under their own roofs: the siding showing between the two is then
+      // the point, not a gap. The band sits at the centre's eave with wings (Hr = Hc).
+      const drop = porchGeom && porchCapZ === z0 && !(Number(roofCfg.porchAttachFt) > 0) && !mass.wings.length ? Math.max(0, Hr - 0.2 - porchGeom.yHigh) : 0;
       const band = box(trimMat, S + 2 * (trimFace + 0.01), 0.3 + drop, face - back);
-      band.position.set(0, H + SS_PLATE_BAND_TOP - 0.15 - drop / 2, z0 + s * (back + face) / 2);
+      // A ROOF STEP's back cap stands on the rear section's plate.
+      band.position.set(0, (z0 === 0 && rearProf ? rearProf.H : Hr) + SS_PLATE_BAND_TOP - 0.15 - drop / 2, z0 + s * (back + face) / 2);
       band.userData.ssPorch = "band";
       rg.add(band);
     });
@@ -8211,7 +9677,15 @@ function buildShed3DModel(THREE, p) {
     // nobody builds, and the priced one is the one that has to be there. The other end keeps its.
     const ends = [END0, ENDL].filter((end) => !(end === END0 ? gableVentAt0 : gableVentAtL));
     const ventMat = ends.length ? louverMat(vH) : null;
-    ends.forEach((end) => drawCapVent(rg, end, vCu, vCy, vW, vH, F, trimMat, ventMat));
+    ends.forEach((end) => {
+      // A ROOF STEP's back cap is the rear section's gable, with the vent laid out in it (or none).
+      if (end === END0 && rearProf) {
+        const b = styleVentBack;
+        if (b) drawCapVent(rg, end, b.vCu, b.vCy, b.vW, b.vH, b.F, trimMat, louverMat(b.vH));
+        return;
+      }
+      drawCapVent(rg, end, vCu, vCy, vW, vH, F, trimMat, ventMat);
+    });
   }
   // A PLACED gable vent: the same drawCapVent, in its own group so it is PICKABLE. The pick raycasts
   // openingsGroup and interiorGroup only (rg is neither), so it goes into openingsGroup with rg's
@@ -8224,32 +9698,126 @@ function buildShed3DModel(THREE, p) {
   placedGableVents.forEach((v) => {
     const vg = new THREE.Group();
     vg.userData = { itemId: v.it.id, wallItem: true, wall: v.it.wall, gable: true };
-    if (uAxisIsX) { vg.position.z = -L / 2; }
-    else { vg.rotation.y = -Math.PI / 2; vg.position.x = L / 2; }
+    if (uAxisIsX) { vg.position.z = -L / 2; vg.position.x = mass.uc; }
+    else { vg.rotation.y = -Math.PI / 2; vg.position.x = L / 2; vg.position.z = mass.uc; }
     const f = v.fit;
-    drawCapVent(vg, v.atZero ? END0 : ENDL, f.u, (f.y0 + f.y1) / 2, f.w, f.h, f.F, v.it.colorHex ? mat(v.it.colorHex) : trimMat, louverMat(f.h));
+    drawCapVent(vg, v.atZero ? END0 : ENDL, f.u - mass.uc, (f.y0 + f.y1) / 2, f.w, f.h, f.F, v.it.colorHex ? mat(v.it.colorHex) : trimMat, louverMat(f.h));
     openingsGroup.add(vg);
   });
   addCapReliefStrips(capVentRects0, capVentRectsL);
-  if (uAxisIsX) { rg.position.z = -L / 2; }
-  else { rg.rotation.y = -Math.PI / 2; rg.position.x = L / 2; }
+  // The WINGS' gable triangles carry the proud relief too (wings, 2026-09-24): stepped from the wall
+  // origin like the centre's and the wall's below, each stopped on the wing roof's line at its
+  // lower edge, and none straddling the step where the centre wall begins.
+  if (capHasStrips) {
+    mass.wings.forEach((g) => {
+      const s = g.side, bs = clad.stepFt, halfW = clad.relief === "rib" ? 0.05 : 0.07;
+      const reliefMat = clad.reliefTrim ? battenMat : wallMat;
+      const face = g.u0 + s * (T / 2);
+      const lo = Math.min(g.u1, face) + halfW + 0.01, hi = Math.max(g.u1, face) - halfW - 0.01;
+      for (let k = 1; k * bs < mass.S; k++) {
+        const u = k * bs - mass.S / 2;
+        if (u < lo || u > hi) continue;
+        const yTop = H + Math.abs(u + s * halfW - g.u1) * g.pitch;
+        if (yTop <= H + 0.05) continue;
+        [-capStripOut(capOut0), L + capStripOut(capOutL)].forEach((z) => {
+          const st = box(reliefMat, halfW * 2, yTop - H, capStripDepth);
+          st.position.set(u - mass.uc, (H + yTop) / 2, z);
+          st.userData.ssWing = s;
+          rg.add(st);
+        });
+      }
+    });
+  }
+  // LAP courses carry on across a wing's triangle too, at the wall's own depth and in step with the
+  // wall below and the centre wall beside it, each cut short under the wing roof: the courses on
+  // the centre's wall would otherwise end in mid-air at the step, their cut ends catching the light.
+  // Only on a flush cap (the wall's face), which is where the wall's courses stand.
+  if (clad.relief === "lap" && capOut0 >= T / 2 - 1e-6 && capOutL >= T / 2 - 1e-6) {
+    mass.wings.forEach((g) => {
+      const s = g.side, face = g.u0 + s * (T / 2);
+      if (!(g.pitch > 1e-3)) return;
+      for (let y = clad.stepFt; y < H + (g.w - T / 2) * g.pitch - 0.05; y += clad.stepFt) {
+        if (y < H - 0.15) continue;   // the wall's own courses run to H - 0.15
+        // Where the wing roof's line clears the course's top by a hair, out to the clerestory's face.
+        const uIn = g.u1 - s * Math.max(trimFace, (y + 0.06 - H) / g.pitch);
+        if ((face - uIn) * -s < 0.1) continue;
+        const a = Math.min(uIn, face), b = Math.max(uIn, face);
+        [-CLAD_RELIEF_OUT, L + CLAD_RELIEF_OUT].forEach((z) => {
+          const st = box(wallMat, b - a, 0.08, 0.1);
+          st.position.set((a + b) / 2 - mass.uc, y, z);
+          st.userData.ssWing = s;
+          rg.add(st);
+        });
+      }
+    });
+  }
+  // + uc: with wings rg holds the CENTRE, whose middle sits uc across the span (0 without wings).
+  if (uAxisIsX) { rg.position.z = -L / 2; rg.position.x = mass.uc; }
+  else { rg.rotation.y = -Math.PI / 2; rg.position.x = L / 2; rg.position.z = mass.uc; }
   roofGroup.add(rg);
   // The projecting porch's deck joins root with rg's transform, so look-inside keeps it like the floor.
   if (porchDeckGroup) {
     porchDeckGroup.position.copy(rg.position);
     porchDeckGroup.rotation.copy(rg.rotation);
     root.add(porchDeckGroup);
+    // On a raised floor the deck is dark underneath too (addUnderShade): over the deck's own boards
+    // and rim, read off the placed group, so it follows the porch onto whichever wall it stands on.
+    if (RAISED) {
+      porchDeckGroup.updateMatrixWorld(true);
+      const db = new THREE.Box3(), mb = new THREE.Box3();
+      porchDeckGroup.traverse((o) => {
+        if (!o.isMesh || !o.userData || (o.userData.ssPorchPart !== "deckBoard" && o.userData.ssPorchPart !== "rim")) return;
+        db.union(mb.setFromObject(o));
+      });
+      if (!db.isEmpty()) addUnderShade((db.min.x + db.max.x) / 2, (db.min.z + db.max.z) / 2, db.max.x - db.min.x, db.max.z - db.min.z);
+    }
   }
   // Corner trim boards live in roofGroup so "look inside" hides them with the roof.
   // Half-extent from trimFace, not a constant of its own: the post must reach past the
   // cladding's proudest surface or the siding renders through it — the 2026-08-27 lap bug,
   // where this face sat at 0.22 against strips reaching 0.23. On panel this is the old
   // T/2 + 0.07 exactly.
+  // cornerMat since 2026-09-24 (colors.corner, else the trim colour). Each board stands as tall as
+  // the taller of the two walls it closes, read at the corner itself from the same per-wall tops the
+  // walls are built to (d3WallTopFt): H at every corner of an ordinary building and at a wing's outer
+  // corner, Hc on the side of a raised centre that has no wing, and at a new-frame shed's high wall
+  // up the tall corner to just under the roof line at its inner face, so it covers the corner notch
+  // the whole way without poking up through the slab on a steep pitch.
   [[-bldgW / 2, -bldgH / 2], [bldgW / 2, -bldgH / 2], [-bldgW / 2, bldgH / 2], [bldgW / 2, bldgH / 2]].forEach((c) => {
     const half = Math.max(T / 2 + 0.07, trimFace);
-    const post = box(trimMat, half * 2, H, half * 2);
-    post.position.set(c[0], H / 2, c[1]);
+    const nsW = c[1] < 0 ? "north" : "south", ewW = c[0] < 0 ? "west" : "east";
+    // Along each wall from its west/north end, in the PLAN's frame (d3WallTops').
+    const cH = Math.max(
+      d3WallTopFt(roofCfg, bldgW, bldgH, H, nsW, c[0] + bldgW / 2, c[0] + bldgW / 2, porchWall === nsW),
+      d3WallTopFt(roofCfg, bldgW, bldgH, H, ewW, c[1] + bldgH / 2, c[1] + bldgH / 2, porchWall === ewW));
+    let cTop = cH;
+    if (cH > H + 1e-9) {
+      const uc = (uAxisIsX ? c[0] : c[1]) - mass.uc;   // in rg's u: the centre's, with wings
+      // Under the roof over THAT corner: a roof step's rear section at the back (north) corners.
+      cTop = Math.max(H, Math.min(cH, (rearProf && c[1] < 0 ? rearProf.yAt : profYAt)(uc - Math.sign(uc) * half)));
+    }
+    // On a raised floor (2026-09-25) the board runs on down over the siding's skirt to its bottom
+    // edge, as the cladding does; 0 on every other building, where it stands on the floor.
+    const cBot = foundationInfo ? -foundationInfo.skirt : 0;
+    const post = box(cornerMat, half * 2, cTop - cBot, half * 2);
+    post.position.set(c[0], (cTop + cBot) / 2, c[1]);
+    if (cTop !== H) post.userData.ssCorner = "tall";
     roofGroup.add(post);
+  });
+  // THE CLERESTORY'S CORNERS: a board at each end of every centre side wall above a wing, from its
+  // foot in the wing roof up to the centre's eave, over the joint where the clerestory meets the
+  // centre's gable wall (and where the two walls' boxes share a plane, so nothing flickers there).
+  mass.wings.forEach((g) => {
+    const half = Math.max(T / 2 + 0.07, trimFace);
+    const yFoot = H + Math.max(0, g.w - half) * g.pitch + D3.ROOF_T * 0.5;
+    const hPost = mass.Hc - yFoot;
+    if (!(hPost > 0.3)) return;
+    [-L / 2, L / 2].forEach((e) => {
+      const post = box(cornerMat, half * 2, hPost, half * 2);
+      post.position.set(uAxisIsX ? g.u0 : e, yFoot + hPost / 2, uAxisIsX ? e : g.u0);
+      post.userData.ssWing = g.side;
+      roofGroup.add(post);
+    });
   });
 
   // ── Interior + attached items (plan §4.3, §4.5, §4.6) ──
@@ -8297,9 +9865,11 @@ function buildShed3DModel(THREE, p) {
       // The same plan-frame -> wall-frame shift and porch clamp buildOneWall gives an opening.
       const alongRaw = (wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale) - (wf.a0Ft || 0);
       const along = Math.max(0.3, Math.min(alongRaw, wf.len - 0.3));
+      // The wall's own top where the device hangs (wings: Hc across a raised centre; H otherwise).
+      const wTop = topOver(wf, along, along);
       g.rotation.y = Math.atan2(wf.N[0], wf.N[1]);   // local +z -> exterior, local x -> along
       g.position.set(wf.O[0] + wf.U[0] * along, 0, wf.O[1] + wf.U[1] * along);
-      const exterior = /flood|exterior|outdoor/i.test(name) || (hFt != null && hFt >= H - 0.25);
+      const exterior = /flood|exterior|outdoor/i.test(name) || (hFt != null && hFt >= wTop - 0.25);
       if (exterior) {
         // Profile u is the along-wall world coordinate on a gable end: world x when the ridge
         // runs along z (north/south are the ends), world z otherwise (see the cap UV comment).
@@ -8312,8 +9882,12 @@ function buildShed3DModel(THREE, p) {
         // slope loop actually built: 0.45 under it leaves the tipped head's top ~0.24 ft clear,
         // and never higher than H - 0.75. The harness asserts that gap against the fascia it
         // measures in the scene.
-        const EAVE_CAP = Math.min(H - 0.75, eaveHangY - 0.45);
-        let top = gableEnd ? Math.max(EAVE_CAP, profYAt(u) - 0.5) : EAVE_CAP;
+        // On a wall standing above H (a raised centre's own wall, a shed's high wall) it hangs under that
+        // wall's top instead, and under THAT wall's own eave finish when one overhangs it (eaveHangBy):
+        // the centre's fascia and soffit hang below its wall top, and a lamp at wTop - 0.75 sat in them.
+        const ownHang = eaveHangBy[it.wall] != null ? eaveHangBy[it.wall] - 0.45 : Infinity;
+        const EAVE_CAP = wTop > H + 0.01 ? Math.min(wTop - 0.75, ownHang) : Math.min(H - 0.75, eaveHangY - 0.45);
+        let top = gableEnd ? Math.max(EAVE_CAP, (mass.wings.length ? d3MassingTopAt(mass, u) : (rearProf && it.wall === "north" ? rearProf.yAt : profYAt)(u)) - 0.5) : EAVE_CAP;
         // On a projecting porch's wall it hangs under the porch ceiling, the way it hangs under an
         // eave: rising into the gable would put it behind the porch roof.
         if (porchGeom && it.wall === porchOut.wall) top = Math.min(top, porchGeom.ceilWall - 0.45);
@@ -8339,7 +9913,7 @@ function buildShed3DModel(THREE, p) {
         const pd = breaker ? 0.25 : 0.04;
         // Kept on the wall whatever the stored height says: the centre may not put the plate
         // through the floor or above the plate line.
-        const y = Math.max(ph / 2 + 0.05, Math.min(hFt != null ? hFt : 1.5, H - ph / 2 - 0.05));
+        const y = Math.max(ph / 2 + 0.05, Math.min(hFt != null ? hFt : 1.5, wTop - ph / 2 - 0.05));
         const zBack = -(T / 2);                        // the interior face
         const plate = add(g, box(mat(breaker ? "#9CA3AF" : "#F1F0EA", breaker ? { roughness: 0.5, metalness: 0.4 } : { roughness: 0.55 }), pw, ph, pd));
         plate.position.set(0, y, zBack - pd / 2);
@@ -8353,11 +9927,13 @@ function buildShed3DModel(THREE, p) {
       }
     } else {
       g.position.set(ftX(it.x), 0, ftZ(it.y));
+      // The LOCAL ceiling (wings: the centre's plate under the raised centre, H under a wing).
+      const cH = d3CeilingFt(roofCfg, bldgW, bldgH, H, g.position.x, g.position.z);
       if (/fan/i.test(name)) {
-        const Y = H - 0.6;
+        const Y = cH - 0.6;
         const hubMat = mat("#374151", { roughness: 0.5, metalness: 0.3 });
         const rod = add(g, cyl(hubMat, 0.03, 0.6));
-        rod.position.y = H - 0.3;
+        rod.position.y = cH - 0.3;
         const hub = add(g, cyl(hubMat, 0.2, 0.22));
         hub.position.y = Y;
         const bladeMat = mat("#8B6B4A", { roughness: 0.8 });
@@ -8371,10 +9947,47 @@ function buildShed3DModel(THREE, p) {
       } else {
         const lit = /light|lamp|led|bulb/i.test(name) || !name;
         const disc = add(g, cyl(lit ? glow() : mat("#F1F0EA"), 0.45, 0.08));
-        disc.position.y = H - 0.06;
+        disc.position.y = cH - 0.06;
       }
     }
     interiorGroup.add(g);
+  };
+  // ── STEPS AND A CUSTOMER'S RAMP ON THE PORCH WALL (fix, 2026-09-25) ──
+  // A ramp on the projecting porch's wall starts at the deck's edge and runs 3 ft out, which is
+  // exactly where the porch's steps stand, and neither looked for the other: a ramp to a centred
+  // door on a porch with centre steps was drawn through the treads and stringers. Where a ramp
+  // overlaps the steps, the STEPS are not drawn -- the customer placed the ramp, and it is how
+  // that doorway is reached. Read off both groups' footprints in root's frame (plan x and z), so
+  // neither frame's arithmetic is copied here, and run after EVERY interior build, full or a
+  // live drag's, so dragging the ramp away brings the steps back. The steps stay in the scene,
+  // hidden, marked userData.ssHiddenBy = "ramp" (porchProbe asserts the two never both show).
+  const planBox = (obj) => {
+    const out = { x0: Infinity, x1: -Infinity, z0: Infinity, z1: -Infinity };
+    const v = new THREE.Vector3();
+    obj.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+      const m = new THREE.Matrix4();
+      for (let n = o; n && n !== root; n = n.parent) { if (n.matrixAutoUpdate) n.updateMatrix(); m.premultiply(n.matrix); }
+      const b = o.geometry.boundingBox;
+      for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
+        v.set(x, y, z).applyMatrix4(m);
+        out.x0 = Math.min(out.x0, v.x); out.x1 = Math.max(out.x1, v.x);
+        out.z0 = Math.min(out.z0, v.z); out.z1 = Math.max(out.z1, v.z);
+      }
+    });
+    return out;
+  };
+  const porchStepsVsRamps = () => {
+    if (!porchStepsGroup || !porchOut) return;
+    const st = planBox(porchStepsGroup);
+    const hit = interiorGroup.children.some((g) => {
+      if (!(g.userData && g.userData.ssRamp === porchOut.wall)) return false;
+      const r = planBox(g);
+      return r.x0 < st.x1 - 0.01 && r.x1 > st.x0 + 0.01 && r.z0 < st.z1 - 0.01 && r.z1 > st.z0 + 0.01;
+    });
+    porchStepsGroup.visible = !hit;
+    porchStepsGroup.userData.ssHiddenBy = hit ? "ramp" : null;
   };
   const buildInterior = (itemsNow) => itemsNow.forEach((it) => {
     const c = itemTypes[it.type];
@@ -8546,8 +10159,17 @@ function buildShed3DModel(THREE, p) {
       if (!wf) return;
       const w = it.widthFt || 3;
       const along = wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale;
-      const run = 3, drop = D3.FLOOR_T;
+      // A RAISED FLOOR LENGTHENS THE RAMP (2026-09-25): it always runs from the floor down to the
+      // grass, at 1 in 4 or gentler -- 3 ft as it has always been while that holds (a floor up to
+      // 0.75 ft), and 4 ft of run for every foot of drop past it, so a 1.1 ft floor's ramp is 4.4 ft
+      // and a 3 ft floor's 12 ft. Lengthened rather than refused: the customer placed it, the price
+      // is per ramp, and a ramp that stops in mid-air, or vanishes, is the one drawing that is wrong
+      // whatever it costs. The 2D plan still draws its footprint at the wall; the calibration panel's
+      // floor height line says ramps are drawn longer. On a slab or skids drop is D3.FLOOR_T and the
+      // run 3, exactly as before.
+      const drop = GRADE, run = Math.max(3, 4 * drop);
       const g = new THREE.Group();
+      g.userData.ssRamp = it.wall;       // porchStepsVsRamps finds the ramps on the porch wall by it
       const deck = box(mat(D3_COLORS.ramp), w, 0.12, Math.sqrt(run * run + drop * drop));
       deck.rotation.x = Math.atan2(drop, run); // far end drops to grade
       deck.position.set(0, -drop / 2 + 0.06, run / 2);
@@ -8580,6 +10202,7 @@ function buildShed3DModel(THREE, p) {
     // textNote / line: 2D annotations with no 3D representation (plan §4.7).
   });
   buildInterior(items);
+  porchStepsVsRamps();
 
   root.add(wallsGroup);
   root.add(openingsGroup);
@@ -8617,9 +10240,28 @@ function buildShed3DModel(THREE, p) {
   // identical roof and could one day be narrowed to the label group alone.
   const sharedMats = new Set([wallMat, trimMat, battenMat]);
   // porch: the projecting porch's numbers as built (d3PorchGeom plus its depth and wall), or null.
-  // Read by tests/harness/porchProbe.mjs.
+  // Read by tests/harness/porchProbe.mjs. In the new frame it also carries d3PorchSpan's width and
+  // whether it stands on a cap end or an eave wall, and `frame` names the roof's axes and each
+  // wall's top (tests/harness/newFrame.mjs); outside it both are exactly what they were.
+  // cornerMat / fasciaMat and the colour role each follows (d3TrimKeyRole) are for setLiveColors.
   const model = { root, envGroup, wallMat, trimMat, battenMat, gableMat, roofGroup, openingsGroup, wallsGroup, interiorGroup, builtFrontWall: frontWall,
-    porch: porchGeom ? { ...porchGeom, D: porchOut.D, wall: porchOut.wall } : null };
+    cornerMat, fasciaMat,
+    cornerRole: d3TrimKeyRole(p.styleSpec && p.styleSpec.colors, "corner"),
+    fasciaRole: d3TrimKeyRole(p.styleSpec && p.styleSpec.colors, "fascia"),
+    porch: porchGeom ? { ...porchGeom, D: porchOut.D, wall: porchOut.wall, ...((NEW_FRAME || mass.wings.length) ? { span: d3PorchSpan(roofCfg, bldgW, bldgH).span, onCap: d3PorchSpan(roofCfg, bldgW, bldgH).onCap, centerU: d3PorchSpan(roofCfg, bldgW, bldgH).centerU } : {}) } : null };
+  if (NEW_FRAME) {
+    // S is the building's full span (mass.S): the roof section's own S is the centre's with wings.
+    model.frame = { uAxisIsX, S: mass.S, L, tallNeg, tops: Object.fromEntries(Object.keys(WALLS).map((w) => [w, WALLS[w].top])), porchWall };
+  }
+  // The massing this was built from (d3Massing: centre span, offset, eave, wings), for
+  // tests/harness/wings.mjs; nothing in the app reads it.
+  model.massing = mass;
+  // The roof step as built (d3RoofStep), for tests/harness/roofStep.mjs; absent without one.
+  if (STEP) model.roofStep = { stepFt: STEP.stepFt, rise: STEP.rise, Hf: STEP.Hf, Hb: STEP.Hb, pitch: STEP.pitch, pitchB: STEP.pitchB, rearPeak: rearProf.peak };
+  // The ground's depth below the floor's top (d3GradeFt) and, on blocks or piers, the skirt, runners
+  // and supports as built, for tests/harness/foundation.mjs; nothing in the app reads them.
+  model.grade = GRADE;
+  model.foundation = foundationInfo;
   model.rebuildWalls = (names, itemsNow) => {
     names.forEach((wname) => {
       if (!WALLS[wname]) return;
@@ -8638,6 +10280,7 @@ function buildShed3DModel(THREE, p) {
   model.rebuildInterior = (itemsNow) => {
     Array.from(interiorGroup.children).forEach((g) => { interiorGroup.remove(g); disposeSubtree(g, null); });
     buildInterior(itemsNow);
+    porchStepsVsRamps();
     setShadowFlags(interiorGroup);
   };
   return model;
@@ -8799,14 +10442,20 @@ async function d3OffscreenShots(p, opts) {
 function d3DefaultShotCamera(p) {
   const fw = p.frontWall || "south";
   const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw] || [0.35, 1];
-  const R = Math.max(p.bldgW, p.bldgH) * 0.5 + D3.WALL_H;
+  // D3.WALL_H unless the building would leave the frame (d3FrameHeightFt: a raised centre, a 20 ft
+  // wall), so every quote already in the field keeps exactly this shot.
+  const frameH = d3FrameHeightFt(p.style3d, p.bldgW, p.bldgH);
+  const R = Math.max(p.bldgW, p.bldgH) * 0.5 + frameH;
   const dist = R * 3.66;
   const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
   const camX = (OUT[0] / outLen) * dist, camZ = (OUT[1] / outLen) * dist;
+  // A raised floor's lowered ground (d3GradeLiftFt, 0 otherwise): frameH is measured from it, so the
+  // eye and the aim come down with it and the supports are in the shot.
+  const lift = d3GradeLiftFt(p.style3d);
   return [{
     fov: 34, far: dist * 10,
-    eye: [camX, dist * 0.5, camZ],
-    at: [0, D3.WALL_H * 0.45, 0],
+    eye: [camX, dist * 0.5 - lift, camZ],
+    at: [0, frameH * 0.45 - lift, 0],
     sun: [camX * 0.8, dist * 0.9, camZ * 0.8],
   }];
 }
@@ -8873,9 +10522,19 @@ const SS_EAVE_FRAME_WALLS = 1.27;
 // own frame of the same wall and they are going to be asked whether the two match. The
 // design's own camera sat at 48.6, half a right angle away, for no measurable gain.
 const SS_EAVE_YAW_DEG = 30;
-// The four the first pass labels, and the same list the server's SELF_CHECK_VIEWPOINTS holds.
-// Order matters: it is the order the pairs are shown in and the order the request is built in.
-const SS_SELFCHECK_VIEWS = ["front", "side", "eaveCorner", "corner"];
+// The viewpoints the first pass labels, and the same list the server's SELF_CHECK_VIEWPOINTS
+// holds. Order matters: it is the order the pairs are shown in and the order the request is
+// built in.
+//
+// `back` and `otherSide` JOINED ON 2026-09-24, appended so every pairing that already worked
+// keeps its place. Four views saw one end and one long side, so the far side and the back were
+// never compared -- and those are exactly where the wings on the other side, a porch on the back
+// wall and a shed's LOW wall are. They are wide views like `front` and `side`: `back` is the
+// frame the model labels square to the back wall (about front + 180), `otherSide` the one square
+// to the far side (about side + 180). Like every other camera here they are aimed at the
+// azimuth the MODEL gave that frame; nothing below derives one view's angle from another's,
+// because a lap's real angles are not a uniform orbit (see ssSelfCheckCameras).
+const SS_SELFCHECK_VIEWS = ["front", "side", "eaveCorner", "corner", "back", "otherSide"];
 
 // ⚠️ WHERE AZIMUTH 0 POINTS, and this is the one number that has to agree with the prompt or
 // every pair is mirrored. The prompt says: "0 is square in front of the gable end the door is
@@ -8899,6 +10558,9 @@ function ssAzimuthDir(deg) {
 // d3ProjectingPorch's own wall arithmetic with the depth test taken out, because the anchor
 // exists whether or not the porch does.
 function d3FrontGableWall(roofCfg, bldgW, bldgH) {
+  // THE NEW FRAME (d3NewFrame): azimuth 0 is the FRONT, and the front is the south wall, whatever
+  // kind of wall it is and wherever porchEnd put a porch. The prompt's FRONT is the same wall.
+  if (d3NewFrame(roofCfg)) return "south";
   const front = ((roofCfg && roofCfg.porchEnd) || "front") !== "back";
   return d3RoofAxes(roofCfg, bldgW, bldgH).uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
 }
@@ -8921,7 +10583,9 @@ function ssFitDistance(f) {
   const fits = (d) => {
     const pitch = Math.atan2(f.lookY - f.eyeY, d);
     const fx = Math.cos(pitch), fy = Math.sin(pitch);
-    const pts = [[d - f.depthHalf, 0], [d + f.depthHalf, 0], [d, f.peak], [d - f.depthHalf, f.peak]];
+    // The base points sit on the floor, or on a raised floor's lowered ground (f.base, below 0).
+    const base = f.base || 0;
+    const pts = [[d - f.depthHalf, base], [d + f.depthHalf, base], [d, f.peak], [d - f.depthHalf, f.peak]];
     for (let i = 0; i < pts.length; i++) {
       const hx = pts[i][0], dy = pts[i][1] - f.eyeY;
       if (hx <= 0.5) return false;
@@ -8968,7 +10632,15 @@ function ssSelfCheckCameras(p, frameMap) {
   // gable and every gambrel the sanitiser will pass. Over-estimating costs a little air above
   // the ridge; under-estimating crops the peak, which is one of the four things the builder is
   // being asked to judge.
-  const peak = H + d3RoofAxes(roof, W, L).S * 0.62;
+  let peak = H + d3RoofAxes(roof, W, L).S * 0.62;
+  // A RAISED CENTRE (wings, d3Massing) stands above its outer walls by more than that allows for:
+  // frame its real ridge too, with the same half-foot of air. Unchanged without wings.
+  if (d3Massing(roof, W, L, H).wings.length) peak = Math.max(peak, d3ModelTopFt(spec, W, L) + 0.5);
+  // A RAISED FLOOR (d3GradeLiftFt, 2026-09-25) puts the ground `lift` further down than it has always
+  // been. The phone that filmed it was held at chest height above THAT ground, so the eye comes down
+  // by the lift, and the framing's base points go down to it, so the supports are in shot. 0 on
+  // every other building: every number below is the one it always was.
+  const lift = d3GradeLiftFt(spec);
   const out = [];
   for (let i = 0; i < SS_SELFCHECK_VIEWS.length; i++) {
     const view = SS_SELFCHECK_VIEWS[i];
@@ -8983,18 +10655,22 @@ function ssSelfCheckCameras(p, frameMap) {
     // is the support function of the rectangle, so this is right at 45° as well as at 0.
     const depthHalf = Math.abs(dir[0]) * W / 2 + Math.abs(dir[1]) * L / 2;
     const crossHalf = Math.abs(dir[1]) * W / 2 + Math.abs(dir[0]) * L / 2;
-    const eyeY = SS_SHOT.EYE_FT;
+    const eyeY = SS_SHOT.EYE_FT - lift;
     out.push(view === "eaveCorner"
       ? ssEaveCamera(dir, W, L, H, peak, depthHalf, crossHalf, frame, az)
-      : ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view));
+      : ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view, lift));
   }
   return out;
 }
 
-// The three wide views: where a person filming would have stood, at the angle they stood at.
-function ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view) {
-  const lookY = peak * 0.45;
-  const dist = ssFitDistance({ depthHalf, crossHalf, peak, eyeY, lookY, fovDeg: SS_SHOT.FOV });
+// The wide views (every one but the eave close-up): where a person filming would have stood,
+// at the angle they stood at.
+// `lift` (a raised floor's, 0 otherwise) frames from the lowered ground up: the aim sits 0.45 of the
+// way up from it, and the footprint's base points are on it.
+function ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view, lift) {
+  const lf = lift > 0 ? lift : 0;
+  const lookY = (peak + lf) * 0.45 - lf;
+  const dist = ssFitDistance({ depthHalf, crossHalf, peak, eyeY, lookY, fovDeg: SS_SHOT.FOV, base: -lf });
   const ex = dir[0] * dist, ez = dir[1] * dist;
   return {
     viewpoint: view, frame, azimuthDeg: az, fov: SS_SHOT.FOV, far: dist * 10,
@@ -9249,7 +10925,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // nudged sideways for a three-quarter view; the sun follows the camera side.
       const fw = frontWall || "south";
       const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw] || [0.35, 1];
-      const R = Math.max(bldgW, bldgH) * 0.5 + D3.WALL_H;
+      // frameH is D3.WALL_H — the framing this has always had — unless the building would leave the
+      // frame (d3FrameHeightFt): a raised centre, a 20 ft wall. The target below reads it too.
+      const frameH = d3FrameHeightFt(spec, bldgW, bldgH);
+      // A raised floor's lowered ground (d3GradeLiftFt, 2026-09-25; 0 on every other building):
+      // frameH is measured from it, so the eye, the orbit target and the sky dome come down with it
+      // and the blocks or piers are framed with the building.
+      const liftFt = d3GradeLiftFt(spec);
+      const R = Math.max(bldgW, bldgH) * 0.5 + frameH;
       // 34° lens (was 45°): the long-lens architectural look — less perspective
       // distortion on the box, matching how buildings are photographed. dist
       // carries the tan(22.5°)/tan(17°) ≈ 1.355 factor so framing is unchanged,
@@ -9274,7 +10957,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       scene.add(sun);
       // far covers the sky dome even at controls.maxDistance (2.5d + 6.5d < 10d).
       const camera = new THREE.PerspectiveCamera(34, 1, 0.1, dist * 10);
-      camera.position.set(camX, dist * 0.5, camZ);
+      camera.position.set(camX, dist * 0.5 - liftFt, camZ);
       // Sky dome: gradient + soft clouds on the inside of a hemisphere, slightly
       // past the horizon so no gap shows between grass edge and sky. Hidden by
       // the Landscape toggle along with the model's envGroup.
@@ -9283,7 +10966,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         new THREE.SphereGeometry(dist * 6.5, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2 + 0.14),
         new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, depthWrite: false })
       ) : null;
-      if (sky) { sky.position.y = -0.5; scene.add(sky); }
+      if (sky) { sky.position.y = -0.5 - liftFt; scene.add(sky); }
       // SmartBuild-style camera presets (3×3 grid), azimuth relative to the
       // FRONT wall so "F" always faces the side the 2D labels call FRONT.
       const setViewPreset = (relDeg, polDeg) => {
@@ -9570,15 +11253,35 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         const along = ((it.wall === "north" || it.wall === "south") ? it.x - mgX : it.y - mgY) / scale;
         return ssGableVentFit(spec.roof || D3_DEFAULT_ROOF, bldgW, bldgH, it.wall, spec.wallHeightFt || D3.WALL_H, it, along, it.ventRiseFt);
       };
+      // The wall's LOCAL top over an item (d3WallTopFt, wings 2026-09-24) — what the renderer's
+      // openingSpan clamps it under: Hc across a raised centre, H on a wing's end wall, the high eave
+      // on a new-frame shed's tall wall. On every wall of any other building it is the plate height,
+      // as before.
+      const wallTop3 = (it) => {
+        const Hn = spec.wallHeightFt || D3.WALL_H;
+        if (!it || !it.wall) return Hn;
+        const w = it.widthFt || (itemTypes[it.type] || {}).width || 0;
+        const ns = it.wall === "north" || it.wall === "south";
+        const len = ns ? bldgW : bldgH;
+        const a = Math.max(w / 2, Math.min((ns ? it.x - mgX : it.y - mgY) / scale, len - w / 2));
+        const rc = spec.roof || D3_DEFAULT_ROOF;
+        // A new-frame shed's high wall that a RECESSED porch has set back stops at H (d3WallTops'
+        // setBack), exactly as buildShed3DModel's porchWall builds it: the front or back wall, in
+        // the new frame, with a porch deeper than 0.5 ft left after its clamp and none projecting.
+        const recessed = !!d3ShedHighWall(rc, bldgW, bldgH) && !d3ProjectingPorch(rc, bldgW, bldgH)
+          && Math.min(Number(rc.porchDepthFt) || 0, bldgH - 4) > 0.5
+          && it.wall === ((rc.porchEnd || "front") !== "back" ? "south" : "north");
+        return d3WallTopFt(rc, bldgW, bldgH, Hn, it.wall, a - w / 2, a + w / 2, recessed);
+      };
       const openSpanOf = (it) => {
         const inchesFt = (v) => (Number(v) > 0 ? Number(v) / 12 : null);
-        const maxTop = (spec.wallHeightFt || D3.WALL_H) - 0.2;
+        const maxTop = wallTop3(it) - 0.2;
         // A VENT HAD NO BRANCH HERE, so it fell into the window's (it is a type:"window" item) and
         // its highlight and live dimensions sat at a window's 3'6" sill while the hole was cut
         // under the plate. Now the renderer's own two answers: the gable fit, else ssVentSpan.
         if (isVentItem(it)) {
           const gf = gableFit3(it);
-          return gf ? [gf.y0, gf.y1] : ssVentSpan({ ...it, ventZone: null }, spec.wallHeightFt || D3.WALL_H);
+          return gf ? [gf.y0, gf.y1] : ssVentSpan({ ...it, ventZone: null }, wallTop3(it));
         }
         if (it.type === "window") {
           const wh = Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.WINDOW_H, maxTop - 0.35);
@@ -9725,6 +11428,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         // write too -- otherwise picking a trim swatch recolours everything except the one
         // detail that makes board & batten legible.
         if (e.model.battenMat) e.model.battenMat.color.set(liveTrimCss);
+        // Corner boards and fascia (colors.corner / colors.fascia) follow whichever colour their key
+        // names (d3TrimKeyRole): the trim when absent, the body when it is the body's colour. A roof
+        // role or a fixed colour stays put here -- neither is a paint swatch.
+        [[e.model.cornerMat, e.model.cornerRole], [e.model.fasciaMat, e.model.fasciaRole]].forEach(([m, role]) => {
+          if (!m) return;
+          if (role === "body") m.color.set(liveBodyCss);
+          else if (role === "trim" || role == null) m.color.set(liveTrimCss);
+        });
         render();
       };
       // ── 3D placement pipeline (every item class, §10.4) ──
@@ -10262,7 +11973,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               // y = 0 is the interior floor (which is what Carolyn specified — "off the
               // floor, not off the ground"), and the header keeps its 0.2 ft.
               const wh = sp[1] - sp[0];
-              const maxTop = (spec.wallHeightFt || D3.WALL_H) - 0.2;
+              const maxTop = wallTop3({ ...it, ...sn }) - 0.2;   // the wall's own top where it lands (wings)
               const want = Math.max(0, Math.min(Math.round((p.y - wh / 2) * 4) / 4, Math.max(0, maxTop - wh)));
               const moved = sn.x !== it.x || sn.y !== it.y || sn.wall !== it.wall;
               if (moved || want !== it.sillFt) {
@@ -10494,7 +12205,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       };
 
       const controls = new OrbitControls(camera, canvasRef.current);
-      controls.target.set(0, D3.WALL_H * 0.45, 0);
+      controls.target.set(0, frameH * 0.45 - liftFt, 0);
       controls.maxPolarAngle = Math.PI * 0.495; // never below the ground plane
       controls.minDistance = R * 1.1;
       controls.maxDistance = dist * 2.5;
@@ -11160,8 +12871,16 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       // because there the wall height is the number being typed: framed for 8ft, a 16ft
       // wall puts the ridge outside the frustum, and this panel has no pan to recover it.
       const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw0] || [0.35, 1];
-      const fitH = (p) => Math.max(D3.WALL_H, Number(p.fitHeightFt) || 0);
+      // ...and never less than d3FrameHeightFt, which is D3.WALL_H unless the building would leave the
+      // frame (a raised centre, a 20 ft wall), so the designer's dock keeps its numbers too.
+      const fitH = (p) => Math.max(D3.WALL_H, Number(p.fitHeightFt) || 0, d3FrameHeightFt(p.style3d, p.bldgW, p.bldgH));
       const frameFor = (p) => { const r = Math.max(p.bldgW, p.bldgH) * 0.5 + fitH(p); return { R: r, dist: r * 3.66 }; };
+      // A raised floor's lowered ground (d3GradeLiftFt, 2026-09-25; 0 on every other building): the
+      // eye, the target and the sky dome come down by it, as in the modal. `framedLift` is the one the
+      // camera is set for now, so a floor height typed in the calibration panel moves the view with
+      // the ground (applyFraming) instead of tilting it.
+      const liftOf = (p) => d3GradeLiftFt(p.style3d);
+      let framedLift = liftOf(p0);
       const f0 = frameFor(p0);
       const R = f0.R, dist = f0.dist;
       const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
@@ -11180,7 +12899,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       scene.add(sun);
 
       const camera = new THREE.PerspectiveCamera(34, 1, 0.1, dist * 10);
-      camera.position.set(camX, dist * 0.5, camZ);
+      camera.position.set(camX, dist * 0.5 - framedLift, camZ);
 
       // The sky dome stays. buildShed3DModel sizes the grass disc to "stay inside
       // the viewer's sky dome" — drop the dome and the customer sees a green disc
@@ -11190,10 +12909,10 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
         new THREE.SphereGeometry(dist * 6.5, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2 + 0.14),
         new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, depthWrite: false })
       ) : null;
-      if (sky) { sky.position.y = -0.5; scene.add(sky); }
+      if (sky) { sky.position.y = -0.5 - framedLift; scene.add(sky); }
 
       const controls = new OrbitControls(camera, canvas);
-      controls.target.set(0, fitH(p0) * 0.45, 0);
+      controls.target.set(0, fitH(p0) * 0.45 - framedLift, 0);
       controls.maxPolarAngle = Math.PI * 0.495;   // never below the ground plane
       controls.minDistance = R * 1.1;
       controls.maxDistance = dist * 2.5;
@@ -11318,7 +13037,15 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
         applyFraming: () => {
           const p = pRef.current;
           const f = frameFor(p);
-          controls.target.set(0, fitH(p) * 0.45, 0);
+          // A floor height that changed moves the eye and the sky with the ground, by the change
+          // alone, so the orbit keeps its angle to the building.
+          const lift = liftOf(p);
+          if (lift !== framedLift) {
+            camera.position.y -= lift - framedLift;
+            if (sky) sky.position.y = -0.5 - lift;
+            framedLift = lift;
+          }
+          controls.target.set(0, fitH(p) * 0.45 - lift, 0);
           controls.minDistance = f.R * 1.1;
           controls.maxDistance = f.dist * 2.5;
           // Grow-only: the sky dome was sized dist*6.5 from the MOUNT-time distance and is
@@ -11328,6 +13055,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
           camera.updateProjectionMatrix();
           controls.update();
         },
+        framedLift: () => framedLift,
       };
       canvas.addEventListener("webglcontextlost", (ev) => { ev.preventDefault(); setPhase("error"); });
       // preventDefault above is what asks the browser to restore the context. Without a
@@ -11392,8 +13120,10 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
     const e = engineRef.current;
     if (!e) return;
     // Framing first: applyFull queues the rAF that actually paints, so this costs no
-    // frame. Guarded on fitHeightFt so a caller that never passes one is untouched.
-    if (fitHeightFt) e.applyFraming();
+    // frame. Guarded on fitHeightFt so a caller that never passes one is untouched — unless the
+    // building would leave the old frame (d3FrameHeightFt: a raised centre, a 20 ft wall).
+    // ...and a raised floor, or one that just stopped being raised (d3GradeLiftFt), whose ground moved.
+    if (fitHeightFt || d3FrameHeightFt(style3d, bldgW, bldgH) > D3.WALL_H || d3GradeLiftFt(style3d) > 0 || (e.framedLift && e.framedLift() > 0)) e.applyFraming();
     e.applyFull();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geomSig]);
@@ -14195,22 +15925,46 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
 // privacy nicety — a 190MB phone video cannot go through an edge function, and the
 // existing photo path already accepts exactly this kind of JPEG.
 //
-// The hard part is WHICH frames. Sampling at equal time intervals looks obvious and is
-// wrong: people pause at the corners (where two faces and the roof rake are visible at
-// once — the most shape-informative viewpoint there is) and hurry along the flat sides, so
-// equal-time sampling spends its budget wherever the operator dawdled and can miss a whole
-// elevation. Sampling at equal CUMULATIVE VISUAL CHANGE self-corrects: standing still
-// accumulates nothing and costs nothing.
+// The hard part is WHICH frames. Until 2026-09-24 they were picked at equal CUMULATIVE VISUAL
+// CHANGE, on the theory that standing still costs nothing and hurrying along a side costs its
+// share. Measured on four real laps, that theory has a hole exactly where it hurts: nothing in a
+// walk-around changes faster than a CLOSE-UP. Walk up to a porch and the near wall races across
+// the frame, so change-weighted sampling spent four of twelve picks on the approach to one
+// porch (two of them of a door and a window box) and two more standing under another porch
+// roof, while whole elevations got one frame or none. A vision model cannot read a roof shape
+// from a post and a soffit.
 //
-// The probe pass that measures change also gets sharpness for free — it has already
-// decoded those frames — so each chosen viewpoint can be nudged to whichever of its
-// neighbours is least motion-blurred without spending another seek.
-// ⚠️ KEEP THIS AT 8 OR BELOW (2026-09-16). A walk-around generated with no photos goes to
-// calibrate_style_ai as source "video" (onDraftFromCombined in portal/12-shell.jsx), and that
-// source's server cap is 8: sanitizePhotoUrls would drop any frame past it. Raising this means
-// raising that cap in portal-settings first, or the extra frames are cut and only `dropped` says so.
-const SS_VID_FRAMES = 8;          // four elevations + four corners, whatever the pacing
-const SS_VID_PROBE_MAX = 36;      // seeks are ~50-100ms; this bounds the probe at ~3s
+// So the picks now follow TIME around the lap, which is what an orbit actually advances with,
+// and every probe is first asked whether it shows the building WHOLE (ssProbeLook, read off the
+// same 32x18 probe the change was always measured on, so it costs no extra seek):
+//   · the sky across the top of the frame: a building that fits has sky over its whole
+//     roofline; a close-up has wall, soffit or porch ceiling touching the top edge
+//   · the largest flat patch that is not sky: a near wall fills the frame with one surface
+//   · a sustained spike in frame-to-frame change: parallax from walking close past something
+// Each probe is good, fair (usable when nothing better covers that stretch) or bad, and a small
+// dynamic programme (ssOrbitPicks) chooses the twelve that sit closest to evenly spaced along the
+// lap while paying a price for every fair or bad frame and for motion blur. Time spent in
+// close-ups counts for less of the lap: walking into a porch and back out barely changes the
+// viewpoint. Every rule degrades to plain equal time: an overcast sky switches the sky test off,
+// a tripod clip has no spikes, and a clip where every probe is bad still gets evenly spaced
+// frames rather than none.
+// ⚠️ NEVER ABOVE THE SERVER'S `video` CAP. A walk-around generated with no photos goes to
+// calibrate_style_ai as source "video" (onDraftFromCombined in portal/12-shell.jsx), and
+// sanitizePhotoUrls drops any frame past that source's cap -- only `dropped` would say so.
+//
+// 8 → 12 (2026-09-24), shipped WITH the server's cap going 8 → 12. Eight was four elevations and
+// four corners on a perfectly paced lap, and no lap is: on the 151.6 s Tri Home clip eight
+// picks average 19 s apart, and a building with wings on BOTH sides is judged on the far side
+// as much as the near one (the self-check now renders it: see "otherSide" in
+// SS_SELFCHECK_VIEWS). Twelve is three per side, the shape Carolyn described
+// for photos on 09-04, and it is still the combined ceiling (CAL_PHOTO_MAX), so a walk-around
+// on its own fills one generation exactly.
+const SS_VID_FRAMES = 12;         // three views per side, whatever the pacing
+// 36 → 54 with it, which keeps the probes per pick where they were (4.5): with 36 probes a
+// 150 s lap is sampled every 4.2 s and twelve picks land three probes apart, leaving the chooser
+// no room to step round a bad frame. Seeks are ~50-100 ms, so this bounds the probe at ~3-5 s;
+// a clip under 45 s never reaches it (1.2 probes a second).
+const SS_VID_PROBE_MAX = 54;
 const SS_VID_LONG_EDGE = 1280;    // ~1200 image tokens per frame, ~200KB of JPEG
 const SS_VID_QUALITY = 0.8;
 
@@ -14223,7 +15977,7 @@ const SS_VID_QUALITY = 0.8;
 // photo-arrival repaint, which is a direct render() for this reason.)
 //
 // So the barrier races the callback against a timer and takes whichever lands first, and
-// it is only asked for on the eight CAPTURE seeks. The probe pass skips it: a probe frame
+// it is only asked for on the twelve CAPTURE seeks. The probe pass skips it: a probe frame
 // one behind shifts the change curve imperceptibly, and paying a throttled timer on all
 // thirty-odd of them is what made the background case pathological.
 function ssSettleFrame(v) {
@@ -14279,6 +16033,176 @@ function ssLumaSharpness(luma, w, h) {
   return s / (w * h);
 }
 
+// A sky pixel in a probe: plainly blue (a clear sky is a DEEP blue at the top of a phone frame,
+// luma 60-90, so brightness alone misses it), bluish haze round the sun, or blown-out glare.
+// White and grey walls are warm or neutral and stay out; an overcast sky stays out too, and
+// ssOrbitPicks notices when that has happened to the whole clip and stops asking.
+function ssSkyPixel(r, g, b) {
+  const l = 0.299 * r + 0.587 * g + 0.114 * b;
+  return (b >= 90 && b > r + 35 && b > g + 15) || (l > 200 && b > r + 10 && b >= g) || l > 235;
+}
+
+// WHAT ONE PROBE SHOWS, from its RGBA pixels (w x h) and their luma:
+//   touch  the share of columns whose TOP pixel is not sky: the building (or a porch ceiling, a
+//          post, a wall) running off the top of the frame
+//   head   the third-lowest count of sky rows down from the top, across the columns: how far
+//          the highest part of the roofline sits below the frame's top edge (the third, so one
+//          post or a lens flare cannot decide it)
+//   flat   the largest 4-connected patch of non-sky pixels whose neighbours step by 8 luma or
+//          less, as a share of the frame: a near wall or ceiling is one smooth surface, while a
+//          building seen whole sits among gravel, grass and background that break it up
+//   cut    the building in the middle of the frame runs off its left or right edge. Its top is
+//          the highest roofline in the middle half of the frame; walking out from there, a
+//          building seen whole drops back below halfway to the background skyline (the sky's
+//          deepest reach, taken at the 85th percentile) before the edge, and one seen from too
+//          close never does. Only asked when the roof stands at least 3 probe rows above that
+//          skyline, so a long low roof seen side-on is not called cut for being flat.
+function ssProbeLook(px, w, h, luma) {
+  const n = w * h;
+  const sky = new Uint8Array(n);
+  for (let q = 0; q < n; q++) sky[q] = ssSkyPixel(px[4 * q], px[4 * q + 1], px[4 * q + 2]) ? 1 : 0;
+  const runs = [];
+  for (let x = 0; x < w; x++) {
+    let r = 0;
+    while (r < h && sky[r * w + x]) r++;
+    runs.push(r);
+  }
+  const sorted = runs.slice().sort((a, b) => a - b);
+  let flat = 0;
+  const seen = new Uint8Array(n);
+  const stack = [];
+  for (let s = 0; s < n; s++) {
+    if (seen[s] || sky[s]) continue;
+    let size = 0;
+    seen[s] = 1;
+    stack.push(s);
+    while (stack.length) {
+      const c = stack.pop();
+      size++;
+      const x = c % w, y = (c - x) / w;
+      const next = [x > 0 ? c - 1 : -1, x + 1 < w ? c + 1 : -1, y > 0 ? c - w : -1, y + 1 < h ? c + w : -1];
+      for (const k of next) {
+        if (k < 0 || seen[k] || sky[k] || Math.abs(luma[k] - luma[c]) > 8) continue;
+        seen[k] = 1;
+        stack.push(k);
+      }
+    }
+    if (size > flat) flat = size;
+  }
+  const c0 = Math.floor(w / 4), c1 = Math.ceil((3 * w) / 4);
+  let xm = c0;
+  for (let x = c0; x < c1; x++) if (runs[x] < runs[xm]) xm = x;
+  const top = runs[xm], deep = sorted[Math.floor(0.85 * (w - 1))];
+  let cut = false;
+  if (deep - top >= 3) {
+    const mid = (top + deep) / 2;
+    let a = xm, b = xm;
+    while (a > 0 && runs[a - 1] <= mid) a--;
+    while (b < w - 1 && runs[b + 1] <= mid) b++;
+    cut = a === 0 || b === w - 1;
+  }
+  return {
+    touch: runs.filter((r) => r === 0).length / w,
+    head: sorted[Math.min(2, sorted.length - 1)],
+    flat: flat / n,
+    cut,
+  };
+}
+
+// WHICH PROBES BECOME THE FRAMES: indices into `probes` ({ t, change, sharp, touch, head, flat, cut },
+// in walk order), at most K of them, in walk order. Pure, like ssProbeClasses, so
+// orbitFramePicks_test can run both.
+//
+// ssProbeClasses: each probe is 2 good, 1 fair or 0 bad:
+//   · sky, only when at least a quarter of the clip shows sky across the top at all (an overcast
+//     or indoor clip has no usable sky and is judged on the other two alone): bad when over a
+//     quarter of the top edge is not sky or the roofline reaches the top, fair when over an
+//     eighth of it is, the roofline is one probe row under the top, or the building is `cut`
+//   · flat: bad over 35 % of the frame, fair over 20 %
+//   · change: a SUSTAINED spike (this step over 1.6 x the clip's median and the next over 1.3 x)
+//     makes a probe fair at best: parallax from walking close past the building
+// The lap is measured in time, each probe's stretch counted at 1 when good, 0.6 when fair and
+// 0.25 when bad, and scaled by how far the view MOVED over it (ssProbeMotion): a pause counts
+// for a tenth. The K picks are the ones whose places along that lap are closest to evenly
+// spaced (the squared error of every gap against lap / K, the lap's two ends included) plus 0, 1
+// or 4 for a good, fair or bad pick and up to 0.3 for motion blur against its four neighbours.
+// An exact dynamic programme: K x N^2 steps, about 35 000 at 54 probes.
+function ssProbeClasses(probes) {
+  const N = probes.length;
+  const median = (a) => { const s = a.slice().sort((x, y) => x - y); return s.length ? s[s.length >> 1] : 0; };
+  const skyOk = probes.filter((p) => p.touch <= 0.25).length >= 0.25 * N;
+  const mc = median(probes.slice(1).map((p) => p.change));
+  return probes.map((p, i) => {
+    let c = 2;
+    if (skyOk) c = (p.touch > 0.25 || p.head === 0) ? 0 : (p.touch <= 0.12 && p.head >= 2 && !p.cut) ? 2 : 1;
+    if (p.flat > 0.35) c = 0;
+    else if (p.flat > 0.2) c = Math.min(c, 1);
+    if (mc > 0 && i > 0 && p.change > 1.6 * mc && (i + 1 >= N || probes[i + 1].change > 1.3 * mc)) c = Math.min(c, 1);
+    return c;
+  });
+}
+// A PAUSE IS NOT PART OF THE LAP (fix, 2026-09-25). Time is what an orbit advances with only
+// while the builder walks. Standing still at the start, at a corner or at the end, the phone
+// films the same view for as long as they stand there, and a lap measured in plain time spread
+// picks through it: a 15 s pause at the start of a 60 s clip took 3 of the 12 frames, all one
+// view, and those are the back and far-side views the wings and high-side reads depend on.
+//
+// So each step between two probes counts for how far the view moved over it, read off `change`
+// (the mean luma difference the probes already measure): under a quarter of the clip's median
+// change it is a pause and counts 0.1, half the median or more counts in full, a straight ramp
+// between. The knee sits below anything walking produces: on the four real laps (2026-09-24)
+// the smallest step was 0.55 to 0.69 of its clip's median, so none of them moves. A clip with no
+// change at all (a still frame, a tripod) counts every step in full, which is plain time.
+// Returns one number per probe: [i] is the step INTO probe i, and [0] repeats [1] for the stretch
+// before the first probe.
+function ssProbeMotion(probes) {
+  const N = probes.length;
+  const s = probes.slice(1).map((p) => p.change).sort((x, y) => x - y);
+  const mc = s.length ? s[s.length >> 1] : 0;
+  const step = (i) => {
+    if (!(mc > 0) || i < 1 || i >= N) return 1;
+    return 0.1 + 0.9 * Math.max(0, Math.min(1, (probes[i].change / mc - 0.25) / 0.25));
+  };
+  return probes.map((_, i) => step(Math.max(1, i)));
+}
+function ssOrbitPicks(probes, K) {
+  const N = probes.length;
+  if (N <= K) return probes.map((_, i) => i);
+  const q = ssProbeClasses(probes);
+  const move = ssProbeMotion(probes);
+  const WEIGHT = [0.25, 0.6, 1], COST = [4, 1, 0];
+  const P = [Math.max(0, probes[0].t) * WEIGHT[q[0]] * move[0]];
+  for (let i = 1; i < N; i++) P.push(P[i - 1] + Math.max(0, probes[i].t - probes[i - 1].t) * (WEIGHT[q[i - 1]] + WEIGHT[q[i]]) / 2 * move[i]);
+  const lap = P[N - 1] + (Math.max(0, probes[N - 1].t - probes[N - 2].t) / 2) * WEIGHT[q[N - 1]] * move[N - 1];
+  const ideal = lap / K;
+  const gap = (x) => { const e = ideal > 0 ? (x - ideal) / ideal : 0; return e * e; };
+  const own = probes.map((p, i) => {
+    let m = 0;
+    for (let j = Math.max(0, i - 2); j <= Math.min(N - 1, i + 2); j++) m = Math.max(m, probes[j].sharp);
+    return COST[q[i]] + (m > 0 ? 0.3 * (1 - p.sharp / m) : 0);
+  });
+  // best[k][i]: the cheapest way to put pick k (0-based) on probe i; from[k][i]: where pick k-1 is.
+  const best = [], from = [];
+  for (let k = 0; k < K; k++) { best.push(new Array(N).fill(Infinity)); from.push(new Array(N).fill(-1)); }
+  for (let i = 0; i < N; i++) best[0][i] = own[i] + gap(P[i] + ideal / 2);
+  for (let k = 1; k < K; k++) {
+    for (let i = k; i < N; i++) {
+      for (let j = k - 1; j < i; j++) {
+        const c = best[k - 1][j] + own[i] + gap(P[i] - P[j]);
+        if (c < best[k][i]) { best[k][i] = c; from[k][i] = j; }
+      }
+    }
+  }
+  let last = K - 1, lastCost = Infinity;
+  for (let i = K - 1; i < N; i++) {
+    const c = best[K - 1][i] + gap(lap - P[i] + ideal / 2);
+    if (c < lastCost) { lastCost = c; last = i; }
+  }
+  const picks = [];
+  for (let k = K - 1, i = last; k >= 0; k--) { picks.unshift(i); i = from[k][i]; }
+  return picks;
+}
+
 async function ssExtractOrbitFrames(file, onStep) {
   const url = URL.createObjectURL(file);
   const v = document.createElement("video");
@@ -14320,42 +16244,12 @@ async function ssExtractOrbitFrames(file, onStep) {
       const d = pctx.getImageData(0, 0, pw, ph).data;
       const luma = new Float32Array(pw * ph);
       for (let p = 0, q = 0; p < d.length; p += 4, q++) luma[q] = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
-      probes.push({ t, change: ssLumaDelta(prev, luma), sharp: ssLumaSharpness(luma, pw, ph) });
+      probes.push({ t, change: ssLumaDelta(prev, luma), sharp: ssLumaSharpness(luma, pw, ph), ...ssProbeLook(d, pw, ph, luma) });
       prev = luma;
     }
 
-    // ── choose viewpoints at equal cumulative change ──────────────────────────────
-    const cum = [];
-    let run = 0;
-    for (const p of probes) { run += p.change; cum.push(run); }
-    const total = run;
-    let picks;
-    if (total < 1e-3) {
-      // Nothing moved: a tripod shot, or a probe that read the same frame every time.
-      // Equal time is the only meaningful fallback, and it is what the caller expects.
-      picks = Array.from({ length: SS_VID_FRAMES }, (_, k) => Math.min(probes.length - 1, Math.round(((k + 0.5) / SS_VID_FRAMES) * (probes.length - 1))));
-    } else {
-      picks = [];
-      let at = 0;
-      for (let k = 0; k < SS_VID_FRAMES; k++) {
-        const want = ((k + 0.5) / SS_VID_FRAMES) * total;
-        while (at < cum.length - 1 && cum[at] < want) at++;
-        picks.push(at);
-      }
-    }
-    // Nudge each pick to the sharpest of itself and its immediate neighbours. Free: those
-    // frames were already decoded during the probe.
-    picks = picks.map((i) => {
-      let best = i;
-      for (const j of [i - 1, i + 1]) {
-        if (j >= 0 && j < probes.length && probes[j].sharp > probes[best].sharp) best = j;
-      }
-      return best;
-    });
-    // De-duplicate while keeping walk order — two targets can land on one probe when the
-    // operator swung round a corner fast.
-    const seen = new Set();
-    picks = picks.filter((i) => (seen.has(i) ? false : (seen.add(i), true)));
+    // ── whole-building viewpoints, evenly round the lap (ssOrbitPicks) ──────────────
+    const picks = ssOrbitPicks(probes, SS_VID_FRAMES);
 
     // ── capture at full resolution ────────────────────────────────────────────────
     const scale = Math.min(1, SS_VID_LONG_EDGE / Math.max(v.videoWidth, v.videoHeight));
@@ -14407,25 +16301,74 @@ const CAL_OVERHANG_CHIPS = [[null, "Read it from the video"], [0, "Flush"], [2, 
 // 16px, and every other field on this panel spreads S.sel's inline fontSize 13. An inline style
 // beats a class, so these three inputs deliberately drop it and take their size from here.
 const SSC_CAL_CSS = ".ssc-dim-in{font-size:13px}@media (pointer:coarse){.ssc-dim-in{font-size:16px}}";
-// ─── THE FREE SECOND PASS, AS THE BUILDER EXPERIENCES IT (2026-09-19) ─────────────────────
+// ─── THE FREE SECOND PASS, AS THE BUILDER EXPERIENCES IT (2026-09-19; rounds 2026-09-24) ───
 // One press is one hold is one charge. The clocks below are the whole of the wait a builder
 // can be asked to sit through, and they are deliberately not the same as the server's.
 //
-//   call 1   the draft        server-side AbortSignal.timeout(110_000), and NO client abort.
+//   call 1   the draft        server-side abort at SS_DRAFT_SERVER_MS, and NO client abort.
+//                             STREAMED since 2026-09-25: the server answers 200 at once and
+//                             writes a space every ten seconds, so the gateway's 150 s of
+//                             silence never ends it, and its reads think at effort "high".
 //                             Abandoning a call that has already taken the hold is the one
-//                             thing that would turn a slow generation into a lost $20.
+//                             thing that would turn a slow generation into a lost $20. A reply
+//                             the server marks `retryable` (cut off at max_tokens, or timed
+//                             out: the hold is already released) is sent ONCE more, lean and
+//                             NOT streamed (the old 125 s budget), under the same key, inside
+//                             the same press -- see calGenerate.
 //   render   SS_RENDER_MS     wall clock in this browser. Over it, the check is skipped and
 //                             the builder keeps the draft. WebGL cannot be interrupted, so
 //                             the loser of the race still runs to its own dispose.
-//   call 2   the check        server aborts at 45 s; this aborts at SS_CHECK_MS, far enough
-//                             above it that a server that answered in time is still heard.
+//   call 2   the check        the server gives the v2 check 125 s at effort "high" (45 s until
+//                             2026-09-24, when the v2 prompt with up to twelve frames and six
+//                             renders ran out of it; then 90 s at "medium" until 2026-09-26);
+//                             the browser aborts at SS_CHECK_MS, 15 s above that, so a server
+//                             that answered in time is still heard after the renders' upload
+//                             and its own set-up. ⚠️ The abort itself is the host's
+//                             (onSelfCheck in portal/12-shell.jsx) and must equal this number:
+//                             this one only budgets the press with it.
+//   rounds   SS_CHECK_ROUNDS  the check runs again on renders of the CORRECTED building,
+//                             up to three times per generation (ssCheckNext says when not).
 //
-// 110 + 5 + 60 is 175 s, so there is no path past the three minutes the design budgeted and
-// no watchdog that could throw away a paid draft to enforce one.
+// ⚠️ THE BUDGET MOVED, AND ON PURPOSE. One round was 110 + 5 + 60 = 175 s, inside the three
+// minutes the 09-19 design budgeted. A draft then had 125 s (max_tokens 8000 → 12000 after the
+// Tri Home press died at the old ceiling), the check 100 s, and a single check round cannot fix
+// what a single check round has already mis-fixed -- so the first round always runs and a LATER
+// round starts only while a whole round (SS_RENDER_MS + SS_CHECK_MS, then 5 + 100 s) still fits
+// inside SS_FLOW_MAX_MS of the press.
+//
+// ⚠️ AND AGAIN ON 2026-09-25, for the streamed draft. Shallow reads were the wrong reads (a shed's
+// high side on the wrong wall 6 times in 7), the reads that thought took 56-106 s, and at effort
+// "high" all three consensus reads ran past 125 s. So the draft is streamed and has 300 s (the
+// server's own rule: 300 s, or what is left of 330 s after a slow set-up) and the press has eight
+// minutes. It was 230 s and seven minutes until the same day's live presses: the reads took
+// 74-215 s, and 8 presses in 12 had a read cut at 230 s, which leaves the consensus one read.
+//
+// ⚠️ AND THE CHECK ON 2026-09-26: 140 s a round, not 100. On Opus 5.5 at effort "medium" a check
+// round took 18-37 s and was not consistent (a centre eave 2 ft low was corrected by the measured
+// difference in 5 runs of 6 and called a match in the sixth), so the v2 check now thinks at "high"
+// inside a 125 s server abort, and this waits 140 s. A whole round is now 5 + 140 = 145 s, and
+// ssCheckNext charges exactly that: it reads SS_RENDER_MS and SS_CHECK_MS and has no number of its
+// own. The first round always runs: 300 + 5 + 140 = 445 s after a draft at its ceiling, and
+// 330 + 5 + 140 = 475 s after one a slow set-up pushed to the server's 330 s, both inside 480. A
+// later round starts only while elapsed + 145 s still fits in 480 s, i.e. no later than 335 s into
+// the press. After a draft at its ceiling that means only when the first check answered inside
+// about 25 s (the reshoot after it counts). But the draft on Opus 5.5 usually answers in 40-90 s, and then two rounds fit even with
+// every check running to its 140 s abort (90 + 145 + 145 = 380 s), and all three when the draft
+// took 40 s or less (40 + 5 + 3 x 145 = 480 s, the first render included) or the checks answer well inside their abort, as they
+// usually do. The one path past eight minutes is a draft the server asked us to retry (the
+// streamed draft at 300 s, then the lean one at its own 125 s), and ssCheckNext gives that path no
+// second round. Still no watchdog that could throw away a paid draft to enforce any of it.
 const SS_RENDER_MS = 5000;
-const SS_CHECK_MS = 60000;
-// When the progress card stops saying "usually about a minute" and says so.
-const SS_SLOW_MS = 90000;
+const SS_CHECK_MS = 140000;
+// After SS_RENDER_MS on purpose: selfCheckPanel_test lifts this block from that line.
+const SS_DRAFT_SERVER_MS = 300000;
+const SS_CHECK_ROUNDS = 3;
+const SS_FLOW_MAX_MS = 480000;
+// When the progress card stops saying "usually four to six minutes" and says so: at six
+// minutes, past the press it describes. Moved with the streamed draft (2026-09-25): at three
+// minutes it fired on an ordinary press whose draft was merely thinking, and at five it would fire
+// on a draft using its 300 s.
+const SS_SLOW_MS = 360000;
 // How far one arrow key turns a compare render. 15° is small enough to land on a frame's own
 // angle and big enough that a builder is not pressing it forty times.
 const SS_SPIN_STEP_DEG = 15;
@@ -14440,19 +16383,63 @@ const SS_RESHOOT_MS = 400;
 const SS_CHECKS = [
   ["roof", "Is the roof the same shape?", "Barn roof with a bend in it, two straight slopes, or one slant."],
   ["porch", "Is the porch right?", "In front of the building or cut into it, at the right end, about the right depth."],
-  ["walls", "Are the walls the right height?", "Compare the side wall next to the door with your picture."],
+  ["walls", "Are the walls the right height?", "Compare an outside wall at the eave with your picture. On a one-slant roof, the low side."],
   ["colours", "Are the colours close?", "Walls, trim and roof. Customers repaint it anyway, so close is fine."],
 ];
 // What each fix panel is called in a sentence. The banner's button names the one it arms, and
 // three of these four can be raised by a machine warning.
 const SS_FIX_WORDS = { roof: "roof", porch: "porch", walls: "wall height", colours: "colour" };
 // What each viewpoint is, in words a builder owns. "eaveCorner" is our name for it.
+// "front" is the wall with the porch or the main door (the 09-24 frame of reference), which on
+// every older style is also the gable end with the door, so one sentence serves both. The two
+// sides are "one" and "the other" rather than long and short: in the new frame the front can be
+// the long wall, and a caption that called a 10 ft end "the long side" would be wrong on screen.
 const SS_VIEW_WORDS = {
-  front: "The end with the door",
-  side: "The long side",
+  front: "The front, with the door or porch",
+  side: "One side",
   eaveCorner: "Close up on the roof edge",
   corner: "From the corner",
+  back: "The back",
+  otherSide: "The other side",
 };
+
+// ─── MORE THAN ONE ROUND (2026-09-24) ─────────────────────────────────────────────────────
+// Whether the check goes round again after the round that just answered: the reason it stops,
+// or null to go again. Pure, so selfCheckPanel_test can walk every branch; calRunSelfCheck is
+// the only caller.
+//   out        the round's answer, { verdict, d3, changed }
+//   round      the round that just ran, 0-based: the server's own counter, which claims round
+//              k by moving it to k + 1, so a repeat of one round is refused rather than re-run
+//   seen       ssShotSig of every building already sent to the check in this press
+//   nextSig    ssShotSig of the building the correction produced
+//   elapsedMs  since the press
+// Stops on anything but a correction (matches, skipped, failed, rejected_too_many), on a
+// "correction" that moved nothing, after SS_CHECK_ROUNDS, on a building already checked -- the
+// oscillation case, where round 3 would re-judge round 1's building and undo round 2 -- and when
+// a whole round no longer fits inside SS_FLOW_MAX_MS of the press.
+function ssCheckNext(out, round, seen, nextSig, elapsedMs) {
+  const verdict = out && out.verdict;
+  if (verdict !== "corrections") return verdict || "failed";
+  if (!out.d3 || !Array.isArray(out.changed) || !out.changed.length) return "unchanged";
+  if (round + 1 >= SS_CHECK_ROUNDS) return "rounds";
+  if ((seen || []).indexOf(nextSig) >= 0) return "repeat";
+  if (!(elapsedMs + SS_RENDER_MS + SS_CHECK_MS <= SS_FLOW_MAX_MS)) return "time";
+  return null;
+}
+// ONE LIST, HOWEVER MANY ROUNDS RAN. Each round's `changed` is relative to the building that
+// round judged, so the same field can move twice (a pitch 0.42 → 0.3, then 0.3 → 0.25). The
+// builder is shown one line per field, from what the draft had to what it ended as, with the
+// latest reason; a field that went round and came back where it started is no line at all.
+function ssMergeChanges(prev, next) {
+  const out = (prev || []).slice();
+  for (const ch of next || []) {
+    if (!ch || !ch.field) continue;
+    const i = out.findIndex((x) => x.field === ch.field);
+    if (i < 0) out.push(ch);
+    else out[i] = { ...out[i], to: ch.to, why: ch.why || out[i].why };
+  }
+  return out.filter((x) => JSON.stringify(x.from ?? null) !== JSON.stringify(x.to ?? null));
+}
 
 // ⚠️ THE BUILDER NEVER SEES kneeU AS A NUMBER, here or anywhere. The CLAMPS comment records
 // that a model reads it from the eave by default and the renderer reads it from the centreline,
@@ -14516,6 +16503,8 @@ function ssShotSig(spec) {
   return JSON.stringify([
     spec.roof || null, spec.wallHeightFt ?? null, spec.siding ?? null, spec.colors || null,
     spec.foundation ?? null, spec.roofMaterial ?? null, spec.gableVent ?? null,
+    // A raised floor's height (2026-09-25) moves the ground, the supports and the porch steps.
+    spec.floorHeightFt ?? null,
   ]);
 }
 
@@ -14523,21 +16512,120 @@ function ssShotSig(spec) {
 // ratios measurably work (0.78 / 0.70 / 1.00 against a truth of 0.72 / 0.72 / 1.00, in 3 of 3
 // runs); a builder cannot check a ratio against a building. Both are true at once, so the
 // number stays a ratio on the wire and becomes feet on the screen.
-function ssRoofInFeet(roof, spanFt) {
+//
+// `centre` (2026-09-24 review): the style has lower wings, so the roof this describes is the
+// middle section's, spanFt is ITS span (d3Massing's Sc, not the building's width) and the
+// heights are above ITS walls. Measured across the full width, a raised centre's 4 ft roof was
+// described as 9 ft 5 in, and the builder is asked to check this sentence against the video.
+function ssRoofInFeet(roof, spanFt, centre) {
   const s2 = Math.max(0.5, Number(spanFt) || 0) / 2;
   const cfg = roof || {};
+  const wall = centre ? "the middle section's walls" : "the wall";
   if (cfg.type === "gambrel") {
     const kneeU = Number(cfg.kneeU) || 0.55;
     const kneeRise = Number(cfg.kneeRise) || 0.55;
     const ridgeRise = Number(cfg.ridgeRise) || 0.8;
     // "back from the wall", not "in from the wall": ssFtInWords already ends in "in" on most
     // values, and "2 ft 3 in in from the wall" is what that reads as on a screen.
-    return `The bend sits ${ssFtInWords(s2 * (1 - kneeU))} back from the wall and ${ssFtInWords(s2 * kneeRise)} above it; the peak is ${ssFtInWords(s2 * ridgeRise)} above the wall.`;
+    return `The bend sits ${ssFtInWords(s2 * (1 - kneeU))} back from ${wall} and ${ssFtInWords(s2 * kneeRise)} above ${centre ? "them" : "it"}; the peak is ${ssFtInWords(s2 * ridgeRise)} above ${wall}.`;
   }
   if (cfg.type === "shed") {
     return `The high side stands ${ssFtInWords(spanFt * (Number(cfg.pitch) || 0.25))} above the low side.`;
   }
-  return `The peak is ${ssFtInWords(s2 * (Number(cfg.pitch) || 0.5))} above the wall.`;
+  return `The peak is ${ssFtInWords(s2 * (Number(cfg.pitch) || 0.5))} above ${wall}.`;
+}
+
+// The rest of "What we drew" (2026-09-24): the parts of a building one roof sentence cannot
+// carry -- which wall is the front or the high one, the lower wings, and where the porch is and
+// how it meets the wall. Each of these is a key the generator can now set, and a builder
+// comparing our 3D with their own frames has to be told it in words before they can say it is
+// wrong. Only what the spec SAYS: an absent key is never described as its default, because
+// "the front is a gable end" on a style that never said so would be a claim we did not make.
+//
+// ⚠️ WHAT WAS BUILT, NOT WHAT WAS ASKED (fix, 2026-09-25). `porchBuilt` is the panel's
+// d3PorchReadout of this spec at the same size: the renderer lowers a given porchPitch where it
+// would leave under 6 ft under the beam, and holds porchPosts to what fits. A 12x16 cabin's 3 in
+// 12 porch roof on 7 ft walls is built at 0.6 in 12, and a line saying "3 in 12" beside it sent
+// the builder to check a roof that is not on screen. With the readout the posts and pitch are the
+// built ones, and a lowered pitch says so; without it (no size yet) they are the spec's.
+// The ROOF STEP the same way (2026-09-28): `stepBuilt` is the panel's d3RoofStep of this spec at
+// that size, and the step is said as DRAWN there. A 56 ft step on a 14x40 cabin behind a 6 ft porch
+// is drawn at 30 ft, a 12 ft one on a 12x16 at 6, and beside wings or on an old-frame landscape size
+// there is no step at all (null), so nothing is said. Undefined (no size yet) says the spec's own.
+function ssDrewWords(spec, porchBuilt, stepBuilt) {
+  const roof = (spec && spec.roof) || {};
+  const raisedOn = spec && (spec.foundation === "blocks" || spec.foundation === "piers") ? spec.foundation : null;
+  const type = roof.type || "gable";
+  const out = [];
+  const walls = { front: "the front", back: "the back", left: "the left side", right: "the right side" };
+  if (type === "shed" && walls[roof.highSide]) out.push(`The high side is ${walls[roof.highSide]}.`);
+  if (type !== "shed" && roof.front === "gable") out.push("The front is a gable end, under the roof triangle.");
+  if (type !== "shed" && roof.front === "eave") out.push("The front is a long side, under the roof edge.");
+  const wing = Number(roof.wingWidthFt) || 0;
+  if (type !== "shed" && wing > 0) {
+    const where = ({ both: "each side", left: "the left side", right: "the right side", front: "the front", back: "the back" })[roof.wingSide] || "the side";
+    const centre = Number(roof.centerEaveFt) > 0 ? `, and the middle section's walls rise to ${ssFtInWords(Number(roof.centerEaveFt))}` : "";
+    out.push(`A lower wing ${ssFtInWords(wing)} wide runs along ${where} under its own roof${centre}.`);
+  }
+  // A ROOF STEP (2026-09-28): where the rear roof section starts and which way its eave steps, only
+  // where the style gives both keys on a roof that can carry them (the sanitiser's rule), and as
+  // DRAWN where the panel hands over d3RoofStep at its size (`stepBuilt`). A number the renderer
+  // held back is said as drawn, with the one given beside it, the porch pitch's way.
+  const stepAt = Number(roof.rearStepFt) || 0, stepRise = Number(roof.rearEaveRiseFt) || 0;
+  if (type === "gable" && roof.front !== "eave" && stepAt > 0.5 && Math.abs(stepRise) >= 0.01) {
+    const sb = stepBuilt === undefined ? { stepFt: stepAt, rise: stepRise }
+      : stepBuilt && isFinite(Number(stepBuilt.stepFt)) && isFinite(Number(stepBuilt.rise)) ? stepBuilt : null;
+    if (sb) {
+      const inches = (ft) => Math.round(Math.abs(Number(ft)) * 12);
+      const atNote = ssFtInWords(Number(sb.stepFt)) === ssFtInWords(stepAt) ? ""
+        : Number(sb.stepFt) < stepAt ? ` (held there from ${ssFtInWords(stepAt)} to leave 4 ft of room in front of it)`
+        : ` (moved out from ${ssFtInWords(stepAt)}: a step is never drawn nearer than 4 ft to the back wall)`;
+      const riseNote = inches(sb.rise) < inches(stepRise) ? ` (lowered from ${inches(stepRise)} in: the roof is too flat for more)` : "";
+      out.push(`The roof steps ${ssFtInWords(Number(sb.stepFt))} from the back wall${atNote}: behind the step its edge sits ${inches(sb.rise)} in ${Number(sb.rise) > 0 ? "higher" : "lower"}${riseNote}, and the two ridges line up.`);
+    }
+  }
+  // "wall" in the new frame, where the front can be a long side; "end" on every older style,
+  // where the porch was only ever on a gable end and the panel has always called it that.
+  const face = (roof.front != null || roof.highSide != null) ? "wall" : "end";
+  const end = roof.porchEnd === "back" ? "back" : "front";
+  const outFt = Number(roof.porchOutFt) || 0;
+  const inFt = Number(roof.porchDepthFt) || 0;
+  if (outFt > 0.5) {
+    const width = Number(roof.porchWidthFt) > 0 ? `, ${ssFtInWords(Number(roof.porchWidthFt))} wide` : "";
+    const attach = Number(roof.porchAttachFt) > 0 ? `, and its roof meets the wall ${ssFtInWords(Number(roof.porchAttachFt))} up` : "";
+    out.push(`The porch stands ${ssFtInWords(outFt)} out from the ${end} ${face}${width}${attach}.`);
+    // Its own framing (2026-09-25), only where the style gives it: absent is the renderer's rule.
+    const pb = porchBuilt && isFinite(Number(porchBuilt.posts)) && isFinite(Number(porchBuilt.pitch)) ? porchBuilt : null;
+    const in12 = (p) => `${Math.round(Number(p) * 120) / 10} in 12`;
+    const built = [];
+    if (Number(roof.porchPosts) >= 2) {
+      const asked = Math.round(Number(roof.porchPosts));
+      built.push(pb && pb.posts < asked ? `${pb.posts} posts (the most that fit)` : `${pb ? pb.posts : asked} posts`);
+    }
+    if (Number(roof.porchPitch) > 0) {
+      built.push(pb && pb.pitchClamped
+        ? `a roof sloping ${in12(pb.pitch)} (lowered from ${in12(roof.porchPitch)} to leave headroom under the beam)`
+        : `a roof sloping ${in12(pb ? pb.pitch : roof.porchPitch)}`);
+    }
+    const stepsAt = ({ left: "on the left", center: "in the middle", right: "on the right" })[roof.porchSteps];
+    // On a raised floor (2026-09-25) the steps climb its whole height, so how many is worth saying:
+    // the readout's count, built to the same grade. At grade it is always one, and never said.
+    const nSteps = raisedOn && porchBuilt && porchBuilt.steps ? Math.round(Number(porchBuilt.steps.count)) : 0;
+    if (stepsAt) built.push(nSteps > 0 ? `${nSteps === 1 ? "one step" : `${nSteps} steps`} ${stepsAt}` : `steps ${stepsAt}`);
+    if (built.length) out.push(`It has ${built.length > 1 ? built.slice(0, -1).join(", ") + " and " + built[built.length - 1] : built[0]}.`);
+  } else if (inFt > 0.5) {
+    out.push(`The porch is cut ${ssFtInWords(inFt)} into the ${end} ${face}.`);
+  }
+  // A RAISED FLOOR (2026-09-25): what it stands on and how high, only where the style says. A height
+  // it does not give is said as the one drawn, and as not measured.
+  if (raisedOn) {
+    const what = raisedOn === "blocks" ? "stacked concrete blocks" : "concrete piers";
+    const h = Number(spec.floorHeightFt);
+    out.push(h > 0
+      ? `It stands on ${what}, its floor ${ssFtInWords(h)} off the ground at the front.`
+      : `It stands on ${what}; no floor height is given, so its floor is drawn ${ssFtInWords(raisedOn === "blocks" ? 1 : 1.5)} off the ground.`);
+  }
+  return out.join(" ");
 }
 
 // One line of the "What the check changed" list, in the words the fix panels use. The numbers
@@ -14569,8 +16657,28 @@ const SS_CHANGE_WORDS = {
   "roof.dormerWidthFt": ["How wide the dormer is", (v) => ssFtInWords(Number(v))],
   "roof.dormerRiseFt": ["How tall the dormer is", (v) => ssFtInWords(Number(v))],
   "roof.dormerOffsetU": ["Where the dormer sits along the roof", null],
+  // THE 2026-09-24 KEYS, in the words the panel's own controls use for them. The server's
+  // allow-list gains every one, and selfCheckPanel_test fails on any it has no words for.
+  "roof.front": ["What the front wall is", (v) => (String(v) === "eave" ? "a long side, under the roof edge" : String(v) === "gable" ? "a gable end, under the roof triangle" : String(v))],
+  "roof.highSide": ["Which wall is the high one", (v) => ({ front: "the front", back: "the back", left: "the left side", right: "the right side" })[String(v)] || String(v)],
+  "roof.porchAttachFt": ["Where the porch roof meets the wall", (v) => `${ssFtInWords(Number(v))} up`],
+  "roof.porchWidthFt": ["How wide the porch is", (v) => ssFtInWords(Number(v))],
+  "roof.wingSide": ["Which sides have a lower wing", (v) => ({ both: "both sides", left: "the left side", right: "the right side", front: "the front", back: "the back" })[String(v)] || String(v)],
+  "roof.wingWidthFt": ["How wide each lower wing is", (v) => (Number(v) > 0 ? ssFtInWords(Number(v)) : "no wings")],
+  "roof.wingPitch": ["How steep the wing roofs are", (v) => `${Math.round(Number(v) * 12)} in 12`],
+  "roof.centerEaveFt": ["How tall the middle section's walls are", (v) => ssFtInWords(Number(v))],
+  // The porch's own framing (2026-09-25), in the words the porch controls use.
+  "roof.porchPosts": ["How many posts the porch has", (v) => `${Math.round(Number(v))} posts`],
+  "roof.porchPitch": ["How steep the porch roof is", (v) => `${Math.round(Number(v) * 120) / 10} in 12`],
+  "roof.porchSteps": ["Where the porch steps are", (v) => ({ left: "on the left", center: "in the middle", right: "on the right" })[String(v)] || String(v)],
+  // The roof step (2026-09-28), in the words its panel controls use: feet from the back wall, and the
+  // rear roof edge's rise in inches (a lower one says so).
+  "roof.rearStepFt": ["Where the roof steps, from the back wall", (v) => (Number(v) > 0.5 ? ssFtInWords(Number(v)) : "no step")],
+  "roof.rearEaveRiseFt": ["How much higher the rear roof edge is", (v) => (Number(v) < 0 ? `${Math.round(-Number(v) * 12)} in lower` : `${Math.round(Number(v) * 12)} in`)],
   gableVent: ["The vent in the gable", (v) => (v && v.widthFrac > 0 ? "there" : "not there")],
-  foundation: ["What it sits on", (v) => (String(v) === "skids" ? "runners" : "a slab")],
+  foundation: ["What it sits on", (v) => ({ skids: "runners", blocks: "concrete blocks", piers: "concrete piers" })[String(v)] || "a slab"],
+  // A raised floor's height (2026-09-25), top-level beside foundation, in the panel's own words.
+  floorHeightFt: ["How high the floor stands off the ground", (v) => ssFtInWords(Number(v))],
   roofMaterial: ["What the roof is made of", (v) => String(v)],
 };
 // A ratio has no builder-readable value, so the line says which WAY it moved instead of
@@ -16044,6 +18152,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   //   verdict  what the SERVER said: matches | corrections | rejected_too_many | skipped | failed
   //   pairs    [{ viewpoint, frame, azimuthDeg, frameUrl, shotUrl }] — one per viewpoint the
   //            first pass labelled, which is the only honest source of a pairing there is
+  //   round    1-based, the check round running now (progress card); rounds = how many ran,
+  //            stop = why the loop ended (ssCheckNext); retry = the draft is on its one
+  //            automatic lean retry (2026-09-24)
   //
   // `adminCalAnswers` is the four questions, and they are the ONLY thing standing between a
   // draft and Save. "unsure" counts as answered on purpose: forcing a builder to click Yes when
@@ -16099,7 +18210,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Where a drag started, and how far it has travelled since. A ref, because a pointermove
   // that re-rendered the panel would fight the drag it is trying to follow.
   const calDragRef = useRef(null);      // { viewpoint, x, from } | null
-  // "Still going." after a minute and a half. A boolean rather than a live elapsed counter:
+  // "Still going." after SS_SLOW_MS (six minutes). A boolean rather than a live elapsed counter:
   // a number ticking up beside a paid generation reads as a stopwatch on a fault, and the
   // only thing a builder can do with it is worry.
   const [adminCalSlow, setAdminCalSlow] = useState(false);
@@ -16107,12 +18218,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (!adminCalBusy || !adminCalCheck) { setAdminCalSlow(false); return undefined; }
     const t = setTimeout(() => setAdminCalSlow(true), SS_SLOW_MS);
     return () => clearTimeout(t);
-    // Keyed on the press, not on the step: the ninety seconds is the whole wait, and
+    // Keyed on the press, not on the step: SS_SLOW_MS is the whole wait, and
     // restarting the clock at each step would mean it never fired.
   }, [adminCalBusy, adminCalCheck && adminCalCheck.at]);
   // Which run a late answer belongs to. A builder who presses Generate again while a check is
   // still in flight must not have the old check's corrections land on the new draft.
   const calRunRef = useRef(0);
+  // WHETHER THIS PANEL IS STILL MOUNTED, for the one wait that can outlive it by minutes: picking
+  // up a streamed draft whose connection dropped (onDraftFromCombined's `recover.alive`, below in
+  // calGenerate). Set true inside the effect as well as at creation, because StrictMode runs an
+  // effect's cleanup and then the effect again on the same component.
+  const calAliveRef = useRef(true);
+  useEffect(() => { calAliveRef.current = true; return () => { calAliveRef.current = false; }; }, []);
   // ONE PRESS IS ONE HOLD IS ONE CHARGE, EVEN AFTER A TIMEOUT (2026-09-18). calibrate_style_ai
   // has always read `idempotencyKey` off the body and handed it to wallet_hold, whose
   // `wallet_tx_idem` unique index is the thing that stops a second $20 hold for one intent - and
@@ -18408,6 +20525,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // is read first here too, and the select shows what the preview draws.
   const calPorchKind = (roof) => (((roof && roof.porchOutFt) || 0) > 0.5 ? "projecting"
     : ((roof && roof.porchDepthFt) || 0) > 0.5 ? "recessed" : "none");
+  // What only a PROJECTING porch has: where its roof meets the wall, its width, its posts, its
+  // roof pitch and its steps. The sanitiser keeps each only while porchOutFt is over 0.5.
+  const CAL_PORCH_OWN_KEYS = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"];
   // Switches the kind, or sets the depth of the one that is on. The other kind's key is DELETED, not
   // written as 0, so a row carries only the porch it has:
   //   none        deletes both depths. porchEnd stays, so a porch turned back on keeps its end.
@@ -18424,6 +20544,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     delete roof.porchOutFt;
     if (kind === "recessed") roof.porchDepthFt = d;
     if (kind === "projecting") { roof.porchOutFt = d; delete roof.porchTruss; }
+    // Where a projecting porch's roof meets the wall, and how wide it is, belong to a projecting
+    // porch only (2026-09-24): the sanitiser keeps them only while porchOutFt is over 0.5, so on
+    // any other kind they would draw in the preview and vanish on Save. Its posts, its roof's pitch
+    // and its steps (2026-09-25) are the projecting porch's too.
+    else { for (const k of CAL_PORCH_OWN_KEYS) delete roof[k]; }
     return { ...p, spec: { ...p.spec, roof } };
   });
   // roof.plateBand: checked writes true, unchecked DELETES the key. Writing false would park
@@ -18442,6 +20567,114 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     else delete colors.wood;
     return { ...p, spec: { ...p.spec, colors } };
   });
+  // ─── THE 2026-09-24 KEYS: the panel's controls for them ──────────────────────────────────
+  // Every one is OPTIONAL and every one means something by being absent (the old frame of
+  // reference, a porch roof just under the eave, a porch the width of its wall, no wings, the
+  // trim colour), so a control that is cleared DELETES its key rather than storing "" or 0. The
+  // sanitiser never emits a default, and neither does this panel: an untouched style saves
+  // byte-for-byte what it loaded.
+  // WHAT THE BUILDING STANDS ON (2026-09-25). A blank pick DELETES `foundation` (the slab absent has
+  // always drawn), and the floor height belongs to blocks or piers only: leaving them deletes it,
+  // as the sanitiser would on Save, so the preview never draws a height Save cannot store. A cleared
+  // height box DELETES floorHeightFt and the renderer draws the kind's own default.
+  const calTidyFloor = (spec) => {
+    if (!d3RaisedFoundation(spec) && "floorHeightFt" in spec) { const out = { ...spec }; delete out.floorHeightFt; return out; }
+    return spec;
+  };
+  const calSetFoundation = (v) => setAdminCal((p) => {
+    const spec = { ...p.spec };
+    if (D3_FOUNDATIONS.indexOf(v) >= 0) spec.foundation = v;
+    else delete spec.foundation;
+    return { ...p, spec: calTidyFloor(spec) };
+  });
+  const calSetFloorHeight = (n) => setAdminCal((p) => {
+    const spec = { ...p.spec };
+    if (n === null || n === undefined || !(Number(n) > 0)) delete spec.floorHeightFt;
+    else spec.floorHeightFt = Number(n);
+    return { ...p, spec };
+  });
+  const calSetRoofOpt = (key, v) => setAdminCal((p) => {
+    const roof = { ...p.spec.roof };
+    if (v === "" || v === null || v === undefined) delete roof[key];
+    else roof[key] = v;
+    return { ...p, spec: { ...p.spec, roof } };
+  });
+  // colors.corner / colors.fascia. Blank is "same as trim", which is what absent draws.
+  const calSetOptColor = (k, v) => setAdminCal((p) => {
+    const colors = { ...p.spec.colors };
+    if (String(v || "").trim()) colors[k] = v;
+    else delete colors[k];
+    return { ...p, spec: { ...p.spec, colors } };
+  });
+  // THE ROOF TYPE, WITH THE KEYS ONLY THE OTHER KIND OF ROOF CAN HAVE TAKEN OFF IT. The sanitiser
+  // drops roof.front and the wings on a shed and roof.highSide on anything else, so leaving them
+  // on would make the preview draw a building that Save cannot store -- and "the new frame is
+  // active" is decided by whether either frame key is PRESENT, so a stale one would turn the
+  // preview's porch and front round while the saved style turned it back.
+  const CAL_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt"];
+  const calSetRoofType = (type) => setAdminCal((p) => {
+    const roof = { ...p.spec.roof, type };
+    if (type === "shed") { delete roof.front; for (const k of CAL_WING_KEYS) delete roof[k]; }
+    else delete roof.highSide;
+    // The roof step (2026-09-28) is a gable's only: the sanitiser drops both keys on anything else.
+    if (type !== "gable") { delete roof.rearStepFt; delete roof.rearEaveRiseFt; }
+    return { ...p, spec: { ...p.spec, roof } };
+  });
+  // The wings on and off. Off deletes all four keys: a builder who says "no wings" has said
+  // nothing about their pitch. On with no width starts at 4 ft, the calSetPorch rule -- a switch
+  // never leaves an empty field behind it.
+  const calSetWings = (side) => setAdminCal((p) => {
+    const roof = { ...p.spec.roof };
+    if (!side) { for (const k of CAL_WING_KEYS) delete roof[k]; }
+    else { roof.wingSide = side; if (!((Number(roof.wingWidthFt) || 0) > 0)) roof.wingWidthFt = 4; }
+    return { ...p, spec: { ...p.spec, roof } };
+  });
+  // An OPTIONAL number: calNumProps, plus a blank that clears, plus the sanitiser's own band so
+  // the preview never draws a number Save would clamp. `write(null)` is the clear.
+  const calOptNumProps = (key, current, band, write) => {
+    const base = calNumProps(key, current === null || current === undefined ? "" : current,
+      (n) => write(Math.max(band[0], Math.min(band[1], n))));
+    return {
+      ...base,
+      onChange: (e) => {
+        if (e.target.value === "") { setCalDraft(""); write(null); return; }
+        base.onChange(e);
+      },
+    };
+  };
+  // WHAT THE BUILDING STANDS ON, AND HOW HIGH (2026-09-25): one pair of controls, drawn in the walls
+  // fix panel and in the full field grid, so the two can never offer different choices. The height
+  // box shows only for blocks and piers, the two that raise the floor; blank is the kind's default.
+  const calFoundationFields = (idPrefix, labelStyle, inputStyle) => {
+    const spec = (adminCal && adminCal.spec) || {};
+    const raised = d3RaisedFoundation(spec);
+    const grade = d3GradeFt(spec);
+    return (
+      <>
+        <label style={labelStyle}>What it stands on
+          <select value={D3_FOUNDATIONS.indexOf(spec.foundation) >= 0 ? spec.foundation : ""} onChange={(e) => calSetFoundation(e.target.value)}
+            data-ss-foundation={idPrefix} style={inputStyle}>
+            <option value="">Not set (a slab on the ground)</option>
+            <option value="slab">Slab (the walls meet the ground)</option>
+            <option value="skids">Skids (runners on the ground)</option>
+            <option value="blocks">Concrete blocks (raised off the ground)</option>
+            <option value="piers">Concrete piers (raised off the ground)</option>
+          </select>
+        </label>
+        {raised && (
+          <label style={labelStyle}>Floor height off the ground, at the front (ft)
+            <input className="ssc-dim-in" type="number" step="0.1" min="0.3" max="6" inputMode="decimal"
+              placeholder={`${D3_FLOOR_HEIGHT_DEFAULT_FT[raised]} ft`} data-ss-floor-height={idPrefix}
+              {...calOptNumProps(idPrefix + "-floorHeightFt", spec.floorHeightFt, [0.3, 6], (n) => calSetFloorHeight(n))}
+              style={inputStyle} />
+            <span style={{ display: "block", fontWeight: 400, marginTop: 2, fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
+              Ground to the top of the floor where the door or porch is. A door is 6 ft 8 in tall, and each step up is about 7 in. Blank draws {ssFtInWords(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}. Porch steps climb the whole height, and a ramp a customer adds is drawn {grade > 0.75 ? ssFtInWords(4 * grade) : "3 ft"} long so it reaches the ground.
+            </span>
+          </label>
+        )}
+      </>
+    );
+  };
   // Grow and shrink the set. Carolyn 2026-09-04 @16:30: "they may just add more, but they may
   // also just remove one." Both are simple now that no position carries a meaning: append, and
   // splice. The old calRemovePhoto had to BLANK the first four in place rather than splice them,
@@ -18487,11 +20720,51 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // porchOutFt under a redraft that reported a recessed porch, so the preview went on drawing the
   // projecting one and Save dropped the new depth without a word. Projecting is checked first, the
   // sanitizer's order. A draft that reports neither keeps the stored porch, as it always has.
+  //
+  // THE 2026-09-24 KEYS, BY THE SAME RULE: whatever the draft is the authority on, it is the only
+  // source of. Every new key rides the spread; what changes is what gets cleared.
+  //   porchAttachFt / porchWidthFt  describe ONE projecting porch. A draft that reports a porch
+  //       brings its own or none, so a stored attach height never lands on a porch it was not
+  //       measured on -- and a recessed porch has neither (the sanitiser keeps them only while
+  //       porchOutFt is over 0.5). porchPosts / porchPitch / porchSteps (2026-09-25) are that
+  //       porch's own framing and follow the same rule.
+  //   wings  a shape draft always decides them (observed.wings is a required answer), so a draft
+  //       that reports a roof and no wings means NO wings, not "keep the stored ones". Otherwise a
+  //       redraft of a plain gable would go on drawing the last draft's wings.
+  //   roof.front / roof.highSide  the frame of reference the draft's own frame labels were
+  //       measured in. A stored one under a draft that did not use it would turn the building a
+  //       quarter turn away from the angles the self-check is about to render at.
+  //
+  // ⚠️ A DRAFT THAT REPORTS A ROOF TYPE REPLACES THE ROOF (2026-09-25). Every shape draft this panel
+  // asks for is a v2 read of the WHOLE roof: the prompt asks for the porch, the wings, a dormer and
+  // a lean-to, and says to leave out what the building does not have. So a key the draft leaves out
+  // means "not on this building", never "keep the last style's". The per-key clearing below grew
+  // one appendage at a time and missed the rest: a regenerated Tri Home saved the old style's 6 ft
+  // dormer, which its draft and all three check rounds had never drawn, because nothing cleared
+  // dormer keys. Only the builder's own roof settings the model is never asked about survive a
+  // redraft: the plate band and the overhang style. A draft with no type (not a shape read) still
+  // merges key by key, and the porch-kind rule below still covers raw data holding both porches.
   const calDraftRoof = (stored, drafted) => {
     const dr = drafted || {};
-    const roof = { ...stored, ...dr };
-    if ((dr.porchOutFt || 0) > 0.5) { delete roof.porchDepthFt; delete roof.porchTruss; }
-    else if ((dr.porchDepthFt || 0) > 0.5) delete roof.porchOutFt;
+    const BUILDER_ONLY = ["plateBand", "overhangStyle"];
+    const base = {};
+    if (dr.type) { for (const k of BUILDER_ONLY) if (stored && k in stored) base[k] = stored[k]; }
+    const roof = dr.type ? { ...base, ...dr } : { ...stored, ...dr };
+    const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"];
+    if ((dr.porchOutFt || 0) > 0.5) {
+      delete roof.porchDepthFt; delete roof.porchTruss;
+      for (const k of own) if (!(k in dr)) delete roof[k];
+    } else if ((dr.porchDepthFt || 0) > 0.5) {
+      delete roof.porchOutFt;
+      for (const k of own) delete roof[k];
+    }
+    if (dr.type) {
+      if (!((Number(dr.wingWidthFt) || 0) > 0)) {
+        for (const k of CAL_WING_KEYS) delete roof[k];
+      }
+      if (!("front" in dr)) delete roof.front;
+      if (!("highSide" in dr)) delete roof.highSide;
+    }
     return roof;
   };
 
@@ -18535,7 +20808,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // its FINAL spec to the spec as it stood BEFORE the generation rather than on top of the
   // first draft. Merging twice is exactly how a porch key survives its own exclusion — see
   // calPreGenRef. Same body, same rules, one caller more.
-  const calShapeMerged = (spec, d3) => ({
+  const calShapeMerged = (spec, d3) => calTidyFloor({
     ...spec,
     roof: calDraftRoof(spec.roof, d3 && d3.roof),
     // Only the keys the model actually read — see the header. An unreported colour is absent
@@ -18547,8 +20820,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // keeps its existing value when the model omits the key, so "the frames never
     // showed the bottom of the building" leaves the builder's setting alone rather
     // than resetting it to a slab.
-    gableVent: (d3 && d3.gableVent && d3.gableVent.widthFrac > 0) ? d3.gableVent : spec.gableVent,
-    foundation: (d3 && (d3.foundation === "skids" || d3.foundation === "slab")) ? d3.foundation : spec.foundation,
+    // A shape draft (it reports a roof type) is the authority on the vent too: the prompt says to
+    // leave gableVent out when the gable ends carry none, so absent means none (2026-09-25).
+    gableVent: (d3 && d3.gableVent && d3.gableVent.widthFrac > 0) ? d3.gableVent : ((d3 && d3.roof && d3.roof.type) ? undefined : spec.gableVent),
+    // blocks and piers (2026-09-25) by the same rule: the draft's when it gives one, else the stored.
+    foundation: (d3 && D3_FOUNDATIONS.indexOf(d3.foundation) >= 0) ? d3.foundation : spec.foundation,
+    // ...and a raised floor's height likewise. calTidyFloor then takes it off anything that is no
+    // longer on blocks or piers, as the sanitiser would on Save.
+    ...((d3 && Number(d3.floorHeightFt) > 0) ? { floorHeightFt: Number(d3.floorHeightFt) } : {}),
     // Third top-level field, same trap: the renderer textures the roof from this before
     // any customer roof-type pick, so a video that read "metal" and had it dropped here
     // would show shingles on a metal building and look like the model got it wrong.
@@ -18779,8 +21058,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       calDimWarnings.push(`This style has no ${calDimW} ft wide size in your catalog. That is fine — we read the building you filmed, not the price list — but check the width and the length are the right way round.`);
     }
     // The commonest way to hand the model a building turned ninety degrees.
+    //
+    // ⚠️ REWORDED, NOT DELETED, WHEN WIDTH STOPPED MEANING THE GABLE END (2026-09-24). Width is now
+    // the FRONT wall -- the one with the porch or the main door -- so a front longer than the
+    // building is deep is a real building (Farmstand is 16 wide and 10 deep), and the old
+    // sentence told that builder to swap two correct numbers. What is still worth saying is what
+    // the numbers MEAN, so the one real mistake left (a door on a short end, typed as the width
+    // of the long side) is caught by the person who can see the building.
     if (calDimInBand("widthFt", calDimW) && calDimInBand("lengthFt", calDimL) && calDimL < calDimW) {
-      calDimWarnings.push("The length is shorter than the width. Width is the GABLE END — the short end, the one with the roof triangle and usually the door — so these may be the wrong way round.");
+      calDimWarnings.push("The length is shorter than the width, so the front is the long side. That is right when the porch or main door is on a long wall; if the door is on a short end, these two are the wrong way round.");
     }
     // Metres typed into a feet box: 16 ft is 4.9 m, so a metres width beside a feet wall height
     // reads as a very tall, very narrow shed. Deliberately NOT half the width, which the brief
@@ -18895,10 +21181,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   //
   // TWELVE IS A HARD CEILING, not a preference: sanitizePhotoUrls ends
   // `.slice(0, Math.min(12, …))`, so a thirteenth view is dropped by the server whatever the
-  // caller asks for. A lap is eight frames, so a walk-around on its own, or with up to four
-  // photos, fits with nothing held back. Past that the WALK gives ground before the builder's
-  // own photos do — a staged photo was aimed at something, a frame is one of eight views of
-  // one lap — but never below CAL_VIDEO_MIN, because four frames is what covers four sides.
+  // caller asks for. A lap is twelve frames since 2026-09-24 (it was eight), so a walk-around on
+  // its own fills the set exactly, and every photo beside it costs one frame. The WALK gives
+  // ground before the builder's own photos do — a staged photo was aimed at something, a frame
+  // is one of twelve views of one lap — but never below CAL_VIDEO_MIN, because four frames is
+  // what covers four sides. The stride below keeps what is kept spread round the whole lap.
   //
   // Frames go FIRST and their count is sent with them: VIDEO_SHAPE_PROMPT opens by telling the
   // model the images are "in walk order, so consecutive frames are adjacent viewpoints", which
@@ -18969,7 +21256,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   //   2. this browser renders that draft from those angles, off screen
   //   3. a FREE second call is handed each render beside the builder's own frame of the same
   //      view, and asked one narrow question: where does our draft not match their building?
-  //   4. whatever it corrects is merged ONCE onto the spec as it stood before step 1
+  //   4. whatever it corrects is merged onto the spec as it stood before step 1 -- never onto
+  //      another merge -- and, since 2026-09-24, steps 2-4 repeat on the corrected building
+  //      for up to SS_CHECK_ROUNDS rounds (calRunSelfCheck, ssCheckNext)
   //
   // ⚠️ NOTHING IN STEPS 2-4 CAN COST THE BUILDER THEIR DRAFT. They have already been charged
   // and they are already holding it. So there is no throw on this path: no renders, no
@@ -19008,14 +21297,35 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // happened, so the two agreed -- but a caller that awaited anything first would have captured
   // the run of whatever style was open by then and every `mine()` below would answer about the
   // wrong building. The default keeps the hand-fix caller working unchanged.
-  const calRunSelfCheck = async (res, urls, draftSpec, dims, run = calRunRef.current) => {
+  //
+  // ⚠️ UP TO SS_CHECK_ROUNDS ROUNDS (2026-09-24). One round could only ever fix what it saw in
+  // the DRAFT's renders, and on 09-21 the one round that turned Farmstand's gable into a shed
+  // left the porch recessed with no chance to look at the shed it had just made. So a round that
+  // corrects something re-renders the CORRECTED building and asks again, with `round` counting
+  // 0, 1, 2 -- the server's own claim counter (round k claims k → k+1; a request without it is
+  // round 0, which is exactly what an older host sends). Each answer's `d3` is the server's
+  // CUMULATIVE spec, so it is merged onto calPreGenRef exactly as the single round was, never
+  // onto the last merge. ssCheckNext decides when to stop. `t0` is the press, for its clock.
+  //
+  // A LATER ROUND CAN NEVER COST AN EARLIER ONE. A failure, a 409 from an older server that
+  // knows only one round, or a refusal on round 2 leaves round 1's corrections standing and
+  // the verdict says what the rounds that worked did.
+  const calRunSelfCheck = async (res, urls, draftSpec, dims, run = calRunRef.current, t0 = Date.now()) => {
     const mine = () => calRunRef.current === run;
     const settle = (patch) => { if (mine()) setAdminCalCheck((p) => ({ ...(p || {}), step: "done", ...patch })); };
     // NO LABELS, NO CHECK, and no fallback either. A uniform orbit is off by a mean of 37
     // degrees on the one lap anyone has measured, so pairing a frame with a render at a
     // guessed angle would show the builder a mismatch we invented and ask them to judge it.
+    //
+    // A DRAFT PICKED UP FROM THE SERVER after its connection dropped (`res.recovered`, 2026-09-25)
+    // carries the frame map its ledger row kept (migration 253), so it arrives with labels and is
+    // checked exactly as a live answer is. Only a row that kept no map -- written before 253, or a
+    // reply that named no views -- or one picked up after the check's 15-minute claim window (the
+    // server would refuse the check) arrives without one, and it is skipped the same way, saying why.
     if (!res.checkId || !res.frameMap) {
-      settle({ verdict: "skipped", reason: "no_frames", pairs: [] });
+      settle(res.recovered
+        ? { verdict: "skipped", reason: "recovered", pairs: [], note: "Your connection dropped while we were drafting, so we picked the draft up from the server. It came back without the list of which view is which, so the side-by-side check did not run this time." }
+        : { verdict: "skipped", reason: "no_frames", pairs: [] });
       return;
     }
     if (mine()) setAdminCalCheck((p) => ({ ...(p || {}), step: "render" }));
@@ -19037,55 +21347,94 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       settle({ verdict: "skipped", reason: shots && shots.length ? "one_view" : "no_render", pairs });
       return;
     }
-    if (mine()) setAdminCalCheck((p) => ({ ...(p || {}), step: "check" }));
-    let out = null;
-    try {
-      out = await setup3d.onSelfCheck({
-        styleValue: adminCal.styleValue, checkId: res.checkId,
-        // THE EXACT ARRAY THE GENERATION WAS SENT, in that order and uncompacted. The frame
-        // indices only mean anything against it, and closing a gap would shift every index
-        // after it — a render aimed at image 6 paired with image 7 looks exactly like a right
-        // answer. The server trusts nothing in it but the positions.
-        photoUrls: urls,
-        renders: shots.map((s) => ({ viewpoint: s.viewpoint, frame: s.frame, base64: s.url })),
-      });
-    } catch (e) {
-      out = { verdict: "failed", reason: "unreachable", note: e && e.message, changed: [], d3: null };
-    }
-    if (!mine()) return;
-    const changed = (out && Array.isArray(out.changed)) ? out.changed : [];
-    // ⚠️ THE FINAL SPEC ONTO THE PRE-GENERATION SPEC, ONCE. Not onto the merged draft — see
-    // calPreGenRef. `d3` is non-null only on verdict "corrections", which is also the only
-    // verdict where anything actually moved.
-    if (out && out.d3 && changed.length) {
-      setAdminCal((p) => ({ ...p, spec: calShapeMerged(calPreGenRef.current || p.spec, out.d3) }));
+    // Every building this press has sent to the check, by signature: the oscillation guard.
+    const seen = [ssShotSig(params.style3d)];
+    let sent = shots;
+    let first = null;        // round 0's answer, which is the verdict when no round moved anything
+    let changed = [];        // one list across every round (ssMergeChanges)
+    let moved = false;
+    let note = "";
+    let ms = 0;
+    let rounds = 0;
+    let renders = shots.length;
+    let stop = null;
+    for (let round = 0; round < SS_CHECK_ROUNDS; round++) {
+      if (mine()) setAdminCalCheck((p) => ({ ...(p || {}), step: "check", round: round + 1 }));
+      let out = null;
+      try {
+        out = await setup3d.onSelfCheck({
+          styleValue: adminCal.styleValue, checkId: res.checkId,
+          // THE EXACT ARRAY THE GENERATION WAS SENT, in that order and uncompacted. The frame
+          // indices only mean anything against it, and closing a gap would shift every index
+          // after it — a render aimed at image 6 paired with image 7 looks exactly like a right
+          // answer. The server trusts nothing in it but the positions.
+          photoUrls: urls,
+          renders: sent.map((s) => ({ viewpoint: s.viewpoint, frame: s.frame, base64: s.url })),
+          round,
+        });
+      } catch (e) {
+        out = { verdict: "failed", reason: "unreachable", note: e && e.message, changed: [], d3: null };
+      }
+      if (!mine()) return;
+      rounds = round + 1;
+      if (!first) first = out || { verdict: "failed" };
+      ms += Number(out && out.ms) || 0;
+      if (out && out.renders) renders = out.renders;
+      const roundChanged = (out && Array.isArray(out.changed)) ? out.changed : [];
+      let nextSig = null;
+      // `d3` is non-null only on verdict "corrections", which is also the only verdict where
+      // anything actually moved.
+      if (out && out.verdict === "corrections" && out.d3 && roundChanged.length) {
+        // ⚠️ THE CUMULATIVE SPEC ONTO THE PRE-GENERATION SPEC, every round. Not onto the merged
+        // draft, and not onto the last round's merge — see calPreGenRef.
+        const after = calShapeMerged(calPreGenRef.current || draftSpec, out.d3);
+        nextSig = ssShotSig(after);
+        const prevShot = calShotRef.current;
+        // CLAIMED BEFORE THE SPEC MOVES. The hand-edit re-shoot effect keys on this signature,
+        // and without the claim it would start a SECOND render of the same building 400 ms into
+        // this one -- another WebGL context, and two writers racing for the same pairs.
+        if (prevShot && nextSig !== prevShot.sig) calShotRef.current = { ...prevShot, sig: nextSig };
+        setAdminCal((p) => ({ ...p, spec: calShapeMerged(calPreGenRef.current || p.spec, out.d3) }));
+        moved = true;
+        changed = ssMergeChanges(changed, roundChanged);
+        if (out.note) note = out.note;
+        // The pairs are pictures of the building BEFORE this correction, so they are taken again
+        // -- the builder must judge what they are going to save, and the next round needs them
+        // as its renders. One model build, and none at all when the correction produced a
+        // building the pairs already show.
+        if (!prevShot || nextSig !== prevShot.sig) {
+          const p2 = calShotParams(after, dims);
+          const reshot = await calShootWithin(p2, res.frameMap);
+          if (!mine()) return;
+          // No new pictures: the pairs stay the ones they are, so the claim goes back to the
+          // building they actually show, and there is nothing to send a next round.
+          if (!reshot || !reshot.length) { calShotRef.current = prevShot; stop = "no_render"; break; }
+          calShotRef.current = { params: p2, frameMap: res.frameMap, sig: nextSig };
+          setAdminCalCheck((p) => ({
+            ...(p || {}),
+            pairs: (p && p.pairs ? p.pairs : []).map((pair) => {
+              const s = reshot.find((x) => x.viewpoint === pair.viewpoint);
+              return s ? { ...pair, shotUrl: s.url } : pair;
+            }),
+          }));
+          sent = reshot;
+        }
+      }
+      stop = ssCheckNext(out, round, seen, nextSig, Date.now() - t0);
+      if (stop) break;
+      if (sent.length < 2) { stop = "one_view"; break; }
+      seen.push(nextSig);
     }
     settle({
-      verdict: (out && out.verdict) || "failed",
-      reason: (out && out.reason) || null,
-      note: (out && out.note) || "",
-      changed, pairs,
-      renders: (out && out.renders) || shots.length,
-      ms: (out && out.ms) || 0,
+      // What the ROUNDS did, not what the last one said: a round 2 that failed or said
+      // "matches" does not undo round 1's corrections, and the list says every one of them.
+      verdict: moved ? "corrections" : ((first && first.verdict) || "failed"),
+      reason: moved ? null : ((first && first.reason) || null),
+      note: moved ? note : ((first && first.note) || ""),
+      changed,
+      renders, ms, rounds, stop,
       corrected: changed.length > 0,
     });
-    // The pairs were taken of the DRAFT. If the check moved something, they are now pictures
-    // of a building the builder is not going to save, so they are taken again — one model
-    // build, and only on the one path where it is wrong to skip it.
-    if (out && out.d3 && changed.length) {
-      const after = calShapeMerged(calPreGenRef.current || draftSpec, out.d3);
-      const p2 = calShotParams(after, dims);
-      const reshot = await calShootWithin(p2, res.frameMap);
-      if (!mine() || !reshot) return;
-      calShotRef.current = { params: p2, frameMap: res.frameMap, sig: ssShotSig(p2.style3d) };
-      setAdminCalCheck((p) => ({
-        ...(p || {}),
-        pairs: (p && p.pairs ? p.pairs : []).map((pair) => {
-          const s = reshot.find((x) => x.viewpoint === pair.viewpoint);
-          return s ? { ...pair, shotUrl: s.url } : pair;
-        }),
-      }));
-    }
   };
 
   // Turn one compare render by hand. The escape hatch for a pairing the labels got wrong: a
@@ -19231,8 +21580,51 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       ? calIdemRef.current.key
       : crypto.randomUUID();
     calIdemRef.current = { styleValue: adminCal.styleValue, key: idem };
+    // The press, for the self-check rounds' clock (ssCheckNext). The same instant as `at` above.
+    const t0 = Date.now();
     try {
-      const res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount, idem, dims);
+      // ⚠️ ONE AUTOMATIC RETRY, AND ONLY WHEN THE SERVER ASKS FOR IT (2026-09-24). A draft cut off
+      // at max_tokens, or one that ran past the server's own abort, comes back `retryable: true`
+      // with the hold ALREADY RELEASED -- the money is back and the key is free again (migration
+      // 248). Before this the builder was shown "The AI ran out of room" and had to press again,
+      // which is the one thing a self-serve flow must not ask of them. So it is sent once more
+      // from here, `lean` (the server answers with less thinking), under the SAME key and inside
+      // the same press: one intent, at most one hold at a time, one charge. Never a second
+      // retry, and never on any other failure -- a refusal, a 402 or a 409 is not the model
+      // running out of room, and resending it would only repeat it.
+      //
+      // Since 2026-09-26 the server also marks a draft the AI SERVICE failed (code
+      // ai_upstream_transient: a frame download it could not make, a busy API, the network) as
+      // retryable, after sending its reads again itself. The same one lean retry takes it; only the
+      // card's line says the other reason (see `retry: "upstream"` below).
+      //
+      // ⚠️ AND ITS STREAMED ANSWER CAN DROP (2026-09-25). The press waits four to six minutes on a
+      // streamed answer, and a phone that backgrounds the tab or a network that blinks drops it while
+      // the server works on. `recover` lets the host pick the draft up from the server instead of
+      // failing (see onDraftFromCombined). It asks by THIS press's key (`idem`, which its ledger row
+      // and its hold carry), so it can only ever find this press's draft; the first ask goes at once
+      // after the drop, even one noticed after the budget (a phone that slept through the press), and
+      // it asks again only while this panel is mounted, this press is still the one on screen and
+      // `until` has not passed; and it switches the card to say so. A draft picked up that way comes
+      // back here exactly as an answer would, frame map included, and everything below -- the apply,
+      // the key, the message, the check -- runs as it does for an answer.
+      let res;
+      try {
+        res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount, idem, dims, {
+          recover: {
+            alive: () => calAliveRef.current && mine(),
+            until: t0 + SS_FLOW_MAX_MS,
+            onRecovering: () => { if (mine()) setAdminCalCheck((p) => (p ? { ...p, recovering: true } : p)); },
+          },
+        });
+      } catch (e1) {
+        if (!(e1 && e1.ssRetryable) || !mine()) throw e1;
+        // WHY it reads again, for the card (2026-09-26): "upstream" when the AI service failed the
+        // read itself (ai_upstream_transient: it could not load the views, was busy, or could not be
+        // reached, even after sending the read again), otherwise the read ran out of room or time.
+        setAdminCalCheck((p) => (p ? { ...p, retry: e1.ssRetryCode === "ai_upstream_transient" ? "upstream" : true } : p));
+        res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount, idem, dims, { lean: true });
+      }
       // A DRAFT LANDED, so this intent is finished and the money for it is spent. The next press
       // is a different generation and has to mint its own key - reusing this one would refuse it.
       calIdemRef.current = null;
@@ -19299,7 +21691,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // It cannot throw — see calRunSelfCheck's header — so the draft above is already safe
       // whatever happens inside it, and this needs no try of its own.
       if (setup3d.onSelfCheck) {
-        await calRunSelfCheck(res, urls, calShapeMerged(calPreGenRef.current || adminCal.spec, draftD3), dims, run);
+        await calRunSelfCheck(res, urls, calShapeMerged(calPreGenRef.current || adminCal.spec, draftD3), dims, run, t0);
       } else {
         // An older host with no check capability. The draft is exactly what it always was.
         setAdminCalCheck((p) => ({ ...(p || {}), step: "done", verdict: "skipped", reason: "unsupported", pairs: [] }));
@@ -19681,6 +22073,29 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calReadoutW = (calShotRef.current && calShotRef.current.params && Number(calShotRef.current.params.bldgW))
     || (calDimInBand("widthFt", calDimW) ? calDimW : 0)
     || bldgW;
+  const calReadoutL = (calShotRef.current && calShotRef.current.params && Number(calShotRef.current.params.bldgH))
+    || (calDimInBand("lengthFt", calDimL) ? calDimL : 0)
+    || bldgH;
+  // THE SPAN THE ROOF IS ACTUALLY DRAWN ACROSS, which is not always the width (2026-09-24). A
+  // shed whose high side is the front slopes front to back, across the DEPTH: Farmstand's
+  // 16 ft front and 10 ft depth at 0.23 is a 2 ft 4 in rise, and measured across the width the
+  // line said 3 ft 8 in. Read through d3RoofAxes, the same function the renderer builds the
+  // roof with, so the sentence and the 3D cannot disagree about which way the roof runs.
+  // WITH WINGS (d3Massing) the roof those sentences describe is the middle section's: its span
+  // Sc, above its own walls (ssRoofInFeet's `centre`), exactly as the renderer builds it.
+  const calReadoutMass = (adminCal && adminCal.spec && calReadoutL > 0)
+    ? d3Massing(adminCal.spec.roof, calReadoutW, calReadoutL, Number(adminCal.spec.wallHeightFt) || D3.WALL_H)
+    : null;
+  const calReadoutCentre = !!(calReadoutMass && calReadoutMass.wings.length);
+  const calReadoutSpan = calReadoutMass
+    ? ((calReadoutCentre ? calReadoutMass.Sc : d3RoofAxes(adminCal.spec.roof, calReadoutW, calReadoutL).S) || calReadoutW)
+    : calReadoutW;
+  // The porch "What we drew" describes, as BUILT at that same size (ssDrewWords): the renderer's
+  // own numbers, so a lowered porch pitch or a capped post count is said as drawn.
+  const calDrewPorch = calReadoutMass ? d3PorchReadout(adminCal.spec, `${calReadoutW}x${calReadoutL}`) : null;
+  // ...and the roof step as DRAWN at that size (d3RoofStep): null where the renderer draws none there,
+  // so the line says nothing about a step that is not on screen.
+  const calDrewStep = calReadoutMass ? d3RoofStep(adminCal.spec.roof, calReadoutW, calReadoutL, Number(adminCal.spec.wallHeightFt) || D3.WALL_H) : undefined;
   const calChecksAnswered = SS_CHECKS.filter(([k]) => adminCalAnswers[k]).length;
   // ⚠️ THE ONE SLICE EACH QUESTION IS ABOUT, so a "No" can be told from a "No, fixed". Cheap
   // and exact: every fix panel writes adminCal.spec, so comparing the slice at answer time
@@ -19690,9 +22105,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calQuestionSig = (key) => {
     const spec = (adminCal && adminCal.spec) || {};
     const roof = spec.roof || {};
-    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand]);
-    if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss]);
-    if (key === "walls") return String(spec.wallHeightFt);
+    // The 2026-09-24 keys are in the slice of the question whose panel sets them: which way the
+    // building faces and the wings are the ROOF's shape, the attach height and width the PORCH's.
+    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt, roof.rearStepFt, roof.rearEaveRiseFt]);
+    if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps]);
+    // What it stands on and how high (2026-09-25) are set in the walls panel, beside the wall.
+    if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt]);
     return JSON.stringify([spec.colors, spec.roofMaterial]);
   };
   // ⚠️ ANSWERED IS NOT AGREED. calChecksAnswered counts any non-empty answer, so "No" -- the
@@ -19794,10 +22212,48 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       return (
         <div style={{ display: "grid", gap: 8 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))", gap: 6 }}>
-            {calFixTile(roof.type === "gambrel", "Barn roof", "bends partway down", () => calSetRoof({ type: "gambrel" }), "ssc-rt-gambrel")}
-            {calFixTile(roof.type === "gable" || !roof.type, "Two slopes", "straight to the peak", () => calSetRoof({ type: "gable" }), "ssc-rt-gable")}
-            {calFixTile(roof.type === "shed", "One slant", "high side to low", () => calSetRoof({ type: "shed" }), "ssc-rt-shed")}
+            {calFixTile(roof.type === "gambrel", "Barn roof", "bends partway down", () => calSetRoofType("gambrel"), "ssc-rt-gambrel")}
+            {calFixTile(roof.type === "gable" || !roof.type, "Two slopes", "straight to the peak", () => calSetRoofType("gable"), "ssc-rt-gable")}
+            {calFixTile(roof.type === "shed", "One slant", "high side to low", () => calSetRoofType("shed"), "ssc-rt-shed")}
           </div>
+          {/* WHICH WAY IT FACES, AND THE WINGS (2026-09-24). The two things a roof's shape can be
+              right about and still draw as the wrong building: a one-slant roof high on the wrong
+              wall, a gable turned a quarter round, a raised middle with no wings beside it. Tiles
+              and plain words like the three above; the field grid below has the same keys. */}
+          {roof.type === "shed" ? (
+            <div style={{ display: "grid", gap: 4 }}>
+              <span style={calFixLabel}>Which wall is the high one</span>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(110px, 100%), 1fr))", gap: 6 }}>
+                {[["front", "The front", "the porch or door side"], ["back", "The back", "behind it"], ["left", "Left side", "facing the front"], ["right", "Right side", "facing the front"]].map(([v, lbl, sub]) =>
+                  calFixTile(roof.highSide === v, lbl, sub, () => calSetRoofOpt("highSide", v), "ssc-hs-" + v))}
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: "grid", gap: 4 }}>
+              <span style={calFixLabel}>The front wall is</span>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))", gap: 6 }}>
+                {calFixTile(roof.front === "gable", "A gable end", "the roof triangle faces you", () => calSetRoofOpt("front", "gable"), "ssc-fr-gable")}
+                {calFixTile(roof.front === "eave", "A long side", "the roof edge faces you", () => calSetRoofOpt("front", "eave"), "ssc-fr-eave")}
+              </div>
+            </div>
+          )}
+          {roof.type !== "shed" && (
+            <div style={{ display: "grid", gap: 4 }}>
+              <span style={calFixLabel}>Lower wings — enclosed rooms under their own lower roof</span>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(110px, 100%), 1fr))", gap: 6 }}>
+                {[["", "None", "one roof over it all"], ["both", "Both sides", "a taller middle"], ["left", "Left side", "facing the front"], ["right", "Right side", "facing the front"]].map(([v, lbl, sub]) =>
+                  calFixTile(v ? ((Number(roof.wingWidthFt) || 0) > 0 && roof.wingSide === v) : !((Number(roof.wingWidthFt) || 0) > 0), lbl, sub, () => calSetWings(v || null), "ssc-wg-" + (v || "none")))}
+              </div>
+              {(Number(roof.wingWidthFt) || 0) > 0 && (
+                <label style={calFixLabel}>How wide each wing is (ft)
+                  <input className="ssc-dim-in" type="number" step="0.5" min="1" max="16" inputMode="decimal"
+                    value={String(Number(roof.wingWidthFt) || 0)}
+                    onChange={(e) => { const n = parseFloat(e.target.value); if (isFinite(n) && n > 0) calSetRoofOpt("wingWidthFt", Math.min(16, n)); }}
+                    style={{ ...S.sel, fontSize: undefined, width: 100, display: "block" }} />
+                </label>
+              )}
+            </div>
+          )}
           {roof.type === "gambrel" ? (
             <div style={{ display: "grid", gap: 6 }}>
               {/* TWO SLIDERS, AND THE THIRD NUMBER IS DERIVED so the pair cannot produce a
@@ -19815,7 +22271,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   style={{ width: "100%", display: "block" }} />
                 <span style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#94A3B8", fontWeight: 600 }}><span>shallow</span><span>steep</span></span>
               </label>
-              <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>{ssRoofInFeet(roof, calReadoutW)}</div>
+              <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>{ssRoofInFeet(roof, calReadoutSpan, calReadoutCentre)}</div>
             </div>
           ) : (
             /* "{n} in 12", because that is what a framing square is marked in and what a
@@ -19880,6 +22336,43 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 style={{ ...S.sel, fontSize: undefined, width: 100, display: "block" }} />
             </label>
           )}
+          {/* WHERE ITS ROOF MEETS THE WALL, AND HOW WIDE IT IS (2026-09-24), projecting only. Blank
+              is the renderer's own answer and is stored as nothing. */}
+          {kind === "projecting" && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))", gap: 6 }}>
+              <label style={calFixLabel}>Its roof meets the wall at (ft up)
+                <input className="ssc-dim-in" type="number" step="0.25" min="6" max="24" inputMode="decimal" placeholder="just under the eave"
+                  {...calOptNumProps("ssc-fix-porchAttachFt", roof.porchAttachFt, [6, 24], (n) => calSetRoofOpt("porchAttachFt", n))}
+                  style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
+              </label>
+              <label style={calFixLabel}>How wide it is (ft)
+                <input className="ssc-dim-in" type="number" step="0.5" min="4" max="60" inputMode="decimal" placeholder="the whole wall"
+                  {...calOptNumProps("ssc-fix-porchWidthFt", roof.porchWidthFt, [4, 60], (n) => calSetRoofOpt("porchWidthFt", n))}
+                  style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
+              </label>
+              {/* ITS POSTS, ITS ROOF'S SLOPE AND ITS STEPS (2026-09-25). Blank is the renderer's own
+                  answer (a post every 8.5 ft, a 2 in 12 roof, no steps) and is stored as nothing. */}
+              <label style={calFixLabel}>Posts along its front
+                <input className="ssc-dim-in" type="number" step="1" min="2" max="8" inputMode="numeric" placeholder="one every 8.5 ft"
+                  {...calOptNumProps("ssc-fix-porchPosts", roof.porchPosts, [2, 8], (n) => calSetRoofOpt("porchPosts", n == null ? null : Math.round(n)))}
+                  style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
+              </label>
+              <label style={calFixLabel}>Its roof's slope (in 12)
+                <input className="ssc-dim-in" type="number" step="0.25" min="0.6" max="6" inputMode="decimal" placeholder="2 in 12"
+                  {...calOptNumProps("ssc-fix-porchPitch", roof.porchPitch == null ? null : Math.round(Number(roof.porchPitch) * 1200) / 100, [0.6, 6], (n) => calSetRoofOpt("porchPitch", n == null ? null : n / 12))}
+                  style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
+              </label>
+              <label style={calFixLabel}>Steps off its front
+                <select value={roof.porchSteps || ""} onChange={(e) => calSetRoofOpt("porchSteps", e.target.value)}
+                  style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }}>
+                  <option value="">No steps</option>
+                  <option value="left">On the left</option>
+                  <option value="center">In the middle</option>
+                  <option value="right">On the right</option>
+                </select>
+              </label>
+            </div>
+          )}
           {kind !== "none" && (
             /* "The end you filmed first" rather than "the front gable end": one of those is a
                fact the builder possesses and the other needs d3RoofAxes read first. */
@@ -19914,8 +22407,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               style={{ ...S.sel, fontSize: undefined, width: 100, display: "block" }} />
           </label>
           <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
-            Floor to the top of the side wall, not to the peak. <b>This is the number you gave us in step 2</b> — changing it here changes it there, because it is one measurement with two boxes.
+            Floor to the top of the outside wall at the eave, not to the peak — on a one-slant roof, the low side. <b>This is the number you gave us in step 2</b> — changing it here changes it there, because it is one measurement with two boxes.
           </div>
+          {calFoundationFields("ssc-fix", calFixLabel, { ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" })}
         </div>
       );
     }
@@ -19928,6 +22422,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <input type="text" placeholder="#hex or blank" value={adminCal.spec.colors[k] || ""} onChange={(e) => calSetColor(k, e.target.value)}
                   style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #CBD5E1", background: adminCal.spec.colors[k] || "#EEE", flexShrink: 0 }} />
+              </div>
+            </label>
+          ))}
+          {/* Corner boards and fascia (2026-09-24): blank is the trim colour, which is what absent
+              draws. The check never corrects a colour, so this is the only way to fix one. */}
+          {[["corner", "Corner boards"], ["fascia", "Fascia and rake boards"]].map(([k, lbl]) => (
+            <label key={"ssc-col-" + k} style={calFixLabel}>{lbl}
+              <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                <input type="text" placeholder="blank = same as trim" value={adminCal.spec.colors[k] || ""} onChange={(e) => calSetOptColor(k, e.target.value)}
+                  style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #CBD5E1", background: adminCal.spec.colors[k] || adminCal.spec.colors.trim || "#EEE", flexShrink: 0 }} />
               </div>
             </label>
           ))}
@@ -19962,11 +22467,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // the loudest of the three, because the preview they are about to confirm against their own
   // frames is then of a different building.
   //
-  // `flagObservedNotes` joins the warnings in the order gambrel, porch, knownDims, and `^`
-  // only ever sees the first, so this reads whichever fired first and arms that one's panel.
-  const calWarnBanner = /^Check (this roof|the porch|the wall height) before saving/.test(calRoofNote) ? calRoofNote : null;
+  // `flagObservedNotes` joins the warnings in the order frame key, gambrel, porch, wings,
+  // knownDims, and `^` only ever sees the first, so this reads whichever fired first and arms
+  // that one's panel. The banner still carries the whole note, so a second warning behind the
+  // first is on screen too.
+  //
+  // AND FIVE, NOT THREE (fix, 2026-09-25). The v2 generation added two openings of its own:
+  // frameKeyWarning ("Check which way the building faces…" on a two-slope roof, "Check which wall
+  // is the high one…" on a shed) and wingsAgreementWarning ("Check the side wings…"). Unmatched,
+  // the frame-key warning -- composed FIRST -- took the banner away from a porch or wall-height
+  // warning behind it as well. selfCheckPanel_test runs this line over every warning the server
+  // writes, so a sixth opening fails a test instead of losing its banner.
+  const calWarnBanner = /^Check (this roof|the porch|the wall height|the side wings|which way the building faces|which wall is the high one) before saving/.test(calRoofNote) ? calRoofNote : null;
   // Which question a machine warning belongs to, so the banner can arm that question's fix
-  // panel rather than leaving the builder to work out which of the four it was about.
+  // panel rather than leaving the builder to work out which of the four it was about. The front
+  // wall, the high side and the wings are all tiles in the ROOF panel, so those three are "roof".
   const calWarnQuestion = !calWarnBanner ? null
     : /^Check the porch/.test(calWarnBanner) ? "porch"
     : /^Check the wall height/.test(calWarnBanner) ? "walls"
@@ -20014,7 +22529,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // load them - `calVideoFrames` there is structurally [], and sending it would have made
         // every operator "Save to config" wipe the builder's walk-around. Omitting the key is
         // what tells the server to leave the column as it found it.
-        body: { adminPassword: adminPwd, clientId: C.clientId, action: "save_style_d3", styleValue: adminCal.styleValue, d3: adminCal.spec, d3Photos: adminCal.photos.filter(Boolean) },
+        // `frame: "front"` (2026-09-25): this editor knows blocks, piers and floorHeightFt, so the
+        // server applies what it sends rather than carrying a stored raised floor forward.
+        body: { adminPassword: adminPwd, clientId: C.clientId, action: "save_style_d3", styleValue: adminCal.styleValue, d3: adminCal.spec, d3Photos: adminCal.photos.filter(Boolean), frame: "front" },
       });
       if (error) throw new Error(error.message || "Save failed");
       if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");
@@ -21339,7 +23856,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   A video shows us the <b>shape</b>. It cannot show us the <b>size</b> — there is nothing in the frame to
                   measure against, so we would be guessing, and a guess here bends every other number. Type the three
                   measurements off the building you filmed and they become the ruler everything else is read against.
-                  {" "}<b>Width is the gable end</b> — the short end with the roof triangle.
+                  {" "}<b>Width is the FRONT wall</b> — the side with the porch, or the main door if there is no porch — and
+                  <b> length runs front to back</b>. On a building with lower wings, measure the whole thing, wings included.
                   {adminCal && !calOwnSizes(adminCal.styleValue).length
                     ? <><br /><b>This style has no sizes set up yet</b>, so there is nothing to start you off — type the size of the building you filmed.</>
                     : null}
@@ -21352,7 +23870,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       model as measurements the builder took. Grey on white read as a finished
                       answer, and one tap on the wall height turned the badge green over all
                       three. The seed stays; the tick waits. */}
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Width (ft) — the gable end
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Width (ft) — the FRONT wall (the side with the porch or main door)
                     {/* fontSize dropped from S.sel on purpose: an inline size beats the class, and
                         the class is what carries the 16px that stops iOS zooming on every tap. */}
                     <input className="ssc-dim-in" type="number" step="0.5" min="4" inputMode="decimal" placeholder="e.g. 12"
@@ -21364,7 +23882,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       </span>
                     )}
                   </label>
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Length (ft) — down the side
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Length (ft) — front to back
                     <input className="ssc-dim-in" type="number" step="0.5" min="4" inputMode="decimal" placeholder="e.g. 24"
                       {...calDimProps("lengthFt", adminCalDims.lengthFt)}
                       style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: (calLengthNeedsLook || !calDimInBand("lengthFt", calDimL)) ? "#F59E0B" : "#CBD5E1", background: calLengthNeedsLook ? "#FFFBEB" : "#FFF" }} />
@@ -21381,7 +23899,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       tests/harness/porchPanel.mjs, which reaches the field below by
                       /^Wall height \(ft\)/. Putting the qualifier before the unit is clearer
                       anyway -- the eave is where a builder has to hold the tape. */}
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height at the eave (ft)
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height at the eave (ft) — the outside walls (single-slope roof: the LOW side)
                     <input className="ssc-dim-in" type="number" step="0.5" min="3" inputMode="decimal" placeholder="e.g. 9"
                       {...calDimProps("wallHeightFt", calDimH)}
                       style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: (calWallNeedsLook || !calDimInBand("wallHeightFt", calDimH)) ? "#F59E0B" : "#CBD5E1", background: (calWallNeedsLook || calWallBad != null) ? "#FFFBEB" : "#FFF" }} />
@@ -21621,7 +24139,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           {[
                             ["draft", `Looking at your ${adminCalCheck.views || 0} views`, `Looked at your ${adminCalCheck.views || 0} views`],
                             ["draft", "Drawing a first 3D from what they show", "Drew a first 3D from what they show"],
-                            ["check", "Checking our 3D against your video, side by side", "Checked our 3D against your video"],
+                            /* THE ROUND IS SAID OUT LOUD once a check is running (2026-09-24). Up to
+                               SS_CHECK_ROUNDS of them, each a render and a check, so without it the
+                               card sits on one line for two minutes and reads as stuck. */
+                            ["check", adminCalCheck.round
+                              ? `Checking its work — round ${adminCalCheck.round} of ${SS_CHECK_ROUNDS}`
+                              : "Checking our 3D against your video, side by side", "Checked our 3D against your video"],
                             ["done", "Correcting anything that doesn't line up", "Correcting anything that doesn't line up"],
                           ].map(([owns, doing, done], i) => {
                             const order = ["draft", "render", "check", "done"];
@@ -21636,10 +24159,28 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                             );
                           })}
                         </ol>
+                        {/* THE AUTOMATIC SECOND READ, said while it happens. Without this line the
+                            first step simply takes twice as long and nothing says why; with it, the
+                            builder knows the first read was thrown away and that it cost nothing. */}
+                        {adminCalCheck.retry && adminCalCheck.step === "draft" && (
+                          <div style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", fontWeight: 700, lineHeight: 1.5 }}>
+                            {adminCalCheck.retry === "upstream"
+                              ? "The AI service couldn't finish the first read, so we are reading your views again. It is still one generation."
+                              : "The first read ran out of room before it finished, so we are reading your views again with a shorter answer. It is still one generation."}
+                          </div>
+                        )}
+                        {/* THE PICKUP, said while it happens (2026-09-25). The answer this press was
+                            waiting on dropped, and the draft is being read back off the server; no
+                            "try again", because pressing again is the one thing that would not help. */}
+                        {adminCalCheck.recovering && adminCalCheck.step === "draft" && (
+                          <div data-ssc-recovering="1" style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", fontWeight: 700, lineHeight: 1.5 }}>
+                            Your connection dropped — picking the draft up from the server… Keep this page open. It is still one generation.
+                          </div>
+                        )}
                         <div style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", lineHeight: 1.5 }}>
                           {adminCalSlow
                             ? "Still going. Big videos take longer — don't close the page."
-                            : "Usually about a minute. You can leave this page open and come back."}
+                            : "Usually four to six minutes — it studies your video carefully. You can leave this page open and come back."}
                         </div>
                         {/* THE MONEY LINE. Under a rule, on every render of this card. */}
                         <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #DDD6FE", fontSize: 11, color: "#4C1D95", fontWeight: 700, lineHeight: 1.5 }}>
@@ -21766,7 +24307,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       builder has their draft and has been charged once either way. */}
                   <div style={{ marginTop: 8, fontSize: 11.5, lineHeight: 1.5, fontWeight: 600, color: adminCalCheck.verdict === "matches" ? "#047857" : adminCalCheck.verdict === "corrections" ? "#5B21B6" : "#B45309" }}>
                     {adminCalCheck.verdict === "matches" && <>✓ Checked against your video — the draft already matches. Look at it yourself anyway; you are the one who has seen the building.</>}
-                    {adminCalCheck.verdict === "corrections" && <>We checked our own 3D against your video and corrected {adminCalCheck.changed.length} thing{adminCalCheck.changed.length === 1 ? "" : "s"}:</>}
+                    {/* HOW MANY ROUNDS, when there was more than one: "corrected 3 things" after
+                        two looks is a different claim from after one, and the list below is the
+                        net of all of them (ssMergeChanges). */}
+                    {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length > 0 && <>We checked our own 3D against your video{(adminCalCheck.rounds || 1) > 1 ? ` ${adminCalCheck.rounds} times` : ""} and corrected {adminCalCheck.changed.length} thing{adminCalCheck.changed.length === 1 ? "" : "s"}:</>}
+                    {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length === 0 && <>We checked our own 3D against your video{(adminCalCheck.rounds || 1) > 1 ? ` ${adminCalCheck.rounds} times` : ""}, and its corrections cancelled each other out, so what you see is the first read. Look at it carefully against your pictures.</>}
                     {adminCalCheck.verdict === "rejected_too_many" && <>Our check thought too much of the draft was wrong to patch safely, so it changed nothing. Go through the four questions below carefully.</>}
                     {(adminCalCheck.verdict === "skipped" || adminCalCheck.verdict === "failed") && <>We couldn't run our own check this time, so what you see is the first read. Look at it carefully against your pictures before you save. You were charged once, as usual.</>}
                   </div>
@@ -21949,7 +24494,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       are true at once, so the number stays a ratio on the wire and becomes
                       feet here. */}
                   <div style={{ marginTop: 10, fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
-                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutW)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the side walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)}.
+                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec, calDrewPorch, calDrewStep)}
                   </div>
                   {/* ── THE FOUR QUESTIONS ───────────────────────────────────────────────
                       ONLY WHERE THERE IS SOMETHING TO ANSWER THEM AGAINST, which is the same
@@ -22140,7 +24685,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof type
-                  <select value={adminCal.spec.roof.type} onChange={(e) => calSetRoof({ type: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                  <select value={adminCal.spec.roof.type} onChange={(e) => calSetRoofType(e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
                     {/* "Single slant" is what ShedPro and Carolyn both call a shed roof.
                         The value stays "shed" -- this is a label, not a new roof type. */}
                     <option value="gable">Gable (two slopes)</option>
@@ -22148,6 +24693,32 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <option value="gambrel">Gambrel (barn)</option>
                   </select>
                 </label>
+                {/* WHICH WAY THE BUILDING FACES (2026-09-24). The FRONT is the wall with the porch,
+                    or the main door when there is no porch, and it is the wall the size's first
+                    number measures. "Not set" is a real answer and it is where every older style
+                    sits: the roof then runs the way it always has (the ridge along the longer
+                    side), and picking it deletes the key rather than storing a default. One
+                    select or the other, never both: the sanitiser keeps roof.front on a gable or
+                    gambrel only and roof.highSide on a shed only. */}
+                {adminCal.spec.roof.type === "shed" ? (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>High side (single slant)
+                    <select value={adminCal.spec.roof.highSide || ""} onChange={(e) => calSetRoofOpt("highSide", e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                      <option value="">Not set (the long way, as before)</option>
+                      <option value="front">Front (falls front to back)</option>
+                      <option value="back">Back (falls back to front)</option>
+                      <option value="left">Left side</option>
+                      <option value="right">Right side</option>
+                    </select>
+                  </label>
+                ) : (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Front wall (porch or door side)
+                    <select value={adminCal.spec.roof.front || ""} onChange={(e) => calSetRoofOpt("front", e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                      <option value="">Not set (ridge the long way, as before)</option>
+                      <option value="gable">Gable end (the roof triangle faces you)</option>
+                      <option value="eave">Long side (the roof edge faces you)</option>
+                    </select>
+                  </label>
+                )}
                 {/* ROOF MATERIAL HAD NO CONTROL AT ALL until 2026-08-28. It could only ever
                     be photo-derived by the AI drafter or inferred from whatever the CUSTOMER
                     later picked -- so a builder who sells metal roofs had no way to say so,
@@ -22193,6 +24764,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <span style={{ display: "block", fontWeight: 400, marginTop: 2 }}>Used when a customer picks a metal roof. The preview shows it once Roof material is Metal.</span>
                   )}
                 </label>
+                {/* WHAT IT STANDS ON (2026-09-25). A top-level key with NO control until today: the
+                    generator could set skids or a slab and nothing on screen could change it. Blocks
+                    and piers raise the floor off the ground; the same pair of controls is in the
+                    walls fix panel (calFoundationFields). */}
+                {calFoundationFields("ss-grid", { fontSize: 11, color: "#92400E", fontWeight: 700 }, { ...S.sel, width: "100%", boxSizing: "border-box" })}
                 {/* PITCH IS ENTERED AS THE RISE, which is the only way a builder states a
                     roof. Carolyn, 2026-08-28 @44:17-46:36: she typed 10 expecting a 10:12,
                     and the drawing came back "120:12" with a 76'6" peak, because this field
@@ -22267,6 +24843,47 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge offset (−0.35…0.35)
                   <input type="number" step="0.05" {...calNumProps("ridgeOffset", adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0, (n) => calSetRoof({ ridgeOffset: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
+                {/* THE ROOF STEP (2026-09-28): a gable built in two sections, the rear one's roof edge
+                    higher (or lower) than the front's while the two ridges line up. Offered on a gable
+                    whose front is not a long side, the only roof Save keeps it on; both numbers or
+                    neither, and a cleared box deletes its key (calOptNumProps). The step is typed in
+                    feet from the BACK wall like every length here, the rise in INCHES because that is
+                    the size it comes in (7 in is 0.58 ft). The line under the rise is d3RoofStep's own
+                    answer at this size, so it says what the preview draws, or why it draws no step. */}
+                {adminCal.spec.roof.type === "gable" && adminCal.spec.roof.front !== "eave" && (() => {
+                  const roof = adminCal.spec.roof;
+                  const hint = { display: "block", fontWeight: 400, marginTop: 2 };
+                  const hasStep = roof.rearStepFt != null && roof.rearStepFt !== "";
+                  const hasRise = roof.rearEaveRiseFt != null && roof.rearEaveRiseFt !== "";
+                  const st = d3RoofStep(roof, bldgW, bldgH, Number(adminCal.spec.wallHeightFt) || D3.WALL_H);
+                  const riseIn = (ft) => Math.round(Math.abs(ft) * 120) / 10;
+                  const why = !hasStep && !hasRise ? "Blank: one roof from the front to the back."
+                    : !(hasStep && hasRise) ? "Give both numbers. One without the other is not drawn or saved."
+                    : st ? `Drawn: the back ${ssFtInWords(st.stepFt)} has its own roof, its edge ${riseIn(st.rise)} in ${st.rise > 0 ? "higher" : "lower"} at ${Math.round(st.pitchB * 120) / 10} in 12, so the ridges line up.`
+                    : !(Number(roof.rearStepFt) > 0.5) ? "A step of 0 is no step."
+                    : !(Math.abs(Number(roof.rearEaveRiseFt)) >= 0.01) ? "A rise of 0 draws no step."
+                    : (Number(roof.wingWidthFt) || 0) > 0.5 ? "Not drawn with lower wings: they run the length of the building at one height."
+                    : (Number(roof.leanToWidthFt) || 0) > 0.5 ? "Not drawn with a lean-to: it runs the length of the building at one height."
+                    : roof.porchEnd === "back" && ((Number(roof.porchDepthFt) || 0) > 0.5 || (Number(roof.porchOutFt) || 0) > 0.5) ? "Not drawn with the porch at the back."
+                    : !d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? `Not drawn on ${sel.size || "this size"}: its ridge runs side to side. Set the front wall to a gable end.`
+                    : `Not drawn: ${sel.size || "this size"} is too short to leave 4 ft each side of the step.`;
+                  return (
+                    <>
+                      <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof step from back (ft)
+                        <input type="number" step="0.5" min="0" max="56" placeholder="blank = no step" data-ss-roof-step="at"
+                          {...calOptNumProps("rearStepFt", roof.rearStepFt, [0, 56], (n) => calSetRoofOpt("rearStepFt", n))}
+                          style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                        <span style={hint}>Where the rear section's own roof starts, measured from the back wall.</span>
+                      </label>
+                      <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Rear roof edge higher by (in)
+                        <input type="number" step="0.5" min="-18" max="18" placeholder="negative = lower" data-ss-roof-step="rise"
+                          {...calOptNumProps("rearEaveRiseIn", roof.rearEaveRiseFt == null || roof.rearEaveRiseFt === "" ? null : Math.round(Number(roof.rearEaveRiseFt) * 1200) / 100, [-18, 18], (n) => calSetRoofOpt("rearEaveRiseFt", n == null ? null : n / 12))}
+                          style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                        <span style={hint} data-ss-roof-step="why">{why}</span>
+                      </label>
+                    </>
+                  );
+                })()}
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height (ft)
                   <input type="number" step="0.5" {...calNumProps("wallHeightFt", adminCal.spec.wallHeightFt || 8, (n) => calSet({ wallHeightFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
@@ -22327,6 +24944,66 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     </select>
                   </label>
                 )}
+                {/* LOWER WINGS (2026-09-24), the Tri Home's shape: ENCLOSED single-storey rooms along
+                    the eave sides, INSIDE the footprint, each under its own roof falling away from
+                    a taller middle section. Not a lean-to, which is open on posts and sits outside.
+                    Gable and gambrel only (the sanitiser drops them on a shed). Width 0 or blank is
+                    off and deletes every wing key, like the lean-to's 0. */}
+                {adminCal.spec.roof.type !== "shed" && (() => {
+                  const roof = adminCal.spec.roof;
+                  const on = (Number(roof.wingWidthFt) || 0) > 0;
+                  // WHICH SIDES CAN TAKE A WING ON THIS ROOF, from d3RoofAxes like the renderer: the
+                  // walls parallel to the ridge. A side that is not one of them is not drawn, and the
+                  // contract is that the panel says so rather than letting it vanish.
+                  const eaveSides = d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? ["left", "right"] : ["front", "back"];
+                  const lost = on && roof.wingSide && roof.wingSide !== "both" && eaveSides.indexOf(roof.wingSide) < 0;
+                  const hint = { fontSize: 10, fontWeight: 700, marginTop: 3, color: "#A16207" };
+                  return (
+                    <>
+                      <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Lower wings, each (ft wide, 0 = none)
+                        <input type="number" step="0.5" min="0" max="16" placeholder="0"
+                          {...calOptNumProps("wingWidthFt", roof.wingWidthFt, [0, 16], (n) => (n > 0 ? calSetRoofOpt("wingWidthFt", n) : calSetWings(null)))}
+                          style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                        <div style={hint}>Enclosed rooms under their own lower roof, inside the size. A lean-to is the open one on posts.</div>
+                      </label>
+                      {on && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wing side
+                          <select value={roof.wingSide || ""} onChange={(e) => calSetRoofOpt("wingSide", e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                            <option value="">Choose…</option>
+                            <option value="both">Both sides</option>
+                            <option value="left">Left side</option>
+                            <option value="right">Right side</option>
+                            <option value="front">Front</option>
+                            <option value="back">Back</option>
+                          </select>
+                          <div style={{ ...hint, color: (lost || !roof.wingSide) ? "#B45309" : "#A16207" }}>
+                            {!roof.wingSide
+                              ? "Not chosen yet, so it is drawn on both sides. Pick the side the wing is on."
+                              : lost
+                                ? `On this roof a wing can only run along the ${eaveSides[0] === "left" ? "left or right side" : "front or back"} — the walls under the roof edge — so a wing on the ${roof.wingSide === "left" || roof.wingSide === "right" ? roof.wingSide + " side" : roof.wingSide} is not drawn.`
+                                : "Runs the full depth, along the wall under the roof edge."}
+                          </div>
+                        </label>
+                      )}
+                      {on && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wing roof pitch (rise in 12)
+                          <input type="number" step="0.5" min="0" max="18" placeholder="blank = 3"
+                            {...calOptNumProps("wingPitch", roof.wingPitch == null ? null : Math.round(Number(roof.wingPitch) * 1200) / 100, [0, 18], (n) => calSetRoofOpt("wingPitch", n == null ? null : n / 12))}
+                            style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                          <div style={hint}>Falls away from the middle, down to the outside wall.</div>
+                        </label>
+                      )}
+                      {on && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Middle section's wall height (ft)
+                          <input type="number" step="0.5" min="6" max="26" placeholder="blank = 3 ft over the wings"
+                            {...calOptNumProps("centerEaveFt", roof.centerEaveFt, [6, 26], (n) => calSetRoofOpt("centerEaveFt", n))}
+                            style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                          <div style={hint}>Floor to the top of the tall middle walls, where its own roof starts.</div>
+                        </label>
+                      )}
+                    </>
+                  );
+                })()}
                 {adminCal.spec.roof.type !== "shed" && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer width (ft, 0 = none)
                     <input type="number" step="0.5" min="0" {...calNumProps("dormerWidthFt", adminCal.spec.roof.dormerWidthFt != null ? adminCal.spec.roof.dormerWidthFt : 0, (n) => calSetRoof({ dormerWidthFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
@@ -22387,13 +25064,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   const kind = calPorchKind(roof);
                   const key = kind === "projecting" ? "porchOutFt" : "porchDepthFt";
                   const hint = { fontSize: 10, fontWeight: 700, marginTop: 3, color: "#A16207" };
-                  // WHAT THE PROJECTING PORCH WILL BUILD at the preview size, from d3PorchGeom, the
-                  // function the renderer builds it with. The panel has no main roof to measure, so
-                  // the height where the porch roof meets the wall is the most it can be. Amber when
-                  // the wall is too short for a 2:12 porch roof over 6'8" posts. It warns and nothing
-                  // is refused: the porch is still drawn.
+                  // WHAT THE PROJECTING PORCH WILL BUILD at the preview size, from d3PorchGeom under
+                  // d3PorchCapFt, the function and the ceiling the renderer builds it with. Where the
+                  // main roof reaches out over a gable-end porch (a rake or eave board past the wall,
+                  // a lean-to) only the renderer can measure it, and the line says the porch roof can
+                  // sit a little lower (pr.atMost). Amber when the wall is too short for a 2:12 porch
+                  // roof over 6'8" posts. It warns and nothing is refused: the porch is still drawn.
                   const pr = kind === "projecting" ? d3PorchReadout(adminCal.spec, sel.size) : null;
                   const warn = !!(pr && (pr.short || pr.pitchClamped));
+                  // A RECESSED porch is not drawn on a building with lower wings (the renderer turns
+                  // it off: its header would stand under a cap that is no longer at the wall's top),
+                  // and the contract is that the panel says so rather than letting it vanish. Read
+                  // off d3Massing, the renderer's own answer, so "wings" means wings that draw.
+                  const recessedLost = kind === "recessed" && d3Massing(roof, bldgW, bldgH, adminCal.spec.wallHeightFt || D3.WALL_H).wings.length > 0;
                   return (
                     <>
                       <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch
@@ -22410,27 +25093,108 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                               half-typed 0.75 would flip the kind and unmount this field mid-keystroke. */}
                           <input type="number" step="0.5" min="0" {...calNumProps(key, roof[key], (n) => { if (n > 0.5) calSetPorch(kind, n); })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                           {kind === "recessed" ? (
-                            <div style={hint}>
-                              Comes out of the building, not off it {String.fromCharCode(0x2014)} the roof and the footprint do not move.
+                            <div style={{ ...hint, color: recessedLost ? "#B45309" : "#A16207" }}>
+                              {recessedLost
+                                ? "Not drawn with lower wings: a recessed porch needs the main roof's edge over it. Use a projecting porch in front of the middle section."
+                                : `Comes out of the building, not off it ${String.fromCharCode(0x2014)} the roof and the footprint do not move.`}
                             </div>
                           ) : (
                             <div style={hint}>Stands in front of the building. The size and the price do not change.</div>
                           )}
-                          {pr && (
-                            <div style={{ ...hint, color: warn ? "#B45309" : "#A16207" }}>
-                              {warn
-                                ? `Walls this short leave ${d3FtIn(pr.postH)} under the porch beam. About ${d3FtIn(pr.hNeeded)} walls give a door's height at 2:12`
-                                : `Posts ${d3FtIn(pr.postH)} clear, porch roof meets the wall at ${d3FtIn(pr.yHigh)} on ${sel.size || "this size"}`}
-                            </div>
-                          )}
+                          {pr && (() => {
+                            // THE PORCH'S OWN FRAMING (2026-09-25). Where the style gives a pitch, the
+                            // suggestions are for THAT pitch, not 2:12, and a pitch the renderer had to
+                            // lower to keep 6 ft under the beam (a given pitch's floor; the solver's own
+                            // 2:12 aims for a door's 6'8") says so on its own line. Where it gives a post
+                            // count or a pitch, or centre steps that added a bay to the post rule, the
+                            // line ends with what is built. Without any of those, every word is what it
+                            // always was.
+                            const in12 = (p) => `${Math.round(p * 12 * 10) / 10}:12`;
+                            const want = in12(pr.pitchWant || 2 / 12);
+                            const lowered = pr.pitchWant && pr.pitchClamped && !pr.short;
+                            const built = (pr.framing.posts || pr.framing.pitch || pr.framing.steps === "center") ? `. ${pr.posts} posts, porch roof ${in12(pr.pitch)}` : "";
+                            return (
+                              <div style={{ ...hint, color: warn ? "#B45309" : "#A16207" }}>
+                                {warn
+                                  ? (lowered
+                                    ? `Porch roof lowered to ${in12(pr.pitch)} from ${want}, to keep ${d3FtIn(pr.postH)} under the beam. ${pr.posts} posts`
+                                    : pr.attachFt != null
+                                    // With the attach height set it is THAT, not the wall, that decides the
+                                    // headroom, so the suggestion is where to hang the porch roof.
+                                    ? `Hung at ${d3FtIn(pr.attachFt)}, the porch roof leaves ${d3FtIn(pr.postH)} under the beam. About ${d3FtIn(pr.attachNeeded)} up gives a door's height at ${want}`
+                                    : `Walls this short leave ${d3FtIn(pr.postH)} under the porch beam. About ${d3FtIn(pr.hNeeded)} walls give a door's height at ${want}`)
+                                  : `Posts ${d3FtIn(pr.postH)} clear, porch roof meets the wall at ${d3FtIn(pr.yHigh)} on ${sel.size || "this size"}${pr.atMost ? ", or a little lower where the main roof's edge reaches over the porch" : ""}${built}`}
+                              </div>
+                            );
+                          })()}
                         </label>
                       )}
                       {kind !== "none" && (
                         <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch end
+                          {/* THE SAME KEY, TWO MEANINGS, and the label follows the one in force. In the
+                              2026-09-24 frame (roof.front or roof.highSide set) "front" is the FRONT
+                              WALL, gable end or not; on every older style it is the front gable end. */}
                           <select value={roof.porchEnd === "back" ? "back" : "front"} onChange={(e) => calSetRoof({ porchEnd: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
-                            <option value="front">Front gable end</option>
-                            <option value="back">Back gable end</option>
+                            <option value="front">{(roof.front != null || roof.highSide != null) ? "Front wall" : "Front gable end"}</option>
+                            <option value="back">{(roof.front != null || roof.highSide != null) ? "Back wall" : "Back gable end"}</option>
                           </select>
+                        </label>
+                      )}
+                      {/* WHERE THE PORCH ROOF MEETS THE WALL, AND HOW WIDE THE PORCH IS (2026-09-24).
+                          Projecting only, the sanitiser's own rule. Farmstand's porch roof meets
+                          its front wall about 2 ft below the eave, with a band of siding between;
+                          Tri Home's porch stands in front of the middle section only. Blank is the
+                          renderer's own answer -- just under the top of the wall, the whole wall
+                          (or the middle section's, with wings) -- and it is stored as nothing. */}
+                      {kind === "projecting" && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch roof meets the wall at (ft up)
+                          <input type="number" step="0.25" min="6" max="24" placeholder="blank = just under the eave"
+                            {...calOptNumProps("porchAttachFt", roof.porchAttachFt, [6, 24], (n) => calSetRoofOpt("porchAttachFt", n))}
+                            style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                          <div style={hint}>Floor to the top of the porch roof, where it meets the wall.</div>
+                        </label>
+                      )}
+                      {kind === "projecting" && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch width (ft)
+                          <input type="number" step="0.5" min="4" max="60" placeholder="blank = the whole wall"
+                            {...calOptNumProps("porchWidthFt", roof.porchWidthFt, [4, 60], (n) => calSetRoofOpt("porchWidthFt", n))}
+                            style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                          <div style={hint}>Along its wall, centred on it.</div>
+                        </label>
+                      )}
+                      {/* THE PORCH'S OWN FRAMING (2026-09-25), projecting only like the two above: how
+                          many posts stand along its front edge (corners included), its roof's own
+                          slope, and where steps leave its deck. Blank is the renderer's own answer --
+                          a post every 8.5 ft or less, a 2 in 12 roof lowered only to keep a door's
+                          height under the beam, no steps -- and is stored as nothing. A pitch the
+                          builder gives is their measured porch, lowered only where it would leave
+                          less than 6 ft under the beam (d3PorchGeom's CLEAR_FLOOR), and its hint
+                          says 6 ft for that reason. */}
+                      {kind === "projecting" && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch posts
+                          <input type="number" step="1" min="2" max="8" placeholder="blank = one every 8.5 ft"
+                            {...calOptNumProps("porchPosts", roof.porchPosts, [2, 8], (n) => calSetRoofOpt("porchPosts", n == null ? null : Math.round(n)))}
+                            style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                          <div style={hint}>Along its front edge, the corner posts included, evenly spaced.</div>
+                        </label>
+                      )}
+                      {kind === "projecting" && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch roof pitch (in 12)
+                          <input type="number" step="0.25" min="0.6" max="6" placeholder="blank = 2 in 12"
+                            {...calOptNumProps("porchPitch", roof.porchPitch == null ? null : Math.round(Number(roof.porchPitch) * 1200) / 100, [0.6, 6], (n) => calSetRoofOpt("porchPitch", n == null ? null : n / 12))}
+                            style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                          <div style={hint}>Lowered only where it would leave less than 6 ft under the beam.</div>
+                        </label>
+                      )}
+                      {kind === "projecting" && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch steps
+                          <select value={roof.porchSteps || ""} onChange={(e) => calSetRoofOpt("porchSteps", e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                            <option value="">None</option>
+                            <option value="left">Left</option>
+                            <option value="center">Center</option>
+                            <option value="right">Right</option>
+                          </select>
+                          <div style={hint}>Off the deck's front edge, as seen standing in front of the porch.</div>
                         </label>
                       )}
                       {/* Gable only: the renderer draws the truss on a gable roof and nowhere else,
@@ -22520,6 +25284,32 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     )}
                   </label>
                 );})}
+                {/* CORNER BOARDS AND FASCIA, APART FROM THE TRIM (2026-09-24). Both used to be the
+                    trim colour, full stop, so a building like Farmstand -- white window casings,
+                    brown corner boards, dark fascia -- could only be drawn with white corners and a
+                    white roof edge. Blank is "same as trim", which is exactly what absent draws,
+                    and it is stored as nothing (calSetOptColor). The two buttons are the answers a
+                    builder actually gives: corners in the wall colour, fascia in the roof colour. */}
+                {[["corner", "Corner boards", "body", "Same as walls"], ["fascia", "Fascia and rake boards", "roof", "Same as roof"]].map(([k, lbl, from, fromLbl]) => {
+                  const colors = adminCal.spec.colors || {};
+                  const own = colors[k] || "";
+                  return (
+                    <label key={"cal-opt-col-" + k} style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>{lbl}
+                      <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                        <input type="text" placeholder="blank = same as trim" value={own} onChange={(e) => calSetOptColor(k, e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                        <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #FCD34D", background: own || colors.trim || "#EEE", flexShrink: 0 }} />
+                      </div>
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
+                        <button type="button" onClick={() => calSetOptColor(k, "")} aria-pressed={!own}
+                          style={{ ...S.btn(!own ? "#92400E" : "#FFF", !own ? "#FFF" : "#92400E"), border: "1px solid #FCD34D", fontSize: 10.5, padding: "2px 6px", fontWeight: 600 }}>Same as trim</button>
+                        {colors[from] && (
+                          <button type="button" onClick={() => calSetOptColor(k, colors[from])} aria-pressed={Boolean(own) && own === colors[from]}
+                            style={{ ...S.btn(own && own === colors[from] ? "#92400E" : "#FFF", own && own === colors[from] ? "#FFF" : "#92400E"), border: "1px solid #FCD34D", fontSize: 10.5, padding: "2px 6px", fontWeight: 600 }}>{fromLbl}</button>
+                        )}
+                      </div>
+                    </label>
+                  );
+                })}
               </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 {/* The sample building the preview renders on. calibrationOnly ONLY, for the
@@ -23056,11 +25846,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       <SSRow {...ssRowProps("style")}>
         <fieldset disabled={planLocked || undefined} aria-disabled={planLocked || undefined} style={ssLockStyle}>
           {/* Building Styles — one row of N tiles that scrolls (Carolyn 2026-09-14); see
-              SSStyleStrip. The click still sets the style and clears the size, as it always did. */}
+              SSStyleStrip. The click sets the style and clears the size, as it always did —
+              EXCEPT when the style is sold in exactly one size (2026-09-25). There is no choice to
+              make then, and a blank size leaves the plan and the 3D on the LAST footprint (10x12
+              on a fresh design), so a style drawn for 37x22 showed as a tall narrow tower until the
+              customer found the one size in the list. */}
           <div>
             <SSSecHead text={ssHead("style")} />
             <SSStyleStrip styles={C.buildingStyles} value={sel.style} perRow={C.branding.stylesPerRow} S={S} disabled={planLocked}
-              onPick={(v) => setSel((p) => ({ ...p, style: v, size: "" }))} />
+              onPick={(v) => {
+                const st = C.buildingStyles.find((s) => s.value === v);
+                const only = st && Array.isArray(st.sizes) && st.sizes.length === 1 ? st.sizes[0] : "";
+                setSel((p) => ({ ...p, style: v, size: only }));
+              }} />
           </div>
         </fieldset>
       </SSRow>

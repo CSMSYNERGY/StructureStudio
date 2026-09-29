@@ -375,15 +375,35 @@ __ssFunctions.invoke = async (name, opts) => {
       // What makes a refusal suspicious is REPETITION, so the row has to survive:
       //   select message, count(*) from app_errors where severity = 'info'
       //   group by 1 having count(*) > 20 order by 2 desc;
-      const st = (res.error && res.error.ssStatus) || null;
+      // A STREAMED answer (calibrate_style_ai's v2 draft, 2026-09-25) is a 200 whose JSON carries the
+      // status it would have had, because its status line went out before the work began. Read it
+      // from there, or every streamed refusal (a 402, a 409, a 429) is filed as a fault.
+      const st = (res.error && res.error.ssStatus)
+        || (!res.error && res.data && res.data.error && Number.isInteger(res.data.status) && res.data.status >= 400 ? res.data.status : null)
+        || null;
       // A transport failure on a page that is ALREADY LEAVING is the navigation killing its
       // own request, not the function being unreachable. Same treatment, and for the same
       // reason, as `session_reconnecting` above: demoted to info under its OWN code so it
       // stays countable, never dropped. `status` is null on this path by definition — a
       // request that never completed has no HTTP status — which is what distinguishes it
       // from a 5xx the server actually sent while the user happened to be navigating.
+      // THREE NAMES, not one (2026-09-25). A request the navigation kills before its response is
+      // supabase-js's FunctionsFetchError; one killed while its BODY is still arriving -- a streamed
+      // draft, whose 200 went out minutes before its JSON -- fails inside response.json(), and
+      // supabase-js hands back that read's own TypeError (a network error) or AbortError instead.
       const ssAborted = ssPageLeaving && st === null
-        && (res.error && res.error.name) === "FunctionsFetchError";
+        && ["FunctionsFetchError", "TypeError", "AbortError"].indexOf((res.error && res.error.name) || "") !== -1;
+      // A STREAMED DRAFT WHOSE ANSWER DROPPED on a page that is STAYING (2026-09-25). The body broke
+      // off mid-read (the parser's SyntaxError, or the read's TypeError, with no status), or the
+      // server closed it at its own deadline (`stream_deadline`, status 504 in the body). Neither is
+      // the outcome: the shell picks the draft up by the press's key (calibrate_style_ai_recover),
+      // and the SERVER files what became of it -- ai_draft_recovered, or ai_draft_recover_none, an
+      // error when a charged draft was lost. So this row is a countable info row under its own code,
+      // never a fault on its own: a phone that backgrounds the tab mid-press is not an outage.
+      // `status` still tells the two apart (null: broke off; 504: the deadline).
+      const ssDraftDropped = !ssAborted && Boolean(opts && opts.body && opts.body.action === "calibrate_style_ai" && opts.body.stream === true)
+        && ((Boolean(res.error) && st === null && ["SyntaxError", "TypeError"].indexOf(res.error.name || "") !== -1)
+          || (!res.error && Boolean(res.data) && res.data.code === "stream_deadline"));
       // A DELIBERATE 5xx REFUSAL. The status split below reads 4xx as "the product declined"
       // and everything else as "something broke" — but a few refusals have to answer 5xx, and
       // they say so with the x-ss-refusal header (logError.ts, and the `refusal()` helpers in
@@ -401,11 +421,11 @@ __ssFunctions.invoke = async (name, opts) => {
         ssRefusal = !!(ctx && ctx.headers && ctx.headers.get("x-ss-refusal") === "1");
       } catch (_r) { /* an unreadable context must never cost us the row */ }
       ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
-        ssAborted ? "fetch_aborted_navigating" : ((res.error && res.error.name) || null),
+        ssAborted ? "fetch_aborted_navigating" : ssDraftDropped ? "draft_stream_dropped" : ((res.error && res.error.name) || null),
         { fn: name, action: opts && opts.body && opts.body.action, target: injected,
           status: st,
           reason: (res.error && res.error.ssReason) || null },
-        (ssAborted || ssRefusal || (st >= 400 && st < 500)) ? "info" : "error");
+        (ssAborted || ssDraftDropped || ssRefusal || (st >= 400 && st < 500)) ? "info" : "error");
     }
   } catch (_) {}
   // Tripwire. portal-settings echoes the tenant it actually resolved. If it disagrees with
@@ -1110,6 +1130,9 @@ function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canP
   // delete_client lives, and Projects is our internal bug board), and someone standing in a
   // builder's shoes has no business in either. Splitting the old single line is the whole
   // difference; `supportView` defaults false so every existing caller is unchanged.
+  // The shell's two ROUTE clamps pass `consolesBarred` here rather than plain supportView:
+  // it is also true for a support account on its OWN portal (2026-09-23). That is safe only
+  // because this argument is read by the admin and projects branches and nowhere else.
   if (tab === "accounts") return isOperator ? tab : ssFallbackTab(access);
   if (tab === "admin") return (isOperator && !supportView) ? tab : ssFallbackTab(access);
   // Projects splits off from Admin here. The two used to share a line because both meant

@@ -767,10 +767,38 @@ function Dashboard({ session }) {
   // asset cannot be deployed atomically. Same non-answer posture as its sibling above — a
   // failed call keeps the last known value rather than reading as `false`, because false
   // here means "full operator rights", which is the wrong way to fail.
-  const [isSupportOp, setIsSupportOp] = useState(false);
+  //
+  // ⚠️ THREE STATES, NOT TWO (2026-09-23): null = still asking, and it is not "no". It decides
+  // more than view-as now. A support account is also kept out of the ADMIN console on its OWN
+  // portal, where supportView is false by design (see the note on it below). That gate opens
+  // only on a real `false`. With a false start it would be open before this rpc answers: a
+  // reload or a deep link on /portal/admin would mount AdminShell the moment is_operator
+  // answered, and its first get_master + list_clients would come back as the two "Operator
+  // access required." 403s that app_errors caught on 09-16 (beta and production) and 09-18.
+  // (Those came from the old `!supportView` gate, which never closed on the own portal at
+  // all.) Every truthy read of this (supportView, the clamp arguments) treats null as "not
+  // support", the same as the old false start did.
+  const [isSupportOp, setIsSupportOp] = useState(null);
+  // Both attempts failed and isSupportOp is still null. Admin stays shut (unknown is never
+  // "not support") but says so; Projects opens anyway, because team members never needed this
+  // rpc before and portal-projects refuses a support operator on its own.
+  const [supportCheckGaveUp, setSupportCheckGaveUp] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    sb.rpc("is_support_operator").then(({ data, error }) => { if (!cancelled && !error) setIsSupportOp(!!data); }).catch(() => {});
+    setSupportCheckGaveUp(false);
+    // One retry after a failed call: while this is null the Admin console stays shut, so a
+    // single network blip would otherwise cost a platform operator Admin until the next token.
+    const failed = (retry) => {
+      if (cancelled) return;
+      if (retry) setTimeout(() => { if (!cancelled) ask(false); }, 1500);
+      else setSupportCheckGaveUp(true);
+    };
+    const ask = (retry) => sb.rpc("is_support_operator").then(({ data, error }) => {
+      if (cancelled) return;
+      if (!error) { setIsSupportOp(!!data); setSupportCheckGaveUp(false); }
+      else failed(retry);
+    }).catch(() => failed(retry));
+    ask(true);
     return () => { cancelled = true; };
     // Token-keyed, exactly as is_operator above — see the note there.
   }, [session.access_token]);
@@ -811,6 +839,25 @@ function Dashboard({ session }) {
   // a normal user of the CSM Synergy tenant, and narrowing there would lock them out of
   // their own account.
   const supportView = !!viewing && isSupportOp;
+  // ⛔ BUT OUR TWO CONSOLES ARE NOT PART OF "THEIR OWN ACCOUNT", and supportView cannot say
+  // so, because it is false on the support account's own portal on purpose (above). This is
+  // the separate question for Admin and Projects: "is this a support account, wherever it is
+  // standing?" The server already refuses both consoles to a support operator everywhere
+  // (_shared/adminAuth.ts, portal-projects). Widening supportView instead would also narrow
+  // myAccess and mirrorAdmin on the support account's own tenant, which is the lockout the
+  // note above warns about. This is the route clamp for both consoles; what is drawn and
+  // mounted is decided by `isSupportOp === false` (Admin) and projectsOpen (Projects) below.
+  // Projects is also closed at its source by migration 250 (can_open_projects answers false
+  // for a support operator). Truthy only on a real answer: null (still asking) does not bar
+  // the route, and the mounts wait instead, so unknown never draws a console either.
+  const consolesBarred = supportView || isSupportOp === true;
+  // Projects on the client, independently of migration 250: drawn and mounted only once the
+  // rpc has said "not support". With 250 applied canProjects is already false for a support
+  // account; without it (or while it is being rolled out) this is what keeps a cold load of
+  // /portal/projects from mounting ProjectsTab and firing a list_boards that can only 403.
+  // If the rpc gave up, Projects opens (see supportCheckGaveUp): the server still refuses a
+  // support operator, and a CSM team member must not lose the board to a network blip.
+  const projectsOpen = canProjects && !supportView && (isSupportOp === false || (isSupportOp === null && supportCheckGaveUp));
   // TWO HALVES OF THE MIRROR, and they have different audiences (Carolyn 2026-09-15: "that
   // account should show for me exactly as it shows for that user … if there are parts of the
   // software they haven't paid for … it shouldn't be accessible to me either").
@@ -915,8 +962,11 @@ function Dashboard({ session }) {
   // ⚠️ canProjects belongs in BOTH clamps or a typed /portal/projects gets rewritten away
   // under a team member while the page itself renders correctly — the exact silent,
   // operator-tabs-only failure the placement comment above this block was written about.
+  // The same goes for consolesBarred: ssClampTab reads its 5th argument ONLY in the admin and
+  // projects branches, so passing it here refuses those two routes to a support account on
+  // its own portal and changes nothing else. `canAdminForUrl` above keeps plain supportView.
   const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
-    (tenant && tenant !== "none") ? tenant.access : null, supportView, canProjects);
+    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects);
   useEffect(() => {
     // Popout windows never normalise the URL: a resolved refusal (canProjects false, or a
     // hand-typed non-projects path) would replaceState to the fallback tab, and that URL
@@ -925,7 +975,10 @@ function Dashboard({ session }) {
     if (SS_POPOUT) return;
     if (!tenant || tenant === "none") return;          // nothing routable yet
     const p = ssParsePath();
-    const gatesResolved = (isOperator || canAdminForUrl || entitlement !== null) && canProjects !== null;
+    // isSupportOp sits beside canProjects because it feeds the same clamp (consolesBarred): a
+    // boot intent is not judged refused until every input to that clamp has answered. It can
+    // only delay a rewrite, never cause one, since null never bars a route.
+    const gatesResolved = (isOperator || canAdminForUrl || entitlement !== null) && canProjects !== null && isSupportOp !== null;
     if (wanted.current && wanted.current !== resolvedTab && !gatesResolved) return;
     if (wanted.current) wanted.current = null;
     // If the clamp REFUSED the tab, the sub segment belonged to the refused page and must
@@ -943,8 +996,9 @@ function Dashboard({ session }) {
     // refused deep link whose CLAMP RESULT does not move when can_open_projects answers —
     // a non-admin on /portal/admin, where projects is not what is being refused — never
     // re-runs this effect: `wanted.current` stays set, the replaceState never happens, and
-    // the address bar keeps a path that bounces again on every reload.
-  }, [resolvedTab, tab, sub, isOperator, canAdminForUrl, entitlement, tenant, canProjects]);
+    // the address bar keeps a path that bounces again on every reload. isSupportOp is listed
+    // for the same reason: gatesResolved reads it too.
+  }, [resolvedTab, tab, sub, isOperator, canAdminForUrl, entitlement, tenant, canProjects, isSupportOp]);
   const viewingFetch = useCallback(async () => {
     const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId } });
     if (error) {
@@ -1456,7 +1510,10 @@ function Dashboard({ session }) {
         // The key is OMITTED, not sent as null, when the caller does not know the frames: the
         // server distinguishes absence ("leave the column alone") from an empty array ("the
         // builder removed the video"), and JSON.stringify drops an undefined property for us.
-        const body = { action: "save_style_d3", styleValue, d3, d3Photos };
+        // `frame: "front"` (2026-09-25) says this designer knows the raised-floor keys: without it
+        // the server carries a stored blocks/piers foundation and its floor height forward over the
+        // null an older panel sends (carryForwardFoundation), and with it this save can clear them.
+        const body = { action: "save_style_d3", styleValue, d3, d3Photos, frame: "front" };
         if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
         // ALWAYS PRESENT, null included (review wf_5199a3e0-d65, high). 01-core's wrapper injects
         // the view-as target whenever this key is absent, and it reads the target when the call
@@ -1597,10 +1654,32 @@ function Dashboard({ session }) {
        the ground — the single most important fact about this input. WHICH one depends on the
        set (2026-09-16, when photos became optional). With photos beside the walk it goes as
        source "combined": combinedShapePrompt, cap 12, Carolyn's own "three from each side".
-       A walk with NO photos goes as source "video": VIDEO_SHAPE_PROMPT, cap 8. That second
-       path relies on SS_VID_FRAMES staying at 8 or below, or the server drops the extra
-       frames and only `dropped` says so. */
-    onDraftFromCombined: async (photoUrls, styleValue, videoCount, idempotencyKey, dims) => {
+       A walk with NO photos goes as source "video": VIDEO_SHAPE_PROMPT, cap 12 since 2026-09-24
+       (it was 8). That second path relies on SS_VID_FRAMES never exceeding the server's cap, or
+       the server drops the extra frames and only `dropped` says so.
+
+       `opts.lean` (2026-09-24) is the designer's ONE automatic retry of a draft the server
+       marked `retryable` -- cut off at max_tokens, or past its own abort, with the hold already
+       released. It rides the SAME idempotencyKey, and the server answers it with less thinking.
+       The flag is read off the refusal's body here, because only this function can see it:
+       supabase-js leaves a non-2xx body unread on `error.context`.
+
+       `stream: true` (2026-09-25) asks for the STREAMED draft: the server answers 200 at once,
+       writes a space every ten seconds, then writes the JSON. The gateway ends a request that is
+       silent for 150 s, so an unstreamed draft has to stop at 125 s and cannot think hard; streamed,
+       it gets up to 300 s and thinks at effort "high". Sent on every press but the lean retry, a
+       short read that fits the old budget. The server streams only a v2 request (frame "front" with
+       dims, which this always is), and a function that has never heard of the key answers as before.
+       No client abort, as before: the server's clock is the only one, and abandoning this call is how
+       a slow generation becomes a lost $20.
+
+       ⚠️ A STREAMED FAILURE ARRIVES AS A 200. Its status line went out before the work began, so the
+       server writes the refusal it would have sent as a body that also carries `status`, with `error`,
+       `code` and `retryable` exactly as before. It is turned back into the SAME failure a non-2xx
+       becomes here: the same sentence (01-core's invoke wrapper puts a non-2xx body's `error` on the
+       message; this reads it off the body), the same `ssRetryable` (and `ssRetryCode`), and so the same one lean retry
+       under the same key in calGenerate. The designer cannot tell the two apart. */
+    onDraftFromCombined: async (photoUrls, styleValue, videoCount, idempotencyKey, dims, opts) => {
       // videoCount says how many of the LEADING urls are walk-around frames, so the server can
       // hand the model a prompt that describes the set it is actually being given rather than
       // asserting the whole array is one continuous lap.
@@ -1615,7 +1694,7 @@ function Dashboard({ session }) {
       // (combinedShapePrompt) opens "from two sources", which is false with no photos beside
       // the walk. VIDEO_SHAPE_PROMPT says exactly what such a set is (every image a frame of one
       // lap, in walk order), the ledger row reads "video", and the charge is the same hold
-      // either way. Its server cap is 8, which is SS_VID_FRAMES, so a whole lap fits. No
+      // either way. Its server cap is SS_VID_FRAMES (12 since 2026-09-24), so a whole lap fits. No
       // function deploy is needed for any of this: the "video" source has been live since the
       // walk-around first shipped in August.
       const source = frames >= urls.length ? "video" : "combined";
@@ -1639,9 +1718,151 @@ function Dashboard({ session }) {
       if (!d || !(Number(d.widthFt) > 0) || !(Number(d.lengthFt) > 0) || !(Number(d.wallHeightFt) > 0)) {
         throw new Error("Type the building's width, length and wall height before generating — the video cannot show us how big it is.");
       }
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined, dims: d } });
-      if (error) throw new Error(error.message || "Generating failed");
-      if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Generating failed");
+      // `frame: "front"` (2026-09-24) is the ROLLOUT GATE's key: it says these dims were typed
+      // against the new dimensions card — the width is the FRONT wall's (the side with the porch or
+      // main door), the length the depth front to back — so the server may read them with the v2
+      // prompt. Production's older bundle never sends it and keeps the legacy prompt, whose ruler
+      // says "across the gable end", the frame ITS card asked in. Sent on the lean retry too.
+      const body = { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined, dims: d, frame: "front" };
+      if (opts && opts.lean) body.lean = true;
+      else body.stream = true;
+      // WHEN THIS PRESS WENT OUT, on this browser's clock and for this browser alone: how long a
+      // `no_row` pickup answer is still waited on (the press's own ledger row may not have landed
+      // yet). Never sent anywhere -- the server finds the press by its key, not by any clock.
+      const pressedAt = Date.now();
+      // The success envelope, built in ONE place for both ways a draft can arrive: the answer
+      // itself, or the ledger row after a dropped stream. The designer cannot tell them apart,
+      // except by `recovered`, which only tells it why the free check may have nothing to pair with.
+      const envelope = (got, extra) => ({
+        d3: got.d3, frames: got.frames || 0, dropped: got.dropped || 0,
+        observed: got.observed || null, dims: got.dims || null,
+        frameMap: got.frameMap || null, checkId: got.checkId || null,
+        ...(extra || {}),
+      });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body });
+      // ── A STREAMED ANSWER THAT NEVER ARRIVED (2026-09-25; by the press's own key since 253) ─────
+      // Two ways: the body broke off (the connection dropped: supabase-js hands back the JSON
+      // parser's own error, or the body read's), or the server closed it at its own deadline with
+      // `stream_deadline` while the work ran on. Either way the server may still be working, or may
+      // have finished and charged, so the builder is NOT told to try again (a retry under the same
+      // key re-runs the model, or with the meter on is refused by the hold). The draft is picked up
+      // from its ledger row instead: calibrate_style_ai_recover, asked with THIS PRESS'S OWN
+      // idempotency key -- the key its ledger row and its wallet hold carry -- so it can only ever
+      // answer about this press.
+      //
+      // ⚠️ THE FIRST ASK GOES AT ONCE, WHATEVER `until` SAYS. A phone that slept through the whole
+      // press notices the drop minutes after the press's budget ran out, and its paid draft is
+      // sitting on the row: it gets one ask, and the draft if it is there. `until` (the press's
+      // SS_FLOW_MAX_MS) bounds how long this keeps asking again while the server says `pending`,
+      // every ten seconds. An ask that FAILED (no answer, or a non-2xx: the connection that dropped
+      // may still be down) is no word from the server, so after one the asking goes on to at least
+      // a minute from the first ask, however late the drop was noticed.
+      //
+      // It ends on the draft (returned exactly as the answer would have been), on `pending: false`
+      // (the server's own sentence, whose money wording comes from the wallet; the designer keeps
+      // the key), or on the budget. `no_row` is the one `pending: false` it does not take at once:
+      // for 90 s from the press the press's own row may simply not be written yet.
+      //
+      // Only a streamed press with a key, never the lean retry, and only with the designer's
+      // `recover` hooks: `alive()` goes false when the designer unmounts or another press takes
+      // over, which stops it before the next ask; `onRecovering()` switches its progress card to the
+      // pickup copy.
+      //
+      // ONE CLIENT ROW when it ends with no verdict from the server: draft_recover_timeout (an
+      // error: the builder was told nothing about their draft), or draft_recover_abandoned (info:
+      // the page moved on). A verdict needs none: the server files its own.
+      const brokeOff = Boolean(error && body.stream && (error.name === "SyntaxError" || error.name === "TypeError"));
+      const closedAtDeadline = Boolean(!error && body.stream && data && typeof data === "object" && data.code === "stream_deadline");
+      if (brokeOff || closedAtDeadline) {
+        const rec = opts && opts.recover;
+        if (!rec || typeof rec.alive !== "function" || !body.idempotencyKey) {
+          throw new Error("Your connection dropped before the draft arrived, so we could not show it. If it finished, you were charged for it once.");
+        }
+        let asked = 0;
+        let got = null;
+        const filed = (code, message, severity) => {
+          try {
+            ssLogError("portal", message, code, { fn: "portal-settings", action: "calibrate_style_ai_recover", asks: asked, last: asked ? (got ? (got.reason || "pending") : "failed") : null }, severity);
+          } catch (_l) { /* a log line must never cost the press */ }
+        };
+        const gone = () => {
+          filed("draft_recover_abandoned", "Stopped picking a dropped draft up: the press is no longer on screen.", "info");
+          return new Error("Stopped picking the draft up: this press is no longer on screen.");
+        };
+        if (!rec.alive()) throw gone();
+        if (typeof rec.onRecovering === "function") rec.onRecovering();
+        const hooks = typeof window !== "undefined" ? window : {};
+        const every = Number(hooks.__ssRecoverPollMs) || 10000;
+        const noRowMs = Number(hooks.__ssRecoverNoRowMs) || 90000;
+        const until = Number(rec.until) || 0;
+        const firstAskAt = Date.now();
+        for (;;) {
+          if (asked > 0) {
+            const end = got ? until : Math.max(until, firstAskAt + 60000);
+            const wait = Math.min(every, end - Date.now());
+            if (!(wait > 0)) break;
+            await new Promise((r) => setTimeout(r, wait));
+            if (!rec.alive()) throw gone();
+          }
+          asked++;
+          got = null;
+          try {
+            const r = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai_recover", styleValue, idempotencyKey: body.idempotencyKey } });
+            got = r && !r.error ? r.data : null;
+          } catch (_e) { got = null; }
+          if (!rec.alive()) throw gone();
+          // THE DRAFT. `dropped` is not on the ledger row, so it is worked out from what was sent.
+          if (got && got.ok && got.d3) {
+            return envelope(got, {
+              dropped: Number.isInteger(got.dropped) ? got.dropped : (got.frames ? Math.max(0, urls.length - got.frames) : 0),
+              recovered: true,
+            });
+          }
+          const young = Date.now() - pressedAt < noRowMs;
+          if (got && got.pending === false && !(got.reason === "no_row" && young)) {
+            throw new Error(got.message || "We could not pick the draft up from the server. Press Generate to try again.");
+          }
+          // `pending: true`, a young `no_row`, or this ask failed on the way (the connection that
+          // dropped may still be down): ask again while the press has time.
+        }
+        filed("draft_recover_timeout", "A dropped draft was not picked up before the asking ran out, with no answer from the server about it.", "error");
+        throw new Error("Your connection dropped and the draft did not reach us in time. Pressing Generate again will not charge you twice for this press.");
+      }
+      // `ssRetryable` IS THE SERVER'S WORD, NEVER A GUESS FROM THE STATUS. A 502 is also a model
+      // refusal or an unreachable AI service, and resending those is a second identical failure
+      // on the builder's clock. Only a body saying `retryable: true` earns the one lean retry.
+      // `ssRetryCode` (2026-09-26) is that body's `code`, so the designer can say WHY it reads again:
+      // ai_upstream_transient is the AI service failing the read (a download it could not make, a busy
+      // API, the network), not a read that ran out of room. Only ever set beside ssRetryable.
+      if (error) {
+        const err = new Error(error.message || "Generating failed");
+        try {
+          const ctx = error.context;
+          const said = ctx && typeof ctx.clone === "function" ? await ctx.clone().json() : null;
+          if (said && said.retryable === true) {
+            err.ssRetryable = true;
+            if (typeof said.code === "string") err.ssRetryCode = said.code;
+          }
+        } catch (_e) { /* no body, or not JSON: not retryable */ }
+        throw err;
+      }
+      // THE STREAMED FAILURE (see the note above this function): a 200 whose body carries the
+      // status it would have had. The same Error the branch above builds for that status: the
+      // server's sentence (error, else message, which is what 01-core puts on a non-2xx), and the
+      // server's `retryable`.
+      if (data && typeof data === "object" && (data.error || (Number.isInteger(data.status) && data.status >= 400))) {
+        const err = new Error(data.error || data.message || "Generating failed");
+        if (data.retryable === true) {
+          err.ssRetryable = true;
+          if (typeof data.code === "string") err.ssRetryCode = data.code;
+        }
+        throw err;
+      }
+      if (!data || !data.ok || !data.d3) {
+        const err = new Error((data && data.error) || "Generating failed");
+        if (data && data.retryable === true) err.ssRetryable = true;
+        throw err;
+      }
       // `dims` ECHOED BACK AS THE SERVER USED THEM, not as they were sent. The designer says so
       // in the success line, which is the only thing that proves the numbers reached the model
       // rather than merely sitting in a form. An older function echoes nothing and the clause
@@ -1652,11 +1873,7 @@ function Dashboard({ session }) {
       // paid, which is what makes the check free and single-use. An older function sends
       // neither, and the designer treats that as "no check on this generation" rather than
       // inventing an angle to render at.
-      return {
-        d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0,
-        observed: data.observed || null, dims: data.dims || null,
-        frameMap: data.frameMap || null, checkId: data.checkId || null,
-      };
+      return envelope(data);
     },
     /* THE FREE SECOND PASS (2026-09-19). The browser renders the draft from the angles the
        first pass labelled, and asks one narrow question: where does OUR DRAFT not match THEIR
@@ -1670,14 +1887,32 @@ function Dashboard({ session }) {
        and the only thing that throws is a 409 on the claim — which means this generation has
        already been checked, and the caller handles it the same way.
 
-       THE CLIENT ABORT IS REAL, unlike the generation's. The server gives up at 45 s; 60 here
-       is far enough above that a server which answered in time is still heard, and it bounds
-       the wait at something a person will sit through. Abandoning THIS call costs nothing,
-       which is exactly what separates it from the one above. */
-    onSelfCheck: async ({ styleValue, checkId, photoUrls, renders }) => {
+       THE CLIENT ABORT IS REAL, unlike the generation's. The server gives up at 125 s on the v2
+       check this designer asks for (45 s on the legacy one; the v2 check had 90 s until it moved
+       to effort "high" on 2026-09-26, see SELF_CHECK_BUDGET in styleD3.ts). 140 here is far
+       enough above that a server which answered in time is still heard after the renders' upload
+       and its own set-up, it matches the component's SS_CHECK_MS so the press budget
+       (SS_FLOW_MAX_MS) plans with the number actually in force, and it bounds the wait at
+       something a person will sit through. Abandoning THIS call costs nothing, which is exactly
+       what separates it from the one above. selfCheckPanel_test pins all three: this number, the
+       component's, and the server's below them.
+
+       `round` (2026-09-24) is which check of this generation this is, 0-based: the server claims
+       round k by moving the row's counter from k to k + 1, at most three times, so a repeat of
+       one round is a 409 rather than a second free look. Absent is round 0 to the server, which
+       is what an older designer sends; a non-integer is not sent at all.
+
+       `frame: "front"` (2026-09-24) is the CHECK's rollout gate, the same key the draft sends: it
+       says this designer reads the check in the FRONT-wall frame, so the server may run the v2
+       check (its massing step, the new roof keys, six views, three rounds). Without it the server
+       runs the check production's older designer has always had, word for word. Sent on every
+       round. */
+    onSelfCheck: async ({ styleValue, checkId, photoUrls, renders, round }) => {
+      const body = { action: "calibrate_style_check", styleValue, checkId, photoUrls, renders, frame: "front" };
+      if (Number.isInteger(round) && round >= 0) body.round = round;
       const { data, error } = await sb.functions.invoke("portal-settings", {
-        body: { action: "calibrate_style_check", styleValue, checkId, photoUrls, renders },
-        signal: AbortSignal.timeout(60000),
+        body,
+        signal: AbortSignal.timeout(140000),
       });
       // A 4xx carries a body, and the body is what says WHY. supabase-js hands back a
       // FunctionsHttpError whose response has to be read for it, so a caller that only looked
@@ -1685,7 +1920,7 @@ function Dashboard({ session }) {
       // builder for what is usually "that generation has already been checked".
       //
       // ⚠️ AND THE SIBLING CASE, which has no body to read at all. A network failure or the
-      // 60 s abort above raises a FunctionsFetchError whose `.context` is the underlying Error,
+      // abort above raises a FunctionsFetchError whose `.context` is the underlying Error,
       // not a Response — so `.json()` throws, `said` stays empty, and `error.message` is the
       // vendor's own fixed string, "Failed to send a request to the Edge Function". The panel
       // renders `note` verbatim under its friendly line, so that sentence landed on the screen
@@ -1782,7 +2017,7 @@ function Dashboard({ session }) {
   // Popout window (?popout=1): the Projects boards only, no shell chrome. No nav renders
   // here and nothing inside ProjectsTab navigates to another tab, so no other page is
   // reachable — which is why ssClampTab needs no popout branch. Gated on the SAME two doors
-  // as the normal mount below (canProjects && !supportView); canProjects three-states:
+  // as the normal mount below (projectsOpen); canProjects and isSupportOp three-state:
   // null = the can_open_projects RPC is still in flight -> neutral wait, never the fallback
   // tab; false -> a plain refusal, still chromeless. The wrapper reproduces the
   // .ss-projects-active geometry (viewport-height flex column, portal.html) because
@@ -1793,9 +2028,9 @@ function Dashboard({ session }) {
     );
     return (
       <div style={{ height: "100vh", boxSizing: "border-box", display: "flex", flexDirection: "column", padding: "14px 16px" }}>
-        {canProjects === null
+        {canProjects === null || (isSupportOp === null && !supportCheckGaveUp)
           ? popMsg("Loading…")
-          : (canProjects && !supportView)
+          : projectsOpen
             ? <ProjectsTab sub={tab === "projects" ? sub : null} onSub={(x) => navigate("projects", x)} />
             : popMsg("You don't have access to Projects.")}
       </div>
@@ -1868,7 +2103,10 @@ function Dashboard({ session }) {
   // the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
   // that array is the role escape hatch and would hand the operator console to every team
   // member. Content renders are ALSO gated (and the server re-checks regardless).
-  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, supportView, canProjects);
+  // consolesBarred, not supportView, for the same reason as resolvedTab's clamp above. The
+  // other ssClampTab calls ask about designer/orders tabs, never read that argument, and keep
+  // plain supportView.
+  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects);
   // Remember the last WORKSPACE page, for Back to Workspace. Assigned during render, not in
   // an effect, and deliberately: it must already be correct on the very first render in which
   // the Settings rail appears, and an effect runs after that render has painted. Idempotent
@@ -2244,7 +2482,7 @@ function Dashboard({ session }) {
             asked for by name: it is the internal bug board and roadmap, work you do between
             other work, so it stays here AND appears there as a shortcut.
             Gating is untouched — the same three expressions, in both places. */}
-        {canProjects && !supportView && (<>
+        {projectsOpen && (<>
         {/* Labelled for whoever is reading it: a CSM team member with Projects and nothing
             else is not an "Operator", and calling the group that would tell them they hold
             access to every builder's account, which they do not. */}
@@ -2296,13 +2534,18 @@ function Dashboard({ session }) {
               before — Accounts is the switcher and support needs it (it is how they reach the
               next builder), while Admin holds delete_client and Projects is our bug board, so
               a support account standing in a builder's shoes gets neither. ssClampTab refuses
-              those routes independently; this only decides what is drawn. */}
-          {(isOperator || (canProjects && !supportView)) && (<>
+              those routes independently; this only decides what is drawn.
+              Admin waits for a real "not support" (isSupportOp === false), which also covers
+              view-as, and is not drawn on a support account's OWN portal either: supportView
+              is false there, so `!supportView` used to draw a console whose every action
+              403s. Projects is drawn on projectsOpen (a real "not support", or the rpc gave
+              up), and migration 250 also makes canProjects false for a support account. */}
+          {(isOperator || projectsOpen) && (<>
             <div className="ss-navlabel">{isOperator ? "Operator" : "Internal"}</div>
             <nav className="ss-nav">
               {isOperator && navItem("accounts", "Accounts")}
-              {isOperator && !supportView && navItem("admin", "Admin")}
-              {canProjects && !supportView && navItem("projects", "Projects")}
+              {isOperator && isSupportOp === false && navItem("admin", "Admin")}
+              {projectsOpen && navItem("projects", "Projects")}
             </nav>
           </>)}
           <div className="ss-spacer"></div>
@@ -2508,7 +2751,10 @@ function Dashboard({ session }) {
                     : `Your account moves to a paid plan${transDateLabel ? ` on ${transDateLabel}` : ""} — ${transDaysLeft} day${transDaysLeft === 1 ? "" : "s"} left.`}
                   {rate && rate.discountPercent > 0 && (rate.monthlyCents != null || rate.annualCents != null) && (
                     <span style={{ fontWeight: 600 }}>
-                      {" "}Your rate: {[rate.monthlyCents != null ? `${fmtRate(rate.monthlyCents)}/mo` : null,
+                      {/* While founding pricing is yearly-only (FOUNDING_ANNUAL_ONLY, 03-catalog)
+                          a /mo figure here would offer the one choice the Billing tab won't take.
+                          Monthly is still the fallback if a tenant somehow has no yearly rate. */}
+                      {" "}Your rate: {[(rate.monthlyCents != null && !(FOUNDING_ANNUAL_ONLY && rate.annualCents != null)) ? `${fmtRate(rate.monthlyCents)}/mo` : null,
                                        rate.annualCents != null ? `${fmtRate(rate.annualCents)}/yr` : null]
                         .filter(Boolean).join(" or ")} — {rate.discountPercent}% off for life.
                     </span>
@@ -2770,8 +3016,20 @@ function Dashboard({ session }) {
                 report, a half-filled billing or link-owner form, a chosen style image — is
                 all local, and unmount-on-tab-switch would silently bin it.
                 Deliberately NOT behind `!gateLocked`: an operator whose OWN tenant is
-                billing-locked must still be able to run the console. */}
-            {adminOpened && isOperator && !supportView && (
+                billing-locked must still be able to run the console.
+                ⚠️ `isSupportOp === false`, not `!supportView` and not `!isSupportOp`. The
+                console fires get_master + list_clients on mount, and adminAuth refuses both to
+                a support operator. `!supportView` let it mount on the support account's own
+                portal; `!isSupportOp` would let it mount while the rpc is still out, which is
+                what a reload on /portal/admin does. Once false, a later failed call keeps
+                false (see the rpc's note), so a blip never unmounts the staged work this
+                comment is about. */}
+            {activeTab === "admin" && isOperator && isSupportOp === null && (
+              <div style={{ padding: 60, textAlign: "center", color: "#64748B", fontSize: 14 }}>
+                {supportCheckGaveUp ? "Couldn't confirm your access. Reload the page to try again." : "Checking access…"}
+              </div>
+            )}
+            {adminOpened && isOperator && isSupportOp === false && (
               <div style={{ display: activeTab === "admin" ? "block" : "none" }}>
                 <AdminShell onOpenAccount={openAccount}
                   sub={activeTab === "admin" ? sub : null} onSub={(x) => navigate("admin", x)} />
@@ -2781,8 +3039,11 @@ function Dashboard({ session }) {
                 accounts/admin; ssClampTab bounces everyone else. Deliberately NOT behind
                 `!gateLocked` — like the Admin console, an operator whose OWN tenant is
                 billing-locked must still reach the internal boards. */}
-            {activeTab === "projects" && canProjects && !supportView && (
+            {activeTab === "projects" && projectsOpen && (
               <ProjectsTab sub={sub} onSub={(x) => navigate("projects", x)} />
+            )}
+            {activeTab === "projects" && !projectsOpen && canProjects && !supportView && isSupportOp === null && (
+              <div style={{ padding: 60, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading…</div>
             )}
             {!gateLocked && activeTab === "support" && (
               <ReleasesView submissionsKey={feedbackKey}

@@ -73,6 +73,7 @@ const CLAMPS = {
   leanToWidthFt: [0, 16], leanToDropFt: [0, 6],
   dormerWidthFt: [0, 12], dormerRiseFt: [0, 6], dormerOffsetU: [-1, 1],
   porchDepthFt: [0, 12], porchOutFt: [0, 12],
+  rearStepFt: [0, 56], rearEaveRiseFt: [-1.5, 1.5],
 };
 const WALL_CLAMP = [5, 14];   // styleD3.ts: min(14, max(5, wh)), after the 3..20 accept gate
 
@@ -96,6 +97,13 @@ export function rendersAs(roof) {
   return lower - upper >= R.GAMBREL_MIN_BEND_DEG ? "gambrel" : "gable";
 }
 
+// A roof step (2026-09-28) as the sanitiser keeps it: a gable's, with both keys, a step over half a
+// foot. A truth or draft with one key and not the other has none, which is what renders.
+export function hasRoofStep(roof) {
+  const r = roof || {};
+  return r.type === "gable" && (num(r.rearStepFt) || 0) > 0.5 && num(r.rearEaveRiseFt) !== null && Math.abs(num(r.rearEaveRiseFt)) >= 0.01;
+}
+
 // One porch, one kind. Projecting wins, which is the sanitiser's own order.
 export function porchKind(roof) {
   const r = roof || {};
@@ -116,6 +124,8 @@ export function porchKind(roof) {
 // Scoring a photo run through the shape merge would credit it with a roofMaterial and a
 // foundation the photo path never applies, and would drop the siding the photo path is the
 // only one that DOES apply. Same reply, two different buildings on screen.
+// The wing keys calDraftRoof clears as one set (the browser's CAL_WING_KEYS).
+const WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt"];
 export function mergeDraft(prior, draft, source = "video") {
   const p = prior || {}, d = draft || {};
   const dr = d.roof || {};
@@ -135,15 +145,38 @@ export function mergeDraft(prior, draft, source = "video") {
     };
   }
 
-  const roof = { ...(p.roof || {}), ...dr };
-  if ((dr.porchOutFt || 0) > 0.5) { delete roof.porchDepthFt; delete roof.porchTruss; }
-  else if ((dr.porchDepthFt || 0) > 0.5) delete roof.porchOutFt;
+  // calDraftRoof's clearing rules, 2026-09-24 keys included: whatever the draft is the authority
+  // on, it is the only source of. A reported porch brings its own attach height and width (and,
+  // 2026-09-25, its posts, roof pitch and steps) or none; a recessed porch has none of them. A draft that reports a roof type decides the wings (no
+  // wingWidthFt over 0 = no wings) and the frame (roof.front / roof.highSide), so a stored one
+  // cannot turn the scored building a quarter turn away from what the draft measured.
+  // A draft that reports a roof TYPE replaces the roof (2026-09-25), keeping only the builder's own
+  // plateBand / overhangStyle — calDraftRoof's rule, so a stale dormer is never scored either.
+  const BUILDER_ONLY = ["plateBand", "overhangStyle"];
+  const base = {};
+  if (dr.type) { for (const k of BUILDER_ONLY) if (p.roof && k in p.roof) base[k] = p.roof[k]; }
+  const roof = dr.type ? { ...base, ...dr } : { ...(p.roof || {}), ...dr };
+  const own = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps"];
+  if ((dr.porchOutFt || 0) > 0.5) {
+    delete roof.porchDepthFt; delete roof.porchTruss;
+    for (const k of own) if (!(k in dr)) delete roof[k];
+  } else if ((dr.porchDepthFt || 0) > 0.5) {
+    delete roof.porchOutFt;
+    for (const k of own) delete roof[k];
+  }
+  if (dr.type) {
+    if (!((Number(dr.wingWidthFt) || 0) > 0)) {
+      for (const k of WING_KEYS) delete roof[k];
+    }
+    if (!("front" in dr)) delete roof.front;
+    if (!("highSide" in dr)) delete roof.highSide;
+  }
   return {
     roof,
     colors: { ...(p.colors || {}), ...(d.colors || {}) },
     siding: p.siding ?? null,
     wallHeightFt: d.wallHeightFt || p.wallHeightFt,
-    gableVent: (d.gableVent && d.gableVent.widthFrac > 0) ? d.gableVent : p.gableVent,
+    gableVent: (d.gableVent && d.gableVent.widthFrac > 0) ? d.gableVent : (dr.type ? undefined : p.gableVent),
     foundation: (d.foundation === "skids" || d.foundation === "slab") ? d.foundation : p.foundation,
     roofMaterial: (d.roofMaterial === "shingle" || d.roofMaterial === "metal") ? d.roofMaterial : p.roofMaterial,
   };
@@ -243,6 +276,18 @@ const FIELDS = [
   // dimensions card ships — an error of zero BY CONSTRUCTION is not a measurement of a
   // generator. See also `shape_no_wall`, which is the headline for any before/after that
   // straddles that change.
+  // THE ROOF STEP (2026-09-28): scored only on a building that has one, so no truth without a step
+  // moves (a draft that invents one is a PHANTOM, below). The joint in feet from the back wall, a
+  // foot either way being a batten or two; the rise in feet, an inch and a quarter being a read.
+  { id: "roof.step", group: G.SHAPE, w: 6, kind: "cat",
+    live: (t) => hasRoofStep(roofOf(t)),
+    get: (s) => (hasRoofStep(roofOf(s)) ? "yes" : "no"), stated: (d) => roofOf(d).rearStepFt != null },
+  { id: "roof.rearStepFt", group: G.SHAPE, w: 3, kind: "num", full: 1.0, zero: 5.0,
+    live: (t) => hasRoofStep(roofOf(t)),
+    get: (s) => (hasRoofStep(roofOf(s)) ? num(roofOf(s).rearStepFt) : 0), stated: (d) => roofOf(d).rearStepFt != null },
+  { id: "roof.rearEaveRiseFt", group: G.SHAPE, w: 3, kind: "num", full: 0.1, zero: 0.5,
+    live: (t) => hasRoofStep(roofOf(t)),
+    get: (s) => (hasRoofStep(roofOf(s)) ? num(roofOf(s).rearEaveRiseFt) : 0), stated: (d) => roofOf(d).rearEaveRiseFt != null },
   { id: "wallHeightFt", group: G.SHAPE, w: 12, kind: "num", full: 0.25, zero: 2.0,
     owner: (ctx) => (ctx.dimsWall == null ? "model" : "given"),
     live: (t, ctx) => ctx.dimsWall == null,
@@ -333,6 +378,7 @@ const PHANTOMS = [
   { id: "leanTo", w: 6, on: (s) => (num(roofOf(s).leanToWidthFt) || 0) > 0 },
   { id: "dormer", w: 6, on: (s) => (num(roofOf(s).dormerWidthFt) || 0) > 0 },
   { id: "porch",  w: 6, on: (s) => porchKind(roofOf(s)) !== "none" },
+  { id: "roofStep", w: 4, on: (s) => hasRoofStep(roofOf(s)) },
 ];
 
 // ─── AGREEMENT: does the model's prose match its own numbers? ────────────────────────────

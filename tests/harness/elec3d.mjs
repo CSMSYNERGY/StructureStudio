@@ -15,6 +15,9 @@
 //   6. a REAL click at an outlet, the fan and a flood light selects nothing -- and the same
 //      click at the workbench does select it (the control that keeps 6 from passing vacuously)
 //   7. Look inside and exterior screenshots
+//   8. a RAISED CENTRE (roof.wingSide, 2026-09-24 review): a flood light on the centre's own eave
+//      wall, which stands above H, hangs 0.2-0.35 ft under THAT wall's eave finish, not in its
+//      soffit at the wall top minus 0.75 (the wing's eave is feet lower and says nothing about it)
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/elec3d.mjs                  (exit 0 = every check held)
@@ -38,6 +41,18 @@ export const CONFIG = {
     { id: "e-220", icon: "🔌", name: "220V Outlet", mount: "wall", withPackage: true, standalone: true, priceWithPackage: 95, priceStandalone: 140, heightOffFloorIn: 48 },
     { id: "e-brk", icon: "🧰", name: "Breaker Panel", mount: "wall", withPackage: true, standalone: true, priceWithPackage: 400, priceStandalone: 600, heightOffFloorIn: 48 },
   ],
+};
+
+// The same 12x24, as a raised centre: the front is the centre's gable end, a 4 ft wing down the WEST
+// side, and the EAST wall is the centre's own eave wall, standing 10.5 ft to the wing's 8. A 10 ft
+// flood light there is taller than that eave allows, so the cap is what decides where it hangs.
+export const CONFIG_RAISED = {
+  ...CONFIG,
+  clientId: "harness-elec3d-raised",
+  buildingStyles: CONFIG.buildingStyles.map((s) => ({ ...s, d3: {
+    roof: { type: "gable", front: "gable", pitch: 0.67, overhang: 1, eave: "fascia", wingSide: "left", wingWidthFt: 4, wingPitch: 0.25, centerEaveFt: 10.5 },
+    siding: "lap", colors: { body: "#eeebe0", trim: "#686c70", roof: "#5f6266" }, wallHeightFt: 8,
+  } })),
 };
 
 const settle = (page, ms = 400) => page.waitForTimeout(ms);
@@ -461,6 +476,9 @@ export async function main() {
   } catch (e) {
     ok("harness ran to the end", false, e && e.stack ? e.stack.split("\n").slice(0, 4).join(" / ") : String(e));
     await page.screenshot({ path: `${shots}/error.png` }).catch(() => {});
+  }
+  try {
+    await raisedCentre(ctx, ok, shots);
   } finally {
     await browser.close();
   }
@@ -468,6 +486,78 @@ export async function main() {
   console.log(bad.length ? `\n${bad.length} check(s) FAILED` : "\nall checks passed");
   console.log(`shots in ${shots}`);
   return bad.length;
+}
+
+// 8. A flood light on a raised centre's own eave wall (see CONFIG_RAISED).
+async function raisedCentre(ctx, ok, shots) {
+  const page = await ctx.newPage();
+  const errors = collectErrors(page);
+  await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
+  await stubSupabase(page, { config: CONFIG_RAISED });
+  try {
+    await openDesigner(page, CONFIG_RAISED.clientId);
+    await page.waitForFunction(() => [...document.querySelectorAll("svg rect")].some((r) => r.getAttribute("stroke") === "#1E293B"), null, { timeout: 30000 });
+    // Picked by its card, so the style's own d3 (the wings) is the one the 3D draws.
+    await page.evaluate(() => {
+      const el = [...document.querySelectorAll("div,span,p,strong,b")].find((e) => e.children.length === 0 && (e.textContent || "").trim() === "Utility" && e.offsetParent);
+      if (el) el.click();
+    });
+    await settle(page, 600);
+    await chooseSize(page);
+    await settle(page, 600);
+    await (await revealTool(page, /Electrical Package/)).click();
+    await settle(page, 600);
+    const flood = await placeElec(page, "Flood Light", "e-flood", () => wallPoint(page, "east", 12));
+    ok("raised centre: flood light placed on the east wall (the centre's own eave wall)", flood && flood.wall === "east", JSON.stringify(flood && { wall: flood.wall }));
+    if (await page.getByText("Add an electrical item").count()) await page.keyboard.press("Escape");
+    if (!flood) return;
+    await openEditor(page);
+    const m = await measure(page);
+    const g = m.groups.find((x) => x.forId === flood.id);
+    const head = g && g.meshes.find((x) => x.geom === "BoxGeometry" && near(x.w, 0.6, 0.001));
+    ok("raised centre: the flood light is drawn", !!head);
+    if (!head) return;
+    const geo = await page.evaluate(async ({ url, head }) => {
+      const THREE = await import(url);
+      const E = window.__ss3dEngine;
+      E.scene.updateMatrixWorld(true);
+      const cuts = [];
+      [[0.5, 0.5], [0.02, 0.02], [0.98, 0.02], [0.02, 0.98], [0.98, 0.98]].forEach(([fx, fz]) => {
+        const x = head.min[0] + fx * (head.max[0] - head.min[0]), z = head.min[2] + fz * (head.max[2] - head.min[2]);
+        const r = new THREE.Raycaster(new THREE.Vector3(x, head.min[1] - 0.01, z), new THREE.Vector3(0, 1, 0), 0, head.max[1] - head.min[1] + 0.02);
+        r.intersectObjects([E.model.roofGroup], true).forEach((h) => cuts.push(+h.point.y.toFixed(3)));
+      });
+      // The eave finish over the lamp: the lowest bottom of the fascia boards (0.14 thick) and the
+      // soffits (0.05 tall) whose footprint reaches over the head.
+      let finish = null;
+      E.model.roofGroup.traverse((o) => {
+        if (!o.isMesh || o.geometry.type !== "BoxGeometry") return;
+        const p = o.geometry.parameters;
+        if (!(Math.abs(p.width - 0.14) < 0.001 || Math.abs(p.height - 0.05) < 0.001)) return;
+        const bb = new THREE.Box3().setFromObject(o);
+        if (bb.max.x < head.min[0] || bb.min.x > head.max[0] || bb.max.z < head.min[2] - 1 || bb.min.z > head.max[2] + 1) return;
+        finish = finish == null ? bb.min.y : Math.min(finish, bb.min.y);
+      });
+      let top = -Infinity;
+      E.model.wallsGroup.children.forEach((grp) => {
+        if (!(grp.userData && grp.userData.wall === "east" && !grp.userData.gable)) return;
+        top = Math.max(top, new THREE.Box3().setFromObject(grp).max.y);
+      });
+      return { cuts, finish, top };
+    }, { url: THREE_URL, head });
+    console.log(`raised centre: east wall top ${f3(geo.top)}, lamp head ${f3(head.min[1])}..${f3(head.max[1])}, eave finish bottom ${f3(geo.finish)}`);
+    ok("raised centre: the east wall stands above H (the centre's own eave wall)", geo.top > 10, f3(geo.top));
+    ok("raised centre: no roof face cuts through the lamp head (it is not in the soffit)", geo.cuts.length === 0, geo.cuts.join(" "));
+    ok("raised centre: the head's top sits 0.2-0.35 ft under THAT eave's finish",
+      geo.finish != null && head.max[1] <= geo.finish - 0.2 && head.max[1] >= geo.finish - 0.35,
+      `head top ${f3(head.max[1])} finish bottom ${f3(geo.finish)} gap ${f3(geo.finish != null ? geo.finish - head.max[1] : null)}`);
+    await shot(page, `${shots}/7-raised-centre-flood.png`, [W / 2 + 7, 9.5, 4], [W / 2, 9.2, 0]);
+    ok("raised centre: no uncaught page errors", errors.filter((e) => /^pageerror/.test(e)).length === 0, errors.slice(0, 3).join(" | "));
+  } catch (e) {
+    ok("raised centre: ran to the end", false, e && e.stack ? e.stack.split("\n").slice(0, 4).join(" / ") : String(e));
+  } finally {
+    await page.close().catch(() => {});
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

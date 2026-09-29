@@ -38,8 +38,9 @@ export type TenantSms = {
   sentBy?: string | null;
   /** Twilio posts delivery updates here. Omitted → no callback, and the row stays 'sent'. */
   statusCallback?: string | null;
-  /** A human hitting send in the CRM, replying to a customer who just texted them, is not
-   *  the thing quiet hours exist to stop. Set for direct replies; never for automation. */
+  /** A person pressing a button that sends THIS one text to THIS one customer (the record
+   *  page's Send, text_sign_link) is not what quiet hours exist to stop. Set for those; never
+   *  for automation. Pinned by _test_stubs/smsQuietHoursWiring_test.ts. */
   bypassQuietHours?: boolean;
 };
 
@@ -170,8 +171,8 @@ export async function sendTenantSms(
     }
 
     // ── Quiet hours ───────────────────────────────────────────────────
-    // TCPA: no marketing texts outside 8am–9pm in the RECIPIENT'S local time. A direct
-    // reply typed by a human answering a customer is exempt (bypassQuietHours).
+    // TCPA: no marketing texts outside 8am–9pm in the RECIPIENT'S local time. A person
+    // pressing send on one text to one customer is exempt (bypassQuietHours).
     if (!msg.bypassQuietHours) {
       const quiet = quietHoursVerdict(key);
       if (!quiet.allowed) return { sent: false, reason: "quiet_hours", error: quiet.reason };

@@ -1,0 +1,372 @@
+// Measured pitches in calibrate_style_ai's wiring (2026-09-26), RUN, not regex-read.
+//
+// WHY THIS EXISTS. Live three-read v2 drafts (five reads since 2026-09-26) JUDGED the slope: a raised centre's 0.41 gable came back
+// 0.45 to 0.8. The v2 reply now carries `measure`, the pixel points a gable's pitch is read from, and
+// styleD3.ts works the slope out (pitchFromMeasure; styleD3.test.ts pins the arithmetic). Only a
+// gable is ever worked out: a shed's and a gambrel's pitch, and every porch pitch, stay the model's.
+// What only the handler can get wrong, and what this pins:
+//
+//   1. On a v2 press each gable read's pitch is replaced by its OWN points' BEFORE the consensus, so
+//      the median is over measured numbers; a read whose points fail keeps the model's number.
+//   2. draft_tokens.samples records, per read, which source won and the model's own number when the
+//      points replaced it, on the five-read record and on the lean retry's single read alike.
+//   3. The lean retry's single read is drafted with its measured pitch too.
+//   4. A legacy request (production's older designer) is untouched: its reply's points, if any, are
+//      ignored, its request bytes are what they were, and its usage record has no samples.
+//   5. (Later the same day.) The same for the WING roofs of a building with wings on both sides: each
+//      read's roof.wingPitch is its own wing points' before the consensus, a read whose points fail,
+//      or whose wings are one-sided, keeps the model's number, and every winged read's sample says
+//      which source won. The legacy path ignores wing points too.
+//
+// HOW: aiDraftConsensusWiring_test's idiom. The handler's block from the abort signal to the end of
+// the parse-failure exit is lifted between the same anchors and run as an async function against a
+// stand-in fetch, hold, logger and ledger, with the real styleD3 functions.
+
+import { assert, assertEquals } from "jsr:@std/assert";
+import {
+  aiModelFields, combinedShapePrompt, consensusOfCalls, draftCallCount, draftCallsUsage, draftReadSample,
+  parseModelSpec, readDraftReply, runDraftCalls, SPEC_PROMPT, videoShapePrompt, DRAFT_CONSENSUS_GRACE_MS,
+  DRAFT_READ_RETRY, draftUpstreamFailure,
+} from "../styleD3.ts";
+
+const read = async (p: string) => (await Deno.readTextFile(new URL(p, import.meta.url))).replace(/\r\n/g, "\n");
+const SOURCE = await read("../../portal-settings/index.ts");
+
+function lift(start: string, end: string, what: string): string {
+  const i = SOURCE.indexOf(start);
+  const j = i < 0 ? -1 : SOURCE.indexOf(end, i + start.length);
+  if (i < 0 || j < 0) {
+    throw new Error(
+      `aiDraftMeasureWiring_test: could not find ${what} in portal-settings/index.ts (start=${i}, end=${j}). ` +
+        "The anchors moved — re-point them rather than deleting this test.",
+    );
+  }
+  return SOURCE.slice(i, j);
+}
+
+const CALL_BLOCK = lift("    const aiSignal = AbortSignal.timeout(draftAbortMs);", "    // ── HOW THE OVERHANG IS FRAMED", "the draft call block");
+for (const must of [
+  "read: (body) => readDraftReply(body, dims, v2Prompt),",
+  "const drafted = parseModelSpec(text, dims, v2Prompt);",
+  "...(lead.reading.pitch ? { samples: [draftReadSample(lead.reading)] } : {}),",
+  "if (consensus) drafted.d3 = consensus.d3;",
+]) {
+  assert(CALL_BLOCK.includes(must), `the lifted call block is missing ${must} — re-point the anchors`);
+}
+
+// ─── The stand-ins (aiDraftConsensusWiring_test's, trimmed to what this file drives) ─────────────
+type Plan = { body: string; delayMs?: number };
+type Sent = { url: string; init: RequestInit & { signal: AbortSignal; body: string } };
+type Reply = { body: Record<string, unknown>; status: number };
+
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const PARAMS = [
+  "AbortSignal", "draftAbortMs", "aiModelFields", "v2Prompt", "lean", "photoUrls", "combined", "combinedShapePrompt",
+  "videoCount", "dims", "fromVideo", "videoShapePrompt", "SPEC_PROMPT", "apiKey", "draftCallCount", "runDraftCalls",
+  "DRAFT_CONSENSUS_GRACE_MS", "fetch", "readDraftReply", "consensusOfCalls", "draftCallsUsage", "recordDraftUsage",
+  "releaseHold", "logEdgeError", "req", "clientId", "t0", "requestStartMs", "aiSource", "json", "filedAtReturnSite",
+  "parseModelSpec", "streamed", "draftEffort", "draftReadSample",
+  // 2026-09-26: the stagger and the retry (off here: the reads go at once, and a 2 s deadline leaves
+  // no room to retry), and the plain sentence for an upstream failure.
+  "DRAFT_READ_RETRY", "draftUpstreamFailure",
+];
+const RUN = new AsyncFunction(
+  ...PARAMS,
+  `${CALL_BLOCK}\nreturn { answered: null, drafted, lead, consensus, callsUsage, text, calls };`,
+);
+
+const DIMS = { widthFt: 30, lengthFt: 20, wallHeightFt: 8 };
+const FRAMES = Array.from({ length: 12 }, (_, i) => `https://example.test/walk/f${i + 1}.jpg`);
+
+async function run(s: { v2: boolean; lean?: boolean }, plans: Plan[]) {
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  const fakeAbortSignal = {
+    timeout: (ms: number) => {
+      const c = new AbortController();
+      timers.push(setTimeout(() => c.abort(new DOMException("Signal timed out.", "TimeoutError")), ms));
+      return c.signal;
+    },
+  };
+  const sent: Sent[] = [];
+  const fetch = (url: string, init: Sent["init"]): Promise<Response> => {
+    const plan = plans[sent.length];
+    sent.push({ url, init });
+    return new Promise((resolve) => {
+      timers.push(setTimeout(() => resolve(new Response(plan.body, { status: 200 })), plan.delayMs ?? 1));
+    });
+  };
+  const released: string[] = [];
+  const logged: string[] = [];
+  const usage: Record<string, unknown>[] = [];
+  const t0 = Date.now();
+  try {
+    const out = await RUN(
+      fakeAbortSignal, 2_000, aiModelFields, s.v2, s.lean ?? false, FRAMES, false, combinedShapePrompt,
+      0, DIMS, true, videoShapePrompt, SPEC_PROMPT, "test-key", draftCallCount, runDraftCalls,
+      DRAFT_CONSENSUS_GRACE_MS, fetch, readDraftReply, consensusOfCalls, draftCallsUsage,
+      // deno-lint-ignore require-await
+      async (tokens: Record<string, unknown>) => { usage.push(tokens); },
+      // deno-lint-ignore require-await
+      async (reason: string) => { released.push(reason); },
+      // deno-lint-ignore require-await
+      async (e: { code: string }) => { logged.push(e.code); },
+      null, "harness-tenant", t0, t0 - 1_000, "video",
+      (body: Record<string, unknown>, status = 200): Reply => ({ body, status }),
+      new Set(), parseModelSpec, false, s.lean ? "low" : "medium", draftReadSample,
+      { ...DRAFT_READ_RETRY, staggerMs: 0 }, draftUpstreamFailure,
+    );
+    return { out, sent, released, logged, usage };
+  } finally {
+    for (const t of timers) clearTimeout(t);
+  }
+}
+
+// ─── Replies ───────────────────────────────────────────────────────────────────────────────────
+// A gable with a projecting porch. Its own numbers are pitch `pitch` and porch pitch `porch`; the
+// points in `measure` say otherwise. Generic points in a 1600 x 900 frame, never a test building's.
+const SIZE = [1600, 900];
+// A gable whose rakes rise `risePx` over 400 px each side: pitch risePx / 400.
+const gable = (risePx: number) => ({ frame: 2, size: SIZE, left: [400, 600], peak: [800, 600 - risePx], right: [1200, 600] });
+// The same with y read UP by mistake: the peak below its ends, which the server refuses.
+const gableYUp = { frame: 2, size: SIZE, left: [400, 300], peak: [800, 500], right: [1200, 300] };
+// The porch-roof and shed points an earlier draft of the v2 prompt asked for (taken out the same day).
+// A reply that still gives them must change nothing.
+const oldPorch = { frame: 4, size: SIZE, wall: [700, 400], edge: [1200, 550], postTop: [1200, 550], postBottom: [1200, 750] };
+const oldShed = { frame: 5, size: SIZE, tallTop: [300, 200], tallBottom: [300, 700], shortTop: [1100, 440], shortBottom: [1100, 700] };
+
+function replyText(own: { pitch: number; porch: number }, measure?: Record<string, unknown>) {
+  return JSON.stringify({
+    roof: { type: "gable", front: "gable", pitch: own.pitch, overhangIn: 6, eave: "fascia", porchOutFt: 6, porchEnd: "front", porchPosts: 4, porchPitch: own.porch },
+    colors: { body: "#333333", trim: "#222222", roof: "#1a1a1a" },
+    roofMaterial: "metal",
+    observed: { roofNote: "a gable with a porch in front", porch: "projecting", wings: "none", confidence: "medium" },
+    frameMap: { front: { frame: 1, azimuthDeg: 0 } },
+    ...(measure ? { measure } : {}),
+  });
+}
+function body(text: string) {
+  return JSON.stringify({
+    content: [{ type: "thinking", thinking: "" }, { type: "text", text }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 21000, output_tokens: 7000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  });
+}
+const plan = (text: string, delayMs = 2): Plan => ({ body: body(text), delayMs });
+
+// ─── 1 and 2. Five reads ──────────────────────────────────────────────────────────────────────
+Deno.test("v2, five reads: each gable read's pitch is its points' BEFORE the median, and a read with bad points keeps the model's", async () => {
+  const r = await run({ v2: true }, [
+    // The model said 0.8; its points say 0.4. It also gives the old porch points, which are not read.
+    plan(replyText({ pitch: 0.8, porch: 0.15 }, { pitch: gable(160), porchPitch: oldPorch })),
+    // The model said 0.6; its points say 0.42.
+    plan(replyText({ pitch: 0.6, porch: 0.12 }, { pitch: gable(168) })),
+    // The model said 0.5; its points are y-up, which is refused.
+    plan(replyText({ pitch: 0.5, porch: 0.2 }, { pitch: gableYUp })),
+    // The model said 0.7; its points say 0.43.
+    plan(replyText({ pitch: 0.7, porch: 0.14 }, { pitch: gable(172) })),
+    // The model said 0.45 and gave no points at all.
+    plan(replyText({ pitch: 0.45, porch: 0.18 })),
+  ]);
+  assertEquals(r.sent.length, 5, "a v2 press is five reads");
+  assertEquals(r.out.answered, null, "it drafted");
+  assertEquals(r.released, [], "and is charged");
+  assertEquals(r.logged, []);
+  // The median of 0.4, 0.42, 0.5, 0.43 and 0.45 is 0.43. Of the model's own 0.8, 0.6, 0.5, 0.7 and
+  // 0.45 it would be 0.6.
+  assertEquals(r.out.drafted.d3.roof.pitch, 0.43);
+  // The porch roof is the median of the model's own 0.15, 0.12, 0.2, 0.14 and 0.18: points never touch it.
+  assertEquals(r.out.drafted.d3.roof.porchPitch, 0.15);
+  assertEquals(r.out.consensus.report.spread.pitch, [0.4, 0.5]);
+  assert(!JSON.stringify(r.out.drafted.d3).includes("measure"), "the points never reach the spec");
+  // One usage write: the five-read record, a sample per read saying which source won.
+  assertEquals(r.usage.length, 1);
+  const samples = r.usage[0].samples as Record<string, unknown>[];
+  assertEquals(samples.map((x) => [x.pitch, x.pitchSource, x.modelPitch ?? null, x.pitchRejected ?? null]), [
+    [0.4, "points", 0.8, null],
+    [0.42, "points", 0.6, null],
+    [0.5, "model", null, true],
+    [0.43, "points", 0.7, null],
+    [0.45, "model", null, null],
+  ]);
+  assertEquals(samples.map((x) => [x.porchPitch, "porchPitchSource" in x]), [[0.15, false], [0.12, false], [0.2, false], [0.14, false], [0.18, false]]);
+  assert(samples.every((x) => x.type === "gable" && x.porchOutFt === 6), "each sample is still the read's roof");
+});
+
+Deno.test("v2, five reads with no points at all: the model's numbers, exactly as before, and every sample says so", async () => {
+  const r = await run({ v2: true }, [
+    plan(replyText({ pitch: 0.8, porch: 0.15 })),
+    plan(replyText({ pitch: 0.6, porch: 0.12 })),
+    plan(replyText({ pitch: 0.5, porch: 0.2 })),
+    plan(replyText({ pitch: 0.7, porch: 0.14 })),
+    plan(replyText({ pitch: 0.45, porch: 0.18 })),
+  ]);
+  assertEquals([r.out.drafted.d3.roof.pitch, r.out.drafted.d3.roof.porchPitch], [0.6, 0.15]);
+  const samples = r.usage[0].samples as Record<string, unknown>[];
+  assertEquals(samples.map((x) => x.pitchSource), Array(5).fill("model"));
+  assert(samples.every((x) => !("pitchRejected" in x) && !("modelPitch" in x)), "no points given is not a rejection");
+});
+
+// ─── 3. The lean retry ────────────────────────────────────────────────────────────────────────
+Deno.test("v2 lean retry: its one read is drafted with its measured pitch, and its record carries that read's sample", async () => {
+  const r = await run({ v2: true, lean: true }, [plan(replyText({ pitch: 0.8, porch: 0.15 }, { pitch: gable(160) }))]);
+  assertEquals(r.sent.length, 1, "one read");
+  assertEquals(r.out.consensus, null, "no consensus");
+  assertEquals(r.out.callsUsage, null, "the single call's own record");
+  assertEquals([r.out.drafted.d3.roof.pitch, r.out.drafted.d3.roof.porchPitch], [0.4, 0.15]);
+  const tokens = r.usage[0];
+  assertEquals(tokens.model, "claude-opus-5-5");
+  assertEquals((tokens.samples as Record<string, unknown>[]).map((x) => [x.pitch, x.pitchSource, x.modelPitch, x.porchPitch]),
+    [[0.4, "points", 0.8, 0.15]]);
+  // The rest of the single call's record is what it always was.
+  for (const k of ["input", "output", "cache_read", "cache_creation", "stopReason", "textChars", "blockTypes"]) assert(k in tokens, `${k} is still recorded`);
+});
+
+// ─── 4. Legacy is untouched ───────────────────────────────────────────────────────────────────
+Deno.test("legacy: a reply's points are ignored, the request bytes are unchanged, and the record has no samples", async () => {
+  // A legacy reply never has points (the legacy prompts do not ask), but if one did, nothing reads them.
+  const text = replyText({ pitch: 0.8, porch: 0.15 }, { pitch: gable(160) });
+  const r = await run({ v2: false }, [plan(text)]);
+  assertEquals(r.sent.length, 1);
+  const want = parseModelSpec(text, DIMS);
+  assert(want.ok, "fixture");
+  assertEquals(r.out.drafted.d3, want.ok ? want.d3 : null, "the reply's own spec, as parseModelSpec has always made it");
+  assertEquals(r.out.drafted.d3.roof.pitch, 0.8);
+  assert(!("samples" in r.usage[0]), "no samples on a legacy record");
+  assert(!("pitch" in r.out.lead.reading), "a legacy reading carries no sources");
+  // The request is the legacy one: Sonnet, the frozen prompt with the old ruler, no measure asked for.
+  const sentBody = JSON.parse(r.sent[0].init.body);
+  assertEquals(sentBody.model, "claude-sonnet-5");
+  const prompt = sentBody.messages[0].content.at(-1).text as string;
+  assertEquals(prompt, videoShapePrompt(DIMS, false));
+  assert(!prompt.includes('"measure"'), "the legacy prompt asks for no points");
+  // And the v2 request asks for them.
+  const v2 = await run({ v2: true, lean: true }, [plan(text)]);
+  assert((JSON.parse(v2.sent[0].init.body).messages[0].content.at(-1).text as string).includes('"measure": {'), "v2 asks");
+});
+
+Deno.test("a gambrel or a shed read keeps its own pitch whatever points it gives, and they are not counted as rejected", async () => {
+  const other = (roof: Record<string, unknown>, pitch: Record<string, unknown>) => JSON.stringify({
+    roof: { front: "gable", overhangIn: 6, ...roof },
+    colors: {},
+    observed: { porch: "none", wings: "none", confidence: "medium" },
+    measure: { pitch },
+  });
+  for (const [name, text, own] of [
+    // A gambrel's pitch key is not a rake slope.
+    ["a gambrel given gable points", other({ type: "gambrel", pitch: 0.7, kneeU: 0.75, kneeRise: 0.72, ridgeRise: 1.03 }, gable(160)), 0.7],
+    // A shed's slope from its wall edges read far off in a yawed frame, so it is never worked out.
+    ["a shed given its wall edges", other({ type: "shed", front: undefined, highSide: "front", pitch: 0.2 }, oldShed), 0.2],
+    ["a shed given gable points", other({ type: "shed", front: undefined, highSide: "front", pitch: 0.2 }, gable(160)), 0.2],
+  ] as const) {
+    const r = await run({ v2: true, lean: true }, [plan(text)]);
+    assertEquals(r.out.drafted.d3.roof.pitch, own, name);
+    const s = (r.usage[0].samples as Record<string, unknown>[])[0];
+    assertEquals([s.pitchSource, "pitchRejected" in s, "porchPitchSource" in s], ["model", false, false], name);
+  }
+});
+
+// ─── 5. The wing roofs ────────────────────────────────────────────────────────────────────────
+// A raised gable centre with an enclosed wing each side and no porch. Its own numbers are pitch
+// `pitch` and wing pitch `wing`; `measure` carries the points. The wing points are live reads
+// (2026-09-26): 1280 x 720 front frames of one raised-centre building, whose wings measure 0.2.
+const LIVE_WINGS = [
+  [[320, 298], [492, 280], [806, 264], [1192, 312]], // 0.11
+  [[312, 332], [492, 282], [806, 268], [1192, 316]], // 0.2
+  [[312, 330], [490, 280], [805, 265], [1195, 335]], // 0.23
+  [[310, 330], [470, 282], [805, 265], [1192, 335]], // 0.24
+  [[310, 332], [492, 282], [805, 265], [1192, 318]], // 0.2
+].map(([leftOuter, leftInner, rightInner, rightOuter]) => ({ frame: 1, size: [1280, 720], leftOuter, leftInner, rightInner, rightOuter }));
+// The same with y read UP by mistake: both wings rise outward, which the server refuses.
+const wingsYUp = { frame: 1, size: [1280, 720], leftOuter: [320, 250], leftInner: [492, 280], rightInner: [806, 264], rightOuter: [1192, 220] };
+
+function wingedText(own: { pitch: number; wing: number }, measure?: Record<string, unknown>, roof: Record<string, unknown> = {}) {
+  return JSON.stringify({
+    roof: { type: "gable", front: "gable", pitch: own.pitch, overhangIn: 6, eave: "fascia", wingSide: "both", wingWidthFt: 9, wingPitch: own.wing, centerEaveFt: 14, ...roof },
+    colors: { body: "#333333", trim: "#222222", roof: "#1a1a1a" },
+    roofMaterial: "metal",
+    observed: { roofNote: "a raised gable centre with a wing each side", porch: "none", wings: "both", confidence: "medium" },
+    frameMap: { front: { frame: 1, azimuthDeg: 0 } },
+    ...(measure ? { measure } : {}),
+  });
+}
+
+Deno.test("v2, five winged reads: each read's wing pitch is its points' BEFORE the median, not the model's", async () => {
+  const own = [0.13, 0.17, 0.21, 0.13, 0.14];
+  const r = await run({ v2: true }, LIVE_WINGS.map((wing, i) => plan(wingedText({ pitch: 0.5, wing: own[i] }, { wing }))));
+  assertEquals(r.sent.length, 5, "a v2 press is five reads");
+  assertEquals(r.out.answered, null, "it drafted");
+  assertEquals([r.released, r.logged], [[], []]);
+  // The median of the points' 0.11, 0.2, 0.23, 0.24 and 0.2 is 0.2. Of the model's own 0.13, 0.17,
+  // 0.21, 0.13 and 0.14 it would be 0.14.
+  assertEquals(r.out.drafted.d3.roof.wingPitch, 0.2);
+  assertEquals(r.out.consensus.report.spread.wingPitch, [0.11, 0.24]);
+  assertEquals([r.out.drafted.d3.roof.wingSide, r.out.drafted.d3.roof.wingWidthFt], ["both", 9], "the rest of the wings is the reads'");
+  const stored = JSON.stringify(r.out.drafted.d3);
+  assert(!stored.includes("measure") && !stored.includes("leftOuter"), "the points never reach the spec");
+  // One usage write: a sample per read saying which source won, beside the gable's.
+  assertEquals(r.usage.length, 1);
+  const samples = r.usage[0].samples as Record<string, unknown>[];
+  assertEquals(samples.map((x) => [x.wingPitch, x.wingPitchSource, x.modelWingPitch ?? null, x.wingPitchRejected ?? null]), [
+    [0.11, "points", 0.13, null],
+    [0.2, "points", 0.17, null],
+    [0.23, "points", 0.21, null],
+    [0.24, "points", 0.13, null],
+    [0.2, "points", 0.14, null],
+  ]);
+  // No gable points were given, so every read's pitch is its own, and none of them was refused.
+  assertEquals(samples.map((x) => [x.pitch, x.pitchSource, "pitchRejected" in x]), Array(5).fill([0.5, "model", false]));
+});
+
+Deno.test("v2, five winged reads: refused points and a one-sided read keep the model's number, and the gable's points are their own", async () => {
+  const r = await run({ v2: true }, [
+    // The wing points say 0.2 against the model's 0.17; the gable's say 0.4 against its 0.8.
+    plan(wingedText({ pitch: 0.8, wing: 0.17 }, { pitch: gable(160), wing: LIVE_WINGS[1] })),
+    // 0.23 against 0.21, and no gable points.
+    plan(wingedText({ pitch: 0.5, wing: 0.21 }, { wing: LIVE_WINGS[2] })),
+    // 0.24 against 0.13; the gable's y-up points are refused, the wing's are not.
+    plan(wingedText({ pitch: 0.6, wing: 0.13 }, { pitch: gableYUp, wing: LIVE_WINGS[3] })),
+    // The wing points are y-up: refused, so the model's 0.14 stands.
+    plan(wingedText({ pitch: 0.7, wing: 0.14 }, { wing: wingsYUp })),
+    // One wing, on the left: its points are not a question, so the model's 0.12 stands, unrefused.
+    plan(wingedText({ pitch: 0.45, wing: 0.12 }, { wing: LIVE_WINGS[4] }, { wingSide: "left" })),
+  ]);
+  assertEquals(r.out.answered, null, "it drafted");
+  // The median of 0.2, 0.23, 0.24, 0.14 and 0.12 is 0.2; of the model's own it would be 0.14.
+  assertEquals(r.out.drafted.d3.roof.wingPitch, 0.2);
+  assertEquals(r.out.drafted.d3.roof.wingSide, "both", "four reads of five saw both sides");
+  // The gable: the median of 0.4, 0.5, 0.6, 0.7 and 0.45 is 0.5.
+  assertEquals(r.out.drafted.d3.roof.pitch, 0.5);
+  const samples = r.usage[0].samples as Record<string, unknown>[];
+  assertEquals(samples.map((x) => [x.wingPitch, x.wingPitchSource, x.modelWingPitch ?? null, x.wingPitchRejected ?? null]), [
+    [0.2, "points", 0.17, null],
+    [0.23, "points", 0.21, null],
+    [0.24, "points", 0.13, null],
+    [0.14, "model", null, true],
+    [0.12, "model", null, null],
+  ]);
+  assertEquals(samples.map((x) => [x.pitch, x.pitchSource, x.modelPitch ?? null, x.pitchRejected ?? null]), [
+    [0.4, "points", 0.8, null],
+    [0.5, "model", null, null],
+    [0.6, "model", null, true],
+    [0.7, "model", null, null],
+    [0.45, "model", null, null],
+  ]);
+});
+
+Deno.test("v2 lean retry and legacy: the lean read's wing pitch is its points'; a legacy reply's wing points are ignored", async () => {
+  const text = wingedText({ pitch: 0.5, wing: 0.13 }, { wing: LIVE_WINGS[3] });
+  const lean = await run({ v2: true, lean: true }, [plan(text)]);
+  assertEquals(lean.sent.length, 1, "one read");
+  assert((JSON.parse(lean.sent[0].init.body).messages[0].content.at(-1).text as string).includes('"wing": {'), "v2 asks for the wing points");
+  assertEquals(lean.out.drafted.d3.roof.wingPitch, 0.24, "its points', not the model's 0.13");
+  assertEquals((lean.usage[0].samples as Record<string, unknown>[]).map((x) => [x.wingPitch, x.wingPitchSource, x.modelWingPitch]),
+    [[0.24, "points", 0.13]]);
+  // Legacy: the reply's own spec, as parseModelSpec has always made it, and no samples.
+  const legacy = await run({ v2: false }, [plan(text)]);
+  const want = parseModelSpec(text, DIMS);
+  assert(want.ok, "fixture");
+  assertEquals(legacy.out.drafted.d3, want.ok ? want.d3 : null);
+  assertEquals(legacy.out.drafted.d3.roof.wingPitch, 0.13, "the model's own number");
+  assert(!("samples" in legacy.usage[0]), "no samples on a legacy record");
+  assert(!(JSON.parse(legacy.sent[0].init.body).messages[0].content.at(-1).text as string).includes('"wing"'), "and the legacy prompt asks for none");
+});

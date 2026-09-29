@@ -70,11 +70,49 @@ import {
   norm as attrNorm,
   resolveBuildingContext,
 } from "../_shared/attributeLines.ts";
-import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, parseFrameMap, gambrelRoofWarning, porchAgreementWarning, knownDimsNote, flagObservedNotes, parseKnownDims, SPEC_PROMPT, videoShapePrompt, combinedShapePrompt, parseSelfCheckRenders, selfCheckPairs, selfCheckPairLabel, selfCheckPrompt, parseSelfCheck, applySelfCheck } from "../_shared/styleD3.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, parseFrameMap, gambrelRoofWarning, porchAgreementWarning, knownDimsNote, flagObservedNotes, parseKnownDims, SPEC_PROMPT, videoShapePrompt, combinedShapePrompt, parseSelfCheckRenders, selfCheckPairs, parseSelfCheck, applySelfCheck } from "../_shared/styleD3.ts";
 import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
+// The v2 generator's two additions (2026-09-24), on their own line so the long list above can move
+// without this one: the walk-around frame cap every frame path shares, and the wings check.
+import { WALK_FRAME_MAX, wingsAgreementWarning, wantsV2Prompt } from "../_shared/styleD3.ts";
+// A raised foundation's save carry-forward (2026-09-25), on its own line for the same reason.
+import { carryForwardFoundation } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
+// The multi-round self-check (v2), on its own line so the generation's import above stays untouched.
+import { parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfCheckChangedFields, SELF_CHECK_MAX_ROUNDS } from "../_shared/styleD3.ts";
+// The check's rollout gate and its one request builder, and the draft's frame-key check (fix,
+// 2026-09-24): the check is gated on `frame` like the draft, and a legacy request is d3ab404's.
+import { selfCheckMode, selfCheckRequest, frameKeyWarning } from "../_shared/styleD3.ts";
+import { aiDraftCostCents, aiModelFields } from "../_shared/styleD3.ts";
+import { runStepZoom } from "../_shared/stepZoom.ts";
+// Consensus drafting (2026-09-25): the v2 draft reads the video several times (five since
+// 2026-09-26, DRAFT_CONSENSUS_CALLS) and combines the reads.
+import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftCallsUsage, consensusSplitWarning, DRAFT_CONSENSUS_GRACE_MS } from "../_shared/styleD3.ts";
+// Measured pitches (2026-09-26): each v2 gable read's pitch is worked out from its own pixel points.
+import { draftReadSample } from "../_shared/styleD3.ts";
+// ...and a pitch at least two reads measured is locked in the self-check (2026-09-26).
+import { measuredPitchLock } from "../_shared/styleD3.ts";
+// A read the API could not serve is sent again, the five reads' first sends are staggered, and an
+// upstream failure is told to the builder in a plain sentence (2026-09-26).
+import { DRAFT_READ_RETRY, draftUpstreamFailure } from "../_shared/styleD3.ts";
+// The streamed draft (2026-09-25): a v2 draft answers behind a heartbeat so it can outlive the
+// gateway's 150 s of silence (see draftAnswer below).
+import { wantsStreamedDraft, DRAFT_STREAM_DEADLINE_MS } from "../_shared/styleD3.ts";
+// Its clocks, bounded by the worker's life as well as the request's (fix, 2026-09-26; see WORKER_BORN_MS).
+import { streamedDraftBudgetMs, streamedDraftDeadlineMs } from "../_shared/styleD3.ts";
+import { heartbeatJsonResponse } from "../_shared/heartbeatJson.ts";
+// Draft recovery (2026-09-25): a streamed draft whose connection dropped is read back off its ledger row,
+// found by the press's own idempotency key (253).
+import {
+  draftMoneyState, isRecoverableDraft, pickRecoverRow, recoverDraftAnswer, DRAFT_RECOVER_COLUMNS, DRAFT_RECOVER_MAX_ROWS,
+  DRAFT_RECOVER_MONEY_COLUMNS, type DraftMoney, type DraftRecoverMoneyRow, type DraftRecoverRow,
+} from "../_shared/styleD3.ts";
+// How young a generation must be for the self-check to claim it; the recover action reads it too.
+import { SELF_CHECK_CLAIM_WINDOW_MS } from "../_shared/styleD3.ts";
+// The press's idempotency key, cut one way for the ledger row, the wallet hold and the pickup (253).
+import { draftIdemKey } from "../_shared/styleD3.ts";
 
 // ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
@@ -149,6 +187,10 @@ const GATES: GateTable = {
   // shape for the style they are editing, so anyone who may not edit structures has no business
   // here either. Free does not mean ungated.
   calibrate_style_check:     { area: "settings_structures", level: "edit" },
+  // Reads back the draft of a STREAMED generation whose answer never reached the browser (the
+  // connection dropped). The generation's own gate, exactly: it hands back what that action would
+  // have, for the caller's own row, and nobody who may not generate may read a draft either.
+  calibrate_style_ai_recover: { area: "settings_structures", level: "edit" },
   upload_style_photo:        { area: "settings_structures", level: "edit" },
   style_photo_upload_url:    { area: "settings_structures", level: "edit" },
   save_style_media:          { area: "settings_structures", level: "edit" },
@@ -440,6 +482,77 @@ function json(body: unknown, status = 200) {
 // said nothing new. Faults still land as `error`; this removes a duplicate, not a record.
 // A WeakSet, so a response that has been answered is not held onto.
 const filedAtReturnSite = new WeakSet<Response>();
+
+// ── THE STREAMED DRAFT (2026-09-25) ──────────────────────────────────────────────────────────
+// How calibrate_style_ai answers: the branch's own Response, or the same answer behind a heartbeat.
+//
+// WHY. The gateway ends a request that has sent nothing for 150 s (a bare 504, invisible to
+// withErrorLog), so the draft's model abort has had to stop at 125 s. At effort "medium", Opus
+// often answered a walk-around in 10-15 s with ~480 output tokens, and those shallow reads were
+// wrong on the hard calls (a shed's high side on the wrong wall 6 times in 7); the reads that
+// thought (3,400-5,400 tokens) took 56-106 s and were right. At "high" all three consensus reads
+// ran past 125 s. The gateway times SILENCE, not the request (a probe that wrote a space every 10 s
+// answered 200 after 220 s), so a streamed draft can take the time a careful read needs.
+//
+// WHICH REQUESTS: wantsStreamedDraft (styleD3.ts), i.e. `stream: true` from the new shell, the v2
+// prompt, and not the lean retry. EVERY OTHER REQUEST gets `work(false)`, the branch's own
+// Response, unchanged: production's older shell, the lean retry and every legacy request.
+//
+// A streamed request answers 200 at once (heartbeatJson.ts) and runs the SAME branch behind it,
+// with `streamed` true: the only things that differ are the model's budget and effort, read inside
+// the branch. Every exit keeps its order and its hold release, ledger write, capture and log rows;
+// a failure's status rides in the body instead of the status line.
+//
+// ⚠️ THE ERROR WRAPPER CANNOT SEE THROUGH THE 200. Unstreamed, withErrorLog files a row for an
+// uncoded 5xx exit ("Could not reach the AI service", the meter's 503s) and for a throw; streamed,
+// it only ever sees a 200 and would file neither. So the work runs inside a REPLAY of the wrapper,
+// on a request carrying the three things the wrapper reads (the URL, the user agent, and the body,
+// for its client id), which files exactly the rows the unstreamed answer would have: the same
+// `alreadyFiled` rule, the same message, the same severity. The replay rethrows a throw, and the
+// heartbeat answers it as a 500.
+//
+// THE WATCHDOG (2026-09-25). supabase-js has no timeout, so a streamed draft that hangs after its
+// reads (a database call that never returns) would keep writing spaces until the platform killed the
+// worker, and the browser would read a body cut off mid-space. The answer is closed instead at
+// DRAFT_STREAM_DEADLINE_MS from the request's arrival or 40 s before this worker's end, whichever
+// comes first (streamedDraftDeadlineMs; the worker's half since 2026-09-26, see WORKER_BORN_MS), with
+// heartbeatJson's `stream_deadline` body (a 504, not retryable), and one coded row is filed. The work
+// is NOT stopped: it stays registered with EdgeRuntime.waitUntil, releases or captures its hold and
+// writes its ledger row, and the browser picks the draft up from that row (calibrate_style_ai_recover).
+//
+// ── THE WORKER'S BIRTH (fix, 2026-09-26) ──────────────────────────────────────────────────────
+// Read ONCE, when the worker evaluates this module at boot. The platform's 400 s wall clock is the
+// WORKER's, not a request's: one worker serves many requests, is routed no new one after 200 s and
+// is ended at 400 s with whatever is still in flight (styleD3.ts's EDGE_WALL_CLOCK_MS has the
+// source). The warm-up ping and the designer's own calls just before every press mean a streamed
+// draft usually lands on a warm worker, so both of its streamed clocks (the reads' budget in
+// calibrate_style_ai, the answer's watchdog here) count from this as well as from the request.
+// Exported for aiDraftStreamWiring_test alone, which puts a request at a chosen age of this worker.
+export const WORKER_BORN_MS = Date.now();
+
+function draftAnswer(
+  req: Request,
+  payload: unknown,
+  at: { requestStartMs: number; clientId: string },
+  work: (streamed: boolean) => Promise<Response>,
+): Promise<Response> | Response {
+  if (!wantsStreamedDraft(payload)) return work(false);
+  const ua = req.headers.get("user-agent");
+  const replay = new Request(req.url, { method: "POST", headers: ua ? { "user-agent": ua } : {}, body: JSON.stringify(payload) });
+  const filed = withErrorLog("portal-settings", () => work(true), { alreadyFiled: (res) => filedAtReturnSite.has(res) });
+  // Worked out ONCE and logged as armed: on a warm worker the worker's term can arm it well before
+  // DRAFT_STREAM_DEADLINE_MS, and the row must say which deadline actually closed the answer.
+  const deadlineMs = streamedDraftDeadlineMs({ now: Date.now(), requestStartMs: at.requestStartMs, workerBornMs: WORKER_BORN_MS });
+  return heartbeatJsonResponse(() => filed(replay), {
+    headers: { ...cors, "Content-Type": "application/json" },
+    deadlineMs,
+    onDeadline: () => logEdgeError({
+      fn: "portal-settings", req, clientId: at.clientId, code: "ai_draft_stream_deadline",
+      message: "The streamed draft's answer reached its deadline with the work still running; it was closed with stream_deadline and the work ran on.",
+      context: { requestMs: Date.now() - at.requestStartMs, deadlineMs, requestDeadlineMs: DRAFT_STREAM_DEADLINE_MS, workerAgeMs: Date.now() - WORKER_BORN_MS },
+    }),
+  });
+}
 
 /**
  * A database or storage call failed. Log the real reason server-side; tell the caller
@@ -833,6 +946,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
 }
 
 Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
+  // When this request reached the function. The gateway's 150 s idle timeout runs from the
+  // request, not from any one call inside it, so a budget that must end before it is measured
+  // from here (calibrate_style_ai's model abort).
+  const requestStartMs = Date.now();
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -3142,7 +3259,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // They are a SEPARATE column because the two are answers to different questions: "what has
     // this builder photographed" and "has this style got a walk-around at all". Mixed into one
     // array, as they were until today, the second question has no answer after a reload - so the
-    // Generate gate would demand a video the builder had already filmed. Cap 8: SS_VID_FRAMES.
+    // Generate gate would demand a video the builder had already filmed. Cap: WALK_FRAME_MAX (12
+    // since 2026-09-24, was 8) — SS_VID_FRAMES, and the self-check only pairs frames stored here.
     //
     // ⚠️ ABSENCE IS NOT EMPTINESS, and this column is the first one here where the difference
     // bites. sanitizePhotoUrls answers [] for undefined exactly as it does for [], so writing it
@@ -3151,7 +3269,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // authenticated refetch lands - silently wiped a walk-around already on file. Only a caller
     // that actually sent an array gets to touch it; everyone else leaves it as they found it.
     const hasVideoFrames = Array.isArray(payload.d3VideoFrames);
-    const videoFrames = sanitizePhotoUrls(payload.d3VideoFrames, 8);
+    // WALK_FRAME_MAX (12 since 2026-09-24), in step with the designer's SS_VID_FRAMES. The STORED lap has to hold
+    // every frame a generation can be sent: the self-check pairs only frames found in the
+    // style's own stored media (selfCheckPairs), so a lap cut to 8 here drops frames 9-12 from
+    // every check -- and a reload would hand Generate eight views of a twelve-view lap.
+    const videoFrames = sanitizePhotoUrls(payload.d3VideoFrames, WALK_FRAME_MAX);
     const found = await findStyleFor3D(styleValue, styleId);
     if (found.err) return found.err;
     if (found.style!.model_status === "locked") return json({ error: LOCKED_MSG }, 409);
@@ -3168,6 +3290,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         clean.d3.roofProfile = stored;
       }
     }
+    // A RAISED FOUNDATION (blocks / piers and floorHeightFt, 2026-09-25): an older panel sends
+    // foundation null (or a draft's "slab") and never floorHeightFt, so a save without frame
+    // "front" keeps the stored pair (carryForwardFoundation). The current panel sends frame "front"
+    // and gets what it sent. Before the guard too, so an old panel's re-save of a raised style
+    // compares as the duplicate it is.
+    carryForwardFoundation(clean.d3, payload.d3, found.style!.d3, payload.frame);
     // THE LATE-SAVE GUARD, BY VERSION (see _shared/styleSaveGuard.ts, and why content alone was
     // not enough). A caller that sent no baseVersion — an older bundle, the operator ?admin=1
     // page — writes unconditionally, exactly as before. A DUPLICATE (this exact save already
@@ -3245,7 +3373,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // only knows about photos must not blank the frames.
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (Array.isArray(payload.d3Photos)) patch.d3_photos = sanitizePhotoUrls(payload.d3Photos, 12);
-    if (Array.isArray(payload.d3VideoFrames)) patch.d3_video_frames = sanitizePhotoUrls(payload.d3VideoFrames, 8);
+    if (Array.isArray(payload.d3VideoFrames)) patch.d3_video_frames = sanitizePhotoUrls(payload.d3VideoFrames, WALK_FRAME_MAX);
     if (Object.keys(patch).length === 1) return json({ ok: true, skipped: true });
     // The same version guard as save_style_d3, over only the columns this call writes.
     const decision = guardDecision({
@@ -3457,6 +3585,88 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, uploads, path: first?.path, token: first?.token, url: first?.url });
   }
 
+  // ── PICK UP A STREAMED DRAFT WHOSE ANSWER NEVER ARRIVED (2026-09-25, BY KEY SINCE 253) ─────────
+  // A streamed draft (calibrate_style_ai below, answered by draftAnswer) takes up to five and a half
+  // minutes behind its heartbeat, and a phone that backgrounds the tab or a network that blinks
+  // drops that answer while the server works on, or after it has finished and charged. The same
+  // key asked again runs the model a second time with the meter off (today), and with it on the
+  // hold refuses it (hold_in_flight; already_charged only once 248 is applied). But the server
+  // writes what it drafted onto the generation's ledger row, so the new shell, instead of telling
+  // the builder to try again, asks HERE: at once when the answer drops, then every ten seconds
+  // until the draft is there, the server says it never will be, or the press's own eight minutes
+  // run out (and while the asks themselves fail, at least a minute from the first).
+  //
+  // ⚠️ THE PRESS IS FOUND BY ITS OWN KEY (253), and nothing here reads a clock the browser sent.
+  // The body names the style and the idempotency key the press went out with; the ledger insert
+  // below writes that key onto the press's row and wallet_hold files the hold under it, so the rows
+  // read here are that press's and nobody else's -- never a later press on another tab or device,
+  // which mints its own key -- and the sentence about money comes from that press's wallet rows,
+  // never from how long ago anything happened (styleD3.ts's recoverDraftAnswer has the table).
+  //
+  // ⛔ ONLY THE CALLER'S OWN ROWS. The gate is calibrate_style_ai's (GATES), and both reads are
+  // filtered on the RESOLVED tenant and the RESOLVED user -- never on anything in the body -- plus
+  // the key, the style and the shape-first sources. So an operator in view-as reads only the rows
+  // they generated there, and a key from another tenant or user finds nothing.
+  //
+  // No model call and no money: two reads (the wallet only when the answer will not be a recovered
+  // draft) and one coded row per answer that ends the wait (none for `pending`).
+  if (action === "calibrate_style_ai_recover") {
+    // The style exactly as calibrate_style_ai writes it into `style_key`: the same String(), the
+    // same 120-character cut, and no trim, or a style whose key has a trailing space finds nothing.
+    const styleKey = String(payload.styleValue ?? "").slice(0, 120);
+    if (!styleKey) return json({ error: "styleValue is required." }, 400);
+    // The key exactly as the insert and wallet_hold cut it (draftIdemKey).
+    const idemKey = draftIdemKey(payload.idempotencyKey);
+    if (!idemKey) return json({ error: "idempotencyKey (the press's own key) is required." }, 400);
+    if (!userId) return json({ error: "Sign in again to pick your draft up." }, 401);
+    // Not an answer about the draft, so never `pending: false`: the shell keeps asking.
+    const unreadable = async (what: string, message: string) => {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ai_draft_recover_failed",
+        message: `Could not read ${what} to pick a draft up: ${message}`,
+      });
+      const failed = json({ error: "We could not check on your draft just now." }, 503);
+      filedAtReturnSite.add(failed);
+      return failed;
+    };
+    const { data: rows, error: recErr } = await admin.from("ai_style_calls")
+      .select(DRAFT_RECOVER_COLUMNS)
+      .eq("client_id", clientId).eq("user_id", userId).eq("idem_key", idemKey).eq("style_key", styleKey)
+      .in("source", ["video", "combined"])
+      .order("called_at", { ascending: false })
+      .limit(DRAFT_RECOVER_MAX_ROWS);
+    if (recErr) return await unreadable("the ledger (migration 253 may not be applied)", recErr.message);
+    const row = pickRecoverRow(rows as DraftRecoverRow[] | null);
+    // The money, whenever the answer will not be a recovered draft (isRecoverableDraft: the same
+    // test recoverDraftAnswer makes), so an unreadable draft on a charged press is said as charged.
+    // A draft to hand back is the answer whatever the wallet says. The press's own debit rows
+    // under the same key (wallet_hold's p_idem).
+    let money: DraftMoney = { kind: "none" };
+    if (!isRecoverableDraft(row)) {
+      const { data: tx, error: txErr } = await admin.from("wallet_transactions")
+        .select(DRAFT_RECOVER_MONEY_COLUMNS)
+        .eq("client_id", clientId).eq("idempotency_key", idemKey).eq("actor_user_id", userId)
+        .eq("meter_kind", "video_3d_generation").eq("kind", "debit");
+      if (txErr) return await unreadable("the wallet", txErr.message);
+      money = draftMoneyState(tx as DraftRecoverMoneyRow[] | null);
+    }
+    const out = recoverDraftAnswer(row, money, Date.now());
+    if (out.kind === "draft") {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: out.code, severity: out.severity,
+        message: "A streamed draft whose answer never reached the browser was picked up from the ledger.",
+        context: { checkId: row?.id ?? null, calledAt: row?.called_at ?? null, frameMap: out.body.frameMap !== null },
+      });
+    } else if (out.kind === "lost") {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: out.code, severity: out.severity,
+        message: `A streamed draft could not be picked up from the ledger (${out.why}).`,
+        context: { why: out.why, money: money.kind, checkId: row?.id ?? null, calledAt: row?.called_at ?? null, draftMs: row?.draft_ms ?? null },
+      });
+    }
+    return json(out.body);
+  }
+
   // Draft a 3D spec from reference photos with Claude. The builder reviews and tunes the
   // result before anything is saved — this only ever returns a draft.
   //
@@ -3464,7 +3674,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // by any owner/admin rather than by whoever holds the operator password. The ledger row
   // is written BEFORE the model call on purpose: a failing style would otherwise be a free
   // retry loop against our API key.
-  if (action === "calibrate_style_ai") {
+  //
+  // The whole branch is ONE function of `streamed` (2026-09-25), answered by draftAnswer above: run
+  // as it is for every request but a streamed v2 draft, and behind a heartbeat for that one.
+  if (action === "calibrate_style_ai") return await draftAnswer(req, payload, { requestStartMs, clientId }, async (streamed: boolean): Promise<Response> => {
     // Two callers, one action, one gate, one meter. `source: "video"` means the URLs are
     // frames the browser cut out of a walk-around video (the file itself never leaves the
     // phone) rather than four staged photos — so it takes eight of them and a prompt that
@@ -3483,10 +3696,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     //
     // TWELVE is Carolyn's own number, 09-04 @13:53: "three from the back, three from this
     // side, one three from this side, and three from this side."
+    //
+    // A walk alone takes WALK_FRAME_MAX since 2026-09-24 (12, was 8): the self-check now compares
+    // the back and the far side too, and a lap of eight saw each side once. Combined stays 12 in
+    // TOTAL, frames and photos together. Each frame is image tokens, so this is also a cost change.
     const fromVideo = payload.source === "video";
     const combined = payload.source === "combined";
     const shapeFirst = fromVideo || combined;
-    const photoUrls = sanitizePhotoUrls(payload.photoUrls, combined ? 12 : fromVideo ? 8 : 4);
+    const photoUrls = sanitizePhotoUrls(payload.photoUrls, combined ? 12 : fromVideo ? WALK_FRAME_MAX : 4);
     // How many of the leading URLs are walk-around frames. Clamped to what actually survived the
     // sanitiser: a caller claiming ten frames out of a set the cap cut to eight would otherwise
     // have the prompt describe two photographs that are not there.
@@ -3507,6 +3724,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // reports what was USED, so a photos-source caller that sent dims is told plainly that they
     // were not.
     const dims = shapeFirst ? dimsRead.dims : null;
+    // ── THE ROLLOUT GATE (2026-09-24, see wantsV2Prompt) ──────────────────────────────────────
+    // Production's older browser bundle calls this same function and already sends dims, typed
+    // against a card that says the width is "across the gable end". The v2 prompt reads them in
+    // the NEW frame (the FRONT wall), so it goes ONLY to a request that says `frame: "front"` —
+    // the new designer's — and has dims. Every other request takes exactly the prompt it took
+    // before v2 existed, dims ruler and all, and none of v2's checks (the wings agreement below).
+    const v2Prompt = wantsV2Prompt(payload.frame, dims);
     // ⚠️ TRUNCATION IS THE FAILURE MODE THAT LOOKS LIKE A BAD MODEL. sanitizePhotoUrls slices
     // SILENTLY, so an over-cap request returns HTTP 200, a full-price ledger row, and a spec
     // drafted from part of the set — and the builder concludes the AI reads sheds badly. The
@@ -3568,7 +3792,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // drift, RLS change) still let the model call proceed -- unmetered spend on exactly the
     // path the ledger exists to meter (audit 2026-08-19). Refusing is the safe side; the
     // cap query above already failed soft for the read case.
-    const { data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert({ client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null, source: combined ? "combined" : fromVideo ? "video" : "photos" }).select("id").single();
+    //
+    // ── THE PRESS'S KEY RIDES ON ITS ROW (253, 2026-09-25) ────────────────────────────────────
+    // `idem_key` is the key wallet_hold files this press's hold under (draftIdemKey: the same
+    // String() and 120-character cut, used for both), so calibrate_style_ai_recover can find THIS
+    // press's row, and its money, after a dropped stream -- by key, never by time. Production's
+    // older shell sends a key too, so its rows simply get the column filled. A request with no key
+    // (the photos path's older callers) inserts exactly the object it always did.
+    //
+    // ⚠️ A MISSING COLUMN MUST NEVER FAIL A GENERATION. This insert IS the spend cap and a failure
+    // here is a 503, so a deploy landing before 253 would refuse every press. PostgREST refuses the
+    // whole statement when one key names a column it cannot find (PGRST204), so on ANY failure with
+    // the key in it the insert is tried once more without it -- the dims write below (247) does the
+    // same -- and one info row names the migration. A second failure is the ledger really being
+    // down, and refuses exactly as before. Without the key the row cannot be picked up after a drop
+    // (the recover action answers no_row), which is the price of a migration not applied yet.
+    const idemKey = draftIdemKey(payload.idempotencyKey);
+    const ledgerInsert: Record<string, unknown> = { client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null, source: combined ? "combined" : fromVideo ? "video" : "photos" };
+    let { data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert(idemKey ? { ...ledgerInsert, idem_key: idemKey } : ledgerInsert).select("id").single();
+    if (ledgerErr && idemKey) {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ai_style_idem_key_write_failed", severity: "info",
+        message: `Could not record the press's key on its ledger row - retrying without it; migration 253 may not be applied: ${ledgerErr.message}`,
+      });
+      ({ data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert(ledgerInsert).select("id").single());
+    }
     if (ledgerErr) return json({ error: "The AI drafting meter is unavailable right now - try again shortly." }, 503);
 
     // ── WALLET HOLD ────────────────────────────────────────────────────────────────
@@ -3601,7 +3849,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // for. One press is one hold is one charge, whichever inputs it read.
     if (shapeFirst) {
       const { data: hold, error: holdErr } = await admin
-        .rpc("wallet_hold", { p_client_id: clientId, p_kind: "video_3d_generation", p_idem: String(payload.idempotencyKey ?? "").slice(0, 120) || null, p_user: userId ?? null })
+        .rpc("wallet_hold", { p_client_id: clientId, p_kind: "video_3d_generation", p_idem: idemKey, p_user: userId ?? null })
         .maybeSingle() as { data: any; error: any };
       if (holdErr) {
         await logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_hold_failed", message: `Wallet hold failed, refusing the generation: ${holdErr.message}` });
@@ -3636,8 +3884,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // ⚠️ AND THE DRAFT REALLY IS LOST, so the message must not pretend otherwise. It is on
       // the ledger row, but nothing reads it back: openCalEditor seeds from building_styles.d3,
       // which is only written on Save. So the honest answer is what it costs to try again, said
-      // before they press rather than after. (Recovering `drafted` from the row would be a new
-      // read action and a real improvement; it is not this fix.)
+      // before they press rather than after. (calibrate_style_ai_recover, 2026-09-25, reads
+      // `drafted` back off the row by the press's key, but only for a press whose STREAMED answer
+      // dropped, while the page that sent it is still open. A press that reaches this line is a
+      // new press that got this answer, and its own row is deleted just below.)
       //
       // No capture and no release: there is no live hold here, only a posted row.
       if (err === "hold_replayed") {
@@ -3677,9 +3927,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // mean charging a card as part of an error response, then retrying the hold — a second
       // money path guarded by nothing, to save one retry. Not worth it.
       //
-      // Awaited rather than backgrounded: EdgeRuntime.waitUntil is unused anywhere in this
-      // codebase, and a money path is the wrong place to prove a new primitive — a task
-      // dropped on shutdown mid-sale leaves a closed_unknown that blocks ALL future top-ups.
+      // Awaited rather than backgrounded: EdgeRuntime.waitUntil only ASKS the runtime to keep
+      // the worker (the streamed draft's heartbeat uses it for the work behind its answer), and a
+      // money path is the wrong place to lean on a request — a task dropped on shutdown mid-sale
+      // leaves a closed_unknown that blocks ALL future top-ups.
       // Cost is up to nmiPost's 30s on a request that is already running an AI 3D generation,
       // and the cooldown caps it at once an hour.
       try {
@@ -3742,86 +3993,356 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // ── THE MODEL CALL: bounded in tokens AND in time (2026-09-17) ──────────────────────
     // The model thinks adaptively, and max_tokens caps thinking and the answer TOGETHER. The
     // old 700/900 left a few hundred tokens beyond the JSON, so a reply that thought first
-    // could run out before writing it. 8000 gives the thinking room; effort "medium" keeps
+    // could run out before writing it. 8000 gave the thinking room; effort "medium" keeps
     // its depth (and latency) in check without switching it off, which the gambrel knee
     // arithmetic in the shape prompt benefits from.
     //
+    // 12000 SINCE 2026-09-24. One 09-21 generation in twelve was cut at 8000 after 103 s, and the
+    // v2 prompt asks for more (the front, the shed's high side, wings, the porch's height and
+    // width, three more colours, six frame-map views) out of more frames. At the ~78 tokens/s
+    // measured that day, 12000 is ~154 s — past the abort below. That is deliberate: the abort is
+    // the real bound on a runaway reply, and it is a clean, released, RETRYABLE failure; the
+    // budget only has to stop being the thing a normal long reply trips over.
+    //
+    // 12000 ON EVERY READ AGAIN (2026-09-26). The streamed draft had 20000 from 2026-09-25, when Opus 5
+    // at effort "high" thought past 12000; Opus 5.5 reads measured live the next day use about 2,000-
+    // 7,000 output tokens, so 12000 is still ~1.7x the longest seen, and it keeps five reads' worst
+    // case under the ceiling below. A read that did run past it is cut off unparsed and dropped from
+    // the consensus, like any failed read. What a press can cost: five reads (Ahsan approved five on
+    // 2026-09-26) of ~26,000 input tokens each (measured live: 78,051 for three) and at most 12,000
+    // output at the v2 model's list price (aiDraftCostCents; Opus 5.5, $4/$20) is at most ~$1.72, and a
+    // typical press (~2,000-5,000 output a read) ~$0.72-$1.02 -- recorded as the capture's cost basis,
+    // never charged to the builder, whose price is the held $20 whatever the tokens.
+    // aiDraftStreamWiring_test holds the worst case under a tenth of that price.
+    //
     // The timeout is the other half. Supabase's gateway answers 504 on its own at 150 s of
     // silence, and that 504 is invisible to withErrorLog and leaves the wallet hold open until
-    // the stale sweep. 110 s leaves room to release the hold and say so. The same signal
-    // covers the body read, which is why the body is read inside this try: a reply that
-    // stalls mid-body is a timeout, not an "unparseable" spec.
+    // the stale sweep. 125 s (110 s until 2026-09-24) still leaves room to release the hold and
+    // say so. The same signal covers the body read, which is why the body is read inside this
+    // try: a reply that stalls mid-body is a timeout, not an "unparseable" spec.
+    //
+    // ⚠️ BOUNDED BY THE GATEWAY, MEASURED FROM THE REQUEST (fix, 2026-09-24; re-cut 2026-09-25).
+    // The auto top-up above runs inline and can spend up to nmiPost's 30 s before this line, so a
+    // 125 s clock started here let a slow top-up plus a slow reply cross the gateway's 150 s: the
+    // builder got a bare 504 (no `retryable`, so no lean retry) while this function went on to
+    // CAPTURE the $20 for a draft nobody would see.
+    //
+    // The first fix took the pre-call time out of the MODEL's 125 s, which cut every request short
+    // by its own set-up, and cut a top-up's by up to 30 s -- production's older designer included,
+    // which has no lean retry to fall back on. A 103 s legacy reply (the 09-21 log has them) that
+    // finished at ~133 s, inside the gateway, was aborted at ~95 s. So the model keeps its 125 s and
+    // only the GATEWAY's clock is charged for the set-up: 145 s from the request (requestStartMs,
+    // the handler's first line), leaving 5 s to release the hold, file the row and answer. That is
+    // the whole 125 s whenever the set-up took 20 s or less, which is every request without a slow
+    // top-up; past 20 s the model gets what is left of 145 s. Never under 60 s: a floor only a set-up
+    // over 85 s could reach, which nothing before this line can take.
+    //
+    // `lean: true` is the new browser's ONE automatic retry after a `retryable` failure (a cut-off
+    // or timed-out reply): same press, same idempotency key — the failed attempt released its hold,
+    // and a released key is reusable (248) — at effort "low", which thinks less and so fits. Only a
+    // real `true` counts; an older browser never sends it and keeps effort "medium".
+    //
+    // ⚠️ A STREAMED DRAFT HAS NO 150 s GATEWAY (2026-09-25, see draftAnswer): its answer is a 200 that
+    // has been writing a space every 10 s since the request arrived. What bounds it instead is the
+    // platform's wall clock, and that is the WORKER's 400 s, not the request's (fix, 2026-09-26): a
+    // worker serves requests until it is 200 s old and is ended at 400 s with whatever is in flight,
+    // so a request on a worker A seconds old has 400 - A (styleD3.ts's EDGE_WALL_CLOCK_MS). So the
+    // model gets 300 s, or what is left of 330 s from the request after a slow set-up, or what is
+    // left until 75 s before this worker's end (WORKER_BORN_MS + 400 s), whichever is least, and never
+    // under 60 s: streamedDraftBudgetMs, which has the arithmetic. On a fresh worker after an ordinary
+    // set-up that is the 300 s it was. Every request that is not streamed keeps exactly the rule below.
+    //
+    // 300 s OF 330 s SINCE 2026-09-25 (it was 230 s of 260 s). Live that day the three "high" reads
+    // took 74-215 s, and in 8 of 12 presses one or two of them hit the 230 s abort (draft_tokens
+    // `aborted: "deadline"`), which left the consensus a single read. Opus streamed ~70 output
+    // tokens/s, so a read that spent 20000 (its cap then) needed ~286 s: 300 s let it finish on a fresh
+    // worker. Opus 5.5 reads (2026-09-26) take 30-80 s with a 12000 cap. The rest of the request still fits: the reads are done by 330 s from the request and
+    // 75 s before the worker's end, the answer's watchdog closes by 360 s and 40 s before the
+    // worker's end (streamedDraftDeadlineMs; 30 s or more for the capture and the ledger write), and
+    // the worker's own end comes after both.
+    const lean = payload.lean === true;
+    // The reads' effort, decided once: "low" on the lean retry, "high" on a streamed draft, "medium"
+    // on everything else (see output_config below for why). The request carries it, and so does
+    // draft_tokens, so "which effort did this draft run at, and was it streamed" is a query.
+    const draftEffort = lean ? "low" : streamed ? "high" : "medium";
     const aiSource = combined ? "combined" : fromVideo ? "video" : "photos";
     const t0 = Date.now();
-    const aiSignal = AbortSignal.timeout(110_000);
-    let res: Response;
-    let replyBody = "";
-    try {
-      res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-        signal: aiSignal,
-        body: JSON.stringify({
-          model: "claude-sonnet-5",
-          // Thinking and the answer share this. The video prompt's `observed` block rides on
-          // top of the spec. A truncated reply is unparseable, not partially useful.
-          max_tokens: 8000,
-          thinking: { type: "adaptive" },
-          output_config: { effort: "medium" },
-          messages: [{
-            role: "user",
-            content: [
-              // URL sources: the photos live in public buckets, so Anthropic can fetch them
-              // and we never proxy the bytes through this function.
-              ...photoUrls.map((url) => ({ type: "image", source: { type: "url", url } })),
-              // A combined set gets a prompt that says which images are walk frames and which are
-              // staged photographs. Until 2026-09-10 it got VIDEO_SHAPE_PROMPT verbatim, whose
-              // first sentence claims every image is a consecutive frame of one lap - false the
-              // moment a builder's own photos are appended, and false in a way that changes how
-              // the model reconciles the views it is shown.
-              // `dims` rides on both shape-first prompts and on neither of them when it is null:
-              // videoShapePrompt(null) IS the old VIDEO_SHAPE_PROMPT constant and a two-argument
-              // combinedShapePrompt is byte-identical to what shipped, so a request without dims
-              // sends exactly the string it sent before this line changed.
-              { type: "text", text: combined ? combinedShapePrompt(videoCount, photoUrls.length - videoCount, dims) : (fromVideo ? videoShapePrompt(dims) : SPEC_PROMPT) },
-            ],
-          }],
-        }),
+    const draftAbortMs = streamed
+      ? streamedDraftBudgetMs({ t0, requestStartMs, workerBornMs: WORKER_BORN_MS })
+      : Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));
+
+    // ── WHAT THE DRAFT CALL USED, on every exit that reached the model (251, 2026-09-23) ──────
+    // Until now a draft's tokens were stored only through wallet_capture, and the meter is
+    // inactive for every tenant, so no successful draft's usage or latency had ever been kept.
+    // One 09-21 press was cut off at max_tokens after 103 s, and without these two columns there
+    // is no telling whether the other eleven finished at 3,000 tokens or at 7,900.
+    //
+    // ⚠️ ITS OWN UPDATE, never a key on the 226 `recorded` write below. PostgREST refuses the
+    // WHOLE statement when one key names a column it cannot find (PGRST204), so a deploy landing
+    // before 251 would otherwise lose drafted/observed/frames on every generation too.
+    //
+    // BEST-EFFORT, and it cannot reject: diagnostics must never fail or change what the builder
+    // gets back. Called WITHOUT await where it starts, so the round trip overlaps the hold
+    // release, the log row and the rest of the handler; each exit awaits it just before its
+    // `return`, because a task still running after the response is not guaranteed to finish
+    // (EdgeRuntime.waitUntil is a request, not a promise — see the auto-recharge note above). `draft_ms` is
+    // read when it is CALLED, which is the moment the reply (or the abort) arrived; with several
+    // calls (consensus drafting, below) the moment the last of them settled, so it is the
+    // builder's wall time, and each call's own time is in draft_tokens.calls.
+    //
+    // aiDraftUsageWiring_test lifts the body below and RUNS it, so keep it plain JavaScript:
+    // the only type annotation is on this first line, which the test uses as its anchor.
+    //
+    // `effort` and `streamed` (2026-09-25) ride at the top of the object, beside the counts, so
+    // streamed drafts at "high" can be told from the rest in SQL without a new column. A null
+    // (a single call that got no reply) stays null: that is what "no reply" means in this column.
+    const recordDraftUsage = async (tokens: Record<string, unknown> | null) => {
+      if (!ledgerRow?.id) return;
+      try {
+        const { error } = await admin.from("ai_style_calls")
+          .update({ draft_tokens: tokens ? { ...tokens, effort: draftEffort, streamed } : tokens, draft_ms: Date.now() - t0 }).eq("id", ledgerRow.id);
+        if (error) {
+          await logEdgeError({
+            fn: "portal-settings", req, clientId, code: "ai_style_draft_usage_log_failed",
+            message: `Could not record the draft call's usage; migration 251 may not be applied: ${error.message}`,
+          });
+        }
+      } catch (e) {
+        // Never the builder's problem, but never silent either: a throw here (a refactor's
+        // TypeError, say) would stop usage recording with nothing to show for it, which is the
+        // blind spot this write exists to close. logEdgeError itself never rejects.
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_style_draft_usage_log_failed",
+          message: `Draft-usage write threw: ${String(e instanceof Error ? e.message : e)}`,
+        });
+      }
+    };
+
+    const aiSignal = AbortSignal.timeout(draftAbortMs);
+    // ── THE REQUEST, BUILT ONCE (2026-09-25) ─────────────────────────────────────────────────
+    // Outside the call, so consensus drafting (below) can send the very same bytes more than once.
+    // The body is the object the single call has always sent, key for key and in the same order,
+    // so a legacy or lean request is byte-for-byte what it was: aiDraftConsensusWiring_test builds
+    // the expected string on its own and compares.
+    const draftInit = {
+      method: "POST",
+      // v2 (the new designer) runs Opus; legacy keeps Sonnet — see aiModelFields in
+      // styleD3.ts for the measurement behind the switch.
+      headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        ...aiModelFields(v2Prompt),
+        // Thinking and the answer share this. The video prompt's `observed` block rides on
+        // top of the spec. A truncated reply is unparseable, not partially useful. 12000 on every
+        // read (see above).
+        max_tokens: 12000,
+        thinking: { type: "adaptive" },
+        // v2 thinks HARD (2026-09-25). At "medium", Opus often answered a walk-around in 10-15 s with
+        // ~480 output tokens -- the JSON and next to no thinking -- and those shallow reads put a
+        // shed's high side on the wrong wall 6 times in 7 and read a 16 ft porch as 10-12 ft with 3
+        // posts; the reads that did think (3,400-5,400 tokens) got both right. "high" makes every
+        // read a careful one. Legacy keeps "medium"; the lean retry keeps "low".
+        // ⚠️ ONLY WHEN STREAMED: tried live 2026-09-25 on the plain request, all three reads ran past
+        // the 125 s draft budget (the gateway ends a silent request at 150 s), so every press fell to
+        // the lean retry. A streamed draft (draftAnswer: the new shell's v2 press) outlives the
+        // gateway with a 300 s budget and thinks "high"; a v2 request that is NOT streamed keeps
+        // "medium" and its 125 s, with the reads' reasoning carried in the reply itself (the prompt's
+        // evidence fields). `streamed` is never true with `lean` (wantsStreamedDraft). The choice is
+        // draftEffort, above, so draft_tokens records the very effort this request sent.
+        output_config: { effort: draftEffort },
+        messages: [{
+          role: "user",
+          content: [
+            // URL sources: the photos live in public buckets, so Anthropic can fetch them
+            // and we never proxy the bytes through this function.
+            ...photoUrls.map((url) => ({ type: "image", source: { type: "url", url } })),
+            // A combined set gets a prompt that says which images are walk frames and which are
+            // staged photographs. Until 2026-09-10 it got VIDEO_SHAPE_PROMPT verbatim, whose
+            // first sentence claims every image is a consecutive frame of one lap - false the
+            // moment a builder's own photos are appended, and false in a way that changes how
+            // the model reconciles the views it is shown.
+            // `dims` rides on both shape-first prompts and on neither of them when it is null:
+            // videoShapePrompt(null) IS the old VIDEO_SHAPE_PROMPT constant and a two-argument
+            // combinedShapePrompt is byte-identical to what shipped, so a request without dims
+            // sends exactly the string it sent before this line changed.
+            // v2Prompt (the rollout gate): the v2 prompt only for the new designer's frame.
+            { type: "text", text: combined ? combinedShapePrompt(videoCount, photoUrls.length - videoCount, dims, v2Prompt) : (fromVideo ? videoShapePrompt(dims, v2Prompt) : SPEC_PROMPT) },
+          ],
+        }],
+      }),
+    };
+
+    // ── CONSENSUS DRAFTING (2026-09-25) ──────────────────────────────────────────────────────
+    // Live v2 runs of one video give the same shape every time and wandering numbers: a raised
+    // centre's eave read 15, 14 and 12.5 ft, the pitch anywhere from 0.37 to 0.7, 3 porch posts or
+    // 4, the steps in the centre or on the right. So the v2 draft sends the SAME request five times
+    // (DRAFT_CONSENSUS_CALLS; three until 2026-09-26) in parallel and combines the reads
+    // (consensusDrafts in styleD3.ts: the medoid read is the base, every discrete field goes by
+    // majority, every number is the median of the reads that agree with the structure chosen for it).
+    // Streamed or not: draftCallCount says why the unstreamed v2 press gets five too.
+    //
+    //   * ONE budget. draftAbortMs above bounds all five together, never each. Once three have
+    //     drafted (DRAFT_CONSENSUS_QUORUM), the other two get DRAFT_CONSENSUS_GRACE_MS (60 s) more
+    //     and are then cut off; the answer combines whatever drafted by then.
+    //   * A call that fails, is cut off or does not parse is dropped. One read that parses is
+    //     enough to answer with; the consensus of one read is that read.
+    //   * NONE parsed: the FIRST call SENT (not the first to come back) is classified exactly the
+    //     way the single call always was, by the exits below, with the hold released as before.
+    //   * ONE call, exactly today's request and handling: every legacy request (production's
+    //     older designer) and the lean retry (draftCallCount). runDraftCalls sends a lone call on
+    //     aiSignal itself.
+    //   * STAGGERED, AND SENT AGAIN WHEN THE API COULD NOT SERVE A READ (2026-09-26, after a live
+    //     press failed in 7 s on the API's 400 "timed out while trying to download the file"): the
+    //     five reads go ~300 ms apart, and a read that got a 429, 5xx, 529 or that download failure,
+    //     or whose send threw, goes again up to twice while the budget has room (DRAFT_READ_RETRY in
+    //     styleD3.ts). A lone call never is, so the legacy request and the lean retry are as before.
+    //
+    // WHEN THE API FAILED THE DRAFT (the lead threw on its own, or answered non-2xx), the builder
+    // gets a plain sentence and the raw status and body go to one coded app_errors row
+    // (draftUpstreamFailure): `retryable` when it was transient, so the new designer's one lean
+    // retry takes it, with the hold released exactly as before. On every draft, a lone call too.
+    //
+    // THE LEAD is the call this branch answers from: the medoid's call when any call drafted, so
+    // the `observed` notes and the frame map read off `text` below are the medoid's own, and
+    // otherwise the first call sent.
+    //
+    // MEASURED PITCHES (2026-09-26), v2 only: the v2 reply carries `measure`, the pixel points a
+    // gable's pitch is read from, and readDraftReply works each gable read's pitch out from its OWN
+    // points before the consensus sees it, so the median is over measured numbers. A read whose
+    // points are missing or fail the checks keeps the model's own number, and so does every shed,
+    // gambrel and porch pitch. Every legacy request passes false and reads exactly as before.
+    const draftCalls = draftCallCount(v2Prompt, lean);
+    const calls = await runDraftCalls({
+      count: draftCalls,
+      deadline: aiSignal,
+      graceMs: DRAFT_CONSENSUS_GRACE_MS,
+      // aiSignal fires draftAbortMs after t0 (give or take the microseconds between the two lines),
+      // which is what "enough budget left for a retry" is measured against.
+      retry: { ...DRAFT_READ_RETRY, deadlineAt: t0 + draftAbortMs },
+      send: (signal) => fetch("https://api.anthropic.com/v1/messages", { ...draftInit, signal }),
+      read: (body) => readDraftReply(body, dims, v2Prompt),
+    });
+    // How many walk frames a frame map may point into (see the note beside frameMap, below).
+    // Declared here because the consensus parses every read's map, not only the lead's.
+    const walkFrames = combined ? videoCount : photoUrls.length;
+    const consensus = draftCalls > 1 ? consensusOfCalls(calls, walkFrames) : null;
+    const lead = consensus ? calls[consensus.call] : calls[0];
+    // What EVERY call used, for draft_tokens and the capture. Null on a single call, whose usage is
+    // recorded exactly as it always has been, at each exit below.
+    const callsUsage = draftCalls > 1 ? draftCallsUsage(aiModelFields(v2Prompt).model, calls, lead, consensus) : null;
+    // ── WHICH WAY THE ROOF STEPS, READ FROM A CLOSE-UP (2026-09-29, v2 consensus only) ──────────
+    // The reads find a roof step but misread its direction, a few inches in a 1280 px frame; the
+    // same joint enlarged 8 times is read right (_shared/stepZoom.ts has the numbers). So when the
+    // consensus draws a step, the joint is cropped out of the frame the reads marked it in and
+    // enlarged, STEP_ZOOM_ASKS asks go in parallel, and the majority's direction (with the height
+    // the same answers measure) replaces the consensus's rearEaveRiseFt. Anything that fails leaves
+    // the consensus exactly as it was. What it did is recorded in draft_tokens.stepZoom, and its
+    // tokens join the draft's usage, so the capture's cost basis includes them.
+    // (No type annotations in this block: the draft wiring tests run it as plain JavaScript.)
+    const stepRoof = consensus ? consensus.d3.roof : null;
+    if (consensus && callsUsage && v2Prompt && dims && stepRoof && typeof stepRoof.rearStepFt === "number" && typeof stepRoof.rearEaveRiseFt === "number") {
+      const zoom = await runStepZoom({
+        blocks: calls.map((c) => c.reading?.stepPoints ?? null), photoUrls, rise0: stepRoof.rearEaveRiseFt,
+        wallFt: dims.wallHeightFt, leftMs: t0 + draftAbortMs - Date.now(), apiKey, model: aiModelFields(true), signal: aiSignal,
       });
-      replyBody = await res.text();
-    } catch (e) {
-      if (aiSignal.aborted) {
-        // Ours, not the network's: the signal fired. Release first, then file one coded row
-        // and mark the response so withErrorLog does not add a generic copy of it.
+      if (zoom.record) {
+        callsUsage.usage.input_tokens = (callsUsage.usage.input_tokens ?? 0) + zoom.input;
+        callsUsage.usage.output_tokens = (callsUsage.usage.output_tokens ?? 0) + zoom.output;
+        callsUsage.tokens.stepZoom = zoom.record;
+      }
+      if (zoom.riseFt !== null) {
+        const clean = sanitizeD3Spec({ ...consensus.d3, roof: { ...stepRoof, rearEaveRiseFt: zoom.riseFt } });
+        if (clean.ok) consensus.d3 = clean.d3;
+      }
+    }
+    // THE API FAILED THE DRAFT (2026-09-26): the two exits below, after their hold release. One coded
+    // row with the raw status and body, and the builder's plain sentence (draftUpstreamFailure),
+    // marked filed so the error wrapper adds no copy, streamed or not.
+    const upstreamFailed = async () => {
+      const failure = draftUpstreamFailure(lead, calls);
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: failure.code, message: failure.message,
+        context: { ...failure.context, elapsedMs: Date.now() - t0, requestMs: Date.now() - requestStartMs, abortMs: draftAbortMs, source: aiSource, frames: photoUrls.length, lean, v2: v2Prompt },
+      });
+      const answered = json(failure.answer, failure.status);
+      filedAtReturnSite.add(answered);
+      return answered;
+    };
+    if (lead.threw) {
+      // No reply to describe on any of these three exits, so draft_tokens stays null (on a single
+      // call; several record what each call did); draft_ms still says how long the press waited
+      // before it gave up.
+      const usageLogged = recordDraftUsage(callsUsage ? callsUsage.tokens : null);
+      if (lead.aborted === "deadline") {
+        // Ours, not the network's: the signal fired while this call was waiting (read the moment
+        // it threw, so a first call that failed on its own at 5 s is not relabelled a timeout by
+        // the other two running out the clock). Release first, then file one coded row and mark
+        // the response so withErrorLog does not add a generic copy of it.
         await releaseHold("model timeout");
         await logEdgeError({
           fn: "portal-settings", req, clientId, code: "ai_call_timeout",
           message: "The AI model did not answer within the time limit.",
-          context: { elapsedMs: Date.now() - t0, source: aiSource, frames: photoUrls.length },
+          context: { elapsedMs: Date.now() - t0, requestMs: Date.now() - requestStartMs, abortMs: draftAbortMs, source: aiSource, frames: photoUrls.length, lean },
         });
-        const timedOut = json({ error: "The AI took too long to answer - please try again." }, 504);
+        // `retryable: true` (2026-09-24) is the machine-readable half of "please try again": the
+        // hold is released, so the same press may go again under the same key, and the new
+        // browser does exactly that ONCE, with `lean: true`. An older browser ignores the field and
+        // shows the sentence, exactly as before.
+        const timedOut = json({ error: "The AI took too long to answer - please try again.", retryable: true }, 504);
         filedAtReturnSite.add(timedOut);
+        await usageLogged;
         return timedOut;
       }
       await releaseHold("fetch failed");            // never reached Anthropic, or dropped mid-reply
-      return json({ error: `Could not reach the AI service: ${e instanceof Error ? e.message : String(e)}` }, 502);
+      const unreachable = await upstreamFailed();
+      await usageLogged;
+      return unreachable;
     }
-    if (!res.ok) {
-      await releaseHold(`upstream ${res.status}`);  // our 429/500 is not the builder's fault
-      return json({ error: `AI service returned ${res.status}: ${replyBody.slice(0, 300)}` }, 502);
+    if (!lead.httpOk) {
+      const usageLogged = recordDraftUsage(callsUsage ? callsUsage.tokens : null);
+      await releaseHold(`upstream ${lead.status}`);  // our 429/500 is not the builder's fault
+      const upstream = await upstreamFailed();
+      await usageLogged;
+      return upstream;
     }
-    let data: any = null;
-    try { data = JSON.parse(replyBody); } catch { data = null; }
-    // Every text block joined, never content[0] -- see modelReplyText for why that mattered.
-    const reply = modelReplyText(data);
+    // Read ONCE, inside runDraftCalls: readDraftReply is the JSON parse and modelReplyText that ran
+    // here before (every text block joined, never content[0] -- see modelReplyText for why).
+    const data = lead.reading.data;
+    const reply = lead.reading.reply;
     const text = reply.text;
     // SHAPES ONLY in the failure rows below: no reply text, no image URLs. Enough for the next
     // failure to name its own cause (thinking used the budget, a refusal, a prose reply) and
     // for elapsedMs to show how close real calls come to the timeout.
+    // `textChars` is the answer's LENGTH, never its text: outputTokens counts thinking and the
+    // answer together, and this is what tells "thinking used the budget" from "the JSON did".
     const replyShape = {
       stopReason: reply.stopReason, blockTypes: reply.blockTypes, outputTokens: reply.outputTokens,
-      elapsedMs: Date.now() - t0, source: aiSource, frames: photoUrls.length,
+      textChars: text.length, elapsedMs: Date.now() - t0, source: aiSource, frames: photoUrls.length,
+      // Whether this was the lean automatic retry — so a truncated retry is a query, not a guess.
+      lean,
+      // Which prompt the rollout gate chose: v2 (the new designer's frame) or the legacy one.
+      v2: v2Prompt,
     };
+    // ── DRAFT USAGE: started here, awaited at each of the three returns below ─────────────
+    // Every outcome that got a reply passes through this line — refused, truncated, unparseable
+    // and drafted alike — so the column's distribution is the whole population, not the failures.
+    // Counts come off `usage` and are null where it did not say; nothing here carries model text.
+    // Several calls (consensus drafting) record callsUsage instead: the same keys summed over every
+    // call, plus one entry per call, the reads' roofs and the agreement report (draftCallsUsage).
+    const draftUsage = data?.usage ?? {};
+    const draftUsageLogged = recordDraftUsage(callsUsage ? callsUsage.tokens : {
+      // Which model ran (2026-09-25), so the cost basis can be re-priced per model later.
+      model: aiModelFields(v2Prompt).model,
+      input: Number.isFinite(draftUsage.input_tokens) ? draftUsage.input_tokens : null,
+      output: Number.isFinite(draftUsage.output_tokens) ? draftUsage.output_tokens : null,
+      cache_read: Number.isFinite(draftUsage.cache_read_input_tokens) ? draftUsage.cache_read_input_tokens : null,
+      cache_creation: Number.isFinite(draftUsage.cache_creation_input_tokens) ? draftUsage.cache_creation_input_tokens : null,
+      stopReason: reply.stopReason,
+      textChars: text.length,
+      blockTypes: reply.blockTypes,
+      // The v2 lean retry's ONE read (2026-09-26): its roof and where its pitch came from, as the
+      // consensus record keeps every read's in `samples`. Absent on every legacy reply.
+      ...(lead.reading.pitch ? { samples: [draftReadSample(lead.reading)] } : {}),
+    });
     if (reply.stopReason === "refusal") {
       await releaseHold("model refused");
       const category = typeof data?.stop_details?.category === "string" ? String(data.stop_details.category).slice(0, 60) : null;
@@ -3832,11 +4353,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       });
       const refused = json({ error: "The AI declined to read these images. Try a different set, or set the shape by hand." }, 502);
       filedAtReturnSite.add(refused);
+      await draftUsageLogged;
       return refused;
     }
     // The builder's numbers go over the model's INSIDE parseModelSpec, between the inches fold
-    // and the sanitiser — see its header for why that is the only position that works.
-    const drafted = parseModelSpec(text, dims);
+    // and the sanitiser — see its header for why that is the only position that works. On v2 the
+    // reply's own points then give a gable's pitch (2026-09-26), exactly as the lead's reading did,
+    // which is what a single read (the lean retry) is drafted with; a consensus replaces it below.
+    const drafted = parseModelSpec(text, dims, v2Prompt);
     if (!drafted.ok) {
       // The model answered unusably. The builder got nothing, so charging for our own
       // parse failure buys a support ticket and teaches them not to trust the feature.
@@ -3850,10 +4374,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         message: truncated ? `Model reply was cut off at max_tokens: ${drafted.error}` : `Model reply did not parse: ${drafted.error}`,
         context: replyShape,
       });
-      const failed = json({ error: truncated ? "The AI ran out of room before finishing - please try again." : drafted.error }, 502);
+      // A cut-off reply is `retryable` (2026-09-24), like the timeout above: the hold is released
+      // and a lean retry thinks less, so it usually fits. An UNPARSEABLE reply is not marked: the
+      // same prompt on the same frames tends to fail the same way, and an automatic retry of it
+      // would spend a second model call on a known failure.
+      const failed = json(truncated
+        ? { error: "The AI ran out of room before finishing - please try again.", retryable: true }
+        : { error: drafted.error }, 502);
       filedAtReturnSite.add(failed);
+      await draftUsageLogged;
       return failed;
     }
+    // THE CONSENSUS TAKES THE LEAD'S PLACE here, and only here. Every exit above answered from the
+    // lead's own reply (a medoid always drafted, so none of them is reachable with a consensus);
+    // everything below (the capture, the flags, the ledger's `drafted`, the response) takes the
+    // combined spec.
+    if (consensus) drafted.d3 = consensus.d3;
 
     // ── HOW THE OVERHANG IS FRAMED: NOT ASKED FOR, AND NOT WRITTEN DOWN EITHER ─────────
     // Neither prompt mentions overhangStyle, and that is the point rather than an oversight.
@@ -3877,12 +4413,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // makes that visible rather than surprising.
     let balanceCents: number | null = null;
     if (holdId != null) {
-      const u = data?.usage ?? null;
+      // Consensus drafting paid for EVERY call that answered, so the cost basis is their sum
+      // (draftCallsUsage: Anthropic's keys, summed, with `calls`). A single call is exactly as before.
+      const u = callsUsage ? callsUsage.usage : (data?.usage ?? null);
       const inTok = Number(u?.input_tokens ?? 0), outTok = Number(u?.output_tokens ?? 0);
-      // Sonnet list price, in cents per token. Kept here rather than in a table because it
-      // is OUR cost basis, not a tenant-facing price; the tokens themselves are stored raw
-      // so a rate correction can be applied retrospectively without losing anything.
-      const costCents = Math.round((inTok * 0.0003 + outTok * 0.0015) * 100) / 100;
+      // OUR cost basis, not a tenant-facing price, by the model this request ran (aiDraftCostCents,
+      // 2026-09-25: the v2 path runs Opus and was recorded at Sonnet's rate). The legacy path's
+      // number is exactly what it always was. The tokens are stored raw, and draft_tokens.model
+      // says which model ran, so a rate correction can be applied retrospectively.
+      const costCents = aiDraftCostCents(v2Prompt, inTok, outTok);
       const { data: bal, error: capErr2 } = await admin.rpc("wallet_capture", {
         p_hold_id: holdId, p_cost_cents: Math.round(costCents), p_usage: u, p_ref_id: String(ledgerRow?.id ?? ""),
       });
@@ -3919,15 +4458,33 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // knownDimsNote joins them on the same day as dims themselves. It is silent unless a wall
     // height the BUILDER typed had to be clamped to what the renderer can draw — the one way
     // their own measurement can still lose, and the one the preview cannot explain by itself.
+    //
+    // The WINGS check joins them on 2026-09-24, for v2 generations ONLY — the ones the rollout
+    // gate sent the v2 prompt (v2Prompt: frame "front" and dims), because only that prompt asks
+    // observed.wings. On every legacy path the question was never put, so the check would say "the
+    // reading never said" on every generation and turn every draft amber. Same posture as the
+    // porch check otherwise: flagged, never repaired.
+    //
+    // THE FRAME-KEY CHECK leads them (fix, 2026-09-24), v2 ONLY for the same reason: the v2 prompt
+    // makes roof.front (gable, gambrel) and roof.highSide (shed) REQUIRED, and a draft without
+    // them is drawn in the old frame -- on a long-fronted building, turned round -- so it is the
+    // first thing the builder is sent to look at, and the draft comes back low-confidence.
+    //
+    // THE SPLIT CHECK joins them with consensus drafting (2026-09-25): a discrete field whose answer
+    // had no majority of the reads that voted on it (1 of 2, 1 of 3, 2 of 4, 2 of 5) is named, so the
+    // builder is told where the reads split and the draft comes back low-confidence. A majority (2 of
+    // 3, 3 of 5) says nothing. Only when there is a consensus, which is v2 only; the checks around it
+    // read the combined spec and the medoid's notes.
     const observedRead = shapeFirst ? parseObservedNotes(text) : null;
     const observedNotes = shapeFirst
-      ? flagObservedNotes(observedRead, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead), knownDimsNote(dims))
+      ? flagObservedNotes(observedRead, v2Prompt ? frameKeyWarning(drafted.d3.roof) : null, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead), v2Prompt ? wingsAgreementWarning(drafted.d3.roof, observedRead) : null, consensus ? consensusSplitWarning(consensus.report) : null, knownDimsNote(dims))
       : null;
 
     // ── WHICH FRAME GOES WITH WHICH VIEW (2026-09-19) ────────────────────────────
-    // Read out of the same reply, at no extra call. Nothing here is stored and nothing reaches
-    // the spec — sanitizeD3Spec drops it — so an older browser that ignores the field behaves
-    // exactly as it does today.
+    // Read out of the same reply, at no extra call. Nothing here reaches the spec —
+    // sanitizeD3Spec drops it — so an older browser that ignores the field behaves exactly as it
+    // does today. Since 253 it is also kept on the ledger row (`frame_map`, its own write below),
+    // so a draft picked up after its connection dropped can still run the free self-check.
     //
     // ⚠️ THE BOUND IS HOW MANY WALK FRAMES WERE SENT, not how many images were. On `combined`
     // the browser says so and the trailing images are the builder's own photographs, which must
@@ -3935,7 +4492,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // frame — that is the prompt's opening sentence — so the bound is the whole array, which
     // also keeps the legacy onDraftFromVideo caller working: it sends no videoCount at all, and
     // taking `videoCount` there would bound every index to zero and drop the whole map.
-    const walkFrames = combined ? videoCount : photoUrls.length;
+    // (`walkFrames` is declared beside the model call, since consensus drafting parses every
+    // read's map with the same bound.)
     const frameMap = shapeFirst ? parseFrameMap(text, walkFrames) : null;
     // The token for the free follow-up check, and only where a check can happen. The row id is a
     // uuid, so it is unguessable, and the claim that spends it is scoped to this client_id as
@@ -3943,6 +4501,35 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // already own. A photos generation gets null rather than a token for an action that would
     // refuse it: a capability for something that cannot happen is an invitation to a 409.
     const checkId = shapeFirst ? (ledgerRow?.id ?? null) : null;
+
+    // ── THE FRAME MAP, KEPT FOR A DRAFT PICKED UP AFTER A DROP (253, 2026-09-25) ────────────────
+    // The free self-check cannot pair a render with a frame without it, and until 253 it lived only
+    // in the answer: a streamed draft whose answer dropped came back through
+    // calibrate_style_ai_recover with no map, and the check was skipped. Now the recover action
+    // hands the row's own map back and the check runs as it does on a live answer.
+    //
+    // ⚠️ ITS OWN UPDATE, BEFORE `drafted` IS WRITTEN, so a pickup that sees the draft sees its map
+    // too. And nothing here can reach the write below: a column that is missing (253 not applied),
+    // a write that fails or a throw costs the MAP and never the draft, and never the builder's
+    // answer -- one info row, and the recovered draft skips the check with a note, exactly as
+    // every draft did before 253. No map (a photos draft, a reply that carried none) is no write,
+    // so those requests keep yesterday's round trips.
+    if (ledgerRow?.id && frameMap) {
+      try {
+        const { error: mapErr } = await admin.from("ai_style_calls").update({ frame_map: frameMap }).eq("id", ledgerRow.id);
+        if (mapErr) {
+          await logEdgeError({
+            fn: "portal-settings", req, clientId, code: "ai_style_frame_map_write_failed", severity: "info",
+            message: `Could not keep the frame map on the generation; migration 253 may not be applied: ${mapErr.message}`,
+          });
+        }
+      } catch (e) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_style_frame_map_write_failed", severity: "info",
+          message: `Frame-map write threw: ${String(e instanceof Error ? e.message : e)}`,
+        });
+      }
+    }
 
     // ── RECORD WHAT IT SAID, not just that it ran (226) ───────────────────────────────────
     // The drafted spec goes back to the browser and lands in an in-memory draft. Unless the
@@ -4008,8 +4595,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // which of the images it just sent goes with which view, and the token for the follow-up
     // request. Both are null on a photos generation and both are simply ignored by a browser
     // that has never heard of them, which is every production browser.
+    //
+    // The draft-usage write started beside replyShape and has had the whole capture and ledger
+    // write to finish; this is the last point it can be waited on before the response goes.
+    await draftUsageLogged;
     return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, dropped: droppedCount, observed: observedNotes, balanceCents, dims, frameMap, checkId });
-  }
+  });
 
   // ── THE FREE SECOND PASS (2026-09-19) ──────────────────────────────────────────────────
   // The builder pressed Generate once, was held once and charged once, and has their draft.
@@ -4038,6 +4629,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // own stored URLs. Handing the browser those inputs would turn one $20 generation into a free
   // vision call on any twelve images on the internet with caller-written text spliced into the
   // prompt — `sanitizePhotoUrls` accepts any https URL and is not bucket-scoped.
+  //
+  // ── UP TO THREE ROUNDS (v2, 2026-09-24; migration 252) ──────────────────────────────────
+  // The browser can now re-render the corrected spec and ask again, up to SELF_CHECK_MAX_ROUNDS
+  // times per generation. Every rail above still holds, per round:
+  //   * ONE CLAIM PER ROUND, and the claim is still one conditional UPDATE with `returning`: a
+  //     compare-and-swap on `self_check_round` (k -> k+1). Round 0 ALSO requires `self_check_at`
+  //     to be null, which is today's single-use claim verbatim — a request with no `round` is
+  //     round 0, so production's older browser gets exactly the one check it always had, and
+  //     its second request is still a 409.
+  //   * A LATER ROUND ONLY AFTER CORRECTIONS. Round k > 0 is claimable only while the row's
+  //     verdict says the round before it applied corrections, and its claim clears the verdict
+  //     until it records its own. So the server stops on matches / failed / skipped / rejected
+  //     whatever a browser does, and two rounds can never be in flight at once.
+  //   * THE ROW, NEVER THE CALLER. Round k > 0 judges `self_check_after ?? drafted` read off the
+  //     claimed row, and states the ruler from the row's `dims`, exactly as round 0 does.
+  //   * The 15-minute window, the tenant and style filters, the kill switch, the render caps and
+  //     the frame whitelist are unchanged, and no round touches money.
   if (action === "calibrate_style_check") {
     const t0 = Date.now();
     const styleValue = String(payload.styleValue ?? "").trim();
@@ -4049,6 +4657,25 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(checkId)) {
       return json({ error: "checkId is required." }, 400);
     }
+    // ── THE ROLLOUT GATE, FOR THE CHECK TOO (fix, 2026-09-24; see selfCheckMode) ─────────────
+    // The new designer sends `frame: "front"` on every check, exactly as on every draft, and only
+    // that request gets the v2 check. Every other request -- production's older designer, which
+    // sends neither `frame` nor `round` -- gets d3ab404's check byte for byte: its prompt, its
+    // 22-path allow-list and six-field cap, its four viewpoints and render caps, its budget, and
+    // its response shape. Until this line the v2 check (new-frame ruler, massing step, 30 paths)
+    // reached that designer too, and could save roof.front, highSide and the wing keys into a
+    // style its renderer cannot draw and its panel cannot clear. Decided before anything else,
+    // because the round limit and the render caps below both depend on it.
+    const checkMode = selfCheckMode(payload.frame);
+    const v2Check = checkMode === "v2";
+    // WHICH ROUND. Absent is round 0. A round past the limit is refused here, before anything
+    // touches the database, with the same 409 code a spent claim gets — one rule for a browser.
+    // A legacy check has ONE round: d3ab404's single-use check.
+    const roundRead = parseSelfCheckRound(payload.round, v2Check ? SELF_CHECK_MAX_ROUNDS : 1);
+    if (!roundRead.ok) {
+      return json({ error: roundRead.error, ...(roundRead.code ? { code: roundRead.code } : {}) }, roundRead.status);
+    }
+    const round = roundRead.round;
     const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
     if (!apiKey) return json({ error: "AI drafting isn't configured yet (ANTHROPIC_API_KEY is unset)." }, 500);
 
@@ -4056,8 +4683,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // they lose is a free second opinion, so every one of these answers 200 with a verdict the
     // panel can render as one quiet line. A 4xx here would make the panel show a failed
     // generation, which is the one thing that never happened.
+    // The round fields are v2's; a legacy answer is d3ab404's, key for key.
     const skipped = (reason: string, note: string) =>
-      json({ ok: true, verdict: "skipped", reason, note, changed: [], checked: {}, d3: null, renders: 0 });
+      json({ ok: true, verdict: "skipped", reason, note, changed: [], checked: {}, d3: null, renders: 0, ...(v2Check ? { round, roundsLeft: 0 } : {}) });
 
     // BEST-EFFORT, like the 226 write above and for the same reason: the builder has already
     // been charged and already holds their draft, and a diagnostics failure must never be the
@@ -4075,13 +4703,45 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
     };
 
+    // ── EACH ROUND'S LINE IN THE HISTORY (v2, migration 252) ──────────────────────────────
+    // `self_check_rounds` is an array with one entry per round, {round, verdict, changed, ms,
+    // tokens, renders}, so "what did round 2 do?" survives round 3 overwriting the scalar
+    // columns. ITS OWN UPDATE, like 251's usage write, so a fault here can never take the
+    // verdict write (which is what unlocks the next round) down with it; best-effort, with one
+    // coded row. GUARDED ON THE ROUND COUNTER: it lands only while the row is still at this
+    // round's claim, so a late write can never overwrite a later round's history.
+    //
+    // Read-modify-write is safe here and only here because rounds are serialised: the next
+    // round cannot be claimed until this round's verdict is written, and this is written first.
+    // `roundsBefore` is the array as the claim's RETURNING saw it.
+    let roundsBefore: unknown = null;
+    // deno-lint-ignore no-explicit-any
+    const appendRound = async (entry: Record<string, any>) => {
+      const prior = Array.isArray(roundsBefore) ? roundsBefore : [];
+      const { error } = await admin.from("ai_style_calls")
+        .update({ self_check_rounds: [...prior, { round, ...entry }].slice(-SELF_CHECK_MAX_ROUNDS) })
+        .eq("id", checkId).eq("client_id", clientId).eq("self_check_round", round + 1);
+      if (error) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_selfcheck_rounds_log_failed",
+          message: `Could not record self-check round ${round + 1} in self_check_rounds: ${error.message}`,
+          context: { checkId, round },
+        });
+      }
+    };
+
     // THE CHECK FAILED AND THE GENERATION DID NOT. Every one of these paths ends with the
     // builder holding the first draft, told that the CHECK could not run — never that their
     // $20 generation failed. One coded row each, so "how often does the second call time out?"
     // is a query rather than a feeling, and the claim stays spent, which is what stops a failing
-    // check becoming a retry loop against our own API key.
+    // check becoming a retry loop against our own API key. A failed round also ENDS the rounds:
+    // its verdict is not "corrections", so the next round's claim finds no row.
     const failedCheck = async (code: string, message: string, context: Record<string, unknown>) => {
       await logEdgeError({ fn: "portal-settings", req, clientId, code, message, context });
+      await appendRound({
+        verdict: "failed", changed: [], ms: Date.now() - t0,
+        tokens: context.tokens ?? null, renders: Number(context.renders ?? 0),
+      });
       await recordSelfCheck(checkId, {
         self_check_verdict: "failed",
         self_check_renders: Number(context.renders ?? 0),
@@ -4092,6 +4752,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         ok: true, verdict: "failed", reason: code, changed: [], checked: {}, d3: null,
         renders: Number(context.renders ?? 0),
         note: "We couldn't finish checking the draft against your video - review it yourself before saving.",
+        ...(v2Check ? { round, roundsLeft: 0 } : {}),
       });
     };
 
@@ -4111,7 +4772,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the browser half of this feature, and burning the tenant's one check on it would hide the
     // fault behind a 409 the next time anyone looked. Nothing here reaches the model, so a
     // caller that keeps sending bad renders keeps getting 400s and spends nothing.
-    const rendersRead = parseSelfCheckRenders(payload.renders, sentUrls.length);
+    // The mode's caps: four renders and 1.2 MB for a legacy check, six and 1.8 MB for v2.
+    const rendersRead = parseSelfCheckRenders(payload.renders, sentUrls.length, checkMode);
     if (!rendersRead.ok) return json({ error: rendersRead.error }, 400);
 
     // ── THE KILL SWITCH, before the claim ────────────────────────────────────────────────
@@ -4165,29 +4827,48 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // check needs. Scoping on `style_key` as well as `client_id` costs nothing and stops a
     // caller pairing one generation's draft with another style's frames — both its own, so not
     // a breach, but a comparison of two different buildings presented as one.
-    const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-    const { data: claimed, error: claimErr } = await admin.from("ai_style_calls")
-      .update({ self_check_at: new Date().toISOString() })
+    const since = new Date(Date.now() - SELF_CHECK_CLAIM_WINDOW_MS).toISOString();
+    // A COMPARE-AND-SWAP ON THE ROUND (v2). `self_check_round` counts the rounds claimed, so
+    // round k is claimable only while it is exactly k, and claiming it makes it k+1 — two
+    // requests for one round cannot both get a row back, and no round can ever run twice.
+    //   * Round 0 is ALSO `self_check_at is null`, today's single-use guard verbatim. That is
+    //     not redundant: a row checked by the pre-252 code has its round still at 0 (the
+    //     default), and without this filter it would be checkable a second time.
+    //   * Round k > 0 is ALSO `self_check_verdict = 'corrections'`, and its claim clears the
+    //     verdict until the round records its own. So a round runs only after the one before
+    //     it FINISHED and CHANGED something: matches, failed, skipped and rejected all end the
+    //     rounds here on the server, and a second round cannot start while one is in flight.
+    // `self_check_at` keeps 247's meaning, when the check was first claimed; only round 0
+    // writes it.
+    let claim = admin.from("ai_style_calls")
+      .update(round === 0
+        ? { self_check_at: new Date().toISOString(), self_check_round: 1 }
+        : { self_check_round: round + 1, self_check_verdict: null })
       .eq("id", checkId).eq("client_id", clientId).eq("style_key", styleValue)
-      .is("self_check_at", null).gt("called_at", since)
-      .select("drafted, dims").maybeSingle();
+      .eq("self_check_round", round).gt("called_at", since);
+    claim = round === 0
+      ? claim.is("self_check_at", null)
+      : claim.eq("self_check_verdict", "corrections");
+    const { data: claimed, error: claimErr } = await claim
+      .select("drafted, dims, self_check_after, self_check_changed, self_check_rounds, draft_tokens").maybeSingle();
     if (claimErr) {
-      // A transient database fault: a dropped connection, a statement timeout, a permission
-      // change. NOT the 247 tell, despite what this comment used to say — the kill-switch read
-      // above names a column 247 adds and runs first, so an unapplied migration never reaches
-      // this statement. The paid path says it too, earlier and on every generation, in
-      // `ai_style_dims_write_failed`. Either way the failure is safe: without the column this
-      // action cannot run at all, which is why nothing below needs its own missing-column
-      // guard.
+      // A database fault: a dropped connection, a statement timeout, a permission change — OR
+      // MIGRATION 252 NOT APPLIED. This is the first statement in the action to name a 252
+      // column (`self_check_round`), so a deploy-before-252 is refused HERE, on every check, and
+      // this row names it. (247 is still told by the kill-switch read above, which runs first.)
+      // Either way the failure is safe: the action cannot run unclaimed, which is why nothing
+      // below needs its own missing-column guard.
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: "ai_selfcheck_claim_failed",
-        message: `Could not claim the check for this generation: ${claimErr.message}`,
+        message: `Could not claim the check for this generation (if every check says this, migration 252 may not be applied): ${claimErr.message}`,
       });
       return skipped("unavailable", "The check could not run just now - review the draft yourself.");
     }
     if (!claimed) {
       return json({
-        error: "That generation has already been checked, or it is too old to check now.",
+        error: round === 0
+          ? "That generation has already been checked, or it is too old to check now."
+          : "That round of the check has already run, the round before it changed nothing, or the generation is too old to check now.",
         code: "check_unavailable",
       }, 409);
     }
@@ -4202,13 +4883,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // The claim has already been spent by the time we get here, and that is correct: a row with
     // no dims will never grow any, so leaving it claimable would only invite the same refusal
     // again. `self_check_verdict = 'skipped'` in the table means exactly this and nothing else.
+    //
+    // v2: THE SPEC A ROUND JUDGES IS THE ONE THE ROW HOLDS. Round 0 judges `drafted`, as it
+    // always has (a round-0 row has no `self_check_after`). Round k > 0 judges what the round
+    // before it produced, `self_check_after`, falling back to `drafted` where that round's net
+    // effect was nothing. Never anything the browser sent: the renders it sent are of the spec
+    // it holds, and this is what they are compared against. `drafted` is read either way, as
+    // the fixed point every round's net change is measured from.
+    roundsBefore = claimed.self_check_rounds ?? null;
     const rowDims = parseKnownDims(claimed.dims);
     const dims = rowDims.ok ? rowDims.dims : null;
-    const draftRead = sanitizeD3Spec(claimed.drafted);
-    if (!dims || !draftRead.ok) {
+    const draftRead = sanitizeD3Spec(claimed.self_check_after ?? claimed.drafted);
+    const firstRead = round === 0 ? draftRead : sanitizeD3Spec(claimed.drafted);
+    if (!dims || !draftRead.ok || !firstRead.ok) {
+      const bad = !draftRead.ok ? draftRead : !firstRead.ok ? firstRead : null;
       const why = !dims
         ? "the generation recorded no measurements"
-        : `the recorded draft could not be read back (${draftRead.ok ? "" : draftRead.error})`;
+        : `the recorded draft could not be read back (${bad && !bad.ok ? bad.error : ""})`;
       // TWO SEVERITIES, because these are two different events wearing one code. A row with no
       // dims is the product correctly declining — `info`, the same posture every other refusal
       // takes, and it must never sit in the fault queue. A row whose `drafted` will not go back
@@ -4217,34 +4908,50 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         fn: "portal-settings", req, clientId, code: "ai_selfcheck_row_unusable",
         severity: dims ? "error" : "info",
         message: `Self-check skipped: ${why}.`,
-        context: { checkId, hasDims: !!dims, hasDraft: draftRead.ok },
+        context: { checkId, round, hasDims: !!dims, hasDraft: draftRead.ok && firstRead.ok },
       });
+      await appendRound({ verdict: "skipped", changed: [], ms: Date.now() - t0, tokens: null, renders: 0 });
       await recordSelfCheck(checkId, { self_check_verdict: "skipped", self_check_renders: 0, self_check_ms: Date.now() - t0 });
       return skipped("row_unusable", "The check could not run on this generation - review the draft yourself.");
     }
 
+    // ── A MEASURED GABLE PITCH IS LOCKED (2026-09-26, measuredPitchLock) ─────────────────
+    // Live, a draft whose reads measured a 0.41 gable from their own points came out at 0.415, and
+    // round 0 of this check then moved it to 0.7 by eye. So a pitch at least two reads MEASURED is
+    // treated like a builder-measured eave: the prompt says it is not the check's to change and
+    // applySelfCheck drops a correction to it. Worked out ONCE, off the ROW (draft_tokens.samples
+    // and the first draft, `drafted`), so it holds for every round of this generation. v2 only:
+    // the legacy check is d3ab404's, rules and prompt alike.
+    // ...and only while the spec this round judges is still a gable: a round that follows one which
+    // turned the roof into a shed is not told its pitch was measured.
+    const pitchLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredPitchLock(claimed.draft_tokens, claimed.drafted);
+
     // ── THE SECOND CALL ──────────────────────────────────────────────────────────────────
     // The builder's frame first and our render second, one pair per viewpoint, with a line
-    // naming which is which. Reality before our attempt at it.
+    // naming which is which. Reality before our attempt at it. The whole request -- prompt,
+    // pairs, model, max_tokens, effort and abort -- is built by selfCheckRequest, so what each
+    // mode sends is pinned on its bytes in styleD3.test.ts.
     //
-    // 45 s, not the 110 s call 1 gets, and the difference is the point: the builder already has
-    // their draft, so a slow check is worth abandoning, and 110 + 5 + 110 is not a wait anyone
-    // should be asked to sit through.
+    // THE BUDGET (SELF_CHECK_BUDGET). LEGACY: d3ab404's 45 s and 4000 tokens at effort "medium",
+    // well under call 1's 125 s -- the builder already has their draft, so a slow check is worth
+    // abandoning. v2: 90 s and 8000 tokens at "medium" from 2026-09-24 (45 s bought ~3,500 tokens
+    // against up to twelve images, and a timeout ends the rounds, which cut off exactly the massing
+    // corrections v2 exists for); 125 s and 12000 tokens at "high" since 2026-09-26, because on
+    // Opus 5.5 the "medium" check answered in 18-37 s and in one run of six called a 2 ft low
+    // centre eave a match. 125 s is the most a request that is not streamed can have: the gateway
+    // ends one that has sent nothing for 150 s, and the set-up above and the ledger writes below
+    // take seconds. The answer is still bounded at eight fields, so the room is for thinking.
+    // ⚠️ The browser's own abort on this call (140 s) must sit above 125 s. If app_errors shows
+    // ai_selfcheck_truncated or ai_selfcheck_timeout rows, or self_check_ms sits near 125000, move the
+    // budget (self_check_tokens holds only {input, output}, and a timed-out round writes none).
     //
-    // max_tokens 4000 rather than call 1's 8000. The answer is bounded at six fields by the
-    // prompt and again by the cap, so the room is all for thinking — and the ceiling that
-    // actually bites here is the clock, which more thinking only brings nearer. If
-    // `self_check_tokens` ever shows replies stopping at max_tokens, this is the number to move.
-    const content: unknown[] = [{
-      type: "text",
-      text: selfCheckPrompt({ dims, draft: draftRead.d3, viewpoints: pairs.map((p) => p.viewpoint) }),
-    }];
-    for (const p of pairs) {
-      content.push({ type: "text", text: selfCheckPairLabel(p.viewpoint) });
-      content.push({ type: "image", source: { type: "url", url: p.frameUrl } });
-      content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: p.base64 } });
-    }
-    const checkSignal = AbortSignal.timeout(45_000);
+    // A later round is told it is one, and which fields the rounds before it changed —
+    // allow-listed NAMES off the row's own self_check_changed, never the model's prose.
+    const plan = selfCheckRequest({
+      mode: checkMode, dims, draft: draftRead.d3, pairs,
+      round, earlier: selfCheckChangedFields(claimed.self_check_changed), pitchLocked,
+    });
+    const checkSignal = AbortSignal.timeout(plan.abortMs);
     let checkRes: Response;
     let checkBody = "";
     try {
@@ -4252,20 +4959,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         method: "POST",
         headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
         signal: checkSignal,
-        body: JSON.stringify({
-          model: "claude-sonnet-5",
-          max_tokens: 4000,
-          thinking: { type: "adaptive" },
-          output_config: { effort: "medium" },
-          messages: [{ role: "user", content }],
-        }),
+        body: JSON.stringify(plan.body),
       });
       checkBody = await checkRes.text();
     } catch (e) {
       return await failedCheck(
         checkSignal.aborted ? "ai_selfcheck_timeout" : "ai_selfcheck_unreachable",
         checkSignal.aborted
-          ? "The self-check did not answer within 45 seconds."
+          ? `The self-check did not answer within ${plan.abortMs / 1000} seconds.`
           : `Could not reach the AI service for the self-check: ${e instanceof Error ? e.message : String(e)}`,
         { elapsedMs: Date.now() - t0, renders: pairs.length },
       );
@@ -4286,7 +4987,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         elapsedMs: Date.now() - t0, renders: pairs.length, tokens,
       });
     }
-    const read = parseSelfCheck(checkReply.text);
+    const read = parseSelfCheck(checkReply.text, checkMode);
     if (!read) {
       return await failedCheck(
         checkReply.stopReason === "max_tokens" ? "ai_selfcheck_truncated" : "ai_selfcheck_unparseable",
@@ -4298,13 +4999,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     // ── THE GATES ────────────────────────────────────────────────────────────────────────
-    // Allow-list, six-field cap, both-lists, the porch exclusion and sanitizeD3Spec, all inside
-    // applySelfCheck so they are testable without a network. `drafted` is NOT touched by any of
-    // it: the first pass stays on the row or "did the check help?" stops being answerable.
+    // Allow-list, field cap, both-lists, the porch exclusion and sanitizeD3Spec, all inside
+    // applySelfCheck so they are testable without a network. The MODE picks the list and the
+    // cap: d3ab404's 22 paths and six fields for a legacy check, 30 and eight for v2. `drafted`
+    // is NOT touched by any of it: the first pass stays on the row or "did the check help?"
+    // stops being answerable.
     // `dims` rides along so a builder who MEASURED the eave keeps it: roof.overhang comes off
     // the allow-list for that generation, the same way wallHeightFt and sizeFt are permanently
-    // off it. selfCheckPrompt stops asking for it in the same breath.
-    const applied = applySelfCheck(draftRead.d3, read, dims);
+    // off it. selfCheckPrompt stops asking for it in the same breath. `pitchLocked` does the same
+    // for roof.pitch where the reads measured it (above).
+    const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked);
     if (!applied.ok) {
       return await failedCheck("ai_selfcheck_merge_failed", applied.error, { elapsedMs: Date.now() - t0, renders: pairs.length, tokens });
     }
@@ -4316,36 +5020,87 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: "ai_selfcheck_field_dropped", severity: "info",
         message: `The self-check proposed ${applied.dropped.length} change(s) that were not applied.`,
-        context: { checkId, verdict: applied.verdict, dropped: applied.dropped.slice(0, 20) },
+        context: { checkId, verdict: applied.verdict, dropped: applied.dropped.slice(0, 20), ...(pitchLocked ? { pitchLocked } : {}) },
       });
     }
 
     const elapsedMs = Date.now() - t0;
+    // THE NET EFFECT, AGAINST THE FIRST DRAFT (v2). `applied.changed` is this round only, with
+    // `from` read off the spec this round judged. `total` runs every line from `drafted` to
+    // the final spec, so `self_check_changed` stays "what the check changed" however many rounds
+    // it took. On round 0 the two are the same list, and round 0 writes `applied.changed` itself
+    // so the check an older browser runs records exactly what it always did. `reverted` is the
+    // fields this round put straight back where the draft had them: a flip-flop.
+    const total = round === 0
+      ? applied.changed
+      : selfCheckTotalChanges(firstRead.d3, applied.d3, claimed.self_check_changed, applied.changed);
+    const reverted = selfCheckReverted(total, applied.changed);
+    // History FIRST, then the verdict: the verdict write is what makes the next round
+    // claimable, so writing it last is what keeps the read-modify-write in appendRound serial.
+    await appendRound({ verdict: applied.verdict, changed: applied.changed, ms: elapsedMs, tokens, renders: pairs.length });
     // `self_check_after` is written ONLY when something actually moved. A null there means the
     // draft stands, so diffing `drafted` against it stays the one query that answers what the
-    // check changes across every tenant, with no rows that differ from `drafted` by nothing.
+    // check changes across every tenant, with no rows that differ from `drafted` by nothing —
+    // which is also why a later round that moves everything BACK writes null rather than a copy
+    // of `drafted`. The scalar columns (verdict, tokens, renders, ms) describe the LATEST round;
+    // `self_check_after` and `self_check_changed` the whole check; every round is in
+    // `self_check_rounds`.
     await recordSelfCheck(checkId, {
       self_check_verdict: applied.verdict,
-      self_check_changed: applied.changed,
+      self_check_changed: total,
       self_check_tokens: tokens,
       self_check_renders: pairs.length,
       self_check_ms: elapsedMs,
-      ...(applied.verdict === "corrections" ? { self_check_after: applied.d3 } : {}),
+      ...(applied.verdict === "corrections" ? { self_check_after: total.length ? applied.d3 : null } : {}),
     });
 
     // The raw `corrections` object is deliberately NOT echoed. `d3` is the merged spec after all
     // three gates and `changed` is what actually moved, with `from` and `to` read off the two
     // specs rather than off the model's own account of them — a browser handed the raw object
     // would have its own fourth chance to apply something the gates just refused.
+    //
+    // A LEGACY check answers exactly as d3ab404 did, key for key (it is always round 0, where
+    // `total` IS `applied.changed`): an older designer reads what it always read.
+    if (!v2Check) {
+      return json({
+        ok: true,
+        verdict: applied.verdict,
+        d3: applied.verdict === "corrections" ? applied.d3 : null,
+        changed: applied.changed,
+        checked: read.checked,
+        note: read.note,
+        renders: pairs.length,
+        ms: elapsedMs,
+      });
+    }
+    //
+    // v2 FIELDS, all additive (an older browser reads none of them):
+    //   d3           round 0: exactly as before, the corrected spec only when something moved.
+    //                Round k > 0: ALWAYS the cumulative spec (the draft plus every round that
+    //                applied), because a later round can move a field BACK, and "null, keep what
+    //                you have" would then leave the browser on a spec the row no longer holds.
+    //   changedTotal every change against the FIRST draft, for "What the check changed".
+    //   reverted     fields this round moved back to the draft's value: the flip-flop to stop on.
+    //   round        which round this answered (0-based).
+    //   roundsLeft   how many more rounds are worth asking for: 0 unless this round applied
+    //                corrections without undoing an earlier one, and never past the limit. The
+    //                server's own hard stops are the claim above, whatever this says.
+    const roundsLeft = applied.verdict === "corrections" && !reverted.length
+      ? Math.max(0, SELF_CHECK_MAX_ROUNDS - (round + 1))
+      : 0;
     return json({
       ok: true,
       verdict: applied.verdict,
-      d3: applied.verdict === "corrections" ? applied.d3 : null,
+      d3: round === 0 ? (applied.verdict === "corrections" ? applied.d3 : null) : applied.d3,
       changed: applied.changed,
+      changedTotal: total,
+      reverted,
       checked: read.checked,
       note: read.note,
       renders: pairs.length,
       ms: elapsedMs,
+      round,
+      roundsLeft,
     });
   }
 
@@ -7018,7 +7773,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       sentBy: userId ?? null,
       statusCallback,
       // A rep pressing this with the customer in front of them is not what quiet hours
-      // exist to stop — it is the same "a human hitting send" case smsSend documents.
+      // exist to stop: one text, one customer, sent by a person (see TenantSms in smsSend).
       bypassQuietHours: true,
     });
     if (!out.sent) {
@@ -7063,6 +7818,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       shortCode,
       sentBy: userId ?? null,
       statusCallback,
+      // A person typed this and pressed Send, so it goes now (Ahsan, 2026-09-29: "if i am
+      // sending manual messages it should go right away"). Quiet hours are for automation;
+      // the scope planned this override from the start and this path was simply missed, so
+      // a builder answering a customer at 9:15pm was told to wait until morning.
+      // The flag skips the clock check and nothing else: consent and STOP still refuse.
+      // Pinned by _test_stubs/smsQuietHoursWiring_test.ts.
+      bypassQuietHours: true,
     });
     if (!out.sent) {
       // `not_active` is the product being switched off, not a fault — it is the state every
