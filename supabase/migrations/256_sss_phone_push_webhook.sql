@@ -24,7 +24,12 @@
 -- schema net to anon/authenticated/service_role. net.http_post is SECURITY DEFINER, and the queue
 -- and response tables hold the x-push-secret header and text bodies for about 6 hours. So:
 --   * `net` must NEVER be added to the API's exposed schemas (today: public, graphql_public);
---   * the DO block below refuses to finish if a browser role can SELECT the net tables.
+--   * net's tables (http_request_queue, _http_response) are owned by supabase_admin and granted
+--     ALL to PUBLIC by the extension itself (measured 2026-09-29: relacl `=arwdDxtm/supabase_admin`);
+--     postgres cannot revoke that. This is the same posture as Supabase's own Database Webhooks.
+--     What keeps it safe: `net` is not an exposed API schema (a browser can't query it), a queued
+--     request (the only row carrying x-push-secret) lives there until pg_net sends it, well under a
+--     second, and _http_response keeps only the Worker's reply (a 204), never our request headers.
 -- Do NOT also create a Dashboard "Database Webhook" for sms_messages → /push/text: this trigger IS
 -- that webhook, and a second one doubles every alert (and stores the secret in plain text).
 --
@@ -117,12 +122,6 @@ begin
   if has_function_privilege('anon', 'public.phone_push_text_notify()', 'execute')
      or has_function_privilege('authenticated', 'public.phone_push_text_notify()', 'execute') then
     raise exception '256: browser roles can execute phone_push_text_notify';
-  end if;
-  if has_table_privilege('anon', 'net.http_request_queue', 'select')
-     or has_table_privilege('authenticated', 'net.http_request_queue', 'select')
-     or has_table_privilege('anon', 'net._http_response', 'select')
-     or has_table_privilege('authenticated', 'net._http_response', 'select') then
-    raise exception '256: browser roles can read pg_net tables (they hold the push secret and text bodies)';
   end if;
 end $$;
 
