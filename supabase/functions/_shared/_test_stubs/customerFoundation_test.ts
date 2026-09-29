@@ -148,8 +148,11 @@ Deno.test("⚠️ every customer-facing resolver call passes the pick, and the c
     const customer = calls.filter((t) => t.startsWith("selectedStyle, sel.style,"));
     assertEquals(customer.length, 5, `${file}: ventRoof2D, the quote's shot, the dormer price gate, the dock and the viewer`);
     for (const t of customer) assert(t.includes("d3CustomerFoundation(C, sel))"), `${file}: ${t.slice(0, 200)}`);
+    // Two seeds, and neither passes a customer choice: openCalEditor's, and the Advanced page's
+    // "Start from" copy of a style (2026-09-28). Both become a draft a builder can save as a style.
     const seed = calls.filter((t) => t.startsWith("s, s.value,"));
-    assertEquals(seed.length, 1, `${file}: openCalEditor's seed`);
-    assert(seed[0].startsWith("s, s.value, C.wallHeightFt);"), `${file}: the seed passes no customer choice: ${seed[0].slice(0, 80)}`);
+    assertEquals(seed.length, 2, `${file}: openCalEditor's seed and the Advanced page's start-from seed`);
+    assert(seed[0].startsWith("s, s.value, C.wallHeightFt);"), `${file}: openCalEditor passes no customer choice: ${seed[0].slice(0, 80)}`);
+    assert(seed[1].startsWith("s, s.value, C.wallHeightFt || 8)"), `${file}: the Advanced seed passes no customer choice: ${seed[1].slice(0, 80)}`);
   }
 });
