@@ -392,6 +392,9 @@ try {
     ok("A: …and the ground's fall goes as two explicit nulls (level ground, said out loud)",
       d3 && Object.prototype.hasOwnProperty.call(d3, "gradeFallFt") && d3.gradeFallFt === null && Object.prototype.hasOwnProperty.call(d3, "gradeFallToward") && d3.gradeFallToward === null,
       d3 && JSON.stringify({ f: d3.gradeFallFt, t: d3.gradeFallToward }));
+    // …and so do the ground's corners (2026-09-29): one explicit null, the same BC-1 rule.
+    ok("A: …and the ground at each corner goes as an explicit null too",
+      d3 && Object.prototype.hasOwnProperty.call(d3, "gradeCornersFt") && d3.gradeCornersFt === null, d3 && JSON.stringify(d3.gradeCornersFt));
     ok("A: set_style_active hides that same new style", sa && sa.body.styleId === "00000000-0000-4000-8000-00000000a001" && sa.body.active === false && sa.body.targetClientId === null, sa && JSON.stringify(sa.body));
     ok("A: the name box is cleared for the next one", (await page.getByLabel("New style name").inputValue()) === "");
     // A name already in use is refused before any call (review ADV-2): the pricing import rejects a

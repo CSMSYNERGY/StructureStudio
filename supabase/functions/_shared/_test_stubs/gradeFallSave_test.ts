@@ -51,6 +51,8 @@ const land = (sent: Record<string, unknown>, stored: unknown, frame: unknown) =>
 const roof = { type: "gable", pitch: 0.4, overhang: 0.6 };
 const LEVEL = { roof, siding: "lap", colors: { body: "#9B2F2F" }, wallHeightFt: 8, foundation: "piers", floorHeightFt: 1.5 };
 const FALLING = { ...LEVEL, gradeFallFt: 2, gradeFallToward: "left" };
+const CORNERS = { fl: 0, fr: 1, bl: 0.5, br: 2.25 };
+const STORED = { ...LEVEL, gradeCornersFt: CORNERS };
 
 Deno.test("both senders put BOTH fall keys on every save, null when there is none, and touch nothing else", () => {
   for (const [who, send] of SENDERS) {
@@ -62,7 +64,10 @@ Deno.test("both senders put BOTH fall keys on every save, null when there is non
     const onlyToward = send({ ...LEVEL, gradeFallToward: "right" });
     assertEquals([onlyToward.gradeFallFt, onlyToward.gradeFallToward], [null, "right"], `${who}: a remembered direction rides`);
     for (const [k, v] of Object.entries(LEVEL)) assertEquals(level[k], v, `${who}: ${k} is untouched`);
-    assertEquals(Object.keys(level).length, Object.keys(LEVEL).length + 2, `${who}: exactly two keys added`);
+    // The ground at each corner (2026-09-29) rides the same way: null when there is none.
+    assert("gradeCornersFt" in level && level.gradeCornersFt === null, `${who}: level ground's corners are an explicit null`);
+    assertEquals(send({ ...LEVEL, gradeCornersFt: CORNERS }).gradeCornersFt, CORNERS, `${who}: corners are sent as they are`);
+    assertEquals(Object.keys(level).length, Object.keys(LEVEL).length + 3, `${who}: exactly three keys added`);
     // The draft is not changed: the keys are added to a copy.
     const draft = { ...LEVEL };
     send(draft);
@@ -95,4 +100,59 @@ Deno.test("⚠️ end to end: a level style saves exactly as before, a clear lan
   // save of a falling style keeps the fall (this is the bug: it used to be erased).
   const beta = land(LEVEL, FALLING, "front");
   assertEquals([beta.foundation, beta.gradeFallFt, beta.gradeFallToward], ["piers", 2, "left"], JSON.stringify(beta));
+});
+
+// ── THE GROUND AT EACH CORNER (gradeCornersFt, 2026-09-29) ON THE WIRE ─────────────────────────────
+// The BC-1 rule, extended: every save that OMITS the key keeps the stored corners (production's
+// designer, and the panels before today, all omit it), whatever the frame; an explicit null clears
+// them; and corners replace the fall, sent or carried.
+Deno.test("⚠️ end to end: corners saved, kept by an older designer's save, cleared by the panel's null, and never beside a fall", () => {
+  for (const [who, send] of SENDERS) {
+    // Typed in the panel on a level style: stored as all four.
+    const typed = land(send({ ...LEVEL, gradeCornersFt: { fl: 0, fr: 1.5, bl: 0, br: 2 } }), LEVEL, "front");
+    assertEquals(typed.gradeCornersFt, { fl: 0, fr: 1.5, bl: 0, br: 2 }, who);
+    // Untouched, a style storing corners saves them back exactly; "Level ground" (no key on the draft) clears.
+    assertEquals(land(send(STORED), STORED, "front").gradeCornersFt, CORNERS, `${who}: kept`);
+    const cleared = land(send(LEVEL), STORED, "front");
+    assert(!("gradeCornersFt" in cleared) && !JSON.stringify(cleared).includes("gradeFall"), `${who}: the panel's clear lands: ${JSON.stringify(cleared)}`);
+    // Corners typed over a stored fall: the panel drops the fall from the draft (calSetGradeCorner), and
+    // the fall goes; the corners are stored in its place.
+    const over = land(send({ ...LEVEL, gradeCornersFt: { fl: 0, fr: 0, bl: 2, br: 3 } }), FALLING, "front");
+    assertEquals(over.gradeCornersFt, { fl: 0, fr: 0, bl: 2, br: 3 }, who);
+    assert(!("gradeFallFt" in over) && !("gradeFallToward" in over), `${who}: no fall beside corners: ${JSON.stringify(over)}`);
+  }
+  // A designer from before today (frame "front", or production's with none): no corners key at all.
+  // Its untouched save keeps them, re-held to the band, and no fall comes back beside them.
+  for (const frame of ["front", undefined, "front-left"]) {
+    for (const sent of [LEVEL, { ...LEVEL, gradeFallFt: null, gradeFallToward: null }, FALLING]) {
+      const kept = land(sent, { ...STORED, gradeCornersFt: { ...CORNERS, br: 11 } }, frame);
+      assertEquals(kept.gradeCornersFt, { ...CORNERS, br: 6 }, `${String(frame)} ${JSON.stringify(sent)}`);
+      assert(!("gradeFallFt" in kept) && !("gradeFallToward" in kept), `${String(frame)}: corners replace the fall: ${JSON.stringify(kept)}`);
+    }
+  }
+  // Production's designer resolves piers to null: the raised floor is carried, and its corners with it.
+  const prod = land({ roof, siding: "lap", colors: {}, wallHeightFt: 8, foundation: null }, STORED, undefined);
+  assertEquals([prod.foundation, prod.gradeCornersFt], ["piers", CORNERS], JSON.stringify(prod));
+  // Not raised any more (skids picked): nothing is carried.
+  const skids = land({ ...LEVEL, foundation: "skids" }, STORED, "front");
+  assert(!("gradeCornersFt" in skids), JSON.stringify(skids));
+  // The sanitiser: all zeros, junk, or no raised floor stores nothing; a sent corner object replaces a sent fall.
+  // null and a non-object leave the fall to its own keys.
+  for (const junk of [null, "2"]) {
+    const r = sanitizeD3Spec({ ...FALLING, gradeCornersFt: junk });
+    assert(r.ok && !("gradeCornersFt" in r.d3) && r.d3.gradeFallFt === 2, JSON.stringify(junk));
+  }
+  // Any corners OBJECT, even one that stores nothing, drops the fall, as the renderer's d3GradeFall ignores
+  // the fall beside it and draws level ground (review 2026-09-30: the preview and the stored row disagreed).
+  for (const junk of [{}, { fl: 0, fr: 0, bl: 0, br: 0 }, [1, 2], { fl: -3, fr: "x" }]) {
+    const r = sanitizeD3Spec({ ...FALLING, gradeCornersFt: junk });
+    assert(r.ok && !("gradeCornersFt" in r.d3) && !("gradeFallFt" in r.d3) && !("gradeFallToward" in r.d3), JSON.stringify([junk, r]));
+    // ...and the carry-forward does not bring a stored fall back beside it.
+    const kept = land({ ...LEVEL, gradeCornersFt: junk }, FALLING, "front");
+    assert(!("gradeFallFt" in kept) && !("gradeFallToward" in kept) && !("gradeCornersFt" in kept), `carry: ${JSON.stringify([junk, kept])}`);
+  }
+  const both = sanitizeD3Spec({ ...FALLING, gradeCornersFt: { fl: "1", br: 7 } });
+  assert(both.ok && JSON.stringify(both.d3.gradeCornersFt) === JSON.stringify({ fl: 1, fr: 0, bl: 0, br: 6 }) && !("gradeFallFt" in both.d3) && !("gradeFallToward" in both.d3), JSON.stringify(both));
+  const slab = sanitizeD3Spec({ ...LEVEL, foundation: "slab", gradeCornersFt: CORNERS });
+  assert(slab.ok && !("gradeCornersFt" in slab.d3), JSON.stringify(slab));
 });

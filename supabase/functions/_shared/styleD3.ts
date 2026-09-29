@@ -230,6 +230,17 @@ const FLOOR_HEIGHT_ACCEPT_FT = 8;
 // time, and is never written here.
 export const GRADE_FALL_FT: readonly [number, number] = [0, 6];
 export const D3_GRADE_FALL_TOWARD = ["back", "left", "right"] as const;
+// ── THE GROUND AT EACH CORNER (top-level gradeCornersFt, 2026-09-29) ─────────────────────────────
+// Carolyn, 09-29, on the Advanced page: "we need to be able to put in where the zero is ... put in four
+// points ... which one is that zero, and then if it drops down like 18 inches, two feet, they put in
+// four corners." { fl, fr, bl, br } -- front-left, front-right, back-left, back-right, in the fall's
+// frame (front = south, back = north, left = west, right = east, seen facing the front) -- each how
+// many feet LOWER the ground is at that corner, held to GRADE_FALL_FT; a missing, junk or negative
+// corner is 0. The renderer takes the drops from the HIGHEST corner (the smallest number is its zero)
+// and floorHeightFt is the floor's height over that corner. Raised foundations only, like the fall;
+// stored only when some corner is below 0 ft, as all four numbers; and it REPLACES the fall: beside
+// it gradeFallFt / gradeFallToward are dropped (the renderer ignores them when it is present).
+export const D3_GRADE_CORNERS = ["fl", "fr", "bl", "br"] as const;
 const isRaisedFoundation = (v: unknown): boolean => (D3_RAISED_FOUNDATIONS as readonly unknown[]).includes(v);
 
 const num = (v: unknown): number | null => {
@@ -259,8 +270,27 @@ export type D3Spec = {
   floorHeightFt?: number;
   gradeFallFt?: number;
   gradeFallToward?: string;
+  gradeCornersFt?: { fl: number; fr: number; bl: number; br: number };
   claddingChoices?: string[];
 };
+
+// The four corners of a gradeCornersFt value, each held to GRADE_FALL_FT (anything that is not a
+// number above 0 is 0), or null when it is not an object or no corner is above 0. The sanitiser's
+// reading and the carry-forward's, so a stored value is re-held exactly as a sent one.
+// Whether a sent gradeCornersFt overrides the fall: the renderer's own test (d3GradeFall), any object.
+const cornersObject = (v: unknown): boolean => !!v && typeof v === "object";
+function gradeCorners(v: unknown): { fl: number; fr: number; bl: number; br: number } | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const src = v as Record<string, unknown>;
+  const out = { fl: 0, fr: 0, bl: 0, br: 0 };
+  let any = false;
+  for (const k of D3_GRADE_CORNERS) {
+    const n = num(src[k]);
+    out[k] = n !== null && n > 0 ? Math.min(GRADE_FALL_FT[1], n) : 0;
+    if (out[k] > 0) any = true;
+  }
+  return any ? out : null;
+}
 
 export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: false; error: string } {
   if (!raw || typeof raw !== "object") return { ok: false, error: "A 3D spec object is required." };
@@ -536,6 +566,17 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     if ((D3_GRADE_FALL_TOWARD as readonly unknown[]).includes(src.gradeFallToward)) {
       d3.gradeFallToward = src.gradeFallToward;
     }
+    // The ground at each corner (2026-09-29): all four, when some corner is lower than 0 ft, in place
+    // of the fall. An explicit null (the current panels' "level ground") or all zeros stores nothing.
+    // ANY corners OBJECT drops the fall, all zeros too (review, 2026-09-30): the renderer's d3GradeFall
+    // ignores the fall beside any gradeCornersFt object and draws level ground, so what is stored is
+    // what was previewed. null (or no key) leaves the fall to its own keys.
+    const gc = gradeCorners(src.gradeCornersFt);
+    if (gc) d3.gradeCornersFt = gc;
+    if (cornersObject(src.gradeCornersFt)) {
+      delete d3.gradeFallFt;
+      delete d3.gradeFallToward;
+    }
   }
 
   // Which claddings THIS style offers the customer (2026-08-25). Absent means all four,
@@ -606,6 +647,21 @@ export function carryForwardFoundation(clean: D3Spec, sent: unknown, stored: unk
   // fields the request did not send are carried, each re-held to its band, and only onto a floor
   // that is raised. The sanitiser never stores the null itself.
   if (!isRaisedFoundation(clean.foundation)) return;
+  // The ground at each corner (2026-09-29) extends the same rule. ABSENCE means "this client has never
+  // heard of it" -- production's designer, and every panel before today, omit the key -- so a stored
+  // value is carried over any save that omits it, whatever the frame, re-held to its band. The panels
+  // that know it send it on every save (12-shell's ssD3WithFall, the operator page's calSpecToSend),
+  // null when there is none, so their "level ground" lands. Carried or sent, it replaces the fall:
+  // a fall is neither carried nor kept beside it.
+  if (!("gradeCornersFt" in s)) {
+    const gc = gradeCorners(was.gradeCornersFt);
+    if (gc) clean.gradeCornersFt = gc;
+  }
+  if (clean.gradeCornersFt || cornersObject(s.gradeCornersFt)) {
+    delete clean.gradeFallFt;
+    delete clean.gradeFallToward;
+    return;
+  }
   const gf = num(was.gradeFallFt);
   if (!("gradeFallFt" in s) && gf !== null && gf > 0) clean.gradeFallFt = Math.min(GRADE_FALL_FT[1], gf);
   if (!("gradeFallToward" in s) && (D3_GRADE_FALL_TOWARD as readonly unknown[]).includes(was.gradeFallToward)) {
