@@ -1,0 +1,906 @@
+// Hold, resume and warm transfer (plan 9C, design b): the TwiML, the transfer_state machine,
+// the three app endpoints, and the Twilio side (after-dial, the warm leg, the conference
+// callback). Twilio's REST API is a stub here; what only a live call can prove is listed in
+// DEVIATIONS ("Not verified here").
+import { describe, expect, it } from "vitest";
+import {
+  conferenceTwiml, EMERGENCY_CALLBACK, HOLD_MUSIC, legsOf, nextTransferState, onTheCall, type CallAction,
+} from "../src/conference";
+import type { CallRow } from "../src/db";
+import {
+  Auth, BUSINESS_NUMBER, CALL_SID, CLIENT, CUSTOMER, FakeNet, NUMBER_ID, USER_A, USER_B, USER_C,
+  appRequest, attr, call, callerCtx, filter, jsonRes, makeEnv, routeInfo, twilioPost, type Seen,
+} from "./helpers";
+
+const CALL_ID = "00000000-0000-4000-8000-0000000ca444";
+const MY_LEG = "CA" + "0".repeat(31) + "5";
+const TEAMMATE_LEG = "CA" + "0".repeat(31) + "6";
+const CONF = "CF" + "0".repeat(31) + "1";
+const ACCOUNT = "AC" + "0".repeat(32);
+const env = makeEnv();
+
+function liveCall(over: Partial<CallRow> = {}): CallRow {
+  return {
+    id: CALL_ID, client_id: CLIENT, number_id: NUMBER_ID, contact_id: null, direction: "in",
+    from_e164: CUSTOMER, to_e164: BUSINESS_NUMBER, twilio_call_sid: CALL_SID, client_call_sid: MY_LEG,
+    placed_by: null, answered_by: USER_A, rang_user_ids: [USER_A], transferred_from: null, transfer_state: null,
+    status: "in_progress", started_at: new Date(Date.now() - 120_000).toISOString(), answered_at: new Date(Date.now() - 100_000).toISOString(),
+    ended_at: null, duration_s: null, error_code: null, is_emergency: false, ...over,
+  };
+}
+
+const outboundCall = (over: Partial<CallRow> = {}) => liveCall({
+  direction: "out", from_e164: BUSINESS_NUMBER, to_e164: CUSTOMER, placed_by: USER_A, answered_by: null, ...over,
+});
+
+/** The Twilio REST stubs, recording what the Worker asked for. */
+interface TwilioStub {
+  conference?: { sid: string; friendly_name: string; status: string } | null;
+  participants?: { call_sid: string; hold: boolean; muted: boolean; status: string }[];
+  callStatus?: Record<string, string>;
+  /** `to` of a fetched call, by CallSid. */
+  callTo?: Record<string, string>;
+  failRedirect?: boolean;
+  /** Only the Twiml redirects (a move): Twilio refuses (21220), or the request gets no answer. */
+  move?: "refused" | "unreachable";
+  /** HTTP status a Participants update (hold / unhold) answers with. */
+  participantStatus?: number;
+  failAdd?: boolean;
+}
+
+function stubTwilio(net: FakeNet, t: TwilioStub = {}) {
+  const api = /^https:\/\/api\.twilio\.com\/2010-04-01\/Accounts\/AC0+/;
+  net.on("POST", (u) => api.test(u.href) && /\/Calls\/CA[0-9a-f]+\.json$/.test(u.pathname), (s) => {
+    const isMove = new URLSearchParams(s.body).has("Twiml");
+    if (isMove && t.move === "unreachable") throw new Error("connection reset");
+    if (t.failRedirect || (isMove && t.move === "refused")) return jsonRes({ code: 21220 }, 400);
+    return jsonRes({ sid: s.url.pathname.split("/").pop()!.replace(".json", "") });
+  });
+  net.on("GET", (u) => api.test(u.href) && /\/Calls\/CA[0-9a-f]+\.json$/.test(u.pathname), (s) => {
+    const sid = s.url.pathname.split("/").pop()!.replace(".json", "");
+    return jsonRes({ sid, status: t.callStatus?.[sid] ?? "completed", to: t.callTo?.[sid] ?? "" });
+  });
+  net.on("GET", (u) => api.test(u.href) && u.pathname.endsWith("/Conferences.json"), () =>
+    jsonRes({ conferences: t.conference ? [t.conference] : [] }));
+  net.on("GET", (u) => api.test(u.href) && /\/Conferences\/CF[0-9a-f]+\.json$/.test(u.pathname), () =>
+    (t.conference ? jsonRes(t.conference) : jsonRes({ code: 20404 }, 404)));
+  net.on("GET", (u) => api.test(u.href) && /\/Conferences\/CF[0-9a-f]+\/Participants\.json$/.test(u.pathname), () =>
+    jsonRes({ participants: t.participants ?? [] }));
+  net.on("POST", (u) => api.test(u.href) && /\/Conferences\/CF[0-9a-f]+\/Participants\/CA[0-9a-f]+\.json$/.test(u.pathname), () =>
+    (t.participantStatus && t.participantStatus >= 400 ? jsonRes({ code: 20404 }, t.participantStatus) : jsonRes({})));
+  net.on("POST", (u) => api.test(u.href) && /\/Conferences\/[0-9a-f-]{36}\/Participants\.json$/.test(u.pathname), () =>
+    (t.failAdd ? jsonRes({ code: 21210 }, 400) : jsonRes({ call_sid: TEAMMATE_LEG })));
+}
+
+const redirects = (net: FakeNet) => net.to(/\/Calls\/CA[0-9a-f]+\.json$/).filter((s) => s.method === "POST").map((s) => ({
+  sid: s.url.pathname.split("/").pop()!.replace(".json", ""),
+  twiml: new URLSearchParams(s.body).get("Twiml"),
+  status: new URLSearchParams(s.body).get("Status"),
+}));
+const participantUpdates = (net: FakeNet) => net.to(/\/Participants\/CA[0-9a-f]+\.json$/).map((s) => ({
+  sid: s.url.pathname.split("/").pop()!.replace(".json", ""),
+  form: Object.fromEntries(new URLSearchParams(s.body)),
+}));
+const patches = (net: FakeNet) => net.writes("phone_calls", "PATCH").map((s: Seen) => ({ body: s.json, url: decodeURIComponent(s.url.search) }));
+const events = (net: FakeNet) => net.writes("phone_call_events").map((s) => s.json.type);
+
+// ── Pure parts ──────────────────────────────────────────────────────────────────────
+
+describe("the transfer_state machine", () => {
+  const table: [CallRow["transfer_state"], CallAction, string][] = [
+    [null, "cold", "transferring"], [null, "hold", "conference+move"], [null, "warm", "conference+move"], [null, "resume", "refused"],
+    ["conference", "cold", "transferring"], ["conference", "hold", "conference"], ["conference", "warm", "conference"], ["conference", "resume", "conference"],
+    ["transferring", "cold", "refused"], ["transferring", "hold", "refused"], ["transferring", "warm", "refused"], ["transferring", "resume", "refused"],
+  ];
+  it.each(table)("%s + %s → %s", (from, action, expected) => {
+    const step = nextTransferState(from, action);
+    const got = !step.ok ? "refused" : `${step.next}${step.move ? "+move" : ""}`;
+    expect(got).toBe(expected);
+  });
+
+  it("says why it refused, in plain English", () => {
+    expect(nextTransferState("transferring", "cold")).toEqual({ ok: false, message: "A transfer is already under way." });
+    expect(nextTransferState(null, "resume")).toEqual({ ok: false, message: "That call isn't on hold." });
+  });
+});
+
+describe("which leg is which", () => {
+  it("inbound: the customer is the parent, so the answering leg is the one moved", () => {
+    expect(legsOf(liveCall())).toEqual({ customer: CALL_SID, agent: MY_LEG, child: MY_LEG, childRole: "agent" });
+  });
+  it("outbound: the customer is the child of the app's Dial", () => {
+    expect(legsOf(outboundCall())).toEqual({ customer: CALL_SID, agent: MY_LEG, child: CALL_SID, childRole: "customer" });
+  });
+  it("outbound after a cold transfer: the customer now leads its own Dial, so the teammate's leg is moved", () => {
+    const handed = outboundCall({ transferred_from: USER_A, answered_by: USER_B, client_call_sid: TEAMMATE_LEG });
+    expect(legsOf(handed)).toEqual({ customer: CALL_SID, agent: TEAMMATE_LEG, child: TEAMMATE_LEG, childRole: "agent" });
+  });
+  it("who is on the call", () => {
+    expect(onTheCall(USER_A, liveCall())).toBe(true);
+    expect(onTheCall(USER_B, liveCall())).toBe(false);
+    expect(onTheCall(USER_A, outboundCall())).toBe(true);
+    // A warm transferrer may still act while the call is in its conference, not after.
+    const warm = liveCall({ answered_by: USER_B, transferred_from: USER_A, transfer_state: "conference" });
+    expect(onTheCall(USER_A, warm)).toBe(true);
+    expect(onTheCall(USER_A, { ...warm, transfer_state: null })).toBe(false);
+  });
+});
+
+describe("conference TwiML", () => {
+  it("the customer waits on Twilio's default music, and their leaving ends it; never an action, never voicemail", () => {
+    const xml = conferenceTwiml(env, CALL_ID, "customer");
+    expect(xml).toBe(
+      '<?xml version="1.0" encoding="UTF-8"?><Response><Dial><Conference beep="false" startConferenceOnEnter="false" endConferenceOnExit="true" '
+      + `statusCallback="https://phone.example.test/voice/conference?call=${CALL_ID}&amp;key=test-webhook-key" statusCallbackEvent="leave" statusCallbackMethod="POST">`
+      + `${CALL_ID}</Conference></Dial></Response>`,
+    );
+    expect(xml).not.toContain("waitUrl");
+    expect(attr(xml, "Dial", "action")).toBeNull();
+  });
+
+  it("the agent waits in silence and does not start it (that IS hold); resume joins with start=true", () => {
+    const held = conferenceTwiml(env, CALL_ID, "agent");
+    expect(attr(held, "Conference", "startConferenceOnEnter")).toBe("false");
+    expect(attr(held, "Conference", "endConferenceOnExit")).toBe("false");
+    expect(attr(held, "Conference", "waitUrl")).toBe("");
+    const live = conferenceTwiml(env, CALL_ID, "agent", true);
+    expect(attr(live, "Conference", "startConferenceOnEnter")).toBe("true");
+  });
+});
+
+// ── after-dial ──────────────────────────────────────────────────────────────────────
+
+describe("/voice/after-dial with the conference", () => {
+  function setup(row: CallRow | null) {
+    const net = new FakeNet().install();
+    net.rest("GET", "phone_calls", () => (row ? [row] : []));
+    net.rpc("phone_route_for_number", () => routeInfo());
+    net.rest("PATCH", "phone_calls", () => [{ id: CALL_ID }]);
+    net.rest("POST", "app_errors", () => []);
+    return net;
+  }
+  const post = async (query: Record<string, string>, params: Record<string, string>) =>
+    call(env, await twilioPost(env, "/voice/after-dial", { CallSid: CALL_SID, AccountSid: ACCOUNT, ...params }, { call: CALL_ID, ...query }));
+
+  it.each([
+    ["bridged (the child left the bridge)", { DialCallStatus: "completed", DialBridged: "true" }],
+    ["not bridged", { DialCallStatus: "no-answer", DialBridged: "false" }],
+  ])("step 0: an inbound parent whose call is in its conference joins it, %s: never voicemail, never a hang-up", async (_l, dialParams) => {
+    const net = setup(liveCall({ transfer_state: "conference" }));
+    const { text } = await post({}, { From: CUSTOMER, To: BUSINESS_NUMBER, Direction: "inbound", ...dialParams });
+    expect(text).toBe(conferenceTwiml(env, CALL_ID, "customer"));
+    expect(text).not.toContain("<Record");
+    expect(text).not.toContain("<Hangup");
+    expect(patches(net)).toEqual([]);
+  });
+
+  it("step 0 wins over a transfer=1 or in-order Dial too (the customer is the parent of every inbound Dial)", async () => {
+    setup(liveCall({ transfer_state: "conference" }));
+    const dials: Record<string, string>[] = [{ transfer: "1" }, { stage: "order", p: "0" }, { stage: "fwd" }];
+    for (const q of dials) {
+      const { text } = await post(q, { From: CUSTOMER, To: BUSINESS_NUMBER, DialCallStatus: "completed", DialBridged: "true" });
+      expect(text).toBe(conferenceTwiml(env, CALL_ID, "customer"));
+    }
+  });
+
+  it("stage=out: the app's leg joins the conference its customer was moved into (held, silent)", async () => {
+    const net = setup(outboundCall({ transfer_state: "conference" }));
+    const { text } = await post({ stage: "out" }, { From: `client:u_${USER_A.replace(/-/g, "")}_g1`, To: CUSTOMER, Direction: "inbound", DialCallStatus: "completed", DialBridged: "true" });
+    expect(text).toBe(conferenceTwiml(env, CALL_ID, "agent"));
+    expect(net.rpcCalls("phone_route_for_number")).toEqual([]);
+  });
+
+  it.each([
+    ["the customer hung up", null, { DialCallStatus: "completed", DialBridged: "true" }],
+    ["no answer", null, { DialCallStatus: "no-answer", DialBridged: "false" }],
+    ["a cold transfer moved the customer", "transferring", { DialCallStatus: "completed", DialBridged: "true" }],
+  ] as const)("stage=out otherwise just hangs the app leg up (%s): never voicemail, no route lookup", async (_l, state, dialParams) => {
+    const net = setup(outboundCall({ transfer_state: state }));
+    const { text } = await post({ stage: "out" }, { From: "client:x", To: CUSTOMER, ...dialParams });
+    expect(text).toBe('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+    expect(net.rpcCalls("phone_route_for_number")).toEqual([]);
+    expect(patches(net)).toEqual([]);
+  });
+
+  it("stage=out with no row yet (the insert race) hangs up, never voicemail", async () => {
+    setup(null);
+    const { text } = await post({ stage: "out" }, { DialCallStatus: "no-answer" });
+    expect(text).toBe('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+  });
+});
+
+// ── The app endpoints ───────────────────────────────────────────────────────────────
+
+async function appSetup(row: CallRow, t: TwilioStub = {}, opts: { claimed?: boolean; target?: unknown; targetSettings?: unknown[]; route?: unknown } = {}) {
+  const net = new FakeNet().install();
+  const auth = await new Auth().init();
+  auth.serve(net);
+  net.rpc("phone_caller_context", (s) => (s.json.p_user_id === USER_A ? callerCtx() : (opts.target === undefined ? callerCtx({ device_generation: 3 }) : opts.target)));
+  net.rest("GET", "phone_calls", () => [row]);
+  net.rest("GET", "phone_user_settings", () => opts.targetSettings ?? []);
+  net.rpc("phone_route_for_number", () => opts.route ?? routeInfo());
+  net.rest("PATCH", "phone_calls", () => (opts.claimed === false ? [] : [{ id: CALL_ID }]));
+  net.rest("POST", "phone_call_events", () => []);
+  net.rest("POST", "app_errors", () => []);
+  stubTwilio(net, t);
+  return { net, token: await auth.token(USER_A) };
+}
+
+const press = async (token: string, what: "hold" | "resume" | "warm-transfer" | "transfer", body: unknown = {}, id = CALL_ID) =>
+  call(env, appRequest("POST", `/calls/${id}/${what}`, token, body));
+
+describe("POST /calls/:id/hold", () => {
+  it("inbound, from a plain call: claims the conference state, then moves YOUR leg (the child) in, waiting; the customer follows via after-dial", async () => {
+    const { net, token } = await appSetup(liveCall());
+    const { res, json } = await press(token, "hold");
+    expect(res.status).toBe(200);
+    expect(json).toEqual({ ok: true, held: true, call_id: CALL_ID });
+    const claim = patches(net)[0];
+    expect(claim.body).toEqual({ transfer_state: "conference" });
+    expect(claim.url).toContain("transfer_state=is.null");
+    expect(redirects(net)).toEqual([{ sid: MY_LEG, twiml: conferenceTwiml(env, CALL_ID, "agent"), status: null }]);
+    expect(events(net)).toEqual(["hold"]);
+  });
+
+  it("outbound, from a plain call: moves the CUSTOMER's leg (the child); your app follows via after-dial?stage=out", async () => {
+    const { net, token } = await appSetup(outboundCall());
+    await press(token, "hold");
+    expect(redirects(net)).toEqual([{ sid: CALL_SID, twiml: conferenceTwiml(env, CALL_ID, "customer"), status: null }]);
+  });
+
+  it("a redirect Twilio refuses puts the state back: you are still on the plain call", async () => {
+    const { net, token } = await appSetup(liveCall(), { move: "refused", callStatus: { [MY_LEG]: "in-progress" } });
+    const { res, json } = await press(token, "hold");
+    expect(res.status).toBe(502);
+    expect(json.error).toEqual({ code: "twilio_error", message: "Hold didn't work. You're still on the call." });
+    const restore = patches(net)[1];
+    expect(restore.body).toEqual({ transfer_state: null });
+    expect(restore.url).toContain("transfer_state=eq.conference");
+    expect(redirects(net).filter((r) => r.status === "completed")).toEqual([]); // nobody hung up on
+    expect(net.to(/Conferences\.json/)).toEqual([]); // Twilio answered: nothing to look for
+  });
+
+  it("the leg being moved had already hung up (a drop as Hold was pressed): the claim goes back and the customer's leg is ended, never left in a conference nobody joins", async () => {
+    // after-dial may already have answered the customer with <Conference> while the claim was
+    // visible; ending their leg is what a plain call does when our side hangs up.
+    const { net, token } = await appSetup(liveCall(), { move: "refused", callStatus: { [MY_LEG]: "completed" } });
+    const { res, json } = await press(token, "hold");
+    expect(res.status).toBe(400);
+    expect(json.error).toEqual({ code: "bad_request", message: "That call has already ended." });
+    expect(patches(net)[1].body).toEqual({ transfer_state: null });
+    expect(redirects(net).filter((r) => r.status === "completed")).toEqual([{ sid: CALL_SID, twiml: null, status: "completed" }]);
+  });
+
+  it("...but leaves the customer alone when a cold transfer took the call meanwhile (the claim was no longer ours)", async () => {
+    const { net, token } = await appSetup(liveCall(), { move: "refused", callStatus: { [MY_LEG]: "completed" } });
+    let n = 0;
+    net.rest("PATCH", "phone_calls", () => (n++ === 0 ? [{ id: CALL_ID }] : [])); // claim wins, put-back finds nothing
+    const { res } = await press(token, "hold");
+    expect(res.status).toBe(400);
+    expect(redirects(net).filter((r) => r.status === "completed")).toEqual([]);
+  });
+
+  it("outbound: the customer hung up as Hold was pressed: your app's leg is ended, not left alone in a conference", async () => {
+    const { net, token } = await appSetup(outboundCall(), { move: "refused", callStatus: { [CALL_SID]: "completed" } });
+    await press(token, "hold");
+    expect(redirects(net).filter((r) => r.status === "completed")).toEqual([{ sid: MY_LEG, twiml: null, status: "completed" }]);
+  });
+
+  it("the redirect got no answer but Twilio did it (your leg is in the conference): the claim is KEPT, so after-dial brings the customer in", async () => {
+    const { net, token } = await appSetup(liveCall(), {
+      move: "unreachable", callStatus: { [MY_LEG]: "in-progress" },
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "init" },
+      participants: [{ call_sid: MY_LEG, hold: false, muted: false, status: "connected" }],
+    });
+    const { res, json } = await press(token, "hold");
+    expect(res.status).toBe(200);
+    expect(json).toEqual({ ok: true, held: true, call_id: CALL_ID });
+    expect(patches(net).map((p) => p.body)).toEqual([{ transfer_state: "conference" }]); // no put-back
+    expect(net.writes("app_errors").map((s) => s.json.code)).toContain("hold_answer_lost");
+  });
+
+  it("the redirect got no answer and nothing moved: the state goes back (after a short look), you are still on the call", async () => {
+    const { net, token } = await appSetup(liveCall(), { move: "unreachable", callStatus: { [MY_LEG]: "in-progress" } });
+    const { res } = await press(token, "hold");
+    expect(res.status).toBe(502);
+    expect(patches(net)[1].body).toEqual({ transfer_state: null });
+    expect(net.to(/Conferences\.json/)).toHaveLength(2);
+  });
+
+  it("already in a STARTED conference: puts the customer on hold through the Participants API, no move", async () => {
+    const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }), { conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" } });
+    const { json } = await press(token, "hold");
+    expect(json).toEqual({ ok: true, held: true, call_id: CALL_ID });
+    expect(patches(net)).toEqual([]);
+    expect(redirects(net)).toEqual([]);
+    expect(net.to(/Conferences\.json/)[0].url.searchParams.get("FriendlyName")).toBe(CALL_ID);
+    expect(participantUpdates(net)).toEqual([{ sid: CALL_SID, form: { Hold: "true", HoldUrl: HOLD_MUSIC, HoldMethod: "GET" } }]);
+  });
+
+  it("a failed conference lookup is an error, not a pretend hold", async () => {
+    const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }));
+    net.on("GET", (u) => u.pathname.endsWith("/Conferences.json"), () => jsonRes({ code: 20500 }, 500));
+    const { res, json } = await press(token, "hold");
+    expect(res.status).toBe(502);
+    expect(json.error.code).toBe("twilio_error");
+  });
+
+  it("already held (the conference has not started, or the legs are still moving): nothing more to do", async () => {
+    for (const conference of [{ sid: CONF, friendly_name: CALL_ID, status: "init" }, null]) {
+      const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }), { conference });
+      const { json } = await press(token, "hold");
+      expect(json).toEqual({ ok: true, held: true, call_id: CALL_ID });
+      expect(participantUpdates(net)).toEqual([]);
+      expect(redirects(net)).toEqual([]);
+    }
+  });
+
+  it.each([
+    ["a cold transfer under way", liveCall({ transfer_state: "transferring" }), 400, "bad_request"],
+    ["a call someone else holds", liveCall({ answered_by: USER_B }), 404, "not_found"],
+    ["a call that ended", liveCall({ status: "completed", ended_at: new Date().toISOString() }), 400, "bad_request"],
+    ["a 911 call", liveCall({ is_emergency: true }), 400, "bad_request"],
+  ])("refuses %s, touching nothing at Twilio", async (_l, row, status, code) => {
+    const { net, token } = await appSetup(row);
+    const { res, json } = await press(token, "hold");
+    expect(res.status).toBe(status);
+    expect(json.error.code).toBe(code);
+    expect(net.to(/api\.twilio\.com/)).toEqual([]);
+  });
+
+  it("two presses cannot both move the call: the loser of the claim touches nothing", async () => {
+    const { net, token } = await appSetup(liveCall(), {}, { claimed: false });
+    const { res } = await press(token, "hold");
+    expect(res.status).toBe(400);
+    expect(redirects(net)).toEqual([]);
+  });
+
+  it("within an hour of a 911 call from this number, an inbound call is not put on hold (plan 14: never voicemail)", async () => {
+    const { net, token } = await appSetup(liveCall(), {}, { route: routeInfo({ recent_emergency_user: USER_A }) });
+    const { res, json } = await press(token, "hold");
+    expect(res.status).toBe(400);
+    expect(json.error).toEqual({ code: "bad_request", message: EMERGENCY_CALLBACK });
+    expect(net.to(/api\.twilio\.com/)).toEqual([]);
+    expect(patches(net)).toEqual([]);
+  });
+
+  it("an outbound call has no 911 callback window to respect", async () => {
+    const { net, token } = await appSetup(outboundCall(), {}, { route: routeInfo({ recent_emergency_user: USER_A }) });
+    const { res } = await press(token, "hold");
+    expect(res.status).toBe(200);
+    expect(net.rpcCalls("phone_route_for_number")).toEqual([]);
+  });
+});
+
+describe("POST /calls/:id/resume", () => {
+  it("a conference nobody has started: brings YOUR leg back in as the one who starts it", async () => {
+    const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }), { conference: { sid: CONF, friendly_name: CALL_ID, status: "init" } });
+    const { json } = await press(token, "resume");
+    expect(json).toEqual({ ok: true, held: false, call_id: CALL_ID });
+    expect(redirects(net)).toEqual([{ sid: MY_LEG, twiml: conferenceTwiml(env, CALL_ID, "agent", true), status: null }]);
+    expect(events(net)).toEqual(["resume"]);
+  });
+
+  it("a conference nobody has started, with the customer on a Participants hold (a warm transfer from hold): takes them off hold FIRST, then starts it", async () => {
+    const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "init" },
+      participants: [customerIn(true), { call_sid: MY_LEG, hold: false, muted: false, status: "connected" }],
+    });
+    const { json } = await press(token, "resume");
+    expect(json).toEqual({ ok: true, held: false, call_id: CALL_ID });
+    expect(participantUpdates(net)).toEqual([{ sid: CALL_SID, form: { Hold: "false" } }]);
+    expect(redirects(net)).toEqual([{ sid: MY_LEG, twiml: conferenceTwiml(env, CALL_ID, "agent", true), status: null }]);
+    const unhold = net.seen.findIndex((s) => /\/Participants\/CA/.test(s.url.pathname));
+    const start = net.seen.findIndex((s) => s.method === "POST" && /\/Calls\/CA/.test(s.url.pathname));
+    expect(unhold).toBeLessThan(start);
+  });
+
+  it("resume is never refused for the 911 callback window: bringing a customer back is always allowed", async () => {
+    const { res } = await press((await appSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" },
+    }, { route: routeInfo({ recent_emergency_user: USER_A }) })).token, "resume");
+    expect(res.status).toBe(200);
+  });
+
+  it("a started conference: takes the customer off hold (Participants API)", async () => {
+    const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }), { conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" } });
+    await press(token, "resume");
+    expect(participantUpdates(net)).toEqual([{ sid: CALL_SID, form: { Hold: "false" } }]);
+    expect(redirects(net)).toEqual([]);
+  });
+
+  it("refuses a call that isn't on hold, and asks for a moment while the legs are still moving", async () => {
+    const plain = await appSetup(liveCall());
+    const a = await press(plain.token, "resume");
+    expect(a.json.error).toEqual({ code: "bad_request", message: "That call isn't on hold." });
+    const moving = await appSetup(liveCall({ transfer_state: "conference" }), { conference: null });
+    const b = await press(moving.token, "resume");
+    expect(b.json.error.message).toContain("Try again in a moment");
+  });
+});
+
+describe("POST /calls/:id/warm-transfer", () => {
+  it("from a plain call: moves it into the conference, then rings the teammate INTO it (Participants API)", async () => {
+    const { net, token } = await appSetup(liveCall());
+    const { res, json } = await press(token, "warm-transfer", { to_user_id: USER_B });
+    expect(res.status).toBe(200);
+    expect(json).toEqual({ ok: true, held: true, call_id: CALL_ID });
+    expect(redirects(net)).toEqual([{ sid: MY_LEG, twiml: conferenceTwiml(env, CALL_ID, "agent"), status: null }]);
+
+    const add = net.to(/\/Conferences\/[0-9a-f-]{36}\/Participants\.json$/)[0];
+    expect(add.url.pathname).toContain(`/Conferences/${CALL_ID}/Participants.json`); // by name
+    const form = new URLSearchParams(add.body);
+    expect(form.get("From")).toBe(BUSINESS_NUMBER);
+    expect(form.get("To")).toBe(`client:u_${USER_B.replace(/-/g, "")}_g3?call_id=${CALL_ID}&transferred_by=${USER_A}`);
+    expect(form.get("StartConferenceOnEnter")).toBe("true");
+    expect(form.get("EndConferenceOnExit")).toBe("false");
+    expect(form.get("Timeout")).toBe("20");
+    expect(form.get("StatusCallback")).toBe(`https://phone.example.test/voice/status?call=${CALL_ID}&leg=warm&user=${USER_B}&key=test-webhook-key`);
+    expect(form.getAll("StatusCallbackEvent")).toEqual(["initiated", "ringing", "answered", "completed"]);
+    expect(form.get("ConferenceStatusCallback")).toBe(`https://phone.example.test/voice/conference?call=${CALL_ID}&key=test-webhook-key`);
+    expect(form.getAll("ConferenceStatusCallbackEvent")).toEqual(["leave"]);
+    expect(form.toString()).not.toMatch(/Record/i);
+
+    expect(net.writes("phone_calls", "PATCH").map((s) => s.json)).toContainEqual({ rang_user_ids: [USER_A, USER_B] });
+    expect(events(net)).toContain("warm_transfer");
+  });
+
+  const addIndex = (net: FakeNet) => net.seen.findIndex((s) => s.method === "POST" && /\/Conferences\/[0-9a-f-]{36}\/Participants\.json$/.test(s.url.pathname));
+  const adds = (net: FakeNet) => net.to(/\/Conferences\/[0-9a-f-]{36}\/Participants\.json$/).filter((s) => s.method === "POST");
+
+  it("ON HOLD (a conference nobody has started): the customer is put on a Participants hold BEFORE the teammate is rung, so starting the conference does not connect them into your private talk", async () => {
+    // The teammate joins with startConferenceOnEnter=true, which connects everyone WAITING.
+    // A customer who is only waiting (plain Hold) would hear the consult; a held one does not.
+    const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }), { conference: { sid: CONF, friendly_name: CALL_ID, status: "init" } });
+    const { res, json } = await press(token, "warm-transfer", { to_user_id: USER_B });
+    expect(res.status).toBe(200);
+    expect(json).toEqual({ ok: true, held: null, call_id: CALL_ID }); // stays on hold; Resume brings them in
+    expect(participantUpdates(net)).toEqual([{ sid: CALL_SID, form: { Hold: "true", HoldUrl: HOLD_MUSIC, HoldMethod: "GET" } }]);
+    const held = net.seen.findIndex((s) => /\/Participants\/CA/.test(s.url.pathname));
+    expect(held).toBeGreaterThanOrEqual(0);
+    expect(held).toBeLessThan(addIndex(net));
+    expect(new URLSearchParams(adds(net)[0].body).get("StartConferenceOnEnter")).toBe("true");
+    expect(redirects(net)).toEqual([]);
+  });
+
+  it.each([
+    ["the customer already on a Participants hold", true],
+    ["you talking to the customer in the conference (after Resume): the teammate joins the two of you", false],
+  ])("a STARTED conference, %s: no hold change, just the teammate (held: null)", async (_l, hold) => {
+    const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" }, participants: [customerIn(hold)],
+    });
+    const { json } = await press(token, "warm-transfer", { to_user_id: USER_B });
+    expect(json).toEqual({ ok: true, held: null, call_id: CALL_ID });
+    expect(participantUpdates(net)).toEqual([]);
+    expect(redirects(net)).toEqual([]);
+    expect(adds(net)).toHaveLength(1);
+  });
+
+  it.each([
+    ["no conference yet (the legs are still moving in after Hold)", null, undefined],
+    ["the customer's leg not in it yet (the hold answers 404)", { sid: CONF, friendly_name: CALL_ID, status: "init" }, 404],
+  ])("%s: asks for a moment and rings nobody", async (_l, conference, participantStatus) => {
+    const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }), { conference, participantStatus });
+    const { res, json } = await press(token, "warm-transfer", { to_user_id: USER_B });
+    expect(res.status).toBe(400);
+    expect(json.error.message).toBe("The call is still being put on hold. Try again in a moment.");
+    expect(adds(net)).toEqual([]);
+  });
+
+  it("a hold Twilio refuses rings nobody (the customer is never connected into the consult)", async () => {
+    const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "init" }, participantStatus: 500,
+    });
+    const { res, json } = await press(token, "warm-transfer", { to_user_id: USER_B });
+    expect(res.status).toBe(502);
+    expect(json.error.message).toBe("Your teammate couldn't be rung. You're still on the call.");
+    expect(adds(net)).toEqual([]);
+  });
+
+  it("within an hour of a 911 call from this number, an inbound call is not warm-transferred", async () => {
+    const { net, token } = await appSetup(liveCall(), {}, { route: routeInfo({ recent_emergency_user: USER_A }) });
+    const { res, json } = await press(token, "warm-transfer", { to_user_id: USER_B });
+    expect(res.status).toBe(400);
+    expect(json.error.message).toBe(EMERGENCY_CALLBACK);
+    expect(net.to(/api\.twilio\.com/)).toEqual([]);
+  });
+
+  it("a teammate on DND is refused (you're still on the line to choose), nothing moved", async () => {
+    const { net, token } = await appSetup(liveCall(), {}, { targetSettings: [{ dnd: true, dnd_until: null }] });
+    const { res, json } = await press(token, "warm-transfer", { to_user_id: USER_B });
+    expect(res.status).toBe(400);
+    expect(json.error.message).toBe("That teammate is on Do Not Disturb.");
+    expect(net.to(/api\.twilio\.com/)).toEqual([]);
+  });
+
+  it("a teammate on another tenant is not found", async () => {
+    const { net, token } = await appSetup(liveCall(), {}, { target: callerCtx({ client_id: "other-tenant" }) });
+    const { res } = await press(token, "warm-transfer", { to_user_id: USER_B });
+    expect(res.status).toBe(404);
+    expect(net.to(/api\.twilio\.com/)).toEqual([]);
+  });
+
+  it("if the teammate can't be rung after the move, says the customer is on hold and how to get them back", async () => {
+    const { token } = await appSetup(liveCall(), { failAdd: true });
+    const { res, json } = await press(token, "warm-transfer", { to_user_id: USER_B });
+    expect(res.status).toBe(502);
+    expect(json.error.message).toBe("Your teammate couldn't be rung. The customer is on hold; press Resume to talk to them.");
+  });
+});
+
+describe("POST /calls/:id/transfer (cold) from the conference", () => {
+  it("claims from 'conference' (not null) and redirects the customer, which ends the conference for the rest", async () => {
+    const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }));
+    const { res } = await press(token, "transfer", { to_user_id: USER_B });
+    expect(res.status).toBe(200);
+    const claim = patches(net)[0];
+    expect(claim.body).toMatchObject({ transfer_state: "transferring", transferred_from: USER_A });
+    expect(claim.url).toContain("transfer_state=eq.conference");
+    expect(redirects(net)[0].sid).toBe(CALL_SID);
+  });
+
+  it("a failed redirect puts it back into the conference state, not null", async () => {
+    const { net, token } = await appSetup(liveCall({ transfer_state: "conference" }), { failRedirect: true });
+    await press(token, "transfer", { to_user_id: USER_B });
+    expect(patches(net)[1].body).toMatchObject({ transfer_state: "conference", answered_by: USER_A });
+  });
+
+  it("within an hour of a 911 call from this number, an inbound call is not cold-transferred either (a teammate on DND would mean voicemail)", async () => {
+    const { net, token } = await appSetup(liveCall(), {}, { route: routeInfo({ recent_emergency_user: USER_A }) });
+    const { res, json } = await press(token, "transfer", { to_user_id: USER_B });
+    expect(res.status).toBe(400);
+    expect(json.error.message).toBe(EMERGENCY_CALLBACK);
+    expect(patches(net)).toEqual([]);
+    expect(net.to(/api\.twilio\.com/)).toEqual([]);
+  });
+});
+
+// ── The Twilio side ─────────────────────────────────────────────────────────────────
+
+function twilioSetup(row: CallRow | null, t: TwilioStub = {}, opts: { claimed?: boolean } = {}) {
+  const net = new FakeNet().install();
+  net.rest("GET", "phone_calls", () => (row ? [row] : []));
+  net.rest("PATCH", "phone_calls", () => (opts.claimed === false ? [] : [{ id: CALL_ID }]));
+  net.rest("POST", "phone_call_events", () => []);
+  net.rest("POST", "app_errors", () => []);
+  net.rpc("phone_route_for_number", () => routeInfo());
+  stubTwilio(net, t);
+  return net;
+}
+
+const warmStatus = async (status: string) => call(env, await twilioPost(env, "/voice/status", {
+  CallSid: TEAMMATE_LEG, CallStatus: status, AccountSid: ACCOUNT, To: `client:u_${USER_B.replace(/-/g, "")}_g3`,
+}, { call: CALL_ID, leg: "warm", user: USER_B }));
+
+const leave = async (leaving: string) => call(env, await twilioPost(env, "/voice/conference", {
+  StatusCallbackEvent: "participant-leave", ConferenceSid: CONF, FriendlyName: CALL_ID, CallSid: leaving, AccountSid: ACCOUNT,
+}, { call: CALL_ID }));
+
+const customerIn = (hold = false) => ({ call_sid: CALL_SID, hold, muted: false, status: "connected" });
+
+describe("the warm-transfer teammate's leg (/voice/status?leg=warm)", () => {
+  it("answering hands them the call: answered_by, transferred_from and client_call_sid move, only while in the conference", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }));
+    const { res } = await warmStatus("in-progress");
+    expect(res.status).toBe(204);
+    const p = patches(net)[0];
+    expect(p.body).toEqual({ answered_by: USER_B, transferred_from: USER_A, client_call_sid: TEAMMATE_LEG });
+    expect(p.url).toContain("transfer_state=eq.conference");
+  });
+
+  it("on an OUTBOUND call, the one handing it on is the placer", async () => {
+    const net = twilioSetup(outboundCall({ transfer_state: "conference" }));
+    await warmStatus("in-progress");
+    expect(patches(net)[0].body).toMatchObject({ transferred_from: USER_A, answered_by: USER_B });
+  });
+
+  it("answering after the call has left its conference (ended, or cold-transferred) hangs the teammate up: no empty conference", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "transferring" }));
+    await warmStatus("in-progress");
+    expect(patches(net)).toEqual([]);
+    expect(redirects(net)).toEqual([{ sid: TEAMMATE_LEG, twiml: null, status: "completed" }]);
+  });
+
+  it("answering while you are still there (the consult) leaves the customer's hold alone", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" },
+      participants: [customerIn(true), { call_sid: MY_LEG, hold: false, muted: false, status: "connected" }, { call_sid: TEAMMATE_LEG, hold: false, muted: false, status: "connected" }],
+    });
+    await warmStatus("in-progress");
+    expect(patches(net)[0].body).toMatchObject({ answered_by: USER_B });
+    expect(participantUpdates(net)).toEqual([]);
+  });
+
+  it("answering after you already hung up, with the customer on hold: the customer comes off hold, so the two talk (SPEC: hanging up hands them over)", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" },
+      participants: [customerIn(true), { call_sid: TEAMMATE_LEG, hold: false, muted: false, status: "connected" }],
+    });
+    await warmStatus("in-progress");
+    expect(patches(net)[0].body).toMatchObject({ answered_by: USER_B, client_call_sid: TEAMMATE_LEG });
+    expect(participantUpdates(net)).toEqual([{ sid: CALL_SID, form: { Hold: "false" } }]);
+    expect(events(net)).toContain("handed_over");
+  });
+
+  describe("accepted on ?key= alone (no TWILIO_AUTH_TOKEN): the user in the URL is not trusted", () => {
+    const keyOnly = makeEnv({ TWILIO_AUTH_TOKEN: undefined });
+    const unsignedAnswer = async (user: string) => call(keyOnly, await twilioPost(keyOnly, "/voice/status", {
+      CallSid: TEAMMATE_LEG, CallStatus: "in-progress", AccountSid: ACCOUNT,
+    }, { call: CALL_ID, leg: "warm", user }));
+    const room = {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" },
+      participants: [customerIn(), { call_sid: MY_LEG, hold: false, muted: false, status: "connected" }, { call_sid: TEAMMATE_LEG, hold: false, muted: false, status: "connected" }],
+      callStatus: { [TEAMMATE_LEG]: "in-progress" },
+    };
+
+    it("a forged answer naming someone the leg did not ring moves nothing (and says so)", async () => {
+      const net = twilioSetup(liveCall({ transfer_state: "conference" }), { ...room, callTo: { [TEAMMATE_LEG]: `client:u_${USER_B.replace(/-/g, "")}_g3` } });
+      await unsignedAnswer(USER_C);
+      expect(patches(net)).toEqual([]);
+      expect(net.writes("app_errors").map((s) => s.json.code)).toContain("warm_answer_unverified");
+    });
+
+    it("a leg that is not in this call's conference moves nothing", async () => {
+      const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+        ...room, participants: [customerIn()], callTo: { [TEAMMATE_LEG]: `client:u_${USER_B.replace(/-/g, "")}_g3` },
+      });
+      await unsignedAnswer(USER_B);
+      expect(patches(net)).toEqual([]);
+    });
+
+    it("an answer Twilio's records agree with hands the call over", async () => {
+      const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+        ...room, callTo: { [TEAMMATE_LEG]: `client:u_${USER_B.replace(/-/g, "")}_g3?call_id=${CALL_ID}&transferred_by=${USER_A}` },
+      });
+      await unsignedAnswer(USER_B);
+      expect(patches(net)[0].body).toEqual({ answered_by: USER_B, transferred_from: USER_A, client_call_sid: TEAMMATE_LEG });
+    });
+  });
+
+  it("no answer while you are still there: nothing changes for the customer", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "init" },
+      participants: [customerIn(), { call_sid: MY_LEG, hold: false, muted: false, status: "connected" }],
+    });
+    await warmStatus("no-answer");
+    expect(redirects(net)).toEqual([]);
+    expect(events(net)).toContain("warm_transfer_missed");
+  });
+
+  it("no answer after you already dropped: the customer, alone, goes to voicemail (never hung up on)", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" },
+      participants: [customerIn()],
+    });
+    await warmStatus("busy");
+    const claim = patches(net)[0];
+    expect(claim.body).toEqual({ transfer_state: null });
+    expect(claim.url).toContain("transfer_state=eq.conference");
+    const r = redirects(net);
+    expect(r).toHaveLength(1);
+    expect(r[0].sid).toBe(CALL_SID);
+    expect(r[0].twiml).toContain("<Record");
+    expect(r[0].twiml).toContain("You've reached Demo Sheds.");
+  });
+});
+
+describe("/voice/conference (a participant left)", () => {
+  it("answers 204 at once", async () => {
+    twilioSetup(null);
+    const { res, text } = await leave(MY_LEG);
+    expect(res.status).toBe(204);
+    expect(text).toBe("");
+  });
+
+  it("you hang up while TALKING to the customer (nobody else there): the call ends for them too", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" },
+      participants: [customerIn(false)],
+      callStatus: { [MY_LEG]: "completed" },
+    });
+    await leave(MY_LEG);
+    expect(redirects(net)).toEqual([{ sid: CALL_SID, twiml: null, status: "completed" }]);
+    expect(events(net)).toContain("conference_ended");
+  });
+
+  it.each([
+    ["on hold (Participants API)", "in-progress", true],
+    ["waiting in a conference that never started", "init", false],
+  ])("you hang up while the customer is %s: voicemail, not a dead line", async (_l, confStatus, hold) => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: confStatus },
+      participants: [customerIn(hold)],
+      callStatus: { [MY_LEG]: "completed" },
+    });
+    await leave(MY_LEG);
+    const r = redirects(net);
+    expect(r).toHaveLength(1);
+    expect(r[0].sid).toBe(CALL_SID);
+    expect(r[0].twiml).toContain("<Record");
+  });
+
+  it("a leg that was only REDIRECTED (resume re-joining) is still live: ignored, nothing listed", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), { callStatus: { [MY_LEG]: "in-progress" }, participants: [customerIn()] });
+    await leave(MY_LEG);
+    expect(net.to(/Participants\.json/)).toEqual([]);
+    expect(redirects(net)).toEqual([]);
+  });
+
+  it("you drop after the teammate joined: the customer is not alone, nothing happens", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference", answered_by: USER_B, transferred_from: USER_A, client_call_sid: TEAMMATE_LEG }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" },
+      participants: [customerIn(), { call_sid: TEAMMATE_LEG, hold: false, muted: false, status: "connected" }],
+    });
+    await leave(MY_LEG);
+    expect(redirects(net)).toEqual([]);
+    expect(participantUpdates(net)).toEqual([]);
+  });
+
+  it("you drop MID-CONSULT (the customer on hold, the teammate took the call): the customer comes off hold and is left with the teammate", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference", answered_by: USER_B, transferred_from: USER_A, client_call_sid: TEAMMATE_LEG }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" },
+      participants: [customerIn(true), { call_sid: TEAMMATE_LEG, hold: false, muted: false, status: "connected" }],
+      callStatus: { [MY_LEG]: "completed" },
+    });
+    await leave(MY_LEG);
+    expect(participantUpdates(net)).toEqual([{ sid: CALL_SID, form: { Hold: "false" } }]);
+    expect(redirects(net)).toEqual([]);
+    expect(patches(net)).toEqual([]); // still in its conference
+  });
+
+  it("the TEAMMATE drops mid-consult: the customer stays on hold for you (Resume is yours to press)", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference", answered_by: USER_B, transferred_from: USER_A, client_call_sid: TEAMMATE_LEG }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" },
+      participants: [customerIn(true), { call_sid: MY_LEG, hold: false, muted: false, status: "connected" }],
+      callStatus: { [TEAMMATE_LEG]: "completed" },
+    });
+    await leave(TEAMMATE_LEG);
+    expect(participantUpdates(net)).toEqual([]);
+    expect(redirects(net)).toEqual([]);
+  });
+
+  it("Twilio's list still showing the leg that left does not stop the customer being finished", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "init" },
+      participants: [customerIn(), { call_sid: MY_LEG, hold: false, muted: false, status: "connected" }],
+      callStatus: { [MY_LEG]: "completed" },
+    });
+    await leave(MY_LEG);
+    expect(redirects(net)[0].twiml).toContain("<Record");
+  });
+
+  it.each([
+    ["the customer leaving (the conference ends by itself)", liveCall({ transfer_state: "conference" }), CALL_SID],
+    ["a call no longer in its conference", liveCall({ transfer_state: null }), MY_LEG],
+    ["a call that has ended", liveCall({ transfer_state: "conference", ended_at: new Date().toISOString() }), MY_LEG],
+  ])("ignores %s", async (_l, row, leaving) => {
+    const net = twilioSetup(row, { participants: [customerIn()], conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" } });
+    await leave(leaving);
+    expect(net.to(/api\.twilio\.com/)).toEqual([]);
+  });
+
+  it("if finishing the customer fails at Twilio, the row goes back to the conference state and the failure is logged", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" },
+      participants: [customerIn(false)],
+      failRedirect: true,
+    });
+    await leave(MY_LEG);
+    const bodies = patches(net);
+    expect(bodies[0].body).toEqual({ transfer_state: null });
+    expect(bodies[1].body).toEqual({ transfer_state: "conference" });
+    expect(bodies[1].url).toContain("transfer_state=is.null");
+    expect(net.writes("app_errors").map((s) => s.json.code)).toContain("conference_event_failed");
+  });
+
+  it("two leave events racing: only the one that wins the claim finishes the customer", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" }, participants: [customerIn()],
+    }, { claimed: false });
+    await leave(MY_LEG);
+    expect(redirects(net)).toEqual([]);
+  });
+});
+
+describe("/voice/status while the call is in its conference", () => {
+  const legEnds = async (sid: string, query: Record<string, string>) =>
+    call(env, await twilioPost(env, "/voice/status", { CallSid: sid, CallStatus: "completed", CallDuration: "40", AccountSid: ACCOUNT }, query));
+
+  it("your (inbound, child) leg ending does NOT close the call: the customer may still be talking to a teammate", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" },
+      participants: [customerIn(), { call_sid: TEAMMATE_LEG, hold: false, muted: false, status: "connected" }],
+    });
+    await legEnds(MY_LEG, { call: CALL_ID, leg: "client" });
+    expect(patches(net)).toEqual([]);
+    expect(redirects(net)).toEqual([]);
+  });
+
+  // The backstop: the leave event is skipped when Twilio still reports the leaving leg live, and
+  // only logged when a REST read fails. The holder's own final status must also finish a
+  // customer it left alone, or they hear hold music until they give up.
+  it.each([
+    ["leg=client (inbound, the answering app)", { call: CALL_ID, leg: "client" }, liveCall({ transfer_state: "conference" }), MY_LEG],
+    ["leg=cell (a forwarded cell that pressed 1)", { call: CALL_ID, leg: "cell", user: USER_A }, liveCall({ transfer_state: "conference" }), MY_LEG],
+    ["leg=warm (the teammate who took a warm transfer)", { call: CALL_ID, leg: "warm", user: USER_B }, liveCall({ transfer_state: "conference", answered_by: USER_B, transferred_from: USER_A, client_call_sid: TEAMMATE_LEG }), TEAMMATE_LEG],
+    ["the outbound app leg (TwiML App callback, no call id)", { leg: "client" }, outboundCall({ transfer_state: "conference" }), MY_LEG],
+  ] as const)("the holder's leg ending, %s, finishes a customer left on hold: voicemail, even with no leave event", async (_l, query, row, sid) => {
+    const net = twilioSetup(row, {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" },
+      // Twilio's list may still show the leg that just ended; its own status proves it gone.
+      participants: [customerIn(true), { call_sid: sid, hold: false, muted: false, status: "connected" }],
+    });
+    await legEnds(sid, { ...query });
+    const claim = patches(net)[0];
+    expect(claim.body).toEqual({ transfer_state: null });
+    expect(claim.url).toContain("transfer_state=eq.conference");
+    const r = redirects(net);
+    expect(r).toHaveLength(1);
+    expect(r[0].sid).toBe(CALL_SID);
+    expect(r[0].twiml).toContain("<Record");
+  });
+
+  it("the holder's leg ending while you were talking hangs the customer up, as a plain call ends", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" }, participants: [customerIn(false)],
+    });
+    await legEnds(MY_LEG, { call: CALL_ID, leg: "client" });
+    expect(redirects(net)).toEqual([{ sid: CALL_SID, twiml: null, status: "completed" }]);
+  });
+
+  it("a leg that only RANG (not the holder) ending is not a reason to finish anyone", async () => {
+    const other = "CA" + "0".repeat(31) + "9";
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" }, participants: [customerIn(true)],
+    });
+    await call(env, await twilioPost(env, "/voice/status", { CallSid: other, CallStatus: "canceled", AccountSid: ACCOUNT }, { call: CALL_ID, leg: "client" }));
+    expect(net.to(/Conferences/)).toEqual([]);
+    expect(redirects(net)).toEqual([]);
+  });
+
+  it("the leave event having finished the customer first: the backstop loses the claim and does nothing", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }), {
+      conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" }, participants: [customerIn(true)],
+    }, { claimed: false });
+    await legEnds(MY_LEG, { call: CALL_ID, leg: "client" });
+    expect(redirects(net)).toEqual([]);
+  });
+
+  it("accepted on ?key= alone, a 'completed' Twilio does not agree with (the leg is live) hangs nobody up", async () => {
+    const keyOnly = makeEnv({ TWILIO_AUTH_TOKEN: undefined });
+    const room = { conference: { sid: CONF, friendly_name: CALL_ID, status: "in-progress" }, participants: [customerIn(false), { call_sid: MY_LEG, hold: false, muted: false, status: "connected" }] };
+    const forged = twilioSetup(liveCall({ transfer_state: "conference" }), { ...room, callStatus: { [MY_LEG]: "in-progress" } });
+    await call(keyOnly, await twilioPost(keyOnly, "/voice/status", { CallSid: MY_LEG, CallStatus: "completed", AccountSid: ACCOUNT }, { call: CALL_ID, leg: "client" }));
+    expect(redirects(forged)).toEqual([]);
+    expect(patches(forged)).toEqual([]);
+    // ...while a real one (Twilio says completed) still finishes the customer.
+    const real = twilioSetup(liveCall({ transfer_state: "conference" }), { ...room, callStatus: { [MY_LEG]: "completed" } });
+    await call(keyOnly, await twilioPost(keyOnly, "/voice/status", { CallSid: MY_LEG, CallStatus: "completed", AccountSid: ACCOUNT }, { call: CALL_ID, leg: "client" }));
+    expect(redirects(real)).toEqual([{ sid: CALL_SID, twiml: null, status: "completed" }]);
+  });
+
+  it("a failed backstop is logged under its own code", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference" }));
+    net.on("GET", (u) => u.pathname.endsWith("/Conferences.json"), () => jsonRes({ code: 20500 }, 500));
+    await legEnds(MY_LEG, { call: CALL_ID, leg: "client" });
+    expect(net.writes("app_errors").map((s) => s.json.code)).toContain("conference_backstop_failed");
+  });
+
+  it("the outbound customer's leg ending closes the call and clears the conference state", async () => {
+    const net = twilioSetup(outboundCall({ transfer_state: "conference" }));
+    await call(env, await twilioPost(env, "/voice/status", { CallSid: CALL_SID, CallStatus: "completed", CallDuration: "95", AccountSid: ACCOUNT }, { call: CALL_ID, leg: "pstn" }));
+    const bodies = patches(net).map((p) => p.body);
+    expect(bodies[0]).toMatchObject({ status: "completed" });
+    expect(bodies).toContainEqual({ transfer_state: null });
+  });
+
+  it("the inbound customer's leg ending closes it too (the existing parent-leg path)", async () => {
+    const net = twilioSetup(liveCall({ transfer_state: "conference", answered_by: USER_C }));
+    await call(env, await twilioPost(env, "/voice/status", { CallSid: CALL_SID, CallStatus: "completed", AccountSid: ACCOUNT }, { leg: "pstn" }));
+    const bodies = patches(net).map((p) => p.body);
+    expect(bodies[0]).toMatchObject({ status: "completed" });
+    expect(bodies).toContainEqual({ transfer_state: null });
+    expect(filter(net.reads("phone_calls")[0], "twilio_call_sid")).toBe(CALL_SID);
+  });
+});

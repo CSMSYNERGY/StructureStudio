@@ -15,8 +15,10 @@
  *   3. Billing is owner-only through EVERY door — preset, stored override, and grant.
  *   4. Nobody grants above themselves, so an admin cannot self-promote.
  *
- * Run: deno test supabase/functions/_shared/access.test.ts
- * (the pre-push gate runs this for you — see scripts/preflight.mjs)
+ * Run: deno test --allow-read supabase/functions/_shared/access.test.ts
+ * (the pre-push gate runs this for you — see scripts/preflight.mjs, which grants a repo-scoped
+ * --allow-read. The read is for the SQL-mirror test at the bottom, which parses the newest
+ * migration that defines area_level_for.)
  */
 import { assert, assertEquals, assertFalse } from "jsr:@std/assert@1";
 import {
@@ -33,6 +35,7 @@ import {
   mayGrant,
   mayGrantMap,
   ownContactsOnly,
+  ownPhoneOnly,
   PRESETS,
   roleForTitle,
   sanitizeAccess,
@@ -699,4 +702,161 @@ Deno.test("a dealer's narrowed contacts scope cannot be widened by someone who s
   assertFalse(mayGrant("admin", narrowed, "contacts", "view"));
   assertFalse(mayGrant("admin", narrowed, "contacts", "edit"));
   assert(mayGrant("admin", narrowed, "contacts", "own"));
+});
+
+// ── SSS PHONE (migration 254, 2026-09-29) ────────────────────────────────────────────────
+// Levels none/own/view/edit. The rule worth pinning is the rank trap: RANK scores 'own' and
+// 'view' the same, so canRead() says yes to both, and only ownPhoneOnly() can tell "my calls"
+// from "the team's calls". Presets are the plan's §7 defaults.
+
+Deno.test("phone presets: owner/admin edit, office staff/sales manager view, reps/dealers own, the rest none", () => {
+  const expected: Record<string, Level> = {
+    owner: "edit", admin: "edit",
+    office_staff: "view", sales_manager: "view",
+    sales_rep: "own", dealer: "own",
+    scheduler: "none", crew_leader: "none", crew_member: "none", driver: "none",
+  };
+  // Every title is listed, so a title added tomorrow fails here until somebody decides.
+  assertEquals(Object.keys(expected).sort(), TITLES.map((t) => t.key).sort());
+  for (const [title, level] of Object.entries(expected)) {
+    const role = title === "owner" ? "owner" : title === "admin" ? "admin" : "user";
+    assertEquals(effectiveAccess(role, title, null).phone, level, title);
+  }
+  // Omission is how a preset denies. Spelling 'none' out would suggest the list is exhaustive.
+  for (const t of ["scheduler", "crew_leader", "crew_member", "driver"] as const) {
+    assertFalse("phone" in PRESETS[t], `${t} should omit phone, not spell out none`);
+  }
+});
+
+Deno.test("phone: an owner is always edit, whatever is stored", () => {
+  for (const stored of ["none", "own", "view"]) {
+    const a = effectiveAccess("owner", "owner", { phone: stored });
+    assertEquals(a.phone, "edit", `stored ${stored}`);
+    assertFalse(ownPhoneOnly(a), "an owner always sees the team");
+  }
+});
+
+Deno.test("phone: the team check is the LITERAL level, because rank puts own == view", () => {
+  const rep = effectiveAccess("user", "sales_rep", null);
+  const office = effectiveAccess("user", "office_staff", null);
+  // Both may use the phone...
+  assert(canRead(rep, "phone"));
+  assert(canRead(office, "phone"));
+  assertEquals(checkGate({ area: "phone", level: "view" }, rep), null,
+    "a gate cannot express 'team', so 'own' passes a view gate — which is why the helper exists");
+  // ...and only one of them sees the team.
+  assert(ownPhoneOnly(rep));
+  assertFalse(ownPhoneOnly(office));
+  assertFalse(ownPhoneOnly(effectiveAccess("user", "admin", null)));
+  assert(ownPhoneOnly(effectiveAccess("user", "dealer", null)));
+});
+
+Deno.test("ownPhoneOnly fails closed: 'none' and a missing key are 'own only' too", () => {
+  // The difference from ownContactsOnly, on purpose: `!ownPhoneOnly(a)` must never be true for
+  // someone with no phone access, even on a path that forgot the canRead gate.
+  assert(ownPhoneOnly({ phone: "none" }));
+  assert(ownPhoneOnly({}));
+  assert(ownPhoneOnly(effectiveAccess("user", "driver", null)));
+  assertFalse(ownPhoneOnly({ phone: "view" }));
+  assertFalse(ownPhoneOnly({ phone: "edit" }));
+  assertFalse(canRead(effectiveAccess("user", "driver", null), "phone"), "and the gate refuses them");
+});
+
+Deno.test("phone: only edit changes phone settings — 'own' does not write", () => {
+  // canEdit(phone) is the settings gate. 'own' makes calls but must not re-route the business
+  // line, so the area is deliberately NOT ownWrites.
+  assertFalse(!!AREAS.find((a) => a.key === "phone")?.ownWrites);
+  assertFalse(canEdit(effectiveAccess("user", "sales_rep", null), "phone"));
+  assertFalse(canEdit(effectiveAccess("user", "office_staff", null), "phone"));
+  assert(canEdit(effectiveAccess("user", "admin", null), "phone"));
+  assert(checkGate({ area: "phone", level: "edit" }, effectiveAccess("user", "sales_manager", null)) !== null);
+});
+
+Deno.test("phone: overrides layer on the preset, and an unknown level is discarded", () => {
+  assertEquals(effectiveAccess("user", "crew_leader", { phone: "own" }).phone, "own");
+  assertEquals(effectiveAccess("user", "driver", { phone: "view" }).phone, "view");
+  assertEquals(effectiveAccess("user", "sales_rep", { phone: "none" }).phone, "none", "taking it away works");
+  assertEquals(effectiveAccess("user", "dealer", { phone: "admin" }).phone, "own", "out-of-vocabulary level keeps the preset");
+  assertEquals(sanitizeAccess({ phone: "own" }, "crew_member"), { phone: "own" });
+  assertEquals(sanitizeAccess({ phone: "sideways" }, "crew_member"), {});
+});
+
+Deno.test("phone: an 'own' holder cannot hand out the team's calls", () => {
+  // mayGrant rule 3, on the second area that pairs 'own' with a real 'view'.
+  const rep = effectiveAccess("user", "sales_rep", null);
+  assertFalse(mayGrant("user", rep, "phone", "view"));
+  assertFalse(mayGrant("user", rep, "phone", "edit"));
+  assert(mayGrant("user", rep, "phone", "own"));
+  // A viewer passes on view or own, never settings.
+  const mgr = effectiveAccess("user", "sales_manager", null);
+  assert(mayGrant("user", mgr, "phone", "view"));
+  assert(mayGrant("user", mgr, "phone", "own"));
+  assertFalse(mayGrant("user", mgr, "phone", "edit"));
+  // An admin (edit) may set any level; an owner may too.
+  assert(mayGrant("admin", effectiveAccess("admin", "admin", null), "phone", "edit"));
+  assert(mayGrant("owner", {}, "phone", "view"));
+});
+
+Deno.test("phone is offered on every tenant's Team screen", () => {
+  // Not internalOnly: every builder's owner hands this out.
+  assert(accessMetadata().areas.some((a) => a.key === "phone"));
+  assertEquals(AREAS.find((a) => a.key === "phone")?.levels, ["none", "own", "view", "edit"]);
+});
+
+// ── The SQL twin, read back and compared cell by cell ───────────────────────────────────
+// scripts/preflight.mjs compares area KEYS, level VOCABULARIES and TITLE keys between this
+// module and area_level_for(), and says in its own header that it cannot compare preset
+// LEVELS, because PRESETS.owner is computed and cannot be scanned. A Deno test can evaluate
+// it, so this closes that gap: every title x area cell, and the two area flags the SQL reads.
+// Migration 219 exists because one such cell (office_staff designer) had to be asserted by
+// hand; the sales_rep `orders` drift CLAUDE.md records was exactly this class.
+//
+// Same discovery rule as preflight: the newest migration that DEFINES the function, never the
+// highest number, and the literals are found by their declaration, never by the bare word.
+Deno.test("area_level_for's k_areas and k_presets match AREAS and PRESETS exactly", async () => {
+  const dir = new URL("../../migrations/", import.meta.url);
+  const names: string[] = [];
+  for await (const e of Deno.readDir(dir)) if (e.isFile && e.name.endsWith(".sql")) names.push(e.name);
+  names.sort().reverse();
+  let file = "";
+  let src = "";
+  for (const n of names) {
+    const s = await Deno.readTextFile(new URL(n, dir));
+    if (/create\s+or\s+replace\s+function\s+public\.area_level_for/i.test(s)) {
+      file = n;
+      src = s;
+      break;
+    }
+  }
+  assert(src, "no migration defines public.area_level_for");
+  const literal = (decl: string) => {
+    const at = new RegExp(decl + "\\s+constant\\s+jsonb\\s*:=").exec(src);
+    assert(at, `${file}: cannot find the ${decl} declaration`);
+    const open = src.indexOf("$j$", at.index);
+    const close = src.indexOf("$j$", open + 3);
+    assert(open > 0 && close > open, `${file}: cannot read the ${decl} literal`);
+    return JSON.parse(src.slice(open + 3, close));
+  };
+  const sqlAreas = literal("k_areas") as Record<string, { levels: string[]; ownerGranted?: boolean; byTitleOnly?: boolean }>;
+  const sqlPresets = literal("k_presets") as Record<string, Record<string, string>>;
+
+  assertEquals(Object.keys(sqlAreas).sort(), [...AREA_KEYS].sort(), `${file}: area keys`);
+  for (const a of AREAS) {
+    assertEquals(sqlAreas[a.key].levels, a.levels, `${file}: ${a.key} levels`);
+    assertEquals(!!sqlAreas[a.key].ownerGranted, !!a.ownerGranted, `${file}: ${a.key} ownerGranted`);
+    assertEquals(!!sqlAreas[a.key].byTitleOnly, !!a.byTitleOnly, `${file}: ${a.key} byTitleOnly`);
+  }
+  assertEquals(Object.keys(sqlPresets).sort(), TITLES.map((t) => t.key).sort(), `${file}: titles`);
+  for (const t of TITLES) {
+    for (const k of AREA_KEYS) {
+      assertEquals(
+        sqlPresets[t.key][k] ?? "none",
+        PRESETS[t.key][k] ?? "none",
+        `${file}: ${t.key}.${k} differs between k_presets and PRESETS`,
+      );
+    }
+    for (const k of Object.keys(sqlPresets[t.key])) {
+      assert(AREA_KEYS.includes(k), `${file}: k_presets.${t.key} names unknown area ${k}`);
+    }
+  }
 });

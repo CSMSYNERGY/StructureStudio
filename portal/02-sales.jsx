@@ -925,7 +925,12 @@ function buildContactTimeline(act) {
 // with a design count + activity dates. Read-only. "Last activity" = the newest
 // design's updated_at (portal logins aren't client-readable); status = the
 // highest fulfillment stage across that lead's designs.
-function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesign = null, onOpenRecord = null }) {
+// SSS Phone (2026-09-29): `callOffered` is ssPhoneOffered's answer for the tenant on screen (the
+// shell's one rule for whether calling exists here at all); `viewing`, `canCall`, `phoneOn` and
+// `userId` are exactly what the contact record's Call tab is given, and the row's Call button asks
+// that tab's own enabled/hint functions, so the list and the record cannot disagree.
+function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesign = null, onOpenRecord = null,
+  callOffered = false, viewing = false, canCall = false, phoneOn = false, userId = null }) {
   // Cache-seeded so returning to Contacts paints the grouped list at once and refreshes
   // behind it (see ssTabCache in 01-core). Operator view-as reads through a different path
   // and is left uncached — those rows are service-role and audit-logged.
@@ -1138,6 +1143,9 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   // Guards against a stale contact_activity response landing under a different contact:
   // every request stamps this ref, and only the newest one is allowed to render.
   const actReqRef = useRef(0);
+  // SSS Phone: where the last row's Call got to — { key, kind, to?, text? }, ssPhoneStartCall's
+  // answer for the row with that group key. One at a time; a new press replaces it.
+  const [callUi, setCallUi] = useState(null);
 
 
   const openDetails = async (g) => {
@@ -1149,6 +1157,20 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     setActBusy(false);
     if (err) { setActErr(await fnError(err)); return; }
     setActivity(data);
+  };
+
+  // ── SSS PHONE: Call from the list ──────────────────────────────────────────────────────
+  // THE RECORD PAGE'S RULES, NOT A COPY OF THEM. The button asks CRM_TABS' own "call" entry
+  // (enabled + hint) with the same four facts the record's ctx carries, and dials through the
+  // same ssPhoneStartCall. A row with no phone gets no button at all: on a list, a column of
+  // greyed "Call"s for email-only customers reads as broken, and the record still explains it.
+  const callTab = CRM_TABS.find((t) => t.key === "call");
+  const callCtx = (g) => ({ viewing: !!viewing, canCall: !!canCall, phone: { on: !!phoneOn }, contact: { phone: g.phone } });
+  const callRow = async (g) => {
+    setCallUi({ key: g.key, kind: "checking", to: ssPhoneE164(g.phone) });
+    const out = await ssPhoneStartCall(g.phone, { contact_id: g.contactId || null, user_id: userId, client_id: clientId },
+      "This contact's phone number can't be dialed. Open their record to check it.");
+    setCallUi({ key: g.key, ...out });
   };
 
   // NOTE: Send invoice deliberately does NOT live here. A contact groups every design that
@@ -1279,8 +1301,50 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                           {detailsFor === g.key ? "Hide details" : "Details"}
                         </button>
                       )}
+                      {callOffered && callTab && g.phone && (() => {
+                        const c = callCtx(g);
+                        const on = callTab.enabled(c);
+                        const why = on ? "Call with SSS Phone" : (typeof callTab.hint === "function" ? callTab.hint(c) : (callTab.hint || ""));
+                        return (
+                          <button type="button" disabled={!on} title={why} data-ss-list-call={g.contactId || g.key}
+                            onClick={() => { if (on) callRow(g); }}
+                            style={{ marginLeft: 10, background: "transparent", border: "none", padding: 0, cursor: on ? "pointer" : "not-allowed", color: on ? ACCENT : "#CBD5E1", fontWeight: 700, fontSize: 13, fontFamily: "inherit" }}>
+                            Call
+                          </button>
+                        );
+                      })()}
                     </td>
                   </tr>
+                  {/* What the row's Call did. Nothing here places a call; it reports what SSS
+                      Phone said, with the same words and the same install card as the record. */}
+                  {callUi && callUi.key === g.key && (
+                    <tr>
+                      <td colSpan={7} style={{ ...S.td, background: "#F8FAFC" }} data-ss-phone-panel="list-call">
+                        <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            {callUi.kind === "checking" && <div style={{ fontSize: 12.5, color: "#64748B" }}>Starting the call in SSS Phone…</div>}
+                            {callUi.kind === "calling" && (
+                              <div style={{ ...S.okMsg, marginBottom: 0 }}>
+                                Calling <strong>{phoneDisplay(callUi.to)}</strong> in SSS Phone. The call runs there, so you can keep working here.
+                              </div>
+                            )}
+                            {callUi.kind === "app" && (
+                              <>
+                                <div style={{ fontSize: 12.5, color: "#475569", marginBottom: 8 }}>
+                                  Opening the SSS Phone app to call <strong>{phoneDisplay(callUi.to)}</strong>. If nothing happens, the app isn't on this phone yet.
+                                </div>
+                                <SsPhoneInstallCard what="call" mobile />
+                              </>
+                            )}
+                            {callUi.kind === "install" && <SsPhoneInstallCard what="call" fromRecord />}
+                            {callUi.kind === "error" && <div style={{ ...S.err, marginBottom: 0 }}>{callUi.text}</div>}
+                          </div>
+                          <button type="button" title="Close" onClick={() => setCallUi(null)}
+                            style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontWeight: 800, fontSize: 15, lineHeight: 1 }}>×</button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
                   {detailsFor === g.key && (
                     <tr>
                       <td colSpan={7} style={{ ...S.td, background: "#F8FAFC" }}>
@@ -1444,6 +1508,15 @@ const CRM_LOCKED_HINT = "The built-in CRM isn't part of your subscription — ad
 const CRM_PICK_HINT = (what) =>
   `Pick a deal or order on the left first, so the ${what} is filed against the right one.`;
 
+// OPERATOR VIEW-AS (plan section 12, SSS Phone). While CSM Synergy is looking at a builder's
+// account, Call and Text go dark: a call or text placed from here would go out from the
+// builder's own number, under the builder's name, to the builder's customer — by somebody who
+// is not on that builder's team. The server refuses a contact from another tenant too; this is
+// the browser saying so before anyone presses the button. FIRST in both hints' order, because
+// it is the one reason nothing else on the page can fix.
+const CRM_VIEWING_CALL_HINT = "Calling isn't available while viewing another account.";
+const CRM_VIEWING_TEXT_HINT = "Texting isn't available while viewing another account.";
+
 const CRM_TABS = [
   // "Not available yet" (the default hint) reads as NOT BUILT, which is the wrong story for
   // a tab that is merely out of this person's reach — it is built, they just cannot write.
@@ -1462,7 +1535,28 @@ const CRM_TABS = [
       : !c.canEdit ? "You don't have permission to add notes."
       : CRM_PICK_HINT("note")) },
   { key: "scheduler", label: "Meeting scheduler", enabled: () => false, hint: "Arrives with the calendar integration." },
-  { key: "call", label: "Call", enabled: () => false, hint: "Arrives with the phone integration." },
+  // CALL — SSS Phone (2026-09-29). Built now, so it no longer says "arrives with the phone
+  // integration". Pressing it hands the number to the SSS Phone extension on this computer (or
+  // the app, on a phone) and the call runs THERE; this page never moves. See startCall.
+  //
+  // It is NOT a CRM tab and NOT a contacts:edit tab, deliberately: it writes nothing through
+  // portal-settings (no crm_ prefix, so the subscription does not gate it), and a rep with
+  // read-only contacts who holds phone access may still ring the customer on screen — the plan
+  // gates calling on the PHONE area alone (section 7). No deal pick either: a call is to the
+  // person, not about one quote.
+  //
+  // Hint order: view-as first (nothing on the page can fix it), then permission, then the
+  // account's switch, then the contact's own data — each still true once the ones above it
+  // are acted on.
+  { key: "call", label: "Call",
+    enabled: (c) => !c.viewing && !!c.canCall && !!(c.phone && c.phone.on) && !!(c.contact && c.contact.phone),
+    hint: (c) => (c.viewing
+      ? CRM_VIEWING_CALL_HINT
+      : !c.canCall
+        ? "You don't have permission to make calls."
+        : !(c.phone && c.phone.on)
+          ? "Calling isn't switched on for this account yet."
+          : "This contact has no phone number on file.") },
   // SMS — A REAL CHANNEL NOW, REVERSING A DECISION THIS COMMENT USED TO RECORD.
   //
   // What stood here read "NO SMS OR WHATSAPP TAB, AND THERE IS NOT GOING TO BE ONE" (Ahsan,
@@ -1489,10 +1583,17 @@ const CRM_TABS = [
   // in this group that cannot fall back to the short code, so sendSms posted contactId null
   // and the server answered "A text has to be addressed to a contact." — printed underneath
   // the phone number this very tab renders. Same rule, same words as the Person panel.
+  //
+  // SSS PHONE (2026-09-29): when the extension is installed and signed in as this person, the
+  // tab opens the customer's thread THERE instead (routeText), and this composer stays as the
+  // fallback for everyone else. Its gates are unchanged — the extension's send runs the same
+  // registration, consent and STOP rules — except the operator view-as, which now greys it.
   {
     key: "sms", label: "SMS",
-    enabled: (c) => c.canEdit && !!(c.contact && c.contact.phone && c.contact.id) && !!(c.sms && c.sms.ready) && !c.needsPick,
-    hint: (c) => (!c.crmUnlocked
+    enabled: (c) => !c.viewing && c.canEdit && !!(c.contact && c.contact.phone && c.contact.id) && !!(c.sms && c.sms.ready) && !c.needsPick,
+    hint: (c) => (c.viewing
+      ? CRM_VIEWING_TEXT_HINT
+      : !c.crmUnlocked
       ? CRM_LOCKED_HINT
       : !c.canEdit
       ? "You don't have permission to text contacts."
@@ -1593,6 +1694,10 @@ const CRM_CHIPS = [
   // Shown only once the account can actually text: a permanently empty filter teaches
   // people the chip is broken. Mirrors CRM_FEED_TYPES.message; keep the two identical.
   { key: "messages", label: "Messages", types: ["sms", "sms_in"], when: (c) => !!(c.sms && c.sms.ready) },
+  // Calls, voicemails and missed calls — SSS Phone. Mirrors CRM_FEED_TYPES.call in
+  // _shared/crmFeed.ts; keep the two identical. Shown once the account can call, OR once this
+  // record has any call on it, so switching calling off later never hides history that exists.
+  { key: "calls", label: "Calls", types: ["call", "call_missed", "voicemail"], when: (c) => !!(c.phone && c.phone.on) || !!c.hasCalls },
   // Where the documents live now — ours AND theirs, one list, because "I don't want it all
   // mixed together" was about the two NAMES being interchangeable, not about them being far
   // apart. Mirrors CRM_FEED_TYPES.document; keep the two identical.
@@ -2307,6 +2412,45 @@ function CrmRecordSkeleton({ kind, onBack }) {
   );
 }
 
+// SSS PHONE: one voicemail in the contact timeline. Nothing is fetched until the person presses
+// Play: the Worker marks a voicemail heard the first time it streams, so opening the record must
+// not fetch it. Then the audio is fetched with the sign-in in the Authorization header
+// (ssPhoneFetchVoicemail) and played from a blob: URL — never an <audio src> carrying the token,
+// which the Worker's request logs would keep (review SSB-7). The session is read at the press, so
+// a page left open past a token refresh still plays.
+function SsVoicemailPlayer({ voicemailId }) {
+  const [src, setSrc] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  // The blob lives in this tab's memory until it is let go; let it go when it is replaced or the
+  // line leaves the screen.
+  useEffect(() => () => { if (src) { try { URL.revokeObjectURL(src); } catch (_e) { /* already gone */ } } }, [src]);
+  const play = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const { data } = await sb.auth.getSession();
+      const token = data && data.session ? data.session.access_token : null;
+      setSrc(await ssPhoneFetchVoicemail(voicemailId, token));
+    } catch (e) { setErr(e && e.message ? e.message : "The voicemail couldn't be loaded. Try again."); }
+    finally { setBusy(false); }
+  };
+  if (src) {
+    return (
+      <audio controls autoPlay src={src} data-ss-voicemail={voicemailId}
+        style={{ display: "block", width: "100%", maxWidth: 340, height: 34, marginTop: 5 }} />
+    );
+  }
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5, flexWrap: "wrap" }}>
+      <button type="button" disabled={busy} onClick={play} data-ss-voicemail-play={voicemailId}
+        style={{ background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 6, padding: "4px 10px", fontSize: 12, fontWeight: 700, color: "#334155", cursor: busy ? "default" : "pointer", fontFamily: "inherit" }}>
+        {busy ? "Loading…" : "▶ Play message"}
+      </button>
+      {err && <span style={{ fontSize: 12, color: "#B91C1C" }}>{err}</span>}
+    </div>
+  );
+}
+
 // The record page. One component, two contexts, driven entirely by the registries above.
 //
 // ⚠️ IT MAKES EXACTLY ONE FETCH, and never a direct sb.from(). designs/payments RLS is
@@ -2317,7 +2461,10 @@ function CrmRecordSkeleton({ kind, onBack }) {
 // (The Sales tax card it renders is the one exception, and carries its own reasons and its own
 // view-as path — see QuoteSalesTaxCard.)
 function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = false, crmUnlocked = true, initialDeal = null, onSeeBilling = null, onBack, onNavigate, onOpenDesign , onOpenOrder = null,
-  clientId = null, viewingLabel = null, canEditDesigns = false, canReadTaxSettings = false, canVerifyTax = false }) {
+  clientId = null, viewingLabel = null, canEditDesigns = false, canReadTaxSettings = false, canVerifyTax = false,
+  // SSS Phone: the signed-in person (the extension refuses a call for anybody else), whether
+  // their access includes calling, and whether calling is switched on for the account.
+  userId = null, canCall = false, phoneOn = false }) {
   // THE SUBSCRIPTION IS AN EDIT GATE, NOT A TAB GATE, and it has to be applied here rather
   // than tab by tab. Every WRITE this page makes is a `crm_*` action — crm_save_note,
   // crm_save_activity, crm_complete_activity, crm_send_email, crm_send_sms, crm_save_contact,
@@ -2354,6 +2501,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   const [upBusy, setUpBusy] = useState(false);
   const [upMsg, setUpMsg] = useState(null);
   const [textMsg, setTextMsg] = useState(null);
+  // SSS Phone: where the last Call / Text hand-off got to ({ what: "call"|"text", kind, ... }),
+  // and whether the reader chose to write a text here after it opened in SSS Phone. In the TOP
+  // hook block for the same reason as everything above: CrmRecord returns early on `!data`,
+  // and a hook below that guard is React #310 and a white page (13ca37e).
+  const [phoneUi, setPhoneUi] = useState(null);
+  const [smsHere, setSmsHere] = useState(false);
   // Recording permission a customer gave in person — the third way into the consent record,
   // alongside the designer gate's checkbox and the customer texting first. Needed because the
   // back catalogue predates consent entirely and is otherwise unreachable.
@@ -2485,7 +2638,11 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // "contact"` half in ONE place, so no tab can accidentally gate itself on a design record
   // — which would break the free Pipeline list that opens design records without a CRM.
   const ctx = { kind, record, isAdmin, canEdit, crmUnlocked, contact: data.contact, designs: data.designs || [], sms: data.sms || null,
-    selectedCode: activeCode, needsPick: kind === "contact" && !activeCode };
+    selectedCode: activeCode, needsPick: kind === "contact" && !activeCode,
+    // SSS Phone. `viewing` is operator view-as (the shell passes viewingLabel only then), and
+    // greys Call and Text first; see CRM_VIEWING_CALL_HINT.
+    viewing: !!viewingLabel, canCall: !!canCall, phone: { on: !!phoneOn },
+    hasCalls: (data.feed || []).some((e) => e.type === "call" || e.type === "call_missed" || e.type === "voicemail") };
   const cname = (data.contact && (data.contact.name || data.contact.email || data.contact.phone)) || "Unnamed contact";
   const sel = (record && record.selections) || {};
   const title = kind === "design"
@@ -2736,6 +2893,61 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     if (failMsg) { setTextMsg({ err: failMsg }); return; }
     setText(""); setTextMsg({ ok: "Sent." }); load();
   };
+
+  // ── SSS PHONE: hand the call or the text over (SPEC section 5) ───────────────────────
+  // The four fields every message carries. user_id and client_id are what let the extension
+  // refuse a portal signed in as somebody else on a shared office computer ("wrong_user"),
+  // so they are the SIGNED-IN person and the tenant on screen — never a contact's owner.
+  const phoneMsg = () => ({
+    to_e164: ssPhoneE164(data.contact && data.contact.phone),
+    contact_id: (data.contact && data.contact.id) || null,
+    user_id: userId || null,
+    client_id: clientId || null,
+  });
+
+  // CALL. One press dials: the extension already holds a registered line (plan D4), so the
+  // time from this click to Twilio is the extension's, not ours. On a phone's browser there is
+  // no extension, so the SSS Phone app opens by its link instead. Neither path moves this page.
+  // The rules are ssPhoneStartCall's (01-core), shared with the contact list's Call button.
+  const startCall = async () => {
+    const msg = phoneMsg();
+    setPhoneUi({ what: "call", kind: "checking", to: msg.to_e164 });
+    const out = await ssPhoneStartCall(data.contact && data.contact.phone, msg,
+      "This contact's phone number can't be dialed. Check it under Summary.");
+    setPhoneUi({ what: "call", ...out });
+  };
+
+  // TEXT. For someone who uses SSS Phone, the SMS tab opens the customer's thread in the
+  // extension (plan section 12: "Opens the thread in the extension or app when SSS Phone is
+  // installed"), so a conversation lives in one place. Everybody else — and anybody whose
+  // extension is signed in as somebody else, or not at all — gets today's composer, unchanged.
+  // It never sends: the extension opens the thread and the person types there.
+  const routeText = async () => {
+    setSmsHere(false);
+    if (!phoneOn || !canCall || ssIsPhoneBrowser()) { setPhoneUi(null); return; }
+    const msg = phoneMsg();
+    setPhoneUi({ what: "text", kind: "checking" });
+    const found = await ssPhonePing();
+    if (!found) { setPhoneUi({ what: "text", kind: "install" }); return; }
+    const who = found.reply || {};
+    // Checked HERE as well as in the extension so the answer is "write it here" rather than a
+    // refusal: a text is not urgent enough to send anybody off to switch accounts.
+    if (!who.user_id || who.user_id !== userId || who.client_id !== clientId) {
+      setPhoneUi({
+        what: "text", kind: "elsewhere",
+        text: who.user_id
+          ? "SSS Phone on this computer is signed in as someone else, so this text goes from here."
+          : "SSS Phone isn't signed in, so this text goes from here.",
+      });
+      return;
+    }
+    const out = await ssPhoneSend("sss.text", msg);
+    if (out.reply && out.reply.ok) { setPhoneUi({ what: "text", kind: "texting", to: msg.to_e164 }); return; }
+    setPhoneUi({ what: "text", kind: "elsewhere", text: `${ssPhoneRefusal(out.reply)} You can still text from here.` });
+  };
+  // Showing the thread in SSS Phone instead of the composer: only once it has actually opened
+  // there (or while we are finding out), and never after "Write it here instead".
+  const smsViaPhone = !!(phoneUi && phoneUi.what === "text" && !smsHere && (phoneUi.kind === "texting" || phoneUi.kind === "checking"));
 
   const sendEmail = async () => {
     const subject = mail.subject.trim(), body = mail.body.trim();
@@ -3314,7 +3526,14 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 return (
                   <button key={t.key} disabled={!on}
                     title={on ? "" : (typeof t.hint === "function" ? t.hint(ctx) : (t.hint || "Not available yet"))}
-                    onClick={() => { if (on) setTab(t.key); }}
+                    onClick={() => {
+                      if (!on) return;
+                      setTab(t.key);
+                      // Call and SMS DO something as they open: Call dials (one press, like the
+                      // phone it is), SMS finds out whether the thread belongs in SSS Phone.
+                      if (t.key === "call") startCall();
+                      else if (t.key === "sms") routeText();
+                    }}
                     style={{
                       background: tab === t.key && on ? "#EEF2FF" : "transparent",
                       color: on ? (tab === t.key ? ACCENT : "#475569") : "#CBD5E1",
@@ -3347,8 +3566,59 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               </div>
             )}
 
-            {tab === "sms" && canEdit && data.contact && data.contact.phone && (
+            {/* ── SSS PHONE: the Call hand-off ────────────────────────────────────────────
+                Nothing here places a call; it reports what SSS Phone said. Every state names
+                what to do next, because a Call button that "did nothing" is the report nobody
+                can act on. */}
+            {tab === "call" && phoneUi && phoneUi.what === "call" && (
+              <div style={{ marginBottom: 12 }} data-ss-phone-panel="call">
+                {phoneUi.kind === "checking" && (
+                  <div style={{ fontSize: 12.5, color: "#64748B" }}>Starting the call in SSS Phone…</div>
+                )}
+                {phoneUi.kind === "calling" && (
+                  <div style={{ ...S.okMsg, marginBottom: 0 }}>
+                    Calling <strong>{phoneDisplay(phoneUi.to)}</strong> in SSS Phone. The call runs there, so you can
+                    keep working on this page.
+                  </div>
+                )}
+                {phoneUi.kind === "app" && (
+                  <>
+                    <div style={{ fontSize: 12.5, color: "#475569", marginBottom: 8 }}>
+                      Opening the SSS Phone app to call <strong>{phoneDisplay(phoneUi.to)}</strong>. If nothing happens,
+                      the app isn't on this phone yet.
+                    </div>
+                    <SsPhoneInstallCard what="call" mobile />
+                  </>
+                )}
+                {phoneUi.kind === "install" && <SsPhoneInstallCard what="call" fromRecord />}
+                {phoneUi.kind === "error" && <div style={{ ...S.err, marginBottom: 0 }}>{phoneUi.text}</div>}
+              </div>
+            )}
+
+            {/* The thread opened in SSS Phone instead of here. One link back to the composer,
+                because a person who wants to type it here should never be stuck. */}
+            {tab === "sms" && canEdit && data.contact && data.contact.phone && smsViaPhone && (
+              <div style={{ marginBottom: 12 }} data-ss-phone-panel="text">
+                {phoneUi.kind === "checking" ? (
+                  <div style={{ fontSize: 12.5, color: "#64748B" }}>Opening the conversation in SSS Phone…</div>
+                ) : (
+                  <div style={{ ...S.okMsg, marginBottom: 0 }}>
+                    The conversation with <strong>{phoneUi.to ? phoneDisplay(phoneUi.to) : data.contact.phone}</strong> is open in SSS Phone.{" "}
+                    <button type="button" onClick={() => setSmsHere(true)}
+                      style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
+                      Write it here instead
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+            {tab === "sms" && canEdit && data.contact && data.contact.phone && !smsViaPhone && (
               <div style={{ marginBottom: 12 }}>
+                {/* Why the composer is here rather than SSS Phone, when that is news. */}
+                {phoneUi && phoneUi.what === "text" && phoneUi.kind === "install" && <SsPhoneInstallCard what="text" compact />}
+                {phoneUi && phoneUi.what === "text" && phoneUi.kind === "elsewhere" && (
+                  <div style={{ fontSize: 12, color: "#64748B", marginBottom: 7 }}>{phoneUi.text}</div>
+                )}
                 <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 5 }}>
                   To <strong>{data.contact.phone}</strong>
                   {data.sms && data.sms.from ? <> — they see <strong>{data.sms.from}</strong>, this account&rsquo;s number.</> : null}
@@ -3632,7 +3902,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               <div style={{ fontSize: 12, color: "#94A3B8" }}>Nothing here yet.</div>
             ) : feed.map((e) => (
               <div key={e.id} style={{ display: "flex", gap: 9, padding: "7px 0", borderTop: "1px solid #F1F5F9" }}>
-                <div style={{ width: 8, height: 8, borderRadius: 99, background: "#CBD5E1", marginTop: 5, flexShrink: 0 }} />
+                {/* A missed call and a waiting voicemail are the two events someone has to
+                    ACT on, so their dot is the one coloured thing in a grey column. */}
+                <div style={{ width: 8, height: 8, borderRadius: 99, background: e.type === "call_missed" ? "#F87171" : e.type === "voicemail" ? "#F59E0B" : "#CBD5E1", marginTop: 5, flexShrink: 0 }} />
                 <div style={{ flex: 1 }}>
                   {/* A note renders as the highlighted card she liked; system events render
                       as plain text. That contrast is what makes a human entry findable in a
@@ -3737,6 +4009,17 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                     <div>
                       <div style={{ fontSize: 13, fontWeight: 600, color: "#1E293B" }}>{e.title}</div>
                       {e.body && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>{e.body}</div>}
+                      {/* SSS PHONE: the voicemail itself, played from the phone-api Worker
+                          (GET /voicemails/:id/audio). Only for someone the Worker will serve —
+                          phone access, calling on, not an operator in view-as (their token is
+                          not on this builder's team) — and only while the recording exists.
+                          The server already left out every call this viewer may not see
+                          (crmFeed's phone scope), so a line that is here is one the Worker
+                          plays. SsVoicemailPlayer fetches nothing until Play is pressed. */}
+                      {e.type === "voicemail" && e.meta && e.meta.voicemailId && !e.meta.voicemailDeleted
+                        && ctx.canCall && ctx.phone.on && !ctx.viewing && ssPhoneVoicemailAudioUrl(e.meta.voicemailId) && (
+                        <SsVoicemailPlayer voicemailId={e.meta.voicemailId} />
+                      )}
                     </div>
                   )}
                   <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>{fmtDate(e.at)}{e.code ? " · " + e.code : ""}</div>

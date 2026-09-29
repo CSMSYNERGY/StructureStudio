@@ -1106,3 +1106,776 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
     </div>
   );
 }
+
+/* ═════════════════════════════════════════════════════════════════════════════
+   SSS PHONE — calling setup, install links and the Calls report (2026-09-29)
+
+   Plan sections 6 and 12, SPEC section 5. CALLING ONLY: the number is bought and
+   registered on the Text Messaging tab above, and nothing here buys, registers or
+   texts. What lives here is the owner's ONE-TIME SETUP (Ahsan, 09-29: "owner sets
+   up the phone once, and the users assigned to that number get the calls
+   automatically"), the switch, "Sign out all devices", and the report.
+
+   In this part rather than a new one, deliberately: a new part renumbers the shell
+   and every test that names it, for three components that belong beside texting —
+   the same number, the same customers, the same audience.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+const PHONE_CARD = {
+  background: "#fff", border: "1px solid #E2E8F0", borderRadius: 12, padding: 18, marginBottom: 14,
+};
+const PHONE_DAYS = [
+  ["mon", "Monday"], ["tue", "Tuesday"], ["wed", "Wednesday"], ["thu", "Thursday"],
+  ["fri", "Friday"], ["sat", "Saturday"], ["sun", "Sunday"],
+];
+// The builder's time zone decides what "after hours" means (plan section 6). US and Canadian
+// zones only — the lines ring in North America (plan section 14's geo permissions).
+const PHONE_TIME_ZONES = [
+  ["America/New_York", "Eastern"], ["America/Chicago", "Central"], ["America/Denver", "Mountain"],
+  ["America/Phoenix", "Arizona (no daylight saving)"], ["America/Los_Angeles", "Pacific"],
+  ["America/Anchorage", "Alaska"], ["Pacific/Honolulu", "Hawaii"], ["America/Halifax", "Atlantic (Canada)"],
+  ["America/St_Johns", "Newfoundland"], ["America/Regina", "Saskatchewan"],
+];
+const PHONE_LEVEL_LABEL = { none: "No phone access", own: "Own calls", view: "Team calls", edit: "Team calls + settings" };
+
+async function phoneAction(action, body) {
+  const { data: d, error } = await sb.functions.invoke("portal-settings", { body: { action, ...(body || {}) } });
+  if (error) throw new Error(await fnError(error));
+  if (d && d.error) throw new Error(d.error);
+  return d || {};
+}
+
+// "+18165550100" → "(816) 555-0100". Anything else is shown as stored.
+function phoneDisplay(e164) {
+  const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(String(e164 || ""));
+  return m ? `(${m[1]}) ${m[2]}-${m[3]}` : String(e164 || "");
+}
+// 42 → "0:42", 192 → "3:12", 3720 → "1:02:00". A table column, so the compact form.
+function phoneClock(s) {
+  if (s == null) return "—";
+  const t = Math.max(0, Math.round(Number(s) || 0));
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), r = t % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${pad(m)}:${pad(r)}` : `${m}:${pad(r)}`;
+}
+function phoneWhen(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d)) return null;
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+  return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
+}
+
+// ── Where to get SSS Phone ──────────────────────────────────────────────────────────────
+// Shown by the contact page when Call finds no extension, by the SMS tab (compact), by the
+// Phone settings tab and by the Calls page. A link still marked PLACEHOLDER (01-core's
+// SS_PHONE_LINKS) reads "coming soon" rather than sending a builder to a page that is not there.
+// `fromRecord`: shown on a contact page after Call / SMS found nothing, where "press Call again"
+// is an instruction the reader can follow. Elsewhere there is no Call button to press.
+function SsPhoneInstallCard({ what = "call", compact = false, mobile = false, fromRecord = false }) {
+  const all = [
+    ["chrome", "Chrome extension", SS_PHONE_LINKS.chrome, "On your computer: calls and texts in a panel beside Structure Studio."],
+    ["ios", "iPhone app", SS_PHONE_LINKS.ios, "Rings like a second line, even with the phone locked."],
+    ["android", "Android app", SS_PHONE_LINKS.android, "Rings like a second line, even with the phone locked."],
+  ];
+  const links = mobile ? all.filter((l) => l[0] !== "chrome") : compact ? all.filter((l) => l[0] === "chrome") : all;
+  const linkEl = ([key, label, url]) => (ssPhoneLinkReady(url) ? (
+    <a key={key} href={url} target="_blank" rel="noopener noreferrer"
+      style={{ ...S.btn(compact ? "#FFF" : ACCENT, compact ? ACCENT : "#FFF"), border: compact ? `1px solid ${ACCENT}` : "none", textDecoration: "none", display: "inline-block", padding: compact ? "5px 11px" : "8px 14px", fontSize: compact ? 12 : 13 }}>
+      Get the {label}
+    </a>
+  ) : (
+    <span key={key} style={{ display: "inline-block", fontSize: 12, fontWeight: 700, color: "#64748B", background: "#F1F5F9", borderRadius: 8, padding: compact ? "5px 11px" : "8px 14px" }}>
+      {label}: link coming soon
+    </span>
+  ));
+  if (compact) {
+    return (
+      <div data-ss-phone-install="compact" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12, color: "#475569", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 10px", marginBottom: 8 }}>
+        <span>With <strong>SSS Phone</strong> installed, {what === "text" ? "texts open in its panel beside this page" : "Call rings the customer from your business number"}.</span>
+        {links.map(linkEl)}
+      </div>
+    );
+  }
+  return (
+    <div data-ss-phone-install={mobile ? "mobile" : "full"} style={{ border: "1px solid #C7D2FE", background: "#EEF2FF", borderRadius: 10, padding: "13px 15px" }}>
+      <div style={{ fontSize: 14, fontWeight: 800, color: "#312E81", marginBottom: 4 }}>
+        {mobile ? "Get the SSS Phone app" : what === "text" ? "Install SSS Phone to text from Structure Studio" : "Install SSS Phone to call from Structure Studio"}
+      </div>
+      <div style={{ fontSize: 12.5, color: "#3730A3", lineHeight: 1.55, marginBottom: 10 }}>
+        SSS Phone is Structure Studio&rsquo;s calling app. Sign in with your Structure Studio login and
+        {what === "text" ? " texts" : " calls"} go out from your business number, without leaving the page you&rsquo;re on.
+      </div>
+      <div style={{ display: "grid", gap: 8 }}>
+        {links.map((l) => (
+          <div key={l[0]} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            {linkEl(l)}
+            <span style={{ fontSize: 12, color: "#4338CA" }}>{l[3]}</span>
+          </div>
+        ))}
+      </div>
+      {fromRecord && !mobile && (
+        <div style={{ fontSize: 11.5, color: "#4338CA", marginTop: 10 }}>
+          Already installed it? Reload this page, then press {what === "text" ? "SMS" : "Call"} again.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Settings → Phone ────────────────────────────────────────────────────────────────────
+const PHONE_DEFAULT_HOURS = {
+  mon: [["08:00", "17:00"]], tue: [["08:00", "17:00"]], wed: [["08:00", "17:00"]],
+  thu: [["08:00", "17:00"]], fri: [["08:00", "17:00"]],
+};
+
+function phoneFormFrom(d) {
+  const r = d && d.route;
+  let tz = r && r.timeZone;
+  if (!tz) {
+    try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (_e) { tz = null; }
+    if (!PHONE_TIME_ZONES.some((z) => z[0] === tz)) tz = "America/Chicago";
+  }
+  return {
+    mode: (r && r.mode) || "all_at_once",
+    members: r ? (r.members || []) : ((d && d.suggestedMembers) || []),
+    ringSeconds: (r && r.ringSeconds) || 20,
+    noAnswer: (r && r.noAnswer) || "voicemail",
+    forwardTo: r && r.forwardTo ? phoneDisplay(r.forwardTo) : "",
+    hoursOn: !!(r && r.businessHours),
+    hours: (r && r.businessHours) || PHONE_DEFAULT_HOURS,
+    timeZone: tz,
+    afterHours: (r && r.afterHours) || "voicemail",
+    greetingUrl: (r && r.greetingUrl) || "",
+  };
+}
+
+function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onOpenTexting = null }) {
+  // ⚠️ HOOKS FIRST, ALL OF THEM, ABOVE EVERY EARLY RETURN — the React #310 rule every screen in
+  // this file follows.
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState(null);
+  const [note, setNote] = useState(null);          // { ok } | { err } after a save
+  const [swNote, setSwNote] = useState(null);      // { ok } | { err } after the on/off switch, shown in the header only
+  const [outNote, setOutNote] = useState(null);    // { userId, ok | err } after a sign-out
+  // Plan phase 6, the number card: the area-code search, its results, and what the last
+  // search / purchase / connect said.
+  const [numQ, setNumQ] = useState("");
+  const [numResults, setNumResults] = useState(null);  // null = not searched yet
+  const [numNote, setNumNote] = useState(null);        // { ok } | { err }
+
+  const load = useCallback(async () => {
+    try {
+      const d = await phoneAction("phone_settings_get");
+      setData(d);
+      setErr(null);
+      // Seeded from the server only while the form is untouched, so a refresh never wipes what
+      // somebody is halfway through choosing.
+      setForm((f) => f || (d && d.scope === "team" ? phoneFormFrom(d) : null));
+    } catch (e) { setErr(e.message); }
+  }, [clientId]);
+  useEffect(() => { load(); }, [load]);
+
+  if (err && !data) return <div style={S.err}>{err}</div>;
+  if (!data) return <SkelRows cols={2} rows={5} />;
+
+  if (data.available === false) {
+    return (
+      <div style={PHONE_CARD} data-ss-phone-settings="unavailable">
+        <h3 style={{ margin: "0 0 6px", fontSize: 16 }}>Phone</h3>
+        <p style={{ margin: 0, fontSize: 13, color: "#475569" }}>
+          SSS Phone isn&rsquo;t set up on this account yet. Once it is, you&rsquo;ll choose who answers your
+          business number here.
+        </p>
+      </div>
+    );
+  }
+
+  const on = data.phoneStatus === "on";
+  const team = data.team || [];
+  const setF = (patch) => setForm((f) => ({ ...f, ...patch }));
+
+  // The switch. Turning it OFF also moves a connected number to voicemail (the server does it,
+  // review SSB-2), so the confirm says what callers will get; turning it back ON reconnects a
+  // number the switch moved. `wantOn` lets "Send calls to voicemail" retry the move while off.
+  const flip = async (wantOn = !on) => {
+    // Only a CONNECTED number is moved to voicemail; one that never pointed at SSS Phone keeps
+    // whatever it did before, so the words are only said where they are true.
+    const moves = !!(data.number && data.number.voiceReady);
+    if (!wantOn && on && !window.confirm(moves
+      ? `Turn calling off? Nobody's SSS Phone will ring, and nobody can call out, until it's turned back on. Callers to ${phoneDisplay(data.number.e164)} go straight to voicemail instead.`
+      : "Turn calling off? Nobody's SSS Phone will ring, and nobody can call out, until it's turned back on.")) return;
+    setBusy(true); setSwNote(null);
+    try {
+      const d = await phoneAction("phone_status_set", { on: wantOn });
+      setData((x) => ({
+        ...x, phoneStatus: d.phoneStatus,
+        number: x.number && d.number ? { ...x.number, voiceReady: !!d.number.voiceReady } : x.number,
+      }));
+      setSwNote(d.warning ? { err: d.warning }
+        : { ok: d.phoneStatus === "on" ? "Calling is on." : moves ? "Calling is off. Calls to your number go to voicemail." : "Calling is off." });
+    } catch (e) { setSwNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+
+  const save = async () => {
+    setBusy(true); setNote(null);
+    try {
+      const d = await phoneAction("phone_settings_save", {
+        mode: form.mode,
+        members: form.members,
+        ringSeconds: Number(form.ringSeconds),
+        noAnswer: form.noAnswer,
+        forwardTo: form.forwardTo,
+        businessHours: form.hoursOn ? form.hours : null,
+        timeZone: form.timeZone,
+        afterHours: form.afterHours,
+        greetingUrl: form.greetingUrl,
+      });
+      setData((x) => ({ ...x, route: d.route, suggestedMembers: null }));
+      setForm(phoneFormFrom({ route: d.route }));
+      setNote({ ok: "Saved. Calls to your number follow these settings from now on." });
+    } catch (e) { setNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+
+  const signOut = async (m) => {
+    const who = m.name || "this person";
+    // It ends their Structure Studio sign-ins too (254's phone_end_user_sessions), so the
+    // confirm says so: a person pressing it for a lost phone should know their colleague will
+    // have to sign in again at their desk as well.
+    if (!window.confirm(`Sign ${who} out on every computer and phone? Use this for a lost phone or someone leaving. They'll have to sign in again to SSS Phone and to Structure Studio.`)) return;
+    setBusy(true); setOutNote(null);
+    try {
+      const d = await phoneAction("phone_signout_user", { userId: m.userId });
+      setOutNote({
+        userId: m.userId,
+        ok: d.sessionsEnded
+          ? `${who} is signed out everywhere and has to sign in again.`
+          // A CSM Synergy support person on this team: their SSS Phone devices here are retired,
+          // but their Structure Studio sign-ins cover the other accounts they support, so only
+          // Structure Studio can end those (the server kept them, review SSB-9).
+          : d.sessionsKept === "operator"
+            ? `${who}'s SSS Phone devices were disconnected from calls on this account. ${who} is on the Structure Studio support team, so their Structure Studio sign-ins were left alone; ask Structure Studio if those need ending too.`
+            : `${who}'s devices were disconnected from calls. A device that is still signed in reconnects on its own, so for a lost phone also change their Structure Studio password.`,
+      });
+      load();
+    } catch (e) { setOutNote({ userId: m.userId, err: e.message }); }
+    finally { setBusy(false); }
+  };
+
+  // ── Plan phase 6: the number, from this tab ───────────────────────────────────────────
+  // Connect: point the number's calls at SSS Phone (phone_enable_number). Search and buy: a
+  // CALLING-ONLY number for a builder with none, which texting reuses once its registration
+  // clears. The server decides who may buy (canBuyNumber); this only offers what will work.
+  const connect = async () => {
+    setBusy(true); setNumNote(null);
+    try {
+      await phoneAction("phone_enable_number");
+      setData((x) => ({ ...x, number: { ...x.number, voiceReady: true } }));
+      setNumNote({ ok: "Connected. Calls to this number ring SSS Phone now." });
+    } catch (e) { setNumNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+  const searchNumbers = async () => {
+    setBusy(true); setNumNote(null);
+    try {
+      const d = await phoneAction("phone_search_numbers", { areaCode: numQ });
+      setNumResults(d.numbers || []);
+    } catch (e) { setNumNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+  const buyNumber = async (e164) => {
+    // Before builder launch only an operator reaches this button (the server's rollout check),
+    // and the texting setup cannot yet take over a number bought here, so the operator is told.
+    const textingCaveat = data.selfServe ? "" : "\n\nUntil texting can take over a number bought here, this account's Text Messaging setup can't get its own number.";
+    if (!window.confirm(`Get ${phoneDisplay(e164)} as your business number? It takes calls right away, and texting can use the same number once the carriers approve your business on the Text Messaging tab.${textingCaveat}`)) return;
+    setBusy(true); setNumNote(null);
+    try {
+      const d = await phoneAction("phone_buy_number", { phoneNumber: e164 });
+      const n = d.number || {};
+      setData((x) => ({ ...x, number: { id: n.id, e164: n.e164 || e164, textingStatus: "pending_registration", voiceReady: !!n.voiceReady, callingOnly: true } }));
+      setNumResults(null);
+      const done = n.voiceReady ? "Your number is ready and connected for calls." : "Your number is ready. Until calling is on, its callers go to voicemail.";
+      // `note`: an earlier try had already got a number, and that one was kept (review SSB-4).
+      setNumNote(d.warning ? { err: [d.note, d.warning].filter(Boolean).join(" ") } : { ok: [d.note, done].filter(Boolean).join(" ") });
+    } catch (e) { setNumNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+
+  const header = (
+    <div style={PHONE_CARD}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
+        <h3 style={{ margin: 0, fontSize: 16 }}>Phone{viewingLabel ? ` — ${viewingLabel}` : ""}</h3>
+        <span data-ss-phone-status={on ? "on" : "off"} style={{
+          display: "inline-flex", alignItems: "center", gap: 7, borderRadius: 999, padding: "5px 12px", fontSize: 12, fontWeight: 800,
+          background: on ? "#ECFDF5" : "#F1F5F9", color: on ? "#047857" : "#475569",
+        }}>
+          <span style={{ width: 7, height: 7, borderRadius: 999, background: on ? "#10B981" : "#94A3B8" }} />
+          {on ? "Calling is on" : "Calling is off"}
+        </span>
+        {/* OFF is always offered to an editor (it is also the safety switch); ON only where the
+            server's rollout check will accept it (canSwitchOn: an operator until builder launch). */}
+        {canEdit && data.scope === "team" && (on || data.canSwitchOn) && (
+          <button type="button" disabled={busy} onClick={() => flip()} data-ss-phone-switch
+            style={{ ...S.btn(on ? "#FFF" : ACCENT, on ? "#B91C1C" : "#FFF"), border: on ? "1px solid #FCA5A5" : "none", marginLeft: "auto", padding: "7px 14px" }}>
+            {on ? "Turn calling off" : "Turn calling on"}
+          </button>
+        )}
+      </div>
+      <p style={{ margin: 0, fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+        {on
+          ? "Customers who call your number ring the people chosen below, in SSS Phone on their computer and phone."
+          : "While calling is off, SSS Phone can't ring or call out for anyone on your team."}
+      </p>
+      {!on && data.scope === "team" && !data.canSwitchOn && (
+        <p data-ss-phone-rollout style={{ margin: "8px 0 0", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+          SSS Phone isn&rsquo;t open to every builder yet. Structure Studio switches it on for your account when it&rsquo;s ready.
+        </p>
+      )}
+      {swNote && swNote.ok && <div style={{ ...S.okMsg, margin: "10px 0 0" }}>{swNote.ok}</div>}
+      {swNote && swNote.err && <div style={{ ...S.err, margin: "10px 0 0" }}>{swNote.err}</div>}
+    </div>
+  );
+
+  const numberCard = (
+    <div style={PHONE_CARD}>
+      <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>Your business number</h4>
+      {data.number ? (
+        <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+          <div data-ss-phone-number style={{ fontSize: 18, fontWeight: 800 }}>{phoneDisplay(data.number.e164)}</div>
+          {data.scope === "team" && (
+            <span style={{ fontSize: 12, color: "#64748B" }}>
+              {data.number.textingStatus === "registered" ? "Texting is set up on this number too."
+                : data.number.callingOnly ? "Calls only for now. Texting uses this same number once the carriers approve your business on the Text Messaging tab."
+                : "Calls work now; texting follows once the carriers approve it."}
+            </span>
+          )}
+        </div>
+      ) : (
+        <div style={{ fontSize: 13, color: "#475569" }}>
+          There&rsquo;s no number on this account yet.{" "}
+          {data.scope === "team" && data.canBuyNumber && data.numbersForSale
+            ? <>Get one for calls below; texting can use the same number later. Or, to set up texting first, </>
+            : null}
+          {onOpenTexting ? (
+            <button type="button" onClick={onOpenTexting}
+              style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
+              {data.scope === "team" && data.canBuyNumber && data.numbersForSale ? "start on the Text Messaging tab" : "Get one on the Text Messaging tab"}
+            </button>
+          ) : "Get one on the Text Messaging tab"}{data.scope === "team" && data.canBuyNumber && data.numbersForSale ? "." : ", then come back to choose who answers it."}
+        </div>
+      )}
+
+      {/* ── Plan phase 6: CONNECT the number for calls ─────────────────────────────────────
+          A number texting bought (or one bought while calling was off) does not ring SSS Phone
+          until its voice webhooks point at the phone-api Worker. The owner does that here,
+          once calling is on. */}
+      {/* Calling is OFF but the number still points at SSS Phone, which tells callers it can't
+          take calls: the switch's move to voicemail did not finish (review SSB-2). Pressing
+          this asks the switch to move it again. */}
+      {data.scope === "team" && data.number && data.number.voiceReady && !on && (
+        <div data-ss-phone-stuck style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
+          <div style={{ fontSize: 13, color: "#B45309", marginBottom: canEdit ? 8 : 0 }}>
+            Calling is off, but this number still sends its calls to SSS Phone, so callers hear that it can&rsquo;t take calls.
+          </div>
+          {canEdit && (
+            <button type="button" data-ss-phone-to-voicemail disabled={busy} onClick={() => flip(false)}
+              style={{ ...S.btn(ACCENT, "#FFF"), padding: "7px 14px", opacity: busy ? 0.55 : 1 }}>
+              Send calls to voicemail
+            </button>
+          )}
+        </div>
+      )}
+      {data.scope === "team" && data.number && !data.number.voiceReady && (
+        <div data-ss-phone-connect-card style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
+          <div style={{ fontSize: 13, color: "#475569", marginBottom: canEdit && data.canConnect ? 8 : 0 }}>
+            Calls to this number don&rsquo;t reach SSS Phone yet.
+          </div>
+          {canEdit && data.canConnect && (
+            <button type="button" data-ss-phone-connect disabled={busy || !on || !data.voiceSetup} onClick={connect}
+              title={!on ? "Turn calling on first" : !data.voiceSetup ? "Connecting numbers for calls isn't set up on this server yet" : ""}
+              style={{ ...S.btn(ACCENT, "#FFF"), padding: "7px 14px", opacity: busy || !on || !data.voiceSetup ? 0.55 : 1 }}>
+              Connect this number for calls
+            </button>
+          )}
+          {canEdit && data.canConnect && !on && <span style={{ fontSize: 12, color: "#64748B", marginLeft: 10 }}>Turn calling on first.</span>}
+        </div>
+      )}
+      {data.scope === "team" && data.number && data.number.voiceReady && on && (
+        <div data-ss-phone-connected style={{ marginTop: 8, fontSize: 12, color: "#047857", fontWeight: 700 }}>Connected for calls.</div>
+      )}
+
+      {/* ── Plan phase 6: a CALLING-ONLY number for a builder with none ────────────────────
+          Offered only to someone the purchase will accept (the server's canBuyNumber: the
+          owner, or an admin they gave Billing). It is the account's one number: texting adopts
+          it after registration instead of buying a second. */}
+      {data.scope === "team" && !data.number && data.canBuyNumber && data.numbersForSale && (
+        <div data-ss-phone-buy style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B", marginBottom: 6 }}>Get a number for calls</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <input value={numQ} inputMode="numeric" maxLength={3} placeholder="Area code, e.g. 816"
+              onChange={(e) => setNumQ(e.target.value.replace(/\D/g, "").slice(0, 3))}
+              style={{ ...S.input, width: 170 }} data-ss-phone-areacode />
+            <button type="button" disabled={busy} onClick={searchNumbers} data-ss-phone-search
+              style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px" }}>
+              {busy && !numResults ? "Searching…" : "Search"}
+            </button>
+          </div>
+          {numResults && numResults.length === 0 && (
+            <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 8 }}>No numbers available there right now. Try a nearby area code, or leave it empty.</div>
+          )}
+          {numResults && numResults.length > 0 && (
+            <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+              {numResults.map((r) => (
+                <div key={r.e164} data-ss-phone-result={r.e164} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 14, fontWeight: 800, minWidth: 130 }}>{phoneDisplay(r.e164)}</span>
+                  <span style={{ fontSize: 12, color: "#64748B", flex: "1 1 120px" }}>{[r.locality, r.region].filter(Boolean).join(", ")}</span>
+                  <button type="button" disabled={busy} onClick={() => buyNumber(r.e164)}
+                    style={{ ...S.btn(ACCENT, "#FFF"), padding: "5px 12px", fontSize: 12.5 }}>
+                    Get this number
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {numNote && numNote.ok && <div style={{ ...S.okMsg, margin: "10px 0 0" }}>{numNote.ok}</div>}
+      {numNote && numNote.err && <div style={{ ...S.err, margin: "10px 0 0" }}>{numNote.err}</div>}
+    </div>
+  );
+
+  const installCard = (
+    <div style={PHONE_CARD}>
+      <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Get SSS Phone</h4>
+      <SsPhoneInstallCard what="call" />
+    </div>
+  );
+
+  // Someone with their OWN calls only: whether it is on, which number customers see, and where
+  // to get the apps. The setup is the team's business (the server did not send it).
+  if (data.scope !== "team" || !form) {
+    return (
+      <div data-ss-phone-settings="own">
+        {header}
+        {numberCard}
+        <div style={{ ...PHONE_CARD, fontSize: 13, color: "#475569" }}>
+          Your owner chooses who answers the business number. Calls you place and take show on the Calls page.
+        </div>
+        {installCard}
+      </div>
+    );
+  }
+
+  const ro = !canEdit;
+  const chosen = form.members.filter((id) => team.some((t) => t.userId === id));
+  const others = team.filter((t) => !chosen.includes(t.userId));
+  const move = (id, by) => setForm((f) => {
+    const list = [...f.members];
+    const i = list.indexOf(id), j = i + by;
+    if (i < 0 || j < 0 || j >= list.length) return f;
+    [list[i], list[j]] = [list[j], list[i]];
+    return { ...f, members: list };
+  });
+  const toggle = (id) => setForm((f) => ({ ...f, members: f.members.includes(id) ? f.members.filter((x) => x !== id) : [...f.members, id] }));
+  const wantsForward = form.noAnswer === "forward" || (form.hoursOn && form.afterHours === "forward");
+  const radio = (name, value, current, label, onPick) => (
+    <label key={value} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13, color: "#1E293B", cursor: ro ? "default" : "pointer" }}>
+      <input type="radio" name={name} checked={current === value} disabled={ro} onChange={() => onPick(value)} />
+      {label}
+    </label>
+  );
+  const deviceWord = (p) => (p === "chrome" ? "Chrome" : p === "ios" ? "iPhone" : "Android");
+  const memberRow = (t, idx) => {
+    const checked = chosen.includes(t.userId);
+    const eligible = t.phoneLevel && t.phoneLevel !== "none";
+    return (
+      <div key={t.userId} data-ss-phone-member={t.userId}
+        style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: "1px solid #F1F5F9", flexWrap: "wrap" }}>
+        <input type="checkbox" checked={checked} disabled={ro || (!eligible && !checked)} onChange={() => toggle(t.userId)}
+          title={eligible ? "" : "No Phone access — change it on the Team tab first"} />
+        <div style={{ flex: "1 1 180px", minWidth: 160 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: eligible ? "#1E293B" : "#94A3B8" }}>
+            {checked && form.mode === "in_order" ? `${idx + 1}. ` : ""}{t.name || "Unnamed team member"}
+          </div>
+          <div style={{ fontSize: 11.5, color: "#64748B" }}>
+            {PHONE_LEVEL_LABEL[t.phoneLevel] || "No phone access"}
+            {(t.devices || []).length > 0 && (
+              <> · {(t.devices || []).map((d) => `${deviceWord(d.platform)}${phoneWhen(d.lastSeenAt) ? ` (${phoneWhen(d.lastSeenAt)})` : ""}`).join(", ")}</>
+            )}
+          </div>
+          {outNote && outNote.userId === t.userId && (
+            <div style={{ fontSize: 12, marginTop: 4, color: outNote.err ? "#B91C1C" : "#047857", fontWeight: 600 }}>{outNote.err || outNote.ok}</div>
+          )}
+        </div>
+        {checked && !ro && (
+          <span style={{ display: "inline-flex", gap: 4 }}>
+            <button type="button" title="Ring earlier" disabled={idx === 0} onClick={() => move(t.userId, -1)}
+              style={{ ...S.btn("#F1F5F9", "#334155"), padding: "3px 8px", fontSize: 12 }}>↑</button>
+            <button type="button" title="Ring later" disabled={idx === chosen.length - 1} onClick={() => move(t.userId, 1)}
+              style={{ ...S.btn("#F1F5F9", "#334155"), padding: "3px 8px", fontSize: 12 }}>↓</button>
+          </span>
+        )}
+        {!ro && eligible && (
+          <button type="button" disabled={busy} onClick={() => signOut(t)} data-ss-phone-signout={t.userId}
+            style={{ ...S.btn("#FFF", "#B91C1C"), border: "1px solid #FECACA", padding: "4px 10px", fontSize: 12 }}>
+            Sign out all devices
+          </button>
+        )}
+      </div>
+    );
+  };
+  const setDay = (day, periods) => setForm((f) => {
+    const hours = { ...f.hours };
+    if (periods.length) hours[day] = periods; else delete hours[day];
+    return { ...f, hours };
+  });
+
+  return (
+    <div data-ss-phone-settings="team">
+      {header}
+      {numberCard}
+
+      <div style={PHONE_CARD}>
+        <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Who answers</h4>
+        <p style={{ margin: "0 0 10px", fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
+          The people ticked here ring on every call to your number, in SSS Phone on their computer and
+          phone. They don&rsquo;t need to set anything up beyond signing in. Up to 10 people.
+        </p>
+        <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginBottom: 10 }}>
+          {radio("ss-phone-mode", "all_at_once", form.mode, "Ring everyone at once", (v) => setF({ mode: v }))}
+          {radio("ss-phone-mode", "in_order", form.mode, "Ring one after another, in this order", (v) => setF({ mode: v }))}
+        </div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", marginBottom: 6 }}>
+          Ring for
+          <select value={String(form.ringSeconds)} disabled={ro} onChange={(e) => setF({ ringSeconds: Number(e.target.value) })}
+            style={{ ...S.input, width: "auto", padding: "5px 8px" }}>
+            {(([10, 15, 20, 25, 30, 45, 60].includes(Number(form.ringSeconds)) ? [] : [Number(form.ringSeconds)])
+              .concat([10, 15, 20, 25, 30, 45, 60]))
+              .map((s) => <option key={s} value={s}>{s} seconds</option>)}
+          </select>
+          {form.mode === "in_order" ? "each" : "before the call moves on"}
+        </label>
+        <div>
+          {chosen.map((id, i) => memberRow(team.find((t) => t.userId === id), i))}
+          {others.map((t) => memberRow(t, -1))}
+        </div>
+        {chosen.length === 0 && (
+          <div style={{ fontSize: 12.5, color: "#B45309", marginTop: 8 }}>
+            Nobody is ticked, so every call goes straight to {form.noAnswer === "forward" ? "the forwarding number" : "voicemail"}.
+          </div>
+        )}
+      </div>
+
+      <div style={PHONE_CARD}>
+        <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>When nobody answers</h4>
+        <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+          {radio("ss-phone-noanswer", "voicemail", form.noAnswer, "Take a voicemail", (v) => setF({ noAnswer: v }))}
+          {radio("ss-phone-noanswer", "forward", form.noAnswer, "Forward to a cell phone", (v) => setF({ noAnswer: v }))}
+        </div>
+        {wantsForward && (
+          <label style={{ display: "block", marginBottom: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 4 }}>Forward to</div>
+            <input value={form.forwardTo} disabled={ro} placeholder="(816) 555-0100" inputMode="tel"
+              onChange={(e) => setF({ forwardTo: formatPhone(e.target.value) })}
+              style={{ ...S.input, maxWidth: 240 }} />
+            <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4, lineHeight: 1.45 }}>
+              The cell hears &ldquo;SSS Phone call, press 1 to answer&rdquo; first, so a switched-off phone&rsquo;s own
+              voicemail never takes your customer&rsquo;s message — it lands in yours.
+            </div>
+          </label>
+        )}
+        <label style={{ display: "block" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 4 }}>Voicemail greeting (optional)</div>
+          <input value={form.greetingUrl} disabled={ro} placeholder="https://… link to an audio file"
+            onChange={(e) => setF({ greetingUrl: e.target.value })} style={S.input} />
+          <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4 }}>
+            Leave it empty for the standard greeting: &ldquo;You&rsquo;ve reached [your business]. We can&rsquo;t take your call
+            right now. Please leave your name, number and a short message after the tone.&rdquo;
+          </div>
+        </label>
+      </div>
+
+      <div style={PHONE_CARD}>
+        <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Business hours</h4>
+        <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+          {radio("ss-phone-hours", "always", form.hoursOn ? "set" : "always", "Always open — ring the team at any hour", () => setF({ hoursOn: false }))}
+          {radio("ss-phone-hours", "set", form.hoursOn ? "set" : "always", "Only during these hours", () => setF({ hoursOn: true }))}
+        </div>
+        {form.hoursOn && (
+          <>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 10 }}>
+              Time zone
+              <select value={form.timeZone} disabled={ro} onChange={(e) => setF({ timeZone: e.target.value })}
+                style={{ ...S.input, width: "auto", padding: "5px 8px" }}>
+                {!PHONE_TIME_ZONES.some((z) => z[0] === form.timeZone) && <option value={form.timeZone}>{form.timeZone}</option>}
+                {PHONE_TIME_ZONES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              </select>
+            </label>
+            <div style={{ display: "grid", gap: 6, marginBottom: 12 }}>
+              {PHONE_DAYS.map(([key, label]) => {
+                const periods = form.hours[key] || [];
+                return (
+                  <div key={key} data-ss-phone-day={key} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ width: 92, fontSize: 13, fontWeight: 700, color: "#334155" }}>{label}</span>
+                    {periods.length === 0 && <span style={{ fontSize: 12.5, color: "#94A3B8" }}>Closed</span>}
+                    {periods.map((p, i) => (
+                      <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <input type="time" value={p[0]} disabled={ro}
+                          onChange={(e) => setDay(key, periods.map((q, k) => (k === i ? [e.target.value, q[1]] : q)))}
+                          style={{ ...S.input, width: 110, padding: "4px 6px" }} />
+                        <span style={{ fontSize: 12, color: "#64748B" }}>to</span>
+                        <input type="time" value={p[1]} disabled={ro}
+                          onChange={(e) => setDay(key, periods.map((q, k) => (k === i ? [q[0], e.target.value] : q)))}
+                          style={{ ...S.input, width: 110, padding: "4px 6px" }} />
+                        {!ro && (
+                          <button type="button" title="Remove these hours" onClick={() => setDay(key, periods.filter((_q, k) => k !== i))}
+                            style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontWeight: 800, fontSize: 14 }}>×</button>
+                        )}
+                      </span>
+                    ))}
+                    {!ro && periods.length < 4 && (
+                      <button type="button" onClick={() => setDay(key, [...periods, periods.length ? ["13:00", "17:00"] : ["08:00", "17:00"]])}
+                        style={{ background: "none", border: "none", color: ACCENT, cursor: "pointer", fontWeight: 700, fontSize: 12, fontFamily: "inherit" }}>
+                        {periods.length ? "+ more hours" : "+ open"}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Outside these hours</div>
+            <div style={{ display: "grid", gap: 6 }}>
+              {radio("ss-phone-after", "voicemail", form.afterHours, "Take a voicemail", (v) => setF({ afterHours: v }))}
+              {radio("ss-phone-after", "forward", form.afterHours, "Forward to the cell phone above", (v) => setF({ afterHours: v }))}
+            </div>
+          </>
+        )}
+      </div>
+
+      {!ro && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+          <button type="button" disabled={busy || !data.number} onClick={save} data-ss-phone-save
+            title={data.number ? "" : "Get a number on the Text Messaging tab first"}
+            style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy || !data.number ? 0.6 : 1 }}>
+            {busy ? "Saving…" : data.route ? "Save phone settings" : "Save and finish setup"}
+          </button>
+          {note && note.err && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{note.err}</span>}
+          {note && note.ok && <span style={{ fontSize: 12.5, color: "#047857", fontWeight: 700 }}>{note.ok}</span>}
+        </div>
+      )}
+
+      {installCard}
+    </div>
+  );
+}
+
+// ── The Calls page ──────────────────────────────────────────────────────────────────────
+// Per person: calls in and out, answered, missed (against everyone the call rang), average
+// length, voicemails, texts sent and received. MY calls by default — Carolyn's own complaint
+// about GHL was that you "can't see just your calls" — and Team for literal view/edit.
+function CallsReport({ clientId, viewingLabel = null, canTeam = false, phoneOn = false }) {
+  // An operator viewing a builder has no calls of their own there, so Team is where they start.
+  const [scope, setScope] = useState(viewingLabel && canTeam ? "team" : "mine");
+  const [days, setDays] = useState(30);
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true); setErr(null);
+    phoneAction("phone_calls_report", { scope, days })
+      .then((d) => { if (!cancelled) { setData(d); setLoading(false); } })
+      .catch((e) => { if (!cancelled) { setErr(e.message); setLoading(false); } });
+    return () => { cancelled = true; };
+  }, [scope, days, clientId]);
+
+  const cols = [
+    ["callsIn", "Calls in"], ["callsOut", "Calls out"], ["answered", "Answered"], ["missed", "Missed"],
+    ["avgSeconds", "Avg length"], ["voicemails", "Voicemails"], ["textsSent", "Texts sent"], ["textsReceived", "Texts received"],
+  ];
+  const cell = (l, k) => (k === "avgSeconds" ? phoneClock(l[k]) : String(l[k] || 0));
+  const toggleBtn = (value, label, disabled, title) => (
+    <button type="button" disabled={disabled} title={title || ""} onClick={() => setScope(value)} data-ss-calls-scope={value}
+      style={{
+        border: "none", borderRadius: 999, padding: "6px 14px", fontSize: 12.5, fontWeight: 800, cursor: disabled ? "not-allowed" : "pointer",
+        background: scope === value ? ACCENT : "#F1F5F9", color: scope === value ? "#FFF" : disabled ? "#CBD5E1" : "#475569",
+      }}>{label}</button>
+  );
+  const lines = (data && data.lines) || [];
+  const empty = !loading && data && data.available !== false && lines.every((l) => !(l.callsIn || l.callsOut || l.textsSent || l.textsReceived));
+
+  return (
+    <div data-ss-calls-report>
+      <div style={{ ...PHONE_CARD, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ display: "inline-flex", gap: 4, background: "#F8FAFC", borderRadius: 999, padding: 3 }}>
+          {toggleBtn("mine", "My calls", false)}
+          {toggleBtn("team", "Team", !canTeam, canTeam ? "" : "Your phone access covers your own calls.")}
+        </div>
+        <select value={String(days)} onChange={(e) => setDays(Number(e.target.value))}
+          style={{ ...S.input, width: "auto", padding: "6px 9px" }}>
+          <option value="7">Last 7 days</option>
+          <option value="30">Last 30 days</option>
+          <option value="90">Last 90 days</option>
+        </select>
+        {viewingLabel && <span style={{ fontSize: 12, color: "#64748B" }}>{viewingLabel}</span>}
+        {!phoneOn && (
+          <span style={{ fontSize: 12, color: "#64748B", marginLeft: "auto" }}>
+            Calling is switched off for this account, so only past calls show here.
+          </span>
+        )}
+      </div>
+
+      <div style={PHONE_CARD}>
+        {err ? <div style={{ ...S.err, marginBottom: 0 }}>{err}</div>
+          : loading && !data ? <SkelRows cols={9} rows={4} />
+          : data && data.available === false ? (
+            <div style={{ fontSize: 13, color: "#475569" }}>Calls show here once SSS Phone is set up on this account.</div>
+          ) : (
+            <>
+              <div style={{ overflowX: "auto", opacity: loading ? 0.55 : 1 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      <th style={S.th}>Person</th>
+                      {cols.map(([k, l]) => <th key={k} style={{ ...S.th, textAlign: "right" }}>{l}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {lines.map((l) => (
+                      <tr key={l.userId || l.name} data-ss-calls-line={l.userId || ""}>
+                        <td style={{ ...S.td, fontWeight: 700 }}>{l.name}</td>
+                        {cols.map(([k]) => <td key={k} style={{ ...S.td, textAlign: "right", color: k === "missed" && l.missed ? "#B91C1C" : "#1E293B" }}>{cell(l, k)}</td>)}
+                      </tr>
+                    ))}
+                    {data && data.scope === "team" && data.totals && (
+                      <tr data-ss-calls-line="totals">
+                        <td style={{ ...S.td, fontWeight: 800, borderTop: "2px solid #E2E8F0" }}>Whole business</td>
+                        {cols.map(([k]) => <td key={k} style={{ ...S.td, textAlign: "right", fontWeight: 800, borderTop: "2px solid #E2E8F0" }}>{cell(data.totals, k)}</td>)}
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {empty && <div style={{ fontSize: 12.5, color: "#94A3B8", marginTop: 10 }}>No calls or texts in the last {days} days.</div>}
+              <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 10, lineHeight: 1.5 }}>
+                A missed call counts against everyone it rang. Texts received count for the person the customer is assigned to;
+                texts from customers assigned to nobody count only in the whole-business line.
+                {data && data.narrowed ? " Only customers assigned to you or that you follow are counted." : ""}
+                {data && data.truncated ? " This period has more activity than one report reads, so the numbers are partial — pick a shorter period." : ""}
+              </div>
+            </>
+          )}
+      </div>
+
+      <div style={PHONE_CARD}>
+        <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Get SSS Phone</h4>
+        <SsPhoneInstallCard what="call" />
+      </div>
+    </div>
+  );
+}

@@ -541,6 +541,9 @@ const TAB_META = {
   "self-serve-display-units": ["Self Serve Displays", "In-unit kiosk to design, estimate, and get live help — coming soon"],
   "commissions": ["Commissions", "Track and calculate sales commissions — coming soon"],
   "reports": ["Reports", "Sales, leads, revenue, and delivery reporting — coming soon"],
+  // SSS Phone's report (plan section 12). Carolyn, 08-27: "the reporting is inside Structure
+  // Studio ... so it's in one place" — the apps place and take the calls, this page counts them.
+  calls: ["Calls", "Calls and texts, person by person — yours, or the whole team's"],
 };
 
 // ── Path routing ─────────────────────────────────────────────────────────────
@@ -690,6 +693,9 @@ const TAB_AREA = {
   commissions: "commissions",
   reports: "reports",
   quickbooks: "settings_quickbooks",
+  // Any phone level reads it: 'own' sees their own line, the Team toggle needs literal
+  // view/edit (ssOwnPhoneOnly) and the server checks the same thing again.
+  calls: "phone",
 };
 // Which area each Settings sub-tab needs. Same registry idea as TAB_AREA above: a sub-tab
 // missing from this map is not access-controlled.
@@ -749,6 +755,11 @@ const SETTINGS_TAB_AREA = {
   // has granted it. Reading the resulting status is contacts-level; that split lives in
   // portal-sms's GATES table, and this map only decides whether the sub-tab is worth showing.
   sms: "settings_billing",
+  // SSS Phone's calling setup (who answers, hours, forwarding) — the phone area itself, not
+  // settings_billing: choosing who picks up spends nothing and registers nothing. An 'own'
+  // holder who reaches the tab sees the install links and their own status only; the setup is
+  // phone_settings_get's team slice, which the server hands to literal view/edit.
+  phone: "phone",
   commissions: "commissions",
   team: "settings_team",
   billing: "settings_billing",
@@ -788,6 +799,241 @@ function ssCanWrite(access, area) {
   return v === "edit" || (v === "own" && OWN_WRITE_AREAS.has(area));
 }
 
+// ══ SSS PHONE — the portal's half of calling (2026-09-29) ════════════════════════════════
+// The contract is structure-studio-phone/docs/SPEC.md, section 5: the portal NEVER places a
+// call itself. Call and Text on a contact hand the number to the SSS Phone Chrome extension on
+// this same computer through chrome.runtime.sendMessage — no network, no page change (Carolyn
+// 08-27: "it opens up the phone ... it's not taking them to a different place") — or, on a
+// phone's browser, open the SSS Phone app by a deep link.
+
+// Phone access, the browser's copy of access.ts' ownPhoneOnly(). The TEAM question — the Calls
+// report's Team toggle, the setup screen — asks for the LITERAL level, because RANK (and so
+// ssCanRead) scores 'own' and 'view' the same. FAILS CLOSED exactly like the server's: anything
+// that is not literally view or edit, including a missing key, is "own calls only".
+function ssOwnPhoneOnly(access) {
+  const v = access && access.phone;
+  return v !== "view" && v !== "edit";
+}
+
+// WHERE CALLING IS OFFERED AT ALL, and this is the ONE place that rule lives (the ssAdvancedOn
+// pattern): the Settings → Phone tab, the Calls rail item and the contact page's Call button all
+// ask it. Plan D9: SSS Phone is OFF for every builder until launch and switched on per tenant,
+// so a builder's owner on production does not get a Phone tab advertising a product that is not
+// released — and, with it, a switch that would turn calling on before billing exists. It is
+// offered when the tenant's phone_status is on, to an operator viewing a tenant (that is how a
+// tenant is switched on), and on beta/local hosts, where unreleased work is looked at.
+// ⚠️ AT BUILDER LAUNCH (plan phase 6, "self-serve switch-on in Settings") this becomes `true`
+// for owners, and nothing else has to change.
+function ssPhoneOffered(phoneStatus, operatorViewing) {
+  return phoneStatus === "on" || !!operatorViewing || ssIsBetaHost();
+}
+
+// The Chrome extension IDs allowed to answer. A PLACEHOLDER until SSS Phone is published —
+// the real IDs replace it here (dev and store builds may both be listed). Only a real Chrome
+// extension ID shape (32 letters a-p) is ever messaged, so the placeholder is inert rather
+// than an error. `window.` so the config is one line to find and so the harness can inject a
+// test ID before the app runs; a value already there wins.
+if (!Array.isArray(window.SS_PHONE_EXTENSION_IDS)) {
+  window.SS_PHONE_EXTENSION_IDS = ["PLACEHOLDER_SSS_PHONE_EXTENSION_ID"];
+}
+// PHONE_API_BASE: the phone-api Worker's public address (SPEC section 1), which serves
+// voicemail audio to the contact timeline (GET /voicemails/:id/audio, SPEC section 3). Same
+// config shape as the IDs above: `window.` so the harness can point it at a stub before the app
+// runs, and a value already there wins. https only; anything else falls back to the default,
+// because the viewer's sign-in token is sent to this address.
+if (typeof window.SS_PHONE_API_BASE !== "string" || !/^https:\/\/[^/?#\s]+$/.test(window.SS_PHONE_API_BASE)) {
+  window.SS_PHONE_API_BASE = "https://phone.structurestudiosuite.com";
+}
+// A voicemail's audio address on the Worker. "" when there is nothing to ask for.
+//
+// ⚠️ NO TOKEN IN THE URL (review SSB-7). This used to be an <audio src> carrying
+// ?access_token=<the viewer's Supabase session>, because an <audio> tag cannot send a header.
+// The phone-api Worker has observability on, and Workers Logs record every request URL, so each
+// play wrote a live session token (an owner's included) into Cloudflare's logs and any other
+// URL log along the way — a token good against every Supabase API and portal-settings action
+// for up to an hour. The audio is now fetched with the token in the Authorization header
+// (ssPhoneFetchVoicemail, which the Worker's CORS allows from the portal's hosts) and played
+// from a blob: URL, so the address itself carries nothing.
+function ssPhoneVoicemailAudioUrl(voicemailId) {
+  const id = String(voicemailId || "");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return "";
+  return `${window.SS_PHONE_API_BASE}/voicemails/${encodeURIComponent(id)}/audio`;
+}
+// Fetch one voicemail as the signed-in person and hand back a blob: URL an <audio> tag plays.
+// Throws a sentence. Only ever called from a press: the Worker marks a voicemail heard the first
+// time it streams, so merely opening the record must not fetch it. The caller revokes the URL.
+async function ssPhoneFetchVoicemail(voicemailId, accessToken, fetchImpl) {
+  const url = ssPhoneVoicemailAudioUrl(voicemailId);
+  if (!url) throw new Error("That voicemail isn't available.");
+  if (!accessToken) throw new Error("Sign in again to play this message.");
+  let res;
+  try {
+    res = await (fetchImpl || fetch)(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+      credentials: "omit",
+    });
+  } catch (_e) {
+    throw new Error("The voicemail couldn't be loaded. Check your connection and try again.");
+  }
+  if (!res.ok) {
+    throw new Error(res.status === 404 ? "That voicemail isn't available any more."
+      : res.status === 401 ? "Sign in again to play this message."
+      : "The voicemail couldn't be loaded. Try again.");
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+// Store links, PLACEHOLDERS for the same reason. A link still carrying PLACEHOLDER is shown as
+// "coming soon" rather than as a button to a page that does not exist.
+const SS_PHONE_LINKS = {
+  chrome: "https://chromewebstore.google.com/detail/PLACEHOLDER_SSS_PHONE_EXTENSION_ID",
+  ios: "https://apps.apple.com/app/PLACEHOLDER_SSS_PHONE_IOS",
+  android: "https://play.google.com/store/apps/details?id=PLACEHOLDER_SSS_PHONE_ANDROID",
+};
+function ssPhoneLinkReady(url) { return !!url && !/PLACEHOLDER/.test(url); }
+
+function ssPhoneExtensionIds() {
+  const ids = Array.isArray(window.SS_PHONE_EXTENSION_IDS) ? window.SS_PHONE_EXTENSION_IDS : [];
+  return ids.filter((id) => typeof id === "string" && /^[a-p]{32}$/.test(id));
+}
+
+// One message to one extension ID → its reply, or null (not installed, no answer, not Chrome).
+// ⚠️ chrome.runtime.lastError MUST be read inside the callback: an ID with no extension behind
+// it (the normal state for most visitors) answers through lastError, and an unread lastError is
+// logged by Chrome as "Unchecked runtime.lastError" on every click.
+function ssPhoneMessage(id, msg, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    let timer = null;
+    const finish = (v) => { if (done) return; done = true; if (timer) clearTimeout(timer); resolve(v); };
+    timer = setTimeout(() => finish(null), timeoutMs);
+    try {
+      const rt = window.chrome && window.chrome.runtime;
+      if (!rt || typeof rt.sendMessage !== "function") { finish(null); return; }
+      rt.sendMessage(id, msg, (reply) => {
+        const err = window.chrome && window.chrome.runtime && window.chrome.runtime.lastError;
+        finish(err || reply === undefined ? null : reply);
+      });
+    } catch (_e) { finish(null); }
+  });
+}
+
+// Which SSS Phone answers on this computer: { id, reply } or null. Every listed ID is asked at
+// once and the first in LIST order that answers wins, so a store build listed first beats a
+// developer build. A found extension is remembered briefly (a second click should not ask
+// again); not-found is never remembered, so installing it and pressing Call again just works.
+let ssPhoneFound = null;
+async function ssPhonePing() {
+  if (ssPhoneFound && Date.now() - ssPhoneFound.at < 15000) return ssPhoneFound;
+  const ids = ssPhoneExtensionIds();
+  const replies = await Promise.all(ids.map((id) => ssPhoneMessage(id, { type: "sss.ping" }, 800)));
+  const i = replies.findIndex((r) => r && r.ok === true);
+  ssPhoneFound = i < 0 ? null : { id: ids[i], reply: replies[i], at: Date.now() };
+  return ssPhoneFound;
+}
+
+// Ask SSS Phone to call or text. → { installed, reply }. `reply` is the extension's own
+// { ok } / { ok:false, error } (SPEC section 5); a silence after a successful ping is reported
+// as error "no_reply" so the screen can say what to do rather than nothing.
+async function ssPhoneSend(type, payload) {
+  const found = await ssPhonePing();
+  if (!found) return { installed: false, reply: null };
+  const reply = await ssPhoneMessage(found.id, { type, ...payload }, 4000);
+  if (!reply) { ssPhoneFound = null; return { installed: true, reply: { ok: false, error: "no_reply" } }; }
+  return { installed: true, reply };
+}
+
+// What each refusal means, in words a builder can act on. Codes are the extension's (SPEC
+// section 5 plus the bridge's own busy / bad_request / emergency_blocked).
+function ssPhoneRefusal(reply) {
+  const code = reply && reply.error;
+  if (code === "wrong_user") {
+    return reply.signed_in_as
+      ? `SSS Phone on this computer is signed in as ${reply.signed_in_as}. Sign in to SSS Phone as yourself, then try again.`
+      : "SSS Phone on this computer is signed in as someone else. Sign in to SSS Phone as yourself, then try again.";
+  }
+  if (code === "signed_out") return "SSS Phone isn't signed in. Open it from your Chrome toolbar, sign in with your Structure Studio login, then try again.";
+  if (code === "no_access") return "Your account doesn't include calling. Ask an owner or admin to turn on Phone access for you on the Team tab.";
+  if (code === "busy") return "Finish your current call in SSS Phone first.";
+  if (code === "emergency_blocked") return "For emergencies, call 911 from your cell phone.";
+  if (code === "bad_request") return "SSS Phone couldn't use that number. Check the contact's phone number.";
+  return "SSS Phone didn't answer. Open it from your Chrome toolbar and try again.";
+}
+
+// A phone's browser, where there is no extension and the SSS Phone APP takes the call.
+function ssIsPhoneBrowser() {
+  try {
+    const uad = navigator.userAgentData;
+    if (uad && typeof uad.mobile === "boolean" && uad.mobile) return true;
+    const ua = String(navigator.userAgent || "");
+    if (/Android|iPhone|iPod|iPad/i.test(ua)) return true;
+    // iPadOS asks for the desktop site and reports itself as a Mac with a touch screen.
+    return /Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1;
+  } catch (_e) { return false; }
+}
+
+// Anything a person typed as a phone number → E.164, or "" when it cannot be dialed. US numbers
+// in any format; an explicit "+" number is passed through for the extension and the Worker to
+// judge (their geo rules, not ours).
+function ssPhoneE164(raw) {
+  const s = String(raw == null ? "" : raw).trim();
+  const d = s.replace(/\D/g, "");
+  if (s.charAt(0) === "+") return d.length >= 8 && d.length <= 15 ? "+" + d : "";
+  if (d.length === 10) return "+1" + d;
+  if (d.length === 11 && d.charAt(0) === "1") return "+" + d;
+  return "";
+}
+
+// Plan section 14 (911 is deferred): "the clients also block before dialing". 933 is Twilio's
+// emergency test number and 112 dials emergency services on most phones.
+function ssPhoneIsEmergency(raw) {
+  const d = String(raw == null ? "" : raw).replace(/\D/g, "");
+  return d === "911" || d === "933" || d === "112";
+}
+
+// The SSS Phone app's deep link — a PLACEHOLDER scheme until the mobile app registers it.
+// Carries the same four fields the extension message does (SPEC section 5), so the app can
+// refuse a different signed-in person the same way the extension does.
+function ssPhoneDeepLink(kind, p) {
+  const q = new URLSearchParams();
+  q.set("to", p.to_e164 || "");
+  if (p.contact_id) q.set("contact_id", p.contact_id);
+  if (p.user_id) q.set("user_id", p.user_id);
+  if (p.client_id) q.set("client_id", p.client_id);
+  return "sssphone://" + kind + "?" + q.toString();
+}
+
+// CALL, the ONE hand-off: the contact page's Call tab and the contact list's Call button both
+// come through here, so the two cannot drift into different rules. `raw` is the contact's phone
+// as stored; `ids` are the other three SPEC fields (the SIGNED-IN person and the tenant on
+// screen, never a contact's owner). → what to show:
+//   { kind: "error", text }    nothing was dialed, and the sentence says why
+//   { kind: "app", to }        a phone's browser: the SSS Phone app was asked to open
+//   { kind: "install", to }    no SSS Phone answered on this computer
+//   { kind: "calling", to }    the extension took the call; it runs there, the page stays put
+// `badNumber` words the undialable case for where the button is ("Check it under Summary").
+async function ssPhoneStartCall(raw, ids, badNumber) {
+  // Plan section 14, 911 deferred: "the clients also block before dialing".
+  if (ssPhoneIsEmergency(raw)) return { kind: "error", text: "For emergencies, call 911 from your cell phone." };
+  const msg = {
+    to_e164: ssPhoneE164(raw),
+    contact_id: (ids && ids.contact_id) || null,
+    user_id: (ids && ids.user_id) || null,
+    client_id: (ids && ids.client_id) || null,
+  };
+  if (!msg.to_e164) return { kind: "error", text: badNumber || "This contact's phone number can't be dialed." };
+  if (ssIsPhoneBrowser()) {
+    try { window.location.href = ssPhoneDeepLink("call", msg); } catch (_e) { /* the panel says what to do */ }
+    return { kind: "app", to: msg.to_e164 };
+  }
+  const out = await ssPhoneSend("sss.call", msg);
+  if (!out.installed) return { kind: "install", to: msg.to_e164 };
+  if (out.reply && out.reply.ok) return { kind: "calling", to: msg.to_e164 };
+  return { kind: "error", text: ssPhoneRefusal(out.reply) };
+}
+
 // ── The Settings sub-pages ───────────────────────────────────────────────────────────────
 // ONE list, read by TWO renderers: the Settings sidebar in 12-shell.jsx and SettingsShell's
 // own body dispatch in 08-integrations.jsx. It lived inside SettingsShell until the sidebar
@@ -801,7 +1047,7 @@ function ssCanWrite(access, area) {
 // all. Carolyn 2026-09-11: Structures / Options / Colors / Designer "aren't grouped … they
 // have their own nav on the side" — they are top-level items, like Designer and Contacts are
 // in the workspace rail. One ordering model and no second sort: the array order IS the rail.
-function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}) {
+function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phoneOffered = false } = {}) {
   return [
     ["structures", "Structures", "Building styles, sizes, and base prices", null],
     ["options", "Options", "Add-on items and rates", null],
@@ -845,6 +1091,13 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
     // it was already the generic word, so no link moved.
     ["email", "Email Settings", "Send estimates and invoices from your own email domain", null],
     ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business", null],
+    // SSS PHONE (2026-09-29) — CALLING ONLY, directly under the texting tab it shares a number
+    // with. The number is bought and registered on Text Messaging; this tab is the owner's
+    // one-time setup of who answers it, plus the install links. `phoneOffered` is
+    // ssPhoneOffered()'s answer for the tenant on screen — see there for why a builder on
+    // production does not see it until calling is switched on for them. The area filter at the
+    // bottom (SETTINGS_TAB_AREA.phone) still applies on top.
+    ...(phoneOffered ? [["phone", "Phone", "Who answers your business number, and the SSS Phone apps", null]] : []),
     // ⚠️ The SLUG STAYS `billing`. Only the LABEL changed, to "Subscription" (Carolyn
     // 2026-09-11) — the group above it is called Billing, and Billing > Billing reads as a
     // mistake. Roughly eight callers do navigate("settings", "billing") — the transition and

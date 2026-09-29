@@ -210,6 +210,25 @@ export const AREAS: Area[] = [
   { key: "commissions",       label: "Commissions",        group: "workspace", hint: "Payouts — 'Own only' hides everyone else's",
     levels: ["none", "own", "edit"] },
   { key: "reports",           label: "Reports",            group: "workspace", hint: "Sales, leads, revenue",               levels: RVE },
+  // SSS PHONE (migration 254, 2026-09-29): making and taking calls, voicemail, the team's call
+  // history and the Calls report. Plan: _Extras/Structure Studio Phone Plan 2026-09-28.md §7.
+  //   own   make and take calls; see your OWN calls and voicemails
+  //   view  also the whole team's calls, the team live channel and the Calls report
+  //   edit  also change phone settings (routing, hours, greeting). Owners are always edit.
+  //
+  // ⚠️ RANK CANNOT TELL 'own' FROM 'view' HERE, and that is the trap this area is built around.
+  // RANK scores both 1, so canRead() is true for both, which is correct for "may they use the
+  // phone at all" and wrong for "may they see the team's calls". Every TEAM check (the Team
+  // tab, the Calls report, the `phone:<client_id>` realtime channel) must ask ownPhoneOnly()
+  // below, which compares the LITERAL level. The SQL twin is phone_own_only() (254).
+  //
+  // NOT ownWrites. 'own' makes calls, but canEdit(phone) is the settings gate, and an 'own'
+  // holder changing the tenant's call routing is exactly what the level exists to prevent.
+  //
+  // Texts are NOT gated here. Who may read or send a text keeps following `contacts` and the
+  // CONTACT_ROW_SCOPE rules, so adding the phone did not move anyone's access to a thread.
+  { key: "phone",             label: "Phone",              group: "workspace", hint: "SSS Phone calls and voicemail — 'Own calls' is just their own; 'Team calls' adds the whole team's and the Calls report; Edit also changes phone settings",
+    levels: ["none", "own", "view", "edit"] },
   // CSM SYNERGY'S OWN BOARDS — bugs, feature requests, roadmap, client setup. Internal only.
   //
   // Carolyn, 2026-09-02, with Settings → Team open beside the Projects people list: "I feel
@@ -289,11 +308,17 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
     designer: "edit", designs: "edit", contacts: "edit", inventory: "edit", orders: "edit",
     change_orders: "edit", change_order_approve: "edit",
     build_schedule: "edit", delivery_schedule: "edit", repairs: "edit", commissions: "edit", reports: "edit",
+    phone: "edit",
     settings_structures: "edit", settings_options: "edit", settings_branding: "edit",
     settings_crm: "edit", settings_quickbooks: "edit", settings_email: "edit",
     settings_team: "edit",
     settings_billing: "none",
   },
+  // PHONE (migration 254) in the presets below: office staff and sales managers 'view' (they
+  // answer the business line and need the team's history), sales reps and dealers 'own' (their
+  // own calls only), and scheduler, crew leader, crew member and driver OMIT it, so they are
+  // 'none' by default. The plan's §7 defaults, kept as proposed on 2026-09-29; an owner changes
+  // anyone's level on the Team screen like any other area.
   // The five titles below arrived together on 2026-09-07. Each one's shape is Carolyn's
   // answer to "what should this person get the moment you pick the title", and the switches
   // stay editable per person afterwards — a preset is a starting point, never a ceiling.
@@ -319,6 +344,7 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
     designs: "edit", contacts: "edit", inventory: "edit", orders: "edit",
     change_orders: "edit",
     build_schedule: "view", delivery_schedule: "view", repairs: "view", reports: "view",
+    phone: "view",
     settings_branding: "edit", settings_quickbooks: "edit",
   },
   // A sales rep plus the two things that make someone a MANAGER of reps: everyone's payout
@@ -334,9 +360,11 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
   sales_manager: {
     designer: "edit", designs: "edit", contacts: "edit", inventory: "view",
     orders: "edit", change_orders: "edit", commissions: "edit", reports: "edit",
+    phone: "view",
   },
   sales_rep: {
     designer: "edit", designs: "edit", contacts: "edit",
+    phone: "own",
     // orders:'edit' since 2026-09-01 (Carolyn): a rep should be able to edit, complete and
     // finalize an order, take the payment and get the signature — the whole sale, from the
     // designer's Push to Invoice through to money in. change_orders is deliberately ABSENT
@@ -359,6 +387,7 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
   dealer: {
     designer: "edit", designs: "edit", contacts: "own",
     inventory: "view", orders: "edit", commissions: "own",
+    phone: "own",
   },
   // Owns all three boards. Everything else is 'view' because a scheduler has to see WHAT they
   // are scheduling and WHO it is for — the building on the order, the customer to call about
@@ -459,6 +488,30 @@ export function seesAllPayouts(access: Record<string, Level>): boolean {
  */
 export function ownContactsOnly(access: Record<string, Level>): boolean {
   return access.contacts === "own";
+}
+
+/**
+ * Phone only: is this caller limited to their OWN calls and voicemails, or may they see the
+ * team's? THE TEAM CHECK IS `!ownPhoneOnly(access)`, and nothing else.
+ *
+ * Why a helper at all: RANK scores 'own' and 'view' the same, so canRead(phone) is true for
+ * both and cannot answer "may they see everyone's calls". Comparing the literal level in one
+ * place keeps the Worker's `/calls?scope=team`, the portal's Calls report and Team tab, and
+ * the realtime policy on `phone:<client_id>` (SQL twin: public.phone_own_only, migration 254)
+ * from each inventing their own version of the rule.
+ *
+ * ⚠️ FAILS CLOSED, which is where it deliberately differs from ownContactsOnly(): anything
+ * that is not literally 'view' or 'edit' is "own only", INCLUDING 'none' and a missing key.
+ * So `!ownPhoneOnly(access)` can never be true for somebody without phone access, even on a
+ * code path that forgot to check canRead(phone) first. The gate still has to run; this just
+ * cannot widen anything if it does not.
+ *
+ * Owners are 'edit' by construction (effectiveAccess short-circuits them, and area_level_for
+ * does the same in SQL), so an owner always sees the team.
+ */
+export function ownPhoneOnly(access: Record<string, Level>): boolean {
+  const lvl = access.phone;
+  return lvl !== "view" && lvl !== "edit";
 }
 
 /**

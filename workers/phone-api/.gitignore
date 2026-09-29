@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+# The repo root ignores every package-lock.json (dev tooling only). This one is the
+# Worker's deploy manifest, so it is committed: an unpinned transitive dependency would
+# change what answers the phone line without anyone changing a line here.
+!package-lock.json

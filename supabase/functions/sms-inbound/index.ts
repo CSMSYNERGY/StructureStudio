@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { timingSafeEqual } from "../_shared/emailInbound.ts";
 import { validateTwilioSignature, hasSignatureKey, smsPhoneKey } from "../_shared/twilioSms.ts";
+import { insertInbound, parseNumMedia } from "./numMedia.ts";
 
 // Inbound SMS → the CRM conversation. The return leg that makes texting two-way, and the
 // twin of email-inbound: same shared-secret gate, same always-200-once-authenticated
@@ -224,7 +225,11 @@ Deno.serve(withErrorLog("sms-inbound", async (req: Request) => {
   // worth more than our ability to file them. An unfiled row is visible to an operator via
   // sms_messages_unmatched_idx and can be re-linked; a dropped one is gone forever.
   const segs = Number(params.NumSegments);
-  const { error } = await admin.from("sms_messages").insert({
+  // num_media (SSS Phone, migration 254): how many photos came with it, so a photo-only text —
+  // whose Body is empty — can say "Photo received" instead of rendering as a blank bubble.
+  // insertInbound retries without the column if the migration has not landed yet; see there.
+  const numMedia = parseNumMedia(params.NumMedia);
+  const { error, retriedWithoutMedia } = await insertInbound(admin, {
     client_id: clientId,
     contact_id: contactId,
     direction: "in",
@@ -234,7 +239,18 @@ Deno.serve(withErrorLog("sms-inbound", async (req: Request) => {
     status: "received",
     provider_sid: sid || null,
     num_segments: Number.isFinite(segs) && segs > 0 ? segs : 1,
-  });
+  }, numMedia);
+  if (retriedWithoutMedia && numMedia > 0) {
+    // Stored, but the count was not: visible so a photo that shows as nothing can be explained.
+    await logEdgeError({
+      fn: "sms-inbound",
+      clientId,
+      code: "sms_inbound_num_media_unstored",
+      message: "An inbound text with photos was stored without its photo count: sms_messages.num_media does not exist yet.",
+      context: { numMedia },
+      severity: "info",
+    }).catch(() => {});
+  }
   // 23505 on the partial unique index means Twilio retried a message we already stored.
   // That is a SUCCESS — the message is safe — so it must not look like a failure and must
   // not provoke another retry.

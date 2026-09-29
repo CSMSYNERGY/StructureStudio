@@ -60,6 +60,8 @@ const ICONS = {
   "self-serve-display-units": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>,
   "commissions": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
   "reports": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>,
+  // A handset — SSS Phone's Calls page, and (by reference, below) Settings → Phone.
+  calls: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>,
 };
 
 // ── Settings rail glyphs ──────────────────────────────────────────────────────────────
@@ -86,6 +88,7 @@ const SETTINGS_ICONS = {
   email: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>,
   sms: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8z"/></svg>,
   commissions: ICONS.commissions,
+  phone: ICONS.calls,                        // the handset — SSS Phone's calling setup
   billing: ICONS.billing,                    // the card — labelled "Subscription" in the rail
   myprofile: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>,
 };
@@ -967,7 +970,9 @@ function Dashboard({ session }) {
       // `clientId` says WHOSE answer this is. The state is not cleared when an operator moves
       // straight from one viewed builder to another, so until the new answer lands it still holds
       // the last one; the Advanced gate (below) reads a mismatch as "not answered yet".
-      setViewedCtx({ access: st.data.access || null, entitlement: bl.data.entitlement || null, clientId: viewing ? viewing.clientId : null });
+      // phoneStatus: the VIEWED tenant's SSS Phone switch, so Call and the Calls page follow the
+      // builder on screen rather than the operator's own account.
+      setViewedCtx({ access: st.data.access || null, entitlement: bl.data.entitlement || null, clientId: viewing ? viewing.clientId : null, phoneStatus: st.data.phoneStatus || null });
     };
     load(0);
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
@@ -1380,6 +1385,8 @@ function Dashboard({ session }) {
       // server-side hole above has to be closed rather than compensated for here.
       let access = null;
       let prefs = null;
+      // SSS Phone's per-tenant switch ("on" | "off" | null), off the same bootstrap call.
+      let phoneStatus = null;
       try {
         // Issued at the top of the effect, not here — see the note there for why that is
         // safe against a view-as arming mid-flight. `bootStatus` is null exactly when
@@ -1393,6 +1400,7 @@ function Dashboard({ session }) {
           // a round trip late renders the wrong tab and then jumps, which reads worse than
           // having no setting at all.
           if (st && st.prefs) prefs = st.prefs;
+          if (st && st.phoneStatus) phoneStatus = st.phoneStatus;
           // …and so does the heading. `status` already reads client_configs server-side and
           // hands back branding.companyName, so the separate client_configs SELECT that used
           // to sit above was a third sequential round trip for a column this response was
@@ -1423,6 +1431,7 @@ function Dashboard({ session }) {
               const again = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
               if (again.data && again.data.access) access = again.data.access;
               if (again.data && again.data.prefs) prefs = again.data.prefs;
+              if (again.data && again.data.phoneStatus) phoneStatus = again.data.phoneStatus;
               if (again.data && again.data.branding && again.data.branding.companyName
                   && (!again.data.clientId || again.data.clientId === mapping.client_id)) {
                 businessName = again.data.branding.companyName;
@@ -1447,7 +1456,7 @@ function Dashboard({ session }) {
       // (performance.mark is wrapped because a hardened browser can make it throw, and a
       // measurement must never be the thing that blanks the portal).
       try { performance.mark("ss:tenant-ready"); } catch (_e) {}
-      setTenant({ clientId: mapping.client_id, businessName: businessName || mapping.client_id, role: mapping.role || "user", access, prefs });
+      setTenant({ clientId: mapping.client_id, businessName: businessName || mapping.client_id, role: mapping.role || "user", access, prefs, phoneStatus });
     })();
   }, [session.access_token, viewing]);
 
@@ -1581,6 +1590,14 @@ function Dashboard({ session }) {
   // remount keys; the invoke wrapper handles the edge functions. Null until the tenant
   // resolves — every real read happens below the early returns.
   const effClientId = viewing ? viewing.clientId : (tenant && tenant !== "none" ? tenant.clientId : null);
+  // SSS Phone: is calling switched on for the tenant ON SCREEN (the viewed one in view-as)?
+  // null = not known yet, which every reader treats as off. `phoneOffered` is ssPhoneOffered's
+  // answer — the ONE rule for whether the Phone tab, the Calls rail item and a live Call button
+  // exist at all (see 01-core.jsx for why a builder on production does not see them yet).
+  const effPhoneStatus = viewing
+    ? (viewedCtx && viewedCtx.clientId === viewing.clientId ? (viewedCtx.phoneStatus || null) : null)
+    : (tenant && tenant !== "none" ? (tenant.phoneStatus || null) : null);
+  const phoneOffered = ssPhoneOffered(effPhoneStatus, !!viewing);
   // 3D setup contract handed to the calibration editor, which lives in Settings ->
   // Designer -> 3D since 2026-08-21 (it used to be a bar across the top of the Designer
   // TAB, over every design anyone opened). The editor itself is still rendered by the
@@ -2516,7 +2533,7 @@ function Dashboard({ session }) {
   // Needed whenever we are ON a settings page (the topbar reads them) OR the rail is up (it
   // draws them) — which are no longer the same condition.
   const settingsTabs = (settingsPage || settingsMode)
-    ? ssSettingsTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess })
+    ? ssSettingsTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, phoneOffered })
     : null;
   // Mirrors SettingsShell's own clamp exactly. `sub` is null on a bare /portal/settings, and
   // can be a slug this build has never heard of — a bookmark to a renamed sub-tab, or a
@@ -2616,6 +2633,10 @@ function Dashboard({ session }) {
           {navItem("delivery-schedule", "Delivery Schedule")}
           {navItem("repairs", "Repairs")}
           {navItem("commissions", "Commissions")}
+          {/* SSS Phone's report. Only where calling is offered (ssPhoneOffered) — a Calls page
+              on an account that cannot call is a list of zeros that reads as broken. The route
+              itself still resolves for anyone with phone access, for old links. */}
+          {phoneOffered && navItem("calls", "Calls")}
           {/* QuickBooks has no nav entry any more (Carolyn 2026-08-24): it is a config
               surface, not workspace work, and it is already mounted a second time at
               Settings → QuickBooks — which is where the links people actually hold point
@@ -3071,6 +3092,13 @@ function Dashboard({ session }) {
                 canEditDesigns={mirrorAdmin || ssCanWrite(mirrorAccess, "designs")}
                 canReadTaxSettings={mirrorAdmin || ssCanRead(mirrorAccess, "settings_crm")}
                 canVerifyTax={mirrorAdmin || ssCanWrite(mirrorAccess, "settings_crm")}
+                /* SSS PHONE. The SIGNED-IN person's id — the extension refuses a call for
+                   anybody else on a shared computer — and whether their own access includes
+                   calling (any phone level; owners always). Not mirrorAdmin: in view-as the
+                   record greys Call and Text before this is ever asked. */
+                userId={session.user ? session.user.id : null}
+                canCall={!viewing && (tenant.role === "owner" || ssCanRead(myAccess, "phone"))}
+                phoneOn={phoneOffered && effPhoneStatus === "on"}
               />
             ) : null}
             {/* The merged era's two sub-views correct themselves; see DesignsLegacySub. */}
@@ -3123,7 +3151,15 @@ function Dashboard({ session }) {
                 <LeadsTable key={"t-" + effClientId} clientId={effClientId}
                   fetchDesigns={viewing ? viewingFetch : null} isAdmin={mirrorAdmin}
                   onOpenRecord={(contactId) => navigate("contacts", "c-" + contactId)}
-                  onOpenDesign={openInDesigner} />
+                  onOpenDesign={openInDesigner}
+                  /* SSS PHONE: Call on each row, fed EXACTLY what CrmRecord's Call tab is fed
+                     below, so the row and the record answer the same way. callOffered is the
+                     one ssPhoneOffered rule: no Call column where calling is not offered. */
+                  callOffered={phoneOffered}
+                  viewing={!!viewing}
+                  userId={session.user ? session.user.id : null}
+                  canCall={!viewing && (tenant.role === "owner" || ssCanRead(myAccess, "phone"))}
+                  phoneOn={phoneOffered && effPhoneStatus === "on"} />
               ) : (
                 <ComingSoon
                   title="Contacts"
@@ -3278,6 +3314,8 @@ function Dashboard({ session }) {
                 qboUnlocked={qboUnlocked}
                 rtpUnlocked={rtpUnlocked}
                 setup3d={setup3d}
+                /* The same answer the rail's list was built from, or the two disagree. */
+                phoneOffered={phoneOffered}
                 sub={sub} onSub={(x) => navigate("settings", x)} />
             )}
             {/* Deep-link landing only — the nav item is gone (2026-08-28) and the real
@@ -3437,6 +3475,18 @@ function Dashboard({ session }) {
                 // but the cache key is explicit rather than implied.
                 <CommissionsReport clientId={effClientId} />
               )
+            )}
+            {/* SSS PHONE — the Calls report (11-sms.jsx). Team needs the LITERAL view/edit
+                level (ssOwnPhoneOnly), the same question portal-settings asks before it hands
+                the team's numbers over. An operator in view-as rides the viewed tenant's rules:
+                a platform operator holds the owner's full map, a support operator the owner's
+                own. portal-settings is in SS_TENANT_SCOPED_FNS, so the report is the viewed
+                builder's, not the operator's (the Commissions trap above does not apply). */}
+            {!gateLocked && activeTab === "calls" && (
+              <CallsReport key={"calls-" + effClientId} clientId={effClientId}
+                viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
+                canTeam={viewing ? (!supportView || !ssOwnPhoneOnly(myAccess)) : (tenant.role === "owner" || !ssOwnPhoneOnly(myAccess))}
+                phoneOn={effPhoneStatus === "on"} />
             )}
             {!gateLocked && activeTab === "reports" && (
               <ComingSoon

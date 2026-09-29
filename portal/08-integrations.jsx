@@ -1487,6 +1487,10 @@ function ssLevelLabel(areaKey, lv) {
   // Approving unlocks is a yes/no, and "Edit" is the wrong word for it — nothing is being
   // edited. Two levels, so this row renders two buttons rather than three.
   if (areaKey === "change_order_approve") return ({ none: "No", edit: "Can approve" })[lv] || lv;
+  // SSS Phone (254): four levels, and the middle two are about WHOSE calls, not read-vs-write —
+  // 'own' makes and takes calls and sees their own, 'view' also sees the team's (the Calls
+  // report, the Team tab in the apps), 'edit' also changes the phone settings.
+  if (areaKey === "phone") return ({ none: "No access", own: "Own calls", view: "Team calls", edit: "Edit" })[lv] || lv;
   return ({ none: "No access", view: "View", edit: "Edit" })[lv] || lv;
 }
 
@@ -3501,10 +3505,12 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null }) {
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null, phoneOffered = false }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
-  const TABS = ssSettingsTabs({ isOwner, isAdmin, access });
+  // phoneOffered rides into BOTH lists (this body and the rail in 12-shell.jsx) from the same
+  // ssPhoneOffered answer, or the rail would offer a Phone tab the body clamps to Structures.
+  const TABS = ssSettingsTabs({ isOwner, isAdmin, access, phoneOffered });
   // Company's six tabs are valid settings slugs too — the clamp below has to know them or
   // /portal/settings/branding, a link people hold, would fall back to Structures.
   const hubs = ssSettingsHubs({ isOwner, isAdmin, access, schedUnlocked });
@@ -3579,6 +3585,15 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           rather than vanishing — a rep should be able to see that texting is coming. */}
       {sub === "sms" && <SmsMessagingView clientId={clientId} viewingLabel={viewingLabel}
         canEdit={isAdmin || ssCanWrite(access, "settings_billing")} />}
+      {/* SSS Phone's calling setup (11-sms.jsx). canEdit is phone:'edit' — the same level
+          phone_settings_save / phone_status_set / phone_signout_user are gated on — read the
+          unclamped way CompanyShell's tax flags are: an owner/admin, or a null map (a platform
+          operator in view-as, whose rights come from app_operators). 'own' never writes here:
+          phone is not an ownWrites area, so ssCanWrite answers false for it. The server
+          refuses regardless. */}
+      {sub === "phone" && <PhoneSettingsView clientId={clientId} viewingLabel={viewingLabel}
+        canEdit={isAdmin || !access || ssCanWrite(access, "phone")}
+        onOpenTexting={() => setSub("sms")} />}
       {hubs.billing.some((t) => t[0] === sub) && (
         <BillingShell sub={sub} onSub={setSub} tabs={hubs.billing} viewingLabel={viewingLabel} />
       )}

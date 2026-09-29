@@ -9,6 +9,8 @@ const ROUTES = [
   "/portal/designer", "/portal/contacts", "/portal/designs", "/portal/designs/list", "/portal/designs/pipeline",
   "/portal/inventory", "/portal/orders", "/portal/build-schedule", "/portal/delivery-schedule", "/portal/repairs",
   "/portal/commissions", "/portal/quickbooks", "/portal/view-3d",
+  // SSS Phone's Calls report. It resolves for anyone with phone access (owners always).
+  "/portal/calls",
   "/portal/support", "/portal/support/mine", "/portal/support/features", "/portal/support/fixes", "/portal/support/roadmap",
   // Our own account only (ssAdvancedOn). For the test owner it must land on the Designer, which
   // is a render; tests/harness/advancedTab.mjs drives both sides of the gate.
@@ -27,6 +29,9 @@ const ROUTES = [
   // suite stops proving anything about the ones it skips.
   "/portal/settings/structures", "/portal/settings/designer", "/portal/settings/connection",
   "/portal/settings/quickbooks", "/portal/settings/email", "/portal/settings/sms",
+  // SSS Phone's calling setup. Offered only where ssPhoneOffered says so (beta hosts, a tenant
+  // with calling on, operators in view-as); elsewhere it CLAMPS to Structures, which is a render.
+  "/portal/settings/phone",
   // Company hub
   "/portal/settings/company", "/portal/settings/branding", "/portal/settings/team",
   "/portal/settings/commissions", "/portal/settings/locations", "/portal/settings/crews",
