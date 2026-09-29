@@ -785,6 +785,41 @@ async function main() {
   r.ok("⚠️ STEPS BACK ON, THE COUNT WENT WITH \"No steps\": blank, no count drawn",
     (await fixCount.inputValue()) === "" && !/\d steps on the left/.test(await spanLine()), await spanLine());
 
+  // ── "blank = N" OVER FALLING GROUND (review, 2026-09-29) ────────────────────────────────
+  // The fix panel's placeholder was the count at the FRONT's floor height, while the flight is
+  // counted on the ground under it: on piers with the ground falling 2 ft toward the porch's end it
+  // said "blank = 3" beside a "What we drew" of more steps. The walls panel stands it on 1.5 ft piers
+  // over a 2 ft fall to the back, the porch panel puts the porch on the back end, and the placeholder
+  // must name the count "What we drew" says -- the drawn one -- which is more than the front's 3.
+  await answer("walls", "Yes");
+  await answer("walls", "No");
+  const fixFoundation = page.locator('select[data-ss-foundation="ssc-fix"]');
+  const fixFall = page.locator('input[data-ss-grade-fall="ssc-fix"]');
+  await fixFoundation.selectOption("piers");
+  await page.waitForTimeout(300);
+  await fixFall.click(); await fixFall.fill("2"); await page.keyboard.press("Tab"); await page.waitForTimeout(300);
+  await answer("porch", "Yes");
+  await answer("porch", "No");
+  await fixPorch.getByRole("button", { name: "The other end", exact: true }).click();
+  await page.waitForTimeout(400);
+  const fallLine = await spanLine();
+  const drewSteps = Number((fallLine.match(/(\d+) steps on the left/) || [])[1]);
+  const fallPh = await fixCount.getAttribute("placeholder");
+  r.ok("⚠️ OVER FALLING GROUND THE FIX PANEL'S BLANK SAYS THE COUNT WHAT WE DREW SAYS",
+    drewSteps > 3 && fallPh === `blank = ${drewSteps}` && (await fixCount.inputValue()) === "", `${fallPh} | ${fallLine}`);
+  r.ok("...and What we drew says the ground falls toward the porch's end",
+    /The ground falls 2 ft toward the back, where the porch is, so the piers on that side stand taller\./.test(fallLine), fallLine);
+  await fixPorch.screenshot({ path: join(shots, "05c-porch-fix-step-count-fall.png") }).catch(() => {});
+  // Back as it was for the checks below: the porch on the end filmed first, on no foundation.
+  await fixPorch.getByRole("button", { name: "The end you filmed first", exact: true }).click();
+  await page.waitForTimeout(200);
+  await answer("walls", "Yes");
+  await answer("walls", "No");
+  await fixFoundation.selectOption("");
+  await page.waitForTimeout(300);
+  r.ok("and back on the ground neither a fall nor a step count is said",
+    !/ground falls/.test(await spanLine()) && !/\d steps on the left/.test(await spanLine()), await spanLine());
+
   // ── THE WARNING BANNER HAS TO REACH A CONTROL, INCLUDING WHERE THERE ARE NO PAIRS ─────
   // The banner is a machine warning promoted out of "What the model saw", and its whole
   // point is that a builder should not have to work out which of the four questions it was

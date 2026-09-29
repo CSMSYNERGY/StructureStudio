@@ -72,7 +72,7 @@ const F = new Function(
   `${renderBlocks.map((b) => b.cmp).join("\n")}; return { D3, D3_GRADE_FALL_TOWARD, d3GradeFt, d3GradeLiftFt, d3GradeMaxFt, d3GradeFall, d3GradeFallAxis, ` +
     `d3GradeFallBlendFt, d3GradeAt, d3FrameHeightFt, d3PorchToRoot, d3PorchStepsGradeFt, d3PorchStepsGeom, d3PorchGeom, d3PorchFraming, ` +
     `d3PorchReadout, d3ResolveStyleSpec, d3DefaultShotCamera, ssSelfCheckCameras, D3_FOUNDATIONS, d3RaisedFoundation, ` +
-    `d3FloorHeightFromFront, d3FrontGableWall, SS_SHOT };`,
+    `d3FloorHeightFromFront, d3FrontGableWall, SS_SHOT, d3PorchBlankStepCount, d3PorchAutoStepCount };`,
 )() as Record<string, Any>;
 const P = new Function(`${panelBlocks.map((b) => b.cmp).join("\n")}; return { ssDrewWords, ssShotSig };`)() as Record<string, Any>;
 // calDraftRoof is the roof half of the merge (calDraftRoof_test's); a plain spread stands in for it.
@@ -345,6 +345,66 @@ Deno.test("d3PorchStepsOnGround: one flight measured and drawn, the builder's st
   }
 });
 
+// ── "blank = N": THE COUNT A BLANK STEP BOX DRAWS (review, 2026-09-29) ──────────────────────────
+// Both placeholders said d3PorchAutoStepCount(d3GradeFt(spec)), the count at the FRONT's height, while
+// the renderer counts the flight on the ground under it: "blank = 3" beside six drawn steps on a back
+// porch over 2 ft of fall. d3PorchBlankStepCount is the readout's flight with the builder's count left out.
+
+Deno.test("d3PorchBlankStepCount: the drawn automatic count, on the ground under the flight", () => {
+  const roof = { type: "gable", front: "gable", pitch: 0.4, porchOutFt: 6, porchSteps: "center" };
+  const auto = (spec: Any, size = `${W}x${L}`) => F.d3PorchReadout({ ...spec, roof: { ...spec.roof, porchStepCount: undefined } }, size).steps.count;
+  // Level ground: exactly the old placeholder, on every foundation and height, the builder's count or not.
+  for (const f of [undefined, "slab", "skids", "blocks", "piers"]) {
+    for (const h of [undefined, 0.3, 0.75, 1.1, 1.5, 3, 6]) {
+      for (const n of [undefined, 1, 4, 12]) {
+        const spec = { roof: { ...roof, porchStepCount: n }, foundation: f, floorHeightFt: h };
+        assertEquals(F.d3PorchBlankStepCount(spec, `${W}x${L}`), F.d3PorchAutoStepCount(F.d3GradeFt(spec)), JSON.stringify(spec));
+      }
+    }
+  }
+  // A fall of 0 and a fall on a slab are level ground.
+  for (const spec of [{ ...PIERS, roof, gradeFallFt: 0 }, { roof, foundation: "slab", gradeFallFt: 2 }]) {
+    assertEquals(F.d3PorchBlankStepCount(spec, `${W}x${L}`), F.d3PorchAutoStepCount(F.d3GradeFt(spec)));
+  }
+  // THE REVIEW'S CASE (gradeFall.mjs K): a back porch, 2 ft of fall to the back. The front's height gives 3,
+  // the flight is drawn with 6, and the blank now says 6.
+  const k = { ...PIERS, roof: { ...roof, porchEnd: "back" }, gradeFallFt: 2, gradeFallToward: "back" };
+  assertEquals(F.d3PorchAutoStepCount(F.d3GradeFt(k)), 3, "the old placeholder");
+  assertEquals(F.d3PorchReadout(k, `${W}x${L}`).steps.count, 6, "drawn");
+  assertEquals(F.d3PorchBlankStepCount(k, `${W}x${L}`), 6);
+  // A count the builder typed does not move it: it is what blank WOULD draw, on the ground under that flight.
+  for (const n of [1, 4, 12, "3", ""]) assertEquals(F.d3PorchBlankStepCount({ ...k, roof: { ...k.roof, porchStepCount: n } }, `${W}x${L}`), 6, String(n));
+  // The sanitiser's steepest fall: 13 drawn, past the 12 a typed count may be.
+  assertEquals(F.d3PorchBlankStepCount({ ...k, gradeFallFt: 6 }, `${W}x${L}`), 13);
+  // Across the fall and uphill, at other sizes: always the readout's own automatic count.
+  for (const [end, steps, toward, size] of [["front", "left", "left", "16x24"], ["front", "right", "left", "16x24"], ["back", "left", "back", "12x16"],
+    ["front", "center", "back", "12x16"], ["back", "right", "right", "20x30"]] as Array<[string, string, string, string]>) {
+    const spec = { ...PIERS, roof: { ...roof, porchEnd: end, porchSteps: steps }, gradeFallFt: 3, gradeFallToward: toward };
+    assertEquals(F.d3PorchBlankStepCount(spec, size), auto(spec, size), `${end} ${steps} ${toward} ${size}`);
+  }
+  // The old frame's landscape gable (gradeFall.mjs O): the porch on the west end, the ground falling to it.
+  const o = { ...PIERS, roof: { type: "gable", pitch: 0.4, porchOutFt: 5, porchSteps: "left" }, gradeFallFt: 2, gradeFallToward: "left" };
+  assertEquals(F.d3PorchBlankStepCount(o, "24x12"), auto(o, "24x12"));
+  assert(F.d3PorchBlankStepCount(o, "24x12") > F.d3PorchAutoStepCount(F.d3GradeFt(o)), "more than the front's height gives");
+  // No projecting porch, or no steps: the front's height, as before.
+  for (const r of [{ type: "gable", pitch: 0.4 }, { ...roof, porchSteps: undefined }, { type: "gable", pitch: 0.4, porchDepthFt: 4, porchSteps: "left" }]) {
+    const spec = { ...PIERS, roof: r, gradeFallFt: 2 };
+    assertEquals(F.d3PorchBlankStepCount(spec, `${W}x${L}`), F.d3PorchAutoStepCount(F.d3GradeFt(spec)), JSON.stringify(r));
+  }
+  assertEquals(F.d3PorchBlankStepCount(null, "12x16"), F.d3PorchAutoStepCount(F.d3GradeFt(null)));
+});
+
+Deno.test("both step boxes' placeholders say d3PorchBlankStepCount, in both twins", () => {
+  for (const t of [CMP, JSX]) {
+    assertStringIncludes(t, "placeholder={`blank = ${d3PorchBlankStepCount(adminCal && adminCal.spec, `${calReadoutW}x${calReadoutL}`)}`}");
+    assertStringIncludes(t, "const autoSteps = d3PorchBlankStepCount(adminCal.spec, sel.size);");
+    assertEquals(t.split("d3PorchAutoStepCount(d3GradeFt(adminCal").length - 1, 0, "the front-height placeholder is gone");
+    // Past the box's 12 the grid's hint says what blank draws, and that a typed count stops at 12.
+    assertStringIncludes(t, "const pastBox = autoSteps > 12 && !(Number(roof.porchStepCount) >= 1);");
+    assertStringIncludes(t, "${pastBox ? ` Left blank, it draws ${autoSteps} steps; a number typed here can be 12 at most.` : \"\"}");
+  }
+});
+
 // ── THE KEYS ROUND-TRIP; NOTHING IS INVENTED ─────────────────────────────────────────────────
 
 Deno.test("d3ResolveStyleSpec names both keys beside blocks or piers, and never defaults them", () => {
@@ -432,4 +492,46 @@ Deno.test("What we drew: the fall is said where there is one, and nothing else c
     assertEquals(P.ssDrewWords({ ...base, ...extra }), P.ssDrewWords(base), JSON.stringify(extra));
   }
   assertEquals(P.ssDrewWords({ roof: base.roof, foundation: "slab", gradeFallFt: 2 }), P.ssDrewWords({ roof: base.roof, foundation: "slab" }), "not raised: not said");
+});
+
+Deno.test("What we drew: the fall sentence says where the porch is when it stands on the side the ground falls to, or away from it", () => {
+  // Review, 2026-09-29: back, left and right are the building's (d3GradeFall), never the porch's. On an
+  // old-frame landscape gable the porch's "front end" is the WEST wall, the side a fall toward the left
+  // falls to, so "The porch stands 5 ft out from the front end ... falls 2 ft toward the left" read as
+  // two different walls. The sentence now names the porch where the two meet.
+  const o = { roof: { type: "gable", pitch: 0.4, porchOutFt: 5, porchSteps: "left" }, foundation: "piers", floorHeightFt: 1.5, gradeFallFt: 2, gradeFallToward: "left" };
+  const ro = F.d3PorchReadout(o, "24x12");
+  assertEquals(ro.wall, "west");
+  const said = P.ssDrewWords(o, ro);
+  assertStringIncludes(said, "The porch stands 5 ft out from the front end.");
+  assertStringIncludes(said, "The ground falls 2 ft toward the left, where the porch is, so the piers on that side stand taller.");
+  // Falling the other way, away from it.
+  const away = { ...o, gradeFallToward: "right" };
+  assertStringIncludes(P.ssDrewWords(away, F.d3PorchReadout(away, "24x12")), "The ground falls 2 ft toward the right, away from the porch, so the piers on that side stand taller.");
+  // Carolyn's Tri Home (gradeFall.mjs K): a back porch, the ground falling to the back.
+  const k = { ...PIERS, roof: { type: "gable", front: "gable", pitch: 0.4, porchOutFt: 6, porchEnd: "back", porchSteps: "center" }, gradeFallFt: 2, gradeFallToward: "back" };
+  assertStringIncludes(P.ssDrewWords(k, F.d3PorchReadout(k, "16x24")), "The ground falls 2 ft toward the back, where the porch is, so the piers on that side stand taller.");
+  // A front porch on a back fall stands uphill, away from it; a front porch across a left fall is neither.
+  const front = { ...k, roof: { ...k.roof, porchEnd: "front" } };
+  assertStringIncludes(P.ssDrewWords(front, F.d3PorchReadout(front, "16x24")), "The ground falls 2 ft toward the back, away from the porch, so the piers");
+  const across = { ...front, gradeFallToward: "left" };
+  assertStringIncludes(P.ssDrewWords(across, F.d3PorchReadout(across, "16x24")), "The ground falls 2 ft toward the left, so the piers on that side stand taller.");
+  // No readout (none yet, or no projecting porch): the sentence it has always been.
+  assertStringIncludes(P.ssDrewWords(o), "The ground falls 2 ft toward the left, so the piers on that side stand taller.");
+  assertStringIncludes(P.ssDrewWords(o, null), "The ground falls 2 ft toward the left, so the piers on that side stand taller.");
+  // Level ground says nothing about the fall, with or without the porch.
+  const level = { ...o, gradeFallFt: undefined, gradeFallToward: undefined };
+  assert(!/ground falls|where the porch is|away from the porch/.test(P.ssDrewWords(level, F.d3PorchReadout(level, "24x12"))));
+});
+
+Deno.test("the height box's hint and the fall's Toward note: plain words, the level sentence untouched", () => {
+  for (const t of [CMP, JSX]) {
+    // Level ground keeps the sentence and the number it always had.
+    assertStringIncludes(t, "` Porch steps climb the whole height, and a ramp a customer adds is drawn ${grade > 0.75 ? ssFtInWords(4 * grade) : \"3 ft\"} long so it reaches the ground.`");
+    // With a fall no one length is right, so it gives the renderer's rule (rampOnGround's 4 ft per foot).
+    assertStringIncludes(t, "\" Porch steps and any ramp a customer adds reach down to the ground where they stand, so on the low side they are taller and longer: a ramp runs 4 ft for every foot it drops.\"");
+    // The directions are the 3D Views menu's, for every direction, and never the porch's.
+    assertStringIncludes(t, "{` Front, back, left and right are the sides the 3D's Views menu calls F, B, L and R${calPorchKind(spec.roof) !== \"none\" ? \", wherever the porch is.\" : \".\"}`}");
+    assertEquals(t.split("Left and right are as you face the front.").length - 1, 0);
+  }
 });
