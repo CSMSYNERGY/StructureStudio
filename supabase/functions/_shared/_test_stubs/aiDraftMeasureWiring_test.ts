@@ -69,6 +69,8 @@ const PARAMS = [
   // 2026-09-26: the stagger and the retry (off here: the reads go at once, and a 2 s deadline leaves
   // no room to retry), and the plain sentence for an upstream failure.
   "DRAFT_READ_RETRY", "draftUpstreamFailure",
+  // 2026-09-29: the two close-ups after the consensus (never tried here: noZoom, below).
+  "runStepZoom", "runOverhangZoom",
 ];
 const RUN = new AsyncFunction(
   ...PARAMS,
@@ -77,6 +79,11 @@ const RUN = new AsyncFunction(
 
 const DIMS = { widthFt: 30, lengthFt: 20, wallHeightFt: 8 };
 const FRAMES = Array.from({ length: 12 }, (_, i) => `https://example.test/walk/f${i + 1}.jpg`);
+// The close-ups after the consensus (the roof step's and the eave overhang's, 2026-09-29) are
+// aiDraftOverhangZoomWiring_test's. Here neither is tried, so the reads' own numbers stand exactly as
+// this file pins them.
+// deno-lint-ignore require-await
+const noZoom = async () => ({ riseFt: null, overhangFt: null, record: null, input: 0, output: 0 });
 
 async function run(s: { v2: boolean; lean?: boolean }, plans: Plan[]) {
   const timers: ReturnType<typeof setTimeout>[] = [];
@@ -114,6 +121,7 @@ async function run(s: { v2: boolean; lean?: boolean }, plans: Plan[]) {
       (body: Record<string, unknown>, status = 200): Reply => ({ body, status }),
       new Set(), parseModelSpec, false, s.lean ? "low" : "medium", draftReadSample,
       { ...DRAFT_READ_RETRY, staggerMs: 0 }, draftUpstreamFailure,
+      noZoom, noZoom,
     );
     return { out, sent, released, logged, usage };
   } finally {

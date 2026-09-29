@@ -18,10 +18,15 @@
 // height at the joint in that frame, times the builder's wall height. When nothing usable comes
 // back, the consensus's step stands exactly as it was.
 //
-// ⚠️ THE IMAGE LIBRARY IS IMPORTED ONLY WHEN A CLOSE-UP IS CUT (stepZoomCrop). Its JPEG and zlib
-// modules fetch their WebAssembly from deno.land as they load, so a static import would put that
-// fetch on every cold start of portal-settings, and an unreachable deno.land would fail requests
+// ⚠️ THE IMAGE LIBRARY IS IMPORTED ONLY WHEN A CLOSE-UP IS CUT (cutCloseUps in closeUp.ts). Its JPEG
+// and zlib modules fetch their WebAssembly from deno.land as they load, so a static import would put
+// that fetch on every cold start of portal-settings, and an unreachable deno.land would fail requests
 // that never draw a step.
+//
+// The cutting, the frame's fetch and the asks are closeUp.ts's since the eave overhang got a close-up
+// of its own (overhangZoom.ts, 2026-09-29); what is sent and what comes back are unchanged.
+import { askCloseUps, closeUpUsage, closeUpWindow, cutCloseUps, fetchFrame, isXY, median } from "./closeUp.ts";
+import type { XY } from "./closeUp.ts";
 
 export const STEP_ZOOM = 8;
 export const STEP_ZOOM_ASKS = 3;
@@ -29,15 +34,6 @@ export const STEP_ZOOM_ASKS = 3;
 export const STEP_ZOOM_MIN_LEFT_MS = 45_000;
 export const STEP_ZOOM_CALL_MS = 40_000;
 export const STEP_ZOOM_MAX_TOKENS = 4000;
-
-type XY = [number, number];
-const isXY = (v: unknown): v is XY =>
-  Array.isArray(v) && v.length === 2 && typeof v[0] === "number" && Number.isFinite(v[0]) && typeof v[1] === "number" && Number.isFinite(v[1]);
-const median = (v: number[]) => {
-  const s = [...v].sort((a, b) => a - b);
-  const m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-};
 
 // Where to crop: the joint as the reads marked it. `frame` is 1-based, `size` the reads' own
 // [width, height] for that frame (the points are in those units), `joint` the front fascia's bottom
@@ -87,11 +83,7 @@ Reply with only a JSON object: {"higher": "front" | "back", "frontFasciaBottomY"
 // frame each way, centred on the joint (scaled from the reads' units) and moved inside the frame.
 export function stepZoomWindow(plan: StepZoomPlan, actual: XY): { x: number; y: number; w: number; h: number; sx: number; sy: number } {
   const sx = actual[0] / plan.size[0], sy = actual[1] / plan.size[1];
-  const w = Math.max(8, Math.round(actual[0] / STEP_ZOOM)), h = Math.max(8, Math.round(actual[1] / STEP_ZOOM));
-  const cx = plan.joint[0] * sx, cy = plan.joint[1] * sy;
-  const x = Math.min(Math.max(0, Math.round(cx - w / 2)), Math.max(0, actual[0] - w));
-  const y = Math.min(Math.max(0, Math.round(cy - h / 2)), Math.max(0, actual[1] - h));
-  return { x, y, w, h, sx, sy };
+  return { ...closeUpWindow([plan.joint[0] * sx, plan.joint[1] * sy], actual, STEP_ZOOM), sx, sy };
 }
 
 // The direction and height from the asks' reply texts. `wallPxActual` is the wall's height at the
@@ -132,16 +124,13 @@ export function stepZoomVerdict(texts: readonly (string | null)[], wallPxActual:
 // as base64 JPEG, its height, the vertical enlargement and the wall's height at the joint in the
 // frame's own pixels.
 export async function stepZoomCrop(bytes: Uint8Array, plan: StepZoomPlan): Promise<{ base64: string; heightPx: number; zoomY: number; wallPxActual: number }> {
-  const { decode, Image } = await import("https://deno.land/x/imagescript@1.3.0/mod.ts");
-  const img = await decode(bytes);
-  if (!(img instanceof Image)) throw new Error("the frame is not a still image");
-  const win = stepZoomWindow(plan, [img.width, img.height]);
-  const outW = win.w * STEP_ZOOM, outH = win.h * STEP_ZOOM;
-  const crop = img.clone().crop(win.x, win.y, win.w, win.h).resize(outW, outH);
-  const jpeg = await crop.encodeJPEG(90);
-  let bin = "";
-  for (let i = 0; i < jpeg.length; i += 0x8000) bin += String.fromCharCode(...jpeg.subarray(i, i + 0x8000));
-  return { base64: btoa(bin), heightPx: outH, zoomY: outH / win.h, wallPxActual: plan.wallPx * win.sy };
+  let sy = 1;
+  const { closeUps: [c] } = await cutCloseUps(bytes, (actual) => {
+    const win = stepZoomWindow(plan, actual);
+    sy = win.sy;
+    return [win];
+  }, STEP_ZOOM);
+  return { base64: c.base64, heightPx: c.height, zoomY: c.height / c.win.h, wallPxActual: plan.wallPx * sy };
 }
 
 // The whole close-up, for the v2 draft (portal-settings): plan the crop from the reads' blocks, fetch
@@ -169,38 +158,13 @@ export async function runStepZoom(o: {
   const record: Record<string, unknown> = { frame: plan.frame, before: o.rise0 };
   let input = 0, output = 0, riseFt: number | null = null;
   try {
-    const got = await f(frameUrl, { signal: AbortSignal.any([o.signal, AbortSignal.timeout(10_000)]) });
-    if (!got.ok) throw new Error(`the frame answered ${got.status}`);
-    const crop = await stepZoomCrop(new Uint8Array(await got.arrayBuffer()), plan);
+    const crop = await stepZoomCrop(await fetchFrame(f, frameUrl, o.signal), plan);
     const callMs = Math.min(STEP_ZOOM_CALL_MS, o.leftMs - 5_000 - (Date.now() - t0));
-    const asks = await Promise.all(Array.from({ length: STEP_ZOOM_ASKS }, async () => {
-      try {
-        const r = await f("https://api.anthropic.com/v1/messages", {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": o.apiKey, "anthropic-version": "2023-06-01" },
-          body: JSON.stringify({
-            ...o.model,
-            max_tokens: STEP_ZOOM_MAX_TOKENS,
-            thinking: { type: "adaptive" },
-            output_config: { effort: "high" },
-            messages: [{ role: "user", content: [
-              { type: "image", source: { type: "base64", media_type: "image/jpeg", data: crop.base64 } },
-              { type: "text", text: stepZoomPrompt(plan.frontOnLeft, crop.heightPx) },
-            ] }],
-          }),
-          signal: AbortSignal.any([o.signal, AbortSignal.timeout(Math.max(1_000, callMs))]),
-        });
-        const j = await r.json();
-        const text = r.ok && Array.isArray(j?.content)
-          ? j.content.filter((b: { type?: string }) => b?.type === "text").map((b: { text?: string }) => String(b.text ?? "")).join("")
-          : null;
-        return { text, usage: j?.usage ?? null };
-      } catch {
-        return { text: null, usage: null };
-      }
-    }));
-    input = asks.reduce((s, a) => s + (Number(a.usage?.input_tokens) || 0), 0);
-    output = asks.reduce((s, a) => s + (Number(a.usage?.output_tokens) || 0), 0);
+    const asks = await askCloseUps({
+      f, apiKey: o.apiKey, model: o.model, maxTokens: STEP_ZOOM_MAX_TOKENS, images: [crop.base64],
+      prompt: stepZoomPrompt(plan.frontOnLeft, crop.heightPx), asks: STEP_ZOOM_ASKS, callMs, signal: o.signal,
+    });
+    [input, output] = closeUpUsage(asks);
     record.usage = { input, output };
     const verdict = stepZoomVerdict(asks.map((a) => a.text), crop.wallPxActual, crop.zoomY, o.wallFt);
     record.votes = verdict ? verdict.votes : null;

@@ -87,6 +87,8 @@ import { parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfChec
 import { selfCheckMode, selfCheckRequest, frameKeyWarning } from "../_shared/styleD3.ts";
 import { aiDraftCostCents, aiModelFields } from "../_shared/styleD3.ts";
 import { runStepZoom } from "../_shared/stepZoom.ts";
+// The eave overhang, read from close-ups of the gable's corners beside the roof step's (2026-09-29).
+import { runOverhangZoom } from "../_shared/overhangZoom.ts";
 // Consensus drafting (2026-09-25): the v2 draft reads the video several times (five since
 // 2026-09-26, DRAFT_CONSENSUS_CALLS) and combines the reads.
 import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftCallsUsage, consensusSplitWarning, DRAFT_CONSENSUS_GRACE_MS } from "../_shared/styleD3.ts";
@@ -94,6 +96,8 @@ import { runDraftCalls, draftCallCount, readDraftReply, consensusOfCalls, draftC
 import { draftReadSample } from "../_shared/styleD3.ts";
 // ...and a pitch at least two reads measured is locked in the self-check (2026-09-26).
 import { measuredPitchLock } from "../_shared/styleD3.ts";
+// ...and so is an overhang the close-ups measured (2026-09-29).
+import { measuredOverhangLock } from "../_shared/styleD3.ts";
 // A read the API could not serve is sent again, the five reads' first sends are staggered, and an
 // upstream failure is told to the builder in a plain sentence (2026-09-26).
 import { DRAFT_READ_RETRY, draftUpstreamFailure } from "../_shared/styleD3.ts";
@@ -4336,20 +4340,54 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the same answers measure) replaces the consensus's rearEaveRiseFt. Anything that fails leaves
     // the consensus exactly as it was. What it did is recorded in draft_tokens.stepZoom, and its
     // tokens join the draft's usage, so the capture's cost basis includes them.
+    //
+    // ── HOW FAR THE EAVES OVERHANG, READ FROM TWO CLOSE-UPS (2026-09-29, the same way) ──────────
+    // The reads judged the overhang at 6 in on two gables whose eaves stand 12 and 16 in past the
+    // walls. Each read marks the gable's two roof tips (measure.pitch, kept on the reading as
+    // `pitchPoints`), which is where the overhang is; enlarged 6 times and asked about together, the
+    // two corners read within 0.13 ft of the truth on both buildings (_shared/overhangZoom.ts has the
+    // numbers). So on a GABLE consensus whose overhang the builder did not measure (dims.overhangIn:
+    // a builder's number always wins, and applyKnownDims has already put it in), the answers' median,
+    // to the nearest inch, replaces the consensus's roof.overhang. Recorded in
+    // draft_tokens.overhangZoom, its tokens joining the cost basis like the step's; the self-check
+    // then leaves it alone (measuredOverhangLock).
+    //
+    // SIDE BY SIDE: the two close-ups run in parallel, so a draft that needs both waits for the
+    // slower one, never for the two added up. Each has its own budget rule (45 s of the draft left).
+    // Each lands on its own through the sanitiser, and anything that fails leaves its field exactly
+    // as the consensus had it.
     // (No type annotations in this block: the draft wiring tests run it as plain JavaScript.)
-    const stepRoof = consensus ? consensus.d3.roof : null;
-    if (consensus && callsUsage && v2Prompt && dims && stepRoof && typeof stepRoof.rearStepFt === "number" && typeof stepRoof.rearEaveRiseFt === "number") {
-      const zoom = await runStepZoom({
-        blocks: calls.map((c) => c.reading?.stepPoints ?? null), photoUrls, rise0: stepRoof.rearEaveRiseFt,
-        wallFt: dims.wallHeightFt, leftMs: t0 + draftAbortMs - Date.now(), apiKey, model: aiModelFields(true), signal: aiSignal,
-      });
-      if (zoom.record) {
-        callsUsage.usage.input_tokens = (callsUsage.usage.input_tokens ?? 0) + zoom.input;
-        callsUsage.usage.output_tokens = (callsUsage.usage.output_tokens ?? 0) + zoom.output;
-        callsUsage.tokens.stepZoom = zoom.record;
+    const zoomRoof = consensus ? consensus.d3.roof : null;
+    const stepRise0 = zoomRoof && typeof zoomRoof.rearStepFt === "number" && typeof zoomRoof.rearEaveRiseFt === "number" ? zoomRoof.rearEaveRiseFt : null;
+    const overhangAsked = !!zoomRoof && zoomRoof.type === "gable" && !!dims && (dims.overhangIn === undefined || dims.overhangIn === null);
+    if (consensus && callsUsage && v2Prompt && dims && zoomRoof && (stepRise0 !== null || overhangAsked)) {
+      const leftMs = t0 + draftAbortMs - Date.now();
+      const [stepZoom, overhangZoom] = await Promise.all([
+        stepRise0 === null ? null : runStepZoom({
+          blocks: calls.map((c) => c.reading?.stepPoints ?? null), photoUrls, rise0: stepRise0,
+          wallFt: dims.wallHeightFt, leftMs, apiKey, model: aiModelFields(true), signal: aiSignal,
+        }),
+        !overhangAsked ? null : runOverhangZoom({
+          blocks: calls.map((c) => c.reading?.pitchPoints ?? null), photoUrls, roof: zoomRoof,
+          widthFt: dims.widthFt, lengthFt: dims.lengthFt, leftMs, apiKey, model: aiModelFields(true), signal: aiSignal,
+        }),
+      ]);
+      if (stepZoom && stepZoom.record) {
+        callsUsage.usage.input_tokens = (callsUsage.usage.input_tokens ?? 0) + stepZoom.input;
+        callsUsage.usage.output_tokens = (callsUsage.usage.output_tokens ?? 0) + stepZoom.output;
+        callsUsage.tokens.stepZoom = stepZoom.record;
       }
-      if (zoom.riseFt !== null) {
-        const clean = sanitizeD3Spec({ ...consensus.d3, roof: { ...stepRoof, rearEaveRiseFt: zoom.riseFt } });
+      if (overhangZoom && overhangZoom.record) {
+        callsUsage.usage.input_tokens = (callsUsage.usage.input_tokens ?? 0) + overhangZoom.input;
+        callsUsage.usage.output_tokens = (callsUsage.usage.output_tokens ?? 0) + overhangZoom.output;
+        callsUsage.tokens.overhangZoom = overhangZoom.record;
+      }
+      if (stepZoom && stepZoom.riseFt !== null) {
+        const clean = sanitizeD3Spec({ ...consensus.d3, roof: { ...consensus.d3.roof, rearEaveRiseFt: stepZoom.riseFt } });
+        if (clean.ok) consensus.d3 = clean.d3;
+      }
+      if (overhangZoom && overhangZoom.overhangFt !== null) {
+        const clean = sanitizeD3Spec({ ...consensus.d3, roof: { ...consensus.d3.roof, overhang: overhangZoom.overhangFt } });
         if (clean.ok) consensus.d3 = clean.d3;
       }
     }
@@ -5024,6 +5062,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // ...and only while the spec this round judges is still a gable: a round that follows one which
     // turned the roof into a shed is not told its pitch was measured.
     const pitchLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredPitchLock(claimed.draft_tokens, claimed.drafted);
+    // ── AN OVERHANG THE CLOSE-UPS MEASURED IS LOCKED THE SAME WAY (2026-09-29, measuredOverhangLock) ──
+    // The draft measured the gable's overhang from enlarged close-ups of its corners, and step 2 of
+    // the check would judge it again by eye in a whole frame, the reading the close-ups replaced. So
+    // it is the builder-measured eave's posture again: the prompt says it is not the check's to change,
+    // and applySelfCheck drops a correction to it. Off the ROW, v2 only, and only while the spec this
+    // round judges is still a gable. A builder who typed the overhang keeps their own path (dims).
+    const overhangLocked = v2Check && draftRead.d3.roof?.type === "gable" && measuredOverhangLock(claimed.draft_tokens, claimed.drafted);
 
     // ── THE SECOND CALL ──────────────────────────────────────────────────────────────────
     // The builder's frame first and our render second, one pair per viewpoint, with a line
@@ -5048,7 +5093,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // allow-listed NAMES off the row's own self_check_changed, never the model's prose.
     const plan = selfCheckRequest({
       mode: checkMode, dims, draft: draftRead.d3, pairs,
-      round, earlier: selfCheckChangedFields(claimed.self_check_changed), pitchLocked,
+      round, earlier: selfCheckChangedFields(claimed.self_check_changed), pitchLocked, overhangLocked,
     });
     const checkSignal = AbortSignal.timeout(plan.abortMs);
     let checkRes: Response;
@@ -5106,8 +5151,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // `dims` rides along so a builder who MEASURED the eave keeps it: roof.overhang comes off
     // the allow-list for that generation, the same way wallHeightFt and sizeFt are permanently
     // off it. selfCheckPrompt stops asking for it in the same breath. `pitchLocked` does the same
-    // for roof.pitch where the reads measured it (above).
-    const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked);
+    // for roof.pitch where the reads measured it (above), and `overhangLocked` for roof.overhang
+    // where the close-ups did.
+    const applied = applySelfCheck(draftRead.d3, read, dims, checkMode, pitchLocked, overhangLocked);
     if (!applied.ok) {
       return await failedCheck("ai_selfcheck_merge_failed", applied.error, { elapsedMs: Date.now() - t0, renders: pairs.length, tokens });
     }
@@ -5119,7 +5165,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: "ai_selfcheck_field_dropped", severity: "info",
         message: `The self-check proposed ${applied.dropped.length} change(s) that were not applied.`,
-        context: { checkId, verdict: applied.verdict, dropped: applied.dropped.slice(0, 20), ...(pitchLocked ? { pitchLocked } : {}) },
+        context: { checkId, verdict: applied.verdict, dropped: applied.dropped.slice(0, 20), ...(pitchLocked ? { pitchLocked } : {}), ...(overhangLocked ? { overhangLocked } : {}) },
       });
     }
 

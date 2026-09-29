@@ -2280,6 +2280,36 @@ export function measuredPitchLock(draftTokens: unknown, drafted: unknown): boole
   return measured.some((p) => Math.abs(p - pitch) <= MEASURED_PITCH_LOCK_TOLERANCE + 1e-9);
 }
 
+// ─── AN OVERHANG THE CLOSE-UPS MEASURED IS LOCKED TOO (2026-09-29) ─────────────────────────────
+// The v2 draft now measures a gable's eave overhang from two enlarged close-ups of its corners
+// (overhangZoom.ts), where the reads had judged it at 6 in on two buildings whose eaves stand 12 and
+// 16 in past the walls. The self-check's step 2 would go on judging it by eye, as a share of the wall's
+// height in a whole frame: the very reading the close-ups replace. So an overhang the close-ups
+// measured is treated like a measured pitch and like the builder's own tape measure: selfCheckPrompt
+// says it is not the check's to change, and applySelfCheck drops a correction to it.
+//
+// True only when both hold, read off the ledger row (draft_tokens and drafted), so the answer is the
+// same for every round of one generation:
+//   * draft_tokens.overhangZoom.after is a number: the close-up ran and gave an overhang (it is null
+//     when too few of its asks held up, and the record is absent when none was tried);
+//   * the drafted spec is a gable whose overhang is that number, within
+//     MEASURED_OVERHANG_LOCK_TOLERANCE for rounding: a draft whose overhang came from anywhere else is
+//     not a measured one.
+// Anything else, anything malformed included, is false, and the check goes on exactly as before. A
+// builder who typed the overhang never gets here (the close-up is not run for them): their eave keeps
+// its own path, the dims chip, unchanged.
+export const MEASURED_OVERHANG_LOCK_TOLERANCE = 0.01;
+export function measuredOverhangLock(draftTokens: unknown, drafted: unknown): boolean {
+  const tokens = measureObject(draftTokens);
+  const zoom = tokens ? measureObject(tokens.overhangZoom) : null;
+  const spec = measureObject(drafted);
+  const roof = spec ? measureObject(spec.roof) : null;
+  if (!zoom || !roof || roof.type !== "gable") return false;
+  const after = zoom.after, overhang = roof.overhang;
+  if (!isCoord(after) || !isCoord(overhang)) return false;
+  return Math.abs(after - overhang) <= MEASURED_OVERHANG_LOCK_TOLERANCE + 1e-9;
+}
+
 // ─── A drafted gambrel that cannot look like one (2026-09-16) ─────────────────────────────
 // A walk-around of a lofted barn drafted kneeU 0.55 / kneeRise 0.35 / ridgeRise 0.75. Every
 // number was in range, the type said gambrel, and the read-back looked right. Rendered, the
@@ -2870,6 +2900,11 @@ export function selfCheckPrompt(opts: {
   // change and the rules list it beside the other measured fields. Absent or false, the prompt is
   // byte for byte the one every check sent before this.
   pitchLocked?: boolean;
+  // measuredOverhangLock's answer for the row (2026-09-29), the same way: true says the draft's eave
+  // overhang was measured from close-ups of the roof's corners, so step 2 says it is not the check's to
+  // change and the rules list it. A builder-measured eave keeps its own words, which win. Absent or
+  // false, the prompt is byte for byte the one every check sent before this.
+  overhangLocked?: boolean;
 }): string {
   const { dims, draft } = opts;
   const pitchLocked = opts.pitchLocked === true;
@@ -2901,6 +2936,9 @@ export function selfCheckPrompt(opts: {
   // allow-list for the same generation, so a correction would be thrown away in any case; this
   // is what stops the model spending its effort on a field that cannot land.
   const measuredEave = dims.overhangIn === undefined || dims.overhangIn === null ? null : dims.overhangIn;
+  // ...and where the draft MEASURED it from close-ups (measuredOverhangLock, 2026-09-29), the same
+  // posture: only where the builder did not, whose words stay as they were.
+  const overhangLocked = opts.overhangLocked === true && measuredEave === null;
   const present = views.length
     ? views.map((v) => `${v} (${SELF_CHECK_VIEW_WORDS[v]})`).join(", ")
     : "none";
@@ -3149,7 +3187,10 @@ effort here.
 
 ${measuredEave !== null ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave}). THE BUILDER MEASURED THIS ONE TOO
    and it is already in the draft. It is not yours to change: a correction to roof.overhang
-   will be thrown away. Mark "overhang" as "ok" and spend the effort on the porch below.` : `2. THE EAVE OVERHANG (roof.overhang, currently ${eave}). Look at the close-up
+   will be thrown away. Mark "overhang" as "ok" and spend the effort on the porch below.` : overhangLocked ? `2. THE EAVE OVERHANG (roof.overhang, currently ${eave}). IT WAS MEASURED: it was worked out
+   from enlarged close-ups of the roof's two eave corners, cut from the builder's own frames,
+   not judged by eye. It is not yours to change: a correction to roof.overhang will be thrown
+   away. Mark "overhang" as "ok" and spend the effort on the porch below.` : `2. THE EAVE OVERHANG (roof.overhang, currently ${eave}). Look at the close-up
    viewpoint, where the roof edge is seen in profile against the sky with the wall below it.
    Measure how far the roof stands out past the wall as a FRACTION OF THE WALL HEIGHT you
    were given, in the frame and in the render, and convert: a roof that projects a
@@ -3255,7 +3296,7 @@ RULES FOR THE ANSWER:
     "changed": []. That is a complete, correct answer. Stop there.
   * Every field in "corrections" must also appear in "changed". Anything not in both is
     ignored.
-  * Never return wallHeightFt, sizeFt, colors or siding${measuredEave === null ? "" : " or roof.overhang"}${pitchLocked ? " or roof.pitch" : ""}. They are not yours to change here.
+  * Never return wallHeightFt, sizeFt, colors or siding${measuredEave === null && !overhangLocked ? "" : " or roof.overhang"}${pitchLocked ? " or roof.pitch" : ""}. They are not yours to change here.
   * Change at most ${SELF_CHECK_MAX_FIELDS} fields. If you believe more than ${SELF_CHECK_MAX_FIELDS} are wrong, the draft is
     not worth patching: return the ${SELF_CHECK_MAX_FIELDS} that matter most and say so in "note".
   * "unclear" is better than a guess. A field the frames genuinely do not settle should be
@@ -3495,7 +3536,11 @@ export function parseSelfCheck(text: string, mode: SelfCheckMode = "v2"): SelfCh
 // worked out from the reads' own points, so roof.pitch comes off the allow-list for this generation
 // the way roof.overhang does for a measured eave, and a correction to it lands in `dropped`. The
 // caller passes it on a v2 check only. Absent (every existing caller) is false: the list is unchanged.
-export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: KnownDims | null, mode: SelfCheckMode = "v2", pitchLocked = false):
+//
+// `overhangLocked` (2026-09-29) is measuredOverhangLock's answer, the same way for roof.overhang: the
+// close-ups measured it, so it comes off the list as a builder-measured eave's does, and lets go on
+// the pitch lock's terms (below). v2 only, and absent is false.
+export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: KnownDims | null, mode: SelfCheckMode = "v2", pitchLocked = false, overhangLocked = false):
   | { ok: false; error: string }
   | {
     ok: true;
@@ -3528,9 +3573,13 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   const typeWanted = declared.includes("roof.type")
     ? ((read.corrections as { roof?: { type?: unknown } }).roof ?? {}).type
     : undefined;
-  const lockPitch = pitchLocked && roofNow?.type === "gable" && (typeWanted === undefined || typeWanted === "gable");
-  const allow = measuredEave || lockPitch
-    ? rules.allow.filter((f) => !(measuredEave && f === "roof.overhang") && !(lockPitch && f === "roof.pitch"))
+  const gableStays = roofNow?.type === "gable" && (typeWanted === undefined || typeWanted === "gable");
+  const lockPitch = pitchLocked && gableStays;
+  // The measured overhang's lock holds on the same terms: the close-ups measured a GABLE's eave corners,
+  // so an answer that turns the roof into something else was not looking at the building they measured.
+  const lockOverhang = overhangLocked === true && gableStays;
+  const allow = measuredEave || lockPitch || lockOverhang
+    ? rules.allow.filter((f) => !((measuredEave || lockOverhang) && f === "roof.overhang") && !(lockPitch && f === "roof.pitch"))
     : rules.allow;
   const dropped: string[] = [];
   // The value the model wants at each allowed path. Read out of `corrections`, never out of the
@@ -4014,11 +4063,13 @@ export function selfCheckRequest(opts: {
   earlier?: readonly string[];
   // v2 only (measuredPitchLock, 2026-09-26). The legacy prompt is frozen and never sees it.
   pitchLocked?: boolean;
+  // v2 only (measuredOverhangLock, 2026-09-29), the same way.
+  overhangLocked?: boolean;
 }): { abortMs: number; body: Record<string, unknown> } {
   const viewpoints = opts.pairs.map((p) => p.viewpoint);
   const text = opts.mode === "legacy"
     ? legacySelfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints })
-    : selfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints, round: opts.round, earlier: opts.earlier, pitchLocked: opts.pitchLocked });
+    : selfCheckPrompt({ dims: opts.dims, draft: opts.draft, viewpoints, round: opts.round, earlier: opts.earlier, pitchLocked: opts.pitchLocked, overhangLocked: opts.overhangLocked });
   const content: unknown[] = [{ type: "text", text }];
   for (const p of opts.pairs) {
     content.push({ type: "text", text: selfCheckPairLabel(p.viewpoint, opts.mode) });
@@ -4100,6 +4151,10 @@ export type DraftReading = {
   // The read's measure.step block (2026-09-29), on a read that gave a roof step and marked it: the
   // draft crops the joint out of the frame these points name (_shared/stepZoom.ts).
   stepPoints?: Record<string, unknown>;
+  // The read's measure.pitch block (2026-09-29), on a gable read that gave one, whether or not its
+  // pitch was taken from it: its two tips are where the eaves' overhang is, and the draft cuts its
+  // close-ups of them out of the frame these points name (_shared/overhangZoom.ts).
+  pitchPoints?: Record<string, unknown>;
 };
 export function readDraftReply(body: string, dims?: KnownDims | null, measure = false): DraftReading {
   // deno-lint-ignore no-explicit-any
@@ -4111,8 +4166,14 @@ export function readDraftReply(body: string, dims?: KnownDims | null, measure = 
   const d3 = spec && spec.ok ? spec.d3 : null;
   if (!measure || !d3) return { data, reply, d3, drafted: d3 !== null };
   const measured = applyMeasuredPitches(d3, reply.text, dims?.lengthFt);
-  const stepPoints = measured.sources.stepSource ? parseMeasure(reply.text)?.step : undefined;
-  return { data, reply, d3: measured.d3, drafted: true, pitch: measured.sources, ...(stepPoints ? { stepPoints } : {}) };
+  const gable = measured.d3.roof?.type === "gable";
+  const blocks = measured.sources.stepSource || gable ? parseMeasure(reply.text) : null;
+  const stepPoints = measured.sources.stepSource ? blocks?.step : undefined;
+  const pitchPoints = gable ? blocks?.pitch : undefined;
+  return {
+    data, reply, d3: measured.d3, drafted: true, pitch: measured.sources,
+    ...(stepPoints ? { stepPoints } : {}), ...(pitchPoints ? { pitchPoints } : {}),
+  };
 }
 
 // One read as draft_tokens keeps it: its sanitised roof, plus where its pitch came from on a

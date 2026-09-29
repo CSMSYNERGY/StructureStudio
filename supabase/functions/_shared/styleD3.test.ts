@@ -6877,3 +6877,162 @@ Deno.test("v2 prompt: the roof step asks for its six points and names which fasc
   assert(p.includes("STEP POINTS, measure.step, only when you give rearStepFt"), "asked for only with a step");
   assert(p.includes("the HIGHER section's roof ends there in a narrow wedge-shaped face"), "the direction's tell");
 });
+
+// ═══ AN OVERHANG THE CLOSE-UPS MEASURED IS LOCKED IN THE SELF-CHECK (2026-09-29) ═════════════════
+// The v2 draft measures a gable's eave overhang from enlarged close-ups of its two corners
+// (overhangZoom.ts) and records what it did in draft_tokens.overhangZoom. measuredOverhangLock reads
+// that record off the row, and the v2 check then treats the overhang as it treats the builder's own
+// tape measure: the prompt says it is not the check's, and applySelfCheck drops a correction to it.
+// aiSelfCheckOverhangLockWiring_test runs it through the handler.
+import { measuredOverhangLock, MEASURED_OVERHANG_LOCK_TOLERANCE } from "./styleD3.ts";
+
+// A row's draft_tokens with the close-up's record, and a drafted spec, as the ledger keeps them.
+const ovhTokens = (after: unknown) => ({
+  model: "claude-opus-5-5", input: 1, output: 1, samples: [],
+  overhangZoom: { frame: 2, gableFt: 14, before: 0.5, after, used: 3, usage: { input: 9900, output: 2700 }, ms: 14000 },
+});
+const ovhDraft = (overhang: unknown, type: unknown = "gable") => ({ roof: { type, front: "gable", pitch: 0.5, overhang }, colors: {} });
+
+Deno.test("measuredOverhangLock: the close-up's own answer, standing in a drafted gable, locks it", () => {
+  assertEquals(MEASURED_OVERHANG_LOCK_TOLERANCE, 0.01);
+  assert(measuredOverhangLock(ovhTokens(17 / 12), ovhDraft(17 / 12)), "17 in, as drafted");
+  // Through the ledger's jsonb and back.
+  assert(measuredOverhangLock(JSON.parse(JSON.stringify(ovhTokens(17 / 12))), JSON.parse(JSON.stringify(ovhDraft(17 / 12)))), "after JSON");
+  assert(measuredOverhangLock(ovhTokens(1.0833), ovhDraft(13 / 12)), "a hair of rounding");
+  assert(measuredOverhangLock(ovhTokens(0), ovhDraft(0)), "a flush eave measured flush");
+  // Beside the reads' samples and the pitch lock's own record: the two locks read different keys.
+  assert(measuredOverhangLock({ ...ovhTokens(1), samples: [{ type: "gable", pitch: 0.5, pitchSource: "points" }] }, ovhDraft(1)), "beside measured samples");
+});
+
+Deno.test("measuredOverhangLock: no close-up, one that gave nothing, or an overhang from anywhere else is not locked", () => {
+  assert(!measuredOverhangLock(ovhTokens(null), ovhDraft(0.5)), "too few asks held up");
+  assert(!measuredOverhangLock({ ...ovhTokens(null), overhangZoom: undefined }, ovhDraft(0.5)), "none was tried");
+  assert(!measuredOverhangLock({ ...ovhTokens(1), overhangZoom: { frame: 2, error: "the frame answered 404", after: null } }, ovhDraft(1)), "it failed");
+  assert(!measuredOverhangLock(ovhTokens(17 / 12), ovhDraft(0.5)), "the draft's overhang is not the close-up's");
+  assert(!measuredOverhangLock(ovhTokens(17 / 12), ovhDraft(17 / 12 + 0.02)), "0.02 ft off");
+  for (const type of ["shed", "gambrel", null]) assert(!measuredOverhangLock(ovhTokens(1), ovhDraft(1, type)), `a drafted ${String(type)}`);
+  for (const [tokens, drafted] of [
+    [null, ovhDraft(1)], ["x", ovhDraft(1)], [[], ovhDraft(1)], [{ overhangZoom: "x" }, ovhDraft(1)], [{ overhangZoom: [1] }, ovhDraft(1)],
+    [ovhTokens("1"), ovhDraft(1)], [ovhTokens(1), null], [ovhTokens(1), { roof: "x" }], [ovhTokens(1), ovhDraft("1")],
+    [ovhTokens(NaN), ovhDraft(NaN)], [ovhTokens(Infinity), ovhDraft(Infinity)],
+  ] as const) {
+    assert(!measuredOverhangLock(tokens, drafted), `${String(JSON.stringify(tokens)).slice(0, 60)} / ${JSON.stringify(drafted)}`);
+  }
+});
+
+// Step 2 as a row whose overhang the close-ups measured reads it.
+const OVERHANG_LOCKED_STEP_2 = `2. THE EAVE OVERHANG (roof.overhang, currently 1 ft). IT WAS MEASURED: it was worked out
+   from enlarged close-ups of the roof's two eave corners, cut from the builder's own frames,
+   not judged by eye. It is not yours to change: a correction to roof.overhang will be thrown
+   away. Mark "overhang" as "ok" and spend the effort on the porch below.
+
+3. THE PORCH`;
+
+Deno.test("⚠️ an overhang-locked prompt says the overhang was MEASURED and lists it as not the check's, and changes nothing else", () => {
+  const unlocked = lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS }));
+  const locked = lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS, overhangLocked: true }));
+  assert(locked.includes(OVERHANG_LOCKED_STEP_2), "step 2, in full, in its place");
+  assert(!locked.includes("Measure how far the roof stands out past the wall"), "it no longer asks for the overhang to be judged");
+  assert(locked.includes("  * Never return wallHeightFt, sizeFt, colors or siding or roof.overhang. They are not yours to change here."),
+    "and the rules list it beside the other measured fields");
+  // Everything outside those two places is the unlocked prompt's.
+  const rest = (p: string) => (p.slice(0, p.indexOf("2. THE EAVE OVERHANG")) + p.slice(p.indexOf("3. THE PORCH")))
+    .replace("colors or siding or roof.overhang.", "colors or siding.");
+  assertEquals(rest(locked), rest(unlocked), "nothing else moved");
+  // With the pitch locked too, both are listed, in the order the builder-measured eave set.
+  const both = lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS, pitchLocked: true, overhangLocked: true }));
+  assert(both.includes("Never return wallHeightFt, sizeFt, colors or siding or roof.overhang or roof.pitch. They are not"), "both measured fields");
+  assert(both.includes(OVERHANG_LOCKED_STEP_2) && both.includes("WAS MEASURED: it was worked out from points"), "and both steps say so");
+  // A later round is told too: the lock is the row's.
+  const later = lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS, round: 1, earlier: ["roof.eave"], overhangLocked: true }));
+  assert(later.includes("THIS IS CHECK ROUND 2 OF") && later.includes(OVERHANG_LOCKED_STEP_2), "round 2");
+  // ⚠️ The builder's own measurement wins: their words, exactly as without the lock.
+  const measuredDims = { ...CHECK_DIMS, overhangIn: 16 };
+  assertEquals(
+    lf(selfCheckPrompt({ dims: measuredDims, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS, overhangLocked: true })),
+    lf(selfCheckPrompt({ dims: measuredDims, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS })),
+    "a builder-measured eave's prompt is untouched",
+  );
+  // Only `true` locks, and false or absent is the prompt every check sent before this, byte for byte.
+  for (const junk of [1, "true", {}, false, undefined]) {
+    assertEquals(lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: LOCK_GABLE, viewpoints: SELF_CHECK_VIEWPOINTS, overhangLocked: junk as unknown as boolean })),
+      unlocked, `overhangLocked ${JSON.stringify(junk)}`);
+  }
+});
+
+Deno.test("selfCheckRequest: v2 carries the overhang lock into its prompt; the legacy body is d3ab404's whatever it is handed", async () => {
+  const v2 = selfCheckRequest({ mode: "v2", dims: CHECK_DIMS, draft: LOCK_GABLE, pairs: PAIRS4, round: 0, overhangLocked: true });
+  const text = lf(((v2.body.messages as { content: { text?: string }[] }[])[0].content[0].text) ?? "");
+  assertEquals(text, lf(selfCheckPrompt({ dims: CHECK_DIMS, draft: LOCK_GABLE, viewpoints: FOUR, round: 0, overhangLocked: true })));
+  assert(text.includes(OVERHANG_LOCKED_STEP_2), "the locked step");
+  const legacy = selfCheckRequest({ mode: "legacy", dims: CHECK_DIMS, draft: CLEAN, pairs: PAIRS4, round: 0, pitchLocked: true, overhangLocked: true });
+  const body = JSON.stringify(legacy.body).replace(/\\r\\n/g, "\\n");
+  assertEquals(body.length, LEGACY_CHECK_BODY_LENGTH, "the legacy body's length");
+  assertEquals(await sha256(body), LEGACY_CHECK_BODY_SHA256, "and its bytes");
+});
+
+Deno.test("⚠️ applySelfCheck with the overhang lock drops an overhang correction and keeps every other one", () => {
+  const read = readOf({
+    verdict: "corrections",
+    corrections: { roof: { overhang: 0.5, eave: "open" } },
+    changed: [
+      { field: "roof.overhang", from: 1, to: 0.5, why: "a twentieth of the wall in the close-up" },
+      { field: "roof.eave", from: "fascia", to: "open", why: "rafter tails in the close-up" },
+    ],
+    checked: {}, note: "",
+  });
+  const locked = applySelfCheck(LOCK_GABLE, read, CHECK_DIMS, "v2", false, true);
+  assert(locked.ok, "buildable");
+  if (!locked.ok) return;
+  assertEquals([locked.verdict, locked.d3.roof.overhang, locked.d3.roof.eave], ["corrections", 1, "open"], "the measured overhang stands, the eave lands");
+  assertEquals(locked.changed.map((c) => c.field), ["roof.eave"], "only the eave is reported");
+  assertEquals(locked.dropped, ["roof.overhang"], "the overhang is recorded as not applied");
+  // Unlocked (the default, and every existing caller's shape) both land.
+  for (const unlocked of [applySelfCheck(LOCK_GABLE, read, CHECK_DIMS), applySelfCheck(LOCK_GABLE, read, CHECK_DIMS, "v2", false, false), applySelfCheck(LOCK_GABLE, read, CHECK_DIMS, "v2", true)]) {
+    assert(unlocked.ok, "unlocked");
+    if (!unlocked.ok) return;
+    assertEquals([unlocked.d3.roof.overhang, unlocked.d3.roof.eave], [0.5, "open"], "both land");
+    assertEquals(unlocked.dropped, []);
+  }
+  // An overhang correction alone is a "matches": the draft stands, and `dropped` says the model tried.
+  const alone = applySelfCheck(LOCK_GABLE, readOf({
+    verdict: "corrections", corrections: { roof: { overhang: 0.2 } },
+    changed: [{ field: "roof.overhang", from: 1, to: 0.2, why: "tight" }], checked: {}, note: "",
+  }), CHECK_DIMS, "v2", false, true);
+  assert(alone.ok, "buildable");
+  if (!alone.ok) return;
+  assertEquals([alone.verdict, alone.changed.length, alone.dropped, alone.d3.roof.overhang], ["matches", 0, ["roof.overhang"], 1]);
+  // Both locks at once: the pitch and the overhang both come off, and the rest lands.
+  const three = readOf({
+    verdict: "corrections", corrections: { roof: { pitch: 0.7, overhang: 0.2, eave: "open" } },
+    changed: [change("roof.pitch"), change("roof.overhang"), change("roof.eave")], checked: {}, note: "",
+  });
+  const both = applySelfCheck(LOCK_GABLE, three, CHECK_DIMS, "v2", true, true);
+  assert(both.ok, "buildable");
+  if (!both.ok) return;
+  assertEquals([both.dropped, both.changed.map((c) => c.field), both.d3.roof.pitch, both.d3.roof.overhang], [["roof.pitch", "roof.overhang"], ["roof.eave"], 0.42, 1]);
+  // The builder's measured eave with the lock as well (the draft never makes that row): dropped once.
+  const measured = applySelfCheck(LOCK_GABLE, read, { ...CHECK_DIMS, overhangIn: 12 }, "v2", false, true);
+  assert(measured.ok, "buildable");
+  if (!measured.ok) return;
+  assertEquals(measured.dropped, ["roof.overhang"]);
+});
+
+Deno.test("applySelfCheck: the overhang lock lets go when the same answer turns the gable into another roof", () => {
+  const read = readOf({
+    verdict: "corrections",
+    corrections: { roof: { type: "shed", highSide: "front", pitch: 0.17, overhang: 0.4 } },
+    changed: [change("roof.type"), change("roof.highSide"), change("roof.pitch"), change("roof.overhang")],
+    checked: {}, note: "",
+  });
+  const r = applySelfCheck(LOCK_GABLE, read, CHECK_DIMS, "v2", true, true);
+  assert(r.ok, "buildable");
+  if (!r.ok) return;
+  assertEquals([r.d3.roof.type, r.d3.roof.pitch, r.d3.roof.overhang, r.dropped], ["shed", 0.17, 0.4, []], "the corners it measured were not a shed's");
+  // A shed being judged (a later round, after the type changed) is never locked either.
+  const shed = cleanSpec({ ...LOCK_GABLE, roof: { ...LOCK_GABLE.roof, type: "shed", highSide: "front", pitch: 0.2 } });
+  const s = applySelfCheck(shed, readOf({ verdict: "corrections", corrections: { roof: { overhang: 0.3 } }, changed: [change("roof.overhang")], checked: {}, note: "" }), CHECK_DIMS, "v2", false, true);
+  assert(s.ok, "buildable");
+  if (!s.ok) return;
+  assertEquals([s.d3.roof.overhang, s.dropped], [0.3, []]);
+});
