@@ -4716,8 +4716,6 @@ function d3Massing(roofCfg, W, L, H) {
       const ovRaw = cfg.overhang != null ? Number(cfg.overhang) : D3.OVERHANG;
       const ov = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
       const minHc = out.ya + Math.max(1.0, D3.ROOF_T + 0.43 + Math.max(0, eaveSlope - pitch) * ov);
-      const rawHc = Number(cfg.centerEaveFt);
-      const wantHc = isFinite(rawHc) && rawHc > 0 ? rawHc : out.ya + 3;
       // WHERE THE WING ROOFS MEET THE CENTRE, CHOSEN (roof.wingAttach / wingAttachFt, 2026-09-28). With
       // an attach the centre's eave is the builder's number EXACTLY and nothing below moves it: the push
       // is what Carolyn saw on the Tri Home and did not want -- "It even pushed the roof up ... they need
@@ -4726,6 +4724,12 @@ function d3Massing(roofCfg, W, L, H) {
       // meets (d3WingsAttach), and wingPitch stays stored, unread, for the day the attach is cleared.
       // Absent, this is the rule it always was, push and all, so no stored style moves.
       const attach = cfg.wingAttach === "roof" || cfg.wingAttach === "wall" ? cfg.wingAttach : null;
+      // A BLANK middle height is 3 ft over the wing roof's top. With an attach that top is worked out, and
+      // the stored wingPitch -- no longer shown, its box a readout -- must not move the building either
+      // (review, 2026-09-29: a hidden 6:12 put the middle 1.5 ft higher than a hidden 3:12), so the blank
+      // reads the default 3:12 wing roof. The panel's placeholder prints the height this gives.
+      const rawHc = Number(cfg.centerEaveFt);
+      const wantHc = isFinite(rawHc) && rawHc > 0 ? rawHc : (attach ? Hn + w * 0.25 : out.ya) + 3;
       if (!attach) {
         out.Hc = Math.max(wantHc, minHc);
         out.hcRaised = out.Hc > wantHc + 1e-9;
@@ -4770,9 +4774,12 @@ function d3RoofEnd(dedup, side) {
 //         p = (Hc - H + d) / (w + d / k), every foot further up adds k of rise per foot of run, so
 //         p <= k exactly when Hc - H <= k * w, WHATEVER d is: a centre taller than H + k * w cannot be
 //         reached from its roof at any distance (the panel says so, with that height). Then the wing
-//         line runs in UNDER the centre's eave and is built as far as it shows -- to the centre's wall,
-//         H + w * p up (uIn = u0, ya there, meets "wall") -- and flagged (cuts). Never switched to "wall"
-//         as a mode: the builder said which, and the distance they asked stays theirs.
+//         line runs in UNDER the centre's eave and is built as far as it shows -- to the centre's wall
+//         (uIn = u0, meets "wall") -- and flagged (cuts). Never switched to "wall" as a mode: the builder
+//         said which, and the distance they asked stays theirs. It meets that wall no higher than the
+//         clearance wall mode holds (review, 2026-09-29): at H + w * p, only 2 in under the Tri Home's
+//         eave, the wing slab buried the centre's soffit and fascia and its flashing stood 0.18 ft up
+//         through the centre's roof. So ya = min(H + w * p, Hc - need), and the pitch is re-read from it.
 // Each wing gains pitch (the BUILT one), ya = A, uIn, run, attach, attachFt (the d built), k (the
 // centre's eave slope on that side), clamped, cuts, and meets / meetFt: where the wing roof actually
 // meets the centre ("roof" or "wall") and how far above or below its eave, for every reader that says
@@ -4785,8 +4792,9 @@ function d3WingsAttach(m, c, dRaw, ov) {
     const e = d3RoofEnd(c, g.side);
     const k = Math.max(0, e.k);
     let d = ask, A, uIn = g.u0, run = g.w, clamped = false, cuts = false;
+    // The least distance under the centre's eave that its eave finish clears a wing roof meeting its wall.
+    const need = g.w > ov + 1e-6 ? Math.max(a, (a + k * ov - ov * (Hc - Hn) / g.w) / (1 - ov / g.w)) : a + k * ov;
     if (m.attach === "wall") {
-      const need = g.w > ov + 1e-6 ? Math.max(a, (a + k * ov - ov * (Hc - Hn) / g.w) / (1 - ov / g.w)) : a + k * ov;
       if (d < need - 1e-9) { d = need; clamped = true; }
       // Never a wing roof falling toward the centre: at the outside wall's height it is flat, and a
       // centre that low may not clear it.
@@ -4799,10 +4807,14 @@ function d3WingsAttach(m, c, dRaw, ov) {
       A = Hc + d;
       if (k > 0.05) { uIn = g.u0 - g.side * (d / k); run = g.w + d / k; }
     }
-    const p = (A - Hn) / run;
+    let p = (A - Hn) / run;
     if (m.attach === "roof" && p > k + 1e-9) cuts = true;
     let meets = m.attach, meetFt = d;
-    if (m.attach === "roof" && cuts) { uIn = g.u0; run = g.w; A = Hn + g.w * p; meets = "wall"; meetFt = Hc - A; }
+    if (m.attach === "roof" && cuts) {
+      uIn = g.u0; run = g.w;
+      A = Math.max(Hn, Math.min(Hn + g.w * p, Hc - need));
+      p = (A - Hn) / g.w; meets = "wall"; meetFt = Hc - A;
+    }
     Object.assign(g, { pitch: p, ya: A, uIn, run, attach: m.attach, attachFt: d, k, clamped, cuts, meets, meetFt });
   });
   m.ya = m.wings.reduce((y, g) => Math.max(y, g.ya), Hn);
@@ -4865,7 +4877,10 @@ function d3LeanToGeom(roofCfg, W, L, H) {
   const flat = ya < y1 + 0.05;
   if (flat) ya = y1 + 0.05;
   const pitch = (ya - y1) / Math.abs(u1 - ua);
-  return { dir, u0, u1, ua, ya, y1, E, k, drop, d, mode, pitch, clamped, flat, noRoof, cuts: mode === "roof" && !noRoof && pitch > k + 1e-9 };
+  // `at` is the distance BUILT from the eave, the one every reader prints (review, 2026-09-29): on the wall
+  // a flat attach is moved up to hold its sliver of pitch, so a 3 ft ask under a 1 ft drop is built 11 in
+  // down, and the readout and the drawing had said 3' 0" beside it.
+  return { dir, u0, u1, ua, ya, y1, E, k, drop, d, at: mode === "wall" ? E - ya : d, mode, pitch, clamped, flat, noRoof, cuts: mode === "roof" && !noRoof && pitch > k + 1e-9 };
 }
 // ── THE ROOF STEP (roof.rearStepFt / roof.rearEaveRiseFt, 2026-09-28) ───────────────────────────────
 // A gable building whose roof is TWO SECTIONS along the ridge. The rear section covers the last
@@ -5406,6 +5421,51 @@ function d3DormerReadout(spec, sizeLabel) {
   const r = d3DormerRoof(roof, w, d, (spec && spec.wallHeightFt) || 8);
   return d3TransomDormerGeom(roof, r.S, r.profYAt, r.lands);
 }
+// A DORMER UNDER A ROOF THAT LANDS ON ITS ROOF (review, 2026-09-29), for a spec + a size label: a lean-to or
+// the wings set "On the roof" cover the roof from the wall up to where they land (d3RoofLands), and a
+// dormer placed out toward that eave stands in the covered part -- its face, where the customer's window
+// goes, meets the lean-to or wing roof. Nothing here moves or clamps the dormer: the builder placed it,
+// and the panel says so, names the covering roof, and the Dormer position that clears it. Covered is
+// the transom's own rule, 0.3 ft short of the landing: a GABLE dormer's face stands 1 ft out from its
+// position (half its 2 ft depth); a TRANSOM that cannot run out 0.8 ft there is not drawn at all.
+// Null when nothing covers it -- every building without a roof attach.
+//   dir      the side it faces, -1 or 1, the covered one
+//   by       "lean-to" or "wing", whose roof covers it
+//   clearAt  the furthest Dormer position toward that eave that clears it, in the box's 0.05 steps,
+//            or null when no position on that side does
+function d3DormerCovered(spec, sizeLabel) {
+  const roof = (spec && spec.roof) || {};
+  if (roof.type === "shed" || !((roof.dormerWidthFt || 0) > 0.5)) return null;
+  const mm = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
+  const w = mm ? parseFloat(mm[1]) : 12, d = mm ? parseFloat(mm[2]) : 16;
+  const H = (spec && spec.wallHeightFt) || 8;
+  const r = d3DormerRoof(roof, w, d, H);
+  if (!r.lands) return null;
+  const fr = Math.max(-0.85, Math.min(0.85, roof.dormerOffsetU != null ? roof.dormerOffsetU : 0.45));
+  const dir = fr < 0 ? -1 : 1;
+  const land = r.lands[dir];
+  if (land == null) return null;
+  const transom = roof.dormerType === "transom";
+  if (transom) {
+    if (d3TransomDormerGeom(roof, r.S, r.profYAt, r.lands).run > 0.8) return null;
+    if (!(d3TransomDormerGeom(roof, r.S, r.profYAt, null).run > 0.8)) return null;
+  } else if (dir * (land - dir * 0.3 - ((r.S / 2) * fr + dir)) >= -1e-9) return null;
+  const reach = transom ? 0.85 : 1;
+  const most = Math.floor(((dir * land - 0.3 - reach) / (r.S / 2)) * 20 + 1e-6) / 20;
+  const m = d3Massing(roof, w, d, H);
+  return { dir, by: m.wings.some((g) => g.side === dir && g.attach === "roof" && !g.cuts) ? "wing" : "lean-to", clearAt: most >= 0.05 ? dir * most : null };
+}
+// The panel's words for d3DormerCovered: in the dormer's own fields (`inDormer`), naming the roof over it,
+// and in the lean-to's or the wings' readout, where "this roof" is that one. Each names the two fixes.
+function d3DormerCoveredWords(dc, inDormer) {
+  if (!dc) return null;
+  const move = dc.clearAt != null
+    ? `Move it up the roof with Dormer position (between ${dc.clearAt < 0 ? `${dc.clearAt} and 0` : `0 and ${dc.clearAt}`})`
+    : "Move it to the other side of the roof with Dormer position";
+  return inDormer
+    ? `The dormer's window wall is under ${dc.by === "wing" ? "a wing roof" : "the lean-to's roof"}. ${move}, or set ${dc.by === "wing" ? "the wings" : "the lean-to"} to "On the wall".`
+    : `The dormer is under this roof. ${move}, or pick "On the wall".`;
+}
 
 // Feet as a builder writes them: 4' 7" rather than 0.55 x half-span. This is the whole
 // point of the elevation drawing -- Carolyn spent two and a half minutes on 2026-08-24
@@ -5818,7 +5878,9 @@ function d3PorchReadout(spec, sizeLabel) {
 // The lean-to's attach for a SPEC and a size LABEL, for the calibration panel (2026-09-28): d3LeanToGeom
 // at that size -- the numbers the renderer builds -- plus, on the wall, whether the roof edge above hangs
 // into it: the eave finish's lowest point out at the overhang (d3EaveFinishDrop, the number the 3D hangs
-// its boards at) against the lean-to's top out there. Null without a lean-to or without an attach.
+// its boards at) against the lean-to's top out there. Null without a lean-to or without an attach. "On
+// the roof" on a shed's high side (noRoof) is built at the eave -- exactly "On the wall" at 0 -- so it is
+// asked the same question (review, 2026-09-29: its slab ran through the high eave's fascia unwarned).
 // What to do about it, solved rather than read off the current numbers (both change as they move):
 //   fasciaAt  the least distance below the eave that clears on the wall. The lean-to builds
 //             (drop - d) / width there, flatter the lower it meets, so the finish's need grows with d
@@ -5845,7 +5907,7 @@ function d3LeanToReadout(spec, sizeLabel) {
   const seat = (D3.ROOF_T + 0.02) * Math.sqrt(1 + g.k * g.k);
   const dropMax = g.k > 0.05 ? g.k * wLt - seat : null;
   const widthMin = g.k > 0.05 ? (g.drop + seat) / g.k : null;
-  return { ...g, fasciaNeed, fasciaAt, dropMax, widthMin, fasciaCuts: g.mode === "wall" && g.E - g.ya < fasciaNeed - 1e-9 };
+  return { ...g, fasciaNeed, fasciaAt, dropMax, widthMin, fasciaCuts: (g.mode === "wall" || g.noRoof) && g.E - g.ya < fasciaNeed - 1e-9 };
 }
 
 // A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
@@ -5964,7 +6026,7 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
           <polyline points={[[LT.ua, LT.mode === "roof" && !LT.noRoof ? LT.E + LT.d : LT.ya], [LT.u1 + LT.dir * OV, LT.y1 - OV * LT.pitch]].map((p) => X(p[0]) + "," + Y(p[1])).join(" ")}
             fill="none" stroke={on("leanToAttachFt") ? HL : INK} strokeWidth="2" />
           <line x1={X(LT.u1)} y1={Y(LT.y1)} x2={X(LT.u1)} y2={Y(0)} stroke={INK} strokeWidth="1.2" />
-          {label(X((LT.u0 + LT.u1) / 2), Y(LT.y1) + 22, LT.noRoof ? "at the eave" : `${d3FtIn(LT.d)} ${LT.mode === "roof" ? "up the roof" : "down the wall"}`, `lean-to, ${Math.round(LT.pitch * 120) / 10} in 12`, "leanToAttachFt")}
+          {label(X((LT.u0 + LT.u1) / 2), Y(LT.y1) + 22, LT.noRoof || LT.at < 1 / 24 ? "at the eave" : `${d3FtIn(LT.at)} ${LT.mode === "roof" ? "up the roof" : "down the wall"}`, `lean-to, ${Math.round(LT.pitch * 120) / 10} in 12`, "leanToAttachFt")}
         </g>
       )}
 
@@ -6109,6 +6171,10 @@ function d3WingsElevation(spec, sizeLabel, focusKey) {
   const pts = (arr) => arr.map((p) => X(p[0]) + "," + Y(p[1])).join(" ");
   const cL = cp[0][0], cR = cp[cp.length - 1][0];
   const g0 = m.wings[0];
+  // Where a wing roof meets the centre, as built; under each wing's own span when the two differ (an
+  // off-centre ridge can land one and not the other), else once under the first (review, 2026-09-29).
+  const meetWords = (g) => (g.meetFt < 1 / 24 ? "meets at the eave" : `meets the ${g.meets} ${d3FtIn(g.meetFt)} ${g.meets === "roof" ? "up" : "down"}`);
+  const meetShown = g0.attach ? (m.wings.every((g) => meetWords(g) === meetWords(g0)) ? [g0] : m.wings) : [];
   return (
     <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: "auto", background: "#FFFBEB", border: "1px solid #FCD34D", borderRadius: 8 }}>
       <line x1={PL - 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(0)} stroke="#D6D3D1" strokeWidth="1" />
@@ -6136,11 +6202,11 @@ function d3WingsElevation(spec, sizeLabel, focusKey) {
       <line x1={X(g0.u1)} y1={Y(0) + 6} x2={X(g0.u0)} y2={Y(0) + 6} {...dimStroke("wingWidthFt")} />
       {label((X(g0.u1) + X(g0.u0)) / 2, Y(g0.ye) + 12, d3FtIn(g0.w), g0.attach ? `wing, ${Math.round(g0.pitch * 120) / 10} in 12` : `wing, ${Math.round(g0.pitch * 12)}:12`, "wingWidthFt")}
       {/* WHERE THE WING ROOF MEETS THE CENTRE (wingAttach, 2026-09-28), a line under the wing's own */}
-      {g0.attach && (
-        <text x={(X(g0.u1) + X(g0.u0)) / 2} y={Y(g0.ye) + 30} textAnchor="middle" style={{ fontSize: 8, fill: on("wingAttachFt") ? HL : DIM }}>
-          {`meets the ${g0.meets} ${d3FtIn(g0.meetFt)} ${g0.meets === "roof" ? "up" : "down"}`}
+      {meetShown.map((g) => (
+        <text key={"meet" + g.side} x={(X(g.u1) + X(g.u0)) / 2} y={Y(g.ye) + 30} textAnchor="middle" style={{ fontSize: 8, fill: on("wingAttachFt") ? HL : DIM }}>
+          {meetWords(g)}
         </text>
-      )}
+      ))}
     </svg>
   );
 }
@@ -17226,12 +17292,19 @@ function ssDrewWords(spec, porchBuilt, stepBuilt, massBuilt) {
     const mb = massBuilt && massBuilt.attach && massBuilt.attach === roof.wingAttach && massBuilt.wings && massBuilt.wings[0] ? massBuilt : null;
     const hc = mb ? mb.Hc : Number(roof.centerEaveFt);
     const centre = hc > 0 && (mb || Number(roof.centerEaveFt) > 0) ? `, and the middle section's walls rise to ${ssFtInWords(hc)}` : "";
-    const place = mb ? mb.wings[0].meets : roof.wingAttach;
-    const byFt = mb ? mb.wings[0].meetFt : Number(roof.wingAttachFt);
-    const by = byFt > 0.005 ? ssFtInWords(byFt) : null;
-    const meets = place === "roof" ? ` that runs up onto the middle section's roof${by ? `, ${by} above its eave` : ""}`
-      : place === "wall" ? ` that meets the middle section's wall ${by ? `${by} below its eave` : "at its eave"}` : "";
+    // On the roof at 0 the wing roof meets the middle section AT its eave, and does not run up onto it.
+    const meetsOf = (place, byFt) => {
+      const by = byFt > 0.005 ? ssFtInWords(byFt) : null;
+      return place === "roof" ? (by ? ` that runs up onto the middle section's roof, ${by} above its eave` : " that meets the middle section at its eave")
+        : place === "wall" ? ` that meets the middle section's wall ${by ? `${by} below its eave` : "at its eave"}` : "";
+    };
+    // Two wings that meet it differently (an off-centre ridge lands one, not the other) are said one by
+    // one, as built (review, 2026-09-29), each named by its wall.
+    const sideOf = (g) => ({ west: "left", east: "right", north: "back", south: "front" })[g.wall] || "other";
+    const each = mb && mb.wings.length > 1 && mb.wings.some((g) => meetsOf(g.meets, g.meetFt) !== meetsOf(mb.wings[0].meets, mb.wings[0].meetFt)) ? mb.wings : null;
+    const meets = each ? "" : mb ? meetsOf(mb.wings[0].meets, mb.wings[0].meetFt) : meetsOf(roof.wingAttach, Number(roof.wingAttachFt));
     out.push(`A lower wing ${ssFtInWords(wing)} wide runs along ${where} under its own roof${meets}${centre}.`);
+    if (each) out.push(each.map((g, i) => `${i ? "the" : "The"} ${sideOf(g)} wing has a roof${meetsOf(g.meets, g.meetFt)}`).join("; ") + ".");
   }
   // A ROOF STEP (2026-09-28): where the rear roof section starts and which way its eave steps, only
   // where the style gives both keys on a roof that can carry them (the sanitiser's rule), and as
@@ -21340,9 +21413,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // mode and its distance travel together: picking "roof" or "wall" with no distance yet starts it at
   // 1 ft (a switch never leaves an empty field, the calSetWings rule), and "At the eave" / "Automatic"
   // DELETES both keys, because absent is today's building. The renderer never changes the mode itself.
+  // A LEAN-TO "On the wall" starts at half its drop instead, to the quarter foot (review, 2026-09-29): 1 ft
+  // under the default 1 ft drop is flat, so the first thing shown was a warning. Where the roof edge above
+  // needs it lower and a slope is still left there, it starts at that clearance, to the quarter foot.
+  const calLeanWallSeed = (spec, roof) => {
+    const lr0 = d3LeanToReadout({ ...spec, roof: { ...roof, leanToAttach: "wall", leanToAttachFt: 0 } }, sel && sel.size);
+    const drop = lr0 ? lr0.drop : (roof.leanToDropFt != null ? Number(roof.leanToDropFt) : 1);
+    let ft = Math.floor(Math.max(0, drop) * 2) / 4;
+    const lr = d3LeanToReadout({ ...spec, roof: { ...roof, leanToAttach: "wall", leanToAttachFt: ft } }, sel && sel.size);
+    if (lr && lr.fasciaCuts && lr.fasciaAt != null) {
+      const up = Math.ceil(lr.fasciaAt * 4 - 1e-6) / 4;
+      if (up > ft && up < drop - 0.05) ft = up;
+    }
+    return ft;
+  };
   const calSetAttach = (modeKey, ftKey, v) => setAdminCal((p) => {
     const roof = { ...p.spec.roof };
-    if (v === "roof" || v === "wall") { roof[modeKey] = v; if (typeof roof[ftKey] !== "number") roof[ftKey] = 1; }
+    if (v === "roof" || v === "wall") { roof[modeKey] = v; if (typeof roof[ftKey] !== "number") roof[ftKey] = modeKey === "leanToAttach" && v === "wall" ? calLeanWallSeed(p.spec, roof) : 1; }
     else { delete roof[modeKey]; delete roof[ftKey]; }
     return { ...p, spec: { ...p.spec, roof } };
   });
@@ -25749,15 +25836,27 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   // side or the middle section's tall wall beside one wing. The option says which it builds.
                   const at0 = d3LeanToReadout({ ...adminCal.spec, roof: { ...roof, leanToAttach: "wall", leanToAttachFt: 0 } }, sel.size);
                   const underEave = at0 ? at0.E - ((adminCal.spec.wallHeightFt) || D3.WALL_H) : 0;
+                  // The roof edge above hanging into it is said the same on the wall and on a shed's high side,
+                  // where "On the roof" meets at the eave, the wall's 0 (review, 2026-09-29).
+                  const fasciaFix = lr && lr.fasciaCuts ? (lr.fasciaAt != null
+                    ? `The roof edge above hangs into the lean-to — ${lr.noRoof ? "pick \"On the wall\" and meet it" : "meet the wall"} at least ${d3FtIn(upIn(lr.fasciaAt))} below the eave.`
+                    : (lr.noRoof ? "The roof edge above hangs into the lean-to — give it more drop and pick \"On the wall\"." : "The roof edge above hangs into the lean-to — give it more drop, or meet it on the roof.")) : null;
                   const warn = !lr ? null
-                    : lr.noRoof ? "This is the roof's high side, with no roof above it to meet, so it meets at the eave."
+                    : lr.noRoof ? `This is the roof's high side, with no roof above it to meet, so it meets at the eave.${fasciaFix ? " " + fasciaFix : ""}`
                       : lr.cuts ? `The lean-to is steeper than the roof it sits on, so the main roof's edge pokes through it. ${cutFix ? cutFix.charAt(0).toUpperCase() + cutFix.slice(1) + "." : "Pick \"On the wall\"."}`
-                        : lr.fasciaCuts ? (lr.fasciaAt != null
-                          ? `The roof edge above hangs into the lean-to — meet the wall at least ${d3FtIn(upIn(lr.fasciaAt))} below the eave.`
-                          : "The roof edge above hangs into the lean-to — give it more drop, or meet it on the roof.")
-                          : lr.flat ? "Its roof would slope back toward the building — lower the outer edge or meet the wall higher."
+                        : lr.fasciaCuts ? fasciaFix
+                          : lr.flat ? `Its outer edge is only ${d3FtIn(lr.drop)} below the eave, so it can't meet the wall lower than ${d3FtIn(lr.at)} — drawn there, nearly flat. Give it more drop or meet the wall higher.`
                             : lr.clamped ? `This roof only goes ${d3FtIn(lr.d)} up from here, so it meets there.`
                               : null;
+                  // ON THE WALL its roof meets the wall BELOW the eave, and a customer's door or window on that
+                  // wall reaching past it runs into the lean-to (review, 2026-09-29). The designer holds an opening
+                  // 0.2 ft under a wall's top; the same 0.2 under this line, to the inch, is how high they can go.
+                  const ltAx = d3RoofAxes(roof, bldgW, bldgH);
+                  const ltWall = lr ? (ltAx.uAxisIsX ? (lr.dir < 0 ? "left" : "right") : (lr.dir < 0 ? "back" : "front")) : null;
+                  const openTop = lr && lr.mode === "wall" && lr.at >= 1 / 24 ? downIn(lr.ya - 0.2) : null;
+                  // A dormer out toward this eave, under the lean-to's roof run up onto it.
+                  const ltDc = lr ? d3DormerCovered(adminCal.spec, sel.size) : null;
+                  const ltDcWords = ltDc && ltDc.by === "lean-to" ? d3DormerCoveredWords(ltDc, false) : null;
                   return (
                     <>
                       <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Lean-to meets the building
@@ -25775,10 +25874,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                             style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                           {lr && (
                             <div style={{ ...hint, color: warn ? "#B45309" : "#A16207" }}>
-                              {`Builds ${Math.round(lr.pitch * 120) / 10} in 12 · ${lr.noRoof ? "meets at the eave" : `meets the ${lr.mode === "roof" ? "roof" : "wall"} ${d3FtIn(lr.d)} ${lr.mode === "roof" ? "above" : "below"} the eave`}`}
+                              {`Builds ${Math.round(lr.pitch * 120) / 10} in 12 · ${lr.noRoof || lr.at < 1 / 24 ? "meets at the eave" : `meets the ${lr.mode === "roof" ? "roof" : "wall"} ${d3FtIn(lr.at)} ${lr.mode === "roof" ? "above" : "below"} the eave`}`}
                               {warn && <div>{warn}</div>}
                             </div>
                           )}
+                          {openTop != null && (
+                            <div data-ss-leanto-openings="" style={{ ...hint, color: openTop < 80 / 12 ? "#B45309" : "#A16207" }}>
+                              {`Doors and windows on the ${ltWall} wall need to stay under ${d3FtIn(openTop)} from the floor, or the lean-to roof crosses them.`}
+                            </div>
+                          )}
+                          {ltDcWords && <div data-ss-dormer-covered="" style={{ ...hint, color: "#B45309" }}>{ltDcWords}</div>}
                         </label>
                       )}
                     </>
@@ -25805,17 +25910,33 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   // wing roof's pitch is WORKED OUT, so its box becomes a readout (wingPitch stays stored).
                   const wm = on && roof.wingAttach ? d3Massing(roof, bldgW, bldgH, Number(adminCal.spec.wallHeightFt) || D3.WALL_H) : null;
                   const wg = wm && wm.attach ? wm.wings : [];
-                  const wIn12 = [...new Set(wg.map((g) => String(Math.round(g.pitch * 120) / 10)))].join(" / ");
+                  // Each wing named by its wall, where the two differ -- an off-centre ridge can land one wing roof
+                  // on the middle roof and not the other (review, 2026-09-29).
+                  const wSide = (g) => ({ west: "left", east: "right", north: "back", south: "front" })[g.wall] || "other";
+                  const wIn12s = wg.map((g) => String(Math.round(g.pitch * 120) / 10));
+                  const wIn12 = new Set(wIn12s).size > 1 ? wg.map((g, i) => `${wSide(g)} ${wIn12s[i]}`).join(" / ") : (wIn12s[0] || "");
+                  const meetLine = (g) => (g.meetFt < 1 / 24 ? "meets the middle section at its eave" : `meets the ${g.meets} ${d3FtIn(g.meetFt)} ${g.meets === "roof" ? "above" : "below"} the middle section's eave`);
+                  const cap1 = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+                  const wMeet = !wg.length ? "" : wg.every((g) => meetLine(g) === meetLine(wg[0])) ? cap1(meetLine(wg[0]))
+                    : wg.map((g, i) => `${i ? wSide(g) : cap1(wSide(g))} wing ${meetLine(g)}`).join("; ");
+                  const cutW = wg.filter((g) => g.cuts);
+                  const cutWho = cutW.length === wg.length ? (wg.length > 1 ? ["the wing roofs", "they meet"] : ["the wing roof", "it meets"]) : [`the ${cutW.length ? wSide(cutW[0]) : ""} wing roof`, "it meets"];
+                  // Blank, the middle stands 3 ft over a default 3:12 wing roof while an attach is set (d3Massing):
+                  // the placeholder prints that height at this size, not a rule the attach no longer follows.
+                  const blankHc = wm ? d3Massing({ ...roof, centerEaveFt: null }, bldgW, bldgH, Number(adminCal.spec.wallHeightFt) || D3.WALL_H).Hc : null;
+                  // A dormer out toward a wing whose roof runs up onto the middle roof over it.
+                  const wDc = wg.length ? d3DormerCovered(adminCal.spec, sel.size) : null;
+                  const wDcWords = wDc && wDc.by === "wing" ? d3DormerCoveredWords(wDc, false) : null;
                   // Up the roof, the wing roof reaches the centre's roof only while the centre's walls stand
                   // no more than k * w over the outside walls, at ANY distance (d3WingsAttach): past that
                   // height, moving it up the roof never helps, so the warning names the height that does.
                   const reachHc = wg.filter((g) => g.cuts).reduce((h, g) => Math.min(h, wm.H + g.k * g.w), Infinity);
                   const wWarn = !wg.length ? null
                     : wm.hcLow ? `The middle section must stand at least 1 ft above the outside walls, so it is drawn at ${d3FtIn(wm.Hc)}.`
-                      : wg.some((g) => g.cuts) ? (wm.attach === "roof"
+                      : cutW.length ? (wm.attach === "roof"
                         ? (reachHc >= wm.H + 1
-                          ? `The middle section is too tall for the wing roofs to reach its roof, so they meet its wall. Bring its walls down to ${d3FtIn(Math.floor(reachHc * 12 + 1e-6) / 12)} or lower, or pick "On the wall".`
-                          : `The middle roof is too flat for the wing roofs to run up onto it, so they meet its wall. Pick "On the wall".`)
+                          ? `The middle section is too tall for ${cutWho[0]} to reach its roof, so ${cutWho[1]} its wall. Bring its walls down to ${d3FtIn(Math.floor(reachHc * 12 + 1e-6) / 12)} or lower, or pick "On the wall".`
+                          : `The middle roof is too flat for ${cutWho[0]} to run up onto it, so ${cutWho[1]} its wall. Pick "On the wall".`)
                         : "The middle section is too low for its roof edge to clear the wing roof — raise its wall height.")
                         : wg.some((g) => g.clamped) ? (wm.attach === "roof"
                           ? `The middle roof only goes ${d3FtIn(Math.min(...wg.map((g) => g.attachFt)))} up, so the wing roof meets there.`
@@ -25849,13 +25970,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         </label>
                       )}
                       {on && (
-                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wing roofs meet the centre
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wing roofs meet the middle section
                           <select value={roof.wingAttach || ""} onChange={(e) => calSetAttach("wingAttach", "wingAttachFt", e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
-                            <option value="">Automatic (raises the centre if needed)</option>
-                            <option value="wall">On the wall, below the centre eave</option>
-                            <option value="roof">On the roof, above the centre eave</option>
+                            <option value="">Automatic (raises the middle section if needed)</option>
+                            <option value="wall">On the wall, below its eave</option>
+                            <option value="roof">On the roof, above its eave</option>
                           </select>
-                          <div style={hint}>{roof.wingAttach ? "The centre stays at its wall height; the wing roof's slope follows." : "Hung under the centre's eave, pushing the centre up if the wing roof is steep."}</div>
+                          <div style={hint}>{roof.wingAttach ? "The middle section stays at its wall height; the wing roof's slope follows." : "Hung under the middle section's eave, pushing it up if the wing roof is steep."}</div>
                         </label>
                       )}
                       {on && roof.wingAttach && (
@@ -25865,10 +25986,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                             style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                           {wg.length > 0 && (
                             <div style={{ ...hint, color: wWarn ? "#B45309" : "#A16207" }}>
-                              {`Meets the ${wg[0].meets} ${d3FtIn(wg[0].meetFt)} ${wg[0].meets === "roof" ? "above" : "below"} the centre eave`}
+                              {wMeet}
                               {wWarn && <div>{wWarn}</div>}
                             </div>
                           )}
+                          {wDcWords && <div data-ss-dormer-covered="" style={{ ...hint, color: "#B45309" }}>{wDcWords}</div>}
                         </label>
                       )}
                       {on && (
@@ -25880,12 +26002,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                               {...calOptNumProps("wingPitch", roof.wingPitch == null ? null : Math.round(Number(roof.wingPitch) * 1200) / 100, [0, 18], (n) => calSetRoofOpt("wingPitch", n == null ? null : n / 12))}
                               style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                           )}
-                          <div style={hint}>{roof.wingAttach ? "Set by where the wing roof meets the centre." : "Falls away from the middle, down to the outside wall."}</div>
+                          <div style={hint}>{roof.wingAttach ? "Set by where the wing roof meets the middle section." : "Falls away from the middle, down to the outside wall."}</div>
                         </label>
                       )}
                       {on && (
                         <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Middle section's wall height (ft)
-                          <input type="number" step="0.5" min="6" max="26" placeholder="blank = 3 ft over the wings"
+                          <input type="number" step="0.5" min="6" max="26" placeholder={blankHc != null ? `blank = ${d3FtIn(blankHc)}` : "blank = 3 ft over the wings"}
                             {...calOptNumProps("centerEaveFt", roof.centerEaveFt, [6, 26], (n) => calSetRoofOpt("centerEaveFt", n))}
                             style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                           <div style={hint}>Floor to the top of the tall middle walls, where its own roof starts.</div>
@@ -25941,6 +26063,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer position (&minus;1 &hellip; 1)
                     <input type="number" step="0.05" {...calNumProps("dormerOffsetU", adminCal.spec.roof.dormerOffsetU != null ? adminCal.spec.roof.dormerOffsetU : 0.45, (n) => calSetRoof({ dormerOffsetU: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    {/* UNDER A LEAN-TO OR WING ROOF run up onto this roof (d3DormerCovered, review 2026-09-29): said,
+                        with the two fixes, never moved -- the builder placed it. */}
+                    {(() => {
+                      const dc = d3DormerCovered(adminCal.spec, sel.size);
+                      return dc ? <div data-ss-dormer-covered="" style={{ fontSize: 10, fontWeight: 700, marginTop: 3, color: "#B45309" }}>{d3DormerCoveredWords(dc, true)}</div> : null;
+                    })()}
                   </label>
                 )}
                 </>)}

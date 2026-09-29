@@ -27,6 +27,14 @@
 //   level with it lands; a transom dormer stops 0.3 ft short of a landed wing roof; the panel names the
 //   drop / width / distance / centre height that fixes each warning and each one does; the unset
 //   lean-to option on a shed's high side says "At wall height"; the drawing's wall tick measures the wall.
+//   (fixes, 2026-09-29) a wing roof that cannot reach the middle roof meets its wall at least the clearance
+//   "On the wall" holds, so the wing slab stays under the middle section's soffit and its flashing under
+//   the middle roof (every wing case measures both); a door no taller than the lean-to panel's "need to
+//   stay under" clears a wall-attached lean-to's roof and a standard 6'8" door over it does not; the
+//   panel says: that height, a dormer under a lean-to roof run up onto its roof (and where it clears), the
+//   high side's roof edge on "On the roof", the distance BUILT (a flat ask, 0 as "at the eave"), a seeded
+//   "On the wall" that builds a slope, the wings in "middle section" words, each wing where the two differ,
+//   and the real blank middle height.
 //
 //   python -m http.server 8143 --bind 127.0.0.1 --directory <repo root>
 //   SS_BASE=http://127.0.0.1:8143 node tests/harness/attach.mjs      (SS_SHOTS=<dir> for the PNGs)
@@ -36,7 +44,7 @@
 // Exit 0 = every assertion held.
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, BASE } from "./lib.mjs";
+import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, BASE, revealTool, svgPoint, buildingRect, readItems } from "./lib.mjs";
 
 const ROOF_T = 0.2, WALL_T = 0.3;
 const COLORS = { body: "#e9e4d8", trim: "#5b5f63", roof: "#3b4a5c", wood: "#a8703f" };
@@ -96,6 +104,8 @@ const WING_CASES = [
   { id: "tri8-roofCannot", H: 8, roof: { ...TRI, pitch: 5 / 12, wingAttach: "roof", wingAttachFt: 1 }, cannot: true },
   // At exactly 6:12 the wing roof and the centre's roof are one plane: it lands, and is not flagged.
   { id: "tri8-roofLevel", H: 8, roof: { ...TRI, pitch: 0.5, wingAttach: "roof", wingAttachFt: 1 }, level: true },
+  // (fixes, 2026-09-29) ...and at 0, where its own line met the centre's wall AT the eave.
+  { id: "tri8-roofCannot0", H: 8, roof: { ...TRI, pitch: 5 / 12, wingAttach: "roof", wingAttachFt: 0 }, cannot: true },
   // A transom dormer on the centre, running out toward the east wing: up the roof, the wing roof covers the
   // centre's eave from its wall in to the landing, so the dormer stops 0.3 ft short of it.
   { id: "tri10-autoDormer", H: 10, roof: { ...TRI, ...DORMER } },
@@ -269,6 +279,44 @@ async function measure(page) {
       if (o && o.depth < 1) cheeks.push(bbOf(q));
     });
     out.dormer = cheeks.length ? { n: cheeks.length, uMin: Math.min(...cheeks.map((b) => b.uMin)), uMax: Math.max(...cheeks.map((b) => b.uMax)) } : null;
+    // (fixes, 2026-09-29) WHERE A WING ROOF MEETS THE CENTRE'S WALL: exact vertical sections through every
+    // roof box, every 0.05 ft out from the centre wall line across the centre's overhang. The worst of the
+    // wing slab's top over the centre's soffit's bottom, and of the flashing's top over the centre deck's
+    // underside (null where the centre has no eave on that side: a wing roof that lands on its roof).
+    const boxesY = (u) => {
+      const x = m.uAxisIsX ? u : 0.3, z = m.uAxisIsX ? 0.3 : u;
+      const hits = [];
+      M.roofGroup.traverse((o) => {
+        if (!o.isMesh || !o.geometry || o.geometry.type !== "BoxGeometry") return;
+        const inv = o.matrixWorld.clone().invert();
+        const p0 = new V(x, 0, z).applyMatrix4(inv), d = new V(x, 1, z).applyMatrix4(inv).sub(p0);
+        const P = o.geometry.parameters, h = [P.width / 2, P.height / 2, P.depth / 2];
+        let t0 = -Infinity, t1 = Infinity;
+        for (let i = 0; i < 3; i++) {
+          const a = p0.getComponent(i), b = d.getComponent(i);
+          if (Math.abs(b) < 1e-12) { if (Math.abs(a) > h[i]) return; continue; }
+          let ta = (-h[i] - a) / b, tb = (h[i] - a) / b;
+          if (ta > tb) [ta, tb] = [tb, ta];
+          t0 = Math.max(t0, ta); t1 = Math.min(t1, tb);
+        }
+        if (t0 <= t1) hits.push({ ud: o.userData || {}, w: P.width, h: P.height, y0: t0, y1: t1 });
+      });
+      return hits;
+    };
+    out.joint = m.wings.map((g) => {
+      let wingOverSoffit = null, flashOverDeck = null;
+      for (let i = 1; i <= 24; i++) {
+        const hits = boxesY(g.u0 + g.side * i * 0.05);
+        const plain = hits.filter((q) => !q.ud.ssWing && !q.ud.ssLeanTo && !q.ud.ssPorchPart);
+        const soffit = plain.find((q) => Math.abs(q.h - 0.05) < 1e-6);
+        const deck = plain.filter((q) => Math.abs(q.h - ROOF_T) < 1e-6 && q.w > 3).sort((a, b) => a.y0 - b.y0)[0];
+        const wslab = hits.find((q) => q.ud.ssWing === g.side && Math.abs(q.h - ROOF_T) < 1e-6 && q.w > 3);
+        const flash = hits.find((q) => q.ud.ssWing === g.side && Math.abs(q.h - 0.38) < 1e-6);
+        if (soffit && wslab) wingOverSoffit = Math.max(wingOverSoffit == null ? -Infinity : wingOverSoffit, wslab.y1 - soffit.y0);
+        if (deck && flash) flashOverDeck = Math.max(flashOverDeck == null ? -Infinity : flashOverDeck, flash.y1 - deck.y0);
+      }
+      return { side: g.side, wingOverSoffit, flashOverDeck };
+    });
     return out;
   }, { ROOF_T });
 }
@@ -333,6 +381,87 @@ async function leanCase(ctx, c, ok, shots, digests) {
   } finally { await page.close(); }
 }
 
+// ── 1b. a door under a wall-attached lean-to (fixes, 2026-09-29) ──────────────────────────────
+// On the wall the lean-to's roof meets the wall BELOW the eave, and the panel says how high doors and
+// windows on that wall can go: 0.2 ft under that line, to the inch -- the header the designer holds under
+// any wall's top. A door that tall, placed through the real 2D "Door wall" tool, clears the lean-to's roof;
+// the standard 6'8" door over it runs into it, which is exactly why the panel says so.
+const DOOR_ROOF = { ...GABLE, ...LEAN("right", { leanToAttach: "wall", leanToAttachFt: 1.5 }) };
+const DOOR_CASES = [{ id: "gR-wall15-door75", heightIn: 75, clears: true }, { id: "gR-wall15-door80", heightIn: 80, clears: false }];
+async function doorCase(ctx, c, ok, shots) {
+  const tag = `lean ${c.id}`;
+  const fixtures = { ...FIXTURES, items: [{ id: "d-walk", name: "Harness Walk Door", price: 300, widthIn: 36, heightIn: c.heightIn, category: "door", colorMode: "fixed", planLabel: "WD", sortOrder: 0, imageUrl: null,
+    sillIn: null, sillMode: "fixed", opLeft: false, opRight: true, opDouble: false, opSlideUp: false, opDefault: "right", swingIn: false, swingOut: true, swingDefault: null, hasTrimColor: false }] };
+  const label = `Harness Lean ${c.id}`;
+  const page = await ctx.newPage();
+  const errors = collectErrors(page);
+  try {
+    await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
+    await stubSupabase(page, { config: configFor(label, "12x16", { roof: DOOR_ROOF, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" }), fixtures });
+    await openDesigner(page, "harness-attach");
+    await pickStyle(page, label);
+    await chooseSize(page, "12x16");
+    const r = await buildingRect(page);
+    const pt = await svgPoint(page, r.x + r.w - 0.4 * (r.w / 12), r.y + 8 * (r.h / 16));
+    await (await revealTool(page, /^Door wall$/)).click();
+    await settle(page, 300);
+    await page.mouse.click(pt.x, pt.y);
+    await settle(page, 600);
+    await page.getByText("Harness Walk Door", { exact: true }).first().click({ timeout: 10000 });
+    await settle(page, 300);
+    await page.getByRole("button", { name: "Place door" }).click();
+    await settle(page, 600);
+    const door = ((await readItems(page)) || []).find((i) => /door/i.test(String(i.type)));
+    ok(`${tag}: a ${c.heightIn} in walk door is on the east wall, under the lean-to`, door && door.wall === "east", JSON.stringify(door && { type: door.type, wall: door.wall }));
+    await openEditor(page);
+    const got = await page.evaluate(() => {
+      const E = window.__ss3dEngine, M = E.model, V = E.camera.position.constructor;
+      E.scene.updateMatrixWorld(true);
+      const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+      M.openingsGroup.children.forEach((g) => {
+        if (!(g.userData && g.userData.itemId != null)) return;
+        g.traverse((o) => {
+          if (!o.isMesh || !o.geometry) return;
+          if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+          const b = o.geometry.boundingBox;
+          for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
+            const v = new V(x, y, z).applyMatrix4(o.matrixWorld);
+            [v.x, v.y, v.z].forEach((q, k) => { mn[k] = Math.min(mn[k], q); mx[k] = Math.max(mx[k], q); });
+          }
+        });
+      });
+      if (!isFinite(mx[1])) return null;
+      // The lean-to slab's underside straight over the door's outer face, where its casing stands proudest.
+      const x = mx[0] - 0.01, z = (mn[2] + mx[2]) / 2;
+      let under = null;
+      M.roofGroup.traverse((o) => {
+        if (!o.isMesh || !o.userData || !o.userData.ssLeanTo || o.geometry.type !== "BoxGeometry" || o.geometry.parameters.width < 3) return;
+        const inv = o.matrixWorld.clone().invert();
+        const p0 = new V(x, 0, z).applyMatrix4(inv), d = new V(x, 1, z).applyMatrix4(inv).sub(p0);
+        const P = o.geometry.parameters, h = [P.width / 2, P.height / 2, P.depth / 2];
+        let t0 = -Infinity, t1 = Infinity;
+        for (let i = 0; i < 3; i++) {
+          const a = p0.getComponent(i), b = d.getComponent(i);
+          if (Math.abs(b) < 1e-12) { if (Math.abs(a) > h[i]) return; continue; }
+          let ta = (-h[i] - a) / b, tb = (h[i] - a) / b;
+          if (ta > tb) [ta, tb] = [tb, ta];
+          t0 = Math.max(t0, ta); t1 = Math.min(t1, tb);
+        }
+        if (t0 <= t1) under = under == null ? t0 : Math.min(under, t0);
+      });
+      return { top: mx[1], faceX: mx[0], under, ya: M.leanTo && M.leanTo.ya };
+    });
+    // The panel's number, the way the panel works it out: 0.2 under the lean-to's line on the wall, to the inch.
+    const limitIn = got && got.ya != null ? Math.floor((got.ya - 0.2) * 12 + 1e-6) : null;
+    console.log(`   ${tag}: casing top ${f3(got && got.top)}, lean-to underside over it ${f3(got && got.under)}, panel says under ${limitIn} in`);
+    ok(`${tag}: the panel's height for this wall is 6' 3" (75 in)`, limitIn === 75, String(limitIn));
+    if (c.clears) ok(`${tag}: a door as tall as the panel says clears the lean-to's roof, casing and all`, got && got.under != null && got.top <= got.under + 1e-6 && c.heightIn <= limitIn, JSON.stringify(got));
+    else ok(`${tag}: a standard door taller than the panel says runs into the lean-to's roof (what the panel warns of)`, got && got.under != null && got.top > got.under && c.heightIn > limitIn, JSON.stringify(got));
+    if (shots) await shot(page, join(shots, `leanto-${c.id}.png`), [13, 7.6, 5], [6, 6.3, 0]);
+    ok(`${tag}: no page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  } finally { await page.close(); }
+}
+
 // ── 2. the wings ─────────────────────────────────────────────────────────────────────────────
 async function wingCase(ctx, c, ok, shots, digests) {
   const tag = `wings ${c.id}`;
@@ -376,10 +505,13 @@ async function wingCase(ctx, c, ok, shots, digests) {
           ok(`${tag}: a clerestory above the ${side} wing, from under its roof up to 14`, cl && cl.minY <= g.ya + 1e-6 && Math.abs(cl.maxY - 14) < 0.01, JSON.stringify(cl));
         } else if (c.cannot) {
           // Up the roof, but the centre stands more than k * w over the walls: at ANY distance the wing line
-          // runs in under the centre's eave. Built as far as it shows, to the centre's wall, and flagged.
-          const p = (14 + dAsk - H) / (w + dAsk / k), ya = H + w * p;
-          ok(`${tag}: the ${side} wing roof cannot reach the centre's roof (14 over ${H} ft walls needs ${f3(((14 - H) / w) * 12)} in 12 there, it is ${f3(k * 12)}): flagged, still "roof", meeting the centre's wall at ${f3(ya)}`,
-            g.cuts === true && g.attach === "roof" && g.attachFt === dAsk && g.meets === "wall" && Math.abs(g.ya - ya) < 1e-9 && Math.abs(g.uIn - u0) < 1e-9 && Math.abs(g.meetFt - (14 - ya)) < 1e-9, JSON.stringify(g));
+          // runs in under the centre's eave. Built as far as it shows, to the centre's wall, and flagged --
+          // meeting that wall no higher than the clearance "On the wall" holds (fixes, 2026-09-29): on its own
+          // line it met 2 in under the eave, burying the centre's soffit, its flashing up through the roof.
+          const a = ROOF_T + 0.43, need = Math.max(a, (a + k * ov - ov * (14 - H) / w) / (1 - ov / w));
+          const p0 = (14 + dAsk - H) / (w + dAsk / k), ya = Math.max(H, Math.min(H + w * p0, 14 - need)), p = (ya - H) / w;
+          ok(`${tag}: the ${side} wing roof cannot reach the centre's roof (14 over ${H} ft walls needs ${f3(((14 - H) / w) * 12)} in 12 there, it is ${f3(k * 12)}): flagged, still "roof", meeting the centre's wall at ${f3(ya)}, ${f3(14 - ya)} under its eave (its own line would meet ${f3(14 - H - w * p0)} under)`,
+            g.cuts === true && g.attach === "roof" && g.attachFt === dAsk && g.meets === "wall" && Math.abs(g.ya - ya) < 1e-9 && Math.abs(g.pitch - p) < 1e-9 && Math.abs(g.uIn - u0) < 1e-9 && Math.abs(g.meetFt - (14 - ya)) < 1e-9 && 14 - ya >= need - 1e-9, JSON.stringify(g));
           const face = u0 + g.side * T / 2;
           const s = m.wings.find((q) => q.side === g.side).slabEnd;
           ok(`${tag}: the ${side} wing slab stops at the centre wall's face on its own line, under the centre's eave`, s && (face - s.u) * g.side >= -0.01 && (face - s.u) * g.side <= 0.15 && Math.abs(s.y - (H + Math.abs(s.u - g.side * 37 / 2) * p)) < 0.04 && s.y < 14, JSON.stringify(s));
@@ -403,6 +535,14 @@ async function wingCase(ctx, c, ok, shots, digests) {
       if (mode === "roof" && !c.cannot) ok(`${tag}: no clerestory: the wing roofs cover the centre's walls`, m.clerestory.length === 0, String(m.clerestory.length));
       if (c.cannot) ok(`${tag}: a clerestory above each wing: the centre's walls show over the wing roofs`, m.clerestory.length === 2, String(m.clerestory.length));
     }
+    // (fixes, 2026-09-29) Wherever the centre keeps its eave over a wing, measured in sections: the wing slab
+    // stays under the centre's soffit and the flashing under the centre's deck.
+    for (const j of m.joint) {
+      const side = j.side < 0 ? "west" : "east";
+      if (j.wingOverSoffit != null) ok(`${tag}: the ${side} wing slab stays under the centre's soffit (${f3(-j.wingOverSoffit)} ft clear at the tightest)`, j.wingOverSoffit <= 0.005, f3(j.wingOverSoffit));
+      if (j.flashOverDeck != null) ok(`${tag}: the ${side} wing's flashing stays under the centre's roof deck (${f3(-j.flashOverDeck)} ft clear)`, j.flashOverDeck <= 0.005, f3(j.flashOverDeck));
+    }
+    if (c.cannot) ok(`${tag}: ...both measured on both sides`, m.joint.length === 2 && m.joint.every((j) => j.wingOverSoffit != null && j.flashOverDeck != null), JSON.stringify(m.joint));
     if (c.roof.dormerType) {
       // The transom dormer runs toward the east eave. Bare roof: to 0.3 ft short of the centre's own eave
       // line (today). With the east wing roof landed on the centre's roof: to 0.3 ft short of the landing.
@@ -427,6 +567,10 @@ async function wingCase(ctx, c, ok, shots, digests) {
 // ── 3. the panel ─────────────────────────────────────────────────────────────────────────────
 const LEAN_PANEL_ROOF = { ...GABLE, leanToWidthFt: 8, leanToDropFt: 2, leanToSide: "left" };
 const TRI_PANEL_ROOF = { ...TRI };
+// (fixes, 2026-09-29) A lean-to with the default 1 ft drop and a dormer out toward it; two wings an off-centre
+// ridge lands differently.
+const LEAN_SEED_ROOF = { ...GABLE, leanToWidthFt: 8, leanToSide: "right", dormerWidthFt: 4 };
+const ODD_WINGS_ROOF = { type: "gable", pitch: 0.5, ridgeOffset: -0.3, wingSide: "both", wingWidthFt: 6, centerEaveFt: 10, wingAttach: "roof", wingAttachFt: 2.5 };
 const panelStyle = (value, label, size, roof, H) => ({ value, label, img: null, sizes: [size], sizeInclusions: {}, sizeInclusionQty: {},
   d3: { roof, siding: "batten", colors: COLORS, wallHeightFt: H, roofMaterial: "metal" } });
 const has = (o, k) => !!o && Object.prototype.hasOwnProperty.call(o, k);
@@ -532,6 +676,8 @@ async function panelCheck(ctx, ok, shots) {
     await settle(page, 400);
     txt = flat(await field(page, "How far (ft)").innerText());
     ok("panel: switching to the wall keeps the distance and says 'below the eave'", /meets the wall 1' 6" below the eave/.test(txt) && !/hangs into/.test(txt), txt);
+    // (fixes, 2026-09-29) Its roof now meets the wall under the eave: how high doors and windows there can go.
+    ok("panel: on the wall it says how high doors and windows on that wall can go (6' 3\", 0.2 under where it meets)", /Doors and windows on the left wall need to stay under 6' 3" from the floor, or the lean-to roof crosses them\./.test(txt), txt);
     d3 = await saveCal(page, calls);
     ok("panel: save wall, 1.5", d3.roof.leanToAttach === "wall" && d3.roof.leanToAttachFt === 1.5, JSON.stringify(d3.roof));
     await typeNumber(page, far, 0.25);
@@ -541,6 +687,11 @@ async function panelCheck(ctx, ok, shots) {
     await typeNumber(page, far, 0.42);
     txt = flat(await field(page, "How far (ft)").innerText());
     ok("panel: ...and meeting the wall that far down clears it", /meets the wall 0' 5" below the eave/.test(txt) && !/hangs into/.test(txt), txt);
+    // (fixes, 2026-09-29) 0 is "at the eave", in the readout and the drawing, never 0' 0".
+    await typeNumber(page, far, 0);
+    txt = flat(await field(page, "How far (ft)").innerText());
+    const el0 = await elevationText(page);
+    ok("panel: on the wall at 0 it reads 'meets at the eave', and the drawing says 'at the eave'", /Builds [\d.]+ in 12 · meets at the eave/.test(txt) && !/0' 0"/.test(txt) && !/Doors and windows/.test(txt) && /at the eave\|lean-to/.test(el0) && !/0' 0" down/.test(el0), `${txt} | ${el0.slice(0, 200)}`);
     await meet.selectOption("");
     await settle(page, 400);
     d3 = await saveCal(page, calls);
@@ -561,16 +712,59 @@ async function panelCheck(ctx, ok, shots) {
     await settle(page, 400);
     txt = flat(await field(page, "How far (ft)").innerText());
     ok("panel: ...and 'On the roof' there says there is no roof above it to meet", /Builds [\d.]+ in 12 · meets at the eave/.test(txt) && /high side, with no roof above it to meet, so it meets at the eave/.test(txt), txt);
+    // (fixes, 2026-09-29) ...built at the eave, the wall's 0, where the high eave's edge hangs into it: said,
+    // as "On the wall" at 0 says it, with the distance that clears -- never switched.
+    ok("panel: ...and that the high eave's roof edge hangs into it, and how far down the wall clears it", /The roof edge above hangs into the lean-to — pick "On the wall" and meet it at least 0' 4" below the eave\./.test(txt), txt);
+    if (shots) await field(page, "Lean-to meets the building").locator("xpath=..").screenshot({ path: join(shots, "panel-leanto-high-roof.png") });
+    await smeet.selectOption("wall");
+    await settle(page, 400);
+    await typeNumber(page, field(page, "How far (ft)").locator("input"), 0.34);
+    txt = flat(await field(page, "How far (ft)").innerText());
+    ok("panel: ...and on the wall 0' 4\" down it clears", /meets the wall 0' 4" below the eave/.test(txt) && !/hangs into/.test(txt), txt);
     ok("panel (shed): no page errors", errors.length === 0, JSON.stringify(errors).slice(0, 300));
     await page.close();
+    // ── (fixes, 2026-09-29) "On the wall" from nothing, the distance BUILT, a dormer under the lean-to ──
+    ({ page, errors, calls } = await openPanel(ctx, "ls", "Harness Lean Seed", "12x16", LEAN_SEED_ROOF, 8));
+    const lmeet = field(page, "Lean-to meets the building").locator("select");
+    await lmeet.waitFor({ state: "visible", timeout: 15000 });
+    await settle(page, 600);
+    await lmeet.selectOption("wall");
+    await settle(page, 500);
+    const lfar = field(page, "How far (ft)").locator("input");
+    txt = flat(await field(page, "How far (ft)").innerText());
+    ok("panel: 'On the wall' under the default 1 ft drop starts at half of it (0.5), a real slope and no warning", (await lfar.inputValue()) === "0.5" && /Builds 0\.8 in 12 · meets the wall 0' 6" below the eave/.test(txt) && !/slope back|nearly flat|hangs into/.test(txt) && /on the right wall need to stay under 7' 3"/.test(txt), txt);
+    if (shots) await field(page, "Lean-to meets the building").locator("xpath=..").screenshot({ path: join(shots, "panel-leanto-wall-seed.png") });
+    await typeNumber(page, lfar, 3);
+    txt = flat(await field(page, "How far (ft)").innerText());
+    const lel = await elevationText(page);
+    ok("panel: 3 ft under a 1 ft drop reads back the 0' 11\" it is BUILT at, and says why", /Builds 0\.1 in 12 · meets the wall 0' 11" below the eave/.test(txt) && /Its outer edge is only 1' 0" below the eave, so it can't meet the wall lower than 0' 11" — drawn there, nearly flat\. Give it more drop or meet the wall higher\./.test(txt) && !/3' 0"/.test(txt), txt);
+    ok("panel: ...and the drawing labels the 0' 11\" it draws, not the 3' 0\" asked", /0' 11" down the wall/.test(lel) && !/3' 0" down the wall/.test(lel), lel.slice(0, 300));
+    if (shots) { const svg = page.locator("svg").filter({ hasText: "down the wall" }).first(); if (await svg.count()) await svg.screenshot({ path: join(shots, "elevation-leanto-wall-flat.png") }); }
+    // Up the roof 1 ft, the lean-to lands 3.5 ft out; the gable dormer at the default 0.45 faces it at 3.7.
+    await lmeet.selectOption("roof");
+    await settle(page, 400);
+    await typeNumber(page, lfar, 1);
+    txt = flat(await field(page, "How far (ft)").innerText());
+    let dtxt = flat(await field(page, /^Dormer position/).innerText());
+    ok("panel: a dormer under the lean-to's roof is said in the lean-to's readout, with the position that clears it", /The dormer is under this roof\. Move it up the roof with Dormer position \(between 0 and 0\.35\), or pick "On the wall"\./.test(txt), txt);
+    ok("panel: ...and in the dormer's own fields", /The dormer's window wall is under the lean-to's roof\. Move it up the roof with Dormer position \(between 0 and 0\.35\), or set the lean-to to "On the wall"\./.test(dtxt), dtxt);
+    if (shots) await field(page, /^Dormer position/).screenshot({ path: join(shots, "panel-dormer-covered.png") });
+    d3 = await saveCal(page, calls);
+    ok("panel: ⚠️ said, never moved: the saved style keeps the builder's dormer (no position written) and the lean-to on the roof, 1 ft", !has(d3.roof, "dormerOffsetU") && d3.roof.leanToAttach === "roof" && d3.roof.leanToAttachFt === 1 && d3.roof.dormerWidthFt === 4, JSON.stringify(d3.roof));
+    await typeNumber(page, field(page, /^Dormer position/).locator("input"), 0.35);
+    txt = flat(await field(page, "How far (ft)").innerText());
+    dtxt = flat(await field(page, /^Dormer position/).innerText());
+    ok("panel: ...at the position it names, both lines go", !/dormer/i.test(txt) && !/under the lean-to's roof/.test(dtxt), `${txt} | ${dtxt}`);
+    ok("panel (lean-to seed): no page errors", errors.length === 0, JSON.stringify(errors).slice(0, 300));
+    await page.close();
     ({ page, errors, calls } = await openPanel(ctx, "tp", "Harness Tri Panel", "37x22", TRI_PANEL_ROOF, 10));
-    const wmeet = field(page, "Wing roofs meet the centre").locator("select");
+    const wmeet = field(page, "Wing roofs meet the middle section").locator("select");
     await wmeet.waitFor({ state: "visible", timeout: 15000 });
     await settle(page, 800);
     d3 = await saveCal(page, calls);
     ok("panel: a wings style saved untouched is exactly what it stored", sameRoof(d3.roof, TRI_PANEL_ROOF), JSON.stringify(d3.roof));
     const wopts = await wmeet.locator("option").allInnerTexts();
-    ok("panel: 'Wing roofs meet the centre' offers Automatic / wall / roof, at Automatic", JSON.stringify(wopts) === JSON.stringify(["Automatic (raises the centre if needed)", "On the wall, below the centre eave", "On the roof, above the centre eave"]) && (await wmeet.inputValue()) === "", JSON.stringify(wopts));
+    ok("panel: 'Wing roofs meet the middle section' offers Automatic / wall / roof, at Automatic, in the middle section's words", JSON.stringify(wopts) === JSON.stringify(["Automatic (raises the middle section if needed)", "On the wall, below its eave", "On the roof, above its eave"]) && (await wmeet.inputValue()) === "", JSON.stringify(wopts));
     let wel = await elevationText(page);
     ok("panel: today (Automatic) the 10 ft walls push the centre, and the drawing says 'centre, raised'", /centre, raised/.test(wel), wel.slice(0, 300));
     ok("panel: ...and the wing pitch is a box to type in", (await field(page, "Wing roof pitch (rise in 12)").locator("input").count()) === 1);
@@ -581,7 +775,7 @@ async function panelCheck(ctx, ok, shots) {
     const pitchField = field(page, "Wing roof pitch (rise in 12)");
     let ptxt = flat(await pitchField.innerText());
     txt = flat(await field(page, "How far (ft)").innerText());
-    ok("panel: 'On the wall' makes the wing pitch a readout of what it builds", (await pitchField.locator("input").count()) === 0 && /Builds 2\.9 in 12/.test(ptxt) && /Set by where the wing roof meets the centre/.test(ptxt), ptxt);
+    ok("panel: 'On the wall' makes the wing pitch a readout of what it builds", (await pitchField.locator("input").count()) === 0 && /Builds 2\.9 in 12/.test(ptxt) && /Set by where the wing roof meets the middle section/.test(ptxt), ptxt);
     ok("panel: 1 ft is closer than the centre's eave allows: moved down, and said", /Moved down to 1' 1" so the middle roof's edge clears the wing roof/.test(txt), txt);
     wel = await elevationText(page);
     ok("panel: ⚠️ with an attach the drawing never says 'centre, raised' — the centre is the 14 ft asked", !/centre, raised/.test(wel) && /centre eave/.test(wel) && /14' 0"/.test(wel) && /meets the wall 1' 1" down/.test(wel), wel.slice(0, 300));
@@ -595,8 +789,8 @@ async function panelCheck(ctx, ok, shots) {
     await settle(page, 500);
     txt = flat(await field(page, "How far (ft)").innerText());
     ptxt = flat(await pitchField.innerText());
-    ok("panel: 'On the roof' reads back 'Meets the roof 1' 6\" above the centre eave' and its own slope", /Meets the roof 1' 6" above the centre eave/.test(txt) && /Builds [\d.]+ in 12/.test(ptxt) && !/Moved down|cuts/.test(txt), `${txt} | ${ptxt}`);
-    if (shots) await field(page, "Wing roofs meet the centre").locator("xpath=..").screenshot({ path: join(shots, "panel-wings-roof.png") });
+    ok("panel: 'On the roof' reads back 'Meets the roof 1' 6\" above the middle section's eave' and its own slope", /Meets the roof 1' 6" above the middle section's eave/.test(txt) && /Builds [\d.]+ in 12/.test(ptxt) && !/Moved down|cuts/.test(txt), `${txt} | ${ptxt}`);
+    if (shots) await field(page, "Wing roofs meet the middle section").locator("xpath=..").screenshot({ path: join(shots, "panel-wings-roof.png") });
     wel = await elevationText(page);
     if (shots) { const svg = page.locator("svg").filter({ hasText: "centre eave" }).first(); if (await svg.count()) await svg.screenshot({ path: join(shots, "elevation-wings-roof.png") }); }
     ok("panel: the drawing says where it meets", /meets the roof 1' 6" up/.test(wel), wel.slice(0, 300));
@@ -607,19 +801,27 @@ async function panelCheck(ctx, ok, shots) {
     const centreH = field(page, "Middle section's wall height (ft)").locator("input");
     await typeNumber(page, centreH, 19);
     txt = flat(await field(page, "How far (ft)").innerText());
-    ok("panel: a centre too tall to reach: says so, names 18' 0\", and reads back that it meets the wall", /too tall for the wing roofs to reach its roof, so they meet its wall\. Bring its walls down to 18' 0" or lower, or pick "On the wall"\./.test(txt) && /Meets the wall 0' \d+" below the centre eave/.test(txt), txt);
-    if (shots) await field(page, "Wing roofs meet the centre").locator("xpath=..").screenshot({ path: join(shots, "panel-wings-cannot.png") });
+    ok("panel: a centre too tall to reach: says so, names 18' 0\", and reads back that it meets the wall", /too tall for the wing roofs to reach its roof, so they meet its wall\. Bring its walls down to 18' 0" or lower, or pick "On the wall"\./.test(txt) && /Meets the wall 0' \d+" below the middle section's eave/.test(txt), txt);
+    if (shots) await field(page, "Wing roofs meet the middle section").locator("xpath=..").screenshot({ path: join(shots, "panel-wings-cannot.png") });
     wel = await elevationText(page);
     ok("panel: ...and the drawing says it meets the wall", /meets the wall 0' \d+" down/.test(wel), wel.slice(0, 300));
     await typeNumber(page, centreH, 18);
     txt = flat(await field(page, "How far (ft)").innerText());
-    ok("panel: ...at 18 ft it lands on the roof", /Meets the roof 1' 6" above the centre eave/.test(txt) && !/too tall/.test(txt), txt);
+    ok("panel: ...at 18 ft it lands on the roof", /Meets the roof 1' 6" above the middle section's eave/.test(txt) && !/too tall/.test(txt), txt);
     // Asked under 1 ft over the walls, the centre is held there: the panel says so and the drawing's label
     // says "min.", never "raised".
     await typeNumber(page, centreH, 10.5);
     txt = flat(await field(page, "How far (ft)").innerText());
     wel = await elevationText(page);
     ok("panel: a centre asked at 10.5 over 10 ft walls is held at 11 and says so", /at least 1 ft above the outside walls, so it is drawn at 11' 0"/.test(txt) && /11' 0"\|centre, min\./.test(wel) && !/centre, raised/.test(wel), `${txt} | ${wel.slice(0, 300)}`);
+    // (fixes, 2026-09-29) Blank, the middle stands 3 ft over a default 3:12 wing roof while an attach is set --
+    // the stored 4:12 (hidden, its box a readout) no longer moves it -- and the placeholder prints that height.
+    await centreH.click();
+    await centreH.fill("");
+    await page.keyboard.press("Tab");
+    await settle(page, 400);
+    wel = await elevationText(page);
+    ok("panel: blank middle height with an attach: the placeholder says the 16' 0\" it builds (10 + 12 x 3:12 + 3), not the stored pitch's 17' 0\"", (await centreH.getAttribute("placeholder")) === `blank = 16' 0"` && /16' 0"\|centre eave/.test(wel), `${await centreH.getAttribute("placeholder")} | ${wel.slice(0, 200)}`);
     await typeNumber(page, centreH, 14);
     await wmeet.selectOption("");
     await settle(page, 400);
@@ -630,6 +832,24 @@ async function panelCheck(ctx, ok, shots) {
     await typeNumber(page, field(page, "Lower wings, each (ft wide, 0 = none)").locator("input"), 0);
     d3 = await saveCal(page, calls);
     ok("panel: wings off (width 0) deletes the attach with every other wing key", !has(d3.roof, "wingAttach") && !has(d3.roof, "wingAttachFt") && !has(d3.roof, "wingWidthFt") && !has(d3.roof, "wingPitch"), keys(d3.roof));
+    ok("panel (wings): no page errors", errors.length === 0, JSON.stringify(errors).slice(0, 300));
+    await page.close();
+    // ── (fixes, 2026-09-29) two wings an off-centre ridge lands differently: each said by its side ──
+    ({ page, errors, calls } = await openPanel(ctx, "ow", "Harness Odd Wings", "24x30", ODD_WINGS_ROOF, 8));
+    await field(page, "Wing roofs meet the middle section").locator("select").waitFor({ state: "visible", timeout: 15000 });
+    await settle(page, 800);
+    txt = flat(await field(page, "How far (ft)").innerText());
+    let optxt = flat(await field(page, "Wing roof pitch (rise in 12)").innerText());
+    let owel = await elevationText(page);
+    ok("panel: two wings that meet differently are read back side by side", /Left wing meets the roof 2' 6" above the middle section's eave; right wing meets the wall 0' 8" below the middle section's eave/.test(txt), txt);
+    ok("panel: ...the warning names the one wing it is about", /too tall for the right wing roof to reach its roof, so it meets its wall\. Bring its walls down to 9' 10" or lower/.test(txt) && !/wing roofs/.test(txt), txt);
+    ok("panel: ...the two slopes are labelled by side", /Builds left 6\.8 \/ right 2\.6 in 12/.test(optxt), optxt);
+    ok("panel: ...and the drawing says each", /meets the roof 2' 6" up/.test(owel) && /meets the wall 0' 8" down/.test(owel), owel.slice(0, 300));
+    if (shots) await field(page, "Wing roofs meet the middle section").locator("xpath=..").screenshot({ path: join(shots, "panel-wings-each.png") });
+    await typeNumber(page, field(page, "How far (ft)").locator("input"), 0);
+    txt = flat(await field(page, "How far (ft)").innerText());
+    owel = await elevationText(page);
+    ok("panel: on the roof at 0 the wing roof meets the middle section AT its eave, said so, never 0' 0\"", /Left wing meets the middle section at its eave; right wing meets the wall 0' 8" below/.test(txt) && !/0' 0"/.test(txt) && /meets at the eave/.test(owel), `${txt} | ${owel.slice(0, 200)}`);
   } catch (e) {
     ok("panel: ran to the end", false, e && e.message ? e.message.split("\n")[0] : String(e));
   } finally {
@@ -648,6 +868,9 @@ try {
   if (want("lean")) for (const c of LEAN_CASES) {
     if (digests && c.roof.leanToAttach) continue;
     try { await leanCase(ctx, c, ok, digests ? null : shots, digests); } catch (e) { ok(`lean ${c.id}: ran`, false, e && e.message); }
+  }
+  if (want("lean") && !digests) for (const c of DOOR_CASES) {
+    try { await doorCase(ctx, c, ok, shots); } catch (e) { ok(`lean ${c.id}: ran`, false, e && e.message); }
   }
   if (want("wings")) for (const c of WING_CASES) {
     if (digests && c.roof.wingAttach) continue;

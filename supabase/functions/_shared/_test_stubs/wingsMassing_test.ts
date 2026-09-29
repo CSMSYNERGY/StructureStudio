@@ -54,7 +54,7 @@ type Any = any;
 const F = new Function(
   `const isVentItem = (it) => !!(it && it.isVent);\n${blocks.map((b) => b.cmp).join("\n")}; return { D3, d3RoofAxes, d3Massing, d3MassingTopAt, d3WallTops, d3WallTopFt, d3CeilingFt, ` +
     `d3PorchSpanWings, d3PorchSpan, d3PorchWallTopFt, d3ModelTopFt, d3FrameHeightFt, d3DefaultShotCamera, ssSelfCheckCameras, ssGableVentFit, SS_SHOT, ` +
-    `d3DormerFaceFt, d3DormerReadout, d3TransomDormerGeom, d3MakeProfYAt, d3RoofProfile, d3DormerWindowFit, d3RoofEnd, d3LeanToGeom };`,
+    `d3DormerFaceFt, d3DormerReadout, d3TransomDormerGeom, d3MakeProfYAt, d3RoofProfile, d3DormerWindowFit, d3RoofEnd, d3LeanToGeom, d3DormerCovered, d3DormerCoveredWords };`,
 )() as Record<string, Any>;
 
 // The Tri Home, as the task drew it: 24 wide across the gable end, 28 deep, 9 ft outer walls, 8 ft
@@ -396,9 +396,18 @@ Deno.test("wall: the centre's eave is EXACTLY the one asked; the wing roof meets
   assertAlmostEquals(F.d3MassingTopAt(m, -4.0001), 15, 1e-3);
   // The clerestory's wall is the one that holds it: the gable ends still step H | Hc | H.
   assertEquals(F.d3WallTops(roof, 24, 28, 9, "south").map((p: Any) => p[2]), [9, 17, 9]);
-  // Blank centre eave: today's default, the stored wing's top + 3 -- and still not pushed.
+  // Blank centre eave: 3 ft over a DEFAULT 3:12 wing roof, and still not pushed. The stored wingPitch (1.2
+  // here) is no longer shown -- its box is a readout -- so it must not move the building either (review,
+  // 2026-09-29: a hidden 6:12 stood the middle 1.5 ft higher than a hidden 3:12, under "blank = 3 ft over
+  // the wings").
   const { centerEaveFt: _c, ...noEave } = roof;
-  assertAlmostEquals(F.d3Massing(noEave, 24, 28, 9).Hc, 9 + 8 * 1.2 + 3, 1e-12);
+  assertAlmostEquals(F.d3Massing(noEave, 24, 28, 9).Hc, 9 + 8 * 0.25 + 3, 1e-12);
+  for (const wingPitch of [undefined, 0.25, 0.5, 1.2]) {
+    for (const wingAttach of ["wall", "roof"]) assertAlmostEquals(F.d3Massing({ ...noEave, wingAttach, wingPitch }, 24, 28, 9).Hc, 14, 1e-12, `${wingAttach}, stored ${wingPitch}`);
+  }
+  // Automatic (no attach) is today's rule exactly: the stored pitch still sets its blank.
+  const { wingAttach: _a, wingAttachFt: _f, ...auto } = noEave;
+  assertAlmostEquals(F.d3Massing(auto, 24, 28, 9).Hc, 9 + 8 * 1.2 + 3, 1e-12);
 });
 
 Deno.test("wall: where today would PUSH the centre up, the centre stays put", () => {
@@ -539,6 +548,12 @@ Deno.test("a lean-to's odd cases are drawn as asked and flagged, never switched"
   const flat = F.d3LeanToGeom({ ...shed, leanToSide: "right", leanToAttach: "wall", leanToAttachFt: 3 }, 12, 16, 8);
   assertEquals([flat.flat, flat.mode], [true, "wall"]);
   assertAlmostEquals(flat.ya, flat.y1 + 0.05, 1e-12);
+  // ...and `at`, the distance every reader prints, is the one BUILT: 0.95 ft under the eave, not the 3 asked
+  // (review, 2026-09-29). Where nothing moved it, it is the distance asked; up the roof, the distance up it.
+  assertEquals(flat.d, 3);
+  assertAlmostEquals(flat.at, 0.95, 1e-12);
+  assertEquals([hw.at, hr.at], [0.5, 0]);
+  assertEquals(steep.at, 1);
 });
 
 Deno.test("a lean-to off a wing meets the WING's roof; off the other side of one wing, the centre's tall wall", () => {
@@ -586,15 +601,44 @@ Deno.test("roof: a wing roof that cannot reach the roof is built as far as it sh
   const k = 5 / 12;
   const m = F.d3Massing({ ...TRI37, pitch: k, wingAttach: "roof", wingAttachFt: 1 }, 37, 22, 8);
   assertEquals([m.Hc, m.attach], [14, "roof"]);
-  const p = (14 + 1 - 8) / (12 + 1 / k);
+  // At the pitch it would need to land, the wing line meets the centre's wall only 2 in under its eave:
+  // the wing slab buried the centre's soffit and fascia and its flashing stood up through the centre's
+  // roof (review, 2026-09-29). It meets that wall no higher than the clearance "On the wall" holds, and
+  // the pitch is re-read from there.
+  const a = F.D3.ROOF_T + 0.43, need = Math.max(a, (a + k * 1 - 1 * (14 - 8) / 12) / (1 - 1 / 12));
+  const p0 = (14 + 1 - 8) / (12 + 1 / k);
+  assert(14 - (8 + 12 * p0) < need, "at its own pitch it would meet inside the clearance");
+  const ya = 14 - need, p = (ya - 8) / 12;
   for (const g of m.wings) {
     assertAlmostEquals(g.pitch, p, 1e-12);
-    assertEquals([g.uIn, g.run, g.attach, g.attachFt, g.meets], [g.u0, 12, "roof", 1, "wall"], "the mode and the distance asked stay the builder's");
-    assertAlmostEquals(g.ya, 8 + 12 * p, 1e-12, "where the wing line meets the centre's wall");
-    assertAlmostEquals(g.meetFt, 14 - (8 + 12 * p), 1e-12);
-    assert(g.ya < m.Hc);
+    assertEquals([g.uIn, g.run, g.attach, g.attachFt, g.meets, g.cuts], [g.u0, 12, "roof", 1, "wall", true], "the mode and the distance asked stay the builder's, flagged");
+    assertAlmostEquals(g.ya, ya, 1e-12, "where the wing line meets the centre's wall");
+    assertAlmostEquals(g.meetFt, need, 1e-12, "the distance said is the one built");
+    // What the centre's eave hangs clears the wing slab's top by today's 0.1 ft at the overhang, as on the wall.
+    assert((14 - k * 1 - 0.3) - (g.ya - 1 * g.pitch + F.D3.ROOF_T + 0.02) >= 0.1 - 1e-9, "the centre's eave finish clears the wing roof");
+    // ...exactly where "On the wall" at the same clearance builds it.
+    const w = F.d3Massing({ ...TRI37, pitch: k, wingAttach: "wall", wingAttachFt: need }, 37, 22, 8).wings.find((q: Any) => q.side === g.side);
+    assertAlmostEquals(w.ya, g.ya, 1e-12);
   }
-  assertAlmostEquals(m.ya, 8 + 12 * p, 1e-12);
+  assertAlmostEquals(m.ya, ya, 1e-12);
+  // Any distance asked builds the same (none of them can land), 0 included -- where it had met AT the eave.
+  for (const d of [0, 0.5, 4]) {
+    for (const g of F.d3Massing({ ...TRI37, pitch: k, wingAttach: "roof", wingAttachFt: d }, 37, 22, 8).wings) assertAlmostEquals(g.meetFt, need, 1e-12, `at ${d}`);
+  }
+  // A centre roof too flat to run up onto (k under 0.05) met the wall AT the eave, meetFt 0: now the clearance too.
+  for (const g of F.d3Massing({ ...TRI37, pitch: 0.04, wingAttach: "roof", wingAttachFt: 1 }, 37, 22, 8).wings) {
+    assertEquals([g.cuts, g.meets], [true, "wall"]);
+    assert(g.meetFt >= a - 1e-9, String(g.meetFt));
+  }
+  // A line that already meets the wall lower than the clearance keeps its own pitch: never raised.
+  const tall = F.d3Massing({ ...TRI37, centerEaveFt: 20, pitch: k, wingAttach: "roof", wingAttachFt: 8 }, 37, 22, 8);
+  for (const g of tall.wings) {
+    const q0 = (20 + g.attachFt - 8) / (12 + g.attachFt / k);
+    assert(20 - (8 + 12 * q0) > a + 1, "this line meets the wall well under the clearance");
+    assertEquals(g.cuts, true);
+    assertAlmostEquals(g.ya, 8 + 12 * q0, 1e-12, "built on its own line");
+    assertAlmostEquals(g.pitch, q0, 1e-12);
+  }
   // The outline: the wing line out to the centre's wall, the centre's own roof from there in.
   const gW = m.wings.find((g: Any) => g.side < 0);
   assertAlmostEquals(F.d3MassingTopAt(m, gW.u0 - 1), 8 + 11 * p, 1e-12);
@@ -646,4 +690,48 @@ Deno.test("a lean-to up the roof cuts or not by its drop and width alone, wherev
     assertAlmostEquals(level.pitch, 0.25, 1e-9);
     assertEquals(level.cuts, false, `level with the roof at ${d}: one plane`);
   }
+});
+
+// ── A DORMER UNDER A ROOF RUN UP ONTO ITS ROOF (review, 2026-09-29) ─────────────────────────────────
+// A lean-to or the wings "On the roof" cover the roof from the wall to where they land. A dormer placed out
+// toward that eave stands in the covered part, its window wall against the lean-to or wing roof. It is SAID,
+// with the Dormer position that clears it, and never moved: the builder placed it.
+Deno.test("⚠️ a dormer under a lean-to or wing roof run up onto its roof is said, with its fix, and never moved", () => {
+  // 12 x 16 gable, a gable dormer at the default 0.45 facing right: its window wall stands at 2.7 + 1 = 3.7,
+  // and a lean-to 1 ft up the right slope lands at 3.5 -- 0.3 ft short of that is 3.2.
+  const lt = { type: "gable", pitch: 0.4, overhang: 0.6, dormerWidthFt: 4, leanToWidthFt: 8, leanToDropFt: 2, leanToSide: "right" };
+  const spec = (roof: Any) => ({ roof, wallHeightFt: 8 });
+  const on = { ...lt, leanToAttach: "roof", leanToAttachFt: 1 };
+  assertEquals(F.d3DormerCovered(spec(on), "12x16"), { dir: 1, by: "lean-to", clearAt: 0.35 }, "(3.5 - 0.3 - 1) / 6 = 0.367, to the 0.05 step");
+  assertEquals(F.d3DormerCovered(spec({ ...on, dormerOffsetU: 0.35 }), "12x16"), null, "at the position it names, it clears");
+  assertEquals(F.d3DormerCovered(spec({ ...on, dormerOffsetU: 0.4 }), "12x16").clearAt, 0.35);
+  // Said, never moved: the gable dormer's face is still its rise.
+  assertEquals(F.d3DormerFaceFt(spec(on), 12, 16), 2.5);
+  // The left side mirrors it; a landing too high up the roof leaves no position on that side.
+  assertEquals(F.d3DormerCovered(spec({ ...on, leanToSide: "left", dormerOffsetU: -0.45 }), "12x16"), { dir: -1, by: "lean-to", clearAt: -0.35 });
+  assertEquals(F.d3DormerCovered(spec({ ...on, leanToAttachFt: 2 }), "12x16"), { dir: 1, by: "lean-to", clearAt: null });
+  // The lean-to on the other side, on the wall, without an attach, or no dormer: nothing to say.
+  for (const extra of [{ leanToSide: "left" }, { leanToAttach: "wall" }, { leanToAttach: undefined, leanToAttachFt: undefined }, { dormerWidthFt: 0 }]) {
+    assertEquals(F.d3DormerCovered(spec({ ...on, ...extra }), "12x16"), null, JSON.stringify(extra));
+  }
+  // The Tri Home, wings 3 ft up an 8:12 middle roof: the dormer at 0.45 on the 13 ft middle is under the east
+  // wing roof (face 3.93, landing 2.02), and at 1 ft up (landing further out) it is not.
+  const tri = { ...TRI37, pitch: 0.67, dormerWidthFt: 6, wingAttach: "roof", wingAttachFt: 3 };
+  assertEquals(F.d3DormerCovered({ roof: tri, wallHeightFt: 10 }, "37x22"), { dir: 1, by: "wing", clearAt: 0.1 });
+  assertEquals(F.d3DormerCovered({ roof: { ...tri, wingAttachFt: 1 }, wallHeightFt: 10 }, "37x22"), null);
+  assertEquals(F.d3DormerCovered({ roof: { ...tri, wingAttach: "wall" }, wallHeightFt: 10 }, "37x22"), null);
+  // A transom the landing leaves no room to run out in is not drawn at all (run 0) -- said too; one it only
+  // shortens is still drawn, and its rise readout already says how far it runs.
+  const tr = { ...lt, dormerType: "transom", leanToAttach: "roof" };
+  assertEquals(F.d3DormerReadout(spec({ ...tr, leanToAttachFt: 1.5 }), "12x16").run, 0);
+  assertEquals(F.d3DormerCovered(spec({ ...tr, leanToAttachFt: 1.5 }), "12x16"), { dir: 1, by: "lean-to", clearAt: 0.15 });
+  assert(F.d3DormerReadout(spec({ ...tr, leanToAttachFt: 1.5, dormerOffsetU: 0.15 }), "12x16").run > 0.8, "at the position it names, it is drawn");
+  assert(F.d3DormerReadout(spec({ ...tr, leanToAttachFt: 0.5 }), "12x16").run > 0.8);
+  assertEquals(F.d3DormerCovered(spec({ ...tr, leanToAttachFt: 0.5 }), "12x16"), null);
+  // The words name the roof over it and both fixes, in plain words.
+  assertEquals(F.d3DormerCoveredWords({ dir: 1, by: "lean-to", clearAt: 0.35 }, true),
+    `The dormer's window wall is under the lean-to's roof. Move it up the roof with Dormer position (between 0 and 0.35), or set the lean-to to "On the wall".`);
+  assertEquals(F.d3DormerCoveredWords({ dir: -1, by: "wing", clearAt: -0.1 }, false),
+    `The dormer is under this roof. Move it up the roof with Dormer position (between -0.1 and 0), or pick "On the wall".`);
+  assertEquals(F.d3DormerCoveredWords(null, true), null);
 });
