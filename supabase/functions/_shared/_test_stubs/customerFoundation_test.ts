@@ -42,6 +42,8 @@ const REGIONS: Array<[string, string]> = [
   ["const D3_FOUNDATIONS = [", "// How much further down the ground is than it has always been"],
   // The resolver names the ground's fall beside the floor height (the slope branch, merged 2026-09-29).
   ["const D3_GRADE_FALL_TOWARD = [", "// { fallFt, toward }"],
+  // ...and the ground at each corner (2026-09-29), which it names the same way (d3GradeCornersGiven).
+  ["const D3_GRADE_CORNERS = [", "// THE GROUND UNDER THE FOUR CORNERS"],
   ["const FOUNDATION_ITEM_LABEL = {", "function foundationLabelOf("],
   ["function d3ResolveStyleSpec(", "// Carolyn (2026-07-02): horizontal lap siding"],
   ["function d3CustomerFoundation(", "// Natural-material fallbacks"],
@@ -117,6 +119,25 @@ Deno.test("customer piers: a raised style keeps the floor where it was drawn; on
   // The style's own object is never written to.
   assertEquals(STYLES.none.d3.foundation, undefined);
   assertEquals(STYLES.blocks.d3.foundation, "blocks");
+});
+
+Deno.test("the ground at each corner (2026-09-29): named beside a raised floor, kept onto piers, gone from a style at grade", () => {
+  const gc = { fl: 0, fr: 1.5, bl: "0.5", br: 9 };
+  const raised = style({ roof: ROOF, siding: "batten", wallHeightFt: 8, foundation: "blocks", floorHeightFt: 1.1, gradeCornersFt: gc });
+  const r = resolve(raised);
+  assertEquals(r.gradeCornersFt, { fl: 0, fr: 1.5, bl: 0.5, br: 6 }, "all four, held to 0..6");
+  assert(r.gradeCornersFt !== gc, "a copy, never the style's own object");
+  assertEquals(resolve(raised, "piers").gradeCornersFt, r.gradeCornersFt, "blocks to the customer's piers: the same ground");
+  for (const f of [undefined, "slab", "skids"]) {
+    const s = style({ roof: ROOF, siding: "batten", wallHeightFt: 8, ...(f ? { foundation: f } : {}), gradeCornersFt: gc });
+    assert(!("gradeCornersFt" in resolve(s)), `${String(f)}: not raised, not named`);
+    assert(!("gradeCornersFt" in resolve(s, "piers")), `${String(f)}: the customer's piers stand on level ground`);
+  }
+  // All zeros, or junk, is level ground: not named, so the object is the one it always was.
+  for (const junk of [{ fl: 0, fr: 0, bl: 0, br: 0 }, {}, [], "2", null, { fl: -1, br: "x" }]) {
+    const s = style({ roof: ROOF, siding: "batten", wallHeightFt: 8, foundation: "piers", floorHeightFt: 2, gradeCornersFt: junk });
+    assertEquals(JSON.stringify(resolve(s)), JSON.stringify(resolve(STYLES.piers)), JSON.stringify(junk));
+  }
 });
 
 const OFFER = { id: "piers", label: "Piers", basis: "each", rate: 100, charged: true };

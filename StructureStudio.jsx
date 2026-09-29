@@ -5050,8 +5050,9 @@ function d3GradeFt(spec) {
 }
 // How much further down the ground is than it has always been: exactly 0 on every building that is
 // not raised, so each camera that subtracts it (the viewer, the docked panel, the quote shot, the
-// self-check) is the arithmetic it always was. Where the ground falls away (d3GradeFall, 2026-09-28)
-// it is measured to the DEEPEST ground under the building (d3GradeMaxFt): each of those cameras
+// self-check) is the arithmetic it always was. Where the ground falls away (d3GradeCorners: a fall,
+// 2026-09-28, or the four corners, 2026-09-29) it is measured to the DEEPEST ground under the
+// building (d3GradeMaxFt): each of those cameras
 // frames the building from its grass up, and the grass that has to be in shot is under the
 // tallest supports. On level ground d3GradeMaxFt is d3GradeFt, so nothing moves. The self-check's
 // walk cameras frame from it too, but their EYE is a phone held above the ground it stood on, so
@@ -5076,8 +5077,11 @@ function d3GradeLiftFt(spec) {
 const D3_GRADE_FALL_TOWARD = ["back", "left", "right"];
 // { fallFt, toward }, or null on level ground: held to the sanitiser's band, (0, 6], and "back" when
 // the style gives no direction.
+// A style that gives the ground at each corner (gradeCornersFt, below) has no fall: the corners win,
+// and the sanitiser drops gradeFallFt / gradeFallToward beside them.
 function d3GradeFall(spec) {
   if (!d3RaisedFoundation(spec)) return null;
+  if (spec.gradeCornersFt && typeof spec.gradeCornersFt === "object") return null;
   const f = Number(spec.gradeFallFt);
   if (!(isFinite(f) && f > 0)) return null;
   return { fallFt: Math.min(6, f), toward: D3_GRADE_FALL_TOWARD.indexOf(spec.gradeFallToward) >= 0 ? spec.gradeFallToward : "back" };
@@ -5094,49 +5098,110 @@ function d3GradeFallAxis(toward, W, L) {
 function d3GradeFallBlendFt(fallFt, ext) {
   return Math.min(2, (0.5 * ext) / fallFt);
 }
-// HOW FAR BELOW THE FLOOR'S TOP THE GROUND IS AT (x, z), in the building's frame: the footprint
-// centred on the origin, W along x, L along z. d3GradeFt along the footprint's uphill edge, that plus
-// the fall along its far edge, and a straight line between. Outside the footprint the ground eases
-// level over d3GradeFallBlendFt with no crease (its slope runs smoothly down to 0), so the site is
-// level in front of the building -- a hair above the front grade, the ease's price -- and level again
-// past the far side, a hair below the far grade. On level ground it is d3GradeFt everywhere.
-function d3GradeAt(spec, W, L, x, z) {
-  const grade = d3GradeFt(spec);
-  const f = d3GradeFall(spec);
-  if (!f) return grade;
-  const ax = d3GradeFallAxis(f.toward, Number(W) || 0, Number(L) || 0);
-  const D = Math.max(1, ax.ext);
-  const B = d3GradeFallBlendFt(f.fallFt, D);
-  const d = x * ax.dir[0] + z * ax.dir[1] + D / 2;
-  const s = d <= -B ? -B / 2
+// ── THE GROUND AT EACH CORNER (top-level gradeCornersFt, 2026-09-29) ────────────────────────────
+// Carolyn, 09-29, on the Advanced page: "we need to be able to put in where the zero is ... put in
+// four points ... which one is that zero, and then if it drops down like 18 inches, two feet, they put
+// in four corners." gradeCornersFt is { fl, fr, bl, br } -- front-left, front-right, back-left,
+// back-right, in the fall's frame above (front = south +z, back = north -z, left = west -x, right =
+// east +x) -- each how many feet LOWER the ground is at that corner, 0..6, a missing one 0. Raised
+// floors only, like the fall. The HIGHEST corner is the zero: the drops are taken from the smallest,
+// and floorHeightFt (d3GradeFt) is the floor's height over THAT corner. When the style gives corners
+// the fall is ignored (d3GradeFall); without them a stored fall is the same thing said with one
+// number, so it is read as corners here (back: both back corners down by the fall; left: both left
+// ones; right: both right ones) and every consumer of the ground has one shape to follow.
+const D3_GRADE_CORNERS = ["fl", "fr", "bl", "br"];
+// The style's own corners, each held to the sanitiser's 0..6 (blank, junk or below 0 is 0), or null
+// when it gives none, gives only zeros, or does not stand on blocks or piers.
+function d3GradeCornersGiven(spec) {
+  if (!d3RaisedFoundation(spec)) return null;
+  const g = spec.gradeCornersFt;
+  if (!g || typeof g !== "object" || Array.isArray(g)) return null;
+  const out = {};
+  let any = false;
+  D3_GRADE_CORNERS.forEach((k) => {
+    const n = Number(g[k]);
+    out[k] = isFinite(n) && n > 0 ? Math.min(6, n) : 0;
+    if (out[k] > 0) any = true;
+  });
+  return any ? out : null;
+}
+// THE GROUND UNDER THE FOUR CORNERS: { fl, fr, bl, br }, each how far below the HIGHEST corner, so
+// at least one is 0; or null on level ground (no corners and no fall, all four the same, not raised).
+function d3GradeCorners(spec) {
+  let c = d3GradeCornersGiven(spec);
+  if (!c) {
+    const f = d3GradeFall(spec);
+    if (!f) return null;
+    const v = f.fallFt;
+    c = f.toward === "left" ? { fl: v, fr: 0, bl: v, br: 0 } : f.toward === "right" ? { fl: 0, fr: v, bl: 0, br: v } : { fl: 0, fr: 0, bl: v, br: v };
+  }
+  const lo = Math.min(c.fl, c.fr, c.bl, c.br);
+  const out = { fl: c.fl - lo, fr: c.fr - lo, bl: c.bl - lo, br: c.br - lo };
+  return out.fl > 0 || out.fr > 0 || out.bl > 0 || out.br > 0 ? out : null;
+}
+// The fall's ease along one axis: `d` feet in from one edge of a footprint `D` long is `d` inside it,
+// and past either edge it bends level over `B` with no crease (its slope runs smoothly down to 0), so
+// it ends B / 2 past the edge. Symmetric: D - ease(D - d) is ease(d).
+function d3GradeEaseFt(d, D, B) {
+  return d <= -B ? -B / 2
     : d < 0 ? ((d + B) * (d + B)) / (2 * B) - B / 2
       : d <= D ? d
         : d < D + B ? D + B / 2 - ((D + B - d) * (D + B - d)) / (2 * B)
           : D + B / 2;
-  return grade + (f.fallFt * s) / D;
 }
-// The deepest ground under the footprint: d3GradeFt plus the fall, and d3GradeFt itself on level
-// ground. The cameras frame from it (d3GradeLiftFt).
+// HOW FAR BELOW THE HIGHEST CORNER THE GROUND IS AT (x, z), for corners `c` (d3GradeCorners) on a
+// footprint W along x by L along z, centred on the origin: each corner's drop at its corner, a
+// straight line along every edge and every line parallel to one (a bilinear surface -- a flat plane
+// when the corners allow one), and outside the footprint each axis eased level (d3GradeEaseFt) over
+// d3GradeFallBlendFt of the steepest change along it, so the site levels off a hair past the drops at
+// the edges. Each axis is measured from its HIGHER side, so a fall read as corners is the number the
+// single-plane fall always gave, to the last bit.
+function d3GradeDropAt(c, W, L, x, z) {
+  const Dx = Math.max(1, W), Dz = Math.max(1, L);
+  const dx = Math.max(Math.abs(c.fr - c.fl), Math.abs(c.br - c.bl));
+  const dz = Math.max(Math.abs(c.bl - c.fl), Math.abs(c.br - c.fr));
+  const Bx = dx > 0 ? d3GradeFallBlendFt(dx, Dx) : 2, Bz = dz > 0 ? d3GradeFallBlendFt(dz, Dz) : 2;
+  const fromRight = c.fl + c.bl > c.fr + c.br;
+  const sx = d3GradeEaseFt(fromRight ? Dx / 2 - x : x + Dx / 2, Dx, Bx);
+  const row = (l, r) => (fromRight ? r + ((l - r) * sx) / Dx : l + ((r - l) * sx) / Dx);
+  const front = row(c.fl, c.fr), back = row(c.bl, c.br);
+  const fromBack = c.fl + c.fr > c.bl + c.br;
+  const sz = d3GradeEaseFt(fromBack ? z + Dz / 2 : Dz / 2 - z, Dz, Bz);
+  return fromBack ? back + ((front - back) * sz) / Dz : front + ((back - front) * sz) / Dz;
+}
+// HOW FAR BELOW THE FLOOR'S TOP THE GROUND IS AT (x, z), in the building's frame: the footprint
+// centred on the origin, W along x, L along z. d3GradeFt at the highest corner, and the ground
+// d3GradeDropAt puts under (x, z) below that. A fall is the old single plane exactly: d3GradeFt along
+// the footprint's uphill edge, that plus the fall along its far edge, a straight line between, level
+// past the blend either side. On level ground it is d3GradeFt everywhere.
+function d3GradeAt(spec, W, L, x, z) {
+  const grade = d3GradeFt(spec);
+  const c = d3GradeCorners(spec);
+  if (!c) return grade;
+  return grade + d3GradeDropAt(c, Number(W) || 0, Number(L) || 0, x, z);
+}
+// The deepest ground under the footprint: d3GradeFt plus the lowest corner's drop (a bilinear surface
+// is lowest at a corner), and d3GradeFt itself on level ground. The cameras frame from it (d3GradeLiftFt).
 function d3GradeMaxFt(spec) {
-  const f = d3GradeFall(spec);
-  return d3GradeFt(spec) + (f ? f.fallFt : 0);
+  const c = d3GradeCorners(spec);
+  return d3GradeFt(spec) + (c ? Math.max(c.fl, c.fr, c.bl, c.br) : 0);
 }
 // A FLOOR HEIGHT READ AT THE FRONT WALL, as floorHeightFt stores it. A video draft reads the floor at
 // the middle of its front wall, where the door and the steps are (the prompt's rule, and the wall
-// d3FrontGableWall names), but floorHeightFt is the height at the fall's UPHILL edge (d3GradeAt).
-// Across a left or right fall that wall's middle stands half the fall lower, and on an old-frame end
-// wall at the downhill side the whole fall, so the reading is taken back up the slope and the door is
-// drawn at the height the video saw. Level ground, and a front wall on the uphill edge, keep the
-// reading exactly; never under the sanitiser's 0.3 (the floor meets the ground there).
+// d3FrontGableWall names), but floorHeightFt is the height at the HIGHEST corner (d3GradeAt). Where
+// the ground under that wall's middle is lower (across a left or right fall half the fall, on an
+// old-frame end wall at the downhill side the whole fall, and whatever the corners put there), the
+// reading is taken back up to the highest corner and the door is drawn at the height the video saw.
+// Level ground, and a front wall at the highest ground, keep the reading exactly; never under the
+// sanitiser's 0.3 (the floor meets the ground there).
 function d3FloorHeightFromFront(spec, W, L, frontFt) {
-  const f = d3GradeFall(spec);
+  const c = d3GradeCorners(spec);
   const w = Number(W) || 0, l = Number(L) || 0;
-  if (!f || !(w > 0) || !(l > 0)) return frontFt;
+  if (!c || !(w > 0) || !(l > 0)) return frontFt;
   const n = { south: [0, 1], north: [0, -1], east: [1, 0], west: [-1, 0] }[d3FrontGableWall(spec.roof, w, l)] || [0, 1];
-  const ax = d3GradeFallAxis(f.toward, w, l);
-  const t = ((n[0] * w * ax.dir[0] + n[1] * l * ax.dir[1]) / 2 + ax.ext / 2) / ax.ext;
-  if (!(t > 1e-9)) return frontFt;
-  return Math.max(0.3, Math.round((frontFt - f.fallFt * t) * 100) / 100);
+  const drop = d3GradeDropAt(c, w, l, (n[0] * w) / 2, (n[1] * l) / 2);
+  if (!(drop > 1e-9)) return frontFt;
+  return Math.max(0.3, Math.round((frontFt - drop) * 100) / 100);
 }
 // WHERE THE PROJECTING PORCH'S OWN FRAME LANDS IN THE BUILDING'S, for the ground under its deck and
 // steps: a function from a point in the porch's frame -- x across it, positive to the right of
@@ -5165,7 +5230,7 @@ function d3PorchToRoot(roofCfg, W, L) {
 // d3PorchStepsOnGround below is the one caller: whatever it passes d3PorchStepsGeom, stepsAt passes.
 function d3PorchStepsGradeFt(spec, W, L, stepsAt) {
   const grade = d3GradeFt(spec);
-  if (!d3GradeFall(spec)) return grade;
+  if (!d3GradeCorners(spec)) return grade;
   const toRoot = d3PorchToRoot(spec.roof, W, L);
   if (!toRoot) return grade;
   const under = (s) => {
@@ -6293,6 +6358,10 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     // blocks or piers only, and never defaulted, so every other style resolves to what it always did.
     ...(D3_RAISED_FOUNDATIONS.indexOf(o.foundation) >= 0 && Number(o.gradeFallFt) > 0 ? { gradeFallFt: Number(o.gradeFallFt) } : {}),
     ...(D3_RAISED_FOUNDATIONS.indexOf(o.foundation) >= 0 && D3_GRADE_FALL_TOWARD.indexOf(o.gradeFallToward) >= 0 ? { gradeFallToward: o.gradeFallToward } : {}),
+    // The ground at each corner (2026-09-29, d3GradeCorners): named for the same reason, beside blocks
+    // or piers only, as all four corners held to 0..6 (d3GradeCornersGiven), and only when one of them
+    // is below 0 ft, so every other style resolves to what it always did.
+    ...(d3GradeCornersGiven(o) ? { gradeCornersFt: d3GradeCornersGiven(o) } : {}),
     // LEGACY DATA, still named here on purpose. Nothing reads d3.claddingChoices any more —
     // 207 moved the offered set into style_cladding and seeded it from this key — but the
     // literal drops what it does not list, and the calibration panel round-trips through this
@@ -6314,11 +6383,11 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
   //     the foundation changes), so a blocks style that stores no height stays at the blocks' own
   //     1 ft instead of jumping to the piers' 1.5 ft: all the customer changed is what holds it up.
   //   · It sits at grade (a slab, skids, or nothing said): piers, with no floor height, so the
-  //     renderer's own piers default (1.5 ft) is drawn; and no fall of the ground, which only a
-  //     style that is already raised can have been measured with.
+  //     renderer's own piers default (1.5 ft) is drawn; and no fall of the ground or corners, which
+  //     only a style that is already raised can have been measured with.
   if (D3_FOUNDATIONS.indexOf(customerFoundation) >= 0 && spec.foundation !== customerFoundation) {
     if (D3_RAISED_FOUNDATIONS.indexOf(spec.foundation) >= 0) spec.floorHeightFt = d3GradeFt(spec);
-    else { delete spec.floorHeightFt; delete spec.gradeFallFt; delete spec.gradeFallToward; }
+    else { delete spec.floorHeightFt; delete spec.gradeFallFt; delete spec.gradeFallToward; delete spec.gradeCornersFt; }
     spec.foundation = customerFoundation;
   }
   return spec;
@@ -7073,45 +7142,59 @@ function d3MakeGroundLabel(THREE, text, hFt) {
   return m;
 }
 
-// THE GRASS WHEN THE GROUND FALLS AWAY (d3GradeAt, 2026-09-28), or null on level ground. The level
-// disc is a CircleGeometry, a centre and a rim, and cannot bend; this is the same disc of radius R,
-// cut into rows ACROSS the fall so every row is one depth, each vertex on d3GradeAt. Rows fall on
-// the footprint's uphill and far edges and eight times across each blend past them, so between two
-// rows the triangles ARE d3GradeAt's straight line wherever it is one -- under the whole building --
-// and a support built to d3GradeAt stands on the grass as drawn. Built in the level disc's own plane
-// (its x and y; z is the ground's height over -d3GradeFt), for the caller's rotation.x = -π/2 at
-// y = -d3GradeFt, with the disc's planar UVs, so the grass texture tiles exactly as it does level.
+// THE GRASS WHEN THE GROUND FALLS AWAY (d3GradeAt: a fall, 2026-09-28, or the ground at each corner,
+// 2026-09-29), or null on level ground. The level disc is a CircleGeometry, a centre and a rim, and
+// cannot bend; this is the same disc of radius R, cut into rows along x (one per z cut) and each row
+// cut at the x cuts, every vertex on d3GradeAt. The cuts fall on the footprint's edges, every half
+// foot across it and eight times across each blend past it, so under the building the grass is
+// d3GradeAt's surface to within a hair (it is a straight line along both axes there: exactly, on a
+// fall's plane; on four corners that do not make a plane, a bilinear sag of at most a sixteenth of
+// its twist over a half-foot cell) and a support built to d3GradeAt stands on the grass as drawn. Two
+// neighbouring rows are stitched by walking their x cuts together, so each row can end on the disc's
+// rim. Built in the level disc's own plane (its x and y; z is the ground's height over -d3GradeFt), for
+// the caller's rotation.x = -π/2 at y = -d3GradeFt, with the disc's planar UVs, so the grass texture
+// tiles exactly as it does level.
 function d3FallenGroundGeometry(THREE, spec, W, L, R) {
-  const f = d3GradeFall(spec);
-  if (!f) return null;
+  const c = d3GradeCorners(spec);
+  if (!c) return null;
   const grade = d3GradeFt(spec);
-  const ax = d3GradeFallAxis(f.toward, W, L);
-  const D = Math.max(1, ax.ext), B = d3GradeFallBlendFt(f.fallFt, D);
-  // Distances along the fall (a = x * dir[0] + z * dir[1]; the footprint spans -D/2..D/2).
-  const cuts = [-R, R];
-  for (let k = 0; k <= 8; k++) cuts.push(-D / 2 - B + (B * k) / 8, D / 2 + (B * k) / 8);
-  const nIn = Math.max(1, Math.ceil(D / 2));
-  for (let k = 1; k < nIn; k++) cuts.push(-D / 2 + (D * k) / nIn);
-  const step = Math.max(2, R / 24);
-  for (let a = D / 2 + B + step; a < R; a += step) cuts.push(a);
-  for (let a = -D / 2 - B - step; a > -R; a -= step) cuts.push(a);
-  const rows = cuts.filter((a) => a >= -R && a <= R).sort((p, q) => p - q).filter((a, i, s) => i === 0 || a - s[i - 1] > 1e-6);
-  const NC = 64, perp = [-ax.dir[1], ax.dir[0]];
+  const Dx = Math.max(1, W), Dz = Math.max(1, L);
+  const dx = Math.max(Math.abs(c.fr - c.fl), Math.abs(c.br - c.bl));
+  const dz = Math.max(Math.abs(c.bl - c.fl), Math.abs(c.br - c.fr));
+  const cutsFor = (D, B) => {
+    const cuts = [-R, R];
+    for (let k = 0; k <= 8; k++) cuts.push(-D / 2 - B + (B * k) / 8, D / 2 + (B * k) / 8);
+    const nIn = Math.max(1, Math.ceil(D * 2));
+    for (let k = 1; k < nIn; k++) cuts.push(-D / 2 + (D * k) / nIn);
+    const step = Math.max(2, R / 24);
+    for (let a = D / 2 + B + step; a < R; a += step) cuts.push(a);
+    for (let a = -D / 2 - B - step; a > -R; a -= step) cuts.push(a);
+    return cuts.filter((a) => a >= -R && a <= R).sort((p, q) => p - q).filter((a, i, s) => i === 0 || a - s[i - 1] > 1e-6);
+  };
+  const xs = cutsFor(Dx, dx > 0 ? d3GradeFallBlendFt(dx, Dx) : 2);
+  const zs = cutsFor(Dz, dz > 0 ? d3GradeFallBlendFt(dz, Dz) : 2);
   const pos = [], uv = [], idx = [];
-  rows.forEach((a) => {
-    const half = Math.sqrt(Math.max(0, R * R - a * a));
-    for (let j = 0; j <= NC; j++) {
-      const c = -half + (2 * half * j) / NC;
-      const x = a * ax.dir[0] + c * perp[0], z = a * ax.dir[1] + c * perp[1];
+  const rows = zs.map((z) => {
+    const half = Math.sqrt(Math.max(0, R * R - z * z));
+    const row = half > 1e-6 ? [-half, ...xs.filter((x) => x > -half + 1e-6 && x < half - 1e-6), half] : [0];
+    return row.map((x) => {
       pos.push(x, -z, grade - d3GradeAt(spec, W, L, x, z));
       uv.push((x / R + 1) / 2, (-z / R + 1) / 2);
-    }
+      return { i: pos.length / 3 - 1, x, y: -z };
+    });
   });
   // Wound so every face looks up once the caller lays the disc flat (+z here), as the circle's do.
-  for (let i = 0; i + 1 < rows.length; i++) {
-    for (let j = 0; j < NC; j++) {
-      const p = i * (NC + 1) + j, q = p + NC + 1;
-      idx.push(p, p + 1, q, p + 1, q + 1, q);
+  const tri = (a, b, d) => {
+    const area = (b.x - a.x) * (d.y - a.y) - (d.x - a.x) * (b.y - a.y);
+    if (Math.abs(area) < 1e-12) return;
+    if (area > 0) idx.push(a.i, b.i, d.i); else idx.push(a.i, d.i, b.i);
+  };
+  for (let r = 0; r + 1 < rows.length; r++) {
+    const A = rows[r], Bq = rows[r + 1];
+    let p = 0, q = 0;
+    while (p < A.length - 1 || q < Bq.length - 1) {
+      if (q >= Bq.length - 1 || (p < A.length - 1 && A[p + 1].x <= Bq[q + 1].x)) { tri(A[p], A[p + 1], Bq[q]); p++; }
+      else { tri(A[p], Bq[q + 1], Bq[q]); q++; }
     }
   }
   const geo = new THREE.BufferGeometry();
@@ -7333,12 +7416,13 @@ function buildShed3DModel(THREE, p) {
   // steps have always been.
   const GRADE = d3GradeFt(p.styleSpec);
   const RAISED = d3RaisedFoundation(p.styleSpec);
-  // GROUND THAT FALLS AWAY (d3GradeFall, 2026-09-28): null on level ground, and every branch it opens
-  // below is guarded by it, so a style without it is built by exactly the code it always was. With
-  // it GRADE is still the depth at the front, and depthAt is the depth anywhere: the grass is bent to
-  // it (d3FallenGroundGeometry); the supports, the deck's supports, a lean-to's posts, the porch
-  // steps and a ramp reach it at their own spot; the labels and the shade under the building lie on it.
-  const FALL = d3GradeFall(p.styleSpec);
+  // GROUND THAT FALLS AWAY (d3GradeCorners: a fall, 2026-09-28, or the ground at each corner,
+  // 2026-09-29): null on level ground, and every branch it opens below is guarded by it, so a style
+  // without it is built by exactly the code it always was. With it GRADE is the depth at the highest
+  // corner (the front, on a fall), and depthAt is the depth anywhere: the grass is bent to it
+  // (d3FallenGroundGeometry); the supports, the deck's supports, a lean-to's posts, the porch steps
+  // and a ramp reach it at their own spot; the labels and the shade under the building lie on it.
+  const FALL = d3GradeCorners(p.styleSpec);
   const depthAt = (x, z) => d3GradeAt(p.styleSpec, bldgW, bldgH, x, z);
   // The deepest ground under a footprint of +-hx by +-hz about (x, z), in a frame `toRoot` maps into the
   // building's (none: already in it). A block's or a pier's foot goes down to it so no edge of it
@@ -10980,9 +11064,12 @@ function buildShed3DModel(THREE, p) {
   // and supports as built, for tests/harness/foundation.mjs; nothing in the app reads them.
   model.grade = GRADE;
   model.foundation = foundationInfo;
-  // The ground's fall (d3GradeFall: { fallFt, toward }), null on level ground; model.grade stays the
-  // depth at the front. For tests/harness/gradeFall.mjs.
-  model.gradeFall = FALL;
+  // The ground's fall (d3GradeFall: { fallFt, toward }), null on level ground and beside corners, and
+  // the ground at each corner as drawn (d3GradeCorners: each corner's drop below the highest, a fall
+  // read as corners), null on level ground; model.grade stays the depth at the highest corner. For
+  // tests/harness/gradeFall.mjs.
+  model.gradeFall = d3GradeFall(p.styleSpec);
+  model.gradeCorners = FALL;
   model.rebuildWalls = (names, itemsNow) => {
     names.forEach((wname) => {
       if (!WALLS[wname]) return;
@@ -11361,13 +11448,13 @@ function ssSelfCheckCameras(p, frameMap) {
   // been. The phone that filmed it was held at chest height above THAT ground, so the eye comes down
   // by the lift, and the framing's base points go down to it, so the supports are in shot. 0 on
   // every other building: every number below is the one it always was.
-  // WHERE THE GROUND FALLS AWAY (d3GradeFall, 2026-09-28) `lift` is the DEEPEST ground's, so the
+  // WHERE THE GROUND FALLS AWAY (d3GradeCorners, 2026-09-28) `lift` is the DEEPEST ground's, so the
   // framing still holds the tallest supports; but the phone was held above the ground its owner stood
   // on, uphill in front of the building and downhill past it. So each walk camera's eye is taken off
   // d3GradeAt where it stands (level past the blend), settled in a few passes because the distance
   // the frame needs moves a little with the eye. Level ground never enters that loop.
   const lift = d3GradeLiftFt(spec);
-  const fall = d3GradeFall(spec);
+  const fall = d3GradeCorners(spec);
   const out = [];
   for (let i = 0; i < SS_SELFCHECK_VIEWS.length; i++) {
     const view = SS_SELFCHECK_VIEWS[i];
@@ -17253,6 +17340,8 @@ function ssShotSig(spec) {
     // ...and so does the ground falling away under it (2026-09-28). Appended only when the style
     // carries either key, so every signature taken before is the one it was.
     ...(spec.gradeFallFt != null || spec.gradeFallToward != null ? [spec.gradeFallFt ?? null, spec.gradeFallToward ?? null] : []),
+    // ...and the ground at each corner (2026-09-29), appended the same way: only on a style that has it.
+    ...(spec.gradeCornersFt != null ? [spec.gradeCornersFt] : []),
   ]);
 }
 
@@ -17395,13 +17484,28 @@ function ssDrewWords(spec, porchBuilt, stepBuilt, massBuilt) {
     // The ground falling away under it (2026-09-28): d3GradeFall's reading, spelt out here so this
     // stays a pure function of the spec. The floor height is the UPHILL edge's, as the panel's box
     // says: the front, or across a left or right fall the other side.
+    // The ground at each corner (2026-09-29, d3GradeCorners): spelt out here for the same reason. A
+    // style that gives corners has no fall; each corner is said as how much lower it is than the
+    // highest, and the floor height is that highest corner's.
+    const gcRaw = spec.gradeCornersFt && typeof spec.gradeCornersFt === "object" && !Array.isArray(spec.gradeCornersFt) ? spec.gradeCornersFt : null;
+    const gcOf = (k) => { const n = Number(gcRaw[k]); return isFinite(n) && n > 0 ? Math.min(6, n) : 0; };
+    const gcLo = gcRaw ? Math.min(gcOf("fl"), gcOf("fr"), gcOf("bl"), gcOf("br")) : 0;
+    const gc = gcRaw ? [["fl", "front-left"], ["fr", "front-right"], ["bl", "back-left"], ["br", "back-right"]].map(([k, name]) => [name, gcOf(k) - gcLo]) : [];
+    const sloped = gc.some(([, v]) => v > 0);
     const fallRaw = Number(spec.gradeFallFt);
-    const fall = isFinite(fallRaw) && fallRaw > 0 ? Math.min(6, fallRaw) : 0;
+    const fall = !gcRaw && isFinite(fallRaw) && fallRaw > 0 ? Math.min(6, fallRaw) : 0;
     const toward = spec.gradeFallToward === "left" || spec.gradeFallToward === "right" ? spec.gradeFallToward : "back";
-    const at = fall > 0 && toward !== "back" ? `on the ${toward === "left" ? "right" : "left"} side` : "at the front";
+    const at = sloped ? "at its highest corner" : fall > 0 && toward !== "back" ? `on the ${toward === "left" ? "right" : "left"} side` : "at the front";
     out.push(h > 0
       ? `It stands on ${what}, its floor ${ssFtInWords(h)} off the ground ${at}.`
-      : `It stands on ${what}; no floor height is given, so its floor is drawn ${ssFtInWords(raisedOn === "blocks" ? 1 : 1.5)} off the ground${fall > 0 ? ` ${at}` : ""}.`);
+      : `It stands on ${what}; no floor height is given, so its floor is drawn ${ssFtInWords(raisedOn === "blocks" ? 1 : 1.5)} off the ground${fall > 0 || sloped ? ` ${at}` : ""}.`);
+    if (sloped) {
+      const high = gc.filter(([, v]) => !(v > 0)).map(([name]) => name);
+      // Under a foot it is said in inches ("6 in lower", not "0 ft 6 in lower").
+      const low = gc.filter(([, v]) => v > 0).map(([name, v]) => `${ssFtInWords(v).replace(/^0 ft /, "")} lower at the ${name}`);
+      const list = (a) => (a.length > 1 ? a.slice(0, -1).join(", ") + " and " + a[a.length - 1] : a[0]);
+      out.push(`The ground is highest at the ${list(high)} corner${high.length > 1 ? "s" : ""}, and ${list(low)}, so the ${raisedOn === "blocks" ? "blocks" : "piers"} stand taller where it is lower.`);
+    }
     if (fall > 0) {
       // Back, left and right are the building's geometry (d3GradeFall), never the porch's, so where
       // the porch as built (d3PorchReadout's wall) stands on the side the ground falls toward, or on
@@ -17629,9 +17733,11 @@ function ssAdvUnfinished(m, step, why, wanted) {
 }
 // THE GROUND'S FALL GOES ON EVERY SAVE, null included (review BC-1, 2026-09-29): the operator page's
 // twin of the portal's ssD3WithFall (12-shell.jsx), which says why. The draft itself is left alone.
+// The ground at each corner (gradeCornersFt, 2026-09-29) rides the same way, null when there is none.
 function calSpecToSend(spec) {
   if (!spec || typeof spec !== "object") return spec;
-  return { ...spec, gradeFallFt: spec.gradeFallFt != null ? spec.gradeFallFt : null, gradeFallToward: spec.gradeFallToward != null ? spec.gradeFallToward : null };
+  return { ...spec, gradeFallFt: spec.gradeFallFt != null ? spec.gradeFallFt : null, gradeFallToward: spec.gradeFallToward != null ? spec.gradeFallToward : null,
+    gradeCornersFt: spec.gradeCornersFt != null ? spec.gradeCornersFt : null };
 }
 // ─── THE ADVANCED PAGE'S LOOK (2026-09-29) ────────────────────────────────────────────────────
 // Ahsan: "can you see the designer tab how organised and good looking it is i want same in the advance
@@ -17755,6 +17861,22 @@ const SS_ADV_CSS = [
   '.ss-adv .ss-adv-pick{display:flex;align-items:center;gap:8px;margin:0 0 8px;min-width:0}',
   '.ss-adv .ss-adv-pick > .ssd-cs-swatch{flex:0 0 auto;width:18px;height:18px}',
   '.ss-adv .ss-adv-pick > .ssd-tb-read{white-space:normal}',
+  // THE GROUND AT EACH CORNER (2026-09-29): the footprint's top view across the middle, the back corners'
+  // boxes over its back corners and the front corners' under its front ones, so each box sits at the
+  // corner it measures, and the plan takes the card's width at every size.
+  '.ss-adv .ss-adv-gc{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 12px;align-items:end;margin:2px 0 0}',
+  '.ss-adv .ss-adv-gc-c{display:flex;flex-direction:column;align-items:flex-start;gap:3px;min-width:0}',
+  '.ss-adv .ss-adv-gc-c.is-r{align-items:flex-end;text-align:right}',
+  '.ss-adv .ss-adv-gc-c.is-bl{grid-column:1;grid-row:1}',
+  '.ss-adv .ss-adv-gc-c.is-br{grid-column:2;grid-row:1}',
+  '.ss-adv .ss-adv-gc-c.is-fl{grid-column:1;grid-row:3;align-self:start}',
+  '.ss-adv .ss-adv-gc-c.is-fr{grid-column:2;grid-row:3;align-self:start}',
+  '.ss-adv .ss-adv-gc-c > .ssd-fld-l{margin:0;white-space:nowrap}',
+  '.ss-adv .ss-adv-gc-in{display:inline-flex;align-items:center;gap:4px}',
+  '.ss-adv .ss-adv-gc-say{font-size:11px;font-weight:600;line-height:1.3;color:var(--ss-muted);white-space:nowrap}',
+  '.ss-adv .ss-adv-gc-say.is-hi{color:var(--ss-accent-text)}',
+  '.ss-adv .ss-adv-gc-plan{grid-column:1 / -1;grid-row:2;justify-self:stretch;min-width:0;display:flex;justify-content:center}',
+  '.ss-adv .ss-adv-gc-plan > svg{display:block;width:100%;height:auto;max-width:100%;max-height:170px}',
   // "More roof settings": a disclosure, closed until asked for.
   '.ss-adv .ss-adv-more{flex:1 1 100%;min-width:0;margin:0;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface)}',
   '.ss-adv .ss-adv-more > summary{display:flex;align-items:center;gap:8px;padding:9px 13px;cursor:pointer;list-style:none;font-size:12.5px;font-weight:700;color:var(--ss-primary)}',
@@ -21628,7 +21750,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // height box DELETES floorHeightFt and the renderer draws the kind's own default.
   // The ground's fall (gradeFallFt / gradeFallToward, 2026-09-28) is a raised floor's too, and goes with
   // it the same way: onto skids, a slab or "Not set", and when a video draft's foundation is not raised.
-  const CAL_RAISED_ONLY = ["floorHeightFt", "gradeFallFt", "gradeFallToward"];
+  // So does the ground at each corner (gradeCornersFt, 2026-09-29).
+  const CAL_RAISED_ONLY = ["floorHeightFt", "gradeFallFt", "gradeFallToward", "gradeCornersFt"];
   const calTidyFloor = (spec) => {
     if (d3RaisedFoundation(spec) || !CAL_RAISED_ONLY.some((k) => k in spec)) return spec;
     const out = { ...spec };
@@ -21653,6 +21776,29 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const spec = { ...p.spec };
     if (v === "" || v === null || v === undefined) delete spec[key];
     else spec[key] = v;
+    return { ...p, spec };
+  });
+  // THE GROUND AT EACH CORNER (gradeCornersFt, 2026-09-29): one corner's drop, in feet, as typed (held
+  // to 0..6; blank, null or 0 is 0). The other three are the style's own corners, or a stored fall read
+  // as corners (d3GradeCorners), so editing a corner of a style that stores a fall writes the fall's
+  // four corners with this one changed and DROPS gradeFallFt / gradeFallToward. All four at 0 is level
+  // ground and deletes the key. calSetGroundLevel is the "Level ground" reset: no corners, no fall.
+  const calSetGradeCorner = (k, n) => setAdminCal((p) => {
+    const spec = { ...p.spec };
+    const cur = d3GradeCornersGiven(spec) || d3GradeCorners(spec) || { fl: 0, fr: 0, bl: 0, br: 0 };
+    const next = { fl: cur.fl, fr: cur.fr, bl: cur.bl, br: cur.br, [k]: Number(n) > 0 ? Math.min(6, Number(n)) : 0 };
+    delete spec.gradeFallFt;
+    delete spec.gradeFallToward;
+    if (next.fl > 0 || next.fr > 0 || next.bl > 0 || next.br > 0) spec.gradeCornersFt = next;
+    else delete spec.gradeCornersFt;
+    return { ...p, spec };
+  });
+  const calSetGroundLevel = () => setAdminCal((p) => {
+    if (!["gradeCornersFt", "gradeFallFt", "gradeFallToward"].some((k) => k in p.spec)) return p;
+    const spec = { ...p.spec };
+    delete spec.gradeCornersFt;
+    delete spec.gradeFallFt;
+    delete spec.gradeFallToward;
     return { ...p, spec };
   });
   const calSetRoofOpt = (key, v) => setAdminCal((p) => {
@@ -21740,14 +21886,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // WHAT THE BUILDING STANDS ON, AND HOW HIGH (2026-09-25): one pair of controls, drawn in the walls
   // fix panel and in the full field grid, so the two can never offer different choices. The height
   // box shows only for blocks and piers, the two that raise the floor; blank is the kind's default.
-  // THE GROUND FALLING AWAY (2026-09-28): blocks and piers only, blank or 0 is level ground. Which way
-  // it falls shows once it falls, and says where the floor height is taken and which piers grow.
+  // THE GROUND AT EACH CORNER (2026-09-29, in place of the fall's two boxes of 2026-09-28): blocks and
+  // piers only. A box per corner, how many feet lower the ground is there, blank or 0 the highest; each
+  // says what it draws ("highest", "1 ft 6 in lower"), and the floor height is taken at the highest.
+  // A style storing a fall opens with the fall's corners in the boxes (d3GradeCorners).
   const calFoundationFields = (idPrefix, labelStyle, inputStyle) => {
     const spec = (adminCal && adminCal.spec) || {};
     const raised = d3RaisedFoundation(spec);
     const grade = d3GradeFt(spec);
-    const fall = d3GradeFall(spec);
-    const uphill = fall && fall.toward === "left" ? "right side" : fall && fall.toward === "right" ? "left side" : "front";
+    const gcBox = d3GradeCornersGiven(spec) || d3GradeCorners(spec);
+    const fall = d3GradeCorners(spec);
+    const uphill = fall ? "highest corner" : "front";
     const noteStyle = { display: "block", fontWeight: 400, marginTop: 2, fontSize: 11, color: "#64748B", lineHeight: 1.5 };
     return (
       <>
@@ -21762,13 +21911,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           </select>
         </label>
         {raised && (
-          <label style={labelStyle}>Floor height off the ground, {uphill === "front" ? "at the front" : `on the ${uphill}`} (ft)
+          <label style={labelStyle}>Floor height off the ground, {uphill === "front" ? "at the front" : `at the ${uphill}`} (ft)
             <input className="ssc-dim-in" type="number" step="0.1" min="0.3" max="6" inputMode="decimal"
               placeholder={`${D3_FLOOR_HEIGHT_DEFAULT_FT[raised]} ft`} data-ss-floor-height={idPrefix}
               {...calOptNumProps(idPrefix + "-floorHeightFt", spec.floorHeightFt, [0.3, 6], (n) => calSetFloorHeight(n))}
               style={inputStyle} />
             <span style={{ display: "block", fontWeight: 400, marginTop: 2, fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
-              {fall ? `Ground to the top of the floor ${uphill === "front" ? "at the front" : `on the ${uphill}`}, where the ground is highest.` : "Ground to the top of the floor where the door or porch is."} A door is 6 ft 8 in tall, and each step up is about 7 in. Blank draws {ssFtInWords(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}.{fall
+              {fall ? "Ground to the top of the floor at the highest corner, the one that reads “highest” below." : "Ground to the top of the floor where the door or porch is."} A door is 6 ft 8 in tall, and each step up is about 7 in. Blank draws {ssFtInWords(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}.{fall
                 // With a fall the steps and a ramp run down to the ground where they stand (the
                 // renderer's d3PorchStepsOnGround and rampOnGround), not to this height, so no one
                 // length is right and the hint gives the rule instead (review, 2026-09-29). Level ground keeps its sentence.
@@ -21778,29 +21927,34 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           </label>
         )}
         {raised && (
-          <label style={labelStyle}>Ground falls away (ft)
-            <input className="ssc-dim-in" type="number" step="0.5" min="0" max="6" inputMode="decimal"
-              placeholder="blank = level" data-ss-grade-fall={idPrefix}
-              {...calOptNumProps(idPrefix + "-gradeFallFt", spec.gradeFallFt, [0, 6], (n) => calSetTopOpt("gradeFallFt", n > 0 ? n : null))}
-              style={inputStyle} />
-          </label>
-        )}
-        {fall && (
-          <label style={labelStyle}>Toward
-            <select value={fall.toward} onChange={(e) => calSetTopOpt("gradeFallToward", e.target.value)}
-              data-ss-grade-fall-toward={idPrefix} style={inputStyle}>
-              <option value="back">Back</option>
-              <option value="left">Left</option>
-              <option value="right">Right</option>
-            </select>
+          <div style={{ ...labelStyle, gridColumn: "1 / -1" }} data-ss-grade-corners={idPrefix}>Ground at each corner (ft lower)
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 6, marginTop: 4, maxWidth: 380 }}>
+              {[["bl", "Back left"], ["br", "Back right"], ["fl", "Front left"], ["fr", "Front right"]].map(([k, name]) => (
+                <label key={k} style={{ display: "block", fontSize: 11, fontWeight: 700 }}>{name}
+                  <input className="ssc-dim-in" type="number" step="0.25" min="0" max="6" inputMode="decimal" placeholder="0"
+                    aria-label={`Ground at the ${name.toLowerCase()} corner, feet lower`} data-ss-grade-corner={k}
+                    {...calOptNumProps(`${idPrefix}-gc-${k}`, gcBox && gcBox[k] > 0 ? gcBox[k] : null, [0, 6], (n) => calSetGradeCorner(k, n))}
+                    style={inputStyle} />
+                  <span data-ss-grade-corner-say={k} style={{ display: "block", fontWeight: 600, marginTop: 1, fontSize: 11, color: fall && !(fall[k] > 0) ? "#166534" : "#64748B" }}>
+                    {!fall ? "level" : fall[k] > 0 ? `${ssFtInWords(fall[k]).replace(/^0 ft /, "")} lower` : "highest"}
+                  </span>
+                </label>
+              ))}
+            </div>
             <span style={noteStyle}>
-              Floor height is measured {uphill === "front" ? "at the front" : `on the ${uphill}`}. The {fall.toward === "back" ? "far side's" : `${fall.toward} side's`} {raised} stand this much taller.{/* The
-                  directions are the building's own, the sides the 3D's Views menu names (d3GradeFall),
+              0 is the highest corner. Floor height is measured there. The {raised} stand taller where the ground is lower.{/* The
+                  directions are the building's own, the sides the 3D's Views menu names (d3GradeCorners),
                   never the porch's: on an old-frame building wider than it is long the porch's
                   "front end" is the left side here (review, 2026-09-29). */}
               {` Front, back, left and right are the sides the 3D's Views menu calls F, B, L and R${calPorchKind(spec.roof) !== "none" ? ", wherever the porch is." : "."}`}
             </span>
-          </label>
+            {gcBox && (
+              <button type="button" onClick={calSetGroundLevel} data-ss-grade-level={idPrefix}
+                style={{ marginTop: 4, background: "#FEF3C7", color: "#92400E", border: "1px solid #FCD34D", borderRadius: 6, padding: "3px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                Level ground
+              </button>
+            )}
+          </div>
         )}
       </>
     );
@@ -21942,7 +22096,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // floorHeightFt keeps the uphill edge's (d3FloorHeightFromFront), so a builder's left or right fall
   // kept across a regenerated draft still draws the door at the height the video saw. Only a draft
   // that gives a height, on a building whose ground falls: every other merge is the object it was.
-  const calFloorFromFront = (m, d3) => ((d3 && Number(d3.floorHeightFt) > 0 && d3GradeFall(m))
+  const calFloorFromFront = (m, d3) => ((d3 && Number(d3.floorHeightFt) > 0 && d3GradeCorners(m))
     ? { ...m, floorHeightFt: d3FloorHeightFromFront(m, bldgW, bldgH, Number(d3.floorHeightFt)) }
     : m);
   const calShapeMerged = (spec, d3) => calTidyFloor(calFloorFromFront({
@@ -23247,7 +23401,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt, roof.wingAttach, roof.wingAttachFt, roof.rearStepFt, roof.rearEaveRiseFt]);
     if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps, roof.porchStepCount]);
     // What it stands on and how high (2026-09-25) are set in the walls panel, beside the wall.
-    if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt, spec.gradeFallFt, spec.gradeFallToward]);
+    if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt, spec.gradeFallFt, spec.gradeFallToward, spec.gradeCornersFt]);
     return JSON.stringify([spec.colors, spec.roofMaterial]);
   };
   // ⚠️ ANSWERED IS NOT AGREED. calChecksAnswered counts any non-empty answer, so "No" -- the
@@ -27377,10 +27531,83 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
     // 03 · WALLS & FOUNDATION ──────────────────────────────────────────────────────────────────
     const raised = spec ? d3RaisedFoundation(spec) : null;
-    const fall = spec ? d3GradeFall(spec) : null;
+    // THE GROUND AT EACH CORNER (2026-09-29). Carolyn, on this page: "we need to be able to put in where
+    // the zero is ... put in four corners." A top view of the footprint, drawn to its width and length
+    // with FRONT (the door side) on its front edge, and a number box at each corner: how many feet lower
+    // the ground is there, blank or 0 the highest. Each box says what it draws ("1' 6" lower",
+    // "highest"), the plan shades the ground darker where it is lower with an arrow down the slope, and
+    // the floor height is measured at the highest corner. A style storing a fall (2026-09-28) opens with
+    // the fall's corners in the boxes, and editing one writes corners in its place (calSetGradeCorner).
+    const fall = spec ? d3GradeCorners(spec) : null;
+    const gcBox = spec && raised ? (d3GradeCornersGiven(spec) || fall) : null;
     const grade = spec ? d3GradeFt(spec) : 0;
-    const uphill = fall && fall.toward === "left" ? "right side" : fall && fall.toward === "right" ? "left side" : "front";
     const fdCur = spec && D3_FOUNDATIONS.indexOf(spec.foundation) >= 0 ? spec.foundation : "";
+    const gcSay = (k) => (!fall ? "level" : fall[k] > 0 ? `${d3FtIn(fall[k])} lower` : "highest");
+    const gcCell = (k, name, cls) => (
+      <div key={k} className={"ss-adv-gc-c " + cls} data-ss-adv-corner={k}>
+        <span className="ssd-fld-l">{name}</span>
+        <span className="ss-adv-gc-in">
+          <input type="number" className="ssd-input ssd-field ss-adv-num" aria-label={`Ground at the ${name.toLowerCase()} corner (ft lower)`}
+            min={0} max={6} step={0.25} inputMode="decimal" placeholder="0"
+            {...calOptNumProps(`adv-gc-${k}`, gcBox && gcBox[k] > 0 ? gcBox[k] : null, [0, 6], (n) => calSetGradeCorner(k, n))} />
+          <span className="ss-adv-unit">ft</span>
+        </span>
+        <span className={"ss-adv-gc-say" + (fall && !(fall[k] > 0) ? " is-hi" : "")} data-ss-adv-corner-say={k}>{advNb(gcSay(k))}</span>
+      </div>
+    );
+    // The plan: north (the back) up, the front at the bottom, the building's own left on the left.
+    const gcPlan = () => {
+      const W = bldgW, L = bldgH, s = 110 / Math.max(W, L, 1);
+      const pw = Math.max(30, W * s), ph = Math.max(30, L * s), M = 9;
+      const x0 = M, y0 = M, x1 = M + pw, y1 = M + ph;
+      const deep = fall ? Math.max(fall.fl, fall.fr, fall.bl, fall.br) : 0;
+      const N = 8, cells = [];
+      if (fall && deep > 0) {
+        for (let i = 0; i < N; i++) {
+          for (let j = 0; j < N; j++) {
+            const t = d3GradeDropAt(fall, W, L, -W / 2 + (W * (i + 0.5)) / N, -L / 2 + (L * (j + 0.5)) / N) / deep;
+            cells.push(<rect key={`${i}-${j}`} x={x0 + (pw * i) / N} y={y0 + (ph * j) / N} width={pw / N + 0.4} height={ph / N + 0.4}
+              style={{ fill: "var(--ss-ink)" }} fillOpacity={0.03 + 0.34 * Math.max(0, Math.min(1, t))} />);
+          }
+        }
+      }
+      // Down the slope at the middle: where the drop grows fastest (x to the right, the front down).
+      const gx = fall ? (fall.fr + fall.br - fall.fl - fall.bl) / (2 * Math.max(1, W)) : 0;
+      const gy = fall ? (fall.fl + fall.fr - fall.bl - fall.br) / (2 * Math.max(1, L)) : 0;
+      const gn = Math.hypot(gx, gy);
+      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, al = Math.min(pw, ph) * 0.3;
+      const ux = gn > 1e-9 ? gx / gn : 0, uy = gn > 1e-9 ? gy / gn : 0;
+      const tip = [cx + ux * al, cy + uy * al], tail = [cx - ux * al, cy - uy * al];
+      const head = [[tip[0], tip[1]], [tip[0] - ux * 6 - uy * 4, tip[1] - uy * 6 + ux * 4], [tip[0] - ux * 6 + uy * 4, tip[1] - uy * 6 - ux * 4]];
+      const porch = d3ProjectingPorch(roof, W, L);
+      const pd = porch ? Math.min(M - 3, Math.max(4, porch.D * s)) : 0;
+      const porchRect = porch && ({ north: [x0, y0 - pd, pw, pd], south: [x0, y1, pw, pd], west: [x0 - pd, y0, pd, ph], east: [x1, y0, pd, ph] })[porch.wall];
+      const dw = Math.max(7, Math.min(pw * 0.3, 3 * s));
+      const pts = { bl: [x0, y0], br: [x1, y0], fl: [x0, y1], fr: [x1, y1] };
+      return (
+        <svg viewBox={`0 0 ${pw + 2 * M} ${ph + 2 * M}`} role="img" data-ss-adv-corner-plan=""
+          style={{ width: `min(100%, ${Math.round((170 * (pw + 2 * M)) / (ph + 2 * M))}px)` }}
+          aria-label={`Top view of the ${bldgW} by ${bldgH} ft footprint, the front at the bottom`}>
+          <rect x={x0} y={y0} width={pw} height={ph} style={{ fill: "var(--ss-surface)" }} />
+          {cells}
+          {porchRect && <rect x={porchRect[0]} y={porchRect[1]} width={porchRect[2]} height={porchRect[3]} style={{ fill: "none", stroke: "var(--ss-subtle)" }} strokeWidth={1} strokeDasharray="3 2" />}
+          <rect x={x0} y={y0} width={pw} height={ph} style={{ fill: "none", stroke: "var(--ss-ink)" }} strokeWidth={1.5} />
+          <rect x={(x0 + x1) / 2 - dw / 2} y={y1 - 2} width={dw} height={4} rx={1} style={{ fill: "var(--ss-accent-fill)" }} />
+          <text x={(x0 + x1) / 2} y={y1 - 6} textAnchor="middle" fontSize={8.5} fontWeight={800} letterSpacing={0.6} style={{ fill: "var(--ss-ink)" }}>FRONT</text>
+          <text x={(x0 + x1) / 2} y={y0 + 11} textAnchor="middle" fontSize={7.5} fontWeight={700} letterSpacing={0.5} style={{ fill: "var(--ss-subtle)" }}>BACK</text>
+          {gn > 1e-9 && (
+            <g data-ss-adv-corner-arrow="">
+              <line x1={tail[0]} y1={tail[1]} x2={tip[0] - ux * 5} y2={tip[1] - uy * 5} style={{ stroke: "var(--ss-ink)" }} strokeWidth={1.4} strokeLinecap="round" />
+              <polygon points={head.map((p) => p.join(",")).join(" ")} style={{ fill: "var(--ss-ink)" }} />
+            </g>
+          )}
+          {Object.entries(pts).map(([k, [x, y]]) => {
+            const hi = fall && !(fall[k] > 0);
+            return <circle key={k} cx={x} cy={y} r={3.4} style={hi ? { fill: "var(--ss-accent-fill)", stroke: "var(--ss-surface)" } : { fill: "var(--ss-surface)", stroke: "var(--ss-ink)" }} strokeWidth={1.2} />;
+          })}
+        </svg>
+      );
+    };
     // Walls and Foundation keep their own heights: a slab has nothing under its tiles, and a stretched
     // Foundation card was mostly empty panel beside Walls.
     const secWalls = spec && (
@@ -27406,18 +27633,29 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             {advTiles({ f: "foundation", label: "What it stands on", value: fdCur || "slab", pick: calSetFoundation,
               opts: [["slab", "Slab", "slab"], ["skids", "Skids", "skids"], ["blocks", "Blocks", "blocks"], ["piers", "Piers", "piers"]],
               note: raised ? null : ["On the ground. The others raise the floor.", "Skids, blocks and piers raise the floor, and the ground can fall away under them."] })}
-            {raised && advNum({ k: "adv-floorHeightFt", f: "floorHeightFt", label: "Floor height (ft)", value: spec.floorHeightFt, min: 0.3, max: 6, step: 0.1,
+            {raised && advNum({ k: "adv-floorHeightFt", f: "floorHeightFt", label: fall ? "Floor height at the highest corner (ft)" : "Floor height (ft)", value: spec.floorHeightFt, min: 0.3, max: 6, step: 0.1,
               band: [0.3, 6], write: (n) => calSetFloorHeight(n), fallback: D3_FLOOR_HEIGHT_DEFAULT_FT[raised], placeholder: String(D3_FLOOR_HEIGHT_DEFAULT_FT[raised]), full: true,
-              note: [fall ? `Ground to floor ${uphill === "front" ? "at the front" : `on the ${uphill}`}, the high side.` : `Ground to floor at the door. Blank draws ${d3FtIn(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}.`,
-                `Ground to the top of the floor ${fall ? `${uphill === "front" ? "at the front" : `on the ${uphill}`}, where the ground is highest` : "where the door or porch is"}. A door is 6' 8" tall, and each step up is about 7". Blank draws ${d3FtIn(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}.${fall
+              note: [fall ? "Ground to floor at the highest corner." : `Ground to floor at the door. Blank draws ${d3FtIn(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}.`,
+                `Ground to the top of the floor ${fall ? "at the highest corner, where the ground is highest" : "where the door or porch is"}. A door is 6' 8" tall, and each step up is about 7". Blank draws ${d3FtIn(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}.${fall
                   ? " Porch steps and any ramp a customer adds reach down to the ground where they stand, so on the low side they are taller and longer: a ramp runs 4 ft for every foot it drops."
                   : ` Porch steps climb the whole height, and a ramp a customer adds is drawn ${grade > 0.75 ? d3FtIn(4 * grade) : "3' 0\""} long so it reaches the ground.`}`] })}
-            {raised && advNum({ k: "adv-gradeFallFt", f: "gradeFallFt", label: "Ground falls away (ft)", value: spec.gradeFallFt, min: 0, max: 6, step: 0.5,
-              band: [0, 6], write: (n) => calSetTopOpt("gradeFallFt", n > 0 ? n : null), fallback: 0, placeholder: "0", ends: ["level", "6 ft"] })}
-            {fall && advSeg({ f: "gradeFallToward", label: "Toward", value: fall.toward, pick: (v) => calSetTopOpt("gradeFallToward", v),
-              opts: [["back", "Back"], ["left", "Left"], ["right", "Right"]], full: true,
-              note: [`The ${fall.toward === "back" ? "far side's" : `${fall.toward} side's`} ${raised} stand this much taller.`,
-                `Floor height is measured ${uphill === "front" ? "at the front" : `on the ${uphill}`}. Front, back, left and right are the sides the 3D's Views menu calls F, B, L and R${calPorchKind(roof) !== "none" ? ", wherever the porch is." : "."}`] })}
+            {raised && (
+              <div key="gradeCorners" className="ss-adv-f is-full" data-ss-adv-f="gradeCornersFt">
+                <div className="ss-adv-fh">
+                  <span className="ssd-fld-l">Ground at each corner</span>
+                  <button type="button" className="ssd-chip" style={advPill} disabled={!gcBox} data-ss-adv-f="groundLevel" onClick={calSetGroundLevel}>Level ground</button>
+                </div>
+                <div className="ss-adv-gc">
+                  {gcCell("bl", "Back left", "is-bl")}
+                  {gcCell("br", "Back right", "is-br is-r")}
+                  <div className="ss-adv-gc-plan">{gcPlan()}</div>
+                  {gcCell("fl", "Front left", "is-fl")}
+                  {gcCell("fr", "Front right", "is-fr is-r")}
+                </div>
+                {advNoteEl(["0 is the highest corner.",
+                  `Floor height is measured there. Type how many feet lower the ground is at each corner: 1.5 is 18", 2 is two feet. Blank or 0 is the highest ground. The ${raised} stand taller where it is lower, and porch steps and a customer's ramp reach down to the ground where they stand. FRONT is the door side; left and right are as you face it, the sides the 3D's Views menu calls L and R${calPorchKind(roof) !== "none" ? ", wherever the porch is." : "."}`])}
+              </div>
+            )}
           </div>
         </div>
       </div>

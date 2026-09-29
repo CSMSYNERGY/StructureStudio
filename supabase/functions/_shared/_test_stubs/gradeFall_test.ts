@@ -72,15 +72,16 @@ const F = new Function(
   `${renderBlocks.map((b) => b.cmp).join("\n")}; return { D3, D3_GRADE_FALL_TOWARD, d3GradeFt, d3GradeLiftFt, d3GradeMaxFt, d3GradeFall, d3GradeFallAxis, ` +
     `d3GradeFallBlendFt, d3GradeAt, d3FrameHeightFt, d3PorchToRoot, d3PorchStepsGradeFt, d3PorchStepsGeom, d3PorchGeom, d3PorchFraming, ` +
     `d3PorchReadout, d3ResolveStyleSpec, d3DefaultShotCamera, ssSelfCheckCameras, D3_FOUNDATIONS, d3RaisedFoundation, ` +
-    `d3FloorHeightFromFront, d3FrontGableWall, SS_SHOT, d3PorchBlankStepCount, d3PorchAutoStepCount };`,
+    `d3FloorHeightFromFront, d3FrontGableWall, SS_SHOT, d3PorchBlankStepCount, d3PorchAutoStepCount, ` +
+    `D3_GRADE_CORNERS, d3GradeCornersGiven, d3GradeCorners, d3GradeDropAt, d3GradeEaseFt };`,
 )() as Record<string, Any>;
 const P = new Function(`${panelBlocks.map((b) => b.cmp).join("\n")}; return { ssDrewWords, ssShotSig };`)() as Record<string, Any>;
 // calDraftRoof is the roof half of the merge (calDraftRoof_test's); a plain spread stands in for it.
 // bldgW x bldgH is the calibration preview's footprint, the component's own state.
 const C = new Function(
-  "calDraftRoof", "D3_FOUNDATIONS", "d3RaisedFoundation", "d3GradeFall", "d3FloorHeightFromFront", "bldgW", "bldgH",
+  "calDraftRoof", "D3_FOUNDATIONS", "d3RaisedFoundation", "d3GradeFall", "d3FloorHeightFromFront", "bldgW", "bldgH", "d3GradeCorners",
   `${calBlocks.map((b) => b.cmp).join("\n")}; return { calTidyFloor, calShapeMerged, CAL_RAISED_ONLY };`,
-)((s: Any, d: Any) => ({ ...(s || {}), ...(d || {}) }), F.D3_FOUNDATIONS, F.d3RaisedFoundation, F.d3GradeFall, F.d3FloorHeightFromFront, 16, 24) as Record<string, Any>;
+)((s: Any, d: Any) => ({ ...(s || {}), ...(d || {}) }), F.D3_FOUNDATIONS, F.d3RaisedFoundation, F.d3GradeFall, F.d3FloorHeightFromFront, 16, 24, F.d3GradeCorners) as Record<string, Any>;
 
 const PIERS = { roof: { type: "gable", pitch: 0.4 }, wallHeightFt: 8, foundation: "piers", floorHeightFt: 1.5 };
 const W = 16, L = 24;
@@ -427,7 +428,7 @@ Deno.test("d3ResolveStyleSpec names both keys beside blocks or piers, and never 
 
 Deno.test("the panel's tidy-up and the video draft's merge: the fall goes with the raised floor", () => {
   const stored = { ...PIERS, colors: {}, gradeFallFt: 2, gradeFallToward: "left" };
-  assertEquals([...C.CAL_RAISED_ONLY], ["floorHeightFt", "gradeFallFt", "gradeFallToward"]);
+  assertEquals([...C.CAL_RAISED_ONLY], ["floorHeightFt", "gradeFallFt", "gradeFallToward", "gradeCornersFt"]);
   assertEquals(C.calTidyFloor(stored), stored, "raised: untouched, the same object");
   const skids = C.calTidyFloor({ ...stored, foundation: "skids" });
   assert(!("gradeFallFt" in skids) && !("gradeFallToward" in skids) && !("floorHeightFt" in skids));
@@ -533,5 +534,204 @@ Deno.test("the height box's hint and the fall's Toward note: plain words, the le
     // The directions are the 3D Views menu's, for every direction, and never the porch's.
     assertStringIncludes(t, "{` Front, back, left and right are the sides the 3D's Views menu calls F, B, L and R${calPorchKind(spec.roof) !== \"none\" ? \", wherever the porch is.\" : \".\"}`}");
     assertEquals(t.split("Left and right are as you face the front.").length - 1, 0);
+  }
+});
+
+// ── THE GROUND AT EACH CORNER (top-level gradeCornersFt, 2026-09-29) ─────────────────────────────
+// Carolyn, 09-29, on the Advanced page: "we need to be able to put in where the zero is ... put in four
+// points". { fl, fr, bl, br }, each how many feet LOWER the ground is at that corner; the HIGHEST corner
+// is the zero and floorHeightFt the floor's height over it. d3GradeAt is a bilinear surface over the
+// footprint, eased level outside it the fall's way; a stored fall is the same surface read as corners.
+
+// The single-plane fall as it was written before the corners (d3GradeAt at 5fb622a), for the bit-for-bit check.
+const oldFallAt = (spec: Any, W: number, L: number, x: number, z: number) => {
+  const grade = F.d3GradeFt(spec);
+  const f = F.d3GradeFall(spec);
+  if (!f) return grade;
+  const ax = F.d3GradeFallAxis(f.toward, Number(W) || 0, Number(L) || 0);
+  const D = Math.max(1, ax.ext);
+  const B = F.d3GradeFallBlendFt(f.fallFt, D);
+  const d = x * ax.dir[0] + z * ax.dir[1] + D / 2;
+  const s = d <= -B ? -B / 2
+    : d < 0 ? ((d + B) * (d + B)) / (2 * B) - B / 2
+      : d <= D ? d
+        : d < D + B ? D + B / 2 - ((D + B - d) * (D + B - d)) / (2 * B)
+          : D + B / 2;
+  return grade + (f.fallFt * s) / D;
+};
+const CORNER_AT = (w: number, l: number) => ({ fl: [-w / 2, l / 2], fr: [w / 2, l / 2], bl: [-w / 2, -l / 2], br: [w / 2, -l / 2] }) as Record<string, [number, number]>;
+
+Deno.test("corners: absent, zeros, all equal, junk or not raised is level ground, exactly d3GradeFt", () => {
+  assertEquals([...F.D3_GRADE_CORNERS], ["fl", "fr", "bl", "br"]);
+  const level = [
+    { ...PIERS, gradeCornersFt: { fl: 0, fr: 0, bl: 0, br: 0 } }, { ...PIERS, gradeCornersFt: {} }, { ...PIERS, gradeCornersFt: null },
+    { ...PIERS, gradeCornersFt: { fl: 2, fr: 2, bl: 2, br: 2 } }, { ...PIERS, gradeCornersFt: { fl: -1, fr: "x", bl: null } }, { ...PIERS, gradeCornersFt: [2, 2] },
+    { foundation: "slab", gradeCornersFt: { fl: 0, br: 2 } }, { roof: PIERS.roof, gradeCornersFt: { br: 3 } },
+    // Corners replace the fall: an object beside a fall, even a level one, is what is drawn.
+    { ...PIERS, gradeFallFt: 2, gradeFallToward: "left", gradeCornersFt: { fl: 0, fr: 0, bl: 0, br: 0 } },
+  ];
+  for (const spec of level) {
+    assertEquals(F.d3GradeCorners(spec), null, JSON.stringify(spec));
+    for (const [x, z] of LATTICE) assertEquals(F.d3GradeAt(spec, W, L, x, z), F.d3GradeFt(spec), `${JSON.stringify(spec)} at ${x}, ${z}`);
+    assertEquals(F.d3GradeMaxFt(spec), F.d3GradeFt(spec));
+    assertEquals(F.d3GradeLiftFt(spec), F.d3GradeFt(spec) - F.D3.FLOOR_T);
+  }
+  assertEquals(F.d3GradeFall({ ...PIERS, gradeFallFt: 2, gradeCornersFt: { br: 1 } }), null, "beside corners there is no fall");
+  assertEquals(F.d3GradeCornersGiven({ ...PIERS, gradeCornersFt: { fl: "1.5", br: 9, bl: -2 } }), { fl: 1.5, fr: 0, bl: 0, br: 6 }, "held to 0..6, a string read as its number");
+});
+
+Deno.test("⚠️ a fall read as corners is the single plane it always was, to the last bit", () => {
+  for (const [w, l] of [[16, 24], [8, 12], [24, 12], [0.5, 3]]) {
+    for (const toward of [undefined, "back", "left", "right"]) {
+      for (const fallFt of [0.5, 2, 6, 9]) {
+        const spec = { ...PIERS, gradeFallFt: fallFt, gradeFallToward: toward };
+        const want = toward === "left" ? { fl: 1, fr: 0, bl: 1, br: 0 } : toward === "right" ? { fl: 0, fr: 1, bl: 0, br: 1 } : { fl: 0, fr: 0, bl: 1, br: 1 };
+        const v = Math.min(6, fallFt);
+        assertEquals(F.d3GradeCorners(spec), { fl: want.fl * v, fr: want.fr * v, bl: want.bl * v, br: want.br * v });
+        for (let x = -30; x <= 30; x += 0.7) {
+          for (let z = -30; z <= 30; z += 0.9) assertEquals(F.d3GradeAt(spec, w, l, x, z), oldFallAt(spec, w, l, x, z), `${w}x${l} ${toward} ${fallFt} at ${x},${z}`);
+        }
+        assertEquals(F.d3GradeMaxFt(spec), F.d3GradeFt(spec) + v);
+      }
+    }
+  }
+});
+
+Deno.test("d3GradeAt on four corners: the highest is the zero, each corner's drop at its corner, straight along every edge", () => {
+  const spec = { ...PIERS, gradeCornersFt: { fl: 0.5, fr: 2.5, bl: 1, br: 4.5 } };
+  const drop = { fl: 0, fr: 2, bl: 0.5, br: 4 };
+  assertEquals(F.d3GradeCorners(spec), drop, "normalised to the highest (front-left) corner");
+  const at = CORNER_AT(W, L);
+  for (const k of ["fl", "fr", "bl", "br"]) assertAlmostEquals(F.d3GradeAt(spec, W, L, ...at[k]), 1.5 + (drop as Any)[k], 1e-12, k);
+  // Bilinear: straight along each edge and along every line parallel to one, the centre the corners' mean.
+  const bil = (x: number, z: number) => {
+    const u = (x + W / 2) / W, v = (z + L / 2) / L;
+    return 1.5 + drop.bl * (1 - u) * (1 - v) + drop.br * u * (1 - v) + drop.fl * (1 - u) * v + drop.fr * u * v;
+  };
+  for (let x = -W / 2; x <= W / 2; x += W / 8) for (let z = -L / 2; z <= L / 2; z += L / 12) assertAlmostEquals(F.d3GradeAt(spec, W, L, x, z), bil(x, z), 1e-9, `${x},${z}`);
+  assertAlmostEquals(F.d3GradeAt(spec, W, L, 0, 0), 1.5 + (0 + 2 + 0.5 + 4) / 4, 1e-12);
+  assertAlmostEquals(F.d3GradeMaxFt(spec), 5.5, 1e-12, "the deepest corner");
+  assertAlmostEquals(F.d3GradeLiftFt(spec), 5.5 - 0.35, 1e-12);
+  // The cameras frame it as a building raised to its deepest corner, like a fall that deep.
+  assertEquals(F.d3FrameHeightFt(spec, W, L), F.d3FrameHeightFt({ ...PIERS, floorHeightFt: 5.5 }, W, L));
+  // Any corner can be the zero, and only the differences matter: +1 on every corner is the same ground.
+  const up = { ...PIERS, gradeCornersFt: { fl: 1.5, fr: 3.5, bl: 2, br: 5.5 } };
+  for (const [x, z] of LATTICE) assertAlmostEquals(F.d3GradeAt(up, W, L, x, z), F.d3GradeAt(spec, W, L, x, z), 1e-12);
+  const back = { ...PIERS, gradeCornersFt: { fl: 2, fr: 1, bl: 0, br: 0.25 } };
+  assertEquals(F.d3GradeCorners(back), { fl: 2, fr: 1, bl: 0, br: 0.25 });
+  assertEquals(F.d3GradeAt(back, W, L, ...at.bl), 1.5, "the back-left zero stands at the floor height");
+});
+
+Deno.test("d3GradeAt on four corners: eased level outside the footprint, no crease, monotone, within the ease of the edges", () => {
+  const spec = { ...PIERS, gradeCornersFt: { fl: 0, fr: 1, bl: 2, br: 3 } };
+  const g = (x: number, z: number) => F.d3GradeAt(spec, W, L, x, z);
+  // Far from the building each quadrant is level.
+  assertAlmostEquals(g(-40, 40), g(-60, 55), 1e-12);
+  assertAlmostEquals(g(40, -40), g(55, -60), 1e-12);
+  // Past a corner by any distance: within the two eases (3 in each) of the corner's own ground.
+  const at = CORNER_AT(W, L);
+  for (const k of ["fl", "fr", "bl", "br"]) {
+    const [x, z] = at[k];
+    const far = g(x * 3, z * 3), c = g(x, z);
+    assert(Math.abs(far - c) <= 0.5 + 1e-9, `${k}: ${far} vs ${c}`);
+  }
+  // No crease: the slope along x and along z changes gradually, and never turns back (monotone rows).
+  for (const z of [-20, -L / 2, 0, 5, L / 2, 20]) {
+    let prev = -Infinity, prevS = NaN;
+    for (let x = -30; x <= 30; x += 0.05) {
+      const y = g(x, z), s = (g(x + 1e-5, z) - g(x - 1e-5, z)) / 2e-5;
+      assert(y >= prev - 1e-12, `rising toward the right along z=${z} at ${x}`);
+      if (isFinite(prevS)) assert(Math.abs(s - prevS) < 0.01, `x slope continuous along z=${z} at ${x}`);
+      prev = y; prevS = s;
+    }
+  }
+  for (const x of [-20, -W / 2, 0, W / 2, 20]) {
+    let prev = -Infinity, prevS = NaN;
+    for (let z = 30; z >= -30; z -= 0.05) {
+      const y = g(x, z), s = (g(x, z + 1e-5) - g(x, z - 1e-5)) / 2e-5;
+      assert(y >= prev - 1e-12, `falling toward the back along x=${x} at ${z}`);
+      if (isFinite(prevS)) assert(Math.abs(s - prevS) < 0.01, `z slope continuous along x=${x} at ${z}`);
+      prev = y; prevS = s;
+    }
+  }
+  // d3GradeEaseFt is the fall's ease, symmetric about the footprint.
+  for (const d of [-5, -1, -0.3, 0, 2, 7.5, 16, 16.4, 17, 30]) assertAlmostEquals(F.d3GradeEaseFt(d, 16, 2) + F.d3GradeEaseFt(16 - d, 16, 2), 16, 1e-12, String(d));
+});
+
+Deno.test("corners: the steps, the floor read at the front and the self-check's eye all follow the corners", () => {
+  // A back porch; the ground lowest at the back-right corner. Its steps stand on the deepest ground under the
+  // flight. "left" is the left of someone facing the porch from behind the building: the back-right (east) end.
+  const roof = { type: "gable", front: "gable", pitch: 0.4, porchOutFt: 6, porchSteps: "left", porchEnd: "back" };
+  const spec = { ...PIERS, roof, gradeCornersFt: { fl: 0, fr: 0, bl: 1, br: 3 } };
+  const s = F.d3PorchReadout(spec, `${W}x${L}`).steps;
+  const toRoot = F.d3PorchToRoot(roof, W, L);
+  let deep = -Infinity;
+  for (const x of [s.x - s.w / 2, s.x + s.w / 2]) for (const d of [s.d0, s.d0 + s.count * s.tread]) deep = Math.max(deep, F.d3GradeAt(spec, W, L, ...toRoot(x, d)));
+  assertAlmostEquals(-s.grade, deep, 1e-12, "the flight's own ground");
+  const other = F.d3PorchReadout({ ...spec, roof: { ...roof, porchSteps: "right" } }, `${W}x${L}`).steps;
+  assert(-s.grade > -other.grade + 0.5, `steps toward the low corner stand deeper (${-s.grade} vs ${-other.grade})`);
+  // A video's floor height, read at the front wall's middle, comes back up to the highest corner.
+  const nf = { type: "gable", front: "gable", pitch: 0.4 };
+  const fs = { ...PIERS, roof: nf, gradeCornersFt: { fl: 1, fr: 2, bl: 0, br: 0 } };
+  assertEquals(F.d3FloorHeightFromFront(fs, W, L, 3), 1.5, "the front's middle is 1.5 ft below the back corners");
+  assertAlmostEquals(F.d3GradeAt({ ...fs, floorHeightFt: 1.5 }, W, L, 0, L / 2), 3, 1e-12);
+  assertEquals(F.d3FloorHeightFromFront({ ...fs, gradeCornersFt: { fl: 0, fr: 0, bl: 2, br: 1 } }, W, L, 2.37), 2.37, "the front at the highest ground: the reading");
+  // The self-check's phone stands EYE_FT + FLOOR_T over the ground under it.
+  const want = F.SS_SHOT.EYE_FT + F.D3.FLOOR_T;
+  const sc = { ...PIERS, gradeCornersFt: { fl: 0, fr: 1, bl: 2.5, br: 4 } };
+  const cams = F.ssSelfCheckCameras({ bldgW: W, bldgH: L, style3d: sc }, WALK_MAP).filter((c: Any) => c.viewpoint !== "eaveCorner");
+  assertEquals(cams.length, 5);
+  for (const c of cams) assertAlmostEquals(eyeOverGrass(sc, W, L, c), want, 1e-5, c.viewpoint);
+});
+
+Deno.test("corners: the resolver names them, the tidy-up takes them off a floor that is not raised, and a draft never brings them", () => {
+  const res = (d3: Any) => F.d3ResolveStyleSpec({ d3 }, "harness", 8);
+  assertEquals(res({ ...PIERS, gradeCornersFt: { fl: 0, br: "2" } }).gradeCornersFt, { fl: 0, fr: 0, bl: 0, br: 2 });
+  for (const d3 of [PIERS, { ...PIERS, gradeCornersFt: { fl: 0, fr: 0, bl: 0, br: 0 } }, { roof: PIERS.roof, foundation: "slab", gradeCornersFt: { br: 2 } }]) {
+    assert(!("gradeCornersFt" in res(d3)), JSON.stringify(d3));
+  }
+  const stored = { ...PIERS, colors: {}, gradeCornersFt: { fl: 0, fr: 1, bl: 0, br: 2 } };
+  assertEquals(C.calTidyFloor(stored), stored, "raised: untouched");
+  assert(!("gradeCornersFt" in C.calTidyFloor({ ...stored, foundation: "skids" })));
+  const kept = C.calShapeMerged(stored, { roof: { type: "gable" }, foundation: "piers" });
+  assertEquals(kept.gradeCornersFt, stored.gradeCornersFt, "a regenerated draft keeps the builder's corners");
+  assert(!("gradeCornersFt" in C.calShapeMerged(stored, { roof: { type: "gable" }, foundation: "slab" })), "a slab draft takes them off");
+  const fromDraft = C.calShapeMerged({ ...PIERS, colors: {} }, { roof: { type: "gable" }, foundation: "piers", gradeCornersFt: { fl: 0, br: 3 } });
+  assert(!("gradeCornersFt" in fromDraft), "the video cannot see the corners");
+  // A draft's floor height at the front wall's middle comes back to the highest corner here too.
+  const draft = { roof: { type: "gable", front: "gable" }, foundation: "piers", floorHeightFt: 2.5 };
+  assertEquals(C.calShapeMerged({ ...stored, gradeCornersFt: { fl: 1, fr: 1, bl: 0, br: 0 } }, draft).floorHeightFt, 1.5);
+});
+
+Deno.test("corners: What we drew says each corner in plain words, and the shot signature changes only where they are", () => {
+  const base = { roof: { type: "gable", pitch: 0.5 }, foundation: "piers", floorHeightFt: 1.5 };
+  const said = P.ssDrewWords({ ...base, gradeCornersFt: { fl: 0, fr: 1.5, bl: 0, br: 2 } });
+  assertStringIncludes(said, "its floor 1 ft 6 in off the ground at its highest corner.");
+  assertStringIncludes(said, "The ground is highest at the front-left and back-left corners, and 1 ft 6 in lower at the front-right and 2 ft lower at the back-right, so the piers stand taller where it is lower.");
+  assertStringIncludes(P.ssDrewWords({ ...base, foundation: "blocks", gradeCornersFt: { fl: 1, fr: 1, bl: 1, br: 0 } }),
+    "The ground is highest at the back-right corner, and 1 ft lower at the front-left, 1 ft lower at the front-right and 1 ft lower at the back-left, so the blocks stand taller where it is lower.");
+  // Corners replace the fall's sentence; level corners say nothing; a slab says nothing.
+  const withFall = P.ssDrewWords({ ...base, gradeFallFt: 2, gradeFallToward: "left", gradeCornersFt: { fl: 0, fr: 0, bl: 1, br: 1 } });
+  assert(!withFall.includes("The ground falls"), withFall);
+  for (const gc of [{ fl: 0, fr: 0, bl: 0, br: 0 }, { fl: 2, fr: 2, bl: 2, br: 2 }]) assertEquals(P.ssDrewWords({ ...base, gradeCornersFt: gc }), P.ssDrewWords(base), JSON.stringify(gc));
+  assertEquals(P.ssDrewWords({ roof: base.roof, foundation: "slab", gradeCornersFt: { br: 2 } }), P.ssDrewWords({ roof: base.roof, foundation: "slab" }));
+  assertStringIncludes(P.ssDrewWords({ roof: base.roof, foundation: "piers", gradeCornersFt: { br: 2 } }), "no floor height is given, so its floor is drawn 1 ft 6 in off the ground at its highest corner.");
+  // The signature: byte for byte without the key, a new one with it and for every change of it.
+  const a = { roof: { type: "gable" }, wallHeightFt: 8, foundation: "piers", floorHeightFt: 1.5 };
+  assertEquals(P.ssShotSig(a), JSON.stringify([a.roof, 8, null, null, "piers", null, null, 1.5]));
+  const c1 = { ...a, gradeCornersFt: { fl: 0, fr: 0, bl: 1, br: 2 } };
+  assert(P.ssShotSig(c1) !== P.ssShotSig(a));
+  assert(P.ssShotSig({ ...c1, gradeCornersFt: { fl: 0, fr: 0, bl: 1, br: 2.5 } }) !== P.ssShotSig(c1));
+});
+
+Deno.test("corners: both panels draw a box per corner with its own attribute, and the fall's two boxes are gone", () => {
+  for (const t of [CMP, JSX]) {
+    assertStringIncludes(t, "data-ss-grade-corners={idPrefix}");
+    assertStringIncludes(t, "data-ss-grade-corner={k}");
+    assertStringIncludes(t, "data-ss-adv-corner={k}");
+    assertStringIncludes(t, "0 is the highest corner. Floor height is measured there.");
+    assertEquals(t.split("data-ss-grade-fall=").length - 1, 0, "the fall's box");
+    assertEquals(t.split("data-ss-grade-fall-toward=").length - 1, 0, "the fall's Toward");
+    assertEquals(t.split('label: "Ground falls away (ft)"').length - 1, 0, "the Advanced page's fall slider");
   }
 });

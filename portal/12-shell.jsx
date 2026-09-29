@@ -501,9 +501,13 @@ function ssStyleSaveKey(styleValue, target = ssTargetClientId) {
 // "no fall" has to be said out loud, as null, or it would never land. The sanitiser drops the null,
 // so nothing ever stores it, and a style with no fall is written exactly as before.
 // The operator page's save (saveCalSpec in the designer twins) sends the same two keys the same way.
+// THE GROUND AT EACH CORNER (gradeCornersFt, 2026-09-29) rides the same way and for the same reason:
+// the server carries a stored value over any save that omits it (production's designer and every
+// panel before today), so this panel's "level ground" is an explicit null too.
 function ssD3WithFall(d3) {
   if (!d3 || typeof d3 !== "object") return d3;
-  return { ...d3, gradeFallFt: d3.gradeFallFt != null ? d3.gradeFallFt : null, gradeFallToward: d3.gradeFallToward != null ? d3.gradeFallToward : null };
+  return { ...d3, gradeFallFt: d3.gradeFallFt != null ? d3.gradeFallFt : null, gradeFallToward: d3.gradeFallToward != null ? d3.gradeFallToward : null,
+    gradeCornersFt: d3.gradeCornersFt != null ? d3.gradeCornersFt : null };
 }
 
 function ssQueueStyleSave(key, run) {

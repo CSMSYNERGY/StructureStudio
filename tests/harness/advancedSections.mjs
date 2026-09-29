@@ -291,10 +291,12 @@ try {
   await shot(page, "ask-porch-4-steps.png");
 
   await radio(page, "What it stands on", "Piers").click();
-  await byLabel(page, "Ground falls away (ft)").fill("2");
-  await page.keyboard.press("Tab");
-  await segBtn(page, "Toward", "Back").click();
-  await panelModel(page, (M) => !!(M.gradeFall && M.gradeFall.fallFt === 2 && M.gradeFall.toward === "back" && M.foundation && M.foundation.kind === "piers"));
+  // The ground 2 ft lower at both back corners (2026-09-29: a box per corner, in place of "falls away" + "Toward").
+  for (const corner of ["back left", "back right"]) {
+    await byLabel(page, `Ground at the ${corner} corner (ft lower)`).fill("2");
+    await page.keyboard.press("Tab");
+  }
+  await panelModel(page, (M) => !!(M.gradeCorners && M.gradeCorners.bl === 2 && M.gradeCorners.br === 2 && M.gradeCorners.fl === 0 && M.gradeCorners.fr === 0 && M.foundation && M.foundation.kind === "piers"));
   const pier = await page.evaluate(() => {
     const P = window.__ss3dPanel, M = P.model, V = P.camera.position.constructor;
     P.scene.updateMatrixWorld(true);

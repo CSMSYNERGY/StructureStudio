@@ -794,10 +794,11 @@ async function main() {
   await answer("walls", "Yes");
   await answer("walls", "No");
   const fixFoundation = page.locator('select[data-ss-foundation="ssc-fix"]');
-  const fixFall = page.locator('input[data-ss-grade-fall="ssc-fix"]');
+  // The fall to the back is its two back corners, 2 ft lower (2026-09-29: a box per corner).
+  const fixCorner = (k) => page.locator(`[data-ss-grade-corners="ssc-fix"] input[data-ss-grade-corner="${k}"]`);
   await fixFoundation.selectOption("piers");
   await page.waitForTimeout(300);
-  await fixFall.click(); await fixFall.fill("2"); await page.keyboard.press("Tab"); await page.waitForTimeout(300);
+  for (const k of ["bl", "br"]) { await fixCorner(k).click(); await fixCorner(k).fill("2"); await page.keyboard.press("Tab"); await page.waitForTimeout(300); }
   await answer("porch", "Yes");
   await answer("porch", "No");
   await fixPorch.getByRole("button", { name: "The other end", exact: true }).click();
@@ -807,8 +808,8 @@ async function main() {
   const fallPh = await fixCount.getAttribute("placeholder");
   r.ok("⚠️ OVER FALLING GROUND THE FIX PANEL'S BLANK SAYS THE COUNT WHAT WE DREW SAYS",
     drewSteps > 3 && fallPh === `blank = ${drewSteps}` && (await fixCount.inputValue()) === "", `${fallPh} | ${fallLine}`);
-  r.ok("...and What we drew says the ground falls toward the porch's end",
-    /The ground falls 2 ft toward the back, where the porch is, so the piers on that side stand taller\./.test(fallLine), fallLine);
+  r.ok("...and What we drew says the two back corners are 2 ft lower",
+    /The ground is highest at the front-left and front-right corners, and 2 ft lower at the back-left and 2 ft lower at the back-right, so the piers stand taller where it is lower\./.test(fallLine), fallLine);
   await fixPorch.screenshot({ path: join(shots, "05c-porch-fix-step-count-fall.png") }).catch(() => {});
   // Back as it was for the checks below: the porch on the end filmed first, on no foundation.
   await fixPorch.getByRole("button", { name: "The end you filmed first", exact: true }).click();
@@ -817,8 +818,8 @@ async function main() {
   await answer("walls", "No");
   await fixFoundation.selectOption("");
   await page.waitForTimeout(300);
-  r.ok("and back on the ground neither a fall nor a step count is said",
-    !/ground falls/.test(await spanLine()) && !/\d steps on the left/.test(await spanLine()), await spanLine());
+  r.ok("and back on the ground neither a slope nor a step count is said",
+    !/ground falls|ground is highest/.test(await spanLine()) && !/\d steps on the left/.test(await spanLine()), await spanLine());
 
   // ── THE WARNING BANNER HAS TO REACH A CONTROL, INCLUDING WHERE THERE ARE NO PAIRS ─────
   // The banner is a machine warning promoted out of "What the model saw", and its whole

@@ -48,9 +48,29 @@
 //      draws the placeholder's number (SS_CASES=panelSteps runs it alone)
 //   9. zero page errors
 //
+// THE GROUND AT EACH CORNER (top-level gradeCornersFt, 2026-09-29). Carolyn, 09-29, on the Advanced page:
+// "we need to be able to put in where the zero is ... put in four corners". { fl, fr, bl, br }, how many
+// feet lower the ground is at each corner, the highest one the zero; a stored fall is the same ground
+// read as corners. This proves, on top of the above:
+//   10. ⚠️ A STORED FALL RENDERS AS IT DID: cases K, Lf, Bk and O build a scene identical, node for node
+//      but the grass (a grid now, not rows; held to d3GradeAt by 1 above), to the designer at
+//      SS_FALL_BASE (default 5fb622a, the commit before the corners), and the same camera
+//   11. four-corner cases (C1..C4): model.gradeCorners is d3GradeCorners (the highest corner the zero),
+//      model.gradeFall null; the drawn grass is d3GradeAt's bilinear surface over and round the
+//      footprint (within 0.01 ft); ⚠️ every support's foot is on the drawn grass at its own spot; the
+//      supports at the DEEPEST corner are the tallest, those at the zero corner the shortest; the deck's
+//      supports, the steps, a lean-to's posts, a ramp, the shade and the labels are on the grass; the
+//      editor frames every foot; the self-check's phone stands on the grass
+//   12. level corners (all 0) are today's level ground, node for node (LV5, LV6 in 7)
+//   8.  THE PANEL (rewritten 2026-09-29): "Ground at each corner (ft lower)", four boxes; each types,
+//      reads out ("highest", "2 ft lower"), saves the four corners and sends the fall keys null; "Level
+//      ground" and leaving piers send gradeCornersFt null; a style storing a fall opens with its corners,
+//      saves the fall back untouched, and an edited corner saves corners in its place; the preview
+//      draws them
+//
 //   python -m http.server 8142 --bind 127.0.0.1 --directory <repo root>
 //   SS_BASE=http://127.0.0.1:8142 node tests/harness/gradeFall.mjs
-//   SS_CASES=K,level,panel,panelSteps ...   (a subset)  SS_SHOTS=<dir>  (side views, before and after)
+//   SS_CASES=K,level,panel,panelSteps,corners,C1,legacy ...   (a subset)  SS_SHOTS=<dir>  (side views, before and after)
 //
 // Exit 0 = every assertion held.
 import { execFileSync } from "node:child_process";
@@ -78,7 +98,7 @@ function pure() {
     ["function d3PorchGeom(", "function d3PorchReadout("],
     ["function d3PorchReadout(", "// A dimensioned end-elevation of the style"],
   ].map(([a, b]) => lift(a, b)).join("\n");
-  return new Function(`${body}; return { D3, d3GradeFt, d3GradeAt, d3GradeFall, d3GradeFallAxis, d3GradeFallBlendFt, d3GradeMaxFt, d3GradeLiftFt, d3FrameHeightFt, d3PorchToRoot, d3PorchReadout };`)();
+  return new Function(`${body}; return { D3, d3GradeFt, d3GradeAt, d3GradeFall, d3GradeFallAxis, d3GradeFallBlendFt, d3GradeMaxFt, d3GradeLiftFt, d3FrameHeightFt, d3PorchToRoot, d3PorchReadout, d3GradeCorners };`)();
 }
 const PURE = pure();
 // The self-check's cameras (ssSelfCheckCameras), from this checkout or from another revision's source.
@@ -153,7 +173,29 @@ const LEVEL = [
   { id: "LV2", label: "Level Piers Zero Fall", size: "16x24", d3: tri({ porchEnd: "back", porchSteps: "center" }, { gradeFallFt: 0, gradeFallToward: "left" }) },
   { id: "LV3", label: "Level Slab With Fall", size: "12x16", d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6, porchOutFt: 6, porchSteps: "left" }, siding: "batten", colors: PLAIN, wallHeightFt: 8, foundation: "slab", gradeFallFt: 2, gradeFallToward: "back" } },
   { id: "LV4", label: "Level Farm Blocks", size: "16x10", d3: { roof: FARM_ROOF, siding: "batten", colors: FARM_COLORS, wallHeightFt: 7.3, roofMaterial: "metal", foundation: "blocks", floorHeightFt: 1.1 } },
+  // 12. Corners that make no slope (2026-09-29): all 0, all the same, and corners on a slab.
+  { id: "LV5", label: "Level Corners Zero", size: "16x24", d3: tri({ porchEnd: "back", porchSteps: "center" }, { gradeCornersFt: { fl: 0, fr: 0, bl: 0, br: 0 } }) },
+  { id: "LV6", label: "Level Corners Same", size: "16x24", d3: tri({ porchEnd: "back", porchSteps: "center" }, { gradeCornersFt: { fl: 2, fr: 2, bl: 2, br: 2 } }) },
+  { id: "LV7", label: "Level Slab With Corners", size: "12x16", d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6, porchOutFt: 6, porchSteps: "left" }, siding: "batten", colors: PLAIN, wallHeightFt: 8, foundation: "slab", gradeCornersFt: { fl: 0, br: 3 } } },
 ];
+// ── 11. THE GROUND AT EACH CORNER (2026-09-29): drops in feet below... as typed; the highest is the zero.
+const CORNER_CASES = [
+  // The Tri Home: a back porch with centre steps, a lean-to off the left, a ramp on the east, the ground
+  // lowest at the back-right corner.
+  { id: "C1", label: "Corners Tri Piers", size: "16x24", kind: "piers", wall: "north", leanTo: true, ramp: true, selfCheck: true,
+    d3: tri({ porchEnd: "back", porchSteps: "center" }, { gradeCornersFt: { fl: 0, fr: 0.5, bl: 1.5, br: 3 } }) },
+  // Carolyn's drawing: 0 at one front corner, 2 at the other, the back dropping 18 in and 2 ft.
+  { id: "C2", label: "Corners Carolyn", size: "12x16", kind: "piers", wall: "south", selfCheck: true,
+    d3: tri({ porchEnd: "front", porchSteps: "left", leanToWidthFt: 0 }, { gradeCornersFt: { fl: 0, fr: 2, bl: 1.5, br: 2.5 } }) },
+  // Blocks on an eave-wall porch (the Farmstand), the zero at the FRONT-RIGHT corner, typed off zero.
+  { id: "C3", label: "Corners Farm Blocks", size: "16x10", kind: "blocks", wall: "south",
+    d3: { roof: FARM_ROOF, siding: "batten", colors: FARM_COLORS, wallHeightFt: 7.3, roofMaterial: "metal", foundation: "blocks", floorHeightFt: 1.1, gradeCornersFt: { fl: 2, fr: 1, bl: 3.5, br: 1.5 } } },
+  // The old frame's landscape gable: the "front" porch on the WEST end wall, the ground twisted.
+  { id: "C4", label: "Corners Old Frame", size: "24x12", kind: "piers", wall: "west",
+    d3: { roof: { type: "gable", pitch: 0.4, overhang: 0.6, porchOutFt: 5, porchSteps: "left" }, siding: "panel", colors: PLAIN, wallHeightFt: 8, foundation: "piers", floorHeightFt: 1.5, gradeCornersFt: { fl: 2.5, fr: 0, bl: 1, br: 0.75 } } },
+];
+// ── 10. A STORED FALL, as the designer before the corners drew it.
+const LEGACY = ["K", "Lf", "Bk", "O"];
 
 const configFor = (c) => {
   const [w, l] = c.size.split("x").map(Number);
@@ -270,14 +312,16 @@ async function openCase(ctx, c, ok, tag, bundle) {
 }
 
 // Every node of the model: its world matrix and, on a mesh, its geometry (type, parameters, a hash of
-// every vertex) and material. Two builds with equal digests are the same scene.
-async function digest(page) {
-  return page.evaluate(() => {
+// every vertex) and material. Two builds with equal digests are the same scene. `skipGround` leaves
+// the grass out (10: a fall's grass is a grid now, held to d3GradeAt by 1).
+async function digest(page, skipGround = false) {
+  return page.evaluate((skipGround) => {
     const E = window.__ss3dEngine, M = E.model;
     M.root.updateMatrixWorld(true);
     const r6 = (v) => Math.round(v * 1e6) / 1e6;
     const out = [];
     M.root.traverse((o) => {
+      if (skipGround && o.userData && o.userData.ssGround) return;
       let s = `${o.type}|${o.matrixWorld.elements.map(r6).join(",")}|${o.visible}`;
       if (o.isMesh) {
         const g = o.geometry, pa = g.attributes.position;
@@ -290,7 +334,7 @@ async function digest(page) {
       out.push(s);
     });
     return { lines: out, cam: [...E.camera.position.toArray(), ...E.controls.target.toArray()].map(r6) };
-  });
+  }, skipGround);
 }
 
 // Everything the fall assertions read, in world space, in one pass; `P` is what the pure functions say.
@@ -710,6 +754,148 @@ async function runLevel(ctx, c, ok, base, shots) {
   }
 }
 
+// ── 10. A STORED FALL RENDERS AS IT DID ──
+// The designer at SS_FALL_BASE (default 5fb622a, the commit before the corners): its compiled component.
+function fallBaseBundle() {
+  const rev = process.env.SS_FALL_BASE || "5fb622a";
+  try {
+    return { rev, js: execFileSync("git", ["-C", REPO, "show", `${rev}:structure-studio.component.compiled.js`], { maxBuffer: 64 * 1024 * 1024 }).toString("utf8") };
+  } catch (_e) {
+    return { rev, js: null };
+  }
+}
+async function runLegacy(ctx, c, ok, base) {
+  const tag = `${c.id} ${c.label} ${c.size} (a stored fall, against ${base.rev})`;
+  const pages = [];
+  try {
+    const now = await openCase(ctx, c, ok, tag, null);
+    pages.push(now.page);
+    const a = await digest(now.page, true);
+    const then = await openCase(ctx, c, ok, `${tag} (${base.rev})`, base.js);
+    pages.push(then.page);
+    const b = await digest(then.page, true);
+    const marks = await Promise.all([now.page, then.page].map((pg) => pg.evaluate(() => ("gradeCorners" in window.__ss3dEngine.model ? window.__ss3dEngine.model.gradeCorners : "absent"))));
+    ok(`${tag}: this build reads the fall as corners, the ${base.rev} designer has no such field (it really is the old bundle)`,
+      marks[0] && typeof marks[0] === "object" && marks[1] === "absent", JSON.stringify(marks));
+    const i = a.lines.findIndex((l, k) => l !== b.lines[k]);
+    ok(`${tag}: ⚠️ EVERY NODE BUT THE GRASS IS ${base.rev}'S (${a.lines.length} nodes: supports, deck, steps, posts, ramp, shade, labels)`,
+      a.lines.length === b.lines.length && i < 0, i >= 0 ? `node ${i}: now ${a.lines[i] && a.lines[i].slice(0, 160)} | then ${b.lines[i] && b.lines[i].slice(0, 160)}` : `${a.lines.length} vs ${b.lines.length}`);
+    ok(`${tag}: ...and the camera and its target`, JSON.stringify(a.cam) === JSON.stringify(b.cam), `${JSON.stringify(a.cam)} vs ${JSON.stringify(b.cam)}`);
+    ok(`${tag}: zero page errors`, now.errors.length === 0 && then.errors.length === 0, [...now.errors, ...then.errors].slice(0, 3).join(" | "));
+  } catch (e) {
+    ok(`${tag}: ran`, false, e && e.message ? e.message.split("\n")[0] : String(e));
+  } finally {
+    for (const p of pages) await p.close();
+  }
+}
+
+// ── 11. THE GROUND AT EACH CORNER ──
+async function runCornerCase(ctx, c, ok, shots) {
+  const gc = c.d3.gradeCornersFt;
+  const tag = `${c.id} ${c.label} ${c.size} (corners ${gc.fl}/${gc.fr}/${gc.bl}/${gc.br})`;
+  let page = null;
+  try {
+    const o = await openCase(ctx, c, ok, tag, null);
+    page = o.page;
+    const { W, L, errors } = o;
+    const m = await measure(page, W, L);
+    const want = PURE.d3GradeCorners(c.d3);
+    const g = c.d3.floorHeightFt;
+    const deepCorner = Object.entries(want).reduce((a, e) => (e[1] > a[1] ? e : a));
+    const zeroCorner = Object.entries(want).find((e) => e[1] === 0);
+    const cornerXZ = { fl: [-W / 2, L / 2], fr: [W / 2, L / 2], bl: [-W / 2, -L / 2], br: [W / 2, -L / 2] };
+    const depth = (x, z) => PURE.d3GradeAt(c.d3, W, L, x, z);
+    // ── the model and the grass ──
+    const mc = await page.evaluate(() => ({ gc: window.__ss3dEngine.model.gradeCorners, gf: window.__ss3dEngine.model.gradeFall }));
+    ok(`${tag}: model.gradeCorners is d3GradeCorners, the highest (${zeroCorner[0]}) the zero; no fall`,
+      mc.gc && ["fl", "fr", "bl", "br"].every((k) => near(mc.gc[k], want[k], 1e-12)) && mc.gf === null && near(m.grade, g, 1e-9), JSON.stringify(mc));
+    ok(`${tag}: the grass is bent (not the level disc), every face under and round the building looking up`,
+      m.groundType !== "CircleGeometry" && m.upFaces > 50 && m.downFaces === 0, `${m.groundType} up ${m.upFaces} down ${m.downFaces}`);
+    const pts = [];
+    for (let x = -W / 2 - 6; x <= W / 2 + 6; x += 0.75) for (let z = -L / 2 - 6; z <= L / 2 + 6; z += 0.8) pts.push([x, z]);
+    for (const k of Object.keys(cornerXZ)) pts.push(cornerXZ[k]);
+    const grass = await grassUnder(page, pts);
+    const gBad = pts.map((p, i) => ({ p, y: grass[i], want: -depth(p[0], p[1]) })).filter((q) => !near(q.y, q.want, 0.01));
+    ok(`${tag}: ⚠️ THE DRAWN GRASS IS d3GradeAt'S FOUR-CORNER SURFACE, over and 6 ft round the footprint (${pts.length} points, within 0.01 ft)`,
+      gBad.length === 0, gBad.slice(0, 3).map((q) => `(${f3(q.p[0])},${f3(q.p[1])}) ${f3(q.y)} want ${f3(q.want)}`).join(" | "));
+    const atCorner = Object.fromEntries(Object.entries(cornerXZ).map(([k, p], i) => [k, grass[pts.length - 4 + i]]));
+    ok(`${tag}: each corner's grass is the floor height plus its drop below the highest`,
+      Object.keys(cornerXZ).every((k) => near(atCorner[k], -(g + want[k]), 0.005)), JSON.stringify(Object.fromEntries(Object.entries(atCorner).map(([k, v]) => [k, f3(v)]))));
+    // ── the supports ──
+    const S = m.supports;
+    const foot = c.kind === "piers" ? () => [0.5, 0.5] : (t) => [t.hx, t.hz];
+    const expectBottom = (t) => { const [hx, hz] = foot(t); return -Math.max(depth(t.cx - hx, t.cz - hz), depth(t.cx + hx, t.cz - hz), depth(t.cx - hx, t.cz + hz), depth(t.cx + hx, t.cz + hz)); };
+    const footBad = S.filter((t) => !(near(t.bottom, expectBottom(t), 0.003) && near(t.bottom, t.grassLow, 0.015) && t.bottom <= t.grassC + 0.015));
+    ok(`${tag}: ⚠️ EVERY SUPPORT'S FOOT IS ON THE DRAWN GRASS AT ITS OWN SPOT: the ground under its lowest edge (${S.length})`,
+      S.length >= 4 && footBad.length === 0, footBad.slice(0, 3).map((t) => `(${f3(t.cx)},${f3(t.cz)}) foot ${f3(t.bottom)} want ${f3(expectBottom(t))} grass ${f3(t.grassLow)}`).join(" | "));
+    ok(`${tag}: every support tops out at the runners' underside`, S.every((t) => near(t.top, m.runnerBottom, 0.002)), f3(m.runnerBottom));
+    const hOf = (t) => t.top - t.bottom;
+    const nearest = (k) => S.reduce((a, t) => (Math.hypot(t.cx - cornerXZ[k][0], t.cz - cornerXZ[k][1]) < Math.hypot(a.cx - cornerXZ[k][0], a.cz - cornerXZ[k][1]) ? t : a));
+    const tallest = Math.max(...S.map(hOf)), shortest = Math.min(...S.map(hOf));
+    const deepT = nearest(deepCorner[0]), zeroT = nearest(zeroCorner[0]);
+    ok(`${tag}: ⚠️ THE SUPPORTS AT THE DEEPEST CORNER (${deepCorner[0]}, ${deepCorner[1]} ft down) ARE THE TALLEST (${f3(hOf(deepT))} ft), AT THE ZERO CORNER THE SHORTEST (${f3(hOf(zeroT))} ft)`,
+      near(hOf(deepT), tallest, 0.005) && near(hOf(zeroT), shortest, 0.005) && hOf(deepT) - hOf(zeroT) > deepCorner[1] * 0.6, `tallest ${f3(tallest)} shortest ${f3(shortest)}`);
+    if (c.kind === "blocks") {
+      const sup = m.foundation.supports || [];
+      ok(`${tag}: block stacks a course per 8 in of their own height, recorded per support`,
+        sup.length === S.length && S.every((t) => (t.n === 1 ? hOf(t) < 1 + 1e-6 : Math.abs(hOf(t) / (8 / 12) - t.n) <= 0.5 + 1e-6)) && new Set(S.map((t) => t.n)).size >= 2,
+        S.map((t) => `${t.n}@${f3(hOf(t))}`).join(" "));
+    }
+    // ── the porch, the lean-to, the ramp ──
+    if (c.wall) {
+      const DS = m.deckSupports;
+      const dBad = DS.filter((t) => !(near(t.bottom, t.grassLow, 0.015) && t.bottom <= t.grassC + 0.015 && near(t.top, m.rimBottom, 0.002)));
+      ok(`${tag}: ⚠️ THE DECK'S SUPPORTS REACH THE DRAWN GRASS AT THEIR OWN SPOT, FROM THE RIM (${DS.length})`, DS.length >= 2 && dBad.length === 0,
+        dBad.slice(0, 3).map((t) => `(${f3(t.cx)},${f3(t.cz)}) ${f3(t.bottom)}..${f3(t.top)} grass ${f3(t.grassLow)}`).join(" | "));
+      const st = m.steps[0];
+      const rd = PURE.d3PorchReadout(c.d3, c.size);
+      const count = st ? st.treads : 0, h = st ? -st.bottom : NaN, rise = h / (count + 1);
+      ok(`${tag}: ⚠️ THE STEPS' FOOT IS ON THE GRASS: at the lowest grass under the flight`,
+        st && near(st.bottom, st.grassMin, 0.015) && st.bottom <= st.grassMax + 0.015, st && `foot ${f3(st.bottom)} grass ${f3(st.grassMin)}..${f3(st.grassMax)}`);
+      ok(`${tag}: ${count} steps, risers of ${f3(rise * 12)} in (7.5 in or less), the panel's readout counting the same`,
+        st && count >= 1 && rise <= 7.5 / 12 + 1e-9 && rd && rd.steps && rd.steps.count === count && near(-rd.steps.grade, h, 0.02), rd && rd.steps && `${rd.steps.count} at ${f3(-rd.steps.grade)}`);
+    }
+    if (c.leanTo) {
+      const lp = m.leanPosts;
+      ok(`${tag}: ⚠️ THE LEAN-TO'S POSTS STAND ON THE DRAWN GRASS AT THEIR OWN FOOT (${lp.length})`, lp.length >= 2 && lp.every((q) => near(q.bottom, q.grassLow, 0.015) && q.bottom <= q.grassC + 0.015),
+        lp.map((q) => `${f3(q.bottom)}/${f3(q.grassLow)}`).join(" "));
+    }
+    if (c.ramp) {
+      const r = m.ramps.find((q) => q.wall === "east");
+      ok(`${tag}: ⚠️ THE RAMP RUNS FROM THE FLOOR TO THE DRAWN GRASS AT ITS FOOT`, r && near(r.bottom, r.grassFar, 0.08) && r.top <= 0.13, r && `${f3(r.bottom)} grass ${f3(r.grassFar)}`);
+      ok(`${tag}: ...1 in 4 or gentler`, r && r.out >= Math.max(3, 4 * -r.grassFar) - 0.15, r && f3(r.out));
+    }
+    // ── sheets on the grass ──
+    ok(`${tag}: the shade under the building${c.wall ? " and the deck" : ""} lies 0.02 over the grass everywhere`,
+      m.shades.length === (c.wall ? 2 : 1) && m.shades.every((s) => s.n > 4 && s.min >= 0.01 && s.max <= 0.03), m.shades.map((s) => `${f3(s.min)}..${f3(s.max)}`).join(" "));
+    ok(`${tag}: the ground labels lie on it`, m.labels.length >= 2 && m.labels.every((s) => s.n > 4 && s.min >= 0.028 && s.max <= 0.052), m.labels.map((s) => `${f3(s.min)}..${f3(s.max)}`).join(" "));
+    // ── the camera ──
+    const maxLift = PURE.d3GradeLiftFt(c.d3), fH = PURE.d3FrameHeightFt(c.d3, W, L);
+    ok(`${tag}: d3GradeLiftFt frames from the deepest corner (${f3(maxLift)} = ${g} + ${deepCorner[1]} - 0.35)`, near(maxLift, g + deepCorner[1] - 0.35, 1e-9));
+    ok(`${tag}: the orbit target comes down with it`, near(m.target[1], fH * 0.45 - maxLift, 1e-6), f3(m.target[1]));
+    const inNdc = (p) => Math.abs(p[0]) <= 1 && Math.abs(p[1]) <= 1 && p[2] < 1;
+    ok(`${tag}: the 3D editor frames every support's foot`, m.framed.every(inNdc), m.framed.filter((p) => !inNdc(p)).slice(0, 3).map((p) => p.map(f3).join(",")).join(" | "));
+    if (c.selfCheck) {
+      const wantEye = SELF.SS_SHOT.EYE_FT + SELF.D3.FLOOR_T;
+      const cams = SELF.ssSelfCheckCameras({ bldgW: W, bldgH: L, style3d: c.d3 }, WALK_MAP).filter((q) => q.viewpoint !== "eaveCorner");
+      const gu = await grassUnder(page, cams.map((q) => [q.eye[0], q.eye[2]]));
+      const gaps = cams.map((q, i) => ({ v: q.viewpoint, gap: q.eye[1] - gu[i] }));
+      ok(`${tag}: ⚠️ THE SELF-CHECK'S PHONE STANDS ON THE GRASS: every walk view's eye ${f3(wantEye)} ft over the drawn grass under it`,
+        cams.length === 5 && gaps.every((q) => near(q.gap, wantEye, 0.01)), gaps.map((q) => `${q.v} ${f3(q.gap)}`).join(" "));
+    }
+    if (shots) {
+      const R = Math.max(W, L), [dx, dz] = cornerXZ[deepCorner[0]], n = Math.hypot(dx, dz);
+      const lift = g + deepCorner[1] / 2;
+      await aim(page, join(shots, `${c.id}-corners-deep.png`), [(dx / n) * R * 1.9, 6 - lift, (dz / n) * R * 1.9], [0, 1.2 - lift, 0]);
+    }
+    ok(`${tag}: zero page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  } catch (e) {
+    ok(`${tag}: ran`, false, e && e.message ? e.message.split("\n")[0] : String(e));
+  } finally {
+    if (page) await page.close();
+  }
+}
+
 // ── 8. THE PANEL ────────────────────────────────────────────────────────────────────────────
 const PANEL_STYLES = [
   { value: "cabin", label: "Harness Fall Cabin", d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.8 }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
@@ -735,10 +921,9 @@ async function runPanel(ctx, ok, shots) {
   await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
   const calls = await stubSupabase(page, { config: PANEL_CONFIG, fixtures: { ramp: FIXTURES.ramp, items: [], windowColors: [] } });
   const has = (o, k) => !!o && Object.prototype.hasOwnProperty.call(o, k);
-  // THE PANEL SENDS BOTH FALL KEYS ON EVERY SAVE, null when there is none (review BC-1, 2026-09-29).
-  // The server carries a stored fall over any save that OMITS the keys (a designer built between
-  // 09-25 and 09-28 sends frame "front" and drops them), so this panel's "no fall" is an explicit
-  // null, which the sanitiser drops and never stores.
+  // THE PANEL SENDS THE FALL'S KEYS AND THE CORNERS ON EVERY SAVE, null when there is none (review BC-1,
+  // 2026-09-29, extended to gradeCornersFt). The server carries a stored value over any save that OMITS
+  // the key, so this panel's "level ground" is an explicit null, which the sanitiser drops.
   const sentNull = (o, k) => has(o, k) && o[k] === null;
   const saves = () => calls.filter((c) => c.path && c.path.endsWith("/functions/v1/admin-save-settings") && c.body && c.body.action === "save_style_d3");
   const save = async () => {
@@ -753,14 +938,19 @@ async function runPanel(ctx, ok, shots) {
     return saves()[saves().length - 1].body;
   };
   const select = () => page.locator('select[data-ss-foundation="ss-grid"]');
-  const fallBox = () => page.locator('input[data-ss-grade-fall="ss-grid"]');
-  const toward = () => page.locator('select[data-ss-grade-fall-toward="ss-grid"]');
-  const typeFall = async (v) => {
-    await fallBox().click();
-    await fallBox().fill(String(v));
+  const group = () => page.locator('[data-ss-grade-corners="ss-grid"]');
+  const box = (k) => group().locator(`input[data-ss-grade-corner="${k}"]`);
+  const say = async (k) => (await group().locator(`[data-ss-grade-corner-say="${k}"]`).innerText()).replace(/\s+/g, " ").trim();
+  const says = async () => { const o = {}; for (const k of ["fl", "fr", "bl", "br"]) o[k] = await say(k); return o; };
+  const values = async () => { const o = {}; for (const k of ["fl", "fr", "bl", "br"]) o[k] = await box(k).inputValue(); return o; };
+  const levelBtn = () => page.locator('button[data-ss-grade-level="ss-grid"]');
+  const typeCorner = async (k, v) => {
+    await box(k).click();
+    await box(k).fill(String(v));
     await page.keyboard.press("Tab");
     await settle(page, 300);
   };
+  const fhText = async () => (await page.locator('input[data-ss-floor-height="ss-grid"]').locator("xpath=..").innerText()).replace(/\s+/g, " ");
   const openStyle = async (label) => {
     const btn = page.getByRole("button", { name: label, exact: true });
     await btn.first().waitFor({ state: "visible", timeout: 30000 });
@@ -768,90 +958,96 @@ async function runPanel(ctx, ok, shots) {
     await select().waitFor({ state: "visible", timeout: 15000 });
     await settle(page, 400);
   };
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   try {
     await page.goto(`${BASE}/?client=${encodeURIComponent(PANEL_CONFIG.clientId)}&admin=1`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function", null, { timeout: 60000 });
     await page.getByText("3D Style Calibration").first().waitFor({ state: "visible", timeout: 30000 });
     await page.getByPlaceholder("Admin password").fill("harness");
     await openStyle("Harness Fall Cabin");
-    const fhLevel = (await page.locator('input[data-ss-floor-height="ss-grid"]').locator("xpath=..").innerText()).replace(/\s+/g, " ");
+    const fhLevel = await fhText();
     ok("panel: level ground keeps the height box's hint it always had", fhLevel.includes("Ground to the top of the floor where the door or porch is. A door is 6 ft 8 in tall"), fhLevel);
     ok("panel: ...its ramp sentence and number too (4 x the 1.5 ft floor)",
       fhLevel.includes("Blank draws 1 ft 6 in. Porch steps climb the whole height, and a ramp a customer adds is drawn 6 ft long so it reaches the ground.") && !fhLevel.includes("4 ft for every foot"), fhLevel);
-    ok("panel: piers show 'Ground falls away (ft)', blank = level, and no 'Toward' without a fall",
-      (await fallBox().count()) === 1 && (await fallBox().inputValue()) === "" && (await fallBox().getAttribute("placeholder")) === "blank = level" && (await toward().count()) === 0);
-    const label = (await fallBox().locator("xpath=..").innerText()).replace(/\s+/g, " ").trim();
-    ok("panel: ...labelled in plain words", /^Ground falls away \(ft\)/.test(label), label);
+    ok("panel: ...and its label says at the front", /^Floor height off the ground, at the front \(ft\)/.test(fhLevel), fhLevel.slice(0, 60));
+    const gText = (await group().innerText()).replace(/\s+/g, " ").trim();
+    ok("panel: piers show 'Ground at each corner (ft lower)', four blank boxes (placeholder 0), each reading 'level', no 'Level ground' button",
+      (await group().count()) === 1 && /^Ground at each corner \(ft lower\)/.test(gText) && same(await values(), { fl: "", fr: "", bl: "", br: "" })
+      && (await box("fl").getAttribute("placeholder")) === "0" && same(await says(), { fl: "level", fr: "level", bl: "level", br: "level" }) && (await levelBtn().count()) === 0, gText);
+    ok("panel: ...in plain words: 0 is the highest corner, the floor height measured there, the directions the 3D Views'",
+      gText.includes("0 is the highest corner. Floor height is measured there. The piers stand taller where the ground is lower. Front, back, left and right are the sides the 3D's Views menu calls F, B, L and R."), gText);
+    ok("panel: ...and the fall's two boxes are gone", (await page.locator("[data-ss-grade-fall],[data-ss-grade-fall-toward]").count()) === 0);
     let body = await save();
-    ok("panel: ⚠️ AN UNTOUCHED LEVEL STYLE SAVES NO FALL: both keys sent as an explicit null, nothing else", sentNull(body.d3, "gradeFallFt") && sentNull(body.d3, "gradeFallToward") && body.d3.foundation === "piers" && body.d3.floorHeightFt === 1.5,
-      JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
-    await typeFall(2);
-    ok("panel: a typed fall shows 'Toward', on Back", (await toward().count()) === 1 && (await toward().inputValue()) === "back");
-    const opts = await toward().locator("option").evaluateAll((os) => os.map((o) => o.textContent));
-    ok("panel: ...offering Back, Left and Right", JSON.stringify(opts) === JSON.stringify(["Back", "Left", "Right"]), JSON.stringify(opts));
-    const hint = (await toward().locator("xpath=..").innerText()).replace(/\s+/g, " ");
-    ok("panel: ...with the hint: floor height at the front, the far side's piers this much taller",
-      hint.includes("Floor height is measured at the front. The far side's piers stand this much taller."), hint);
-    // Review, 2026-09-29 (UX7): the directions are the building's, the 3D Views menu's, for every
-    // direction; with no porch there is no porch to mention.
-    ok("panel: ...and which sides front, back, left and right are: the 3D's Views (no porch here)",
-      hint.includes("stand this much taller. Front, back, left and right are the sides the 3D's Views menu calls F, B, L and R.") && !hint.includes("wherever the porch is") && !hint.includes("as you face the front"), hint);
-    const fhBack = (await page.locator('input[data-ss-floor-height="ss-grid"]').locator("xpath=..").innerText()).replace(/\s+/g, " ");
-    ok("panel: ...and the height box's hint: at the front, where the ground is highest", fhBack.includes("Ground to the top of the floor at the front, where the ground is highest."), fhBack);
-    // Review, 2026-09-29 (UX3, F2): with a fall the steps and a ramp reach the ground where they stand,
-    // so the level sentence's one length ("drawn 6 ft long") is no longer promised.
-    ok("panel: ⚠️ ...WITH A FALL IT NO LONGER PROMISES ONE RAMP LENGTH: the ramp's rule instead",
-      fhBack.includes("Blank draws 1 ft 6 in. Porch steps and any ramp a customer adds reach down to the ground where they stand, so on the low side they are taller and longer: a ramp runs 4 ft for every foot it drops.")
-      && !fhBack.includes("drawn 6 ft long") && !fhBack.includes("climb the whole height"), fhBack);
+    ok("panel: ⚠️ AN UNTOUCHED LEVEL STYLE SAVES NO SLOPE: gradeCornersFt and both fall keys sent as an explicit null",
+      sentNull(body.d3, "gradeCornersFt") && sentNull(body.d3, "gradeFallFt") && sentNull(body.d3, "gradeFallToward") && body.d3.foundation === "piers" && body.d3.floorHeightFt === 1.5,
+      JSON.stringify({ c: body.d3.gradeCornersFt, f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
+    await typeCorner("fr", 2);
+    ok("panel: a typed front-right 2 reads '2 ft lower' there and 'highest' at the other three",
+      same(await says(), { fl: "highest", fr: "2 ft lower", bl: "highest", br: "highest" }), JSON.stringify(await says()));
+    const fhSlope = await fhText();
+    ok("panel: ...the height box now says it is taken at the highest corner", /^Floor height off the ground, at the highest corner \(ft\)/.test(fhSlope)
+      && fhSlope.includes("Ground to the top of the floor at the highest corner, the one that reads “highest” below.") && !fhSlope.includes("where the door or porch is"), fhSlope);
+    ok("panel: ⚠️ ...and no longer promises one ramp length: the ramp's rule instead",
+      fhSlope.includes("a ramp runs 4 ft for every foot it drops.") && !fhSlope.includes("drawn 6 ft long"), fhSlope);
+    ok("panel: ...and a 'Level ground' button appears", (await levelBtn().count()) === 1);
     body = await save();
-    ok("panel: a typed 2 saves gradeFallFt 2 and no direction (null; back is what absent draws)", body.d3.gradeFallFt === 2 && sentNull(body.d3, "gradeFallToward"), JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
-    await toward().selectOption("left");
-    await settle(page);
-    const hintL = (await toward().locator("xpath=..").innerText()).replace(/\s+/g, " ");
-    ok("panel: Left says the floor height is taken on the right side and the left side's piers grow",
-      hintL.includes("Floor height is measured on the right side. The left side's piers stand this much taller."), hintL);
-    const fhLabel = (await page.locator('input[data-ss-floor-height="ss-grid"]').locator("xpath=..").innerText()).replace(/\s+/g, " ");
-    ok("panel: ...and the floor height box says on the right side", /^Floor height off the ground, on the right side \(ft\)/.test(fhLabel), fhLabel.slice(0, 60));
-    ok("panel: ...its hint says the height is taken there, where the ground is highest (not 'where the door or porch is')",
-      fhLabel.includes("Ground to the top of the floor on the right side, where the ground is highest.") && !fhLabel.includes("where the door or porch is"), fhLabel);
-    ok("panel: ...and Toward says which way left is: the 3D's Views", hintL.includes("Front, back, left and right are the sides the 3D's Views menu calls F, B, L and R."), hintL);
+    ok("panel: ⚠️ it saves all four corners, and the fall keys as null", same(body.d3.gradeCornersFt, { fl: 0, fr: 2, bl: 0, br: 0 }) && sentNull(body.d3, "gradeFallFt") && sentNull(body.d3, "gradeFallToward"),
+      JSON.stringify(body.d3.gradeCornersFt));
+    await typeCorner("bl", 1.5);
+    await typeCorner("br", 2.5);
+    ok("panel: back-left 1.5 and back-right 2.5 read '1 ft 6 in lower' and '2 ft 6 in lower'",
+      same(await says(), { fl: "highest", fr: "2 ft lower", bl: "1 ft 6 in lower", br: "2 ft 6 in lower" }), JSON.stringify(await says()));
     body = await save();
-    ok("panel: Left saves gradeFallToward \"left\"", body.d3.gradeFallFt === 2 && body.d3.gradeFallToward === "left", JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
-    await typeFall(9);
+    ok("panel: ...and save as typed", same(body.d3.gradeCornersFt, { fl: 0, fr: 2, bl: 1.5, br: 2.5 }), JSON.stringify(body.d3.gradeCornersFt));
+    await typeCorner("fl", 9);
+    ok("panel: past the band a corner is held at 6; the highest (zero) corner moves to back-left; under a foot is said in inches",
+      same(await says(), { fl: "4 ft 6 in lower", fr: "6 in lower", bl: "highest", br: "1 ft lower" }), JSON.stringify(await says()));
     body = await save();
-    ok("panel: past the band it saves at the top, 6", body.d3.gradeFallFt === 6, String(body.d3.gradeFallFt));
-    await typeFall("");
-    ok("panel: a cleared box hides 'Toward'", (await toward().count()) === 0);
+    ok("panel: ...saved at 6", body.d3.gradeCornersFt && body.d3.gradeCornersFt.fl === 6, JSON.stringify(body.d3.gradeCornersFt));
+    await typeCorner("fl", "");
     body = await save();
-    ok("panel: ⚠️ A CLEARED BOX SENDS gradeFallFt null, an explicit clear (the direction is remembered, as the sanitiser does)", sentNull(body.d3, "gradeFallFt") && body.d3.gradeFallToward === "left", JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
-    await typeFall(0);
+    ok("panel: a cleared box is 0 there", same(body.d3.gradeCornersFt, { fl: 0, fr: 2, bl: 1.5, br: 2.5 }), JSON.stringify(body.d3.gradeCornersFt));
+    if (shots) await group().screenshot({ path: join(shots, "panel-corners.png") }).catch(() => {});
+    await levelBtn().click();
+    await settle(page, 300);
+    ok("panel: 'Level ground' empties every box and they read 'level'",
+      same(await values(), { fl: "", fr: "", bl: "", br: "" }) && same(await says(), { fl: "level", fr: "level", bl: "level", br: "level" }) && (await levelBtn().count()) === 0);
     body = await save();
-    ok("panel: 0 is level too: gradeFallFt null", sentNull(body.d3, "gradeFallFt"), String(body.d3.gradeFallFt));
-    await typeFall(1.5);
+    ok("panel: ⚠️ ...AND SENDS gradeCornersFt null, an explicit clear", sentNull(body.d3, "gradeCornersFt") && sentNull(body.d3, "gradeFallFt"), JSON.stringify(body.d3.gradeCornersFt));
+    await typeCorner("br", 1);
+    // As a builder does it: a click on the select (which leaves the box it was in), then the pick.
+    await select().focus();
     await select().selectOption("skids");
     await settle(page);
-    ok("panel: skids hides the fall box", (await fallBox().count()) === 0 && (await toward().count()) === 0);
+    ok("panel: skids hides the corners", (await group().count()) === 0);
     body = await save();
-    ok("panel: ⚠️ LEAVING PIERS CLEARS BOTH FALL KEYS (sent as null)", body.d3.foundation === "skids" && sentNull(body.d3, "gradeFallFt") && sentNull(body.d3, "gradeFallToward"), JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
+    ok("panel: ⚠️ LEAVING PIERS CLEARS THE CORNERS (sent as null)", body.d3.foundation === "skids" && sentNull(body.d3, "gradeCornersFt") && sentNull(body.d3, "gradeFallFt"), JSON.stringify(body.d3.gradeCornersFt));
 
+    // A style storing a FALL (2 ft toward the left): it opens as corners, saves the fall back untouched,
+    // and an edited corner saves corners in its place.
     await openStyle("Harness Fall Tri");
-    ok("panel: a style storing a fall opens with it: 2 ft, toward Left", (await fallBox().inputValue()) === "2" && (await toward().inputValue()) === "left");
+    ok("panel: a style storing a 2 ft fall to the left opens with it as corners: both left corners 2",
+      same(await values(), { fl: "2", fr: "", bl: "2", br: "" }) && same(await says(), { fl: "2 ft lower", fr: "highest", bl: "2 ft lower", br: "highest" }), JSON.stringify(await values()));
     body = await save();
-    ok("panel: ⚠️ ...AND SAVES IT BACK EXACTLY", body.d3.gradeFallFt === 2 && body.d3.gradeFallToward === "left" && body.frame === "front", JSON.stringify({ f: body.d3.gradeFallFt, t: body.d3.gradeFallToward, frame: body.frame }));
+    ok("panel: ⚠️ ...AND SAVES THE FALL BACK EXACTLY, untouched, with no corners",
+      body.d3.gradeFallFt === 2 && body.d3.gradeFallToward === "left" && sentNull(body.d3, "gradeCornersFt") && body.frame === "front",
+      JSON.stringify({ c: body.d3.gradeCornersFt, f: body.d3.gradeFallFt, t: body.d3.gradeFallToward, frame: body.frame }));
+    await typeCorner("br", 0.5);
+    body = await save();
+    ok("panel: ⚠️ editing a corner of it writes the four corners and drops the fall",
+      same(body.d3.gradeCornersFt, { fl: 2, fr: 0, bl: 2, br: 0.5 }) && sentNull(body.d3, "gradeFallFt") && sentNull(body.d3, "gradeFallToward"),
+      JSON.stringify({ c: body.d3.gradeCornersFt, f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
     if (shots) await select().locator("xpath=../..").screenshot({ path: join(shots, "panel-fields.png") }).catch(() => {});
-    // The preview draws the DRAFT: a typed 3 ft fall.
-    await typeFall(3);
+    // The preview draws the DRAFT: these corners, not the stored fall.
     await page.getByRole("button", { name: /Preview in 3D/ }).first().click();
-    await page.waitForFunction(() => { const E = window.__ss3dEngine; return !!(E && E.model && E.model.gradeFall && E.model.gradeFall.fallFt > 2.9); }, null, { timeout: 60000 });
+    await page.waitForFunction(() => { const E = window.__ss3dEngine; return !!(E && E.model && E.model.gradeCorners && E.model.gradeCorners.br === 0.5); }, null, { timeout: 60000 });
     await settle(page, 800);
-    const pv = await page.evaluate(() => { const E = window.__ss3dEngine; return { grade: E.model.grade, fall: E.model.gradeFall, target: E.controls.target.y }; });
-    const spec3 = { ...PANEL_STYLES[1].d3, gradeFallFt: 3 };
-    ok("panel: the 3D preview draws the typed fall, its orbit target down by the deepest ground",
-      Math.abs(pv.grade - 1.5) < 1e-9 && pv.fall && pv.fall.fallFt === 3 && pv.fall.toward === "left"
-      && Math.abs(pv.target - (PURE.d3FrameHeightFt(spec3, 16, 24) * 0.45 - PURE.d3GradeLiftFt(spec3))) < 1e-6, JSON.stringify(pv));
-    if (shots) {
-      await cornerShot(page, join(shots, "panel-preview-left.png"), 16, 24, "left", 1.5 + 1.5);
-    }
+    const specNow = { ...PANEL_STYLES[1].d3, gradeFallFt: undefined, gradeFallToward: undefined, gradeCornersFt: { fl: 2, fr: 0, bl: 2, br: 0.5 } };
+    const pv = await page.evaluate(() => { const E = window.__ss3dEngine; return { grade: E.model.grade, gc: E.model.gradeCorners, fall: E.model.gradeFall, target: E.controls.target.y }; });
+    ok("panel: the 3D preview draws the typed corners, not the fall, its orbit target down by the deepest one",
+      Math.abs(pv.grade - 1.5) < 1e-9 && same(pv.gc, { fl: 2, fr: 0, bl: 2, br: 0.5 }) && pv.fall === null
+      && Math.abs(pv.target - (PURE.d3FrameHeightFt(specNow, 16, 24) * 0.45 - PURE.d3GradeLiftFt(specNow))) < 1e-6, JSON.stringify(pv));
+    if (shots) await cornerShot(page, join(shots, "panel-preview-corners.png"), 16, 24, "left", 1.5 + 1);
     ok("panel: zero page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
   } catch (e) {
     ok("panel: ran to the end", false, e && e.message ? e.message.split("\n")[0] : String(e));
@@ -885,8 +1081,10 @@ async function runPanelSteps(ctx, ok, shots) {
   };
   const count = () => page.locator('input[data-ss-step-count="ss-grid"]');
   const rise = async () => (await page.locator('div[data-ss-step-rise="ss-grid"]').innerText()).replace(/\s+/g, " ").trim();
-  const fallBox = () => page.locator('input[data-ss-grade-fall="ss-grid"]');
+  // The fall to the back is typed as its two back corners (2026-09-29: a box per corner).
+  const cornerBox = (k) => page.locator(`[data-ss-grade-corners="ss-grid"] input[data-ss-grade-corner="${k}"]`);
   const fill = async (loc, v) => { await loc.click(); await loc.fill(String(v)); await page.keyboard.press("Tab"); await settle(page, 300); };
+  const fallBack = async (v) => { await fill(cornerBox("bl"), v); await fill(cornerBox("br"), v); };
   const spec = PANEL_STYLES.find((s) => s.value === "porch").d3;
   // The count the drawn flight has with the box blank, from the designer's own readout at the style's size.
   const drawnAt = (fall) => PURE.d3PorchReadout({ ...spec, gradeFallFt: fall }, "16x24").steps.count;
@@ -909,15 +1107,15 @@ async function runPanelSteps(ctx, ok, shots) {
     const fh = (await page.locator('input[data-ss-floor-height="ss-grid"]').locator("xpath=..").innerText()).replace(/\s+/g, " ");
     ok(`${tag}: the height box's hint gives the ramp's rule over the fall, not one length`,
       fh.includes("a ramp runs 4 ft for every foot it drops.") && !fh.includes("drawn 6 ft long"), fh);
-    const note = (await page.locator('select[data-ss-grade-fall-toward="ss-grid"]').locator("xpath=..").innerText()).replace(/\s+/g, " ");
-    ok(`${tag}: Toward says the directions are the 3D Views', wherever the porch is`,
+    const note = (await page.locator('[data-ss-grade-corners="ss-grid"]').innerText()).replace(/\s+/g, " ");
+    ok(`${tag}: the corners say the directions are the 3D Views', wherever the porch is`,
       note.includes("Front, back, left and right are the sides the 3D's Views menu calls F, B, L and R, wherever the porch is."), note);
     if (shots) await count().locator("xpath=../..").screenshot({ path: join(shots, "panel-steps-fall2.png") }).catch(() => {});
     let body = await save();
     ok(`${tag}: ⚠️ SAVED UNTOUCHED, NO COUNT IS SENT (the placeholder is only words)`, !has(body.d3.roof, "porchStepCount") && body.d3.gradeFallFt === 2, JSON.stringify(body.d3.roof));
 
     // The sanitiser's steepest fall: blank draws 13, past the 12 a typed count may be.
-    await fill(fallBox(), 6);
+    await fallBack(6);
     ok(`${tag}: a 6 ft fall: "blank = 13", the drawn count`, drawnAt(6) === 13 && (await count().getAttribute("placeholder")) === "blank = 13", await count().getAttribute("placeholder"));
     r = await rise();
     ok(`${tag}: ⚠️ ...AND THE HINT SAYS BLANK DRAWS 13 WHILE A TYPED COUNT STOPS AT 12`,
@@ -936,19 +1134,19 @@ async function runPanelSteps(ctx, ok, shots) {
     ok(`${tag}: ⚠️ ...AND THE KEY IS DELETED`, !has(body.d3.roof, "porchStepCount"), JSON.stringify(body.d3.roof));
 
     // Back to 2 ft; the 3D preview draws the placeholder's number.
-    await fill(fallBox(), 2);
+    await fallBack(2);
     const ph = await count().getAttribute("placeholder");
     await page.getByRole("button", { name: /Preview in 3D/ }).first().click();
-    await page.waitForFunction(() => { const E = window.__ss3dEngine; return !!(E && E.model && E.model.porch && E.model.porch.steps && E.model.gradeFall); }, null, { timeout: 90000 });
+    await page.waitForFunction(() => { const E = window.__ss3dEngine; return !!(E && E.model && E.model.porch && E.model.porch.steps && E.model.gradeCorners); }, null, { timeout: 90000 });
     await settle(page, 800);
     const m = await page.evaluate(() => {
       const M = window.__ss3dEngine.model;
       let treads = 0;
       M.root.traverse((q) => { if (q.userData && q.userData.ssPorchPart === "stepTread") treads++; });
-      return { treads, count: M.porch.steps.count, wall: M.porch.wall, fall: M.gradeFall };
+      return { treads, count: M.porch.steps.count, wall: M.porch.wall, gc: M.gradeCorners };
     });
     ok(`${tag}: ⚠️ THE 3D PREVIEW DRAWS THE PLACEHOLDER'S NUMBER (${ph})`,
-      ph === `blank = ${m.count}` && m.treads === m.count && m.wall === "north" && m.fall && m.fall.fallFt === 2, JSON.stringify({ ph, ...m }));
+      ph === `blank = ${m.count}` && m.treads === m.count && m.wall === "north" && m.gc && m.gc.bl === 2 && m.gc.br === 2 && m.gc.fl === 0, JSON.stringify({ ph, ...m }));
     if (shots) {
       await page.evaluate(() => { const E = window.__ss3dEngine; E.camera.position.set(30, 4, -34); E.controls.target.set(0, -1.5, -14); E.controls.update(); E.render(); });
       await settle(page, 300);
@@ -975,6 +1173,13 @@ try {
   if (!only || only.includes("level")) {
     if (base.js) LEVEL.forEach((c) => q.push(() => runLevel(ctx, c, ok, base, shots)));
     else console.log(`SKIP  level ground against ${base.rev}: that revision is not in this repository (set SS_LEVEL_BASE)`);
+  }
+  if (!only || only.includes("corners")) CORNER_CASES.forEach((c) => q.push(() => runCornerCase(ctx, c, ok, shots)));
+  else CORNER_CASES.filter((c) => only.includes(c.id)).forEach((c) => q.push(() => runCornerCase(ctx, c, ok, shots)));
+  if (!only || only.includes("legacy")) {
+    const fb = fallBaseBundle();
+    if (fb.js) CASES.filter((c) => LEGACY.includes(c.id)).forEach((c) => q.push(() => runLegacy(ctx, c, ok, fb)));
+    else console.log(`SKIP  a stored fall against ${fb.rev}: that revision is not in this repository (set SS_FALL_BASE)`);
   }
   if (!only || only.includes("panel")) q.push(() => runPanel(ctx, ok, shots));
   if (!only || only.includes("panel") || only.includes("panelSteps")) q.push(() => runPanelSteps(ctx, ok, shots));
