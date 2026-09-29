@@ -7773,7 +7773,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       sentBy: userId ?? null,
       statusCallback,
       // A rep pressing this with the customer in front of them is not what quiet hours
-      // exist to stop — it is the same "a human hitting send" case smsSend documents.
+      // exist to stop: one text, one customer, sent by a person (see TenantSms in smsSend).
       bypassQuietHours: true,
     });
     if (!out.sent) {
@@ -7818,6 +7818,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       shortCode,
       sentBy: userId ?? null,
       statusCallback,
+      // A person typed this and pressed Send, so it goes now (Ahsan, 2026-09-29: "if i am
+      // sending manual messages it should go right away"). Quiet hours are for automation;
+      // the scope planned this override from the start and this path was simply missed, so
+      // a builder answering a customer at 9:15pm was told to wait until morning.
+      // The flag skips the clock check and nothing else: consent and STOP still refuse.
+      // Pinned by _test_stubs/smsQuietHoursWiring_test.ts.
+      bypassQuietHours: true,
     });
     if (!out.sent) {
       // `not_active` is the product being switched off, not a fault — it is the state every
