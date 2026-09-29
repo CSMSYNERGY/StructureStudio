@@ -238,6 +238,67 @@ export const D3_PORCH_STEPS = ["left", "center", "right"] as const;
 // given, and the renderer never flips it. ABSENT is today's render: a lean-to hung at the eave, and
 // wings whose centre section is pushed up out of the way of a steep wing roof.
 export const D3_ATTACH = ["roof", "wall"] as const;
+// ── AS MANY LEAN-TOS AS THEY WANT, EACH WHERE THEY WANT (roof.leanTos, 2026-09-29) ─────────────────
+// Carolyn, 09-29: "they start with a core building, then they can add a lean-to and specify where they
+// want it, and add another one and specify where they want it ... as many lean-tos ... wherever they
+// want." An ARRAY of up to six, each on one building wall as seen standing in front of the FRONT wall
+// (the renderer's frame, the one gradeFallToward is read in: front is south, left is west):
+//   wall      "left" | "right" | "front" | "back"                        required
+//   widthFt   how far it sticks out, 0.5..16                             required
+//   dropFt    how far its outer edge sits below where it meets, 0..6     absent: 1
+//   attach    "roof" | "wall": where its roof meets the building          absent: at the eave, or at
+//             wall height on a gable end ("roof" means nothing there, and is ignored, never switched)
+//   attachFt  how far up the roof / down the wall, 0..8                  kept like leanToAttachFt
+//   lengthFt  how much of the wall it runs along, 2..60                  absent: the whole wall
+//   offsetFt  where along the wall, from the wall's middle, -30..30      absent: centred; toward the
+//             RIGHT on the front and back walls, toward the FRONT on the left and right walls
+//   enclosed  true: walled in with the building's siding                 absent: open on posts
+// An entry without a known wall or a width is dropped; so is a key outside that list. A non-empty
+// list REPLACES the single lean-to (leanToWidthFt, leanToDropFt, leanToSide, leanToAttach,
+// leanToAttachFt), whose keys are then dropped here; absent, those keys are today's lean-to exactly.
+// Production's older designer ignores an unknown roof key, so a style with the list draws there with
+// no lean-to at all -- missing, which is honest, and its own save round-trips the list untouched.
+export const D3_LEANTO_WALLS = ["left", "right", "front", "back"] as const;
+export const D3_LEANTOS_MAX = 6;
+export const LEANTO_BANDS: Record<string, readonly [number, number]> = {
+  widthFt: [0.5, 16], dropFt: [0, 6], attachFt: [0, 8], lengthFt: [2, 60], offsetFt: [-30, 30],
+};
+const D3_LEANTO_LEGACY_KEYS = ["leanToWidthFt", "leanToDropFt", "leanToSide", "leanToAttach", "leanToAttachFt"] as const;
+export function sanitizeLeanTos(raw: unknown): Record<string, unknown>[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: Record<string, unknown>[] = [];
+  for (const e of raw) {
+    if (out.length >= D3_LEANTOS_MAX) break;
+    if (!e || typeof e !== "object" || Array.isArray(e)) continue;
+    const src = e as Record<string, unknown>;
+    if (!(D3_LEANTO_WALLS as readonly string[]).includes(String(src.wall))) continue;
+    const band = (k: string): number | null => {
+      const n = num(src[k]);
+      if (n === null) return null;
+      const [lo, hi] = LEANTO_BANDS[k];
+      return Math.min(hi, Math.max(lo, n));
+    };
+    // Over half a foot wide or it is no lean-to: the renderer's rule (d3LeanToList, and the single
+    // lean-to's leanToWidthFt > 0.5), so a list the 3D would draw nothing of never deletes the single
+    // lean-to's keys or the roof step (review, 2026-09-30). Clamped only from above.
+    const w0 = num(src.widthFt);
+    if (w0 === null || !(w0 > 0.5)) continue;
+    const widthFt = Math.min(LEANTO_BANDS.widthFt[1], w0);
+    const lt: Record<string, unknown> = { wall: String(src.wall), widthFt };
+    const dropFt = band("dropFt");
+    if (dropFt !== null) lt.dropFt = dropFt;
+    if ((D3_ATTACH as readonly string[]).includes(String(src.attach))) lt.attach = String(src.attach);
+    const attachFt = band("attachFt");
+    if (attachFt !== null) lt.attachFt = attachFt;
+    const lengthFt = band("lengthFt");
+    if (lengthFt !== null) lt.lengthFt = lengthFt;
+    const offsetFt = band("offsetFt");
+    if (offsetFt !== null) lt.offsetFt = offsetFt;
+    if (src.enclosed === true) lt.enclosed = true;
+    out.push(lt);
+  }
+  return out.length ? out : null;
+}
 // ── WHAT THE BUILDING STANDS ON (top-level `foundation`; blocks and piers 2026-09-25) ──────────
 // "slab" and "skids" draw at grade, as they always have. "blocks" (stacked 8x8x16 concrete blocks
 // under the runners) and "piers" (round concrete piers) RAISE THE FLOOR off the ground: every
@@ -515,16 +576,21 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // beside wings or a lean-to, which run the length of an eave wall at ONE eave height, and never
   // with a porch at the back, which the rear section would stand over. Dropped rather than stored
   // for later, the porch attach height's rule: an inert key is a trap for the next edit.
+  // THE LEAN-TO LIST (roof.leanTos, 2026-09-29): a non-empty one replaces the single lean-to, whose keys
+  // go, and it is written LAST, after every other roof key, so no stored spec's key order moves.
+  const leanTos = sanitizeLeanTos(rawRoof.leanTos);
+  if (leanTos) for (const k of D3_LEANTO_LEGACY_KEYS) delete roof[k];
   const stepAt = num(roof.rearStepFt), stepRise = num(roof.rearEaveRiseFt);
   const roofOn = (k: string) => (num(roof[k]) ?? 0) > 0.5;
   if (stepAt !== null && stepAt > 0.5 && stepRise !== null && Math.abs(stepRise) >= 0.01
-      && type === "gable" && roof.front !== "eave" && !roofOn("wingWidthFt") && !roofOn("leanToWidthFt")
+      && type === "gable" && roof.front !== "eave" && !roofOn("wingWidthFt") && !roofOn("leanToWidthFt") && !leanTos
       && !(roof.porchEnd === "back" && (roofOn("porchDepthFt") || roofOn("porchOutFt")))) {
     roof.rearStepFt = Math.max(4, stepAt);
   } else {
     delete roof.rearStepFt;
     delete roof.rearEaveRiseFt;
   }
+  if (leanTos) roof.leanTos = leanTos;
 
   // Anything that is not a renderable cladding means "unset", which the renderer
   // draws as panel siding. Matches the AI validator's posture: drop what we cannot
@@ -2934,7 +3000,7 @@ export function roofStepAtSize(roof: Record<string, unknown> | null | undefined,
   const want = num(cfg.rearStepFt), rise0 = num(cfg.rearEaveRiseFt);
   if (cfg.type !== "gable" || want === null || rise0 === null || !(want > 0.5) || !(Math.abs(rise0) >= 0.01)) return null;
   const front = cfg.front === "gable" || cfg.front === "eave" ? cfg.front : null;
-  if (front === "eave" || (num(cfg.wingWidthFt) ?? 0) > 0.5 || (num(cfg.leanToWidthFt) ?? 0) > 0.5) return null;
+  if (front === "eave" || (num(cfg.wingWidthFt) ?? 0) > 0.5 || (num(cfg.leanToWidthFt) ?? 0) > 0.5 || sanitizeLeanTos(cfg.leanTos)) return null;
   const porchOut = Math.min(12, num(cfg.porchOutFt) ?? 0) > 0.5;
   if (cfg.porchEnd === "back" && (porchOut || (num(cfg.porchDepthFt) ?? 0) > 0.5)) return null;
   // d3RoofAxes: a gable front runs the ridge front to back; without a front, a portrait footprint does.

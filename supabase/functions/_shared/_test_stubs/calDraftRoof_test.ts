@@ -160,6 +160,10 @@ Deno.test("dev/score.mjs's mergeDraft clears exactly what calDraftRoof clears", 
     [{ type: "gable", wingSide: "both", wingWidthFt: 8, wingAttach: "roof", wingAttachFt: 2 }, { type: "gable", pitch: 0.5 }],
     [{ type: "gable", wingSide: "both", wingWidthFt: 8, wingAttach: "wall", wingAttachFt: 1 }, { type: "gable", wingSide: "both", wingWidthFt: 10, wingPitch: 0.3 }],
     [{ type: "gable", leanToWidthFt: 8, leanToSide: "left", leanToAttach: "roof", leanToAttachFt: 1.5 }, { type: "gable" }],
+    // The lean-to list (roof.leanTos, 2026-09-29) is the builder's own, set on the Advanced page: a typed
+    // draft replaces the roof and it goes, like the single lean-to; a draft with no type keeps it.
+    [{ type: "gable", leanTos: [{ wall: "left", widthFt: 8 }, { wall: "front", widthFt: 5, enclosed: true }] }, { type: "gable", pitch: 0.5 }],
+    [{ type: "gable", leanTos: [{ wall: "left", widthFt: 8 }] }, { pitch: 0.5 }],
   ];
   for (const [stored, drafted] of cases) {
     const scored = mergeDraft({ roof: stored }, { roof: drafted }, "video").roof;
@@ -196,4 +200,10 @@ Deno.test("⚠️ A TYPED DRAFT REPLACES THE ROOF: no stale dormer or lean-to, t
   assertEquals([noWings.wingAttach, noWings.wingAttachFt], ["roof", 2], "an untyped draft clears nothing");
   // A draft that reports a dormer keeps its own.
   assertEquals(calDraftRoof(stored, { type: "gable", dormerWidthFt: 5 }).dormerWidthFt, 5);
+});
+
+Deno.test("⚠️ the lean-to list (roof.leanTos, 2026-09-29) goes with a typed draft and stays without one", () => {
+  const stored = { type: "gable", pitch: 0.4, leanTos: [{ wall: "left", widthFt: 8 }, { wall: "front", widthFt: 5, enclosed: true }] };
+  assert(!("leanTos" in calDraftRoof(stored, { type: "gable", pitch: 0.5 })), "a typed draft is the video's roof: no stale lean-tos");
+  assertEquals(calDraftRoof(stored, { pitch: 0.5 }).leanTos, stored.leanTos, "a draft with no type keeps them");
 });

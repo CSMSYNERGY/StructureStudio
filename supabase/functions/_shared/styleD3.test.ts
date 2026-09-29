@@ -7066,4 +7066,89 @@ Deno.test("applySelfCheck: the overhang lock lets go when the same answer turns 
   assert(s.ok, "buildable");
   if (!s.ok) return;
   assertEquals([s.d3.roof.overhang, s.dropped], [0.3, []]);
+
+// ═══ AS MANY LEAN-TOS AS THEY WANT, EACH WHERE THEY WANT (roof.leanTos, 2026-09-29) ═══════════════════
+// Carolyn, 09-29: "they can add a lean-to and specify where they want it, and add another one and specify
+// where they want it". A list of up to six, each on a building wall, with its own width, drop, attach,
+// run along the wall and walls. A non-empty list REPLACES the single lean-to, whose keys go; without one
+// the single lean-to is stored exactly as it always was. The renderer's side is
+// _test_stubs/leanTos_test.ts and tests/harness/leanTos.mjs.
+import { D3_LEANTO_WALLS, D3_LEANTOS_MAX, sanitizeLeanTos, roofStepAtSize } from "./styleD3.ts";
+
+Deno.test("roof.leanTos: every wall and every key round-trips, in order, and nothing is invented", () => {
+  for (const wall of D3_LEANTO_WALLS) {
+    const r = roofOf({ type: "gable", leanTos: [{ wall, widthFt: 8 }] });
+    assertEquals(r.leanTos, [{ wall, widthFt: 8 }], `a bare lean-to on the ${wall} wall gains no key`);
+  }
+  const full = { wall: "front", widthFt: 10, dropFt: 2, attach: "wall", attachFt: 1.5, lengthFt: 12, offsetFt: -3, enclosed: true };
+  const r = roofOf({ type: "gambrel", leanTos: [full] });
+  assertEquals(r.leanTos, [full], "every key kept");
+  assertEquals(Object.keys((r.leanTos as Record<string, unknown>[])[0]), ["wall", "widthFt", "dropFt", "attach", "attachFt", "lengthFt", "offsetFt", "enclosed"], "in one order");
+  // Written LAST, after every other roof key, so no stored spec's key order moves.
+  const k = Object.keys(roofOf({ type: "gable", pitch: 0.4, porchOutFt: 6, porchSteps: "left", leanTos: [{ wall: "left", widthFt: 6 }] }));
+  assertEquals(k[k.length - 1], "leanTos", "the list is the roof's last key");
+  // Every roof type: a lean-to has no roof-type gate.
+  for (const type of ["shed", "gable", "gambrel"]) assertEquals((roofOf({ type, leanTos: [{ wall: "back", widthFt: 4 }] }).leanTos as unknown[]).length, 1, type);
+  // Absent, empty or not a list: no key at all.
+  for (const v of [undefined, null, [], "left", { wall: "left", widthFt: 8 }, 3]) {
+    assert(!("leanTos" in roofOf({ type: "gable", leanTos: v })), `${JSON.stringify(v)} stores no list`);
+  }
+});
+
+Deno.test("roof.leanTos: bands clamp, junk entries and junk keys are dropped, six at most", () => {
+  const one = (e: Record<string, unknown>) => sanitizeLeanTos([{ wall: "left", widthFt: 8, ...e }])![0];
+  assertEquals(one({ widthFt: 40 }).widthFt, 16, "width clamps to 16");
+  // Half a foot or less is no lean-to (the renderer draws only over 0.5 ft): dropped, never clamped up.
+  for (const w of [0.5, 0.1, 0, -3]) assertEquals(sanitizeLeanTos([{ wall: "left", widthFt: w }]), null, `width ${w}: no lean-to, no list`);
+  assertEquals(one({ widthFt: 0.51 }).widthFt, 0.51, "just over half a foot is kept");
+  assertEquals(one({ widthFt: "6.5" }).widthFt, 6.5, "a numeric string reads as its number");
+  assertEquals(one({ dropFt: 9 }).dropFt, 6, "drop clamps to 6");
+  assertEquals(one({ dropFt: -1 }).dropFt, 0, "and to 0");
+  assertEquals(one({ attachFt: 20 }).attachFt, 8, "attach distance clamps to 8");
+  assertEquals(one({ lengthFt: 1 }).lengthFt, 2, "length clamps to 2");
+  assertEquals(one({ lengthFt: 99 }).lengthFt, 60, "and to 60");
+  assertEquals(one({ offsetFt: -45 }).offsetFt, -30, "offset clamps to -30");
+  assertEquals(one({ offsetFt: 45 }).offsetFt, 30, "and to 30");
+  for (const junk of ["Roof", "eave", "", 1, true, null]) assert(!("attach" in one({ attach: junk })), `attach ${JSON.stringify(junk)} dropped`);
+  for (const v of D3_ATTACH) assertEquals(one({ attach: v }).attach, v, `attach "${v}" kept`);
+  for (const junk of [false, "true", 1, null]) assert(!("enclosed" in one({ enclosed: junk })), `enclosed ${JSON.stringify(junk)} dropped: absent is open`);
+  assert(!("colour" in one({ colour: "#fff" })) && !("side" in one({ side: "left" })), "a key outside the list is dropped");
+  for (const v of [NaN, "x", null, undefined]) assert(!("dropFt" in one({ dropFt: v })), `drop ${String(v)} dropped`);
+  // An entry without a known wall or a width is no lean-to.
+  assertEquals(sanitizeLeanTos([{ wall: "Left", widthFt: 8 }, { wall: "north", widthFt: 8 }, { wall: "left" }, { widthFt: 8 }, null, "left", [1], { wall: "right", widthFt: "x" }]), null, "nothing drawable: no list");
+  assertEquals(sanitizeLeanTos([{ wall: "top", widthFt: 8 }, { wall: "right", widthFt: 5 }])!.map((e) => e.wall), ["right"], "the bad entry goes, the good one stays");
+  const eight = Array.from({ length: 8 }, (_, i) => ({ wall: D3_LEANTO_WALLS[i % 4], widthFt: 4 + i }));
+  const kept = sanitizeLeanTos(eight)!;
+  assertEquals(kept.length, D3_LEANTOS_MAX, "six at most");
+  assertEquals(kept.map((e) => e.widthFt), [4, 5, 6, 7, 8, 9], "the first six, in order");
+});
+
+Deno.test("roof.leanTos REPLACES the single lean-to; without it the single lean-to is stored as it always was", () => {
+  const single = { leanToWidthFt: 8, leanToDropFt: 2, leanToSide: "left", leanToAttach: "roof", leanToAttachFt: 1 };
+  const withList = roofOf({ type: "gable", ...single, leanTos: [{ wall: "front", widthFt: 6 }] });
+  for (const k of Object.keys(single)) assert(!(k in withList), `${k} goes beside a list`);
+  assertEquals(withList.leanTos, [{ wall: "front", widthFt: 6 }]);
+  // No drawable list (empty, junk): the single lean-to stays, key for key, in its old order.
+  const before = roofOf({ type: "gable", pitch: 0.4, ...single });
+  for (const v of [undefined, [], [{ wall: "up", widthFt: 3 }]]) {
+    const after = roofOf({ type: "gable", pitch: 0.4, ...single, leanTos: v });
+    assertEquals(JSON.stringify(after), JSON.stringify(before), `${JSON.stringify(v)}: byte-identical`);
+  }
+  // Review, 2026-09-30: a list of nothing the 3D draws (half a foot or less) is no list, so it neither
+  // deletes the single lean-to nor stands in for it; the stored roof is the single lean-to's, byte for byte.
+  for (const v of [[{ wall: "left", widthFt: 0.1 }], [{ wall: "left", widthFt: 0.5 }, { wall: "front", widthFt: 0 }]]) {
+    const after = roofOf({ type: "gable", pitch: 0.4, ...single, leanTos: v });
+    assertEquals(JSON.stringify(after), JSON.stringify(before), `${JSON.stringify(v)}: the single lean-to stays`);
+  }
+});
+
+Deno.test("roof.leanTos: the roof step is refused beside any lean-to, the list's as the single one's", () => {
+  const step = { type: "gable", front: "gable", pitch: 0.41, rearStepFt: 12, rearEaveRiseFt: 0.4 };
+  assertEquals(roofOf(step).rearStepFt, 12, "alone, the step is kept");
+  const r = roofOf({ ...step, leanTos: [{ wall: "back", widthFt: 6, lengthFt: 4 }] });
+  assert(!("rearStepFt" in r) && !("rearEaveRiseFt" in r), "beside a listed lean-to, both step keys go");
+  assertEquals(roofStepAtSize(step, 14, 40)!.drawn!.stepFt, 12, "the server's mirror draws it alone");
+  assertEquals(roofStepAtSize({ ...step, leanTos: [{ wall: "left", widthFt: 6 }] }, 14, 40), null, "and not beside a listed lean-to");
+  // A list with nothing drawable in it (half a foot wide) is no lean-to: the step stays, as the renderer draws it.
+  assertEquals(roofOf({ ...step, leanTos: [{ wall: "back", widthFt: 0.5 }] }).rearStepFt, 12, "a 6 in lean-to does not refuse the step");
 });
