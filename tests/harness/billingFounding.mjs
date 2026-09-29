@@ -22,6 +22,13 @@
 //      checkout goes through the (stubbed) Collect.js lightbox and posts a subscribe whose plan
 //      ids are all *_annual; the stub declines it and the page shows that.
 //   d. a transition tenant with a 10% discount: the shell's banner quotes /yr only.
+//   e. the SERVER's refusal as the Billing tab shows it (2026-09-29). portal-billing now answers a
+//      cart with a monthly plan in it with 409 + code "founding_annual_only" + a sentence
+//      (_shared/foundingPricing.ts, read from there so there is no second copy). Today's page never
+//      sends one, so the stub answers the new builder's checkout with that refusal to see how it
+//      reads: the red message box carries the sentence word for word (no "non-2xx", no " — ask an
+//      owner" suffix), the portal logs it as an INFO row (a refusal, not a fault), and the button
+//      is usable again.
 //
 // Monthly checks only ever look at PLAN-TILE toggles (button[data-plan-interval]). The Synergy CRM
 // card has its own Monthly/Yearly buttons; they are a display-only toggle beside an external
@@ -131,6 +138,22 @@ const TENANTS = {
 };
 const DECLINE = "Harness stub: the card was declined, and nothing was charged.";
 
+// The server's founding refusal, lifted from the module portal-billing answers with.
+const FOUNDING_SRC = readFileSync(join(ROOT, "supabase", "functions", "_shared", "foundingPricing.ts"), "utf8");
+const lift = (re, what) => {
+  const m = FOUNDING_SRC.match(re);
+  if (!m) throw new Error(`billingFounding: could not read ${what} from _shared/foundingPricing.ts`);
+  return m[1];
+};
+const REFUSAL = {
+  status: Number(lift(/FOUNDING_ANNUAL_ONLY_STATUS: number = (\d+);/, "the status")),
+  body: {
+    error: lift(/FOUNDING_ANNUAL_ONLY_MESSAGE =\s*"([^"]+)";/, "the sentence"),
+    code: lift(/FOUNDING_ANNUAL_ONLY_CODE = "([^"]+)";/, "the code"),
+    planIds: ["simple_layout_monthly"],
+  },
+};
+
 const { ok, failed, results } = reporter();
 const { browser, ctx: unused } = await launch({ width: 1400, height: 1000 });
 await unused.close();
@@ -139,8 +162,9 @@ const H = { "access-control-allow-origin": "*", "access-control-expose-headers":
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", headers: H, body: JSON.stringify(body) });
 
 // One fresh context per scenario: nothing the portal caches in storage can leak between them.
-async function open(label, status, path = "/portal/settings/billing") {
+async function open(label, status, path = "/portal/settings/billing", { subscribeAnswer = null } = {}) {
   const billing = [];   // every portal-billing request body, in order
+  const logged = [];    // every log_error RPC body (what the portal files in app_errors)
   const pageErrors = [];
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 1000 }, serviceWorkers: "block" });
   await ctx.addInitScript(([ref, s]) => {
@@ -164,7 +188,7 @@ async function open(label, status, path = "/portal/settings/billing") {
     if (req.method() === "OPTIONS") return route.fulfill({ status: 200, headers: { ...H, "access-control-allow-headers": "*", "access-control-allow-methods": "*" }, body: "" });
     let body = {};
     try { body = JSON.parse(req.postData() || "{}"); } catch (_e) { /* not JSON */ }
-    if (url.includes("/rest/v1/rpc/log_error")) return json(route, null);
+    if (url.includes("/rest/v1/rpc/log_error")) { logged.push(body); return json(route, null); }
     if (url.includes("/rest/v1/rpc/")) return json(route, false);   // is_operator, is_support_operator, can_open_projects, …
     if (url.includes("/rest/v1/client_users")) return json(route, [{ client_id: CLIENT, role: "owner" }]);
     if (url.includes("/rest/v1/")) return json(route, []);
@@ -178,7 +202,7 @@ async function open(label, status, path = "/portal/settings/billing") {
       if (warm) return json(route, { ok: true });
       if (body.action === "status") return json(route, status);
       // Anything that would move money is answered with a refusal: nothing here is ever "bought".
-      if (body.action === "subscribe") return json(route, { error: DECLINE }, 402);
+      if (body.action === "subscribe") return subscribeAnswer ? json(route, subscribeAnswer.body, subscribeAnswer.status) : json(route, { error: DECLINE }, 402);
       return json(route, { error: `Harness stub: unexpected portal-billing action ${body.action}` }, 400);
     }
     if (url.includes("/portal-settings")) {
@@ -201,7 +225,7 @@ async function open(label, status, path = "/portal/settings/billing") {
 
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
-  return { label, page, ctx, billing, pageErrors };
+  return { label, page, ctx, billing, logged, pageErrors };
 }
 
 const text = (page) => page.evaluate(() => document.body.innerText);
@@ -419,6 +443,41 @@ try {
     ok("d: …and no /mo figure", !banner.includes("/mo"), banner);
     ok("d: …with the discount", banner.includes("10% off for life"), banner);
     ok("d: no uncaught page errors", S.pageErrors.length === 0, S.pageErrors.join(" | "));
+    await S.ctx.close();
+  }
+
+  // ── e: the server's founding refusal, as the Billing tab shows it ──
+  {
+    const S = await open("e", TENANTS.c, "/portal/settings/billing", { subscribeAnswer: REFUSAL });
+    const loaded = await waitText(S.page, "Choose your features");
+    ok("e: the plan picker loads", loaded);
+    const btn = checkoutButton(S.page);
+    const label = (await btn.count()) ? (await btn.first().innerText()).trim() : null;
+    if (label) {
+      await btn.first().scrollIntoViewIfNeeded();
+      await btn.first().click();
+    }
+    const shown = await waitText(S.page, REFUSAL.body.error, 10000);
+    ok("e: pressing checkout sends one subscribe, and the stub refuses it", actions(S, "subscribe").length === 1, JSON.stringify(actions(S, "subscribe")));
+    ok(`e: the page shows the server's sentence: "${REFUSAL.body.error}"`, shown);
+    // The whole message box, not a substring: the invoke wrapper appends advice to a 401/403, and
+    // supabase-js's own "non-2xx" wording is what shows when the body is not read.
+    const box = await S.page.evaluate((m) => {
+      const el = [...document.querySelectorAll("div")].find((d) => d.children.length === 0 && d.textContent.includes(m));
+      return el ? el.textContent : null;
+    }, REFUSAL.body.error);
+    ok("e: the message box holds exactly that sentence (no suffix, no generic wording)", box === REFUSAL.body.error, JSON.stringify(box));
+    ok("e: no \"non-2xx\" text anywhere", !(await text(S.page)).includes("non-2xx"));
+    await S.page.waitForTimeout(500);   // the log_error RPC is fire-and-forget
+    const rows = S.logged.filter((b) => b.p_message === REFUSAL.body.error);
+    ok("e: the portal files it once, as an INFO row (a refusal), never an error",
+      rows.length === 1 && rows[0].p_severity === "info" && rows[0].p_context && rows[0].p_context.status === REFUSAL.status,
+      JSON.stringify(rows));
+    ok("e: nothing on this press was filed as an error", !S.logged.some((b) => b.p_severity === "error"), JSON.stringify(S.logged.filter((b) => b.p_severity === "error")));
+    ok("e: the button is usable again", label ? (await btn.first().innerText()).trim() === "Continue to secure card entry" : false, String(label));
+    await S.page.evaluate(() => window.scrollTo(0, 0));
+    await S.page.screenshot({ path: join(SHOTS, `billing-e-server-refusal${SHOT_TAG}.png`), fullPage: true });
+    ok("e: no uncaught page errors", S.pageErrors.length === 0, S.pageErrors.join(" | "));
     await S.ctx.close();
   }
 } finally {

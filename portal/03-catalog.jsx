@@ -1162,13 +1162,17 @@ const TOPUP_PRESETS = [10000, 25000, 50000];
 // showing but when they click on it, it doesn't do anything." Founding members are backing the
 // platform, so they prepay the year.
 //
-// This is the ONE switch. Set it to false and the Monthly buttons work again, the tile copy goes
-// back to "Pick monthly or yearly", and the transition banner (12-shell) quotes /mo again.
-// Nothing else was taken apart to do this: the _monthly billing_plans rows, the interval maths
-// and portal-billing's subscribe all still handle monthly. ⚠️ So this is enforced in the BROWSER
-// only — the server still sells a monthly plan to anyone who asks for one directly. That was
-// deliberate while it lived on beta alone: the live site's older frontend still offered Monthly,
-// and a server refusal would have broken its checkout. Add the server refusal when this goes live.
+// This is the browser's switch. Set it to false and the Monthly buttons work again, the tile copy
+// goes back to "Pick monthly or yearly", and the transition banner (12-shell) quotes /mo again.
+// Nothing else was taken apart to do this: the _monthly billing_plans rows and the interval maths
+// all still handle monthly.
+//
+// ⚠️ THE SERVER HAS THE OTHER HALF (2026-09-29, when this went live on production): portal-billing's
+// subscribe refuses any monthly plan while FOUNDING_ANNUAL_ONLY in
+// supabase/functions/_shared/foundingPricing.ts is on (409 "founding_annual_only"), so a stale tab
+// or a hand-made request cannot buy monthly either. Reopening monthly means flipping BOTH
+// constants; _shared/foundingPricing.test.ts reads this line and fails the push when they differ.
+// Keep it a literal true/false so that test can read it.
 const FOUNDING_ANNUAL_ONLY = true;
 
 // ─── Billing (per-feature subscriptions via portal-billing; Deposyt/NMI gateway) ───

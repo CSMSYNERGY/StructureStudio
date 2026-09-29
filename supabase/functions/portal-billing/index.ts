@@ -6,6 +6,9 @@ import { withErrorLog } from "../_shared/logError.ts";
 import { paidThroughOf, unusedCreditOf } from "../_shared/billingPeriods.ts";
 import { GATEWAY, TOKENIZATION_KEY, nmiConfigured, nmiPost, isGatewayUnknown } from "../_shared/nmi.ts";
 import { chargeTopup, MIN_TOPUP_CENTS, MAX_TOPUP_CENTS } from "../_shared/walletTopup.ts";
+import {
+  FOUNDING_ANNUAL_ONLY_CODE, FOUNDING_ANNUAL_ONLY_MESSAGE, FOUNDING_ANNUAL_ONLY_STATUS, monthlyPlansRefused,
+} from "../_shared/foundingPricing.ts";
 
 // Only `status` is a read here; subscribe/cancel move real money.
 // WHAT EACH ACTION REQUIRES (migration 100) — see _shared/access.ts.
@@ -55,7 +58,9 @@ const GATES: GateTable = {
 // Actions:
 //   { action: "status" } → { configured, hasCard, plans[], subscriptions[], checkout? }
 //   { action: "subscribe", planIds: string[], paymentToken? }
-//       paymentToken required unless a vault card is on file.
+//       paymentToken required unless a vault card is on file. While founding pricing is
+//       yearly only, a monthly plan anywhere in planIds is refused (409, code
+//       "founding_annual_only") — see _shared/foundingPricing.ts.
 //   { action: "cancel", subscriptionId }
 //
 // Secrets: NMI_SECURITY_KEY, NMI_TOKENIZATION_KEY, optional NMI_GATEWAY_URL.
@@ -710,6 +715,25 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     if (chosen.some((p) => !p)) return json({ error: "Unknown plan in selection." }, 400);
     if (chosen.some((p) => p!.availability !== "available")) {
       return json({ error: "One of the selected features isn't available yet." }, 400);
+    }
+    // ── Founding pricing is yearly only (2026-09-29) ──────────────────────────────────
+    // The server half of FOUNDING_ANNUAL_ONLY (portal/03-catalog.jsx), pinned to it by
+    // _shared/foundingPricing.test.ts. The browser never lets a monthly plan into the cart, so
+    // this only ever answers a request that did not come from today's Billing tab: a tab still
+    // running the pre-promotion frontend, or a hand-made call. The WHOLE cart is refused, annual
+    // lines included — a partial checkout would charge for half of what was asked for.
+    //
+    // Placed after the internal-account 409 (our own account keeps its own answer) and ahead of
+    // the card vault, the confirm-amount handshake, the operator's strict audit row and every
+    // gateway call, so a refused cart touches nothing. A 4xx, so withErrorLog files no row here
+    // and the portal logs it as an info refusal, never a fault.
+    const monthlyInCart = monthlyPlansRefused(chosen.map((p) => p!));
+    if (monthlyInCart.length > 0) {
+      return json({
+        error: FOUNDING_ANNUAL_ONLY_MESSAGE,
+        code: FOUNDING_ANNUAL_ONLY_CODE,
+        planIds: monthlyInCart.map((p) => p.id),
+      }, FOUNDING_ANNUAL_ONLY_STATUS);
     }
     const features = chosen.map((p) => p!.feature);
     if (new Set(features).size !== features.length) {
