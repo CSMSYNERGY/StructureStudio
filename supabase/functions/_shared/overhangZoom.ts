@@ -32,6 +32,12 @@
 //   * A CORNER OUT OF THE FRAME is garbage (the roof's end put on the frame's border, or on something
 //     inside), and the border check with the lopsided one rejected every such ask. A tip just inside
 //     the border is fine: the window moves inside the frame, as the step's does.
+//   * A ROOF END INSIDE ITS WALL is a point on the wrong thing: an eave cannot stand in from the wall
+//     under it. In the probe only 2 asks put a side below 0 (-0.05 and -0.12 ft), each beside a large
+//     other side, so the lopsided check dropped them; but that check alone keeps a side at -1.4 ft
+//     beside one at 0.04 (the larger under 0.25 ft), and such an ask beside one good one would set the
+//     cabin at 4 in. So a side more than 0.1 ft inside its wall drops the ask (a flush eave's trim may
+//     read a hair in); it drops no ask the probe kept.
 //   * WHAT IS LEFT is a bias of +0.13 ft on the cabin, whose fascia ends stand about a foot in front of
 //     the porch posts, which magnifies them a little in the frame; the truth allowed for that and this
 //     does not. Well inside the 0.25 ft the old reads missed by twice over.
@@ -39,7 +45,8 @@
 // ONLY A GABLE, and only what the builder did not measure. portal-settings asks only on a v2 consensus
 // that is a gable, when at least one read gave usable pitch points and the builder left overhangIn
 // empty (a measured overhang always wins). A shed has no pitch points, and the prompt leaves them out on
-// a gambrel. When nothing usable comes back, the consensus's overhang stands exactly as it was.
+// a gambrel, and not beside a lean-to (overhangGableWidthFt). When nothing usable comes back, the
+// consensus's overhang stands exactly as it was.
 //
 // ⚠️ THE IMAGE LIBRARY is closeUp.ts's lazy import, never a static one (see there).
 import { askCloseUps, closeUpUsage, closeUpWindow, cutCloseUps, fetchFrame, isXY, median } from "./closeUp.ts";
@@ -59,6 +66,9 @@ export const OVERHANG_ZOOM_MAX_TOKENS = 4000;
 // under half of it.
 export const OVERHANG_LOPSIDED_MIN_FT = 0.25;
 export const OVERHANG_LOPSIDED_RATIO = 0.5;
+// ...and INSIDE THE WALL, and dropped, when either side's roof end stands more than 0.1 ft (about an
+// inch) in from its wall corner.
+export const OVERHANG_INSIDE_MAX_FT = 0.1;
 // At least two asks must survive, or the consensus's overhang stands.
 export const OVERHANG_ZOOM_MIN_KEPT = 2;
 // CLAMPS.overhang in styleD3.ts.
@@ -67,8 +77,9 @@ export const OVERHANG_MAX_FT = 3;
 // ── WHERE TO CUT ──────────────────────────────────────────────────────────────────────────────────
 // The reads' measure.pitch blocks: `frame` (1-based), the image's `size` and three points on the
 // gable's sloping top edge, `left` and `right` its outer tips. A block counts when its frame is a whole
-// number from 1, its size is two numbers above 0, and its points make a gable: left, peak and right
-// run left to right and the peak stands above both tips (a smaller y).
+// number from 1, its size is two numbers above 0, every point lies inside that size (0..width by
+// 0..height, the pitch's own rule in styleD3's measurePoints), and its points make a gable: left, peak
+// and right run left to right and the peak stands above both tips (a smaller y).
 //
 // The frame is the one most reads used (ties to the lowest), and each tip is the median of those
 // reads' own, x and y apart. Each read's points are taken as shares of its OWN size, so a read that
@@ -84,6 +95,7 @@ export function overhangZoomPlan(blocks: readonly unknown[]): OverhangZoomPlan |
     if (frame === null || !isXY(o.size) || !isXY(o.left) || !isXY(o.peak) || !isXY(o.right)) continue;
     const [w, h] = o.size, l = o.left, p = o.peak, r = o.right;
     if (!(w > 0 && h > 0)) continue;
+    if ([l, p, r].some(([x, y]) => x < 0 || x > w || y < 0 || y > h)) continue;
     if (!(l[0] < p[0] && p[0] < r[0] && p[1] < l[1] && p[1] < r[1])) continue;
     ok.push({ frame, left: [l[0] / w, l[1] / h], right: [r[0] / w, r[1] / h] });
   }
@@ -121,9 +133,14 @@ export function overhangZoomWindows(plan: OverhangZoomPlan, actual: XY): Overhan
 //     keeps under 4 ft; a wing of half a foot or less is not drawn.
 // So the raised-centre house, 37 ft wide with 11.5 ft wings on both sides, is a 14 ft gable, and the
 // cabin 14 ft. `wings` says whether the gable is a centre section's, for the prompt. Null on anything
-// but a gable, or without a real width and depth.
+// but a gable, or without a real width and depth, and NULL BESIDE A LEAN-TO (leanToWidthFt over half a
+// foot, the renderer's own test): the renderer draws it outside the footprint off an eave side, so the
+// gable-end frame shows the roof running on past one wall, a tip or a corner may land on the lean-to's
+// end, and this ruler knows nothing of it (a good 1 ft eave beside an 8 ft lean-to on a 12 ft gable
+// would read about 0.6). None of the probed buildings had one; the roof step's close-up refuses them too.
 export function overhangGableWidthFt(roof: Record<string, unknown> | null | undefined, widthFt: number, lengthFt: number): { gableFt: number; wings: boolean } | null {
   if (!roof || roof.type !== "gable") return null;
+  if (Number(roof.leanToWidthFt) > 0.5) return null;
   if (!(Number.isFinite(widthFt) && widthFt > 0 && Number.isFinite(lengthFt) && lengthFt > 0)) return null;
   const front = roof.front === "gable" || roof.front === "eave" ? roof.front : null;
   const acrossWidth = front ? front === "gable" : lengthFt >= widthFt;
@@ -164,10 +181,11 @@ export function overhangZoomPrompt(wings: boolean, w: number, h: number): string
 // and the answer is their mean. REJECTED, with the reason, when: it does not parse or a point is
 // missing, or lies outside its close-up; either wallFaceIs is "not in view"; the span is not above 0;
 // a roof end sits on the frame's border (the left one within 1 px of x 0, the right within 2 px of
-// its width: the corner is cut off by the frame); or the answer is LOPSIDED (above).
+// its width: the corner is cut off by the frame); either side is INSIDE THE WALL; or the answer is
+// LOPSIDED (both above). Those last two keep both sides for the record.
 export type OverhangAsk =
   | { ft: number; left: number; right: number }
-  | { why: "unparsed" | "no point" | "not in view" | "no span" | "at the border" | "lopsided"; left?: number; right?: number };
+  | { why: "unparsed" | "no point" | "not in view" | "no span" | "at the border" | "inside the wall" | "lopsided"; left?: number; right?: number };
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
 export function overhangAskFeet(text: string | null, wins: Pick<OverhangWindows, "left" | "right">, frameW: number, gableFt: number): OverhangAsk {
   const m = String(text ?? "").match(/\{[\s\S]*\}/);
@@ -192,6 +210,7 @@ export function overhangAskFeet(text: string | null, wins: Pick<OverhangWindows,
   if (L.roof <= 1 || R.roof >= frameW - 2) return { why: "at the border" };
   const left = (L.wall - L.roof) / span * gableFt, right = (R.roof - R.wall) / span * gableFt;
   const big = Math.max(left, right), small = Math.min(left, right);
+  if (small < -OVERHANG_INSIDE_MAX_FT) return { why: "inside the wall", left: r3(left), right: r3(right) };
   if (big >= OVERHANG_LOPSIDED_MIN_FT && small < OVERHANG_LOPSIDED_RATIO * big) return { why: "lopsided", left: r3(left), right: r3(right) };
   return { ft: (left + right) / 2, left: r3(left), right: r3(right) };
 }
@@ -212,8 +231,9 @@ export function overhangZoomVerdict(texts: readonly (string | null)[], wins: Pic
 // null to keep the consensus's. `record` is what draft_tokens.overhangZoom keeps: the frame, the tips
 // in its pixels, the gable's width, the overhang before and after, each ask's two sides in feet (or
 // why it was dropped), how many were used, the time and the tokens; null when no close-up was tried
-// (not a gable, no usable points, no such frame, or under OVERHANG_ZOOM_MIN_LEFT_MS of the draft's
-// budget left). `input` and `output` are the asks' tokens. Never throws.
+// (not a gable, a lean-to, no usable points, no such frame, or under OVERHANG_ZOOM_MIN_LEFT_MS of the
+// draft's budget left). `input` and `output` are the asks' tokens. Never throws, and never holds the
+// draft past its signal: a fetch, cut or ask the signal cut short is recorded as the error.
 export async function runOverhangZoom(o: {
   blocks: readonly unknown[];
   photoUrls: readonly string[];
@@ -239,7 +259,7 @@ export async function runOverhangZoom(o: {
     const cut = await cutCloseUps(await fetchFrame(f, frameUrl, o.signal), (actual) => {
       const w = overhangZoomWindows(plan, actual);
       return [w.left, w.right];
-    }, OVERHANG_ZOOM);
+    }, OVERHANG_ZOOM, o.signal);
     // The same windows again, from the frame's real size: pure, so they are the ones just cut.
     const placed = overhangZoomWindows(plan, cut.frame);
     const [cl, cr] = cut.closeUps;

@@ -1,8 +1,9 @@
 // deno test -A supabase/functions/_shared/overhangZoom.test.ts
 import { assert, assertAlmostEquals, assertEquals } from "jsr:@std/assert";
 import {
-  OVERHANG_ZOOM, OVERHANG_ZOOM_ASKS, OVERHANG_ZOOM_MAX_TOKENS, OVERHANG_ZOOM_MIN_LEFT_MS, overhangAskFeet,
-  overhangGableWidthFt, overhangZoomPlan, overhangZoomPrompt, overhangZoomVerdict, overhangZoomWindows, runOverhangZoom,
+  OVERHANG_INSIDE_MAX_FT, OVERHANG_LOPSIDED_MIN_FT, OVERHANG_LOPSIDED_RATIO, OVERHANG_ZOOM, OVERHANG_ZOOM_ASKS,
+  OVERHANG_ZOOM_MAX_TOKENS, OVERHANG_ZOOM_MIN_LEFT_MS, overhangAskFeet, overhangGableWidthFt, overhangZoomPlan,
+  overhangZoomPrompt, overhangZoomVerdict, overhangZoomWindows, runOverhangZoom,
 } from "./overhangZoom.ts";
 import { readDraftReply } from "./styleD3.ts";
 
@@ -43,6 +44,13 @@ const HOUSE_ANSWERS = [
   ans([635, 400, 788, 442], [615, 390, 490, 395]),
   "```json\n" + ans([636, 402, 789, 390], [614, 388, 492, 396]) + "\n```",
 ];
+// An answer on the cabin's close-ups that reads `lf` ft on the left and `rf` ft on the right: both wall
+// corners where the probe's first answer put them (left window at x 142, right at 869, 6x), each roof
+// end moved out from its wall by its feet at the walls' span to the 14 ft gable. A negative side puts
+// the roof end inside its wall.
+const WALL_L = 142 + 1047 / 6, WALL_R = 869 + 284 / 6, PX_PER_FT = (WALL_R - WALL_L) / 14;
+const feetAns = (lf: number, rf: number) =>
+  ans([(WALL_L - lf * PX_PER_FT - 142) * 6, 522, 1047, 562], [(WALL_R + rf * PX_PER_FT - 869) * 6, 490, 284, 565]);
 
 Deno.test("overhangZoomPlan: the reads' most common frame, and each tip the median of theirs, as shares of the frame", () => {
   const cabin = overhangZoomPlan(CABIN_READS)!;
@@ -66,12 +74,20 @@ Deno.test("overhangZoomPlan: only blocks that make a gable count, and none is no
     { ...b, left: ["248", 226] }, { ...b, peak: undefined },
     // left and right swapped, the peak outside the tips, y read UP (the peak below the tips)
     { ...b, left: b.right, right: b.left }, { ...b, peak: [1000, 108] }, { ...b, peak: [645, 300] },
+    // a point outside the block's own size (the pitch's rule): the size given as [height, width] puts
+    // the right tip at 975 of 720; a point a pixel off the top or the left
+    { ...b, size: [720, 1280] }, { ...b, left: [-1, 226] }, { ...b, peak: [645, -1] }, { ...b, right: [1281, 268] },
   ]) {
     assertEquals(overhangZoomPlan([bad]), null, JSON.stringify(bad));
   }
   assertEquals(overhangZoomPlan([]), null);
-  // ...and a bad block beside good ones is simply left out.
+  // ...and a bad block beside good ones is simply left out: the swapped size would have moved the right
+  // tip to x 1733 of 1280 and taken both the roof's end and the wall corner out of the close-up.
   assertEquals(overhangZoomPlan([{ ...b, peak: [645, 300] }, CABIN_READS[1]])?.left, [248 / 1280, 228 / 720]);
+  const swapped = overhangZoomPlan([b, { ...CABIN_READS[1], size: [720, 1280] }])!;
+  assertEquals(overhangZoomWindows(swapped, [1280, 720]).tipR, [975, 272], "the good read's own tip, not a mean with 1733");
+  // A point ON the size's edge is inside it.
+  assertEquals(overhangZoomWindows(overhangZoomPlan([{ ...b, right: [1280, 268] }])!, [1280, 720]).tipR, [1280, 268]);
 });
 
 Deno.test("overhangZoomWindows: a sixth of the frame each way, centred on each tip, kept inside the frame", () => {
@@ -111,6 +127,15 @@ Deno.test("overhangGableWidthFt: the width the renderer draws the gable at, less
   for (const [roof, w, l] of [[{ type: "shed" }, 16, 10], [{ type: "gambrel", front: "gable" }, 16, 24], [null, 14, 40], [{ type: "gable" }, 0, 40], [{ type: "gable" }, 14, NaN]] as const) {
     assertEquals(overhangGableWidthFt(roof as Record<string, unknown> | null, w, l), null, JSON.stringify([roof, w, l]));
   }
+  // A lean-to (over half a foot, the renderer's own test) is no ruler either: drawn off an eave side,
+  // outside the footprint, it runs the roof on past one wall of the gable end, and this width knows
+  // nothing of it. Half a foot or less is not drawn, so it changes nothing.
+  for (const lean of [{ leanToWidthFt: 8, leanToSide: "right" }, { leanToWidthFt: 0.6, leanToSide: "left" }, { leanToWidthFt: "8" }]) {
+    const roof = { type: "gable", front: "gable", ...lean };
+    assertEquals(overhangGableWidthFt(roof, 12, 20), null, JSON.stringify(roof));
+  }
+  assertEquals(overhangGableWidthFt({ type: "gable", front: "gable", leanToWidthFt: 0.5, leanToSide: "right" }, 12, 20), { gableFt: 12, wings: false });
+  assertEquals(overhangGableWidthFt({ type: "gable", front: "gable", leanToWidthFt: 0 }, 12, 20), { gableFt: 12, wings: false });
 });
 
 Deno.test("overhangZoomPrompt: the probe's words, the wing sentence only with wings, and the close-up's size", () => {
@@ -178,6 +203,38 @@ Deno.test("overhangAskFeet: every rejection, with its reason", () => {
   assert("ft" in tight && tight.ft < 0.25, JSON.stringify(tight));
 });
 
+Deno.test("overhangAskFeet: a roof end INSIDE its wall is a point on the wrong thing, and the checks' edges", () => {
+  const w = overhangZoomWindows(overhangZoomPlan(CABIN_READS)!, [1280, 720]);
+  const read = (t: string) => {
+    const r = overhangAskFeet(t, w, 1280, 14);
+    return "why" in r ? r.why : "kept";
+  };
+  // The builder helper reads what it was built to.
+  const built = overhangAskFeet(feetAns(1.2, 0.9), w, 1280, 14);
+  assert("ft" in built && Math.abs(built.left - 1.2) < 1e-3 && Math.abs(built.right - 0.9) < 1e-3, JSON.stringify(built));
+  // The left roof end 1.4 ft inside its wall beside a right one 0.04 ft out: the larger side is under
+  // 0.25 ft, so the lopsided check alone kept it, at -0.69 ft, and a verdict beside one good answer
+  // wrote 4 in and locked it from the self-check.
+  const wrong = overhangAskFeet(ans([1100, 522, 700, 562], [300, 490, 290, 565]), w, 1280, 14);
+  assertEquals(wrong, { why: "inside the wall", left: -1.417, right: 0.035 });
+  // Both sides half a foot inside, and one side just over the 0.1 ft allowance.
+  assertEquals(read(feetAns(-0.538, -0.538)), "inside the wall");
+  assertEquals(read(feetAns(-0.11, 0.1)), "inside the wall");
+  assertEquals(read(feetAns(0.1, -0.11)), "inside the wall");
+  // A flush eave's trim may read a hair inside: kept.
+  assertEquals(read(feetAns(-0.09, 0.1)), "kept");
+  assertEquals(read(feetAns(-0.09, -0.09)), "kept");
+  assertEquals(OVERHANG_INSIDE_MAX_FT, 0.1);
+  // LOPSIDED at its edges: the smaller side under half the larger (0.49 of it) is dropped, over half
+  // (0.51) kept, once the larger is 0.25 ft or more; at 0.24 ft both sides are a tight eave.
+  assertEquals([OVERHANG_LOPSIDED_RATIO, OVERHANG_LOPSIDED_MIN_FT], [0.5, 0.25]);
+  assertEquals(read(feetAns(1, 0.49)), "lopsided");
+  assertEquals(read(feetAns(0.49, 1)), "lopsided");
+  assertEquals(read(feetAns(1, 0.51)), "kept");
+  assertEquals(read(feetAns(0.26, 0.1)), "lopsided");
+  assertEquals(read(feetAns(0.24, 0.1)), "kept");
+});
+
 Deno.test("overhangZoomVerdict: the median of at least two kept answers, to the nearest inch, held to 0..3 ft", () => {
   const cabin = overhangZoomWindows(overhangZoomPlan(CABIN_READS)!, [1280, 720]);
   const v = overhangZoomVerdict(CABIN_ANSWERS, cabin, 1280, 14);
@@ -190,10 +247,22 @@ Deno.test("overhangZoomVerdict: the median of at least two kept answers, to the 
   // Two of three kept (one lopsided) is enough.
   const two = overhangZoomVerdict([CABIN_ANSWERS[0], ans([657, 522, 1047, 562], [628, 490, 600, 565]), CABIN_ANSWERS[1]], cabin, 1280, 14);
   assertEquals([two.overhangFt, two.kept], [17 / 12, 2]);
-  // Held to 0..3 ft: roofs inside their walls read 0, and a ruler gone wrong at most 3.
+  // Roofs well inside their walls are not an overhang of 0: both asks are dropped, and the consensus's
+  // overhang stands.
   const inside = ans([1100, 522, 1047, 562], [250, 490, 284, 565]);
-  assertEquals(overhangZoomVerdict([inside, inside], cabin, 1280, 14).overhangFt, 0);
+  const none = overhangZoomVerdict([inside, inside], cabin, 1280, 14);
+  assertEquals([none.overhangFt, none.kept, none.asks.map((a) => ("why" in a ? a.why : "kept"))], [null, 0, ["inside the wall", "inside the wall"]]);
+  // One wrong-side answer beside a good one no longer halves the cabin's 17 in to 4 (and locks it).
+  const wrong = ans([1100, 522, 700, 562], [300, 490, 290, 565]);
+  const beside = overhangZoomVerdict([CABIN_ANSWERS[0], wrong, null], cabin, 1280, 14);
+  assertEquals([beside.overhangFt, beside.kept], [null, 1]);
+  const twoIn = overhangZoomVerdict([feetAns(-0.538, -0.538), feetAns(-0.538, -0.538), CABIN_ANSWERS[0]], cabin, 1280, 14);
+  assertEquals([twoIn.overhangFt, twoIn.kept], [null, 1]);
+  // Held to 0..3 ft: a flush eave whose trim reads a hair inside is 0, and a ruler gone wrong at most 3.
+  assertEquals(overhangZoomVerdict([feetAns(-0.05, -0.05), feetAns(-0.05, -0.05)], cabin, 1280, 14).overhangFt, 0);
   assertEquals(overhangZoomVerdict(CABIN_ANSWERS, cabin, 1280, 60).overhangFt, 3);
+  // The MEDIAN, not the mean: 1.0, 1.1 and 2.0 ft is 13 in (the mean would be 16).
+  assertEquals(overhangZoomVerdict([feetAns(1, 1), feetAns(2, 2), feetAns(1.1, 1.1)], cabin, 1280, 14).overhangFt, 13 / 12);
 });
 
 Deno.test("readDraftReply: a gable read's pitch points ride on the reading, whatever became of its pitch", () => {
@@ -219,16 +288,18 @@ Deno.test("readDraftReply: a gable read's pitch points ride on the reading, what
 
 // ─── The whole close-up, with a stand-in for the frame and the Messages API ─────────────────────
 // A 1280 by 720 frame drawn like the cabin's gable end: sky, the gable wall from x 316 to 916 below
-// y 230, and the roof's eave band from x 251 to 974 between y 214 and 232 (1-based pixels).
-const frameJpeg = async () => {
+// y 230, and the roof's eave band from x 251 to 974 between y 214 and 232 (1-based pixels). `s`
+// draws the same picture `s` times the size (1.5: a 1920 by 1080 frame).
+const frameJpeg = async (s = 1) => {
   const { Image } = await imagescript();
-  const img = new Image(1280, 720);
+  const px = (v: number) => Math.round(v * s);
+  const img = new Image(px(1280), px(720));
   img.fill(Image.rgbaToColor(120, 170, 220, 255));
-  for (let y = 230; y <= 720; y++) for (let x = 316; x <= 916; x++) img.setPixelAt(x, y, Image.rgbaToColor(150, 40, 40, 255));
-  for (let y = 214; y <= 232; y++) for (let x = 251; x <= 974; x++) img.setPixelAt(x, y, Image.rgbaToColor(20, 20, 20, 255));
+  for (let y = px(230); y <= px(720); y++) for (let x = px(316); x <= px(916); x++) img.setPixelAt(x, y, Image.rgbaToColor(150, 40, 40, 255));
+  for (let y = px(214); y <= px(232); y++) for (let x = px(251); x <= px(974); x++) img.setPixelAt(x, y, Image.rgbaToColor(20, 20, 20, 255));
   return await img.encodeJPEG(95);
 };
-const fakeFetch = (frame: Uint8Array | null, replies: (string | null)[]) => {
+const fakeFetch = (frame: Uint8Array | null, replies: (string | null)[], onFrame?: () => void) => {
   const sent: Record<string, unknown>[] = [];
   const frames: string[] = [];
   let n = 0;
@@ -242,6 +313,7 @@ const fakeFetch = (frame: Uint8Array | null, replies: (string | null)[]) => {
       return new Response(JSON.stringify({ content: [{ type: "thinking", thinking: "" }, { type: "text", text }], usage: { input_tokens: 3300, output_tokens: 900 } }), { status: 200 });
     }
     frames.push(u);
+    onFrame?.();
     return frame ? new Response(frame as BodyInit, { status: 200 }) : new Response("nope", { status: 404 });
   }) as typeof fetch;
   return { fn, sent, frames };
@@ -303,6 +375,7 @@ Deno.test("runOverhangZoom: not a gable, no usable points, no such frame, or too
   for (const over of [
     { blocks: [null, {}] }, { blocks: [{ ...CABIN_READS[0], peak: [645, 400] }] }, { roof: { ...CABIN_ROOF, type: "shed", highSide: "front" } },
     { roof: { ...CABIN_ROOF, type: "gambrel" } }, { photoUrls: ["https://x/1.jpg"] }, { leftMs: OVERHANG_ZOOM_MIN_LEFT_MS - 1 }, { widthFt: 0 },
+    { roof: { ...CABIN_ROOF, leanToWidthFt: 8, leanToSide: "right" } },
   ]) {
     const z = await runOverhangZoom(RUN({ ...over, fetchFn: f.fn }));
     assertEquals(z, { overhangFt: null, record: null, input: 0, output: 0 }, JSON.stringify(over));
@@ -313,3 +386,48 @@ Deno.test("runOverhangZoom: not a gable, no usable points, no such frame, or too
   assertEquals([z.overhangFt, z.record?.error, z.record?.after, z.record?.before, z.input], [null, "the frame answered 404", null, 0.5, 0]);
   assertEquals(f.sent.length, 0);
 });
+
+Deno.test("runOverhangZoom: the draft's time running out during the cut stops it there, recorded, with no ask sent", async () => {
+  // The frame's fetch returns just as the draft's signal fires: the cut is never waited for (the image
+  // library's own load takes no signal and once held a draft 11 s past its deadline), no ask goes out.
+  const c = new AbortController();
+  const f = fakeFetch(new Uint8Array([0xff, 0xd8, 0xff]), CABIN_ANSWERS, () => c.abort(new DOMException("Signal timed out.", "TimeoutError")));
+  const t = Date.now();
+  const z = await runOverhangZoom(RUN({ fetchFn: f.fn, signal: c.signal }));
+  assert(Date.now() - t < 1_000, `returned ${Date.now() - t} ms later`);
+  assertEquals([z.overhangFt, z.record?.error, z.record?.after, z.input, z.output], [null, "Signal timed out.", null, 0, 0]);
+  assertEquals([f.frames.length, f.sent.length], [1, 0]);
+});
+
+Deno.test({ name: "runOverhangZoom: a 1920 x 1080 frame is cut, placed and bordered by its REAL size, not the reads'", ignore: !NET, fn: async () => {
+  // The reads gave their points in 1280 x 720; the frame is 1920 x 1080. The tips scale to (372, 339)
+  // and (1462.5, 402), the windows to 320 x 180 at x 212 and 1303, and each close-up is 1920 x 1080.
+  // The answers put the corners where the probe's first cabin answer did, 1.5 times further out.
+  const at = (winX: number, frameX: number) => (frameX - winX) * 6;
+  const big = (y: number) => ans([at(212, 377.25), y, at(212, 474.75), y + 40], [at(1303, 1460.5), y, at(1303, 1374.5), y + 40], ["wall corner", "porch post"]);
+  const f = fakeFetch(await frameJpeg(1.5), [big(500), big(510), big(520)]);
+  const z = await runOverhangZoom(RUN({ fetchFn: f.fn }));
+  assertEquals(z.overhangFt, 17 / 12, "the same cabin, read on the bigger frame");
+  assertEquals(z.record?.tips, { left: [372, 339], right: [1463, 402] });
+  assertEquals((z.record?.asks as Record<string, unknown>[]).map((a) => [a.left, a.right]), [[1.517, 1.338], [1.517, 1.338], [1.517, 1.338]]);
+  const content = (f.sent[0] as { messages: { content: { text?: string; source?: { data: string } }[] }[] }).messages[0].content;
+  assertEquals(content[2].text, overhangZoomPrompt(false, 1920, 1080), "the close-ups' own size in the prompt");
+  const { Image } = await imagescript();
+  const left = await Image.decode(Uint8Array.from(atob(content[0].source!.data), (ch) => ch.charCodeAt(0)));
+  const right = await Image.decode(Uint8Array.from(atob(content[1].source!.data), (ch) => ch.charCodeAt(0)));
+  assertEquals([left.width, left.height, right.width, right.height], [1920, 1080, 1920, 1080]);
+  const dark = (img: typeof left, x: number, y: number) => Image.colorToRGBA(img.getPixelAt(x, y))[0] < 60;
+  // The band (frame rows 321-348) ends at frame x 376.5 on the left, close-up x ~987, and at 1461 on
+  // the right, close-up x ~948.
+  assert(!dark(left, 900, 500) && dark(left, 1100, 500), "left: sky, then the band from ~987");
+  assert(dark(right, 850, 130) && !dark(right, 1050, 130), "right: the band, then sky past ~948");
+  // THE BORDER is the real frame's: reads whose right tip is 5 px from their frame's edge put the right
+  // window at x 1600, up against the 1920 px frame's edge. A roof end at frame x 1919 is on the border
+  // and dropped; one at 1860 (a wall corner at 1800) is kept, though both lie past 1280.
+  const edge = [{ ...CABIN_READS[0], peak: [760, 108], right: [1275, 268] }, { ...CABIN_READS[1], peak: [760, 108], right: [1275, 268] }];
+  const side = (roofX: number) => ans([at(212, 377.25), 500, at(212, 474.75), 540], [at(1600, roofX), 500, at(1600, 1800), 540]);
+  const g = fakeFetch(await frameJpeg(1.5), [side(1919), side(1860), side(1860)]);
+  const e = await runOverhangZoom(RUN({ fetchFn: g.fn, blocks: edge }));
+  assertEquals((e.record?.asks as Record<string, unknown>[]).map((a) => a.why ?? "kept"), ["at the border", "kept", "kept"]);
+  assertEquals([e.overhangFt, e.record?.used], [10 / 12, 2]);
+} });

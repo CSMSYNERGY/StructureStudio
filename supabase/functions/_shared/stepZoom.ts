@@ -122,14 +122,14 @@ export function stepZoomVerdict(texts: readonly (string | null)[], wallPxActual:
 
 // Crops the joint out of a frame's JPEG bytes and enlarges it STEP_ZOOM times. Returns the close-up
 // as base64 JPEG, its height, the vertical enlargement and the wall's height at the joint in the
-// frame's own pixels.
-export async function stepZoomCrop(bytes: Uint8Array, plan: StepZoomPlan): Promise<{ base64: string; heightPx: number; zoomY: number; wallPxActual: number }> {
+// frame's own pixels. Waited for only until `signal` fires (cutCloseUps).
+export async function stepZoomCrop(bytes: Uint8Array, plan: StepZoomPlan, signal: AbortSignal): Promise<{ base64: string; heightPx: number; zoomY: number; wallPxActual: number }> {
   let sy = 1;
   const { closeUps: [c] } = await cutCloseUps(bytes, (actual) => {
     const win = stepZoomWindow(plan, actual);
     sy = win.sy;
     return [win];
-  }, STEP_ZOOM);
+  }, STEP_ZOOM, signal);
   return { base64: c.base64, heightPx: c.height, zoomY: c.height / c.win.h, wallPxActual: plan.wallPx * sy };
 }
 
@@ -138,7 +138,8 @@ export async function stepZoomCrop(bytes: Uint8Array, plan: StepZoomPlan): Promi
 // the new rearEaveRiseFt, or null to keep the consensus's: the verdict's own height, else the
 // consensus's height with the verdict's direction. `record` is what draft_tokens.stepZoom keeps,
 // null when no close-up was tried (no usable points, no such frame, or under STEP_ZOOM_MIN_LEFT_MS
-// of the draft's budget left); `input` and `output` are the asks' tokens. Never throws.
+// of the draft's budget left); `input` and `output` are the asks' tokens. Never throws, and never
+// holds the draft past its signal: a fetch, cut or ask the signal cut short is recorded as the error.
 export async function runStepZoom(o: {
   blocks: readonly unknown[];
   photoUrls: readonly string[];
@@ -158,7 +159,7 @@ export async function runStepZoom(o: {
   const record: Record<string, unknown> = { frame: plan.frame, before: o.rise0 };
   let input = 0, output = 0, riseFt: number | null = null;
   try {
-    const crop = await stepZoomCrop(await fetchFrame(f, frameUrl, o.signal), plan);
+    const crop = await stepZoomCrop(await fetchFrame(f, frameUrl, o.signal), plan, o.signal);
     const callMs = Math.min(STEP_ZOOM_CALL_MS, o.leftMs - 5_000 - (Date.now() - t0));
     const asks = await askCloseUps({
       f, apiKey: o.apiKey, model: o.model, maxTokens: STEP_ZOOM_MAX_TOKENS, images: [crop.base64],

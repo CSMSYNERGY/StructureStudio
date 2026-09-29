@@ -4347,13 +4347,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // `pitchPoints`), which is where the overhang is; enlarged 6 times and asked about together, the
     // two corners read within 0.13 ft of the truth on both buildings (_shared/overhangZoom.ts has the
     // numbers). So on a GABLE consensus whose overhang the builder did not measure (dims.overhangIn:
-    // a builder's number always wins, and applyKnownDims has already put it in), the answers' median,
+    // a builder's number always wins, and applyKnownDims has already put it in), and that has no
+    // lean-to (runOverhangZoom tries nothing beside one: overhangGableWidthFt), the answers' median,
     // to the nearest inch, replaces the consensus's roof.overhang. Recorded in
     // draft_tokens.overhangZoom, its tokens joining the cost basis like the step's; the self-check
     // then leaves it alone (measuredOverhangLock).
     //
     // SIDE BY SIDE: the two close-ups run in parallel, so a draft that needs both waits for the
-    // slower one, never for the two added up. Each has its own budget rule (45 s of the draft left).
+    // slower one, never for the two added up. Each has its own budget rule (45 s of the draft left),
+    // and neither outlasts aiSignal: the image library's load takes no signal, so the cut is waited
+    // for only until it fires (_shared/closeUp.ts), and that close-up records the error.
     // Each lands on its own through the sanitiser, and anything that fails leaves its field exactly
     // as the consensus had it.
     // (No type annotations in this block: the draft wiring tests run it as plain JavaScript.)

@@ -3,7 +3,7 @@
 // and the asks. stepZoom.test.ts and overhangZoom.test.ts drive it through their own runs; this pins
 // the pieces themselves.
 import { assert, assertEquals } from "jsr:@std/assert";
-import { askCloseUps, closeUpUsage, closeUpWindow, cutCloseUps, fetchFrame, median } from "./closeUp.ts";
+import { askCloseUps, closeUpUsage, closeUpWindow, cutCloseUps, fetchFrame, loadImageLibrary, median, untilAborted } from "./closeUp.ts";
 
 // The image library fetches its WebAssembly from deno.land as it loads (closeUp.ts's note), so the
 // test that cuts a real close-up runs only with network access; preflight's run skips it.
@@ -92,7 +92,8 @@ Deno.test("the image library is never a static import", async () => {
     assert(!/^\s*import\b[^;]*imagescript/m.test(src), `${f} imports the image library statically`);
   }
   const src = await Deno.readTextFile(new URL("./closeUp.ts", import.meta.url));
-  assertEquals(src.split('await import("https://deno.land/x/imagescript@1.3.0/mod.ts")').length - 1, 1, "one lazy import, in cutCloseUps");
+  assertEquals(src.split('import("https://deno.land/x/imagescript@1.3.0/mod.ts")').length - 1, 1, "one lazy import");
+  assert(src.includes('export const loadImageLibrary = () => import("https://deno.land/x/imagescript@1.3.0/mod.ts");'), "a literal specifier, so the bundle carries it");
 });
 
 Deno.test({ name: "cutCloseUps: decodes once, cuts every window and enlarges each", ignore: !NET, fn: async () => {
@@ -106,7 +107,7 @@ Deno.test({ name: "cutCloseUps: decodes once, cuts every window and enlarges eac
   const cut = await cutCloseUps(jpeg, (actual) => {
     seen = actual;
     return [{ x: 90, y: 40, w: 40, h: 30 }, { x: 600, y: 300, w: 20, h: 10 }];
-  }, 6);
+  }, 6, new AbortController().signal);
   assertEquals(seen, [1280, 720], "placed on the frame's real size");
   assertEquals(cut.frame, [1280, 720]);
   assertEquals(cut.closeUps.map((c) => [c.win, c.width, c.height]), [
@@ -120,3 +121,68 @@ Deno.test({ name: "cutCloseUps: decodes once, cuts every window and enlarges eac
   const [r2] = Image.colorToRGBA(first.getPixelAt(20, 20));
   assert(r1 < 40 && r2 > 90, `inside the square ${r1}, outside it ${r2}`);
 } });
+
+// ─── The draft's deadline, which the image library's own load does not take (2026-09-30) ─────────
+const timedOut = () => new DOMException("Signal timed out.", "TimeoutError");
+
+Deno.test("untilAborted: the promise's own outcome, or the signal's reason as soon as it fires", async () => {
+  assertEquals(await untilAborted(Promise.resolve(7), new AbortController().signal), 7);
+  let err: unknown = null;
+  try { await untilAborted(Promise.reject(new Error("its own")), new AbortController().signal); } catch (e) { err = e; }
+  assertEquals((err as Error).message, "its own");
+  // A promise that never settles: the signal fires 30 ms in, and that is when it rejects.
+  const c = new AbortController();
+  setTimeout(() => c.abort(timedOut()), 30);
+  const t = Date.now();
+  err = null;
+  try { await untilAborted(new Promise(() => {}), c.signal); } catch (e) { err = e; }
+  assertEquals([(err as DOMException).name, (err as DOMException).message], ["TimeoutError", "Signal timed out."]);
+  assert(Date.now() - t < 1_000, `rejected ${Date.now() - t} ms later`);
+  // Already fired: straight away. The promise's own later failure is handled, never left unhandled
+  // (which would fail this test).
+  let late!: (e: Error) => void;
+  const lateP = new Promise<never>((_, reject) => { late = reject; });
+  const done = new AbortController();
+  done.abort(timedOut());
+  err = null;
+  try { await untilAborted(lateP, done.signal); } catch (e) { err = e; }
+  assertEquals((err as DOMException).name, "TimeoutError");
+  late(new Error("the load failed later"));
+  await new Promise((r) => setTimeout(r, 10));
+});
+
+Deno.test("cutCloseUps: a load that stalls is waited for only until the draft's signal fires, and none starts after it", async () => {
+  let loads = 0;
+  const stalls = (() => { loads++; return new Promise(() => {}); }) as unknown as typeof loadImageLibrary;
+  const c = new AbortController();
+  setTimeout(() => c.abort(timedOut()), 30);
+  const t = Date.now();
+  let err: unknown = null;
+  try { await cutCloseUps(new Uint8Array([1]), () => [], 6, c.signal, stalls); } catch (e) { err = e; }
+  assertEquals([(err as DOMException).message, loads], ["Signal timed out.", 1]);
+  assert(Date.now() - t < 1_000, `gave up ${Date.now() - t} ms later`);
+  // Already out of time: nothing is loaded at all.
+  err = null;
+  try { await cutCloseUps(new Uint8Array([1]), () => [], 6, c.signal, stalls); } catch (e) { err = e; }
+  assertEquals([(err as DOMException).message, loads], ["Signal timed out.", 1]);
+});
+
+Deno.test("cutCloseUps: a load that fails is logged once for the worker, and every cut still says why", async () => {
+  // A fresh copy of the module, so whatever another test did to its once-per-worker flag is not seen.
+  const fresh = (await import("./closeUp.ts?log-once")) as typeof import("./closeUp.ts");
+  const fails = (() => Promise.reject(new Error("error reading a body from connection"))) as unknown as typeof loadImageLibrary;
+  const logged: string[] = [];
+  const was = console.error;
+  console.error = (...a: unknown[]) => { logged.push(a.map(String).join(" ")); };
+  try {
+    for (let i = 0; i < 3; i++) {
+      let err: unknown = null;
+      try { await fresh.cutCloseUps(new Uint8Array([1]), () => [], 6, new AbortController().signal, fails); } catch (e) { err = e; }
+      assertEquals((err as Error).message, "error reading a body from connection");
+    }
+  } finally {
+    console.error = was;
+  }
+  assertEquals(logged.length, 1, JSON.stringify(logged));
+  assert(logged[0].includes("the image library did not load") && logged[0].includes("error reading a body from connection"), logged[0]);
+});

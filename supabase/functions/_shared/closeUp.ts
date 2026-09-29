@@ -9,6 +9,13 @@
 // ⚠️ THE IMAGE LIBRARY IS IMPORTED ONLY WHEN A CLOSE-UP IS CUT (cutCloseUps). Its JPEG and zlib modules
 // fetch their WebAssembly from deno.land as they load, so a static import would put that fetch on every
 // cold start of portal-settings, and an unreachable deno.land would fail requests that never cut one.
+//
+// ⚠️ AND THAT LOAD IS NOT THE DRAFT'S TO CANCEL (2026-09-30). The library's own WebAssembly fetch takes
+// no signal: a cold load over a slow connection held a draft 2.6 and 11 s past its deadline. So the cut
+// is waited for only until the draft's signal fires (untilAborted), and the draft moves on; the load
+// finishes or fails on its own. A module whose load failed stays failed for the worker's life (the
+// module map keeps the error), so every close-up on that worker records the same error until it is
+// recycled; the first failure is also logged, once per worker, so such a worker shows in the logs.
 
 export type XY = [number, number];
 export const isXY = (v: unknown): v is XY =>
@@ -30,29 +37,64 @@ export function closeUpWindow(centre: XY, actual: XY, div: number): CloseUpWindo
   return { x, y, w, h };
 }
 
+// `p`, or a rejection with the signal's reason as soon as `signal` fires, whichever comes first
+// (straight away when it already has). `p` itself runs on; a later rejection of it is handled here,
+// never left unhandled.
+export function untilAborted<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+  let onAbort = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+  return Promise.race([p, aborted]).finally(() => signal.removeEventListener("abort", onAbort));
+}
+
+// The image library, loaded on the first cut. Its first failure on a worker is logged (the note above).
+export const loadImageLibrary = () => import("https://deno.land/x/imagescript@1.3.0/mod.ts");
+let libraryFailureLogged = false;
+async function imageLibrary(load: typeof loadImageLibrary) {
+  try {
+    return await load();
+  } catch (e) {
+    if (!libraryFailureLogged) {
+      libraryFailureLogged = true;
+      console.error(`closeUp: the image library did not load, so every close-up on this worker fails until it is recycled: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
+    }
+    throw e;
+  }
+}
+
 // Decodes a frame's JPEG bytes once and cuts every window `place` gives for the frame's real size,
 // each enlarged `zoom` times (the library's default, nearest-neighbour, resize) and encoded as JPEG
 // at quality 90. `frame` is the frame's [width, height]; each close-up is its window, its base64 and
-// its own width and height (the window's times `zoom`).
+// its own width and height (the window's times `zoom`). Waited for only until `signal` (the draft's
+// own budget) fires, which rejects with its reason; nothing is started when it already has. `load`
+// is the library's loader, a parameter only so a test can hand in one that stalls or fails.
 export type CloseUp = { win: CloseUpWindow; base64: string; width: number; height: number };
 export async function cutCloseUps(
   bytes: Uint8Array,
   place: (actual: XY) => readonly CloseUpWindow[],
   zoom: number,
+  signal: AbortSignal,
+  load: typeof loadImageLibrary = loadImageLibrary,
 ): Promise<{ frame: XY; closeUps: CloseUp[] }> {
-  const { decode, Image } = await import("https://deno.land/x/imagescript@1.3.0/mod.ts");
-  const img = await decode(bytes);
-  if (!(img instanceof Image)) throw new Error("the frame is not a still image");
-  const frame: XY = [img.width, img.height];
-  const closeUps: CloseUp[] = [];
-  for (const win of place(frame)) {
-    const width = win.w * zoom, height = win.h * zoom;
-    const jpeg = await img.clone().crop(win.x, win.y, win.w, win.h).resize(width, height).encodeJPEG(90);
-    let bin = "";
-    for (let i = 0; i < jpeg.length; i += 0x8000) bin += String.fromCharCode(...jpeg.subarray(i, i + 0x8000));
-    closeUps.push({ win, base64: btoa(bin), width, height });
-  }
-  return { frame, closeUps };
+  signal.throwIfAborted();
+  return await untilAborted((async () => {
+    const { decode, Image } = await imageLibrary(load);
+    const img = await decode(bytes);
+    if (!(img instanceof Image)) throw new Error("the frame is not a still image");
+    const frame: XY = [img.width, img.height];
+    const closeUps: CloseUp[] = [];
+    for (const win of place(frame)) {
+      const width = win.w * zoom, height = win.h * zoom;
+      const jpeg = await img.clone().crop(win.x, win.y, win.w, win.h).resize(width, height).encodeJPEG(90);
+      let bin = "";
+      for (let i = 0; i < jpeg.length; i += 0x8000) bin += String.fromCharCode(...jpeg.subarray(i, i + 0x8000));
+      closeUps.push({ win, base64: btoa(bin), width, height });
+    }
+    return { frame, closeUps };
+  })(), signal);
 }
 
 // The frame's bytes, from the public bucket URL the reads were sent. Throws on a non-2xx answer, and

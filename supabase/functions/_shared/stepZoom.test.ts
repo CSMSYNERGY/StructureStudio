@@ -77,7 +77,7 @@ Deno.test({ name: "stepZoomCrop: crops the joint out of a JPEG and enlarges it e
   const { Image } = await imagescript();
   const jpeg = await frameJpeg();
   const plan = stepZoomPlan([block()])!;
-  const c = await stepZoomCrop(jpeg, plan);
+  const c = await stepZoomCrop(jpeg, plan, new AbortController().signal);
   assertEquals([c.heightPx, c.zoomY, c.wallPxActual], [720, 8, 201]);
   const out = await Image.decode(Uint8Array.from(atob(c.base64), (ch) => ch.charCodeAt(0)));
   assertEquals([out.width, out.height], [1280, 720]);
@@ -95,7 +95,7 @@ Deno.test({ name: "stepZoomCrop: crops the joint out of a JPEG and enlarges it e
 } });
 
 // A fetch stand-in: the frame URL answers `frame`, the Messages API answers `replies` in turn.
-const fakeFetch = (frame: Uint8Array | null, replies: (string | null)[]) => {
+const fakeFetch = (frame: Uint8Array | null, replies: (string | null)[], onFrame?: () => void) => {
   const sent: Record<string, unknown>[] = [];
   let n = 0;
   const fn = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -106,6 +106,7 @@ const fakeFetch = (frame: Uint8Array | null, replies: (string | null)[]) => {
       if (text === null) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 529 });
       return new Response(JSON.stringify({ content: [{ type: "thinking", thinking: "" }, { type: "text", text }], usage: { input_tokens: 1500, output_tokens: 400 } }), { status: 200 });
     }
+    onFrame?.();
     return frame ? new Response(frame as BodyInit, { status: 200 }) : new Response("nope", { status: 404 });
   }) as typeof fetch;
   return { fn, sent };
@@ -145,6 +146,17 @@ Deno.test("runStepZoom: nothing to crop, no frame, or too little time left is no
   // A frame that will not load is recorded and changes nothing.
   const z = await runStepZoom(RUN({ fetchFn: f.fn }));
   assertEquals([z.riseFt, z.record?.error, z.record?.after], [null, "the frame answered 404", null]);
+});
+
+Deno.test("runStepZoom: the draft's time running out during the cut stops it there, recorded, with no ask sent", async () => {
+  // The image library's own load takes no signal, so the cut is waited for only until the draft's fires.
+  const c = new AbortController();
+  const f = fakeFetch(new Uint8Array([0xff, 0xd8, 0xff]), [ans("back", 480, 400)], () => c.abort(new DOMException("Signal timed out.", "TimeoutError")));
+  const t = Date.now();
+  const z = await runStepZoom(RUN({ fetchFn: f.fn, signal: c.signal }));
+  assert(Date.now() - t < 1_000, `returned ${Date.now() - t} ms later`);
+  assertEquals([z.riseFt, z.record?.error, z.record?.after, z.input], [null, "Signal timed out.", null, 0]);
+  assertEquals(f.sent.length, 0);
 });
 
 Deno.test("readDraftReply: a measured read's step points ride on the reading, and a read with no step has none", () => {
