@@ -4916,7 +4916,7 @@ function d3MassingTopAt(m, u) {
 // Top-level statements here are literal-only on purpose: shedProfile_test evaluates this region alone.
 const D3_WINGLIST_WALLS = ["left", "right", "front", "back"];
 const D3_WINGLIST_MAX = 16;
-const D3_WINGLIST_ENDS = false;
+const D3_WINGLIST_ENDS = true;
 // A stored number: a finite number, or a numeric string that is not blank (Number("") is 0, a blank box
 // is not a 0). The sanitizer's wlNum, token for token.
 function d3WlNum(v) {
@@ -11375,8 +11375,8 @@ function buildShed3DModel(THREE, p) {
       rg.add(cap);
     });
   }
-  // ── END WINGS (roof.wingList on a gable wall, D3_WINGLIST_ENDS, 2026-10-01) ─────────────────────
-  // Carolyn, 09-29: "A wing can go on a wing ... Wherever they want." A wing on an END wall is a lower
+  // ── END WINGS (roof.wingList on a gable wall, D3_WINGLIST_ENDS, 2026-09-30) ─────────────────────
+  // The client, on the 09-29 call: "A wing can go on a wing ... Wherever they want." A wing on an END wall is a lower
   // room across the whole width, its roof falling to that end wall: a side wing turned a quarter. Each is
   // built in its own group `eg`, turned -90 degrees about y inside rg, so eg's x is rg's z (along the ridge)
   // and eg's z is -(rg's x); the building's width then runs eg z uc - S/2 .. uc + S/2. In that frame it is
