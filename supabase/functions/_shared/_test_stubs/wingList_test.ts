@@ -513,7 +513,7 @@ Deno.test("⚠️ invariants at every size, both frames, flag off and on: finite
   }
   assertEquals(n, 2 * LISTS.length * INV_SIZES.length * 3);
   // A wing left tight is drawn and flagged (design §3.6 step 9); the next test keeps the everyday lists free of it.
-  console.log(`invariants: ${n} massings, ${tight} tight wings (all in the 16-entry mix)`);
+  console.log(`invariants: ${n} massings, ${tight} tight wings`);
 });
 
 Deno.test("the everyday lists never leave a wing tight at any size", () => {
@@ -522,6 +522,30 @@ Deno.test("the everyday lists never leave a wing tight at any size", () => {
       for (const L of [F, FE]) {
         const m = L.d3Massing(roof, W, D, 9);
         assert([...m.wings, ...m.ends].every((g: Any) => !g.tight), `${name} ${W}x${D}: ${JSON.stringify([...m.wings, ...m.ends].filter((g: Any) => g.tight))}`);
+      }
+    }
+  }
+});
+
+// An "On the wall" wing that carries an Automatic one reads its own pitch back through the push: plain
+// re-substitution crawled (-overhang/width per solve) and three solves left the carried wing tight with its
+// parent's wall about half an inch under the floor. The settle's secant step lands it.
+Deno.test("the settle lands an attached wing that carries another: nothing tight, the fixed point exact", () => {
+  const roof = { ...G, wingList: [{ wall: "left", widthFt: 4, attach: "wall", attachFt: 1 }, { wall: "left", widthFt: 6 }, { wall: "right", widthFt: 10, pitch: 0.6 }] };
+  for (const L of [F, FE]) {
+    const m = L.d3Massing(roof, 30, 32, 9);
+    const w0 = m.wings.find((g: Any) => g.i === 0), w1 = m.wings.find((g: Any) => g.i === 1);
+    assert(m.wings.every((g: Any) => !g.tight), JSON.stringify(m.wings));
+    near(w0.pitch, 1.224, "the attached parent's built pitch");
+    near(w0.ye, 12.104, "its outside wall, pushed by the wing it carries");
+    near(w0.ye, w1.ya + Math.max(1, D3A() + Math.max(0, w0.pitch - w1.pitch) * 1), "the push read on the built pitch");
+  }
+  for (const [W, D] of INV_SIZES) {
+    for (const front of [undefined, "gable", "eave"]) {
+      for (const L of [F, FE]) {
+        const [, mix] = LISTS.find(([n]) => n === "mix16")!;
+        const m = L.d3Massing({ ...mix, ...(front ? { front } : {}) }, W, D, 9);
+        assert([...m.wings, ...m.ends].every((g: Any) => !g.tight), `mix16 ${W}x${D} front ${front}`);
       }
     }
   }

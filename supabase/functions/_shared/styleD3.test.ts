@@ -7367,3 +7367,18 @@ Deno.test("⚠️ roof.wingList never reaches the video path: no allow-list entr
     assert(!p.includes("wingList"), `${name} does not name wingList`);
   }
 });
+
+Deno.test("⚠️ roof.wingList: a model reply that invents one loses it, and keeps the step it drew beside it", () => {
+  const reply = (roof: Record<string, unknown>) => JSON.stringify({ roof, colors: {}, wallHeightFt: 9 });
+  const list = [{ wall: "left", widthFt: 8 }, { wall: "left", widthFt: 6 }];
+  const r = parseModelSpec(reply({ type: "gable", pitch: 0.5, wingList: list, wingSide: "both", wingWidthFt: 8 }));
+  assert(r.ok, "the reply parses");
+  if (!r.ok) return;
+  assert(!("wingList" in r.d3.roof), "no wing list from a model reply");
+  assertEquals([r.d3.roof.wingSide, r.d3.roof.wingWidthFt], ["both", 8], "the keys the prompts name are untouched");
+  const step = { type: "gable", front: "gable", pitch: 0.41, rearStepFt: 12, rearEaveRiseFt: 0.4 };
+  const s = parseModelSpec(reply({ ...step, wingList: list }));
+  assert(s.ok && s.d3.roof.rearStepFt === 12 && !("wingList" in s.d3.roof), "the step stays; the invented list does not");
+  // The builder's own saves still keep it: only the model-reply door drops it.
+  assert("wingList" in roofOf({ type: "gable", pitch: 0.5, wingList: list }), "the sanitiser keeps a saved list");
+});

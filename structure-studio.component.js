@@ -4901,7 +4901,7 @@ function d3MassingTopAt(m, u) {
   return d3MakeProfYAt(m.prof, m.Hc)(u - m.uc);
 }
 // ── STACKABLE WINGS (roof.wingList, 2026-10-01) ────────────────────────────────────────────────────
-// Carolyn, 09-29: "they start with a core building ... add a lean-to and specify where they want it ... add
+// The client, on the 09-29 call: "they start with a core building ... add a lean-to and specify where they want it ... add
 // another one ... as many wings, as many lean-tos" / "A wing can go on a wing" / "Wherever they want."
 // roof.wingList is an ORDERED list of wings, each { wall, widthFt, pitch, attach, attachFt, eaveFt }, on a
 // building wall as seen standing in front of the front wall (the lean-to list's frame, d3LeanToWall). A
@@ -5179,18 +5179,31 @@ function d3MassingList(cfg, ax, Hn, out, allowEnds) {
     Z.forEach((ch) => ch.forEach((t, j) => { if (j) t.top = ch[j - 1].ye; }));
     out.prof = d3RoofProfile(cfg, out.Sc, out.Hc, ax.tallNeg).dedup;
   };
-  // 9. Settle: re-solve on the built pitches of the attached wings that carried another, at most 3 solves.
+  // 9. Settle: re-solve on the built pitches of the attached wings that carried another, while they move.
+  // Such a pitch is a fixed point: the wing it carries pushes its wall up by an amount read off the guess, and
+  // the wall moves the pitch back by about -overhang/width of the guess's change. Plain re-substitution
+  // crawls there, and never lands when the wing is no wider than the overhang, so from the third solve each
+  // guess that still moves takes the secant step through its last two (guess, built) pairs. Twelve solves at
+  // most; a wing still short of its clearance after them is flagged tight below, and drawn.
+  let prev = null;
   for (let solves = 1; ; solves++) {
     solve();
-    const built = {};
+    const built = {}, next = {}, pair = {};
     let again = false;
     drawn.forEach((r) => {
       if (!r.attach) return;
-      built[r.i] = r.pitch;
-      if (used[r.i] && Math.abs(r.pitch - (guess[r.i] != null ? guess[r.i] : r.p0)) > 1e-9) again = true;
+      const x = guess[r.i] != null ? guess[r.i] : r.p0, fx = r.pitch;
+      built[r.i] = fx; next[r.i] = fx; pair[r.i] = { x, fx };
+      if (!used[r.i] || Math.abs(fx - x) <= 1e-9) return;
+      again = true;
+      const p = prev && prev[r.i];
+      if (p && Math.abs(x - p.x) > 1e-12) {
+        const m = (fx - p.fx) / (x - p.x);
+        if (m < 0.9) next[r.i] = Math.max(0, (fx - m * x) / (1 - m));
+      }
     });
-    if (!again || solves >= 3) break;
-    guess = built;
+    if (!again || solves >= 12) break;
+    prev = pair; guess = next;
   }
   // Drawn although a clearance could not be met on the built pitches: an Automatic wing under a face that
   // stands below its floor, or beside end wings a side face below the end roofs' floor.

@@ -300,7 +300,7 @@ export function sanitizeLeanTos(raw: unknown): Record<string, unknown>[] | null 
   return out.length ? out : null;
 }
 // ── STACKABLE WINGS (roof.wingList, 2026-10-01) ─────────────────────────────────────────────────
-// Carolyn, 09-29: "they can add as many wings, as many lean-tos ... wherever they want". An ordered list,
+// The client, on the 09-29 call: "they can add as many wings, as many lean-tos ... wherever they want". An ordered list,
 // inner to outer on each wall; a wing's parent is the previous entry on the same wall. Structural rule
 // = the renderer's d3WingListEntries (stubs/wingList_test fuzz-tests the two): an object, a wall word,
 // a width over 0.5 ft, the first 16 such. A size never drops an entry here: the renderer says why a wing
@@ -1894,6 +1894,11 @@ export function parseModelSpec(text: string, dims?: KnownDims | null, measure = 
   if (!m) return { ok: false, error: "The model did not return a spec." };
   let parsed: unknown;
   try { parsed = JSON.parse(m[0]); } catch { return { ok: false, error: "The model returned malformed JSON." }; }
+  // roof.wingList (2026-10-01) is the Advanced page's alone: no prompt names it, and a model reply that
+  // invents one does not get a stacked building drawn from a video. Dropped before the sanitiser, so the
+  // invented list cannot refuse a roof step the model drew beside it.
+  const rawRoof = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).roof : null;
+  if (rawRoof && typeof rawRoof === "object") delete (rawRoof as Record<string, unknown>).wingList;
   const clean = sanitizeD3Spec(applyKnownDims(foldOverhangInches(parsed), dims));
   if (!measure || !clean.ok) return clean;
   return { ok: true, d3: applyMeasuredPitches(clean.d3, text, dims?.lengthFt).d3 };
