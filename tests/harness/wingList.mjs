@@ -220,7 +220,7 @@ async function scene(page, engine = "__ss3dEngine") {
       const i = q.userData.ssWingList;
       (by[i] = by[i] || []).push({ ...bb(q), type: q.geometry.type, post: q.parent === M.roofGroup, tier: q.userData.ssWingTier, side: q.userData.ssWing,
         slabTan: q.geometry.type === "BoxGeometry" && q.rotation.z !== 0 && q.geometry.parameters && q.geometry.parameters.depth > 5 ? Math.abs(Math.tan(q.rotation.z)) : null,
-        trim: q.material === M.trimMat });
+        trim: q.material === M.trimMat || q.material === M.fasciaMat });
     });
     const cl = [];
     M.wallsGroup.children.forEach((g) => { if (g.userData && g.userData.clerestory) cl.push({ ...bb(g), side: g.userData.clerestory, i: g.userData.clerestoryI }); });
@@ -572,8 +572,11 @@ function endChecks(tag, S) {
     ok(`${name}: no member crosses its inner line z ${f3(t.zI)}`, t.sz * (inner - t.zI) >= -T / 2 - 1e-3, `reach ${f3(inner)}`);
     const c = S.cl.find((q) => q.i === t.i);
     const cz = c && zr(c);
-    ok(`${name}: a clerestory on its inner line (inner face ${f3(t.zI - t.sz * T / 2)}), from <= ya ${f3(t.ya)} up to ${f3(t.top)}`,
-      !!c && c.side === 2 * t.sz && near(t.sz > 0 ? cz[0] : cz[1], t.zI - t.sz * T / 2, 0.03) && c.minY <= t.ya + 1e-6 && near(c.maxY, t.top, 0.01),
+    // Tier 1 stands under the gable end's stair (d3ListEndStair: each side wing's outside wall over its band,
+    // the middle at Hc), so it rises to Hc; a tier j > 1 meets its parent's outside wall, t.top.
+    const cTop = t.tier === 1 ? m.Hc : t.top;
+    ok(`${name}: a clerestory on its inner line (inner face ${f3(t.zI - t.sz * T / 2)}), from <= ya ${f3(t.ya)} up to ${f3(cTop)}`,
+      !!c && c.side === 2 * t.sz && near(t.sz > 0 ? cz[0] : cz[1], t.zI - t.sz * T / 2, 0.03) && c.minY <= t.ya + 1e-6 && near(c.maxY, cTop, 0.01),
       c && JSON.stringify([c.side, f3(cz[0]), f3(cz[1]), f3(c.minY), f3(c.maxY)]));
     const posts = ms.filter((q) => q.post);
     ok(`${name}: two corner boards at the long walls' corners on z ${f3(t.zI)}`, posts.length === 2
@@ -639,7 +642,7 @@ if (want("C") && ENDS) {
     oracleCheck("C", m, PURE_E, CASE_C, 30, 32, 9);
     tierChecks("C", S);
     endChecks("C", S);
-    const lo = m.zA - 16 - 0.7, hi = m.zB - 16 + 0.7;
+    const lo = m.zA - 16 - OV - 0.1, hi = m.zB - 16 + OV + 0.1;
     const out = m.wings.flatMap((g) => (S.by[g.i] || []).filter((q) => q.zMin < lo || q.zMax > hi).map((q) => [g.i, f3(q.zMin), f3(q.zMax)]));
     ok(`C: every side-tier member stands inside the middle's run (world z ${f3(lo)} .. ${f3(hi)})`, !out.length, JSON.stringify(out.slice(0, 3)));
     await shot(page, "C-south-west.png", [-36, 24, 46], [0, 10, 0]);
