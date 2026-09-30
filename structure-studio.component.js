@@ -1207,7 +1207,7 @@ function ssPorchTrussWall(roofCfg, bldgW, bldgH) {
   if (!cfg.porchTruss || (cfg.type || "gable") !== "gable") return null;
   if (d3ProjectingPorch(cfg, bldgW, bldgH)) return null;
   // Wings (d3Massing) switch the recessed porch off in the renderer, and its truss with it.
-  if (d3Massing(cfg, bldgW, bldgH, D3.WALL_H).wings.length) return null;
+  if (d3WingsOn(d3Massing(cfg, bldgW, bldgH, D3.WALL_H))) return null;
   const ax = d3RoofAxes(cfg, bldgW, bldgH);
   const depth = Math.max(0, Math.min(Number(cfg.porchDepthFt) || 0, (ax.uAxisIsX ? bldgH : bldgW) - 4));
   if (!(depth > 0.5)) return null;
@@ -1235,6 +1235,8 @@ function d3ProjectingPorch(roofCfg, bldgW, bldgH) {
   // is a gable end or an eave wall; d3PorchSpan says which it is. Outside it, today's rule.
   const wall = d3NewFrame(cfg) ? (front ? "south" : "north")
     : d3RoofAxes(cfg, bldgW, bldgH).uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
+  // END WINGS (roof.wingList): no projecting porch on an end wing's end, nor on an eave wall beside one.
+  if (cfg.wingList && d3WingListBlocksPorch(cfg, bldgW, bldgH, wall)) return null;
   return { D, wall };
 }
 // WHERE ALONG ITS WALL THE PROJECTING PORCH STANDS, or null with no projecting porch:
@@ -4697,6 +4699,8 @@ function d3Massing(roofCfg, W, L, H) {
   const ax = d3RoofAxes(cfg, W, L);
   const Hn = Number(H) > 0 ? Number(H) : 8;
   const out = { uAxisIsX: ax.uAxisIsX, S: ax.S, L: ax.L, tallNeg: ax.tallNeg, H: Hn, Sc: ax.S, uc: 0, Hc: Hn, ya: Hn, wings: [], dropped: [], hcRaised: false, prof: null };
+  // STACKABLE WINGS (roof.wingList): a structural list builds every wing, and the keys below are not read.
+  if (d3WingListOn(cfg)) return d3MassingList(cfg, ax, Hn, out, D3_WINGLIST_ENDS);
   const type = cfg.type || "gable";
   const want = Math.min(16, Number(cfg.wingWidthFt) || 0);
   if ((type === "gable" || type === "gambrel") && want > 0.5) {
@@ -4886,6 +4890,7 @@ function d3WingsAttach(m, c, modes, dRaws, ov) {
 // The top of the massing's outline at the building's own u: the centre's roof over the centre, the
 // wing roof's line over a wing. Null-safe on u outside the span (the nearest end's answer).
 function d3MassingTopAt(m, u) {
+  if (d3WingListDeep(m)) return d3ListTopAt(m, u);
   for (let i = 0; i < m.wings.length; i++) {
     const g = m.wings[i];
     if ((u - g.u0) * g.side > 0) return g.ye + Math.min(g.w, Math.abs(u - g.u1)) * g.pitch;
@@ -4949,6 +4954,437 @@ function d3WingsOn(m) { return !!(m && (m.wings.length || (m.ends && m.ends.leng
 // then does a reader take its list branch; one wing per side from a list is read by today's code, whose
 // records it carries field for field.
 function d3WingListDeep(m) { return !!(m && m.list && ((m.ends && m.ends.length) || m.wings.some((g) => g.tier > 1))); }
+// THE MASSING FROM A WING LIST. d3Massing hands over here when d3WingListOn, with `out` its plain building
+// (Sc = S, uc = 0, Hc = H), and this fills it in. Every legacy key keeps its meaning -- Sc and uc the middle
+// section's span and offset (the SUMS of every side wing), Hc its wall height, ya the highest side-wing roof
+// top, wings the side wings with today's fields -- and the list adds:
+//   list      true                     zA, zB   the middle's run along the ridge (rg z), 0 and L without end wings
+//   E         { "-1", "1" }: the middle's long-wall top over zA..zB on each side (the outermost side wing's
+//             outside wall where a side has wings, else Hc)
+//   ends      the end wings           listDropped  [{ i, why: "room" | "end" }], stored but not drawn here
+//   hcRaisedBy  the entries whose roof pushed Hc up (hcRaised)
+// Each side wing: side, wall, w, pitch (built), u1 (outer wall line), u0 (inner), ye (its outside wall),
+// ya (where its roof meets the face inside it); tier 1's attach fields as d3WingsAttach writes them; then
+// i (index in roof.wingList), bwall (the building word), tier (1 = against the middle), outer, want, shrunk,
+// top (the face it meets: Hc, else the next wing in's ye), ask (its eaveFt, read), askIgnored, raised,
+// raisedBy, raisedFrom (pushed above its ask, by whom, from what), low (an ask held up to stand 1 ft over
+// the wing outside it), tight (drawn although a clearance could not be met), roofIgnored ("On the roof"
+// asked where only a wing against the middle can have it; built Automatic); and a tier 2+ "On the wall"
+// wing's attach, attachFt, clamped, cuts, meets, meetFt. Each end wing: i, wall, bwall, at (0: rg z 0,
+// 1: z L), sz (its outward sign), tier, outer, w, want, shrunk, pitch, zO (its outside wall), zI (its inner
+// line), ye, ya, top, attach, attachFt, clamped, cuts, meets, meetFt, ask, askIgnored, raised, raisedBy,
+// raisedFrom, low, tight, roofIgnored.
+// The order: wings = every tier 1 (-u side, then +u), then every tier 2, ...; ends = tier 1 (end 0, end 1),
+// then tier 2, ... So m.wings[0] is a tier-1 wing. `allowEnds` false keeps end-wall entries stored, not
+// drawn (why "end"): D3_WINGLIST_ENDS, until the end-wing renderer ships.
+// One wing per side and no end wing is float for float the legacy massing of the same wings (the mirror,
+// d3WingListFromLegacy): the same shares, the same literals, and d3TierMeetMiddle is d3WingsAttach.
+function d3MassingList(cfg, ax, Hn, out, allowEnds) {
+  const a = D3.ROOF_T + 0.43;
+  const ovRaw = cfg.overhang != null ? Number(cfg.overhang) : D3.OVERHANG;
+  const ov = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
+  out.list = true; out.zA = 0; out.zB = ax.L; out.E = { "-1": Hn, "1": Hn };
+  out.ends = []; out.listDropped = []; out.hcRaisedBy = [];
+  const band = (v, lo, hi, dflt) => { const n = d3WlNum(v); return n === null ? dflt : Math.max(lo, Math.min(hi, n)); };
+  // 1. Resolve each entry's wall at this size: an eave wall takes a side wing, a gable wall an end wing.
+  const sideRecs = [], endRecs = [];
+  d3WingListEntries(cfg).forEach(({ e, i }) => {
+    const r = { i, bwall: e.wall, want: Math.min(16, d3WlNum(e.widthFt)), p0: band(e.pitch, 0, 1.5, 0.25),
+      attach: e.attach === "roof" || e.attach === "wall" ? e.attach : null, d: band(e.attachFt, 0, 10, 0), ask0: band(e.eaveFt, 6, 26, null) };
+    const f = d3LeanToWall(ax, e.wall);
+    if (f.kind === "eave") {
+      r.side = f.dir;
+      r.wall = ax.uAxisIsX ? (f.dir < 0 ? "west" : "east") : (f.dir < 0 ? "north" : "south");
+      sideRecs.push(r);
+    } else if (!allowEnds) out.listDropped.push({ i, why: "end" });
+    else {
+      r.at = f.atL ? 1 : 0; r.sz = f.sz;
+      r.wall = ax.uAxisIsX ? (f.atL ? "south" : "north") : (f.atL ? "west" : "east");
+      endRecs.push(r);
+    }
+  });
+  // 2. Room: the middle keeps 4 ft each way. Every side wing shares one pool (S - 4), every end wing another
+  // (L - 4), in list order, by today's own expression; a wing squeezed to half a foot is not drawn here.
+  const share = (recs, room) => {
+    const sum = recs.reduce((t, r) => t + r.want, 0), same = recs.every((r) => r.want === recs[0].want);
+    return recs.filter((r) => {
+      r.w = same ? Math.min(r.want, room / recs.length) : sum > room ? r.want * room / sum : r.want;
+      if (!(r.w > 0.5)) { out.listDropped.push({ i: r.i, why: "room" }); return false; }
+      r.shrunk = r.w < r.want - 1e-9;
+      return true;
+    });
+  };
+  const sides = share(sideRecs, ax.S - 4), ends = share(endRecs, ax.L - 4);
+  out.listDropped.sort((p, q) => p.i - q.i);
+  // 3. The chains, inner to outer on each wall.
+  const G = { "-1": sides.filter((r) => r.side < 0), "1": sides.filter((r) => r.side > 0) };
+  const Z = [ends.filter((r) => r.at === 0), ends.filter((r) => r.at === 1)];
+  const hasEnds = ends.length > 0;
+  const chain = (ch, isEnd) => ch.forEach((r, k) => {
+    r.tier = k + 1; r.outer = k === ch.length - 1;
+    r.roofIgnored = r.attach === "roof" && (isEnd || k > 0);
+    if (r.roofIgnored) r.attach = null;
+    r.askIgnored = isEnd ? r.outer : r.outer && !hasEnds;
+    r.ask = r.askIgnored ? null : r.ask0;
+  });
+  chain(G["-1"], false); chain(G["1"], false); chain(Z[0], true); chain(Z[1], true);
+  if (!sides.length && !hasEnds) {
+    out.prof = d3RoofProfile(cfg, out.Sc, out.Hc, ax.tallNeg).dedup;
+    return out;
+  }
+  // 4. Side lines: the outermost wing on today's literals, each one in from it on the next one's inner line.
+  [-1, 1].forEach((s) => {
+    const ch = G[s];
+    for (let k = ch.length - 1; k >= 0; k--) {
+      const g = ch[k];
+      if (k === ch.length - 1) { g.u1 = s * ax.S / 2; g.u0 = s * (ax.S / 2 - g.w); } else { g.u1 = ch[k + 1].u0; g.u0 = g.u1 - s * g.w; }
+    }
+  });
+  const sN = G["-1"].reduce((t, g) => t + g.w, 0), sP = G["1"].reduce((t, g) => t + g.w, 0);
+  out.Sc = ax.S - sN - sP;
+  out.uc = (sN - sP) / 2;
+  // 5. End lines, from the end wall in.
+  Z.forEach((ch, at) => {
+    let z = at ? ax.L : 0;
+    for (let j = ch.length - 1; j >= 0; j--) { const t = ch[j]; t.zO = z; t.zI = z - t.sz * t.w; z = t.zI; }
+  });
+  out.zA = Z[0].length ? Z[0][0].zI : 0;
+  out.zB = Z[1].length ? Z[1][0].zI : ax.L;
+  // The middle's roof with its eave at 0, and its eave slope (d3WingHcFloor's).
+  const c = d3RoofProfile(cfg, out.Sc, 0, ax.tallNeg).dedup;
+  const slopeAt = (p, q) => (Math.abs(q[0] - p[0]) > 1e-9 ? Math.abs((q[1] - p[1]) / (q[0] - p[0])) : 0);
+  const kcMax = c.length > 1 ? Math.max(slopeAt(c[0], c[1]), slopeAt(c[c.length - 2], c[c.length - 1])) : 0;
+  const floorOf = d3WingHcFloor(cfg, out.Sc, ax.tallNeg);
+  // The end wings on the middle's inner lines. An Automatic one's roof passes under the eave corners and
+  // rakes of everything standing on its line; it falls along z, so its pitch does not help (floorEnd). One
+  // "On the wall" meets a face that stands at least 1 ft over its outside wall (meetMin), and a blank face
+  // is the least that lets it be 3 in 12 and meet where it asked (meetBlankEnd).
+  const T1e = [Z[0][0], Z[1][0]].filter(Boolean);
+  const endFloorOf = (t, k) => t.ya + Math.max(1.0, a + k * ov);
+  const floorEnd = (k) => T1e.reduce((y, t) => (t.attach ? y : Math.max(y, endFloorOf(t, k))), -Infinity);
+  const meetMin = () => T1e.reduce((y, t) => (t.attach ? Math.max(y, t.ye + 1) : y), -Infinity);
+  const meetBlankOf = (t, k) => t.ye + t.w * 0.25 + Math.max(t.d, a + k * ov);
+  const meetBlankEnd = (k) => T1e.reduce((y, t) => (t.attach ? Math.max(y, meetBlankOf(t, k)) : y), -Infinity);
+  const endBy = (k, y) => T1e.filter((t) => (t.attach ? Math.max(t.ye + 1, meetBlankOf(t, k)) : endFloorOf(t, k)) >= y - 1e-6).map((t) => t.i);
+  // An attached wing's pitch is not known until its own face is: a wing it carries reads a GUESS (its asked
+  // pitch first), and the whole solve runs again on the built pitches while they move -- three times at most.
+  const drawn = sides.concat(ends);
+  let guess = {}, used = {};
+  const kOf = (r) => { used[r.i] = true; return r.attach ? (guess[r.i] != null ? guess[r.i] : r.p0) : r.p0; };
+  const push = (child, parent, kP) => {                      // the child is Automatic: it pushes its face up
+    child.pitch = child.p0; child.ya = child.ye + child.w * child.p0;
+    const fl = child.ya + Math.max(1.0, a + Math.max(0, kP - child.p0) * ov);
+    parent.ye = Math.max(parent.ask != null ? parent.ask : fl, fl);
+    if (parent.ask != null && fl > parent.ask + 1e-9) { parent.raised = true; parent.raisedBy.push(child.i); parent.raisedFrom = parent.ask; }
+  };
+  const meetParent = (child, parent, kP) => {                // the child is "On the wall": its face is never pushed
+    const blank = child.ye + child.w * 0.25 + Math.max(child.d, a + kP * ov);
+    parent.ye = Math.max(parent.ask != null ? parent.ask : blank, child.ye + 1);
+    parent.low = parent.ask != null && parent.ask < child.ye + 1 - 1e-9;
+  };
+  const meetOn = (child, Hp, kP) => {                        // d3WingsAttach's wall branch, against a face Hp
+    const w = child.w, ye = child.ye;
+    let d = child.d, clamped = false, cuts = false;
+    const need = w > ov + 1e-6 ? Math.max(a, (a + kP * ov - ov * (Hp - ye) / w) / (1 - ov / w)) : a + kP * ov;
+    if (d < need - 1e-9) { d = need; clamped = true; }
+    if (Hp - d < ye) { d = Hp - ye; clamped = true; cuts = d < need - 1e-9; }
+    child.ya = Hp - d; child.pitch = (child.ya - ye) / w;
+    child.mt = { attach: "wall", attachFt: d, clamped, cuts, meets: "wall", meetFt: d };
+  };
+  const hold = (g) => {                                      // a side face the end roofs pass under
+    const k = kOf(g), h = Math.max(floorEnd(k), meetMin());
+    if (h > g.ye + 1e-9) {
+      g.raised = true; if (g.raisedFrom == null) g.raisedFrom = g.ye;
+      endBy(k, h).forEach((i) => { if (g.raisedBy.indexOf(i) < 0) g.raisedBy.push(i); });
+      g.ye = h;
+    }
+  };
+  const solve = () => {
+    used = {};
+    drawn.forEach((r) => Object.assign(r, { ye: Hn, ya: Hn, pitch: r.p0, raised: false, raisedBy: [], raisedFrom: null, low: false, tight: false, mt: null }));
+    out.E = { "-1": Hn, "1": Hn }; out.hcRaisedBy = []; out.hcRaised = false; delete out.hcLow; delete out.attach;
+    // 6. End chains, outer to inner. A tier-1 "On the wall" end wing is met in step 8.
+    Z.forEach((ch) => {
+      if (!ch.length) return;
+      for (let j = ch.length - 1; j >= 1; j--) {
+        const child = ch[j], parent = ch[j - 1], kP = kOf(parent);
+        if (child.attach) { meetParent(child, parent, kP); meetOn(child, parent.ye, kP); } else push(child, parent, kP);
+      }
+      const t = ch[0]; t.pitch = t.p0; t.ya = t.ye + t.w * t.p0;
+    });
+    // 7. Side chains, outer to inner. The outermost stands on the building's wall at H; beside end wings its
+    // outside wall rises over the middle stretch to pass over the end roofs (raised, raisedBy those wings).
+    [-1, 1].forEach((s) => {
+      const ch = G[s], n = ch.length;
+      if (!n) return;
+      const gn = ch[n - 1];
+      if (hasEnds) {
+        const k = kOf(gn), fE = floorEnd(k), mm = meetMin();
+        const blankE = Math.max(fE, meetBlankEnd(k), Hn + 1);
+        gn.ye = Math.max(gn.ask != null ? gn.ask : blankE, fE, mm, Hn + 1);
+        const from = gn.ask != null ? gn.ask : Hn;
+        if (gn.ye > from + 1e-9) { gn.raised = true; gn.raisedFrom = from; gn.raisedBy = endBy(k, gn.ye); }
+      }
+      for (let k = n - 1; k >= 1; k--) {
+        const child = ch[k], parent = ch[k - 1], kP = kOf(parent);
+        if (child.attach) { meetParent(child, parent, kP); if (hasEnds) hold(parent); meetOn(child, parent.ye, kP); } else push(child, parent, kP);
+      }
+      ch[0].pitch = ch[0].p0; ch[0].ya = ch[0].ye + ch[0].w * ch[0].p0;
+      out.E[s] = gn.ye;
+    });
+    // 8. The middle: today's rule on the tier-1 wings, each from its own outside wall.
+    const T1 = [G["-1"][0], G["1"][0]].filter(Boolean);
+    out.ya = sides.length ? sides.reduce((y, g) => Math.max(y, g.ya), -Infinity) : Hn;
+    const attach = T1.map((g) => g.attach).find((x) => x) || null;
+    const rawHc = Number(cfg.centerEaveFt);
+    const wantHc = isFinite(rawHc) && rawHc > 0 ? rawHc
+      : T1.length ? (attach ? T1.reduce((t, g) => Math.max(t, g.ye + g.w * (g.attach ? 0.25 : g.p0)), -Infinity) : out.ya) + 3
+      : Math.max(floorEnd(kcMax), meetBlankEnd(kcMax));
+    let minHc = T1.reduce((t, g) => (g.attach ? t : Math.max(t, floorOf(g))), -Infinity);
+    if (hasEnds) minHc = Math.max(minHc, floorEnd(kcMax));
+    const lowFloor = hasEnds ? Math.max(Hn + 1, meetMin()) : -Infinity;
+    if (!attach) {
+      const base = Math.max(wantHc, lowFloor);
+      if (hasEnds && base > wantHc + 1e-9) out.hcLow = true;
+      out.Hc = Math.max(base, minHc);
+      out.hcRaised = out.Hc > base + 1e-9;
+    } else {
+      const base = Math.max(wantHc, T1.reduce((t, g) => Math.max(t, g.ye), -Infinity) + 1, lowFloor);
+      out.hcLow = base > wantHc + 1e-9;
+      out.Hc = Math.max(base, minHc);
+      out.hcRaised = out.Hc > base + 1e-9;
+      out.attach = attach;
+      d3TierMeetMiddle(out, c, T1, ov);
+      out.ya = sides.reduce((y, g) => Math.max(y, g.ya), Hn);
+    }
+    if (out.hcRaised) {
+      T1.forEach((g) => { if (!g.attach && floorOf(g) >= out.Hc - 1e-6) out.hcRaisedBy.push(g.i); });
+      T1e.forEach((t) => { if (!t.attach && endFloorOf(t, kcMax) >= out.Hc - 1e-6) out.hcRaisedBy.push(t.i); });
+    }
+    [-1, 1].forEach((s) => { const ch = G[s]; if (!ch.length) out.E[s] = out.Hc; ch.forEach((g, k) => { g.top = k ? ch[k - 1].ye : out.Hc; }); });
+    // A tier-1 end wing "On the wall" meets the lowest face on its line, under the steepest eave there.
+    const Emin = Math.min(out.E["-1"], out.E["1"]);
+    T1e.forEach((t) => {
+      t.top = Emin;
+      if (!t.attach) return;
+      let kF = kcMax;
+      [-1, 1].forEach((s) => { const ch = G[s]; if (ch.length) kF = Math.max(kF, kOf(ch[ch.length - 1])); });
+      const need = a + kF * ov;
+      let d = t.d, clamped = false, cuts = false;
+      if (d < need - 1e-9) { d = need; clamped = true; }
+      if (Emin - d < t.ye) { d = Emin - t.ye; clamped = true; cuts = d < need - 1e-9; }
+      t.ya = Emin - d; t.pitch = (t.ya - t.ye) / t.w;
+      t.mt = { attach: "wall", attachFt: d, clamped, cuts, meets: "wall", meetFt: d };
+    });
+    Z.forEach((ch) => ch.forEach((t, j) => { if (j) t.top = ch[j - 1].ye; }));
+    out.prof = d3RoofProfile(cfg, out.Sc, out.Hc, ax.tallNeg).dedup;
+  };
+  // 9. Settle: re-solve on the built pitches of the attached wings that carried another, at most 3 solves.
+  for (let solves = 1; ; solves++) {
+    solve();
+    const built = {};
+    let again = false;
+    drawn.forEach((r) => {
+      if (!r.attach) return;
+      built[r.i] = r.pitch;
+      if (used[r.i] && Math.abs(r.pitch - (guess[r.i] != null ? guess[r.i] : r.p0)) > 1e-9) again = true;
+    });
+    if (!again || solves >= 3) break;
+    guess = built;
+  }
+  // Drawn although a clearance could not be met on the built pitches: an Automatic wing under a face that
+  // stands below its floor, or beside end wings a side face below the end roofs' floor.
+  [G["-1"], G["1"], Z[0], Z[1]].forEach((ch) => ch.forEach((child, k) => {
+    const parent = ch[k - 1];
+    if (!parent || child.attach) return;
+    if (parent.ye < child.ya + Math.max(1.0, a + Math.max(0, parent.pitch - child.pitch) * ov) - 1e-9) child.tight = true;
+  }));
+  if (hasEnds) sides.forEach((g) => { if (g.ye < floorEnd(g.pitch) - 1e-9) g.tight = true; });
+  // 10. The records, legacy keys first.
+  const sideRec = (g) => {
+    const o = { side: g.side, wall: g.wall, w: g.w, pitch: g.pitch, u1: g.u1, u0: g.u0, ye: g.ye, ya: g.ya };
+    if (g.tier === 1 && g.attach) Object.assign(o, { uIn: g.uIn, run: g.run, attach: g.attach, attachFt: g.attachFt, k: g.k, clamped: g.clamped, cuts: g.cuts, meets: g.meets, meetFt: g.meetFt });
+    Object.assign(o, { i: g.i, bwall: g.bwall, tier: g.tier, outer: g.outer, want: g.want, shrunk: g.shrunk, top: g.top, ask: g.ask, askIgnored: g.askIgnored,
+      raised: g.raised, raisedBy: g.raisedBy, raisedFrom: g.raisedFrom, low: g.low, tight: g.tight, roofIgnored: g.roofIgnored });
+    if (g.tier > 1 && g.mt) Object.assign(o, g.mt);
+    return o;
+  };
+  const endRec = (t) => ({ i: t.i, wall: t.wall, bwall: t.bwall, at: t.at, sz: t.sz, tier: t.tier, outer: t.outer, w: t.w, want: t.want, shrunk: t.shrunk,
+    pitch: t.pitch, zO: t.zO, zI: t.zI, ye: t.ye, ya: t.ya, top: t.top,
+    attach: t.mt ? "wall" : null, attachFt: t.mt ? t.mt.attachFt : null, clamped: t.mt ? t.mt.clamped : false, cuts: t.mt ? t.mt.cuts : false,
+    meets: t.mt ? "wall" : null, meetFt: t.mt ? t.mt.meetFt : null,
+    ask: t.ask, askIgnored: t.askIgnored, raised: t.raised, raisedBy: t.raisedBy, raisedFrom: t.raisedFrom, low: t.low, tight: t.tight, roofIgnored: t.roofIgnored });
+  for (let k = 0; k < Math.max(G["-1"].length, G["1"].length); k++) [G["-1"][k], G["1"][k]].forEach((g) => { if (g) out.wings.push(sideRec(g)); });
+  for (let k = 0; k < Math.max(Z[0].length, Z[1].length); k++) [Z[0][k], Z[1][k]].forEach((t) => { if (t) out.ends.push(endRec(t)); });
+  return out;
+}
+// A tier-1 side wing that meets the MIDDLE on the wall or up its roof: d3WingsAttach's body token for token,
+// each wing from its own outside wall (g.ye, H on a wing standing on the building's wall) and its own asked
+// distance (g.d). It writes the same fields on the wing: pitch, ya, uIn, run, attach, attachFt, k, clamped,
+// cuts, meets, meetFt. d3MassingList then takes the middle's ya over every side wing.
+function d3TierMeetMiddle(m, c, T1, ov) {
+  const Hc = m.Hc, a = D3.ROOF_T + 0.43;
+  T1.forEach((g) => {
+    const mode = g.attach;
+    if (!mode) return;
+    const Hn = g.ye;
+    const ask = g.d;
+    const e = d3RoofEnd(c, g.side);
+    const k = Math.max(0, e.k);
+    let d = ask, A, uIn = g.u0, run = g.w, clamped = false, cuts = false;
+    const need = g.w > ov + 1e-6 ? Math.max(a, (a + k * ov - ov * (Hc - Hn) / g.w) / (1 - ov / g.w)) : a + k * ov;
+    if (mode === "wall") {
+      if (d < need - 1e-9) { d = need; clamped = true; }
+      if (Hc - d < Hn) { d = Hc - Hn; clamped = true; cuts = d < need - 1e-9; }
+      A = Hc - d;
+    } else {
+      const most = Math.max(0, e.rise - 0.25);
+      if (!(k > 0.05)) { clamped = d > 0; d = 0; cuts = true; }
+      else if (d > most + 1e-9) { d = most; clamped = true; }
+      A = Hc + d;
+      if (k > 0.05) { uIn = g.u0 - g.side * (d / k); run = g.w + d / k; }
+    }
+    let p = (A - Hn) / run;
+    if (mode === "roof" && p > k + 1e-9) cuts = true;
+    let meets = mode, meetFt = d;
+    if (mode === "roof" && cuts) {
+      uIn = g.u0; run = g.w;
+      A = Math.max(Hn, Math.min(Hn + g.w * p, Hc - need));
+      p = (A - Hn) / g.w; meets = "wall"; meetFt = Hc - A;
+    }
+    Object.assign(g, { pitch: p, ya: A, uIn, run, attach: mode, attachFt: d, k, clamped, cuts, meets, meetFt });
+  });
+}
+// d3MassingTopAt over a DEEP list: each side wing's roof line over its own band (the outermost out past the
+// building's wall, as today), a tier-1 roof run up onto the middle's roof out to where it lands, else the
+// middle's roof. The outline across the middle stretch; the end wings are not in it.
+function d3ListTopAt(m, u) {
+  for (let i = 0; i < m.wings.length; i++) {
+    const g = m.wings[i], s = g.side;
+    if (g.outer) { if ((u - g.u0) * s > 0) return g.ye + Math.min(g.w, Math.abs(u - g.u1)) * g.pitch; }
+    else if ((u - g.u0) * s > 0 && (u - g.u1) * s <= 0) return g.ye + Math.abs(u - g.u1) * g.pitch;
+  }
+  for (let i = 0; i < m.wings.length; i++) {
+    const g = m.wings[i];
+    if (g.tier === 1 && g.uIn != null && (u - g.uIn) * g.side > 0 && (u - g.u0) * g.side <= 0) return Math.max(g.ye + Math.abs(u - g.u1) * g.pitch, d3MakeProfYAt(m.prof, m.Hc)(u - m.uc));
+  }
+  return d3MakeProfYAt(m.prof, m.Hc)(u - m.uc);
+}
+// A gable wall across the middle stretch (no end wing on it), in the wall's along-frame (u + S/2): each side
+// wing's outside wall height over its band, outermost first, the middle at Hc, each inner boundary at the
+// clerestory's outer face (d3WallTops' c0/c1, one per wing). Null when every piece is H.
+function d3ListEndStair(m) {
+  const T = D3.WALL_T, S = m.S, half = S / 2, out = [];
+  const L0 = m.wings.filter((g) => g.side < 0).sort((p, q) => q.tier - p.tier);
+  const R0 = m.wings.filter((g) => g.side > 0).sort((p, q) => p.tier - q.tier);
+  let x = 0;
+  L0.forEach((g) => { const b = g.u0 - T / 2 + half; out.push([x, b, g.ye]); x = b; });
+  const mid = R0.length ? R0[0].u0 + T / 2 + half : S;
+  out.push([x, mid, m.Hc]); x = mid;
+  R0.forEach((g, k) => { const b = g.outer ? S : R0[k + 1].u0 + T / 2 + half; out.push([x, b, g.ye]); x = b; });
+  return out.every((p) => p[2] === m.H) ? null : out;
+}
+// d3WallTops over a DEEP list. A gable wall carrying an end wing is that wing's outside wall, H (null); one
+// without is the stair. A long wall: without end wings, today's (null under side wings, else Hc); with them,
+// each end wing's outside wall over its stretch and the middle's (m.E) between, in rg z, each boundary at the
+// end wing's inner line's outer face, then turned into the plan's along-frame (landscape: L - z).
+function d3ListWallTops(m, wall) {
+  const gables = m.uAxisIsX ? ["north", "south"] : ["west", "east"];
+  if (gables.indexOf(wall) >= 0) {
+    const at = wall === (m.uAxisIsX ? "north" : "east") ? 0 : 1;
+    return m.ends.some((t) => t.at === at) ? null : d3ListEndStair(m);
+  }
+  const s = wall === (m.uAxisIsX ? "west" : "north") ? -1 : 1;
+  if (!m.ends.length) return m.wings.some((g) => g.side === s) ? null : [[0, m.L, m.Hc]];
+  const T = D3.WALL_T;
+  const E0 = m.ends.filter((t) => t.at === 0).sort((p, q) => q.tier - p.tier);
+  const E1 = m.ends.filter((t) => t.at === 1).sort((p, q) => p.tier - q.tier);
+  const b = (t) => t.zI + t.sz * T / 2;
+  const pieces = [];
+  let z = 0;
+  E0.forEach((t) => { pieces.push([z, b(t), t.ye]); z = b(t); });
+  const z1 = E1.length ? b(E1[0]) : m.L;
+  pieces.push([z, z1, m.E[s]]); z = z1;
+  E1.forEach((t, k) => { const e = t.outer ? m.L : b(E1[k + 1]); pieces.push([z, e, t.ye]); z = e; });
+  if (m.uAxisIsX) return pieces;
+  return pieces.map((p) => [m.L - p[1], m.L - p[0], p[2]]).sort((p, q) => p[0] - q[0]);
+}
+// d3CeilingFt over a DEEP list, at world (x, z): an end wing's plate over its stretch, else the middle's
+// under the middle, else the side wing's whose band it is in, else the outside wall's.
+function d3ListCeilingFt(m, x, z) {
+  const u = m.uAxisIsX ? x : z, zr = m.uAxisIsX ? z + m.L / 2 : m.L / 2 - x;
+  for (let j = 0; j < m.ends.length; j++) {
+    const t = m.ends[j];
+    if (t.sz * (zr - t.zI) > 1e-6 && (t.outer || t.sz * (zr - t.zO) <= 1e-6)) return t.ye;
+  }
+  if (Math.abs(u - m.uc) <= m.Sc / 2 + 1e-6) return m.Hc;
+  for (let i = 0; i < m.wings.length; i++) {
+    const g = m.wings[i], s = g.side;
+    if ((u - g.u0) * s > 0 && (g.outer || (u - g.u1) * s <= 0)) return g.ye;
+  }
+  return m.H;
+}
+// A dormer sits at the middle of the ridge, dormerWidthFt long: beside end wings it must stay half a foot
+// inside the middle stretch, or it would reach over an end wing's roof. "end", or null (every other style).
+function d3DormerBlocked(roofCfg, W, L, H) {
+  if (!d3WingListOn(roofCfg)) return null;
+  const m = d3Massing(roofCfg, W, L, H);
+  const dw = Number(roofCfg.dormerWidthFt);
+  return m.list && m.ends.length && dw > 0.5 && (m.L / 2 - dw / 2 < m.zA + 0.5 || m.L / 2 + dw / 2 > m.zB - 0.5) ? "end" : null;
+}
+// A projecting porch on `wall` (a compass wall) that end wings rule out: on a gable end that carries an end
+// wing (its wall is that wing's low eave), and on an eave wall while any end wing exists (its eave steps
+// along the wall). False without end wings. The end wings' widths do not depend on the wall height.
+function d3WingListBlocksPorch(roofCfg, W, L, wall) {
+  if (!d3WingListOn(roofCfg)) return false;
+  const m = d3Massing(roofCfg, W, L, D3.WALL_H);
+  if (!(m.list && m.ends.length)) return false;
+  const gable = m.uAxisIsX ? wall === "north" || wall === "south" : wall === "west" || wall === "east";
+  return gable ? m.ends.some((t) => t.wall === wall) : true;
+}
+// THE OLDER DESIGNER'S APPROXIMATION of a list (production reads wingSide / wingWidthFt / wingPitch /
+// centerEaveFt only): one wing per eave side that has any, as wide as that side's whole stack and meeting
+// the middle where the stack's tier 1 does. { drop: true } without a side wing: delete those three keys and
+// the older designer draws the plain building (end wings are missing there, which is honest).
+function d3WingListFallback(roof, W, L, H) {
+  const m = d3Massing(roof, W, L, H);
+  const names = { west: "left", east: "right", north: "back", south: "front" };
+  const stacks = [-1, 1].map((s) => m.wings.filter((g) => g.side === s)).filter((ch) => ch.length);
+  if (!stacks.length) return { drop: true };
+  const first = stacks[0];
+  const wW = Math.min(16, first.reduce((t, g) => t + g.w, 0));
+  const t1 = first.find((g) => (g.tier || 1) === 1) || first[0];
+  return { wingSide: stacks.length > 1 ? "both" : names[first[0].wall], wingWidthFt: wW, wingPitch: Math.max(0, Math.min(1.5, (t1.ya - m.H) / wW)) };
+}
+// The list that draws a legacy style's wings (wingSide / wingWidthFt / wingPitch / wingAttach /
+// wingAttachFt / wingSides) at this size: one entry per eave wing it asks for, with the width ASKED (so the
+// room share shrinks it as the legacy massing does at every size), its pitch, and its attach. Taken from the
+// legacy massing's own ask, BEFORE the room is shared, so a wing that is squeezed out at this size is kept
+// too (listed, not drawn, here) and drawn where it fits, as it always was. [] without legacy wings.
+function d3WingListFromLegacy(roof, W, L, H) {
+  const cfg = roof || {};
+  const type = cfg.type || "gable";
+  const want = Math.min(16, Number(cfg.wingWidthFt) || 0);
+  if (!((type === "gable" || type === "gambrel") && want > 0.5)) return [];
+  const ax = d3RoofAxes(cfg, W, L);
+  const negWall = ax.uAxisIsX ? "west" : "north", posWall = ax.uAxisIsX ? "east" : "south";
+  const named = { left: "west", right: "east", front: "south", back: "north" };
+  const asked = (cfg.wingSide || "both") === "both" ? [negWall, posWall] : (named[cfg.wingSide] ? [named[cfg.wingSide]] : []);
+  const walls = asked.filter((w) => w === negWall || w === posWall);
+  const rawP = cfg.wingPitch != null ? Number(cfg.wingPitch) : 0.25;
+  const pitch = isFinite(rawP) ? Math.max(0, Math.min(1.5, rawP)) : 0.25;
+  const shared = cfg.wingAttach === "roof" || cfg.wingAttach === "wall" ? cfg.wingAttach : null;
+  const bw = { west: "left", east: "right", north: "back", south: "front" };
+  return walls.map((wall) => ({ wall, o: d3WingSideCfg(cfg, wall, want, pitch, shared) })).filter(({ o }) => o.want > 0.5).map(({ wall, o }) => {
+    const e = { wall: bw[wall], widthFt: o.want, pitch: o.pitch };
+    if (o.attach) {
+      e.attach = o.attach;
+      const ft = Number(o.attachFt);
+      if (isFinite(ft)) e.attachFt = Math.max(0, Math.min(10, ft));
+    }
+    return e;
+  });
+}
 // ── WHERE A LEAN-TO MEETS THE BUILDING (roof.leanToAttach / leanToAttachFt, 2026-09-28) ─────────────
 // Carolyn, 09-28 @9:20, on a lean-to: "we need to be able to slide it up here [on the roof] and slide
 // it down on the side here", and "the further out they go, the higher up in the roof they have to go so
@@ -4978,7 +5414,8 @@ function d3LeanToGeom(roofCfg, W, L, H) {
   const m = d3Massing(cfg, W, L, H);
   const dir = cfg.leanToSide === "left" ? -1 : 1;
   const u0 = dir * (m.S / 2), u1 = u0 + dir * leanW;
-  const g = m.wings.find((q) => q.side === dir);
+  // The OUTERMOST wing on that side (roof.wingList stacks them; a legacy wing has no `outer`).
+  const g = m.wings.find((q) => q.side === dir && q.outer !== false);
   const end = g ? { y: g.ye, k: g.pitch, rise: g.ya - g.ye } : d3RoofEnd(m.prof, dir);
   const E = end.y, k = end.k;
   const d0 = Number(cfg.leanToAttachFt);
@@ -5083,6 +5520,10 @@ function d3LeanTosGeom(roofCfg, W, L, H) {
   const cfg = roofCfg || {};
   const ax = d3RoofAxes(cfg, W, L);
   const Hn = Number(H) > 0 ? Number(H) : D3.WALL_H;
+  // END WINGS (roof.wingList): an eave wall's eave steps where they stand, so a lean-to attached along a
+  // stretch of it they take is hung at wall height instead (endCross). Null on every other style.
+  const mz = d3WingListOn(cfg) ? d3Massing(cfg, W, L, Hn) : null;
+  const zRun = mz && mz.list && mz.ends.length ? mz : null;
   return list.map(({ e, i }) => {
     const f = d3LeanToWall(ax, e.wall);
     const w = Math.min(16, Number(e.widthFt));
@@ -5095,7 +5536,8 @@ function d3LeanTosGeom(roofCfg, W, L, H) {
         leanToAttach: attach || "wall", leanToAttachFt: attach ? e.attachFt : 0 }, W, L, Hn);
       const zc = ax.L / 2 + mid;
       const at = { ...base, a0: zc - run.len / 2, a1: zc + run.len / 2, roofIgnored: false };
-      if (attach) return { ...g, ...at };
+      const endCross = !!(zRun && attach && (at.a0 < zRun.zA - 1e-9 || at.a1 > zRun.zB + 1e-9));
+      if (attach && !endCross) return { ...g, ...at };
       // Absent attach hangs at WALL HEIGHT, the plate H, line for line the single lean-to without an attach
       // (review, 2026-09-30): from the wall line at H, its outer edge drop under it, the drop held to
       // H - 1.5 and never lifted to a sliver of pitch. That is the eave wherever the eave is the plate; on
@@ -5104,7 +5546,7 @@ function d3LeanTosGeom(roofCfg, W, L, H) {
       const drop = Math.min(e.dropFt != null ? Number(e.dropFt) : 1, Hn - 1.5);
       const y1 = Hn - drop;
       return { ...g, ...at, ua: g.u0, ya: Hn, y1, drop, d: Math.max(0, g.E - Hn), at: Math.max(0, g.E - Hn), mode: null,
-        pitch: (Hn - y1) / Math.abs(g.u1 - g.u0), clamped: false, flat: false, noRoof: false, cuts: false };
+        pitch: (Hn - y1) / Math.abs(g.u1 - g.u0), clamped: false, flat: false, noRoof: false, cuts: false, ...(endCross ? { endCross: true } : {}) };
     }
     const E = Hn;
     const drop = Math.min(e.dropFt != null ? Number(e.dropFt) : 1, E - 1.5);
@@ -5149,7 +5591,7 @@ function d3RoofStep(roofCfg, W, L, H) {
   if (cfg.type !== "gable" || cfg.rearStepFt == null || cfg.rearEaveRiseFt == null) return null;
   const want = Number(cfg.rearStepFt), rise0 = Number(cfg.rearEaveRiseFt);
   if (!(want > 0.5) || !(Math.abs(rise0) >= 0.01)) return null;
-  if (d3FrontKind(cfg) === "eave" || Number(cfg.wingWidthFt) > 0.5 || Number(cfg.leanToWidthFt) > 0.5 || d3HasLeanTos(cfg)) return null;
+  if (d3FrontKind(cfg) === "eave" || Number(cfg.wingWidthFt) > 0.5 || Number(cfg.leanToWidthFt) > 0.5 || d3HasLeanTos(cfg) || d3WingListOn(cfg)) return null;
   const ax = d3RoofAxes(cfg, W, L);
   if (!ax.uAxisIsX) return null;
   const porchOut = d3ProjectingPorch(cfg, W, L);
@@ -5192,6 +5634,7 @@ function d3WallTops(roofCfg, W, L, H, wall, setBack) {
     return [[0, ax.L, H + ax.S * ((roofCfg && roofCfg.pitch) || 0.25)]];
   }
   const m = d3Massing(roofCfg, W, L, H);
+  if (d3WingListDeep(m)) return d3ListWallTops(m, wall);
   if (!m.wings.length) {
     const st = d3RoofStep(roofCfg, W, L, H);
     if (!st) return null;
@@ -5246,6 +5689,7 @@ function d3PorchWallTopFt(roofCfg, W, L, H) {
 // (d3RoofStep: the back rearStepFt feet, world z from the north wall) it is that section's plate.
 function d3CeilingFt(roofCfg, W, L, H, x, z) {
   const m = d3Massing(roofCfg, W, L, H);
+  if (d3WingListDeep(m)) return d3ListCeilingFt(m, x, z);
   if (!m.wings.length) {
     const st = d3RoofStep(roofCfg, W, L, H);
     return st && z < -L / 2 + st.stepFt ? st.Hb : H;
@@ -5628,7 +6072,7 @@ function d3TransomDormerGeom(roofCfg, S, profYAt, lands) {
 // wall under the eave (a wing) or runs in under the deck (a lean-to).
 function d3RoofLands(roofCfg, m, W, L, H) {
   let out = null;
-  m.wings.forEach((g) => { if (g.attach === "roof" && !g.cuts) (out = out || {})[g.side] = g.uIn - m.uc; });
+  m.wings.forEach((g) => { if ((g.tier || 1) === 1 && g.attach === "roof" && !g.cuts) (out = out || {})[g.side] = g.uIn - m.uc; });
   const lt = d3LeanToGeom(roofCfg, W, L, H);
   if (lt && lt.mode === "roof" && !lt.noRoof && !lt.cuts && !m.wings.some((g) => g.side === lt.dir)) (out = out || {})[lt.dir] = lt.ua - m.uc;
   // THE LEAN-TO LIST (roof.leanTos, 2026-09-29): each one up the roof of an eave wall covers that eave
@@ -5773,7 +6217,7 @@ function d3DormerCovered(spec, sizeLabel) {
   const reach = transom ? 0.85 : 1;
   const most = Math.floor(((dir * land - 0.3 - reach) / (r.S / 2)) * 20 + 1e-6) / 20;
   const m = d3Massing(roof, w, d, H);
-  return { dir, by: m.wings.some((g) => g.side === dir && g.attach === "roof" && !g.cuts) ? "wing" : "lean-to", clearAt: most >= 0.05 ? dir * most : null };
+  return { dir, by: m.wings.some((g) => (g.tier || 1) === 1 && g.side === dir && g.attach === "roof" && !g.cuts) ? "wing" : "lean-to", clearAt: most >= 0.05 ? dir * most : null };
 }
 // The panel's words for d3DormerCovered: in the dormer's own fields (`inDormer`), naming the roof over it,
 // and in the lean-to's or the wings' readout, where "this roof" is that one. Each names the two fixes.
@@ -6142,7 +6586,7 @@ function d3PorchCapFt(roofCfg, W, L, H, trimFace) {
   }
   // The slope that ends at this wall: a wing's, or the centre's own end leg.
   let k = 0;
-  const wing = m.wings.find((g) => g.side === s);
+  const wing = m.wings.find((g) => g.side === s && g.outer !== false);
   if (wing) k = wing.pitch;
   else {
     const pr = s > 0 ? m.prof.slice().reverse() : m.prof;
@@ -6271,7 +6715,7 @@ function d3LeanTosReadout(spec, sizeLabel) {
     const P = d3PorchSpan(roof, w, d);
     porch = P.onCap ? { wall: compass[pj.wall], kind: "projecting", a0: P.centerU - P.span / 2, a1: P.centerU + P.span / 2 }
       : { wall: compass[pj.wall], kind: "projecting", a0: ax.L / 2 - P.span / 2, a1: ax.L / 2 + P.span / 2 };
-  } else if ((Number(roof.porchDepthFt) || 0) > 0.5 && !d3Massing(roof, w, d, D3.WALL_H).wings.length) {
+  } else if ((Number(roof.porchDepthFt) || 0) > 0.5 && !d3WingsOn(d3Massing(roof, w, d, D3.WALL_H))) {
     const front = (roof.porchEnd || "front") !== "back";
     const pw = d3NewFrame(roof) ? (front ? "south" : "north") : ax.uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
     porch = { wall: compass[pw], kind: "recessed", a0: -Infinity, a1: Infinity };
@@ -11929,7 +12373,7 @@ function ssSelfCheckCameras(p, frameMap) {
   let peak = H + d3RoofAxes(roof, W, L).S * 0.62;
   // A RAISED CENTRE (wings, d3Massing) stands above its outer walls by more than that allows for:
   // frame its real ridge too, with the same half-foot of air. Unchanged without wings.
-  if (d3Massing(roof, W, L, H).wings.length) peak = Math.max(peak, d3ModelTopFt(spec, W, L) + 0.5);
+  if (d3WingsOn(d3Massing(roof, W, L, H))) peak = Math.max(peak, d3ModelTopFt(spec, W, L) + 0.5);
   // A RAISED FLOOR (d3GradeLiftFt, 2026-09-25) puts the ground `lift` further down than it has always
   // been. The phone that filmed it was held at chest height above THAT ground, so the eye comes down
   // by the lift, and the framing's base points go down to it, so the supports are in shot. 0 on
