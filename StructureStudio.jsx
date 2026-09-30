@@ -6747,6 +6747,10 @@ function d3LeanTosReadout(spec, sizeLabel) {
 // `frame` "plain" (the Advanced page, 2026-09-29) draws it bare, for a card that is already the frame;
 // anything else is the amber panel every other caller has always had.
 function D3ElevationSVG({ spec, sizeLabel, focusKey, frame }) {
+  // A WING LIST (roof.wingList, 2026-10-01) with a wing on a wing or an end wing draws its own stepped end;
+  // one wing per side from a list is today's drawing below (d3WingListDeep).
+  const listed = d3WingListElevation(spec, sizeLabel, focusKey, frame);
+  if (listed) return listed;
   // WINGS (d3Massing, 2026-09-24): a raised centre draws the stepped end the 3D builds instead.
   const winged = d3WingsElevation(spec, sizeLabel, focusKey, frame);
   if (winged) return winged;
@@ -7000,6 +7004,240 @@ function d3LeanTosElev(LTS, X, Y, OV, focusKey, label) {
     );
   });
   return lines.concat(names);
+}
+// ── THE WING LIST IN 2D (roof.wingList, 2026-10-01) ─────────────────────────────────────────────────
+// Three plain functions returning JSX (no hooks), each read off d3Massing, the numbers the 3D builds:
+//   d3WingListElevation      the End view of a DEEP massing (d3WingListDeep: a wing on a wing, or an end
+//                            wing); null otherwise, so one wing per side from a list is today's drawing
+//   d3WingListSideElevation  along a long wall, only with end wings drawn
+//   d3WingListPlanSVG        the Wings tab's Plan: every section from above
+// A wing's focus keys are "wl<i>-..." (i = its index in roof.wingList); a box on its card lights it.
+function d3WingListSize(sizeLabel) {
+  const mm = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
+  return { w: mm ? parseFloat(mm[1]) : 12, d: mm ? parseFloat(mm[2]) : 16 };
+}
+function d3WingListLit(focusKey, i) { return typeof focusKey === "string" && focusKey.indexOf("wl" + i + "-") === 0; }
+// THE END VIEW OF STACKED WINGS: the lower storey across the whole span, each side wing's own walls up to its
+// outside wall where that stands above the building's, each wing's roof from its outer eave (out past the wall
+// by the overhang) up to the face inside it, the middle's walls and roof over them, and the lean-tos. An end
+// wing on the end in view (the z = L end: the front, standing in front of a gable front) is its roof seen
+// end-on, a band from its eave up to where it meets the middle, drawn in front of the rest. Dimensioned like
+// the drawing it stands in for: the wall on the left, the middle's eave and the peak on the right, every
+// wing's width under it and every raised outside wall at its top.
+function d3WingListElevation(spec, sizeLabel, focusKey, frame) {
+  const roof = (spec && spec.roof) || {};
+  if (!d3WingListOn(roof)) return null;
+  const { w, d } = d3WingListSize(sizeLabel);
+  const H = (spec && spec.wallHeightFt) || 8;
+  const m = d3Massing(roof, w, d, H);
+  if (!d3WingListDeep(m)) return null;
+  const OV = roof.overhang != null ? Number(roof.overhang) || 0 : D3.OVERHANG;
+  const S = m.S, s2 = S / 2;
+  const cp = m.prof.map((p) => [p[0] + m.uc, p[1]]);
+  let peak = m.Hc;
+  cp.forEach((p) => { if (p[1] > peak) peak = p[1]; });
+  const VW = 360, VH = 224, PL = 54, PR = 78, PT = 14, PB = 48;
+  const innerW = VW - PL - PR, innerH = VH - PT - PB;
+  const LTS = (d3LeanTosGeom(roof, w, d, H) || []).filter((q) => q.kind === "eave");
+  const ltL = LTS.reduce((a, q) => (q.dir < 0 ? Math.max(a, q.w) : a), 0), ltR = LTS.reduce((a, q) => (q.dir > 0 ? Math.max(a, q.w) : a), 0);
+  const sc = Math.min(innerW / Math.max(S + OV * 2 + ltL + ltR, 1), innerH / Math.max(peak, 1));
+  const X = (u) => PL + innerW / 2 + (u - (ltR - ltL) / 2) * sc;
+  const Y = (y) => PT + innerH - y * sc;
+  const HL = "#B45309", DIM = "#A16207", INK = "#78350F";
+  const on = (k) => focusKey === k || (typeof focusKey === "string" && focusKey.split(":")[0] === k);
+  const lit = (i) => d3WingListLit(focusKey, i);
+  const dimStroke = (k) => ({ stroke: on(k) ? HL : DIM, strokeWidth: on(k) ? 2 : 1 });
+  const PLAIN = frame === "plain";
+  const label = (x, y, main, sub, k, anchor) => (
+    <g>
+      <text x={x} y={y} textAnchor={anchor || "middle"} style={{ fontSize: PLAIN ? 11 : 10, fontWeight: 800, fill: on(k) ? HL : INK }}>{main}</text>
+      {sub ? <text x={x} y={y + (PLAIN ? 10 : 9)} textAnchor={anchor || "middle"} style={{ fontSize: PLAIN ? 9 : 8, fill: DIM }}>{sub}</text> : null}
+    </g>
+  );
+  const ext = (far, near) => {
+    const dx = near[0] - far[0], dy = near[1] - far[1];
+    if (Math.abs(dx) < 1e-6) return near;
+    const k = OV / Math.abs(dx);
+    return [near[0] + dx * k, near[1] + dy * k];
+  };
+  // A wing against the middle whose roof runs up onto the middle's roof covers the middle's eave on that side.
+  const landL = m.wings.find((g) => g.side < 0 && g.tier === 1 && g.attach === "roof" && !g.cuts);
+  const landR = m.wings.find((g) => g.side > 0 && g.tier === 1 && g.attach === "roof" && !g.cuts);
+  const centreRoof = [landL ? [landL.uIn, landL.ya] : ext(cp[1], cp[0])]
+    .concat(cp.slice(landL ? 1 : 0, landR ? cp.length - 1 : cp.length), [landR ? [landR.uIn, landR.ya] : ext(cp[cp.length - 2], cp[cp.length - 1])]);
+  const pts = (arr) => arr.map((p) => X(p[0]) + "," + Y(p[1])).join(" ");
+  const cL = cp[0][0], cR = cp[cp.length - 1][0];
+  const inView = m.ends.filter((t) => t.at === 1);
+  const in12 = (p) => Math.round(p * 120) / 10;
+  const fs = PLAIN ? 9 : 8;
+  return (
+    <svg viewBox={`0 0 ${VW} ${VH}`} style={d3ElevFrame(frame)} data-ss-elev-winglist="">
+      <line x1={PL - 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(0)} stroke="#D6D3D1" strokeWidth="1" />
+      <rect x={X(-s2)} y={Y(H)} width={S * sc} height={H * sc} fill="#FEF3C7" stroke={INK} strokeWidth="1.2" />
+      {m.wings.filter((g) => g.ye > H + 1e-6).map((g) => (
+        <rect key={"wlw" + g.i} x={X(Math.min(g.u0, g.u1))} y={Y(g.ye)} width={Math.abs(g.u1 - g.u0) * sc} height={(g.ye - H) * sc}
+          fill="#FEF3C7" stroke={lit(g.i) ? HL : INK} strokeWidth="1.2" />
+      ))}
+      {m.Hc > H + 1e-6 && <rect x={X(cL)} y={Y(m.Hc)} width={(cR - cL) * sc} height={(m.Hc - H) * sc} fill="#FEF3C7" stroke={INK} strokeWidth="1.2" />}
+      {m.wings.map((g) => (
+        <polyline key={"wl" + g.i} points={pts([[g.u1 + g.side * OV, g.ye - OV * g.pitch], [g.u1, g.ye], [g.uIn != null ? g.uIn : g.u0, g.ya]])}
+          fill="none" stroke={lit(g.i) ? HL : INK} strokeWidth="2" strokeLinejoin="round" />
+      ))}
+      <polyline points={pts(centreRoof)} fill="none" stroke={INK} strokeWidth="2" strokeLinejoin="round" />
+      {d3LeanTosElev(LTS, X, Y, OV, focusKey, label)}
+      {inView.map((t) => {
+        const lo = t.ye - OV * t.pitch;
+        return (
+          <g key={"wle" + t.i}>
+            <rect x={X(-s2 - OV)} y={Y(t.ya)} width={(S + OV * 2) * sc} height={Math.max(1, (t.ya - lo) * sc)} fill="#FDE68A" fillOpacity="0.9"
+              stroke={lit(t.i) ? HL : INK} strokeWidth={lit(t.i) ? 2 : 1.2} />
+            <text x={X(0)} y={(Y(t.ya) + Y(lo)) / 2 + 3} textAnchor="middle" style={{ fontSize: fs, fontWeight: 700, fill: lit(t.i) ? HL : INK }}>
+              {`${t.bwall} end wing${t.tier > 1 ? " " + t.tier : ""}, ${in12(t.pitch)} in 12`}
+            </text>
+          </g>
+        );
+      })}
+      {/* THE WALL (left), THE MIDDLE'S EAVE and THE PEAK (right) */}
+      <line x1={PL - 22} y1={Y(0)} x2={PL - 22} y2={Y(H)} {...dimStroke("wallHeightFt")} />
+      {label(PL - 26, (Y(0) + Y(H)) / 2, d3FtIn(H), "wall", "wallHeightFt", "end")}
+      <line x1={VW - PR + 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(m.Hc)} {...dimStroke("centerEaveFt")} />
+      {label(VW - PR + 14, (Y(H) + Y(m.Hc)) / 2, d3FtIn(m.Hc), m.hcRaised ? "middle, raised" : (m.hcLow ? "middle, min." : "middle eave"), "centerEaveFt", "start")}
+      <line x1={VW - 8} y1={Y(0)} x2={VW - 8} y2={Y(peak)} stroke={DIM} strokeWidth="1" />
+      {label(VW - 12, Y(peak) + 10, d3FtIn(peak), "peak", null, "end")}
+      {/* EVERY WING'S WIDTH under it, and every outside wall that stands above the building's at its top */}
+      {m.wings.map((g) => (
+        <g key={"wld" + g.i}>
+          <line x1={X(g.u1)} y1={Y(0) + 6} x2={X(g.u0)} y2={Y(0) + 6} stroke={lit(g.i) ? HL : DIM} strokeWidth={lit(g.i) ? 2 : 1} />
+          <text x={(X(g.u1) + X(g.u0)) / 2} y={Y(0) + 17} textAnchor="middle" style={{ fontSize: fs, fontWeight: 700, fill: lit(g.i) ? HL : INK }}>{d3FtIn(g.w)}</text>
+          {g.ye > H + 1e-6 && (
+            <text x={(X(g.u1) + X(g.u0)) / 2} y={Y(g.ye) + 11} textAnchor="middle" style={{ fontSize: fs - 0.5, fontWeight: 700, fill: lit(g.i) ? HL : DIM }}>
+              <title>{`${g.bwall} wing ${g.tier}: outside wall ${d3FtIn(g.ye)}`}</title>
+              {d3FtIn(g.ye)}
+            </text>
+          )}
+        </g>
+      ))}
+      <line x1={X(-s2)} y1={Y(0) + 26} x2={X(s2)} y2={Y(0) + 26} stroke={DIM} strokeWidth="1" />
+      {label((X(-s2) + X(s2)) / 2, Y(0) + 38, d3FtIn(S), "span", null)}
+    </svg>
+  );
+}
+// THE SIDE VIEW (end wings only): standing at a long wall, the end wings' roofs falling from where they meet
+// the middle down to the end walls, the middle's long wall over the middle stretch to its top there and its
+// roof above, dimensioned: each end wing's depth and pitch, and the long wall's height (raised, when the end
+// roofs pushed it up). Portrait: the west wall, north on the left. Landscape: the south wall, west on the left.
+function d3WingListSideElevation(spec, sizeLabel, focusKey, frame) {
+  const roof = (spec && spec.roof) || {};
+  if (!d3WingListOn(roof)) return null;
+  const { w, d } = d3WingListSize(sizeLabel);
+  const H = (spec && spec.wallHeightFt) || 8;
+  const m = d3Massing(roof, w, d, H);
+  if (!(m.list && m.ends && m.ends.length)) return null;
+  const OV = roof.overhang != null ? Number(roof.overhang) || 0 : D3.OVERHANG;
+  const L = m.L, P = m.uAxisIsX;
+  const E = m.E[P ? "-1" : "1"];
+  let peak = m.Hc;
+  m.prof.forEach((p) => { if (p[1] > peak) peak = p[1]; });
+  const VW = 360, VH = 200, PL = 54, PR = 88, PT = 14, PB = 34;
+  const innerW = VW - PL - PR, innerH = VH - PT - PB;
+  const sc = Math.min(innerW / Math.max(L + OV * 2, 1), innerH / Math.max(peak, 1));
+  const X = (z) => PL + innerW / 2 + ((P ? z : L - z) - L / 2) * sc;
+  const Y = (y) => PT + innerH - y * sc;
+  const HL = "#B45309", DIM = "#A16207", INK = "#78350F";
+  const lit = (i) => d3WingListLit(focusKey, i);
+  const PLAIN = frame === "plain";
+  const fs = PLAIN ? 9 : 8;
+  const pts = (arr) => arr.map((p) => X(p[0]) + "," + Y(p[1])).join(" ");
+  const xL = Math.min(X(m.zA), X(m.zB)), xR = Math.max(X(m.zA), X(m.zB));
+  return (
+    <svg viewBox={`0 0 ${VW} ${VH}`} style={d3ElevFrame(frame)} data-ss-elev-winglist-side="">
+      <line x1={PL - 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(0)} stroke="#D6D3D1" strokeWidth="1" />
+      <polygon points={pts([[m.zA - OV, E], [m.zB + OV, E], [m.zB + OV, peak], [m.zA - OV, peak]])} fill="#FFFBEB" stroke={INK} strokeWidth="1.2" />
+      <rect x={xL} y={Y(E)} width={xR - xL} height={E * sc} fill="#FEF3C7" stroke={INK} strokeWidth="1.2" />
+      {m.ends.map((t) => (
+        <g key={"wls" + t.i}>
+          <rect x={Math.min(X(t.zI), X(t.zO))} y={Y(t.ye)} width={Math.abs(X(t.zO) - X(t.zI))} height={t.ye * sc} fill="#FEF3C7" stroke={lit(t.i) ? HL : INK} strokeWidth="1.2" />
+          <polyline points={pts([[t.zO + t.sz * OV, t.ye - OV * t.pitch], [t.zO, t.ye], [t.zI, t.ya]])} fill="none" stroke={lit(t.i) ? HL : INK} strokeWidth="2" strokeLinejoin="round" />
+          <line x1={X(t.zO)} y1={Y(0) + 6} x2={X(t.zI)} y2={Y(0) + 6} stroke={lit(t.i) ? HL : DIM} strokeWidth={lit(t.i) ? 2 : 1} />
+          <text x={(X(t.zO) + X(t.zI)) / 2} y={Y(0) + 17} textAnchor="middle" style={{ fontSize: fs, fontWeight: 700, fill: lit(t.i) ? HL : INK }}>{d3FtIn(t.w)}</text>
+          <text x={(X(t.zO) + X(t.zI)) / 2} y={Y(0) + 27} textAnchor="middle" style={{ fontSize: fs - 1, fill: DIM }}>{`${t.bwall} end, ${Math.round(t.pitch * 120) / 10} in 12`}</text>
+        </g>
+      ))}
+      <line x1={PL - 22} y1={Y(0)} x2={PL - 22} y2={Y(H)} stroke={DIM} strokeWidth="1" />
+      <text x={PL - 26} y={(Y(0) + Y(H)) / 2} textAnchor="end" style={{ fontSize: PLAIN ? 11 : 10, fontWeight: 800, fill: INK }}>{d3FtIn(H)}</text>
+      <text x={PL - 26} y={(Y(0) + Y(H)) / 2 + 10} textAnchor="end" style={{ fontSize: fs, fill: DIM }}>end walls</text>
+      <line x1={VW - PR + 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(E)} stroke={DIM} strokeWidth="1" />
+      <text x={VW - PR + 14} y={(Y(0) + Y(E)) / 2} textAnchor="start" style={{ fontSize: PLAIN ? 11 : 10, fontWeight: 800, fill: INK }}>{d3FtIn(E)}</text>
+      <text x={VW - PR + 14} y={(Y(0) + Y(E)) / 2 + 10} textAnchor="start" style={{ fontSize: fs, fill: DIM }}>{E > H + 1e-6 ? "middle walls, raised" : "middle walls"}</text>
+    </svg>
+  );
+}
+// THE PLAN (the Wings tab): the building from above, the front at the bottom. Portrait: across = u + S/2,
+// down = z (north at the top). Landscape: across = L - z (west on the left), down = u + S/2 (north at the top).
+// The middle is a rectangle with its ridge dashed and its wall height; each drawn wing a rectangle with its
+// short name (L2 = Left wing 2, F1 = Front end wing 1), its outside wall's height and a chevron pointing down
+// its roof. The wing whose card has the focus is amber; a click hands its index to onPick. Wings not drawn at
+// this size (listDropped) are not drawn here either. Null without a structural list.
+function d3WingListPlanSVG({ spec, sizeLabel, focusKey, onPick }) {
+  const roof = (spec && spec.roof) || {};
+  if (!d3WingListOn(roof)) return null;
+  const { w, d } = d3WingListSize(sizeLabel);
+  const H = (spec && spec.wallHeightFt) || 8;
+  const m = d3Massing(roof, w, d, H);
+  const S = m.S, L = m.L, P = m.uAxisIsX;
+  const PW = P ? S : L, PH = P ? L : S;
+  const at = (u, z) => (P ? [u + S / 2, z] : [L - z, u + S / 2]);
+  const VW = 270, PAD = 12, PADB = 20, MAXH = 200;
+  const sc = Math.min((VW - PAD * 2) / Math.max(PW, 1), MAXH / Math.max(PH, 1));
+  const VH = Math.round(PH * sc + PAD + PADB);
+  const ox = (VW - PW * sc) / 2;
+  const X = (x) => ox + x * sc, Y = (y) => PAD + y * sc;
+  const HL = "#B45309", DIM = "#A16207", INK = "#78350F";
+  const box = (u0, u1, z0, z1) => {
+    const p = at(u0, z0), q = at(u1, z1);
+    return { x: X(Math.min(p[0], q[0])), y: Y(Math.min(p[1], q[1])), w: Math.abs(q[0] - p[0]) * sc, h: Math.abs(q[1] - p[1]) * sc };
+  };
+  // Down the roof, in the plan: (du, dz) turned into (across, down).
+  const vec = (du, dz) => (P ? [du, dz] : [-dz, du]);
+  const chevron = (b, v, color) => {
+    const tall = b.h >= b.w;
+    const cx = b.x + b.w / 2 + (tall ? 0 : Math.min(34, b.w / 3)), cy = b.y + b.h / 2 + (tall ? Math.min(22, b.h / 3) : 0);
+    const r = Math.max(3, Math.min(6, Math.min(b.w, b.h) / 4));
+    const px = -v[1], py = v[0];
+    const p3 = [[cx - v[0] * r * 0.5 + px * r, cy - v[1] * r * 0.5 + py * r], [cx + v[0] * r * 0.6, cy + v[1] * r * 0.6], [cx - v[0] * r * 0.5 - px * r, cy - v[1] * r * 0.5 - py * r]];
+    return <polyline points={p3.map((p) => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ")} fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />;
+  };
+  const named = (bw, end, k) => `${bw.charAt(0).toUpperCase() + bw.slice(1)} ${end ? "end wing" : "wing"} ${k}`;
+  const secs = m.wings.map((g) => ({ i: g.i, short: g.bwall.charAt(0).toUpperCase() + g.tier, name: named(g.bwall, false, g.tier), ye: g.ye,
+    b: box(Math.min(g.u0, g.u1), Math.max(g.u0, g.u1), m.zA, m.zB), v: vec(g.side, 0) }))
+    .concat((m.ends || []).map((t) => ({ i: t.i, short: t.bwall.charAt(0).toUpperCase() + t.tier, name: named(t.bwall, true, t.tier), ye: t.ye,
+      b: box(-S / 2, S / 2, Math.min(t.zI, t.zO), Math.max(t.zI, t.zO)), v: vec(0, t.sz) })));
+  const mid = box(m.uc - m.Sc / 2, m.uc + m.Sc / 2, m.zA, m.zB);
+  const pk = m.prof.reduce((a, p) => (p[1] > a[1] ? p : a), m.prof[0]);
+  const r0 = at(m.uc + pk[0], m.zA), r1 = at(m.uc + pk[0], m.zB);
+  return (
+    <svg viewBox={`0 0 ${VW} ${VH}`} role="group" aria-label="The building from above, the front at the bottom" style={{ width: "100%", height: "auto", display: "block" }}>
+      <rect x={mid.x} y={mid.y} width={mid.w} height={mid.h} fill="#FFFBEB" stroke={INK} strokeWidth="1.2" />
+      <line x1={X(r0[0])} y1={Y(r0[1])} x2={X(r1[0])} y2={Y(r1[1])} stroke={DIM} strokeWidth="1" strokeDasharray="4 3" />
+      <text x={mid.x + mid.w / 2} y={mid.y + mid.h / 2 - 2} textAnchor="middle" style={{ fontSize: 10, fontWeight: 800, fill: INK }}>Middle</text>
+      <text x={mid.x + mid.w / 2} y={mid.y + mid.h / 2 + 10} textAnchor="middle" style={{ fontSize: 9, fill: DIM }}>{d3FtIn(m.Hc)}</text>
+      {secs.map((q) => {
+        const on = d3WingListLit(focusKey, q.i);
+        const ink = on ? HL : INK;
+        const roomy = q.b.w >= 22 && q.b.h >= 30;
+        return (
+          <g key={"wl" + q.i} data-ss-plan-wl={q.i} onClick={onPick ? () => onPick(q.i) : undefined}>
+            <title>{`${q.name}: outside wall ${d3FtIn(q.ye)}`}</title>
+            <rect x={q.b.x} y={q.b.y} width={q.b.w} height={q.b.h} fill={on ? "#FDE68A" : "#FEF3C7"} stroke={ink} strokeWidth={on ? 2.2 : 1.2} />
+            <text x={q.b.x + q.b.w / 2} y={q.b.y + q.b.h / 2 - (roomy ? 2 : -3)} textAnchor="middle" style={{ fontSize: 10, fontWeight: 800, fill: ink }}>{q.short}</text>
+            {roomy && <text x={q.b.x + q.b.w / 2} y={q.b.y + q.b.h / 2 + 9} textAnchor="middle" style={{ fontSize: 8, fill: on ? HL : DIM }}>{d3FtIn(q.ye)}</text>}
+            {chevron(q.b, q.v, ink)}
+          </g>
+        );
+      })}
+      <text x={VW / 2} y={VH - 6} textAnchor="middle" style={{ fontSize: 9, fontWeight: 800, fill: DIM, letterSpacing: 1 }}>FRONT</text>
+    </svg>
+  );
 }
 // THE END ELEVATION WITH WINGS (2026-09-24), or null when the style has none: the stepped outline
 // the 3D builds, read off d3Massing — the lower storey across the whole span, the centre's walls
@@ -18382,7 +18620,14 @@ function ssDrewWords(spec, porchBuilt, stepBuilt, massBuilt) {
   if (type !== "shed" && roof.front === "gable") out.push("The front is a gable end, under the roof triangle.");
   if (type !== "shed" && roof.front === "eave") out.push("The front is a long side, under the roof edge.");
   const wing = Number(roof.wingWidthFt) || 0;
-  if (type !== "shed" && wing > 0) {
+  // A WING LIST (roof.wingList, 2026-10-01), as BUILT: one sentence, and none of the sentences below, which
+  // would describe the older designer's approximation (wingSide / wingWidthFt / wingPitch). Nothing at all
+  // when no wing is drawn at this size. Read off the massing only.
+  const listBuilt = massBuilt && massBuilt.list ? massBuilt : null;
+  if (listBuilt) {
+    const n = (listBuilt.wings ? listBuilt.wings.length : 0) + (listBuilt.ends ? listBuilt.ends.length : 0);
+    if (n > 0) out.push(`${n} wing${n === 1 ? "" : "s"}, set on the Advanced page, with the middle section's walls at ${ssFtInWords(listBuilt.Hc)}.`);
+  } else if (type !== "shed" && wing > 0) {
     const where = ({ both: "each side", left: "the left side", right: "the right side", front: "the front", back: "the back" })[roof.wingSide] || "the side";
     // Where that roof meets the middle section (roof.wingAttach, 2026-09-28), only when the style says,
     // and as built when the caller has the massing.
@@ -18930,6 +19175,24 @@ const SS_ADV_CSS = [
   '.ss-adv .ss-adv-lt-h > .ssd-card-t{margin:0}',
   '.ss-adv .ss-adv-lt-x{font-family:inherit;flex:0 0 auto;width:26px;height:26px;margin:0;padding:0;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);color:var(--ss-muted);font-size:12px;font-weight:700;line-height:1;cursor:pointer}',
   '.ss-adv .ss-adv-lt-x:hover{border-color:#DC2626;color:#DC2626;background:#FEF2F2}',
+  // THE WING LIST (roof.wingList, 2026-10-01): a group of cards per wall, each card's name and remove cross on
+  // one row (the lean-to card's), the card of the wing picked in the Plan ringed, a wing not drawn quiet.
+  '.ss-adv .ss-adv-wl-group > .ss-adv-cards{margin-top:2px}',
+  '.ss-adv .ss-adv-wl-group > .ss-adv-chips{margin-top:10px}',
+  '.ss-adv .ss-adv-wlcard{background:var(--ss-surface)}',
+  '.ss-adv .ss-adv-wlcard.is-off{background:var(--ss-panel)}',
+  '.ss-adv .ss-adv-wlcard.is-lit{box-shadow:0 0 0 2px #F59E0B}',
+  '.ss-adv .ss-adv-wl-h{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 9px}',
+  '.ss-adv .ss-adv-wl-h > .ssd-card-t{margin:0;min-width:0}',
+  '.ss-adv .ss-adv-wl-sub{margin:-5px 0 10px;font-size:11.5px;font-weight:600;line-height:1.35;color:var(--ss-muted)}',
+  '.ss-adv .ss-adv-wl-x{font-family:inherit;flex:0 0 auto;width:26px;height:26px;margin:0;padding:0;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);color:var(--ss-muted);font-size:12px;font-weight:700;line-height:1;cursor:pointer}',
+  '.ss-adv .ss-adv-wl-x:hover{border-color:#DC2626;color:#DC2626;background:#FEF2F2}',
+  '.ss-adv .ss-adv-wl-plan svg{display:block;width:100%;height:auto;max-width:380px;margin:4px auto 0}',
+  '.ss-adv .ss-adv-wl-plan [data-ss-plan-wl]{cursor:pointer}',
+  '.ss-adv .ss-adv-wl-add .ssd-chip:disabled,.ss-adv .ss-adv-wl-group .ssd-chip:disabled{opacity:.45;cursor:not-allowed}',
+  '@media (max-width:600px){.ss-adv .ss-adv-wl-group .ss-adv-cards > .ssd-card{flex-basis:100%}}',
+  '.ss-adv .ssd-frame[data-ssd-bp="xs"] .ss-adv-wlcard .ssd-seg,.ss-adv .ssd-frame[data-ssd-bp="sm"] .ss-adv-wlcard .ssd-seg{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%}',
+  '.ss-adv .ssd-frame[data-ssd-bp="xs"] .ss-adv-wlcard .ssd-seg-b,.ss-adv .ssd-frame[data-ssd-bp="sm"] .ss-adv-wlcard .ssd-seg-b{height:auto;min-height:calc(var(--ssd-chip-h) - 2px);padding:3px 6px;white-space:normal;line-height:1.15;text-align:center}',
 ].join("\n");
 
 // "Blank building", the first tile of Start from: SSStyleStrip draws every tile as an <img>, so a
@@ -22832,7 +23095,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // on would make the preview draw a building that Save cannot store -- and "the new frame is
   // active" is decided by whether either frame key is PRESENT, so a stale one would turn the
   // preview's porch and front round while the saved style turned it back.
-  const CAL_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt", "wingSides"];
+  const CAL_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt", "wingSides", "wingList"];
   const calSetRoofType = (type) => setAdminCal((p) => {
     const roof = { ...p.spec.roof, type };
     if (type === "shed") { delete roof.front; for (const k of CAL_WING_KEYS) delete roof[k]; }
@@ -22924,6 +23187,60 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (turnOn && calWingZero(roof, side)) roof.wingSides = { ...roof.wingSides, [side]: { ...roof.wingSides[side], widthFt: 4 } };
     return { ...p, spec: { ...p.spec, roof: calWingSync(roof) } };
   });
+  // THE WING LIST (roof.wingList, 2026-10-01), edited on the Advanced page's Wings tab. The brief, 09-29: "they
+  // can add as many wings, as many lean-tos", "A wing can go on a wing", "Wherever they want." An ordered list
+  // of wings, each on a building wall, inner to outer on each wall (d3MassingList). While it has a structural
+  // entry (d3WingListOn) it is what beta draws, and every other wing key but centerEaveFt is ignored.
+  // Production's older designer reads only wingSide / wingWidthFt / wingPitch / centerEaveFt, so after every
+  // list edit those three follow d3WingListFallback (one wing per side that has any, as wide as that side's
+  // stack and meeting the middle where the stack does; none when only end wings are left), and the per-side
+  // and attach keys, which nothing reads beside a list, go. centerEaveFt, the shared middle height, is never
+  // touched. `H` is the wall height the page draws at.
+  const calWingListOf = (roof) => (d3WingListOn(roof) ? roof.wingList : []);
+  const calWingListSync = (roof, H) => {
+    const fb = d3WingListFallback(roof, bldgW, bldgH, H);
+    if (fb.drop) { delete roof.wingSide; delete roof.wingWidthFt; delete roof.wingPitch; }
+    else { roof.wingSide = fb.wingSide; roof.wingWidthFt = fb.wingWidthFt; roof.wingPitch = fb.wingPitch; }
+    delete roof.wingSides; delete roof.wingAttach; delete roof.wingAttachFt;
+    return roof;
+  };
+  // Every list edit. A style without a list yet is converted first, at the size on screen
+  // (d3WingListFromLegacy: the same wings, drawn the same), then edited. Nothing left means no wings at all:
+  // every wing key goes (calSetWings(null)'s rule), the middle height included.
+  const calEditWingList = (edit) => setAdminCal((p) => {
+    const roof = { ...p.spec.roof };
+    const H = Number(p.spec.wallHeightFt) || D3.WALL_H;
+    const cur = d3WingListOn(roof) ? roof.wingList.map((e) => (e && typeof e === "object" && !Array.isArray(e) ? { ...e } : e))
+      : d3WingListFromLegacy(roof, bldgW, bldgH, H);
+    const next = edit(cur).filter(Boolean).slice(0, D3_WINGLIST_MAX);
+    delete roof.wingSides; delete roof.wingAttach; delete roof.wingAttachFt;
+    if (next.length) { roof.wingList = next; calWingListSync(roof, H); }
+    else { for (const k of CAL_WING_KEYS) delete roof[k]; }
+    return { ...p, spec: { ...p.spec, roof } };
+  });
+  // One wing's keys: "", null or undefined DELETES a key (absent is its default), the calSetLeanTo rule.
+  const calSetWingListEntry = (i, patch) => calEditWingList((list) => list.map((e, j) => {
+    if (j !== i) return e;
+    const o = { ...e };
+    Object.keys(patch).forEach((k) => { const v = patch[k]; if (v === "" || v === null || v === undefined) delete o[k]; else o[k] = v; });
+    return o;
+  }));
+  // A new wing on `wall` (a building word: left, right, front, back), outside any already there: 8 ft wide,
+  // everything else blank.
+  const calWingListAdd = (wall) => calEditWingList((list) => list.concat([{ wall, widthFt: 8 }]));
+  // Move in (dir -1, toward the middle) or out (+1): swap places with the next wing in or out on that wall.
+  const calWingListMove = (i, dir) => calEditWingList((list) => {
+    const w = list[i] && list[i].wall;
+    const on = (x) => !!(x && typeof x === "object" && x.wall === w && d3WlNum(x.widthFt) > 0.5);
+    let j = i + dir;
+    while (j >= 0 && j < list.length && !on(list[j])) j += dir;
+    if (!w || j < 0 || j >= list.length) return list;
+    const out = list.slice();
+    out[i] = list[j]; out[j] = list[i];
+    return out;
+  });
+  // One wing off. The wings outside it move in and meet what it met; nothing else is removed.
+  const calWingListRemove = (i) => calEditWingList((list) => list.filter((_, j) => j !== i));
   // WHERE A LEAN-TO OR THE WINGS MEET THE BUILDING (roof.leanToAttach / wingAttach, 2026-09-28). The
   // mode and its distance travel together: picking "roof" or "wall" with no distance yet starts it at
   // 1 ft (a switch never leaves an empty field, the calSetWings rule), and "At the eave" / "Automatic"
@@ -24508,7 +24825,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const roof = spec.roof || {};
     // The 2026-09-24 keys are in the slice of the question whose panel sets them: which way the
     // building faces and the wings are the ROOF's shape, the attach height and width the PORCH's.
-    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt, roof.wingAttach, roof.wingAttachFt, roof.rearStepFt, roof.rearEaveRiseFt, roof.wingSides]);
+    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt, roof.wingAttach, roof.wingAttachFt, roof.rearStepFt, roof.rearEaveRiseFt, roof.wingSides, roof.wingList]);
     if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps, roof.porchStepCount]);
     // What it stands on and how high (2026-09-25) are set in the walls panel, beside the wall.
     if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt, spec.gradeFallFt, spec.gradeFallToward, spec.gradeCornersFt]);
@@ -24641,6 +24958,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {roof.type !== "shed" && (
             <div style={{ display: "grid", gap: 4 }}>
               <span style={calFixLabel}>Lower wings — enclosed rooms under their own lower roof</span>
+              {/* A WING LIST (roof.wingList, 2026-10-01) is set wing by wing on the Advanced page. These tiles edit
+                  the older designer's shared keys, which the list replaces, so only the note is shown. */}
+              {d3WingListOn(roof) ? (() => {
+                const n = (d3WingListEntries(roof) || []).length;
+                return <span data-ss-cal-winglist-fix="" style={{ display: "block", marginTop: 4, fontSize: 11, fontWeight: 600, color: "#B45309" }}>{`This style has ${n} wing${n === 1 ? "" : "s"}, set on the Advanced page.`}</span>;
+              })() : (<>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(110px, 100%), 1fr))", gap: 6 }}>
                 {[["", "None", "one roof over it all"], ["both", "Both sides", "a taller middle"], ["left", "Left side", "facing the front"], ["right", "Right side", "facing the front"]].map(([v, lbl, sub]) =>
                   calFixTile(v ? ((Number(roof.wingWidthFt) || 0) > 0 && roof.wingSide === v) : !((Number(roof.wingWidthFt) || 0) > 0), lbl, sub, () => calSetWings(v || null), "ssc-wg-" + (v || "none")))}
@@ -24658,6 +24981,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   )}
                 </label>
               )}
+              </>)}
             </div>
           )}
           {roof.type === "gambrel" ? (
@@ -27480,7 +27804,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     a taller middle section. Not a lean-to, which is open on posts and sits outside.
                     Gable and gambrel only (the sanitiser drops them on a shed). Width 0 or blank is
                     off and deletes every wing key, like the lean-to's 0. */}
-                {adminCal.spec.roof.type !== "shed" && (() => {
+                {/* A WING LIST (roof.wingList, 2026-10-01) was set on the Advanced page, wing by wing. The shared
+                    boxes below edit the older designer's approximation of it, which beta ignores beside the list,
+                    so they are not shown; the list itself is saved as it came. */}
+                {d3WingListOn(adminCal.spec.roof) && (() => {
+                  const n = (d3WingListEntries(adminCal.spec.roof) || []).length;
+                  return (
+                    <div data-ss-cal-winglist="" style={{ gridColumn: "1 / -1", fontSize: 10, fontWeight: 700, marginTop: 3, color: "#B45309" }}>
+                      {`This style has ${n} wing${n === 1 ? "" : "s"}, set on the Advanced page.`}
+                    </div>
+                  );
+                })()}
+                {adminCal.spec.roof.type !== "shed" && !d3WingListOn(adminCal.spec.roof) && (() => {
                   const roof = adminCal.spec.roof;
                   const on = (Number(roof.wingWidthFt) || 0) > 0;
                   // WHICH SIDES CAN TAKE A WING ON THIS ROOF, from d3RoofAxes like the renderer: the
@@ -28505,6 +28840,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <div className="ss-adv-elev">
           <D3ElevationSVG spec={spec} sizeLabel={sel.size} focusKey={calFocus} frame="plain" />
         </div>
+        {/* END WINGS (roof.wingList): the Side view, along a long wall, where the end wings' roofs fall. */}
+        {(() => {
+          const sideView = d3WingListSideElevation(spec, sel.size, calFocus, "plain");
+          return sideView ? (
+            <div className="ss-adv-elev" data-ss-adv="side">
+              <span className="ssd-plan-t" style={{ display: "block", margin: "8px 0 2px" }}>Side view</span>
+              {sideView}
+            </div>
+          ) : null;
+        })()}
         <span className="ss-adv-note" style={{ textAlign: "center" }}>Move a slider or click a box: its measurement lights up here.</span>
       </div>
     );
@@ -28824,6 +29169,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const wallLen = (wall) => (wall === "front" || wall === "back" ? bldgW : bldgH);
       const upIn = (ft) => Math.ceil(ft * 12 - 1e-6) / 12, downIn = (ft) => Math.floor(ft * 12 + 1e-6) / 12;
       const dc = rds.some((r) => r.kind === "eave" && r.mode === "roof") ? d3DormerCovered({ ...spec, roof: { ...roof, leanTos: list } }, sel.size) : null;
+      // END WINGS (roof.wingList): which end wing an attached side-wall lean-to runs past (endCross, d3LeanTosGeom).
+      const ltEndM = rds.some((r) => r.endCross) ? d3Massing({ ...roof, leanTos: list }, bldgW, bldgH, wallH) : null;
+      const ltEndWords = (r) => {
+        const ts = ltEndM ? ltEndM.ends.filter((t) => t.tier === 1 && ((t.at === 0 && r.a0 < ltEndM.zA - 1e-9) || (t.at === 1 && r.a1 > ltEndM.zB + 1e-9))) : [];
+        return ts.length === 1 ? `the ${ts[0].bwall} end wing` : ts.length ? `the ${ts.map((t) => t.bwall).join(" and ")} end wings` : "an end wing";
+      };
       const out = [];
       if (!list.length) out.push(<div key="off">{advNoteEl(["An open roof on posts, outside the building's size.", "Add as many as you like, each on the wall you pick: a side, the front or the back, all of it or part."], { marginTop: 0 })}</div>);
       // THE OLD FRAME (no front wall or high side picked): the roof turns with the size, its ridge the long
@@ -28948,6 +29299,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 opts: [["open", "Open on posts"], ["enclosed", "Enclosed"]],
                 note: e.enclosed === true ? "Walled in with this building's siding." : "A roof on posts." })}
               {clash.length > 0 && <div key="clash" className="ss-adv-f is-full">{clash.map((t, k) => <div key={k}>{advSay(t, true, { "data-ss-leanto-clash": "" })}</div>)}</div>}
+              {r && r.endCross && <div key="endCross" className="ss-adv-f is-full">{advSay(`Runs past ${ltEndWords(r)}: hung at wall height.`, true, { "data-ss-leanto-endcross": "" })}</div>}
             </div>
           </div>,
         );
@@ -28965,6 +29317,260 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       );
       return out;
     };
+    // THE WING LIST ON THE PAGE (roof.wingList, 2026-10-01). The brief, 09-29: "they start with a core building
+    // ... add a lean-to and specify where they want it ... add another one", "A wing can go on a wing",
+    // "Wherever they want." The add row: a button per building wall, named for what that wall is at the size
+    // on screen ("+ Left side" under a roof edge, "+ Front end" under a gable, d3LeanToWall), each adding a wing
+    // on that wall outside any already there. `used` walls are left out (their own "+ Add a wing on ..." is under
+    // their cards). End walls only once end wings are drawn (D3_WINGLIST_ENDS). Under it, what a wing cannot be,
+    // and what does that instead: the honest gap, said where it bites.
+    const wlCap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+    const wlAddRow = (used, full) => {
+      const ax = d3RoofAxes(roof, bldgW, bldgH);
+      const eave = ax.uAxisIsX ? ["left", "right"] : ["front", "back"];
+      const gable = ax.uAxisIsX ? ["front", "back"] : ["left", "right"];
+      const walls = eave.concat(D3_WINGLIST_ENDS ? gable : []).filter((w) => used.indexOf(w) < 0);
+      return (
+        <div key="wlAdd" className="ss-adv-f is-full ss-adv-wl-add">
+          {walls.length > 0 && (
+            <div className="ss-adv-chips" style={{ marginTop: 0 }}>
+              {walls.map((w) => (
+                <button key={w} type="button" className="ssd-chip" style={advPill} data-ss-adv-f="wlAdd" data-ss-adv-wall={w} disabled={!!full}
+                  onClick={() => calWingListAdd(w)}>{`+ ${wlCap(w)} ${eave.indexOf(w) >= 0 ? "side" : "end"}`}</button>
+              ))}
+            </div>
+          )}
+          {advNoteEl(D3_WINGLIST_ENDS
+            ? ["A wing goes on a whole wall: along a side, or across a whole end.", "For part of a wall, or an end wing's side, use a lean-to. A wing behind just one side wing is not a wing in this version either: an enclosed lean-to on the Lean-to tab does that."]
+            : ["A wing goes along a whole side wall. Wings across an end wall come in the next update.", "For part of a wall, or an end wall, use a lean-to: an enclosed lean-to on the Lean-to tab goes on any wall, whole or part."])}
+          {full && advNoteEl(`Up to ${D3_WINGLIST_MAX} wings on one building.`)}
+        </div>
+      );
+    };
+    // List mode (d3WingListOn). Top to bottom: the switch (off deletes every wing key, the list included), the
+    // middle section's wall height and who pushed it, the Plan, a summary with every wing not drawn at this size
+    // and why, then a group of cards per wall in End-view order (the -u side, the +u side, end 0, end 1), each
+    // group's cards in chain order, inner to outer, and a "+ Add a wing on" the outermost; then the add row for
+    // the walls with none. A card's name is its wall and its place on that wall ("Left wing 2", "Front end wing
+    // 1"); every box on it is named for it (aria), and its focus keys "wl<i>-..." light the Plan and End view.
+    const wingListPanel = () => {
+      const ax = d3RoofAxes(roof, bldgW, bldgH);
+      const wm = d3Massing(roof, bldgW, bldgH, wallH);
+      const ents = d3WingListEntries(roof) || [];
+      const full = ents.length >= D3_WINGLIST_MAX;
+      const recOf = (i) => wm.wings.find((g) => g.i === i) || wm.ends.find((t) => t.i === i) || null;
+      const dropOf = (i) => wm.listDropped.find((x) => x.i === i) || null;
+      const isEnd = (bw) => d3LeanToWall(ax, bw).kind !== "eave";
+      const rank = (bw) => { const f = d3LeanToWall(ax, bw); return f.kind === "eave" ? (f.dir < 0 ? 0 : 1) : (f.atL ? 3 : 2); };
+      const onWall = (bw) => ents.filter(({ e }) => e.wall === bw);
+      const walls = D3_WINGLIST_WALLS.filter((bw) => onWall(bw).length > 0).sort((p, q) => rank(p) - rank(q));
+      const nameAt = (bw, k) => `${wlCap(bw)} ${isEnd(bw) ? "end wing" : "wing"} ${k}`;
+      const nameOf = (i) => {
+        const x = ents.find((y) => y.i === i);
+        return x ? nameAt(x.e.wall, onWall(x.e.wall).findIndex((y) => y.i === i) + 1) : "a wing";
+      };
+      const lit = (i) => typeof calFocus === "string" && calFocus.indexOf("wl" + i + "-") === 0;
+      const sizeAt = `${bldgW} × ${bldgH}`;
+      const capFirst = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+      // "Left wing 1's roof, set to Automatic, pushes", or "the roofs of Left wing 1 and Right wing 1, ... push".
+      const pushes = (names) => (names.length === 1 ? `${names[0]}'s roof, set to Automatic, pushes` : `the roofs of ${names.join(" and ")}, set to Automatic, push`);
+      // "the front end wing's roof passes" / "the front and back end wings' roofs pass".
+      const endRoofs = (ts, one, many) => (ts.length === 1 ? `the ${ts[0].bwall} end wing's roof ${one}` : `the ${ts.map((t) => t.bwall).join(" and ")} end wings' roofs ${many}`);
+      const wDc = wm.wings.some((g) => g.tier === 1 && g.attach === "roof") ? d3DormerCovered(spec, sel.size) : null;
+      const out = [advSwitch("wingsOn", true, "Wings on", "Add wings", () => calSetWings(null))];
+      // ── the middle section's wall height ──
+      const hc = roof.centerEaveFt;
+      const blankHc = d3Massing({ ...roof, centerEaveFt: null }, bldgW, bldgH, wallH).Hc;
+      const pushWho = wm.hcRaised && wm.hcRaisedBy.length ? pushes(wm.hcRaisedBy.map(nameOf)) : null;
+      const t1Ends = wm.ends.filter((t) => t.tier === 1);
+      const eMin = Math.min(wm.E["-1"], wm.E["1"]);
+      const endSay = t1Ends.length ? `${wm.wings.length ? "The long walls" : "The middle's long walls"} stand at ${d3FtIn(eMin)} over the middle stretch: ${endRoofs(t1Ends, "passes", "pass")} under their eaves (outside walls ${d3FtIn(wallH)}).` : null;
+      out.push(
+        <div key="wlc" className="ss-adv-flds">
+          {advNum({ k: "centerEaveFt", label: "Middle section wall height (ft)", value: hc, min: 6, max: 26, step: 0.5, band: [6, 26],
+            write: (n) => calSetRoofOpt("centerEaveFt", n), placeholder: "Auto", fallback: blankHc != null ? blankHc : wallH + 3, full: true,
+            note: `Floor to the top of the tall middle walls. Auto draws ${d3FtIn(blankHc != null ? blankHc : wallH + 3)}.`,
+            children: (
+              <>
+                <div className="ss-adv-chips">
+                  <button type="button" aria-pressed={hc == null || hc === ""} onClick={() => calSetRoofOpt("centerEaveFt", null)}
+                    className={hc == null || hc === "" ? "ssd-chip is-on" : "ssd-chip"} style={advPill}>Auto</button>
+                </div>
+                {wm.hcLow && !wm.hcRaised && advSay(`The middle section must stand at least 1 ft above the walls beside it, so it is drawn at ${d3FtIn(wm.Hc)}.`, true)}
+                {pushWho && advSay(`Drawn at ${d3FtIn(wm.Hc)}: ${pushWho} it up to fit.`, true, { "data-ss-adv-readout": "wings-push" })}
+                {endSay && advSay(endSay, false, { "data-ss-adv-readout": "wings-ends" })}
+              </>
+            ) })}
+        </div>,
+      );
+      // ── the Plan: every section from above; a click finds that wing's card ──
+      out.push(
+        <div key="wlPlan" className="ssd-plan ss-adv-wl-plan" data-ss-adv="wingplan">
+          <div className="ssd-plan-head">
+            <span className="ssd-plan-t">Plan</span>
+            <span className="ssd-plan-meta">{bldgW} × {bldgH} ft, from above</span>
+          </div>
+          {d3WingListPlanSVG({ spec, sizeLabel: sel.size, focusKey: calFocus, onPick: (i) => {
+            const e = roof.wingList[i];
+            setCalFocus("wl" + i + "-widthFt");
+            setCalDraft(e && e.widthFt != null ? String(e.widthFt) : "");
+            const el = document.querySelector('[data-ss-adv-wl="' + i + '"]');
+            if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
+          } })}
+          <span className="ss-adv-note" style={{ textAlign: "center" }}>The front is at the bottom; each arrow points down that roof. Click a wing to find its card.</span>
+        </div>,
+      );
+      // ── the summary: how many, where, the middle that is left, and every wing not drawn here ──
+      const perWall = walls.map((bw) => `${onWall(bw).length} ${isEnd(bw) ? `across the ${bw} end` : `on the ${bw} side`}`);
+      const drops = wm.listDropped.map((x) => (x.why === "room"
+        ? `${nameOf(x.i)} is not drawn at ${sizeAt}: the middle keeps at least 4 ft.`
+        : `${nameOf(x.i)} is not drawn yet: wings across an end wall come in the next update.`));
+      // THE OLD FRAME (no front wall picked): the ridge runs the long way, so on a size the other way round a
+      // side wall is an end wall. Each wing keeps its wall, and the page names walls as they are on screen.
+      const flipped = !d3NewFrame(roof) && !ax.uAxisIsX ? walls : [];
+      out.push(
+        <div key="wlSum" className="ss-adv-f is-full" data-ss-adv-readout="wl-summary">
+          {advSay(`${ents.length} wing${ents.length === 1 ? "" : "s"}: ${perWall.join(", ")}. The middle is ${d3FtIn(wm.Sc)} wide${wm.ends.length ? ` and ${d3FtIn(wm.zB - wm.zA)} long` : ""}.`, false)}
+          {drops.map((t, k) => <div key={"wlDrop" + k}>{advSay(t, true, { "data-ss-adv-wl-dropped": "" })}</div>)}
+          {flipped.length > 0 && <div data-ss-adv-wl-frame="">{advNoteEl([flipped.map((bw) => (isEnd(bw)
+            ? `At this size the ${bw} wall is an end wall, so its wings are end wings.`
+            : `At this size the ${bw} wall is a side wall, so its wings are side wings.`)).join(" "),
+            "No front wall is picked in Shape, so the roof runs the long way and turns on a size the other way round. Pick a front wall to fix which way the roof runs at every size."])}</div>}
+        </div>,
+      );
+      // ── one card per wing ──
+      const wlCard = (e, i, bw, k, n, end) => {
+        const name = nameAt(bw, k);
+        const r = recOf(i), drop = dropOf(i);
+        const parent = k > 1 ? nameAt(bw, k - 1) : null;
+        const inner = parent || (end ? "the middle" : "the middle section");
+        const innerPoss = parent ? `${parent}'s` : end ? "the middle's" : "the middle section's";
+        const set = (patch) => calSetWingListEntry(i, patch);
+        const aria = (t) => `${name} ${t}`;
+        // "On the roof" is only for a side wing against the middle (at this size); anywhere else it is built
+        // Automatic (roofIgnored) and the card says so. The asked mode stays saved.
+        const roofOk = !end && (r ? r.tier === 1 : k === 1);
+        const asked = e.attach === "roof" || e.attach === "wall" ? e.attach : "";
+        const a = asked === "wall" || (asked === "roof" && roofOk) ? asked : "";
+        const body = [];
+        body.push(advNum({ k: `wl${i}-widthFt`, f: "wlWidthFt", label: "Width (ft)", aria: aria("width (ft)"), value: e.widthFt, min: 1, max: 16, step: 0.5, band: [0, 16],
+          write: (v) => { if (v == null) return; if (v > 0.5) set({ widthFt: v }); else calWingListRemove(i); }, fallback: 8, full: true,
+          note: drop ? (drop.why === "room" ? `Not drawn at ${sizeAt}: the middle keeps at least 4 ft. It stays saved.` : "Not drawn yet: wings across an end wall come in the next update. It stays saved.")
+            : r && r.shrunk ? `Drawn ${d3FtIn(r.w)} wide: the middle keeps at least 4 ft.` : null }));
+        const meetsLabel = k === 1 ? (end ? "Meets the middle's end wall" : "Meets the middle section") : `Meets ${parent}`;
+        body.push(advSeg({ f: "wlAttach", label: meetsLabel, aria: `${name} meets ${k === 1 ? (end ? "the middle's end wall" : "the middle section") : parent}`, value: asked, full: true,
+          pick: (v) => set(v ? { attach: v, attachFt: typeof e.attachFt === "number" ? e.attachFt : 1 } : { attach: null }),
+          opts: [["", "Automatic"], ["wall", "On the wall"], ["roof", "On the roof", !roofOk, roofOk ? undefined : "Only a wing against the middle can run up onto its roof"]],
+          note: a ? `${capFirst(innerPoss)} wall keeps its height; this wing's slope follows.` : [`Hung under ${innerPoss} eave.`, "A steep roof set to Automatic pushes that wall up to fit."],
+          children: r && r.roofIgnored ? advSay("On the roof is only for a wing against the middle; this one is built Automatic.", true) : null }));
+        if (a) {
+          const meetLine = r && r.meets ? (r.meetFt < 1 / 24 ? `Meets ${inner} at its eave`
+            : `Meets the ${r.meets} ${d3FtIn(r.meetFt)} ${r.meets === "roof" ? "above" : "below"} ${innerPoss} eave`) : null;
+          // Today's words for a wing against the middle (the per-side cards'), and the same in plain words for
+          // one against a wing or across an end.
+          const warn = !r || !r.attach ? null
+            : !end && r.tier === 1 ? (r.cuts ? (r.attach === "roof"
+              ? (r.ye + r.k * r.w >= r.ye + 1
+                ? `The middle section is too tall for this wing's roof to reach its roof, so it meets its wall. Bring the middle walls down to ${d3FtIn(Math.floor((r.ye + r.k * r.w) * 12 + 1e-6) / 12)} or lower, or pick "On the wall".`
+                : `The middle roof is too flat for this wing's roof to run up onto it, so it meets its wall. Pick "On the wall".`)
+              : "The middle section is too low for its roof edge to clear this wing's roof — raise its wall height.")
+              : r.clamped ? (r.attach === "roof"
+                ? `The middle roof only goes ${d3FtIn(r.attachFt)} up, so this wing's roof meets there.`
+                : `Moved down to ${d3FtIn(r.attachFt)} so the middle roof's edge clears this wing's roof.`)
+                : null)
+              : r.cuts ? `${capFirst(inner)} is too low for its roof edge to clear this wing's roof — ${parent ? "raise its outside wall" : "raise the middle section's walls"}.`
+                : r.clamped ? `Moved down to ${d3FtIn(r.attachFt)} so ${innerPoss} roof edge clears this wing's roof.` : null;
+          const dcSay = wDc && wDc.by === "wing" && r && !end && r.tier === 1 && wDc.dir === r.side ? advSay(d3DormerCoveredWords(wDc, false), true, { "data-ss-dormer-covered": "" }) : null;
+          body.push(advNum({ k: `wl${i}-attachFt`, f: "wlAttachFt", label: a === "roof" ? "How far up its roof (ft)" : "How far down its wall (ft)",
+            aria: aria(a === "roof" ? "how far up the roof (ft)" : "how far down the wall (ft)"),
+            value: e.attachFt, min: 0, max: 10, step: 0.25, band: [0, 10], write: (v) => set({ attachFt: v == null ? 0 : v }), placeholder: "0", fallback: 0, full: true,
+            children: <>{meetLine && advSay(meetLine, false, { "data-ss-adv-readout": "wl-" + i })}{advSay(warn, true)}{dcSay}</> }));
+          body.push(
+            <div key="wlp" className="ss-adv-f" data-ss-adv-f="wlPitch"><div className="ss-adv-fh"><span className="ssd-fld-l">Roof pitch</span></div>
+              {advSay(r ? `Builds ${Math.round(r.pitch * 120) / 10} in 12` : "Worked out from where it meets", false)}{advNoteEl(`Set by where this wing's roof meets ${inner}.`)}</div>,
+          );
+        } else {
+          body.push(advNum({ k: `wl${i}-pitch`, f: "wlPitch", label: "Roof pitch", aria: aria("roof pitch"), unit: "in 12",
+            value: e.pitch == null ? null : Math.round(Number(e.pitch) * 1200) / 100, min: 0, max: 18, step: 0.5, band: [0, 18],
+            write: (v) => set({ pitch: v == null ? null : v / 12 }), placeholder: "3", fallback: 3, note: "Slopes down to its outside wall. Blank is 3 in 12." }));
+        }
+        // Its outside wall, where that is not the building's own wall: a wing with another outside it, or the
+        // outermost side wing while end wings are there. Auto is the least that clears.
+        if (r && !r.askIgnored) {
+          const auto = e.eaveFt == null ? r.ye : (() => {
+            const m2 = d3Massing({ ...roof, wingList: roof.wingList.map((x, j) => (j === i ? { ...x, eaveFt: undefined } : x)) }, bldgW, bldgH, wallH);
+            const r2 = m2.wings.find((g) => g.i === i) || m2.ends.find((t) => t.i === i);
+            return r2 ? r2.ye : r.ye;
+          })();
+          const byEnd = r.raised ? wm.ends.filter((t) => (r.raisedBy || []).indexOf(t.i) >= 0) : [];
+          const bySide = r.raised ? (r.raisedBy || []).filter((j) => wm.wings.some((g) => g.i === j)) : [];
+          const pushSay = !r.raised ? null
+            : byEnd.length ? `Raised from ${d3FtIn(r.raisedFrom != null ? r.raisedFrom : wallH)} to ${d3FtIn(r.ye)} over the middle stretch: ${endRoofs(byEnd, "has", "have")} to pass under this eave.`
+              : bySide.length ? `Drawn at ${d3FtIn(r.ye)}: ${pushes(bySide.map(nameOf))} it up to fit.` : `Drawn at ${d3FtIn(r.ye)}, raised to fit.`;
+          body.push(advNum({ k: `wl${i}-eaveFt`, f: "wlEaveFt", label: "Outside wall height (ft)", aria: aria("outside wall height (ft)"), value: e.eaveFt, min: 6, max: 26, step: 0.5, band: [6, 26],
+            write: (v) => set({ eaveFt: v }), placeholder: "Auto", fallback: auto, full: true, note: `Auto draws ${d3FtIn(auto)}.`,
+            children: (
+              <>
+                <div className="ss-adv-chips">
+                  <button type="button" aria-pressed={e.eaveFt == null} onClick={() => set({ eaveFt: null })}
+                    className={e.eaveFt == null ? "ssd-chip is-on" : "ssd-chip"} style={advPill}>Auto</button>
+                </div>
+                {pushSay && advSay(pushSay, true, { "data-ss-adv-readout": "wl-push-" + i })}
+                {r.low && advSay(`Held at ${d3FtIn(r.ye)}: it must stand at least 1 ft above the wing outside it.`, true)}
+              </>
+            ) }));
+        } else if (r) {
+          body.push(<div key="wle" className="ss-adv-f is-full">{advNoteEl(`Its outside wall is the building's wall, ${d3FtIn(wallH)}.`)}</div>);
+        }
+        if (r && r.tight) body.push(<div key="wlt" className="ss-adv-f is-full">{advSay("Drawn, but a roof edge passes closer over this wing's roof than it should. Raise the wall inside it, or give this roof less pitch.", true, { "data-ss-adv-wl-tight": "" })}</div>);
+        if (n > 1) {
+          body.push(
+            <div key="wlm" className="ss-adv-f is-full" data-ss-adv-f="wlMove">
+              <div className="ss-adv-chips" role="group" aria-label={`${name}: move`} style={{ marginTop: 0 }}>
+                <button type="button" className="ssd-chip" style={advPill} disabled={k === 1} title={k === 1 ? `Already against ${inner}` : `Swap places with ${parent}`}
+                  onClick={() => calWingListMove(i, -1)}>Move in</button>
+                <button type="button" className="ssd-chip" style={advPill} disabled={k === n} title={k === n ? "Already the outermost" : `Swap places with ${nameAt(bw, k + 1)}`}
+                  onClick={() => calWingListMove(i, 1)}>Move out</button>
+              </div>
+            </div>,
+          );
+        }
+        const sub = k === 1 ? (end ? `across the ${bw} end, against the middle` : "against the middle section") : `on ${parent}'s outer wall`;
+        const next = k < n ? nameAt(bw, k + 1) : null;
+        const xTitle = next ? `Remove ${name}. ${next} moves in and meets ${inner}${n - k > 1 ? ", and the wings outside it move in with it" : ""}.` : `Remove ${name}. Nothing else moves.`;
+        return (
+          <div key={"wl" + i} className={"ssd-card ss-adv-wlcard" + (r ? "" : " is-off") + (lit(i) ? " is-lit" : "")}
+            data-ss-adv-wl={i} data-ss-adv-wl-wall={bw} data-ss-adv-wl-tier={r ? r.tier : ""}>
+            <div className="ss-adv-wl-h">
+              <span className="ssd-card-t">{name}</span>
+              <button type="button" className="ss-adv-wl-x" data-ss-adv-f="wlRemove" aria-label={`Remove ${name}`} title={xTitle}
+                onClick={() => calWingListRemove(i)}>✕</button>
+            </div>
+            <div className="ss-adv-wl-sub">{capFirst(sub)}</div>
+            <div className="ss-adv-flds">{body}</div>
+          </div>
+        );
+      };
+      walls.forEach((bw) => {
+        const chain = onWall(bw);
+        const end = isEnd(bw);
+        const n = chain.length;
+        out.push(
+          <div key={"wlg" + bw} className="ss-adv-f is-full ss-adv-wl-group" data-ss-adv-wl-wall={bw}>
+            <div className="ss-adv-fh"><span className="ssd-fld-l">{end ? `${wlCap(bw)} end, under the gable` : `${wlCap(bw)} side, along the roof edge`}</span></div>
+            <div className="ss-adv-cards ss-adv-top">{chain.map(({ e, i }, j) => wlCard(e, i, bw, j + 1, n, end))}</div>
+            {(!end || D3_WINGLIST_ENDS) && (
+              <div className="ss-adv-chips">
+                <button type="button" className="ssd-chip" style={advPill} data-ss-adv-f="wlAddOn" data-ss-adv-wall={bw} disabled={full}
+                  onClick={() => calWingListAdd(bw)}>{`+ Add a wing on ${nameAt(bw, n)}`}</button>
+              </div>
+            )}
+          </div>,
+        );
+      });
+      out.push(wlAddRow(walls, full));
+      return out;
+    };
     // EACH WING SET ON ITS OWN (roof.wingSides, 2026-09-29). Carolyn, 09-29, on this page: "I want this wing
     // to be like this and this wing to be like this". One shared control, the middle section's wall height,
     // then a card per side the roof can carry a wing on (its eave sides, d3RoofAxes): each with its own
@@ -28973,10 +29579,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // shared keys equal to the first wing's, so an older designer still draws something close; the
     // switches write wingSide. Turning the wings on writes what it always did, nothing per side.
     const wingPanel = () => {
+      if (d3WingListOn(roof)) return wingListPanel();
       const on = (Number(roof.wingWidthFt) || 0) > 0;
       const out = [advSwitch("wingsOn", on, "Lower wings on", "Add lower wings", () => calSetWings(on ? null : "both"))];
       if (!on) {
         out.push(<div key="off">{advNoteEl(["Enclosed side rooms under a lower roof, inside the size.", "They stand beside a taller middle section. A lean-to is the open one on posts."], { marginTop: -6 })}</div>);
+        // A WING LIST (roof.wingList, 2026-10-01): a wing on any wall, one on another, from here as well.
+        out.push(wlAddRow([], false));
         return out;
       }
       const eaveSides = calWingEaveSides(roof);
@@ -29068,6 +29677,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           })}
         </div>,
       );
+      // MORE THAN ONE WING PER SIDE (roof.wingList, 2026-10-01): a click turns these wings into the list, drawn
+      // the same (d3WingListFromLegacy), and adds the new wing outside any on that wall.
+      out.push(<div key="wlMore" className="ss-adv-f is-full"><div className="ss-adv-fh"><span className="ssd-fld-l">{D3_WINGLIST_ENDS ? "More wings: on a wing, or on an end wall" : "More wings: a wing on a wing"}</span></div></div>);
+      out.push(wlAddRow([], false));
       return out;
     };
     const dormerPanel = () => {
@@ -29079,8 +29692,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
       const dg = d3DormerReadout(spec, sel.size);
       const dc = d3DormerCovered(spec, sel.size);
+      // END WINGS (roof.wingList): a dormer that would reach over an end wing's roof is not drawn (d3DormerBlocked).
+      const dEnd = d3DormerBlocked(roof, bldgW, bldgH, wallH);
       out.push(
         <div key="dm" className="ss-adv-flds">
+          {dEnd && <div key="dmEnd" className="ss-adv-f is-full">{advSay("Not drawn: it would reach over an end wing.", true, { "data-ss-dormer-endwing": "" })}</div>}
           {advSeg({ f: "dormerType", label: "Dormer type", value: roof.dormerType === "transom" ? "transom" : "gable", pick: (v) => calSetRoof({ dormerType: v }), full: true,
             opts: [["gable", "Gable"], ["transom", "Transom"]],
             note: roof.dormerType === "transom" ? "A lean-to off the roof." : "Its own little roof, the pitch running across." })}
@@ -29102,6 +29718,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const pr = kind === "projecting" ? d3PorchReadout(spec, sel.size) : null;
       const warn = !!(pr && (pr.short || pr.pitchClamped));
       const recessedLost = kind === "recessed" && d3WingsOn(d3Massing(roof, bldgW, bldgH, spec.wallHeightFt || D3.WALL_H));
+      // END WINGS (roof.wingList): no projecting porch on an end that has an end wing, nor on a side wall while
+      // any end wing is there (d3WingListBlocksPorch, d3ProjectingPorch's wall), and it is said here.
+      const pjEnd = (() => {
+        if (kind !== "projecting" || !roof.wingList) return null;
+        const front = (roof.porchEnd || "front") !== "back";
+        const ux = d3RoofAxes(roof, bldgW, bldgH).uAxisIsX;
+        const pw = d3NewFrame(roof) || ux ? (front ? "south" : "north") : (front ? "west" : "east");
+        if (!d3WingListBlocksPorch(roof, bldgW, bldgH, pw)) return null;
+        return (ux ? pw === "north" || pw === "south" : pw === "west" || pw === "east") ? "end" : "side";
+      })();
       const newFrame = roof.front != null || roof.highSide != null;
       const out = [advTiles({ f: "porchKind", label: "Porch", value: kind, pick: (v) => calSetPorch(v),
         opts: [["none", "None", "none"], ["recessed", "Recessed", "recessed"], ["projecting", "Projecting", "projecting"]],
@@ -29135,6 +29761,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const porchW = Math.max(bldgW, bldgH);
       out.push(
         <div key="pc" className="ss-adv-flds">
+          {pjEnd && <div key="pjEnd" className="ss-adv-f is-full">{advSay(pjEnd === "end" ? "Not drawn: an end wing is on that end." : "Not drawn: a side-wall porch waits until the end wings are off.", true, { "data-ss-porch-endwing": "" })}</div>}
           {advNum({ k: key, f: "porchDepth", label: "Depth (ft)", value: roof[key], min: 1, max: 16, step: 0.5,
             commit: (n) => { if (n > 0.5) calSetPorch(kind, n); },
             children: <>
