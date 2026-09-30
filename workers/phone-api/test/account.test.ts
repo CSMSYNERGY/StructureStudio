@@ -1,4 +1,4 @@
-// /health, CORS, /settings/me, /devices, /devices/signout-all, /log, /turn, /calls/:id/events,
+// /health, CORS, /settings/me, /devices, /devices/forget, /devices/signout-all, /log, /turn, /calls/:id/events,
 // /voicemails/:id/audio.
 import { describe, expect, it } from "vitest";
 import {
@@ -116,6 +116,41 @@ describe("POST /devices", () => {
     const { token, env } = await setup();
     const { json } = await call(env, appRequest("POST", "/devices", token, { platform: "ios", build_type: "prod", push_token: "abc", push_kind: "fcm", app_version: "1" }));
     expect(json.error.code).toBe("bad_request");
+  });
+});
+
+describe("POST /devices/forget", () => {
+  it("deletes only the caller's own row for that token, so a signed-out phone stops getting text alerts", async () => {
+    const { net, token, env } = await setup();
+    net.rest("DELETE", "phone_devices", () => []);
+    const { json } = await call(env, appRequest("POST", "/devices/forget", token, { platform: "android", push_token: "fcm:tok-1" }));
+    expect(json).toEqual({ ok: true });
+    const del = net.writes("phone_devices", "DELETE")[0];
+    expect(filter(del, "user_id")).toBe(USER_A);
+    expect(filter(del, "platform")).toBe("android");
+    expect(filter(del, "push_token")).toBe("fcm:tok-1");
+  });
+
+  it("works after phone access was removed (stopping alerts must not depend on it)", async () => {
+    const { net, token, env } = await setup(callerCtx({ phone_level: "none" }));
+    net.rest("DELETE", "phone_devices", () => []);
+    expect((await call(env, appRequest("POST", "/devices/forget", token, { platform: "ios", push_token: "abc123" }))).json).toEqual({ ok: true });
+  });
+
+  it("refuses a missing or malformed token and the extension's platform, deleting nothing", async () => {
+    const { net, token, env } = await setup();
+    net.rest("DELETE", "phone_devices", () => []);
+    for (const body of [{ platform: "android" }, { platform: "android", push_token: "bad token!" }, { platform: "chrome", push_token: "x" }]) {
+      const { json } = await call(env, appRequest("POST", "/devices/forget", token, body));
+      expect(json.error.code).toBe("bad_request");
+    }
+    expect(net.writes("phone_devices", "DELETE")).toHaveLength(0);
+  });
+
+  it("needs a login", async () => {
+    const { env } = await setup();
+    const { json } = await call(env, new Request(`${BASE}/devices/forget`, { method: "POST", body: "{}" }));
+    expect(json.error.code).toBe("unauthorized");
   });
 });
 

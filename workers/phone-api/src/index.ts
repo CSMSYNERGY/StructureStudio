@@ -26,7 +26,7 @@ import { hold, resume, warmTransfer } from "./routes/conference";
 import { mediaFile } from "./routes/media";
 import { sendSms } from "./routes/sms";
 import { getThread, listCalls, listThreads, search, team } from "./routes/reads";
-import { devices, health, log, settingsMe, signOutAll, turn } from "./routes/me";
+import { devices, forgetDevice, health, log, settingsMe, signOutAll, turn } from "./routes/me";
 import { pushText } from "./routes/push";
 import { recordingSweep } from "./cron/sweep";
 import { retention } from "./cron/retention";
@@ -124,6 +124,7 @@ const ROUTES: { method: string; re: RegExp; h: Handler }[] = [
   { method: "GET", re: /^\/team$/, h: (r, env) => team(env, r) },
   { method: "POST", re: /^\/settings\/me$/, h: (r, env) => settingsMe(env, r) },
   { method: "POST", re: /^\/devices$/, h: (r, env) => devices(env, r) },
+  { method: "POST", re: /^\/devices\/forget$/, h: (r, env) => forgetDevice(env, r) },
   { method: "POST", re: /^\/devices\/signout-all$/, h: (r, env) => signOutAll(env, r) },
   { method: "POST", re: /^\/log$/, h: (r, env) => log(env, r) },
   { method: "GET", re: /^\/turn$/, h: (r, env, ec) => turn(env, ec, r) },

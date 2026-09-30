@@ -105,6 +105,25 @@ export async function devices(env: Env, req: Request): Promise<Response> {
   return ok();
 }
 
+// ── POST /devices/forget ────────────────────────────────────────────────────────────
+
+/**
+ * Sign-out on one phone. The app unregisters the line with Twilio itself, but text alerts go
+ * to the push token saved here, so without this a signed-out phone kept showing customers'
+ * texts (seen on Android, 2026-09-30). Deletes only the caller's own row for that token.
+ * Needs a login only: someone whose phone access was removed must still be able to stop them.
+ */
+export async function forgetDevice(env: Env, req: Request): Promise<Response> {
+  const { admin, userId } = await requireLogin(env, req);
+  const body = await readJson(req);
+  const platform = String(body.platform ?? "");
+  if (!["ios", "android"].includes(platform)) throw new ApiError("bad_request", "Unknown platform.");
+  const pushToken = body.push_token == null ? "" : String(body.push_token);
+  if (!pushToken || pushToken.length > 4096 || !/^[\w:.\-]+$/.test(pushToken)) throw new ApiError("bad_request", "That push token isn't valid.");
+  must(await admin.from("phone_devices").delete().eq("user_id", userId).eq("platform", platform).eq("push_token", pushToken), "forget device");
+  return ok();
+}
+
 // ── POST /devices/signout-all ───────────────────────────────────────────────────────
 
 /**
