@@ -798,6 +798,12 @@ async function advModel(page, test, timeout = 60000) {
 async function typeBox(page, loc, v) { await loc.click(); await loc.fill(String(v)); await loc.blur(); await settle(page, 350); }
 const wlCards = (page) => page.$$eval("[data-ss-adv-wl]", (c) => c.map((x) => ({ i: x.dataset.ssAdvWl, wall: x.dataset.ssAdvWlWall, tier: x.dataset.ssAdvWlTier,
   t: (x.querySelector(".ssd-card-t") || {}).textContent, lit: x.classList.contains("is-lit") })));
+// Every Plan label inside its own section's rectangle (the middle's included), on screen: the texts that are not.
+const planOverflow = (page) => page.evaluate(() => [...document.querySelectorAll('[data-ss-adv="wingplan"] svg > g')].flatMap((g) => {
+  const r = g.querySelector("rect").getBoundingClientRect();
+  return [...g.querySelectorAll("text")].filter((t) => { const b = t.getBoundingClientRect(); return b.width > 0 && (b.left < r.left - 1 || b.right > r.right + 1 || b.top < r.top - 1 || b.bottom > r.bottom + 1); })
+    .map((t) => t.textContent);
+}));
 const mass = (page) => page.evaluate(() => { const m = window.__ss3dPanel.model.massing; return JSON.parse(JSON.stringify(m)); });
 const clickF = async (page, f, wall) => { await page.locator(`[data-ss-adv-f="${f}"]${wall ? `[data-ss-adv-wall="${wall}"]` : ""}`).first().click(); await settle(page, 450); };
 async function setSize(page, W, L) {
@@ -829,7 +835,7 @@ if (want("A")) {
     }));
     ok("A1: the master switch is still the first tool button", add0.first === "wingsOn", String(add0.first));
     ok(`A1: the add row offers ${ENDS ? "every wall" : "the side walls only (end wings wait for their flag)"}`,
-      JSON.stringify(add0.add) === JSON.stringify(ENDS ? ["left", "right", "front", "back"] : ["left", "right"]), JSON.stringify(add0.add));
+      JSON.stringify(add0.add) === JSON.stringify(ENDS ? ["left", "right", "back", "front"] : ["left", "right"]), JSON.stringify(add0.add));
     // Today's wings on: the legacy cards, and the add row under them.
     await page.locator('[data-ss-adv-f="wingsOn"]').click();
     await settle(page, 400);
@@ -837,6 +843,9 @@ if (want("A")) {
     const legacy = await page.$$eval("[data-ss-adv-wing]", (c) => c.map((x) => x.dataset.ssAdvWing));
     ok("A1: the legacy cards are unchanged (left, right)", JSON.stringify(legacy) === '["left","right"]', JSON.stringify(legacy));
     ok("A1: …and the wlAdd row is there", (await page.locator('[data-ss-adv-f="wlAdd"][data-ss-adv-wall="left"]').count()) === 1);
+    // A side that already has today's wing says the new one goes ON that wing (review, 2026-09-30).
+    const addTxt = sp(await page.locator('[data-ss-adv-f="wlAdd"][data-ss-adv-wall="left"]').innerText());
+    ok("A1: …its button says it adds a wing on the left wing", addTxt === "+ Add a wing on the left wing", addTxt);
     ok(`A1: gable-wall add buttons ${ENDS ? "are" : "are not"} offered`, (await page.locator('[data-ss-adv-f="wlAdd"][data-ss-adv-wall="front"]').count()) === (ENDS ? 1 : 0));
     const pre = await mass(page);
     // A2: + Left side converts today's wings and adds one outside the left one.
@@ -856,6 +865,16 @@ if (want("A")) {
     await typeBox(page, page.getByLabel("Left wing 3 width (ft)", { exact: true }), 6);
     await advModel(page, (M) => M.massing.wings.some((g) => g.tier === 3 && Math.abs(g.w - 6) < 1e-9));
     ok("A3: typing 6 into Left wing 3 width (ft) draws it 6 wide", true);
+    // The box commits on every keystroke: a half-typed "0" holds the wing at 1 ft and never removes it (only ✕
+    // does; review, 2026-09-30, where a Backspace to "0" took a wing and its settings away).
+    const box3 = page.getByLabel("Left wing 3 width (ft)", { exact: true });
+    await box3.click(); await box3.press("Control+a"); await box3.press("0"); await settle(page, 350);
+    const mid0 = await wlCards(page);
+    await advModel(page, (M) => M.massing.wings.some((g) => g.tier === 3 && Math.abs(g.w - 1) < 1e-9));
+    await box3.press("Backspace"); await box3.press("6"); await box3.blur(); await settle(page, 350);
+    await advModel(page, (M) => M.massing.wings.some((g) => g.tier === 3 && Math.abs(g.w - 6) < 1e-9));
+    ok("A3: a box that reads 0 mid-typing keeps Left wing 3 (drawn 1 ft wide), and 6 typed after it draws 6", mid0.filter((c) => c.wall === "left").length === 3
+      && (await wlCards(page)).filter((c) => c.wall === "left").length === 3, JSON.stringify(mid0));
     // A4: the Plan card.
     const m3 = await mass(page);
     const plan = await page.$$eval('[data-ss-adv="wingplan"] [data-ss-plan-wl]', (g) => g.map((x) => x.dataset.ssPlanWl));
@@ -865,6 +884,8 @@ if (want("A")) {
     await settle(page, 300);
     cards = await wlCards(page);
     const litRect = await page.$eval(`[data-ss-adv="wingplan"] [data-ss-plan-wl="${pick.i}"] rect`, (r) => r.getAttribute("stroke"));
+    const over4 = await planOverflow(page);
+    ok("A4: every Plan label fits inside its section", over4.length === 0, JSON.stringify(over4));
     ok("A4: clicking a wing in the Plan focuses its card and lights its rectangle", cards.filter((c) => c.lit).map((c) => c.i).join() === String(pick.i) && litRect === "#B45309", JSON.stringify({ lit: cards.filter((c) => c.lit), litRect }));
     // A5: Left wing 2's outside wall asked 9.5 ft; Left wing 3 at 12 in 12, Automatic, pushes it up.
     await typeBox(page, page.getByLabel("Left wing 2 outside wall height (ft)", { exact: true }), 9.5);
@@ -904,7 +925,9 @@ if (want("A")) {
     ok("A7: Save sends the list exactly", !!roof && JSON.stringify(roof.wingList) === JSON.stringify(expectList), `${JSON.stringify(roof && roof.wingList)} vs ${JSON.stringify(expectList)}`);
     const t1L = m4.wings.find((g) => g.side < 0 && g.tier === 1), sumL = m4.wings.filter((g) => g.side < 0).reduce((t, g) => t + g.w, 0);
     const fb = PURE.d3WingListFallback(roof || {}, 30, 32, m4.H);
-    ok("A7: …with the fallback: both sides, the left stack's width, the pitch that meets where its tier 1 does", !!roof && roof.wingSide === "both" && near(roof.wingWidthFt, Math.min(16, sumL), 1e-9)
+    // The left stack (18 ft) is more than twice the right one (4 ft): the older designer draws the left stack
+    // alone, rather than 13 ft on each side (review, 2026-09-30).
+    ok("A7: …with the fallback: the wider left stack alone, its width, the pitch that meets where its tier 1 does", !!roof && roof.wingSide === "left" && near(roof.wingWidthFt, Math.min(16, sumL), 1e-9)
       && near(roof.wingPitch, Math.max(0, Math.min(1.5, (t1L.ya - m4.H) / Math.min(16, sumL))), 1e-9) && roof.wingSide === fb.wingSide && roof.wingWidthFt === fb.wingWidthFt && roof.wingPitch === fb.wingPitch,
       JSON.stringify({ side: roof && roof.wingSide, w: roof && roof.wingWidthFt, p: roof && roof.wingPitch, sumL, ya: t1L.ya }));
     // Today's switch never writes centerEaveFt, and the list's writers never touch it: still absent.
@@ -937,9 +960,9 @@ if (want("A")) {
       note: /Up to 16 wings on one building/.test(document.querySelector("[data-ss-adv-panel]").innerText) }));
     ok("A10: at 16 every wlAdd / wlAddOn is disabled, and the note shows", cap.n === 16 && cap.dis.length > 0 && cap.dis.every(Boolean) && cap.note, JSON.stringify(cap));
     // A wing squeezed to 6 in or less by the room share is not drawn at this size: its card says so, and
-    // it stays in the list (0.6 ft asked beside 16 wings shares out well under 0.5).
+    // it stays in the list (1 ft, the least the box takes, asked beside 16 wings shares out well under 0.5).
     const lastR = (await wlCards(page)).filter((c) => c.wall === "right").pop();
-    await typeBox(page, page.getByLabel(`Right wing ${lastR.tier} width (ft)`, { exact: true }), 0.6);
+    await typeBox(page, page.getByLabel(`Right wing ${lastR.tier} width (ft)`, { exact: true }), 1);
     await advModel(page, (M) => M.massing.listDropped.length > 0);
     const m16 = await mass(page);
     const dropped = await page.$$eval("[data-ss-adv-wl-dropped]", (s) => s.map((x) => x.innerText));
@@ -974,6 +997,9 @@ if (want("A")) {
       return { sw: se.scrollWidth, cw: se.clientWidth, lefts: [...new Set(cs.map((r) => Math.round(r.left)))] };
     });
     ok("A11: at 390 px no sideways scroll", lay.sw <= lay.cw, JSON.stringify(lay));
+    // A 6 ft middle at 390 px: its label turns on end rather than running over the wings (review, 2026-09-30).
+    const over11 = await planOverflow(ph.page);
+    ok("A11: every Plan label fits inside its section at 390 px", over11.length === 0, JSON.stringify(over11));
     ok("A11: …and the cards stack in one column", lay.lefts.length === 1, JSON.stringify(lay));
     if (process.env.SS_SHOTS) await ph.page.locator("[data-ss-adv-panel]").screenshot({ path: join(shots, "A-wings-panel-390.png") }).catch(() => {});
     ok("A11: zero page errors", ph.errors.length === 0, ph.errors.slice(0, 3).join(" | "));
@@ -1004,6 +1030,16 @@ if (want("P")) {
     while (!saves().length && Date.now() - t0 < 15000) await settle(page, 150);
     const body = saves()[0] && saves()[0].body;
     ok("P: Save to config, untouched, sends the roof exactly as stored", !!body && JSON.stringify(body.d3.roof) === JSON.stringify(roof), body && JSON.stringify(body.d3.roof));
+    // A single slant drops every wing key, the list included (calSetRoofType("shed") deletes CAL_WING_KEYS). This
+    // is the list-carrying seed calNewKeys' step 7 never had (review, 2026-09-30).
+    await page.locator("label").filter({ hasText: /^Roof type/ }).locator("select").selectOption("shed");
+    await settle(page, 400);
+    await page.getByRole("button", { name: "Save to config" }).click();
+    const t1 = Date.now();
+    while (saves().length < 2 && Date.now() - t1 < 15000) await settle(page, 150);
+    const shed = saves()[1] && saves()[1].body && saves()[1].body.d3.roof;
+    const WK = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingSides", "wingAttach", "wingAttachFt", "wingList"];
+    ok("P: a single slant drops the list with every wing key", !!shed && shed.type === "shed" && WK.every((k) => !(k in shed)), JSON.stringify(shed && Object.keys(shed)));
     ok("P: zero page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
   } catch (e) { ok("P: ran", false, e && e.stack); }
   await page.close();
@@ -1018,16 +1054,25 @@ if (want("X") && OLD) {
   try {
     const { page, errors } = await openCase("Older Designer", size, d3, { base: OLD });
     const m = await page.evaluate(() => JSON.parse(JSON.stringify(window.__ss3dEngine.model.massing)));
-    // The approximation asks each side as wide as the left stack (16 at most); the older designer then shares
-    // the room as it always has, so what it draws is the legacy massing of the approximation keys alone.
-    const sumL = (d3.roof.wingList || []).filter((e) => e.wall === "left").reduce((t, e) => t + e.widthFt, 0);
-    const legacyRoof = { ...d3.roof }; delete legacyRoof.wingList;
+    // The approximation (d3WingListFallback) asks one width: both sides at the two stacks' mean when they are
+    // about one width, else the wider stack alone. The older designer then shares the room as it always has, so
+    // what it draws is the legacy massing of those keys alone -- and it is judged against beta's massing of the
+    // list: the same middle height, and a middle no further off than the narrower stack (review, 2026-09-30).
     const [W, L] = sizeOf(size);
-    const lm = PURE.d3Massing(legacyRoof, W, L, Number(d3.wallHeightFt) || 8);
-    ok("X: the approximation asks one wing per side as wide as the left stack", d3.roof.wingSide === "both" && near(d3.roof.wingWidthFt, Math.min(16, sumL), 1e-9), JSON.stringify({ w: d3.roof.wingWidthFt, sumL }));
-    ok("X: the older designer draws one wing per side, exactly the legacy massing of those keys", m.wings.length === 2 && !("list" in m)
+    const H = Number(d3.wallHeightFt) || 8;
+    const beta = PURE.d3Massing(d3.roof, W, L, H);
+    const stack = (s) => beta.wings.filter((g) => g.side === s).reduce((t, g) => t + g.w, 0);
+    const sN = stack(-1), sP = stack(1), both = Math.max(sN, sP) <= 2 * Math.min(sN, sP) + 1e-9;
+    const legacyRoof = { ...d3.roof }; delete legacyRoof.wingList;
+    const lm = PURE.d3Massing(legacyRoof, W, L, H);
+    ok("X: the approximation asks the mean of two stacks of about one width, else the wider stack alone",
+      d3.roof.wingSide === (both ? "both" : sN >= sP ? "left" : "right") && near(d3.roof.wingWidthFt, Math.min(16, both ? (sN + sP) / 2 : Math.max(sN, sP)), 1e-9),
+      JSON.stringify({ side: d3.roof.wingSide, w: d3.roof.wingWidthFt, sN, sP }));
+    ok("X: the older designer draws exactly the legacy massing of those keys", m.wings.length === lm.wings.length && !("list" in m)
       && m.wings.every((g, k) => near(g.w, lm.wings[k].w, 1e-9) && near(g.ya, lm.wings[k].ya, 1e-9)) && near(m.Hc, lm.Hc, 1e-9),
       JSON.stringify({ drawn: m.wings.map((g) => [g.w, g.ya]), legacy: lm.wings.map((g) => [g.w, g.ya]), Hc: [m.Hc, lm.Hc] }));
+    ok("X: …at beta's middle height, with a middle no further off than the narrower stack", near(m.Hc, beta.Hc, 1e-6)
+      && Math.abs(m.Sc - beta.Sc) <= (both ? 1e-6 : Math.min(sN, sP) + 1e-6), JSON.stringify({ Hc: [m.Hc, beta.Hc], Sc: [m.Sc, beta.Sc], sN, sP }));
     ok("X: zero page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
     await page.close();
   } catch (e) { ok("X: ran", false, e && e.stack); }

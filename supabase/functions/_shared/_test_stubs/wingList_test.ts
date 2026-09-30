@@ -250,7 +250,8 @@ Deno.test("Case S: a side stack, two wings on the left and one on the right", ()
   near(F.d3MassingTopAt(m, -12), 9.75, "top at -12"); near(F.d3MassingTopAt(m, -5), 12.5, "top at -5");
   near(F.d3CeilingFt(roof, 30, 32, 9, -12, 0), 9, "ceiling -12"); near(F.d3CeilingFt(roof, 30, 32, 9, -5, 0), 11.5, "ceiling -5");
   near(F.d3CeilingFt(roof, 30, 32, 9, 3, 0), 16.5, "ceiling 3"); near(F.d3CeilingFt(roof, 30, 32, 9, 10, 0), 9, "ceiling 10");
-  assertEquals(F.d3WingListFallback(roof, 30, 32, 9), { wingSide: "both", wingWidthFt: 14, wingPitch: 0.32142857142857145 });
+  // 14 on the left, 8 on the right: about one width, so both sides at the mean, meeting where the left tier 1 does.
+  assertEquals(F.d3WingListFallback(roof, 30, 32, 9), { wingSide: "both", wingWidthFt: 11, wingPitch: 4.5 / 11 });
   // No end wall in the list: the flag changes nothing.
   assertEquals(JSON.stringify(FE.d3Massing(roof, 30, 32, 9)), JSON.stringify(m));
 });
@@ -296,6 +297,45 @@ Deno.test("Case T: the Tri Home plus a front end wing (flag on)", () => {
   assertEquals(FE.d3WallTops(roof, 24, 28, 9, "south"), null);
   // The side wings' own fallback: one wing per side, the end wing missing (honest).
   assertEquals(FE.d3WingListFallback(roof, 24, 28, 9), { wingSide: "both", wingWidthFt: 8, wingPitch: (14 - 9) / 8 });
+});
+
+// The older designer draws ONE width on both sides (it reads wingSide / wingWidthFt / wingPitch only), and draws
+// the legacy massing of those keys: the approximation is judged against beta's massing here, not only for being
+// drawn (review, 2026-09-30: one width from the left stack drew a 4 ft right stack 13 ft wide).
+const legacyOf = (roof: Any, W: number, D: number) => {
+  const fb = F.d3WingListFallback(roof, W, D, 9);
+  const leg = { ...roof, ...fb };
+  delete leg.wingList;
+  return { fb, m: F.d3Massing(leg, W, D, 9) };
+};
+Deno.test("the older designer's approximation: about one width draws both sides at the mean, else the wider side alone", () => {
+  // Two stacks within a factor of two: both sides at the mean; the middle comes out exactly beta's, and so does
+  // its blank height (the pitch meets where the highest wing does).
+  for (const [roof, W, D] of [
+    [{ ...G, wingList: [{ wall: "left", widthFt: 8 }, { wall: "left", widthFt: 6 }, { wall: "right", widthFt: 8 }] }, 30, 32],
+    [{ ...G, wingList: [{ wall: "left", widthFt: 8 }, { wall: "right", widthFt: 8, pitch: 0.5 }] }, 30, 32],
+    [{ ...G, wingList: [{ wall: "left", widthFt: 6 }, { wall: "right", widthFt: 4 }, { wall: "right", widthFt: 5 }] }, 30, 40],
+  ] as [Any, number, number][]) {
+    const m = F.d3Massing(roof, W, D, 9), { fb, m: lm } = legacyOf(roof, W, D);
+    assertEquals(fb.wingSide, "both", JSON.stringify(roof.wingList));
+    near(lm.Sc, m.Sc, `Sc ${JSON.stringify(roof.wingList)}`); near(lm.Hc, m.Hc, `Hc ${JSON.stringify(roof.wingList)}`);
+    assertEquals(lm.wings.length, 2);
+  }
+  // Two that differ more: the wider stack alone, as wide as it is, at the height beta draws.
+  for (const [roof, W, D, side, w] of [
+    [{ ...G, wingList: [{ wall: "left", widthFt: 4 }, { wall: "right", widthFt: 12 }] }, 40, 40, "right", 12],
+    [{ ...G, wingList: [{ wall: "left", widthFt: 4 }, { wall: "right", widthFt: 8 }, { wall: "right", widthFt: 8 }] }, 40, 40, "right", 16],
+    [{ ...G, wingList: [{ wall: "left", widthFt: 4 }, { wall: "right", widthFt: 4 }, { wall: "left", widthFt: 8, eaveFt: 9.5 }, { wall: "left", widthFt: 6, pitch: 1 }] }, 30, 32, "left", 16],
+  ] as [Any, number, number, string, number][]) {
+    const m = F.d3Massing(roof, W, D, 9), { fb, m: lm } = legacyOf(roof, W, D);
+    assertEquals([fb.wingSide, fb.wingWidthFt], [side, w], JSON.stringify(roof.wingList));
+    assertEquals(lm.wings.map((g: Any) => g.side), [side === "left" ? -1 : 1]);
+    near(lm.wings[0].w, w, "drawn as wide as the stack"); near(lm.Hc, m.Hc, `Hc ${JSON.stringify(roof.wingList)}`);
+  }
+  // One side only: that side's stack.
+  const one = { ...G, wingList: [{ wall: "right", widthFt: 8 }, { wall: "right", widthFt: 6 }] };
+  assertEquals(F.d3WingListFallback(one, 30, 32, 9), { wingSide: "right", wingWidthFt: 14, wingPitch: 4.5 / 14 });
+  near(legacyOf(one, 30, 32).m.Sc, F.d3Massing(one, 30, 32, 9).Sc, "one side: Sc");
 });
 
 // ── FOUR: push and meet ──────────────────────────────────────────────────────────────────────
@@ -512,8 +552,10 @@ Deno.test("⚠️ invariants at every size, both frames, flag off and on: finite
     }
   }
   assertEquals(n, 2 * LISTS.length * INV_SIZES.length * 3);
-  // A wing left tight is drawn and flagged (design §3.6 step 9); the next test keeps the everyday lists free of it.
+  // A wing left tight is drawn and flagged (design §3.6 step 9). The settle leaves none in this sweep, and
+  // this asserts it: three plain re-solves left 60 here, four left 8 (review, 2026-09-30).
   console.log(`invariants: ${n} massings, ${tight} tight wings`);
+  assertEquals(tight, 0, "the settle leaves no wing tight in the invariant sweep");
 });
 
 Deno.test("the everyday lists never leave a wing tight at any size", () => {
@@ -547,6 +589,47 @@ Deno.test("the settle lands an attached wing that carries another: nothing tight
         const m = L.d3Massing({ ...mix, ...(front ? { front } : {}) }, W, D, 9);
         assert([...m.wings, ...m.ends].every((g: Any) => !g.tight), `mix16 ${W}x${D} front ${front}`);
       }
+    }
+  }
+});
+
+// Seeded random side chains, half of them "On the wall" (the integrator's settle probe, 2026-09-30): the settle
+// lands every one. Plain re-substitution left 263 of these 3000 lists tight, and a cap of 5 solves still leaves
+// one, so this guards both the secant step and the cap of 12.
+Deno.test("the settle lands 3000 seeded random attached side chains: nothing tight", () => {
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const left: string[] = [];
+  for (let q = 0; q < 3000; q++) {
+    const len = 2 + Math.floor(rnd() * 6);
+    const wingList = Array.from({ length: len }, () => ({ wall: ["left", "right"][Math.floor(rnd() * 2)], widthFt: +(1 + rnd() * 9).toFixed(1), pitch: +(rnd() * 1.2).toFixed(2),
+      ...(rnd() < 0.5 ? { attach: "wall", attachFt: +(rnd() * 3).toFixed(1) } : {}) }));
+    const roof = { ...G, overhang: +(rnd() * 2).toFixed(1), wingList };
+    const m = F.d3Massing(roof, 30, 40, 9);
+    if (m.wings.some((g: Any) => g.tight)) left.push(JSON.stringify(roof));
+  }
+  assertEquals(left.length, 0, left.slice(0, 2).join("\n"));
+});
+
+// An "On the wall" wing on a wing is checked again on its parent's BUILT pitch: where the settle stopped short,
+// its meet is under the margin, and it is flagged tight (drawn, and its card says so) rather than passed
+// silently (review, 2026-09-30: the one list in 20,000 random ones that did this).
+Deno.test("an attached wing on a wing left under its margin on the built pitch is flagged tight", () => {
+  const roof = { type: "gambrel", pitch: 0.5, overhang: 1.5, front: "gable", wingList: [
+    { wall: "left", widthFt: 2, pitch: 0.4, attach: "wall", attachFt: 2 }, { wall: "right", widthFt: 2, pitch: 0.25, attach: "wall", attachFt: 0 },
+    { wall: "right", widthFt: 1 }, { wall: "left", widthFt: 10, attach: "wall", attachFt: 0 }, { wall: "right", widthFt: 5, attach: "roof", attachFt: 0.5 }] };
+  const a = D3A(), ov = 1.5;
+  for (const L of [F, FE]) {
+    const m = L.d3Massing(roof, 16, 10, 9);
+    const child = m.wings.find((g: Any) => g.i === 3), parent = tier(m, -1, 1);
+    assertEquals([child.tier, child.attach, child.cuts, child.tight], [2, "wall", false, true]);
+    const clear = parent.ye - child.ya - Math.max(0, parent.pitch - child.pitch) * ov;
+    assert(clear < a - 1e-9, `the meet on the built pitch is under the margin: ${clear}`);
+    // Every other attached wing on a wing in the same list clears it on the built pitch.
+    for (const g of m.wings) {
+      if (g.tier < 2 || !g.attach || g.cuts || g.tight) continue;
+      const p = tier(m, g.side, g.tier - 1);
+      assert(p.ye - g.ya - Math.max(0, p.pitch - g.pitch) * ov >= a - 1e-9, `i${g.i}`);
     }
   }
 });

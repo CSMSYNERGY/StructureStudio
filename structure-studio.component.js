@@ -5207,9 +5207,19 @@ function d3MassingList(cfg, ax, Hn, out, allowEnds) {
   }
   // Drawn although a clearance could not be met on the built pitches: an Automatic wing under a face that
   // stands below its floor, or beside end wings a side face below the end roofs' floor.
+  // An "On the wall" wing on a wing met its face with a clearance worked out from its parent's GUESSED pitch:
+  // where the settle stopped short of the built pitch, meetOn's own clearance is checked again on it
+  // (review, 2026-09-30: 1 list in 20,000 random ones, 0.617 ft under the 0.63 ft margin).
   [G["-1"], G["1"], Z[0], Z[1]].forEach((ch) => ch.forEach((child, k) => {
     const parent = ch[k - 1];
-    if (!parent || child.attach) return;
+    if (!parent) return;
+    if (child.attach) {
+      if (!child.mt || child.mt.cuts) return;
+      const w = child.w, kP = parent.pitch;
+      const need = w > ov + 1e-6 ? Math.max(a, (a + kP * ov - ov * (parent.ye - child.ye) / w) / (1 - ov / w)) : a + kP * ov;
+      if (parent.ye - child.ya < need - 1e-9) child.tight = true;
+      return;
+    }
     if (parent.ye < child.ya + Math.max(1.0, a + Math.max(0, parent.pitch - child.pitch) * ov) - 1e-9) child.tight = true;
   }));
   if (hasEnds) sides.forEach((g) => { if (g.ye < floorEnd(g.pitch) - 1e-9) g.tight = true; });
@@ -5356,18 +5366,26 @@ function d3WingListBlocksPorch(roofCfg, W, L, wall) {
   return gable ? m.ends.some((t) => t.wall === wall) : true;
 }
 // THE OLDER DESIGNER'S APPROXIMATION of a list (production reads wingSide / wingWidthFt / wingPitch /
-// centerEaveFt only): one wing per eave side that has any, as wide as that side's whole stack and meeting
-// the middle where the stack's tier 1 does. { drop: true } without a side wing: delete those three keys and
-// the older designer draws the plain building (end wings are missing there, which is honest).
+// centerEaveFt only, and draws ONE width on both sides): a side's wings become one wing as wide as that
+// side's whole stack. Two stacks of about one width (the narrower at least half the wider) are drawn on both
+// sides at their MEAN width, so the middle comes out exactly as wide as beta's. Two that differ more are
+// drawn as the wider stack alone: one width on both sides drew the narrow side two to four times too wide,
+// and the middle and its roof several feet off (review, 2026-09-30). The pitch meets the middle where the
+// highest of those wings does, so a blank middle height (that meeting plus 3 ft) is beta's there too.
+// { drop: true } without a side wing: delete those three keys and the older designer draws the plain
+// building (end wings are missing there, which is honest).
 function d3WingListFallback(roof, W, L, H) {
   const m = d3Massing(roof, W, L, H);
   const names = { west: "left", east: "right", north: "back", south: "front" };
   const stacks = [-1, 1].map((s) => m.wings.filter((g) => g.side === s)).filter((ch) => ch.length);
   if (!stacks.length) return { drop: true };
-  const first = stacks[0];
-  const wW = Math.min(16, first.reduce((t, g) => t + g.w, 0));
-  const t1 = first.find((g) => (g.tier || 1) === 1) || first[0];
-  return { wingSide: stacks.length > 1 ? "both" : names[first[0].wall], wingWidthFt: wW, wingPitch: Math.max(0, Math.min(1.5, (t1.ya - m.H) / wW)) };
+  const wOf = (ch) => ch.reduce((t, g) => t + g.w, 0);
+  const two = stacks.length > 1 ? [wOf(stacks[0]), wOf(stacks[1])] : null;
+  const both = !!two && Math.max(two[0], two[1]) <= 2 * Math.min(two[0], two[1]) + 1e-9;
+  const drawn = both ? stacks : [two && two[1] > two[0] + 1e-9 ? stacks[1] : stacks[0]];
+  const wW = Math.min(16, both ? (two[0] + two[1]) / 2 : wOf(drawn[0]));
+  const ya = drawn.reduce((y, ch) => ch.reduce((t, g) => Math.max(t, g.ya), y), -Infinity);
+  return { wingSide: both ? "both" : names[drawn[0][0].wall], wingWidthFt: wW, wingPitch: Math.max(0, Math.min(1.5, (ya - m.H) / wW)) };
 }
 // The list that draws a legacy style's wings (wingSide / wingWidthFt / wingPitch / wingAttach /
 // wingAttachFt / wingSides) at this size: one entry per eave wing it asks for, with the width ASKED (so the
@@ -7203,7 +7221,7 @@ function d3WingListPlanSVG({ spec, sizeLabel, focusKey, onPick }) {
   const S = m.S, L = m.L, P = m.uAxisIsX;
   const PW = P ? S : L, PH = P ? L : S;
   const at = (u, z) => (P ? [u + S / 2, z] : [L - z, u + S / 2]);
-  const VW = 270, PAD = 12, PADB = 20, MAXH = 200;
+  const VW = 270, PAD = 12, PADB = 20, MAXH = 230;
   const sc = Math.min((VW - PAD * 2) / Math.max(PW, 1), MAXH / Math.max(PH, 1));
   const VH = Math.round(PH * sc + PAD + PADB);
   const ox = (VW - PW * sc) / 2;
@@ -7231,22 +7249,52 @@ function d3WingListPlanSVG({ spec, sizeLabel, focusKey, onPick }) {
   const mid = box(m.uc - m.Sc / 2, m.uc + m.Sc / 2, m.zA, m.zB);
   const pk = m.prof.reduce((a, p) => (p[1] > a[1] ? p : a), m.prof[0]);
   const r0 = at(m.uc + pk[0], m.zA), r1 = at(m.uc + pk[0], m.zB);
+  // A label is drawn only where it fits its rectangle (about 0.6 em a character): across when it fits, on
+  // end in a tall narrow one, else only the short name ("M" for the middle). The middle squeezed to its 4 ft
+  // ran "Middle" over the wings beside it, and on a phone the 8 px heights could not be read (review,
+  // 2026-09-30). A halo in the rectangle's own colour keeps the dashed ridge out of the middle's label.
+  const fitsIn = (t, fs, room) => String(t).length * fs * 0.6 <= room - 4;
+  const halo = (bg) => ({ stroke: bg, strokeWidth: 3, strokeLinejoin: "round", paintOrder: "stroke" });
+  const upright = (x, y, t, st, bg) => <text x={x} y={y} transform={`rotate(-90 ${x} ${y})`} textAnchor="middle" dominantBaseline="central" {...halo(bg)} style={st}>{t}</text>;
+  const midLabel = (() => {
+    const cx = mid.x + mid.w / 2, cy = mid.y + mid.h / 2, hc = d3FtIn(m.Hc), bg = "#FFFBEB";
+    const big = { fontSize: 11, fontWeight: 800, fill: INK }, small = { fontSize: 10, fill: DIM };
+    // The ridge's dash stops behind the label: a patch of the middle's own colour under it.
+    const gap = (w, h) => <rect key="g" x={cx - w / 2} y={cy - h / 2} width={w} height={h} fill={bg} />;
+    if (fitsIn("Middle", 11, mid.w) && fitsIn(hc, 10, mid.w)) {
+      return [gap(Math.min(mid.w - 2, Math.max(6.6 * 6, hc.length * 6) + 6), 30),
+        <text key="t" x={cx} y={cy - 2} textAnchor="middle" {...halo(bg)} style={big}>Middle</text>,
+        <text key="h" x={cx} y={cy + 11} textAnchor="middle" {...halo(bg)} style={small}>{hc}</text>];
+    }
+    if (mid.w >= 14 && fitsIn(`Middle ${hc}`, 11, mid.h)) {
+      return [gap(Math.min(mid.w - 2, 18), `Middle ${hc}`.length * 6.6 + 10),
+        <g key="u">{upright(cx, cy, <><tspan style={big}>Middle</tspan><tspan dx="5" style={small}>{hc}</tspan></>, null, bg)}</g>];
+    }
+    return mid.w >= 10 ? [<text key="m" x={cx} y={cy + 4} textAnchor="middle" {...halo(bg)} style={big}>M</text>] : [];
+  })();
   return (
     <svg viewBox={`0 0 ${VW} ${VH}`} role="group" aria-label="The building from above, the front at the bottom" style={{ width: "100%", height: "auto", display: "block" }}>
-      <rect x={mid.x} y={mid.y} width={mid.w} height={mid.h} fill="#FFFBEB" stroke={INK} strokeWidth="1.2" />
-      <line x1={X(r0[0])} y1={Y(r0[1])} x2={X(r1[0])} y2={Y(r1[1])} stroke={DIM} strokeWidth="1" strokeDasharray="4 3" />
-      <text x={mid.x + mid.w / 2} y={mid.y + mid.h / 2 - 2} textAnchor="middle" style={{ fontSize: 10, fontWeight: 800, fill: INK }}>Middle</text>
-      <text x={mid.x + mid.w / 2} y={mid.y + mid.h / 2 + 10} textAnchor="middle" style={{ fontSize: 9, fill: DIM }}>{d3FtIn(m.Hc)}</text>
+      <g>
+        <title>{`Middle: walls ${d3FtIn(m.Hc)}`}</title>
+        <rect x={mid.x} y={mid.y} width={mid.w} height={mid.h} fill="#FFFBEB" stroke={INK} strokeWidth="1.2" />
+        <line x1={X(r0[0])} y1={Y(r0[1])} x2={X(r1[0])} y2={Y(r1[1])} stroke={DIM} strokeWidth="1" strokeDasharray="4 3" />
+        {midLabel}
+      </g>
       {secs.map((q) => {
         const on = d3WingListLit(focusKey, q.i);
-        const ink = on ? HL : INK;
-        const roomy = q.b.w >= 22 && q.b.h >= 30;
+        const ink = on ? HL : INK, bg = on ? "#FDE68A" : "#FEF3C7";
+        const cx = q.b.x + q.b.w / 2, cy = q.b.y + q.b.h / 2, ye = d3FtIn(q.ye);
+        const named = q.b.w >= 10 && q.b.h >= 12;
+        const across = named && fitsIn(ye, 10, q.b.w) && q.b.h >= 34;
+        const onEnd = named && !across && q.b.w >= 14 && q.b.h >= String(ye).length * 6 + 64;
+        const small = { fontSize: 10, fill: on ? HL : DIM };
         return (
           <g key={"wl" + q.i} data-ss-plan-wl={q.i} onClick={onPick ? () => onPick(q.i) : undefined}>
-            <title>{`${q.name}: outside wall ${d3FtIn(q.ye)}`}</title>
-            <rect x={q.b.x} y={q.b.y} width={q.b.w} height={q.b.h} fill={on ? "#FDE68A" : "#FEF3C7"} stroke={ink} strokeWidth={on ? 2.2 : 1.2} />
-            <text x={q.b.x + q.b.w / 2} y={q.b.y + q.b.h / 2 - (roomy ? 2 : -3)} textAnchor="middle" style={{ fontSize: 10, fontWeight: 800, fill: ink }}>{q.short}</text>
-            {roomy && <text x={q.b.x + q.b.w / 2} y={q.b.y + q.b.h / 2 + 9} textAnchor="middle" style={{ fontSize: 8, fill: on ? HL : DIM }}>{d3FtIn(q.ye)}</text>}
+            <title>{`${q.name}: outside wall ${ye}`}</title>
+            <rect x={q.b.x} y={q.b.y} width={q.b.w} height={q.b.h} fill={bg} stroke={ink} strokeWidth={on ? 2.2 : 1.2} />
+            {named && <text x={cx} y={cy + (across ? -2 : 4)} textAnchor="middle" {...halo(bg)} style={{ fontSize: 11, fontWeight: 800, fill: ink }}>{q.short}</text>}
+            {across && <text x={cx} y={cy + 11} textAnchor="middle" {...halo(bg)} style={small}>{ye}</text>}
+            {onEnd && upright(cx, cy - 12 - String(ye).length * 3, ye, small, bg)}
             {chevron(q.b, q.v, ink)}
           </g>
         );
@@ -23207,8 +23255,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // of wings, each on a building wall, inner to outer on each wall (d3MassingList). While it has a structural
   // entry (d3WingListOn) it is what beta draws, and every other wing key but centerEaveFt is ignored.
   // Production's older designer reads only wingSide / wingWidthFt / wingPitch / centerEaveFt, so after every
-  // list edit those three follow d3WingListFallback (one wing per side that has any, as wide as that side's
-  // stack and meeting the middle where the stack does; none when only end wings are left), and the per-side
+  // list edit those three follow d3WingListFallback (one wing a side at the two stacks' mean width, or the
+  // wider stack alone when the two differ a lot; none when only end wings are left), and the per-side
   // and attach keys, which nothing reads beside a list, go. centerEaveFt, the shared middle height, is never
   // touched. `H` is the wall height the page draws at.
   const calWingListOf = (roof) => (d3WingListOn(roof) ? roof.wingList : []);
@@ -29339,25 +29387,36 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // on that wall outside any already there. `used` walls are left out (their own "+ Add a wing on ..." is under
     // their cards). End walls only once end wings are drawn (D3_WINGLIST_ENDS). Under it, what a wing cannot be,
     // and what does that instead: the honest gap, said where it bites.
+    // The buttons run in the End view's order, as the groups do (the -u side first: Back before Front on a roof
+    // whose eaves are front and back). `legacy` (today's wings, before the first list edit): `onWing` names the
+    // walls that already carry a wing, whose button then says it adds one ON that wing; and on the old frame
+    // (no front wall picked) the page says, before the conversion fixes the wings to walls, that on a size the
+    // other way round the roof turns and they stand on end walls (review, 2026-09-30).
     const wlCap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
-    const wlAddRow = (used, full) => {
+    const wlFrameNote = () => (D3_WINGLIST_ENDS
+      ? ["No front wall is picked in Shape, so the roof turns on a size the other way round, and a side wing there is an end wing.", "Pick a front wall in Shape to fix which way the roof runs at every size."]
+      : ["No front wall is picked in Shape, so the roof turns on a size the other way round: a side wing there stands on an end wall, and is not drawn yet.", "Wings across an end wall come in the next update. Pick a front wall in Shape to keep these wings along the sides at every size."]);
+    const wlAddRow = (used, full, legacy) => {
       const ax = d3RoofAxes(roof, bldgW, bldgH);
       const eave = ax.uAxisIsX ? ["left", "right"] : ["front", "back"];
       const gable = ax.uAxisIsX ? ["front", "back"] : ["left", "right"];
-      const walls = eave.concat(D3_WINGLIST_ENDS ? gable : []).filter((w) => used.indexOf(w) < 0);
+      const rk = (w) => { const f = d3LeanToWall(ax, w); return f.kind === "eave" ? (f.dir < 0 ? 0 : 1) : (f.atL ? 3 : 2); };
+      const walls = eave.concat(D3_WINGLIST_ENDS ? gable : []).filter((w) => used.indexOf(w) < 0).sort((p, q) => rk(p) - rk(q));
+      const onWing = (legacy && legacy.onWing) || [];
       return (
         <div key="wlAdd" className="ss-adv-f is-full ss-adv-wl-add">
           {walls.length > 0 && (
             <div className="ss-adv-chips" style={{ marginTop: 0 }}>
               {walls.map((w) => (
                 <button key={w} type="button" className="ssd-chip" style={advPill} data-ss-adv-f="wlAdd" data-ss-adv-wall={w} disabled={!!full}
-                  onClick={() => calWingListAdd(w)}>{`+ ${wlCap(w)} ${eave.indexOf(w) >= 0 ? "side" : "end"}`}</button>
+                  onClick={() => calWingListAdd(w)}>{onWing.indexOf(w) >= 0 ? `+ Add a wing on the ${w} wing` : `+ ${wlCap(w)} ${eave.indexOf(w) >= 0 ? "side" : "end"}`}</button>
               ))}
             </div>
           )}
           {advNoteEl(D3_WINGLIST_ENDS
             ? ["A wing goes on a whole wall: along a side, or across a whole end.", "For part of a wall, or an end wing's side, use a lean-to. A wing behind just one side wing is not a wing in this version either: an enclosed lean-to on the Lean-to tab does that."]
             : ["A wing goes along a whole side wall. Wings across an end wall come in the next update.", "For part of a wall, or an end wall, use a lean-to: an enclosed lean-to on the Lean-to tab goes on any wall, whole or part."])}
+          {legacy && !d3NewFrame(roof) && <div data-ss-adv-wl-frame="">{advNoteEl(wlFrameNote())}</div>}
           {full && advNoteEl(`Up to ${D3_WINGLIST_MAX} wings on one building.`)}
         </div>
       );
@@ -29392,7 +29451,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // "the front end wing's roof passes" / "the front and back end wings' roofs pass".
       const endRoofs = (ts, one, many) => (ts.length === 1 ? `the ${ts[0].bwall} end wing's roof ${one}` : `the ${ts.map((t) => t.bwall).join(" and ")} end wings' roofs ${many}`);
       const wDc = wm.wings.some((g) => g.tier === 1 && g.attach === "roof") ? d3DormerCovered(spec, sel.size) : null;
-      const out = [advSwitch("wingsOn", true, "Wings on", "Add wings", () => calSetWings(null))];
+      // One wording for the switch, as in today's mode (review, 2026-09-30).
+      const out = [advSwitch("wingsOn", true, "Lower wings on", "Add lower wings", () => calSetWings(null))];
       // ── the middle section's wall height ──
       const hc = roof.centerEaveFt;
       const blankHc = d3Massing({ ...roof, centerEaveFt: null }, bldgW, bldgH, wallH).Hc;
@@ -29441,16 +29501,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         ? `${nameOf(x.i)} is not drawn at ${sizeAt}: the middle keeps at least 4 ft.`
         : `${nameOf(x.i)} is not drawn yet: wings across an end wall come in the next update.`));
       // THE OLD FRAME (no front wall picked): the ridge runs the long way, so on a size the other way round a
-      // side wall is an end wall. Each wing keeps its wall, and the page names walls as they are on screen.
-      const flipped = !d3NewFrame(roof) && !ax.uAxisIsX ? walls : [];
+      // side wall is an end wall. Each wing keeps its wall, and the page names walls as they are on screen. It is
+      // said at every size, not only at a turned one: the style's other sizes turn as well (review, 2026-09-30).
+      const oldFrame = !d3NewFrame(roof);
+      const flipped = oldFrame && !ax.uAxisIsX ? walls : [];
+      const frameNote = wlFrameNote();
       out.push(
         <div key="wlSum" className="ss-adv-f is-full" data-ss-adv-readout="wl-summary">
           {advSay(`${ents.length} wing${ents.length === 1 ? "" : "s"}: ${perWall.join(", ")}. The middle is ${d3FtIn(wm.Sc)} wide${wm.ends.length ? ` and ${d3FtIn(wm.zB - wm.zA)} long` : ""}.`, false)}
           {drops.map((t, k) => <div key={"wlDrop" + k}>{advSay(t, true, { "data-ss-adv-wl-dropped": "" })}</div>)}
-          {flipped.length > 0 && <div data-ss-adv-wl-frame="">{advNoteEl([flipped.map((bw) => (isEnd(bw)
+          {oldFrame && <div data-ss-adv-wl-frame="">{advNoteEl(flipped.length ? [flipped.map((bw) => (isEnd(bw)
             ? `At this size the ${bw} wall is an end wall, so its wings are end wings.`
-            : `At this size the ${bw} wall is a side wall, so its wings are side wings.`)).join(" "),
-            "No front wall is picked in Shape, so the roof runs the long way and turns on a size the other way round. Pick a front wall to fix which way the roof runs at every size."])}</div>}
+            : `At this size the ${bw} wall is a side wall, so its wings are side wings.`)).join(" "), frameNote.join(" ")] : frameNote)}</div>}
+          {/* PRODUCTION (R5, design §2.6): the older designer draws d3WingListFallback's one wing a side, and its
+              own wings-off leaves this list in place. Said here, where a builder sets the list (review, 2026-09-30). */}
+          <div data-ss-adv-wl-live="">{advNoteEl(["The live site shows a simpler version of these wings until beta is promoted.",
+            "Its older designer draws one wing on each side (or only the wider side's, when the two sides differ a lot) and no end wings. Turning the wings off in its calibration panel leaves this list in place: turn them off here."])}</div>
         </div>,
       );
       // ── one card per wing ──
@@ -29468,16 +29534,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         const asked = e.attach === "roof" || e.attach === "wall" ? e.attach : "";
         const a = asked === "wall" || (asked === "roof" && roofOk) ? asked : "";
         const body = [];
-        body.push(advNum({ k: `wl${i}-widthFt`, f: "wlWidthFt", label: "Width (ft)", aria: aria("width (ft)"), value: e.widthFt, min: 1, max: 16, step: 0.5, band: [0, 16],
-          write: (v) => { if (v == null) return; if (v > 0.5) set({ widthFt: v }); else calWingListRemove(i); }, fallback: 8, full: true,
+        // At least 1 ft, the lean-to box's rule. The box commits on every keystroke, so a half-typed "0" or ".5"
+        // took the wing and all its settings away with no undo (review, 2026-09-30); only ✕ removes a wing.
+        body.push(advNum({ k: `wl${i}-widthFt`, f: "wlWidthFt", label: "Width (ft)", aria: aria("width (ft)"), value: e.widthFt, min: 1, max: 16, step: 0.5, band: [1, 16],
+          write: (v) => { if (v != null) set({ widthFt: Math.max(1, Math.min(16, v)) }); }, fallback: 8, full: true,
           note: drop ? (drop.why === "room" ? `Not drawn at ${sizeAt}: the middle keeps at least 4 ft. It stays saved.` : "Not drawn yet: wings across an end wall come in the next update. It stays saved.")
             : r && r.shrunk ? `Drawn ${d3FtIn(r.w)} wide: the middle keeps at least 4 ft.` : null }));
         const meetsLabel = k === 1 ? (end ? "Meets the middle's end wall" : "Meets the middle section") : `Meets ${parent}`;
-        body.push(advSeg({ f: "wlAttach", label: meetsLabel, aria: `${name} meets ${k === 1 ? (end ? "the middle's end wall" : "the middle section") : parent}`, value: asked, full: true,
+        // A wing asked "On the roof" that is built Automatic (roofIgnored) shows Automatic pressed, the mode that
+        // is built, rather than a pressed and disabled chip (review, 2026-09-30); the sentence says the ask is kept.
+        body.push(advSeg({ f: "wlAttach", label: meetsLabel, aria: `${name} meets ${k === 1 ? (end ? "the middle's end wall" : "the middle section") : parent}`, value: r && r.roofIgnored ? "" : asked, full: true,
           pick: (v) => set(v ? { attach: v, attachFt: typeof e.attachFt === "number" ? e.attachFt : 1 } : { attach: null }),
           opts: [["", "Automatic"], ["wall", "On the wall"], ["roof", "On the roof", !roofOk, roofOk ? undefined : "Only a wing against the middle can run up onto its roof"]],
           note: a ? `${capFirst(innerPoss)} wall keeps its height; this wing's slope follows.` : [`Hung under ${innerPoss} eave.`, "A steep roof set to Automatic pushes that wall up to fit."],
-          children: r && r.roofIgnored ? advSay("On the roof is only for a wing against the middle; this one is built Automatic.", true) : null }));
+          children: r && r.roofIgnored ? advSay("On the roof is only for a wing against the middle, so this one is built Automatic. On the roof stays saved for when it is moved back in.", true) : null }));
         if (a) {
           const meetLine = r && r.meets ? (r.meetFt < 1 / 24 ? `Meets ${inner} at its eave`
             : `Meets the ${r.meets} ${d3FtIn(r.meetFt)} ${r.meets === "roof" ? "above" : "below"} ${innerPoss} eave`) : null;
@@ -29537,7 +29607,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         } else if (r) {
           body.push(<div key="wle" className="ss-adv-f is-full">{advNoteEl(`Its outside wall is the building's wall, ${d3FtIn(wallH)}.`)}</div>);
         }
-        if (r && r.tight) body.push(<div key="wlt" className="ss-adv-f is-full">{advSay("Drawn, but a roof edge passes closer over this wing's roof than it should. Raise the wall inside it, or give this roof less pitch.", true, { "data-ss-adv-wl-tight": "" })}</div>);
+        if (r && r.tight) body.push(<div key="wlt" className="ss-adv-f is-full">{advSay(r.attach && parent
+          ? `Drawn, but ${innerPoss} roof edge passes closer over this wing's roof than it should. Raise ${innerPoss} outside wall, or meet it further down.`
+          : "Drawn, but a roof edge passes closer over this wing's roof than it should. Raise the wall inside it, or give this roof less pitch.", true, { "data-ss-adv-wl-tight": "" })}</div>);
         if (n > 1) {
           body.push(
             <div key="wlm" className="ss-adv-f is-full" data-ss-adv-f="wlMove">
@@ -29600,7 +29672,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (!on) {
         out.push(<div key="off">{advNoteEl(["Enclosed side rooms under a lower roof, inside the size.", "They stand beside a taller middle section. A lean-to is the open one on posts."], { marginTop: -6 })}</div>);
         // A WING LIST (roof.wingList, 2026-10-01): a wing on any wall, one on another, from here as well.
-        out.push(wlAddRow([], false));
+        out.push(wlAddRow([], false, { onWing: [] }));
         return out;
       }
       const eaveSides = calWingEaveSides(roof);
@@ -29695,7 +29767,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // MORE THAN ONE WING PER SIDE (roof.wingList, 2026-10-01): a click turns these wings into the list, drawn
       // the same (d3WingListFromLegacy), and adds the new wing outside any on that wall.
       out.push(<div key="wlMore" className="ss-adv-f is-full"><div className="ss-adv-fh"><span className="ssd-fld-l">{D3_WINGLIST_ENDS ? "More wings: on a wing, or on an end wall" : "More wings: a wing on a wing"}</span></div></div>);
-      out.push(wlAddRow([], false));
+      out.push(wlAddRow([], false, { onWing: onSides }));
       return out;
     };
     const dormerPanel = () => {
