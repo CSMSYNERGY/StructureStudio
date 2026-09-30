@@ -37,6 +37,8 @@ import {
 import { carryForwardFoundation, D3_FOUNDATIONS, D3_RAISED_FOUNDATIONS, FLOOR_HEIGHT_FT } from "./styleD3.ts";
 // Where an appendage meets the building, the porch's step count, and the ground's fall (2026-09-28).
 import { D3_ATTACH, D3_GRADE_FALL_TOWARD, GRADE_FALL_FT } from "./styleD3.ts";
+// Stackable wings (roof.wingList, 2026-10-01).
+import { sanitizeWingList, D3_WINGLIST_MAX, D3_WINGLIST_WALLS, WINGLIST_BANDS } from "./styleD3.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
@@ -7152,4 +7154,216 @@ Deno.test("roof.leanTos: the roof step is refused beside any lean-to, the list's
   assertEquals(roofStepAtSize({ ...step, leanTos: [{ wall: "left", widthFt: 6 }] }, 14, 40), null, "and not beside a listed lean-to");
   // A list with nothing drawable in it (half a foot wide) is no lean-to: the step stays, as the renderer draws it.
   assertEquals(roofOf({ ...step, leanTos: [{ wall: "back", widthFt: 0.5 }] }).rearStepFt, 12, "a 6 in lean-to does not refuse the step");
+});
+
+// ── STACKABLE WINGS (roof.wingList, 2026-10-01) ─────────────────────────────────────────────────────
+// An ordered list of wings, each on a building wall; a wing's parent is the previous entry on its wall.
+// The sanitiser keeps the first 16 STRUCTURAL entries (an object, a wall word, a width over half a foot),
+// clamps each number into its band, drops what it does not know, writes the list LAST, and never deletes a
+// legacy key because of it. The renderer's d3WingListEntries is the same rule (stubs/wingList_test).
+const WL_FULL = { wall: "left", widthFt: 8, pitch: 0.25, attach: "wall", attachFt: 1, eaveFt: 12 };
+const wlOne = (e: Record<string, unknown>) => sanitizeWingList([{ wall: "left", widthFt: 8, ...e }])![0];
+const wlShow = (v: unknown) => JSON.stringify(v) ?? String(v);
+
+Deno.test("roof.wingList: round-trips on a gable and a gambrel, in one key order, and nothing is invented", () => {
+  assertEquals([...D3_WINGLIST_WALLS], ["left", "right", "front", "back"]);
+  assertEquals(D3_WINGLIST_MAX, 16, "sixteen wings per building");
+  assertEquals(WINGLIST_BANDS, { widthFt: [0.5, 16], pitch: [0, 1.5], attachFt: [0, 10], eaveFt: [6, 26] });
+  for (const type of ["gable", "gambrel"]) {
+    const full = roofOf({ type, wingList: [WL_FULL] });
+    assertEquals(full.wingList, [WL_FULL], `${type}: every key kept`);
+    assertEquals(Object.keys((full.wingList as Record<string, unknown>[])[0]), ["wall", "widthFt", "pitch", "attach", "attachFt", "eaveFt"], `${type}: in one order`);
+    // The same keys handed over in another order come back in the contract's order.
+    const shuffled = { eaveFt: 12, attachFt: 1, attach: "wall", pitch: 0.25, widthFt: 8, wall: "left" };
+    assertEquals(Object.keys((roofOf({ type, wingList: [shuffled] }).wingList as Record<string, unknown>[])[0]),
+                 ["wall", "widthFt", "pitch", "attach", "attachFt", "eaveFt"], `${type}: reordered on the way in`);
+    for (const wall of D3_WINGLIST_WALLS) {
+      assertEquals(roofOf({ type, wingList: [{ wall, widthFt: 8 }] }).wingList, [{ wall, widthFt: 8 }], `${type}: a bare wing on the ${wall} wall gains no key`);
+    }
+  }
+  // Written LAST: after every other roof key, the lean-to list included.
+  const k = Object.keys(roofOf({ type: "gable", pitch: 0.4, porchOutFt: 6, porchSteps: "left", wingSide: "both", wingWidthFt: 6,
+                                 wingList: [{ wall: "left", widthFt: 6 }], leanTos: [{ wall: "back", widthFt: 4 }] }));
+  assertEquals(k.slice(-2), ["leanTos", "wingList"], "the wing list is the roof's last key, after leanTos");
+  const k2 = Object.keys(roofOf({ type: "gambrel", wingList: [{ wall: "front", widthFt: 6 }], pitch: 0.4, eave: "open" }));
+  assertEquals(k2[k2.length - 1], "wingList", "last even when it was handed over first");
+});
+
+Deno.test("roof.wingList: bands clamp, junk fields and junk entries are dropped", () => {
+  // widthFt: required, clamped from above only; half a foot or less is no wing.
+  assertEquals(wlOne({ widthFt: 20 }).widthFt, 16, "width 20 clamps to 16");
+  assertEquals(wlOne({ widthFt: "8" }).widthFt, 8, "a numeric string reads as its number");
+  assertEquals(sanitizeWingList([{ wall: "left", widthFt: 0.5 }]), null, "width 0.5: no wing, no list");
+  assertEquals(wlOne({ widthFt: 0.51 }).widthFt, 0.51, "just over half a foot is kept");
+  for (const w of ["", "  ", "x", null, undefined, NaN, Infinity, -3, 0, true]) {
+    assertEquals(sanitizeWingList([{ wall: "left", widthFt: w }]), null, `width ${wlShow(w)}: dropped`);
+  }
+  // The optional numbers clamp into their bands.
+  assertEquals(wlOne({ pitch: 2 }).pitch, 1.5, "pitch clamps to 1.5");
+  assertEquals(wlOne({ pitch: -1 }).pitch, 0, "and to 0");
+  assertEquals(wlOne({ attachFt: 12 }).attachFt, 10, "attach distance clamps to 10");
+  assertEquals(wlOne({ eaveFt: 3 }).eaveFt, 6, "outside wall clamps up to 6");
+  assertEquals(wlOne({ eaveFt: 40 }).eaveFt, 26, "and down to 26");
+  assertEquals(wlOne({ pitch: "0.5" }).pitch, 0.5, "numeric strings read on every number");
+  // A blank box is no number (the shared num() reads "" as 0; this list's parser does not).
+  for (const k of ["pitch", "attachFt", "eaveFt"]) {
+    for (const v of ["", " ", "x", null, undefined, NaN, Infinity, true, [3], {}]) {
+      assert(!(k in wlOne({ [k]: v })), `${k} ${wlShow(v)}: field absent`);
+    }
+  }
+  // attach: a known word, as given; anything else leaves the field out (Automatic).
+  for (const v of D3_ATTACH) assertEquals(wlOne({ attach: v }).attach, v, `attach "${v}" kept`);
+  for (const junk of ["up", "auto", ["roof"], ["wall"], "Roof", "", 1, true, null]) {
+    assert(!("attach" in wlOne({ attach: junk })), `attach ${wlShow(junk)}: field absent`);
+  }
+  // attachFt is kept whenever numeric, even without attach (remembered for the next time it is attached).
+  assertEquals(wlOne({ attachFt: 2 }), { wall: "left", widthFt: 8, attachFt: 2 }, "attachFt stays without attach");
+  // A field outside the list is dropped.
+  assertEquals(wlOne({ color: "red", side: "left", tier: 2, on: 0 }), { wall: "left", widthFt: 8 }, "unknown fields dropped");
+  // An entry without a known wall word, or not an object, is no wing.
+  for (const junk of [{ wall: "top", widthFt: 8 }, { wall: ["left"], widthFt: 8 }, { wall: "Left", widthFt: 8 }, { wall: "west", widthFt: 8 },
+                      { widthFt: 8 }, { wall: "left" }, null, 3, [], ["left", 8], "left", true]) {
+    assertEquals(sanitizeWingList([junk]), null, `${wlShow(junk)}: dropped`);
+  }
+  assertEquals(sanitizeWingList([{ wall: "top", widthFt: 8 }, null, { wall: "right", widthFt: 5 }]), [{ wall: "right", widthFt: 5 }], "the bad entries go, the good one stays");
+  // Not a list: no key at all.
+  for (const v of ["left", {}, { wall: "left", widthFt: 8 }, 4, null, undefined, true]) {
+    assertEquals(sanitizeWingList(v), null, `${wlShow(v)}: no list`);
+    assert(!("wingList" in roofOf({ type: "gable", wingList: v })), `${wlShow(v)}: stores no key`);
+  }
+  assert(!("wingList" in roofOf({ type: "gable", wingList: [] })), "an empty list stores no key");
+});
+
+Deno.test("roof.wingList: the first sixteen structural entries, in order", () => {
+  const twenty = Array.from({ length: 20 }, (_, i) => ({ wall: D3_WINGLIST_WALLS[i % 4], widthFt: 1 + i / 2 }));
+  const kept = sanitizeWingList(twenty)!;
+  assertEquals(kept.length, D3_WINGLIST_MAX, "sixteen at most");
+  assertEquals(kept.map((e) => e.widthFt), twenty.slice(0, 16).map((e) => e.widthFt), "the first sixteen, in order");
+  assertEquals(kept.map((e) => e.wall), twenty.slice(0, 16).map((e) => e.wall), "each on its own wall");
+  // Junk between them does not count toward the sixteen and does not stop the walk.
+  const junky: unknown[] = [];
+  twenty.forEach((e, i) => {
+    junky.push(null, { wall: "top", widthFt: 8 }, { wall: "left", widthFt: 0.5 }, "x", e);
+    if (i % 3 === 0) junky.push([]);
+  });
+  assertEquals(sanitizeWingList(junky), kept, "junk interleaved: the same first sixteen structural entries");
+  assertEquals((roofOf({ type: "gable", wingList: junky }).wingList as unknown[]).length, 16, "and that is what is stored");
+});
+
+Deno.test("roof.wingList: a shed drops it with the wing set; a gambrel keeps it", () => {
+  const wings = { wingSide: "both", wingWidthFt: 6, wingPitch: 0.25, centerEaveFt: 12, wingList: [WL_FULL] };
+  const shed = roofOf({ type: "shed", pitch: 0.2, ...wings });
+  for (const k of Object.keys(wings)) assert(!(k in shed), `a shed drops ${k}`);
+  assertEquals(roofOf({ type: "gambrel", ...wings }).wingList, [WL_FULL], "a gambrel keeps the list");
+  assertEquals(roofOf({ type: "gable", ...wings }).wingList, [WL_FULL], "and so does a gable");
+});
+
+Deno.test("roof.wingList: every legacy wing key survives beside a list, with its value", () => {
+  const legacy = { wingSide: "both", wingWidthFt: 7, wingPitch: 0.3, centerEaveFt: 14, wingAttach: "wall", wingAttachFt: 1.5,
+                   wingSides: { left: { widthFt: 6, pitch: 0.25, attach: "auto", attachFt: 1 } } };
+  const before = roofOf({ type: "gable", pitch: 0.5, ...legacy });
+  const after = roofOf({ type: "gable", pitch: 0.5, ...legacy, wingList: [WL_FULL, { wall: "front", widthFt: 8 }] });
+  for (const k of Object.keys(legacy)) assertEquals(after[k], before[k], `${k} survives beside a list`);
+  const { wingList, ...rest } = after;
+  assertEquals(JSON.stringify(rest), JSON.stringify(before), "everything but the list is stored as it was, in its old order");
+  assertEquals(wingList, [WL_FULL, { wall: "front", widthFt: 8 }]);
+  // The lean-to list is independent: it stays too.
+  const both = roofOf({ type: "gable", leanTos: [{ wall: "back", widthFt: 4 }], wingList: [WL_FULL] });
+  assertEquals(both.leanTos, [{ wall: "back", widthFt: 4 }], "a lean-to list stays beside a wing list");
+});
+
+Deno.test("⚠️ roof.wingList: without a structural list every stored style comes back byte for byte", () => {
+  const tri = { roof: { type: "gable", front: "gable", pitch: 0.47, overhang: 1, eave: "fascia", wingSide: "both", wingWidthFt: 7,
+                        wingPitch: 0.25, centerEaveFt: 16, porchOutFt: 6, porchEnd: "front", porchAttachFt: 10.5 },
+                siding: "lap", colors: { body: "#454b52", trim: "#2a2e33", roof: "#2e3238", wood: "#a96c3e" }, wallHeightFt: 8 };
+  const farmstand = { roof: { type: "shed", highSide: "front", front: "eave", pitch: 0.23, overhang: 1, eave: "open", tailSpacingIn: 24,
+                              porchOutFt: 4, porchEnd: "front", porchAttachFt: 7.3 },
+                      foundation: "skids", roofMaterial: "metal", colors: { body: "#4a3b30", trim: "#ffffff", roof: "#2b2f33" } };
+  const plain = { roof: { type: "gable", pitch: 0.5, overhang: 1 }, siding: "panel", colors: {}, wallHeightFt: 9 };
+  const shed = { roof: { type: "shed", pitch: 0.2, highSide: "front" }, siding: "batten", colors: {} };
+  const gambrel = { roof: { type: "gambrel", kneeU: 0.72, kneeRise: 0.72, ridgeRise: 1, overhang: 0.15, porchOutFt: 6.5, porchEnd: "front" },
+                    siding: "panel", colors: {}, foundation: "blocks", floorHeightFt: 2 };
+  const leanToList = { roof: { type: "gable", pitch: 0.4, leanTos: [{ wall: "left", widthFt: 8, enclosed: true }, { wall: "back", widthFt: 6, lengthFt: 10 }] },
+                       siding: "lap", colors: {} };
+  const stepped = { roof: { type: "gable", front: "gable", pitch: 0.41, rearStepFt: 12, rearEaveRiseFt: 0.4 }, siding: "panel", colors: {} };
+  const junk = [undefined, null, [], "left", {}, [null], [{ wall: "top", widthFt: 8 }], [{ wall: "left" }], [{ wall: "left", widthFt: 0.5 }]];
+  const styles: Record<string, { roof: Record<string, unknown> } & Record<string, unknown>> = { tri, farmstand, plain, shed, gambrel, leanToList, stepped };
+  for (const [name, spec] of Object.entries(styles)) {
+    const base = sanitizeD3Spec(spec);
+    assert(base.ok, `${name} parses`);
+    for (const v of junk) {
+      const withJunk = sanitizeD3Spec({ ...spec, roof: { ...spec.roof, wingList: v } });
+      assertEquals(JSON.stringify(withJunk), JSON.stringify(base), `${name} with wingList ${wlShow(v)}: byte-identical`);
+    }
+  }
+  assertEquals((sanitizeD3Spec(stepped) as { ok: true; d3: D3Spec }).d3.roof.rearStepFt, 12, "the stepped cabin really does keep its step");
+});
+
+Deno.test("roof.wingList: the roof step is refused beside a structural list, and only a structural one", () => {
+  const step = { type: "gable", front: "gable", pitch: 0.41, rearStepFt: 12, rearEaveRiseFt: 0.4 };
+  assertEquals(roofOf(step).rearStepFt, 12, "alone, the step is kept");
+  assertEquals(roofStepAtSize(step, 14, 40)!.drawn!.stepFt, 12, "the server's mirror draws it alone");
+  for (const wall of D3_WINGLIST_WALLS) {
+    const r = roofOf({ ...step, wingList: [{ wall, widthFt: 6 }] });
+    assert(!("rearStepFt" in r) && !("rearEaveRiseFt" in r), `beside a ${wall} wing, both step keys go`);
+    assertEquals(roofStepAtSize({ ...step, wingList: [{ wall, widthFt: 6 }] }, 14, 40), null, `the server's mirror draws none beside a ${wall} wing`);
+  }
+  // A list with nothing structural in it is no wing: the step stays, in the sanitiser and its mirror.
+  for (const v of [[{ wall: "back", widthFt: 0.5 }], [{ wall: "top", widthFt: 8 }], [null], [], "left"]) {
+    assertEquals(roofOf({ ...step, wingList: v }).rearStepFt, 12, `${wlShow(v)} does not refuse the step`);
+    assertEquals(roofStepAtSize({ ...step, wingList: v }, 14, 40)!.drawn!.stepFt, 12, `${wlShow(v)}: the mirror draws it`);
+  }
+});
+
+Deno.test("⚠️ roof.wingList: the heaviest spec a builder can save still fits under the 4096-byte guard", () => {
+  const wing = { wall: "right", widthFt: 15.5, pitch: 0.3333333333333333, attach: "wall", attachFt: 9.75, eaveFt: 25.5 };
+  const leanTo = { wall: "front", widthFt: 15.75, dropFt: 5.25, attach: "wall", attachFt: 7.75, lengthFt: 59.5, offsetFt: -29.5, enclosed: true };
+  const worst = {
+    roof: {
+      type: "gable", front: "gable", pitch: 0.4166666666666667, ridgeOffset: -0.3333333333333333, overhang: 1.1666666666666667,
+      tailSpacingIn: 23.5, eave: "fascia", overhangStyle: "extended", plateBand: true,
+      dormerType: "transom", dormerWidthFt: 11.5, dormerRiseFt: 5.5, dormerOffsetU: -0.4166666666666667,
+      porchOutFt: 11.5, porchEnd: "front", porchAttachFt: 23.5, porchWidthFt: 59.5, porchPosts: 8, porchPitch: 0.4166666666666667,
+      porchSteps: "center", porchStepCount: 12, porchTruss: true,
+      wingSide: "both", wingWidthFt: 15.5, wingPitch: 0.3333333333333333, centerEaveFt: 25.5,
+      leanTos: Array.from({ length: 6 }, () => leanTo),
+      wingList: Array.from({ length: D3_WINGLIST_MAX }, () => wing),
+    },
+    siding: "batten",
+    colors: { body: "#AABBCC", trim: "#AABBCC", roof: "#AABBCC", wood: "#AABBCC", corner: "#AABBCC", fascia: "#AABBCC" },
+    wallHeightFt: 13.5, roofMaterial: "shingle", roofProfile: "standingseam", gableVent: { widthFrac: 0.3333333333333333 },
+    foundation: "blocks", floorHeightFt: 2.75, gradeFallFt: 2.75, gradeFallToward: "back",
+    gradeCornersFt: { fl: 1.25, fr: 2.75, bl: 0.75, br: 1.75 },
+    claddingChoices: ["panel", "lap", "batten", "agpanel"],
+  };
+  const r = sanitizeD3Spec(worst);
+  const bytes = r.ok ? JSON.stringify(r.d3).length : -1;
+  console.log(`worst spec, ${D3_WINGLIST_MAX} maximal wings and 6 maximal lean-tos: ${bytes} of 4096 bytes`);
+  assert(r.ok, `the worst spec is accepted (${r.ok ? bytes : r.error})`);
+  if (!r.ok) return;
+  assertEquals((r.d3.roof.wingList as unknown[]).length, D3_WINGLIST_MAX, "every wing kept");
+  assertEquals((r.d3.roof.leanTos as unknown[]).length, 6, "every lean-to kept");
+  assert(bytes <= 4096, `${bytes} bytes fit under the guard`);
+});
+
+Deno.test("⚠️ roof.wingList never reaches the video path: no allow-list entry, no prompt names it", () => {
+  for (const [name, list] of [["SELF_CHECK_ALLOW", SELF_CHECK_ALLOW], ["SELF_CHECK_LEGACY_ALLOW", SELF_CHECK_LEGACY_ALLOW]] as const) {
+    assert(!(list as readonly string[]).some((f) => f.includes("wingList")), `${name} has no wingList path`);
+  }
+  const dims: KnownDims = { widthFt: 16, lengthFt: 24, wallHeightFt: 9 };
+  const prompts: [string, string][] = [
+    ["SPEC_PROMPT", SPEC_PROMPT],
+    ["VIDEO_SHAPE_PROMPT", VIDEO_SHAPE_PROMPT],
+    ["videoShapePrompt", videoShapePrompt(dims)],
+    ["videoShapePrompt v2", videoShapePrompt(dims, true)],
+    ["combinedShapePrompt", combinedShapePrompt(8, 4, dims)],
+    ["combinedShapePrompt v2", combinedShapePrompt(8, 4, dims, true)],
+    ["selfCheckPrompt", selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS })],
+    ["selfCheckPrompt round 1", selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS, round: 1, earlier: ["roof.wingWidthFt"] })],
+    ["legacySelfCheckPrompt", legacySelfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS })],
+  ];
+  for (const [name, p] of prompts) {
+    assert(typeof p === "string" && p.length > 0, `${name} builds`);
+    assert(!p.includes("wingList"), `${name} does not name wingList`);
+  }
 });

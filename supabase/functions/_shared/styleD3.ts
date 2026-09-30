@@ -189,7 +189,7 @@ export const D3_SHED_HIGH_SIDES = ["front", "back", "left", "right"] as const;
 // renderer, not here, because the sanitiser cannot know which way a later edit will turn the roof.
 export const D3_WING_SIDES = ["both", "left", "right", "front", "back"] as const;
 // The keys that only mean something with a ridge. Dropped as a set on a shed.
-const D3_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt", "wingSides"] as const;
+const D3_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt", "wingSides", "wingList"] as const;
 // ── EACH WING SET ON ITS OWN (roof.wingSides, 2026-09-29) ─────────────────────────────────────────
 // Carolyn, 09-29, on the Advanced page: "I want this wing to be like this and this wing to be like
 // this". { left?, right?, front?, back? }, one entry per wall a wing can stand on, each OVERRIDING the
@@ -296,6 +296,49 @@ export function sanitizeLeanTos(raw: unknown): Record<string, unknown>[] | null 
     if (offsetFt !== null) lt.offsetFt = offsetFt;
     if (src.enclosed === true) lt.enclosed = true;
     out.push(lt);
+  }
+  return out.length ? out : null;
+}
+// ── STACKABLE WINGS (roof.wingList, 2026-10-01) ─────────────────────────────────────────────────
+// Carolyn, 09-29: "they can add as many wings, as many lean-tos ... wherever they want". An ordered list,
+// inner to outer on each wall; a wing's parent is the previous entry on the same wall. Structural rule
+// = the renderer's d3WingListEntries (stubs/wingList_test fuzz-tests the two): an object, a wall word,
+// a width over 0.5 ft, the first 16 such. A size never drops an entry here: the renderer says why a wing
+// is not drawn at a size, and the wing stays saved.
+export const D3_WINGLIST_WALLS = ["left", "right", "front", "back"] as const;
+export const D3_WINGLIST_MAX = 16;
+export const WINGLIST_BANDS: Record<string, readonly [number, number]> = {
+  widthFt: [0.5, 16], pitch: [0, 1.5], attachFt: [0, 10], eaveFt: [6, 26],
+};
+// A LOCAL number parser, not the shared num(): a blank box is no number at all (num("") is 0). The
+// twins' d3WlNum is this line for line, so the sanitiser and the renderer keep the same entries.
+const wlNum = (v: unknown): number | null => {
+  if (typeof v === "string" && v.trim() === "") return null;
+  const n = typeof v === "string" ? Number(v) : v;
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
+};
+export function sanitizeWingList(raw: unknown): Record<string, unknown>[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: Record<string, unknown>[] = [];
+  for (const e of raw) {
+    if (out.length >= D3_WINGLIST_MAX) break;
+    if (!e || typeof e !== "object" || Array.isArray(e)) continue;
+    const src = e as Record<string, unknown>;
+    if (typeof src.wall !== "string" || !(D3_WINGLIST_WALLS as readonly string[]).includes(src.wall)) continue;
+    const w0 = wlNum(src.widthFt);
+    if (w0 === null || !(w0 > 0.5)) continue;
+    const band = (k: string): number | null => {
+      const n = wlNum(src[k]);
+      if (n === null) return null;
+      const [lo, hi] = WINGLIST_BANDS[k];
+      return Math.min(hi, Math.max(lo, n));
+    };
+    const wl: Record<string, unknown> = { wall: src.wall, widthFt: Math.min(16, w0) };
+    const pitch = band("pitch"); if (pitch !== null) wl.pitch = pitch;
+    if (typeof src.attach === "string" && (D3_ATTACH as readonly string[]).includes(src.attach)) wl.attach = src.attach;
+    const attachFt = band("attachFt"); if (attachFt !== null) wl.attachFt = attachFt;
+    const eaveFt = band("eaveFt"); if (eaveFt !== null) wl.eaveFt = eaveFt;
+    out.push(wl);
   }
   return out.length ? out : null;
 }
@@ -580,10 +623,14 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // go, and it is written LAST, after every other roof key, so no stored spec's key order moves.
   const leanTos = sanitizeLeanTos(rawRoof.leanTos);
   if (leanTos) for (const k of D3_LEANTO_LEGACY_KEYS) delete roof[k];
+  // THE WING LIST (roof.wingList, 2026-10-01): a wing key, so never on a shed. It deletes no legacy wing
+  // or lean-to key (production's older designer still reads those), refuses the roof step like any wing,
+  // and is written LAST of all, after the lean-to list, so no stored spec's key order moves.
+  const wingList = type === "shed" ? null : sanitizeWingList(rawRoof.wingList);
   const stepAt = num(roof.rearStepFt), stepRise = num(roof.rearEaveRiseFt);
   const roofOn = (k: string) => (num(roof[k]) ?? 0) > 0.5;
   if (stepAt !== null && stepAt > 0.5 && stepRise !== null && Math.abs(stepRise) >= 0.01
-      && type === "gable" && roof.front !== "eave" && !roofOn("wingWidthFt") && !roofOn("leanToWidthFt") && !leanTos
+      && type === "gable" && roof.front !== "eave" && !roofOn("wingWidthFt") && !roofOn("leanToWidthFt") && !leanTos && !wingList
       && !(roof.porchEnd === "back" && (roofOn("porchDepthFt") || roofOn("porchOutFt")))) {
     roof.rearStepFt = Math.max(4, stepAt);
   } else {
@@ -591,6 +638,7 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     delete roof.rearEaveRiseFt;
   }
   if (leanTos) roof.leanTos = leanTos;
+  if (wingList) roof.wingList = wingList;
 
   // Anything that is not a renderable cladding means "unset", which the renderer
   // draws as panel siding. Matches the AI validator's posture: drop what we cannot
@@ -3000,7 +3048,7 @@ export function roofStepAtSize(roof: Record<string, unknown> | null | undefined,
   const want = num(cfg.rearStepFt), rise0 = num(cfg.rearEaveRiseFt);
   if (cfg.type !== "gable" || want === null || rise0 === null || !(want > 0.5) || !(Math.abs(rise0) >= 0.01)) return null;
   const front = cfg.front === "gable" || cfg.front === "eave" ? cfg.front : null;
-  if (front === "eave" || (num(cfg.wingWidthFt) ?? 0) > 0.5 || (num(cfg.leanToWidthFt) ?? 0) > 0.5 || sanitizeLeanTos(cfg.leanTos)) return null;
+  if (front === "eave" || (num(cfg.wingWidthFt) ?? 0) > 0.5 || (num(cfg.leanToWidthFt) ?? 0) > 0.5 || sanitizeLeanTos(cfg.leanTos) || sanitizeWingList(cfg.wingList)) return null;
   const porchOut = Math.min(12, num(cfg.porchOutFt) ?? 0) > 0.5;
   if (cfg.porchEnd === "back" && (porchOut || (num(cfg.porchDepthFt) ?? 0) > 0.5)) return null;
   // d3RoofAxes: a gable front runs the ridge front to back; without a front, a portrait footprint does.
