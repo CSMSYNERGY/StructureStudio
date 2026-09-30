@@ -836,6 +836,8 @@ if (want("A")) {
     ok("A1: the master switch is still the first tool button", add0.first === "wingsOn", String(add0.first));
     ok(`A1: the add row offers ${ENDS ? "every wall" : "the side walls only (end wings wait for their flag)"}`,
       JSON.stringify(add0.add) === JSON.stringify(ENDS ? ["left", "right", "back", "front"] : ["left", "right"]), JSON.stringify(add0.add));
+    // The blank seed is the old frame with its wings off: nothing yet to fix to a wall, so no frame note (review, 2026-09-30).
+    ok("A1: with the wings off there is no old-frame note", (await page.locator("[data-ss-adv-wl-frame]").count()) === 0);
     // Today's wings on: the legacy cards, and the add row under them.
     await page.locator('[data-ss-adv-f="wingsOn"]').click();
     await settle(page, 400);
@@ -847,6 +849,9 @@ if (want("A")) {
     const addTxt = sp(await page.locator('[data-ss-adv-f="wlAdd"][data-ss-adv-wall="left"]').innerText());
     ok("A1: …its button says it adds a wing on the left wing", addTxt === "+ Add a wing on the left wing", addTxt);
     ok(`A1: gable-wall add buttons ${ENDS ? "are" : "are not"} offered`, (await page.locator('[data-ss-adv-f="wlAdd"][data-ss-adv-wall="front"]').count()) === (ENDS ? 1 : 0));
+    // Today's wings on the old frame: the note says what adding a wing HERE does, not that today's wings vanish.
+    const frame1 = await page.$$eval("[data-ss-adv-wl-frame]", (b) => b.map((x) => x.innerText));
+    ok("A1: …the old-frame note says it is about adding a wing here", frame1.length === 1 && frame1[0].startsWith("Adding a wing here fixes these wings to their walls."), JSON.stringify(frame1));
     const pre = await mass(page);
     // A2: + Left side converts today's wings and adds one outside the left one.
     await clickF(page, "wlAdd", "left");
@@ -854,6 +859,8 @@ if (want("A")) {
     const m1 = await mass(page);
     let cards = await wlCards(page);
     ok("A2: three cards: left, left, right (the converted pair plus the new left)", JSON.stringify(cards.map((c) => [c.wall, c.tier])) === '[["left","1"],["left","2"],["right","1"]]', JSON.stringify(cards));
+    // The "until this update reaches your live site" note is for beta hosts only; here (127.0.0.1) it is absent.
+    ok("A2: the live-site note is not shown off a beta host", (await page.locator("[data-ss-adv-wl-live]").count()) === 0);
     const preR = pre.wings.find((g) => g.side > 0), r1 = m1.wings.find((g) => g.side > 0);
     ok("A2: the tier-1 wings keep their width and pitch; the right one its lines", m1.wings.filter((g) => g.tier === 1).every((g) => pre.wings.some((p) => p.side === g.side && near(p.w, g.w, 1e-9) && near(p.pitch, g.pitch, 1e-9)))
       && near(preR.u0, r1.u0, 1e-9) && near(preR.u1, r1.u1, 1e-9) && near(preR.ye, r1.ye, 1e-9), JSON.stringify({ pre: pre.wings.map((g) => [g.side, g.w, g.pitch, g.u0]), now: m1.wings.map((g) => [g.side, g.tier, g.w, g.pitch, g.u0]) }));
@@ -1000,6 +1007,12 @@ if (want("A")) {
     // A 6 ft middle at 390 px: its label turns on end rather than running over the wings (review, 2026-09-30).
     const over11 = await planOverflow(ph.page);
     ok("A11: every Plan label fits inside its section at 390 px", over11.length === 0, JSON.stringify(over11));
+    // …and reads at 10 px or more there: the card draws 270 units in about 240 px (review, 2026-09-30).
+    const px11 = await ph.page.evaluate(() => {
+      const svg = document.querySelector('[data-ss-adv="wingplan"] svg'), k = svg.getBoundingClientRect().width / svg.viewBox.baseVal.width;
+      return [...svg.querySelectorAll("text")].map((t) => [t.textContent, +(parseFloat(getComputedStyle(t).fontSize) * k).toFixed(1)]);
+    });
+    ok("A11: every Plan label renders at 10 px or more at 390 px", px11.length > 0 && px11.every(([t, px]) => t === "FRONT" ? px >= 9 : px >= 10), JSON.stringify(px11));
     ok("A11: …and the cards stack in one column", lay.lefts.length === 1, JSON.stringify(lay));
     if (process.env.SS_SHOTS) await ph.page.locator("[data-ss-adv-panel]").screenshot({ path: join(shots, "A-wings-panel-390.png") }).catch(() => {});
     ok("A11: zero page errors", ph.errors.length === 0, ph.errors.slice(0, 3).join(" | "));

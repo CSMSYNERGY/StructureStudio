@@ -332,6 +332,15 @@ Deno.test("the older designer's approximation: about one width draws both sides 
     assertEquals(lm.wings.map((g: Any) => g.side), [side === "left" ? -1 : 1]);
     near(lm.wings[0].w, w, "drawn as wide as the stack"); near(lm.Hc, m.Hc, `Hc ${JSON.stringify(roof.wingList)}`);
   }
+  // The side left out can be the one that raises beta's middle (a steep narrow wing): the pitch still meets
+  // where it does, so the middle is beta's height (review, 2026-09-30: 1.3 ft low when only the drawn side counted).
+  {
+    const roof = { ...G, overhang: 0.6, wingList: [{ wall: "right", widthFt: 11.5, pitch: 0.41 }, { wall: "left", widthFt: 5.5, pitch: 1.1 }] };
+    const m = F.d3Massing(roof, 24, 28, 9), { fb, m: lm } = legacyOf(roof, 24, 28);
+    assertEquals([fb.wingSide, fb.wingWidthFt], ["right", 11.5]);
+    assert(m.wings.find((g: Any) => g.side === -1).ya > m.wings.find((g: Any) => g.side === 1).ya + 1, "the dropped left wing is the higher one");
+    near(lm.Hc, m.Hc, "Hc with a steep narrow side dropped");
+  }
   // One side only: that side's stack.
   const one = { ...G, wingList: [{ wall: "right", widthFt: 8 }, { wall: "right", widthFt: 6 }] };
   assertEquals(F.d3WingListFallback(one, 30, 32, 9), { wingSide: "right", wingWidthFt: 14, wingPitch: 4.5 / 14 });

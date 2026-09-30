@@ -5371,7 +5371,8 @@ function d3WingListBlocksPorch(roofCfg, W, L, wall) {
 // sides at their MEAN width, so the middle comes out exactly as wide as beta's. Two that differ more are
 // drawn as the wider stack alone: one width on both sides drew the narrow side two to four times too wide,
 // and the middle and its roof several feet off (review, 2026-09-30). The pitch meets the middle where the
-// highest of those wings does, so a blank middle height (that meeting plus 3 ft) is beta's there too.
+// highest wing on EITHER side does, dropped side included (a steep narrow wing left out still raises beta's
+// middle), so a blank middle height (that meeting plus 3 ft) is beta's there too, up to the 1.5 pitch cap.
 // { drop: true } without a side wing: delete those three keys and the older designer draws the plain
 // building (end wings are missing there, which is honest).
 function d3WingListFallback(roof, W, L, H) {
@@ -5384,7 +5385,7 @@ function d3WingListFallback(roof, W, L, H) {
   const both = !!two && Math.max(two[0], two[1]) <= 2 * Math.min(two[0], two[1]) + 1e-9;
   const drawn = both ? stacks : [two && two[1] > two[0] + 1e-9 ? stacks[1] : stacks[0]];
   const wW = Math.min(16, both ? (two[0] + two[1]) / 2 : wOf(drawn[0]));
-  const ya = drawn.reduce((y, ch) => ch.reduce((t, g) => Math.max(t, g.ya), y), -Infinity);
+  const ya = stacks.reduce((y, ch) => ch.reduce((t, g) => Math.max(t, g.ya), y), -Infinity);
   return { wingSide: both ? "both" : names[drawn[0][0].wall], wingWidthFt: wW, wingPitch: Math.max(0, Math.min(1.5, (ya - m.H) / wW)) };
 }
 // The list that draws a legacy style's wings (wingSide / wingWidthFt / wingPitch / wingAttach /
@@ -7212,6 +7213,7 @@ function d3WingListSideElevation(spec, sizeLabel, focusKey, frame) {
 // short name (L2 = Left wing 2, F1 = Front end wing 1), its outside wall's height and a chevron pointing down
 // its roof. The wing whose card has the focus is amber; a click hands its index to onPick. Wings not drawn at
 // this size (listDropped) are not drawn here either. Null without a structural list.
+const D3_WL_PLAN_FK = 1.15;
 function d3WingListPlanSVG({ spec, sizeLabel, focusKey, onPick }) {
   const roof = (spec && spec.roof) || {};
   if (!d3WingListOn(roof)) return null;
@@ -7253,24 +7255,29 @@ function d3WingListPlanSVG({ spec, sizeLabel, focusKey, onPick }) {
   // end in a tall narrow one, else only the short name ("M" for the middle). The middle squeezed to its 4 ft
   // ran "Middle" over the wings beside it, and on a phone the 8 px heights could not be read (review,
   // 2026-09-30). A halo in the rectangle's own colour keeps the dashed ridge out of the middle's label.
-  const fitsIn = (t, fs, room) => String(t).length * fs * 0.6 <= room - 4;
+  // ON A PHONE the card is narrower than the 270 units drawn (240 px at 390), so the plan's text is a step
+  // larger there (--ss-wl-fk, set on the xs breakpoint in the stylesheet): 9 px heights were still too small
+  // (review, 2026-09-30). Every fit below is judged at that larger step, so a label fits at either size.
+  const K = D3_WL_PLAN_FK;
+  const fz = (n) => `calc(${n}px * var(--ss-wl-fk, 1))`;
+  const fitsIn = (t, fs, room) => String(t).length * fs * K * 0.6 <= room - 4;
   const halo = (bg) => ({ stroke: bg, strokeWidth: 3, strokeLinejoin: "round", paintOrder: "stroke" });
   const upright = (x, y, t, st, bg) => <text x={x} y={y} transform={`rotate(-90 ${x} ${y})`} textAnchor="middle" dominantBaseline="central" {...halo(bg)} style={st}>{t}</text>;
   const midLabel = (() => {
     const cx = mid.x + mid.w / 2, cy = mid.y + mid.h / 2, hc = d3FtIn(m.Hc), bg = "#FFFBEB";
-    const big = { fontSize: 11, fontWeight: 800, fill: INK }, small = { fontSize: 10, fill: DIM };
+    const big = { fontSize: fz(11), fontWeight: 800, fill: INK }, small = { fontSize: fz(10), fill: DIM };
     // The ridge's dash stops behind the label: a patch of the middle's own colour under it.
     const gap = (w, h) => <rect key="g" x={cx - w / 2} y={cy - h / 2} width={w} height={h} fill={bg} />;
     if (fitsIn("Middle", 11, mid.w) && fitsIn(hc, 10, mid.w)) {
-      return [gap(Math.min(mid.w - 2, Math.max(6.6 * 6, hc.length * 6) + 6), 30),
+      return [gap(Math.min(mid.w - 2, Math.max(6.6 * 6, hc.length * 6) * K + 6), 30 * K),
         <text key="t" x={cx} y={cy - 2} textAnchor="middle" {...halo(bg)} style={big}>Middle</text>,
         <text key="h" x={cx} y={cy + 11} textAnchor="middle" {...halo(bg)} style={small}>{hc}</text>];
     }
     if (mid.w >= 14 && fitsIn(`Middle ${hc}`, 11, mid.h)) {
-      return [gap(Math.min(mid.w - 2, 18), `Middle ${hc}`.length * 6.6 + 10),
+      return [gap(Math.min(mid.w - 2, 18 * K), `Middle ${hc}`.length * 6.6 * K + 10),
         <g key="u">{upright(cx, cy, <><tspan style={big}>Middle</tspan><tspan dx="5" style={small}>{hc}</tspan></>, null, bg)}</g>];
     }
-    return mid.w >= 10 ? [<text key="m" x={cx} y={cy + 4} textAnchor="middle" {...halo(bg)} style={big}>M</text>] : [];
+    return mid.w >= 10 * K ? [<text key="m" x={cx} y={cy + 4} textAnchor="middle" {...halo(bg)} style={big}>M</text>] : [];
   })();
   return (
     <svg viewBox={`0 0 ${VW} ${VH}`} role="group" aria-label="The building from above, the front at the bottom" style={{ width: "100%", height: "auto", display: "block" }}>
@@ -7284,22 +7291,22 @@ function d3WingListPlanSVG({ spec, sizeLabel, focusKey, onPick }) {
         const on = d3WingListLit(focusKey, q.i);
         const ink = on ? HL : INK, bg = on ? "#FDE68A" : "#FEF3C7";
         const cx = q.b.x + q.b.w / 2, cy = q.b.y + q.b.h / 2, ye = d3FtIn(q.ye);
-        const named = q.b.w >= 10 && q.b.h >= 12;
+        const named = q.b.w >= 10 * K && q.b.h >= 12 * K;
         const across = named && fitsIn(ye, 10, q.b.w) && q.b.h >= 34;
-        const onEnd = named && !across && q.b.w >= 14 && q.b.h >= String(ye).length * 6 + 64;
-        const small = { fontSize: 10, fill: on ? HL : DIM };
+        const onEnd = named && !across && q.b.w >= 14 * K && q.b.h >= String(ye).length * 6 * K + 64;
+        const small = { fontSize: fz(10), fill: on ? HL : DIM };
         return (
           <g key={"wl" + q.i} data-ss-plan-wl={q.i} onClick={onPick ? () => onPick(q.i) : undefined}>
             <title>{`${q.name}: outside wall ${ye}`}</title>
             <rect x={q.b.x} y={q.b.y} width={q.b.w} height={q.b.h} fill={bg} stroke={ink} strokeWidth={on ? 2.2 : 1.2} />
-            {named && <text x={cx} y={cy + (across ? -2 : 4)} textAnchor="middle" {...halo(bg)} style={{ fontSize: 11, fontWeight: 800, fill: ink }}>{q.short}</text>}
+            {named && <text x={cx} y={cy + (across ? -2 : 4)} textAnchor="middle" {...halo(bg)} style={{ fontSize: fz(11), fontWeight: 800, fill: ink }}>{q.short}</text>}
             {across && <text x={cx} y={cy + 11} textAnchor="middle" {...halo(bg)} style={small}>{ye}</text>}
             {onEnd && upright(cx, cy - 12 - String(ye).length * 3, ye, small, bg)}
             {chevron(q.b, q.v, ink)}
           </g>
         );
       })}
-      <text x={VW / 2} y={VH - 6} textAnchor="middle" style={{ fontSize: 9, fontWeight: 800, fill: DIM, letterSpacing: 1 }}>FRONT</text>
+      <text x={VW / 2} y={VH - 6} textAnchor="middle" style={{ fontSize: fz(9), fontWeight: 800, fill: DIM, letterSpacing: 1 }}>FRONT</text>
     </svg>
   );
 }
@@ -19253,6 +19260,8 @@ const SS_ADV_CSS = [
   '.ss-adv .ss-adv-wl-x:hover{border-color:#DC2626;color:#DC2626;background:#FEF2F2}',
   '.ss-adv .ss-adv-wl-plan svg{display:block;width:100%;height:auto;max-width:380px;margin:4px auto 0}',
   '.ss-adv .ss-adv-wl-plan [data-ss-plan-wl]{cursor:pointer}',
+  // The Plan's text a step larger on a phone (D3_WL_PLAN_FK, which its fits are judged at): 240 px for 270 units.
+  '.ssd-frame[data-ssd-bp="xs"] .ss-adv-wl-plan svg{--ss-wl-fk:1.15}',
   '.ss-adv .ss-adv-wl-add .ssd-chip:disabled,.ss-adv .ss-adv-wl-group .ssd-chip:disabled{opacity:.45;cursor:not-allowed}',
   '@media (max-width:600px){.ss-adv .ss-adv-wl-group .ss-adv-cards > .ssd-card{flex-basis:100%}}',
   '.ss-adv .ssd-frame[data-ssd-bp="xs"] .ss-adv-wlcard .ssd-seg,.ss-adv .ssd-frame[data-ssd-bp="sm"] .ss-adv-wlcard .ssd-seg{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%}',
@@ -29391,11 +29400,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // whose eaves are front and back). `legacy` (today's wings, before the first list edit): `onWing` names the
     // walls that already carry a wing, whose button then says it adds one ON that wing; and on the old frame
     // (no front wall picked) the page says, before the conversion fixes the wings to walls, that on a size the
-    // other way round the roof turns and they stand on end walls (review, 2026-09-30).
+    // other way round the roof turns and they stand on end walls (review, 2026-09-30). Said as what adding a
+    // wing HERE does (today's wings follow the eaves and are drawn at every size), and only while some are on:
+    // with the wings off there is nothing yet to fix to a wall (review, 2026-09-30).
     const wlCap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
-    const wlFrameNote = () => (D3_WINGLIST_ENDS
-      ? ["No front wall is picked in Shape, so the roof turns on a size the other way round, and a side wing there is an end wing.", "Pick a front wall in Shape to fix which way the roof runs at every size."]
-      : ["No front wall is picked in Shape, so the roof turns on a size the other way round: a side wing there stands on an end wall, and is not drawn yet.", "Wings across an end wall come in the next update. Pick a front wall in Shape to keep these wings along the sides at every size."]);
+    const wlFrameNote = (before) => (before
+      ? (D3_WINGLIST_ENDS
+        ? ["Adding a wing here fixes these wings to their walls. No front wall is picked in Shape, so on a size the other way round they would be end wings.", "Until then they follow the long sides at every size. Pick a front wall in Shape to fix which way the roof runs at every size."]
+        : ["Adding a wing here fixes these wings to their walls. No front wall is picked in Shape, so on a size the other way round they would stand on end walls and are not drawn yet.", "Until then they follow the long sides at every size. Wings across an end wall come in the next update. Pick a front wall in Shape to keep these wings along the sides at every size."])
+      : D3_WINGLIST_ENDS
+        ? ["No front wall is picked in Shape, so the roof turns on a size the other way round, and a side wing there is an end wing.", "Pick a front wall in Shape to fix which way the roof runs at every size."]
+        : ["No front wall is picked in Shape, so the roof turns on a size the other way round: a side wing there stands on an end wall, and is not drawn yet.", "Wings across an end wall come in the next update. Pick a front wall in Shape to keep these wings along the sides at every size."]);
     const wlAddRow = (used, full, legacy) => {
       const ax = d3RoofAxes(roof, bldgW, bldgH);
       const eave = ax.uAxisIsX ? ["left", "right"] : ["front", "back"];
@@ -29416,7 +29431,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {advNoteEl(D3_WINGLIST_ENDS
             ? ["A wing goes on a whole wall: along a side, or across a whole end.", "For part of a wall, or an end wing's side, use a lean-to. A wing behind just one side wing is not a wing in this version either: an enclosed lean-to on the Lean-to tab does that."]
             : ["A wing goes along a whole side wall. Wings across an end wall come in the next update.", "For part of a wall, or an end wall, use a lean-to: an enclosed lean-to on the Lean-to tab goes on any wall, whole or part."])}
-          {legacy && !d3NewFrame(roof) && <div data-ss-adv-wl-frame="">{advNoteEl(wlFrameNote())}</div>}
+          {legacy && onWing.length > 0 && !d3NewFrame(roof) && <div data-ss-adv-wl-frame="">{advNoteEl(wlFrameNote(true))}</div>}
           {full && advNoteEl(`Up to ${D3_WINGLIST_MAX} wings on one building.`)}
         </div>
       );
@@ -29505,6 +29520,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // said at every size, not only at a turned one: the style's other sizes turn as well (review, 2026-09-30).
       const oldFrame = !d3NewFrame(roof);
       const flipped = oldFrame && !ax.uAxisIsX ? walls : [];
+      const wlOnBeta = typeof window !== "undefined" && /(^|\.)beta(\.|--)/.test(window.location.hostname);
       const frameNote = wlFrameNote();
       out.push(
         <div key="wlSum" className="ss-adv-f is-full" data-ss-adv-readout="wl-summary">
@@ -29514,9 +29530,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             ? `At this size the ${bw} wall is an end wall, so its wings are end wings.`
             : `At this size the ${bw} wall is a side wall, so its wings are side wings.`)).join(" "), frameNote.join(" ")] : frameNote)}</div>}
           {/* PRODUCTION (R5, design §2.6): the older designer draws d3WingListFallback's one wing a side, and its
-              own wings-off leaves this list in place. Said here, where a builder sets the list (review, 2026-09-30). */}
-          <div data-ss-adv-wl-live="">{advNoteEl(["The live site shows a simpler version of these wings until beta is promoted.",
-            "Its older designer draws one wing on each side (or only the wider side's, when the two sides differ a lot) and no end wings. Turning the wings off in its calibration panel leaves this list in place: turn them off here."])}</div>
+              own wings-off leaves this list in place. Said here, where a builder sets the list, and only on a beta
+              host (the submit's betaMode test): this code is what production gets, where the sentence is false.
+              ⚠️ PROMOTION HOLD: delete this note in the first change after the wing list reaches production; the
+              work log carries the item (review, 2026-09-30). */}
+          {wlOnBeta && <div data-ss-adv-wl-live="">{advNoteEl(["Until this update reaches your live site, it shows one wing on each side.",
+            "There each side's wings are drawn as one wing (only the wider side's, when the two sides differ a lot), and end wings are not drawn. Turning the wings off on your live site leaves this list in place: turn them off here."])}</div>}
         </div>,
       );
       // ── one card per wing ──
