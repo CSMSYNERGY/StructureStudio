@@ -29,27 +29,43 @@
 //             Participants API (routes/conference.ts keepCustomerHeld), because a customer who
 //             is only waiting would otherwise be connected into the private consult.
 //
+// ── HAS IT STARTED? ─────────────────────────────────────────────────────────────────────
+// Twilio's REST status does NOT say. A plain Hold (both legs in with start=false, the customer
+// on wait music) reads in-progress, both legs connected, hold=false (seen live, 2026-09-30).
+// hasStarted below is the one answer everything here uses: a recorded start for this
+// conference (Twilio's own `start` event, or a warm-transfer teammate answering: they join with
+// start=true beside the customer), or the participant list proving it (a connected leg that
+// joined with start=true beside another connected leg). None can say "started" for a
+// conference that has not, so "false" means NOT PROVEN, and every caller does what is safe
+// either way (hold and warm transfer hold the customer; resume brings the agent back in with
+// start=true, which is harmless in a started conference; a customer left alone gets voicemail).
+//
 // ── HOLD / RESUME ───────────────────────────────────────────────────────────────────────
-//   hold     from a plain Dial: the move above, nothing else. In a conference that has
-//            started: Participants API Hold=true on the customer (HoldUrl = the same music).
-//            In one that has not started, nothing, UNLESS a Resume is still on its way in
-//            (callEvents.ts resumeInFlight): its leg will start the conference when it lands
-//            and connect a customer who is only waiting, so the customer is held through the
-//            Participants API first, as keepCustomerHeld does for a warm transfer.
-//   resume   a conference that has not started: take the customer off a Participants hold if
-//            a warm transfer put one on, then redirect the agent's leg back in with
-//            startConferenceOnEnter=true, which starts it. A started one: Hold=false.
+//   hold     from a plain Dial: the move above, nothing else. In a conference: Participants
+//            API Hold=true on the customer (HoldUrl = the same music) unless they are on one,
+//            also when nothing proves it started: the leg that started it may have gone, or a
+//            Resume may still be on its way in (callEvents.ts resumeInFlight) to start it and
+//            connect a customer who is only waiting. A refusal is only a failure while that
+//            Resume lands; otherwise the conference has not started, which is hold.
+//   resume   unless the conference has started, redirect the agent's leg back in with
+//            startConferenceOnEnter=true, which starts it and connects the customer who was
+//            waiting. Then take the customer off a Participants hold if they are on one (Hold
+//            after Resume, or a warm transfer from hold), and only then: Twilio refuses
+//            Hold=false on a leg that is not held (HTTP 400, seen live). The redirect goes
+//            first, so a failed Resume leaves a held customer held, never connected behind an
+//            error.
 //
 // ── NOBODY IS LEFT ALONE ────────────────────────────────────────────────────────────────
 // Every <Conference> and every added participant reports `leave`. When someone other than the
 // customer hangs up (a leg that was only redirected is still live, and is ignored) and the
 // customer is the only one left, the customer is finished: voicemail if they were waiting (on
-// hold, or never connected), hung up if they were talking. The leg that holds the call for us
-// ending (its own status callback) is a second trigger for the same check, so a leave event
-// that was skipped or failed cannot strand the customer. A teammate a warm transfer is still
-// ringing is in the participant list (DEVIATIONS 45), so whoever handed the call on hanging up
-// during the ring does not leave the customer alone. A teammate who never answers is handled
-// the same way from their leg's status callback, always voicemail.
+// hold, or the conference never started), hung up if they were talking. The leg that holds the
+// call for us ending (its own status callback) is a second trigger for the same check, so a
+// leave event that was skipped or failed cannot strand the customer. A teammate a warm
+// transfer is still ringing is in the participant list (DEVIATIONS 45), so whoever handed the
+// call on hanging up during the ring does not leave the customer alone. A teammate who never
+// answers is handled the same way from their leg's status callback, and from the leave Twilio
+// sends for their leg too: always voicemail, never a hand-over.
 //
 // ── HANDED OVER ON HOLD ─────────────────────────────────────────────────────────────────
 // SPEC: the one who warm-transfers hanging up leaves the customer with the teammate. When the
@@ -59,6 +75,7 @@
 // silence, and the teammate's app, which never pressed Hold, has no Resume to offer.
 
 import type { Env } from "./env";
+import { conferenceStarted, recordConferenceStart } from "./callEvents";
 import {
   addCallEvent, adminClient, callById, patchCall, routeForNumber, type Admin, type CallRow, type RouteInfo,
 } from "./db";
@@ -67,7 +84,7 @@ import { parseIdentity, stripClientPrefix, toE164 } from "./identity";
 import { logFault } from "./log";
 import type { TwilioParams } from "./twilioSignature";
 import {
-  fetchCall, fetchConference, findConference, listParticipants, updateCall, updateParticipant, type TwilioCall,
+  fetchCall, findConference, listParticipants, updateCall, updateParticipant, type TwilioCall,
   type TwilioParticipant,
 } from "./twilioRest";
 import { conference, response } from "./twiml";
@@ -77,8 +94,12 @@ import { voicemailTwiml } from "./voicemail";
 /** Twilio's default conference hold music (the documented default waitUrl), used as HoldUrl. */
 export const HOLD_MUSIC = "https://twimlets.com/holdmusic?Bucket=com.twilio.music.classical";
 
-/** Conference events we ask for, in TwiML's spelling. Only a participant leaving matters. */
-export const CONFERENCE_EVENTS = "leave";
+/**
+ * Conference events we ask for, in TwiML's spelling: `start` (recorded, HAS IT STARTED?) and a
+ * participant leaving. Twilio takes them from whichever leg CREATES the conference, so every
+ * way in carries both (the Participants API takes them as a list: split on the space).
+ */
+export const CONFERENCE_EVENTS = "start leave";
 
 export type Role = "customer" | "agent";
 
@@ -221,6 +242,34 @@ export function nextTransferState(current: TransferState, action: CallAction): S
   }
 }
 
+// ── Has the conference started? ─────────────────────────────────────────────────────────
+
+/**
+ * Does Twilio's participant list PROVE the conference has started? Twilio starts one when a leg
+ * joins with startConferenceOnEnter=true while someone else is in it, so a connected leg that
+ * joined that way beside another connected leg means it has. The absence proves nothing: the
+ * leg that started it may have left since, and nothing un-starts a conference.
+ */
+export function participantsProveStart(parts: TwilioParticipant[]): boolean {
+  const connected = parts.filter((p) => p.status === "connected");
+  return connected.length >= 2 && connected.some((p) => p.start_conference_on_enter === true);
+}
+
+/**
+ * Has the call's conference started (HAS IT STARTED? above)? The participant list first (no
+ * read), then a recorded start for this ConferenceSid. `parts` null when the list could not be
+ * read. False means not proven; a failed event read counts as that too.
+ */
+export async function hasStarted(admin: Admin, callId: string, conferenceSid: string, parts: TwilioParticipant[] | null): Promise<boolean> {
+  if (parts && participantsProveStart(parts)) return true;
+  return conferenceStarted(admin, callId, conferenceSid).catch(() => false);
+}
+
+/** Is this leg in the conference and on a Participants-API hold? */
+export function heldIn(parts: TwilioParticipant[], callSid: string): boolean {
+  return stillIn(parts).some((p) => p.call_sid === callSid && p.hold === true);
+}
+
 // ── Finishing a customer left alone ─────────────────────────────────────────────────────
 
 export type FinishOutcome = "voicemail" | "hung_up" | "handed_over" | "not_alone" | "no_customer" | "lost_race";
@@ -242,7 +291,8 @@ async function handOver(env: Env, admin: Admin, row: CallRow, conferenceSid: str
  * leg known to have ended, left out even if Twilio's list still shows it.
  *   - only the customer: finish them. `prefer` "voicemail" always leaves a message (a warm
  *     transfer nobody took); "auto" leaves one only if they were waiting (held, or the
- *     conference never started) and otherwise hangs up, as any call ends when the other side
+ *     conference never started: hasStarted, with the leg that left still counting toward the
+ *     proof while Twilio lists it) and otherwise hangs up, as any call ends when the other side
  *     hangs up. A warm transfer that was missed earlier changes nothing: the apps cleared it and
  *     said so ("You're still on the call"), so hanging up after it is an ordinary end (SPEC
  *     section 3). One still ringing keeps the customer company in the list (DEVIATIONS 45).
@@ -253,7 +303,7 @@ async function handOver(env: Env, admin: Admin, row: CallRow, conferenceSid: str
 export async function finishIfAlone(env: Env, admin: Admin, row: CallRow, conferenceSid: string, prefer: "voicemail" | "auto", gone?: string): Promise<FinishOutcome> {
   const customer = row.twilio_call_sid;
   if (!customer) return "no_customer";
-  const [parts, conf] = await Promise.all([listParticipants(env, conferenceSid), fetchConference(env, conferenceSid)]);
+  const parts = await listParticipants(env, conferenceSid);
   const left = stillIn(parts).filter((p) => p.call_sid !== gone);
   const me = left.find((p) => p.call_sid === customer);
   if (!me) return "not_alone";
@@ -262,7 +312,7 @@ export async function finishIfAlone(env: Env, admin: Admin, row: CallRow, confer
     return handOver(env, admin, row, conferenceSid, customer);
   }
   if (others.length) return "not_alone";
-  const waiting = prefer === "voicemail" || me.hold === true || conf?.status === "init";
+  const waiting = prefer === "voicemail" || me.hold === true || !(await hasStarted(admin, row.id, conferenceSid, parts));
 
   // The claim: out of the conference state first, conditionally, so two leave events that
   // both see the customer alone cannot both redirect them (the second would restart the
@@ -289,13 +339,36 @@ export async function finishIfAlone(env: Env, admin: Admin, row: CallRow, confer
 
 // ── /voice/conference (Twilio's conference status callback) ─────────────────────────────
 
+/**
+ * Twilio's `start` event: the conference has started. Recorded as `conference_started` with its
+ * ConferenceSid, which hasStarted reads; a duplicate is harmless and nothing removes it, and a
+ * failed insert throws (conference_event_failed). Accepted on ?key= alone (`signed` false), the
+ * callback proves nothing, so it counts only when Twilio's participant list proves the same: a
+ * forged one would make Resume leave the customer on hold music, and hang up a customer left
+ * waiting instead of taking a voicemail. warmLegStatus records the same on a teammate's answer.
+ */
+async function recordStart(env: Env, callId: string, conferenceSid: string, signed: boolean): Promise<"started" | "ignored"> {
+  if (!signed && !participantsProveStart(await listParticipants(env, conferenceSid))) {
+    await logFault({
+      code: "conference_start_unverified", severity: "warn",
+      message: "An unsigned conference-start callback did not match Twilio's participant list; it was not recorded.",
+      context: { callId },
+    });
+    return "ignored";
+  }
+  await recordConferenceStart(adminClient(env), callId, conferenceSid);
+  return "started";
+}
+
 /** Runs in waitUntil after the 204. */
-export async function conferenceEvent(env: Env, p: TwilioParams, url: URL): Promise<FinishOutcome | "ignored"> {
+export async function conferenceEvent(env: Env, p: TwilioParams, url: URL, signed = true): Promise<FinishOutcome | "started" | "ignored"> {
   const callId = url.searchParams.get("call") ?? "";
-  if (!UUID_RE.test(callId) || p.StatusCallbackEvent !== "participant-leave") return "ignored";
   const conferenceSid = String(p.ConferenceSid ?? "");
+  if (!UUID_RE.test(callId) || !conferenceSid) return "ignored";
+  if (p.StatusCallbackEvent === "conference-start") return recordStart(env, callId, conferenceSid, signed);
+  if (p.StatusCallbackEvent !== "participant-leave") return "ignored";
   const leaving = String(p.CallSid ?? "");
-  if (!conferenceSid || !leaving) return "ignored";
+  if (!leaving) return "ignored";
 
   const admin = adminClient(env);
   const row = await callById(admin, callId);
@@ -310,7 +383,10 @@ export async function conferenceEvent(env: Env, p: TwilioParams, url: URL): Prom
   // (holderLegEnded) when it is the one holding the call.
   const gone = await fetchCall(env, leaving);
   if (gone && !TERMINAL.has(gone.status)) return "ignored";
-  return finishIfAlone(env, admin, row, conferenceSid, "auto", leaving);
+  // A leg that ended without being answered (only a warm transfer's teammate joins before
+  // answering; Twilio sends a leave for it too) was never with the customer and hands nothing
+  // over: it is finished as its own status callback finishes it (warmLegStatus), voicemail.
+  return finishIfAlone(env, admin, row, conferenceSid, gone && gone.status !== "completed" ? "voicemail" : "auto", leaving);
 }
 
 // ── The holder's leg ended (/voice/status) ──────────────────────────────────────────────
@@ -359,10 +435,13 @@ function rangUser(leg: TwilioCall | null): string | null {
  * Status of the teammate's leg a warm transfer dialed into the conference. Runs in waitUntil
  * after the generic status event has been recorded.
  *   answered   they now hold the call: answered_by moves to them, transferred_from keeps
- *              who handed it on, client_call_sid becomes their leg. If the call has already
- *              left its conference (ended, or cold-transferred meanwhile), they are hung up
- *              instead of being left in an empty conference. If the one who handed it on has
- *              already gone and the customer is on hold, the customer comes off hold.
+ *              who handed it on, client_call_sid becomes their leg. They joined with
+ *              start=true beside the customer, so the conference has started: recorded, as
+ *              Twilio's start callback is, because once they leave nothing else proves it (HAS
+ *              IT STARTED?). If the call has already left its conference (ended, or
+ *              cold-transferred meanwhile), they are hung up instead of being left in an empty
+ *              conference. If the one who handed it on has already gone and the customer is on
+ *              hold, the customer comes off hold.
  *   unanswered (no-answer, busy, failed, canceled): a warm_transfer_missed event; if the
  *              customer is now alone, voicemail; otherwise the row is touched so the realtime
  *              broadcast tells the apps (GET /calls then shows `warm.state` "missed"). Their
@@ -414,6 +493,11 @@ export async function warmLegStatus(env: Env, row: CallRow, p: TwilioParams, url
     if (!moved) return;
     try {
       room ??= await roomOf(env, row.id);
+      if (room) {
+        await recordConferenceStart(admin, row.id, room.sid).catch((e) => logFault({
+          code: "conference_start_record_failed", clientId: row.client_id, message: (e as Error).message, context: { callId: row.id },
+        }));
+      }
       const customer = row.twilio_call_sid;
       const me = room?.parts.find((x) => x.call_sid === customer);
       const others = room ? stillIn(room.parts).filter((x) => x.call_sid !== customer && x.call_sid !== sid) : [];

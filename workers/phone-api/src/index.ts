@@ -26,7 +26,7 @@ import { hold, resume, warmTransfer } from "./routes/conference";
 import { mediaFile } from "./routes/media";
 import { sendSms } from "./routes/sms";
 import { getThread, listCalls, listThreads, search, team } from "./routes/reads";
-import { devices, health, log, settingsMe, signOutAll, turn } from "./routes/me";
+import { devices, forgetDevice, health, log, settingsMe, signOutAll, turn } from "./routes/me";
 import { pushText } from "./routes/push";
 import { recordingSweep } from "./cron/sweep";
 import { retention } from "./cron/retention";
@@ -92,8 +92,8 @@ async function handleTwilio(req: Request, env: Env, ec: Ctx, path: string, t0: n
       return out.xml ? twiml(out.xml) : noContent();
     }
     case "/voice/conference":
-      // Conference status callback (a participant left). Reply first, act after.
-      ec.waitUntil(conferenceEvent(env, p, url).catch((e) => logFault({ code: "conference_event_failed", message: (e as Error).message, req })));
+      // Conference status callback (it started, or a participant left). Reply first, act after.
+      ec.waitUntil(conferenceEvent(env, p, url, check.signed).catch((e) => logFault({ code: "conference_event_failed", message: (e as Error).message, req })));
       return noContent();
     case "/voice/transcription":
       ec.waitUntil(transcription(env, p, url).catch((e) => logFault({ code: "transcript_write_failed", message: (e as Error).message, req })));
@@ -124,6 +124,7 @@ const ROUTES: { method: string; re: RegExp; h: Handler }[] = [
   { method: "GET", re: /^\/team$/, h: (r, env) => team(env, r) },
   { method: "POST", re: /^\/settings\/me$/, h: (r, env) => settingsMe(env, r) },
   { method: "POST", re: /^\/devices$/, h: (r, env) => devices(env, r) },
+  { method: "POST", re: /^\/devices\/forget$/, h: (r, env) => forgetDevice(env, r) },
   { method: "POST", re: /^\/devices\/signout-all$/, h: (r, env) => signOutAll(env, r) },
   { method: "POST", re: /^\/log$/, h: (r, env) => log(env, r) },
   { method: "GET", re: /^\/turn$/, h: (r, env, ec) => turn(env, ec, r) },
