@@ -5362,6 +5362,23 @@ function d3WingListBlocksPorch(roofCfg, W, L, wall) {
   const gable = m.uAxisIsX ? wall === "north" || wall === "south" : wall === "west" || wall === "east";
   return gable ? m.ends.some((t) => t.wall === wall) : true;
 }
+// Why a RECESSED porch is not drawn with lower wings, and what to use instead. With side wings only, a
+// projecting porch in front of the middle. With end wings, only a porch end whose wall (d3ProjectingPorch's
+// rule) d3WingListBlocksPorch leaves open, a gable end with no end wing, or none: the old sentence sent the
+// builder to a projecting porch that end wings refuse too (review, 2026-09-30). Labels as the Porch end
+// control names them.
+function d3RecessedLostWords(roofCfg, W, L) {
+  const lead = "Not drawn with lower wings: a recessed porch needs the main roof's edge over it.";
+  const m = d3WingListOn(roofCfg) ? d3Massing(roofCfg, W, L, D3.WALL_H) : null;
+  if (!(m && m.list && m.ends.length)) return `${lead} Use a projecting porch in front of the middle section.`;
+  const wallWord = roofCfg.front != null || roofCfg.highSide != null ? "wall" : "gable end";
+  const ux = d3RoofAxes(roofCfg, W, L).uAxisIsX;
+  const wallOf = (pe) => (d3NewFrame(roofCfg) || ux ? (pe === "back" ? "north" : "south") : (pe === "back" ? "east" : "west"));
+  const ok = ["front", "back"].filter((pe) => !d3WingListBlocksPorch(roofCfg, W, L, wallOf(pe)));
+  return ok.length === 1 ? `${lead} Use a projecting porch on the ${ok[0]} ${wallWord}, the end with no end wing.`
+    : ok.length ? `${lead} Use a projecting porch.`
+      : `${lead} A projecting porch is not drawn either while the end wings are on.`;
+}
 // THE OLDER DESIGNER'S APPROXIMATION of a list (production reads wingSide / wingWidthFt / wingPitch /
 // centerEaveFt only, and draws ONE width on both sides): a side's wings become one wing as wide as that
 // side's whole stack. Two stacks of about one width (the narrower at least half the wider) are drawn on both
@@ -28279,7 +28296,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           {kind === "recessed" ? (
                             <div style={{ ...hint, color: recessedLost ? "#B45309" : "#A16207" }}>
                               {recessedLost
-                                ? "Not drawn with lower wings: a recessed porch needs the main roof's edge over it. Use a projecting porch in front of the middle section."
+                                ? d3RecessedLostWords(roof, bldgW, bldgH)
                                 : `Comes out of the building, not off it ${String.fromCharCode(0x2014)} the roof and the footprint do not move.`}
                             </div>
                           ) : (
@@ -29709,8 +29726,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         const name = nameAt(bw, k);
         const r = recOf(i), drop = dropOf(i);
         const parent = k > 1 ? nameAt(bw, k - 1) : null;
-        const inner = parent || (end ? "the middle" : "the middle section");
-        const innerPoss = parent ? `${parent}'s` : end ? "the middle's" : "the middle section's";
+        // A tier-1 end wing beside side wings meets under the long walls (the side wings' outside walls over
+        // the middle stretch, E), not under the middle's eave: the wings-ends line's subject, at its eMin. With
+        // no side wings E is the middle's eave, and the card says "the middle's" (review, 2026-09-30).
+        const longWalls = end && k === 1 && wm.wings.length > 0;
+        const longSame = Math.abs(wm.E["-1"] - wm.E["1"]) < 1e-6;
+        const inner = parent || (longWalls ? "the long walls" : end ? "the middle" : "the middle section");
+        const innerPoss = parent ? `${parent}'s` : longWalls ? "the long walls'" : end ? "the middle's" : "the middle section's";
         const set = (patch) => calSetWingListEntry(i, patch);
         const aria = (t) => `${name} ${t}`;
         // "On the roof" is only for a side wing against the middle (at this size); anywhere else it is built
@@ -29731,11 +29753,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         body.push(advSeg({ f: "wlAttach", label: meetsLabel, aria: `${name} meets ${k === 1 ? (end ? "the middle's end wall" : "the middle section") : parent}`, value: r && r.roofIgnored ? "" : asked, full: true,
           pick: (v) => set(v ? { attach: v, attachFt: typeof e.attachFt === "number" ? e.attachFt : 1 } : { attach: null }),
           opts: [["", "Automatic"], ["wall", "On the wall"], ["roof", "On the roof", !roofOk, roofOk ? undefined : "Only a wing against the middle can run up onto its roof"]],
-          note: a ? `${capFirst(innerPoss)} wall keeps its height; this wing's slope follows.` : [`Hung under ${innerPoss} eave.`, "A steep roof set to Automatic pushes that wall up to fit."],
+          note: longWalls ? (a ? "The long walls keep their height; this wing's slope follows." : ["Hung under the long walls' eaves.", "A steep roof set to Automatic pushes those walls up to fit."])
+            : a ? `${capFirst(innerPoss)} wall keeps its height; this wing's slope follows.` : [`Hung under ${innerPoss} eave.`, "A steep roof set to Automatic pushes that wall up to fit."],
           children: r && r.roofIgnored ? advSay("On the roof is only for a wing against the middle, so this one is built Automatic. On the roof stays saved for when it is moved back in.", true) : null }));
         if (a) {
-          const meetLine = r && r.meets ? (r.meetFt < 1 / 24 ? `Meets ${inner} at its eave`
-            : `Meets the ${r.meets} ${d3FtIn(r.meetFt)} ${r.meets === "roof" ? "above" : "below"} ${innerPoss} eave`) : null;
+          const meetLine = !(r && r.meets) ? null
+            : longWalls ? (r.meetFt < 1 / 24 ? `Meets ${longSame ? "the long walls at their eaves" : "the lower long wall at its eave"} (${d3FtIn(eMin)})`
+              : `Meets the ${r.meets} ${d3FtIn(r.meetFt)} below ${longSame ? "the long walls' eave" : "the lower long wall's eave"} (${d3FtIn(eMin)})`)
+            : r.meetFt < 1 / 24 ? `Meets ${inner} at its eave`
+              : `Meets the ${r.meets} ${d3FtIn(r.meetFt)} ${r.meets === "roof" ? "above" : "below"} ${innerPoss} eave`;
           // Today's words for a wing against the middle (the per-side cards'), and the same in plain words for
           // one against a wing or across an end.
           const warn = !r || !r.attach ? null
@@ -29748,8 +29774,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 ? `The middle roof only goes ${d3FtIn(r.attachFt)} up, so this wing's roof meets there.`
                 : `Moved down to ${d3FtIn(r.attachFt)} so the middle roof's edge clears this wing's roof.`)
                 : null)
-              : r.cuts ? `${capFirst(inner)} is too low for its roof edge to clear this wing's roof — ${parent ? "raise its outside wall" : "raise the middle section's walls"}.`
-                : r.clamped ? `Moved down to ${d3FtIn(r.attachFt)} so ${innerPoss} roof edge clears this wing's roof.` : null;
+              : r.cuts ? (longWalls ? "The long walls are too low for their roof edges to clear this wing's roof — raise the side wings' outside walls."
+                : `${capFirst(inner)} is too low for its roof edge to clear this wing's roof — ${parent ? "raise its outside wall" : "raise the middle section's walls"}.`)
+                : r.clamped ? (longWalls ? `Moved down to ${d3FtIn(r.attachFt)} so the long walls' roof edges clear this wing's roof.`
+                  : `Moved down to ${d3FtIn(r.attachFt)} so ${innerPoss} roof edge clears this wing's roof.`) : null;
           const dcSay = wDc && wDc.by === "wing" && r && !end && r.tier === 1 && wDc.dir === r.side ? advSay(d3DormerCoveredWords(wDc, false), true, { "data-ss-dormer-covered": "" }) : null;
           body.push(advNum({ k: `wl${i}-attachFt`, f: "wlAttachFt", label: a === "roof" ? "How far up its roof (ft)" : "How far down its wall (ft)",
             aria: aria(a === "roof" ? "how far up the roof (ft)" : "how far down the wall (ft)"),
@@ -30039,7 +30067,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             children: <>
               {kind === "recessed"
                 ? advSay(recessedLost
-                  ? "Not drawn with lower wings: a recessed porch needs the main roof's edge over it. Use a projecting porch in front of the middle section."
+                  ? d3RecessedLostWords(roof, bldgW, bldgH)
                   : "Cut out of the building: the roof and the footprint stay.", recessedLost)
                 : advNoteEl("In front of the building; the size and price stay the same.")}
               {prWords && advSay(prWords, warn, { "data-ss-adv-readout": "porch" })}

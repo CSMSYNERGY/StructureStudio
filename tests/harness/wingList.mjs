@@ -1023,6 +1023,82 @@ if (want("A")) {
   await ph.actx.close();
 }
 
+// ── AE · an end wing's words on the Advanced page (flag on) ───────────────────────────────────────
+// A tier-1 end wing beside side wings meets under the long walls (E), not under the middle's eave (Hc), and
+// its card says so; with no side wings E = Hc and the card still says "the middle's". A recessed porch lost
+// to an end wing points at a porch that is drawn, not at a projecting porch the end wing refuses too
+// (review, 2026-09-30).
+if (want("AE") && ENDS) {
+  const { actx, page, errors } = await openAdvanced();
+  const nb = (t) => String(t).replace(/ /g, " ");   // advNb joins a length's parts with a no-break space
+  const cardTxt = async (i) => nb(await page.locator(`[data-ss-adv-wl="${i}"]`).innerText());
+  // A note's second sentence sits behind its "i" (advNoteEl's details): textContent reads it, innerText may not.
+  const cardAll = async (i) => nb(await page.locator(`[data-ss-adv-wl="${i}"]`).evaluate((el) => el.textContent));
+  const pickAttach = async (i, lab) => { await page.locator(`[data-ss-adv-wl="${i}"] [data-ss-adv-f="wlAttach"] button`, { hasText: lab }).click(); await settle(page, 450); };
+  try {
+    await setSize(page, 24, 32);
+    await page.locator('[data-ss-adv-sec="wings"]').click();
+    await settle(page, 300);
+    // AE1: an end wing alone: E = Hc, "the middle's" is right.
+    await clickF(page, "wlAdd", "front");
+    await advModel(page, (M) => M.massing.list && M.massing.ends.length === 1 && M.massing.wings.length === 0);
+    const e0 = (await mass(page)).ends[0];
+    await pickAttach(e0.i, "On the wall");
+    await advModel(page, (M) => M.massing.ends.length === 1 && M.massing.ends[0].attach === "wall");
+    const t0 = await cardTxt(e0.i);
+    ok("AE1: an end wing alone, On the wall: its card reads from the middle's eave", /The middle's wall keeps its height/.test(t0) && /(below the middle's eave|Meets the middle at its eave)/.test(t0) && /meets the middle\./.test(t0) && !/long wall/.test(t0), t0);
+    // AE2: the porch with only an end wing: a recessed porch points at the end with no end wing, and a
+    // projecting porch there is drawn.
+    await page.locator('[data-ss-adv-sec="porch"]').click();
+    await settle(page, 300);
+    await page.locator('[data-ss-adv-f="porchKind"] [data-ss-adv-tile="recessed"]').click();
+    await settle(page, 450);
+    const rTxt = sp(await page.locator('[data-ss-adv-f="porchDepth"]').innerText());
+    const m2 = /Use a projecting porch on the (front|back) (gable end|wall), the end with no end wing\./.exec(rTxt);
+    ok("AE2: a recessed porch lost to an end wing points at the end with no end wing, not in front of the middle", !!m2 && !/in front of the middle section/.test(rTxt), rTxt);
+    await page.locator('[data-ss-adv-f="porchKind"] [data-ss-adv-tile="projecting"]').click();
+    await settle(page, 450);
+    if (m2) { await page.locator('[data-ss-adv-f="porchEnd"] button').nth(m2[1] === "back" ? 1 : 0).click(); await settle(page, 450); }
+    ok("AE2: …and a projecting porch on that end is drawn (no end-wing refusal)", !!m2 && (await page.locator("[data-ss-porch-endwing]").count()) === 0);
+    await page.locator('[data-ss-adv-f="porchKind"] [data-ss-adv-tile="none"]').click();
+    await settle(page, 450);
+    // AE3: side wings too (the Tri Home plus a front end wing) and a tall middle: the end roof meets under the
+    // side wings' raised outside walls, so the card names the long walls and their eave height.
+    await page.locator('[data-ss-adv-sec="wings"]').click();
+    await settle(page, 300);
+    await clickF(page, "wlAdd", "left");
+    await clickF(page, "wlAdd", "right");
+    await advModel(page, (M) => M.massing.ends.length === 1 && M.massing.wings.length === 2);
+    await typeBox(page, page.getByLabel("Middle section wall height (ft)", { exact: true }), 17);
+    await advModel(page, (M) => Math.abs(M.massing.Hc - 17) < 1e-9);
+    const m3 = await mass(page), e3 = m3.ends[0], eMin = Math.min(m3.E["-1"], m3.E["1"]);
+    const t3 = await cardTxt(e3.i);
+    const ftIn = (v) => { const i = Math.round(v * 12); return `${Math.floor(i / 12)}' ${i % 12}"`; };
+    ok(`AE3: beside side wings, On the wall: the card reads from the long walls' eave (${ftIn(eMin)}), not the middle's (${ftIn(m3.Hc)})`,
+      eMin < m3.Hc - 1 && /The long walls keep their height; this wing's slope follows\./.test(t3) && (t3.includes(`below the long walls' eave (${ftIn(eMin)})`) || /Meets the long walls at their eaves/.test(t3))
+      && /meets the long walls\./.test(t3) && !/middle's eave|middle's wall/.test(t3), JSON.stringify({ Hc: m3.Hc, E: m3.E, t3 }));
+    await pickAttach(e3.i, "Automatic");
+    await advModel(page, (M) => M.massing.ends.length === 1 && !M.massing.ends[0].attach);
+    const t4 = await cardAll(e3.i);
+    ok("AE3: …and Automatic: hung under the long walls' eaves", /Hung under the long walls' eaves\./.test(t4) && /pushes those walls up to fit/.test(t4) && !/middle's eave/.test(t4), t4);
+    // AE4: with side wings and an end wing, a recessed porch has no end to go to: said so.
+    await page.locator('[data-ss-adv-sec="porch"]').click();
+    await settle(page, 300);
+    await page.locator('[data-ss-adv-f="porchKind"] [data-ss-adv-tile="recessed"]').click();
+    await settle(page, 450);
+    const r4 = sp(await page.locator('[data-ss-adv-f="porchDepth"]').innerText());
+    ok("AE4: the same with side wings: the recessed porch's sentence never sends the builder to a refused porch", !/in front of the middle section/.test(r4) && /Use a projecting porch on the (front|back) |A projecting porch is not drawn either/.test(r4), r4);
+    if (process.env.SS_SHOTS) {
+      await page.locator('[data-ss-adv-f="porchDepth"]').screenshot({ path: join(shots, "AE-porch-recessed-1440.png") }).catch(() => {});
+      await page.locator('[data-ss-adv-sec="wings"]').click();
+      await settle(page, 300);
+      await page.locator(`[data-ss-adv-wl="${e3.i}"]`).screenshot({ path: join(shots, "AE-end-card-1440.png") }).catch(() => {});
+    }
+    ok("AE: zero page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
+  } catch (e) { ok("AE: ran", false, e && e.stack); }
+  await actx.close();
+}
+
 // ── P · the calibration panel ─────────────────────────────────────────────────────────────────
 if (want("P")) {
   const roof = { ...G, wingSide: "both", wingWidthFt: 14, wingPitch: 0.32142857142857145, wingList: CASE_S.wingList };
