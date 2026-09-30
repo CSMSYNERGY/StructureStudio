@@ -4892,6 +4892,60 @@ function d3MassingTopAt(m, u) {
   }
   return d3MakeProfYAt(m.prof, m.Hc)(u - m.uc);
 }
+// ── STACKABLE WINGS (roof.wingList, 2026-10-01) ────────────────────────────────────────────────────
+// Carolyn, 09-29: "they start with a core building ... add a lean-to and specify where they want it ... add
+// another one ... as many wings, as many lean-tos" / "A wing can go on a wing" / "Wherever they want."
+// roof.wingList is an ORDERED list of wings, each { wall, widthFt, pitch, attach, attachFt, eaveFt }, on a
+// building wall as seen standing in front of the front wall (the lean-to list's frame, d3LeanToWall). A
+// wing's parent is implicit: the previous entry on the same wall, else the middle section, so each wall
+// carries a chain inner -> outer and a cycle cannot be written. Wings are INSIDE the size, like the wings
+// above: they narrow or shorten the middle and never make the building bigger.
+//   on an eave wall   a side wing: today's lower room down the whole length, its roof falling outward
+//   on a gable wall   an end wing: a lower room across the whole width, its roof falling to the end wall
+// A structural list (d3WingListOn) REPLACES every legacy wing key but centerEaveFt; without one, junk or
+// absent, nothing here runs and every building is the one it always was (d3Massing's one line).
+// styleD3.ts sanitizeWingList keeps exactly the entries d3WingListEntries reads, the first 16 of them.
+// Top-level statements here are literal-only on purpose: shedProfile_test evaluates this region alone.
+const D3_WINGLIST_WALLS = ["left", "right", "front", "back"];
+const D3_WINGLIST_MAX = 16;
+const D3_WINGLIST_ENDS = false;
+// A stored number: a finite number, or a numeric string that is not blank (Number("") is 0, a blank box
+// is not a 0). The sanitizer's wlNum, token for token.
+function d3WlNum(v) {
+  if (typeof v === "string" && v.trim() === "") return null;
+  const n = typeof v === "string" ? Number(v) : v;
+  return typeof n === "number" && isFinite(n) ? n : null;
+}
+// The STRUCTURAL entries, each with its raw index in roof.wingList (the mesh tag, the card, the focus keys),
+// or null: an object, a wall word, a width over half a foot -- the first 16 such, in order. Whether one is
+// DRAWN at a size is the massing's to say (listDropped); an entry is never dropped for a size.
+function d3WingListEntries(roofCfg) {
+  const a = roofCfg && Array.isArray(roofCfg.wingList) ? roofCfg.wingList : null;
+  if (!a) return null;
+  const out = [];
+  for (let i = 0; i < a.length && out.length < D3_WINGLIST_MAX; i++) {
+    const e = a[i];
+    if (!e || typeof e !== "object" || Array.isArray(e)) continue;
+    if (typeof e.wall !== "string" || D3_WINGLIST_WALLS.indexOf(e.wall) < 0) continue;
+    const w = d3WlNum(e.widthFt);
+    if (w === null || !(w > 0.5)) continue;
+    out.push({ e, i });
+  }
+  return out.length ? out : null;
+}
+// "Has a wing list": a gable or gambrel with at least one structural entry. The one switch every list path
+// is entered by, and the roof step's refusal (styleD3.ts asks the same question).
+function d3WingListOn(roofCfg) {
+  const t = (roofCfg && roofCfg.type) || "gable";
+  return (t === "gable" || t === "gambrel") && !!d3WingListEntries(roofCfg);
+}
+// "Wings exist" for every gate that used to read m.wings.length: side wings or end wings drawn. The same
+// answer as m.wings.length on every massing without a list (it has no ends).
+function d3WingsOn(m) { return !!(m && (m.wings.length || (m.ends && m.ends.length))); }
+// The massing holds something the legacy readers cannot express: a wing on a wing, or an end wing. Only
+// then does a reader take its list branch; one wing per side from a list is read by today's code, whose
+// records it carries field for field.
+function d3WingListDeep(m) { return !!(m && m.list && ((m.ends && m.ends.length) || m.wings.some((g) => g.tier > 1))); }
 // ── WHERE A LEAN-TO MEETS THE BUILDING (roof.leanToAttach / leanToAttachFt, 2026-09-28) ─────────────
 // Carolyn, 09-28 @9:20, on a lean-to: "we need to be able to slide it up here [on the roof] and slide
 // it down on the side here", and "the further out they go, the higher up in the roof they have to go so
