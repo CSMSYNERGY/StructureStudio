@@ -563,6 +563,46 @@ Deno.test("'What we drew' says a wing roof at 0 meets the middle at its eave, an
   assert(!/The left wing/.test(F.ssDrewWords({ roof: { ...up, wingAttachFt: 2.5 } }, null, undefined, same)));
 });
 
+// STACKABLE WINGS (roof.wingList, 2026-10-01). A list style also carries the older designer's one-wing-per-side
+// approximation (wingSide / wingWidthFt / wingPitch), which is not the building drawn here. Once the panel
+// hands over the list massing it drew, 'What we drew' says the list in one sentence and nothing from those
+// keys; with nothing drawn at that size it says nothing about wings.
+Deno.test("⚠️ 'What we drew' says a wing list in one sentence from the massing, never the fallback keys", () => {
+  const roof = { type: "gable", pitch: 0.5, wingSide: "both", wingWidthFt: 14, wingPitch: 0.32142857142857145,
+    wingList: [{ wall: "left", widthFt: 8 }, { wall: "left", widthFt: 6 }, { wall: "right", widthFt: 8 }] };
+  assertEquals(F.ssDrewWords({ roof }, null, undefined, { Hc: 16.5, list: true, wings: [{}, {}, {}], ends: [] }),
+    "3 wings, set on the Advanced page, with the middle section's walls at 16 ft 6 in.");
+  assertEquals(F.ssDrewWords({ roof }, null, undefined, { Hc: 12, list: true, wings: [{}], ends: [] }),
+    "1 wing, set on the Advanced page, with the middle section's walls at 12 ft.");
+  assertEquals(F.ssDrewWords({ roof }, null, undefined, { Hc: 17, list: true, wings: [{}, {}], ends: [{}] }),
+    "3 wings, set on the Advanced page, with the middle section's walls at 17 ft.");
+  const none = F.ssDrewWords({ roof }, null, undefined, { Hc: 9, list: true, wings: [], ends: [] });
+  assert(!/wing/i.test(none), none);
+  // Beside the other features the sentence stands alone for the wings.
+  const porch = F.ssDrewWords({ roof: { ...roof, front: "gable", porchOutFt: 6 } }, null, undefined, { Hc: 16.5, list: true, wings: [{}, {}, {}], ends: [] });
+  assertStringIncludes(porch, "3 wings, set on the Advanced page, with the middle section's walls at 16 ft 6 in.");
+  assert(!/lower wing/i.test(porch), porch);
+});
+
+// ⚠️ An edit to the wing list is an edit to the roof: it clears an unfixed roof "No" (calQuestionSig).
+Deno.test("⚠️ the roof question's slice holds the wing list", () => {
+  const [a, b] = ["  const calQuestionSig = (key) => {", "  // ⚠️ ANSWERED IS NOT AGREED."];
+  const sigFor = new Function("adminCal", `${lift(CMP, "structure-studio.component.js", a, b)}; return calQuestionSig;`) as (cal: unknown) => (key: string) => string;
+  const sig = (spec: Record<string, unknown>, key: string) => sigFor({ spec })(key);
+  const roof = { type: "gable", front: "gable", pitch: 0.5, overhang: 1 };
+  const base = { roof, wallHeightFt: 9, colors: { body: "#3a3d3f" }, roofMaterial: "metal" };
+  const one = { ...base, roof: { ...roof, wingList: [{ wall: "left", widthFt: 8 }] } };
+  for (const [what, from, to] of [
+    ["a list added", base, one],
+    ["a wing added on a wing", one, { ...base, roof: { ...roof, wingList: [{ wall: "left", widthFt: 8 }, { wall: "left", widthFt: 6 }] } }],
+    ["a wing's width changed", one, { ...base, roof: { ...roof, wingList: [{ wall: "left", widthFt: 7 }] } }],
+    ["the list taken off", one, base],
+  ] as const) {
+    assert(sig(from, "roof") !== sig(to, "roof"), `${what}: the roof's slice moves`);
+    for (const k of ["porch", "walls", "colours"]) assertEquals(sig(from, k), sig(to, k), `${what}: the ${k} question's slice does not`);
+  }
+});
+
 // ── The roof step (2026-09-28), in words ──────────────────────────────────────────────────
 
 Deno.test("the roof step reads in the words of its panel controls, and 'What we drew' says it", () => {

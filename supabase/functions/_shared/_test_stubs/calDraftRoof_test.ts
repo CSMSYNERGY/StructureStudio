@@ -164,6 +164,18 @@ Deno.test("dev/score.mjs's mergeDraft clears exactly what calDraftRoof clears", 
     // draft replaces the roof and it goes, like the single lean-to; a draft with no type keeps it.
     [{ type: "gable", leanTos: [{ wall: "left", widthFt: 8 }, { wall: "front", widthFt: 5, enclosed: true }] }, { type: "gable", pitch: 0.5 }],
     [{ type: "gable", leanTos: [{ wall: "left", widthFt: 8 }] }, { pitch: 0.5 }],
+    // Each wing set on its own (roof.wingSides, 2026-09-29) and the wing list (roof.wingList, 2026-10-01) are
+    // the builder's, set on the Advanced page: a typed draft replaces the roof and they go, with or without
+    // wings of its own; a draft with no type keeps them.
+    [{ type: "gable", wingSide: "both", wingWidthFt: 8, wingSides: { left: { widthFt: 6 } } }, { type: "gable", pitch: 0.5 }],
+    [{ type: "gable", wingSide: "both", wingWidthFt: 8, wingSides: { left: { widthFt: 6 } } }, { type: "gable", wingSide: "both", wingWidthFt: 10 }],
+    [{ type: "gable", wingSide: "both", wingWidthFt: 8, wingSides: { left: { widthFt: 6 } } }, { pitch: 0.5 }],
+    [{ type: "gable", wingList: [{ wall: "left", widthFt: 8 }, { wall: "left", widthFt: 6 }] }, { type: "gable", pitch: 0.5 }],
+    [{ type: "gable", wingList: [{ wall: "left", widthFt: 8 }, { wall: "left", widthFt: 6 }] }, { type: "gable", wingSide: "both", wingWidthFt: 10 }],
+    [{ type: "gable", wingList: [{ wall: "left", widthFt: 8 }, { wall: "left", widthFt: 6 }] }, { pitch: 0.5 }],
+    // A typed draft that carries a list but no wings: the wing set is cleared as one, list included.
+    [{ type: "gable" }, { type: "gable", wingList: [{ wall: "left", widthFt: 8 }] }],
+    [{ type: "gable" }, { type: "gable", wingSides: { left: { widthFt: 6 } } }],
   ];
   for (const [stored, drafted] of cases) {
     const scored = mergeDraft({ roof: stored }, { roof: drafted }, "video").roof;
@@ -206,4 +218,26 @@ Deno.test("⚠️ the lean-to list (roof.leanTos, 2026-09-29) goes with a typed 
   const stored = { type: "gable", pitch: 0.4, leanTos: [{ wall: "left", widthFt: 8 }, { wall: "front", widthFt: 5, enclosed: true }] };
   assert(!("leanTos" in calDraftRoof(stored, { type: "gable", pitch: 0.5 })), "a typed draft is the video's roof: no stale lean-tos");
   assertEquals(calDraftRoof(stored, { pitch: 0.5 }).leanTos, stored.leanTos, "a draft with no type keeps them");
+});
+
+Deno.test("⚠️ the wing list and the per-side wings (2026-09-29 / 10-01) go with a typed draft and stay without one", () => {
+  const list = [{ wall: "left", widthFt: 8 }, { wall: "left", widthFt: 6 }, { wall: "front", widthFt: 8 }];
+  const sides = { left: { widthFt: 6, attach: "wall", attachFt: 1 }, right: { widthFt: 10 } };
+  for (const [k, v] of [["wingList", list], ["wingSides", sides]] as const) {
+    const stored = { type: "gable", wingSide: "both", wingWidthFt: 8, [k]: v };
+    assert(!has(calDraftRoof(stored, { type: "gable", pitch: 0.5 }), k), `${k}: a typed draft without wings clears it`);
+    assert(!has(calDraftRoof(stored, { type: "gable", wingSide: "both", wingWidthFt: 10 }), k), `${k}: a typed draft with its own wings replaces it`);
+    assertEquals(calDraftRoof(stored, { pitch: 0.5 })[k], v, `${k}: a draft with no type keeps it`);
+    // A typed draft that reports no wings clears the whole wing set, even a list it carries itself.
+    assert(!has(calDraftRoof({ type: "gable" }, { type: "gable", [k]: v }), k), `${k}: cleared with the wing set`);
+  }
+});
+
+Deno.test("⚠️ dev/score.mjs's WING_KEYS is the browser's CAL_WING_KEYS, key for key and in order", async () => {
+  // The scorer's list is module-private, so it is read the way the browser's is: lifted from the text.
+  const score = await Deno.readTextFile(new URL("../../../../dev/score.mjs", import.meta.url));
+  const scored = new Function(`${lift(score, "dev/score.mjs", "const WING_KEYS = ", "];")} return WING_KEYS;`)() as string[];
+  const browser = new Function(`${blocks[0].cmp} return CAL_WING_KEYS;`)() as string[];
+  assertEquals(browser, scored);
+  assertEquals(browser[browser.length - 1], "wingList", "the list is the last key of the set");
 });

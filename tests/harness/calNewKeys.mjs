@@ -293,7 +293,7 @@ export async function main() {
     await typeNumber(page, wingW, 0);
     d3 = await save(page, calls);
     ok("⚠️ WIDTH 0 IS OFF, AND DELETES EVERY WING KEY",
-      !has(d3.roof, "wingWidthFt") && !has(d3.roof, "wingSide") && !has(d3.roof, "wingPitch") && !has(d3.roof, "centerEaveFt"), keys(d3.roof));
+      !has(d3.roof, "wingWidthFt") && !has(d3.roof, "wingSide") && !has(d3.roof, "wingPitch") && !has(d3.roof, "centerEaveFt") && !has(d3.roof, "wingList"), keys(d3.roof));
 
     // ── 7. back to a single slant ──
     await typeNumber(page, wingW, 6);
@@ -303,7 +303,7 @@ export async function main() {
     await settle(page);
     d3 = await save(page, calls);
     ok("⚠️ A SINGLE SLANT DROPS THE FRONT-WALL CHOICE AND EVERY WING KEY",
-      !has(d3.roof, "front") && !has(d3.roof, "wingWidthFt") && !has(d3.roof, "wingSide"), keys(d3.roof));
+      !has(d3.roof, "front") && !has(d3.roof, "wingWidthFt") && !has(d3.roof, "wingSide") && !has(d3.roof, "wingList"), keys(d3.roof));
     ok("...and offers no wings", (await field(page, "Lower wings, each (ft wide, 0 = none)").count()) === 0);
   } catch (e) {
     ok("ran to the end", false, e && e.message ? e.message.split("\n")[0] : String(e));
