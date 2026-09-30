@@ -1071,8 +1071,10 @@ if (want("X") && OLD) {
     ok("X: the older designer draws exactly the legacy massing of those keys", m.wings.length === lm.wings.length && !("list" in m)
       && m.wings.every((g, k) => near(g.w, lm.wings[k].w, 1e-9) && near(g.ya, lm.wings[k].ya, 1e-9)) && near(m.Hc, lm.Hc, 1e-9),
       JSON.stringify({ drawn: m.wings.map((g) => [g.w, g.ya]), legacy: lm.wings.map((g) => [g.w, g.ya]), Hc: [m.Hc, lm.Hc] }));
+    // (plus what the 16 ft cap on the one width leaves out: an 18 ft stack is drawn 16 wide)
+    const capped = both ? 2 * Math.max(0, (sN + sP) / 2 - 16) : Math.max(0, Math.max(sN, sP) - 16);
     ok("X: …at beta's middle height, with a middle no further off than the narrower stack", near(m.Hc, beta.Hc, 1e-6)
-      && Math.abs(m.Sc - beta.Sc) <= (both ? 1e-6 : Math.min(sN, sP) + 1e-6), JSON.stringify({ Hc: [m.Hc, beta.Hc], Sc: [m.Sc, beta.Sc], sN, sP }));
+      && Math.abs(m.Sc - beta.Sc) <= (both ? 0 : Math.min(sN, sP)) + capped + 1e-6, JSON.stringify({ Hc: [m.Hc, beta.Hc], Sc: [m.Sc, beta.Sc], sN, sP, capped }));
     ok("X: zero page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
     await page.close();
   } catch (e) { ok("X: ran", false, e && e.stack); }
