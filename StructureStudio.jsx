@@ -24435,7 +24435,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calReadoutMass = (adminCal && adminCal.spec && calReadoutL > 0)
     ? d3Massing(adminCal.spec.roof, calReadoutW, calReadoutL, Number(adminCal.spec.wallHeightFt) || D3.WALL_H)
     : null;
-  const calReadoutCentre = !!(calReadoutMass && calReadoutMass.wings.length);
+  const calReadoutCentre = !!(calReadoutMass && d3WingsOn(calReadoutMass));
   const calReadoutSpan = calReadoutMass
     ? ((calReadoutCentre ? calReadoutMass.Sc : d3RoofAxes(adminCal.spec.roof, calReadoutW, calReadoutL).S) || calReadoutW)
     : calReadoutW;
@@ -27252,7 +27252,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     : st ? `Drawn: the back ${ssFtInWords(st.stepFt)} has its own roof, its edge ${riseIn(st.rise)} in ${st.rise > 0 ? "higher" : "lower"} at ${Math.round(st.pitchB * 120) / 10} in 12, so the ridges line up.`
                     : !(Number(roof.rearStepFt) > 0.5) ? "A step of 0 is no step."
                     : !(Math.abs(Number(roof.rearEaveRiseFt)) >= 0.01) ? "A rise of 0 draws no step."
-                    : (Number(roof.wingWidthFt) || 0) > 0.5 ? "Not drawn with lower wings: they run the length of the building at one height."
+                    : (Number(roof.wingWidthFt) || 0) > 0.5 || d3WingListOn(roof) ? "Not drawn with lower wings: they run the length of the building at one height."
                     : d3AnyLeanTo(roof) ? "Not drawn with a lean-to: it runs the length of the building at one height."
                     : roof.porchEnd === "back" && ((Number(roof.porchDepthFt) || 0) > 0.5 || (Number(roof.porchOutFt) || 0) > 0.5) ? "Not drawn with the porch at the back."
                     : !d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? `Not drawn on ${sel.size || "this size"}: its ridge runs side to side. Set the front wall to a gable end.`
@@ -27635,7 +27635,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   // it off: its header would stand under a cap that is no longer at the wall's top),
                   // and the contract is that the panel says so rather than letting it vanish. Read
                   // off d3Massing, the renderer's own answer, so "wings" means wings that draw.
-                  const recessedLost = kind === "recessed" && d3Massing(roof, bldgW, bldgH, adminCal.spec.wallHeightFt || D3.WALL_H).wings.length > 0;
+                  const recessedLost = kind === "recessed" && d3WingsOn(d3Massing(roof, bldgW, bldgH, adminCal.spec.wallHeightFt || D3.WALL_H));
                   return (
                     <>
                       <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch
@@ -28477,7 +28477,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const isShed = roof.type === "shed", isGam = roof.type === "gambrel";
     // The span the roof sentences describe, as the calibration readout reads it (d3Massing / d3RoofAxes).
     const advMass = spec ? d3Massing(roof, bldgW, bldgH, wallH) : null;
-    const advCentre = !!(advMass && advMass.wings.length);
+    const advCentre = !!(advMass && d3WingsOn(advMass));
     const advSpan = advMass ? ((advCentre ? advMass.Sc : d3RoofAxes(roof, bldgW, bldgH).S) || bldgW) : bldgW;
     const gamSl = ssGambrelSliders(roof);
     const ohLive = d3OverhangStyleApplies(roof);
@@ -28493,7 +28493,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           : st ? `Drawn: the back ${d3FtIn(st.stepFt)} has its own roof, its edge ${riseIn(st.rise)} in ${st.rise > 0 ? "higher" : "lower"} at ${Math.round(st.pitchB * 120) / 10} in 12, so the ridges line up.`
             : !(Number(roof.rearStepFt) > 0.5) ? "A step of 0 is no step."
               : !(Math.abs(Number(roof.rearEaveRiseFt)) >= 0.01) ? "A rise of 0 draws no step."
-                : (Number(roof.wingWidthFt) || 0) > 0.5 ? "Not drawn with lower wings: they run the length of the building at one height."
+                : (Number(roof.wingWidthFt) || 0) > 0.5 || d3WingListOn(roof) ? "Not drawn with lower wings: they run the length of the building at one height."
                   : d3AnyLeanTo(roof) ? "Not drawn with a lean-to: it runs the length of the building at one height."
                     : roof.porchEnd === "back" && ((Number(roof.porchDepthFt) || 0) > 0.5 || (Number(roof.porchOutFt) || 0) > 0.5) ? "Not drawn with the porch at the back."
                       : !d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? `Not drawn on ${sizeWords}: its ridge runs side to side. Set the front wall to a gable end.`
@@ -29049,7 +29049,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const key = kind === "projecting" ? "porchOutFt" : "porchDepthFt";
       const pr = kind === "projecting" ? d3PorchReadout(spec, sel.size) : null;
       const warn = !!(pr && (pr.short || pr.pitchClamped));
-      const recessedLost = kind === "recessed" && d3Massing(roof, bldgW, bldgH, spec.wallHeightFt || D3.WALL_H).wings.length > 0;
+      const recessedLost = kind === "recessed" && d3WingsOn(d3Massing(roof, bldgW, bldgH, spec.wallHeightFt || D3.WALL_H));
       const newFrame = roof.front != null || roof.highSide != null;
       const out = [advTiles({ f: "porchKind", label: "Porch", value: kind, pick: (v) => calSetPorch(v),
         opts: [["none", "None", "none"], ["recessed", "Recessed", "recessed"], ["projecting", "Projecting", "projecting"]],
@@ -29167,7 +29167,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {addOnTabs.map(([k, label]) => {
                 const off = addOnOff(k);
                 const on = addOn === k;
-                const has = k === "leanto" ? d3AnyLeanTo(roof) : k === "wings" ? (Number(roof.wingWidthFt) || 0) > 0
+                const has = k === "leanto" ? d3AnyLeanTo(roof) : k === "wings" ? (Number(roof.wingWidthFt) || 0) > 0 || d3WingListOn(roof)
                   : k === "dormer" ? (roof.dormerWidthFt || 0) > 0.5 : calPorchKind(roof) !== "none";
                 return (
                   <button key={k} type="button" role="tab" aria-selected={on} data-ss-adv-sec={k} disabled={off}
