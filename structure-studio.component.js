@@ -8783,7 +8783,11 @@ function buildShed3DModel(THREE, p) {
   // porch is off — its posts and header would stand under a cap that is no longer at the wall's
   // top — and ssPorchTrussWall says the same for the truss.
   const mass = d3Massing(roofCfg, bldgW, bldgH, H);
-  const porchOn = porchDepth > 0.5 && !mass.wings.length;
+  // STACKED WINGS (roof.wingList, 2026-10-01): true only when the massing holds what a legacy one cannot
+  // (a wing on a wing, or an end wing). Every stacked branch below is guarded by it, so every other
+  // building, a converted one-wing-per-side list included, is built by exactly the code it was.
+  const wlDeep = d3WingListDeep(mass);
+  const porchOn = porchDepth > 0.5 && !d3WingsOn(mass);
   // THE ROOF STEP (d3RoofStep, 2026-09-28): two roof sections along the ridge, the rear one's eave
   // higher or lower, the ridges level. Null on every other building, and every branch it opens
   // below is guarded by it, so without both keys the model is built by exactly the code it was.
@@ -8855,6 +8859,12 @@ function buildShed3DModel(THREE, p) {
     (mass.uAxisIsX ? ["north", "south"] : ["west", "east"]).forEach((n) => {
       const c = mass.S / 2 + mass.uc - (WALLS[n].a0Ft || 0);
       WALLS[n].capCuts = [c - mass.Sc / 2, c + mass.Sc / 2];
+      // A wing on a wing (wlDeep): each inner tier's cap starts at its outer wall line, u1, where the
+      // stepped wall's piece under it reaches T/2 on under the next tier's clerestory.
+      if (wlDeep) {
+        mass.wings.forEach((g) => { if (!g.outer) WALLS[n].capCuts.push(g.u1 + mass.S / 2 - (WALLS[n].a0Ft || 0)); });
+        WALLS[n].capCuts.sort((p, q) => p - q);
+      }
     });
   }
   // CLERESTORY holds the centre's side walls above each wing roof — from just under the wing slab
@@ -8865,11 +8875,26 @@ function buildShed3DModel(THREE, p) {
     // A wing roof run up onto the centre's roof (wingAttach "roof", 2026-09-28) leaves no centre wall
     // showing above it: the wing's own body closes the gable end up to it instead.
     if (g.attach === "roof" && !g.cuts) return;
+    // A WING ON A WING (wlDeep): every tier has its own clerestory on its inner line u0, from just under
+    // its roof (never below its own outside wall, g.ye) up to the face it meets, g.top: the middle's
+    // eave for tier 1, the next tier in's outside wall otherwise. Tier 1 keeps today's key; tier k
+    // adds k ("clerestoryNeg2"). Only a tier-1 wing can be on the middle's roof.
+    if (wlDeep) {
+      const k = g.tier, ye = g.ye, top = g.top != null ? g.top : mass.Hc;
+      const yFk = k === 1 && g.attach === "roof" ? ye + (g.w - T / 2) * g.pitch : g.ya - (T / 2) * g.pitch;
+      const botK = Math.max(ye, yFk - 0.3), key = (g.side < 0 ? "clerestoryNeg" : "clerestoryPos") + (k === 1 ? "" : k);
+      CLERESTORY[key] = mass.uAxisIsX
+        ? { len: mass.L, O: [g.u0, -mass.L / 2], U: [0, 1], N: [g.side, 0], a0Ft: 0, bot: botK, tops: [[0, mass.L, top]], clerestory: g.side, clerestoryI: g.i, clerestoryTier: k }
+        : { len: mass.L, O: [-mass.L / 2, g.u0], U: [1, 0], N: [0, g.side], a0Ft: 0, bot: botK, tops: [[0, mass.L, top]], clerestory: g.side, clerestoryI: g.i, clerestoryTier: k };
+      return;
+    }
     const yF = g.attach === "roof" ? H + (g.w - T / 2) * g.pitch : g.ya - (T / 2) * g.pitch;
     const u0 = g.u0, bot = Math.max(H, yF - 0.3);
     CLERESTORY[g.side < 0 ? "clerestoryNeg" : "clerestoryPos"] = mass.uAxisIsX
       ? { len: mass.L, O: [u0, -mass.L / 2], U: [0, 1], N: [g.side, 0], a0Ft: 0, bot, tops: [[0, mass.L, mass.Hc]], clerestory: g.side }
       : { len: mass.L, O: [-mass.L / 2, u0], U: [1, 0], N: [0, g.side], a0Ft: 0, bot, tops: [[0, mass.L, mass.Hc]], clerestory: g.side };
+    // A wing from roof.wingList (one per side here) carries its list index, as every list-built wing does.
+    if (g.i != null) CLERESTORY[g.side < 0 ? "clerestoryNeg" : "clerestoryPos"].clerestoryI = g.i;
   });
   // The pieces of wall `wf`'s top over [a0, a1], clipped to it, and the lowest of them.
   const topsOf = (wf, a0, a1) => {
@@ -9362,7 +9387,7 @@ function buildShed3DModel(THREE, p) {
     // tagged with the wall name so the 3D palette can place new items by
     // clicking a wall.
     const wg = new THREE.Group();
-    wg.userData = wf.clerestory ? { clerestory: wf.clerestory } : { wall: wname };
+    wg.userData = wf.clerestory ? (wf.clerestoryI != null ? { clerestory: wf.clerestory, clerestoryI: wf.clerestoryI } : { clerestory: wf.clerestory }) : { wall: wname };
     // UP TO THE LOCAL TOP (topsOf, wings): one box to the lowest top across the run, then one box
     // per piece that stands higher, so no seam runs down the wall under the step. Without `tops`
     // that is exactly the one box to H this has always built.
@@ -10769,10 +10794,15 @@ function buildShed3DModel(THREE, p) {
   // a lamp on a wall above H reads its own. A slope end's local u says which wall: with the centre
   // shifted by uc, u + uc is the building's u, -u = west (uAxisIsX) or north.
   const eaveHangBy = {};
+  // noteHangOn is the per-wall half, for a slope that names the wall it overhangs (an end wing's
+  // eave stands on a gable-end wall, which no local u can say).
+  const noteHangOn = (wall, y) => {
+    eaveHangBy[wall] = Math.min(eaveHangBy[wall] != null ? eaveHangBy[wall] : Infinity, y);
+  };
   const noteEaveHang = (uLocal, y) => {
     const ub = uLocal + mass.uc;
     const wall = mass.uAxisIsX ? (ub < 0 ? "west" : "east") : (ub < 0 ? "north" : "south");
-    eaveHangBy[wall] = Math.min(eaveHangBy[wall] != null ? eaveHangBy[wall] : Infinity, y);
+    noteHangOn(wall, y);
   };
   // A slope's endpoint is an INTERIOR JOINT when another slope shares it: a gable ridge,
   // or a gambrel knee. Everything else is a free edge that should really overhang.
@@ -10796,24 +10826,29 @@ function buildShed3DModel(THREE, p) {
   // that stops a centre slab at the landing when P is the centre's eave point on such a side; null
   // everywhere else, which is every building without that attach.
   const wingLandsAt = (P) => {
-    const g = mass.wings.find((q) => q.attach === "roof" && !q.cuts && Math.abs(P[0] - (q.u0 - mass.uc)) < 1e-6 && Math.abs(P[1] - Hr) < 1e-6);
+    const g = mass.wings.find((q) => (q.tier || 1) === 1 && q.attach === "roof" && !q.cuts && Math.abs(P[0] - (q.u0 - mass.uc)) < 1e-6 && Math.abs(P[1] - Hr) < 1e-6);
     return g ? -Math.hypot(g.uIn - mass.uc - P[0], g.ya - P[1]) : null;
   };
+  // A wing built from roof.wingList also carries its list index and tier, which the harness groups by.
+  const tagWingList = (o, g) => { if (g.i != null) { o.userData.ssWingList = g.i; o.userData.ssWingTier = g.tier; } };
   const wingSlopes = [];
   mass.wings.forEach((g) => {
     // `face` is the clerestory's OUTER face, the wing's side of the centre wall line.
     const s = g.side, lu1 = g.u1 - mass.uc, face = g.u0 + s * (T / 2) - mass.uc;
-    const yFace = H + (g.w - T / 2) * g.pitch;
+    // A WING ON A WING (wlDeep) stands on its own outside wall's top, g.ye (a tier with another wing
+    // outside it is raised to clear that wing's roof); every other wing stands on H.
+    const ye = wlDeep ? g.ye : H;
+    const yFace = ye + (g.w - T / 2) * g.pitch;
     // ON THE CENTRE'S ROOF (wingAttach "roof", 2026-09-28) the wing roof lands at (uIn, ya), up the
     // centre's eave leg, and the body is closed up to it: the wedge between the centre's roof line,
     // carried out to the face, and the wing's. Its caps are the gable end's wall there.
     const onRoof = g.attach === "roof" && !g.cuts;
-    if (yFace - H > 0.02) {
+    if (yFace - ye > 0.02) {
       const sh = new THREE.Shape();
-      sh.moveTo(lu1, H); sh.lineTo(face, H);
+      sh.moveTo(lu1, ye); sh.lineTo(face, ye);
       if (onRoof) { sh.lineTo(face, mass.Hc - (T / 2) * g.k); sh.lineTo(g.uIn - mass.uc, g.ya); }
       else sh.lineTo(face, yFace);
-      sh.lineTo(lu1, H);
+      sh.lineTo(lu1, ye);
       const wgeo = new THREE.ExtrudeGeometry(sh, { depth: L, bevelEnabled: false });
       const wuv = wgeo.attributes.uv;
       if (wuv) { for (let i = 0; i < wuv.count; i++) wuv.setX(i, wuv.getX(i) + (mass.S / 2 + mass.uc)); wuv.needsUpdate = true; }
@@ -10830,6 +10865,7 @@ function buildShed3DModel(THREE, p) {
       }
       const body = new THREE.Mesh(wgeo, wcap ? [wallMat, gableMat] : gableMat);
       body.userData.ssWing = s;
+      tagWingList(body, g);
       rg.add(body);
     }
     // The flashing where the wing roof meets the clerestory, from the slab's top up 0.3 ft, standing
@@ -10841,15 +10877,17 @@ function buildShed3DModel(THREE, p) {
       d3RoofSlabUVs(fl);
       fl.position.set(face + s * fT / 2, slabTop + 0.14, L / 2);
       fl.userData.ssWing = s;
+      tagWingList(fl, g);
       rg.add(fl);
     }
     // On the centre's roof the slab runs to where it lands and stops square there: the two decks meet in
     // a valley, so each top face runs on under the other's (jointExt's concave case, an extension of 0).
-    const outer = [lu1, H], inner = onRoof ? [g.uIn - mass.uc, g.ya] : [face, yFace];
+    const outer = [lu1, ye], inner = onRoof ? [g.uIn - mass.uc, g.ya] : [face, yFace];
     const sl = s < 0 ? [outer, inner] : [inner, outer];   // left to right, so the slab's normal points up
     sl.wing = s;
     sl.wingIn = inner;
     sl.wingInExt = onRoof ? 0 : (D3.ROOF_T + 0.02) * g.pitch + 0.005;  // the slab's top edge reaches the face
+    sl.wingList = g.i; sl.wingTier = g.tier;
     wingSlopes.push(sl);
   });
   // ONE SLOPE OF ONE SECTION OF ROOF (the roof step, 2026-09-28). `sec` is the section: the eave its
@@ -10859,7 +10897,11 @@ function buildShed3DModel(THREE, p) {
   // zLen centred on zMid, the rakes and fly rafters stand only at a gable end, and the rafter tails
   // are laid across z0..z1. Called for every slope below, once per section.
   const buildSlope = (sl, sec) => {
-    const nWing0 = rg.children.length;
+    // The group the section is built in (rg, or an end wing's own turned group) and where its eave
+    // finish is noted: by the wall a section names (sec.hangWall), else by the low end's side of u.
+    const G = sec.group || rg;
+    const hang = (u, y) => (sec.hangWall ? noteHangOn(sec.hangWall, y) : noteEaveHang(u, y));
+    const nWing0 = G.children.length;
     const A = sl[0], B = sl[1];
     const du = B[0] - A[0], dy = B[1] - A[1];
     const slen = Math.sqrt(du * du + dy * dy);
@@ -10908,7 +10950,7 @@ function buildShed3DModel(THREE, p) {
       (A[1] + B[1]) / 2 + uy * shift + ny * t,
       sec.zMid
     );
-    rg.add(slab);
+    G.add(slab);
     // Eave fascia: a trim board hung on the slab's LOW edge, the finish
     // carpentry that stops a roof reading as a floating slab. Positioned with
     // the SAME normal offset the slab itself carries, or it hangs visibly
@@ -10947,9 +10989,9 @@ function buildShed3DModel(THREE, p) {
         const fasH = OV_NOTCHED ? Math.max(0.08, fasTop - finishY) : D3_EAVE.FASCIA_H;
         const fascia = box(fasciaMat, D3_EAVE.FASCIA_T, fasH, sec.zLen);
         fascia.position.set(edgeU, OV_NOTCHED ? fasTop - fasH / 2 : edgeY - 0.14, sec.zMid);
-        rg.add(fascia);
+        G.add(fascia);
         eaveHangY = Math.min(eaveHangY, OV_NOTCHED ? finishY : edgeY - 0.14 - 0.2);   // the board's bottom edge
-        noteEaveHang(lowEnd[0], OV_NOTCHED ? finishY : edgeY - 0.14 - 0.2);
+        hang(lowEnd[0], OV_NOTCHED ? finishY : edgeY - 0.14 - 0.2);
         if (OV_NOTCHED) {
           // The level soffit, hung DIRECTLY on the deck's underside -- that IS the cut-back. It
           // runs level from the fascia toward the wall and, because the deck rises away from the
@@ -10960,7 +11002,7 @@ function buildShed3DModel(THREE, p) {
           if (soffitW > 0.06) {
             const soffit = box(fasciaMat, soffitW, D3_EAVE.SOFFIT_T, sec.zLen);
             soffit.position.set((wallU + edgeU) / 2, deckBotY - D3_EAVE.SOFFIT_T / 2, sec.zMid);
-            rg.add(soffit);
+            G.add(soffit);
             // A roof step's section keeps its boxed eave's outline (the wall, the corner where the
             // soffit meets the deck's underside, and that underside's slope), so the joint can close
             // the lower section's box where it ends (the end cap beside the wedge). Only a stepped
@@ -10990,7 +11032,7 @@ function buildShed3DModel(THREE, p) {
         // between tail and deck.
         const tailN = 0.02 - TAIL_DROP + TAIL_H / 2;
         eaveHangY = Math.min(eaveHangY, eaveY - d3EaveFinishDrop(roofCfg, ny));   // tails' outboard bottom
-        noteEaveHang(lowEnd[0], eaveY - d3EaveFinishDrop(roofCfg, ny));
+        hang(lowEnd[0], eaveY - d3EaveFinishDrop(roofCfg, ny));
         const tailLen = OV + 0.5;             // outboard face flush with the slab end,
                                               // inboard end buried behind the wall
         const tailU = eaveU - towardLow * ux * (tailLen / 2) + nx * tailN;
@@ -11000,7 +11042,7 @@ function buildShed3DModel(THREE, p) {
           const tl = box(tailMat(), tailLen, TAIL_H, TAIL_W);
           tl.rotation.z = tailRot;
           tl.position.set(tailU, tailY, z);
-          rg.add(tl);
+          G.add(tl);
         };
         // COUNT IS A RULE, not a number. Bays are laid across the wall span z in [0, L]
         // and rounded to whole bays, so both gable walls always carry an end rafter and
@@ -11014,7 +11056,7 @@ function buildShed3DModel(THREE, p) {
         // Fly-rafter tails, one under each rake about 10 in outboard of the gable wall.
         // Skipped when the overhang is too shallow to hold one, and at a joint, which has no rake.
         const flyOut = Math.min(OV - 0.1, 10 / 12);
-        if (flyOut > 0.15) { if (sec.end0) addTail(-flyOut); if (sec.endL) addTail(L + flyOut); }
+        if (flyOut > 0.15) { if (sec.end0) addTail(sec.z0 - flyOut); if (sec.endL) addTail(sec.z1 + flyOut); }
       }
     }
     // ── THE SHED'S HIGH EAVE (new frame, 2026-09-24) ──
@@ -11039,26 +11081,26 @@ function buildShed3DModel(THREE, p) {
         const edgeU = hiU + nx * (D3.ROOF_T / 2 + 0.02);
         const edgeY = hiY + ny * (D3.ROOF_T / 2 + 0.02);
         const sofBot = wallTopY - 0.005 - D3_EAVE.SOFFIT_T;
-        noteEaveHang(highEave[0], sofBot);
+        hang(highEave[0], sofBot);
         const fasTop = edgeY + 0.06;                        // just under the deck's top face
         const fasH = Math.max(0.08, fasTop - sofBot);
         const hfas = box(fasciaMat, D3_EAVE.FASCIA_T, fasH, L + OV * 2);
         hfas.position.set(edgeU, fasTop - fasH / 2, L / 2);
         hfas.userData.ssHighEave = "fascia";
-        rg.add(hfas);
+        G.add(hfas);
         const sofIn = highEave[0], sofOut = edgeU - towardHigh * D3_EAVE.FASCIA_T / 2;
         if (Math.abs(sofOut - sofIn) > 0.06) {
           const hsof = box(fasciaMat, Math.abs(sofOut - sofIn), D3_EAVE.SOFFIT_T, L + OV * 2);
           hsof.position.set((sofIn + sofOut) / 2, sofBot + D3_EAVE.SOFFIT_T / 2, L / 2);
           hsof.userData.ssHighEave = "soffit";
-          rg.add(hsof);
+          G.add(hsof);
         }
       } else {
         const TAIL_W = D3_EAVE.TAIL_W, TAIL_H = D3_EAVE.TAIL_H;
         const tailN = 0.02 - D3_EAVE.TAIL_DROP + TAIL_H / 2;
         const tailLen = OV + 0.5;
         // The tails' bottom edge where it crosses the wall line; it rises outward from there.
-        noteEaveHang(highEave[0], wallTopY + (0.02 - D3_EAVE.TAIL_DROP) / Math.max(1e-6, ny));
+        hang(highEave[0], wallTopY + (0.02 - D3_EAVE.TAIL_DROP) / Math.max(1e-6, ny));
         const tailU = hiU - towardHigh * ux * (tailLen / 2) + nx * tailN;
         const tailY = hiY - towardHigh * uy * (tailLen / 2) + ny * tailN;
         const addHiTail = (z) => {
@@ -11066,7 +11108,7 @@ function buildShed3DModel(THREE, p) {
           tl.rotation.z = Math.atan2(dy, du);
           tl.position.set(tailU, tailY, z);
           tl.userData.ssHighEave = "tail";
-          rg.add(tl);
+          G.add(tl);
         };
         const tailStep = L / Math.max(1, Math.round(L / Math.max(0.5, (roofCfg.tailSpacingIn || 24) / 12)));
         for (let z = 0; z <= L + 1e-6; z += tailStep) addHiTail(Math.min(z, L));
@@ -11092,7 +11134,7 @@ function buildShed3DModel(THREE, p) {
         highEnd[1] - towardHigh * uy * (CAPW / 2 - 0.06) + ny * (D3.ROOF_T + 0.05),
         sec.zMid
       );
-      rg.add(capBoard);
+      G.add(capBoard);
     }
     // Rake boards: trim running up the roof edge at each gable end. Without
     // them the slab's raw end face reads unfinished — every rake on the
@@ -11105,8 +11147,8 @@ function buildShed3DModel(THREE, p) {
     // outer face and the slab's end face are one plane and trade pixels in a stipple along every
     // rake, plain to see wherever the fascia and roof colours differ. Every other style keeps the
     // plane it has always had (the byte-for-byte rule for stored styles).
-    const rakeProud = (NEW_FRAME || mass.wings.length) ? 0.01 : 0;
-    [-OV + 0.05 - rakeProud, L + OV - 0.05 + rakeProud].filter((z, i) => (i ? sec.endL : sec.end0)).forEach((z) => {
+    const rakeProud = (NEW_FRAME || d3WingsOn(mass)) ? 0.01 : 0;
+    [sec.z0 - OV + 0.05 - rakeProud, sec.z1 + OV - 0.05 + rakeProud].filter((z, i) => (i ? sec.endL : sec.end0)).forEach((z) => {
       const rake = box(fasciaMat, slen + extA + extB, 0.32, 0.1);
       rake.rotation.z = Math.atan2(dy, du);
       rake.position.set(
@@ -11114,10 +11156,13 @@ function buildShed3DModel(THREE, p) {
         (A[1] + B[1]) / 2 + uy * shift + ny * (D3.ROOF_T / 2 - 0.08),
         z
       );
-      rg.add(rake);
+      G.add(rake);
     });
     // A wing's slab, eave finish and rakes carry its side, for the porch scan and the harness.
-    if (sl.wing) for (let k = nWing0; k < rg.children.length; k++) rg.children[k].userData.ssWing = sl.wing;
+    if (sl.wing) for (let k = nWing0; k < G.children.length; k++) {
+      G.children[k].userData.ssWing = sl.wing;
+      if (sl.wingList != null) { G.children[k].userData.ssWingList = sl.wingList; G.children[k].userData.ssWingTier = sl.wingTier; }
+    }
   };
   // THE SECTIONS. Without a step there is ONE, the whole roof, and every number it hands buildSlope
   // is the expression the loop has always used, so the roof is built exactly as it was. With one
@@ -11414,7 +11459,7 @@ function buildShed3DModel(THREE, p) {
       // The rake trim along the porch roof's side edge.
       // 0.005 ft proud of the sheet's side face in the new frame and with wings, for the main rake's
       // reason (coplanar faces stipple); every other porch keeps its plane.
-      pg.add(part(onSlope(fasciaMat, dWall, dEnd, s * (side + SIDE_OV - 0.04 + ((NEW_FRAME || mass.wings.length) ? 0.005 : 0)), 0.08, 0.28, -0.06), "rake"));
+      pg.add(part(onSlope(fasciaMat, dWall, dEnd, s * (side + SIDE_OV - 0.04 + ((NEW_FRAME || d3WingsOn(mass)) ? 0.005 : 0)), 0.08, 0.28, -0.06), "rake"));
     }
     // The board and the dark trim face in front of it, both the roof's full width, which closes the
     // corners past the cheeks and rake trims.
@@ -11573,7 +11618,7 @@ function buildShed3DModel(THREE, p) {
       // ...unless the style sets where the porch roof meets the wall (roof.porchAttachFt), or wings
       // hold the porch roof down under their own roofs: the siding showing between the two is then
       // the point, not a gap. The band sits at the centre's eave with wings (Hr = Hc).
-      const drop = porchGeom && porchCapZ === z0 && !(Number(roofCfg.porchAttachFt) > 0) && !mass.wings.length ? Math.max(0, Hr - 0.2 - porchGeom.yHigh) : 0;
+      const drop = porchGeom && porchCapZ === z0 && !(Number(roofCfg.porchAttachFt) > 0) && !d3WingsOn(mass) ? Math.max(0, Hr - 0.2 - porchGeom.yHigh) : 0;
       const band = box(trimMat, S + 2 * (trimFace + 0.01), 0.3 + drop, face - back);
       // A ROOF STEP's back cap stands on the rear section's plate.
       band.position.set(0, (z0 === 0 && rearProf ? rearProf.H : Hr) + SS_PLATE_BAND_TOP - 0.15 - drop / 2, z0 + s * (back + face) / 2);
@@ -11675,16 +11720,18 @@ function buildShed3DModel(THREE, p) {
       const s = g.side, bs = clad.stepFt, halfW = clad.relief === "rib" ? 0.05 : 0.07;
       const reliefMat = clad.reliefTrim ? battenMat : wallMat;
       const face = g.u0 + s * (T / 2);
+      const ye = wlDeep ? g.ye : H;   // a wing on a wing: from its own outside wall's top
       const lo = Math.min(g.u1, face) + halfW + 0.01, hi = Math.max(g.u1, face) - halfW - 0.01;
       for (let k = 1; k * bs < mass.S; k++) {
         const u = k * bs - mass.S / 2;
         if (u < lo || u > hi) continue;
-        const yTop = H + Math.abs(u + s * halfW - g.u1) * g.pitch;
-        if (yTop <= H + 0.05) continue;
+        const yTop = ye + Math.abs(u + s * halfW - g.u1) * g.pitch;
+        if (yTop <= ye + 0.05) continue;
         [-capStripOut(capOut0), L + capStripOut(capOutL)].forEach((z) => {
-          const st = box(reliefMat, halfW * 2, yTop - H, capStripDepth);
-          st.position.set(u - mass.uc, (H + yTop) / 2, z);
+          const st = box(reliefMat, halfW * 2, yTop - ye, capStripDepth);
+          st.position.set(u - mass.uc, (ye + yTop) / 2, z);
           st.userData.ssWing = s;
+          tagWingList(st, g);
           rg.add(st);
         });
       }
@@ -11697,17 +11744,19 @@ function buildShed3DModel(THREE, p) {
   if (clad.relief === "lap" && capOut0 >= T / 2 - 1e-6 && capOutL >= T / 2 - 1e-6) {
     mass.wings.forEach((g) => {
       const s = g.side, face = g.u0 + s * (T / 2);
+      const ye = wlDeep ? g.ye : H;   // a wing on a wing: its wall's courses run to its own top, g.ye
       if (!(g.pitch > 1e-3)) return;
-      for (let y = clad.stepFt; y < H + (g.w - T / 2) * g.pitch - 0.05; y += clad.stepFt) {
-        if (y < H - 0.15) continue;   // the wall's own courses run to H - 0.15
+      for (let y = clad.stepFt; y < ye + (g.w - T / 2) * g.pitch - 0.05; y += clad.stepFt) {
+        if (y < ye - 0.15) continue;   // the wall's own courses run to H - 0.15
         // Where the wing roof's line clears the course's top by a hair, out to the clerestory's face.
-        const uIn = g.u1 - s * Math.max(trimFace, (y + 0.06 - H) / g.pitch);
+        const uIn = g.u1 - s * Math.max(trimFace, (y + 0.06 - ye) / g.pitch);
         if ((face - uIn) * -s < 0.1) continue;
         const a = Math.min(uIn, face), b = Math.max(uIn, face);
         [-CLAD_RELIEF_OUT, L + CLAD_RELIEF_OUT].forEach((z) => {
           const st = box(wallMat, b - a, 0.08, 0.1);
           st.position.set((a + b) / 2 - mass.uc, y, z);
           st.userData.ssWing = s;
+          tagWingList(st, g);
           rg.add(st);
         });
       }
@@ -11771,13 +11820,16 @@ function buildShed3DModel(THREE, p) {
   // centre's gable wall (and where the two walls' boxes share a plane, so nothing flickers there).
   mass.wings.forEach((g) => {
     const half = Math.max(T / 2 + 0.07, trimFace);
-    const yFoot = H + Math.max(0, g.w - half) * g.pitch + D3.ROOF_T * 0.5;
-    const hPost = mass.Hc - yFoot;
+    // A wing on a wing (wlDeep): from its own roof up to the face it meets (g.top). The clerestory corner
+    // of tier k + 1 is tier k's outer gable corner, so this one loop covers every step of the stair.
+    const yFoot = (wlDeep ? g.ye : H) + Math.max(0, g.w - half) * g.pitch + D3.ROOF_T * 0.5;
+    const hPost = (wlDeep && g.top != null ? g.top : mass.Hc) - yFoot;
     if (!(hPost > 0.3)) return;
     [-L / 2, L / 2].forEach((e) => {
       const post = box(cornerMat, half * 2, hPost, half * 2);
       post.position.set(uAxisIsX ? g.u0 : e, yFoot + hPost / 2, uAxisIsX ? e : g.u0);
       post.userData.ssWing = g.side;
+      tagWingList(post, g);
       roofGroup.add(post);
     });
   });
@@ -12213,7 +12265,7 @@ function buildShed3DModel(THREE, p) {
     cornerMat, fasciaMat,
     cornerRole: d3TrimKeyRole(p.styleSpec && p.styleSpec.colors, "corner"),
     fasciaRole: d3TrimKeyRole(p.styleSpec && p.styleSpec.colors, "fascia"),
-    porch: porchGeom ? { ...porchGeom, D: porchOut.D, wall: porchOut.wall, ...((NEW_FRAME || mass.wings.length) ? { span: d3PorchSpan(roofCfg, bldgW, bldgH).span, onCap: d3PorchSpan(roofCfg, bldgW, bldgH).onCap, centerU: d3PorchSpan(roofCfg, bldgW, bldgH).centerU } : {}) } : null };
+    porch: porchGeom ? { ...porchGeom, D: porchOut.D, wall: porchOut.wall, ...((NEW_FRAME || d3WingsOn(mass)) ? { span: d3PorchSpan(roofCfg, bldgW, bldgH).span, onCap: d3PorchSpan(roofCfg, bldgW, bldgH).onCap, centerU: d3PorchSpan(roofCfg, bldgW, bldgH).centerU } : {}) } : null };
   if (NEW_FRAME) {
     // S is the building's full span (mass.S): the roof section's own S is the centre's with wings.
     model.frame = { uAxisIsX, S: mass.S, L, tallNeg, tops: Object.fromEntries(Object.keys(WALLS).map((w) => [w, WALLS[w].top])), porchWall };
