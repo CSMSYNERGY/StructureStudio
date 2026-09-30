@@ -218,7 +218,9 @@ try {
   const OWN = {
     leanto: ["leanToAdd", "leanToWall", "leanToWidthFt", "leanToDropFt", "leanToAttach", "leanToAttachFt", "leanToLength", "leanToLengthFt", "leanToOffsetFt", "leanToEnclosed"],
     // Each wing set on its own (roof.wingSides, 2026-09-29): the shared middle height, then a card per eave side.
-    wings: ["wingsOn", "centerEaveFt", ...["left", "right", "front", "back"].flatMap((s) => ["wingOn", "wingWidthFt", "wingAttach", "wingAttachFt", "wingPitch"].map((f) => `${f}-${s}`))],
+    // The wing list (roof.wingList, 2026-10-01): the add row, "+ Add a wing on ...", and each list card's controls.
+    wings: ["wingsOn", "centerEaveFt", ...["left", "right", "front", "back"].flatMap((s) => ["wingOn", "wingWidthFt", "wingAttach", "wingAttachFt", "wingPitch"].map((f) => `${f}-${s}`)),
+      "wlAdd", "wlAddOn", "wlWidthFt", "wlAttach", "wlAttachFt", "wlPitch", "wlEaveFt", "wlMove", "wlRemove"],
     dormer: ["dormerOn", "dormerType", "dormerWidthFt", "dormerRiseFt", "dormerOffsetU"],
     porch: ["porchKind", "porchDepth", "porchEnd", "porchTruss", "porchWidthFt", "porchAttachFt", "porchPitch", "porchPosts", "porchSteps", "porchStepCount", "wood"],
   };
