@@ -147,14 +147,21 @@ export async function recordingMedia(env: Env, recordingSid: string, range: stri
 export interface TwilioConference {
   sid: string;
   friendly_name: string;
-  /** init = participants are waiting and nobody has started it; in-progress; completed. */
+  /**
+   * init, in-progress or completed: whether the conference is live, NOT whether it has started.
+   * A plain Hold (both legs joined with startConferenceOnEnter=false, the customer on wait
+   * music) reads in-progress (seen on a live call, 2026-09-30). conference.ts hasStarted says.
+   */
   status: string;
 }
 
 export interface TwilioParticipant {
   call_sid: string;
+  /** A Participants-API hold only. A leg waiting in a conference nobody has started reads false. */
   hold: boolean;
   muted: boolean;
+  /** How the leg joined (conference.ts participantsProveStart). */
+  start_conference_on_enter?: boolean;
   /** queued, connecting, ringing, connected, complete, failed. */
   status: string;
 }
@@ -166,13 +173,6 @@ export async function findConference(env: Env, name: string): Promise<TwilioConf
   if (!res.ok) throw new TwilioError("list conferences", res.status, await codeOf(res));
   const body = (await res.json()) as { conferences?: TwilioConference[] };
   return (body.conferences ?? []).find((c) => c.friendly_name === name && c.status !== "completed") ?? null;
-}
-
-export async function fetchConference(env: Env, conferenceSid: string): Promise<TwilioConference | null> {
-  const res = await call(env, "fetch conference", `/Conferences/${encodeURIComponent(conferenceSid)}.json`);
-  if (res.status === 404) return null;
-  if (!res.ok) throw new TwilioError("fetch conference", res.status, await codeOf(res));
-  return (await res.json()) as TwilioConference;
 }
 
 export async function listParticipants(env: Env, conferenceSid: string): Promise<TwilioParticipant[]> {

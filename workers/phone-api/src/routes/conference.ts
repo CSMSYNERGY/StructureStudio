@@ -25,7 +25,7 @@ import { resumeInFlight } from "../callEvents";
 import { requireCaller, type Caller } from "../context";
 import { addCallEvent, callerContext, must, routeForNumber, type CallRow } from "../db";
 import {
-  CONFERENCE_EVENTS, HOLD_MUSIC, conferenceTwiml, isTerminal, legsOf, nextTransferState, onTheCall,
+  CONFERENCE_EVENTS, HOLD_MUSIC, conferenceTwiml, hasStarted, heldIn, isTerminal, legsOf, nextTransferState, onTheCall,
   refuseEmergencyCallback, transferParams, type CallAction,
 } from "../conference";
 import { ApiError, ok, readJson, UUID_RE } from "../http";
@@ -133,9 +133,11 @@ async function moveIntoConference(env: Env, ec: Ctx, c: Caller, call: CallRow, a
  * startConferenceOnEnter=true, and starting a conference connects everyone WAITING in it. A
  * conference that has not started (plain Hold) has the customer waiting, not held, so they
  * would be connected into your private talk with the teammate: hold them through the
- * Participants API first. A started conference needs nothing: a held customer stays held, and
- * a customer you are talking to (after Resume) stays in the call, which the teammate joins.
- * Not there yet (the legs are still moving in after Hold): asks for a moment, rings nobody.
+ * Participants API first. That is also what happens when nothing proves it started (hasStarted),
+ * because holding a customer is safe either way. A started conference needs nothing: a held
+ * customer stays held, and a customer you are talking to (after Resume) stays in the call,
+ * which the teammate joins. Not there yet (the legs are still moving in after Hold): asks for
+ * a moment, rings nobody.
  *
  * Answers `customer_held`: true when the customer is held as a participant through the
  * consult (a private talk with the teammate; Resume brings them in), false when they are
@@ -155,16 +157,15 @@ async function keepCustomerHeld(env: Env, ec: Ctx, c: Caller, call: CallRow): Pr
   }
   const customer = call.twilio_call_sid;
   if (!conf || !customer) throw stillMoving;
-  if (conf.status !== "init") {
+  const parts = await listParticipants(env, conf.sid).catch(() => null);
+  if (await hasStarted(c.admin, call.id, conf.sid, parts)) {
     // Started: nothing changes. Held means a Hold after Resume (Participants hold); otherwise
     // the customer is talking with you, or joins the talk if their leg is still on its way in.
-    try {
-      return (await listParticipants(env, conf.sid))
-        .some((p) => p.call_sid === customer && p.hold === true && p.status !== "complete" && p.status !== "failed");
-    } catch {
-      return null;
-    }
+    return parts ? heldIn(parts, customer) : null;
   }
+  // Already held (a warm transfer from hold that was missed): leave it. Twilio refuses a hold
+  // change a leg already has (Hold=false on one not held answered 400 live).
+  if (parts && heldIn(parts, customer)) return true;
   try {
     await updateParticipant(env, conf.sid, customer, { Hold: "true", HoldUrl: HOLD_MUSIC, HoldMethod: "GET" });
   } catch (e) {
@@ -193,32 +194,46 @@ export async function hold(env: Env, ec: Ctx, req: Request, idParam: string): Pr
     const holdCustomer = (sid: string, customerSid: string) =>
       updateParticipant(env, sid, customerSid, { Hold: "true", HoldUrl: HOLD_MUSIC, HoldMethod: "GET" });
     let conf;
+    let started = false;
+    let held = false;
     try {
       conf = await findConference(env, call.id);
       // Not found: the legs are still on their way in, and they arrive held.
-      if (conf && conf.status !== "init" && customer) await holdCustomer(conf.sid, customer);
+      if (conf && customer) {
+        const parts = await listParticipants(env, conf.sid);
+        held = heldIn(parts, customer);
+        started = await hasStarted(c.admin, call.id, conf.sid, parts);
+        // Already held (a second press): nothing to change, and Twilio may refuse the same hold.
+        if (started && !held) await holdCustomer(conf.sid, customer);
+      }
     } catch (e) {
       twilioFailure(ec, c, call, "hold", e);
       throw new ApiError("twilio_error", "Hold didn't work. You're still on the call.");
     }
-    // "init": nobody has started it, which already is hold... unless Resume was pressed just
-    // before this and its leg has not landed yet. When it does it starts the conference and
-    // connects a customer who is only waiting, so "held" would be untrue. Hold the customer
-    // through the Participants API now (as keepCustomerHeld does), so they stay on hold when
-    // it starts; and when that can't be done, say the customer is NOT held.
-    afterResume = !!conf && conf.status === "init" && !!customer
+    // Not proven started. Nobody having started it already is hold, but "not proven" is not
+    // "not started": the leg that started it may have left with no start recorded (the two of
+    // you are talking), or a Resume pressed just before this is still landing (when it does it
+    // starts the conference and connects a customer who is only waiting). So the customer is
+    // held through the Participants API anyway, as keepCustomerHeld does: safe either way.
+    // A refusal is the truth only while that Resume lands: then say the customer is NOT held.
+    // Otherwise 404 (their leg is not in yet: it arrives waiting) and 400 (Twilio refusing a
+    // hold in a conference that has not started, DEVIATIONS 55) both leave them on hold.
+    afterResume = !!conf && !started && !!customer
       && await resumeInFlight(c.admin, call.id).catch(() => false);
-    if (afterResume && conf && customer) {
+    if (conf && customer && !started && !held) {
       try {
         await holdCustomer(conf.sid, customer);
       } catch (e) {
-        const truth = { held: false, call_id: call.id };
+        const status = e instanceof TwilioError ? e.status : 0;
+        const truth = afterResume ? { held: false, call_id: call.id } : undefined;
         // 404: the customer's leg is not in yet either; it will join the started conference.
-        if (e instanceof TwilioError && e.status === 404) {
+        if (afterResume && status === 404) {
           throw new ApiError("bad_request", "The call is still coming off hold. Press Hold again in a moment.", undefined, truth);
         }
-        twilioFailure(ec, c, call, "hold", e);
-        throw new ApiError("twilio_error", "Hold didn't work. You're still on the call.", undefined, truth);
+        if (afterResume || (status !== 404 && status !== 400)) {
+          twilioFailure(ec, c, call, "hold", e);
+          throw new ApiError("twilio_error", "Hold didn't work. You're still on the call.", undefined, truth);
+        }
       }
     }
   }
@@ -242,30 +257,34 @@ export async function resume(env: Env, ec: Ctx, req: Request, idParam: string): 
     throw new ApiError("twilio_error", "Couldn't take the call off hold. Please try again.");
   }
   if (!conf) throw new ApiError("bad_request", "The call is still being put on hold. Try again in a moment.");
-  const starting = conf.status === "init";
+  let starting = false;
   try {
-    if (starting) {
-      // Nobody has started it: bring the agent's leg back in as the one who starts it. A warm
-      // transfer from hold put the customer on a Participants hold (keepCustomerHeld); starting
-      // the conference would not end that, so it comes off first.
-      if (!call.client_call_sid) throw new ApiError("bad_request", "The call is still being put on hold. Try again in a moment.");
-      const customer = call.twilio_call_sid;
-      if (customer && (await listParticipants(env, conf.sid)).some((p) => p.call_sid === customer && p.hold === true)) {
-        await updateParticipant(env, conf.sid, customer, { Hold: "false" });
-      }
+    const parts = await listParticipants(env, conf.sid);
+    // Not proven started (a plain Hold reads in-progress too): bring the agent's leg back in as
+    // the one who starts it. Into a conference that had started, that is only a moment's
+    // leave and re-join, which the leave event ignores.
+    starting = !(await hasStarted(c.admin, call.id, conf.sid, parts));
+    if (starting && !call.client_call_sid) throw new ApiError("bad_request", "The call is still being put on hold. Try again in a moment.");
+    // The redirect first: if Twilio refuses it (a conference that started with nothing
+    // recording it, and the holder's leg since ended), a held customer is still held, never
+    // connected to whoever is in the conference while the app shows the error.
+    if (starting && call.client_call_sid) {
       await updateCall(env, call.client_call_sid, { Twiml: conferenceTwiml(env, call.id, "agent", true) });
-    } else if (call.twilio_call_sid) {
-      await updateParticipant(env, conf.sid, call.twilio_call_sid, { Hold: "false" });
     }
+    // A Participants hold (Hold after Resume, or a warm transfer from hold) comes off too:
+    // starting the conference does not end it. Only a leg that IS held: Twilio refuses
+    // Hold=false on one that is not (HTTP 400, seen live on a plain Hold).
+    const customer = call.twilio_call_sid;
+    if (customer && heldIn(parts, customer)) await updateParticipant(env, conf.sid, customer, { Hold: "false" });
   } catch (e) {
     if (e instanceof ApiError) throw e;
     twilioFailure(ec, c, call, "resume", e);
     throw new ApiError("twilio_error", "Couldn't take the call off hold. Please try again.");
   }
   const event = addCallEvent(c.admin, call.id, "resume", { user: c.userId });
-  // Your leg is still on its way back in, so the conference reads 'init' for a moment: a Hold
-  // pressed now must see this event (hold, resumeInFlight), so it is written before the answer.
-  // A lost mark never fails the press: Twilio has already done it.
+  // Your leg is still on its way back in, so nothing proves the conference started for a
+  // moment: a Hold pressed now must see this event (hold, resumeInFlight), so it is written
+  // before the answer. A lost mark never fails the press: Twilio has already done it.
   if (starting) await event.catch(() => {});
   else ec.waitUntil(event);
   return ok({ held: false, call_id: call.id });
@@ -336,7 +355,7 @@ export async function warmTransfer(env: Env, ec: Ctx, req: Request, idParam: str
       StatusCallbackEvent: ["initiated", "ringing", "answered", "completed"],
       ConferenceStatusCallback: hook(env, "/voice/conference", { call: call.id }),
       ConferenceStatusCallbackMethod: "POST",
-      ConferenceStatusCallbackEvent: [CONFERENCE_EVENTS],
+      ConferenceStatusCallbackEvent: CONFERENCE_EVENTS.split(" "),
     });
   } catch (e) {
     twilioFailure(ec, c, call, "warm_transfer", e);

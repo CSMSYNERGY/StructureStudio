@@ -1,8 +1,9 @@
 // What phone_call_events say about a live call that its row cannot: how the latest warm
-// transfer stands (GET /calls `warm`), and whether a Resume is still on its way in (Hold).
-// Migration 254 has no column for either, and one would be migration 255; the Worker already
-// writes the events these are read from, and phone_call_events_call_idx (call_id, at) serves
-// both reads.
+// transfer stands (GET /calls `warm`), whether a Resume is still on its way in (Hold), and
+// whether the call's conference is recorded as started (conference.ts hasStarted).
+// Migration 254 has no column for any of them, and one would be migration 255; the Worker
+// already writes the events these are read from, and phone_call_events_call_idx (call_id, at)
+// serves every read.
 //
 // ONLY THE WORKER'S OWN EVENTS COUNT. The apps post timing marks into the same table through
 // POST /calls/:id/events, and both post one called `warm_transfer`. That handler always stamps
@@ -104,11 +105,12 @@ export async function warmStates(admin: Admin, calls: Pick<CallRow, "id" | "answ
 
 /**
  * Is a Resume still on its way in? In a conference nobody has started, resume redirects the
- * agent's leg back in with startConferenceOnEnter=true, and until that leg lands the conference
- * still reads 'init'. True when the Worker's latest hold/resume on the call, since its latest
- * cold transfer, is a resume (resume writes that event before it answers, so a Hold pressed
- * after it always sees it). A Resume from before a cold transfer was in a conference that is
- * over; the one Hold is pressed in now was entered by a move, and nobody has resumed it.
+ * agent's leg back in with startConferenceOnEnter=true, and until that leg lands nothing proves
+ * the conference started (conference.ts hasStarted). True when the Worker's latest hold/resume
+ * on the call, since its latest cold transfer, is a resume (resume writes that event before it
+ * answers, so a Hold pressed after it always sees it). A Resume from before a cold transfer was
+ * in a conference that is over; the one Hold is pressed in now was entered by a move, and
+ * nobody has resumed it.
  */
 export async function resumeInFlight(admin: Admin, callId: string): Promise<boolean> {
   const rows = (must(
@@ -117,4 +119,32 @@ export async function resumeInFlight(admin: Admin, callId: string): Promise<bool
     "read hold events",
   ) as EventRow[] | null) ?? [];
   return sinceLastTransfer(rows).filter((e) => e.type === "hold" || e.type === "resume").pop()?.type === "resume";
+}
+
+/**
+ * What the Worker records when a call's conference has started: Twilio's `start` event, or a
+ * warm-transfer teammate answering (they join with start=true beside the customer; conference.ts).
+ */
+export const CONFERENCE_STARTED = "conference_started";
+
+/**
+ * Record that THIS conference has started. Unlike addCallEvent a failed insert throws: a start
+ * nobody recorded is what makes Hold and Resume fall back to what is safe either way.
+ */
+export async function recordConferenceStart(admin: Admin, callId: string, conferenceSid: string): Promise<void> {
+  must(await admin.from("phone_call_events").insert({ call_id: callId, type: CONFERENCE_STARTED, data: { conference_sid: conferenceSid } }), "record conference start");
+}
+
+/**
+ * Is THIS conference recorded as started? Keyed by its ConferenceSid, because a call can have
+ * one conference after another under the same name (a cold transfer ends the first). The event
+ * is never removed: nothing un-starts a conference.
+ */
+export async function conferenceStarted(admin: Admin, callId: string, conferenceSid: string): Promise<boolean> {
+  const rows = (must(
+    await admin.from("phone_call_events").select("call_id, type, at, data").eq("call_id", callId)
+      .eq("type", CONFERENCE_STARTED).eq("data->>conference_sid", conferenceSid).limit(10),
+    "read conference start",
+  ) as EventRow[] | null) ?? [];
+  return rows.some((e) => fromWorker(e) && e.data?.conference_sid === conferenceSid);
 }

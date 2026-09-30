@@ -92,8 +92,8 @@ async function handleTwilio(req: Request, env: Env, ec: Ctx, path: string, t0: n
       return out.xml ? twiml(out.xml) : noContent();
     }
     case "/voice/conference":
-      // Conference status callback (a participant left). Reply first, act after.
-      ec.waitUntil(conferenceEvent(env, p, url).catch((e) => logFault({ code: "conference_event_failed", message: (e as Error).message, req })));
+      // Conference status callback (it started, or a participant left). Reply first, act after.
+      ec.waitUntil(conferenceEvent(env, p, url, check.signed).catch((e) => logFault({ code: "conference_event_failed", message: (e as Error).message, req })));
       return noContent();
     case "/voice/transcription":
       ec.waitUntil(transcription(env, p, url).catch((e) => logFault({ code: "transcript_write_failed", message: (e as Error).message, req })));
