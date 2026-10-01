@@ -1486,19 +1486,41 @@ function Dashboard({ session }) {
     if (window.__ssWarmed) return undefined;
     window.__ssWarmed = true;
     const first = setTimeout(() => {
-      ssWarmFn("portal-schedule"); ssWarmFn("portal-commissions");
-      ssWarmFn("portal-settings"); ssWarmFn("portal-billing");
+      ssWarmThrottled("portal-schedule"); ssWarmThrottled("portal-commissions");
+      ssWarmThrottled("portal-settings"); ssWarmThrottled("portal-billing");
     }, 1500);
     const second = setTimeout(() => {
-      ssWarmFn("portal-payments"); ssWarmFn("portal-setup");
-      ssWarmFn("portal-feedback"); ssWarmFn("sync-design-status");
+      ssWarmThrottled("portal-payments"); ssWarmThrottled("portal-setup");
+      ssWarmThrottled("portal-feedback"); ssWarmThrottled("sync-design-status");
     }, 3000);
     return () => { clearTimeout(first); clearTimeout(second); };
-    // Deps stay EMPTY on purpose. Adding one (isOperator, to warm the operator-only functions)
-    // would re-run the effect the moment that flag resolves; React runs the previous cleanup
-    // first, so the pending timers would be cleared and the re-run would bail on the
-    // __ssWarmed guard — warming nothing at all. Two operators are not worth that risk.
+    // Deps stay EMPTY on purpose. Adding a late flag (isOperator) would re-run this the moment it
+    // resolves; React runs the cleanup first, clearing the pending timers, and the re-run bails
+    // on __ssWarmed, so nothing gets warmed. The operator-only functions get their own effect below.
   }, []);
+
+  // ── Warm the operator-only isolates ─────────────────────────────────────────────
+  // operator-portal (Accounts, the switcher, every view-as read), admin-catalog (Admin) and
+  // portal-projects (Projects) back screens the boot waves never name, and a cold one costs the
+  // same ~2.5 s. Their flags come from three token-keyed rpcs that answer AFTER boot, so this is a
+  // separate effect keyed on the resolved answers. No page-level guard: ssWarmThrottled stamps a
+  // function only when its ping is SENT, so a re-run that clears this timer just schedules it again.
+  // Each ping is gated on the SAME condition that draws its console, never on isOperator alone. A
+  // support operator is refused by admin-catalog and portal-projects at the door, and
+  // tests/harness/supportConsoles.mjs counts every request a support account sends to either.
+  const warmOperatorPortal = !!isOperator;
+  const warmAdminCatalog = !!isOperator && isSupportOp === false;
+  const warmProjectsFn = !!projectsOpen;
+  useEffect(() => {
+    if (!warmOperatorPortal && !warmAdminCatalog && !warmProjectsFn) return undefined;
+    // Behind the boot waves (1.5 s / 3 s), for the same reason they are delayed.
+    const t = setTimeout(() => {
+      if (warmOperatorPortal) ssWarmThrottled("operator-portal");
+      if (warmAdminCatalog) ssWarmThrottled("admin-catalog");
+      if (warmProjectsFn) ssWarmThrottled("portal-projects");
+    }, 3500);
+    return () => clearTimeout(t);
+  }, [warmOperatorPortal, warmAdminCatalog, warmProjectsFn]);
 
   // ── Who the signed-in person is, and the operator's user editor ────────────────
   // `profile` is the caller's own client_users row. needsDetails drives a one-time nudge:
@@ -2458,10 +2480,15 @@ function Dashboard({ session }) {
   // product, and they are how an operator leaves a locked account (their content renders
   // outside `!gateLocked` below for the same reason).
   const gateLockedFor = (id) => gateLocked && id !== "accounts" && id !== "admin" && id !== "projects";
+  // Intent warming: a pointer entering a rail link, or keyboard focus reaching it, warms the
+  // function(s) that page opens on (SS_NAV_WARM, 01-core). Skipped for the page you are already on
+  // and behind a billing lock, where the page is BillingGate. The consoles are never padlocked.
+  const warmNav = (id) => { if (activeTab !== id && !gateLockedFor(id)) ssWarmNav(id, !!viewing); };
   const navItem = (id, label, badge) => navHidden(id) ? null : (
     <a href={ssPagePath(id, null)} className={activeTab === id ? "active" : ""}
       aria-current={activeTab === id ? "page" : undefined}
       title={gateLockedFor(id) ? `${label} — activate your account to use this` : (badge ? `${label} — ${badge.toLowerCase()}` : label)}
+      onMouseEnter={() => warmNav(id)} onFocus={() => warmNav(id)}
       onClick={ssNavClick(() => navigate(id))}>
       {ICONS[id]}
       <span className="lbl">{label}</span>
@@ -2580,6 +2607,8 @@ function Dashboard({ session }) {
   const setItem = ([id, label]) => (
     <a key={id} href={ssPagePath("settings", setTarget(id))} className={settingsSub === id ? "active" : ""}
       aria-current={settingsSub === id ? "page" : undefined} title={label}
+      onMouseEnter={() => { if (settingsSub !== id) ssWarmSettings(id); }}
+      onFocus={() => { if (settingsSub !== id) ssWarmSettings(id); }}
       onClick={ssNavClick(() => navigate("settings", setTarget(id)))}>
       {SETTINGS_ICONS[id]}
       <span className="lbl">{label}</span>
@@ -2756,7 +2785,7 @@ function Dashboard({ session }) {
               a 52px-wide tenant list helps nobody; the Accounts page covers that mode. */}
           {isOperator && (
             <div className="ss-switch-wrap" ref={pickerRef}>
-              <button type="button" className="ss-switch" onClick={() => setPickerOpen((o) => !o)}
+              <button type="button" className="ss-switch" onMouseEnter={() => ssWarmThrottled("operator-portal")} onClick={() => setPickerOpen((o) => !o)}
                 aria-haspopup="listbox" aria-expanded={pickerOpen}
                 title={viewing ? `Viewing ${shownBusiness} — switch account` : "Switch account"}>
                 <div className="ss-clogo" aria-hidden="true">{tenantInitials}</div>
@@ -2801,7 +2830,7 @@ function Dashboard({ session }) {
           )}
           {/* ⚠️ Not to be confused with `supportView` in this file, which is a support
               OPERATOR viewing a tenant — a role, not this page. Same word, unrelated. */}
-          <a className="ss-newlink" href={ssPagePath("support", null)} onClick={ssNavClick(() => navigate("support"))} title="Support">
+          <a className="ss-newlink" href={ssPagePath("support", null)} onMouseEnter={() => warmNav("support")} onFocus={() => warmNav("support")} onClick={ssNavClick(() => navigate("support"))} title="Support">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2.35 6.76H21l-5.32 4.02L17.7 20 12 15.6 6.3 20l2.02-7.22L3 8.76h6.65z"/></svg>
             <span>Support</span>
           </a>

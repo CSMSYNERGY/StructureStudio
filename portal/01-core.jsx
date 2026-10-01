@@ -2445,6 +2445,57 @@ function ssWarmFn(name) {
   } catch (_e) { /* a warm-up must never be why something failed */ }
 }
 
+// ── Warm on INTENT, and on flags that resolve late ─────────────────────────────────────
+// The boot waves (12-shell) warm each isolate once, and isolates recycle within minutes, so a
+// click several minutes in lands cold (~2.5 s before the function runs a line). These fire when
+// a person is about to open something — the pointer enters a rail link, keyboard focus reaches
+// it — at most once per function per minute however much the pointer wanders.
+// The stamp is taken when a ping is SENT, never when it is scheduled: a caller whose timer was
+// cleared before it fired has sent nothing and must not have spent its minute. That is the boot
+// effect's deps trap, and why the operator warm-up uses this rather than a page flag.
+// ⚠️ Only functions that answer ?warm=1 may be named here. Without that endpoint an anon-key ping
+// runs the real auth — admin-catalog would count it as a FAILED ADMIN PASSWORD (it gained the
+// endpoint 2026-10-02, deployed before this code shipped).
+const SS_WARM_EVERY_MS = 60000;
+const ssWarmSentAt = new Map(); // function name -> Date.now() of this page's last ping
+function ssWarmThrottled(name) {
+  try {
+    const now = Date.now();
+    if (now - (ssWarmSentAt.get(name) || 0) < SS_WARM_EVERY_MS) return;
+    ssWarmSentAt.set(name, now);
+    ssWarmFn(name);
+  } catch (_e) { /* a warm-up must never be why something failed */ }
+}
+// What each rail destination calls when it OPENS. Designer/Advanced are absent on purpose: they
+// open on REST plus the designer bundle, and submit-estimate is minutes away.
+const SS_NAV_WARM = {
+  designs: ["sync-design-status"],                      // REST list paints, then the status sync
+  contacts: ["sync-design-status"],
+  inventory: ["portal-settings", "sync-design-status"], // list_inventory, then the sync
+  orders: ["portal-settings", "portal-schedule"],       // orders_designs; schedule_links
+  "build-schedule": ["portal-schedule"],
+  "delivery-schedule": ["portal-schedule"],
+  repairs: ["portal-schedule"],
+  commissions: ["portal-commissions"],
+  calls: ["portal-settings"],                           // phone_calls_report
+  settings: ["portal-settings"],                        // Structures' catalog read
+  support: ["portal-setup"],                            // the setup checklist
+  accounts: ["operator-portal"],
+  admin: ["admin-catalog"],
+  projects: ["portal-projects"],
+};
+// Settings rail items that open on something other than portal-settings.
+const SS_SETTINGS_WARM = { billing: ["portal-billing"], sms: ["portal-sms"] };
+function ssWarmNav(id, viewing) {
+  // View-as reads Pipeline/Contacts through operator-portal with no status sync, and Commissions
+  // renders a refusal card there.
+  const fns = viewing && (id === "designs" || id === "contacts") ? ["operator-portal"]
+    : viewing && id === "commissions" ? []
+    : (SS_NAV_WARM[id] || []);
+  fns.forEach(ssWarmThrottled);
+}
+function ssWarmSettings(id) { (SS_SETTINGS_WARM[id] || ["portal-settings"]).forEach(ssWarmThrottled); }
+
 // Table-shaped skeleton: the same column count as the real table, so the header row and the
 // first paint line up and nothing jumps when the rows arrive.
 function SkelRows({ cols = 5, rows = 6, widths = null }) {

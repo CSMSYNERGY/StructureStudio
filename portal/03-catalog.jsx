@@ -2130,7 +2130,12 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const [dragIdx, setDragIdx] = useState(null);              // index of the style row being dragged
 
   const load = async () => {
-    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
+    // Shares the same-tick catalog flight with RealTimePricing, which Settings → Structures mounts
+    // beside this card (window.__ssCatalogFlight below). Key = the tenant the call will hit.
+    const body = { action: "catalog" };
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     setCat(data);
   };
@@ -2671,8 +2676,8 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
 // LayoutPricing, DoorsView, RampsView, WindowsView) and FIVE of the things inside them —
 // LayoutPricing, the door catalog, RampsView, WindowColorsEditor, the window catalog —
 // each fire their OWN identical portal-settings {action:"catalog"} in the same mount tick.
-// That action is one edge invocation doing ten parallel table reads
-// (supabase/functions/portal-settings/index.ts:1027-1082) and returning the whole payload
+// That action is one edge invocation doing sixteen table reads plus the wallet pair, all in one
+// Promise.all (portal-settings, `if (action === "catalog")`), and returning the whole payload
 // every time; four of the five callers keep a slice of it (one fixture category + colors,
 // windowColors alone, rampSettings alone). Five identical copies contend on the same edge
 // instance and the tab is only whole when the SLOWEST lands — so the wait was the tail of
@@ -2680,6 +2685,9 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
 //
 // This coalesces those flights and does nothing else: same action, same arguments, same
 // payload, same tenant scoping. Only how many copies go on the wire changes.
+// Settings → Structures shares it too (2026-10-02): PricingCsv and RealTimePricing mount side by
+// side and each read the catalog. The accepted trade, the same one the Options cards make: if that
+// one invocation fails, both cards show the error instead of usually only one.
 //
 // ⚠️ IN-FLIGHT ONLY, AND ONLY WITHIN THE TICK THAT STARTED IT — a settled result is NEVER
 // reused. Every mutation on this tab ends in `await load()` (LayoutPricing.toggleArchive,
@@ -2758,11 +2766,14 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
   const [confirmToggle, setConfirmToggle] = useState(null);  // { to: boolean } | null
 
   const load = async () => {
+    // The catalog flight is keyed like every sibling's (the tenant the call will hit), so it is
+    // the SAME flight PricingCsv starts in this tick. It used "catalog|<id>", which never matched.
+    const catBody = scoped({ action: "catalog" });
     const [rtpRes, catRes] = await Promise.all([
       sb.functions.invoke("portal-settings", { body: scoped({ action: "rtp_data" }) }),
       window.__ssCatalogFlight(
-        () => sb.functions.invoke("portal-settings", { body: scoped({ action: "catalog" }) }),
-        "catalog|" + (clientId || "own"),
+        () => sb.functions.invoke("portal-settings", { body: catBody }),
+        String(catBody.targetClientId == null ? (ssTargetClientId || "") : catBody.targetClientId),
       ),
     ]);
     const rtpErr = rtpRes.error || (rtpRes.data && rtpRes.data.error);

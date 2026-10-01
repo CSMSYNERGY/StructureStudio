@@ -2206,7 +2206,33 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
-    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes] = await Promise.all([
+    // WALLET, read here rather than only in portal-billing, because the calibration panel has to
+    // show "$20 · balance $140" BEFORE the builder clicks. Learning the price from a 402 after
+    // waiting thirty seconds for a generation is the worst possible ordering.
+    //
+    // ALL READS AT ONCE (2026-10-02), the same move as `status`. The wallet pair keys on clientId and
+    // a constant kind and never needed the catalog's answer, yet it waited for all sixteen table
+    // reads to land first: one more serial round trip on every catalog call. It starts with them
+    // now. Its tolerance is UNCHANGED and deliberate: errors read as 0 balance / null price / meter
+    // off; only a throw gives wallet = null; this promise never rejects, and it is outside the
+    // error loop below, so a wallet failure still cannot fail the catalog.
+    const walletRead = (async (): Promise<{ balanceCents: number; heldCents: number; priceCents: number | null; meterActive: boolean } | null> => {
+      try {
+        const [acct, price] = await Promise.all([
+          admin.from("wallet_accounts").select("balance_cents, held_cents").eq("client_id", clientId).maybeSingle(),
+          admin.from("usage_prices").select("price_cents, active, visible").eq("kind", "video_3d_generation").maybeSingle(),
+        ]);
+        return {
+          balanceCents: Number(acct.data?.balance_cents ?? 0),
+          heldCents: Number(acct.data?.held_cents ?? 0),
+          // Redacted when visible is false, the same posture portal-billing takes on
+          // billing_plans.price_cents — the projection and the revoke are both load-bearing.
+          priceCents: price.data && price.data.visible !== false ? Number(price.data.price_cents) : null,
+          meterActive: Boolean(price.data?.active),
+        };
+      } catch (_) { return null; }
+    })();
+    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes, wallet] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
       // updated_at (2026-09-14): the style's version, which the 3D editor sends back with its
@@ -2241,6 +2267,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Foundation services (237). The card renders a FIXED four rows, so a tenant with no rows
       // is simply one offering no site work yet.
       admin.from("foundation_items").select("id, item_id, label_override, rate, basis, taxable, internal_only, active, sort_order").eq("client_id", clientId).order("sort_order"),
+      // NOT one of the sixteen: never in the error loop below, and it cannot reject (see above).
+      walletRead,
     ]);
     // csRamp is in this list. It used to be the one query of the nine whose error was not
     // checked, and its defaults are not neutral: `rs` would come back undefined and the
@@ -2267,27 +2295,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
     // aiReady lets the editor DISABLE "Draft from photos" with a reason rather than letting a
     // builder click a button that can only fail: the Anthropic key is an edge secret, so the
-    // browser has no other way to know whether the feature is configured.
-    // WALLET, read here rather than only in portal-billing, because the calibration panel
-    // has to show "$20 · balance $140" BEFORE the builder clicks. Learning the price from
-    // a 402 after waiting thirty seconds for a generation is the worst possible ordering.
-    // Fails soft to nulls: a wallet read that errors must not blank the whole catalog.
-    let wallet: { balanceCents: number; heldCents: number; priceCents: number | null; meterActive: boolean } | null = null;
-    try {
-      const [acct, price] = await Promise.all([
-        admin.from("wallet_accounts").select("balance_cents, held_cents").eq("client_id", clientId).maybeSingle(),
-        admin.from("usage_prices").select("price_cents, active, visible").eq("kind", "video_3d_generation").maybeSingle(),
-      ]);
-      wallet = {
-        balanceCents: Number(acct.data?.balance_cents ?? 0),
-        heldCents: Number(acct.data?.held_cents ?? 0),
-        // Redacted when visible is false, the same posture portal-billing takes on
-        // billing_plans.price_cents — the projection and the revoke are both load-bearing.
-        priceCents: price.data && price.data.visible !== false ? Number(price.data.price_cents) : null,
-        meterActive: Boolean(price.data?.active),
-      };
-    } catch (_) { wallet = null; }
-
+    // browser has no other way to know whether the feature is configured. `wallet` is read with
+    // the sixteen above (walletRead).
     return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], wallHeights: wallHeightsRes.data ?? [], cladding: claddingRes.data ?? [], insulation: insulationRes.data ?? [],
       // Null for a tenant who has never opened the card — the portal falls back to the same
       // defaults the table declares, so the form is never blank.
@@ -2321,6 +2330,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // 2026-09-15 (see the note above the row scope). Errors reading billing fail CLOSED — a
   // paid gate that fails open is no gate (the wallet's posture).
   const RTP_ACTIONS = new Set(["rtp_data", "save_rtp_material", "delete_rtp_material", "reorder_rtp_materials", "save_rtp_bom", "save_rtp_overhead", "import_rtp_workbook", "set_rtp_enabled"]);
+  // rtp_data's five reads START here, alongside the entitlement check below, instead of after it
+  // (2026-10-02): the check is two or three round trips of its own, and the reads never needed its
+  // answer. Nothing is RETURNED until the check has passed — the rtp_data branch awaits these only
+  // after it — so an unpaid tenant still gets the teaser and nothing else. Every read is
+  // read-only (rtp_compute_prices is STABLE; for a tenant with no BOM it loops over nothing). The
+  // .catch only marks the promise handled, so a refusal path that never awaits it cannot leave an
+  // unhandled rejection behind.
+  const rtpDataReads = action === "rtp_data"
+    ? Promise.all([
+      admin.from("rtp_materials").select("id, category, name, unit_cost, sort_order, active").eq("client_id", clientId).order("sort_order").order("created_at"),
+      admin.from("rtp_bom_lines").select("id, size_id, material_id, section, qty, sort_order").eq("client_id", clientId).order("sort_order"),
+      admin.from("rtp_overhead_lines").select("id, label, kind, value, sort_order, active").eq("client_id", clientId).order("sort_order").order("created_at"),
+      admin.from("client_settings").select("rtp_enabled").eq("client_id", clientId).maybeSingle(),
+      admin.rpc("rtp_compute_prices", { p_client_id: clientId }),
+    ])
+    : null;
+  rtpDataReads?.catch(() => {});
   if (RTP_ACTIONS.has(action)) {
     let paid = false;
     try { paid = await hasPaidFeature(admin, clientId, "on_demand_pricing"); }
@@ -2455,13 +2481,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   };
 
   if (action === "rtp_data") {
-    const [mats, bom, ovh, cs, prev] = await Promise.all([
-      admin.from("rtp_materials").select("id, category, name, unit_cost, sort_order, active").eq("client_id", clientId).order("sort_order").order("created_at"),
-      admin.from("rtp_bom_lines").select("id, size_id, material_id, section, qty, sort_order").eq("client_id", clientId).order("sort_order"),
-      admin.from("rtp_overhead_lines").select("id, label, kind, value, sort_order, active").eq("client_id", clientId).order("sort_order").order("created_at"),
-      admin.from("client_settings").select("rtp_enabled").eq("client_id", clientId).maybeSingle(),
-      admin.rpc("rtp_compute_prices", { p_client_id: clientId }),
-    ]);
+    // Started above the entitlement check (rtpDataReads); awaited only now that it has passed.
+    const [mats, bom, ovh, cs, prev] = await rtpDataReads!;
     for (const r of [mats, bom, ovh, cs, prev]) if (r.error) return dbFail(req, clientId, "load your real-time pricing", r.error);
     return json({
       ok: true, entitled: true,
