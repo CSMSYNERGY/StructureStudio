@@ -20,6 +20,7 @@
 // Same specifier every function in this project uses — mixing jsr: and esm.sh would
 // bundle two copies of supabase-js into each function.
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { checkAccessToken } from "./localJwt.ts";
 import {
   canEdit,
   canRead,
@@ -78,7 +79,14 @@ export type TenantCtx = {
    * who did it, we must not do it.
    */
   auditStrict: (action: string, rowCount?: number | null, note?: string | null) => Promise<void>;
+  /** How the caller was verified: "local" (token checked here + resolve_caller) or "network"
+   *  (GoTrue's getUser). For Server-Timing — a fast path that has quietly switched itself off
+   *  looks exactly like a slow day otherwise. */
+  authPath: "local" | "network";
 };
+
+/** The caller's client_users row, as both the fast path and the plain read return it. */
+type MappingRow = { client_id: string; role: string | null; title: string | null; access: unknown };
 
 export type Resolved =
   | { ok: true; ctx: TenantCtx }
@@ -115,15 +123,48 @@ function makeAudit(admin: Admin, actor: { userId: string; email: string } | null
   };
 }
 
+/** The 401 for a caller GoTrue would not vouch for, with WHY in a fixed enum. */
+function notSignedIn(authHeader: string): Resolved {
+  // WHICH failure this was is the one thing the log could never say. Every cause
+  // collapsed into this single string with `userErr` thrown away, so 34 "Not signed in."
+  // rows across four weeks could not distinguish a tab that sent the BARE ANON KEY
+  // because its session had momentarily vanished from a real token being rejected — and
+  // those two want opposite fixes. Classify instead of guessing. It costs no round trip,
+  // and naming the credential back to the caller that just sent it leaks nothing (the
+  // reason is deliberately a fixed enum, never `userErr.message`, which is provider text
+  // this project's error contract keeps out of the browser).
+  // Classify STRUCTURALLY rather than by comparing against SUPABASE_ANON_KEY. That env
+  // value and the literal baked into the browser bundle live in two different deploy
+  // pipelines, and the day they drift the classifier would invert in silence — reporting
+  // "a real token was refused" for precisely the case where no user token was sent, which
+  // is worse than the one ambiguous string it replaces. The shape is the fact: an anon key
+  // is a well-formed JWT whose payload carries role "anon" and no `sub`.
+  const bearer = authHeader.replace(/^Bearer\s+/i, "").trim();
+  const claims: Record<string, unknown> | null = (() => {
+    try {
+      const part = bearer.split(".")[1];
+      if (!part) return null;
+      const b = part.replace(/-/g, "+").replace(/_/g, "/");
+      return JSON.parse(atob(b + "=".repeat((4 - (b.length % 4)) % 4))) as Record<string, unknown>;
+    } catch { return null; }
+  })();
+  const reason = !bearer
+    ? "missing"
+    : (claims && !claims.sub && claims.role === "anon") ? "anon_key" : "rejected";
+  return { ok: false, status: 401, body: { error: "Not signed in.", reason } };
+}
+
 /**
  * Resolve which tenant this request acts on, and whether the caller may write to it.
  *
  * Gate ORDER is load-bearing:
- *   1. auth.getUser() first. The bare anon key is a valid JWT with no `sub`, so it dies
- *      here — BEFORE targetClientId is ever read. That is the primary defence, not the
- *      operator lookup below.
+ *   1. Who is calling, first: the token verified here plus resolve_caller's session check,
+ *      or auth.getUser() when that cannot decide. The bare anon key is a valid JWT with no
+ *      `sub` (and no `kid`), so it falls to getUser and dies there — BEFORE targetClientId
+ *      is ever read. That is the primary defence, not the operator lookup below.
  *   2. Parse the body (here, not in the caller) so a malformed body from an
  *      unauthenticated caller still 401s rather than 400s — preserving today's precedence.
+ *      The session check in step 1 runs before the body for the same reason.
  *   3. Own-tenant mapping, then the operator override.
  */
 export async function resolveTenant(
@@ -177,39 +218,48 @@ export async function resolveTenant(
 
   // 1. Real user check (the bare anon key passes the gateway but has no user).
   const authHeader = req.headers.get("Authorization") || "";
-  const userClient = createClient(supabaseUrl, anonKey, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userErr } = await userClient.auth.getUser();
-  const user = userData?.user;
-  if (userErr || !user) {
-    // WHICH failure this was is the one thing the log could never say. Every cause
-    // collapsed into this single string with `userErr` thrown away, so 34 "Not signed in."
-    // rows across four weeks could not distinguish a tab that sent the BARE ANON KEY
-    // because its session had momentarily vanished from a real token being rejected — and
-    // those two want opposite fixes. Classify instead of guessing. It costs no round trip,
-    // and naming the credential back to the caller that just sent it leaks nothing (the
-    // reason is deliberately a fixed enum, never `userErr.message`, which is provider text
-    // this project's error contract keeps out of the browser).
-    // Classify STRUCTURALLY rather than by comparing against SUPABASE_ANON_KEY. That env
-    // value and the literal baked into the browser bundle live in two different deploy
-    // pipelines, and the day they drift the classifier would invert in silence — reporting
-    // "a real token was refused" for precisely the case where no user token was sent, which
-    // is worse than the one ambiguous string it replaces. The shape is the fact: an anon key
-    // is a well-formed JWT whose payload carries role "anon" and no `sub`.
-    const bearer = authHeader.replace(/^Bearer\s+/i, "").trim();
-    const claims: Record<string, unknown> | null = (() => {
-      try {
-        const part = bearer.split(".")[1];
-        if (!part) return null;
-        const b = part.replace(/-/g, "+").replace(/_/g, "/");
-        return JSON.parse(atob(b + "=".repeat((4 - (b.length % 4)) % 4))) as Record<string, unknown>;
-      } catch { return null; }
-    })();
-    const reason = !bearer
-      ? "missing"
-      : (claims && !claims.sub && claims.role === "anon") ? "anon_key" : "rejected";
-    return { ok: false, status: 401, body: { error: "Not signed in.", reason } };
+
+  // FAST PATH (2026-10-01): verify the token here and ask the database, in ONE query, whether
+  // its session is still alive and which business the caller belongs to. getUser() was a round
+  // trip to GoTrue on every call and the slowest, least predictable part of this preamble
+  // (2.6–3.5 s on a bad call against 0.12–0.16 s on a good one). See _shared/localJwt.ts.
+  //   verified + session live  → this user; the client_users row below is already in hand.
+  //   verified + session gone  → 401, the same answer getUser() gives a signed-out token.
+  //   invalid                  → 401 (expired, forged, malformed).
+  //   unchecked, or the query failed (migration 257 not applied, a blip) → getUser() below,
+  //   exactly as before. Slower, never weaker.
+  let user: { id: string; email?: string } | null = null;
+  let knownMapping: MappingRow[] | null = null;
+  let authPath: "local" | "network" = "network";
+  const local = await checkAccessToken(authHeader.replace(/^Bearer\s+/i, "").trim());
+  if (local.kind === "invalid") {
+    return { ok: false, status: 401, body: { error: "Not signed in.", reason: "rejected" } };
+  }
+  if (local.kind === "verified") {
+    const { data: rows, error: rpcErr } = await admin.rpc("resolve_caller", {
+      p_user_id: local.sub,
+      p_session_id: local.sessionId,
+    });
+    const row = !rpcErr && Array.isArray(rows) ? rows[0] : null;
+    if (row) {
+      if (!row.session_live) {
+        return { ok: false, status: 401, body: { error: "Not signed in.", reason: "rejected" } };
+      }
+      user = { id: local.sub, email: local.email };
+      knownMapping = row.client_id
+        ? [{ client_id: row.client_id, role: row.role, title: row.title, access: row.access }]
+        : [];
+      authPath = "local";
+    }
+  }
+
+  if (!user) {
+    const userClient = createClient(supabaseUrl, anonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const { data: userData, error: userErr } = await userClient.auth.getUser();
+    user = userData?.user ?? null;
+    if (userErr || !user) return notSignedIn(authHeader);
   }
 
   // 2. Body.
@@ -239,11 +289,15 @@ export async function resolveTenant(
   //    limit(1) not maybeSingle(): maybeSingle() ERRORS when a duplicate client_users row
   //    exists, which would lock the user out entirely. portal.html already guards this
   //    the same way (its "audit #F6" comment); these functions did not.
-  const { data: mapRows, error: mapErr } = await admin
-    .from("client_users")
-    .select("client_id, role, title, access")
-    .eq("user_id", user.id)
-    .limit(1);
+  //    On the fast path resolve_caller has already read this same row (same columns, same
+  //    unordered limit 1), so there is nothing to fetch.
+  const { data: mapRows, error: mapErr } = knownMapping
+    ? { data: knownMapping, error: null }
+    : await admin
+      .from("client_users")
+      .select("client_id, role, title, access")
+      .eq("user_id", user.id)
+      .limit(1);
   if (mapErr) return { ok: false, status: 500, body: { error: mapErr.message } };
   const mapping = mapRows && mapRows[0];
 
@@ -288,6 +342,7 @@ export async function resolveTenant(
         action,
         audit: (act, n = null, note = null) => a(act, n, note, false).catch(() => {}),
         auditStrict: (act, n = null, note = null) => a(act, n, note, true),
+        authPath,
       },
     };
   }
@@ -447,6 +502,7 @@ export async function resolveTenant(
       action,
       audit: (act, n = null, note = null) => a(act, n, note, false).catch(() => {}),
       auditStrict: (act, n = null, note = null) => a(act, n, note, true),
+      authPath,
     },
   };
 }

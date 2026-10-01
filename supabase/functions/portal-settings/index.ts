@@ -561,7 +561,7 @@ function json(body: unknown, status = 200) {
 //
 // Added 2026-10-01 to find out what is left of "every call costs ~2.2 s" once the function
 // runs next to the database (the portal pins it to us-east-1 since the same day).
-type ServerTiming = { auth: number; db: number; dbN: number };
+type ServerTiming = { auth: number; authPath?: string; db: number; dbN: number };
 
 const timedFetch = (st: ServerTiming): typeof fetch => async (input, init) => {
   const t0 = performance.now();
@@ -589,7 +589,7 @@ function withServerTiming(
       const region = Deno.env.get("SB_REGION") ?? "unknown";
       res.headers.set(
         "Server-Timing",
-        `auth;dur=${ms(st.auth)}, db;desc="${st.dbN} queries";dur=${ms(st.db)}, ` +
+        `auth;desc="${st.authPath ?? "none"}";dur=${ms(st.auth)}, db;desc="${st.dbN} queries";dur=${ms(st.db)}, ` +
           `total;dur=${ms(performance.now() - t0)}, region;desc="${region}"`,
       );
       // Cross-origin JS sees only safelisted headers; the refusal marker may already be named.
@@ -1114,6 +1114,7 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
   const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status" });
   st.auth = performance.now() - authStart;
   if (!r.ok) return json(r.body, r.status);
+  st.authPath = r.ctx.authPath; // "local" = the fast path in _shared/resolveTenant.ts held
   const { clientId, role, operator, payload, action, audit, auditStrict, userId, userEmail, canRead, canEdit, access } = r.ctx;
 
   // Reads are logged best-effort; writes get a durable row (below, per action).
