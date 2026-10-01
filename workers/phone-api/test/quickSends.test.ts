@@ -35,7 +35,13 @@ function row(id: string, over: Partial<Row> = {}): Row {
 
 const out = ({ client_id: _c, user_id: _u, created_at: _t, ...r }: Row) => r;
 
-/** phone_quick_sends on the fake network: honours the id/user_id/client_id filters, order and limit. */
+/** The error PostgREST answers when phone_add_quick_send raises at the cap. */
+const capError = () => jsonRes({ code: "P0001", message: "quick_send_cap", details: null, hint: null }, 400);
+
+/**
+ * phone_quick_sends on the fake network: honours the id/user_id/client_id filters, order and
+ * limit, and phone_add_quick_send counts and numbers the way migration 258's does.
+ */
 function table(net: FakeNet, rows: Row[]) {
   const scoped = (s: Seen) => rows.filter((r) => (["id", "user_id", "client_id"] as const).every((col) => {
     const v = filter(s, col);
@@ -49,10 +55,16 @@ function table(net: FakeNet, rows: Row[]) {
     const limit = Number(s.url.searchParams.get("limit")) || sorted.length;
     return sorted.slice(0, limit);
   });
-  net.rest("POST", "phone_quick_sends", (s) => {
-    const r = row("00000000-0000-4000-8000-00000000dfff", { ...s.json, usage_count: 0, updated_at: T0 });
+  net.rpc("phone_add_quick_send", (s) => {
+    const { p_user, p_client, p_name, p_body, p_category } = s.json;
+    const mine = rows.filter((r) => r.user_id === p_user && r.client_id === p_client);
+    if (mine.length >= 100) return capError();
+    const r = row("00000000-0000-4000-8000-00000000dfff", {
+      client_id: p_client, user_id: p_user, name: p_name, body: p_body, category: p_category,
+      sort_order: Math.max(-1, ...mine.map((x) => x.sort_order)) + 1,
+    });
     rows.push(r);
-    return [r];
+    return r;
   });
   net.rest("PATCH", "phone_quick_sends", (s) => {
     const hit = scoped(s);
@@ -139,42 +151,41 @@ describe("GET /quick-sends", () => {
 });
 
 describe("POST /quick-sends", () => {
-  it("adds one after the last, trimmed, owned by the caller on their team", async () => {
+  it("adds one after the last, trimmed, owned by the caller on their team, in one database call", async () => {
     const { net, token, env } = await setup([row(QS_1, { sort_order: 0 }), row(QS_2, { sort_order: 4 }), ...strangers().map((r) => ({ ...r, sort_order: 50 }))]);
     const { json } = await call(env, appRequest("POST", "/quick-sends", token, {
       name: "  Running late  ", body: "  Hi {first_name}, I'm running about 10 minutes late.\n", category: " Follow-ups ",
     }));
     expect(json.ok).toBe(true);
     expect(json.quick_send).toMatchObject({ name: "Running late", body: "Hi {first_name}, I'm running about 10 minutes late.", category: "Follow-ups", sort_order: 5, usage_count: 0 });
-    const ins = net.writes("phone_quick_sends", "POST");
-    expect(ins).toHaveLength(1);
-    expect(ins[0].json).toEqual({
-      name: "Running late", body: "Hi {first_name}, I'm running about 10 minutes late.", category: "Follow-ups",
-      user_id: USER_A, client_id: CLIENT, sort_order: 5,
+    const add = net.rpcCalls("phone_add_quick_send");
+    expect(add).toHaveLength(1);
+    expect(add[0].json).toEqual({
+      p_user: USER_A, p_client: CLIENT,
+      p_name: "Running late", p_body: "Hi {first_name}, I'm running about 10 minutes late.", p_category: "Follow-ups",
     });
-    const count = net.reads("phone_quick_sends")[0];
-    expect(filter(count, "user_id")).toBe(USER_A);
-    expect(filter(count, "client_id")).toBe(CLIENT);
+    // Counting and numbering are the RPC's, under its lock: never a read-then-insert here.
+    expect(net.to(/\/rest\/v1\/phone_quick_sends/)).toHaveLength(0);
   });
 
   it.each([[undefined], [null], ["   "]])("the first one is sort_order 0, and category %j is none", async (category) => {
     const { net, token, env } = await setup(strangers());
     const { json } = await call(env, appRequest("POST", "/quick-sends", token, { name: "Thanks", body: "Thank you!", category }));
     expect(json.quick_send).toMatchObject({ sort_order: 0, category: null });
-    expect(net.writes("phone_quick_sends", "POST")[0].json.category).toBeNull();
+    expect(net.rpcCalls("phone_add_quick_send")[0].json.p_category).toBeNull();
   });
 
   it("tidies runs of spaces in a category, so it can't make a second chip", async () => {
     const { net, token, env } = await setup();
     await call(env, appRequest("POST", "/quick-sends", token, { name: "x", body: "y", category: "Follow   ups" }));
-    expect(net.writes("phone_quick_sends", "POST")[0].json.category).toBe("Follow ups");
+    expect(net.rpcCalls("phone_add_quick_send")[0].json.p_category).toBe("Follow ups");
   });
 
   it("counts characters the way the database does (an emoji is one)", async () => {
     const { net, token, env } = await setup();
     const { json } = await call(env, appRequest("POST", "/quick-sends", token, { name: "😀".repeat(60), body: "👍".repeat(1600), category: "é".repeat(30) }));
     expect(json.ok).toBe(true);
-    expect(net.writes("phone_quick_sends", "POST")).toHaveLength(1);
+    expect(net.rpcCalls("phone_add_quick_send")).toHaveLength(1);
   });
 
   it.each([
@@ -192,7 +203,7 @@ describe("POST /quick-sends", () => {
     const { res, json } = await call(env, appRequest("POST", "/quick-sends", token, body));
     expect(res.status).toBe(400);
     expect(json.error).toEqual({ code: "bad_request", message });
-    expect(net.writes("phone_quick_sends")).toHaveLength(0);
+    expect(net.rpcCalls("phone_add_quick_send")).toHaveLength(0);
   });
 
   it("refuses a body that isn't a JSON object", async () => {
@@ -203,13 +214,15 @@ describe("POST /quick-sends", () => {
 
   it("stops at 100 per person, and says what to do", async () => {
     const full = Array.from({ length: 100 }, (_, i) => row(`00000000-0000-4000-8000-${String(i).padStart(12, "0")}`, { sort_order: i }));
-    const { net, token, env } = await setup([...full, ...strangers()]);
-    const { json } = await call(env, appRequest("POST", "/quick-sends", token, { name: "One more", body: "Hello" }));
+    const { net, rows, token, env } = await setup([...full, ...strangers()]);
+    const { res, json } = await call(env, appRequest("POST", "/quick-sends", token, { name: "One more", body: "Hello" }));
+    expect(res.status).toBe(400);
     expect(json.error).toEqual({
       code: "bad_request",
       message: "You have 100 quick sends, which is the most you can keep. Delete one you don't use, then add this one.",
     });
-    expect(net.writes("phone_quick_sends", "POST")).toHaveLength(0);
+    expect(net.rpcCalls("phone_add_quick_send")).toHaveLength(1);
+    expect(rows).toHaveLength(102);
   });
 
   it("the 100th still fits, and other people's quick sends don't count against the caller", async () => {
@@ -219,6 +232,14 @@ describe("POST /quick-sends", () => {
     const { json } = await call(env, appRequest("POST", "/quick-sends", token, { name: "Last", body: "Hello" }));
     expect(json.ok).toBe(true);
     expect(json.quick_send.sort_order).toBe(99);
+  });
+
+  it("any other database refusal is internal, not the cap sentence", async () => {
+    const { net, token, env } = await setup();
+    net.rpc("phone_add_quick_send", () => jsonRes({ code: "23514", message: "new row violates check constraint \"phone_quick_sends_body_chk\"" }, 400));
+    const { res, json } = await call(env, appRequest("POST", "/quick-sends", token, { name: "x", body: "y" }));
+    expect(res.status).toBe(500);
+    expect(json.error.code).toBe("internal");
   });
 });
 
@@ -344,7 +365,7 @@ describe("who may use /quick-sends", () => {
     const { res, json } = await call(env, new Request(`${BASE}${path}`, { method, ...(method === "POST" ? { body: JSON.stringify({ name: "x", body: "y" }) } : {}) }));
     expect(res.status).toBe(401);
     expect(json.error.code).toBe("unauthorized");
-    expect(net.to(/\/rest\/v1\/(phone_quick_sends|rpc\/phone_(seed_quick_sends|quick_send_used))/)).toHaveLength(0);
+    expect(net.to(/\/rest\/v1\/(phone_quick_sends|rpc\/phone_(seed_quick_sends|quick_send_used|add_quick_send))/)).toHaveLength(0);
   });
 
   it.each(all)("%s %s needs phone access", async (method, path) => {
@@ -352,7 +373,7 @@ describe("who may use /quick-sends", () => {
     const { res, json } = await call(env, appRequest(method, path, token, method === "POST" ? { name: "x", body: "y" } : undefined));
     expect(res.status).toBe(403);
     expect(json.error.code).toBe("no_phone_access");
-    expect(net.to(/\/rest\/v1\/(phone_quick_sends|rpc\/phone_(seed_quick_sends|quick_send_used))/)).toHaveLength(0);
+    expect(net.to(/\/rest\/v1\/(phone_quick_sends|rpc\/phone_(seed_quick_sends|quick_send_used|add_quick_send))/)).toHaveLength(0);
   });
 
   it("someone on no team is refused", async () => {

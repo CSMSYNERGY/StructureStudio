@@ -1,5 +1,5 @@
 -- 258_phone_quick_sends.sql — My Synergy Phone quick sends: each person's saved messages, the
---                             starter set they are given once, and the Worker's two RPCs.
+--                             starter set they are given once, and the Worker's three RPCs.
 --
 -- ⛔ APPLY BY HAND, AFTER A HUMAN HAS READ IT (SQL editor / MCP execute_sql /
 --    `supabase db query --linked -f`), then record the row in
@@ -24,6 +24,7 @@
 --   PART 2   RLS on, zero policies, service-role only, all three
 --   PART 3   phone_seed_quick_sends(user, client)       copy the starter set in, once ever
 --            phone_quick_send_used(id, user, client)    usage_count + 1 on the caller's own row
+--            phone_add_quick_send(user, client, ...)    add one after the last, never past 100
 --   PART 4   apply-time assertions (they RAISE and abort the transaction)
 --   PART 5   a behavioural probe on synthetic rows, rolled back, leaving nothing
 --
@@ -56,9 +57,9 @@
 -- service_role. Each function gets `revoke execute ... from public, anon, authenticated` and a
 -- grant to service_role only. PART 4 asserts all of it.
 --   phone_seed_quick_sends   SECURITY DEFINER, as the plan asks, with search_path = ''.
---   phone_quick_send_used    SECURITY INVOKER. It needs nothing service_role lacks, so a stray
---                            grant to a browser role would meet the table's revoked privileges
---                            instead of running as the owner.
+--   phone_quick_send_used    SECURITY INVOKER, both. They need nothing service_role lacks, so a
+--   phone_add_quick_send     stray grant to a browser role would meet the table's revoked
+--                            privileges instead of running as the owner.
 --
 -- ── CHOICES THE PLAN LEFT OPEN ───────────────────────────────────────────────────────────
 --   1. The length limits are CHECKs (name 1–60, body 1–1600, category NULL or 1–30), counted as
@@ -74,11 +75,14 @@
 --      theirs at the top.
 --   4. updated_at moves only when name, body, category or sort_order is written (a column-list
 --      trigger), so counting an Insert does not make a quick send look edited.
---   5. The 100-per-person cap is the Worker's, on adding one. It is not a constraint: the
---      starter set may take someone who already had 100 a little past it, and that is fine.
+--   5. The 100-per-person cap is phone_add_quick_send's. It counts, numbers and inserts under a
+--      per-person advisory lock, so a burst of adds at once queues and still stops at 100 (a
+--      count in the Worker and a separate insert let N parallel adds land N past it). It is not
+--      a constraint: the starter set may take someone who already had 100 a little past it, and
+--      that is fine.
 --
 -- ── SAFE WITH WHAT IS LIVE ───────────────────────────────────────────────────────────────
--- Beta and production share this database. Three new tables nothing reads yet, and two new
+-- Beta and production share this database. Three new tables nothing reads yet, and three new
 -- functions nothing calls until the Worker ships its /quick-sends routes. No existing table,
 -- function or grant is touched. Apply this BEFORE deploying a Worker with /quick-sends, or every
 -- list read there fails.
@@ -86,6 +90,7 @@
 -- ── ROLLBACK ─────────────────────────────────────────────────────────────────────────────
 -- Deploy the Worker without /quick-sends first. Everyone's quick sends go with the table:
 --   begin;
+--   drop function if exists public.phone_add_quick_send(uuid, text, text, text, text);
 --   drop function if exists public.phone_quick_send_used(uuid, uuid, text);
 --   drop function if exists public.phone_seed_quick_sends(uuid, text);
 --   drop table if exists public.phone_quick_send_seeded;
@@ -178,7 +183,7 @@ grant select, insert, update, delete on public.phone_quick_send_defaults to serv
 grant select, insert, update, delete on public.phone_quick_send_seeded   to service_role;
 
 -- ═════════════════════════════════════════════════════════════════════════════════════════
--- PART 3 — the Worker's two RPCs. service_role only.
+-- PART 3 — the Worker's three RPCs. service_role only.
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 
 -- ── phone_seed_quick_sends: the starter set, once ever per person and team ──────────────
@@ -260,6 +265,52 @@ comment on function public.phone_quick_send_used(uuid, uuid, text) is
 revoke execute on function public.phone_quick_send_used(uuid, uuid, text) from public, anon, authenticated;
 grant  execute on function public.phone_quick_send_used(uuid, uuid, text) to service_role;
 
+-- ── phone_add_quick_send: add one, never past 100 ───────────────────────────────────────
+-- Called by POST /quick-sends with a name, body and category the Worker has already trimmed and
+-- checked; the table's own checks are the backstop. Count, next sort_order and insert all happen
+-- under one lock per person and team, held until this transaction commits, so adds that arrive
+-- together queue and the cap holds however many there are (choice 5). At 100 it raises
+-- 'quick_send_cap', which the Worker turns into a sentence. Returns the new row.
+create or replace function public.phone_add_quick_send(
+  p_user uuid, p_client text, p_name text, p_body text, p_category text)
+returns public.phone_quick_sends
+language plpgsql
+volatile
+security invoker
+set search_path = ''
+as $fn$
+declare
+  v_count integer;
+  v_next  integer;
+  v_row   public.phone_quick_sends;
+begin
+  if p_user is null or p_client is null or p_client = '' then
+    raise exception 'a person and a team are required' using errcode = 'null_value_not_allowed';
+  end if;
+
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtext('phone_quick_send:' || p_user::text || ':' || p_client));
+
+  select count(*), coalesce(max(q.sort_order), -1) + 1 into v_count, v_next
+    from public.phone_quick_sends q
+   where q.user_id = p_user and q.client_id = p_client;
+  if v_count >= 100 then
+    raise exception 'quick_send_cap' using errcode = 'P0001';
+  end if;
+
+  insert into public.phone_quick_sends (client_id, user_id, name, body, category, sort_order)
+  values (p_client, p_user, p_name, p_body, p_category, v_next)
+  returning * into v_row;
+  return v_row;
+end
+$fn$;
+
+comment on function public.phone_add_quick_send(uuid, text, text, text, text) is
+  'My Synergy Phone (migration 258): adds one quick send for p_user on p_client after their last, under a per-person advisory lock so parallel adds cannot pass the cap. Raises quick_send_cap (P0001) at 100. Returns the new row. service_role only.';
+
+revoke execute on function public.phone_add_quick_send(uuid, text, text, text, text) from public, anon, authenticated;
+grant  execute on function public.phone_add_quick_send(uuid, text, text, text, text) to service_role;
+
 -- ═════════════════════════════════════════════════════════════════════════════════════════
 -- PART 4 — apply-time assertions. Each RAISE aborts the transaction.
 -- ═════════════════════════════════════════════════════════════════════════════════════════
@@ -295,7 +346,8 @@ begin
   end loop;
 
   foreach v_fn in array array['public.phone_seed_quick_sends(uuid,text)',
-                              'public.phone_quick_send_used(uuid,uuid,text)'] loop
+                              'public.phone_quick_send_used(uuid,uuid,text)',
+                              'public.phone_add_quick_send(uuid,text,text,text,text)'] loop
     if has_function_privilege('anon', v_fn, 'EXECUTE')
        or has_function_privilege('authenticated', v_fn, 'EXECUTE') then
       raise exception '258: % is callable from the browser — revoke from PUBLIC as well as the named roles', v_fn;
@@ -308,10 +360,12 @@ begin
            where p.oid = 'public.phone_seed_quick_sends(uuid,text)'::regprocedure) then
     raise exception '258: phone_seed_quick_sends must be SECURITY DEFINER (the plan)';
   end if;
-  if (select p.prosecdef from pg_catalog.pg_proc p
-       where p.oid = 'public.phone_quick_send_used(uuid,uuid,text)'::regprocedure) then
-    raise exception '258: phone_quick_send_used must be SECURITY INVOKER';
-  end if;
+  foreach v_fn in array array['public.phone_quick_send_used(uuid,uuid,text)',
+                              'public.phone_add_quick_send(uuid,text,text,text,text)'] loop
+    if (select p.prosecdef from pg_catalog.pg_proc p where p.oid = v_fn::regprocedure) then
+      raise exception '258: % must be SECURITY INVOKER', v_fn;
+    end if;
+  end loop;
 
   -- ── The checks exist (PART 5 proves they refuse what they must) ──
   foreach v_con in array array['phone_quick_sends_name_chk','phone_quick_sends_body_chk',
@@ -360,7 +414,9 @@ declare
   k_cid     constant text := '__258_probe__';
   u1        uuid := gen_random_uuid();
   u2        uuid := gen_random_uuid();
+  u3        uuid := gen_random_uuid();
   v_n       integer;
+  v_row     public.phone_quick_sends;
   v_id      uuid;
   v_names   text[];
   v_refused boolean;
@@ -479,11 +535,46 @@ begin
     insert into public.phone_quick_send_defaults (name, body, category)
     values (repeat('é', 60), repeat('b', 1600), repeat('c', 30));
 
+    -- ── 8. Adding one: theirs, after the last, and refused at 100 ──
+    v_row := public.phone_add_quick_send(u3, k_cid, 'Probe added', 'Probe body', null);
+    if v_row.user_id is distinct from u3 or v_row.client_id is distinct from k_cid or v_row.sort_order <> 0 then
+      raise exception '258 probe: the first add was not theirs at sort_order 0: %', v_row;
+    end if;
+    -- 98 more with a gap in sort_order, so "after the last" and "after as many as there are" differ.
+    insert into public.phone_quick_sends (client_id, user_id, name, body, sort_order)
+    select k_cid, u3, 'Probe ' || g, 'Probe body', 10 + g from generate_series(1, 98) g;
+    v_row := public.phone_add_quick_send(u3, k_cid, 'Probe hundredth', 'Probe body', 'Probe');
+    if v_row.sort_order <> 109 then
+      raise exception '258 probe: the 100th went to sort_order %, not 109 (after the last)', v_row.sort_order;
+    end if;
+    v_refused := false;
+    begin
+      perform public.phone_add_quick_send(u3, k_cid, 'Probe one too many', 'Probe body', null);
+    exception when raise_exception then
+      if sqlerrm <> 'quick_send_cap' then raise; end if;
+      v_refused := true;
+    end;
+    if not v_refused then
+      raise exception '258 probe: an add past 100 was taken';
+    end if;
+    if (select count(*) from public.phone_quick_sends q where q.user_id = u3 and q.client_id = k_cid) <> 100 then
+      raise exception '258 probe: a refused add left a row';
+    end if;
+    -- Their 100 hold back no one else on the team, and not themselves on another team.
+    perform public.phone_add_quick_send(u2, k_cid, 'Probe theirs', 'Probe body', null);
+    perform public.phone_add_quick_send(u3, k_cid || '-2', 'Probe other team', 'Probe body', null);
+    v_refused := false;
+    begin
+      perform public.phone_add_quick_send(u2, k_cid, ' ', 'Probe body', null);
+    exception when check_violation then v_refused := true;
+    end;
+    if not v_refused then raise exception '258 probe: phone_add_quick_send took a blank name'; end if;
+
     raise exception 'ROLLBACK_PROBE';
   exception
     when others then
       if sqlerrm = 'ROLLBACK_PROBE' then
-        raise notice '258 probe: seeded once (not while empty, not twice, not after deleting all), per person and team; used counts own rows only; the checks hold; nothing was kept';
+        raise notice '258 probe: seeded once (not while empty, not twice, not after deleting all), per person and team; used counts own rows only; the checks hold; adds stop at 100; nothing was kept';
       else
         raise;
       end if;

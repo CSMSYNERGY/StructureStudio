@@ -25,7 +25,10 @@ import { logFault } from "../log";
 export const NAME_MAX = 60;
 export const BODY_MAX = 1600;
 export const CATEGORY_MAX = 30;
-/** Per person, on adding one. The starter set may take someone a little past it (258, choice 5). */
+/**
+ * Per person, on adding one, for the sentence. phone_add_quick_send (258) holds the same number
+ * and enforces it. The starter set may take someone a little past it (258, choice 5).
+ */
 export const MAX_PER_PERSON = 100;
 /** Far above the cap, so a list the starter set pushed past it still shows whole. */
 const LIST_LIMIT = 500;
@@ -138,29 +141,17 @@ export async function createQuickSend(env: Env, req: Request): Promise<Response>
   const body = await readJson(req);
   const fields = { name: nameOf(body.name), body: bodyOf(body.body), category: categoryOf(body.category) };
 
-  // Highest sort_order first: the new one goes after it, and the row count says whether there is
-  // room. Two saves at the same moment could both see 99 and land 101; the cap stops a runaway
-  // list, it is not a quota, so that is fine.
-  const top = (must(
-    await c.admin.from("phone_quick_sends").select("sort_order")
-      .eq("user_id", c.userId).eq("client_id", c.ctx.client_id)
-      .order("sort_order", { ascending: false }).limit(MAX_PER_PERSON),
-    "count quick sends",
-  ) as { sort_order: number }[] | null) ?? [];
-  if (top.length >= MAX_PER_PERSON) {
+  // One RPC counts, numbers (after the last) and inserts under a per-person lock, so adds that
+  // arrive together queue and the cap holds however many there are. Only the starter set may
+  // take someone past it.
+  const res = await c.admin.rpc("phone_add_quick_send", {
+    p_user: c.userId, p_client: c.ctx.client_id, p_name: fields.name, p_body: fields.body, p_category: fields.category,
+  });
+  if (res.error?.message === "quick_send_cap") {
     throw new ApiError("bad_request", `You have ${MAX_PER_PERSON} quick sends, which is the most you can keep. Delete one you don't use, then add this one.`);
   }
-
-  const saved = must(
-    await c.admin.from("phone_quick_sends").insert({
-      ...fields,
-      user_id: c.userId,
-      client_id: c.ctx.client_id,
-      sort_order: top.length ? (Number(top[0].sort_order) || 0) + 1 : 0,
-    }).select(COLUMNS).single(),
-    "add quick send",
-  ) as QuickSendRow | null;
-  if (!saved) throw new ApiError("internal", "The quick send couldn't be saved. Please try again.");
+  const saved = must(res, "add quick send") as QuickSendRow | null;
+  if (!saved?.id) throw new ApiError("internal", "The quick send couldn't be saved. Please try again.");
   return ok({ quick_send: quickSendOut(saved) });
 }
 
