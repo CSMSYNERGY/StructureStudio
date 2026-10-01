@@ -27,7 +27,7 @@ import * as jose from "jsr:@panva/jose@6";
 
 export type TokenCheck =
   | { kind: "verified"; sub: string; email: string; sessionId: string; userMetadata: Record<string, unknown> }
-  | { kind: "invalid" }
+  | { kind: "invalid"; why: "token_expired" | "token_invalid" }
   | { kind: "unchecked" };
 
 // One key set per isolate: createRemoteJWKSet caches the keys (10 min) and refetches on an
@@ -104,6 +104,7 @@ export async function checkAccessToken(bearer: string): Promise<TokenCheck> {
     };
   } catch (e) {
     const code = (e as { code?: string })?.code ?? "";
-    return TOKEN_IS_BAD.has(code) ? { kind: "invalid" } : { kind: "unchecked" };
+    if (!TOKEN_IS_BAD.has(code)) return { kind: "unchecked" };
+    return { kind: "invalid", why: code === "ERR_JWT_EXPIRED" ? "token_expired" : "token_invalid" };
   }
 }

@@ -3870,7 +3870,12 @@ function PortalApp() {
         const { data } = await sb.auth.getSession();
         if (data && data.session) {
           setExpired(true);
-          await sb.auth.signOut(); // clears the local session even if the server call fails
+          // scope "local" (2026-10-02): end only THIS browser's session (every tab here shares it).
+          // The default is "global", which ends every session the user has, on every device, so one
+          // tab's 401 (a multi-tab refresh race, a blip) signed the person out of their phone and
+          // other computers too. Seen on beta: one stale tab, zero sessions left for the account.
+          // The deliberate Sign Out button keeps the default.
+          await sb.auth.signOut({ scope: "local" }); // clears the local session even if the server call fails
         }
       } catch (_e) { /* never let the guard crash the app */ }
       handling = false;

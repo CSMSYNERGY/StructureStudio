@@ -45,13 +45,24 @@ export type CallerResult =
   | { ok: true; caller: Caller }
   | { ok: false; status: 401; body: { error: string; reason: string } };
 
-const REJECTED: CallerResult = { ok: false, status: 401, body: { error: "Not signed in.", reason: "rejected" } };
+// WHICH check refused, in the same fixed-enum `reason` the GoTrue path already returns ("missing" |
+// "anon_key" | "rejected"). The portal only LOGS it (app_errors context.reason) and never branches
+// on it. Added 2026-10-02 after a sign-out on beta that the log could not attribute: "rejected"
+// was shared by an expired token, a forged one, an ENDED session and GoTrue saying no.
+//   token_expired — exp has passed (the same answer getUser gives);
+//   token_invalid — bad signature or a malformed token;
+//   session_ended — validly signed, but the session row is gone or past not_after, or the user is
+//                   deleted or banned: signed out somewhere, which GoTrue also refuses
+//                   (session_not_found).
+// Naming the reason back to the caller that holds the token leaks nothing.
+const refused = (reason: "token_expired" | "token_invalid" | "session_ended"): CallerResult =>
+  ({ ok: false, status: 401, body: { error: "Not signed in.", reason } });
 
 export async function verifyCaller(req: Request, admin: Admin): Promise<CallerResult> {
   const authHeader = req.headers.get("Authorization") || "";
 
   const local = await checkAccessToken(authHeader.replace(/^Bearer\s+/i, "").trim());
-  if (local.kind === "invalid") return REJECTED;
+  if (local.kind === "invalid") return refused(local.why);
   if (local.kind === "verified") {
     const { data: rows, error: rpcErr } = await admin.rpc("resolve_caller", {
       p_user_id: local.sub,
@@ -59,7 +70,7 @@ export async function verifyCaller(req: Request, admin: Admin): Promise<CallerRe
     });
     const row = !rpcErr && Array.isArray(rows) ? rows[0] : null;
     if (row) {
-      if (!row.session_live) return REJECTED;
+      if (!row.session_live) return refused("session_ended");
       return {
         ok: true,
         caller: {

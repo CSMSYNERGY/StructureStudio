@@ -111,7 +111,7 @@ Deno.test("SIGNED-OUT session: 401 even though GoTrue would have said yes", asyn
   const r = await resolveTenant(req(await token()), admin, { readActions: READS });
   assertEquals(r.ok, false);
   assertEquals((r as any).status, 401);
-  assertEquals((r as any).body.reason, "rejected");
+  assertEquals((r as any).body.reason, "session_ended");
 });
 
 Deno.test("signed-out session still 401s before a malformed body 400s (precedence)", async () => {
@@ -126,6 +126,7 @@ Deno.test("expired token: 401 on the spot, no query, no GoTrue", async () => {
   const { admin, calls } = makeAdmin(LIVE_OWNER);
   const r = await resolveTenant(req(await token({ exp: Math.floor(Date.now() / 1000) - 60 })), admin, { readActions: READS });
   assertEquals((r as any).status, 401);
+  assertEquals((r as any).body.reason, "token_expired");
   assertEquals(calls.rpc.length, 0);
 });
 
@@ -134,6 +135,7 @@ Deno.test("forged token (signed by a key the project never published): 401", asy
   const { admin, calls } = makeAdmin(LIVE_OWNER);
   const r = await resolveTenant(req(await token({ key: rogue.privateKey })), admin, { readActions: READS });
   assertEquals((r as any).status, 401);
+  assertEquals((r as any).body.reason, "token_invalid");
   assertEquals(calls.rpc.length, 0);
 });
 
