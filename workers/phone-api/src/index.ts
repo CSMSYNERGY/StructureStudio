@@ -27,6 +27,7 @@ import { mediaFile } from "./routes/media";
 import { sendSms } from "./routes/sms";
 import { getThread, listCalls, listThreads, search, team } from "./routes/reads";
 import { devices, forgetDevice, health, log, settingsMe, signOutAll, turn } from "./routes/me";
+import { createQuickSend, deleteQuickSend, listQuickSends, quickSendUsed, updateQuickSend } from "./routes/quickSends";
 import { pushText } from "./routes/push";
 import { recordingSweep } from "./cron/sweep";
 import { retention } from "./cron/retention";
@@ -128,6 +129,12 @@ const ROUTES: { method: string; re: RegExp; h: Handler }[] = [
   { method: "POST", re: /^\/devices\/signout-all$/, h: (r, env) => signOutAll(env, r) },
   { method: "POST", re: /^\/log$/, h: (r, env) => log(env, r) },
   { method: "GET", re: /^\/turn$/, h: (r, env, ec) => turn(env, ec, r) },
+  { method: "GET", re: /^\/quick-sends$/, h: (r, env, ec) => listQuickSends(env, ec, r) },
+  { method: "POST", re: /^\/quick-sends$/, h: (r, env) => createQuickSend(env, r) },
+  // The two actions before the plain /:id, so the id route can never take them.
+  { method: "POST", re: /^\/quick-sends\/([^/]+)\/delete$/, h: (r, env, _ec, m) => deleteQuickSend(env, r, pathParam(m[1])) },
+  { method: "POST", re: /^\/quick-sends\/([^/]+)\/used$/, h: (r, env, _ec, m) => quickSendUsed(env, r, pathParam(m[1])) },
+  { method: "POST", re: /^\/quick-sends\/([^/]+)$/, h: (r, env, _ec, m) => updateQuickSend(env, r, pathParam(m[1])) },
   { method: "POST", re: /^\/push\/text$/, h: (r, env, ec) => pushText(env, ec, r) },
 ];
 
