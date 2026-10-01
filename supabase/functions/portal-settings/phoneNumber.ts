@@ -1,4 +1,4 @@
-// SSS Phone, plan phase 6 (section 16, row 6): a builder's number for CALLS, self-serve.
+// My Synergy Phone, plan phase 6 (section 16, row 6): a builder's number for CALLS, self-serve.
 //
 //   * A CALLING-ONLY NUMBER for a builder who has no texting number yet (plan D6: "Voice needs
 //     no A2P registration, so phase 6 adds a way to buy a number for calls straight away;

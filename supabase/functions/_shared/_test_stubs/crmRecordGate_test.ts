@@ -171,11 +171,11 @@ Deno.test("Invoice is Simple Layout, not CRM, and survives the lock", () => {
   assertEquals(t.enabled(c), true, "invoice must stay enabled without the CRM");
 });
 
-Deno.test("Scheduler (never built) and Call (SSS Phone) answer to their own rules, never the CRM subscription", () => {
+Deno.test("Scheduler (never built) and Call (My Synergy Phone) answer to their own rules, never the CRM subscription", () => {
   const c = ctxFor();
   assertEquals(tab("scheduler").enabled(c), false);
   assert(/calendar integration/i.test(hintOf(tab("scheduler"), c)), "the scheduler is unbuilt, and says so");
-  // Call is BUILT since 2026-09-29 (SSS Phone): it is off in this fixture only because the fixture
+  // Call is BUILT since 2026-09-29 (My Synergy Phone): it is off in this fixture only because the fixture
   // carries no phone access and no calling switch, and it says that in phone terms.
   assertEquals(tab("call").enabled(c), false);
   assert(/permission to make calls/i.test(hintOf(tab("call"), c)), hintOf(tab("call"), c));

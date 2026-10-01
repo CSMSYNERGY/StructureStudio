@@ -1,4 +1,4 @@
-// SSS Phone — sms-inbound stores NumMedia (supabase/functions/sms-inbound/numMedia.ts).
+// My Synergy Phone — sms-inbound stores NumMedia (supabase/functions/sms-inbound/numMedia.ts).
 //
 // Run: deno test --node-modules-dir=none --allow-read tests/phone/
 

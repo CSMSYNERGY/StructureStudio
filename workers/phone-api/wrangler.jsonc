@@ -1,4 +1,4 @@
-// SSS Phone: the phone-api Worker (Twilio call webhooks, access tokens, texting and the apps'
+// My Synergy Phone: the phone-api Worker (Twilio call webhooks, access tokens, texting and the apps'
 // read endpoints). Code in src/, contract in the phone repo's docs/SPEC.md, runbook in SETUP.md.
 //
 // DEPLOYS ARE MANUAL: `npx wrangler deploy` from THIS directory. Unlike the three static

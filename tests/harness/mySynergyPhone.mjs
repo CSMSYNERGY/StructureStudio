@@ -1,10 +1,10 @@
-// SSS Phone in the portal, driven for real on the COMPILED portal (2026-09-29).
+// My Synergy Phone in the portal, driven for real on the COMPILED portal (2026-09-29).
 //
 // What it proves, each against the artifact the browser actually loads:
-//   A. Call on a contact hands the number to the SSS Phone extension (chrome.runtime.sendMessage,
+//   A. Call on a contact hands the number to the My Synergy Phone extension (chrome.runtime.sendMessage,
 //      SPEC section 5) with all four fields, and the page does not move.
-//   B. SMS on the same contact opens the thread in SSS Phone, with a way back to the composer.
-//   C. No extension installed: Call shows the "Install SSS Phone" card; SMS keeps today's
+//   B. SMS on the same contact opens the thread in My Synergy Phone, with a way back to the composer.
+//   C. No extension installed: Call shows the "Install My Synergy Phone" card; SMS keeps today's
 //      composer with a small install tip.
 //   D. The extension signed in as somebody else: Call says so in words; SMS falls back to the
 //      composer and says why.
@@ -13,7 +13,7 @@
 //   G. Settings → Phone renders the owner's one-time setup, and Save / the on-off switch /
 //      "Sign out all devices" send what the server expects (validated by the REAL parseRoute).
 //   H. The Calls page renders My and Team, Team with the whole-business line.
-//   I. On a phone's browser, Call opens the SSS Phone app instead of messaging an extension.
+//   I. On a phone's browser, Call opens the My Synergy Phone app instead of messaging an extension.
 //   J. Call on the contact LIST: the same four fields, the same greyed hints (view-as, calling
 //      off) as the record page, and the page does not move.
 //   K. A voicemail in the contact timeline plays from the phone-api Worker
@@ -40,9 +40,9 @@
 // boots, answering exactly the SPEC section 5 messages.
 //
 //   python -m http.server 8131 --bind 127.0.0.1   (repo root)
-//   SS_BASE=http://127.0.0.1:8131 node tests/harness/sssPhone.mjs   (exit 0 = every check held)
+//   SS_BASE=http://127.0.0.1:8131 node tests/harness/mySynergyPhone.mjs   (exit 0 = every check held)
 //
-// Shots land in %TEMP%/ss-harness/sss-phone (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an older
+// Shots land in %TEMP%/ss-harness/my-synergy-phone (SS_SHOTS overrides). SS_PORTAL_ARTIFACT=<an older
 // portal.app.compiled.js> serves that file instead, which is how to prove the checks can fail:
 // against the artifact before this change, A-I all fail (Call is the greyed "arrives with the
 // phone integration" tab, and there is no Phone tab or Calls page).
@@ -73,7 +73,7 @@ const OWNER_ACCESS = Object.fromEntries(["designer", "designs", "contacts", "inv
   "settings_email", "settings_team", "settings_billing"].map((k) => [k, "edit"]));
 
 // One deal, so the contact's SMS tab can be used: texting from a contact record files against a
-// picked deal (the 2026-09-02 picker rule), and that rule is untouched by SSS Phone.
+// picked deal (the 2026-09-02 picker rule), and that rule is untouched by My Synergy Phone.
 const DESIGN = {
   short_code: "SS-TEST00001", created_at: "2026-09-17T15:00:00Z", updated_at: "2026-09-17T15:00:00Z",
   status: "sent", selections: { style: "Utility", size: "10x12" }, expected_close_date: null,
@@ -108,7 +108,7 @@ const CALLS = [
 const TEXTS = [{ direction: "out", sent_by: USER.id, contact_id: CONTACT_ID }, { direction: "in", sent_by: null, contact_id: CONTACT_ID }];
 
 const { ok, failed } = reporter();
-const shots = shotsDir("sss-phone");
+const shots = shotsDir("my-synergy-phone");
 const pageErrors = [];
 const H = { "access-control-allow-origin": "*", "access-control-expose-headers": "*" };
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", headers: H, body: JSON.stringify(body) });
@@ -205,7 +205,7 @@ async function scenario(browser, opts) {
       if (!state.sms) return json(route, { ok: true });
       calls.push({ fn: "portal-sms", ...body });
       if (body.action === "buy_number") {
-        // What the server answers after adopting (SSS Phone phase 6): the number joins the
+        // What the server answers after adopting (My Synergy Phone phase 6): the number joins the
         // Messaging Service, the registration moves to number_pending. A STUB: nothing at Twilio.
         if (body.phoneNumber) return json(route, { error: "This stub only adopts." }, 400);
         state.sms = { ...state.sms, status: "number_pending", numbers: state.sms.numbers.map((n) => ({ ...n, callingOnly: false })) };
@@ -274,7 +274,7 @@ async function scenario(browser, opts) {
       }
       case "phone_status_set": {
         // The server's rollout check (SSB-1): ON is refused unless the rollout is open to them.
-        if (body.on && !rolloutOpen) return json(route, { error: "SSS Phone isn't open to every builder yet. Structure Studio switches it on for your account when it's ready." }, 403);
+        if (body.on && !rolloutOpen) return json(route, { error: "My Synergy Phone isn't open to every builder yet. Structure Studio switches it on for your account when it's ready." }, 403);
         state.phoneStatus = body.on ? "on" : "off";
         // SSB-2: OFF moves a connected number to voicemail (or says it could not).
         let warning = null;
@@ -340,7 +340,7 @@ async function pickDeal(s) {
 
 const { browser } = await launch({ width: 1400, height: 1000 });
 try {
-  // ── A + B. Owner, calling on, SSS Phone installed and signed in as them ─────────────────────
+  // ── A + B. Owner, calling on, My Synergy Phone installed and signed in as them ──────────────
   {
     const s = await scenario(browser, { name: "A" });
     await openContact(s);
@@ -350,7 +350,7 @@ try {
       ok("A1 Call is enabled", await call.isEnabled());
       const path0 = await s.page.evaluate(() => location.pathname);
       await tap(call);
-      await s.page.waitForFunction(() => /Calling \(555\) 555-0142 in SSS Phone/.test(document.body.innerText), null, { timeout: 8000 }).catch(() => {});
+      await s.page.waitForFunction(() => /Calling \(555\) 555-0142 in My Synergy Phone/.test(document.body.innerText), null, { timeout: 8000 }).catch(() => {});
       const msgs = await s.sent();
       const callMsg = msgs.find((m) => m.type === "sss.call");
       ok("A2 the portal pinged the extension first", msgs.length > 0 && msgs[0].type === "sss.ping", JSON.stringify(msgs.map((m) => m.type)));
@@ -358,21 +358,21 @@ try {
         !!callMsg && callMsg.id === EXT_ID && callMsg.to_e164 === "+15555550142" && callMsg.contact_id === CONTACT_ID
           && callMsg.user_id === USER.id && callMsg.client_id === CLIENT, JSON.stringify(callMsg));
       const text = await s.page.locator('[data-ss-phone-panel="call"]').innerText().catch(() => "");
-      ok("A4 the page says the call is running in SSS Phone", /Calling \(555\) 555-0142 in SSS Phone/.test(text), text.slice(0, 120));
+      ok("A4 the page says the call is running in My Synergy Phone", /Calling \(555\) 555-0142 in My Synergy Phone/.test(text), text.slice(0, 120));
       ok("A5 and the page did not move", (await s.page.evaluate(() => location.pathname)) === path0);
       await s.page.screenshot({ path: join(shots, "A-call-handed-off.png") });
 
       // B. SMS routes to the extension, with a way back.
       await pickDeal(s);
       await tap(tabBtn(s.page, "SMS"));
-      await s.page.waitForFunction(() => document.body.innerText.includes("is open in SSS Phone"), null, { timeout: 8000 }).catch(() => {});
+      await s.page.waitForFunction(() => document.body.innerText.includes("is open in My Synergy Phone"), null, { timeout: 8000 }).catch(() => {});
       const textMsg = (await s.sent()).find((m) => m.type === "sss.text");
       ok("B1 SMS sent sss.text with the same four fields",
         !!textMsg && textMsg.to_e164 === "+15555550142" && textMsg.contact_id === CONTACT_ID && textMsg.user_id === USER.id && textMsg.client_id === CLIENT,
         JSON.stringify(textMsg));
-      ok("B2 the composer is replaced by 'open in SSS Phone'", (await s.page.locator('[data-ss-phone-panel="text"]').count()) === 1
+      ok("B2 the composer is replaced by 'open in My Synergy Phone'", (await s.page.locator('[data-ss-phone-panel="text"]').count()) === 1
         && (await s.page.locator('textarea[placeholder="Text this customer…"]').count()) === 0);
-      await s.page.screenshot({ path: join(shots, "B-text-in-sss-phone.png") });
+      await s.page.screenshot({ path: join(shots, "B-text-in-my-synergy-phone.png") });
       await tap(s.page.locator("button", { hasText: "Write it here instead" }));
       await s.page.waitForTimeout(300);
       ok("B3 'Write it here instead' brings today's composer back", (await s.page.locator('textarea[placeholder="Text this customer…"]').count()) === 1);
@@ -405,18 +405,18 @@ try {
     await rowCall.waitFor({ timeout: 15000 }).catch(() => {});
     const listRendered = ok("J0 the contact list rendered a Call button on the row", (await rowCall.count()) === 1);
     if (listRendered) {
-      ok("J1 it is enabled when calling is on and SSS Phone is this person's", await rowCall.isEnabled());
+      ok("J1 it is enabled when calling is on and My Synergy Phone is this person's", await rowCall.isEnabled());
       const before = (await s.sent()).length;
       const path0 = await s.page.evaluate(() => location.pathname);
       await tap(rowCall);
-      await s.page.waitForFunction(() => /Calling \(555\) 555-0142 in SSS Phone/.test(document.body.innerText), null, { timeout: 8000 }).catch(() => {});
+      await s.page.waitForFunction(() => /Calling \(555\) 555-0142 in My Synergy Phone/.test(document.body.innerText), null, { timeout: 8000 }).catch(() => {});
       const msgs = (await s.sent()).slice(before);
       const callMsg = msgs.find((m) => m.type === "sss.call");
       ok("J2 the row's Call sends sss.call with the same four fields",
         !!callMsg && callMsg.id === EXT_ID && callMsg.to_e164 === "+15555550142" && callMsg.contact_id === CONTACT_ID
           && callMsg.user_id === USER.id && callMsg.client_id === CLIENT, JSON.stringify(msgs));
       const panel = await s.page.locator('[data-ss-phone-panel="list-call"]').innerText().catch(() => "");
-      ok("J3 the row says the call is running in SSS Phone", /Calling \(555\) 555-0142 in SSS Phone/.test(panel), panel.slice(0, 120));
+      ok("J3 the row says the call is running in My Synergy Phone", /Calling \(555\) 555-0142 in My Synergy Phone/.test(panel), panel.slice(0, 120));
       ok("J4 and the list did not move", (await s.page.evaluate(() => location.pathname)) === path0);
       await s.page.screenshot({ path: join(shots, "J-list-call.png") });
     }
@@ -430,7 +430,7 @@ try {
     await tap(tabBtn(s.page, "Call"));
     await s.page.waitForSelector('[data-ss-phone-install="full"]', { timeout: 8000 }).catch(() => {});
     const card = await s.page.locator('[data-ss-phone-install="full"]').innerText().catch(() => "");
-    ok("C1 Call with no extension shows the Install SSS Phone card", /Install SSS Phone to call from Structure Studio/.test(card), card.slice(0, 80));
+    ok("C1 Call with no extension shows the Install My Synergy Phone card", /Install My Synergy Phone to call from Structure Studio/.test(card), card.slice(0, 80));
     ok("C2 the store link is a placeholder, so it reads 'coming soon' rather than linking nowhere", /link coming soon/.test(card)
       && (await s.page.locator('[data-ss-phone-install="full"] a').count()) === 0);
     ok("C3 nothing but a ping was attempted", (await s.sent()).every((m) => m.type === "sss.ping"));
@@ -451,14 +451,14 @@ try {
     await s.ctx.close();
   }
 
-  // ── D. SSS Phone signed in as somebody else ───────────────────────────────────────────────
+  // ── D. My Synergy Phone signed in as somebody else ────────────────────────────────────────
   {
     const s = await scenario(browser, { name: "D", who: { user_id: REP, client_id: CLIENT } });
     await openContact(s);
     await tap(tabBtn(s.page, "Call"));
     await s.page.waitForFunction(() => /signed in as/.test(document.body.innerText), null, { timeout: 8000 }).catch(() => {});
     const panel = await s.page.locator('[data-ss-phone-panel="call"]').innerText().catch(() => "");
-    ok("D1 Call names who SSS Phone is signed in as", /signed in as Robin Example/.test(panel), panel.slice(0, 140));
+    ok("D1 Call names who My Synergy Phone is signed in as", /signed in as Robin Example/.test(panel), panel.slice(0, 140));
     await pickDeal(s);
     await tap(tabBtn(s.page, "SMS"));
     await s.page.waitForTimeout(500);
@@ -533,14 +533,14 @@ try {
       ok("G6 install links are on the tab", (await s.page.locator('[data-ss-phone-install="full"]').count()) === 1);
       await s.page.screenshot({ path: join(shots, "G-phone-settings.png"), fullPage: true });
 
-      // L. Plan phase 6: a texting number that does not ring SSS Phone yet gets connected here.
+      // L. Plan phase 6: a texting number that does not ring My Synergy Phone yet gets connected here.
       const connect = s.page.locator("[data-ss-phone-connect]");
       ok("L1 a number not yet connected offers 'Connect this number for calls'", (await connect.count()) === 1 && await connect.isEnabled());
       await tap(connect);
       await s.page.waitForSelector("[data-ss-phone-connected]", { timeout: 8000 }).catch(() => {});
       ok("L2 it sends phone_enable_number and the card says the number is connected",
         s.calls.some((c) => c.action === "phone_enable_number") && (await s.page.locator("[data-ss-phone-connected]").count()) === 1
-          && /Calls to this number ring SSS Phone now/.test(await s.page.locator("body").innerText()));
+          && /Calls to this number ring My Synergy Phone now/.test(await s.page.locator("body").innerText()));
 
       // Setup: add the rep, ring in order, business hours on, save.
       await tick(box(REP));
@@ -809,13 +809,13 @@ try {
     await s.page.waitForSelector('[data-ss-phone-install="mobile"]', { timeout: 8000 }).catch(() => {});
     await s.page.waitForTimeout(500);
     const panel = await s.page.locator('[data-ss-phone-panel="call"]').innerText().catch(() => "");
-    ok("I1 Call on a phone says it is opening the SSS Phone app", /Opening the SSS Phone app to call \(555\) 555-0142/.test(panel), panel.slice(0, 100));
+    ok("I1 Call on a phone says it is opening the My Synergy Phone app", /Opening the My Synergy Phone app to call \(555\) 555-0142/.test(panel), panel.slice(0, 100));
     ok("I2 with the app links (not the Chrome extension)", (await s.page.locator('[data-ss-phone-install="mobile"]').count()) === 1
       && !/Chrome extension/.test(await s.page.locator('[data-ss-phone-install="mobile"]').innerText()));
-    const deep = navs.find((u) => u.startsWith("sssphone://"));
+    const deep = navs.find((u) => u.startsWith("mysynergyphone://"));
     // SPEC section 7: the four fields, then `ts` (when the page made the link; the app drops one
     // more than a minute old).
-    const want = `sssphone://call?to=%2B15555550142&contact_id=${CONTACT_ID}&user_id=${USER.id}&client_id=${CLIENT}&ts=`;
+    const want = `mysynergyphone://call?to=%2B15555550142&contact_id=${CONTACT_ID}&user_id=${USER.id}&client_id=${CLIENT}&ts=`;
     const ts = deep && deep.startsWith(want) ? Number(deep.slice(want.length)) : NaN;
     ok("I3 the app link carries the four fields and ts, the moment it was made", Number.isInteger(ts) && Math.abs(Date.now() - ts) < 60000,
       deep || `navigations seen: ${JSON.stringify(navs)}`);
@@ -830,5 +830,5 @@ try {
 
 console.log(`\nshots: ${shots}`);
 const bad = failed();
-if (bad.length) { console.log(`\nsssPhone: ${bad.length} FAILED`); process.exit(1); }
+if (bad.length) { console.log(`\nmySynergyPhone: ${bad.length} FAILED`); process.exit(1); }
 console.log("all checks held");

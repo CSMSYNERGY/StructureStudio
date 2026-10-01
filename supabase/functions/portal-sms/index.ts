@@ -38,7 +38,7 @@ import {
   JOB_POSITIONS,
   type BuilderIntake,
 } from "../_shared/twilioTrustHub.ts";
-// SSS Phone plan phase 6: buy_number ADOPTS a calling-only number instead of buying a second.
+// My Synergy Phone plan phase 6: buy_number ADOPTS a calling-only number instead of buying a second.
 import { adoptBranch, buyPlanFromRead, numberRowWritten, type LiveNumber } from "./adoptNumber.ts";
 
 // Self-serve SMS onboarding: the builder's own A2P 10DLC registration and their own number.
@@ -350,7 +350,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       registrationStatus: n.registration_status,
       purchasedAt: n.purchased_at,
       // Bought for calls on the Phone tab and not in a Messaging Service yet: buy_number adopts
-      // it (SSS Phone plan phase 6), so the number step offers "use it" instead of a search.
+      // it (My Synergy Phone plan phase 6), so the number step offers "use it" instead of a search.
       callingOnly: !n.messaging_service_sid,
     })),
     businessTypes: BUSINESS_TYPES,
@@ -855,7 +855,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
 
         // ⚠️ ONE LIVE NUMBER PER TENANT, AND THIS READ IS THE ONLY THING ENFORCING IT (the
         // warning below is still true of it). It is a read of the rows rather than a count since
-        // SSS Phone phase 6, because ONE kind of existing number is not a refusal: a CALLING-ONLY
+        // My Synergy Phone phase 6, because ONE kind of existing number is not a refusal: a CALLING-ONLY
         // number the Phone tab bought (messaging_service_sid NULL) is the builder's number, and
         // texting ADOPTS it (adoptNumber.ts) instead of buying a second one. A failed read now
         // refuses; it used to read as "no numbers" and go on to buy.
@@ -875,7 +875,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           return json({ error: "This account already has a texting number." }, 409);
         }
 
-        // ── ADOPT the calling-only number (SSS Phone plan phase 6) ─────────────────────────
+        // ── ADOPT the calling-only number (My Synergy Phone plan phase 6) ──────────────────
         // No search, no purchase and NO WALLET HOLD: the Phone tab held the first month under
         // this function's own key (sms_num:<client>:<number>) when it bought the number. Every
         // step is safe to repeat; adoptNumber.ts has the order and why, and adoptBranch the
@@ -920,7 +920,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
 
         // ⚠️ ONE LIVE NUMBER PER TENANT, AND THE READ ABOVE (buyPlan: "buy" only when the
         // tenant has NO live number) IS THE ONLY THING ENFORCING IT. It was a count here until
-        // SSS Phone phase 6 moved it up so a calling-only number could be adopted instead.
+        // My Synergy Phone phase 6 moved it up so a calling-only number could be adopted instead.
         // This comment used to claim a partial unique index backed it up. It does not.
         // 165_sms_registration.sql has sms_numbers_live_unique on (phone_number) — one TENANT
         // per number, which is what stops two builders sharing an inbound number — and

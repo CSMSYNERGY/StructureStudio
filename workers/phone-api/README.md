@@ -1,6 +1,6 @@
 # phone-api
 
-The SSS Phone Worker. It answers Twilio's call webhooks, mints Twilio Access Tokens for the Chrome extension and the phone app, sends texts through the shared texting rules, serves the apps' read endpoints, pushes text alerts to phones, and runs two crons: a recording sweep, and a daily job for voicemail retention and (once armed) billing. It also handles hold and warm transfer (plan 9C, design b), voicemail transcription, and inbound photos.
+The My Synergy Phone Worker. It answers Twilio's call webhooks, mints Twilio Access Tokens for the Chrome extension and the phone app, sends texts through the shared texting rules, serves the apps' read endpoints, pushes text alerts to phones, and runs two crons: a recording sweep, and a daily job for voicemail retention and (once armed) billing. It also handles hold and warm transfer (plan 9C, design b), voicemail transcription, and inbound photos.
 
 The contract is `docs/SPEC.md` in the private `structure-studio-phone` repo, section 3. The product plan is `_Extras/Structure Studio Phone Plan 2026-09-28.md` in the vault. Where this Worker reads the contract a particular way, `DEVIATIONS.md` says so. The one-time setup is in `SETUP.md`.
 
@@ -111,7 +111,7 @@ App endpoints take `Authorization: Bearer <Supabase access token>` and answer `{
 | `GET /threads`, `/threads/:key`, `/calls`, `/search`, `/team` | Contacts row scope and phone level applied. Lists return `cursor` when there is another page. A live call in its conference carries `warm` (how its latest warm transfer stands). |
 | `POST /settings/me`, `/devices`, `/devices/signout-all` | Sign-out-all bumps `device_generation`, forgets push tokens and ends every Auth session. |
 | `POST /push/text` | Database webhook on new inbound `sms_messages` rows. |
-| `POST /log` | App errors into `app_errors`, severity kept. |
+| `POST /log` | App errors into `app_errors`, severity kept. Sources `my-synergy-phone-extension` and `my-synergy-phone-mobile`, plus the two codes builds from before the 2026-10-01 rename still send (SETUP.md section 9: deploy this Worker before any renamed build ships). |
 | `GET /turn` | Twilio Network Traversal Service credentials. |
 | `GET /health` | `{ok, version, deployment}`. |
 

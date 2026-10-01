@@ -71,7 +71,7 @@
 //      self-contained `_shared/*.test.ts` (currently the OAuth discovery document's endpoint
 //      validation, which guards where the client secret gets sent), the pre-existing
 //      `_shared/_test_stubs/*_test.ts`, which needs its own import map, and `tests/phone/`
-//      (SSS Phone's portal and edge pieces, run from the repo root). Same skip-with-a-warning
+//      (My Synergy Phone's portal and edge pieces, run from the repo root). Same skip-with-a-warning
 //      policy as step 6. Then the migration tests in `tests/sql/*.test.cjs` (PGlite, Node), ONLY
 //      when `tests/sql/node_modules` is already installed: the gate never installs anything, so
 //      without it the step prints a SKIPPED line and blocks nothing — unless CI is set or
@@ -1643,7 +1643,7 @@ function denoCheck() {
 // resolveTenant, which its own header notes sits in front of every tenant's settings, billing and
 // designs. Discovering it by convention rather than listing it means a new file in either shape is
 // covered the day it lands.
-// SSS Phone's Deno suite and the PGlite migration tests, both outside supabase/functions.
+// My Synergy Phone's Deno suite and the PGlite migration tests, both outside supabase/functions.
 const PHONE_TESTS_DIR = "tests/phone";
 const SQL_TESTS_DIR = "tests/sql";
 
@@ -1671,7 +1671,7 @@ function testGroups() {
     }
   }
 
-  // tests/phone — SSS Phone's portal-settings, portal-sms and portal pieces (DEVIATIONS item 13
+  // tests/phone — My Synergy Phone's portal-settings, portal-sms and portal pieces (DEVIATIONS item 13
   // in supabase/functions/portal-settings). They sat outside every gate until 2026-09-29. Run from
   // the REPO ROOT (they read the shipped sources by paths relative to themselves, portal/ and
   // workers/ included), with exactly the flags their headers document: --allow-env because the

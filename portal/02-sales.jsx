@@ -925,7 +925,7 @@ function buildContactTimeline(act) {
 // with a design count + activity dates. Read-only. "Last activity" = the newest
 // design's updated_at (portal logins aren't client-readable); status = the
 // highest fulfillment stage across that lead's designs.
-// SSS Phone (2026-09-29): `callOffered` is ssPhoneOffered's answer for the tenant on screen (the
+// My Synergy Phone (2026-09-29): `callOffered` is ssPhoneOffered's answer for the tenant on screen (the
 // shell's one rule for whether calling exists here at all); `viewing`, `canCall`, `phoneOn` and
 // `userId` are exactly what the contact record's Call tab is given, and the row's Call button asks
 // that tab's own enabled/hint functions, so the list and the record cannot disagree.
@@ -1143,7 +1143,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   // Guards against a stale contact_activity response landing under a different contact:
   // every request stamps this ref, and only the newest one is allowed to render.
   const actReqRef = useRef(0);
-  // SSS Phone: where the last row's Call got to — { key, kind, to?, text? }, ssPhoneStartCall's
+  // My Synergy Phone: where the last row's Call got to — { key, kind, to?, text? }, ssPhoneStartCall's
   // answer for the row with that group key. One at a time; a new press replaces it.
   const [callUi, setCallUi] = useState(null);
 
@@ -1159,7 +1159,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     setActivity(data);
   };
 
-  // ── SSS PHONE: Call from the list ──────────────────────────────────────────────────────
+  // ── MY SYNERGY PHONE: Call from the list ───────────────────────────────────────────────
   // THE RECORD PAGE'S RULES, NOT A COPY OF THEM. The button asks CRM_TABS' own "call" entry
   // (enabled + hint) with the same four facts the record's ctx carries, and dials through the
   // same ssPhoneStartCall. A row with no phone gets no button at all: on a list, a column of
@@ -1304,7 +1304,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                       {callOffered && callTab && g.phone && (() => {
                         const c = callCtx(g);
                         const on = callTab.enabled(c);
-                        const why = on ? "Call with SSS Phone" : (typeof callTab.hint === "function" ? callTab.hint(c) : (callTab.hint || ""));
+                        const why = on ? "Call with My Synergy Phone" : (typeof callTab.hint === "function" ? callTab.hint(c) : (callTab.hint || ""));
                         return (
                           <button type="button" disabled={!on} title={why} data-ss-list-call={g.contactId || g.key}
                             onClick={() => { if (on) callRow(g); }}
@@ -1315,23 +1315,23 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
                       })()}
                     </td>
                   </tr>
-                  {/* What the row's Call did. Nothing here places a call; it reports what SSS
-                      Phone said, with the same words and the same install card as the record. */}
+                  {/* What the row's Call did. Nothing here places a call; it reports what
+                      My Synergy Phone said, with the same words and the same install card as the record. */}
                   {callUi && callUi.key === g.key && (
                     <tr>
                       <td colSpan={7} style={{ ...S.td, background: "#F8FAFC" }} data-ss-phone-panel="list-call">
                         <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            {callUi.kind === "checking" && <div style={{ fontSize: 12.5, color: "#64748B" }}>Starting the call in SSS Phone…</div>}
+                            {callUi.kind === "checking" && <div style={{ fontSize: 12.5, color: "#64748B" }}>Starting the call in My Synergy Phone…</div>}
                             {callUi.kind === "calling" && (
                               <div style={{ ...S.okMsg, marginBottom: 0 }}>
-                                Calling <strong>{phoneDisplay(callUi.to)}</strong> in SSS Phone. The call runs there, so you can keep working here.
+                                Calling <strong>{phoneDisplay(callUi.to)}</strong> in My Synergy Phone. The call runs there, so you can keep working here.
                               </div>
                             )}
                             {callUi.kind === "app" && (
                               <>
                                 <div style={{ fontSize: 12.5, color: "#475569", marginBottom: 8 }}>
-                                  Opening the SSS Phone app to call <strong>{phoneDisplay(callUi.to)}</strong>. If nothing happens, the app isn't on this phone yet.
+                                  Opening the My Synergy Phone app to call <strong>{phoneDisplay(callUi.to)}</strong>. If nothing happens, the app isn't on this phone yet.
                                 </div>
                                 <SsPhoneInstallCard what="call" mobile />
                               </>
@@ -1508,7 +1508,7 @@ const CRM_LOCKED_HINT = "The built-in CRM isn't part of your subscription — ad
 const CRM_PICK_HINT = (what) =>
   `Pick a deal or order on the left first, so the ${what} is filed against the right one.`;
 
-// OPERATOR VIEW-AS (plan section 12, SSS Phone). While CSM Synergy is looking at a builder's
+// OPERATOR VIEW-AS (plan section 12, My Synergy Phone). While CSM Synergy is looking at a builder's
 // account, Call and Text go dark: a call or text placed from here would go out from the
 // builder's own number, under the builder's name, to the builder's customer — by somebody who
 // is not on that builder's team. The server refuses a contact from another tenant too; this is
@@ -1535,8 +1535,8 @@ const CRM_TABS = [
       : !c.canEdit ? "You don't have permission to add notes."
       : CRM_PICK_HINT("note")) },
   { key: "scheduler", label: "Meeting scheduler", enabled: () => false, hint: "Arrives with the calendar integration." },
-  // CALL — SSS Phone (2026-09-29). Built now, so it no longer says "arrives with the phone
-  // integration". Pressing it hands the number to the SSS Phone extension on this computer (or
+  // CALL — My Synergy Phone (2026-09-29). Built now, so it no longer says "arrives with the phone
+  // integration". Pressing it hands the number to the My Synergy Phone extension on this computer (or
   // the app, on a phone) and the call runs THERE; this page never moves. See startCall.
   //
   // It is NOT a CRM tab and NOT a contacts:edit tab, deliberately: it writes nothing through
@@ -1584,7 +1584,7 @@ const CRM_TABS = [
   // and the server answered "A text has to be addressed to a contact." — printed underneath
   // the phone number this very tab renders. Same rule, same words as the Person panel.
   //
-  // SSS PHONE (2026-09-29): when the extension is installed and signed in as this person, the
+  // MY SYNERGY PHONE (2026-09-29): when the extension is installed and signed in as this person, the
   // tab opens the customer's thread THERE instead (routeText), and this composer stays as the
   // fallback for everyone else. Its gates are unchanged — the extension's send runs the same
   // registration, consent and STOP rules — except the operator view-as, which now greys it.
@@ -1694,7 +1694,7 @@ const CRM_CHIPS = [
   // Shown only once the account can actually text: a permanently empty filter teaches
   // people the chip is broken. Mirrors CRM_FEED_TYPES.message; keep the two identical.
   { key: "messages", label: "Messages", types: ["sms", "sms_in"], when: (c) => !!(c.sms && c.sms.ready) },
-  // Calls, voicemails and missed calls — SSS Phone. Mirrors CRM_FEED_TYPES.call in
+  // Calls, voicemails and missed calls — My Synergy Phone. Mirrors CRM_FEED_TYPES.call in
   // _shared/crmFeed.ts; keep the two identical. Shown once the account can call, OR once this
   // record has any call on it, so switching calling off later never hides history that exists.
   { key: "calls", label: "Calls", types: ["call", "call_missed", "voicemail"], when: (c) => !!(c.phone && c.phone.on) || !!c.hasCalls },
@@ -2412,7 +2412,7 @@ function CrmRecordSkeleton({ kind, onBack }) {
   );
 }
 
-// SSS PHONE: one voicemail in the contact timeline. Nothing is fetched until the person presses
+// MY SYNERGY PHONE: one voicemail in the contact timeline. Nothing is fetched until the person presses
 // Play: the Worker marks a voicemail heard the first time it streams, so opening the record must
 // not fetch it. Then the audio is fetched with the sign-in in the Authorization header
 // (ssPhoneFetchVoicemail) and played from a blob: URL — never an <audio src> carrying the token,
@@ -2462,7 +2462,7 @@ function SsVoicemailPlayer({ voicemailId }) {
 // view-as path — see QuoteSalesTaxCard.)
 function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = false, crmUnlocked = true, initialDeal = null, onSeeBilling = null, onBack, onNavigate, onOpenDesign , onOpenOrder = null,
   clientId = null, viewingLabel = null, canEditDesigns = false, canReadTaxSettings = false, canVerifyTax = false,
-  // SSS Phone: the signed-in person (the extension refuses a call for anybody else), whether
+  // My Synergy Phone: the signed-in person (the extension refuses a call for anybody else), whether
   // their access includes calling, and whether calling is switched on for the account.
   userId = null, canCall = false, phoneOn = false }) {
   // THE SUBSCRIPTION IS AN EDIT GATE, NOT A TAB GATE, and it has to be applied here rather
@@ -2501,8 +2501,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   const [upBusy, setUpBusy] = useState(false);
   const [upMsg, setUpMsg] = useState(null);
   const [textMsg, setTextMsg] = useState(null);
-  // SSS Phone: where the last Call / Text hand-off got to ({ what: "call"|"text", kind, ... }),
-  // and whether the reader chose to write a text here after it opened in SSS Phone. In the TOP
+  // My Synergy Phone: where the last Call / Text hand-off got to ({ what: "call"|"text", kind, ... }),
+  // and whether the reader chose to write a text here after it opened in My Synergy Phone. In the TOP
   // hook block for the same reason as everything above: CrmRecord returns early on `!data`,
   // and a hook below that guard is React #310 and a white page (13ca37e).
   const [phoneUi, setPhoneUi] = useState(null);
@@ -2639,7 +2639,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // — which would break the free Pipeline list that opens design records without a CRM.
   const ctx = { kind, record, isAdmin, canEdit, crmUnlocked, contact: data.contact, designs: data.designs || [], sms: data.sms || null,
     selectedCode: activeCode, needsPick: kind === "contact" && !activeCode,
-    // SSS Phone. `viewing` is operator view-as (the shell passes viewingLabel only then), and
+    // My Synergy Phone. `viewing` is operator view-as (the shell passes viewingLabel only then), and
     // greys Call and Text first; see CRM_VIEWING_CALL_HINT.
     viewing: !!viewingLabel, canCall: !!canCall, phone: { on: !!phoneOn },
     hasCalls: (data.feed || []).some((e) => e.type === "call" || e.type === "call_missed" || e.type === "voicemail") };
@@ -2894,7 +2894,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     setText(""); setTextMsg({ ok: "Sent." }); load();
   };
 
-  // ── SSS PHONE: hand the call or the text over (SPEC section 5) ───────────────────────
+  // ── MY SYNERGY PHONE: hand the call or the text over (SPEC section 5) ────────────────
   // The four fields every message carries. user_id and client_id are what let the extension
   // refuse a portal signed in as somebody else on a shared office computer ("wrong_user"),
   // so they are the SIGNED-IN person and the tenant on screen — never a contact's owner.
@@ -2907,7 +2907,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
 
   // CALL. One press dials: the extension already holds a registered line (plan D4), so the
   // time from this click to Twilio is the extension's, not ours. On a phone's browser there is
-  // no extension, so the SSS Phone app opens by its link instead. Neither path moves this page.
+  // no extension, so the My Synergy Phone app opens by its link instead. Neither path moves this page.
   // The rules are ssPhoneStartCall's (01-core), shared with the contact list's Call button.
   const startCall = async () => {
     const msg = phoneMsg();
@@ -2917,8 +2917,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     setPhoneUi({ what: "call", ...out });
   };
 
-  // TEXT. For someone who uses SSS Phone, the SMS tab opens the customer's thread in the
-  // extension (plan section 12: "Opens the thread in the extension or app when SSS Phone is
+  // TEXT. For someone who uses My Synergy Phone, the SMS tab opens the customer's thread in the
+  // extension (plan section 12: "Opens the thread in the extension or app when My Synergy Phone is
   // installed"), so a conversation lives in one place. Everybody else — and anybody whose
   // extension is signed in as somebody else, or not at all — gets today's composer, unchanged.
   // It never sends: the extension opens the thread and the person types there.
@@ -2936,8 +2936,8 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       setPhoneUi({
         what: "text", kind: "elsewhere",
         text: who.user_id
-          ? "SSS Phone on this computer is signed in as someone else, so this text goes from here."
-          : "SSS Phone isn't signed in, so this text goes from here.",
+          ? "My Synergy Phone on this computer is signed in as someone else, so this text goes from here."
+          : "My Synergy Phone isn't signed in, so this text goes from here.",
       });
       return;
     }
@@ -2945,7 +2945,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     if (out.reply && out.reply.ok) { setPhoneUi({ what: "text", kind: "texting", to: msg.to_e164 }); return; }
     setPhoneUi({ what: "text", kind: "elsewhere", text: `${ssPhoneRefusal(out.reply)} You can still text from here.` });
   };
-  // Showing the thread in SSS Phone instead of the composer: only once it has actually opened
+  // Showing the thread in My Synergy Phone instead of the composer: only once it has actually opened
   // there (or while we are finding out), and never after "Write it here instead".
   const smsViaPhone = !!(phoneUi && phoneUi.what === "text" && !smsHere && (phoneUi.kind === "texting" || phoneUi.kind === "checking"));
 
@@ -3530,7 +3530,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                       if (!on) return;
                       setTab(t.key);
                       // Call and SMS DO something as they open: Call dials (one press, like the
-                      // phone it is), SMS finds out whether the thread belongs in SSS Phone.
+                      // phone it is), SMS finds out whether the thread belongs in My Synergy Phone.
                       if (t.key === "call") startCall();
                       else if (t.key === "sms") routeText();
                     }}
@@ -3566,25 +3566,25 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               </div>
             )}
 
-            {/* ── SSS PHONE: the Call hand-off ────────────────────────────────────────────
-                Nothing here places a call; it reports what SSS Phone said. Every state names
+            {/* ── MY SYNERGY PHONE: the Call hand-off ─────────────────────────────────────
+                Nothing here places a call; it reports what My Synergy Phone said. Every state names
                 what to do next, because a Call button that "did nothing" is the report nobody
                 can act on. */}
             {tab === "call" && phoneUi && phoneUi.what === "call" && (
               <div style={{ marginBottom: 12 }} data-ss-phone-panel="call">
                 {phoneUi.kind === "checking" && (
-                  <div style={{ fontSize: 12.5, color: "#64748B" }}>Starting the call in SSS Phone…</div>
+                  <div style={{ fontSize: 12.5, color: "#64748B" }}>Starting the call in My Synergy Phone…</div>
                 )}
                 {phoneUi.kind === "calling" && (
                   <div style={{ ...S.okMsg, marginBottom: 0 }}>
-                    Calling <strong>{phoneDisplay(phoneUi.to)}</strong> in SSS Phone. The call runs there, so you can
+                    Calling <strong>{phoneDisplay(phoneUi.to)}</strong> in My Synergy Phone. The call runs there, so you can
                     keep working on this page.
                   </div>
                 )}
                 {phoneUi.kind === "app" && (
                   <>
                     <div style={{ fontSize: 12.5, color: "#475569", marginBottom: 8 }}>
-                      Opening the SSS Phone app to call <strong>{phoneDisplay(phoneUi.to)}</strong>. If nothing happens,
+                      Opening the My Synergy Phone app to call <strong>{phoneDisplay(phoneUi.to)}</strong>. If nothing happens,
                       the app isn't on this phone yet.
                     </div>
                     <SsPhoneInstallCard what="call" mobile />
@@ -3595,15 +3595,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               </div>
             )}
 
-            {/* The thread opened in SSS Phone instead of here. One link back to the composer,
+            {/* The thread opened in My Synergy Phone instead of here. One link back to the composer,
                 because a person who wants to type it here should never be stuck. */}
             {tab === "sms" && canEdit && data.contact && data.contact.phone && smsViaPhone && (
               <div style={{ marginBottom: 12 }} data-ss-phone-panel="text">
                 {phoneUi.kind === "checking" ? (
-                  <div style={{ fontSize: 12.5, color: "#64748B" }}>Opening the conversation in SSS Phone…</div>
+                  <div style={{ fontSize: 12.5, color: "#64748B" }}>Opening the conversation in My Synergy Phone…</div>
                 ) : (
                   <div style={{ ...S.okMsg, marginBottom: 0 }}>
-                    The conversation with <strong>{phoneUi.to ? phoneDisplay(phoneUi.to) : data.contact.phone}</strong> is open in SSS Phone.{" "}
+                    The conversation with <strong>{phoneUi.to ? phoneDisplay(phoneUi.to) : data.contact.phone}</strong> is open in My Synergy Phone.{" "}
                     <button type="button" onClick={() => setSmsHere(true)}
                       style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
                       Write it here instead
@@ -3614,7 +3614,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             )}
             {tab === "sms" && canEdit && data.contact && data.contact.phone && !smsViaPhone && (
               <div style={{ marginBottom: 12 }}>
-                {/* Why the composer is here rather than SSS Phone, when that is news. */}
+                {/* Why the composer is here rather than My Synergy Phone, when that is news. */}
                 {phoneUi && phoneUi.what === "text" && phoneUi.kind === "install" && <SsPhoneInstallCard what="text" compact />}
                 {phoneUi && phoneUi.what === "text" && phoneUi.kind === "elsewhere" && (
                   <div style={{ fontSize: 12, color: "#64748B", marginBottom: 7 }}>{phoneUi.text}</div>
@@ -4009,7 +4009,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                     <div>
                       <div style={{ fontSize: 13, fontWeight: 600, color: "#1E293B" }}>{e.title}</div>
                       {e.body && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>{e.body}</div>}
-                      {/* SSS PHONE: the voicemail itself, played from the phone-api Worker
+                      {/* MY SYNERGY PHONE: the voicemail itself, played from the phone-api Worker
                           (GET /voicemails/:id/audio). Only for someone the Worker will serve —
                           phone access, calling on, not an operator in view-as (their token is
                           not on this builder's team) — and only while the recording exists.

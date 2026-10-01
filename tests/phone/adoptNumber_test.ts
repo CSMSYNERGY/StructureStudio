@@ -1,4 +1,4 @@
-// SSS Phone plan phase 6 — texting ADOPTS a calling-only number (portal-sms buy_number,
+// My Synergy Phone plan phase 6 — texting ADOPTS a calling-only number (portal-sms buy_number,
 // supabase/functions/portal-sms/adoptNumber.ts and its wiring in index.ts), and the SMS tab's
 // "Use this number for texting" (portal/11-sms.jsx).
 //

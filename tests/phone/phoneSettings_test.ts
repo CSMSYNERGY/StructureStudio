@@ -1,4 +1,4 @@
-// SSS Phone — portal-settings' pure rules (supabase/functions/portal-settings/phone.ts).
+// My Synergy Phone — portal-settings' pure rules (supabase/functions/portal-settings/phone.ts).
 //
 // Run: deno test --node-modules-dir=none --allow-read tests/phone/
 //

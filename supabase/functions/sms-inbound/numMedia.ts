@@ -1,6 +1,6 @@
 // How many photos came with an inbound text, and storing it without ever losing the text.
 //
-// SSS Phone (plan section 6, release 1): "a text that came with photos shows 'Photo received.
+// My Synergy Phone (plan section 6, release 1): "a text that came with photos shows 'Photo received.
 // Viewing photos arrives in release 2.' so nothing looks empty." A photo-only MMS has an EMPTY
 // Body, so without this count the app would show a blank bubble and the builder would think the
 // customer sent nothing. Twilio posts NumMedia on every inbound message; sms_messages.num_media

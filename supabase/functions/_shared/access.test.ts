@@ -704,7 +704,7 @@ Deno.test("a dealer's narrowed contacts scope cannot be widened by someone who s
   assert(mayGrant("admin", narrowed, "contacts", "own"));
 });
 
-// ── SSS PHONE (migration 254, 2026-09-29) ────────────────────────────────────────────────
+// ── MY SYNERGY PHONE (migration 254, 2026-09-29) ─────────────────────────────────────────
 // Levels none/own/view/edit. The rule worth pinning is the rank trap: RANK scores 'own' and
 // 'view' the same, so canRead() says yes to both, and only ownPhoneOnly() can tell "my calls"
 // from "the team's calls". Presets are the plan's §7 defaults.

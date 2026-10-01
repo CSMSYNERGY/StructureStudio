@@ -197,15 +197,25 @@ describe("POST /log", () => {
   it("records app errors with the severity the app chose", async () => {
     const { net, token, env } = await setup();
     const { json } = await call(env, appRequest("POST", "/log", token, {
-      source: "sss-phone-extension", severity: "warn", code: "mic_denied", message: "Microphone blocked", context: { step: "welcome" }, app_version: "0.3.1",
+      source: "my-synergy-phone-extension", severity: "warn", code: "mic_denied", message: "Microphone blocked", context: { step: "welcome" }, app_version: "0.3.1",
     }, { "user-agent": "TestAgent/1" }));
     expect(json).toEqual({ ok: true });
     const row = net.writes("app_errors")[0].json;
     expect(row).toMatchObject({
-      source: "sss-phone-extension", severity: "warn", code: "mic_denied", message: "Microphone blocked", client_id: CLIENT,
+      source: "my-synergy-phone-extension", severity: "warn", code: "mic_denied", message: "Microphone blocked", client_id: CLIENT,
       user_agent: "TestAgent/1", context: { step: "welcome", app_version: "0.3.1", user_id: USER_A },
     });
   });
+
+  it.each(["my-synergy-phone-mobile", "sss-phone-extension", "sss-phone-mobile"])(
+    "accepts %s too (builds from before the 2026-10-01 rename still send the old codes), stored as sent",
+    async (source) => {
+      const { net, token, env } = await setup();
+      const { json } = await call(env, appRequest("POST", "/log", token, { source, message: "x", app_version: "0.3.0" }));
+      expect(json).toEqual({ ok: true });
+      expect(net.writes("app_errors")[0].json).toMatchObject({ source, message: "x" });
+    },
+  );
 
   it("refuses any other source (the apps cannot write as edge functions)", async () => {
     const { token, env } = await setup();

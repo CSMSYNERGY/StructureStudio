@@ -42,7 +42,7 @@ async function setup(opts: { contact?: unknown; followers?: string[]; phoneStatu
   const net = new FakeNet().install();
   const env = makeEnv({
     FCM_SERVICE_ACCOUNT_JSON: JSON.stringify({ client_email: "push@demo.iam.example.test", private_key: await pem("rsa"), project_id: "demo-project", token_uri: "https://oauth2.example.test/token" }),
-    APNS_KEY_P8: await pem("ec"), APNS_KEY_ID: "KEY0000000", APNS_TEAM_ID: "TEAM000000", APNS_BUNDLE_ID: "com.example.sssphone.dev",
+    APNS_KEY_P8: await pem("ec"), APNS_KEY_ID: "KEY0000000", APNS_TEAM_ID: "TEAM000000", APNS_BUNDLE_ID: "com.example.mysynergyphone.dev",
     ...opts.env,
   });
   net.rest("GET", "client_settings", () => [{ phone_status: opts.phoneStatus ?? "on" }]);
@@ -116,7 +116,7 @@ describe("/push/text", () => {
     // The dev build's token goes to Apple's sandbox, with our bundle id as the topic.
     const apple = net.to(/push\.apple\.com/)[0];
     expect(apple.url.origin).toBe("https://api.sandbox.push.apple.com");
-    expect(apple.headers.get("apns-topic")).toBe("com.example.sssphone.dev");
+    expect(apple.headers.get("apns-topic")).toBe("com.example.mysynergyphone.dev");
     expect(apple.headers.get("apns-push-type")).toBe("alert");
     expect(apple.headers.get("authorization")).toMatch(/^bearer [\w-]+\.[\w-]+\.[\w-]+$/);
     expect(apple.json.aps.alert).toEqual({ title: "Jordan Demo", body: "Is the shed ready?" });
@@ -167,34 +167,34 @@ describe("APNs topic per build type", () => {
   ];
 
   it("apnsTopic: APNS_BUNDLE_ID_DEV for dev (falling back to APNS_BUNDLE_ID), APNS_BUNDLE_ID for prod, never the other way", () => {
-    const both = makeEnv({ APNS_BUNDLE_ID: "com.example.sssphone", APNS_BUNDLE_ID_DEV: "com.example.sssphone.dev" });
-    expect(apnsTopic(both, "dev")).toBe("com.example.sssphone.dev");
-    expect(apnsTopic(both, "prod")).toBe("com.example.sssphone");
-    const one = makeEnv({ APNS_BUNDLE_ID: "com.example.sssphone.dev" });
-    expect(apnsTopic(one, "dev")).toBe("com.example.sssphone.dev");
-    expect(apnsTopic(one, "prod")).toBe("com.example.sssphone.dev");
-    const devOnly = makeEnv({ APNS_BUNDLE_ID_DEV: "com.example.sssphone.dev" });
+    const both = makeEnv({ APNS_BUNDLE_ID: "com.example.mysynergyphone", APNS_BUNDLE_ID_DEV: "com.example.mysynergyphone.dev" });
+    expect(apnsTopic(both, "dev")).toBe("com.example.mysynergyphone.dev");
+    expect(apnsTopic(both, "prod")).toBe("com.example.mysynergyphone");
+    const one = makeEnv({ APNS_BUNDLE_ID: "com.example.mysynergyphone.dev" });
+    expect(apnsTopic(one, "dev")).toBe("com.example.mysynergyphone.dev");
+    expect(apnsTopic(one, "prod")).toBe("com.example.mysynergyphone.dev");
+    const devOnly = makeEnv({ APNS_BUNDLE_ID_DEV: "com.example.mysynergyphone.dev" });
     expect(apnsTopic(devOnly, "prod")).toBeNull();
   });
 
   it("each iPhone gets its own build's host and topic, chosen by the device row's build_type", async () => {
     const { net, env } = await setup({
       contact: { name: "Jordan Demo", owner_user_id: USER_A },
-      env: { APNS_BUNDLE_ID: "com.example.sssphone", APNS_BUNDLE_ID_DEV: "com.example.sssphone.dev" },
+      env: { APNS_BUNDLE_ID: "com.example.mysynergyphone", APNS_BUNDLE_ID_DEV: "com.example.mysynergyphone.dev" },
     });
     net.rest("GET", "phone_devices", () => IPHONES);
     await call(env, hook(env, inbound()));
     const sent = net.to(/push\.apple\.com/).map((s) => ({ host: s.url.origin, token: s.url.pathname.split("/").pop(), topic: s.headers.get("apns-topic") }));
     expect(sent.sort((a, b) => a.token!.localeCompare(b.token!))).toEqual([
-      { host: "https://api.sandbox.push.apple.com", token: "dd01", topic: "com.example.sssphone.dev" },
-      { host: "https://api.push.apple.com", token: "pp01", topic: "com.example.sssphone" },
+      { host: "https://api.sandbox.push.apple.com", token: "dd01", topic: "com.example.mysynergyphone.dev" },
+      { host: "https://api.push.apple.com", token: "pp01", topic: "com.example.mysynergyphone" },
     ]);
   });
 
   it("a build type with no topic is skipped (logged per build type); the other still sends", async () => {
     const { net, env } = await setup({
       contact: { name: "Jordan Demo", owner_user_id: USER_A },
-      env: { APNS_BUNDLE_ID: undefined, APNS_BUNDLE_ID_DEV: "com.example.sssphone.dev" },
+      env: { APNS_BUNDLE_ID: undefined, APNS_BUNDLE_ID_DEV: "com.example.mysynergyphone.dev" },
     });
     net.rest("GET", "phone_devices", () => IPHONES);
     const { res } = await call(env, hook(env, inbound()));

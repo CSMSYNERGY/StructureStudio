@@ -28,7 +28,7 @@ export type ErrorCode =
 export const ERROR_TEXT: Record<ErrorCode, string> = {
   unauthorized: "Please sign in again.",
   no_phone_access: "Your account doesn't have phone access. Ask your owner to turn it on.",
-  phone_off: "SSS Phone isn't switched on for your business yet.",
+  phone_off: "My Synergy Phone isn't switched on for your business yet.",
   retired_device: "This device was signed out. Please sign in again.",
   not_your_customer: "You can only text your own customers.",
   no_consent: "This customer hasn't agreed to texts yet.",

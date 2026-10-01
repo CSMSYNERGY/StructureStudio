@@ -41,7 +41,7 @@ describe("/voice/screen (press 1 to answer)", () => {
   it("asks the cell to press 1, naming the business, and hangs up on silence", async () => {
     setup();
     const { text } = await call(env, await twilioPost(env, "/voice/screen", { CallSid: LEG }, { call: CALL_ID, user: USER_A, b: "Demo Sheds" }));
-    expect(text).toContain("<Say language=\"en-US\">SSS Phone call for Demo Sheds, press 1 to answer.</Say>");
+    expect(text).toContain("<Say language=\"en-US\">My Synergy Phone call for Demo Sheds, press 1 to answer.</Say>");
     expect(attr(text, "Gather", "numDigits")).toBe("1");
     expect(attr(text, "Gather", "action")).toBe(`https://phone.example.test/voice/screen?call=${CALL_ID}&user=${USER_A}&b=Demo%20Sheds&step=accept&key=test-webhook-key`);
     expect(text).toMatch(/<\/Gather><Hangup\/><\/Response>$/);
@@ -65,7 +65,7 @@ describe("/voice/screen (press 1 to answer)", () => {
     setup();
     const { res, text } = await call(env, await twilioPost(env, "/voice/screen", { CallSid: LEG }, { call: CALL_ID, b: "Bob's Sheds & Barns" }));
     expect(res.status).toBe(200);
-    expect(text).toContain("SSS Phone call for Bob's Sheds &amp; Barns, press 1");
+    expect(text).toContain("My Synergy Phone call for Bob's Sheds &amp; Barns, press 1");
     expect(attr(text, "Gather", "action")).toContain("b=Bob%27s%20Sheds%20%26%20Barns");
   });
 });

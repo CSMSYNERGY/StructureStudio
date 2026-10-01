@@ -118,7 +118,7 @@ describe("/voice/outbound", () => {
     expect(text).toContain("<Dial");
   });
 
-  it.each([["+15555", "can't be dialed. Check it"], ["+19005550100", "can't be dialed from SSS Phone"], ["client:someone", "can't be dialed. Check it"]])(
+  it.each([["+15555", "can't be dialed. Check it"], ["+19005550100", "can't be dialed from My Synergy Phone"], ["client:someone", "can't be dialed. Check it"]])(
     "refuses a bad or premium number %s", async (to, words) => {
       setup();
       const { text } = await dialOut(makeEnv(), { To: to });

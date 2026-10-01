@@ -1,4 +1,4 @@
-// SSS Phone — the portal's Call / Text gates and its extension bridge, tested against the
+// My Synergy Phone — the portal's Call / Text gates and its extension bridge, tested against the
 // SHIPPED source (portal/02-sales.jsx and portal/01-core.jsx), the crmRecordGate_test way:
 // slice the real block between stable anchors, fail loudly if they move, run it.
 //
@@ -87,9 +87,9 @@ Deno.test("SMS outside view-as is exactly what it was", () => {
 });
 
 // ── 01-core's phone helpers ────────────────────────────────────────────────────────────────
-// Sliced from the SSS PHONE block through the settings-tabs comment that follows it. `window`,
+// Sliced from the MY SYNERGY PHONE block through the settings-tabs comment that follows it. `window`,
 // `navigator` and `ssIsBetaHost` are injected so the slice runs outside a browser.
-const PHONE_BLOCK = slice(CORE, "function ssOwnPhoneOnly(", "// ── The Settings sub-pages", "SSS PHONE helpers");
+const PHONE_BLOCK = slice(CORE, "function ssOwnPhoneOnly(", "// ── The Settings sub-pages", "MY SYNERGY PHONE helpers");
 type Win = { SS_PHONE_EXTENSION_IDS?: unknown; chrome?: unknown; location: { href: string } };
 function helpers(win: Win, nav: Record<string, unknown> = { userAgent: "Mozilla/5.0 (Windows NT 10.0) Chrome/140" }, beta = false) {
   return new Function("window", "navigator", "ssIsBetaHost", `${PHONE_BLOCK};
@@ -123,7 +123,7 @@ Deno.test("the extension IDs: the unpacked dev build's stable id by default, an 
   const h = helpers(defaults);
   assert(Array.isArray(defaults.SS_PHONE_EXTENSION_IDS), "the config constant was not created");
   // The dev build's id (a fixed manifest key keeps it stable). The store id is ADDED here, first,
-  // when SSS Phone is published; the comment above the constant says so.
+  // when My Synergy Phone is published; the comment above the constant says so.
   assertEquals(defaults.SS_PHONE_EXTENSION_IDS, ["ipiccbfkkbenmiaiaoecbhbjalkbikjk"]);
   assertEquals(h.ssPhoneExtensionIds(), ["ipiccbfkkbenmiaiaoecbhbjalkbikjk"], "a real Chrome id shape, so it IS messaged");
   assert(/add the Chrome Web Store id to this list, FIRST/.test(CORE), "the note to add the store id is next to the constant");
@@ -180,7 +180,7 @@ Deno.test("bridge: a refusal comes back as the extension's error, and reads as w
   });
   const out = await h.ssPhoneSend("sss.call", {});
   assertEquals(out.reply.error, "wrong_user");
-  assertEquals(h.ssPhoneRefusal(out.reply), "SSS Phone on this computer is signed in as Robin Example. Sign in to SSS Phone as yourself, then try again.");
+  assertEquals(h.ssPhoneRefusal(out.reply), "My Synergy Phone on this computer is signed in as Robin Example. Sign in to My Synergy Phone as yourself, then try again.");
   for (const code of ["signed_out", "no_access", "busy", "bad_request", "emergency_blocked", "no_reply", "something_new"]) {
     const words = h.ssPhoneRefusal({ ok: false, error: code });
     assert(words.length > 20 && !/undefined|null/.test(words), `${code}: ${words}`);
@@ -199,9 +199,9 @@ Deno.test("ssPhoneE164, the emergency guard, and the app deep link", () => {
   // SPEC section 7: `ts` is when the page made the link (epoch ms); the app drops one over a
   // minute old, so a replayed link never offers a call nobody just asked for.
   const link = h.ssPhoneDeepLink("call", { to_e164: "+15555550100", contact_id: "c1", user_id: "u1", client_id: "demo-tenant" }, 1790000000000);
-  assertEquals(link, "sssphone://call?to=%2B15555550100&contact_id=c1&user_id=u1&client_id=demo-tenant&ts=1790000000000");
+  assertEquals(link, "mysynergyphone://call?to=%2B15555550100&contact_id=c1&user_id=u1&client_id=demo-tenant&ts=1790000000000");
   const before = Date.now();
-  const live = new URL(h.ssPhoneDeepLink("call", { to_e164: "+15555550100" }).replace("sssphone://", "https://x/"));
+  const live = new URL(h.ssPhoneDeepLink("call", { to_e164: "+15555550100" }).replace("mysynergyphone://", "https://x/"));
   const ts = Number(live.searchParams.get("ts"));
   assert(/^\d{13}$/.test(String(live.searchParams.get("ts"))) && ts >= before && ts <= Date.now(), `ts is Date.now(): ${live.searchParams.get("ts")}`);
 });

@@ -1061,7 +1061,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
       )}
 
       {/* ── Step 5: the number ─────────────────────────────────────────────── */}
-      {/* SSS Phone plan phase 6: a number already bought for CALLS (Settings → Phone) is the
+      {/* My Synergy Phone plan phase 6: a number already bought for CALLS (Settings → Phone) is the
           business's one number, so texting takes it over instead of buying a second one. The
           server adopts it on buy_number with no number picked, and takes no second charge (the
           first month was taken when it was bought). */}
@@ -1151,7 +1151,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
 }
 
 /* ═════════════════════════════════════════════════════════════════════════════
-   SSS PHONE — calling setup, install links and the Calls report (2026-09-29)
+   MY SYNERGY PHONE — calling setup, install links and the Calls report (2026-09-29)
 
    Plan sections 6 and 12, SPEC section 5. CALLING ONLY: the number is bought and
    registered on the Text Messaging tab above, and nothing here buys, registers or
@@ -1226,7 +1226,7 @@ function phoneWhen(iso) {
   return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
 }
 
-// ── Where to get SSS Phone ──────────────────────────────────────────────────────────────
+// ── Where to get My Synergy Phone ───────────────────────────────────────────────────────
 // Shown by the contact page when Call finds no extension, by the SMS tab (compact), by the
 // Phone settings tab and by the Calls page. A link still marked PLACEHOLDER (01-core's
 // SS_PHONE_LINKS) reads "coming soon" rather than sending a builder to a page that is not there.
@@ -1252,7 +1252,7 @@ function SsPhoneInstallCard({ what = "call", compact = false, mobile = false, fr
   if (compact) {
     return (
       <div data-ss-phone-install="compact" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12, color: "#475569", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 10px", marginBottom: 8 }}>
-        <span>With <strong>SSS Phone</strong> installed, {what === "text" ? "texts open in its panel beside this page" : "Call rings the customer from your business number"}.</span>
+        <span>With <strong>My Synergy Phone</strong> installed, {what === "text" ? "texts open in its panel beside this page" : "Call rings the customer from your business number"}.</span>
         {links.map(linkEl)}
       </div>
     );
@@ -1260,10 +1260,10 @@ function SsPhoneInstallCard({ what = "call", compact = false, mobile = false, fr
   return (
     <div data-ss-phone-install={mobile ? "mobile" : "full"} style={{ border: "1px solid #C7D2FE", background: "#EEF2FF", borderRadius: 10, padding: "13px 15px" }}>
       <div style={{ fontSize: 14, fontWeight: 800, color: "#312E81", marginBottom: 4 }}>
-        {mobile ? "Get the SSS Phone app" : what === "text" ? "Install SSS Phone to text from Structure Studio" : "Install SSS Phone to call from Structure Studio"}
+        {mobile ? "Get the My Synergy Phone app" : what === "text" ? "Install My Synergy Phone to text from Structure Studio" : "Install My Synergy Phone to call from Structure Studio"}
       </div>
       <div style={{ fontSize: 12.5, color: "#3730A3", lineHeight: 1.55, marginBottom: 10 }}>
-        SSS Phone is Structure Studio&rsquo;s calling app. Sign in with your Structure Studio login and
+        My Synergy Phone is Structure Studio&rsquo;s calling app. Sign in with your Structure Studio login and
         {what === "text" ? " texts" : " calls"} go out from your business number, without leaving the page you&rsquo;re on.
       </div>
       <div style={{ display: "grid", gap: 8 }}>
@@ -1351,7 +1351,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       <div style={PHONE_CARD} data-ss-phone-settings="unavailable">
         <h3 style={{ margin: "0 0 6px", fontSize: 16 }}>Phone</h3>
         <p style={{ margin: 0, fontSize: 13, color: "#475569" }}>
-          SSS Phone isn&rsquo;t set up on this account yet. Once it is, you&rsquo;ll choose who answers your
+          My Synergy Phone isn&rsquo;t set up on this account yet. Once it is, you&rsquo;ll choose who answers your
           business number here.
         </p>
       </div>
@@ -1366,12 +1366,12 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   // review SSB-2), so the confirm says what callers will get; turning it back ON reconnects a
   // number the switch moved. `wantOn` lets "Send calls to voicemail" retry the move while off.
   const flip = async (wantOn = !on) => {
-    // Only a CONNECTED number is moved to voicemail; one that never pointed at SSS Phone keeps
+    // Only a CONNECTED number is moved to voicemail; one that never pointed at My Synergy Phone keeps
     // whatever it did before, so the words are only said where they are true.
     const moves = !!(data.number && data.number.voiceReady);
     if (!wantOn && on && !window.confirm(moves
-      ? `Turn calling off? Nobody's SSS Phone will ring, and nobody can call out, until it's turned back on. Callers to ${phoneDisplay(data.number.e164)} go straight to voicemail instead.`
-      : "Turn calling off? Nobody's SSS Phone will ring, and nobody can call out, until it's turned back on.")) return;
+      ? `Turn calling off? My Synergy Phone won't ring for anyone, and nobody can call out, until it's turned back on. Callers to ${phoneDisplay(data.number.e164)} go straight to voicemail instead.`
+      : "Turn calling off? My Synergy Phone won't ring for anyone, and nobody can call out, until it's turned back on.")) return;
     setBusy(true); setSwNote(null);
     try {
       const d = await phoneAction("phone_status_set", { on: wantOn });
@@ -1411,7 +1411,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     // It ends their Structure Studio sign-ins too (254's phone_end_user_sessions), so the
     // confirm says so: a person pressing it for a lost phone should know their colleague will
     // have to sign in again at their desk as well.
-    if (!window.confirm(`Sign ${who} out on every computer and phone? Use this for a lost phone or someone leaving. They'll have to sign in again to SSS Phone and to Structure Studio.`)) return;
+    if (!window.confirm(`Sign ${who} out on every computer and phone? Use this for a lost phone or someone leaving. They'll have to sign in again to My Synergy Phone and to Structure Studio.`)) return;
     setBusy(true); setOutNote(null);
     try {
       const d = await phoneAction("phone_signout_user", { userId: m.userId });
@@ -1419,11 +1419,11 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
         userId: m.userId,
         ok: d.sessionsEnded
           ? `${who} is signed out everywhere and has to sign in again.`
-          // A CSM Synergy support person on this team: their SSS Phone devices here are retired,
+          // A CSM Synergy support person on this team: their My Synergy Phone devices here are retired,
           // but their Structure Studio sign-ins cover the other accounts they support, so only
           // Structure Studio can end those (the server kept them, review SSB-9).
           : d.sessionsKept === "operator"
-            ? `${who}'s SSS Phone devices were disconnected from calls on this account. ${who} is on the Structure Studio support team, so their Structure Studio sign-ins were left alone; ask Structure Studio if those need ending too.`
+            ? `${who}'s devices were disconnected from calls in My Synergy Phone on this account. ${who} is on the Structure Studio support team, so their Structure Studio sign-ins were left alone; ask Structure Studio if those need ending too.`
             : `${who}'s devices were disconnected from calls. A device that is still signed in reconnects on its own, so for a lost phone also change their Structure Studio password.`,
       });
       load();
@@ -1432,7 +1432,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   };
 
   // ── Plan phase 6: the number, from this tab ───────────────────────────────────────────
-  // Connect: point the number's calls at SSS Phone (phone_enable_number). Search and buy: a
+  // Connect: point the number's calls at My Synergy Phone (phone_enable_number). Search and buy: a
   // CALLING-ONLY number for a builder with none, which texting reuses once its registration
   // clears. The server decides who may buy (canBuyNumber); this only offers what will work.
   const connect = async () => {
@@ -1440,7 +1440,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     try {
       await phoneAction("phone_enable_number");
       setData((x) => ({ ...x, number: { ...x.number, voiceReady: true } }));
-      setNumNote({ ok: "Connected. Calls to this number ring SSS Phone now." });
+      setNumNote({ ok: "Connected. Calls to this number ring My Synergy Phone now." });
     } catch (e) { setNumNote({ err: e.message }); }
     finally { setBusy(false); }
   };
@@ -1492,12 +1492,12 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       </div>
       <p style={{ margin: 0, fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
         {on
-          ? "Customers who call your number ring the people chosen below, in SSS Phone on their computer and phone."
-          : "While calling is off, SSS Phone can't ring or call out for anyone on your team."}
+          ? "Customers who call your number ring the people chosen below, in My Synergy Phone on their computer and phone."
+          : "While calling is off, My Synergy Phone can't ring or call out for anyone on your team."}
       </p>
       {!on && data.scope === "team" && !data.canSwitchOn && (
         <p data-ss-phone-rollout style={{ margin: "8px 0 0", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
-          SSS Phone isn&rsquo;t open to every builder yet. Structure Studio switches it on for your account when it&rsquo;s ready.
+          My Synergy Phone isn&rsquo;t open to every builder yet. Structure Studio switches it on for your account when it&rsquo;s ready.
         </p>
       )}
       {swNote && swNote.ok && <div style={{ ...S.okMsg, margin: "10px 0 0" }}>{swNote.ok}</div>}
@@ -1535,16 +1535,16 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       )}
 
       {/* ── Plan phase 6: CONNECT the number for calls ─────────────────────────────────────
-          A number texting bought (or one bought while calling was off) does not ring SSS Phone
+          A number texting bought (or one bought while calling was off) does not ring My Synergy Phone
           until its voice webhooks point at the phone-api Worker. The owner does that here,
           once calling is on. */}
-      {/* Calling is OFF but the number still points at SSS Phone, which tells callers it can't
+      {/* Calling is OFF but the number still points at My Synergy Phone, which tells callers it can't
           take calls: the switch's move to voicemail did not finish (review SSB-2). Pressing
           this asks the switch to move it again. */}
       {data.scope === "team" && data.number && data.number.voiceReady && !on && (
         <div data-ss-phone-stuck style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
           <div style={{ fontSize: 13, color: "#B45309", marginBottom: canEdit ? 8 : 0 }}>
-            Calling is off, but this number still sends its calls to SSS Phone, so callers hear that it can&rsquo;t take calls.
+            Calling is off, but this number still sends its calls to My Synergy Phone, so callers hear that it can&rsquo;t take calls.
           </div>
           {canEdit && (
             <button type="button" data-ss-phone-to-voicemail disabled={busy} onClick={() => flip(false)}
@@ -1557,7 +1557,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       {data.scope === "team" && data.number && !data.number.voiceReady && (
         <div data-ss-phone-connect-card style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
           <div style={{ fontSize: 13, color: "#475569", marginBottom: canEdit && data.canConnect ? 8 : 0 }}>
-            Calls to this number don&rsquo;t reach SSS Phone yet.
+            Calls to this number don&rsquo;t reach My Synergy Phone yet.
           </div>
           {canEdit && data.canConnect && (
             <button type="button" data-ss-phone-connect disabled={busy || !on || !data.voiceSetup} onClick={connect}
@@ -1615,7 +1615,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
 
   const installCard = (
     <div style={PHONE_CARD}>
-      <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Get SSS Phone</h4>
+      <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Get My Synergy Phone</h4>
       <SsPhoneInstallCard what="call" />
     </div>
   );
@@ -1831,7 +1831,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       <div style={PHONE_CARD}>
         <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Who answers</h4>
         <p style={{ margin: "0 0 10px", fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
-          The people ticked here ring on every call to your number, in SSS Phone on their computer and
+          The people ticked here ring on every call to your number, in My Synergy Phone on their computer and
           phone. They don&rsquo;t need to set anything up beyond signing in. Up to 10 people.
         </p>
         <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginBottom: 10 }}>
@@ -1872,7 +1872,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
               onChange={(e) => setF({ forwardTo: formatPhone(e.target.value) })}
               style={{ ...S.input, maxWidth: 240 }} />
             <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4, lineHeight: 1.45 }}>
-              The cell hears &ldquo;SSS Phone call, press 1 to answer&rdquo; first, so a switched-off phone&rsquo;s own
+              The cell hears &ldquo;My Synergy Phone call, press 1 to answer&rdquo; first, so a switched-off phone&rsquo;s own
               voicemail never takes your customer&rsquo;s message — it lands in yours.
             </div>
           </label>
@@ -2023,7 +2023,7 @@ function CallsReport({ clientId, viewingLabel = null, canTeam = false, phoneOn =
         {err ? <div style={{ ...S.err, marginBottom: 0 }}>{err}</div>
           : loading && !data ? <SkelRows cols={9} rows={4} />
           : data && data.available === false ? (
-            <div style={{ fontSize: 13, color: "#475569" }}>Calls show here once SSS Phone is set up on this account.</div>
+            <div style={{ fontSize: 13, color: "#475569" }}>Calls show here once My Synergy Phone is set up on this account.</div>
           ) : (
             <>
               <div style={{ overflowX: "auto", opacity: loading ? 0.55 : 1 }}>
@@ -2062,7 +2062,7 @@ function CallsReport({ clientId, viewingLabel = null, canTeam = false, phoneOn =
       </div>
 
       <div style={PHONE_CARD}>
-        <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Get SSS Phone</h4>
+        <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Get My Synergy Phone</h4>
         <SsPhoneInstallCard what="call" />
       </div>
     </div>

@@ -17,7 +17,7 @@ node_modules
 .wrangler
 supabase
 scripts
-# Server-side Worker source (workers/phone-api, the SSS Phone API, 2026-09-29). It deploys as
+# Server-side Worker source (workers/phone-api, the My Synergy Phone API, 2026-09-29). It deploys as
 # its own Worker from its own directory; with assets.directory "." in the three static configs,
 # leaving it off this list would publish its source, tests and node_modules on every product host.
 workers/

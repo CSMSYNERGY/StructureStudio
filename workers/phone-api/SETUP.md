@@ -30,11 +30,11 @@ All four must pass. The dry run prints the bindings and "exiting now"; it upload
 
 1. The auth token (Console, Account info). Twilio's API never returns it, so only a person can copy it. If you can, set `TWILIO_AUTH_TOKEN` in step 3: the Worker then requires the `?key=` AND a valid `X-Twilio-Signature` on every webhook. Without it the Worker still works, on the `?key=` alone (the request's `AccountSid` must also be ours), and logs `twilio_signature_skipped` at `warn` once per isolate so the gap stays visible. `PHONE_WEBHOOK_SECRET` is what it can never run without. This deployment has had an empty token on the edge functions before, so check the value is real, not just present.
 2. Create a Standard API key (Account, API keys). Keep its SID and secret for step 3.
-3. Create the calls TwiML App, "SSS Phone calls":
+3. Create the calls TwiML App, "My Synergy Phone calls":
    - Voice request URL: `<BASE>/voice/outbound?key=<PHONE_WEBHOOK_SECRET>`, POST
    - Voice status callback URL: `<BASE>/voice/status?leg=client&key=<PHONE_WEBHOOK_SECRET>`
    - Voice fallback URL: a TwiML Bin that says "Calling is having a problem. Please try again or use your cell." and hangs up.
-4. Create the setup-test TwiML App, "SSS Phone setup test", whose voice URL is a TwiML Bin containing `<Response><Echo/></Response>`.
+4. Create the setup-test TwiML App, "My Synergy Phone setup test", whose voice URL is a TwiML Bin containing `<Response><Echo/></Response>`.
 5. Voice geo permissions: United States and Canada only, with premium and high-risk numbers blocked.
 6. The pilot number (Phone numbers, the number, Voice configuration):
    - A call comes in: Webhook `<BASE>/voice/inbound?key=<PHONE_WEBHOOK_SECRET>`, POST
@@ -134,6 +134,19 @@ Once the portal's Phone tab ships, it owns these settings.
   select created_at, severity, code, message from public.app_errors
    where source = 'edge:phone-api' and not resolved order by created_at desc limit 50;
   ```
+
+## 9. The rename to My Synergy Phone (2026-10-01)
+
+The extension and the app send their errors to `/log` with a source code, and the rename changed those codes: `my-synergy-phone-extension` and `my-synergy-phone-mobile` replace `sss-phone-extension` and `sss-phone-mobile`. This Worker accepts all four (`LOG_SOURCES` in `src/routes/me.ts`).
+
+1. Deploy this Worker FIRST, before anyone installs a renamed extension or app build. The Worker from before the rename knows only the two old codes and answers any other source with 400 "Unknown log source.", so every error a renamed build reported would be dropped and nothing would reach `app_errors`. To check, have a renamed build send one error and find its row in `app_errors`.
+2. While both kinds of build are installed, look for app errors under both names (`like`, not `in`, because these are patterns):
+   ```sql
+   select created_at, source, severity, code, message from public.app_errors
+    where (source like 'sss-phone-%' or source like 'my-synergy-phone-%') and not resolved
+    order by created_at desc limit 50;
+   ```
+3. Once no installed build sends the old codes, drop them from `LOG_SOURCES` and redeploy.
 
 ## Rolling back
 

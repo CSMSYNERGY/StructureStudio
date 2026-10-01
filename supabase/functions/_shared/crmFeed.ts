@@ -64,7 +64,7 @@ export const CRM_FEED_TYPES = {
   //
   // WhatsApp remains not a feature, and nothing here reserves a slot for it.
   message: ["sms", "sms_in"],
-  // CALLS (SSS Phone, 2026-09-29). Carolyn, 2026-08-26 27:02: "and we have calls." Three types
+  // CALLS (My Synergy Phone, 2026-09-29). Carolyn, 2026-08-26 27:02: "and we have calls." Three types
   // under one chip, for the reason email and message are one chip each — a conversation split
   // across filters is not a conversation:
   //   call        — a call that connected (either direction), or an outbound one that did not
@@ -254,7 +254,7 @@ export async function buildCrmFeed(
           .eq("client_id", clientId).eq("contact_id", opts.contactId)
           .order("created_at", { ascending: false }).limit(80))
       : Promise.resolve([]),
-    // SLOT 14 — CALLS (SSS Phone). Contact-scoped only, like texts' person half: phone_calls is
+    // SLOT 14 — CALLS (My Synergy Phone). Contact-scoped only, like texts' person half: phone_calls is
     // keyed on the contact matched from the caller's number, never on a design, so a design
     // record with no contact linked has no calls to show. The voicemail rides along as an
     // embed (phone_voicemails.call_id is a unique FK), which keeps this one round trip.

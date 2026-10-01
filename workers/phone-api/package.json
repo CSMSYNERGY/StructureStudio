@@ -1,7 +1,7 @@
 {
   "name": "phone-api",
   "private": true,
-  "description": "SSS Phone Worker: Twilio call webhooks, access tokens, texting and the app's read endpoints. Deploy is manual (see SETUP.md). Versions are pinned exactly because the bundle is what runs the phone line.",
+  "description": "My Synergy Phone Worker: Twilio call webhooks, access tokens, texting and the app's read endpoints. Deploy is manual (see SETUP.md). Versions are pinned exactly because the bundle is what runs the phone line.",
   "type": "module",
   "scripts": {
     "test": "vitest run",

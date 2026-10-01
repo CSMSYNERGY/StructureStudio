@@ -1,4 +1,4 @@
-// SSS Phone plan phase 6 — the calling-only number and "Connect this number for calls"
+// My Synergy Phone plan phase 6 — the calling-only number and "Connect this number for calls"
 // (supabase/functions/portal-settings/phoneNumber.ts, and its wiring in index.ts).
 //
 // Run: deno test --node-modules-dir=none --allow-read --allow-env tests/phone/

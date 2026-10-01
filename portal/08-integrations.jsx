@@ -1487,7 +1487,7 @@ function ssLevelLabel(areaKey, lv) {
   // Approving unlocks is a yes/no, and "Edit" is the wrong word for it — nothing is being
   // edited. Two levels, so this row renders two buttons rather than three.
   if (areaKey === "change_order_approve") return ({ none: "No", edit: "Can approve" })[lv] || lv;
-  // SSS Phone (254): four levels, and the middle two are about WHOSE calls, not read-vs-write —
+  // My Synergy Phone (254): four levels, and the middle two are about WHOSE calls, not read-vs-write —
   // 'own' makes and takes calls and sees their own, 'view' also sees the team's (the Calls
   // report, the Team tab in the apps), 'edit' also changes the phone settings.
   if (areaKey === "phone") return ({ none: "No access", own: "Own calls", view: "Team calls", edit: "Edit" })[lv] || lv;
@@ -3585,7 +3585,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           rather than vanishing — a rep should be able to see that texting is coming. */}
       {sub === "sms" && <SmsMessagingView clientId={clientId} viewingLabel={viewingLabel}
         canEdit={isAdmin || ssCanWrite(access, "settings_billing")} />}
-      {/* SSS Phone's calling setup (11-sms.jsx). canEdit is phone:'edit' — the same level
+      {/* My Synergy Phone's calling setup (11-sms.jsx). canEdit is phone:'edit' — the same level
           phone_settings_save / phone_status_set / phone_signout_user are gated on — read the
           unclamped way CompanyShell's tax flags are: an owner/admin, or a null map (a platform
           operator in view-as, whose rights come from app_operators). 'own' never writes here:

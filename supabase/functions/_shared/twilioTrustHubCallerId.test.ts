@@ -1,4 +1,4 @@
-// twilioTrustHub.ts, the SSS Phone additions (plan §14 and phase 6):
+// twilioTrustHub.ts, the My Synergy Phone additions (plan §14 and phase 6):
 //   * caller-ID trust — setupVoiceTrust (SHAKEN/STIR and Voice Integrity Trust Products),
 //     fetchTrustProduct, fetchCustomerProfile, parseVoiceIntegrityInfo, trustProductStatus;
 //   * the number helpers texting's ADOPTION of a calling-only number uses (portal-sms
@@ -493,7 +493,7 @@ Deno.test("parseVoiceIntegrityInfo: one of Twilio's use cases, whole positive co
   assert(long.ok && long.info.notes.length === 500);
 });
 
-// ── The number helpers the texting ADOPTION uses (portal-sms buy_number, SSS Phone phase 6) ───
+// ── The number helpers the texting ADOPTION uses (portal-sms buy_number, My Synergy Phone phase 6) ───
 Deno.test("attachNumberToService / numberInService / clearNumberSmsUrl / findIncomingNumberSid speak the Messaging and numbers APIs", async () => {
   const seen: { method: string; url: string; form?: Record<string, string> }[] = [];
   let attached = false;

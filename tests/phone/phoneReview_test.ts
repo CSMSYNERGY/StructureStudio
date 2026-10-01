@@ -1,4 +1,4 @@
-// SSS Phone — the review fixes of 2026-09-29 that live in portal-settings' pure module (phone.ts)
+// My Synergy Phone — the review fixes of 2026-09-29 that live in portal-settings' pure module (phone.ts)
 // and in the Phone tab: the rollout switch on the server (SSB-1), "Sign out all devices" and a
 // CSM Synergy operator's sessions (SSB-9), the generation bump and the Save-as-contact refusals
 // pulled out of index.ts so they RUN here (SSB-10).
@@ -93,7 +93,7 @@ Deno.test("signoutPlan (review SSB-9): a builder can retire an operator's device
   // Another operator repairing the account may end them.
   assertEquals(signoutPlan({ targetRole: "user", callerRole: "operator", callerIsOperator: true, targetIsOperator: true }), { ok: true, endSessions: true });
   // The answer says their sign-ins were kept, and the Phone tab words it.
-  const b = slice(SRC, 'if (action === "phone_signout_user") {', '// ── "Save as contact" (SSS Phone)', "phone_signout_user");
+  const b = slice(SRC, 'if (action === "phone_signout_user") {', '// ── "Save as contact" (My Synergy Phone)', "phone_signout_user");
   assert(/\.\.\.\(plan\.endSessions \? \{\} : \{ sessionsKept: "operator" \}\)/.test(b));
   assert(/d\.sessionsKept === "operator"/.test(SMS), "the Phone tab says why their Structure Studio sign-ins were left alone");
 });

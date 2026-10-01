@@ -1,4 +1,4 @@
-// SSS Phone plan phase 6 — caller-ID trust (plan §14): portal-settings' phone_trust_setup and
+// My Synergy Phone plan phase 6 — caller-ID trust (plan §14): portal-settings' phone_trust_setup and
 // phone_trust_status (supabase/functions/portal-settings/phoneTrust.ts and their wiring in
 // index.ts), and the Phone tab's Caller ID card (portal/11-sms.jsx).
 //

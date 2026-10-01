@@ -872,7 +872,7 @@ function badInput(message: string): TrustHubError {
 /**
  * Put a number into a Messaging Service (POST Services/{MG}/PhoneNumbers {PhoneNumberSid}).
  * purchaseNumber's own attach step, and the adoption of a calling-only number (portal-sms
- * buy_number, SSS Phone plan phase 6). One copy, so both attach the same way.
+ * buy_number, My Synergy Phone plan phase 6). One copy, so both attach the same way.
  * https://www.twilio.com/docs/messaging/api/phonenumber-resource
  */
 export async function attachNumberToService(serviceSid: string, numberSid: string, http: TrustHubHttp = viaCall): Promise<void> {
@@ -920,7 +920,7 @@ export async function clearNumberSmsUrl(numberSid: string, http: TrustHubHttp = 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Caller ID trust — SHAKEN/STIR and Voice Integrity (SSS Phone, plan §14, phase 6)
+// Caller ID trust — SHAKEN/STIR and Voice Integrity (My Synergy Phone, plan §14, phase 6)
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Two Trust Products per builder number, both built on the business profile the texting

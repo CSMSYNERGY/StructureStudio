@@ -358,7 +358,7 @@ const GATES: GateTable = {
   crm_save_activity:     { area: "contacts", level: "edit" },
   crm_complete_activity: { area: "contacts", level: "edit" },
   crm_save_contact:      { area: "contacts", level: "edit" },
-  // SSS Phone's "Save as contact" for an unknown number (plan section 6). Creating a customer
+  // My Synergy Phone's "Save as contact" for an unknown number (plan section 6). Creating a customer
   // is the same altitude as editing one; CONTACT_ROW_SCOPE marks it `creates`, and the branch
   // makes a caller limited to their own customers the new contact's owner.
   crm_create_contact:    { area: "contacts", level: "edit" },
@@ -475,7 +475,7 @@ const GATES: GateTable = {
   // Carolyn asked for those to be separate switches.
   attest_change_order: { area: "change_orders", level: "edit" },
 
-  // ── SSS Phone (calling settings + the Calls report) ──────────────────────────────────
+  // ── My Synergy Phone (calling settings + the Calls report) ───────────────────────────
   // The `phone` area (none/own/view/edit), which _shared/access.ts and area_level_for carry.
   // Plan section 7: making and taking calls needs any read level; changing phone settings
   // needs edit. ⚠️ `view` here is the FLOOR, and RANK lets 'own' through it: the two reads
@@ -493,7 +493,7 @@ const GATES: GateTable = {
   // needs more than this line; the switch is also the safety control.
   phone_status_set: { area: "phone", level: "edit" },
   // "Sign out all devices" for ONE team member (a lost phone, someone leaving). It retires
-  // every SSS Phone device they have by bumping their device generation. Ending their
+  // every My Synergy Phone device they have by bumping their device generation. Ending their
   // Structure Studio sign-ins as well is refused for a CSM Synergy operator's team row unless
   // the caller is an operator too (signoutPlan in phone.ts).
   phone_signout_user: { area: "phone", level: "edit" },
@@ -1481,7 +1481,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data: loginPref, error: loginPrefErr } = canRead("settings_crm")
       ? await admin.from("client_settings").select("customer_login_default").eq("client_id", clientId).maybeSingle()
       : { data: null, error: null };
-    // Is SSS Phone switched on for this tenant (client_settings.phone_status, plan D9)? The
+    // Is My Synergy Phone switched on for this tenant (client_settings.phone_status, plan D9)? The
     // shell needs it to decide whether Call is offered on a contact and whether the Calls page
     // is in the rail. ITS OWN READ, AND TOLERANT, for the same reason as the one above: naming
     // phone_status in the main select would black out every tenant's portal if this deploys
@@ -8418,7 +8418,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, designs: dRes.data ?? [], versions: vRes.data ?? [], estimates, invoiceSends: sends ?? [] });
   }
 
-  // ══ SSS PHONE — calling settings and the Calls report (2026-09-29) ═══════════════════════
+  // ══ MY SYNERGY PHONE — calling settings and the Calls report (2026-09-29) ════════════════
   //
   // The build contract is structure-studio-phone/docs/SPEC.md; the why is the plan's sections
   // 6, 7 and 12. The CALL PATH does not come through here — calls are placed and answered by the
@@ -8571,7 +8571,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   const numberToVoicemail = async (n: PhoneNum): Promise<boolean> => {
     const fail = (why: string, context: Record<string, unknown> = {}) => {
       logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_voicemail_config_failed", severity: "error",
-        message: `Calling is off but the number still points at SSS Phone: ${why}`, context: { number_id: n.id, ...context } }).catch(() => {});
+        message: `Calling is off but the number still points at My Synergy Phone: ${why}`, context: { number_id: n.id, ...context } }).catch(() => {});
       return false;
     };
     try {
@@ -8798,7 +8798,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!member) return json({ error: "That person isn't on your team." }, 404);
     // Who may do this to whom, and whether it may end their Structure Studio sign-ins as well
     // (phone.ts signoutPlan): an admin never signs out the owner; a CSM Synergy operator's team
-    // row gets its SSS Phone devices retired but its sessions kept unless the caller is an
+    // row gets its My Synergy Phone devices retired but its sessions kept unless the caller is an
     // operator too (review SSB-9) — those sessions cover every tenant they support.
     const [callerOp, targetOp] = await Promise.all([
       callerIsOperator(),
@@ -8832,7 +8832,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       },
     });
     if ("error" in bumped) {
-      return phoneNotReady(bumped.error) ? phoneUnavailable() : dbFail(req, clientId, "sign them out of SSS Phone", bumped.error);
+      return phoneNotReady(bumped.error) ? phoneUnavailable() : dbFail(req, clientId, "sign them out of My Synergy Phone", bumped.error);
     }
     if ("conflict" in bumped) {
       return json({ error: "Their phone settings changed at the same moment. Press it again." }, 409);
@@ -8867,7 +8867,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     });
   }
 
-  // ── "Save as contact" (SSS Phone) ───────────────────────────────────────────────────────
+  // ── "Save as contact" (My Synergy Phone) ────────────────────────────────────────────────
   // Plan section 6: calls and texts from a number that matches no contact show as their own
   // thread, and "Save as contact" creates the CRM contact (source "phone") and links that
   // number's earlier calls and texts to it. The extension and the app call exactly this, with

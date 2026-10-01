@@ -1,4 +1,4 @@
-// SSS Phone — the portal pieces added on 2026-09-29's second pass, tested against the SHIPPED
+// My Synergy Phone — the portal pieces added on 2026-09-29's second pass, tested against the SHIPPED
 // source the way portalPhone_test.ts does (slice between stable anchors, fail loudly if they move):
 //   * the phone area's labels on the Team switches (ssLevelLabel)
 //   * Call on the contact LIST, through the record page's own rules
@@ -34,7 +34,7 @@ Deno.test("the Team screen names the phone levels: No access / Own calls / Team 
 });
 
 // ── 01-core: the voicemail URL and the shared hand-off ─────────────────────────────────────
-const PHONE_BLOCK = slice(CORE, "function ssOwnPhoneOnly(", "// ── The Settings sub-pages", "SSS PHONE helpers");
+const PHONE_BLOCK = slice(CORE, "function ssOwnPhoneOnly(", "// ── The Settings sub-pages", "MY SYNERGY PHONE helpers");
 type Win = Record<string, unknown> & { location: { href: string } };
 function core(win: Win, nav: Record<string, unknown> = { userAgent: "Mozilla/5.0 (Windows NT 10.0) Chrome/140" }) {
   return new Function("window", "navigator", "ssIsBetaHost", `${PHONE_BLOCK};
@@ -148,7 +148,7 @@ Deno.test("ssPhoneStartCall on a phone's browser opens the app by its link and m
   const h = core(w, { userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)" });
   assertEquals(await h.ssPhoneStartCall("(555) 555-0142", IDS), { kind: "app", to: "+15555550142" });
   const t0 = Date.now();
-  assert(/^sssphone:\/\/call\?to=%2B15555550142&contact_id=c1&user_id=u1&client_id=demo-tenant&ts=\d{13}$/.test(w.location.href), w.location.href);
+  assert(/^mysynergyphone:\/\/call\?to=%2B15555550142&contact_id=c1&user_id=u1&client_id=demo-tenant&ts=\d{13}$/.test(w.location.href), w.location.href);
   const ts = Number(w.location.href.split("&ts=")[1]);
   assert(Math.abs(ts - t0) < 60000, "the link carries the moment it was made (the app drops one over a minute old)");
   assertEquals(sent, []);

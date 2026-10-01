@@ -1,4 +1,4 @@
-// SSS Phone plan phase 6: texting ADOPTS the number a builder already has for calls.
+// My Synergy Phone plan phase 6: texting ADOPTS the number a builder already has for calls.
 //
 // Plan D6 is one number per builder for calls AND texts, and calling never waits on text
 // registration. So the Phone tab (portal-settings phone_buy_number) can buy a CALLING-ONLY

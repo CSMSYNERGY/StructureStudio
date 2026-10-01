@@ -1,4 +1,4 @@
-// phone-api: the SSS Phone Worker. Contract: the phone repo's docs/SPEC.md section 3.
+// phone-api: the My Synergy Phone Worker. Contract: the phone repo's docs/SPEC.md section 3.
 //
 // Three kinds of traffic, handled differently on purpose:
 //   /voice/*    Twilio. ?key= first, always, and X-Twilio-Signature whenever TWILIO_AUTH_TOKEN

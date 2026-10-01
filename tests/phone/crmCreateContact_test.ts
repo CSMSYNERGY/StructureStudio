@@ -1,4 +1,4 @@
-// SSS Phone — "Save as contact" (portal-settings crm_create_contact) and the migration-254
+// My Synergy Phone — "Save as contact" (portal-settings crm_create_contact) and the migration-254
 // pieces behind it and behind "Sign out all devices".
 //
 // Run: deno test --node-modules-dir=none --allow-read tests/phone/
@@ -43,7 +43,7 @@ Deno.test("parseCreateContact refuses what the apps never send, each with a sent
   assert(/phone number/.test(err({ name: "Pat", phone: "(555) 555-0142" })), "only E.164, the SPEC's shape");
   assert(/phone number/.test(err({ name: "Pat", phone: "Anonymous" })));
   assert(/phone number/.test(err({ name: "Pat", phone: "" })));
-  assert(/SSS Phone/.test(err({ name: "Pat", phone: "+15555550142", source: "design" })));
+  assert(/My Synergy Phone/.test(err({ name: "Pat", phone: "+15555550142", source: "design" })));
   assertEquals(parseCreateContact({ name: "x".repeat(250), phone: "+15555550142" }).ok && (parseCreateContact({ name: "x".repeat(250), phone: "+15555550142" }) as { name: string }).name.length, 200);
 });
 
@@ -131,7 +131,7 @@ Deno.test("254 adds phone_end_user_sessions (service_role only) and phone_signou
   assert(/delete from auth\.sessions s where s\.user_id = p_user_id;/.test(fn), "it must delete ONLY that user's sessions");
   assert(MIG.includes("revoke execute on function public.phone_end_user_sessions(uuid) from public, anon, authenticated;"));
   assert(MIG.includes("grant  execute on function public.phone_end_user_sessions(uuid) to service_role;"));
-  const signout = slice(SRC, 'if (action === "phone_signout_user") {', '// ── "Save as contact" (SSS Phone)', "phone_signout_user branch");
+  const signout = slice(SRC, 'if (action === "phone_signout_user") {', '// ── "Save as contact" (My Synergy Phone)', "phone_signout_user branch");
   assert(/admin\.rpc\("phone_end_user_sessions", \{ p_user_id: target \}\)/.test(signout));
   // Who may, and whether sessions end, is phone.ts signoutPlan (driven in phoneReview_test.ts);
   // the branch must ask it BEFORE anything changes and end sessions only when it says so.

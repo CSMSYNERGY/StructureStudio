@@ -225,7 +225,7 @@ Deno.serve(withErrorLog("sms-inbound", async (req: Request) => {
   // worth more than our ability to file them. An unfiled row is visible to an operator via
   // sms_messages_unmatched_idx and can be re-linked; a dropped one is gone forever.
   const segs = Number(params.NumSegments);
-  // num_media (SSS Phone, migration 254): how many photos came with it, so a photo-only text —
+  // num_media (My Synergy Phone, migration 254): how many photos came with it, so a photo-only text —
   // whose Body is empty — can say "Photo received" instead of rendering as a blank bubble.
   // insertInbound retries without the column if the migration has not landed yet; see there.
   const numMedia = parseNumMedia(params.NumMedia);

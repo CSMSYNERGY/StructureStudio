@@ -1,4 +1,4 @@
-// SSS Phone — calls in the CRM timeline (supabase/functions/_shared/crmFeed.ts).
+// My Synergy Phone — calls in the CRM timeline (supabase/functions/_shared/crmFeed.ts).
 //
 // Run: deno test --node-modules-dir=none --allow-read tests/phone/
 //

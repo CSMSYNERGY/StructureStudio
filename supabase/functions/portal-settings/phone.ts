@@ -1,4 +1,4 @@
-// SSS Phone — the pure half of portal-settings' calling actions (2026-09-29).
+// My Synergy Phone — the pure half of portal-settings' calling actions (2026-09-29).
 //
 // Everything in here is a function of its arguments: no database, no Deno.env, no Twilio. The
 // handlers in index.ts read the rows and write the results; this file decides whether a route
@@ -6,7 +6,7 @@
 // separate module for one reason — index.ts calls Deno.serve at import time, so nothing in it
 // can be unit-tested, and these are exactly the rules that need tests.
 //
-// The contract these follow is the SSS Phone SPEC (structure-studio-phone/docs/SPEC.md,
+// The contract these follow is the My Synergy Phone SPEC (structure-studio-phone/docs/SPEC.md,
 // section 2): phone_routes' columns and CHECK constraints are mirrored here so a bad value is
 // refused with a sentence the owner can act on, instead of a Postgres constraint name.
 
@@ -387,7 +387,7 @@ export const DUPLICATE_PHONE_SENTENCE =
   "Another contact already has that phone number. Open that contact instead, or clear the number there first.";
 
 /**
- * The SSS Phone apps' "Save as contact" body → what crm_create_contact is called with, or a
+ * The My Synergy Phone apps' "Save as contact" body → what crm_create_contact is called with, or a
  * sentence. Contract (extension/src/ui/client.ts, mobile/src/lib/portalActions.ts):
  * `{ name, phone: "<E.164>", source: "phone" }`.
  *
@@ -407,10 +407,10 @@ export function parseCreateContact(raw: Record<string, unknown>):
   if (!name) return { ok: false, error: "Type the customer's name." };
   const e164 = String(raw?.phone ?? "").trim();
   if (!/^\+[1-9]\d{6,14}$/.test(e164)) {
-    return { ok: false, error: "That phone number isn't complete. Save it from the number SSS Phone shows." };
+    return { ok: false, error: "That phone number isn't complete. Save it from the number My Synergy Phone shows." };
   }
   const src = raw?.source ?? "phone";
-  if (src !== "phone") return { ok: false, error: "Contacts saved here come from SSS Phone." };
+  if (src !== "phone") return { ok: false, error: "Contacts saved here come from My Synergy Phone." };
   const nanp = /^\+1([2-9]\d{2})([2-9]\d{2})(\d{4})$/.exec(e164);
   return { ok: true, name, phone: nanp ? `(${nanp[1]}) ${nanp[2]}-${nanp[3]}` : e164 };
 }
@@ -418,9 +418,9 @@ export function parseCreateContact(raw: Record<string, unknown>):
 // ── The rollout switch, on the server (plan D9, review SSB-1) ───────────────────────────────
 
 /**
- * Is SSS Phone open to every builder yet? PHONE_SELF_SERVE=on in the edge environment is the
+ * Is My Synergy Phone open to every builder yet? PHONE_SELF_SERVE=on in the edge environment is the
  * builder-launch switch (plan phase 6, "self-serve switch-on in Settings"). Until it is set,
- * every action that turns calling on, points a number at SSS Phone, or rents a number needs a
+ * every action that turns calling on, points a number at My Synergy Phone, or rents a number needs a
  * CSM Synergy operator (app_operators) — the browser's ssPhoneOffered() only decides what is
  * DRAWN, and beta hosts draw the Phone tab for everyone on the one database and the one Twilio
  * account production uses.
@@ -437,7 +437,7 @@ export function phoneSelfServeOn(get: (name: string) => string | undefined | nul
 
 /** The sentence every rollout refusal answers with. */
 export const PHONE_ROLLOUT_SENTENCE =
-  "SSS Phone isn't open to every builder yet. Structure Studio switches it on for your account when it's ready.";
+  "My Synergy Phone isn't open to every builder yet. Structure Studio switches it on for your account when it's ready.";
 
 /** null = allowed; otherwise the sentence to refuse with. Turning calling OFF is never gated:
  *  the switch is also the safety control. */
@@ -449,12 +449,12 @@ export function phoneRolloutRefusal(o: { selfServe: boolean; operator: boolean }
 
 /**
  * Ending someone's Supabase sessions signs them out of Structure Studio EVERYWHERE, not only
- * SSS Phone. Two people must therefore not be at a builder's mercy:
+ * My Synergy Phone. Two people must therefore not be at a builder's mercy:
  *   * the business's owner, from an admin (an owner may, their own lost phone; so may an
  *     operator repairing the account) — refused outright, as before;
  *   * a CSM Synergy operator who has a team row on this tenant (live: 4 app_operators do, two
  *     as owner, two as user). Their sign-ins cover every tenant they support and the operator
- *     tools, so a builder's admin or co-owner may retire their SSS Phone devices on THIS team
+ *     tools, so a builder's admin or co-owner may retire their My Synergy Phone devices on THIS team
  *     (the generation bump and the device rows) but never end those sessions. Only another
  *     operator may. The answer says which happened.
  */
@@ -511,10 +511,10 @@ export function createContactRefusal(error: { code?: unknown; message?: unknown 
   // crm_contacts_tenant_phone: that number is already a contact. crm_save_contact's sentence.
   if (code === "23505") return { status: 409, error: DUPLICATE_PHONE_SENTENCE };
   if (code === "PGRST202" || code === "42883") {
-    return { status: 503, refusal: true, error: "Saving a contact from SSS Phone isn't available on this server yet. Add this customer in Structure Studio for now." };
+    return { status: 503, refusal: true, error: "Saving a contact from My Synergy Phone isn't available on this server yet. Add this customer in Structure Studio for now." };
   }
   if (/a phone number is required/i.test(msg)) {
-    return { status: 400, error: "That phone number can't be saved. Save it from the number SSS Phone shows." };
+    return { status: 400, error: "That phone number can't be saved. Save it from the number My Synergy Phone shows." };
   }
   if (/owner is not on this team/i.test(msg)) {
     return { status: 403, error: "Your account isn't on this team any more. Sign in again." };

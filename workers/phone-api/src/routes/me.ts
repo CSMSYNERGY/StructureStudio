@@ -171,7 +171,16 @@ export async function signOutAll(env: Env, req: Request): Promise<Response> {
 
 // ── POST /log ───────────────────────────────────────────────────────────────────────
 
-const LOG_SOURCES = new Set(["sss-phone-extension", "sss-phone-mobile"]);
+// The app was renamed My Synergy Phone on 2026-10-01. Builds installed before that still send
+// the old codes, so both are accepted, and a row keeps the code the app sent (app_version in its
+// context says which build). Drop the two old codes once no installed build sends them.
+// ⚠️ DEPLOY ORDER: this Worker goes out BEFORE any renamed extension or app build is installed.
+// A Worker without the new codes answers them 400 "Unknown log source.", and those errors are
+// lost (SETUP.md section 9).
+const LOG_SOURCES = new Set([
+  "my-synergy-phone-extension", "my-synergy-phone-mobile",
+  "sss-phone-extension", "sss-phone-mobile",
+]);
 const LOG_SEVERITIES = new Set(["error", "warn", "info"]);
 const perUser = new Map<string, { windowStart: number; n: number }>();
 const LOG_PER_MINUTE = 30;

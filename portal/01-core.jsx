@@ -541,7 +541,7 @@ const TAB_META = {
   "self-serve-display-units": ["Self Serve Displays", "In-unit kiosk to design, estimate, and get live help — coming soon"],
   "commissions": ["Commissions", "Track and calculate sales commissions — coming soon"],
   "reports": ["Reports", "Sales, leads, revenue, and delivery reporting — coming soon"],
-  // SSS Phone's report (plan section 12). Carolyn, 08-27: "the reporting is inside Structure
+  // My Synergy Phone's report (plan section 12). Carolyn, 08-27: "the reporting is inside Structure
   // Studio ... so it's in one place" — the apps place and take the calls, this page counts them.
   calls: ["Calls", "Calls and texts, person by person — yours, or the whole team's"],
 };
@@ -755,7 +755,7 @@ const SETTINGS_TAB_AREA = {
   // has granted it. Reading the resulting status is contacts-level; that split lives in
   // portal-sms's GATES table, and this map only decides whether the sub-tab is worth showing.
   sms: "settings_billing",
-  // SSS Phone's calling setup (who answers, hours, forwarding) — the phone area itself, not
+  // My Synergy Phone's calling setup (who answers, hours, forwarding) — the phone area itself, not
   // settings_billing: choosing who picks up spends nothing and registers nothing. An 'own'
   // holder who reaches the tab sees the install links and their own status only; the setup is
   // phone_settings_get's team slice, which the server hands to literal view/edit.
@@ -799,12 +799,12 @@ function ssCanWrite(access, area) {
   return v === "edit" || (v === "own" && OWN_WRITE_AREAS.has(area));
 }
 
-// ══ SSS PHONE — the portal's half of calling (2026-09-29) ════════════════════════════════
+// ══ MY SYNERGY PHONE — the portal's half of calling (2026-09-29) ═════════════════════════
 // The contract is structure-studio-phone/docs/SPEC.md, section 5: the portal NEVER places a
-// call itself. Call and Text on a contact hand the number to the SSS Phone Chrome extension on
+// call itself. Call and Text on a contact hand the number to the My Synergy Phone Chrome extension on
 // this same computer through chrome.runtime.sendMessage — no network, no page change (Carolyn
 // 08-27: "it opens up the phone ... it's not taking them to a different place") — or, on a
-// phone's browser, open the SSS Phone app by a deep link.
+// phone's browser, open the My Synergy Phone app by a deep link.
 
 // Phone access, the browser's copy of access.ts' ownPhoneOnly(). The TEAM question — the Calls
 // report's Team toggle, the setup screen — asks for the LITERAL level, because RANK (and so
@@ -817,7 +817,7 @@ function ssOwnPhoneOnly(access) {
 
 // WHERE CALLING IS OFFERED AT ALL, and this is the ONE place that rule lives (the ssAdvancedOn
 // pattern): the Settings → Phone tab, the Calls rail item and the contact page's Call button all
-// ask it. Plan D9: SSS Phone is OFF for every builder until launch and switched on per tenant,
+// ask it. Plan D9: My Synergy Phone is OFF for every builder until launch and switched on per tenant,
 // so a builder's owner on production does not get a Phone tab advertising a product that is not
 // released — and, with it, a switch that would turn calling on before billing exists. It is
 // offered when the tenant's phone_status is on, to an operator viewing a tenant (that is how a
@@ -830,8 +830,8 @@ function ssPhoneOffered(phoneStatus, operatorViewing) {
 
 // The Chrome extension IDs allowed to answer, asked in LIST ORDER (the first that answers
 // wins, ssPhonePing). Today that is the UNPACKED DEV BUILD's id: stable because that build is
-// made with a fixed manifest `key` (the SSS Phone repo's EXTENSION_KEY, docs/extension-dev.md
-// "Keeping the extension ID stable"), so every developer and the pilot load it under one id. ⚠️ WHEN SSS PHONE IS PUBLISHED, add the Chrome Web Store id to this list, FIRST, so a store
+// made with a fixed manifest `key` (the My Synergy Phone repo's EXTENSION_KEY, docs/extension-dev.md
+// "Keeping the extension ID stable"), so every developer and the pilot load it under one id. ⚠️ WHEN MY SYNERGY PHONE IS PUBLISHED, add the Chrome Web Store id to this list, FIRST, so a store
 // install beats a dev build on the same computer (and update SS_PHONE_LINKS.chrome below). The
 // extension checks this page's origin against its own allow-list either way (SPEC section 5), so
 // listing an id grants it nothing. Only a real Chrome extension ID shape (32 letters a-p) is ever
@@ -892,9 +892,9 @@ async function ssPhoneFetchVoicemail(voicemailId, accessToken, fetchImpl) {
 // Store links, PLACEHOLDERS until the listings are published. A link still carrying PLACEHOLDER
 // is shown as "coming soon" rather than as a button to a page that does not exist.
 const SS_PHONE_LINKS = {
-  chrome: "https://chromewebstore.google.com/detail/PLACEHOLDER_SSS_PHONE_EXTENSION_ID",
-  ios: "https://apps.apple.com/app/PLACEHOLDER_SSS_PHONE_IOS",
-  android: "https://play.google.com/store/apps/details?id=PLACEHOLDER_SSS_PHONE_ANDROID",
+  chrome: "https://chromewebstore.google.com/detail/PLACEHOLDER_MY_SYNERGY_PHONE_EXTENSION_ID",
+  ios: "https://apps.apple.com/app/PLACEHOLDER_MY_SYNERGY_PHONE_IOS",
+  android: "https://play.google.com/store/apps/details?id=PLACEHOLDER_MY_SYNERGY_PHONE_ANDROID",
 };
 function ssPhoneLinkReady(url) { return !!url && !/PLACEHOLDER/.test(url); }
 
@@ -924,7 +924,7 @@ function ssPhoneMessage(id, msg, timeoutMs) {
   });
 }
 
-// Which SSS Phone answers on this computer: { id, reply } or null. Every listed ID is asked at
+// Which My Synergy Phone answers on this computer: { id, reply } or null. Every listed ID is asked at
 // once and the first in LIST order that answers wins, so a store build listed first beats a
 // developer build. A found extension is remembered briefly (a second click should not ask
 // again); not-found is never remembered, so installing it and pressing Call again just works.
@@ -938,7 +938,7 @@ async function ssPhonePing() {
   return ssPhoneFound;
 }
 
-// Ask SSS Phone to call or text. → { installed, reply }. `reply` is the extension's own
+// Ask My Synergy Phone to call or text. → { installed, reply }. `reply` is the extension's own
 // { ok } / { ok:false, error } (SPEC section 5); a silence after a successful ping is reported
 // as error "no_reply" so the screen can say what to do rather than nothing.
 async function ssPhoneSend(type, payload) {
@@ -955,18 +955,18 @@ function ssPhoneRefusal(reply) {
   const code = reply && reply.error;
   if (code === "wrong_user") {
     return reply.signed_in_as
-      ? `SSS Phone on this computer is signed in as ${reply.signed_in_as}. Sign in to SSS Phone as yourself, then try again.`
-      : "SSS Phone on this computer is signed in as someone else. Sign in to SSS Phone as yourself, then try again.";
+      ? `My Synergy Phone on this computer is signed in as ${reply.signed_in_as}. Sign in to My Synergy Phone as yourself, then try again.`
+      : "My Synergy Phone on this computer is signed in as someone else. Sign in to My Synergy Phone as yourself, then try again.";
   }
-  if (code === "signed_out") return "SSS Phone isn't signed in. Open it from your Chrome toolbar, sign in with your Structure Studio login, then try again.";
+  if (code === "signed_out") return "My Synergy Phone isn't signed in. Open it from your Chrome toolbar, sign in with your Structure Studio login, then try again.";
   if (code === "no_access") return "Your account doesn't include calling. Ask an owner or admin to turn on Phone access for you on the Team tab.";
-  if (code === "busy") return "Finish your current call in SSS Phone first.";
+  if (code === "busy") return "Finish your current call in My Synergy Phone first.";
   if (code === "emergency_blocked") return "For emergencies, call 911 from your cell phone.";
-  if (code === "bad_request") return "SSS Phone couldn't use that number. Check the contact's phone number.";
-  return "SSS Phone didn't answer. Open it from your Chrome toolbar and try again.";
+  if (code === "bad_request") return "My Synergy Phone couldn't use that number. Check the contact's phone number.";
+  return "My Synergy Phone didn't answer. Open it from your Chrome toolbar and try again.";
 }
 
-// A phone's browser, where there is no extension and the SSS Phone APP takes the call.
+// A phone's browser, where there is no extension and the My Synergy Phone APP takes the call.
 function ssIsPhoneBrowser() {
   try {
     const uad = navigator.userAgentData;
@@ -997,8 +997,8 @@ function ssPhoneIsEmergency(raw) {
   return d === "911" || d === "933" || d === "112";
 }
 
-// The SSS Phone app's deep link (SPEC section 7, "Call link"):
-//   sssphone://call?to=<E.164>&contact_id=<uuid>&user_id=<uuid>&client_id=<slug>&ts=<epoch ms>
+// The My Synergy Phone app's deep link (SPEC section 7, "Call link"):
+//   mysynergyphone://call?to=<E.164>&contact_id=<uuid>&user_id=<uuid>&client_id=<slug>&ts=<epoch ms>
 // The same four fields the extension message carries (SPEC section 5), so the app refuses a
 // different signed-in person the same way the extension does, plus `ts`, when this page made the
 // link: a custom scheme has no sender, so the app drops a link more than a minute old (or ahead)
@@ -1011,7 +1011,7 @@ function ssPhoneDeepLink(kind, p, now) {
   if (p.user_id) q.set("user_id", p.user_id);
   if (p.client_id) q.set("client_id", p.client_id);
   q.set("ts", String(Math.floor(Number.isFinite(now) ? now : Date.now())));
-  return "sssphone://" + kind + "?" + q.toString();
+  return "mysynergyphone://" + kind + "?" + q.toString();
 }
 
 // CALL, the ONE hand-off: the contact page's Call tab and the contact list's Call button both
@@ -1019,8 +1019,8 @@ function ssPhoneDeepLink(kind, p, now) {
 // as stored; `ids` are the other three SPEC fields (the SIGNED-IN person and the tenant on
 // screen, never a contact's owner). → what to show:
 //   { kind: "error", text }    nothing was dialed, and the sentence says why
-//   { kind: "app", to }        a phone's browser: the SSS Phone app was asked to open
-//   { kind: "install", to }    no SSS Phone answered on this computer
+//   { kind: "app", to }        a phone's browser: the My Synergy Phone app was asked to open
+//   { kind: "install", to }    no My Synergy Phone answered on this computer
 //   { kind: "calling", to }    the extension took the call; it runs there, the page stays put
 // `badNumber` words the undialable case for where the button is ("Check it under Summary").
 async function ssPhoneStartCall(raw, ids, badNumber) {
@@ -1100,13 +1100,13 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null, phone
     // it was already the generic word, so no link moved.
     ["email", "Email Settings", "Send estimates and invoices from your own email domain", null],
     ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business", null],
-    // SSS PHONE (2026-09-29) — CALLING ONLY, directly under the texting tab it shares a number
+    // MY SYNERGY PHONE (2026-09-29) — CALLING ONLY, directly under the texting tab it shares a number
     // with. The number is bought and registered on Text Messaging; this tab is the owner's
     // one-time setup of who answers it, plus the install links. `phoneOffered` is
     // ssPhoneOffered()'s answer for the tenant on screen — see there for why a builder on
     // production does not see it until calling is switched on for them. The area filter at the
     // bottom (SETTINGS_TAB_AREA.phone) still applies on top.
-    ...(phoneOffered ? [["phone", "Phone", "Who answers your business number, and the SSS Phone apps", null]] : []),
+    ...(phoneOffered ? [["phone", "Phone", "Who answers your business number, and the My Synergy Phone apps", null]] : []),
     // ⚠️ The SLUG STAYS `billing`. Only the LABEL changed, to "Subscription" (Carolyn
     // 2026-09-11) — the group above it is called Billing, and Billing > Billing reads as a
     // mistake. Roughly eight callers do navigate("settings", "billing") — the transition and

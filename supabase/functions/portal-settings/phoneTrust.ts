@@ -1,4 +1,4 @@
-// SSS Phone plan phase 6 — caller-ID trust for a builder's number (plan section 14, "Caller ID
+// My Synergy Phone plan phase 6 — caller-ID trust for a builder's number (plan section 14, "Caller ID
 // reputation"): SHAKEN/STIR, so Twilio signs the builder's calls at level A, and Voice Integrity,
 // which registers the number with the carriers' spam engines against "Spam Likely".
 //
