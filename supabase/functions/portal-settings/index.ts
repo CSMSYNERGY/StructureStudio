@@ -537,6 +537,11 @@ const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  // Lets the browser remember this preflight instead of re-asking before nearly every call.
+  // Without it Chrome keeps a preflight for 5 s, so a click paid a whole extra round trip to
+  // the function first — measured 2026-10-01 at 0.4–1.7 s from Pakistan, and still a full
+  // round trip from anywhere. Chrome caps the value at 7200 (2 h); Firefox honours 86400.
+  "Access-Control-Max-Age": "86400",
 };
 
 function json(body: unknown, status = 200) {
@@ -544,6 +549,59 @@ function json(body: unknown, status = 200) {
     status,
     headers: { ...cors, "Content-Type": "application/json" },
   });
+}
+
+// ── Server-Timing ───────────────────────────────────────────────────────────────────────
+// Where one call's time went, written on the response itself so it can be read from the
+// portal's own tab (DevTools → Network → Timing, or response.headers) without filing a row
+// anywhere: `auth` is resolveTenant (the sign-in check plus the company lookup), `db` is every
+// query made through `admin` summed — the company lookup included, and parallel queries
+// counted in full, so it can exceed wall time — and `total` is the whole handler. Durations
+// and the region only; nothing about the caller or the data.
+//
+// Added 2026-10-01 to find out what is left of "every call costs ~2.2 s" once the function
+// runs next to the database (the portal pins it to us-east-1 since the same day).
+type ServerTiming = { auth: number; db: number; dbN: number };
+
+const timedFetch = (st: ServerTiming): typeof fetch => async (input, init) => {
+  const t0 = performance.now();
+  try {
+    return await fetch(input, init);
+  } finally {
+    st.db += performance.now() - t0;
+    st.dbN++;
+  }
+};
+
+function withServerTiming(
+  handler: (req: Request, st: ServerTiming) => Promise<Response>,
+): (req: Request) => Promise<Response> {
+  return async (req: Request): Promise<Response> => {
+    const t0 = performance.now();
+    const st: ServerTiming = { auth: 0, db: 0, dbN: 0 };
+    const res = await handler(req, st);
+    // Only real calls are timed; a preflight carries nothing to time. (Not written as an
+    // OPTIONS equality test on purpose: aiDraftRetryWiring_test finds the handler's first line
+    // by the first such test in this file.)
+    if (req.method !== "POST") return res;
+    try {
+      const ms = (n: number) => Math.round(n);
+      const region = Deno.env.get("SB_REGION") ?? "unknown";
+      res.headers.set(
+        "Server-Timing",
+        `auth;dur=${ms(st.auth)}, db;desc="${st.dbN} queries";dur=${ms(st.db)}, ` +
+          `total;dur=${ms(performance.now() - t0)}, region;desc="${region}"`,
+      );
+      // Cross-origin JS sees only safelisted headers; the refusal marker may already be named.
+      const exposed = res.headers.get("Access-Control-Expose-Headers");
+      res.headers.set("Access-Control-Expose-Headers", exposed ? `${exposed}, Server-Timing` : "Server-Timing");
+      res.headers.set("Timing-Allow-Origin", "*");
+    } catch {
+      // Immutable headers (a Response.redirect): the response matters, the timing does not.
+    }
+    // The SAME object, never a copy: withErrorLog's alreadyFiled check is by identity.
+    return res;
+  };
 }
 
 // 5xx responses whose app_errors row was already written at the return site, with more detail
@@ -1016,7 +1074,7 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
   return { imported: created + updated, created, updated, skipped };
 }
 
-Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
+Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request, st: ServerTiming) => {
   // When this request reached the function. The gateway's 150 s idle timeout runs from the
   // request, not from any one call inside it, so a budget that must end before it is measured
   // from here (calibrate_style_ai's model abort).
@@ -1051,8 +1109,10 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // `targetClientId` to act on another tenant — that is what makes the portal's "view as"
   // mode actually read and write the viewed account instead of the operator's own.
   // Everything below this block is unchanged and simply uses `clientId`.
-  const admin = createClient(supabaseUrl, serviceKey);
+  const admin = createClient(supabaseUrl, serviceKey, { global: { fetch: timedFetch(st) } });
+  const authStart = performance.now();
   const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "status" });
+  st.auth = performance.now() - authStart;
   if (!r.ok) return json(r.body, r.status);
   const { clientId, role, operator, payload, action, audit, auditStrict, userId, userEmail, canRead, canEdit, access } = r.ctx;
 
@@ -13669,4 +13729,4 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);
-}, { alreadyFiled: (res) => filedAtReturnSite.has(res) }));
+}), { alreadyFiled: (res) => filedAtReturnSite.has(res) }));

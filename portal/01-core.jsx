@@ -42,7 +42,19 @@ const ssHasStepUpHeader = (url, opts) => {
   // supabase-js may hand us either (Request) or (url, init), so check both.
   return read(opts && opts.headers) || read(url && url.headers);
 };
-const ssFetch = (url, opts) => fetch(url, opts).then((res) => {
+// Every edge-function call runs in the DATABASE's region, not the one nearest the caller.
+// Supabase runs a function wherever the request lands by default, and every query inside it
+// then crosses back to us-east-1 — measured 2026-10-01 from Pakistan: the function ran in
+// Singapore and `status` spent 2.2 s inside the server, 0.85 s once pinned. One long trip to
+// the function beats a long trip per query, and for anyone already near Virginia it changes
+// nothing. A query param, not the x-region header: the functions' CORS does not allow that
+// header, so the browser would refuse the call at the preflight.
+const SS_FN_REGION = "us-east-1";
+const ssPinFnRegion = (url) =>
+  (typeof url === "string" && url.indexOf("/functions/v1/") !== -1 && url.indexOf("forceFunctionRegion=") === -1)
+    ? url + (url.indexOf("?") === -1 ? "?" : "&") + "forceFunctionRegion=" + SS_FN_REGION
+    : url;
+const ssFetch = (url, opts) => fetch(ssPinFnRegion(url), opts).then((res) => {
   try {
     const u = String(url && url.url ? url.url : url);
     if (res.status === 401 && (u.indexOf("/rest/v1/") !== -1 || u.indexOf("/functions/v1/") !== -1)
@@ -2419,7 +2431,9 @@ function ssCacheClear() { ssTabCache.clear(); }
 // predates the ?warm=1 endpoint this must fail in complete silence.
 function ssWarmFn(name) {
   try {
-    fetch(SUPABASE_URL + "/functions/v1/" + name + "?warm=1", {
+    // Pinned like every real call (ssPinFnRegion): isolates are per region, so warming the
+    // nearest one would boot a worker the real call never uses.
+    fetch(ssPinFnRegion(SUPABASE_URL + "/functions/v1/" + name + "?warm=1"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
