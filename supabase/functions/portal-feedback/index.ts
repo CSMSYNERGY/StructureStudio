@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { verifyCaller } from "../_shared/verifyCaller.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 
 // Portal-facing bug / feature-request intake for portal.html.
@@ -382,24 +383,27 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
   if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
   const token = Deno.env.get("MONDAY_API_TOKEN");
+  const admin = createClient(supabaseUrl, serviceKey);
 
-  // 1. Real user check (the bare anon key passes the gateway but has no user).
-  const authHeader = req.headers.get("Authorization") || "";
-  const userClient = createClient(supabaseUrl, anonKey, { global: { headers: { Authorization: authHeader } } });
-  const { data: userData, error: userErr } = await userClient.auth.getUser();
-  const user = userData?.user;
-  if (userErr || !user) return json({ error: "Not signed in." }, 401);
+  // 1. Real user check (the bare anon key passes the gateway but has no user) — the shared
+  //    check in _shared/verifyCaller.ts: token verified here + one session query, getUser()
+  //    only when that cannot decide.
+  const who = await verifyCaller(req, admin);
+  if (!who.ok) return json(who.body, who.status);
+  const { user } = who.caller;
+  // `user` carries id, email and user_metadata — the three fields this function reads.
 
   // 2. Resolve the caller's tenant — never from the body.
   //    limit(1) not maybeSingle(): maybeSingle() ERRORS when a duplicate client_users row
   //    exists, which would lock the user out entirely. portal.html already guards this
   //    the same way (its "audit #F6" comment), as does _shared/resolveTenant.ts.
-  const admin = createClient(supabaseUrl, serviceKey);
-  const { data: mapRows, error: mapErr } = await admin
-    .from("client_users").select("client_id, role").eq("user_id", user.id).limit(1);
+  //    On verifyCaller's fast path this row came back with the session check.
+  const { data: mapRows, error: mapErr } = who.caller.mapping
+    ? { data: who.caller.mapping, error: null }
+    : await admin
+      .from("client_users").select("client_id, role").eq("user_id", user.id).limit(1);
   if (mapErr) return json({ error: mapErr.message }, 500);
   const mapping = mapRows && mapRows[0];
   if (!mapping) return json({ error: "No business is linked to this account." }, 403);

@@ -15,6 +15,7 @@ import { assertEquals } from "jsr:@std/assert@1";
 import * as jose from "jsr:@panva/jose@6";
 import { resolveTenant } from "../resolveTenant.ts";
 import { useKeysForTest } from "../localJwt.ts";
+import { verifyCaller } from "../verifyCaller.ts";
 import { stubAuth } from "./supabase_stub.ts";
 
 Deno.env.set("SUPABASE_URL", "https://stub.supabase.co");
@@ -185,4 +186,45 @@ Deno.test("live session but no business linked: 403, same as the slow path", asy
   const { admin } = makeAdmin([{ session_live: true, client_id: null, role: null, title: null, access: null }]);
   const r = await resolveTenant(req(await token()), admin, { readActions: READS });
   assertEquals((r as any).status, 403);
+});
+
+// ── verifyCaller, which the four functions outside resolveTenant now call directly ─────────
+// (portal-commissions, portal-feedback, portal-projects, operator-portal). portal-feedback names
+// the submitter from user_metadata and stores `user.email ?? null`, so both must come through
+// the fast path exactly as getUser() delivered them.
+
+Deno.test("verifyCaller fast path: id, email and user_metadata from the token; mapping in hand", async () => {
+  goTrueSaysNo();
+  const t = await new jose.SignJWT({
+    email: "pat@acme.test", role: "authenticated", session_id: SID,
+    user_metadata: { full_name: "Pat Builder" },
+  })
+    .setProtectedHeader({ alg: "ES256", kid: KID }).setSubject(UID).setIssuer(ISS)
+    .setAudience("authenticated").setIssuedAt().setExpirationTime("1h").sign(privateKey);
+  const { admin } = makeAdmin(LIVE_OWNER);
+  const v = await verifyCaller(req(t), admin);
+  assertEquals(v.ok, true);
+  const c = (v as any).caller;
+  assertEquals(c.user, { id: UID, email: "pat@acme.test", user_metadata: { full_name: "Pat Builder" } });
+  assertEquals(c.mapping, [{ client_id: "acme", role: "owner", title: null, access: null }]);
+  assertEquals(c.authPath, "local");
+});
+
+Deno.test("verifyCaller: a token with no email gives email undefined (callers write `email ?? null`)", async () => {
+  goTrueSaysNo();
+  const t = await new jose.SignJWT({ role: "authenticated", session_id: SID })
+    .setProtectedHeader({ alg: "ES256", kid: KID }).setSubject(UID).setIssuer(ISS)
+    .setAudience("authenticated").setIssuedAt().setExpirationTime("1h").sign(privateKey);
+  const { admin } = makeAdmin(LIVE_OWNER);
+  const v = await verifyCaller(req(t), admin);
+  assertEquals((v as any).caller.user.email, undefined);
+  assertEquals((v as any).caller.user.user_metadata, {});
+});
+
+Deno.test("verifyCaller fallback: mapping is NULL, so the caller knows to read client_users itself", async () => {
+  goTrueSaysYes();
+  const v = await verifyCaller(req("x"), makeAdmin(LIVE_OWNER).admin);
+  assertEquals(v.ok, true);
+  assertEquals((v as any).caller.mapping, null);
+  assertEquals((v as any).caller.authPath, "network");
 });

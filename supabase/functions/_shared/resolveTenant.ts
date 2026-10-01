@@ -17,10 +17,7 @@
 // Shape follows _shared/adminGate.ts: return {ok:false,status,body} rather than a
 // Response, so each function keeps its own CORS headers.
 
-// Same specifier every function in this project uses — mixing jsr: and esm.sh would
-// bundle two copies of supabase-js into each function.
-import { createClient } from "jsr:@supabase/supabase-js@2";
-import { checkAccessToken } from "./localJwt.ts";
+import { verifyCaller } from "./verifyCaller.ts";
 import {
   canEdit,
   canRead,
@@ -85,9 +82,6 @@ export type TenantCtx = {
   authPath: "local" | "network";
 };
 
-/** The caller's client_users row, as both the fast path and the plain read return it. */
-type MappingRow = { client_id: string; role: string | null; title: string | null; access: unknown };
-
 export type Resolved =
   | { ok: true; ctx: TenantCtx }
   | { ok: false; status: number; body: Record<string, unknown> };
@@ -121,37 +115,6 @@ function makeAudit(admin: Admin, actor: { userId: string; email: string } | null
     const { error } = await admin.from("admin_audit").insert(row);
     if (error && strict) throw new Error(`Could not record this action for audit: ${error.message}`);
   };
-}
-
-/** The 401 for a caller GoTrue would not vouch for, with WHY in a fixed enum. */
-function notSignedIn(authHeader: string): Resolved {
-  // WHICH failure this was is the one thing the log could never say. Every cause
-  // collapsed into this single string with `userErr` thrown away, so 34 "Not signed in."
-  // rows across four weeks could not distinguish a tab that sent the BARE ANON KEY
-  // because its session had momentarily vanished from a real token being rejected — and
-  // those two want opposite fixes. Classify instead of guessing. It costs no round trip,
-  // and naming the credential back to the caller that just sent it leaks nothing (the
-  // reason is deliberately a fixed enum, never `userErr.message`, which is provider text
-  // this project's error contract keeps out of the browser).
-  // Classify STRUCTURALLY rather than by comparing against SUPABASE_ANON_KEY. That env
-  // value and the literal baked into the browser bundle live in two different deploy
-  // pipelines, and the day they drift the classifier would invert in silence — reporting
-  // "a real token was refused" for precisely the case where no user token was sent, which
-  // is worse than the one ambiguous string it replaces. The shape is the fact: an anon key
-  // is a well-formed JWT whose payload carries role "anon" and no `sub`.
-  const bearer = authHeader.replace(/^Bearer\s+/i, "").trim();
-  const claims: Record<string, unknown> | null = (() => {
-    try {
-      const part = bearer.split(".")[1];
-      if (!part) return null;
-      const b = part.replace(/-/g, "+").replace(/_/g, "/");
-      return JSON.parse(atob(b + "=".repeat((4 - (b.length % 4)) % 4))) as Record<string, unknown>;
-    } catch { return null; }
-  })();
-  const reason = !bearer
-    ? "missing"
-    : (claims && !claims.sub && claims.role === "anon") ? "anon_key" : "rejected";
-  return { ok: false, status: 401, body: { error: "Not signed in.", reason } };
 }
 
 /**
@@ -213,54 +176,12 @@ export async function resolveTenant(
     staffActions?: Set<string>;
   },
 ): Promise<Resolved> {
-  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
-
-  // 1. Real user check (the bare anon key passes the gateway but has no user).
-  const authHeader = req.headers.get("Authorization") || "";
-
-  // FAST PATH (2026-10-01): verify the token here and ask the database, in ONE query, whether
-  // its session is still alive and which business the caller belongs to. getUser() was a round
-  // trip to GoTrue on every call and the slowest, least predictable part of this preamble
-  // (2.6–3.5 s on a bad call against 0.12–0.16 s on a good one). See _shared/localJwt.ts.
-  //   verified + session live  → this user; the client_users row below is already in hand.
-  //   verified + session gone  → 401, the same answer getUser() gives a signed-out token.
-  //   invalid                  → 401 (expired, forged, malformed).
-  //   unchecked, or the query failed (migration 257 not applied, a blip) → getUser() below,
-  //   exactly as before. Slower, never weaker.
-  let user: { id: string; email?: string } | null = null;
-  let knownMapping: MappingRow[] | null = null;
-  let authPath: "local" | "network" = "network";
-  const local = await checkAccessToken(authHeader.replace(/^Bearer\s+/i, "").trim());
-  if (local.kind === "invalid") {
-    return { ok: false, status: 401, body: { error: "Not signed in.", reason: "rejected" } };
-  }
-  if (local.kind === "verified") {
-    const { data: rows, error: rpcErr } = await admin.rpc("resolve_caller", {
-      p_user_id: local.sub,
-      p_session_id: local.sessionId,
-    });
-    const row = !rpcErr && Array.isArray(rows) ? rows[0] : null;
-    if (row) {
-      if (!row.session_live) {
-        return { ok: false, status: 401, body: { error: "Not signed in.", reason: "rejected" } };
-      }
-      user = { id: local.sub, email: local.email };
-      knownMapping = row.client_id
-        ? [{ client_id: row.client_id, role: row.role, title: row.title, access: row.access }]
-        : [];
-      authPath = "local";
-    }
-  }
-
-  if (!user) {
-    const userClient = createClient(supabaseUrl, anonKey, {
-      global: { headers: { Authorization: authHeader } },
-    });
-    const { data: userData, error: userErr } = await userClient.auth.getUser();
-    user = userData?.user ?? null;
-    if (userErr || !user) return notSignedIn(authHeader);
-  }
+  // 1. Who is calling — _shared/verifyCaller.ts: the token checked here plus resolve_caller's
+  //    session check, or getUser() when that cannot decide. On the fast path the caller's
+  //    client_users row comes back in the same query, so step 3 has nothing to fetch.
+  const who = await verifyCaller(req, admin);
+  if (!who.ok) return who;
+  const { user, mapping: knownMapping, authPath } = who.caller;
 
   // 2. Body.
   // deno-lint-ignore no-explicit-any

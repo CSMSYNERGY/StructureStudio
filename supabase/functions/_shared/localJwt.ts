@@ -26,7 +26,7 @@
 import * as jose from "jsr:@panva/jose@6";
 
 export type TokenCheck =
-  | { kind: "verified"; sub: string; email: string; sessionId: string }
+  | { kind: "verified"; sub: string; email: string; sessionId: string; userMetadata: Record<string, unknown> }
   | { kind: "invalid" }
   | { kind: "unchecked" };
 
@@ -96,6 +96,11 @@ export async function checkAccessToken(bearer: string): Promise<TokenCheck> {
       sub: sub.toLowerCase(),
       email: typeof payload.email === "string" ? payload.email : "",
       sessionId: sessionId.toLowerCase(),
+      // Supabase copies user_metadata into every access token; portal-feedback names the
+      // submitter from it, as it did from getUser()'s user object.
+      userMetadata: (payload.user_metadata && typeof payload.user_metadata === "object" && !Array.isArray(payload.user_metadata))
+        ? payload.user_metadata as Record<string, unknown>
+        : {},
     };
   } catch (e) {
     const code = (e as { code?: string })?.code ?? "";

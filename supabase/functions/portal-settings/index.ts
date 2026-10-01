@@ -1497,20 +1497,44 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 }
 
   if (action === "status") {
-    // The caller's own preferences row. Best-effort: a failure here must never stop the
-    // bootstrap call that every role depends on to learn its access map.
-    let myPrefs: Record<string, unknown> | null = null;
-    if (userId) {
-      const { data: pr } = await admin.from("client_users")
-        .select("prefs").eq("user_id", userId).limit(1).maybeSingle();
-      myPrefs = (pr && pr.prefs && typeof pr.prefs === "object" && !Array.isArray(pr.prefs))
+    // ALL FIVE READS AT ONCE (2026-10-01). Nothing below depends on another read's answer —
+    // each keys on clientId or userId alone — and `status` is the portal shell's bootstrap,
+    // awaited on every boot, so five sequential round trips were five times the wait for the
+    // first paint. Each read keeps its own tolerance exactly as before (see the notes on each
+    // below); only the waiting is shared. The pre-232 branding retry stays sequential: it runs
+    // only when the first branding read fails, which is rare by design.
+    const [prRes, settingsRes, cfgFirst, loginPrefRes, phoneRes] = await Promise.all([
+      // The caller's own preferences row. Best-effort: a failure here must never stop the
+      // bootstrap call that every role depends on to learn its access map.
+      userId
+        ? admin.from("client_users").select("prefs").eq("user_id", userId).limit(1).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+      admin
+        .from("client_settings")
+        .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, co_unlock_required, co_free_days, co_fee_cents, co_fee_taxable, co_fee_label, co_unlock_hours, email_provider, email_domain_status, updated_at")
+        .eq("client_id", clientId)
+        .maybeSingle(),
+      // Designer branding lives in client_configs (drives the public ?client= link). See the
+      // fallback note below.
+      admin
+        .from("client_configs")
+        .select("company_name, tagline, logo_url, accent_color, header_bg, styles_per_row")
+        .eq("client_id", clientId)
+        .maybeSingle(),
+      // The builder's default login-code channel (migration 231) — see the note below.
+      canRead("settings_crm")
+        ? admin.from("client_settings").select("customer_login_default").eq("client_id", clientId).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+      // My Synergy Phone's on/off for this tenant (migration 254) — see the note below.
+      canRead("phone")
+        ? admin.from("client_settings").select("phone_status").eq("client_id", clientId).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+    ]);
+    const pr = prRes.data;
+    const myPrefs: Record<string, unknown> | null =
+      (pr && pr.prefs && typeof pr.prefs === "object" && !Array.isArray(pr.prefs))
         ? pr.prefs as Record<string, unknown> : null;
-    }
-    const { data, error } = await admin
-      .from("client_settings")
-      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, co_unlock_required, co_free_days, co_fee_cents, co_fee_taxable, co_fee_label, co_unlock_hours, email_provider, email_domain_status, updated_at")
-      .eq("client_id", clientId)
-      .maybeSingle();
+    const { data, error } = settingsRes;
     if (error) return dbFail(req, clientId, "load your settings", error);
     // Designer branding lives in client_configs (drives the public ?client= link).
     //
@@ -1523,12 +1547,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // list turns that into "stylesPerRow reads as default" instead; a save that carries
     // stylesPerRow then fails loudly on the missing column and writes nothing (one UPDATE).
     // Apply 232 first anyway — this is the seatbelt, not the plan.
-    let { data: cfg, error: cfgErr } = await admin
-      .from("client_configs")
-      .select("company_name, tagline, logo_url, accent_color, header_bg, styles_per_row")
-      .eq("client_id", clientId)
-      .maybeSingle();
-    if (cfgErr) {
+    let { data: cfg } = cfgFirst;
+    if (cfgFirst.error) {
       ({ data: cfg } = await admin
         .from("client_configs")
         .select("company_name, tagline, logo_url, accent_color, header_bg")
@@ -1539,18 +1559,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // PURPOSE: `status` is the portal shell's bootstrap, so naming customer_login_default in the
     // select above would fail this action — and black out every tenant's portal — if this deploys
     // before 231 is applied. A failed read shows "text", which is what the default means anyway.
-    const { data: loginPref, error: loginPrefErr } = canRead("settings_crm")
-      ? await admin.from("client_settings").select("customer_login_default").eq("client_id", clientId).maybeSingle()
-      : { data: null, error: null };
+    const { data: loginPref, error: loginPrefErr } = loginPrefRes;
     // Is My Synergy Phone switched on for this tenant (client_settings.phone_status, plan D9)? The
     // shell needs it to decide whether Call is offered on a contact and whether the Calls page
     // is in the rail. ITS OWN READ, AND TOLERANT, for the same reason as the one above: naming
     // phone_status in the main select would black out every tenant's portal if this deploys
     // before migration 254. A failed read answers null ("not known"), which the browser treats
     // as off. Asked only of people with some phone access — nobody else has a use for it.
-    const { data: phoneRow, error: phoneRowErr } = canRead("phone")
-      ? await admin.from("client_settings").select("phone_status").eq("client_id", clientId).maybeSingle()
-      : { data: null, error: null };
+    const { data: phoneRow, error: phoneRowErr } = phoneRes;
     const phoneStatus: "on" | "off" | null = canRead("phone") && !phoneRowErr
       ? ((phoneRow as { phone_status?: string } | null)?.phone_status === "on" ? "on" : "off")
       : null;

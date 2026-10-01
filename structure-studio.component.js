@@ -33,6 +33,19 @@ const { createClient } = window.supabase;
 const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp6ZWFtamJoZHJzYnlnZG5waGJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzczNDIwNDMsImV4cCI6MjA5MjkxODA0M30.YawJS7aiyTbQdwVnzndyKwD2ejNGYhdBSiectURvxwY";
 
+// Every edge-function call runs in the DATABASE's region (us-east-1), not the one nearest the
+// visitor. Supabase runs a function wherever the request lands by default, and each query inside
+// it then crosses back to Virginia — measured 2026-10-01 from Pakistan, the function ran in
+// Singapore and spent 2.2 s on a call that takes 0.35 s next to the database. The portal pins its
+// own calls the same way (ssPinFnRegion in portal/01-core.jsx); this client is separate, so it
+// needs its own. A query param, not the x-region header, which the functions' CORS refuses.
+const ssDesignerFetch = (url, opts) => fetch(
+  (typeof url === "string" && url.indexOf("/functions/v1/") !== -1 && url.indexOf("forceFunctionRegion=") === -1)
+    ? url + (url.indexOf("?") === -1 ? "?" : "&") + "forceFunctionRegion=us-east-1"
+    : url,
+  opts,
+);
+
 // Address-autocomplete key used when a tenant's config row doesn't carry its own
 // googleMapsApiKey.
 const DEFAULT_GOOGLE_MAPS_API_KEY = "AIzaSyDEKe7mODI2xKnUQ5-z7L0ZZnUfBgE6dok";
@@ -20732,7 +20745,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
   // ─── Supabase client (browser-safe anon key, baked-in — config rows can't
   // redirect the data connection) ───
-  const supabase = useMemo(() => createClient(SUPABASE_URL, SUPABASE_ANON_KEY), []);
+  const supabase = useMemo(() => createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: ssDesignerFetch } }), []);
 
   // Tracks the design currently being edited (set on load via ?id=, then on save)
   const currentDesignIdRef = useRef(null);
@@ -33137,7 +33150,7 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
     let cancelled = false;
     (async () => {
       try {
-        const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: ssDesignerFetch } });
         // Share-link path: ?id=<short_code> without ?client= or a tenant subdomain
         // means someone opened a saved design's bare link. The design row records
         // which tenant owns it; look that up so the right config wraps the load.

@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { verifyCaller } from "../_shared/verifyCaller.ts";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 import { isInternalTenant } from "../_shared/internalTenant.ts";
@@ -256,23 +257,25 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  const admin = createClient(supabaseUrl, serviceKey);
 
-  // 1. Real signed-in user (bare anon key passes the gateway but carries no user).
-  const authHeader = req.headers.get("Authorization") || "";
-  const userClient = createClient(supabaseUrl, anonKey, { global: { headers: { Authorization: authHeader } } });
-  const { data: userData, error: userErr } = await userClient.auth.getUser();
-  const user = userData?.user;
-  if (userErr || !user) return json({ error: "Not signed in." }, 401);
+  // 1. Real signed-in user (bare anon key passes the gateway but carries no user) — the shared
+  //    check in _shared/verifyCaller.ts: token verified here + one session query, getUser()
+  //    only when that cannot decide.
+  const who = await verifyCaller(req, admin);
+  if (!who.ok) return json(who.body, who.status);
+  const { user } = who.caller;
 
   // 2. Map the caller to their tenant + role (service role; client_id is never trusted from the body).
   //    limit(1) not maybeSingle(): maybeSingle() ERRORS when a duplicate client_users row
   //    exists, which would lock the user out entirely. portal.html already guards this
   //    the same way (its "audit #F6" comment), as does _shared/resolveTenant.ts.
-  const admin = createClient(supabaseUrl, serviceKey);
-  const { data: meRows, error: meErr } = await admin
-    .from("client_users").select("client_id, role, title, access").eq("user_id", user.id).limit(1);
+  //    On verifyCaller's fast path this row came back with the session check.
+  const { data: meRows, error: meErr } = who.caller.mapping
+    ? { data: who.caller.mapping, error: null }
+    : await admin
+      .from("client_users").select("client_id, role, title, access").eq("user_id", user.id).limit(1);
   if (meErr) return dbFail(req, null, "check your account", meErr);
   const me = meRows && meRows[0];
   if (!me?.client_id) return json({ error: "Your login isn't attached to an account." }, 403);

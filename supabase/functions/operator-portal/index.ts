@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { verifyCaller } from "../_shared/verifyCaller.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 
@@ -74,20 +75,17 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
   if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  const admin = createClient(supabaseUrl, serviceKey);
 
-  // 1. Real user check (the bare anon key passes the gateway but has no user).
-  const authHeader = req.headers.get("Authorization") || "";
-  const userClient = createClient(supabaseUrl, anonKey, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userErr } = await userClient.auth.getUser();
-  const user = userData?.user;
-  if (userErr || !user) return json({ error: "Not signed in." }, 401);
+  // 1. Real user check (the bare anon key passes the gateway but has no user) — the shared
+  //    check in _shared/verifyCaller.ts: token verified here + one session query, getUser()
+  //    only when that cannot decide.
+  const who = await verifyCaller(req, admin);
+  if (!who.ok) return json(who.body, who.status);
+  const { user } = who.caller;
 
   // 2. Operator membership — service role (app_operators has no browser policies).
-  const admin = createClient(supabaseUrl, serviceKey);
   const { data: op, error: opErr } = await admin
     .from("app_operators")
     // can_write gates the write actions below; support_only decides which actions exist
