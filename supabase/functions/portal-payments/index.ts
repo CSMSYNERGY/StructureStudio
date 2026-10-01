@@ -98,6 +98,8 @@ const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  // The browser keeps this preflight for 2 h (Chrome's cap) instead of 5 s — see portal-settings.
+  "Access-Control-Max-Age": "86400",
 };
 /** Same severity split as customer-pay, and for the same reason: this function logs at
  *  minStatus 400 so the money trail is durable, which means a gate refusal and a declined

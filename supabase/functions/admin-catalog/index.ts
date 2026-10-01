@@ -25,6 +25,8 @@ const cors = {
   // step-up fix shipped broken: the header was added client-side only.
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-ss-stepup",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  // The browser keeps this preflight for 2 h (Chrome's cap) instead of 5 s — see portal-settings.
+  "Access-Control-Max-Age": "86400",
 };
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
