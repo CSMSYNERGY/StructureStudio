@@ -193,6 +193,24 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
+  // ── Warm-up ───────────────────────────────────────────────────────────────────────
+  // The portal pings this when an operator's flags resolve and when the pointer reaches the
+  // Admin link, so the console's first list_clients/get_master does not also pay a cold isolate
+  // (~2.5 s). It answers ABOVE EVERYTHING THE GATE DOES, and that placement is the safety case:
+  //   • before checkAdminAuth: no getUser round trip, no app_operators read, and above all no
+  //     checkAdminPassword. The ping carries the anon key and no password, and below this line
+  //     that is a FAILED ADMIN PASSWORD: an admin_auth_attempts failure on the caller's IP
+  //     bucket (5 = a lock), an admin_auth_failed audit row, a count toward the global brake and
+  //     a 400 ms sleep. A ping per boot would walk an operator's own IP up the lock tiers;
+  //   • before createClient and the operator success audit further down;
+  //   • before req.json(): it never reads the BODY (the single parse below owns that stream);
+  //   • 200, so withErrorLog (minStatus 500) files nothing in app_errors;
+  //   • a QUERY PARAM, not an action: READ_ONLY_ACTIONS, PASSWORD_REQUIRED and the switch are
+  //     untouched. It can only skip work, never authorize any.
+  // ⚠️ DEPLOY THIS BEFORE ANY PORTAL BUNDLE THAT WARMS admin-catalog (2026-10-02: shipped alone,
+  // ahead of the portal change that pings it). _test_stubs/adminCatalogWarm_test.ts pins the order.
+  if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
+
   let p: any;
   try { p = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
 
