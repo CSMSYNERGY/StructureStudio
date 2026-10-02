@@ -2172,9 +2172,31 @@ function CommissionsReport({ clientId }) {
   // ⛔ Do not add a fifth client-side guard. The database holds this now.
   //
   // What still protects the money is `reconciling`: figures painted before compute finishes
-  // are the last computed ones, so they are labelled as such and every control that COMMITS
+  // are not the reconciled ones, so they are labelled as such and every control that COMMITS
   // to a number stays disabled until the post-compute read lands. Money never paints
   // optimistically — it just no longer makes the whole tab wait.
+  //
+  // ⏱ SINCE 2026-10-02 THE PAINT RUNS BESIDE compute, NOT BEFORE IT, and compute returns the
+  // post-compute ledger itself (`withEntries`), so an open is two calls side by side instead of
+  // three in a row (the three took 4.6 s on beta from Pakistan, 2026-10-01). What that changes,
+  // and why it holds:
+  //   • The paint can now land MID-compute — some lines updated, new ones missing, retired ones
+  //     still shown. Still safe for the same reason as above: `reconciling` stays true until the
+  //     ledger compute returned (read after every one of its writes) is on screen.
+  //   • `settled` is the guard against the paint arriving LATE: once that ledger is applied, an
+  //     older read may not repaint or re-cache over it. Without it a slow paint (cold isolate,
+  //     a preflight) would put pre-compute rows back on screen with the controls enabled — the
+  //     double-pay class described above.
+  //   • WHO may reconcile is decided by the server: compute with withEntries answers a caller
+  //     without rate access with the ledger and no 403, so the tab asks everyone the same way
+  //     and a rep's open files no refusal row. The old "only if painted.canSeeRates" check is
+  //     gone with it.
+  //   • No ledger back (compute failed, was refused, or an older server ignored withEntries):
+  //     today's path — wait for the paint, then read list_entries AFTER compute. If that read
+  //     fails too and nothing from this run is on screen, the tab falls back to the empty
+  //     scaffold, exactly as a failed first read always did; cached figures are never left
+  //     armed. A caller with no Commissions access at all files one more 403 per open than
+  //     before (the tab is hidden at that level).
 
   // Entries only. This is what every mutation needs: the server actions do their own writes,
   // so re-running compute after each one bought nothing and cost the user eight seconds of
@@ -2190,29 +2212,41 @@ function CommissionsReport({ clientId }) {
     const run = (async () => {
       setErr(null);
       setReconciling(true);
-      // 1. Paint the ledger as it stands. This is the leg that used to wait behind compute.
-      let painted = null;
-      try { painted = await refreshEntries(); }
-      catch (e) { setErr(e.message); setData({ entries: [] }); }
-      // 2. Reconcile from GHL behind the paint, then repaint — but ONLY for someone the
-      //    server says may run it. compute is gated on canSeeRates (portal-commissions), so
-      //    a rep's call was a guaranteed 403 on every single mount, and the invoke wrapper
-      //    files every 4xx as severity='info'. A refusal that fires by construction for the
-      //    whole team is precisely what the `having count(*) > 20` triage query is meant to
-      //    catch, so this one drowned that signal instead of reporting anything.
-      //    ⚠️ Keyed off the response we JUST received, never off `data` — that is seeded
-      //    from ssCacheGet and can be another session's copy. And it still runs whenever
-      //    that response is missing (a failed read): an owner's reconcile is the money path
-      //    and must never be skipped just because we could not vouch for the caller.
-      if (!painted || painted.canSeeRates) {
-        try { await call({ action: "compute" }); await refreshEntries(); }
-        catch (_e) { /* transient, or a caller we could not vouch for — the painted rows stand */ }
+      // The cache key is built from whoever is signed in WHEN THE ANSWER LANDS (ssCacheKey reads
+      // ssCurrentUserId). A slow compute that outlives a sign-out and a different sign-in on this
+      // machine must not seed that person's tab with this run's ledger, so a run only writes for
+      // the user it started as (2026-10-02, review finding).
+      const who = ssCurrentUserId;
+      const put = (r) => { if (ssCurrentUserId !== who) return; setData(r); ssCachePut("portal-commissions", "list_entries", clientId, r); };
+      let settled = false;   // the post-compute ledger is applied: older reads may not repaint or re-cache
+      let fresh = false;     // some read from THIS run is on screen (not just the cache seed)
+      // 1. Paint the ledger as it stands, BESIDE the reconcile (see the note above). A cache hit is
+      //    already painted by the useState seed, so it needs no paint leg.
+      const paint = ssCacheGet("portal-commissions", "list_entries", clientId) ? null
+        : call({ action: "list_entries" })
+          .then((r) => { if (!settled) { put(r); fresh = true; } return r; })
+          .catch((e) => { if (!settled) { setErr(e.message); setData({ entries: [] }); fresh = true; } return null; });
+      // 2. Reconcile, and get the ledger as it stands AFTER every write compute made.
+      let ledger = null;
+      try { const c = await call({ action: "compute", withEntries: true }); ledger = c && c.ledger ? c.ledger : null; }
+      catch (_e) { /* transient, refused, or an older server: fall back below */ }
+      if (ledger) { settled = true; setErr(null); put(ledger); }
+      else {
+        // Today's path: a read that STARTS after compute. Let the paint finish first so it
+        // cannot land on top of this one.
+        if (paint) await paint;
+        settled = true;
+        try { await refreshEntries(); }
+        catch (e) {
+          // As a failed first read always did: never leave cached figures armed.
+          if (!fresh) { setErr(e.message); setData({ entries: [] }); }
+        }
       }
       setReconciling(false);
     })().finally(() => { inflight.current = null; });
     inflight.current = run;
     return run;
-  }, [refreshEntries]);
+  }, [refreshEntries, clientId]);
   useEffect(() => { load(); }, [load]);
 
   // What every control that COMMITS to a figure is disabled by. `busy` alone is not enough
