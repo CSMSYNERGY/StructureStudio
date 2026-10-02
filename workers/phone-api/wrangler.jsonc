@@ -36,7 +36,7 @@
     "DAILY_MINUTE_CAP": "600",
     // Chrome extension ids (or full chrome-extension:// origins), comma separated. Empty until
     // the listing is published; the unpacked dev build's id goes here for local testing.
-    "EXTENSION_ORIGINS": "ipiccbfkkbenmiaiaoecbhbjalkbikjk",
+    "EXTENSION_ORIGINS": "deoplohngfikappgihmmofhfhhdcpkch,ipiccbfkkbenmiaiaoecbhbjalkbikjk",
     // Release 2. The daily minute debit and the monthly line fee run only when this is "on"
     // AND their usage_prices meter is armed (active and priced). Both rails, the way
     // taxMeter.ts is armed.

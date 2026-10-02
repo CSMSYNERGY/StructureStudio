@@ -850,7 +850,7 @@ function ssPhoneOffered(phoneStatus, operatorViewing) {
 // messaged. `window.` so the config is one line to find and so the harness can inject a test ID
 // before the app runs; a value already there wins.
 if (!Array.isArray(window.SS_PHONE_EXTENSION_IDS)) {
-  window.SS_PHONE_EXTENSION_IDS = ["ipiccbfkkbenmiaiaoecbhbjalkbikjk"];
+  window.SS_PHONE_EXTENSION_IDS = ["deoplohngfikappgihmmofhfhhdcpkch", "ipiccbfkkbenmiaiaoecbhbjalkbikjk"];
 }
 // PHONE_API_BASE: the phone-api Worker's public address (SPEC section 1), which serves
 // voicemail audio to the contact timeline (GET /voicemails/:id/audio, SPEC section 3). Same

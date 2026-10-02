@@ -124,8 +124,8 @@ Deno.test("the extension IDs: the unpacked dev build's stable id by default, an 
   assert(Array.isArray(defaults.SS_PHONE_EXTENSION_IDS), "the config constant was not created");
   // The dev build's id (a fixed manifest key keeps it stable). The store id is ADDED here, first,
   // when My Synergy Phone is published; the comment above the constant says so.
-  assertEquals(defaults.SS_PHONE_EXTENSION_IDS, ["ipiccbfkkbenmiaiaoecbhbjalkbikjk"]);
-  assertEquals(h.ssPhoneExtensionIds(), ["ipiccbfkkbenmiaiaoecbhbjalkbikjk"], "a real Chrome id shape, so it IS messaged");
+  assertEquals(defaults.SS_PHONE_EXTENSION_IDS, ["deoplohngfikappgihmmofhfhhdcpkch", "ipiccbfkkbenmiaiaoecbhbjalkbikjk"]);
+  assertEquals(h.ssPhoneExtensionIds(), ["deoplohngfikappgihmmofhfhhdcpkch", "ipiccbfkkbenmiaiaoecbhbjalkbikjk"], "the store ID and the unpacked dev ID, both real Chrome id shapes, so both ARE messaged");
   assert(/add the Chrome Web Store id to this list, FIRST/.test(CORE), "the note to add the store id is next to the constant");
   assert(!h.ssPhoneLinkReady(h.SS_PHONE_LINKS.chrome), "a placeholder store link must read as not ready");
   const injected: Win = { location: { href: "" }, SS_PHONE_EXTENSION_IDS: ["abcdefghijklmnopabcdefghijklmnop", "not-an-id", 7] };
