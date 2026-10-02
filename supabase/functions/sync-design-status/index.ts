@@ -358,9 +358,13 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
           // every order on every one of them — one serial UPDATE each, all of them no-ops.
           const cents = Math.round(t * 100);
           if (o.total_cents === cents && o.total_source === "ghl") continue;
+          // The manual check above read a snapshot; someone can set a manual total between that
+          // read and this write. Re-check it in the UPDATE itself so a manual total is never
+          // overwritten. `.or` and not `.neq`: total_source is nullable, and neq skips NULLs.
           const { error: tErr } = await admin
             .from("orders").update({ total_cents: cents, total_source: "ghl", updated_at: new Date().toISOString() })
-            .eq("id", o.id).eq("client_id", clientId);
+            .eq("id", o.id).eq("client_id", clientId)
+            .or("total_source.is.null,total_source.neq.manual");
           if (tErr) console.warn(`order total update failed for ${o.short_code}:`, tErr.message);
         }
       }
