@@ -129,6 +129,53 @@ describe("POST /token", () => {
     expect(net.writes("app_errors")[0].json.code).toBe("session_check_unavailable");
   });
 
+  describe("wallet (the app banner)", () => {
+    const tokenReq = async (auth: Auth) => appRequest("POST", "/token", await auth.token(USER_A), { platform: "ios", build_type: "prod", app_version: "1" });
+    const gate = (allow: boolean, reason: string, available: number, auto = false) =>
+      ({ allow, reason, available_cents: available, floor_cents: 500, auto_topup_enabled: auto });
+
+    it("PHONE_USAGE_METERS off (how it ships): ok, and the wallet is not even asked", async () => {
+      const { net, auth, env } = await setup();
+      const { json } = await call(env, await tokenReq(auth));
+      expect(json.wallet).toEqual({ state: "ok", topping_up: false });
+      expect(net.rpcCalls("wallet_usage_gate")).toEqual([]);
+    });
+
+    it.each([
+      ["above twice the floor", gate(true, "above_floor", 1000), { state: "ok", topping_up: false }],
+      ["above the floor but under twice it", gate(true, "above_floor", 999), { state: "low", topping_up: false }],
+      ["exempt with nothing in it", gate(true, "exempt", 0), { state: "ok", topping_up: false }],
+      ["below the floor, auto top-up off", gate(false, "below_floor", 10), { state: "blocked", topping_up: false }],
+    ])("meters on, %s", async (_l, g, wallet) => {
+      const { net, auth } = await setup();
+      net.rpc("wallet_usage_gate", () => g);
+      const env = makeEnv({ PHONE_USAGE_METERS: "on" });
+      const { res, json } = await call(env, await tokenReq(auth));
+      expect(res.status).toBe(200);
+      expect(json.wallet).toEqual(wallet);
+      expect(net.rpcCalls("wallet_usage_gate")[0].json).toEqual({ p_client_id: "demo-tenant", p_meter: "voice_minute" });
+      expect(net.to(/wallet-autotopup/)).toEqual([]);
+    });
+
+    it("blocked with auto top-up on: topping_up, and a top-up is asked for", async () => {
+      const { net, auth } = await setup();
+      net.rpc("wallet_usage_gate", () => gate(false, "below_floor", 10, true));
+      net.on("POST", (u) => u.href === `${SUPABASE_URL}/functions/v1/wallet-autotopup`, () => jsonRes({ fired: true, ok: true }));
+      const { json } = await call(makeEnv({ PHONE_USAGE_METERS: "on" }), await tokenReq(auth));
+      expect(json.wallet).toEqual({ state: "blocked", topping_up: true });
+      expect(net.to(/wallet-autotopup/).map((s) => s.json)).toEqual([{ client_id: "demo-tenant" }]);
+      expect(json.token).toBeTruthy(); // the line still works: incoming calls ring
+    });
+
+    it("a gate that fails reads ok, and the token is still issued", async () => {
+      const { net, auth } = await setup();
+      net.rpc("wallet_usage_gate", () => jsonRes({ message: "down" }, 500));
+      const { res, json } = await call(makeEnv({ PHONE_USAGE_METERS: "on" }), await tokenReq(auth));
+      expect(res.status).toBe(200);
+      expect(json.wallet).toEqual({ state: "ok", topping_up: false });
+    });
+  });
+
   it("refuses a missing or bad login", async () => {
     const { env } = await setup();
     const none = await call(env, appRequest("POST", "/token", null, { platform: "chrome", build_type: "prod" }));

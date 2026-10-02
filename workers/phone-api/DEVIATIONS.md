@@ -30,9 +30,13 @@ Where the Worker reads the contract a particular way, adds to it, or departs fro
 21. Calls with no contact (unknown numbers) are visible to contacts `view`/`edit`, and to anyone else only if they took part in the call.
 22. `/voicemails/:id/audio` marks the voicemail heard (`listened_at`, `listened_by`) the first time it is played. There is no separate endpoint for that in the SPEC.
 23. `/log` is rate-limited to 30 rows a minute per person per isolate, so a crash loop cannot flood `app_errors`. It stores `app_version` and `user_id` inside `context`.
-24. The usage debit has a second rail, env `PHONE_USAGE_METERS` (default `off`), on top of the `voice_minute` meter being active and priced. It has not been run against the live `wallet_credit`; see the header of `src/cron/usageDebit.ts`. The monthly line fee runs from the same cron on the same two rails (item 37).
-    - **Catch-up (added 2026-09-29, plan 17 "retried, never dropped").** Each daily run looks at the last 7 UTC days, not only yesterday, and charges every tenant-day with minutes whose key (`voice_minute:<client_id>:<YYYY-MM-DD>`) is not on the ledger yet. A failed charge, or a whole run that failed or never happened, is charged by a later run for up to a week. One ledger read skips the days already charged.
-    - The window never reaches back before the earliest `phone_minutes` debit on the ledger, so the first run after arming charges only yesterday, never calls made while the meter was off. Known edge: disarming for a few days and arming again charges any of those days still inside the window.
+24. **Usage charges, one wallet line per call and per text (migration 259, 2026-10).** This replaced the daily combined minute debit (`src/cron/usageDebit.ts`, deleted; it never ran live). `src/cron/usageCharge.ts` runs every 5 minutes from the tick (minute % 5 == 2) and charges each finished call or text at Twilio's own cost times `phone_billing_settings.markup`, through `wallet_usage_debit` (idempotency key `usage:call:<id>` / `usage:sms:<id>`). Its header has the queue, the states and the request cap.
+    - **Rails:** env `PHONE_USAGE_METERS` (default `off`) AND the meter armed in the database (`phone_usage_armed`: markup and `armed_at` set, the meter active or the tenant on the pilot list). A call or text before `armed_at` is never charged. Arm in that order: the env rail first, then `armed_at`.
+    - **The ledger wins:** a debit whose reply was lost (or whose row update failed) is already on the ledger when its row is retried. The retry records the ledger line's own charge and cost (`wallet_usage_debit` returns them on a replay), and a retried row that would now settle as shadow, exempt or not billable is settled as charged from that line instead, with a warning (`usage_charge_kept_from_ledger`) in case it should be refunded.
+    - **Billable talk:** a `completed` call with `duration_s > 0` is billed whether or not `answered_at` was written (Twilio's completed means it connected). A `missed` call waits 20 minutes before it is settled, one recording sweep, so a voicemail the sweep files late is still billed as one.
+    - **Cost capture:** env `PHONE_USAGE_COST_CAPTURE` (anything but `off`; ships `on`) records every call's and text's Twilio cost, and what it would charge, as `shadow` rows in `usage_charges` while nothing is charged.
+    - **Twilio's totals:** the 09:00 UTC run stores yesterday's Usage Records in `twilio_usage_daily`, to check the per-item costs against.
+    - The monthly line fee moved unchanged to `src/cron/lineFee.ts` and still runs at 09:00 UTC on its two rails (item 37).
 25. Voicemail retention is one Worker-wide setting (`VOICEMAIL_RETENTION_DAYS`), not per builder yet.
 26. `SUPABASE_URL` is a secret, not a var, so the project ref stays out of this public repo.
 
@@ -99,12 +103,12 @@ Where the Worker reads the contract a particular way, adds to it, or departs fro
     - Twilio only transcribes English recordings of 2 s to 2 min, so a longer message gets no text.
     - The `voicemail_transcription` meter is not charged by anything yet.
 35. **Wallet floor.**
-    - **When it applies:** only while `voice_minute` is active and priced, as asked. It does **not** also need `PHONE_USAGE_METERS=on`, because a refusal moves no money.
-    - **The check:** outbound calls are refused below env `WALLET_FLOOR_CENTS` (default 500). The balance compared is `balance_cents - held_cents`, and no wallet row counts as zero.
+    - **When it applies (changed 2026-10, migration 259):** only while `PHONE_USAGE_METERS=on` AND `voice_minute` is armed in the database (`phone_usage_armed`). With the env rail off the database is not asked at all.
+    - **The check:** one RPC, `wallet_usage_gate(client, 'voice_minute')`, the same answer the texting path gets (`_shared/usageGate.ts`). Outbound calls are refused below `phone_billing_settings.floor_cents` (default 500; it was the env var `WALLET_FLOOR_CENTS`, now removed). The balance compared is `balance_cents - held_cents` minus the sub-cent remainder rounded up, and no wallet row counts as zero.
     - **Exempt:** tenants with `metered_exempt` or `billing_exempt` are never refused.
-    - **The refusal:** TwiML `<Say>` ("Your Structure Studio wallet is empty. Top up in Settings, Billing.") and a `failed` row with `error_code = wallet_empty`, logged at `info`.
+    - **The refusal:** TwiML `<Say>` ("Your wallet is empty. Add funds in Structure Studio under Settings, Billing.", or with auto top-up on "Your wallet is being topped up. Try again in a minute." after asking `wallet-autotopup` for a top-up) and a `failed` row with `error_code = wallet_empty`, logged at `info`. `/token` reports the same verdict as `wallet: {state, topping_up}`.
     - **Failures:** a failed read allows the call and logs `wallet_floor_check_failed` at `warn`.
-    - **Latency:** the three reads run in the same parallel round as the minute cap, so they add no round trip. Inbound calls and 911 never reach this check.
+    - **Latency:** the RPC runs in the same parallel round as the minute cap, so it adds no round trip. Inbound calls and 911 never reach this check.
 36. **MMS.** **Sending photos is not built.** `_shared/smsSend.ts` → `twilioSms.ts sendSms` posts `Body` only, and a second send path would mean a second set of texting rules. `POST /sms/send` therefore refuses a non-empty `media_urls` with `bad_request` ("Sending photos isn't available yet. Send the text on its own.") instead of dropping the photos without saying so.
 
     **Viewing** works: `GET /media/:messageId/:index` streams one inbound file.
@@ -115,7 +119,7 @@ Where the Worker reads the contract a particular way, adds to it, or departs fro
 
     **Proposed column, for the backend lane:** `alter table public.sms_messages add column if not exists media jsonb;`. It holds an array in `MediaUrl{N}` order of `{"sid":"ME...","content_type":"image/jpeg"}`. `sms-inbound` would write it from `MediaUrl{N}` (keeping only the `ME` SID from the URL) and `MediaContentType{N}`, with the same retry-without-the-column fallback `numMedia.ts` uses. Store SIDs, never full URLs.
 37. **Monthly line fee (`phone_line_monthly`).**
-    - **When it runs:** in the daily cron, but only when `PHONE_USAGE_METERS=on` **and** its meter is active and priced. That is one rail more than asked, matching the minute debit so that no cent moves on a DB flag alone. Arming it means turning on both.
+    - **When it runs:** in the daily cron, but only when `PHONE_USAGE_METERS=on` **and** its meter is active and priced. That is one rail more than asked, matching the usage charges (item 24) so that no cent moves on a DB flag alone. Arming it means turning on both.
     - **Who pays:** once per tenant per UTC month, charged in advance with no proration. A tenant has a line when its phone switch is on and it holds a voice-enabled number that has not been released.
     - **Idempotency:** the key is `phone_line_monthly:<client_id>:<YYYY-MM>`. One ledger read skips tenants already charged that month. Exempt tenants are skipped.
     - **Failures:** a failed charge is logged (`phone_line_fee_failed`) and retried by the next day's run.

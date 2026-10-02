@@ -20,7 +20,7 @@ src/routes/reads.ts   /threads, /threads/:key, /calls, /search, /team
 src/routes/me.ts      /settings/me, /devices, /devices/signout-all, /log, /turn, /health
 src/routes/quickSends.ts  /quick-sends: each person's saved messages (list, add, change, delete, used)
 src/routes/push.ts    /push/text (FCM HTTP v1, APNs)
-src/cron/             sweep.ts (*/15), retention.ts and usageDebit.ts (daily, 09:00 UTC: minute debit, monthly line fee)
+src/cron/             sweep.ts (*/15), usageCharge.ts (every 5 min: each call and text at Twilio cost x markup; 09:00 UTC: Twilio's daily usage totals), retention.ts and lineFee.ts (daily, 09:00 UTC: monthly line fee)
 src/conference.ts     the conference design: TwiML, which leg is which, the transfer_state machine, /voice/conference
 src/callEvents.ts     what phone_call_events say that the row cannot: a warm transfer's state, a Resume still landing
 src/voicemail.ts      the greeting + <Record> TwiML (and transcription)
@@ -56,10 +56,10 @@ Deploying is manual, from this directory, and only by a person (see SETUP.md). T
 | `EMERGENCY_MODE` | `block` | `block` answers 911, 933 and 112 with "For emergencies, call 9 1 1 from your cell phone." Only the exact value `allow` lets 911 and 933 through (phase 6, needs registered emergency addresses). |
 | `DAILY_MINUTE_CAP` | `600` | Outbound minutes per builder per UTC day, each call rounded up. `0` turns the cap off. |
 | `EXTENSION_ORIGINS` | empty | Chrome extension ids (or full `chrome-extension://` origins), comma separated, allowed by CORS. The portal origins (app., beta., beta-2-0.) are built in. |
-| `PHONE_USAGE_METERS` | `off` | Release 2. The daily minute debit runs only when this is `on` and the `voice_minute` meter is active and priced; the monthly line fee only when this is `on` and `phone_line_monthly` is active and priced. |
+| `PHONE_USAGE_METERS` | `off` | Release 2. Exactly `on` lets calls and texts be charged to the wallet one by one (`src/cron/usageCharge.ts`) and the wallet floor refuse an outbound call, but only where the meter is also armed in the database (`phone_billing_settings` markup and `armed_at` set, and the `usage_prices` meter active or the tenant on the pilot list; migration 259). The monthly line fee needs this `on` and `phone_line_monthly` active and priced. The edge functions read the same name as a Supabase function secret for the texting path, so arming texts sent from the portal means setting it there too. |
+| `PHONE_USAGE_COST_CAPTURE` | `on` | Anything but `off` records what every call and text cost at Twilio, and what it would charge at the current markup, as `shadow` rows in `usage_charges`, while nothing is charged. Also stores Twilio's daily usage totals in `twilio_usage_daily` at 09:00 UTC. |
 | `VOICEMAIL_RETENTION_DAYS` | `365` | Recordings older than this are deleted at Twilio by the daily job. Minimum 30. |
 | `TRANSCRIBE` | `off` | Release 2. `on` adds Twilio transcription to every voicemail (`<Record transcribe>`, about $0.05 a minute, English, 2 s to 2 min); the text lands in `phone_voicemails.transcript` and on the call's `voicemail` summary. |
-| `WALLET_FLOOR_CENTS` | `500` | Outbound calls are refused ("Your Structure Studio wallet is empty...") when the wallet's spendable balance is below this, but only while the `voice_minute` meter is active and priced. Exempt tenants, inbound calls and 911 are never refused. |
 
 ## Secrets (`npx wrangler secret put <NAME>`)
 

@@ -10,12 +10,21 @@ export interface Env {
   EMERGENCY_MODE?: string;
   DAILY_MINUTE_CAP?: string;
   EXTENSION_ORIGINS?: string;
+  /**
+   * Exactly "on" lets cron/usageCharge.ts charge armed calls and texts to the wallet, and lets
+   * wallet.ts refuse an outbound call below the floor. Anything else: nothing is charged and
+   * nothing is refused (costs are still recorded, see PHONE_USAGE_COST_CAPTURE).
+   */
   PHONE_USAGE_METERS?: string;
+  /**
+   * Anything but "off" (unset included) records what every call and text cost at Twilio, and
+   * what it WOULD have charged at the current markup, in usage_charges as `shadow` rows, while
+   * nothing is charged. Carolyn compares those numbers before arming.
+   */
+  PHONE_USAGE_COST_CAPTURE?: string;
   VOICEMAIL_RETENTION_DAYS?: string;
   /** "on" adds Twilio transcription to voicemail (<Record transcribe>). Anything else: off. */
   TRANSCRIBE?: string;
-  /** Outbound calls are refused below this wallet balance, only while voice_minute is armed. */
-  WALLET_FLOOR_CENTS?: string;
 
   // ── Supabase ───────────────────────────────────────────────────────────────────────
   SUPABASE_URL?: string;

@@ -233,6 +233,17 @@ verify_jwt = false
 [functions.portal-sms]
 verify_jwt = true
 
+[functions.wallet-autotopup]
+# The automatic wallet top-up as an HTTP door (migration 259): the Worker's usage cron and the
+# SMS/call wallet-floor refusals POST {client_id} here. Server-to-server only. The real gate is
+# inside: the bearer must equal the runtime's SUPABASE_SERVICE_ROLE_KEY or WALLET_AUTOTOPUP_SECRET,
+# compared in constant time. true here because a service-role JWT passes the gateway.
+# ⚠️ An `sb_secret_…` key is NOT a JWT and the gateway 401s it before the function runs. If the
+# Worker's SUPABASE_SERVICE_ROLE_KEY is that format, its top-up requests die here (the Worker logs
+# the 401, this side logs nothing) and this must become false — safe, because the in-function
+# check is the authentication either way.
+verify_jwt = true
+
 # Twilio Event Streams cannot send a Supabase JWT. With verification ON the gateway
 # 401s every delivery BEFORE the function runs — the billing-webhook failure mode,
 # invisible from inside the database. Auth is the shared URL secret.

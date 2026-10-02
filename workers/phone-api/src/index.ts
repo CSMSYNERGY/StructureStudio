@@ -31,14 +31,19 @@ import { createQuickSend, deleteQuickSend, listQuickSends, quickSendUsed, update
 import { pushText } from "./routes/push";
 import { recordingSweep } from "./cron/sweep";
 import { retention } from "./cron/retention";
-import { chargeMonthlyLineFees, debitDailyUsage } from "./cron/usageDebit";
+import { chargeMonthlyLineFees } from "./cron/lineFee";
+import { runUsageCharges, snapshotTwilioUsage } from "./cron/usageCharge";
 
 export const CRON_SWEEP = "*/15 * * * *";
 export const CRON_DAILY = "0 9 * * *";
 // The account's free plan has 5 cron triggers in total and 4 are used by other workers, so the
 // Worker runs ONE every-minute tick: keep-warm every minute, the sweep on minutes divisible by
-// 15, and the daily jobs at 09:00 UTC. The two older strings still dispatch (tests, rollback).
+// 15, the call and text charges every 5 minutes (minute % 5 == 2, so never on a sweep minute
+// and never at 09:00), and the daily jobs at 09:00 UTC. The two older strings still dispatch
+// (tests, rollback).
 export const CRON_TICK = "* * * * *";
+/** The minute (mod 5) the usage charges run on. */
+export const USAGE_MINUTE_MOD5 = 2;
 
 // ── Twilio ──────────────────────────────────────────────────────────────────────────
 
@@ -214,14 +219,19 @@ export default {
     const tick = event.cron === CRON_TICK;
     const sweepDue = event.cron === CRON_SWEEP || (tick && at.getUTCMinutes() % 15 === 0);
     const dailyDue = event.cron === CRON_DAILY || (tick && at.getUTCHours() === 9 && at.getUTCMinutes() === 0);
+    const usageDue = tick && at.getUTCMinutes() % 5 === USAGE_MINUTE_MOD5;
     const run = async () => {
       if (tick) await job("keep_warm", () => keepWarm(env));
       if (sweepDue) {
         await job("sweep", () => recordingSweep(env));
       }
+      if (usageDue) {
+        // Each call and text, one wallet line each (or a shadow cost row while disarmed).
+        await job("usage_charges", () => runUsageCharges(env, adminClient(env), at));
+      }
       if (dailyDue) {
         await job("retention", () => retention(env));
-        await job("usage_debit", () => debitDailyUsage(env, adminClient(env)));
+        await job("twilio_usage", () => snapshotTwilioUsage(env, adminClient(env), at));
         await job("line_fee", () => chargeMonthlyLineFees(env, adminClient(env)));
       }
     };

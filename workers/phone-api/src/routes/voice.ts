@@ -27,7 +27,7 @@ import {
 } from "../twiml";
 import { hook } from "../urls";
 import { voicemailTwiml } from "../voicemail";
-import { walletFloorCheck } from "../wallet";
+import { requestAutoTopup, WALLET_WORDS, walletFloorCheck } from "../wallet";
 
 /** Twilio allows at most 10 nouns in one <Dial>. */
 const MAX_NOUNS = 10;
@@ -50,7 +50,9 @@ export const SAY = {
   minuteCap: "Today's calling limit is reached. It resets tomorrow.",
   badIdentity: "My Synergy Phone isn't signed in correctly. Please sign out and back in.",
   notInService: "Sorry, this number can't take calls right now. Please try again later.",
-  walletEmpty: "Your Structure Studio wallet is empty. Top up in Settings, Billing.",
+  // The wallet floor's two refusals (wallet.ts): auto top-up on, or not.
+  walletEmpty: WALLET_WORDS.empty,
+  walletToppingUp: WALLET_WORDS.toppingUp,
   thanks: "Thank you. Goodbye.",
 } as const;
 
@@ -253,7 +255,7 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
 
   const cap = intVar(env.DAILY_MINUTE_CAP, 600, 0);
   // All in one parallel round: the contact's tenant, today's minutes, and the wallet floor
-  // (plan section 17; its three small reads cost no extra round trip here).
+  // (wallet.ts: one RPC while PHONE_USAGE_METERS is on, none while it is off).
   const [contactOk, used, wallet] = await Promise.all([
     (async () => {
       if (!contactParam) return true;
@@ -265,7 +267,7 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
       return !!row;
     })(),
     cap > 0 ? minutesUsedToday(admin, ctx.client_id) : Promise.resolve(0),
-    walletFloorCheck(admin, ctx.client_id, intVar(env.WALLET_FLOOR_CENTS, 500, 0)),
+    walletFloorCheck(env, admin, ctx.client_id),
   ]);
   // A contact id from another tenant (an operator's stale tab, or a forged param) is refused
   // outright, never dialed "without the contact".
@@ -283,6 +285,12 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
       code: "wallet_empty", severity: "info", clientId: ctx.client_id, throttleMs: 60 * 60_000,
       message: `Outbound call refused: wallet ${wallet.availableCents} cents is below the floor of ${wallet.floorCents}.`,
     }));
+    // Auto top-up on: ask for one now (after the answer; the edge function decides whether to
+    // charge the card) and tell them to try again shortly. Same error_code either way.
+    if (wallet.autoTopupEnabled) {
+      ec.waitUntil(requestAutoTopup(env, ctx.client_id));
+      return refuse("wallet_empty", SAY.walletToppingUp);
+    }
     return refuse("wallet_empty", SAY.walletEmpty);
   }
   if (wallet.reason === "error") {

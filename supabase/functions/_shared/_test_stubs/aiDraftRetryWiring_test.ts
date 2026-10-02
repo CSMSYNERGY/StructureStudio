@@ -93,7 +93,10 @@ Deno.test("⚠️ the model keeps its 125 s, and the gateway's 150 s is measured
   const decl = lift(DRAFT, "const draftAbortMs =", ";\n", "the draft budget") + ";";
   assertEquals(decl.split("\n").map((l) => l.trim()).join(" "),
     "const draftAbortMs = streamed ? streamedDraftBudgetMs({ t0, requestStartMs, workerBornMs: WORKER_BORN_MS }) : Math.max(60_000, Math.min(125_000, 145_000 - (t0 - requestStartMs)));");
-  assert(DRAFT.indexOf("const draftAbortMs =") > DRAFT.indexOf("autoTopupDecision("), "measured after the top-up has run");
+  // The top-up's mechanics moved to _shared/walletAutoTopup.ts (2026-10); its call site is what
+  // stands here now. The indexOf > 0 half matters: without it a renamed call reads -1 and passes.
+  assert(DRAFT.indexOf("runAutoTopup(") > 0, "the top-up runs inside the generation branch");
+  assert(DRAFT.indexOf("const draftAbortMs =") > DRAFT.indexOf("runAutoTopup("), "measured after the top-up has run");
   assert(DRAFT.indexOf("const draftAbortMs =") < DRAFT.indexOf("const aiSignal ="), "and before the call it bounds");
   const budget = (spentMs: number) => new Function("t0", "requestStartMs", "streamed", `${decl}; return draftAbortMs;`)(1_000_000 + spentMs, 1_000_000, false) as number;
   assertEquals(budget(0), 125_000, "no set-up: the whole 125 s");

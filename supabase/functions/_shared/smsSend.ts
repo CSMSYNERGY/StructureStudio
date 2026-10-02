@@ -17,13 +17,16 @@ import {
   sendSms, smsCredentialsConfigured, smsE164US, smsPhoneKey, isDamagedPhoneKey, SmsApiError,
 } from "./twilioSms.ts";
 import { quietHoursVerdict } from "./smsQuietHours.ts";
+import { checkUsageGate, keepAlive, requestAutoTopup } from "./usageGate.ts";
 
 export type SmsOutcome = {
   sent: boolean;
   /** not_active: the feature is off for this deployment or this tenant — the caller should
    *  say "not switched on", never "failed". opted_out / bad_number / failed are real
-   *  refusals with something to tell the user. */
-  reason?: "not_active" | "opted_out" | "no_consent" | "bad_number" | "damaged_number" | "quiet_hours" | "failed";
+   *  refusals with something to tell the user. wallet_empty (migration 259): the prepaid
+   *  wallet is under the usage floor while the SMS meter is armed; `error` says either that a
+   *  top-up is on its way or where to add funds, and is meant to be shown as-is. */
+  reason?: "not_active" | "opted_out" | "no_consent" | "bad_number" | "damaged_number" | "quiet_hours" | "wallet_empty" | "failed";
   error?: string;
   id?: string;
 };
@@ -42,6 +45,11 @@ export type TenantSms = {
    *  page's Send, text_sign_link) is not what quiet hours exist to stop. Set for those; never
    *  for automation. Pinned by _test_stubs/smsQuietHoursWiring_test.ts. */
   bypassQuietHours?: boolean;
+  /** Keeps background work alive past the caller's response — today only the automatic top-up
+   *  a wallet_empty refusal asks for. The Worker passes its ctx.waitUntil; an edge function can
+   *  omit it (EdgeRuntime.waitUntil is used). Without either, the request is sent and may be
+   *  cut off when the response ends. */
+  waitUntil?: ((p: Promise<unknown>) => void) | null;
 };
 
 export async function sendTenantSms(
@@ -192,6 +200,48 @@ export async function sendTenantSms(
 
     const body = String(msg.body ?? "").trim().slice(0, 1600);
     if (!body) return { sent: false, reason: "failed", error: "The message is empty." };
+
+    // ── The wallet floor (migration 259) ─────────────────────────────────────────────
+    // LAST of the refusals, deliberately: a text that would have been refused anyway (STOP, no
+    // consent, quiet hours) is answered with that reason, never with "top up your wallet" —
+    // paying would not have sent it. And BEFORE the claim row, so a refused text leaves no
+    // ledger row, costs nothing and is never billed by the usage cron.
+    //
+    // DISARMED unless PHONE_USAGE_METERS is "on" in this runtime's env (zero network when off)
+    // AND the database says the sms_segment meter is armed for this tenant. FAILS OPEN: an
+    // error answers allow, and is logged here so a broken gate is visible rather than free.
+    // Nothing is charged here; the Worker's usage cron charges the sent text afterwards from
+    // Twilio's own price.
+    const gate = await checkUsageGate(admin, clientId, "sms_segment");
+    if (gate.reason === "error") {
+      await logEdgeError({
+        fn: "sms-send",
+        clientId,
+        code: "usage_gate_failed",
+        message: `Wallet floor check failed, the text was allowed: ${gate.error ?? "unknown"}`,
+      });
+    }
+    if (!gate.allow) {
+      if (gate.autoTopupEnabled) {
+        // Ask for the top-up, do not wait for it: the card sale can take 30 s and this answer
+        // should not. wallet-autotopup applies the threshold and the hour's cooldown itself, so
+        // a builder pressing Send five times is five requests and at most one charge. A request
+        // that never got a 200 is logged; a decline is logged by wallet-autotopup itself.
+        keepAlive(requestAutoTopup(clientId).then(async (r) => {
+          if (r.status !== 200) {
+            await logEdgeError({
+              fn: "sms-send",
+              clientId,
+              code: "auto_topup_request_failed",
+              message: `The automatic top-up request after a wallet_empty refusal did not get a 200 from wallet-autotopup: ${r.reason ?? "unknown"}`,
+              context: { status: r.status, requested: r.requested },
+            });
+          }
+        }), msg.waitUntil);
+        return { sent: false, reason: "wallet_empty", error: "Your wallet is being topped up. Try again in a minute." };
+      }
+      return { sent: false, reason: "wallet_empty", error: "Your wallet is empty. Add funds in Settings, Billing." };
+    }
 
     // ── Ledger first: claim the send before touching the provider ────────────────────
     const { data: row, error: insErr } = await admin.from("sms_messages").insert({

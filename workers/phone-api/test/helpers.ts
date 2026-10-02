@@ -32,6 +32,10 @@ export function makeEnv(over: Partial<Env> = {}): Env {
     DAILY_MINUTE_CAP: "600",
     EXTENSION_ORIGINS: "abcdefghijklmnopabcdefghijklmnop",
     PHONE_USAGE_METERS: "off",
+    // wrangler.jsonc ships "on". Off here so the tick and daily-cron tests that are not about
+    // billing do not run the usage charges against a fake network with no routes for them;
+    // test/usageCharge.test.ts turns it on.
+    PHONE_USAGE_COST_CAPTURE: "off",
     VOICEMAIL_RETENTION_DAYS: "365",
     SUPABASE_URL,
     SUPABASE_SERVICE_ROLE_KEY: "test-service-key",

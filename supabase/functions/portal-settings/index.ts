@@ -79,7 +79,7 @@ import { WALK_FRAME_MAX, wingsAgreementWarning, wantsV2Prompt } from "../_shared
 import { carryForwardFoundation } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
-import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
+import { runAutoTopup } from "../_shared/walletAutoTopup.ts";
 // The multi-round self-check (v2), on its own line so the generation's import above stays untouched.
 import { parseSelfCheckRound, selfCheckTotalChanges, selfCheckReverted, selfCheckChangedFields, SELF_CHECK_MAX_ROUNDS } from "../_shared/styleD3.ts";
 // The check's rollout gate and its one request builder, and the draft's frame-key check (fix,
@@ -4134,50 +4134,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // leaves a closed_unknown that blocks ALL future top-ups.
       // Cost is up to nmiPost's 30s on a request that is already running an AI 3D generation,
       // and the cooldown caps it at once an hour.
-      try {
-        const [{ data: acct }, { data: cust }] = await Promise.all([
-          admin.from("wallet_accounts")
-            .select("balance_cents, held_cents, auto_topup_enabled, auto_topup_threshold_cents, auto_topup_amount_cents, auto_topup_last_at")
-            .eq("client_id", clientId).maybeSingle(),
-          admin.from("billing_customers").select("vault_id").eq("client_id", clientId).maybeSingle(),
-        ]);
-        // Bind the vault id BEFORE the decision so its presence is provable rather than
-        // implied: autoTopupDecision refuses without a card, but the type checker cannot know
-        // that, and a non-null assertion on a money path is a comment pretending to be code.
-        const vaultId = cust?.vault_id ? String(cust.vault_id) : "";
-        const decision = autoTopupDecision(acct, Boolean(vaultId), Date.now());
-        if (decision.fire && vaultId) {
-          // Stamp the cooldown BEFORE charging, not after. A burst of generations can cross
-          // the threshold several times in seconds; the failure to design against is five
-          // recharges, not a late one. If the charge then fails, the stamp costs at most an
-          // hour's delay before the next attempt.
-          await admin.from("wallet_accounts")
-            .update({ auto_topup_last_at: new Date().toISOString() }).eq("client_id", clientId);
-          const r = await chargeTopup(admin, {
-            clientId, vaultId, amountCents: decision.amountCents,
-            actorUserId: null, auto: true,
-          });
-          if (!r.ok && !r.blocking) {
-            // A DECLINE switches auto-recharge off rather than retrying hourly forever. An
-            // expired card declines identically every time, and a loop against it earns real
-            // declines on the merchant account. The Billing tab shows this reason; turning it
-            // back on is a human act.
-            await admin.from("wallet_accounts")
-              .update({ auto_topup_enabled: false, auto_topup_disabled_reason: String(r.error).slice(0, 300) })
-              .eq("client_id", clientId);
-            await logEdgeError({ fn: "portal-settings", req, clientId, code: "auto_topup_declined", message: `Auto top-up declined, switched off: ${r.error}` });
-          } else if (!r.ok) {
-            // Blocking (gateway-unknown, or charged-but-not-credited). Leave it ENABLED:
-            // the closed_unknown attempt row already blocks every further top-up, and
-            // support's reconciliation is what should restore normal service — switching it
-            // off here would make a resolved incident look like a card problem.
-            await logEdgeError({ fn: "portal-settings", req, clientId, code: "auto_topup_unresolved", message: `Auto top-up needs a human: ${r.error}` });
-          }
-        }
-      } catch (e) {
-        await logEdgeError({ fn: "portal-settings", req, clientId, code: "auto_topup_crashed", message: `Auto top-up check failed (generation unaffected): ${(e as Error).message}` })
-          .catch(() => undefined);
-      }
+      //
+      // THE MECHANICS LIVE IN _shared/walletAutoTopup.ts since 2026-10 (migration 259), shared with
+      // the wallet-autotopup function that phone usage billing calls: the decision, the cooldown
+      // stamp, the charge, the decline switch-off. It never throws, and its app_errors rows are
+      // still filed under portal-settings when this is the caller.
+      await runAutoTopup(admin, clientId, req, { fn: "portal-settings" });
     }
 
     // From here on, every exit path must either capture or release the hold. A generation

@@ -54,6 +54,10 @@ const CALL_SELECT = `${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${VM_SE
  * transfer rang someone into) is how the latest warm transfer stands: callEvents.ts WarmInfo.
  * A teammate who does not answer changes nothing else on the row, so this is the only way an
  * app waiting on one learns it is over before its own ring limit.
+ *
+ * `error_code` is why a call was refused before it was placed (wallet_empty, minute_cap,
+ * not_your_customer, ...; null for every call that went out or came in), so Recents can say
+ * "Not placed: wallet empty" instead of a bare "failed".
  */
 export function callSummary(r: CallWithJoins, warm?: WarmInfo | null) {
   const contact = one(r.crm_contacts);
@@ -65,6 +69,7 @@ export function callSummary(r: CallWithJoins, warm?: WarmInfo | null) {
     contact_id: r.contact_id,
     contact_name: contact?.name ?? null,
     status: r.status,
+    error_code: r.error_code ?? null,
     started_at: r.started_at,
     duration_s: r.duration_s,
     answered_by: r.answered_by,

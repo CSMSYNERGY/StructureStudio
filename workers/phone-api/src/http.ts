@@ -36,7 +36,8 @@ export const ERROR_TEXT: Record<ErrorCode, string> = {
   number_not_registered: "Your texting number isn't registered yet.",
   no_number: "Your business doesn't have a phone number yet.",
   emergency_blocked: "For emergencies, call 911 from your cell phone.",
-  wallet_empty: "Your Structure Studio wallet is empty. Top up in Settings, Billing.",
+  // Kept identical to wallet.ts WALLET_WORDS.empty (not imported: this file is a leaf).
+  wallet_empty: "Your wallet is empty. Add funds in Structure Studio under Settings, Billing.",
   minute_cap: "Today's calling limit is reached. It resets tomorrow.",
   not_found: "That wasn't found.",
   bad_request: "Something about that request wasn't right.",

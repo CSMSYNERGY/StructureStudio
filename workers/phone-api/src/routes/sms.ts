@@ -23,12 +23,25 @@ import { must } from "../db";
 import { ApiError, ok, readJson, UUID_RE, type ErrorCode } from "../http";
 import { phoneDigits, toE164 } from "../identity";
 import { logFault } from "../log";
+import { WALLET_WORDS } from "../wallet";
 import { mayReadUnknownNumbers, maySendToContacts, narrowedToOwn, visibleContactIds } from "../scope";
 
 const TEMP_ID_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
 
-/** A refused send, in the SPEC's codes and plain English. smsSend's own sentences are kept. */
+/**
+ * A refused send, in the SPEC's codes and plain English. smsSend's own sentences are kept,
+ * except the wallet's: sendTenantSms words that one for the portal ("Settings, Billing"), and
+ * the apps are not Structure Studio, so they get the Worker's sentence, the same one a refused
+ * call speaks (wallet.ts WALLET_WORDS). Which of the two is told by smsSend's own sentence:
+ * the reason is the same for both.
+ */
 export function mapSmsRefusal(out: SmsOutcome): { code: ErrorCode; message: string; status: number } {
+  // `wallet_empty` is compared as a string: it is newer than some copies of SmsOutcome's
+  // reason union, and this must compile against either.
+  if ((out.reason as string | undefined) === "wallet_empty") {
+    const toppingUp = /topped up/i.test(out.error ?? "");
+    return { code: "wallet_empty", status: 402, message: toppingUp ? WALLET_WORDS.toppingUp : WALLET_WORDS.empty };
+  }
   switch (out.reason) {
     case "no_consent":
       return { code: "no_consent", status: 409, message: out.error ?? "This customer hasn't agreed to texts yet." };
@@ -135,6 +148,9 @@ export async function sendSms(env: Env, ec: Ctx, req: Request): Promise<Response
     // A person typed this and pressed Send: it goes now, at any hour (portal rule since 09-29).
     // Consent and STOP still refuse. Stated explicitly, as every caller must (the wiring test).
     bypassQuietHours: true,
+    // A wallet_empty refusal with auto top-up on asks for a top-up; this keeps that request
+    // alive past our answer.
+    waitUntil: (p) => ec.waitUntil(p),
   });
 
   if (!out.sent || !out.id) {

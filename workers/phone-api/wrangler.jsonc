@@ -37,18 +37,26 @@
     // Chrome extension ids (or full chrome-extension:// origins), comma separated. Empty until
     // the listing is published; the unpacked dev build's id goes here for local testing.
     "EXTENSION_ORIGINS": "ipiccbfkkbenmiaiaoecbhbjalkbikjk",
-    // Release 2. The daily minute debit and the monthly line fee run only when this is "on"
-    // AND their usage_prices meter is armed (active and priced). Both rails, the way
-    // taxMeter.ts is armed.
+    // Release 2. Exactly "on" lets calls and texts be charged to the wallet one by one
+    // (src/cron/usageCharge.ts), and the wallet floor refuse an outbound call. Even then a
+    // charge also needs the meter armed in the database (phone_billing_settings markup and
+    // armed_at set, and the usage_prices meter active or the tenant on the pilot list). The
+    // monthly line fee needs this AND its own meter active and priced. Anything else: nothing
+    // is charged and nothing is refused. Turn this on (and deploy) BEFORE setting armed_at:
+    // anything after armed_at that a Worker still on "off" settles is a final shadow row, never
+    // charged (the ARMING notes at the bottom of migration 259).
     "PHONE_USAGE_METERS": "off",
+    // Release 2. Anything but "off" records what every call and text cost at Twilio, and what
+    // it would charge at the current markup, as `shadow` rows in usage_charges, while nothing
+    // is charged. On from day one so Carolyn has real costs before she sets the markup.
+    "PHONE_USAGE_COST_CAPTURE": "on",
     // Days a voicemail recording is kept at Twilio before the daily job deletes it.
     "VOICEMAIL_RETENTION_DAYS": "365",
     // Release 2. "on" adds Twilio transcription to voicemail (<Record transcribe>, about
     // $0.05/minute, English, 2 s to 2 min). Anything else: off.
-    "TRANSCRIBE": "off",
-    // Outbound calls are refused below this wallet balance (cents), but ONLY while the
-    // voice_minute meter is active and priced. Inbound calls and 911 are never refused.
-    "WALLET_FLOOR_CENTS": "500"
+    "TRANSCRIBE": "off"
+    // The wallet floor that refuses an outbound call is no longer a var here: it is
+    // phone_billing_settings.floor_cents (migration 259), so calls and texts share one number.
   },
 
   // Runs the Worker next to Supabase (us-east-1). Measured 2026-09-29 on real Twilio calls:
@@ -58,7 +66,8 @@
 
   "triggers": {
     // ONE tick (the account's free plan has 5 cron triggers and 4 are taken): keep-warm every
-    // minute, the recording sweep every 15 minutes, retention and the debits at 09:00 UTC.
+    // minute, the recording sweep every 15 minutes, call and text charges every 5 minutes
+    // (minute % 5 == 2), and retention, Twilio's daily usage totals and the line fee at 09:00 UTC.
     "crons": ["* * * * *"]
   },
 
