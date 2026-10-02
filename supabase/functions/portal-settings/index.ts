@@ -10066,7 +10066,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     let d: RsDomain;
     try {
-      d = await rsVerifyDomain(String(cur.resend_domain_id));
+      // READ FIRST, and ask Resend to re-check only a domain that isn't verified yet. The verify
+      // POST restarts Resend's check and parks the domain at "pending" for minutes while it
+      // re-crawls, and rsVerifyDomain reads the status straight after it — so this button could
+      // never record a domain whose records were already in place: every press re-parked it and
+      // read "pending" back (seen live on structure-studio / csmsynergy.com, 2026-10-02: Resend
+      // said verified, one press flipped it to pending for ~3 minutes, and the card said
+      // "Not verified yet"). A domain still waiting on DNS gets the POST as before.
+      const id = String(cur.resend_domain_id);
+      const now = await rsGetDomain(id);
+      d = rsDomainVerified(now) ? now : await rsVerifyDomain(id);
     } catch (e) {
       // Park an authored note on the card (the UI's failed/pending panel renders
       // lastError) — never provider text. Best-effort: the response already says it.
@@ -10314,7 +10323,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     let d: RsDomain;
     try {
-      d = await rsVerifyDomain(String(cur.resend_inbound_domain_id));
+      // Read first, for the same reason as email_verify_domain: the verify POST re-parks the
+      // domain at "pending" while Resend re-crawls, so a reply address that is already
+      // receiving must be recorded from a plain read, not from the read straight after a POST.
+      const id = String(cur.resend_inbound_domain_id);
+      const now = await rsGetDomain(id);
+      d = rsInboundReady(now) ? now : await rsVerifyDomain(id);
     } catch (e) {
       return rsFail(req, clientId, "check your reply address", e);
     }
