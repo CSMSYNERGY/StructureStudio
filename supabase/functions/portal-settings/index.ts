@@ -10151,14 +10151,39 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     const fromLocal = (typeof cur.email_from_local === "string" && cur.email_from_local.trim()) || "info";
     const businessName = String(cur.business_name ?? "").trim() || clientId;
+    // A test to someone who is already a contact goes out like a real conversation email:
+    // sendTenantEmail then gives it that contact's portal reply address (c.<id>@reply.<domain>,
+    // once replies are switched on) and files it on their record, so hitting Reply on the test
+    // shows up in the contact's conversation. Without this the test had no Reply-To at all and
+    // a reply went to the From address's own inbox (Ahsan, 2026-10-02: "if i send reply to the
+    // email it should show in contacts conversation tab"). No matching contact: as before.
+    // A lookup failure only costs the routing, never the send.
+    let contactId: string | null = null;
+    try {
+      const { data: c } = await admin.from("crm_contacts")
+        // ilike for case only: % and _ (common in addresses) are escaped so they match literally.
+        .select("id").eq("client_id", clientId).ilike("email", to.replace(/[\\%_]/g, (ch) => "\\" + ch))
+        .order("updated_at", { ascending: false }).limit(1).maybeSingle();
+      if (c?.id) contactId = String(c.id);
+    } catch (_) { /* no routing is fine for a test */ }
     // sendTenantEmail owns the ledger row, the beta redirect and the dark guards — it
     // never throws; the verdict below is the whole outcome.
     const out = await sendTenantEmail(admin, clientId, {
       kind: "test",
       to,
+      ...(contactId ? { contactId } : {}),
       ...testEmail({ businessName, fromAddress: `${fromLocal}@${cur.email_domain}` }),
     });
-    if (out.sent) return json({ ok: true, messageId: out.messageId });
+    if (out.sent) {
+      // As crm_send_email does: put the contact on the ledger row so the test sits in their
+      // conversation next to the reply it invites.
+      if (contactId) {
+        await admin.from("email_sends").update({ contact_id: contactId })
+          .eq("client_id", clientId).eq("kind", "test").eq("to_email", to)
+          .is("contact_id", null).order("created_at", { ascending: false }).limit(1);
+      }
+      return json({ ok: true, messageId: out.messageId });
+    }
     if (out.reason === "not_active") {
       // The tenant-side switches all say go, so the missing half is the platform's
       // (secrets unset) — the friendly not-ready sentence, never a 500.
