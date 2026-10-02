@@ -9,6 +9,10 @@ import { chargeTopup, MIN_TOPUP_CENTS, MAX_TOPUP_CENTS } from "../_shared/wallet
 import {
   FOUNDING_ANNUAL_ONLY_CODE, FOUNDING_ANNUAL_ONLY_MESSAGE, FOUNDING_ANNUAL_ONLY_STATUS, monthlyPlansRefused,
 } from "../_shared/foundingPricing.ts";
+import {
+  applyLedgerFilter, costPlusNote, LEDGER_COLUMNS, LEDGER_COLUMNS_PRE_259, LEDGER_CSV_MAX_ROWS, LEDGER_CSV_PAGE,
+  LEDGER_STATES, ledgerCsv, parseLedgerQuery, toLedgerRow, walletLineLabel,
+} from "../_shared/walletLedger.ts";
 
 // Only `status` is a read here; subscribe/cancel move real money.
 // WHAT EACH ACTION REQUIRES (migration 100) — see _shared/access.ts.
@@ -35,6 +39,11 @@ const GATES: GateTable = {
   // charge, but it AUTHORISES unattended charges, so it is not a lesser permission.
   topup:          { area: "settings_billing", level: "edit" },
   topup_settings: { area: "settings_billing", level: "edit" },
+  // The wallet's full ledger (usage billing, 259). A READ, so view level: the same people who
+  // see the wallet card and its ten-line list in `status`. That list sits behind `mine`, which
+  // also keeps it from an operator without can_bill; resolveTenant lets such an operator make
+  // reads, so the branch repeats that half of `mine` itself. Search: WALLET LEDGER.
+  wallet_transactions: { area: "settings_billing", level: "view" },
 };
 
 // Platform billing endpoint for the portal's Billing tab — CSM Synergy charging
@@ -62,6 +71,9 @@ const GATES: GateTable = {
 //       yearly only, a monthly plan anywhere in planIds is refused (409, code
 //       "founding_annual_only") — see _shared/foundingPricing.ts.
 //   { action: "cancel", subscriptionId }
+//   { action: "wallet_transactions", filter?, cursor?, limit?, from?, to?, format?: "csv", tz? }
+//       → { rows[], next_cursor } — or, with format "csv", { csv, rows, truncated }.
+//       The wallet ledger, 50 lines a page, newest first. See _shared/walletLedger.ts.
 //
 // Secrets: NMI_SECURITY_KEY, NMI_TOKENIZATION_KEY, optional NMI_GATEWAY_URL.
 
@@ -122,6 +134,113 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   const { clientId, operator, payload, action, userEmail, userId, audit, auditStrict, canRead } = r.ctx;
   if (operator) audit(`operator_billing_${action}`).catch(() => {});
   const configured = nmiConfigured;
+
+  // ── WALLET LEDGER (usage billing, migration 259) ─────────────────────────────────────────
+  // The Billing tab's Transactions view: every line on the wallet, 50 a page, with the
+  // All / Calls / Texts / Funds / Other chips, a date range and a CSV export. Carolyn
+  // 2026-10-02: each call and text is "its own line under Transactions, like GoHighLevel".
+  //
+  // Answered HERE, ahead of the plan, subscription, vault, settings and grant reads below,
+  // because it needs none of them. Those five round trips decide entitlement and price, and
+  // "Load more" on a ledger is no reason to pay for them every fifty lines. Who may ask is
+  // unchanged by the position: resolveTenant has already run the gate (settings_billing at
+  // view), and the other half of status's `mine` filter is repeated below.
+  //
+  // Ahead of the `configured` 503 too, on purpose. This reads our own table; a deployment with
+  // no gateway still has a wallet, and the wallet card renders without one as well.
+  //
+  // ⛔ The select is LEDGER_COLUMNS and nothing else — never cost_cents, cost_micros or usage
+  // (our cost and margin). _shared/walletLedger.test.ts reads this branch and fails the push if
+  // any of them appears; _test_stubs/walletTransactions_test.ts checks what goes on the wire.
+  if (action === "wallet_transactions") {
+    // `mine`'s second half. The gate proved the area for a builder; a platform operator passes
+    // every area, so their can_bill axis is checked here, exactly as `status` withholds the
+    // wallet card from an operator without it.
+    if (!canRead("settings_billing") || (operator && !operator.canBill)) {
+      return json({ error: "Your access does not include the wallet. Ask an owner." }, 403);
+    }
+    const parsed = parseLedgerQuery(payload);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const q = parsed.query;
+
+    // Ordered by id, newest first, not by created_at. For every line that moves the balance
+    // when it is inserted (top-ups, grants, refunds, adjustments, every call and text), id is
+    // the order the balance moved in: wallet_credit and wallet_usage_debit take the wallet row's
+    // lock BEFORE they insert, so ids follow the lock, while created_at (and posted_at) is now(),
+    // the start of the transaction, which can be earlier than a line that got the lock first.
+    // A running Balance column has to follow the lock or it reads out of order. It also makes
+    // the cursor one number.
+    //
+    // ⚠️ THE ONE EXCEPTION IS A 3D GENERATION. wallet_hold inserts the line (fixing its id) and
+    // wallet_capture moves the balance minutes later by updating that same row. A call charged
+    // in between sits ABOVE the 3D line yet shows the balance from before the capture, so that
+    // pair reads out of step: each balance is what the wallet held after that line moved it,
+    // but the two moved in the other order. Ordering by posted_at would fix that pair and break
+    // the case above instead (two charges racing for the lock, posted_at being transaction
+    // start too), so it is not the cure. The cure is a sequence stamped under the lock, on
+    // insert and on capture, which belongs in the database.
+    // _test_stubs/walletTransactions_test.ts pins today's behaviour.
+    //
+    // INDEX: this read wants (client_id, id desc) on wallet_transactions. Without it Postgres
+    // reads the tenant's whole ledger off wallet_tx_client_recent and sorts it per page.
+    const page = (cols: string, before: number | null, n: number) => {
+      let sel = admin.from("wallet_transactions").select(cols)
+        .eq("client_id", clientId).in("state", [...LEDGER_STATES]);
+      sel = applyLedgerFilter(sel, q.filter);
+      if (q.from) sel = sel.gte("created_at", q.from);
+      if (q.to) sel = sel.lt("created_at", q.to);
+      if (before != null) sel = sel.lt("id", before);
+      return sel.order("id", { ascending: false }).limit(n);
+    };
+    // Before migration 259 the exact columns do not exist and PostgREST refuses the whole
+    // select (42703). Drop to whole cents for the rest of this request rather than failing it.
+    let cols: string = LEDGER_COLUMNS;
+    const read = async (before: number | null, n: number) => {
+      let r = await page(cols, before, n);
+      if (r.error?.code === "42703" && cols === LEDGER_COLUMNS) {
+        cols = LEDGER_COLUMNS_PRE_259;
+        r = await page(cols, before, n);
+      }
+      return r;
+    };
+    const failed = (message: string) => {
+      console.error("wallet ledger read failed:", message);
+      return json({ error: "We couldn't load your transactions. Try again in a moment." }, 500);
+    };
+
+    if (!q.csv) {
+      // One extra row says whether there is a next page without a count(*).
+      const { data, error } = await read(q.before, q.limit + 1);
+      if (error) return failed(error.message);
+      // deno-lint-ignore no-explicit-any
+      const raw = (data ?? []) as any[];
+      const rows = raw.slice(0, q.limit).map(toLedgerRow);
+      const more = raw.length > q.limit && rows.length > 0;
+      return json({ rows, next_cursor: more ? String(rows[rows.length - 1].id) : null });
+    }
+
+    // CSV: the whole filtered range from the newest line down (cursor and limit do not apply),
+    // capped at LEDGER_CSV_MAX_ROWS. Read in PostgREST-sized pages, and only an EMPTY page ends
+    // the walk: a short page may just be the server's own row cap, and stopping on it would
+    // drop the rest of the export without a word.
+    const out: ReturnType<typeof toLedgerRow>[] = [];
+    let before: number | null = null;
+    let truncated = false;
+    while (out.length < LEDGER_CSV_MAX_ROWS) {
+      const { data, error } = await read(before, Math.min(LEDGER_CSV_PAGE, LEDGER_CSV_MAX_ROWS - out.length));
+      if (error) return failed(error.message);
+      // deno-lint-ignore no-explicit-any
+      const raw = (data ?? []) as any[];
+      if (!raw.length) break;
+      out.push(...raw.map(toLedgerRow));
+      before = out[out.length - 1].id;
+      if (out.length >= LEDGER_CSV_MAX_ROWS) {
+        const probe = await read(before, 1);
+        truncated = !probe.error && (probe.data ?? []).length > 0;
+      }
+    }
+    return json({ csv: ledgerCsv(out, q.tz), rows: out.length, truncated });
+  }
 
   // Plan rows. Two DIFFERENT questions are asked of this table and conflating them locked out
   // paying customers:
@@ -573,36 +692,41 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // balance is what this business has paid for, so it belongs with `discount` and
     // `hasCard`, not with `entitlement`.
     //
-    // Labels are authored HERE, server-side, so the browser never maps a `kind` enum to
-    // English and drifts from it. `cost_cents` and `usage` are never selected — that
-    // column is our gross margin on a $20 charge and is the single worst thing in this
+    // Labels are authored server-side (walletLineLabel, _shared/walletLedger.ts — shared with
+    // the Transactions view so one line is never named two ways), so the browser never maps a
+    // `kind` enum to English and drifts from it. `cost_cents`, `cost_micros` and `usage` are
+    // never selected — those columns are our gross margin and the single worst thing in this
     // schema for a tenant to read.
     let wallet: Record<string, unknown> | null = null;
     if (mine) {
       try {
+        // `pricing` arrives with migration 259 ('fixed' | 'cost_plus'). Against a database 259
+        // has not reached, the select naming it is refused whole, and an empty meter list would
+        // tell a builder whose texting meters are live that "nothing is metered" — so read the
+        // old column set instead. Only ever costs a second query in that window.
+        const meterRead = async () => {
+          const withPricing = await admin.from("usage_prices").select("kind, label, unit_label, price_cents, active, visible, pricing").eq("active", true).order("sort_order");
+          if (!withPricing.error) return withPricing;
+          return await admin.from("usage_prices").select("kind, label, unit_label, price_cents, active, visible").eq("active", true).order("sort_order");
+        };
         const [acct, price, txs] = await Promise.all([
           admin.from("wallet_accounts").select("balance_cents, held_cents, metered_exempt, auto_topup_enabled, auto_topup_threshold_cents, auto_topup_amount_cents, auto_topup_last_at, auto_topup_disabled_reason").eq("client_id", clientId).maybeSingle(),
-          admin.from("usage_prices").select("kind, label, unit_label, price_cents, active, visible").eq("active", true).order("sort_order"),
+          meterRead(),
           admin.from("wallet_transactions").select("id, kind, amount_cents, meter_kind, state, memo, created_at")
             .eq("client_id", clientId).in("state", ["posted", "held"]).order("created_at", { ascending: false }).limit(10),
         ]);
-        const meters = (price.data ?? []).map((p: any) => ({
-          kind: p.kind, label: p.label, unitLabel: p.unit_label,
-          priceCents: p.visible === false ? null : Number(p.price_cents),
-        }));
-        const label = (t: any) => {
-          if (t.kind === "topup") return "Added funds";
-          if (t.kind === "grant") return "Credit from CSM Synergy";
-          if (t.kind === "adjustment") return t.memo ? `Adjustment — ${t.memo}` : "Adjustment";
-          if (t.kind === "refund") return "Refund";
-          if (t.meter_kind === "video_3d_generation") return "3D generation from a video";
-          // The two sales-tax meters (179). Only reachable since migration 244 taught
-          // wallet_credit to record meter_kind — before it every direct-post debit landed with
-          // a null kind and read "Usage", which is exactly the row a builder cannot explain.
-          if (t.meter_kind === "tax_lookup") return "Tax verification";
-          if (t.meter_kind === "tax_invoice") return "Invoice tax check";
-          return "Usage";
-        };
+        // A COST-PLUS meter (calls and texts, 259) has no price to show: what a builder pays is
+        // Twilio's real cost times the markup, per call or text. Its price_cents is 0, which this
+        // card printed as "No charge" — the opposite of true. Send the sentence instead, and a
+        // null price so the card's "balance covers N" count does not divide by a made-up number.
+        const meters = (price.data ?? []).map((p: any) => {
+          const billedAs = p.pricing === "cost_plus" ? costPlusNote(p.kind, p.unit_label) : null;
+          return {
+            kind: p.kind, label: p.label, unitLabel: p.unit_label,
+            priceCents: billedAs || p.visible === false ? null : Number(p.price_cents),
+            ...(billedAs ? { billedAs } : {}),
+          };
+        });
         wallet = {
           balanceCents: Number(acct.data?.balance_cents ?? 0),
           heldCents: Number(acct.data?.held_cents ?? 0),
@@ -623,7 +747,7 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
           },
           meters,
           transactions: (txs.data ?? []).map((t: any) => ({
-            id: t.id, label: label(t), amountCents: Number(t.amount_cents),
+            id: t.id, label: walletLineLabel(t), amountCents: Number(t.amount_cents),
             pending: t.state === "held", at: t.created_at,
           })),
         };
