@@ -432,6 +432,103 @@ describe("calls: every leg is found and priced", () => {
     });
     expect(rowPatch(net, row.id).cost_detail.recording).toEqual({ sid: RE(1), duration_s: 25, price_micros: 2500 });
   });
+
+  // A device switch (src/handoff.ts) on a PLAIN call. By the time a call is charged its
+  // transfer_state is NULL again (/voice/status clears it when the customer's leg ends), so the
+  // conference estimate cannot come from the row. A lost or unverified conference-start callback
+  // leaves no conference_started either: the Worker's own device_switch 'done' is what says the
+  // call ran in its conference, as 'hold' and 'warm_transfer' do for theirs.
+  it("a call moved to the phone: the REST ring leg and the old leg priced, an earlier unanswered ring costs 0 and holds nothing up, and the move brings the conference estimate", async () => {
+    const row = charge("call", CALL, { direction: "in" });
+    const net = world({
+      queue: [row],
+      calls: [callRow(CALL, {
+        direction: "in", from_e164: CUSTOMER, to_e164: BUSINESS_NUMBER, twilio_call_sid: CA(50), client_call_sid: CA(52),
+        duration_s: 280, transfer_state: null,
+      })],
+      events: [
+        { call_id: CALL, type: "answered", data: { leg: "client", status: "in-progress", sid: CA(51) } },
+        { call_id: CALL, type: "device_switch", data: { phase: "offered", to: "mobile", held: false, user: "u" } },
+        { call_id: CALL, type: "ended", data: { leg: "handoff", status: "no-answer", sid: CA(53) } },
+        { call_id: CALL, type: "device_switch", data: { phase: "missed", to: "mobile", sid: CA(53), status: "no-answer" } },
+        { call_id: CALL, type: "device_switch", data: { phase: "offered", to: "mobile", held: false, user: "u" } },
+        { call_id: CALL, type: "device_switch", data: { phase: "done", to: "mobile", from_sid: CA(51), sid: CA(52), ms: 2100 } },
+        { call_id: CALL, type: "ended", data: { leg: "client", status: "completed", sid: CA(51) } },
+      ],
+      legs: [
+        { sid: CA(50), status: "completed", duration: 300, price: "-0.04250", direction: "inbound", from: CUSTOMER, to: BUSINESS_NUMBER },
+        { sid: CA(51), parent: CA(50), status: "completed", duration: 120, price: "-0.00400", direction: "outbound-dial", from: CUSTOMER, to: APP },
+        // The rings the Worker placed over REST to the person's own identity: no parent.
+        { sid: CA(52), status: "completed", duration: 170, price: "-0.01200", direction: "outbound-api", from: BUSINESS_NUMBER, to: APP },
+        { sid: CA(53), status: "no-answer", duration: 0, price: null, direction: "outbound-api", from: BUSINESS_NUMBER, to: APP },
+      ],
+    });
+    const out = await runIt();
+    countedAll(net, out);
+    expect(out).toMatchObject({ charged: 1, pending: 0 });
+    // Legs 42,500 + 4,000 + 12,000 + 0; conference (5 + 2 + 3 minutes) × 1,800 = 18,000.
+    expect(debits(net)[0]).toMatchObject({
+      p_meter_kind: "voice_minute_in", p_cost_micros: 76500, p_charge_micros: 153000, p_memo: "Incoming call from (555) 555-0142 · 5 min",
+    });
+    const p = rowPatch(net, row.id);
+    expect(p.cost_source).toBe("mixed");
+    expect(p.cost_detail.conference).toEqual({ participant_legs: 3, micros: 18000, estimated: true });
+    expect(p.cost_detail.legs.map((l: { sid: string; kind: string; price_micros: number }) => [l.sid, l.kind, l.price_micros])).toEqual([
+      [CA(50), "pstn_in", 42500], [CA(51), "client", 4000], [CA(52), "client", 12000], [CA(53), "client", 0],
+    ]);
+    // REST-created legs never ran a <Dial>: never asked for children.
+    expect(twilioGets(net).filter((u) => u.includes("ParentCallSid") && (u.includes(CA(52)) || u.includes(CA(53))))).toEqual([]);
+  });
+
+  it("an outbound call moved to the computer: the device.connect leg comes from the move's event, the old app leg by walking up, and the move brings the conference estimate", async () => {
+    const row = charge("call", CALL);
+    const net = world({
+      queue: [row],
+      calls: [callRow(CALL, { client_call_sid: CA(72), twilio_call_sid: CA(71), duration_s: 200, transfer_state: null })],
+      events: [
+        { call_id: CALL, type: "device_switch", data: { phase: "offered", to: "chrome", held: false, user: "u" } },
+        { call_id: CALL, type: "device_switch", data: { phase: "done", to: "chrome", from_sid: CA(70), sid: CA(72), ms: 1800 } },
+      ],
+      legs: [
+        { sid: CA(70), status: "completed", duration: 90, price: "-0.00400", direction: "inbound", from: APP, to: CUSTOMER },
+        { sid: CA(71), parent: CA(70), status: "completed", duration: 200, price: "-0.05600", direction: "outbound-dial", from: BUSINESS_NUMBER, to: CUSTOMER },
+        { sid: CA(72), status: "completed", duration: 130, price: "-0.01200", direction: "inbound", from: APP, to: "" },
+      ],
+    });
+    const out = await runIt();
+    countedAll(net, out);
+    // Legs 4,000 + 56,000 + 12,000; conference (2 + 4 + 3 minutes) × 1,800 = 16,200.
+    expect(debits(net)[0]).toMatchObject({ p_meter_kind: "voice_minute", p_cost_micros: 88200, p_charge_micros: 176400 });
+    const p = rowPatch(net, row.id);
+    expect(new Set(p.cost_detail.legs.map((l: { sid: string }) => l.sid))).toEqual(new Set([CA(70), CA(71), CA(72)]));
+    expect(p.cost_detail.conference).toEqual({ participant_legs: 3, micros: 16200, estimated: true });
+  });
+
+  it("a move that only rang (missed, canceled) or failed is no conference by itself", async () => {
+    const row = charge("call", CALL, { direction: "in" });
+    const net = world({
+      queue: [row],
+      calls: [callRow(CALL, { direction: "in", from_e164: CUSTOMER, twilio_call_sid: CA(80), client_call_sid: CA(81), duration_s: 60 })],
+      events: [
+        { call_id: CALL, type: "device_switch", data: { phase: "missed", to: "mobile", sid: CA(82), status: "no-answer" } },
+        { call_id: CALL, type: "device_switch", data: { phase: "canceled", to: "chrome", sid: null, reason: "declined" } },
+        { call_id: CALL, type: "device_switch", data: { phase: "failed", to: "mobile", reason: "ring_failed" } },
+        // An app's own mark is never trusted, whatever it says.
+        { call_id: CALL, type: "device_switch", data: { phase: "done", sid: CA(83), source: "app" } },
+      ],
+      legs: [
+        { sid: CA(80), status: "completed", duration: 60, price: "-0.00850", direction: "inbound", from: CUSTOMER, to: BUSINESS_NUMBER },
+        { sid: CA(81), parent: CA(80), status: "completed", duration: 55, price: "-0.00400", direction: "outbound-dial", from: CUSTOMER, to: APP },
+        { sid: CA(82), status: "canceled", duration: 0, price: null, direction: "outbound-api", from: BUSINESS_NUMBER, to: APP },
+      ],
+    });
+    await runIt();
+    expect(debits(net)[0]).toMatchObject({ p_cost_micros: 12500 });
+    const p = rowPatch(net, row.id);
+    expect(p.cost_source).toBe("twilio");
+    expect(p.cost_detail.conference).toBeUndefined();
+    expect(twilioGets(net).some((u) => u.includes(CA(83)))).toBe(false);
+  });
 });
 
 // ── Calls: not priced yet ───────────────────────────────────────────────────────────

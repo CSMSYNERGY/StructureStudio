@@ -683,6 +683,27 @@ describe("the computer answers (/voice/outbound with HandoffCall)", () => {
     expect(net.reads("client_settings")).toEqual([]);
   });
 
+  it("with usage billing armed, a wallet under the floor and the day's minute cap spent, the computer still takes the call: a move never meets the wallet floor or the cap", async () => {
+    // makeEnv ships PHONE_USAGE_METERS off, where walletFloorCheck asks nothing at all, so the
+    // test above cannot see the gate. Here it is on, and the gate would refuse.
+    const armed = makeEnv({ PHONE_USAGE_METERS: "on", DAILY_MINUTE_CAP: "1" });
+    const { net, calls, log } = await setup({
+      row: outboundCall(ringing("chrome")),
+      tw: { conference: true, parts: [inRoom(NEW, { start_conference_on_enter: true })], onRedirect: (sid, tw) => tw.parts.push(inRoom(sid)) },
+    });
+    net.rpc("wallet_usage_gate", () => ({ allow: false, reason: "below_floor", available_cents: 0, floor_cents: 500, auto_topup_enabled: true }));
+    const { text } = await call(armed, await twilioPost(armed, "/voice/outbound", {
+      CallSid: NEW, AccountSid: ACCOUNT, From: `client:u_${HEX_A}_g1`, To: "handoff", Direction: "inbound", HandoffCall: CALL_ID, HandoffKey: KEY,
+    }));
+    expect(text).toBe(conferenceTwiml(armed, CALL_ID, "agent", true));
+    expect(log).toEqual(["claim+conference", "redirect:customer", "swap", "end:old"]);
+    expect(calls.row.client_call_sid).toBe(NEW);
+    expect(net.rpcCalls("wallet_usage_gate")).toEqual([]);
+    expect(net.to(/\/functions\/v1\/wallet-autotopup$/)).toEqual([]);
+    expect(net.writes("phone_calls", "POST")).toEqual([]);
+    expect(net.reads("phone_calls").filter((s) => s.url.searchParams.has("started_at"))).toEqual([]);
+  });
+
   it("a plain OUTBOUND call: the customer leaves the old leg's Dial before anything waits on the new leg, so the old device hanging up meanwhile cannot take them down", async () => {
     const s = await setup({
       row: outboundCall(ringing("chrome")),

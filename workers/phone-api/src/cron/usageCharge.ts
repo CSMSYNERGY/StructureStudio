@@ -64,8 +64,9 @@
 //     and each leg's parent, which after a cold transfer may be on no row and in no event;
 //   * the voicemail recording's own price;
 //   * conference minutes, which Twilio bills separately and no leg resource shows: when the
-//     call was ever moved into its conference (hold, warm transfer), an ESTIMATE of 1,800
-//     micros per participant-minute for every leg that connected (cost_source 'mixed').
+//     call was ever moved into its conference (hold, warm transfer, a finished device switch),
+//     an ESTIMATE of 1,800 micros per participant-minute for every leg that connected
+//     (cost_source 'mixed').
 // A leg that never connected (busy, no-answer, canceled) costs nothing whatever its price says.
 // A connected leg Twilio has not priced keeps the row pending, until fallback_after_hours
 // (default 6) after the call ended: then the missing pieces are ESTIMATED at the fallback
@@ -90,6 +91,7 @@
 
 import type { Env } from "../env";
 import { must, patchCall, type Admin } from "../db";
+import { DEVICE_SWITCH } from "../handoff";
 import { logFault } from "../log";
 import {
   fetchCallCost, fetchMessage, fetchRecording, listChildCalls, listUsageDaily, twilioConfigured,
@@ -303,6 +305,14 @@ const FINAL_CALL = new Set(["completed", "missed", "voicemail", "no_answer", "bu
 const UNANSWERED = new Set(["missed", "no_answer", "busy", "failed"]);
 /** The Worker's events that mean the call was moved into its conference at some point. */
 const CONFERENCE_EVENTS = new Set(["hold", "warm_transfer", "conference_started", "handed_over", "conference_voicemail", "conference_ended"]);
+/**
+ * A device switch that finished (handoff.ts completeHandoff step 4): the new leg was connected in
+ * the call's conference before the swap, so the call ran there from then on, whether or not
+ * Twilio's conference-start callback was recorded. Only 'done': a move that rang and was missed,
+ * canceled or failed proves no conference by itself (one that did put the call there leaves
+ * conference_started or hold).
+ */
+const movedIntoConference = (e: UsageEvent): boolean => e.type === DEVICE_SWITCH && e.data?.phase === "done";
 const LIVE_LEG = new Set(["queued", "initiated", "ringing", "in-progress"]);
 const LIVE_SMS = new Set(["queued", "sending", "accepted", "scheduled", "receiving"]);
 const CALL_SID_RE = /^CA[0-9a-f]{32}$/i;
@@ -1008,9 +1018,11 @@ async function callCost(run: Run, call: UsageCall, vm: VmJoin | null, events: Us
     }
   }
 
-  // Conference minutes are billed apart from the legs, and no leg resource shows them.
+  // Conference minutes are billed apart from the legs, and no leg resource shows them. The row
+  // rarely says so by now (/voice/status clears transfer_state when the customer's leg ends), so
+  // the Worker's own events do: hold, warm transfer, Twilio's start, and a finished device switch.
   const hadConference = call.transfer_state === "conference"
-    || events.some((e) => e.data?.source !== "app" && CONFERENCE_EVENTS.has(e.type));
+    || events.some((e) => e.data?.source !== "app" && (CONFERENCE_EVENTS.has(e.type) || movedIntoConference(e)));
   let conference = false;
   if (hadConference) {
     const joined = collected.legs.filter((l) => (l.duration ?? 0) > 0);
