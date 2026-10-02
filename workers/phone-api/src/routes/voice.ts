@@ -17,9 +17,10 @@ import {
   type Admin, type CallRow, type RouteInfo, type RouteMember,
 } from "../db";
 import { conferenceTwiml, holderLegEnded, warmLegStatus } from "../conference";
+import { endRingWithCall, goneTwiml, handoffAnswer, handoffLegStatus, holdsCall } from "../handoff";
 import { UUID_RE } from "../http";
 import { isOpen } from "../hours";
-import { emergencyDigits, isPremiumRate, parseIdentity, phoneDigits, stripClientPrefix, toE164, toIdentity } from "../identity";
+import { emergencyDigits, isPremiumRate, parseIdentity, phoneDigits, stripClientPrefix, toE164, toIdentity, type ParsedIdentity } from "../identity";
 import { logFault } from "../log";
 import type { TwilioParams } from "../twilioSignature";
 import {
@@ -183,9 +184,32 @@ async function minutesUsedToday(admin: Admin, clientId: string, now = new Date()
   return minutes;
 }
 
+/**
+ * The computer answering a move of a live call to it (../handoff.ts): the extension's
+ * device.connect({To:'handoff', HandoffCall, HandoffKey}). Not an outbound call at all, so it
+ * is answered here, before every outbound rule: no phone_calls row (the call has one), no daily
+ * minute cap and no wallet floor (the call is already paid for as it goes). The caller is
+ * re-checked as every outbound call is (team, generation, the switch), and must hold the call.
+ */
+async function handoffOutbound(env: Env, ec: Ctx, p: TwilioParams, identity: ParsedIdentity): Promise<string> {
+  const callId = String(p.HandoffCall ?? "").trim();
+  const key = String(p.HandoffKey ?? "").trim();
+  if (!UUID_RE.test(callId) || !UUID_RE.test(key)) return goneTwiml();
+  const admin = adminClient(env);
+  const [ctx, call] = await Promise.all([callerContext(admin, identity.userId), callById(admin, callId)]);
+  if (!ctx || ctx.phone_level === "none") return response(say(SAY.noAccess), hangup());
+  if (ctx.device_generation !== identity.generation) return response(say(SAY.retired), hangup());
+  if (ctx.phone_status !== "on") return response(say(SAY.phoneOff), hangup());
+  if (!call || call.client_id !== ctx.client_id || !holdsCall(identity.userId, call)) return goneTwiml();
+  return handoffAnswer(env, ec, call, key, String(p.CallSid ?? ""), "chrome");
+}
+
 export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): Promise<string> {
   const identity = parseIdentity(stripClientPrefix(p.From ?? ""));
   if (!identity) return response(say(SAY.badIdentity), hangup());
+  // A device switch, not a call to anyone: answered before the 911 check and every outbound
+  // rule below (handoffOutbound).
+  if (p.HandoffCall !== undefined || p.HandoffKey !== undefined) return handoffOutbound(env, ec, p, identity);
   const admin = adminClient(env);
   const rawTo = String(p.To ?? "").trim();
 
@@ -467,6 +491,11 @@ export async function afterDial(env: Env, ec: Ctx, p: TwilioParams, url: URL): P
 
   if (stage === "out") {
     const out = await withCallRow(admin, callId, 3);
+    // A device switch (../handoff.ts) has given the call to the person's other device: this is
+    // the leg it moved FROM, and it no longer holds the call. Before that hand-over it joins the
+    // conference as below, so if the switch fails it still has the call.
+    const leg = String(p.CallSid ?? "");
+    if (out && leg && leg === out.handoff_from_sid && leg !== out.client_call_sid) return response(hangup());
     if (out?.transfer_state === "conference" && !out.ended_at) return conferenceTwiml(env, out.id, "agent");
     return response(hangup());
   }
@@ -606,6 +635,7 @@ function unansweredOutcome(status: string): string {
  *   leg=client & call  a <Client> an inbound call (or a transfer) rang
  *   leg=cell & call  a forwarded cell; its answer is marked by /voice/screen on press 1
  *   leg=warm & call  the teammate a warm transfer dialed into the conference (conference.ts)
+ *   leg=handoff & call  the ring a device switch placed to the person's phone (handoff.ts)
  *   leg=pstn, no call  the number's own status callback: the inbound customer leg
  *   leg=client, no call  the TwiML App's status callback: the outbound app leg
  *
@@ -637,6 +667,14 @@ export async function applyStatus(env: Env, p: TwilioParams, url: URL, signed = 
     leg: leg || null, status, sid: sid || null, user: who ?? (url.searchParams.get("user") || null),
     duration: Number.isFinite(duration) ? duration : null,
   }, at);
+
+  // The call itself ending (its holder's leg, or the customer's) while a move to the person's
+  // other device is still ringing: stop the ring. Nothing below changes for it.
+  if (row.handoff_state === "ringing") {
+    await endRingWithCall(env, row, sid, status, signed).catch((e) => logFault({
+      code: "handoff_cancel_failed", clientId: row!.client_id, message: (e as Error).message, context: { callId: id },
+    }));
+  }
 
   const finalDuration = (): number | null => {
     if (row!.transferred_from && row!.answered_at) {
@@ -680,6 +718,13 @@ export async function applyStatus(env: Env, p: TwilioParams, url: URL, signed = 
   if (UUID_RE.test(callId) && leg === "warm") {
     // The teammate a warm transfer dialed into the conference (conference.ts).
     await warmLegStatus(env, row, p, url, signed);
+    return;
+  }
+
+  if (UUID_RE.test(callId) && leg === "handoff") {
+    // The ring a device switch placed to the person's own phone (../handoff.ts). Once it holds
+    // the call it is client_call_sid, and its end is the holder's, above.
+    await handoffLegStatus(env, row, p, signed);
     return;
   }
 

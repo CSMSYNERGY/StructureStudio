@@ -13,6 +13,7 @@ import { toIdentity } from "../identity";
 import { logFault } from "../log";
 import { callIsMine, isTeamLevel, mayReadUnknownNumbers, visibleContactIds } from "../scope";
 import { nextTransferState, onTheCall, refuseEmergencyCallback, transferParams } from "../conference";
+import { refuseWhileSwitching } from "../handoff";
 import { clientNoun, dial, response } from "../twiml";
 import { recordingMedia, TwilioError, updateCall } from "../twilioRest";
 import { hook } from "../urls";
@@ -58,6 +59,8 @@ export async function transfer(env: Env, ec: Ctx, req: Request, idParam: string)
   // one who handed it on by warm transfer.
   if (!onTheCall(c.userId, call)) throw new ApiError("not_found", "Only the person on the call can transfer it.");
   if (call.status !== "in_progress" || call.ended_at) throw new ApiError("bad_request", "That call has already ended.");
+  // Not while the call is moving to the person's other device (../handoff.ts).
+  refuseWhileSwitching(call);
   // From a plain call or from its conference (hold / warm transfer). Redirecting the customer
   // out of the conference ends it for everyone else, which is what a cold transfer does anyway.
   const step = nextTransferState(call.transfer_state, "cold");

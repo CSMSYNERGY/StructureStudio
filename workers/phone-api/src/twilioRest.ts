@@ -80,6 +80,42 @@ export async function updateCall(env: Env, callSid: string, fields: Record<strin
   if (!res.ok) throw new TwilioError("update call", res.status, await codeOf(res));
 }
 
+export interface NewCall {
+  /**
+   * A number, or client:<identity>. A client address may carry custom parameters as a query
+   * string (client:alice?name=value&...): Twilio hands them to the Voice SDK's CallInvite as
+   * customParameters (Twilio "share information between your applications", 2020-09; keep the
+   * whole set under about 800 bytes).
+   */
+  to: string;
+  from: string;
+  /** The TwiML Twilio fetches (POST) when the call is answered. */
+  url: string;
+  /** Seconds to ring before giving up (no-answer). */
+  timeout: number;
+  statusCallback: string;
+  /** Default: every progress event (initiated ringing answered completed). */
+  statusCallbackEvent?: string[];
+}
+
+/** Place a call (the device switch's ring to the person's own phone, handoff.ts). Returns its CallSid. */
+export async function createCall(env: Env, c: NewCall): Promise<string> {
+  const res = await call(env, "create call", "/Calls.json", form({
+    To: c.to,
+    From: c.from,
+    Url: c.url,
+    Method: "POST",
+    Timeout: String(c.timeout),
+    StatusCallback: c.statusCallback,
+    StatusCallbackMethod: "POST",
+    StatusCallbackEvent: c.statusCallbackEvent ?? ["initiated", "ringing", "answered", "completed"],
+  }));
+  if (!res.ok) throw new TwilioError("create call", res.status, await codeOf(res));
+  const body = (await res.json().catch(() => ({}))) as { sid?: string };
+  if (!body.sid) throw new TwilioError("create call (no sid)", res.status, 0);
+  return String(body.sid);
+}
+
 export interface TwilioCall {
   sid: string;
   from: string;

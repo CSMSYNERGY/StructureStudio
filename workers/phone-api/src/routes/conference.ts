@@ -25,26 +25,32 @@ import { resumeInFlight } from "../callEvents";
 import { requireCaller, type Caller } from "../context";
 import { addCallEvent, callerContext, must, routeForNumber, type CallRow } from "../db";
 import {
-  CONFERENCE_EVENTS, HOLD_MUSIC, conferenceTwiml, hasStarted, heldIn, isTerminal, legsOf, nextTransferState, onTheCall,
-  refuseEmergencyCallback, transferParams, type CallAction,
+  CONFERENCE_EVENTS, HOLD_MUSIC, conferenceTwiml, hasStarted, heldIn, legsOf, nextTransferState, onTheCall,
+  redirectChild, refuseEmergencyCallback, transferParams, type CallAction,
 } from "../conference";
+import { refuseWhileSwitching } from "../handoff";
 import { ApiError, ok, readJson, UUID_RE } from "../http";
 import { toIdentity } from "../identity";
 import { logFault } from "../log";
 import {
-  addParticipant, fetchCall, findConference, listParticipants, TwilioError, updateCall, updateParticipant,
+  addParticipant, findConference, listParticipants, TwilioError, updateCall, updateParticipant,
 } from "../twilioRest";
 import { hook } from "../urls";
 import { resolveCall } from "./calls";
 import { onDnd } from "./voice";
 
-/** The call, checked the same way for all three: yours, live, not an emergency call. */
+/**
+ * The call, checked the same way for all three: yours, live, not an emergency call, and not
+ * being moved to your other device (handoff.ts; the move would land on a call that changed
+ * under it).
+ */
 async function liveCallOf(c: Caller, idParam: string): Promise<CallRow> {
   const call = await resolveCall(c, idParam);
   if (!call) throw new ApiError("not_found", "That call wasn't found.");
   if (!onTheCall(c.userId, call)) throw new ApiError("not_found", "Only the person on the call can do that.");
   if (call.status !== "in_progress" || call.ended_at) throw new ApiError("bad_request", "That call has already ended.");
   if (call.is_emergency) throw new ApiError("bad_request", "An emergency call can't be put on hold or transferred.");
+  refuseWhileSwitching(call);
   return call;
 }
 
@@ -57,35 +63,12 @@ function twilioFailure(ec: Ctx, c: Caller, call: CallRow, what: string, e: unkno
   }));
 }
 
-/** How long a redirect whose answer was lost gets to show up in the conference. */
-const MOVE_SETTLE_MS = 700;
-
 /**
- * What a failed redirect of the child leg really left behind. Twilio's own error means it did
- * nothing; a request that got NO answer (status 0) may still have been carried out.
- *   gone    the child had already ended: our side hung up, or dropped, as the button was pressed
- *   moved   the child is in the conference: Twilio did it, only its answer was lost
- *   stayed  the plain call is as it was
- */
-async function whatTheMoveDid(env: Env, callId: string, child: string, err: unknown): Promise<"gone" | "moved" | "stayed"> {
-  const leg = await fetchCall(env, child);
-  if (!leg || isTerminal(leg.status)) return "gone";
-  if (!(err instanceof TwilioError) || err.status !== 0) return "stayed";
-  for (let i = 0; i < 2; i++) {
-    if (i) await new Promise((r) => setTimeout(r, MOVE_SETTLE_MS));
-    const conf = await findConference(env, callId);
-    const parts = conf ? await listParticipants(env, conf.sid) : [];
-    if (parts.some((p) => p.call_sid === child && p.status !== "complete" && p.status !== "failed")) return "moved";
-  }
-  return "stayed";
-}
-
-/**
- * Move a plain Dial into the call's conference: claim, then redirect the child leg. The
- * parent follows by itself through the Dial's action (after-dial step 0), which answers it
- * with the conference as soon as it sees the claim.
+ * Move a plain Dial into the call's conference: claim, then redirect the child leg
+ * (../conference.ts redirectChild). The parent follows by itself through the Dial's action
+ * (after-dial step 0), which answers it with the conference as soon as it sees the claim.
  *
- * When the redirect fails, what it left behind decides (whatTheMoveDid):
+ * When the redirect fails, what it left behind decides (whatTheMoveDid, ../conference.ts):
  *   moved   keep the claim: the move happened and after-dial is taking the parent in.
  *   stayed  put the claim back: the call is exactly as it was.
  *   gone    put the claim back and end the PARENT leg too. after-dial may already have
@@ -99,33 +82,29 @@ async function moveIntoConference(env: Env, ec: Ctx, c: Caller, call: CallRow, a
   const claimed = must(await c.admin.from("phone_calls").update({ transfer_state: "conference" })
     .eq("id", call.id).is("transfer_state", null).select("id"), "claim conference") as { id: string }[] | null;
   if (!claimed?.length) throw new ApiError("bad_request", "Something else is happening on this call. Try again in a moment.");
-  try {
-    await updateCall(env, legs.child, { Twiml: conferenceTwiml(env, call.id, legs.childRole) });
+  const { outcome, error: e } = await redirectChild(env, call);
+  if (e === undefined) return;
+  const what = action === "hold" ? "hold" : "warm_transfer";
+  if (outcome === "moved") {
+    ec.waitUntil(logFault({
+      code: `${what}_answer_lost`, severity: "warn", clientId: c.ctx.client_id, context: { callId: call.id },
+      message: `${what}: Twilio's answer to the redirect was lost, but the leg is in the conference.`,
+    }));
     return;
-  } catch (e) {
-    const what = action === "hold" ? "hold" : "warm_transfer";
-    const outcome = await whatTheMoveDid(env, call.id, legs.child, e).catch(() => "stayed" as const);
-    if (outcome === "moved") {
-      ec.waitUntil(logFault({
-        code: `${what}_answer_lost`, severity: "warn", clientId: c.ctx.client_id, context: { callId: call.id },
-        message: `${what}: Twilio's answer to the redirect was lost, but the leg is in the conference.`,
-      }));
-      return;
-    }
-    const { data: back } = await c.admin.from("phone_calls").update({ transfer_state: null })
-      .eq("id", call.id).eq("transfer_state", "conference").select("id");
-    if (outcome === "gone") {
-      const parent = legs.childRole === "agent" ? legs.customer : legs.agent;
-      if (parent && Array.isArray(back) && back.length) {
-        ec.waitUntil(updateCall(env, parent, { Status: "completed" }).catch(() => {}));
-      }
-      throw new ApiError("bad_request", "That call has already ended.");
-    }
-    twilioFailure(ec, c, call, what, e);
-    throw new ApiError("twilio_error", action === "hold"
-      ? "Hold didn't work. You're still on the call."
-      : "The transfer didn't go through. You're still on the call.");
   }
+  const { data: back } = await c.admin.from("phone_calls").update({ transfer_state: null })
+    .eq("id", call.id).eq("transfer_state", "conference").select("id");
+  if (outcome === "gone") {
+    const parent = legs.childRole === "agent" ? legs.customer : legs.agent;
+    if (parent && Array.isArray(back) && back.length) {
+      ec.waitUntil(updateCall(env, parent, { Status: "completed" }).catch(() => {}));
+    }
+    throw new ApiError("bad_request", "That call has already ended.");
+  }
+  twilioFailure(ec, c, call, what, e);
+  throw new ApiError("twilio_error", action === "hold"
+    ? "Hold didn't work. You're still on the call."
+    : "The transfer didn't go through. You're still on the call.");
 }
 
 /**

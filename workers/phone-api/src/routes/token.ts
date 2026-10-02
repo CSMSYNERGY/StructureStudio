@@ -119,5 +119,9 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
       forward_to_cell: s?.forward_to_cell ?? null,
     },
     wallet,
+    // What this Worker can do that older ones could not, so an app shows a button only when
+    // the server behind it has the endpoint. handoff: moving a live call to the person's
+    // other device (../handoff.ts, routes/handoff.ts).
+    features: { handoff: true },
   });
 }

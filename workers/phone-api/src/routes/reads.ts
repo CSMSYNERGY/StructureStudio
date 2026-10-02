@@ -13,6 +13,7 @@ import type { Env } from "../env";
 import { warmStates, type WarmInfo } from "../callEvents";
 import { requireCaller, type Caller } from "../context";
 import { CALL_COLUMNS, must, type CallRow } from "../db";
+import { switchUnderWay } from "../handoff";
 import { ApiError, ok, pathParam, UUID_RE } from "../http";
 import { toE164, toIdentity } from "../identity";
 import { callIsMine, isTeamLevel, mayReadUnknownNumbers, phoneLevelOf, visibleContactIds } from "../scope";
@@ -76,6 +77,10 @@ export function callSummary(r: CallWithJoins, warm?: WarmInfo | null) {
     voicemail: vm && !vm.deleted_at
       ? { id: vm.id, duration_s: vm.duration_s, listened: !!vm.listened_at, transcript: vm.transcript ?? null }
       : null,
+    // A move to the person's other device under way (../handoff.ts): ringing / connecting, and
+    // where to. Null when none is, or the last one is past its 45 s. Outcomes: GET /calls/:id/handoff.
+    handoff_state: switchUnderWay(r) ? r.handoff_state ?? null : null,
+    handoff_to: switchUnderWay(r) ? r.handoff_to ?? null : null,
     ...(warm ? { warm } : {}),
   };
 }
