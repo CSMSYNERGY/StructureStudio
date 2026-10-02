@@ -102,5 +102,9 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
       dnd: s ? onDnd({ dnd: s.dnd === true, dnd_until: s.dnd_until ?? null }) : false,
       forward_to_cell: s?.forward_to_cell ?? null,
     },
+    // What this Worker can do that older ones could not, so an app shows a button only when
+    // the server behind it has the endpoint. handoff: moving a live call to the person's
+    // other device (../handoff.ts, routes/handoff.ts).
+    features: { handoff: true },
   });
 }

@@ -14,6 +14,7 @@ src/routes/voice.ts   outbound, inbound, after-dial, screen, status, voicemail
 src/routes/token.ts   POST /token
 src/routes/calls.ts   cold transfer, call events, voicemail audio
 src/routes/conference.ts  hold, resume, warm transfer (the app endpoints)
+src/routes/handoff.ts  moving a live call to the person's other device (the app endpoints)
 src/routes/media.ts   GET /media/:messageId/:index (inbound photos)
 src/routes/sms.ts     POST /sms/send
 src/routes/reads.ts   /threads, /threads/:key, /calls, /search, /team
@@ -22,6 +23,7 @@ src/routes/quickSends.ts  /quick-sends: each person's saved messages (list, add,
 src/routes/push.ts    /push/text (FCM HTTP v1, APNs)
 src/cron/             sweep.ts (*/15), retention.ts and usageDebit.ts (daily, 09:00 UTC: minute debit, monthly line fee)
 src/conference.ts     the conference design: TwiML, which leg is which, the transfer_state machine, /voice/conference
+src/handoff.ts        moving a live call between the person's devices: the answer, make before break, /voice/handoff
 src/callEvents.ts     what phone_call_events say that the row cannot: a warm transfer's state, a Resume still landing
 src/voicemail.ts      the greeting + <Record> TwiML (and transcription)
 src/wallet.ts         the wallet floor for outbound calls
@@ -108,6 +110,9 @@ App endpoints take `Authorization: Bearer <Supabase access token>` and answer `{
 | `POST /calls/:id/warm-transfer` | `{to_user_id}`. Rings the teammate into the call's conference. From a plain call, when they answer all three of you talk, and you hang up when ready. From hold, the customer stays on hold while you and the teammate talk; Resume brings them in, and hanging up hands them to the teammate off hold. A teammate on DND is refused. Answers `customer_held` (a private consult or not); the teammate's app gets `customer_e164` and `contact_id`. A teammate who doesn't answer touches the row, so the apps hear at once and read `warm` on `GET /calls` (DEVIATIONS 47 to 51). A customer left alone because nobody answered goes to voicemail. Hold and both transfers are refused on inbound calls for an hour after a 911 call from the number. |
 | `GET /media/:messageId/:index` | An inbound photo (or other file) from a text, streamed from Twilio after the thread's scope check. Bearer header only (SPEC section 3); `?access_token=` is refused. |
 | `POST /calls/:id/events` | Client timing marks into `phone_call_events`. |
+| `POST /calls/:id/handoff`, `/handoff/cancel`, `GET /calls/:id/handoff` | Move a live call to the person's other device (migration 260; apply it before deploying). `{to: chrome|mobile, leg_sid}` from the device holding the call. The phone is rung through Twilio (25 s, `handoff=1` custom parameters), the computer through the row's realtime broadcast. Nothing about the call changes until the other device answers; then the new leg joins the call's conference, a plain call is moved in, `client_call_sid` passes to the new leg, and only then is the old leg ended. A failure leaves the call where it was. Hold, Resume and both transfers are refused while a move is under way (`handoff_in_progress`). Outcomes are `device_switch` events (DEVIATIONS 57 to 60). |
+| `GET /handoff/pending?for=chrome` | The computer's ring: a move to it, still ringing (45 s), on a call the caller holds. |
+| `POST /voice/handoff` | Twilio: the phone answering a move. `/voice/outbound` with `HandoffCall` + `HandoffKey` is the computer answering, before every outbound rule (no new row, no minute cap, no wallet floor). |
 | `POST /sms/send` | The CRM's checks, then `sendTenantSms` with `bypassQuietHours: true`, then tags the row with `client_temp_id` and `sent_via`. `media_urls` is refused: sending photos isn't built (the shared send has no media). |
 | `GET /threads`, `/threads/:key`, `/calls`, `/search`, `/team` | Contacts row scope and phone level applied. Lists return `cursor` when there is another page. A live call in its conference carries `warm` (how its latest warm transfer stands). |
 | `POST /settings/me`, `/devices`, `/devices/signout-all` | Sign-out-all bumps `device_generation`, forgets push tokens and ends every Auth session. |

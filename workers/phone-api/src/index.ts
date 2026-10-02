@@ -20,6 +20,8 @@ import { logFault } from "./log";
 import { verifyTwilioRequest } from "./twilioSignature";
 import { afterDial, applyStatus, inbound, outbound, screen, transcription, voicemail } from "./routes/voice";
 import { conferenceEvent } from "./conference";
+import { voiceHandoff } from "./handoff";
+import { cancelHandoff, handoffStatus, pendingHandoff, startHandoff } from "./routes/handoff";
 import { token } from "./routes/token";
 import { events, transfer, voicemailAudio } from "./routes/calls";
 import { hold, resume, warmTransfer } from "./routes/conference";
@@ -44,7 +46,7 @@ export const CRON_TICK = "* * * * *";
 
 const VOICE_PATHS = new Set([
   "/voice/outbound", "/voice/inbound", "/voice/after-dial", "/voice/screen", "/voice/status", "/voice/voicemail",
-  "/voice/conference", "/voice/transcription",
+  "/voice/conference", "/voice/transcription", "/voice/handoff",
 ]);
 
 async function handleTwilio(req: Request, env: Env, ec: Ctx, path: string, t0: number): Promise<Response> {
@@ -99,6 +101,9 @@ async function handleTwilio(req: Request, env: Env, ec: Ctx, path: string, t0: n
     case "/voice/transcription":
       ec.waitUntil(transcription(env, p, url).catch((e) => logFault({ code: "transcript_write_failed", message: (e as Error).message, req })));
       return noContent();
+    case "/voice/handoff":
+      // The answer URL of the ring that moves a call to the person's phone (handoff.ts).
+      return twiml(await voiceHandoff(env, ec, p, url));
   }
   return new Response("Not found", { status: 404 });
 }
@@ -117,6 +122,11 @@ const ROUTES: { method: string; re: RegExp; h: Handler }[] = [
   { method: "POST", re: /^\/calls\/([^/]+)\/hold$/, h: (r, env, ec, m) => hold(env, ec, r, pathParam(m[1])) },
   { method: "POST", re: /^\/calls\/([^/]+)\/resume$/, h: (r, env, ec, m) => resume(env, ec, r, pathParam(m[1])) },
   { method: "POST", re: /^\/calls\/([^/]+)\/events$/, h: (r, env, _ec, m) => events(env, r, pathParam(m[1])) },
+  // Moving a live call to the person's other device (routes/handoff.ts).
+  { method: "POST", re: /^\/calls\/([^/]+)\/handoff$/, h: (r, env, ec, m) => startHandoff(env, ec, r, pathParam(m[1])) },
+  { method: "GET", re: /^\/calls\/([^/]+)\/handoff$/, h: (r, env, _ec, m) => handoffStatus(env, r, pathParam(m[1])) },
+  { method: "POST", re: /^\/calls\/([^/]+)\/handoff\/cancel$/, h: (r, env, _ec, m) => cancelHandoff(env, r, pathParam(m[1])) },
+  { method: "GET", re: /^\/handoff\/pending$/, h: (r, env) => pendingHandoff(env, r) },
   { method: "POST", re: /^\/sms\/send$/, h: (r, env, ec) => sendSms(env, ec, r) },
   { method: "GET", re: /^\/threads$/, h: (r, env) => listThreads(env, r) },
   { method: "GET", re: /^\/threads\/([^/]+)$/, h: (r, env, _ec, m) => getThread(env, r, m[1]) },

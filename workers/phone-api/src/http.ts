@@ -19,6 +19,14 @@ export type ErrorCode =
   | "emergency_blocked"
   | "wallet_empty"
   | "minute_cap"
+  // Moving a call to the person's other device (handoff.ts).
+  | "not_your_call"
+  | "not_live"
+  | "emergency"
+  | "transfer_in_progress"
+  | "handoff_in_progress"
+  | "no_target_device"
+  | "ring_failed"
   | "not_found"
   | "bad_request"
   | "twilio_error"
@@ -38,6 +46,13 @@ export const ERROR_TEXT: Record<ErrorCode, string> = {
   emergency_blocked: "For emergencies, call 911 from your cell phone.",
   wallet_empty: "Your Structure Studio wallet is empty. Top up in Settings, Billing.",
   minute_cap: "Today's calling limit is reached. It resets tomorrow.",
+  not_your_call: "Only the device on the call can move it.",
+  not_live: "That call has already ended.",
+  emergency: "An emergency call can't be moved.",
+  transfer_in_progress: "A transfer is under way. Wait for it to finish.",
+  handoff_in_progress: "The call is already moving to your other device. Wait for it to finish.",
+  no_target_device: "There's no other device signed in to move the call to.",
+  ring_failed: "Couldn't ring your phone. You're still on the call.",
   not_found: "That wasn't found.",
   bad_request: "Something about that request wasn't right.",
   twilio_error: "The phone service had a problem. Please try again.",
@@ -57,6 +72,13 @@ const STATUS: Record<ErrorCode, number> = {
   emergency_blocked: 403,
   wallet_empty: 402,
   minute_cap: 429,
+  not_your_call: 403,
+  not_live: 409,
+  emergency: 409,
+  transfer_in_progress: 409,
+  handoff_in_progress: 409,
+  no_target_device: 409,
+  ring_failed: 502,
   not_found: 404,
   bad_request: 400,
   twilio_error: 502,

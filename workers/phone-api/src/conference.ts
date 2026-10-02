@@ -73,6 +73,12 @@
 // customer comes off hold: when the transferrer leaves mid-consult, or when the teammate
 // answers after the transferrer has already gone. Otherwise the two would sit in music and
 // silence, and the teammate's app, which never pressed Hold, has no Resume to offer.
+//
+// ── A DEVICE SWITCH ─────────────────────────────────────────────────────────────────────
+// Moving the call to the same person's other device (handoff.ts) uses this conference too: the
+// new leg joins it as the agent, a plain call is moved in with the same claim and redirect as
+// Hold (redirectChild), and client_call_sid passes to the new leg before the old one is ended.
+// While that is connecting, the old leg leaving does not finish the customer (finishIfAlone).
 
 import type { Env } from "./env";
 import { conferenceStarted, recordConferenceStart } from "./callEvents";
@@ -84,7 +90,7 @@ import { parseIdentity, stripClientPrefix, toE164 } from "./identity";
 import { logFault } from "./log";
 import type { TwilioParams } from "./twilioSignature";
 import {
-  fetchCall, findConference, listParticipants, updateCall, updateParticipant, type TwilioCall,
+  fetchCall, findConference, listParticipants, TwilioError, updateCall, updateParticipant, type TwilioCall,
   type TwilioParticipant,
 } from "./twilioRest";
 import { conference, response } from "./twiml";
@@ -168,6 +174,53 @@ export function onTheCall(userId: string, call: Pick<CallRow, "answered_by" | "d
     || (call.transfer_state === "conference" && call.transferred_from === userId);
 }
 
+// ── Redirecting the child (THE MOVE, step 2) ────────────────────────────────────────────
+
+/** How long a redirect whose answer was lost gets to show up in the conference. */
+const MOVE_SETTLE_MS = 700;
+
+/**
+ * What a failed redirect of the child leg really left behind. Twilio's own error means it did
+ * nothing; a request that got NO answer (status 0) may still have been carried out.
+ *   gone    the child had already ended: our side hung up, or dropped, as the button was pressed
+ *   moved   the child is in the conference: Twilio did it, only its answer was lost
+ *   stayed  the plain call is as it was
+ */
+export type MoveOutcome = "gone" | "moved" | "stayed";
+
+async function whatTheMoveDid(env: Env, callId: string, child: string, err: unknown): Promise<MoveOutcome> {
+  const leg = await fetchCall(env, child);
+  if (!leg || isTerminal(leg.status)) return "gone";
+  if (!(err instanceof TwilioError) || err.status !== 0) return "stayed";
+  for (let i = 0; i < 2; i++) {
+    if (i) await new Promise((r) => setTimeout(r, MOVE_SETTLE_MS));
+    const conf = await findConference(env, callId);
+    const parts = conf ? await listParticipants(env, conf.sid) : [];
+    if (parts.some((p) => p.call_sid === child && p.status !== "complete" && p.status !== "failed")) return "moved";
+  }
+  return "stayed";
+}
+
+/**
+ * Step 2 of THE MOVE, once step 1's claim (transfer_state → 'conference') is made: redirect the
+ * plain Dial's child leg into the call's conference, as its role. The parent follows by itself
+ * through the Dial's action (after-dial step 0). `error` is set when Twilio's answer was not a
+ * success, and `outcome` is then what the failure left behind (whatTheMoveDid); without
+ * `error`, Twilio did it. Hold and warm transfer (routes/conference.ts moveIntoConference) and
+ * a device switch (handoff.ts completeHandoff) each decide what the outcome means for them.
+ */
+export async function redirectChild(env: Env, call: Pick<CallRow, "id" | "direction" | "twilio_call_sid" | "client_call_sid" | "transferred_from">): Promise<{ outcome: MoveOutcome; error?: unknown }> {
+  const legs = legsOf(call);
+  if (!legs.child) return { outcome: "stayed", error: new TwilioError("redirect (no child leg)", 0, 0) };
+  try {
+    await updateCall(env, legs.child, { Twiml: conferenceTwiml(env, call.id, legs.childRole) });
+    return { outcome: "moved" };
+  } catch (e) {
+    const outcome = await whatTheMoveDid(env, call.id, legs.child, e).catch(() => "stayed" as const);
+    return { outcome, error: e };
+  }
+}
+
 // ── Transfer legs' custom parameters ────────────────────────────────────────────────────
 
 /**
@@ -204,9 +257,32 @@ export const EMERGENCY_CALLBACK = "For an hour after a 911 call from this number
  * never refused. Pass `info` when the route has been read already.
  */
 export async function refuseEmergencyCallback(admin: Admin, call: Pick<CallRow, "direction" | "to_e164">, info?: RouteInfo | null): Promise<void> {
-  if (call.direction !== "in") return;
+  if (await inEmergencyCallbackWindow(admin, call, info)) throw new ApiError("bad_request", EMERGENCY_CALLBACK);
+}
+
+/** Is this an inbound call within an hour of a 911 call from its number (the rule above)? */
+export async function inEmergencyCallbackWindow(admin: Admin, call: Pick<CallRow, "direction" | "to_e164">, info?: RouteInfo | null): Promise<boolean> {
+  if (call.direction !== "in") return false;
   const route = info !== undefined ? info : await routeForNumber(admin, call.to_e164);
-  if (route?.recent_emergency_user) throw new ApiError("bad_request", EMERGENCY_CALLBACK);
+  return !!route?.recent_emergency_user;
+}
+
+// ── A device switch under way (handoff.ts) ──────────────────────────────────────────────
+
+/**
+ * How long a device switch (moving the call to the person's other device, handoff.ts) counts
+ * as under way after its last step (handoff_at: the ring, then the answer). Past this it is
+ * over whatever handoff_state says, so a lost callback never blocks Hold, Transfer or the next
+ * move for good. Here rather than in handoff.ts so this file, which handoff.ts imports, needs
+ * nothing from it.
+ */
+export const HANDOFF_WINDOW_MS = 45_000;
+
+/** Is a device switch under way on this row (ringing or connecting, and not stale)? */
+export function switchUnderWay(call: Partial<Pick<CallRow, "handoff_state" | "handoff_at">>, now = Date.now()): boolean {
+  if (!call.handoff_state || !call.handoff_at) return false;
+  const at = Date.parse(call.handoff_at);
+  return Number.isFinite(at) && now - at < HANDOFF_WINDOW_MS;
 }
 
 // ── The state machine ───────────────────────────────────────────────────────────────────
@@ -272,7 +348,7 @@ export function heldIn(parts: TwilioParticipant[], callSid: string): boolean {
 
 // ── Finishing a customer left alone ─────────────────────────────────────────────────────
 
-export type FinishOutcome = "voicemail" | "hung_up" | "handed_over" | "not_alone" | "no_customer" | "lost_race";
+export type FinishOutcome = "voicemail" | "hung_up" | "handed_over" | "not_alone" | "no_customer" | "lost_race" | "switching";
 
 /** The participants still in the call (a leg that has left is `complete` or gone). */
 function stillIn(parts: TwilioParticipant[]): TwilioParticipant[] {
@@ -299,8 +375,25 @@ async function handOver(env: Env, admin: Admin, row: CallRow, conferenceSid: str
  *   - the customer on hold and only the person who now holds the call (client_call_sid,
  *     moved there when they answered a warm transfer): the transferrer has hung up mid-consult,
  *     so the customer comes off hold ("auto" only).
+ * A device switch (handoff.ts) moves the call between the same person's two devices, and
+ * neither of its legs is ever someone handing the call on:
+ *   - while it is connecting, the leg the call is moving FROM (handoff_from_sid) leaving changes
+ *     nothing: the leg replacing it has answered but may not be listed yet, and finishing the
+ *     customer would send them to voicemail as they are handed over. completeHandoff checks
+ *     again itself if the switch fails;
+ *   - a leg that lost the call TO the switch (the old leg once the new one holds it, the new leg
+ *     of a failed one while the old one still does) leaving never takes a held customer off
+ *     hold (the person who has the call put them there), though a customer it leaves truly
+ *     alone is finished as above. Only while that is still how the legs stand: the handoff_*
+ *     columns outlive the move (nothing clears them), so once the call has been handed on
+ *     since (a warm transfer moves client_call_sid to the teammate), the leg that handed it on
+ *     is an ordinary transferrer again, whichever device it was, and HANDED OVER ON HOLD applies.
  */
 export async function finishIfAlone(env: Env, admin: Admin, row: CallRow, conferenceSid: string, prefer: "voicemail" | "auto", gone?: string): Promise<FinishOutcome> {
+  if (gone && gone === row.handoff_from_sid && row.handoff_state === "connecting" && switchUnderWay(row)) return "switching";
+  const switchLeg = !!gone && gone !== row.client_call_sid && !!row.handoff_sid && !!row.handoff_from_sid
+    && ((gone === row.handoff_from_sid && row.client_call_sid === row.handoff_sid)
+      || (gone === row.handoff_sid && row.client_call_sid === row.handoff_from_sid));
   const customer = row.twilio_call_sid;
   if (!customer) return "no_customer";
   const parts = await listParticipants(env, conferenceSid);
@@ -308,7 +401,7 @@ export async function finishIfAlone(env: Env, admin: Admin, row: CallRow, confer
   const me = left.find((p) => p.call_sid === customer);
   if (!me) return "not_alone";
   const others = left.filter((p) => p.call_sid !== customer);
-  if (prefer === "auto" && me.hold === true && others.length === 1 && others[0].call_sid === row.client_call_sid) {
+  if (!switchLeg && prefer === "auto" && me.hold === true && others.length === 1 && others[0].call_sid === row.client_call_sid) {
     return handOver(env, admin, row, conferenceSid, customer);
   }
   if (others.length) return "not_alone";
