@@ -22,6 +22,7 @@ import { ApiError, ok, readJson } from "../http";
 import { toIdentity } from "../identity";
 import { bearerToken, verifySupabaseJwt } from "../jwt";
 import { logFault } from "../log";
+import { maySendToContacts } from "../scope";
 import { requestAutoTopup, walletFloorCheck, walletStateOf, type WalletState } from "../wallet";
 import { onDnd } from "./voice";
 
@@ -112,6 +113,10 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
       client_id: ctx.client_id,
       phone_level: ctx.phone_level,
       own_contacts_only: ctx.own_contacts_only,
+      // May they text a SAVED contact? The rule /sms/send checks first, so an app can hide the
+      // composer on a customer's thread instead of letting Send fail. Replies to an unknown number
+      // that texted first follow a different rule (sms.ts) and do not read this.
+      can_text_contacts: maySendToContacts(ctx),
     },
     number: ctx.number ? { e164: ctx.number.e164 } : null,
     settings: {

@@ -229,3 +229,7 @@ Where the Worker reads the contract a particular way, adds to it, or departs fro
     - A `body_text` that is only whitespace counts as missing, so that mail is read from its HTML too.
     - `compose.email_to` is the contact's address (trimmed, the shape check `crm_send_email` uses) whatever `email_block` says. The contact read adds `email` only; the plan also lists `phone`, which nothing in the response uses.
     - The paid-CRM check fails closed: if the billing read errors, the whole thread read answers `internal` (logged as `db_check_the_CRM_subscription`) rather than show a composer that can't send, or the wrong reason. Someone who can't write gets `no_edit` without that read.
+
+## Added 2026-10-03: whether the person may text saved customers
+
+63. **`POST /token` adds `user.can_text_contacts`.** It is `maySendToContacts` (scope.ts), the first check `/sms/send` makes for a text to a saved contact: true for contacts `edit` or `own` (`own` is still narrowed to the customers they own or follow), false for `view` and `none`. A view-only login could see a customer's thread, type a text and only learn on Send that it may not text them; the apps now hide the composer instead. It says nothing about replies to an unknown number: those need contacts `view` or `edit`, not limited to their own customers, and a text in from that number first, so a view-only login can still reply there. An older Worker leaves the field out, and the apps read that as true.

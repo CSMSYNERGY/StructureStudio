@@ -68,7 +68,7 @@ describe("POST /token", () => {
     expect(res.status).toBe(200);
     expect(json).toMatchObject({
       ok: true, identity: `u_${HEX_A}_g4`, ttl: 3600, edge: "roaming",
-      user: { user_id: USER_A, client_id: "demo-tenant", phone_level: "own", own_contacts_only: false },
+      user: { user_id: USER_A, client_id: "demo-tenant", phone_level: "own", own_contacts_only: false, can_text_contacts: true },
       number: { e164: "+15555550100" },
       settings: { dnd: true, forward_to_cell: "+15555550177" },
     });
@@ -80,6 +80,20 @@ describe("POST /token", () => {
       push_credential_sid: env.TWILIO_PUSH_CREDENTIAL_APNS_PROD,
     });
     expect(payload.exp - payload.iat).toBe(3600);
+  });
+
+  // can_text_contacts is /sms/send's first check for a saved contact (scope.ts maySendToContacts):
+  // a view-only login sees customers but cannot text them, so the apps hide the composer there.
+  it.each([
+    ["contacts edit", callerCtx({ contacts_level: "edit" }), true],
+    ["contacts own (writes, narrowed per row)", callerCtx({ contacts_level: "own", own_contacts_only: true }), true],
+    ["contacts view only", callerCtx({ contacts_level: "view" }), false],
+    ["no contacts access", callerCtx({ contacts_level: "none" }), false],
+  ])("can_text_contacts with %s", async (_l, ctx, can) => {
+    const { auth, env } = await setup(ctx);
+    const { res, json } = await call(env, appRequest("POST", "/token", await auth.token(USER_A), { platform: "android", build_type: "prod", app_version: "1" }));
+    expect(res.status).toBe(200);
+    expect(json.user.can_text_contacts).toBe(can);
   });
 
   it("adds _dev only for iPhone development-profile builds, with the sandbox credential", async () => {
