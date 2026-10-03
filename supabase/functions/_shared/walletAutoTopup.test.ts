@@ -215,6 +215,29 @@ Deno.test("portal-settings keeps its own name on the rows it causes", async () =
 
 // ── Who may call wallet-autotopup ────────────────────────────────────────────────────
 
+const fakeJwt = (payload: Record<string, unknown>) =>
+  `eyJhbGciOiJIUzI1NiJ9.${btoa(JSON.stringify(payload)).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_")}.sig`;
+
+Deno.test("the caller check: a gateway-verified service_role JWT, and nothing else by claim", () => {
+  const keys = { serviceKey: "runtime-key", secret: "" };
+  assert(autoTopupCallerAllowed(`Bearer ${fakeJwt({ role: "service_role" })}`, { ...keys, gatewayVerified: true }), "service_role claim, gateway verified");
+  assert(!autoTopupCallerAllowed(`Bearer ${fakeJwt({ role: "service_role" })}`, keys), "the claim alone is not proof without the gateway");
+  assert(!autoTopupCallerAllowed(`Bearer ${fakeJwt({ role: "authenticated" })}`, { ...keys, gatewayVerified: true }), "a signed-in user's token");
+  assert(!autoTopupCallerAllowed(`Bearer ${fakeJwt({ role: "anon" })}`, { ...keys, gatewayVerified: true }), "the anon key");
+  assert(!autoTopupCallerAllowed("Bearer not.a-jwt", { ...keys, gatewayVerified: true }), "garbage");
+  assert(!autoTopupCallerAllowed("Bearer sb_secret_abc", { ...keys, gatewayVerified: true }), "a non-JWT key that is not configured");
+});
+
+Deno.test("wallet-autotopup keeps verify_jwt = true, which is what makes the role claim proof", async () => {
+  const toml = (await Deno.readTextFile(new URL("../../config.toml", import.meta.url))).replace(/\r\n/g, "\n");
+  const block = /\[functions\.wallet-autotopup\]\n([\s\S]*?)(?=\n\[|$)/.exec(toml);
+  assert(block, "config.toml has no [functions.wallet-autotopup] block");
+  const lines = (block?.[1] ?? "").split("\n").filter((l) => !/^\s*#/.test(l));
+  assert(lines.some((l) => /^\s*verify_jwt\s*=\s*true\s*$/.test(l)), "verify_jwt must stay true for wallet-autotopup");
+  const fn = await Deno.readTextFile(new URL("../wallet-autotopup/index.ts", import.meta.url));
+  assert(fn.includes("gatewayVerified: true"), "the function no longer trusts the gateway; drop this test only with that");
+});
+
 Deno.test("the caller check: either key, constant-time, and an empty key never matches", () => {
   const keys = { serviceKey: "runtime-key", secret: "worker-key" };
   assert(autoTopupCallerAllowed("Bearer runtime-key", keys), "the runtime's own key");

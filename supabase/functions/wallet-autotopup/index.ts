@@ -43,6 +43,9 @@ Deno.serve(withErrorLog("wallet-autotopup", async (req: Request) => {
   const allowed = autoTopupCallerAllowed(req.headers.get("authorization"), {
     serviceKey: Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
     secret: Deno.env.get("WALLET_AUTOTOPUP_SECRET") ?? "",
+    // verify_jwt = true (config.toml): the gateway has checked the signature before we run, so
+    // a service_role claim here is the Worker's real key. See autoTopupCallerAllowed.
+    gatewayVerified: true,
   });
   if (!allowed) return json({ error: "unauthorized" }, 401);
 

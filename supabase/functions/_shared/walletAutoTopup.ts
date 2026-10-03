@@ -166,10 +166,18 @@ export async function runAutoTopup(
  * passed the gateway and failed an equality check against the runtime's). The Worker holds its
  * own key, so for the Worker's calls set WALLET_AUTOTOPUP_SECRET to that exact value on the
  * Supabase side. Compared in constant time; an empty secret never matches.
+ *
+ * THIRD DOOR, `gatewayVerified`: a JWT whose `role` claim is service_role. The Worker's key
+ * cannot be read back out of Cloudflare to copy into WALLET_AUTOTOPUP_SECRET, so equality alone
+ * left the Worker's top-ups depending on a string nobody can check. The claim is only proof
+ * because the Supabase gateway has ALREADY verified the token's signature (verify_jwt = true for
+ * this function in config.toml), and nothing but the project's service key carries that role.
+ * The caller passes `gatewayVerified: true` only for that reason; a source test pins the
+ * config line, because with verify_jwt off this claim is forgeable by anyone.
  */
 export function autoTopupCallerAllowed(
   authorization: string | null | undefined,
-  keys: { serviceKey?: string | null; secret?: string | null },
+  keys: { serviceKey?: string | null; secret?: string | null; gatewayVerified?: boolean },
 ): boolean {
   const m = /^Bearer\s+(.+)$/i.exec(String(authorization ?? "").trim());
   const presented = m ? m[1].trim() : "";
@@ -179,5 +187,19 @@ export function autoTopupCallerAllowed(
     // No short-circuit, so the time taken does not say which key (if either) matched.
     if (k && timingSafeEqual(presented, k)) ok = true;
   }
+  if (keys.gatewayVerified === true && jwtRole(presented) === "service_role") ok = true;
   return ok;
+}
+
+/** The `role` claim of a JWT-shaped string, or null. Decodes only; it does NOT verify. */
+export function jwtRole(token: string): string | null {
+  const parts = token.split(".");
+  if (parts.length !== 3 || !parts[1]) return null;
+  try {
+    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const json = JSON.parse(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4)));
+    return json && typeof json.role === "string" ? json.role : null;
+  } catch {
+    return null;
+  }
 }
