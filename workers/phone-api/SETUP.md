@@ -53,6 +53,15 @@ node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
 
 `SMS_INBOUND_SECRET` must be the same value the edge functions use. The phase 4 secrets (push credentials, Firebase, APNs) can wait; until they are set, text alerts are skipped and logged once an hour.
 
+`LOG_PSEUDONYM_KEY` is the key for the Chrome extension's error reports (section 10). Generate it the same way, save it in the password manager FIRST (Cloudflare never shows a secret again, and without the copy nobody can find a person's reports when they ask for help), then set it:
+
+```
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+npx wrangler secret put LOG_PSEUDONYM_KEY
+```
+
+Paste the value at the prompt. Set it once and leave it: a new key gives everyone new refs, so a person's reports from before the change can only be found with the old key.
+
 APNs topics: `APNS_BUNDLE_ID` is the topic for `prod` devices, `APNS_BUNDLE_ID_DEV` for `dev` ones. While both builds use the `.dev` bundle id (the individual Apple account), set only `APNS_BUNDLE_ID` to it; dev devices fall back to it. When the store build moves to the final bundle id, set `APNS_BUNDLE_ID` to that and `APNS_BUNDLE_ID_DEV` to the `.dev` id.
 
 ## 4. First deploy, on workers.dev
@@ -149,6 +158,27 @@ The extension and the app send their errors to `/log` with a source code, and th
     order by created_at desc limit 50;
    ```
 3. Once no installed build sends the old codes, drop them from `LOG_SOURCES` and redeploy.
+
+## 10. Error reports from the Chrome extension (2026-10-03)
+
+The extension's privacy policy claims the Chrome Web Store's Limited Use rules, so its error reports store no user id, no business id and no Twilio identity, call SID, email or phone number (DEVIATIONS 64). Each report has `context.user_ref` and `context.client_ref` instead: a keyed pseudonym that groups one person's errors without saying who they are.
+
+1. Set `LOG_PSEUDONYM_KEY` (section 3) before deploying this Worker. Without it the reports are still saved, with no refs, and `log_pseudonym_key_missing` appears in `app_errors` at `warn`.
+2. Triage reads the rows as before. To see how many people one error hits, count refs, not rows:
+   ```sql
+   select code, message, count(*) as reports, count(distinct context->>'user_ref') as people
+     from public.app_errors
+    where source in ('my-synergy-phone-extension', 'sss-phone-extension') and not resolved
+    group by code, message order by people desc, reports desc limit 50;
+   ```
+3. When someone asks for help with the extension, find THEIR reports, and only theirs. From this directory, with the key from the password manager:
+   ```
+   $env:LOG_PSEUDONYM_KEY = "<the key>"
+   node scripts/log-ref.mjs --user <their user id> --client <their client id>
+   Remove-Item Env:LOG_PSEUDONYM_KEY
+   ```
+   It prints their `user_ref` and `client_ref` and the query to run. It reads and writes nothing itself. Use it only for the person who asked, for security, or when the law requires it.
+4. Deleting a business (admin-catalog's tenant wipe) removes its rows by `client_id`, so it no longer reaches the extension's reports. Those rows name nobody; if a business asks for its reports to be deleted, find them with `--client` and delete them by hand.
 
 ## Rolling back
 

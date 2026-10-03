@@ -20,6 +20,7 @@ src/routes/sms.ts     POST /sms/send
 src/routes/reads.ts   /threads, /threads/:key, /calls, /search, /team
 src/emailThread.ts    email in a conversation: the rows the apps get, HTML mail as text, whether they can send
 src/routes/me.ts      /settings/me, /devices, /devices/signout-all, /log, /turn, /health
+src/logPrivacy.ts     what a Chrome extension error report keeps: keyed refs instead of ids, known context keys, numbers and ids redacted
 src/routes/quickSends.ts  /quick-sends: each person's saved messages (list, add, change, delete, used)
 src/routes/push.ts    /push/text (FCM HTTP v1, APNs)
 src/cron/             sweep.ts (*/15), usageCharge.ts (every 5 min: each call and text at Twilio cost x markup; 09:00 UTC: Twilio's daily usage totals), retention.ts and lineFee.ts (daily, 09:00 UTC: monthly line fee)
@@ -32,6 +33,7 @@ src/jwt.ts            Supabase login check (ES256 via JWKS, cached per isolate)
 src/twilioSignature.ts  ?key= always, X-Twilio-Signature whenever TWILIO_AUTH_TOKEN is set
 src/accessToken.ts    Twilio Access Token (HS256, cty twilio-fpa;v=1)
 src/scope.ts          contacts row scope and "mine", reusing _shared/access.ts
+scripts/log-ref.mjs   one person's user_ref / client_ref, to find their extension error reports when they ask for help
 ```
 
 It imports five files from `supabase/functions/_shared`: `smsSend.ts` (and through it `twilioSms.ts`, `smsQuietHours.ts`, `logError.ts`), `access.ts`, `featureCheck.ts` (and through it `billingPeriods.ts`; the paid-CRM check for email), and `crmFeed.ts` (only `senderVerifiedFrom`, the inbound sender check the portal shows). Those files are written for Deno. Wrangler's `alias` maps their `jsr:@supabase/supabase-js@2` import onto the npm package installed here, and `src/env.ts` installs a `Deno.env.get` shim over the Worker's env, so they read the same secret names they read on the edge functions. Nothing under `supabase/functions` is edited for this. After a change to any of those shared files, redeploy this Worker along with the edge functions that import them.
@@ -85,6 +87,7 @@ Deploy only from a tree that has origin/beta merged in, or from beta itself. A `
 | `PHONE_WEBHOOK_SECRET` | yes | The `?key=` on every Twilio URL this Worker serves. Use letters and digits only (32 or more). If it is missing, every Twilio request is refused (503), and Twilio falls back to the number's Voice Fallback URL. |
 | `SMS_INBOUND_SECRET` | yes | Same value as on the edge functions. Texts sent from the apps carry it on their `sms-status` callback URL. |
 | `PUSH_WEBHOOK_SECRET` | yes | The `x-push-secret` header the database webhook sends to `/push/text`. |
+| `LOG_PSEUDONYM_KEY` | yes | The HMAC key for the Chrome extension's error reports: they store `user_ref` and `client_ref` (keyed pseudonyms) instead of the user and business ids (DEVIATIONS 64). 32 characters or more. Keep a copy in the password manager: `scripts/log-ref.mjs` needs it to find a person's reports when they ask for help, and Cloudflare never shows a secret again. Unset or shorter, those reports are saved with no refs at all and `log_pseudonym_key_missing` is logged at `warn` once per isolate. Changing it starts new refs: older reports keep the old ones. |
 | `FCM_SERVICE_ACCOUNT_JSON` | phase 4 | The Firebase service account JSON, whole. Android text alerts. Unset means they are skipped and logged once an hour. |
 | `APNS_KEY_P8` | phase 4 | The APNs auth key (.p8 text). iPhone text alerts. |
 | `APNS_KEY_ID` | phase 4 | That key's id. |
@@ -121,7 +124,7 @@ App endpoints take `Authorization: Bearer <Supabase access token>` and answer `{
 | `POST /settings/me`, `/devices`, `/devices/signout-all` | Sign-out-all bumps `device_generation`, forgets push tokens and ends every Auth session. |
 | `GET /quick-sends`, `POST /quick-sends`, `POST /quick-sends/:id`, `/:id/delete`, `/:id/used` | Each person's saved messages (migration 258; apply it before deploying these). The list gives the starter set first, once ever (`phone_seed_quick_sends`; a failure there is logged as `quick_send_seed_failed` and the list still answers). Add takes `{name, body, category?}`, at most 100 per person (`phone_add_quick_send` counts and inserts under a per-person lock, so a burst of adds can't pass it); change takes any of them. Every query is narrowed to the caller's `user_id` and `client_id`: someone else's id, or one that isn't a uuid, is `not_found`. `used` counts an Insert, not a send. Phone access is needed, the tenant's switch is not. |
 | `POST /push/text` | Database webhook on new inbound `sms_messages` rows. |
-| `POST /log` | App errors into `app_errors`, severity kept. Sources `my-synergy-phone-extension` and `my-synergy-phone-mobile`, plus the two codes builds from before the 2026-10-01 rename still send (SETUP.md section 9: deploy this Worker before any renamed build ships). |
+| `POST /log` | App errors into `app_errors`, severity kept. Sources `my-synergy-phone-extension` and `my-synergy-phone-mobile`, plus the two codes builds from before the 2026-10-01 rename still send (SETUP.md section 9: deploy this Worker before any renamed build ships). A report from the Chrome extension names nobody: `client_id` is null, `context` has `user_ref` and `client_ref` instead of `user_id`, only the context keys the extension is known to send (others are dropped and listed by name in `dropped`), and emails, phone numbers, uuids, Twilio identities and SIDs are `[redacted]` in the message, code and context (DEVIATIONS 64). A mobile app report keeps `client_id` and `context.user_id`. |
 | `GET /turn` | Twilio Network Traversal Service credentials. |
 | `GET /health` | `{ok, version, deployment}`. |
 
