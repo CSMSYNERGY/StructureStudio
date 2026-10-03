@@ -8,6 +8,7 @@ import { adminClient, must } from "../db";
 import { ApiError, ok, readJson } from "../http";
 import { isPremiumRate, toE164 } from "../identity";
 import { logFault } from "../log";
+import { EXTENSION_LOG_SOURCES, extensionContext, pseudonymKey, reportRefs, scrubText } from "../logPrivacy";
 import { ntsToken } from "../twilioRest";
 import { onDnd } from "./voice";
 
@@ -188,6 +189,11 @@ const LOG_PER_MINUTE = 30;
 /**
  * App errors into app_errors, at the severity the app chose (plan section 14: log_error would
  * demote a chrome-extension:// page to info, so the apps come through here instead).
+ *
+ * A report from the Chrome extension names nobody (src/logPrivacy.ts, DEVIATIONS 64): no
+ * client_id and no user_id, but `user_ref` and `client_ref` (keyed pseudonyms), only the
+ * context keys the extension is known to send, and emails, numbers, uuids and SIDs redacted
+ * from the text. A report from the mobile app is stored as it always was.
  */
 export async function log(env: Env, req: Request): Promise<Response> {
   const { admin, userId, ctx } = await requireLogin(env, req);
@@ -195,8 +201,8 @@ export async function log(env: Env, req: Request): Promise<Response> {
   const source = String(body.source ?? "");
   if (!LOG_SOURCES.has(source)) throw new ApiError("bad_request", "Unknown log source.");
   const severity = LOG_SEVERITIES.has(String(body.severity)) ? String(body.severity) : "error";
-  const message = String(body.message ?? "").trim().slice(0, 4000);
-  if (!message) throw new ApiError("bad_request", "The log message is empty.");
+  const rawMessage = String(body.message ?? "").trim();
+  if (!rawMessage) throw new ApiError("bad_request", "The log message is empty.");
 
   // A crash loop in one app must not flood the table.
   const now = Date.now();
@@ -209,18 +215,60 @@ export async function log(env: Env, req: Request): Promise<Response> {
     const encoded = JSON.stringify(body.context);
     context = encoded.length > 8000 ? { _truncated: true, bytes: encoded.length } : (body.context as Record<string, unknown>);
   }
-  const { error } = await admin.from("app_errors").insert({
-    source,
-    severity,
-    code: body.code == null ? null : String(body.code).slice(0, 100),
-    message,
-    url: null,
-    user_agent: (req.headers.get("user-agent") ?? "").slice(0, 400) || null,
-    client_id: ctx?.client_id ?? null,
-    context: { ...context, app_version: String(body.app_version ?? "").slice(0, 40) || null, user_id: userId },
-  });
+  const code = body.code == null ? null : String(body.code);
+  const appVersion = String(body.app_version ?? "");
+  const userAgent = (req.headers.get("user-agent") ?? "").slice(0, 400) || null;
+  const row: Record<string, unknown> = EXTENSION_LOG_SOURCES.has(source)
+    ? {
+      source,
+      severity,
+      code: code == null ? null : scrubText(code, 100),
+      message: scrubText(rawMessage, 4000),
+      url: null,
+      user_agent: userAgent,
+      client_id: null,
+      context: {
+        ...extensionContext(context),
+        app_version: scrubText(appVersion, 40) || null,
+        ...(await extensionRefs(env, userId, ctx?.client_id ?? null)),
+      },
+    }
+    : {
+      source,
+      severity,
+      code: code == null ? null : code.slice(0, 100),
+      message: rawMessage.slice(0, 4000),
+      url: null,
+      user_agent: userAgent,
+      client_id: ctx?.client_id ?? null,
+      context: { ...context, app_version: appVersion.slice(0, 40) || null, user_id: userId },
+    };
+  const { error } = await admin.from("app_errors").insert(row);
   if (error) throw new ApiError("internal", "The error report couldn't be saved.");
   return ok();
+}
+
+/**
+ * The extension report's `user_ref` and `client_ref`. Without a usable LOG_PSEUDONYM_KEY, or if
+ * the hash fails, there are none at all (never the raw ids, never an unkeyed hash) and the
+ * report is still saved; the gap is logged once per isolate, with no id in it.
+ */
+async function extensionRefs(env: Env, userId: string, clientId: string | null): Promise<Record<string, string>> {
+  if (!pseudonymKey(env.LOG_PSEUDONYM_KEY)) {
+    await logFault({
+      code: "log_pseudonym_key_missing",
+      severity: "warn",
+      once: true,
+      message: "LOG_PSEUDONYM_KEY is unset or shorter than 32 characters: Chrome extension error reports are saved without user_ref or client_ref.",
+    });
+    return {};
+  }
+  try {
+    return await reportRefs(env.LOG_PSEUDONYM_KEY, userId, clientId);
+  } catch (e) {
+    await logFault({ code: "log_pseudonym_failed", once: true, message: `Couldn't compute the log pseudonyms: ${(e as Error)?.message ?? e}` });
+    return {};
+  }
 }
 
 // ── GET /turn ───────────────────────────────────────────────────────────────────────

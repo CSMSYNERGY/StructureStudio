@@ -5,6 +5,7 @@ import {
   Auth, BASE, BUSINESS_NUMBER, CLIENT, CUSTOMER, FakeNet, USER_A, USER_B,
   appRequest, call, callerCtx, filter, jsonRes, makeEnv,
 } from "./helpers";
+import { logRef } from "../src/logPrivacy";
 
 async function setup(ctx: Record<string, unknown> | null = callerCtx()) {
   const net = new FakeNet().install();
@@ -194,26 +195,128 @@ describe("POST /devices/signout-all", () => {
 });
 
 describe("POST /log", () => {
-  it("records app errors with the severity the app chose", async () => {
+  // A test value, not a real key: 32 characters or more is what the Worker accepts.
+  const LOG_KEY = "test-log-pseudonym-key-0123456789abcdef";
+  const report = (net: FakeNet, source: string) => net.writes("app_errors").map((s) => s.json).find((r) => r.source === source);
+
+  it("records a phone app's errors with the severity it chose, with its user and business", async () => {
     const { net, token, env } = await setup();
-    const { json } = await call(env, appRequest("POST", "/log", token, {
-      source: "my-synergy-phone-extension", severity: "warn", code: "mic_denied", message: "Microphone blocked", context: { step: "welcome" }, app_version: "0.3.1",
+    const { json } = await call(makeEnv({ ...env, LOG_PSEUDONYM_KEY: LOG_KEY }), appRequest("POST", "/log", token, {
+      source: "my-synergy-phone-mobile", severity: "warn", code: "mic_denied", message: "Microphone blocked for +15555550142",
+      context: { step: "welcome", call_sid: "CA" + "ab12".repeat(8) }, app_version: "0.3.1",
     }, { "user-agent": "TestAgent/1" }));
     expect(json).toEqual({ ok: true });
     const row = net.writes("app_errors")[0].json;
-    expect(row).toMatchObject({
-      source: "my-synergy-phone-extension", severity: "warn", code: "mic_denied", message: "Microphone blocked", client_id: CLIENT,
-      user_agent: "TestAgent/1", context: { step: "welcome", app_version: "0.3.1", user_id: USER_A },
+    // The mobile app's reports are unchanged by the extension's privacy rules (DEVIATIONS 64).
+    expect(row).toEqual({
+      source: "my-synergy-phone-mobile", severity: "warn", code: "mic_denied", message: "Microphone blocked for +15555550142", url: null,
+      client_id: CLIENT, user_agent: "TestAgent/1",
+      context: { step: "welcome", call_sid: "CA" + "ab12".repeat(8), app_version: "0.3.1", user_id: USER_A },
     });
+  });
+
+  it("stores a Chrome extension report with keyed refs, and no client_id, user_id, identity or call SID", async () => {
+    const { net, token, env } = await setup();
+    const identity = `u_${USER_A.replace(/-/g, "")}_g2`;
+    const { json } = await call(makeEnv({ ...env, LOG_PSEUDONYM_KEY: LOG_KEY }), appRequest("POST", "/log", token, {
+      source: "my-synergy-phone-extension", severity: "warn", code: "twilio_error",
+      message: `Call to +1 (555) 555-0142 for someone@example.test failed on client:${identity} (contact ${USER_B})`,
+      context: {
+        where: "call", repeats: 3, code: "twilio_error", twilio_code: 31005, surface: "popup",
+        identity, user_id: USER_B, call_sid: "CA" + "ab12".repeat(8), reason: "dialing 5555550142",
+      },
+      app_version: "0.3.1",
+    }, { "user-agent": "TestAgent/1" }));
+    expect(json).toEqual({ ok: true });
+    const row = report(net, "my-synergy-phone-extension");
+    expect(row).toEqual({
+      source: "my-synergy-phone-extension", severity: "warn", code: "twilio_error",
+      message: "Call to [redacted] for [redacted] failed on client:[redacted] (contact [redacted])",
+      url: null, client_id: null, user_agent: "TestAgent/1",
+      context: {
+        where: "call", repeats: 3, code: "twilio_error", twilio_code: 31005, surface: "popup", reason: "dialing [redacted]",
+        dropped: ["identity", "user_id", "call_sid"],
+        app_version: "0.3.1",
+        user_ref: await logRef(LOG_KEY, "user", USER_A),
+        client_ref: await logRef(LOG_KEY, "client", CLIENT),
+      },
+    });
+    const stored = JSON.stringify(row);
+    for (const id of [USER_A, USER_B, USER_A.replace(/-/g, ""), CLIENT, "5550142", "example.test"]) expect(stored).not.toContain(id);
+    expect(net.writes("app_errors")).toHaveLength(1);
+  });
+
+  it("gives the same person the same refs on every report, and another person different ones", async () => {
+    const first = await setup();
+    const env = makeEnv({ ...first.env, LOG_PSEUDONYM_KEY: LOG_KEY });
+    await call(env, appRequest("POST", "/log", first.token, { source: "my-synergy-phone-extension", message: "one", app_version: "0.3.1" }));
+    await call(env, appRequest("POST", "/log", first.token, { source: "sss-phone-extension", message: "two", app_version: "0.2.9" }));
+    const [a1, a2] = first.net.writes("app_errors").map((s) => s.json.context);
+    expect(a1.user_ref).toMatch(/^[0-9a-f]{24}$/);
+    expect(a2.user_ref).toBe(a1.user_ref);
+    expect(a2.client_ref).toBe(a1.client_ref);
+
+    // Someone else, in another business.
+    first.net.rpc("phone_caller_context", () => callerCtx({ client_id: "other-tenant" }));
+    await call(env, appRequest("POST", "/log", await first.auth.token(USER_B), { source: "my-synergy-phone-extension", message: "three", app_version: "0.3.1" }));
+    const b = first.net.writes("app_errors")[2].json.context;
+    expect(b.user_ref).toMatch(/^[0-9a-f]{24}$/);
+    expect(b.user_ref).not.toBe(a1.user_ref);
+    expect(b.client_ref).not.toBe(a1.client_ref);
+  });
+
+  it("without LOG_PSEUDONYM_KEY: stores no refs at all, still saves the report, and says so once", async () => {
+    const { net, token, env } = await setup();
+    for (const message of ["first", "second"]) {
+      const { json } = await call(env, appRequest("POST", "/log", token, {
+        source: "my-synergy-phone-extension", message, context: { where: "offscreen" }, app_version: "0.3.1",
+      }));
+      expect(json).toEqual({ ok: true });
+    }
+    const rows = net.writes("app_errors").map((s) => s.json);
+    const reports = rows.filter((r) => r.source === "my-synergy-phone-extension");
+    expect(reports.map((r) => r.message)).toEqual(["first", "second"]);
+    for (const r of reports) {
+      expect(r.client_id).toBeNull();
+      expect(r.context).toEqual({ where: "offscreen", app_version: "0.3.1" });
+    }
+    const warned = rows.filter((r) => r.code === "log_pseudonym_key_missing");
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toMatchObject({ source: "edge:phone-api", severity: "warn", client_id: null });
+    expect(JSON.stringify(warned[0])).not.toContain(USER_A);
+  });
+
+  it("a key shorter than 32 characters counts as missing", async () => {
+    const { net, token, env } = await setup();
+    await call(makeEnv({ ...env, LOG_PSEUDONYM_KEY: "too-short" }), appRequest("POST", "/log", token, { source: "my-synergy-phone-extension", message: "x" }));
+    expect(report(net, "my-synergy-phone-extension").context).toEqual({ app_version: null });
+  });
+
+  it("leaves client_ref out for someone with no business", async () => {
+    const { net, token, env } = await setup(null);
+    await call(makeEnv({ ...env, LOG_PSEUDONYM_KEY: LOG_KEY }), appRequest("POST", "/log", token, { source: "my-synergy-phone-extension", message: "x" }));
+    const row = report(net, "my-synergy-phone-extension");
+    expect(row.client_id).toBeNull();
+    expect(Object.keys(row.context).sort()).toEqual(["app_version", "user_ref"]);
   });
 
   it.each(["my-synergy-phone-mobile", "sss-phone-extension", "sss-phone-mobile"])(
     "accepts %s too (builds from before the 2026-10-01 rename still send the old codes), stored as sent",
     async (source) => {
       const { net, token, env } = await setup();
-      const { json } = await call(env, appRequest("POST", "/log", token, { source, message: "x", app_version: "0.3.0" }));
+      const { json } = await call(makeEnv({ ...env, LOG_PSEUDONYM_KEY: LOG_KEY }), appRequest("POST", "/log", token, { source, message: "x", app_version: "0.3.0" }));
       expect(json).toEqual({ ok: true });
-      expect(net.writes("app_errors")[0].json).toMatchObject({ source, message: "x" });
+      const row = net.writes("app_errors")[0].json;
+      expect(row).toMatchObject({ source, message: "x" });
+      // The legacy extension code gets the extension's rules; the legacy mobile code does not.
+      if (source === "sss-phone-extension") {
+        expect(row.client_id).toBeNull();
+        expect(row.context.user_id).toBeUndefined();
+        expect(row.context.user_ref).toMatch(/^[0-9a-f]{24}$/);
+      } else {
+        expect(row.client_id).toBe(CLIENT);
+        expect(row.context.user_id).toBe(USER_A);
+      }
     },
   );
 

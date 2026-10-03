@@ -55,6 +55,12 @@ export interface Env {
   /** The ?key= on the sms-status callback URL texts carry (same value as the edge functions). */
   SMS_INBOUND_SECRET?: string;
   PUSH_WEBHOOK_SECRET?: string;
+  /**
+   * The HMAC key for the Chrome extension's error reports (POST /log, src/logPrivacy.ts): they
+   * store a keyed pseudonym of the person and the business instead of their ids. 32 characters
+   * or more; unset or shorter, those reports are saved with no pseudonym at all.
+   */
+  LOG_PSEUDONYM_KEY?: string;
 
   // ── Text alerts ───────────────────────────────────────────────────────────────────
   /** The Firebase service account JSON, whole. */
