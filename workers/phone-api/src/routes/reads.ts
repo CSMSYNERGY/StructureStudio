@@ -8,17 +8,26 @@
 //   • the phone level: `own` sees "my" calls (section 7's definition, scope.ts callIsMine);
 //     `view`/`edit` may ask for the team's.
 // Texts follow the contacts area, as they always have; "mine" narrows the thread LIST only.
+// Email follows it the same way (emailThread.ts shapes it), and is never narrowed by phone level.
 
+import { hasPaidFeature } from "../../../../supabase/functions/_shared/featureCheck.ts";
 import type { Env } from "../env";
 import { warmStates, type WarmInfo } from "../callEvents";
 import { requireCaller, type Caller } from "../context";
-import { CALL_COLUMNS, must, type CallRow } from "../db";
+import { CALL_COLUMNS, DbError, must, type CallRow } from "../db";
+import {
+  EMAIL_PAGE, INBOUND_COLS, LIST_EMAIL_KINDS, SEND_COLS, THREAD_EMAIL_KINDS,
+  contactEmailFilter, emailAddress, emailBlock, hasText, threadEmails,
+  type Compose, type EmailInboundRow, type EmailSendRow, type EmailSettings, type ThreadEmail,
+} from "../emailThread";
 import { ApiError, ok, pathParam, UUID_RE } from "../http";
 import { toE164, toIdentity } from "../identity";
-import { callIsMine, isTeamLevel, mayReadUnknownNumbers, phoneLevelOf, visibleContactIds } from "../scope";
+import { callIsMine, isTeamLevel, mayReadUnknownNumbers, maySendToContacts, phoneLevelOf, visibleContactIds } from "../scope";
 
 const PAGE = 50;
 const SCAN = 500;
+/** Rows read per email table for one page of the list (?channels=…,email). */
+const EMAIL_SCAN = 200;
 
 function cursorParam(url: URL): string | null {
   const raw = url.searchParams.get("cursor");
@@ -173,48 +182,159 @@ export function threadKey(m: Pick<MsgRow, "contact_id" | "direction" | "from_num
   return m.contact_id ?? `n:${customerNumber(m)}`;
 }
 
+/**
+ * `?channels=sms,email` (opt-in): what the list is built from. Absent, or naming nothing known,
+ * means texts alone: older apps and the shipped extension send no param, and the list they get
+ * is the one from before email joined it, byte for byte.
+ */
+function channelsParam(url: URL): Set<"sms" | "email"> | null {
+  const raw = url.searchParams.get("channels");
+  if (raw === null) return null;
+  const set = new Set<"sms" | "email">();
+  for (const part of raw.split(",")) {
+    const v = part.trim().toLowerCase();
+    if (v === "sms" || v === "email") set.add(v);
+  }
+  return set.size ? set : null;
+}
+
+/** One thing that happened in a conversation, from whichever table it came from. */
+interface ThreadEvent {
+  key: string;
+  contact_id: string | null;
+  at: string;
+  direction: "in" | "out";
+  /** A text's words, or an email's subject (so a renderer that knows nothing of email still reads right). */
+  body: string;
+  channel: "sms" | "email";
+  sent_by: string | null;
+  /** The text itself, for texts: the thread's number comes from it. */
+  sms: MsgRow | null;
+}
+
+/** One table's newest rows below the cursor. `full` means it hit its limit: older rows exist that it didn't read. */
+interface Scan {
+  events: ThreadEvent[];
+  full: boolean;
+}
+
+const newestFirst = (x: { at: string }, y: { at: string }) => (x.at < y.at ? 1 : x.at > y.at ? -1 : 0);
+
 export async function listThreads(env: Env, req: Request): Promise<Response> {
   const c = await requireCaller(env, req);
   if (c.ctx.contacts_level === "none") return ok({ threads: [] });
   const url = new URL(req.url);
   const cursor = cursorParam(url);
+  const channels = channelsParam(url);
+  const withSms = !channels || channels.has("sms");
+  const withEmail = channels?.has("email") ?? false;
   const mine = url.searchParams.get("mine") === "1" || !isTeamLevel(c.ctx.phone_level);
   const me = c.userId;
+  const client = c.ctx.client_id;
+  const none = Promise.resolve({ data: [], error: null });
 
   // No crm_contacts embed here: sms_messages.contact_id has no foreign key, so PostgREST cannot
   // join it (phone_calls has one, which is why the call reads embed). Names and owners are read
   // in one batch below.
-  let q = c.admin.from("sms_messages")
-    .select("id, contact_id, direction, body, status, created_at, from_number, to_number, sent_by")
-    .eq("client_id", c.ctx.client_id).order("created_at", { ascending: false }).limit(SCAN);
-  if (cursor) q = q.lt("created_at", cursor);
-  const msgs = (must(await q, "list texts") as MsgRow[] | null) ?? [];
+  const texts = async (): Promise<Scan> => {
+    let q = c.admin.from("sms_messages")
+      .select("id, contact_id, direction, body, status, created_at, from_number, to_number, sent_by")
+      .eq("client_id", client).order("created_at", { ascending: false }).limit(SCAN);
+    if (cursor) q = q.lt("created_at", cursor);
+    const msgs = (must(await q, "list texts") as MsgRow[] | null) ?? [];
+    return {
+      events: msgs.map((m) => ({
+        key: threadKey(m), contact_id: m.contact_id, at: m.created_at, direction: m.direction,
+        body: m.body ?? "", channel: "sms", sent_by: m.sent_by, sms: m,
+      })),
+      full: msgs.length === SCAN,
+    };
+  };
+  // Email moves a conversation up when someone wrote it: the customer's mail and ours (kind
+  // conversation or test), on a contact. Mail from someone who isn't a contact isn't listed,
+  // as in the portal, and quotes and invoices show inside the conversation, not here.
+  const received = async (): Promise<Scan> => {
+    let q = c.admin.from("email_inbound").select("id, contact_id, subject, received_at")
+      .eq("client_id", client).not("contact_id", "is", null).order("received_at", { ascending: false }).limit(EMAIL_SCAN);
+    if (cursor) q = q.lt("received_at", cursor);
+    const rows = (must(await q, "list received email") as { id: string; contact_id: string; subject: string | null; received_at: string }[] | null) ?? [];
+    return {
+      events: rows.map((r) => ({
+        key: r.contact_id, contact_id: r.contact_id, at: r.received_at, direction: "in",
+        body: r.subject ?? "", channel: "email", sent_by: null, sms: null,
+      })),
+      full: rows.length === EMAIL_SCAN,
+    };
+  };
+  const sent = async (): Promise<Scan> => {
+    let q = c.admin.from("email_sends").select("id, contact_id, subject, created_at, sent_by")
+      .eq("client_id", client).not("contact_id", "is", null).in("kind", LIST_EMAIL_KINDS)
+      .order("created_at", { ascending: false }).limit(EMAIL_SCAN);
+    if (cursor) q = q.lt("created_at", cursor);
+    const rows = (must(await q, "list sent email") as { id: string; contact_id: string; subject: string | null; created_at: string; sent_by: string | null }[] | null) ?? [];
+    return {
+      events: rows.map((r) => ({
+        key: r.contact_id, contact_id: r.contact_id, at: r.created_at, direction: "out",
+        body: r.subject ?? "", channel: "email", sent_by: r.sent_by ?? null, sms: null,
+      })),
+      full: rows.length === EMAIL_SCAN,
+    };
+  };
+  const scans = await Promise.all([
+    withSms ? texts() : { events: [], full: false },
+    ...(withEmail ? [received(), sent()] : []),
+  ]);
 
-  // Newest message per thread, and whether I sent anything in it.
-  const groups = new Map<string, { last: MsgRow; sentByMe: boolean }>();
-  for (const m of msgs) {
-    const key = threadKey(m);
-    const g = groups.get(key);
-    if (!g) groups.set(key, { last: m, sentByMe: m.sent_by === me });
-    else if (m.sent_by === me) g.sentByMe = true;
+  // Where this page's window ends. A scan that hit its limit has read back only to its oldest
+  // row; anything older, from any table, waits for the next page. Otherwise a thread could show
+  // an older email as its newest while a newer text sat unread just past the end of the text
+  // scan, and then show again on the next page. With texts alone this is the oldest text read.
+  let boundary: string | null = null;
+  for (const s of scans) {
+    if (!s.full || !s.events.length) continue;
+    const oldest = s.events[s.events.length - 1].at;
+    if (boundary === null || oldest > boundary) boundary = oldest;
+  }
+  const events = scans.flatMap((s) => s.events).filter((e) => boundary === null || e.at >= boundary).sort(newestFirst);
+
+  // Newest event per thread, its newest text (for the number), and whether I sent anything in it.
+  const groups = new Map<string, { last: ThreadEvent; sms: MsgRow | null; sentByMe: boolean }>();
+  for (const e of events) {
+    const g = groups.get(e.key);
+    if (!g) {
+      groups.set(e.key, { last: e, sms: e.sms, sentByMe: e.sent_by === me });
+      continue;
+    }
+    if (e.sent_by === me) g.sentByMe = true;
+    if (!g.sms) g.sms = e.sms;
   }
 
-  // Page 2+: a thread whose newest text is ABOVE the cursor was already shown on an earlier page.
+  // Page 2+: a thread whose newest message is ABOVE the cursor was already shown on an earlier
+  // page. Every table the list is built from is asked.
   if (cursor && groups.size) {
     const ids = [...groups.keys()].filter((k) => !k.startsWith("n:"));
     const nums = [...groups.keys()].filter((k) => k.startsWith("n:")).map((k) => k.slice(2)).filter(Boolean);
-    const [newerC, newerN] = await Promise.all([
-      ids.length
-        ? c.admin.from("sms_messages").select("contact_id").eq("client_id", c.ctx.client_id).gte("created_at", cursor).in("contact_id", ids).limit(1000)
-        : Promise.resolve({ data: [], error: null }),
-      nums.length
-        ? c.admin.from("sms_messages").select("direction, from_number, to_number, contact_id").eq("client_id", c.ctx.client_id)
+    const [newerC, newerN, newerIn, newerOut] = await Promise.all([
+      withSms && ids.length
+        ? c.admin.from("sms_messages").select("contact_id").eq("client_id", client).gte("created_at", cursor).in("contact_id", ids).limit(1000)
+        : none,
+      withSms && nums.length
+        ? c.admin.from("sms_messages").select("direction, from_number, to_number, contact_id").eq("client_id", client)
           .gte("created_at", cursor).is("contact_id", null)
           .or(`from_number.in.(${nums.join(",")}),to_number.in.(${nums.join(",")})`).limit(1000)
-        : Promise.resolve({ data: [], error: null }),
+        : none,
+      withEmail && ids.length
+        ? c.admin.from("email_inbound").select("contact_id").eq("client_id", client).gte("received_at", cursor).in("contact_id", ids).limit(1000)
+        : none,
+      withEmail && ids.length
+        ? c.admin.from("email_sends").select("contact_id").eq("client_id", client).in("kind", LIST_EMAIL_KINDS)
+          .gte("created_at", cursor).in("contact_id", ids).limit(1000)
+        : none,
     ]);
     for (const r of (must(newerC as never, "check newer texts") as MsgRow[] | null) ?? []) groups.delete(threadKey(r));
     for (const r of (must(newerN as never, "check newer texts") as MsgRow[] | null) ?? []) groups.delete(threadKey(r));
+    for (const r of (must(newerIn as never, "check newer email") as { contact_id: string }[] | null) ?? []) groups.delete(r.contact_id);
+    for (const r of (must(newerOut as never, "check newer email") as { contact_id: string }[] | null) ?? []) groups.delete(r.contact_id);
   }
 
   const candidates = [...groups.entries()];
@@ -222,11 +342,13 @@ export async function listThreads(env: Env, req: Request): Promise<Response> {
   const [visible, contactRows] = await Promise.all([
     visibleContactIds(c, contactIds),
     contactIds.length
-      ? c.admin.from("crm_contacts").select("id, name, owner_user_id").eq("client_id", c.ctx.client_id).in("id", contactIds)
-      : Promise.resolve({ data: [], error: null }),
+      ? c.admin.from("crm_contacts").select(withEmail ? "id, name, owner_user_id, phone" : "id, name, owner_user_id")
+        .eq("client_id", client).in("id", contactIds)
+      : none,
   ]);
-  const contacts = new Map<string, { name: string | null; owner_user_id: string | null }>();
-  for (const r of (must(contactRows as never, "read thread contacts") as { id: string; name: string | null; owner_user_id: string | null }[] | null) ?? []) {
+  type ContactRow = { id: string; name: string | null; owner_user_id: string | null; phone?: string | null };
+  const contacts = new Map<string, ContactRow>();
+  for (const r of (must(contactRows as never, "read thread contacts") as ContactRow[] | null) ?? []) {
     contacts.set(r.id, r);
   }
   const unknownOk = mayReadUnknownNumbers(c.ctx);
@@ -244,16 +366,19 @@ export async function listThreads(env: Env, req: Request): Promise<Response> {
       key,
       contact_id: g.last.contact_id,
       contact_name: contact?.name ?? null,
-      e164: customerNumber(g.last),
-      last: { body: g.last.body ?? "", direction: g.last.direction, at: g.last.created_at },
+      // The number from their newest text. A contact who has only emailed gets the one on their
+      // record, and may have none (null). `e164_source` says which, so the apps fold an `n:`
+      // thread into this one only when its texts are the ones filed here: a number on the record
+      // says nothing about where texts from it went.
+      e164: g.sms ? customerNumber(g.sms) : toE164(contact?.phone),
+      ...(channels ? { e164_source: g.sms ? "sms" : "contact" } : {}),
+      last: { body: g.last.body, direction: g.last.direction, at: g.last.at, ...(channels ? { channel: g.last.channel } : {}) },
     });
     if (threads.length >= PAGE) break;
   }
   // A full page continues after its last thread; a full scan that filtered down to a short page
-  // continues after the oldest text it read, so nothing further back is unreachable.
-  const nextCursor = threads.length >= PAGE
-    ? threads[threads.length - 1].last.at
-    : msgs.length === SCAN ? msgs[msgs.length - 1].created_at : null;
+  // continues from the window's end, so nothing further back is unreachable.
+  const nextCursor = threads.length >= PAGE ? threads[threads.length - 1].last.at : boundary;
   return ok({ threads, ...(nextCursor ? { cursor: nextCursor } : {}) });
 }
 
@@ -266,19 +391,23 @@ export async function getThread(env: Env, req: Request, rawKey: string): Promise
   const msgCols = "id, direction, body, status, created_at, sent_by, client_temp_id, num_media";
   let msgs;
   let calls;
+  let emails: ThreadEmail[];
+  let compose: Compose;
   if (UUID_RE.test(key)) {
     const contact = must(
-      await c.admin.from("crm_contacts").select("id, owner_user_id").eq("client_id", c.ctx.client_id).eq("id", key).maybeSingle(),
+      await c.admin.from("crm_contacts").select("id, owner_user_id, email").eq("client_id", c.ctx.client_id).eq("id", key).maybeSingle(),
       "read contact",
-    );
+    ) as { id: string; owner_user_id: string | null; email: string | null } | null;
     if (!contact) throw notFound();
     const seen = await visibleContactIds(c, [key]);
     if (!seen.has(key)) throw notFound();
-    [msgs, calls] = await Promise.all([
+    [msgs, calls, emails, compose] = await Promise.all([
       c.admin.from("sms_messages").select(msgCols).eq("client_id", c.ctx.client_id).eq("contact_id", key)
         .order("created_at", { ascending: false }).limit(200),
       c.admin.from("phone_calls").select(CALL_SELECT).eq("client_id", c.ctx.client_id).eq("contact_id", key)
         .order("started_at", { ascending: false }).limit(PAGE),
+      contactEmails(c, key),
+      composeFor(c, contact.email),
     ]);
   } else if (key.startsWith("n:")) {
     const e164 = toE164(key.slice(2));
@@ -289,6 +418,9 @@ export async function getThread(env: Env, req: Request, rawKey: string): Promise
       c.admin.from("phone_calls").select(CALL_SELECT).eq("client_id", c.ctx.client_id).is("contact_id", null)
         .or(`from_e164.eq.${e164},to_e164.eq.${e164}`).order("started_at", { ascending: false }).limit(PAGE),
     ]);
+    // Email is kept on contacts: a number nobody has saved has none, and no address to write to.
+    emails = [];
+    compose = { email_to: null, email_block: "unknown_number" };
   } else {
     throw new ApiError("bad_request", "That conversation key isn't valid.");
   }
@@ -308,7 +440,68 @@ export async function getThread(env: Env, req: Request, rawKey: string): Promise
       num_media: Number(r.num_media ?? 0) || 0,
     })),
     calls: await summaries(c, cr),
+    emails,
+    compose,
   });
+}
+
+/**
+ * A contact's email, both ways (emailThread.ts shapes it): mail stamped with the contact, and
+ * mail about any of their designs, which is how quotes and invoices are found. Sign-in codes
+ * never are. The caller has already checked the contact is this tenant's and theirs to see.
+ * Mail that came in with no text part has its HTML read in one more, small read: by id, for
+ * those rows only.
+ */
+async function contactEmails(c: Caller, contactId: string): Promise<ThreadEmail[]> {
+  const client = c.ctx.client_id;
+  const designs = (must(
+    await c.admin.from("designs").select("short_code").eq("client_id", client).eq("contact_id", contactId).limit(200),
+    "read contact designs",
+  ) as { short_code: string | null }[] | null) ?? [];
+  const scope = contactEmailFilter(contactId, designs.map((d) => d.short_code));
+  const [sentRes, receivedRes] = await Promise.all([
+    c.admin.from("email_sends").select(SEND_COLS).eq("client_id", client).in("kind", THREAD_EMAIL_KINDS).or(scope)
+      .order("created_at", { ascending: false }).limit(EMAIL_PAGE),
+    c.admin.from("email_inbound").select(INBOUND_COLS).eq("client_id", client).or(scope)
+      .order("received_at", { ascending: false }).limit(EMAIL_PAGE),
+  ]);
+  const sent = (must(sentRes as never, "read sent email") as EmailSendRow[] | null) ?? [];
+  const received = (must(receivedRes as never, "read received email") as EmailInboundRow[] | null) ?? [];
+
+  const html = new Map<string, string>();
+  const bare = received.filter((r) => !hasText(r.body_text)).map((r) => r.id);
+  if (bare.length) {
+    const rows = (must(
+      await c.admin.from("email_inbound").select("id, body_html").eq("client_id", client).in("id", bare),
+      "read received email html",
+    ) as { id: string; body_html: string | null }[] | null) ?? [];
+    for (const r of rows) if (r.body_html) html.set(r.id, r.body_html);
+  }
+  return threadEmails(sent, received, html);
+}
+
+/**
+ * Can this person email this contact from the thread? Advice for the composer: the portal
+ * action that sends (crm_send_email) checks all of it again. The paid-CRM check fails closed
+ * like every paid gate (featureCheck.ts): a billing read that errors fails this read rather
+ * than offer a composer that can't send. Someone who can't write is told so without it.
+ */
+async function composeFor(c: Caller, address: string | null): Promise<Compose> {
+  const email_to = emailAddress(address);
+  const canEdit = maySendToContacts(c.ctx);
+  if (!canEdit) return { email_to, email_block: "no_edit" };
+  const [crmPaid, settings] = await Promise.all([
+    // A DbError, so app_errors names what failed rather than filing it as "unhandled".
+    hasPaidFeature(c.admin, c.ctx.client_id, "crm").catch((e: unknown) => {
+      throw new DbError("check the CRM subscription", (e as Error)?.message ?? String(e));
+    }),
+    c.admin.from("client_settings").select("email_provider, invoice_in_ghl, email_domain_status")
+      .eq("client_id", c.ctx.client_id).maybeSingle(),
+  ]);
+  return {
+    email_to,
+    email_block: emailBlock({ canEdit, crmPaid, settings: must(settings, "read email settings") as EmailSettings | null, address: email_to }),
+  };
 }
 
 // ── search ──────────────────────────────────────────────────────────────────────────
