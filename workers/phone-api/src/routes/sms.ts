@@ -13,8 +13,10 @@
 // explicitly: a text a person types goes out at any hour, the portal's rule since 09-29.
 //
 // UNKNOWN NUMBERS (no contact): a reply is allowed for contacts view or edit, only to a number
-// whose latest text in the thread came IN from that number (it texted first, which sms-inbound
-// records as consent to reply). Someone limited to their own customers saves the contact first.
+// that has texted this business at least once (any text IN from it with no contact attached; it
+// texted first, which sms-inbound records as consent to reply). The newest message in the thread
+// may be one of ours: that is still a reply. Refused once the number is saved as a contact (reply
+// from their thread then). Someone limited to their own customers saves the contact first.
 
 import type { Ctx, Env } from "../env";
 import { sendTenantSms, type SmsOutcome } from "../../../../supabase/functions/_shared/smsSend.ts";
