@@ -8157,6 +8157,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
     const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
     { const bad = await mismatchedPair(contactId, shortCode); if (bad) return bad; }
+    // The phone app's id for its pending bubble (My Synergy Phone, migration 261), written on the
+    // ledger row so the confirmed email replaces the bubble instead of showing twice. Ignored, not
+    // refused, when it is not the shape the app makes: it is a display detail, never a reason to
+    // hold back an email someone wrote.
+    const rawTempId = typeof payload.clientTempId === "string" ? payload.clientTempId : "";
+    const clientTempId = /^[A-Za-z0-9_-]{1,64}$/.test(rawTempId) ? rawTempId : null;
 
     // ── THE BROWSER SENDS IDS, NEVER AN ADDRESS ───────────────────────────────────────
     // Exactly the rule crm_send_sms and text_sign_link already state, applied to the channel
@@ -8173,12 +8179,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return json({ error: "An email has to be addressed to a contact or a deal." }, 400);
     }
     let to = "";
+    // Whether contactId named a real contact of THIS tenant. Only then does it go on the ledger
+    // row (below), because that row is what files the email in a person's conversation.
+    let contactFound = false;
     // Shape-checked before it reaches Postgres: crm_contacts.id is a uuid, and a malformed one
     // would answer 22P02 and turn a bad id into a 500 rather than the refusal below.
     if (contactId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(contactId)) {
       const { data: c, error: cErr } = await admin.from("crm_contacts")
         .select("email").eq("client_id", clientId).eq("id", contactId).maybeSingle();
       if (cErr) return dbFail(req, clientId, "look up that contact", cErr);
+      contactFound = !!c;
       to = String(c?.email ?? "").trim();
     }
     if (!to && shortCode) {
@@ -8245,24 +8255,30 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       subject,
       html,
       text: body,
+      // The words, the writer and the app's bubble id go on the ledger row (migration 261), so
+      // the conversation shows what was said and who said it. sentBy is the signed-in person
+      // from the JWT, never anything in the body.
+      bodyText: body,
+      ...(userId ? { sentBy: String(userId) } : {}),
+      ...(clientTempId ? { clientTempId } : {}),
       ...(replyTo ? { replyTo } : {}),
       ...(shortCode ? { shortCode } : {}),
-      // Carried so sendTenantEmail can build the threading Message-ID. Without it a
-      // conversation email about no particular design gets no threading id, and a reply
-      // could only be placed by the sender's address — which cannot tell two people at the
-      // same company apart.
-      ...(contactId ? { contactId } : {}),
+      // Only a contact the lookup above FOUND in this tenant. sendTenantEmail writes it to the
+      // ledger row at the claim — that is what files the email in the person's whole email
+      // history, including mail about no design at all — and builds the threading Message-ID
+      // from it, without which a conversation email about no particular design gets no
+      // threading id and a reply could only be placed by the sender's address (which cannot
+      // tell two people at the same company apart).
+      //
+      // The row used to get its contact AFTER the send, by stamping the newest conversation row
+      // to the same address. That missed every failed send, and every send the beta redirect
+      // re-addressed (to_email is then the test inbox), so those never reached the record.
+      ...(contactFound ? { contactId } : {}),
     } as any);
 
     if (out.sent) {
-      // sendTenantEmail owns the ledger row; stamp the contact scope onto it so the person's
-      // whole email history surfaces on their record, including mail about no design at all.
-      if (contactId) {
-        await admin.from("email_sends").update({ contact_id: contactId })
-          .eq("client_id", clientId).eq("kind", "conversation").eq("to_email", to)
-          .is("contact_id", null).order("created_at", { ascending: false }).limit(1);
-      }
-      return json({ ok: true, messageId: out.messageId });
+      // `id` is the ledger row, which the phone app matches its bubble to. The portal ignores it.
+      return json({ ok: true, messageId: out.messageId, id: out.id });
     }
     if (out.reason === "not_active") {
       // Not a fault: this tenant has not connected a sending domain yet. 503 is the closest
@@ -10167,21 +10183,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (c?.id) contactId = String(c.id);
     } catch (_) { /* no routing is fine for a test */ }
     // sendTenantEmail owns the ledger row, the beta redirect and the dark guards — it
-    // never throws; the verdict below is the whole outcome.
+    // never throws; the verdict below is the whole outcome. It also writes the contact (and
+    // who sent the test) on the ledger row at the claim (migration 261), so the test sits in
+    // their conversation next to the reply it invites — sent or not, and under the beta
+    // redirect too, which the old after-the-send stamp by address could not see.
     const out = await sendTenantEmail(admin, clientId, {
       kind: "test",
       to,
       ...(contactId ? { contactId } : {}),
+      ...(userId ? { sentBy: String(userId) } : {}),
       ...testEmail({ businessName, fromAddress: `${fromLocal}@${cur.email_domain}` }),
     });
     if (out.sent) {
-      // As crm_send_email does: put the contact on the ledger row so the test sits in their
-      // conversation next to the reply it invites.
-      if (contactId) {
-        await admin.from("email_sends").update({ contact_id: contactId })
-          .eq("client_id", clientId).eq("kind", "test").eq("to_email", to)
-          .is("contact_id", null).order("created_at", { ascending: false }).limit(1);
-      }
       return json({ ok: true, messageId: out.messageId });
     }
     if (out.reason === "not_active") {

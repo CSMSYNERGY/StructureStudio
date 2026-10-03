@@ -187,15 +187,27 @@ export async function buildCrmFeed(
     // mail keyed on a design, and conversation mail keyed on the person — which often is
     // about no design at all ("are you still thinking about the 12x24?"). An `or` rather
     // than two queries so the 80-row cap applies to the merged history, not twice over.
+    //
+    // ⚠️ NOT q(), because q() turns ANY read error into []: a crmFeed deployed ahead of
+    // migration 261 would be refused body_text (no such column), and every sent email would
+    // vanish from every record page with nothing logged. On that one error the read is tried
+    // again without body_text; those rows have no words and keep the "Emailed to …" line below.
     (codes.length || opts.contactId)
-      ? q(admin.from("email_sends")
-          .select("id, short_code, contact_id, kind, to_email, subject, status, created_at")
-          .eq("client_id", clientId)
-          .or([
-            codes.length ? `short_code.in.(${codes.join(",")})` : null,
-            opts.contactId ? `contact_id.eq.${opts.contactId}` : null,
-          ].filter(Boolean).join(","))
-          .order("created_at", { ascending: false }).limit(80))
+      ? (async () => {
+          const read = (cols: string) => admin.from("email_sends")
+            .select(cols)
+            .eq("client_id", clientId)
+            .or([
+              codes.length ? `short_code.in.(${codes.join(",")})` : null,
+              opts.contactId ? `contact_id.eq.${opts.contactId}` : null,
+            ].filter(Boolean).join(","))
+            .order("created_at", { ascending: false }).limit(80);
+          let r = await read("id, short_code, contact_id, kind, to_email, subject, status, created_at, body_text");
+          if (r?.error && ["42703", "PGRST204"].includes(String(r.error.code))) {
+            r = await read("id, short_code, contact_id, kind, to_email, subject, status, created_at");
+          }
+          return r?.data ?? [];
+        })().catch(() => [])
       : Promise.resolve([]),
     codes.length ? q(admin.from("design_acceptances").select("id, short_code, subject, quote_number, signer_name, method, created_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("change_orders").select("id, short_code, co_no, status, total_before_cents, total_after_cents, created_at").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
@@ -354,8 +366,15 @@ export async function buildCrmFeed(
     // A conversation reads as the SUBJECT, because that is what someone actually wrote and
     // what they will scan for. A document reads as its kind, because "Quote emailed to
     // jane@…" is the useful line and its subject is boilerplate.
+    //
+    // ITS BODY IS THE WORDS, once there are any (migration 261 keeps them in body_text), so our
+    // side of the conversation reads the way the customer's replies already do. An email from
+    // before 261 has none and keeps the old "Emailed to …" line. With the words shown, the
+    // status moves up to the title, so a send that failed still says so: a failed email that
+    // reads like a sent one is the builder finding out from the customer.
+    const words = typeof e.body_text === "string" && e.body_text.trim() ? e.body_text : null;
     push(e.kind === "conversation"
-      ? { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: e.subject || "(no subject)", body: `Emailed to ${e.to_email || "customer"}${st}`, code: e.short_code, icon: "email" }
+      ? { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${e.subject || "(no subject)"}${words ? st : ""}`, body: words ?? `Emailed to ${e.to_email || "customer"}${st}`, code: e.short_code, icon: "email" }
       : { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${labelKind(e.kind)} emailed to ${e.to_email || "customer"}${st}`, body: e.subject || null, code: e.short_code, icon: "email" });
   }
   for (const a of accepts as any[]) {
@@ -404,22 +423,7 @@ export async function buildCrmFeed(
       meta: {
         from: r.from_email,
         inbound: true,
-        // TOKENISED, not one regex with a word boundary. The first version wrote `\b` into
-        // this file through a script and got a literal 0x08 BACKSPACE byte instead, so the
-        // lookahead could never match, the test always passed, and senderVerified was always
-        // false - every reply would have worn the NOT VERIFIED chip, which is precisely the
-        // badge-fatigue this design set out to avoid. Nothing threw; the unit test passed
-        // because it exercised a retyped copy of the regex rather than this file.
-        //
-        // No parseable token means UNKNOWN, not verified: a verdict string we cannot read is
-        // not a verdict we may vouch for.
-        senderVerified: (() => {
-          if (r.spam_verdict == null) return null;
-          const toks = String(r.spam_verdict).toLowerCase()
-            .match(/(?:spam|virus|spf|dkim|dmarc)=[a-z0-9_-]+/g);
-          if (!toks || !toks.length) return null;
-          return toks.every((t) => t.endsWith("=pass"));
-        })(),
+        senderVerified: senderVerifiedFrom(r.spam_verdict),
         senderVerdict: r.spam_verdict ?? null,
       },
     });
@@ -544,6 +548,33 @@ export async function buildCrmFeed(
 
   out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   return out.slice(0, opts.limit || 200);
+}
+
+/**
+ * The receiving side's verdict on an inbound email (email_inbound.spam_verdict), as the three
+ * states the screen shows: true = every check it reported passed; false = one did not; null = it
+ * told us nothing we can read. See the email_in loop above for why null is not true.
+ *
+ * Exported for the phone-api Worker's email thread (workers/phone-api/src/emailThread.ts), so the
+ * phone and the portal can never disagree about a reply. The Worker can import it only because
+ * this file imports nothing: keep this function pure.
+ *
+ * TOKENISED, not one regex with a word boundary. The first version wrote a word-boundary escape
+ * into this file through a script and got a literal 0x08 BACKSPACE byte instead, so the lookahead
+ * could never match, the test always passed, and senderVerified was always false - every reply
+ * would have worn the NOT VERIFIED chip, which is precisely the badge-fatigue this design set out
+ * to avoid. Nothing threw; the unit test passed because it exercised a retyped copy of the regex
+ * rather than this file.
+ *
+ * No parseable token means UNKNOWN, not verified: a verdict string we cannot read is not a
+ * verdict we may vouch for.
+ */
+export function senderVerifiedFrom(verdict: unknown): boolean | null {
+  if (verdict == null) return null;
+  const toks = String(verdict).toLowerCase()
+    .match(/(?:spam|virus|spf|dkim|dmarc)=[a-z0-9_-]+/g);
+  if (!toks || !toks.length) return null;
+  return toks.every((t) => t.endsWith("=pass"));
 }
 
 /**

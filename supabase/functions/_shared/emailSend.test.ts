@@ -85,7 +85,10 @@ type StubOpts = {
   /** The client_settings row maybeSingle() hands back (null = no row). */
   settings?: Record<string, unknown> | null;
   /** Force the email_sends insert to fail / return no id. */
-  insertError?: { message: string } | null;
+  insertError?: { message: string; code?: string } | null;
+  /** Decide per row: the database before a migration refuses only the rows that name its
+   *  columns. Checked before insertError. */
+  insertErrorFor?: (row: Record<string, unknown>) => { message: string; code?: string } | null;
   insertThrows?: boolean;
   /** Force every email_sends update to fail. */
   updateError?: { message: string } | null;
@@ -121,9 +124,10 @@ function stubAdmin(opts: StubOpts = {}) {
               return {
                 single() {
                   if (opts.insertThrows) throw new Error("connection reset mid-insert");
+                  const error = opts.insertErrorFor?.(row) ?? opts.insertError ?? null;
                   return Promise.resolve(
-                    opts.insertError
-                      ? { data: null, error: opts.insertError }
+                    error
+                      ? { data: null, error }
                       : { data: { id: "es-row-1" }, error: null },
                   );
                 },
@@ -776,6 +780,237 @@ Deno.test("sent but the 'sent' update fails → STILL sent:true (a 'failed' woul
     assert(res.sent, "the email really went out — reporting failure would push the caller onto "
       + "its GHL fallback and the customer would get the email twice");
     assertEquals(res.sent && res.messageId, "rs-msg-1");
+  } finally {
+    teardown();
+  }
+});
+
+// ── Migration 261: the claim row carries the conversation (My Synergy Phone) ─────────────────
+// The phone app shows one conversation per contact, our emails included, so the ledger row has
+// to say who it is about, what it said, who wrote it and which pending bubble it confirms — and
+// say it at the CLAIM, so a failed send and a beta-redirected one are filed like any other. The
+// rule that makes this safe is that none of it can fail the claim insert: a refused claim is an
+// email that is not sent.
+
+const CONTACT = "00000000-0000-4000-8000-0000000000c1";
+const WRITER = "00000000-0000-4000-8000-0000000000a1";
+const CONVO: TenantMail = {
+  kind: "conversation",
+  to: "lead@example.net",
+  subject: "Your shed",
+  html: "<div>Hi Sam</div>",
+  text: "Hi Sam",
+  contactId: CONTACT,
+  bodyText: "Hi Sam,\nthe 12x24 is ready.",
+  sentBy: WRITER,
+  clientTempId: "tmp_1A-b",
+};
+
+Deno.test("261: the claim carries contact_id, body_text, sent_by and client_temp_id, and the outcome names the row", async () => {
+  setup();
+  try {
+    const db = stubAdmin({ settings: VERIFIED });
+    let contactAtSend: unknown = "unset";
+    stubFetch(() => {
+      contactAtSend = (inserts(db.calls)[0]?.payload as Record<string, unknown> | undefined)?.contact_id;
+      return jsonResponse(OK_SEND);
+    });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, CONVO);
+    assert(res.sent, "must send");
+    assertEquals(res.sent && res.id, "es-row-1", "the ledger row id comes back, so the phone can match its bubble");
+    const row = inserts(db.calls)[0].payload as Record<string, unknown>;
+    assertEquals(row.contact_id, CONTACT);
+    assertEquals(row.body_text, "Hi Sam,\nthe 12x24 is ready.", "the words are kept as typed, line breaks included");
+    assertEquals(row.sent_by, WRITER);
+    assertEquals(row.client_temp_id, "tmp_1A-b");
+    assertEquals(row.status, "claimed", "still a claim row first");
+    assertEquals(contactAtSend, CONTACT,
+      "the details are on the CLAIM, before the provider call — not stamped on afterwards");
+    // Nothing else writes them: the one update after the send is the status flip.
+    const upd = updates(db.calls);
+    assertEquals(upd.length, 1);
+    assert(!("contact_id" in (upd[0].payload as Record<string, unknown>)), "no after-the-send stamp");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("261: a send that carries none of them writes exactly the row it always wrote", async () => {
+  setup();
+  try {
+    // Every quote, invoice, change order and receipt. Keys left OUT, not written as null, so
+    // document mail does not depend on the migration's columns at all.
+    stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: VERIFIED });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
+    assert(res.sent, "must send");
+    assertArrayEquals(
+      Object.keys(inserts(db.calls)[0].payload as Record<string, unknown>).sort(),
+      ["client_id", "from_email", "kind", "short_code", "status", "subject", "to_email"],
+    );
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("261: a contactId that is not a uuid is left off the row and never fails the claim", async () => {
+  setup();
+  try {
+    // email_sends.contact_id is a uuid column, so this value would fail the insert with 22P02 —
+    // and a failed claim is an email that is not sent. It still threads, as it always did.
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: VERIFIED });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, { ...CONVO, contactId: "ghl-contact-123" });
+    assert(res.sent, "a bad contact id must not cost the email");
+    const row = inserts(db.calls)[0].payload as Record<string, unknown>;
+    assert(!("contact_id" in row), "not a uuid → not on the row");
+    assertEquals(row.body_text, "Hi Sam,\nthe 12x24 is ready.", "the rest of the row is unaffected");
+    const msgId = String(JSON.parse(fetches[0].body ?? "{}").headers?.["Message-ID"] ?? "");
+    assert(msgId.startsWith("<ss.tenant-1.c.ghl-contact-123."), `still threads on it, got ${msgId}`);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("261: a sentBy or clientTempId of the wrong shape is left off; an over-long body is cut on the row only", async () => {
+  setup();
+  try {
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: VERIFIED });
+    // 20,001 emoji: 40,002 UTF-16 units, 20,001 characters as Postgres counts them.
+    const long = "\u{1F600}".repeat(20001);
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, {
+      ...CONVO, sentBy: "not-a-user", clientTempId: "has a space", bodyText: long, text: long,
+    });
+    assert(res.sent, "must send");
+    const row = inserts(db.calls)[0].payload as Record<string, unknown>;
+    assert(!("sent_by" in row), "a sentBy that is not a uuid stays off the row");
+    assert(!("client_temp_id" in row), "a client temp id the app would not make stays off the row");
+    assertEquals(Array.from(String(row.body_text)).length, 20000,
+      "cut to email_sends_body_text_chk's 20,000 characters, counted as Postgres counts them");
+    assertEquals(String(row.body_text).length, 40000, "never splits an emoji in half");
+    assertEquals(JSON.parse(fetches[0].body ?? "{}").text.length, long.length, "the email itself is not cut");
+    // A body that is only whitespace is no words at all.
+    stubFetch(() => jsonResponse(OK_SEND));
+    const db2 = stubAdmin({ settings: VERIFIED });
+    await sendTenantEmail(db2.admin, CLIENT_ID, { ...CONVO, bodyText: "  \n " });
+    assert(!("body_text" in (inserts(db2.calls)[0].payload as Record<string, unknown>)), "whitespace is not a body");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("261: a failed send still names its row; no row, no id", async () => {
+  setup();
+  try {
+    // The provider refused it: the row exists (status failed), and the phone shows it as not sent.
+    stubFetch(() => jsonResponse({ statusCode: 422, name: "validation_error", message: "x" }, 422));
+    let db = stubAdmin({ settings: VERIFIED });
+    let res = await sendTenantEmail(db.admin, CLIENT_ID, CONVO);
+    assert(!res.sent && res.reason === "failed", "must be failed");
+    assertEquals(!res.sent ? res.id : "", "es-row-1", "a failed send has a row, and says which");
+    assertEquals((inserts(db.calls)[0].payload as Record<string, unknown>).contact_id, CONTACT,
+      "a failed send is filed on the contact too — the old after-the-send stamp never reached it");
+
+    // The claim insert failed: there is no row to name.
+    stubFetch(() => jsonResponse(OK_SEND));
+    db = stubAdmin({ settings: VERIFIED, insertError: { message: "permission denied" } });
+    res = await sendTenantEmail(db.admin, CLIENT_ID, CONVO);
+    assert(!res.sent && !("id" in res), "no claim row → no id");
+
+    // Dark: nothing was written.
+    db = stubAdmin({ settings: { ...VERIFIED, email_provider: "ghl" } });
+    res = await sendTenantEmail(db.admin, CLIENT_ID, CONVO);
+    assert(!res.sent && res.reason === "not_active" && !("id" in res), "a dark send has no row and no id");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("261: under the beta redirect the contact still goes on the row", async () => {
+  setup();
+  try {
+    // to_email is the test inbox here, which is exactly why matching the newest row to the same
+    // address after the send could never file a beta-mode email on the customer.
+    stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: { ...VERIFIED, beta_mode: true, beta_email: "owner@example.com" } });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, CONVO);
+    assert(res.sent && res.redirected, "redirected send");
+    const row = inserts(db.calls)[0].payload as Record<string, unknown>;
+    assertEquals(row.to_email, "owner@example.com");
+    assertEquals(row.contact_id, CONTACT);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("261: a NUL or a lone surrogate in the words is cleaned on the row, never refused", async () => {
+  setup();
+  try {
+    // Postgres text cannot hold U+0000 and PostgREST refuses a lone surrogate, and a refused
+    // claim is an email that is not sent. crm_send_email's 20,000-unit slice makes the second
+    // one itself when an emoji straddles the cut: the result is exactly 20,000 units, so the
+    // length cut never sees it.
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: VERIFIED });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, { ...CONVO, bodyText: "a\u0000b" });
+    assert(res.sent, "must send");
+    assertEquals((inserts(db.calls)[0].payload as Record<string, unknown>).body_text, "ab", "the NUL is dropped");
+
+    const halfEmoji = ("a".repeat(19999) + "\u{1F600}x").slice(0, 20000);
+    assertEquals(halfEmoji.length, 20000, "fixture: exactly the slice's length");
+    const db2 = stubAdmin({ settings: VERIFIED });
+    const res2 = await sendTenantEmail(db2.admin, CLIENT_ID, { ...CONVO, bodyText: halfEmoji, text: halfEmoji });
+    assert(res2.sent, "must send");
+    const stored = String((inserts(db2.calls)[0].payload as Record<string, unknown>).body_text);
+    assertEquals(stored.length, 20000, "one unit for one unit");
+    assertEquals(stored.at(-1), "\uFFFD", "the half emoji becomes the replacement character");
+    assert(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(stored), "no lone surrogate is left");
+    assertEquals(JSON.parse(fetches[1].body ?? "{}").text, halfEmoji, "the email itself is sent exactly as given");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("261: deployed before the migration, the claim is retried without the new columns and the email still sends", async () => {
+  setup();
+  try {
+    // PostgREST before 261 refuses the whole insert when a key names a column it cannot find.
+    // contact_id is older, so it is kept and the email still lands on the contact.
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({
+      settings: VERIFIED,
+      insertErrorFor: (row) => ("body_text" in row || "sent_by" in row || "client_temp_id" in row)
+        ? { message: "Could not find the 'body_text' column of 'email_sends' in the schema cache", code: "PGRST204" }
+        : null,
+    });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, CONVO);
+    assert(res.sent, "a migration not applied yet must not cost the email");
+    assertEquals(res.sent && res.id, "es-row-1");
+    assertEquals(fetches.length, 1, "sent once");
+    const tries = inserts(db.calls);
+    assertEquals(tries.length, 2, "one refused claim, one retry");
+    assertEquals((tries[0].payload as Record<string, unknown>).body_text, "Hi Sam,\nthe 12x24 is ready.", "the first try carries everything");
+    const retry = tries[1].payload as Record<string, unknown>;
+    assert(!("body_text" in retry) && !("sent_by" in retry) && !("client_temp_id" in retry), "the retry leaves the 261 keys off");
+    assertEquals(retry.contact_id, CONTACT, "and keeps the contact");
+    assertEquals(retry.status, "claimed");
+
+    // A second refusal is the ledger really being down: refused as before, nothing sent.
+    const fetches2 = stubFetch(() => jsonResponse(OK_SEND));
+    const db2 = stubAdmin({ settings: VERIFIED, insertError: { message: "column does not exist", code: "42703" } });
+    const res2 = await sendTenantEmail(db2.admin, CLIENT_ID, CONVO);
+    assert(!res2.sent && res2.reason === "failed" && !("id" in res2), "no claim row, no send");
+    assertEquals(inserts(db2.calls).length, 2, "tried once more, and only once");
+    assertEquals(fetches2.length, 0, "nothing sent");
+
+    // Any other error is not retried, and a send that carried none of the keys has nothing to drop.
+    const db3 = stubAdmin({ settings: VERIFIED, insertError: { message: "permission denied", code: "42501" } });
+    await sendTenantEmail(db3.admin, CLIENT_ID, CONVO);
+    assertEquals(inserts(db3.calls).length, 1, "not a missing column: no retry");
+    const db4 = stubAdmin({ settings: VERIFIED, insertError: { message: "column does not exist", code: "42703" } });
+    await sendTenantEmail(db4.admin, CLIENT_ID, MAIL);
+    assertEquals(inserts(db4.calls).length, 1, "document mail carries no 261 keys: no retry");
   } finally {
     teardown();
   }
