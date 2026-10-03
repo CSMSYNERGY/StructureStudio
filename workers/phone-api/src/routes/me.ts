@@ -190,10 +190,11 @@ const LOG_PER_MINUTE = 30;
  * App errors into app_errors, at the severity the app chose (plan section 14: log_error would
  * demote a chrome-extension:// page to info, so the apps come through here instead).
  *
- * A report from the Chrome extension names nobody (src/logPrivacy.ts, DEVIATIONS 64): no
- * client_id and no user_id, but `user_ref` and `client_ref` (keyed pseudonyms), only the
- * context keys the extension is known to send, and emails, numbers, uuids and SIDs redacted
- * from the text. A report from the mobile app is stored as it always was.
+ * A report from the Chrome extension carries no direct identifier (src/logPrivacy.ts,
+ * DEVIATIONS 64): no client_id and no user_id, but `user_ref` and `client_ref` (keyed
+ * pseudonyms), only the context keys the extension is known to send, and emails, numbers,
+ * uuids and SIDs redacted from the text. Pseudonymous is not anonymous, so those rows are read
+ * only in summary (SETUP.md section 10). A report from the mobile app is stored as it always was.
  */
 export async function log(env: Env, req: Request): Promise<Response> {
   const { admin, userId, ctx } = await requireLogin(env, req);

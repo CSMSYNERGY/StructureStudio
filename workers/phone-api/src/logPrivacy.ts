@@ -2,14 +2,18 @@
 //
 // The extension's privacy policy claims the Chrome Web Store's Limited Use rules: people here
 // may read user data only with the user's consent, for security, to comply with the law, or
-// aggregated and anonymised for running the service. Staff read app_errors row by row, so an
-// extension report must not say who it came from. It keeps:
+// aggregated and anonymised for running the service. So an extension report carries no direct
+// identifier. It keeps:
 //   - no client_id and no context.user_id. Instead `user_ref` and `client_ref`: an HMAC-SHA-256
 //     of the id under the Worker secret LOG_PSEUDONYM_KEY, cut to 24 hex characters. One
 //     person's repeated errors still group together, and when someone asks for help (consent)
-//     scripts/log-ref.mjs turns THEIR id into the ref to look for. Without the key nobody can
-//     go from a ref back to a person, and the key is only in the Worker's secrets and with
-//     whoever runs that script. No key: no refs at all, never the raw id or an unkeyed hash.
+//     scripts/log-ref.mjs turns THEIR id into the ref to look for. The key stops anyone
+//     recomputing a ref from an id they hold. No key: no refs at all, never the raw id or an
+//     unkeyed hash.
+//   It is pseudonymous, NOT anonymous: a report's time and codes can be lined up with
+//   phone_calls, which names the person. So these rows (and the Worker's own edge:phone-api
+//   rows) are read only in summary unless the person consents, for security or for the law
+//   (SETUP.md section 10). That rule is the policy's; nothing here can enforce it.
 //   - only the context keys the extension is known to send (EXTENSION_CONTEXT_KEYS), scalar
 //     values only. Any other key is dropped and only its name is listed in `dropped`, so a new
 //     key from a newer build shows up as something to add here rather than vanishing quietly.
@@ -94,7 +98,7 @@ const SCRUB: RegExp[] = [
   /\bu_[0-9a-f]{32}_g\d+(?:_dev)?/gi,
   // Twilio SIDs: two letters and 32 hex (CA call, SM/MM text, PN number, ...).
   /(?<![a-z0-9])[a-z]{2}[0-9a-f]{32}(?![a-z0-9])/gi,
-  // uuids (users, contacts, calls, threads "c:<uuid>").
+  // uuids (users, contacts and so a saved customer's thread key, calls).
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
   // Any other run of 32 or more hex characters (a uuid without its hyphens).
   /[0-9a-f]{32,}/gi,

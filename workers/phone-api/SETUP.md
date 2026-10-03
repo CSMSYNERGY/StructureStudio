@@ -140,10 +140,11 @@ Once the portal's Phone tab ships, it owns these settings.
   - Warm transfer: the teammate's app rings with the call's name on it; when they answer all three talk; you hang up and they carry on. A teammate who doesn't answer after you've hung up leaves the customer in voicemail, not in silence.
   - With `TRANSCRIBE=on`, leave a 10-second message and see the text on the call.
   - Text a photo to the number and open it from the thread.
-- After every deploy, check `app_errors` for source `edge:phone-api` and resolve our own test rows:
+- After every deploy, check `app_errors` for source `edge:phone-api` with the summary query in section 10 step 2, not a list of rows: these rows are written while the Worker handles everyone's calls and texts, the Chrome extension's users included. Your own test rows you may list and resolve by your test business:
   ```sql
   select created_at, severity, code, message from public.app_errors
-   where source = 'edge:phone-api' and not resolved order by created_at desc limit 50;
+   where source = 'edge:phone-api' and client_id = '<your test business>' and not resolved
+   order by created_at desc limit 50;
   ```
 
 ## 9. The rename to My Synergy Phone (2026-10-01)
@@ -151,34 +152,64 @@ Once the portal's Phone tab ships, it owns these settings.
 The extension and the app send their errors to `/log` with a source code, and the rename changed those codes: `my-synergy-phone-extension` and `my-synergy-phone-mobile` replace `sss-phone-extension` and `sss-phone-mobile`. This Worker accepts all four (`LOG_SOURCES` in `src/routes/me.ts`).
 
 1. Deploy this Worker FIRST, before anyone installs a renamed extension or app build. The Worker from before the rename knows only the two old codes and answers any other source with 400 "Unknown log source.", so every error a renamed build reported would be dropped and nothing would reach `app_errors`. To check, have a renamed build send one error and find its row in `app_errors`.
-2. While both kinds of build are installed, look for app errors under both names (`like`, not `in`, because these are patterns):
+2. While both kinds of build are installed, look for app errors under both names. The mobile app's you may list:
    ```sql
    select created_at, source, severity, code, message from public.app_errors
-    where (source like 'sss-phone-%' or source like 'my-synergy-phone-%') and not resolved
+    where source in ('my-synergy-phone-mobile', 'sss-phone-mobile') and not resolved
     order by created_at desc limit 50;
    ```
+   The Chrome extension's (`my-synergy-phone-extension`, `sss-phone-extension`) only in summary (section 10 step 2).
 3. Once no installed build sends the old codes, drop them from `LOG_SOURCES` and redeploy.
 
-## 10. Error reports from the Chrome extension (2026-10-03)
+## 10. Error reports and the Chrome extension's Limited Use rules (2026-10-03)
 
-The extension's privacy policy claims the Chrome Web Store's Limited Use rules, so its error reports store no user id, no business id and no Twilio identity, call SID, email or phone number (DEVIATIONS 64). Each report has `context.user_ref` and `context.client_ref` instead: a keyed pseudonym that groups one person's errors without saying who they are.
+The extension's privacy policy claims the Chrome Web Store's Limited Use rules: people here may read an extension user's data only with that person's consent (they ask for help), for security, or when the law requires it, and for running the service only aggregated and anonymised. So the extension's error reports store no user id, no business id and no Twilio identity, call SID, email or phone number (DEVIATIONS 64). Each has `context.user_ref` and `context.client_ref` instead: a keyed pseudonym that groups one person's errors.
+
+Pseudonymous is not anonymous. Anyone who can query the database can line a report's time and its `where: "call"` or `twilio_code` up with `phone_calls` or `phone_call_events`, which name the person, and one match names every report under that ref. The Worker's own rows (`edge:phone-api`) say more still: business ids, call ids, sometimes a contact id or a number in `url` or `message`, and a row does not say whether the extension or the app was involved. What keeps the policy true is how both are read:
 
 1. Set `LOG_PSEUDONYM_KEY` (section 3) before deploying this Worker. Without it the reports are still saved, with no refs, and `log_pseudonym_key_missing` appears in `app_errors` at `warn`.
-2. Triage reads the rows as before. To see how many people one error hits, count refs, not rows:
+2. Routine triage (after a deploy, a daily look, an agent doing it for us) reads the extension's reports and the Worker's own rows only in summary, with this query, and never lists them. It shows no ref, no id and no time, and it scrubs emails, ids, SIDs and numbers out of the message as it groups:
    ```sql
-   select code, message, count(*) as reports, count(distinct context->>'user_ref') as people
-     from public.app_errors
-    where source in ('my-synergy-phone-extension', 'sss-phone-extension') and not resolved
-    group by code, message order by people desc, reports desc limit 50;
+   select source, code, severity, s.message, count(*) as reports,
+          count(distinct context->>'user_ref') as people, count(distinct client_id) as businesses
+     from public.app_errors,
+          lateral (select regexp_replace(regexp_replace(regexp_replace(regexp_replace(message,
+                     '[^\s@]+(@|%40)[^\s@]+', '[email]', 'g'),
+                     '\w*[0-9a-fA-F]{32}\w*', '[id]', 'g'),
+                     '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', '[id]', 'g'),
+                     '\+?\(?\d[\d\s().-]{8,}\d', '[number]', 'g') as message) s
+    where source in ('my-synergy-phone-extension', 'sss-phone-extension', 'edge:phone-api')
+      and not resolved and created_at > now() - interval '7 days'
+    group by 1, 2, 3, 4
+    order by reports desc limit 50;
    ```
+   `people` counts the extension's reporters, `businesses` the businesses in the Worker's rows. Change the window to suit, but keep times out of the output. Resolve a whole group at once (`update public.app_errors set resolved = true, resolved_at = now(), resolution_note = '<why>' where source = '<source>' and code = '<code>' and not resolved`) rather than reading its rows. Never join these rows to `phone_calls`, `phone_call_events` or the user list by time. The same rule covers the Worker's Cloudflare logs (`observability` is on in `wrangler.jsonc`): their request URLs and console lines carry the same ids.
+
+   Open single rows (`select *`) only for the person who asked for help (step 3, and only theirs), for a security incident, when the law requires it, or for your own test rows (the Worker's by your test business, section 8; the extension's by step 3 with your own test user).
 3. When someone asks for help with the extension, find THEIR reports, and only theirs. From this directory, with the key from the password manager:
    ```
    $env:LOG_PSEUDONYM_KEY = "<the key>"
    node scripts/log-ref.mjs --user <their user id> --client <their client id>
    Remove-Item Env:LOG_PSEUDONYM_KEY
    ```
-   It prints their `user_ref` and `client_ref` and the query to run. It reads and writes nothing itself. Use it only for the person who asked, for security, or when the law requires it.
-4. Deleting a business (admin-catalog's tenant wipe) removes its rows by `client_id`, so it no longer reaches the extension's reports. Those rows name nobody; if a business asks for its reports to be deleted, find them with `--client` and delete them by hand.
+   It prints their `user_ref` and `client_ref` and the query to run. It reads and writes nothing itself. With their consent the Worker's rows about their own calls may be read too (`context->>'callId'` of a call they name).
+4. Once, when this ships: the extension's reports from before it hold user ids, business ids, Twilio identities, numbers and emails, in `context` AND in `message`, so stripping keys is not enough. Keep a summary, then delete every one of them, resolved or not. They are the extension rows with `context.user_id`, a key no new report has, so rows the old Worker wrote during the deploy are caught too:
+   ```sql
+   -- a. the summary to keep: paste the output into the work log
+   select source, code, severity, count(*) as reports, count(distinct context->>'user_id') as people
+     from public.app_errors
+    where source in ('my-synergy-phone-extension', 'sss-phone-extension') and context ? 'user_id'
+    group by 1, 2, 3 order by reports desc;
+   -- b. delete them
+   delete from public.app_errors
+    where source in ('my-synergy-phone-extension', 'sss-phone-extension') and context ? 'user_id';
+   -- c. must say 0 (run it again a few minutes later, after the last old isolate is gone)
+   select count(*) from public.app_errors
+    where source in ('my-synergy-phone-extension', 'sss-phone-extension')
+      and (context ? 'user_id' or context ? 'identity' or client_id is not null);
+   ```
+   The summary keeps what the rows were good for: which errors came back, and how often.
+5. Deleting a business (admin-catalog's tenant wipe) removes its rows by `client_id`, so it no longer reaches the extension's reports. Those rows hold no business id; if a business asks for its reports to be deleted, find them with `--client` and delete them by hand.
 
 ## Rolling back
 
