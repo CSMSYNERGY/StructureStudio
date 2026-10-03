@@ -1051,6 +1051,677 @@ function AdmBilling() {
   );
 }
 
+// ── Phone & text billing (global) ───────────────────────────────────────────
+// Carolyn, 10-02 call: every call minute and text a builder uses comes out of their prepaid
+// wallet, one line per call or text, like GoHighLevel — "super, super important". Ahsan's
+// decisions the same day: the price is Twilio's REAL cost × one markup she edits here, and it
+// ships switched off. Until she starts charging, the phone server still records what every
+// call and text cost us and what it WOULD have charged, so the report on this card is how she
+// picks the markup: real Twilio numbers against what GHL charges her today.
+//
+// admin-catalog's phone_billing_get / _set / _arm / phone_usage_report back it, all four on
+// can_bill (an operator without it sees the server's own sentence and nothing else — the
+// report is our margin on every builder). The rules behind every number — what may be saved,
+// what "on" means, how a month adds up — are in _shared/phoneBillingAdmin.ts with its tests;
+// this card only formats them. The one sum done here is the markup example under the input,
+// which mirrors previewChargeMicros there (keep them the same).
+//
+// Money is in MICROS (millionths of a dollar) on the wire: a call minute at 2× is about
+// $0.028, which cents cannot hold. Inputs are typed in dollars ("0.0200") and converted with
+// Math.round(× 1e6); the server refuses anything that is not a whole number of micros inside
+// its range, so a stray keystroke is a refusal, never a different price.
+const pbUsd = (micros, dp) => {
+  if (micros == null || !Number.isFinite(Number(micros))) return "—";
+  const n = Number(micros);
+  // 4 decimals below $10 — a month of one builder's texts is often cents, and $0.03 vs $0.0256
+  // is exactly the difference being compared with GHL — 2 above, where 4 is noise.
+  const d = dp != null ? dp : (Math.abs(n) < 10000000 ? 4 : 2);
+  return (n < 0 ? "−$" : "$") + (Math.abs(n) / 1e6).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+};
+// micros → the text an input shows: "0.0045", "0.02", "" for none.
+const pbMicrosText = (m) => {
+  if (m == null) return "";
+  const parts = (Number(m) / 1e6).toFixed(6).split(".");
+  const frac = parts[1].replace(/0+$/, "");
+  return parts[0] + "." + (frac.length < 2 ? (frac + "00").slice(0, 2) : frac);
+};
+// "$0.02" / "0.02" → 20000; "" → null; anything else → NaN (shown as an error, never sent).
+const pbDollarsToMicros = (s) => {
+  const t = String(s == null ? "" : s).trim().replace(/^\$/, "").replace(/,/g, "");
+  if (!t) return null;
+  if (!/^\d*\.?\d*$/.test(t)) return NaN;
+  const n = Number(t);
+  return Number.isFinite(n) ? Math.round(n * 1e6) : NaN;
+};
+const pbNum = (n, dp = 0) => Number(n || 0).toLocaleString("en-US", { maximumFractionDigits: dp });
+// The worker's rule (and previewChargeMicros'): round(cost × markup) half up, on the markup's
+// thousandths, capped at cap × units. Used only for the example line under the markup.
+const pbCharge = (cost, markup, cap, units = 1) => {
+  if (markup == null || !Number.isFinite(markup)) return null;
+  let c = Math.floor((cost * Math.round(markup * 1000) + 500) / 1000);
+  if (cap != null && Number.isFinite(cap)) c = Math.min(c, Math.round(cap * units));
+  return c;
+};
+
+// The money settings the form edits, in the order the card shows them. [column, label, can be blank]
+const PB_MONEY = [
+  ["ceiling_min_micros", "Most per call minute", true],
+  ["ceiling_seg_micros", "Most per text segment", true],
+  ["carrier_fee_out_micros", "Carrier fee per text segment sent", false],
+  ["carrier_fee_in_micros", "Carrier fee per text segment received", false],
+  ["fallback_out_min_micros", "Outgoing call, per minute", false],
+  ["fallback_in_min_micros", "Incoming call, per minute", false],
+  ["fallback_client_min_micros", "App-to-app call leg, per minute", false],
+  ["fallback_sms_seg_micros", "Text, per segment", false],
+];
+
+function pbFormFrom(s) {
+  const f = {
+    markup: s.markup == null ? "" : String(s.markup),
+    floor_cents: (Number(s.floor_cents || 0) / 100).toFixed(2),
+    fallback_after_hours: String(s.fallback_after_hours == null ? "" : s.fallback_after_hours),
+    bill_unanswered_calls: s.bill_unanswered_calls === true,
+  };
+  for (const [k] of PB_MONEY) f[k] = pbMicrosText(s[k]);
+  return f;
+}
+
+// The form as a patch of ONLY what changed, plus the first thing that can't be read. Sending
+// only the changes means two operators editing different fields cannot undo each other.
+function pbPatchFrom(form, s) {
+  const patch = {};
+  const mk = String(form.markup).trim();
+  if (mk === "") { if (s.markup != null) patch.markup = null; }
+  else {
+    const n = Number(mk);
+    if (!/^\d*\.?\d*$/.test(mk) || !Number.isFinite(n)) return { patch, error: "The markup must be a number, like 2 or 2.5." };
+    if (n !== s.markup) patch.markup = n;
+  }
+  const fl = String(form.floor_cents).trim().replace(/^\$/, "");
+  if (fl === "" || !/^\d*\.?\d*$/.test(fl)) return { patch, error: "The minimum balance must be an amount like 5.00." };
+  const flc = Math.round(Number(fl) * 100);
+  if (flc !== s.floor_cents) patch.floor_cents = flc;
+  for (const [k, label, blankOk] of PB_MONEY) {
+    const v = pbDollarsToMicros(form[k]);
+    if (Number.isNaN(v)) return { patch, error: `${label}: enter an amount like 0.0200.` };
+    if (v === null && !blankOk) return { patch, error: `${label} can't be blank.` };
+    if (v !== s[k]) patch[k] = v;
+  }
+  const h = String(form.fallback_after_hours).trim();
+  if (!/^\d+$/.test(h)) return { patch, error: "The wait before using fallback rates must be a whole number of hours." };
+  if (Number(h) !== s.fallback_after_hours) patch.fallback_after_hours = Number(h);
+  if (form.bill_unanswered_calls !== s.bill_unanswered_calls) patch.bill_unanswered_calls = form.bill_unanswered_calls;
+  return { patch, error: null };
+}
+
+function AdmMoneyInput({ value, onChange, placeholder, disabled }) {
+  return (
+    <div style={{ position: "relative" }}>
+      <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: "#94A3B8", pointerEvents: "none" }}>$</span>
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} disabled={disabled}
+        inputMode="decimal" style={{ ...S.input, paddingLeft: 22 }} />
+    </div>
+  );
+}
+
+const PB_HELP = { fontSize: 11.5, color: "#64748B", marginTop: 4, lineHeight: 1.45 };
+
+// The confirm for Start / Stop / change who is charged. A dialog rather than window.confirm
+// because the point is to say, in full, what will start being charged — who, at what price,
+// what is free, and who gets blocked — before anyone is charged a cent.
+function AdmPhoneArmDialog({ plan, onClose, onConfirm, busy, err }) {
+  const s = plan.settings;
+  const caps = [];
+  if (s.ceiling_min_micros != null) caps.push(`${pbUsd(s.ceiling_min_micros)} a call minute`);
+  if (s.ceiling_seg_micros != null) caps.push(`${pbUsd(s.ceiling_seg_micros)} a text segment`);
+  const stopping = plan.target === "off";
+  const li = { marginBottom: 6 };
+  return (
+    <AdmOverlay onClose={busy ? () => {} : onClose} maxWidth={560} labelledBy="adm-pb-arm-ttl">
+      <div id="adm-pb-arm-ttl" style={{ fontSize: 17, fontWeight: 800, color: stopping ? "#991B1B" : "#1E293B", marginBottom: 10 }}>
+        {stopping ? "Stop charging for calls and texts?" : plan.wasOn ? "Change who is charged for calls and texts?" : "Start charging for calls and texts?"}
+      </div>
+      {stopping ? (
+        <div style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, marginBottom: 16 }}>
+          Nothing new is charged from now on, and nobody is blocked for a low balance. We keep recording what
+          every call and text costs, so the report below keeps filling in. Charges already made stay on the
+          wallets. The pilot list is cleared.
+        </div>
+      ) : (
+        <div style={{ fontSize: 13.5, color: "#334155", lineHeight: 1.55, marginBottom: 14 }}>
+          <div style={{ marginBottom: 8 }}>
+            <strong>Who: </strong>
+            {plan.target === "all"
+              ? <>every builder on the platform{plan.exemptCount > 0 ? ` (${plan.exemptCount} non-billable builder${plan.exemptCount === 1 ? " is" : "s are"} never charged)` : ""}.</>
+              : <>only {plan.pilots.map((c) => c.name).join(", ")}. Everyone else&rsquo;s costs are only recorded.</>}
+          </div>
+          <ul style={{ margin: "0 0 0 18px", padding: 0 }}>
+            <li style={li}>Every call minute, outgoing and incoming, and every text segment, sent and received, from now on comes out of their wallet, each as its own line under Transactions.</li>
+            <li style={li}>Price: Twilio&rsquo;s real cost &times; <strong>{s.markup}</strong>{caps.length ? <>, never more than {caps.join(" or ")}</> : null}.</li>
+            <li style={li}>Missed calls are {s.bill_unanswered_calls ? <strong>charged</strong> : "free"}. Texts that fail to send are never charged.</li>
+            <li style={li}>Nothing that happened before now is charged.</li>
+            <li style={li}>A builder whose wallet falls below <strong>{money(s.floor_cents)}</strong> can&rsquo;t make calls or send texts until they add funds. If they have auto top-up on, it runs first. Incoming calls always ring.</li>
+          </ul>
+          {!plan.serverSwitchOn && (
+            <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", color: "#92400E", fontSize: 12.5, marginTop: 10 }}>
+              The server switch is still off, so nothing is actually charged, and nobody is blocked, until it&rsquo;s turned on at the server.
+            </div>
+          )}
+        </div>
+      )}
+      {err && <div style={S.err}>{err}</div>}
+      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+        <button type="button" onClick={onClose} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
+        <button type="button" onClick={onConfirm} disabled={busy}
+          style={{ ...S.btn(stopping ? "#DC2626" : ACCENT, "#FFF"), opacity: busy ? 0.7 : 1 }}>
+          {busy ? "Saving…" : stopping ? "Stop charging" : plan.wasOn ? "Change who is charged" : "Start charging"}
+        </button>
+      </div>
+    </AdmOverlay>
+  );
+}
+
+function AdmPhoneBilling({ clients }) {
+  const [cfg, setCfg] = useState(null);                 // phone_billing_get payload; null = loading
+  const [loadErr, setLoadErr] = useState(null);
+  const [form, setForm] = useState(null);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveMsg, setSaveMsg] = useState(null);         // { ok } | { err }
+  const [showEstimates, setShowEstimates] = useState(false);
+  const [who, setWho] = useState("pilot");              // "pilot" | "all"
+  const [pilotPick, setPilotPick] = useState([]);
+  const [armPlan, setArmPlan] = useState(null);         // the dialog's plan while it is open
+  const [armBusy, setArmBusy] = useState(false);
+  const [armErr, setArmErr] = useState(null);
+  const [armMsg, setArmMsg] = useState(null);
+  // The report month is a UTC month — Twilio's daily totals are UTC days and the server cuts
+  // the month the same way.
+  const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
+  const [report, setReport] = useState(null);           // null = loading | { err } | payload
+  const [showCats, setShowCats] = useState(false);
+  const reportSeq = useRef(0);
+
+  // Applies a settings payload to the card: the form, and who-is-charged as it really is now.
+  const apply = useCallback((c) => {
+    setCfg(c);
+    setForm(pbFormFrom(c.settings));
+    const mode = c.charging && c.charging.mode;
+    setWho(mode === "all" ? "all" : "pilot");
+    setPilotPick(mode === "pilot" ? (c.settings.pilot_client_ids || []) : []);
+  }, []);
+
+  const load = useCallback(async () => {
+    setLoadErr(null);
+    try { apply(await adminApi("phone_billing_get")); }
+    catch (e) { setLoadErr(e.message || "Couldn't load phone billing."); }
+  }, [apply]);
+  useEffect(() => { load(); }, [load]);
+
+  // Month changes race: only the newest request may land, or a slow "September" would paint
+  // over the "October" the operator is now looking at.
+  const loadReport = useCallback(async (m) => {
+    const seq = ++reportSeq.current;
+    setReport(null);
+    try {
+      const r = await adminApi("phone_usage_report", { month: m });
+      if (seq === reportSeq.current) setReport(r);
+    } catch (e) {
+      if (seq === reportSeq.current) setReport({ err: e.message || "Couldn't load the report." });
+    }
+  }, []);
+  useEffect(() => { if (/^\d{4}-\d{2}$/.test(month)) loadReport(month); }, [month, loadReport]);
+
+  const s = cfg && cfg.settings;
+  const charging = (cfg && cfg.charging) || { mode: "off", pilotIds: [], activeMeters: [], problem: null };
+  const isOn = charging.mode !== "off";
+  const parsed = useMemo(() => (form && s ? pbPatchFrom(form, s) : { patch: {}, error: null }), [form, s]);
+  const dirty = Object.keys(parsed.patch).length > 0;
+  const clientList = clients || [];
+  const nameOf = (id) => { const c = clientList.find((x) => x.client_id === id); return (c && (c.company_name || c.client_id)) || id; };
+  const exemptIds = new Set(clientList.filter((c) => c.billingExempt).map((c) => c.client_id));
+
+  // The example under the markup: today's typical Twilio prices (our fallback rates, which are
+  // set from them) through the same rule the worker charges with.
+  const example = useMemo(() => {
+    if (!form || !s) return null;
+    const mk = Number(String(form.markup).trim());
+    if (!String(form.markup).trim() || !Number.isFinite(mk) || mk < 1 || mk > 10) return null;
+    // What the field says, or the saved value while it says nothing usable. A blank CAP is not
+    // "nothing usable": it is the operator removing the cap, and the example must show the
+    // uncapped price they are about to save, not the cap they just cleared. A blank required
+    // field can't be saved at all (pbPatchFrom refuses it), so that one keeps the saved value.
+    const blankOk = new Set(PB_MONEY.filter((m) => m[2]).map((m) => m[0]));
+    const v = (k) => {
+      const x = pbDollarsToMicros(form[k]);
+      if (x === null && blankOk.has(k)) return null;
+      return Number.isFinite(x) ? x : s[k];
+    };
+    const minCost = v("fallback_out_min_micros");
+    const segCost = (v("fallback_sms_seg_micros") || 0) + (v("carrier_fee_out_micros") || 0);
+    return {
+      mk, minCost, segCost,
+      minCharge: pbCharge(minCost, mk, v("ceiling_min_micros")),
+      segCharge: pbCharge(segCost, mk, v("ceiling_seg_micros")),
+    };
+  }, [form, s]);
+
+  const setField = (k, val) => { setForm((f) => ({ ...f, [k]: val })); setSaveMsg(null); };
+
+  const save = async () => {
+    if (!dirty || parsed.error || saveBusy) return;
+    if (isOn && !window.confirm("Charging is on.\n\nThe new prices apply from the next charge run (within about 5 minutes), including calls and texts still waiting for Twilio's price.\n\nSave them?")) return;
+    setSaveBusy(true); setSaveMsg(null);
+    try {
+      const r = await adminApi("phone_billing_set", parsed.patch);
+      setCfg((c) => ({ ...c, settings: r.settings, charging: r.charging || c.charging }));
+      setForm(pbFormFrom(r.settings));
+      setSaveMsg({ ok: r.note || "Saved." });
+      // "Would have charged" is priced at today's markup and caps, so the report is now stale.
+      loadReport(month);
+    } catch (e) { setSaveMsg({ err: e.message || "Couldn't save." }); }
+    setSaveBusy(false);
+  };
+
+  const openArm = (target) => {
+    setArmErr(null); setArmMsg(null);
+    setArmPlan({
+      target,
+      wasOn: isOn,
+      settings: s,
+      serverSwitchOn: !!(cfg && cfg.serverSwitchOn),
+      pilots: pilotPick.map((id) => ({ id, name: nameOf(id) })),
+      exemptCount: clientList.filter((c) => c.billingExempt).length,
+    });
+  };
+  const confirmArm = async () => {
+    if (!armPlan) return;
+    setArmBusy(true); setArmErr(null);
+    try {
+      const body = armPlan.target === "off" ? { armed: false }
+        : armPlan.target === "pilot" ? { armed: true, pilot_client_ids: armPlan.pilots.map((c) => c.id) }
+        : { armed: true, scope: "all" };
+      const r = await adminApi("phone_billing_arm", body);
+      apply({ ...cfg, settings: r.settings, meters: r.meters, charging: r.charging, serverSwitchOn: r.serverSwitchOn,
+        pilots: (r.settings.pilot_client_ids || []).map((id) => ({ clientId: id, companyName: nameOf(id) })) });
+      setArmMsg(r.note || "Saved.");
+      setArmPlan(null);
+    } catch (e) { setArmErr(e.message || "Couldn't change charging."); }
+    setArmBusy(false);
+  };
+
+  // What the primary button would do, and whether it would change anything.
+  const wantTarget = who === "all" ? "all" : "pilot";
+  const samePilots = charging.mode === "pilot" && pilotPick.length === charging.pilotIds.length && pilotPick.every((id) => charging.pilotIds.indexOf(id) !== -1);
+  const armChanges = !(charging.mode === wantTarget && (wantTarget === "all" || samePilots));
+  const armBlocked = !s ? "Loading…"
+    : s.markup == null ? "Set a markup and save it first."
+    : dirty ? "Save or undo your price changes first — charging uses the saved prices."
+    : wantTarget === "pilot" && pilotPick.length === 0 ? "Add at least one pilot builder, or choose every builder."
+    : null;
+
+  const exportCsv = () => {
+    const r = report;
+    if (!r || r.err) return;
+    const d = (m) => (m == null ? "" : Number((Number(m) / 1e6).toFixed(6)));
+    // Numbers are written bare. csvEscape's formula guard prefixes a leading "-" with an
+    // apostrophe, which would turn every negative margin into text in Excel; a JS number
+    // cannot carry a formula, so only strings go through it.
+    const cell = (v) => (typeof v === "number" ? String(v) : csvEscape(v));
+    const headers = ["Month", "Builder", "Builder ID", "Calls", "Outgoing calls", "Incoming calls", "Texts", "Texts sent", "Texts received",
+      "Call minutes", "Text segments", "Our cost (USD)", "Priced by Twilio", "Estimated", "Partly estimated", "Charged",
+      "Would have charged at today's markup", "Absorbed", "Margin", "Margin if charging had been on", "Waiting for a price", "Failed"];
+    const line = (t, name, id) => [r.month, name, id, t.calls, t.callsOut, t.callsIn, t.texts, t.textsOut, t.textsIn, t.minutes, t.segments,
+      d(t.costMicros), d(t.costTwilioMicros), d(t.costEstimateMicros), d(t.costMixedMicros), d(t.chargedMicros), d(t.wouldChargeMicros),
+      d(t.absorbedMicros), d(t.marginMicros), d(t.projectedMarginMicros), t.counts.pending, t.counts.failed];
+    const rows = [headers, ...r.tenants.map((t) => line(t, t.companyName, t.clientId)), line(r.totals, "All builders", ""), [],
+      ["Twilio's bill, days covered", d(r.account.twilioMicros), `${r.account.daysCovered} of ${r.account.daysExpected} days`],
+      ["Our cost on those days", d(r.account.ourCostCoveredMicros)],
+      ["Gap (not matched to a call or text)", d(r.account.gapMicros)],
+      [], ["Twilio category", "Count", "Usage", "Price (USD)", "In the total"],
+      ...r.account.categories.map((c) => [c.category, c.count, c.usage, d(c.priceMicros), c.inTotal ? "yes" : "no (inside another category)"])];
+    downloadFile(`phone-usage-${r.month}.csv`, rows.map((row) => row.map(cell).join(",")).join("\r\n"));
+  };
+
+  const modeChip = charging.mode === "all" ? <AdmChip tone="good">On for every builder</AdmChip>
+    : charging.mode === "pilot" ? <AdmChip tone="on">On for {charging.pilotIds.length} pilot builder{charging.pilotIds.length === 1 ? "" : "s"}</AdmChip>
+    : charging.mode === "partial" ? <AdmChip tone="danger">Needs attention</AdmChip>
+    : <AdmChip tone="neutral">Off — recording costs only</AdmChip>;
+
+  const TH = { textAlign: "left", fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4, padding: "8px 10px", borderBottom: "1px solid #E2E8F0", whiteSpace: "nowrap" };
+  const TD = { fontSize: 13, color: "#1E293B", padding: "9px 10px", borderBottom: "1px solid #F1F5F9", whiteSpace: "nowrap" };
+  const R = { textAlign: "right" };
+  const rep = report && !report.err ? report : null;
+  const tot = rep && rep.totals;
+  const neg = (m) => (m != null && m < 0 ? { color: "#B91C1C" } : null);
+
+  return (
+    <div style={S.card}>
+      <CardHead title="Phone & text billing"
+        desc="Calls and texts come out of each builder's wallet at Twilio's real cost × your markup, one line per call or text under their Transactions. While charging is off we still record what every call and text costs us and what it would have charged, so you can compare with GoHighLevel before turning it on."
+        right={cfg ? modeChip : null} />
+
+      {loadErr && <div style={{ ...S.err, marginBottom: 0 }}>{loadErr}</div>}
+      {!cfg && !loadErr && <div><SkelBar w="60%" h={12} /><SkelBar w="40%" h={12} style={{ marginTop: 10 }} /></div>}
+
+      {cfg && form && (
+        <>
+          {/* ── Prices ─────────────────────────────────────────────── */}
+          <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", margin: "6px 0 10px" }}>Prices</div>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 220px", maxWidth: 300 }}>
+              <label style={S.lbl}>Markup (× Twilio&rsquo;s cost)</label>
+              <input value={form.markup} onChange={(e) => setField("markup", e.target.value)} placeholder="e.g. 2" inputMode="decimal" style={S.input} />
+              <div style={PB_HELP}>1 = at cost, 2 = double. Between 1 and 10. Charging can&rsquo;t start until this is set.</div>
+            </div>
+            <div style={{ flex: "1 1 160px", maxWidth: 200 }}>
+              <label style={S.lbl}>Minimum balance</label>
+              <AdmMoneyInput value={form.floor_cents} onChange={(v) => setField("floor_cents", v)} placeholder="5.00" />
+              <div style={PB_HELP}>Below this a builder can&rsquo;t make calls or send texts until they add funds. Incoming calls always ring.</div>
+            </div>
+            <div style={{ flex: "1 1 160px", maxWidth: 200 }}>
+              <label style={S.lbl}>Most per call minute</label>
+              <AdmMoneyInput value={form.ceiling_min_micros} onChange={(v) => setField("ceiling_min_micros", v)} placeholder="no cap" />
+              <div style={PB_HELP}>Optional. Never charge more than this a minute, whatever Twilio charged us.</div>
+            </div>
+            <div style={{ flex: "1 1 160px", maxWidth: 200 }}>
+              <label style={S.lbl}>Most per text segment</label>
+              <AdmMoneyInput value={form.ceiling_seg_micros} onChange={(v) => setField("ceiling_seg_micros", v)} placeholder="no cap" />
+              <div style={PB_HELP}>Optional. Use the caps to promise &ldquo;never more than you pay now&rdquo;.</div>
+            </div>
+          </div>
+          {example && (
+            <div style={{ fontSize: 12.5, color: "#334155", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 12px", marginTop: 12 }}>
+              At &times;{example.mk}, a typical outgoing call minute (about {pbUsd(example.minCost)} from Twilio) charges <strong>{pbUsd(example.minCharge)}</strong>,
+              and a typical text segment (about {pbUsd(example.segCost)} with the carrier fee) charges <strong>{pbUsd(example.segCharge)}</strong>.
+            </div>
+          )}
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, color: "#1E293B", cursor: "pointer", marginTop: 12 }}>
+            <input type="checkbox" checked={form.bill_unanswered_calls} onChange={(e) => setField("bill_unanswered_calls", e.target.checked)} style={{ marginTop: 3 }} />
+            <span>
+              Charge for missed calls
+              <span style={{ display: "block", fontSize: 12, color: "#64748B", marginTop: 2 }}>
+                Off: a call nobody answered and that left no voicemail is free to the builder. We still record its cost. A voicemail is always charged.
+              </span>
+            </span>
+          </label>
+
+          <button type="button" onClick={() => setShowEstimates((v) => !v)} aria-expanded={showEstimates}
+            style={{ background: "none", border: "none", padding: 0, marginTop: 14, color: ACCENT, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>
+            {showEstimates ? "▾" : "▸"} Carrier fees and fallback rates
+          </button>
+          {showEstimates && (
+            <div style={{ marginTop: 10, paddingLeft: 12, borderLeft: "2px solid #E2E8F0" }}>
+              <div style={{ ...PB_HELP, marginTop: 0, marginBottom: 8 }}>
+                Twilio bills US carrier fees on texts separately, so they aren&rsquo;t in a text&rsquo;s price. We add this estimate to every segment.
+                Check it against the carrier-fee line in Twilio&rsquo;s bill in the report below.
+              </div>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                {PB_MONEY.slice(2, 4).map(([k, label]) => (
+                  <div key={k} style={{ flex: "1 1 200px", maxWidth: 240 }}>
+                    <label style={S.lbl}>{label}</label>
+                    <AdmMoneyInput value={form[k]} onChange={(v) => setField(k, v)} />
+                  </div>
+                ))}
+              </div>
+              <div style={{ ...PB_HELP, marginTop: 14, marginBottom: 8 }}>
+                Twilio usually prices a call or text within minutes. If it still hasn&rsquo;t after this many hours, we use these rates
+                instead, and the report shows that line as estimated.
+              </div>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                <div style={{ flex: "0 1 140px" }}>
+                  <label style={S.lbl}>Wait (hours)</label>
+                  <input value={form.fallback_after_hours} onChange={(e) => setField("fallback_after_hours", e.target.value)} inputMode="numeric" style={S.input} />
+                </div>
+                {PB_MONEY.slice(4).map(([k, label]) => (
+                  <div key={k} style={{ flex: "1 1 180px", maxWidth: 220 }}>
+                    <label style={S.lbl}>{label}</label>
+                    <AdmMoneyInput value={form[k]} onChange={(v) => setField(k, v)} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {parsed.error && <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>{parsed.error}</div>}
+          {saveMsg && saveMsg.ok && <div style={{ ...S.okMsg, marginTop: 12, marginBottom: 0 }}>{saveMsg.ok}</div>}
+          {saveMsg && saveMsg.err && <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>{saveMsg.err}</div>}
+          <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
+            <button type="button" onClick={save} disabled={!dirty || !!parsed.error || saveBusy}
+              style={{ ...S.btn(ACCENT, "#FFF"), opacity: (!dirty || parsed.error || saveBusy) ? 0.55 : 1, cursor: dirty && !parsed.error && !saveBusy ? "pointer" : "not-allowed" }}>
+              {saveBusy ? "Saving…" : "Save prices"}
+            </button>
+            {dirty && (
+              <button type="button" onClick={() => { setForm(pbFormFrom(s)); setSaveMsg(null); }} disabled={saveBusy} style={S.btn("#F1F5F9", "#334155")}>Undo changes</button>
+            )}
+          </div>
+
+          {/* ── Who is charged ─────────────────────────────────────── */}
+          <div style={{ borderTop: "1px solid #E2E8F0", margin: "20px 0 0", paddingTop: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", marginBottom: 6 }}>Who is charged</div>
+            <div style={{ fontSize: 13, color: "#334155", lineHeight: 1.5 }}>
+              {charging.mode === "all" && <>Every builder is charged for calls and texts{charging.armedAt ? ` since ${new Date(charging.armedAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}. Non-billable builders never are.</>}
+              {charging.mode === "pilot" && <>Only {charging.pilotIds.map(nameOf).join(", ")} {charging.pilotIds.length === 1 ? "is" : "are"} charged{charging.armedAt ? ` since ${new Date(charging.armedAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}. Everyone else&rsquo;s costs are only recorded.</>}
+              {charging.mode === "off" && <>Nobody is charged. Every call and text&rsquo;s cost, and what it would have charged, is recorded for the report below.</>}
+              {charging.mode === "partial" && <span style={{ color: "#991B1B", fontWeight: 600 }}>{charging.problem}</span>}
+            </div>
+            <div style={{ fontSize: 12, color: cfg.serverSwitchOn ? "#15803D" : "#92400E", marginTop: 6 }}>
+              {cfg.serverSwitchOn
+                ? "Server switch: on."
+                : "Server switch: off. Until it's turned on at the server, nothing is charged and nobody is blocked, whatever this card says."}
+            </div>
+
+            <div style={{ display: "flex", gap: 18, flexWrap: "wrap", fontSize: 13, color: "#1E293B", marginTop: 12 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                <input type="radio" checked={who === "pilot"} onChange={() => setWho("pilot")} />
+                <span>Only these pilot builders</span>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                <input type="radio" checked={who === "all"} onChange={() => setWho("all")} />
+                <span>Every builder</span>
+              </label>
+            </div>
+            {who === "pilot" && (
+              <div style={{ marginTop: 10 }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                  {pilotPick.length === 0 && <span style={{ fontSize: 12.5, color: "#94A3B8" }}>No pilot builders yet.</span>}
+                  {pilotPick.map((id) => (
+                    <span key={id} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 999, padding: "3px 6px 3px 10px", fontSize: 12.5, color: "#1E293B" }}>
+                      {nameOf(id)}
+                      {exemptIds.has(id) && <span style={{ color: "#92400E", fontSize: 11.5 }} title="Non-billable builders are never charged">non-billable</span>}
+                      <button type="button" onClick={() => setPilotPick(pilotPick.filter((x) => x !== id))} aria-label={`Remove ${nameOf(id)}`}
+                        style={{ background: "none", border: "none", cursor: "pointer", color: "#64748B", fontSize: 14, lineHeight: 1, padding: "0 2px" }}>×</button>
+                    </span>
+                  ))}
+                </div>
+                <select value="" onChange={(e) => { const v = e.target.value; if (v && pilotPick.indexOf(v) === -1) setPilotPick(pilotPick.concat([v])); }}
+                  style={{ ...S.input, maxWidth: 320 }} disabled={!clients}>
+                  <option value="">{clients ? "Add a builder…" : "Loading builders…"}</option>
+                  {clientList.filter((c) => pilotPick.indexOf(c.client_id) === -1).map((c) => (
+                    <option key={c.client_id} value={c.client_id}>{(c.company_name || c.client_id) + (c.billingExempt ? " (non-billable)" : "")}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {armMsg && <div style={{ ...S.okMsg, marginTop: 12, marginBottom: 0 }}>{armMsg}</div>}
+            <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap", alignItems: "center" }}>
+              {/* Shown only when pressing it would change something: when what is picked above is
+                  already what is on, the only meaningful button is Stop. */}
+              {armChanges && (
+                <button type="button" onClick={() => openArm(wantTarget)} disabled={!!armBlocked}
+                  title={armBlocked || undefined}
+                  style={{ ...S.btn(ACCENT, "#FFF"), opacity: armBlocked ? 0.55 : 1, cursor: armBlocked ? "not-allowed" : "pointer" }}>
+                  {isOn ? "Change who is charged…" : "Start charging…"}
+                </button>
+              )}
+              {isOn && (
+                <button type="button" onClick={() => openArm("off")} style={S.btn("#FEF2F2", "#DC2626")}>Stop charging…</button>
+              )}
+              {armBlocked && armChanges && <span style={{ fontSize: 12, color: "#64748B" }}>{armBlocked}</span>}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ── Monthly report ─────────────────────────────────────────── */}
+      {cfg && (
+        <div style={{ borderTop: "1px solid #E2E8F0", margin: "20px 0 0", paddingTop: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B" }}>Monthly report</div>
+            <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} style={{ ...S.input, width: "auto", padding: "5px 8px" }} />
+            <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+              <button type="button" onClick={() => loadReport(month)} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "7px 12px" }}>Refresh</button>
+              <button type="button" onClick={exportCsv} disabled={!rep} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "7px 12px", opacity: rep ? 1 : 0.5 }}>Download CSV</button>
+            </div>
+          </div>
+          <div style={{ ...PB_HELP, marginTop: 0, marginBottom: 12 }}>
+            Months are UTC, like Twilio&rsquo;s bill. &ldquo;Would have charged&rdquo; uses today&rsquo;s saved markup and caps, for calls and texts recorded while charging was off for that builder.
+          </div>
+          {report === null && <SkelBar w="70%" h={12} />}
+          {report && report.err && <div style={{ ...S.err, marginBottom: 0 }}>{report.err}</div>}
+          {rep && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 12, marginBottom: 14 }}>
+                <AdmBillingStat label="Our cost" value={pbUsd(tot.costMicros)}
+                  sub={`Twilio's price ${pbUsd(tot.costTwilioMicros)} · estimated ${pbUsd(tot.costEstimateMicros + tot.costMixedMicros)}`} />
+                <AdmBillingStat label="Charged to builders" value={pbUsd(tot.chargedMicros)}
+                  sub={`${pbNum(tot.counts.charged)} ${tot.counts.charged === 1 ? "call or text" : "calls and texts"}`} />
+                <AdmBillingStat label="Would have charged" value={tot.wouldChargeMicros == null ? "Set a markup" : pbUsd(tot.wouldChargeMicros)}
+                  sub={rep.markup != null ? `at today's ×${rep.markup}, while charging was off` : "needs a markup to price"} />
+                <AdmBillingStat label="Absorbed" value={pbUsd(tot.absorbedMicros)} sub="missed calls, failed texts, non-billable builders" />
+                <AdmBillingStat label="Margin" value={<span style={neg(tot.marginMicros) || undefined}>{pbUsd(tot.marginMicros)}</span>}
+                  sub={tot.projectedMarginMicros != null && tot.projectedMarginMicros !== tot.marginMicros
+                    ? `charged − our cost · if charging had been on: ${pbUsd(tot.projectedMarginMicros)}`
+                    : "charged − our cost"} />
+                <AdmBillingStat label="Twilio's bill" value={pbUsd(rep.account.twilioMicros)}
+                  sub={rep.account.twilioMicros == null
+                    ? "no daily totals from Twilio yet"
+                    : `${rep.account.daysCovered} of ${rep.account.daysExpected} day${rep.account.daysExpected === 1 ? "" : "s"} so far · unmatched ${pbUsd(rep.account.gapMicros)}`} />
+              </div>
+              {rep.account.twilioMicros != null && (
+                <div style={{ ...PB_HELP, marginTop: 0, marginBottom: 10 }}>
+                  Unmatched = Twilio&rsquo;s bill minus the cost we matched to a call or text on the same days. A little is normal (rounding,
+                  estimated carrier fees). A lot means the carrier-fee estimate is off, or usage we don&rsquo;t track yet.
+                </div>
+              )}
+              {tot.counts.pending > 0 && (
+                <div style={{ ...PB_HELP, marginTop: 0, marginBottom: 6, color: "#92400E" }}>
+                  {pbNum(tot.counts.pending)} call{tot.counts.pending === 1 ? "" : "s"} or text{tot.counts.pending === 1 ? " is" : "s are"} still waiting for Twilio&rsquo;s price, so {tot.counts.pending === 1 ? "it isn't" : "they aren't"} in the money columns yet.
+                </div>
+              )}
+              {tot.counts.failed > 0 && (
+                <div style={{ ...PB_HELP, marginTop: 0, marginBottom: 6, color: "#B91C1C" }}>
+                  {pbNum(tot.counts.failed)} couldn&rsquo;t be priced or charged. The phone server&rsquo;s error log has the reason.
+                </div>
+              )}
+              {rep.truncated && (
+                <div style={{ ...PB_HELP, marginTop: 0, marginBottom: 6, color: "#B91C1C" }}>
+                  This month has more rows than the report reads at once ({pbNum(rep.rowCount)} shown). The totals are incomplete.
+                </div>
+              )}
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>
+                    <th style={TH}>Builder</th>
+                    <th style={{ ...TH, ...R }}>Calls</th><th style={{ ...TH, ...R }}>Texts</th>
+                    <th style={{ ...TH, ...R }}>Minutes</th><th style={{ ...TH, ...R }}>Segments</th>
+                    <th style={{ ...TH, ...R }}>Our cost</th><th style={{ ...TH, ...R }}>Charged</th>
+                    <th style={{ ...TH, ...R }}>Would have charged</th><th style={{ ...TH, ...R }}>Absorbed</th>
+                    <th style={{ ...TH, ...R }}>Margin</th>
+                  </tr></thead>
+                  <tbody>
+                    {rep.tenants.map((t) => {
+                      const est = t.costEstimateMicros + t.costMixedMicros;
+                      return (
+                        <tr key={t.clientId}>
+                          <td style={TD}>
+                            <div style={{ fontWeight: 700 }}>{t.companyName}</div>
+                            <div style={{ fontSize: 11, color: "#94A3B8" }}>
+                              {t.clientId}{t.counts.exempt > 0 ? " · non-billable" : ""}{t.counts.pending > 0 ? ` · ${t.counts.pending} waiting for a price` : ""}
+                            </div>
+                          </td>
+                          <td style={{ ...TD, ...R }} title={`${t.callsOut} outgoing · ${t.callsIn} incoming`}>{pbNum(t.calls)}</td>
+                          <td style={{ ...TD, ...R }} title={`${t.textsOut} sent · ${t.textsIn} received`}>{pbNum(t.texts)}</td>
+                          <td style={{ ...TD, ...R }}>{pbNum(t.minutes, 2)}</td>
+                          <td style={{ ...TD, ...R }}>{pbNum(t.segments, 2)}</td>
+                          <td style={{ ...TD, ...R }}>
+                            {pbUsd(t.costMicros)}
+                            {est > 0 && <div style={{ fontSize: 11, color: "#94A3B8" }}>{pbUsd(est)} estimated</div>}
+                          </td>
+                          <td style={{ ...TD, ...R, fontWeight: 700 }}>{pbUsd(t.chargedMicros)}</td>
+                          <td style={{ ...TD, ...R }}>{t.wouldChargeMicros == null ? "—" : pbUsd(t.wouldChargeMicros)}</td>
+                          <td style={{ ...TD, ...R }}>{pbUsd(t.absorbedMicros)}</td>
+                          <td style={{ ...TD, ...R, ...(neg(t.marginMicros) || {}) }}>
+                            {pbUsd(t.marginMicros)}
+                            {t.projectedMarginMicros != null && t.projectedMarginMicros !== t.marginMicros && (
+                              <div style={{ fontSize: 11, color: "#94A3B8" }} title="If charging had been on for this builder">if on: {pbUsd(t.projectedMarginMicros)}</div>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {rep.tenants.length === 0 && (
+                      <tr><td colSpan={10} style={{ ...TD, color: "#94A3B8", textAlign: "center", padding: 24 }}>No calls or texts recorded for {rep.month}.</td></tr>
+                    )}
+                    {rep.tenants.length > 1 && (
+                      <tr style={{ background: "#F8FAFC" }}>
+                        <td style={{ ...TD, fontWeight: 800 }}>All builders</td>
+                        <td style={{ ...TD, ...R, fontWeight: 700 }}>{pbNum(tot.calls)}</td>
+                        <td style={{ ...TD, ...R, fontWeight: 700 }}>{pbNum(tot.texts)}</td>
+                        <td style={{ ...TD, ...R, fontWeight: 700 }}>{pbNum(tot.minutes, 2)}</td>
+                        <td style={{ ...TD, ...R, fontWeight: 700 }}>{pbNum(tot.segments, 2)}</td>
+                        <td style={{ ...TD, ...R, fontWeight: 700 }}>{pbUsd(tot.costMicros)}</td>
+                        <td style={{ ...TD, ...R, fontWeight: 800 }}>{pbUsd(tot.chargedMicros)}</td>
+                        <td style={{ ...TD, ...R, fontWeight: 700 }}>{tot.wouldChargeMicros == null ? "—" : pbUsd(tot.wouldChargeMicros)}</td>
+                        <td style={{ ...TD, ...R, fontWeight: 700 }}>{pbUsd(tot.absorbedMicros)}</td>
+                        <td style={{ ...TD, ...R, fontWeight: 700, ...(neg(tot.marginMicros) || {}) }}>{pbUsd(tot.marginMicros)}</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {rep.account.categories.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <button type="button" onClick={() => setShowCats((v) => !v)} aria-expanded={showCats}
+                    style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>
+                    {showCats ? "▾" : "▸"} Twilio&rsquo;s bill by category
+                  </button>
+                  {showCats && (
+                    <div style={{ overflowX: "auto", marginTop: 8 }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead><tr>
+                          <th style={TH}>Category</th><th style={{ ...TH, ...R }}>Count</th><th style={{ ...TH, ...R }}>Usage</th>
+                          <th style={{ ...TH, ...R }}>Price</th><th style={TH}>In the total</th>
+                        </tr></thead>
+                        <tbody>
+                          {rep.account.categories.map((c) => (
+                            <tr key={c.category}>
+                              <td style={TD}><code>{c.category}</code></td>
+                              <td style={{ ...TD, ...R }}>{pbNum(c.count, 2)}</td>
+                              <td style={{ ...TD, ...R }}>{pbNum(c.usage, 2)}</td>
+                              <td style={{ ...TD, ...R }}>{pbUsd(c.priceMicros)}</td>
+                              <td style={{ ...TD, color: c.inTotal ? "#1E293B" : "#94A3B8" }}>{c.inTotal ? "Yes" : "No, it's inside another line"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {armPlan && (
+        <AdmPhoneArmDialog plan={armPlan} busy={armBusy} err={armErr}
+          onClose={() => { setArmPlan(null); setArmErr(null); }} onConfirm={confirmArm} />
+      )}
+    </div>
+  );
+}
+
 // ── The shell ────────────────────────────────────────────────────────────────
 // Seven sub-tabs, split by SCOPE — which is the thing the old flat toolbar hid. "Layout
 // Items" wrote one tenant's row while "Master Items" read the platform-wide palette, and
@@ -1059,7 +1730,7 @@ function AdmBilling() {
 // styles, then items, then prices.
 const ADM_TABS = [
   ["clients", "Builders",        "Every tenant on the platform — search, create, and open",       "global"],
-  ["billing", "Billing",         "Subscribers, revenue and billing health across the platform",   "global"],
+  ["billing", "Billing",         "Subscribers, revenue, billing health and phone & text charges across the platform", "global"],
   ["account", "Account",        "Owner logins, billing posture, and deletion",                   "client"],
   ["styles",  "Styles & Sizes", "Building styles this builder offers, and the sizes under each",  "client"],
   ["items",   "Items",          "Which placeable layout items this builder gets",                 "client"],
@@ -1250,6 +1921,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
           onPick={pickClient} onOpenAccount={onOpenAccount} onFlash={flash} onReload={loadClients} />
       )}
       {sub === "billing" && <AdmBilling />}
+      {sub === "billing" && <AdmPhoneBilling clients={clients} />}
       {sub === "master" && <AdmMaster master={master} masterErr={masterErr} />}
       {sub === "master" && <AdmTaxCodes />}
 

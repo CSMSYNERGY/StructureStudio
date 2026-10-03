@@ -3330,7 +3330,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         try { (globalThis as any).EdgeRuntime?.waitUntil?.(send); } catch { /* the ledger settles or it doesn't */ }
       } else {
         quoteTexted = outcome.sent;
-        if (!outcome.sent) quoteTextReason = outcome.reason || "failed";
+        // wallet_empty is the BUILDER's prepaid balance, and this response also reaches the
+        // anonymous shopper on the public designer: they read "failed", like any other send
+        // problem that is none of their business. Signed-in staff see the real reason.
+        if (!outcome.sent) {
+          quoteTextReason = outcome.reason === "wallet_empty" && !staffCaller ? "failed" : (outcome.reason || "failed");
+        }
       }
     }
 
@@ -3354,7 +3359,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // The quote-created text (above). quoteTextReason is null when it went, else one of:
       //   not_first_issue | test_mode | no_phone | timeout          (decided here)
       //   not_active | no_consent | opted_out | quiet_hours |
-      //   bad_number | damaged_number | failed                     (sendTenantSms's refusals)
+      //   bad_number | damaged_number | wallet_empty | failed      (sendTenantSms's refusals)
+      // wallet_empty (migration 259) is the usage floor while texts are armed, and only a
+      // signed-in staff caller is told it (anonymous callers get "failed"); the designer's
+      // ssQuoteTextReasonText has no case for it yet and falls through to "wallet empty".
       // The portal success screen shows "Texted a login link to …" / "Not texted — …"; the public
       // designer ignores both. not_first_issue is not news to anyone and should render nothing.
       quoteTexted,

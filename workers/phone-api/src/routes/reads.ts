@@ -20,6 +20,7 @@ import {
   contactEmailFilter, emailAddress, emailBlock, hasText, threadEmails,
   type Compose, type EmailInboundRow, type EmailSendRow, type EmailSettings, type ThreadEmail,
 } from "../emailThread";
+import { switchUnderWay } from "../handoff";
 import { ApiError, ok, pathParam, UUID_RE } from "../http";
 import { toE164, toIdentity } from "../identity";
 import { callIsMine, isTeamLevel, mayReadUnknownNumbers, maySendToContacts, phoneLevelOf, visibleContactIds } from "../scope";
@@ -63,6 +64,10 @@ const CALL_SELECT = `${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${VM_SE
  * transfer rang someone into) is how the latest warm transfer stands: callEvents.ts WarmInfo.
  * A teammate who does not answer changes nothing else on the row, so this is the only way an
  * app waiting on one learns it is over before its own ring limit.
+ *
+ * `error_code` is why a call was refused before it was placed (wallet_empty, minute_cap,
+ * not_your_customer, ...; null for every call that went out or came in), so Recents can say
+ * "Not placed: wallet empty" instead of a bare "failed".
  */
 export function callSummary(r: CallWithJoins, warm?: WarmInfo | null) {
   const contact = one(r.crm_contacts);
@@ -74,12 +79,17 @@ export function callSummary(r: CallWithJoins, warm?: WarmInfo | null) {
     contact_id: r.contact_id,
     contact_name: contact?.name ?? null,
     status: r.status,
+    error_code: r.error_code ?? null,
     started_at: r.started_at,
     duration_s: r.duration_s,
     answered_by: r.answered_by,
     voicemail: vm && !vm.deleted_at
       ? { id: vm.id, duration_s: vm.duration_s, listened: !!vm.listened_at, transcript: vm.transcript ?? null }
       : null,
+    // A move to the person's other device under way (../handoff.ts): ringing / connecting, and
+    // where to. Null when none is, or the last one is past its 45 s. Outcomes: GET /calls/:id/handoff.
+    handoff_state: switchUnderWay(r) ? r.handoff_state ?? null : null,
+    handoff_to: switchUnderWay(r) ? r.handoff_to ?? null : null,
     ...(warm ? { warm } : {}),
   };
 }

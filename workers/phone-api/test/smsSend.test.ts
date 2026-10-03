@@ -4,8 +4,10 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  Auth, BUSINESS_NUMBER, CLIENT, CONTACT_1, CUSTOMER, FakeNet, USER_A, appRequest, call, callerCtx, filter, jsonRes, makeEnv,
+  Auth, BUSINESS_NUMBER, CLIENT, CONTACT_1, CUSTOMER, FakeNet, SUPABASE_URL, USER_A, appRequest, call, callerCtx, filter, jsonRes, makeEnv,
 } from "./helpers";
+import { mapSmsRefusal } from "../src/routes/sms";
+import type { SmsOutcome } from "../../../supabase/functions/_shared/smsSend.ts";
 
 const MSG_ID = "00000000-0000-4000-8000-00000000e002";
 const SERVICE = "MG" + "0".repeat(32);
@@ -83,6 +85,54 @@ describe("/sms/send with the shared send rules", () => {
     const { res, json } = await call(env, send(token));
     expect(res.status).toBe(502);
     expect(json.error).toEqual({ code: "twilio_error", message: "The text could not be sent (carrier code 21211). Try again, or call them instead." });
+  });
+});
+
+describe("an empty wallet (wallet_empty, migration 259)", () => {
+  const gate = (auto: boolean) => ({ allow: false, reason: "below_floor", available_cents: 120, floor_cents: 500, auto_topup_enabled: auto });
+
+  it("402 with the Worker's sentence, and no claim row, no Twilio send", async () => {
+    const { net, token } = await setup();
+    net.rpc("wallet_usage_gate", () => gate(false));
+    const env = makeEnv({ PHONE_USAGE_METERS: "on" });
+    const { res, json } = await call(env, send(token));
+    expect(res.status).toBe(402);
+    expect(json.error).toEqual({ code: "wallet_empty", message: "Your wallet is empty. Add funds in Structure Studio under Settings, Billing." });
+    expect(net.rpcCalls("wallet_usage_gate")[0].json).toEqual({ p_client_id: CLIENT, p_meter: "sms_segment" });
+    expect(net.writes("sms_messages", "POST")).toEqual([]);
+    expect(net.to(/Messages\.json$/)).toEqual([]);
+    expect(net.to(/wallet-autotopup/)).toEqual([]);
+  });
+
+  it("auto top-up on: 402 saying it is being topped up, and the top-up request is kept alive (waitUntil)", async () => {
+    const { net, token } = await setup();
+    net.rpc("wallet_usage_gate", () => gate(true));
+    net.on("POST", (u) => u.href === `${SUPABASE_URL}/functions/v1/wallet-autotopup`, () => jsonRes({ fired: true, ok: true }));
+    const env = makeEnv({ PHONE_USAGE_METERS: "on" });
+    const { res, json } = await call(env, send(token));
+    expect(res.status).toBe(402);
+    expect(json.error).toEqual({ code: "wallet_empty", message: "Your wallet is being topped up. Try again in a minute." });
+    expect(net.to(/wallet-autotopup/).map((s) => s.json)).toEqual([{ client_id: CLIENT }]);
+    expect(net.writes("sms_messages", "POST")).toEqual([]);
+  });
+
+  it("PHONE_USAGE_METERS off: the gate is never asked and the text goes", async () => {
+    const { net, token, env } = await setup();
+    net.rpc("wallet_usage_gate", () => gate(false));
+    const { res } = await call(env, send(token));
+    expect(res.status).toBe(200);
+    expect(net.rpcCalls("wallet_usage_gate")).toEqual([]);
+  });
+
+  it("mapSmsRefusal: the two wallet sentences, from smsSend's portal wording", () => {
+    const out = (error: string) => ({ sent: false, reason: "wallet_empty", error }) as unknown as SmsOutcome;
+    expect(mapSmsRefusal(out("Your wallet is empty. Add funds in Settings, Billing."))).toEqual({
+      code: "wallet_empty", status: 402, message: "Your wallet is empty. Add funds in Structure Studio under Settings, Billing.",
+    });
+    expect(mapSmsRefusal(out("Your wallet is being topped up. Try again in a minute."))).toEqual({
+      code: "wallet_empty", status: 402, message: "Your wallet is being topped up. Try again in a minute.",
+    });
+    expect(mapSmsRefusal({ sent: false, reason: "wallet_empty" } as unknown as SmsOutcome).status).toBe(402);
   });
 });
 

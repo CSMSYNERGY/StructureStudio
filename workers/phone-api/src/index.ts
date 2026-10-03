@@ -20,6 +20,8 @@ import { logFault } from "./log";
 import { verifyTwilioRequest } from "./twilioSignature";
 import { afterDial, applyStatus, inbound, outbound, screen, transcription, voicemail } from "./routes/voice";
 import { conferenceEvent } from "./conference";
+import { voiceHandoff } from "./handoff";
+import { cancelHandoff, handoffStatus, pendingHandoff, startHandoff } from "./routes/handoff";
 import { token } from "./routes/token";
 import { events, transfer, voicemailAudio } from "./routes/calls";
 import { hold, resume, warmTransfer } from "./routes/conference";
@@ -31,20 +33,25 @@ import { createQuickSend, deleteQuickSend, listQuickSends, quickSendUsed, update
 import { pushText } from "./routes/push";
 import { recordingSweep } from "./cron/sweep";
 import { retention } from "./cron/retention";
-import { chargeMonthlyLineFees, debitDailyUsage } from "./cron/usageDebit";
+import { chargeMonthlyLineFees } from "./cron/lineFee";
+import { runUsageCharges, snapshotTwilioUsage } from "./cron/usageCharge";
 
 export const CRON_SWEEP = "*/15 * * * *";
 export const CRON_DAILY = "0 9 * * *";
 // The account's free plan has 5 cron triggers in total and 4 are used by other workers, so the
 // Worker runs ONE every-minute tick: keep-warm every minute, the sweep on minutes divisible by
-// 15, and the daily jobs at 09:00 UTC. The two older strings still dispatch (tests, rollback).
+// 15, the call and text charges every 5 minutes (minute % 5 == 2, so never on a sweep minute
+// and never at 09:00), and the daily jobs at 09:00 UTC. The two older strings still dispatch
+// (tests, rollback).
 export const CRON_TICK = "* * * * *";
+/** The minute (mod 5) the usage charges run on. */
+export const USAGE_MINUTE_MOD5 = 2;
 
 // ── Twilio ──────────────────────────────────────────────────────────────────────────
 
 const VOICE_PATHS = new Set([
   "/voice/outbound", "/voice/inbound", "/voice/after-dial", "/voice/screen", "/voice/status", "/voice/voicemail",
-  "/voice/conference", "/voice/transcription",
+  "/voice/conference", "/voice/transcription", "/voice/handoff",
 ]);
 
 async function handleTwilio(req: Request, env: Env, ec: Ctx, path: string, t0: number): Promise<Response> {
@@ -99,6 +106,9 @@ async function handleTwilio(req: Request, env: Env, ec: Ctx, path: string, t0: n
     case "/voice/transcription":
       ec.waitUntil(transcription(env, p, url).catch((e) => logFault({ code: "transcript_write_failed", message: (e as Error).message, req })));
       return noContent();
+    case "/voice/handoff":
+      // The answer URL of the ring that moves a call to the person's phone (handoff.ts).
+      return twiml(await voiceHandoff(env, ec, p, url));
   }
   return new Response("Not found", { status: 404 });
 }
@@ -117,6 +127,11 @@ const ROUTES: { method: string; re: RegExp; h: Handler }[] = [
   { method: "POST", re: /^\/calls\/([^/]+)\/hold$/, h: (r, env, ec, m) => hold(env, ec, r, pathParam(m[1])) },
   { method: "POST", re: /^\/calls\/([^/]+)\/resume$/, h: (r, env, ec, m) => resume(env, ec, r, pathParam(m[1])) },
   { method: "POST", re: /^\/calls\/([^/]+)\/events$/, h: (r, env, _ec, m) => events(env, r, pathParam(m[1])) },
+  // Moving a live call to the person's other device (routes/handoff.ts).
+  { method: "POST", re: /^\/calls\/([^/]+)\/handoff$/, h: (r, env, ec, m) => startHandoff(env, ec, r, pathParam(m[1])) },
+  { method: "GET", re: /^\/calls\/([^/]+)\/handoff$/, h: (r, env, _ec, m) => handoffStatus(env, r, pathParam(m[1])) },
+  { method: "POST", re: /^\/calls\/([^/]+)\/handoff\/cancel$/, h: (r, env, _ec, m) => cancelHandoff(env, r, pathParam(m[1])) },
+  { method: "GET", re: /^\/handoff\/pending$/, h: (r, env) => pendingHandoff(env, r) },
   { method: "POST", re: /^\/sms\/send$/, h: (r, env, ec) => sendSms(env, ec, r) },
   { method: "GET", re: /^\/threads$/, h: (r, env) => listThreads(env, r) },
   { method: "GET", re: /^\/threads\/([^/]+)$/, h: (r, env, _ec, m) => getThread(env, r, m[1]) },
@@ -214,14 +229,19 @@ export default {
     const tick = event.cron === CRON_TICK;
     const sweepDue = event.cron === CRON_SWEEP || (tick && at.getUTCMinutes() % 15 === 0);
     const dailyDue = event.cron === CRON_DAILY || (tick && at.getUTCHours() === 9 && at.getUTCMinutes() === 0);
+    const usageDue = tick && at.getUTCMinutes() % 5 === USAGE_MINUTE_MOD5;
     const run = async () => {
       if (tick) await job("keep_warm", () => keepWarm(env));
       if (sweepDue) {
         await job("sweep", () => recordingSweep(env));
       }
+      if (usageDue) {
+        // Each call and text, one wallet line each (or a shadow cost row while disarmed).
+        await job("usage_charges", () => runUsageCharges(env, adminClient(env), at));
+      }
       if (dailyDue) {
         await job("retention", () => retention(env));
-        await job("usage_debit", () => debitDailyUsage(env, adminClient(env)));
+        await job("twilio_usage", () => snapshotTwilioUsage(env, adminClient(env), at));
         await job("line_fee", () => chargeMonthlyLineFees(env, adminClient(env)));
       }
     };

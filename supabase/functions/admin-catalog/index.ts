@@ -8,6 +8,11 @@ import { paidThroughOf } from "../_shared/billingPeriods.ts";
 import { pingAvalara } from "../_shared/salesTax.ts";
 import { finishLookup, insertLookup, PING_CLIENT_ID, pingResponse } from "../_shared/taxLookups.ts";
 import { syncTaxCodes } from "../_shared/taxCodeSync.ts";
+import {
+  chargingMode, describeSettingsChange, monthRange, normalizePilotIds, normalizeSettings,
+  parseSettingsPatch, PHONE_METER_LABELS, PHONE_METERS, PHONE_SETTINGS_COLUMNS, phoneBillingDbError,
+  summarizePhoneUsage, type PhoneBillingSettings, type TwilioDailyRow, type UsageChargeRow,
+} from "../_shared/phoneBillingAdmin.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -189,6 +194,88 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
   return { imported: created + updated, created, updated, skipped };
 }
 
+// ── Phone & text billing: the database half (usage billing Part 1 step 6, 2026-10-02) ──────
+// The rules — what may be saved, what "charging is on" means, how a month adds up — live in
+// _shared/phoneBillingAdmin.ts so they are unit-tested; these helpers only read and write.
+// phone_billing_settings, usage_charges and twilio_usage_daily are server-only tables
+// (migration 259 revokes them from anon/authenticated), so the service-role client here is
+// their only reader outside the phone-api worker.
+const PHONE_BILLING_ACTIONS = new Set(["phone_billing_get", "phone_billing_set", "phone_billing_arm", "phone_usage_report"]);
+
+async function readPhoneBilling(sb: any): Promise<{ settings: PhoneBillingSettings; meters: any[] }> {
+  const [st, mt] = await Promise.all([
+    sb.from("phone_billing_settings").select(PHONE_SETTINGS_COLUMNS).eq("id", true).maybeSingle(),
+    sb.from("usage_prices").select("kind, label, unit_label, active, pricing, price_cents, updated_at").in("kind", [...PHONE_METERS]),
+  ]);
+  if (st.error) throw phoneBillingDbError(st.error);
+  if (mt.error) throw phoneBillingDbError(mt.error);
+  // 259 seeds the one row; its absence means 259 is not (fully) applied, not "all defaults".
+  if (!st.data) throw phoneBillingDbError({ code: "42P01" });
+  // Always the contract's order, so the console lists out/in calls then out/in texts.
+  const meters = PHONE_METERS.map((k) => (mt.data ?? []).find((m: any) => m.kind === k)).filter(Boolean);
+  return { settings: normalizeSettings(st.data), meters };
+}
+
+/** Switch the four phone meters on or off together, and prove it reached every one of them. */
+async function setPhoneMeters(sb: any, active: boolean, nowIso: string) {
+  const { data, error } = await sb.from("usage_prices").update({ active, updated_at: nowIso })
+    .in("kind", [...PHONE_METERS]).select("kind, active");
+  if (error) throw phoneBillingDbError(error);
+  const n = (data ?? []).filter((m: any) => m.active === active).length;
+  // Switching OFF with a meter row missing is fine — a missing row charges nobody. Switching ON
+  // with one missing would leave that kind of usage free while the console says "every builder".
+  if (active && n !== PHONE_METERS.length) {
+    throw new Error(`Only ${n} of the ${PHONE_METERS.length} phone meters exist in the price list, so charging could not be switched on for everything. Check migration 259.`);
+  }
+}
+
+/**
+ * Every usage_charges row for one month. KEYSET pages on id, continuing until an EMPTY page —
+ * not "until a short page": PostgREST's max-rows can sit below the page size asked for, and a
+ * short-page stop would then end after the first page and report a fraction of the month as
+ * the whole of it. Capped so a runaway month cannot hold the isolate; the report says when it
+ * stopped short.
+ */
+async function readUsageChargesForMonth(sb: any, from: string, to: string): Promise<{ rows: UsageChargeRow[]; truncated: boolean }> {
+  const PAGE = 1000, MAX_ROWS = 100_000;
+  const rows: UsageChargeRow[] = [];
+  let lastId = 0;
+  for (;;) {
+    const { data, error } = await sb.from("usage_charges")
+      .select("id, client_id, source, direction, state, occurred_at, cost_micros, cost_source, units, unit, charge_micros")
+      .gte("occurred_at", from).lt("occurred_at", to)
+      .gt("id", lastId).order("id", { ascending: true }).limit(PAGE);
+    if (error) throw phoneBillingDbError(error);
+    const batch = (data ?? []) as any[];
+    if (batch.length === 0) return { rows, truncated: false };
+    rows.push(...batch);
+    lastId = Number(batch[batch.length - 1].id);
+    if (rows.length >= MAX_ROWS) return { rows, truncated: true };
+  }
+}
+
+/** Twilio's daily account totals for one month (a few hundred rows at most), same paging rule. */
+async function readTwilioDaily(sb: any, firstDay: string, nextFirstDay: string): Promise<TwilioDailyRow[]> {
+  const PAGE = 1000;
+  const out: TwilioDailyRow[] = [];
+  // The offset advances by what CAME BACK, not by PAGE, for the max-rows reason above: a
+  // server cap of 500 with `offset += PAGE` would silently skip rows 500–999 of every page.
+  let offset = 0;
+  while (offset < 20_000) {
+    const { data, error } = await sb.from("twilio_usage_daily")
+      .select("day, category, count, usage, price_micros")
+      .gte("day", firstDay).lt("day", nextFirstDay)
+      .order("day", { ascending: true }).order("category", { ascending: true })
+      .range(offset, offset + PAGE - 1);
+    if (error) throw phoneBillingDbError(error);
+    const batch = (data ?? []) as TwilioDailyRow[];
+    if (batch.length === 0) break;
+    out.push(...batch);
+    offset += batch.length;
+  }
+  return out;
+}
+
 Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -272,6 +359,15 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
     // The ADMIN_PASSWORD break-glass path is untouched (it carries no operator row at all).
     if (String(action ?? "") === "set_payments" && !identity.canBill) {
       return json({ error: "This operator account cannot change payment routing." }, 403);
+    }
+    // Phone & text billing (usage billing Part 1 step 6): all four on the money grant, the two
+    // READS included. phone_billing_get and phone_usage_report serve OUR COST of every call and
+    // text — the margin on every builder, the same class of number as wallet_status's
+    // cost_cents — and an operator without can_bill has no reason to see it. Being absent from
+    // READ_ONLY_ACTIONS they need can_write as well. Own sentence, because "cannot change
+    // billing" would be wrong for a read.
+    if (PHONE_BILLING_ACTIONS.has(String(action ?? "")) && !identity.canBill) {
+      return json({ error: "This operator account cannot see or change phone and text billing." }, 403);
     }
   }
 
@@ -897,6 +993,206 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           sb.from("wallet_reconcile").select("*").eq("client_id", clientId).maybeSingle(),
         ]);
         return json({ ok: true, account: acct.data ?? null, transactions: txs.data ?? [], reconcile: recon.data ?? null });
+      }
+
+      // ── PHONE & TEXT BILLING, OPERATOR SIDE (usage billing Part 1 step 6, 2026-10-02) ─────
+      // The "Phone & text billing" card under Admin → Billing. Every call minute and text a
+      // builder uses is charged to their wallet at Twilio's real cost × ONE markup set here
+      // (Ahsan 2026-10-02). Until it is armed, the phone-api worker still records each item's
+      // real cost and what it WOULD have charged (usage_charges state 'shadow'), and
+      // phone_usage_report adds that up, so Carolyn sets the markup against what GoHighLevel
+      // charges with real numbers instead of guesses. All four are on can_bill (see the gate).
+      case "phone_billing_get": {
+        const { settings, meters } = await readPhoneBilling(sb);
+        let pilots: { clientId: string; companyName: string }[] = [];
+        if (settings.pilot_client_ids.length) {
+          const { data: cfg } = await sb.from("client_configs").select("client_id, company_name").in("client_id", settings.pilot_client_ids);
+          const byId = new Map((cfg ?? []).map((c: any) => [String(c.client_id), String(c.company_name || c.client_id)]));
+          pilots = settings.pilot_client_ids.map((id) => ({ clientId: id, companyName: byId.get(id) ?? id }));
+        }
+        return json({
+          ok: true,
+          settings,
+          meters: meters.map((m: any) => ({
+            kind: m.kind, label: m.label, plainLabel: PHONE_METER_LABELS[m.kind as keyof typeof PHONE_METER_LABELS] ?? m.label,
+            active: m.active === true, pricing: m.pricing ?? null, updatedAt: m.updated_at ?? null,
+          })),
+          charging: chargingMode(settings, meters),
+          pilots,
+          // The env rail as the EDGE functions see it (it gates texts sent from the portal). The
+          // phone-api worker reads its own copy from wrangler; both are off until go-live, and
+          // with the rail off nothing is charged and nobody is blocked whatever this card says.
+          serverSwitchOn: Deno.env.get("PHONE_USAGE_METERS") === "on",
+        });
+      }
+
+      case "phone_billing_set": {
+        // Validated before any read: a refused body costs nothing and writes nothing.
+        const patch = parseSettingsPatch(p, new Set(["action", "adminPassword"]));
+        const { settings: before, meters } = await readPhoneBilling(sb);
+        const wasMode = chargingMode(before, meters).mode;
+        // No markup = nothing can be priced, and 259's gate reads it as "not armed". Clearing it
+        // while charging is on would stop charging through the Save prices button — no confirm,
+        // no arm audit row, and the card would still show the pilot list as live. Stopping has
+        // its own button; this refuses the side door.
+        if ("markup" in patch && patch.markup === null && wasMode !== "off") {
+          throw new Error("Charging is on. Press Stop charging before clearing the markup.");
+        }
+        const { data: row, error } = await sb.from("phone_billing_settings")
+          .update({ ...patch, updated_at: new Date().toISOString(), updated_by: identity.via === "operator" ? identity.userId : null })
+          .eq("id", true).select(PHONE_SETTINGS_COLUMNS).maybeSingle();
+        if (error) throw phoneBillingDbError(error);
+        if (!row) throw phoneBillingDbError({ code: "42P01" });
+        // The column list is a joined constant, so supabase-js cannot type the row; it is the
+        // PHONE_SETTINGS_COLUMNS shape, and normalizeSettings reads it defensively either way.
+        const after = normalizeSettings(row as unknown as Record<string, unknown>);
+        const changes = describeSettingsChange(before, after);
+        // A DEDICATED audit row, the set_payments way: the generic operator row at the top of
+        // this function records only that the action ran, and the password path writes no success
+        // row at all. When a builder asks why a minute cost what it did, the question is which
+        // markup or cap was in force from when, and who set it.
+        try {
+          await sb.from("admin_audit").insert({
+            action: "phone_billing_set",
+            target_client_id: null,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: `via=${identity.via} charging=${wasMode} ${changes.join("; ") || "no change"}`.slice(0, 2000),
+          });
+        } catch (_e) { /* best-effort: never fail a completed write on a logging failure */ }
+        return json({
+          ok: true,
+          settings: after,
+          changed: changes,
+          charging: chargingMode(after, meters),
+          note: changes.length === 0
+            ? "Nothing changed."
+            : wasMode === "off"
+            ? "Saved. Charging is off, so nobody is charged. The report uses these prices for “would have charged”."
+            // The worker prices an item when it runs, not when the call happened, so a call still
+            // waiting for Twilio's price is charged at the NEW numbers. Said, because it is true.
+            : "Saved. Charging is on: these prices apply from the next charge run (within about 5 minutes), including calls and texts still waiting for Twilio's price.",
+        });
+      }
+
+      case "phone_billing_arm": {
+        // Start or stop charging. TWO shapes of "on", one of "off" (259's gate: markup set AND
+        // armed_at set AND (meter active OR tenant in pilot_client_ids)):
+        //   {armed:true, pilot_client_ids:[…]} → PILOT: meters stay inactive, only the listed
+        //                                         builders are charged.
+        //   {armed:true, scope:"all"}          → EVERYONE: all four meters active, pilot list
+        //                                         cleared (it no longer means anything).
+        //   {armed:false}                      → OFF: meters inactive AND the pilot list
+        //                                         CLEARED. armed_at is kept (the contract keeps
+        //                                         it as when charging last started), so a pilot
+        //                                         list left behind would keep charging every
+        //                                         pilot — membership alone satisfies the gate.
+        // armed_at is set to now() on EVERY arm, including a change to the pilot list while on:
+        // the worker shadows anything that happened before armed_at, so a builder added today is
+        // never charged for yesterday. The cost is the other side of the same rule — a call
+        // already pilot-billed but still waiting for Twilio's price when the list changes is
+        // recorded, not charged. Undercharging is the safe direction.
+        if (typeof p.armed !== "boolean") throw new Error("armed must be true or false.");
+        const pilots = p.pilot_client_ids == null ? [] : normalizePilotIds(p.pilot_client_ids);
+        if (!p.armed && pilots.length) throw new Error("Stop charging takes no pilot list: it stops charging for everyone.");
+        // "Everyone" must be asked for by name. An empty or blank pilot list normalises to [],
+        // and reading that as "everyone" would let the field meant to NARROW charging widen it
+        // to every builder on the platform.
+        if (p.armed && !pilots.length && p.scope !== "all") {
+          throw new Error("Add at least one pilot builder, or choose every builder.");
+        }
+        const { settings: before, meters } = await readPhoneBilling(sb);
+        const was = chargingMode(before, meters);
+        const target: "off" | "pilot" | "all" = !p.armed ? "off" : pilots.length ? "pilot" : "all";
+        if (p.armed) {
+          if (before.markup == null) {
+            throw new Error("Set a markup and save it before charging starts. Without one nothing can be priced.");
+          }
+          if (target === "all" && meters.length !== PHONE_METERS.length) {
+            throw new Error(`Only ${meters.length} of the ${PHONE_METERS.length} phone meters exist in the price list, so charging can't be switched on for everything. Check migration 259.`);
+          }
+          if (pilots.length) {
+            const { data: known, error: kErr } = await sb.from("client_configs").select("client_id").in("client_id", pilots);
+            if (kErr) throw kErr;
+            const have = new Set((known ?? []).map((r: any) => String(r.client_id)));
+            const missing = pilots.filter((id) => !have.has(id));
+            if (missing.length) throw new Error(`Unknown builder${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}. Nothing was changed.`);
+          }
+        }
+        // WRITE ORDER, with no transaction across PostgREST calls: everything that NARROWS who is
+        // charged goes first and the one write that WIDENS it goes last. A failure part-way then
+        // leaves fewer builders charged than either the old or the new state — never more.
+        const nowIso = new Date().toISOString();
+        const by = identity.via === "operator" ? identity.userId : null;
+        if (target !== "all") await setPhoneMeters(sb, false, nowIso);
+        const settingsPatch: Record<string, unknown> = target === "off"
+          ? { pilot_client_ids: [], updated_at: nowIso, updated_by: by }
+          : { pilot_client_ids: target === "pilot" ? pilots : [], armed_at: nowIso, updated_at: nowIso, updated_by: by };
+        const { data: row, error } = await sb.from("phone_billing_settings")
+          .update(settingsPatch).eq("id", true).select("armed_at").maybeSingle();
+        if (error) throw phoneBillingDbError(error);
+        if (!row) throw phoneBillingDbError({ code: "42P01" });
+        if (target === "all") await setPhoneMeters(sb, true, nowIso);
+
+        // Read back what is REALLY on, rather than echo what was asked for.
+        const { settings: after, meters: metersAfter } = await readPhoneBilling(sb);
+        const now = chargingMode(after, metersAfter);
+        try {
+          await sb.from("admin_audit").insert({
+            action: "phone_billing_arm",
+            target_client_id: null,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: (`via=${identity.via} mode ${was.mode} -> ${now.mode}`
+              + ` pilots [${before.pilot_client_ids.join(",")}] -> [${after.pilot_client_ids.join(",")}]`
+              + ` armed_at ${before.armed_at ?? "(none)"} -> ${after.armed_at ?? "(none)"}`
+              + ` markup ${after.markup ?? "(none)"}`).slice(0, 2000),
+          });
+        } catch (_e) { /* best-effort: never fail a completed write on a logging failure */ }
+
+        const serverSwitchOn = Deno.env.get("PHONE_USAGE_METERS") === "on";
+        const railNote = serverSwitchOn || now.mode === "off"
+          ? ""
+          : " The server switch is still off, so nothing is actually charged until it is turned on.";
+        const note = now.mode === "all"
+          ? `Charging is on for every builder. From now on each call minute and text comes out of their wallet at Twilio's cost × ${after.markup}. Non-billable builders are never charged.${railNote}`
+          : now.mode === "pilot"
+          ? `Charging is on for ${after.pilot_client_ids.length} pilot builder${after.pilot_client_ids.length === 1 ? "" : "s"} only (${after.pilot_client_ids.join(", ")}), at Twilio's cost × ${after.markup}. Everyone else's costs are only recorded.${railNote}`
+          : now.mode === "off"
+          ? "Charging is off. Nothing new is charged and nobody is blocked for a low balance. Costs are still recorded, and charges already made stay on the wallets."
+          : `Saved, but the result isn't clean: ${now.problem ?? "check the meters."}`;
+        return json({
+          ok: true,
+          settings: after,
+          meters: metersAfter.map((m: any) => ({
+            kind: m.kind, label: m.label, plainLabel: PHONE_METER_LABELS[m.kind as keyof typeof PHONE_METER_LABELS] ?? m.label,
+            active: m.active === true, pricing: m.pricing ?? null, updatedAt: m.updated_at ?? null,
+          })),
+          charging: now,
+          serverSwitchOn,
+          note,
+        });
+      }
+
+      case "phone_usage_report": {
+        // One month, UTC (Twilio's daily totals are UTC days). Everything is computed from the
+        // RAW rows in _shared/phoneBillingAdmin.ts, so every figure on the card and in the CSV
+        // comes from one pass and they cannot disagree. "Would have charged" is priced at TODAY's
+        // markup and caps — that is the question being asked before arming ("what would this
+        // month have made at 2×?"), not the markup that happened to be set on the day.
+        const range = monthRange(p.month, new Date());
+        const [{ settings }, charges, twilio, cfg] = await Promise.all([
+          readPhoneBilling(sb),
+          readUsageChargesForMonth(sb, range.from, range.to),
+          readTwilioDaily(sb, range.firstDay, range.nextFirstDay),
+          sb.from("client_configs").select("client_id, company_name"),
+        ]);
+        if (cfg.error) throw cfg.error;
+        const names = new Map<string, string>((cfg.data ?? []).map((c: any) => [String(c.client_id), String(c.company_name || c.client_id)]));
+        return json({
+          ok: true,
+          ...summarizePhoneUsage({ range, rows: charges.rows, twilio, settings, names, truncated: charges.truncated }),
+        });
       }
 
       // ── Avalara credential check (2026-09-17) ─────────────────────────────────────

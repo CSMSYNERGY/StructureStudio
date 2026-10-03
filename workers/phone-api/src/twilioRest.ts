@@ -80,6 +80,42 @@ export async function updateCall(env: Env, callSid: string, fields: Record<strin
   if (!res.ok) throw new TwilioError("update call", res.status, await codeOf(res));
 }
 
+export interface NewCall {
+  /**
+   * A number, or client:<identity>. A client address may carry custom parameters as a query
+   * string (client:alice?name=value&...): Twilio hands them to the Voice SDK's CallInvite as
+   * customParameters (Twilio "share information between your applications", 2020-09; keep the
+   * whole set under about 800 bytes).
+   */
+  to: string;
+  from: string;
+  /** The TwiML Twilio fetches (POST) when the call is answered. */
+  url: string;
+  /** Seconds to ring before giving up (no-answer). */
+  timeout: number;
+  statusCallback: string;
+  /** Default: every progress event (initiated ringing answered completed). */
+  statusCallbackEvent?: string[];
+}
+
+/** Place a call (the device switch's ring to the person's own phone, handoff.ts). Returns its CallSid. */
+export async function createCall(env: Env, c: NewCall): Promise<string> {
+  const res = await call(env, "create call", "/Calls.json", form({
+    To: c.to,
+    From: c.from,
+    Url: c.url,
+    Method: "POST",
+    Timeout: String(c.timeout),
+    StatusCallback: c.statusCallback,
+    StatusCallbackMethod: "POST",
+    StatusCallbackEvent: c.statusCallbackEvent ?? ["initiated", "ringing", "answered", "completed"],
+  }));
+  if (!res.ok) throw new TwilioError("create call", res.status, await codeOf(res));
+  const body = (await res.json().catch(() => ({}))) as { sid?: string };
+  if (!body.sid) throw new TwilioError("create call (no sid)", res.status, 0);
+  return String(body.sid);
+}
+
 export interface TwilioCall {
   sid: string;
   from: string;
@@ -245,6 +281,202 @@ export async function messageMediaContent(env: Env, messageSid: string, mediaSid
   } catch {
     throw new TwilioError("fetch media (unreachable)", 0, 0);
   }
+}
+
+// ── What things cost (cron/usageCharge.ts) ──────────────────────────────────────────
+//
+// Twilio states a price as a NEGATIVE decimal string in USD ("-0.01400"), filled in a while
+// after the call or text ends: null until then. Usage Records state theirs as positive
+// strings. Both come out of here as positive micros (millionths of a dollar), rounded half
+// up, so the billing code never sees a sign or a float; null stays null ("not priced yet").
+// Every price is assumed to be USD (the account's currency); priceUnit is carried through so
+// cost_detail shows it if that ever changes.
+
+/** A Twilio price string as positive micros, rounded half up. Null, blank or garbage → null. */
+export function priceMicros(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  // Exact decimal arithmetic on the digits: 0.0000005 * 1e6 in floating point is
+  // 0.49999999999999994, which Math.round takes down.
+  const m = /^[+-]?(\d*)(?:\.(\d*))?$/.exec(s);
+  if (!m || (!m[1] && !m[2])) {
+    const n = Number(s);
+    return Number.isFinite(n) ? Math.round(Math.abs(n) * 1_000_000) : null;
+  }
+  const whole = Number(m[1] || "0");
+  const frac = (m[2] ?? "").padEnd(7, "0");
+  const micros = whole * 1_000_000 + Number(frac.slice(0, 6)) + (Number(frac[6]) >= 5 ? 1 : 0);
+  return Number.isFinite(micros) ? micros : null;
+}
+
+/** One call leg, with what it cost. */
+export interface TwilioLegCost {
+  sid: string;
+  /** queued, ringing, in-progress, completed, busy, failed, no-answer, canceled. */
+  status: string;
+  /** Seconds, once the leg has ended. */
+  duration: number | null;
+  /** Positive micros, or null while Twilio has not priced it. */
+  price: number | null;
+  priceUnit: string | null;
+  parentCallSid: string | null;
+  /** inbound, outbound-api or outbound-dial. */
+  direction: string;
+  /** "client:..." for an app leg; otherwise a number. Never logged or stored. */
+  from: string;
+  to: string;
+}
+
+interface RawCall {
+  sid?: string;
+  status?: string;
+  duration?: string | number | null;
+  price?: string | null;
+  price_unit?: string | null;
+  parent_call_sid?: string | null;
+  direction?: string;
+  from?: string;
+  to?: string;
+}
+
+function legCost(c: RawCall): TwilioLegCost {
+  const d = Number.parseInt(String(c.duration ?? ""), 10);
+  return {
+    sid: String(c.sid ?? ""),
+    status: String(c.status ?? ""),
+    duration: Number.isFinite(d) ? d : null,
+    price: priceMicros(c.price),
+    priceUnit: c.price_unit ?? null,
+    parentCallSid: c.parent_call_sid ?? null,
+    direction: String(c.direction ?? ""),
+    from: String(c.from ?? ""),
+    to: String(c.to ?? ""),
+  };
+}
+
+/**
+ * One leg's price, duration and status. A separate function from fetchCall on purpose: that
+ * one hands conference.ts and the sweep Twilio's raw resource, and they read it by Twilio's
+ * own field names. Null when Twilio has no such call.
+ */
+export async function fetchCallCost(env: Env, callSid: string): Promise<TwilioLegCost | null> {
+  const res = await call(env, "fetch call", `/Calls/${encodeURIComponent(callSid)}.json`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new TwilioError("fetch call", res.status, await codeOf(res));
+  return legCost((await res.json()) as RawCall);
+}
+
+/**
+ * The legs a call's TwiML dialed (its <Dial> children), with their prices. A cold transfer
+ * dials again from the same parent, or from a child for an outbound call, so the billing code
+ * walks this more than one level down. One page of 50 is far more than one call ever makes.
+ */
+export async function listChildCalls(env: Env, parentSid: string): Promise<TwilioLegCost[]> {
+  const q = new URLSearchParams({ ParentCallSid: parentSid, PageSize: "50" });
+  const res = await call(env, "list child calls", `/Calls.json?${q}`);
+  if (res.status === 404) return [];
+  if (!res.ok) throw new TwilioError("list child calls", res.status, await codeOf(res));
+  const body = (await res.json()) as { calls?: RawCall[] };
+  return (body.calls ?? []).map(legCost).filter((c) => c.sid);
+}
+
+export interface TwilioMessageCost {
+  sid: string;
+  /** queued, sending, sent, delivered, undelivered, failed, receiving, received, ... */
+  status: string;
+  numSegments: number | null;
+  /** Positive micros, or null while Twilio has not priced it. Carrier fees are NOT in it. */
+  price: number | null;
+  priceUnit: string | null;
+  direction: string;
+}
+
+/** One text's status, segments and price. Null when Twilio has no such message. */
+export async function fetchMessage(env: Env, messageSid: string): Promise<TwilioMessageCost | null> {
+  const res = await call(env, "fetch message", `/Messages/${encodeURIComponent(messageSid)}.json`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new TwilioError("fetch message", res.status, await codeOf(res));
+  const m = (await res.json()) as { sid?: string; status?: string; num_segments?: string | number | null; price?: string | null; price_unit?: string | null; direction?: string };
+  const seg = Number.parseInt(String(m.num_segments ?? ""), 10);
+  return {
+    sid: String(m.sid ?? messageSid),
+    status: String(m.status ?? ""),
+    numSegments: Number.isFinite(seg) ? seg : null,
+    price: priceMicros(m.price),
+    priceUnit: m.price_unit ?? null,
+    direction: String(m.direction ?? ""),
+  };
+}
+
+export interface TwilioRecordingCost {
+  sid: string;
+  duration: number | null;
+  price: number | null;
+}
+
+/** A recording's duration and price. Null when it is gone (retention deletes them). */
+export async function fetchRecording(env: Env, recordingSid: string): Promise<TwilioRecordingCost | null> {
+  const res = await call(env, "fetch recording", `/Recordings/${encodeURIComponent(recordingSid)}.json`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new TwilioError("fetch recording", res.status, await codeOf(res));
+  const r = (await res.json()) as { sid?: string; duration?: string | number | null; price?: string | null };
+  const d = Number.parseInt(String(r.duration ?? ""), 10);
+  return { sid: String(r.sid ?? recordingSid), duration: Number.isFinite(d) ? d : null, price: priceMicros(r.price) };
+}
+
+/**
+ * The Usage Records categories the daily snapshot keeps (twilio_usage_daily): what calls and
+ * texts cost the account as a whole, so the per-item costs and the carrier-fee estimate can be
+ * checked against Twilio's own totals. Any conference category is kept as well (Twilio names
+ * it differently across products).
+ */
+export const USAGE_CATEGORIES = new Set([
+  "calls", "calls-inbound", "calls-outbound", "calls-client",
+  "sms-inbound", "sms-outbound", "sms-messages-carrierfees", "recordings",
+]);
+
+export interface TwilioUsageRecord {
+  category: string;
+  count: number | null;
+  usage: number | null;
+  /** Positive micros. */
+  priceMicros: number | null;
+  priceUnit: string | null;
+}
+
+/**
+ * One UTC day's Usage Records (Daily.json, StartDate = EndDate = day), the categories above
+ * only. Every category comes back on one or two pages, so this follows next_page_uri a few
+ * times at most.
+ */
+export async function listUsageDaily(env: Env, day: string): Promise<TwilioUsageRecord[]> {
+  const out: TwilioUsageRecord[] = [];
+  let path: string | null = `/Usage/Records/Daily.json?${new URLSearchParams({ StartDate: day, EndDate: day, PageSize: "1000" })}`;
+  for (let page = 0; path && page < 5; page++) {
+    const res: Response = await call(env, "list usage", path);
+    if (!res.ok) throw new TwilioError("list usage", res.status, await codeOf(res));
+    const body = (await res.json()) as {
+      usage_records?: { category?: string; count?: string | number | null; usage?: string | number | null; price?: string | null; price_unit?: string | null }[];
+      next_page_uri?: string | null;
+    };
+    for (const r of body.usage_records ?? []) {
+      const category = String(r.category ?? "");
+      if (!USAGE_CATEGORIES.has(category) && !/conference/i.test(category)) continue;
+      const count = Number(r.count);
+      const usage = Number(r.usage);
+      out.push({
+        category,
+        count: r.count === null || r.count === undefined || !Number.isFinite(count) ? null : count,
+        usage: r.usage === null || r.usage === undefined || !Number.isFinite(usage) ? null : usage,
+        priceMicros: priceMicros(r.price),
+        priceUnit: r.price_unit ?? null,
+      });
+    }
+    const next = body.next_page_uri ?? null;
+    path = next ? next.replace(/^.*\/Accounts\/[^/]+/, "") : null;
+  }
+  return out;
 }
 
 /** Network Traversal Service: short-lived STUN/TURN credentials. */

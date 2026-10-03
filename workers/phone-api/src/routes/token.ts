@@ -6,6 +6,14 @@
 // token stays valid until it expires even after every session is revoked, and this is the one
 // endpoint that turns a login into a working line. It fails OPEN on an Auth outage (a phone that
 // cannot get a token cannot take calls) and CLOSED on Auth saying the session is gone.
+//
+// `wallet` tells the apps whether outbound calls and texts are going through, for the banner
+// (wallet.ts walletStateOf): ok, low (still allowed, under twice the floor) or blocked, with
+// topping_up when auto top-up is on. It is the wallet floor's own answer (wallet_usage_gate,
+// voice_minute), asked only while PHONE_USAGE_METERS is on and only once the caller is known,
+// so a disarmed deployment pays nothing for it. Anything it cannot tell reads "ok": the floor
+// itself fails open, so a banner saying "blocked" on a read error would be a lie. A blocked
+// tenant with auto top-up on gets a top-up asked for here too, so "topping up" is true.
 
 import type { Ctx, Env } from "../env";
 import { mintAccessToken, pushCredentialFor, type BuildType, type Platform } from "../accessToken";
@@ -14,6 +22,7 @@ import { ApiError, ok, readJson } from "../http";
 import { toIdentity } from "../identity";
 import { bearerToken, verifySupabaseJwt } from "../jwt";
 import { logFault } from "../log";
+import { requestAutoTopup, walletFloorCheck, walletStateOf, type WalletState } from "../wallet";
 import { onDnd } from "./voice";
 
 export const TOKEN_TTL = 3600;
@@ -65,6 +74,13 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
     throw new ApiError("internal", "The phone service isn't configured yet.");
   }
 
+  let wallet: WalletState = { state: "ok", topping_up: false };
+  if (env.PHONE_USAGE_METERS === "on") {
+    const verdict = await walletFloorCheck(env, admin, ctx.client_id);
+    wallet = walletStateOf(verdict);
+    if (verdict.refuse && verdict.autoTopupEnabled) ec.waitUntil(requestAutoTopup(env, ctx.client_id));
+  }
+
   // Only iPhone development-profile builds get _dev: they use sandbox push and must never share
   // a push binding with the TestFlight build (plan D8).
   const identity = toIdentity(claims.sub, ctx.device_generation, platform === "ios" && buildType === "dev");
@@ -102,5 +118,10 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
       dnd: s ? onDnd({ dnd: s.dnd === true, dnd_until: s.dnd_until ?? null }) : false,
       forward_to_cell: s?.forward_to_cell ?? null,
     },
+    wallet,
+    // What this Worker can do that older ones could not, so an app shows a button only when
+    // the server behind it has the endpoint. handoff: moving a live call to the person's
+    // other device (../handoff.ts, routes/handoff.ts).
+    features: { handoff: true },
   });
 }

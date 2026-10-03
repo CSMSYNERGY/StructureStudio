@@ -1175,6 +1175,305 @@ const TOPUP_PRESETS = [10000, 25000, 50000];
 // Keep it a literal true/false so that test can read it.
 const FOUNDING_ANNUAL_ONLY = true;
 
+// ─── Wallet → Transactions (usage billing, migration 259) ───
+// Carolyn 2026-10-02: every call minute and every text comes out of the wallet, and "each charge
+// is its own line under Transactions, like GoHighLevel". So this is GHL's table: Date,
+// Description, Amount, Balance, newest first, with All / Calls / Texts / Funds / Other chips, a
+// date range, Load more and Export CSV. It replaces the card's ten-line "Recent activity" list,
+// which printed a $0.028 call as "−$0.00".
+//
+// Everything a line says is decided by portal-billing's `wallet_transactions` action
+// (_shared/walletLedger.ts): the description, the chip it counts under, whether it is pending,
+// and `precise` — a call or text, or any amount that is not whole cents, shows four decimal
+// places ($0.0280); everything else shows two. A balance shows four places on those lines and
+// whenever it is not whole cents itself (see balanceOf). This file maps no `kind` to English.
+//
+// INLINE STYLES ONLY, like every component here (there is no component stylesheet), so the phone
+// layout is chosen by measuring the card rather than by a media query: under WALLET_TX_NARROW_PX
+// each line becomes two rows, description over date on the left, amount over balance on the right.
+const WALLET_TX_FILTERS = [["all", "All"], ["calls", "Calls"], ["texts", "Texts"], ["funds", "Funds"], ["other", "Other"]];
+const WALLET_TX_NARROW_PX = 560;
+// Narrower still (a 320 px phone with the settings rail beside it leaves a ~230 px card), two date
+// fields side by side clip their own dates, so they stack.
+const WALLET_TX_TIGHT_PX = 280;
+
+// "$0.0280" / "$1,234.50", unsigned, from integer micros or cents. Never float division into a
+// display string: four places is exactly where 0.1 + 0.2 shows up.
+function walletTxMoney(micros, cents, precise) {
+  if (precise && micros != null) {
+    const units = Math.round(Math.abs(micros) / 100);   // ten-thousandths of a dollar
+    return { neg: micros < 0 && units !== 0, text: "$" + Math.floor(units / 10000).toLocaleString("en-US") + "." + String(units % 10000).padStart(4, "0") };
+  }
+  if (cents == null) return null;
+  const c = Math.abs(cents);
+  return { neg: cents < 0, text: "$" + Math.floor(c / 100).toLocaleString("en-US") + "." + String(c % 100).padStart(2, "0") };
+}
+
+async function walletTxCall(body) {
+  const { data: d, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "wallet_transactions", ...body } });
+  if (e) {
+    // The sentence is in the BODY; e.message alone is the generic non-2xx.
+    let m = e.message;
+    try { const ctx = await e.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_x) {}
+    throw new Error(m);
+  }
+  if (d && d.error) throw new Error(d.error);
+  return d || {};
+}
+
+// `recent` is status's ten-line list. It is shown ONLY when the full list cannot load, so a
+// portal that ships ahead of portal-billing (an older function answers "Unrecognised action")
+// still shows the latest activity instead of losing it.
+function WalletTransactions({ reloadKey, recent = [] }) {
+  const [filter, setFilter] = useState("all");
+  const [fromDay, setFromDay] = useState("");   // yyyy-mm-dd, local
+  const [toDay, setToDay] = useState("");
+  const [rows, setRows] = useState(null);       // null = first page loading
+  const [next, setNext] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(null);       // "more" | "export"
+  const [note, setNote] = useState(null);       // { ok } | { err } after an export
+  const [boxW, setBoxW] = useState(1000);       // the card's measured width
+  const narrow = boxW < WALLET_TX_NARROW_PX;
+  const tight = boxW < WALLET_TX_TIGHT_PX;
+  const boxRef = useRef(null);
+  const seq = useRef(0);                        // the newest request wins; older answers are dropped
+
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    const measure = () => setBoxW(Math.round(el.getBoundingClientRect().width));
+    measure();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", measure);
+      return () => window.removeEventListener("resize", measure);
+    }
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // The range in the builder's OWN days: from local midnight of the first day to local midnight
+  // after the last, sent as instants (portal-billing compares from-inclusive, to-exclusive). A
+  // date-only string through bare new Date() is UTC midnight, a day early in every US zone.
+  const range = useMemo(() => {
+    const startOf = (day, plusDays) => {
+      const d = ssLocalDate(day);
+      if (!d || !Number.isFinite(d.getTime())) return null;
+      d.setDate(d.getDate() + plusDays);
+      return d.toISOString();
+    };
+    const from = fromDay ? startOf(fromDay, 0) : null;
+    const to = toDay ? startOf(toDay, 1) : null;
+    return { from, to, bad: !!(fromDay && toDay && fromDay > toDay), key: `${from}|${to}` };
+  }, [fromDay, toDay]);
+  const params = () => ({ filter, ...(range.from ? { from: range.from } : {}), ...(range.to ? { to: range.to } : {}) });
+
+  useEffect(() => {
+    if (range.bad) return;
+    const my = ++seq.current;
+    setRows(null); setNext(null); setErr(null);
+    (async () => {
+      try {
+        const d = await walletTxCall(params());
+        if (seq.current !== my) return;
+        setRows(d.rows || []); setNext(d.next_cursor || null);
+      } catch (e) {
+        if (seq.current !== my) return;
+        setErr(e.message); setRows([]);
+      }
+    })();
+  }, [filter, range.key, range.bad, reloadKey]);
+
+  const loadMore = async () => {
+    if (!next || busy) return;
+    const my = seq.current;
+    setBusy("more");
+    try {
+      const d = await walletTxCall({ ...params(), cursor: next });
+      if (seq.current === my) { setRows((p) => (p || []).concat(d.rows || [])); setNext(d.next_cursor || null); }
+    } catch (e) {
+      if (seq.current === my) setNote({ err: e.message });
+    }
+    setBusy(null);
+  };
+
+  const exportCsv = async () => {
+    if (busy || range.bad) return;
+    setBusy("export"); setNote(null);
+    try {
+      let tz = "UTC";
+      try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch (_x) {}
+      const d = await walletTxCall({ ...params(), format: "csv", tz });
+      if (typeof d.csv !== "string") throw new Error("The export came back empty. Try again.");
+      const span = fromDay || toDay ? `-${fromDay || "start"}-to-${toDay || "today"}` : `-${ssLocalIso(new Date())}`;
+      // A byte-order mark so Excel opens it as UTF-8: descriptions carry "·" and "—".
+      downloadFile(`wallet-transactions${filter === "all" ? "" : "-" + filter}${span}.csv`, "﻿" + d.csv);
+      setNote(d.truncated
+        ? { ok: "Downloaded the newest 10,000 lines. Narrow the dates to export older ones." }
+        : { ok: `Downloaded ${Number(d.rows || 0).toLocaleString("en-US")} line${d.rows === 1 ? "" : "s"}.` });
+    } catch (e) { setNote({ err: e.message }); }
+    setBusy(null);
+  };
+
+  // Fallback rows from status, in this table's shape (whole cents, no balance).
+  const fallback = err && recent.length > 0;
+  // A range that ends before it starts shows the warning and no lines, rather than the last
+  // range's lines under dates that no longer describe them.
+  const shown = range.bad ? []
+    : fallback
+      ? recent.map((t) => ({ id: t.id, created_at: t.at, description: t.label, amount_cents: t.amountCents, pending: !!t.pending, precise: false, balance_after_cents: null }))
+      : (rows || []);
+  const filtered = filter !== "all" || !!fromDay || !!toDay;
+
+  const when = (iso) => {
+    const d = new Date(iso);
+    if (!Number.isFinite(d.getTime())) return { day: "", time: "" };
+    return {
+      day: d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+      time: d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }),
+    };
+  };
+  const amountOf = (r) => {
+    const m = walletTxMoney(r.amount_exact_micros, r.amount_cents, r.precise);
+    if (!m) return null;
+    return <span style={{ color: m.neg ? "#991B1B" : "#065F46", fontWeight: 700 }}>{m.neg ? "−" : "+"}{m.text}</span>;
+  };
+  // The balance's places are its OWN, not the amount's. `precise` is decided by the amount, and a
+  // top-up after three texts has a whole-cent amount on a balance that still owes a fraction of a
+  // cent: printed to two places it read $34.99 under a text line's $9.9876, and the CSV said
+  // 34.9876. So four places whenever the exact balance is not whole cents, and on every call or
+  // text line as before. (portal-billing nulls an exact balance that does not match the cents,
+  // which is what a captured 3D hold leaves behind, so that one falls back to its cents.)
+  const balanceOf = (r) => {
+    if (r.pending) return <span style={{ color: "#92400E", fontWeight: 700 }}>Pending</span>;
+    const exact = r.balance_after_exact_micros;
+    const m = walletTxMoney(exact, r.balance_after_cents, r.precise || (exact != null && exact % 10000 !== 0));
+    return m ? <span style={{ color: m.neg ? "#991B1B" : "#334155" }}>{m.neg ? "−" : ""}{m.text}</span> : <span style={{ color: "#CBD5E1" }}>—</span>;
+  };
+  const NUM = { fontVariantNumeric: "tabular-nums", textAlign: "right", whiteSpace: "nowrap" };
+  const GRID = { display: "grid", gridTemplateColumns: "150px minmax(0, 1fr) 112px 112px", gap: 12, alignItems: "baseline" };
+  const CAP = { fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8" };
+
+  return (
+    <div ref={boxRef} style={S.card} data-wallet-tx="card">
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+        <div style={{ ...S.h2, marginBottom: 0 }}>Transactions</div>
+        <button type="button" onClick={exportCsv} disabled={!!busy || range.bad} data-wallet-tx-export=""
+          style={{ ...S.btn("#F1F5F9", "#334155"), marginLeft: "auto", border: "1px solid #E2E8F0", padding: "6px 14px", fontSize: 12.5, opacity: busy || range.bad ? 0.6 : 1, cursor: busy || range.bad ? "default" : "pointer" }}>
+          {busy === "export" ? "Exporting…" : "Export CSV"}
+        </button>
+      </div>
+
+      {/* Chips, then the dates. Side by side on a wide card; stacked on a phone, where the two
+          date fields share the row and shrink (the portal's DateRange keeps the browser's own
+          width for a date field, which pushed a 390 px phone's card 10 px past its edge). */}
+      <div style={{ display: "flex", flexDirection: narrow ? "column" : "row", gap: narrow ? 10 : 14, flexWrap: narrow ? "nowrap" : "wrap", alignItems: narrow ? "stretch" : "flex-end", marginBottom: 12 }}>
+        <div role="group" aria-label="Show" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {WALLET_TX_FILTERS.map(([k, label]) => {
+            const on = filter === k;
+            return (
+              <button key={k} type="button" aria-pressed={on} onClick={() => setFilter(k)} data-wallet-tx-filter={k}
+                style={{
+                  cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700, padding: "5px 12px", borderRadius: 999,
+                  border: on ? "1px solid " + ACCENT : "1px solid #E2E8F0", background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#475569",
+                }}>{label}</button>
+            );
+          })}
+        </div>
+        <div style={FCTRL}>
+          {/* Clear sits on the heading line, not beside the fields, so on a phone the two date
+              fields keep the whole row. */}
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
+            <span style={FLBL}>Dates</span>
+            {(fromDay || toDay) && (
+              <button type="button" onClick={() => { setFromDay(""); setToDay(""); }}
+                style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: 0, fontFamily: "inherit" }}>
+                Clear dates
+              </button>
+            )}
+          </div>
+          <div style={{ display: "flex", flexDirection: tight ? "column" : "row", gap: 6, alignItems: tight ? "stretch" : "center", minWidth: 0 }}>
+            {[[fromDay, setFromDay, "From"], [toDay, setToDay, "To"]].map(([v, set, name], i) => (<React.Fragment key={name}>
+              {i === 1 && !tight && <span style={{ color: "#94A3B8", fontSize: 12 }}>–</span>}
+              <input type="date" aria-label={name} value={v} onChange={(e) => set(e.target.value)}
+                style={{ ...S.input, padding: "6px 8px", minWidth: 0, ...(tight ? { width: "100%" } : narrow ? { flex: "1 1 0", width: "auto" } : { flex: "0 0 auto", width: 150 }) }} />
+            </React.Fragment>))}
+          </div>
+        </div>
+      </div>
+
+      {range.bad && (
+        <div style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600, marginBottom: 10 }}>The start date is after the end date.</div>
+      )}
+      {note && note.err && <div style={S.err}>{note.err}</div>}
+      {note && note.ok && <div style={S.okMsg}>{note.ok}</div>}
+      {err && (
+        <div style={{ ...S.err, ...(fallback ? { background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E" } : {}) }}>
+          {fallback ? `Showing your latest activity only. The full list couldn't load: ${err}` : err}
+        </div>
+      )}
+
+      {!narrow && (shown.length > 0 || (rows === null && !range.bad)) && (
+        <div style={{ ...GRID, padding: "0 0 7px", borderBottom: "2px solid #E2E8F0" }}>
+          <span style={CAP}>Date</span><span style={CAP}>Description</span>
+          <span style={{ ...CAP, textAlign: "right" }}>Amount</span><span style={{ ...CAP, textAlign: "right" }}>Balance</span>
+        </div>
+      )}
+
+      {rows === null && !range.bad ? (
+        [0, 1, 2].map((i) => (
+          <div key={i} style={{ padding: "11px 0", borderBottom: "1px solid #F1F5F9", display: "flex", gap: 12 }}>
+            <SkelBar w={narrow ? "55%" : 130} h={11} /><SkelBar w="35%" h={11} />
+          </div>
+        ))
+      ) : shown.length === 0 && !range.bad ? (
+        !err && (
+          <p style={{ fontSize: 13, color: "#64748B", margin: "6px 0 0" }}>
+            {filtered ? "Nothing matches these filters." : "No transactions yet. Funds you add and everything charged to the wallet will show here."}
+          </p>
+        )
+      ) : shown.map((r) => {
+        const w = when(r.created_at);
+        const desc = (
+          <span style={{ color: "#334155", fontWeight: 600, overflowWrap: "anywhere" }}>
+            {r.description}
+            {r.pending && <span style={{ color: "#92400E", fontWeight: 700 }}> · pending</span>}
+          </span>
+        );
+        return narrow ? (
+          <div key={r.id} data-wallet-tx-row={r.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "9px 0", borderBottom: "1px solid #F1F5F9", fontSize: 13 }}>
+            <div style={{ minWidth: 0 }}>
+              <div>{desc}</div>
+              <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 2 }}>{w.day} · {w.time}</div>
+            </div>
+            <div style={{ ...NUM, flexShrink: 0 }}>
+              <div>{amountOf(r)}</div>
+              <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 2 }}>{r.pending || r.balance_after_cents != null ? <>Balance {balanceOf(r)}</> : null}</div>
+            </div>
+          </div>
+        ) : (
+          <div key={r.id} data-wallet-tx-row={r.id} style={{ ...GRID, padding: "9px 0", borderBottom: "1px solid #F1F5F9", fontSize: 13 }}>
+            <span style={{ color: "#475569", whiteSpace: "nowrap" }}>{w.day}<span style={{ color: "#94A3B8" }}> · {w.time}</span></span>
+            {desc}
+            <span style={NUM}>{amountOf(r)}</span>
+            <span style={NUM}>{balanceOf(r)}</span>
+          </div>
+        );
+      })}
+
+      {!fallback && !range.bad && next && (
+        <div style={{ textAlign: "center", marginTop: 12 }}>
+          <button type="button" onClick={loadMore} disabled={!!busy} data-wallet-tx-more=""
+            style={{ ...S.btn("#FFF", ACCENT), border: "1px solid #E2E8F0", padding: "7px 18px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}>
+            {busy === "more" ? "Loading…" : "Load more"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Billing (per-feature subscriptions via portal-billing; Deposyt/NMI gateway) ───
 // Each feature (Simple Layout, RealTime Pricing, …) is its own recurring
 // subscription, chosen monthly or yearly independently. Simple Layout is the
@@ -1712,7 +2011,12 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                   return (
                     <div key={m.kind} style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", padding: "5px 0", borderTop: "1px solid #F1F5F9", fontSize: 13 }}>
                       <span style={{ color: "#334155", fontWeight: 600 }}>{m.label || m.kind}</span>
-                      {hasPrice && (
+                      {/* Calls and texts (259) cost Twilio's real price times the markup, so
+                          there is no fixed figure to print: the server sends the sentence
+                          instead ("Billed per call minute") and a null price. */}
+                      {m.billedAs ? (
+                        <span style={{ color: "#475569", whiteSpace: "nowrap" }}>{m.billedAs}</span>
+                      ) : hasPrice && (
                         <span style={{ color: "#475569", whiteSpace: "nowrap" }}>
                           {m.priceCents === 0 ? "No charge" : <><strong>{fmt$(m.priceCents)}</strong>{m.unitLabel ? ` / ${m.unitLabel}` : ""}</>}
                           {covers !== null && <span style={{ color: "#94A3B8" }}> · balance covers {covers}</span>}
@@ -1816,25 +2120,16 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                 </div>
               </div>
             )}
-            {(w.transactions || []).length > 0 && (
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 6 }}>Recent activity</div>
-                {w.transactions.map((t) => (
-                  <div key={t.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "5px 0", borderTop: "1px solid #F1F5F9", fontSize: 13 }}>
-                    <span style={{ color: "#475569" }}>
-                      {t.label}
-                      {t.pending && <span style={{ color: "#92400E", fontWeight: 700 }}> · pending</span>}
-                    </span>
-                    <span style={{ fontWeight: 700, color: t.amountCents < 0 ? "#991B1B" : "#065F46", whiteSpace: "nowrap" }}>
-                      {t.amountCents < 0 ? "−" : "+"}{fmt$(Math.abs(t.amountCents))}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
+            {/* The ten-line "Recent activity" list that sat here moved into Transactions below
+                (2026-10-02): it printed whole cents, so a $0.028 call read "−$0.00". status
+                still sends it, and Transactions falls back to it if its own list can't load. */}
           </div>
         );
       })()}
+      {/* TRANSACTIONS — the whole ledger, GHL-style. Mounted only where the wallet card is, so
+          it inherits the same audience (status's `mine` filter: owners, granted admins,
+          operators with can_bill). Reloads whenever `status` does, so a top-up shows at once. */}
+      {data && data.wallet && <WalletTransactions reloadKey={data} recent={data.wallet.transactions || []} />}
 
       </>)}
       {showSub && (<>

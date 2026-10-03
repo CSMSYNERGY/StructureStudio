@@ -136,6 +136,23 @@ describe("GET /calls", () => {
     expect(net.reads("phone_calls")[0].url.searchParams.get("or")).toBeNull();
   });
 
+  it("carries error_code, so Recents can say why a call was not placed (wallet_empty)", async () => {
+    const { net, token, env } = await setup(callerCtx({ phone_level: "view" }));
+    net.rest("GET", "phone_calls", () => [
+      callRow("r1", { direction: "out", placed_by: USER_A, status: "failed", error_code: "wallet_empty", duration_s: null }),
+      callRow("r2", { answered_by: USER_A }),
+    ]);
+    const { json } = await call(env, appRequest("GET", "/calls?scope=team", token));
+    expect(json.calls.map((c: { id: string; status: string; error_code: string | null }) => [c.id, c.status, c.error_code])).toEqual([
+      ["r1", "failed", "wallet_empty"],
+      ["r2", "completed", null],
+    ]);
+    expect(net.reads("phone_calls")[0].url.searchParams.get("select")).toContain("error_code");
+    // Our cost never travels to the apps.
+    expect(net.reads("phone_calls")[0].url.searchParams.get("select")).not.toContain("cost_cents");
+    expect(Object.keys(json.calls[0])).not.toContain("cost_cents");
+  });
+
   it("drops calls about customers the caller can't see, and unknown numbers for own-scoped users unless they took part", async () => {
     const { net, token, env } = await setup(callerCtx({ phone_level: "view", contacts_level: "own", own_contacts_only: true }), [CONTACT_1]);
     net.rest("GET", "phone_calls", () => [

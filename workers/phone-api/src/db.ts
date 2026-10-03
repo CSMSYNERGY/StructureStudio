@@ -202,10 +202,24 @@ export interface CallRow {
   duration_s: number | null;
   error_code: string | null;
   is_emergency: boolean;
+  // Moving the call to the person's other device (migration 260, handoff.ts). Optional so the
+  // many fixtures written before it need nothing; the Worker always selects them.
+  /** ringing / connecting while a move is under way, else null. */
+  handoff_state?: "ringing" | "connecting" | null;
+  handoff_to?: "chrome" | "mobile" | null;
+  /** The one-time key the answering device must present. A capability: never written to phone_call_events, never broadcast. */
+  handoff_key?: string | null;
+  /** When it started ringing, then when it was answered. */
+  handoff_at?: string | null;
+  /** The answering leg (for the phone: the ring the Worker placed). */
+  handoff_sid?: string | null;
+  /** The leg the call is moving away from. */
+  handoff_from_sid?: string | null;
 }
 
 export const CALL_COLUMNS =
-  "id, client_id, number_id, contact_id, direction, from_e164, to_e164, twilio_call_sid, client_call_sid, placed_by, answered_by, rang_user_ids, transferred_from, transfer_state, status, started_at, answered_at, ended_at, duration_s, error_code, is_emergency";
+  "id, client_id, number_id, contact_id, direction, from_e164, to_e164, twilio_call_sid, client_call_sid, placed_by, answered_by, rang_user_ids, transferred_from, transfer_state, status, started_at, answered_at, ended_at, duration_s, error_code, is_emergency, "
+  + "handoff_state, handoff_to, handoff_key, handoff_at, handoff_sid, handoff_from_sid";
 
 export async function callById(admin: Admin, id: string): Promise<CallRow | null> {
   return must(

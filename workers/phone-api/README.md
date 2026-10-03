@@ -14,6 +14,7 @@ src/routes/voice.ts   outbound, inbound, after-dial, screen, status, voicemail
 src/routes/token.ts   POST /token
 src/routes/calls.ts   cold transfer, call events, voicemail audio
 src/routes/conference.ts  hold, resume, warm transfer (the app endpoints)
+src/routes/handoff.ts  moving a live call to the person's other device (the app endpoints)
 src/routes/media.ts   GET /media/:messageId/:index (inbound photos)
 src/routes/sms.ts     POST /sms/send
 src/routes/reads.ts   /threads, /threads/:key, /calls, /search, /team
@@ -21,8 +22,9 @@ src/emailThread.ts    email in a conversation: the rows the apps get, HTML mail 
 src/routes/me.ts      /settings/me, /devices, /devices/signout-all, /log, /turn, /health
 src/routes/quickSends.ts  /quick-sends: each person's saved messages (list, add, change, delete, used)
 src/routes/push.ts    /push/text (FCM HTTP v1, APNs)
-src/cron/             sweep.ts (*/15), retention.ts and usageDebit.ts (daily, 09:00 UTC: minute debit, monthly line fee)
+src/cron/             sweep.ts (*/15), usageCharge.ts (every 5 min: each call and text at Twilio cost x markup; 09:00 UTC: Twilio's daily usage totals), retention.ts and lineFee.ts (daily, 09:00 UTC: monthly line fee)
 src/conference.ts     the conference design: TwiML, which leg is which, the transfer_state machine, /voice/conference
+src/handoff.ts        moving a live call between the person's devices: the answer, make before break, /voice/handoff
 src/callEvents.ts     what phone_call_events say that the row cannot: a warm transfer's state, a Resume still landing
 src/voicemail.ts      the greeting + <Record> TwiML (and transcription)
 src/wallet.ts         the wallet floor for outbound calls
@@ -59,10 +61,10 @@ Deploy only from a tree that has origin/beta merged in, or from beta itself. A `
 | `EMERGENCY_MODE` | `block` | `block` answers 911, 933 and 112 with "For emergencies, call 9 1 1 from your cell phone." Only the exact value `allow` lets 911 and 933 through (phase 6, needs registered emergency addresses). |
 | `DAILY_MINUTE_CAP` | `600` | Outbound minutes per builder per UTC day, each call rounded up. `0` turns the cap off. |
 | `EXTENSION_ORIGINS` | empty | Chrome extension ids (or full `chrome-extension://` origins), comma separated, allowed by CORS. The portal origins (app., beta., beta-2-0.) are built in. |
-| `PHONE_USAGE_METERS` | `off` | Release 2. The daily minute debit runs only when this is `on` and the `voice_minute` meter is active and priced; the monthly line fee only when this is `on` and `phone_line_monthly` is active and priced. |
+| `PHONE_USAGE_METERS` | `off` | Release 2. Exactly `on` lets calls and texts be charged to the wallet one by one (`src/cron/usageCharge.ts`) and the wallet floor refuse an outbound call, but only where the meter is also armed in the database (`phone_billing_settings` markup and `armed_at` set, and the `usage_prices` meter active or the tenant on the pilot list; migration 259). The monthly line fee needs this `on` and `phone_line_monthly` active and priced. The edge functions read the same name as a Supabase function secret for the texting path, so arming texts sent from the portal means setting it there too. |
+| `PHONE_USAGE_COST_CAPTURE` | `on` | Anything but `off` records what every call and text cost at Twilio, and what it would charge at the current markup, as `shadow` rows in `usage_charges`, while nothing is charged. Also stores Twilio's daily usage totals in `twilio_usage_daily` at 09:00 UTC. |
 | `VOICEMAIL_RETENTION_DAYS` | `365` | Recordings older than this are deleted at Twilio by the daily job. Minimum 30. |
 | `TRANSCRIBE` | `off` | Release 2. `on` adds Twilio transcription to every voicemail (`<Record transcribe>`, about $0.05 a minute, English, 2 s to 2 min); the text lands in `phone_voicemails.transcript` and on the call's `voicemail` summary. |
-| `WALLET_FLOOR_CENTS` | `500` | Outbound calls are refused ("Your Structure Studio wallet is empty...") when the wallet's spendable balance is below this, but only while the `voice_minute` meter is active and priced. Exempt tenants, inbound calls and 911 are never refused. |
 
 ## Secrets (`npx wrangler secret put <NAME>`)
 
@@ -111,6 +113,9 @@ App endpoints take `Authorization: Bearer <Supabase access token>` and answer `{
 | `POST /calls/:id/warm-transfer` | `{to_user_id}`. Rings the teammate into the call's conference. From a plain call, when they answer all three of you talk, and you hang up when ready. From hold, the customer stays on hold while you and the teammate talk; Resume brings them in, and hanging up hands them to the teammate off hold. A teammate on DND is refused. Answers `customer_held` (a private consult or not); the teammate's app gets `customer_e164` and `contact_id`. A teammate who doesn't answer touches the row, so the apps hear at once and read `warm` on `GET /calls` (DEVIATIONS 47 to 51). A customer left alone because nobody answered goes to voicemail. Hold and both transfers are refused on inbound calls for an hour after a 911 call from the number. |
 | `GET /media/:messageId/:index` | An inbound photo (or other file) from a text, streamed from Twilio after the thread's scope check. Bearer header only (SPEC section 3); `?access_token=` is refused. |
 | `POST /calls/:id/events` | Client timing marks into `phone_call_events`. |
+| `POST /calls/:id/handoff`, `/handoff/cancel`, `GET /calls/:id/handoff` | Move a live call to the person's other device (migration 260; apply it before deploying). `{to: chrome|mobile, leg_sid}` from the device holding the call. The phone is rung through Twilio (25 s, `handoff=1` custom parameters), the computer through the row's realtime broadcast. Nothing about the call changes until the other device answers; then the new leg joins the call's conference, a plain call is moved in, `client_call_sid` passes to the new leg, and only then is the old leg ended. A failure leaves the call where it was. Hold, Resume and both transfers are refused while a move is under way (`handoff_in_progress`). Outcomes are `device_switch` events (DEVIATIONS 57 to 60). |
+| `GET /handoff/pending?for=chrome` | The computer's ring: a move to it, still ringing (45 s), on a call the caller holds. |
+| `POST /voice/handoff` | Twilio: the phone answering a move. `/voice/outbound` with `HandoffCall` + `HandoffKey` is the computer answering, before every outbound rule (no new row, no minute cap, no wallet floor). |
 | `POST /sms/send` | The CRM's checks, then `sendTenantSms` with `bypassQuietHours: true`, then tags the row with `client_temp_id` and `sent_via`. `media_urls` is refused: sending photos isn't built (the shared send has no media). |
 | `GET /threads`, `/threads/:key`, `/calls`, `/search`, `/team` | Contacts row scope and phone level applied. Lists return `cursor` when there is another page. A live call in its conference carries `warm` (how its latest warm transfer stands). `/threads/:key` also returns the contact's `emails`, both ways and oldest first: mail stamped with the contact or about one of their designs, never sign-in codes, bodies as plain text cut at 8000 characters (`body_truncated`). Beside them, `compose`: the contact's `email_to`, and `email_block` when this person can't email them from the thread (`no_edit`, `no_crm`, `not_set_up`, `no_address`; `unknown_number` for an `n:` key, which has no email). Email is sent through portal-settings `crm_send_email`, not here. `GET /threads?channels=sms,email` builds the list from email too: `last.channel` says which, an email's `last.body` is its subject, and `e164` is null for someone who has only emailed and has no number on their record. `e164_source` says where the number came from: `sms` (their texts) or `contact` (their record). Without the param the list is texts alone, exactly as before. Both read columns from migration 261: apply it before deploying. |
 | `POST /settings/me`, `/devices`, `/devices/signout-all` | Sign-out-all bumps `device_generation`, forgets push tokens and ends every Auth session. |
