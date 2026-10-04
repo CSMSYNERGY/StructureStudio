@@ -764,13 +764,16 @@ function MySubmissions({ refreshKey }) {
 // and this list, so they cannot disagree). A `locked` row is a paid add-on this builder has
 // not bought: shown, padlocked, and left out of the count — Carolyn 2026-09-04, it doubles
 // as the upsell. A step we have not finished building never arrives here at all.
-function SetupChecklist({ items, counts, onPatch, onReload, onNavigate, canAdmin }) {
+function SetupChecklist({ items, counts, canEdit, onPatch, onReload, onNavigate, canAdmin }) {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);      // id being toggled
   const [viewing, setViewing] = useState(null); // { url, title } — screenshot popup
 
+  // Ticking is portal-setup's owner/admin action (or an operator who can write). Everyone
+  // else reads the list; their checkbox is disabled rather than ticking and bouncing back.
+  const mayTick = canEdit !== false;
   const toggle = async (it) => {
-    if (it.locked) return;
+    if (it.locked || !mayTick) return;
     const done = !it.completed_at;
     setBusy(it.id); setError(null);
     // Optimistic: ticking a box that then sits there doing nothing feels broken.
@@ -843,9 +846,10 @@ function SetupChecklist({ items, counts, onPatch, onReload, onNavigate, canAdmin
                   <SsLock title={`Needs ${ssFeatureLabel(feat)}`} />
                 </span>
               ) : (
-                <input type="checkbox" checked={isDone} disabled={busy === it.id}
+                <input type="checkbox" checked={isDone} disabled={busy === it.id || !mayTick}
                   onChange={() => toggle(it)} aria-label={it.title}
-                  style={{ marginTop: 3, width: 16, height: 16, flexShrink: 0, cursor: "pointer" }} />
+                  title={mayTick ? undefined : "An owner or admin ticks these off"}
+                  style={{ marginTop: 3, width: 16, height: 16, flexShrink: 0, cursor: mayTick ? "pointer" : "default" }} />
               )}
               <div style={{ minWidth: 0, flex: 1 }}>
                 {/* No line-through on a locked row — that reads as "done". */}
@@ -952,7 +956,9 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
         const c = items.filter((i) => !i.locked);
         return { total: c.length, done: c.filter((i) => i.completed_at).length, open: c.filter((i) => !i.completed_at).length };
       })();
-      const next = { items, counts };
+      // `canEdit` is whether this caller's tick will be accepted (owner/admin, or an operator
+      // who can write). Absent from an older edge function → assume yes, as before.
+      const next = { items, counts, canEdit: data.canEdit !== false };
       setSetupData(next);
       return next;
     } catch (_e) {
@@ -980,7 +986,7 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
         ? { ...x, completed_at: done ? new Date().toISOString() : null, completed_by_kind: done ? "client" : null, completed_by_name: done ? "You" : null }
         : x);
       const c = items.filter((i) => !i.locked);
-      return { items, counts: { total: c.length, done: c.filter((i) => i.completed_at).length, open: c.filter((i) => !i.completed_at).length } };
+      return { ...cur, items, counts: { total: c.length, done: c.filter((i) => i.completed_at).length, open: c.filter((i) => !i.completed_at).length } };
     });
   }, []);
 
@@ -1113,6 +1119,7 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
       </div>
 
       {effTab === "setup" ? <SetupChecklist items={setupData && setupData.items} counts={setupData && setupData.counts}
+        canEdit={!setupData || setupData.canEdit !== false}
         onPatch={patchSetup} onReload={loadSetup} onNavigate={onNavigate} canAdmin={canAdmin} />
         : effTab === "mine" ? <MySubmissions refreshKey={submissionsKey} />
         : error ? <div style={S.err}>Couldn't load updates: {error}</div>
