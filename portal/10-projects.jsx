@@ -1291,20 +1291,32 @@ function ProjectsTab({ sub, onSub }) {
     return boards.find((b) => b.slug === sub) || boards[0];
   }, [boards, sub, setupMode]);
 
+  // ONLY THE LATEST get_board MAY LAND. Responses do not come back in the order they were
+  // asked for — opening Roadmap runs the roadmap sync first, so it is routinely the slow one —
+  // and every one of them used to be applied. Click Roadmap, then Bugs: Bugs answered, then
+  // Roadmap's late answer replaced it, leaving the Bugs tab lit over Roadmap's table, and
+  // "＋ Add item" (which files into data.board) put the new card on Roadmap. Two reloads of
+  // one board after quick edits race the same way and can repaint the older state.
+  const boardReq = useRef({ seq: 0, boardId: null });
   const loadBoard = useCallback((b) => {
     if (!b) return;
+    const seq = ++boardReq.current.seq;
+    boardReq.current.boardId = b.id;
+    const latest = () => boardReq.current.seq === seq;
     setLoading(true); setErr("");
     pmCall({ action: "get_board", boardId: b.id }).then((d) => {
+      if (!latest()) return;
       setData(d); setCanWrite(!!d.canWrite);
       setView(pmLoadView(b.slug, d.columns));
       setSavedViews(d.views || []);
       // If this browser still holds pre-sharing local views, push them up and re-read.
       pmLiftLocalViews(b).then((lifted) => {
-        if (lifted) pmCall({ action: "get_board", boardId: b.id }).then((d2) => setSavedViews(d2.views || [])).catch(() => {});
+        if (lifted) pmCall({ action: "get_board", boardId: b.id })
+          .then((d2) => { if (boardReq.current.boardId === b.id) setSavedViews(d2.views || []); }).catch(() => {});
       });
       const dateCols = d.columns.filter((c) => c.type === "date");
       setWhenColId((cur) => (dateCols.some((c) => c.id === cur) ? cur : (dateCols[0] ? dateCols[0].id : null)));
-    }).catch((e) => setErr(e.message)).finally(() => setLoading(false));
+    }).catch((e) => { if (latest()) setErr(e.message); }).finally(() => { if (latest()) setLoading(false); });
   }, []);
   useEffect(() => { if (activeBoard) loadBoard(activeBoard); }, [activeBoard && activeBoard.id]);
 
