@@ -1628,7 +1628,16 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           : cur.toLocaleDateString("en-US", { month: "long", year: "numeric" });
         const step = (dir) => {
           const c = new Date(cursorMs);
-          if (calView === "week") c.setDate(c.getDate() + dir * 7); else c.setMonth(c.getMonth() + dir);
+          if (calView === "week") c.setDate(c.getDate() + dir * 7);
+          else {
+            // Clamp the day: setMonth() on the 29th–31st overflows a shorter month, so from
+            // Oct 31 "›" landed on Dec 1 (November skipped) and "‹" on Oct 1 (stuck). The
+            // cursor is any day — it starts at today and "Open that week" / "+N more" set it.
+            const day = c.getDate();
+            c.setDate(1);
+            c.setMonth(c.getMonth() + dir);
+            c.setDate(Math.min(day, new Date(c.getFullYear(), c.getMonth() + 1, 0).getDate()));
+          }
           setCursorMs(c.getTime());
         };
         const dropProps = (iso) => canEdit ? {
