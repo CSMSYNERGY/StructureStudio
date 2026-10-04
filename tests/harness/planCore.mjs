@@ -259,5 +259,52 @@ try {
     ok("F: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
     await page.close();
   }
+  if (want("H")) {
+    // The electrical package on a 12x24 (12 outlets, 2 lights, 1 switch), then the customer picks
+    // 10x12, whose standard is 7 outlets, 1 light, 1 switch. Every device is charged at
+    // max(0, placed - covered), so whatever is left on the plan past the new standard is billed.
+    const BIG = "12x24", SMALL = "10x12";
+    const ELEC = {
+      ...CONFIG, clientId: "harness-plan-elec",
+      buildingStyles: [{ value: "utility", label: "Utility", img: null, sizes: [BIG, SMALL], sizeInclusions: {}, sizeInclusionQty: {} }],
+      defaultSizes: [BIG, SMALL],
+      sizePricing: { utility: { [BIG]: { widthFt: 12, lengthFt: 24, basePrice: 9000 }, [SMALL]: { widthFt: 10, lengthFt: 12, basePrice: 6000 } } },
+      electrical: { label: "Electrical Package", price: 850, includePanel: false, outletItemId: "e-out", switchItemId: "e-sw", lightItemId: "e-lt",
+        outletSpacingFt: 6, lightSpacingFt: 10, outletHeightIn: 18, switchHeightIn: 48, outletAboveBenchIn: 42 },
+      electricalItems: [
+        { id: "e-out", icon: "🔌", name: "Outlet", mount: "wall", withPackage: true, standalone: false, priceWithPackage: 45, priceStandalone: null, heightOffFloorIn: 18 },
+        { id: "e-sw", icon: "🎚️", name: "Light Switch", mount: "wall", withPackage: true, standalone: false, priceWithPackage: 35, priceStandalone: null, heightOffFloorIn: 48 },
+        { id: "e-lt", icon: "💡", name: "Light", mount: "ceiling", withPackage: true, standalone: false, priceWithPackage: 65, priceStandalone: null, heightOffFloorIn: 96 },
+      ],
+    };
+    const page = await ctx.newPage();
+    const errors = collectErrors(page);
+    await stubSupabase(page, { config: ELEC, fixtures: FIXTURES });
+    await openDesigner(page, ELEC.clientId);
+    await planReady(page);
+    const pickSize = async (label, lenFt) => {
+      const sel = page.locator("select").filter({ has: page.locator("option", { hasText: label }) });
+      await sel.first().selectOption({ label });
+      await page.waitForFunction((l) => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === `${l} ft`), lenFt, { timeout: 15000 });
+      await settle(page, 600);
+    };
+    await pickSize(BIG, 24);
+    await (await revealTool(page, /Electrical Package/)).click();
+    await settle(page, 600);
+    const count = async () => {
+      const its = (await readItems(page)) || [];
+      const n = (id) => its.filter((i) => i.electricalItemId === id).length;
+      return { outlet: n("e-out"), light: n("e-lt"), sw: n("e-sw") };
+    };
+    const big = await count();
+    ok("H: the package lays out 12 outlets, 2 lights and a switch on the 12x24", big.outlet === 12 && big.light === 2 && big.sw === 1, JSON.stringify(big));
+    await pickSize(SMALL, 12);
+    const small = await count();
+    ok("H: after picking 10x12 nothing is left on the plan past the new standard (7 outlets, 1 light, 1 switch)",
+      small.outlet <= 7 && small.light <= 1 && small.sw <= 1, JSON.stringify(small));
+    ok("H: ...and the 10x12 standard is laid out in full", small.outlet === 7 && small.light === 1 && small.sw === 1, JSON.stringify(small));
+    ok("H: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
+    await page.close();
+  }
 } finally { await browser.close(); }
 process.exit(failed().length ? 1 : 0);

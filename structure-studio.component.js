@@ -21136,10 +21136,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (!p) return;   // blank/unparseable (a style click just blanked it): keep the last real size
     const prev = parseSize(prevSizeRef.current);
     if (prev && (prev.w !== p.w || prev.h !== p.h) && items.length) {
+      // ⚠️ THE ELECTRICAL PACKAGE IS RE-LAID OUT FOR THE NEW SIZE, not carried across. What it covers
+      // is arithmetic on the building (electricalAutoCounts), and every device on the plan is
+      // charged at max(0, placed - covered) in the preview and in submit-estimate. Carrying the old size's
+      // devices across therefore BILLED the customer for extras they never added the moment the
+      // building got smaller (12x24 -> 10x12: 12 outlets placed, 7 covered, 5 charged), and drew
+      // fewer than the package includes when it got bigger. So the auto devices sit out the reflow
+      // and the standard layout is laid out again on the new building, exactly what switching the
+      // package off and on does; anything the customer placed by hand is reflowed like any item.
+      const elecPkg = sel.electrical ? electricalOffered(C) : null;
+      const reflowable = elecPkg ? items.filter((i) => !i.elecAuto) : items;
       // A vent in the gable is re-fitted to the NEW building's gable, or brought down to its wall
       // when the new size has none there (reflowItems' gablePlace).
       const vr = ventRoof2D();
-      const { items: nextItems, events } = reflowItems(items, prev, p, ITEMS, (cand, sn, g) =>
+      const { items: reflowed, events } = reflowItems(reflowable, prev, p, ITEMS, (cand, sn, g) =>
         ssGableVentPlace(vr.roof, p.w, p.h, vr.H, cand, sn, g.scale, g.mgX, g.mgY,
           ((sn.wall === "north" || sn.wall === "south") ? sn.x - g.mgX : sn.y - g.mgY) / g.scale, cand.ventRiseFt));
       const blocked = events.filter((e) => e.kind === "blocked");
@@ -21148,6 +21158,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         setSizeBlock({ from: prevSizeRef.current, to: sel.size, items: blocked });
         setSel((s) => ({ ...s, size: prevSizeRef.current }));
         return;                       // prevSizeRef stays put; the revert re-runs this effect
+      }
+      let nextItems = reflowed;
+      if (elecPkg) {
+        const g = pageGeom(p.w, p.h);
+        const add = electricalAutoItems(elecPkg, {
+          widthFt: p.w, lengthFt: p.h, scale: g.scale, mgX: g.mgX, mgY: g.mgY, pW: g.pW, pH: g.pH,
+          itemTypes: { ...ITEMS, ...elecToolsFor(true) },
+          existing: reflowed, frontWall: getFrontWall(reflowed), startId: idCounter,
+        });
+        idCounter += add.length + 1;
+        nextItems = reflowed.concat(add);
       }
       setItems(nextItems);
       setSelectedId(null);
