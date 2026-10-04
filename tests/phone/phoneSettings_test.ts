@@ -190,6 +190,27 @@ Deno.test("report: a call a teammate answered is NOT a miss for the others", () 
   assertEquals(r.totals.missed, 0);
 });
 
+Deno.test("report: answered with NO answered_by (the forward number took it, or a cold transfer nobody took) is answered, not missed", () => {
+  // The Worker writes both shapes: /voice/screen stamps answered_at with no user for the route's
+  // forward number, and a cold transfer clears answered_by and keeps answered_at (fileVoicemail:
+  // "an answered call that ended in voicemail stays answered").
+  const forwarded = call({ status: "completed", rang_user_ids: [A, B], answered_at: "2026-09-29T15:00:00Z", duration_s: 90 });
+  const transferVm = call({ status: "completed", rang_user_ids: [A, B], answered_at: "2026-09-29T16:00:00Z", duration_s: 30 });
+  // Mid-transfer (answered once, nobody holding it now): neither answered nor missed yet.
+  const live = call({ status: "in_progress", rang_user_ids: [A, B], answered_at: "2026-09-29T17:00:00Z" });
+  const r = buildCallsReport({
+    calls: [forwarded, transferVm, live],
+    texts: [], voicemailCallIds: new Set([transferVm.id]), contactOwner: new Map(),
+    people: [{ userId: A, name: "A" }, { userId: B, name: "B" }],
+    includeOthers: true, nameOf: () => "x",
+  });
+  for (const l of r.lines) {
+    assertEquals([l.callsIn, l.answered, l.missed, l.voicemails], [3, 0, 0, 0], l.name);
+  }
+  assertEquals([r.totals.callsIn, r.totals.answered, r.totals.missed, r.totals.voicemails], [3, 2, 0, 0]);
+  assertEquals(r.totals.avgSeconds, 60);
+});
+
 Deno.test("report: voicemails, live calls, outbound and average length", () => {
   const vmCall = call({ status: "voicemail", rang_user_ids: [A] });
   const vmByRow = call({ status: "missed", rang_user_ids: [A] });
