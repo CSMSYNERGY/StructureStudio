@@ -12467,6 +12467,11 @@ function buildShed3DModel(THREE, p) {
         const mid = (pm[0] - wf.O[0]) * wf.U[0] + (pm[1] - wf.O[1]) * wf.U[1];
         if (Math.abs(along - mid) < porchGeom.side) rampOut = porchOut.D;
       }
+      // A RECESSED porch's own wall is set back under the roof (WALLS: its O moves in porchDepth) and
+      // the porch floor runs on out to the footprint line in front of it, so a ramp to a door on that
+      // wall starts at the floor's edge, where it would on any other wall, rather than at the set-back
+      // wall with its whole run buried in the porch floor.
+      if (porchWall && it.wall === porchWall) rampOut = porchDepth + T / 2;
       // Where the ground falls away (FALL) the drop is the ground's depth at the ramp's own foot, and
       // the run that depth sets (rampOnGround).
       let drop = GRADE, run = Math.max(3, 4 * drop);
