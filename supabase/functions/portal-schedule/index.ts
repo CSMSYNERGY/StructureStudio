@@ -794,9 +794,20 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // ~9 round trips in single file, and drivers/territories/team were three of them —
       // awaited inside the response literal, so they only started once everything else had
       // finished. They depend on nothing; they go first, alongside the loads read.
+      //
+      // Both whole-set reads are PAGED (see fetchAll). The loads read used to be
+      // `.limit(500)` on an ASCENDING date sort, which kept the OLDEST 500: past that, every
+      // new load — the upcoming week, and every undated planned load (sorted last) — silently
+      // vanished from the board, from the Repairs tab's "add to a load" picker, and from the
+      // calendar. The stops read had no limit at all, which on PostgREST means 1000 rows, so a
+      // board past ~1000 stops lost its higher-numbered stops (it sorted by stop_order alone),
+      // under-filling deck bars on the loads it truncated.
+      // Stops are read for the whole tenant rather than `.in(load_id, …)`: every stop belongs to
+      // a load (load_id NOT NULL, cascade), and every load is now in hand, so it is the same set
+      // without a URL that grows by ~40 characters per load.
       const [loadsRes, drivers, territories, team] = await Promise.all([
-        admin.from("delivery_loads").select("*").eq("client_id", clientId)
-          .order("load_date", { ascending: true, nullsFirst: false }).limit(500),
+        fetchAll((from, to) => admin.from("delivery_loads").select("*").eq("client_id", clientId)
+          .order("load_date", { ascending: true, nullsFirst: false }).order("id").range(from, to)),
         getDrivers(),
         getTerritories(),
         getTeam(),
@@ -805,8 +816,8 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       const loads = loadsRes.data;
       const loadIds = (loads ?? []).map((l) => l.id);
       const { data: stops } = loadIds.length
-        ? await admin.from("delivery_stops").select("*").eq("client_id", clientId)
-          .in("load_id", loadIds).order("stop_order")
+        ? await fetchAll((from, to) => admin.from("delivery_stops").select("*").eq("client_id", clientId)
+          .order("load_id").order("stop_order").order("id").range(from, to))
         : { data: [] };
       // Build status per stop (for the cross-link chips), and where each unit sits on the
       // ladder — independent of each other, so one wave rather than two.
