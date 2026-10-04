@@ -35,6 +35,37 @@ export function consentSentenceInvoice(invoiceNumber: string, totalDisplay: stri
   return `I agree that my electronic signature is as binding as a handwritten one, and I accept invoice ${invoiceNumber}${totalDisplay ? ` for ${totalDisplay}` : ""}.`;
 }
 
+/** Signing off a CHANGE to a signed order (ack_change_order, 2026-09-07). The figure is the
+ *  WHOLE revised order — every acknowledged change and every fee — not this change alone,
+ *  and the sentence names what it replaces. Moved here from customer-accept unchanged so
+ *  customer-quotes can send the customer the exact text the signature will store: my-quotes
+ *  kept a hand-written copy ("I approve change order CO-n … for a new total of <this
+ *  change's after-figure>") that had stopped matching the stored sentence, figure included. */
+export function consentSentenceChangeOrder(p: {
+  /** invoice_sends.invoice_number, raw — any truthy value makes the document an "invoice". */
+  invoiceNumber: unknown;
+  quoteNumber: string;
+  coNo: number | string;
+  /** The whole revised order, in dollars, or null when it cannot be computed. */
+  newTotal: number | null;
+  feeCents: number;
+  feeTaxCents: number;
+  /** YYYY-MM-DD of the invoice signature this revision replaces, or null. */
+  priorDate: string | null;
+  /** What the customer has paid above the revised total, in cents (0 when nothing). */
+  refundCents: number;
+}): string {
+  const docName = String(p.invoiceNumber ?? "").trim() || p.quoteNumber;
+  return `I agree that my electronic signature is as binding as a handwritten one, and I accept the revised ` +
+    `${p.invoiceNumber ? "invoice" : "quote"} ${docName} (revision ${p.coNo})` +
+    (p.newTotal == null ? "" : ` for ${fmtMoney(p.newTotal)}`) +
+    `, which includes change order CO-${p.coNo}` +
+    (p.feeCents > 0 ? ` and a change order fee of ${fmtMoney((p.feeCents + p.feeTaxCents) / 100)}` : "") +
+    (p.priorDate ? `, and replaces the version I signed on ${p.priorDate}` : "") +
+    (p.refundCents > 0 ? `. The revised total is below what I have already paid, and ${fmtMoney(p.refundCents / 100)} is to be refunded to me` : "") +
+    `.`;
+}
+
 /** The money figure inside those sentences. Rounded to cents FIRST, so a float tail can never
  *  print a different cent than the invoice does. Deliberately not emailTemplates' formatMoney:
  *  that one passes pre-formatted strings through, and a sentence must only ever name a number. */

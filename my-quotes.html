@@ -994,6 +994,14 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
         newTot.textContent = "New order total: " + nt;
         box.appendChild(newTot);
       }
+    } else if (co.newTotal != null && co.totalAfter != null && fmtMoney(co.newTotal) !== fmtMoney(co.totalAfter)) {
+      // newTotal is the WHOLE revised order (customer-quotes), which an earlier approved change
+      // moves past this change's own after-figure. Say so, or the pair above contradicts the
+      // amount in the sentence beside the checkbox.
+      var newTot2 = document.createElement("div");
+      newTot2.style.cssText = "font-size:13px;font-weight:800;margin-top:4px;color:#92400E";
+      newTot2.textContent = "New order total: " + fmtMoney(co.newTotal);
+      box.appendChild(newTot2);
     }
     var btn = document.createElement("button");
     btn.type = "button";
@@ -1565,7 +1573,14 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     var consentBox = document.createElement("input");
     consentBox.type = "checkbox";
     var consentSpan = document.createElement("span");
-    if (co) {
+    if (co && typeof co.consentText === "string" && co.consentText) {
+      // The exact sentence customer-accept will store for this signature, composed by the
+      // server from the whole revised order (customer-quotes, _shared/consentSentences.ts).
+      // The copy below had drifted from it — it named this change's own after-figure, so a
+      // customer could tick one amount while the record held another.
+      consentSpan.textContent = co.consentText;
+    } else if (co) {
+      // A customer-quotes from before consentText shipped: the old local composition.
       var afterText = fmtMoney(co.totalAfter);
       consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I approve change order CO-" +
         (co.coNo != null ? co.coNo : "?") + " to quote " + numText + (afterText ? " for a new total of " + afterText : "") + ".";

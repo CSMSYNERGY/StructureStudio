@@ -11,7 +11,7 @@ import { acceptanceEmail, invoiceRequestEmail } from "../_shared/emailTemplates.
 import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { rsSendEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
 import { portalOrderUrl } from "../_shared/customerPortalUrl.ts";
-import { consentSentence, consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
+import { consentSentence, consentSentenceChangeOrder, consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
 // The accept race (2026-09-17): the total the customer SAW, checked against the one about to freeze.
 import { checkExpectedTotal, promoteMiss } from "../_shared/acceptTotal.ts";
 
@@ -423,7 +423,6 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
         .eq("client_id", identity.clientId).eq("short_code", co.short_code).eq("subject", "invoice")
         .order("revision", { ascending: false }).limit(1).maybeSingle(),
     ]);
-    const docName = String(invRow?.invoice_number ?? "").trim() || quoteNo;
     const priorDate = priorAcc?.accepted_at
       ? new Date(String(priorAcc.accepted_at)).toISOString().slice(0, 10)
       : null;
@@ -451,15 +450,18 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     }
     const refundCents = projected == null ? 0 : Math.max(0, settledCents - projected.totalCents);
 
-    const coConsent =
-      `I agree that my electronic signature is as binding as a handwritten one, and I accept the revised ` +
-      `${invRow?.invoice_number ? "invoice" : "quote"} ${docName} (revision ${co.co_no})` +
-      (newTotal == null ? "" : ` for ${fmtMoney(newTotal)}`) +
-      `, which includes change order ${coLabel}` +
-      (feeCents > 0 ? ` and a change order fee of ${fmtMoney((feeCents + feeTaxCents) / 100)}` : "") +
-      (priorDate ? `, and replaces the version I signed on ${priorDate}` : "") +
-      (refundCents > 0 ? `. The revised total is below what I have already paid, and ${fmtMoney(refundCents / 100)} is to be refunded to me` : "") +
-      `.`;
+    // Composed in _shared/consentSentences.ts since customer-quotes sends the customer this
+    // exact sentence to tick (my-quotes' hand-kept copy had drifted from it). Same text.
+    const coConsent = consentSentenceChangeOrder({
+      invoiceNumber: invRow?.invoice_number,
+      quoteNumber: quoteNo,
+      coNo: co.co_no,
+      newTotal,
+      feeCents,
+      feeTaxCents,
+      priorDate,
+      refundCents,
+    });
 
     const ip = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || null;
     const userAgent = (req.headers.get("user-agent") || "").slice(0, 300) || null;

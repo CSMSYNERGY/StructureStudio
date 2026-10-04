@@ -4,9 +4,9 @@ import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession, identityForClient } from "../_shared/customerSession.ts";
 import { loadAddressStanding, loadOwnedDesigns } from "../_shared/customerIdentity.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
-import { amountOwed, subtotalsFromSnapshot, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amountOwed, orderCentsAfterAck, subtotalsFromSnapshot, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
-import { consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
+import { consentSentenceChangeOrder, consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
 
 // customer-quotes: the authenticated quote list for the CUSTOMER portal (the shed
 // shopper's own view, not the tenant owner's). The caller presents the opaque bearer
@@ -203,9 +203,14 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   // would show the customer a stale figure and have them sign for it.
   // deno-lint-ignore no-explicit-any
   const ackedByCode = new Map<string, any[]>();
+  // The pending rows as read, for the whole-order figure and the consent sentence below.
+  // deno-lint-ignore no-explicit-any
+  const pendingRawById = new Map<string, any>();
   if (ssMode && mine.length > 0) {
     const { data: cos } = await admin.from("change_orders")
-      .select("id, short_code, co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, created_at, status, acknowledged_at")
+      // fee_taxable: orderCentsAfterAck taxes a fee only when it is set, exactly as
+      // customer-accept's ack reads it — without it a taxable fee's tax drops out of the total.
+      .select("id, short_code, co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable, created_at, status, acknowledged_at")
       .eq("client_id", identity.clientId)
       .in("status", ["pending_ack", "acknowledged"])
       .in("short_code", mine.map((d) => d.short_code));
@@ -231,6 +236,7 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
       // arrive at a different number than the invoice does.
       const coFee = Number(co.fee_cents) || 0;
       const coFeeTax = Number(co.fee_tax_cents) || 0;
+      pendingRawById.set(String(co.id), co);
       const list = cosByCode.get(co.short_code) ?? [];
       list.push({
         id: co.id,
@@ -247,6 +253,74 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
         createdAt: co.created_at,
       });
       cosByCode.set(co.short_code, list);
+    }
+  }
+
+  // ── WHAT A PENDING CHANGE ASKS THEM TO SIGN (2026-10-04) ──────────────────────────────
+  // customer-accept's ack_change_order stores, as the consent evidence, a sentence naming the
+  // WHOLE revised order (every acknowledged change and every fee), the document it revises,
+  // the signature it replaces and any refund owed — composed in _shared/consentSentences.ts.
+  // my-quotes was printing its own sentence beside the checkbox, naming this change's
+  // after-figure alone, so on an order with an earlier fee or manual change the customer
+  // ticked one amount and the record holds another. The same inputs, read the same way, are
+  // computed here and sent down with each pending change: `consentText` is the exact text the
+  // signature will store, and `newTotal` is the figure inside it. Only orders with a pending
+  // change pay for these reads.
+  if (pendingRawById.size > 0) {
+    const pendingCodes = [...cosByCode.keys()];
+    const [invNoRes, accRes, ordIdRes] = await Promise.all([
+      admin.from("invoice_sends").select("short_code, invoice_number")
+        .eq("client_id", identity.clientId).in("short_code", pendingCodes),
+      admin.from("design_acceptances").select("short_code, accepted_at, revision")
+        .eq("client_id", identity.clientId).eq("subject", "invoice").in("short_code", pendingCodes),
+      admin.from("orders").select("id, short_code")
+        .eq("client_id", identity.clientId).in("short_code", pendingCodes),
+    ]);
+    const invNoByCode = new Map<string, unknown>();
+    for (const r of invNoRes.data ?? []) invNoByCode.set(String(r.short_code), r.invoice_number);
+    // The newest invoice signature per code — customer-accept reads the highest revision.
+    const priorByCode = new Map<string, { revision: number; at: string }>();
+    for (const a of accRes.data ?? []) {
+      const rev = Number(a.revision) || 0;
+      const cur = priorByCode.get(String(a.short_code));
+      if (a.accepted_at && (!cur || rev > cur.revision)) priorByCode.set(String(a.short_code), { revision: rev, at: String(a.accepted_at) });
+    }
+    // Settled money per code: not voided, and neither clearing nor returned (customer-accept's rule).
+    const codeByOrder = new Map<string, string>();
+    for (const o of ordIdRes.data ?? []) codeByOrder.set(String(o.id), String(o.short_code));
+    const settledByCode = new Map<string, number>();
+    if (codeByOrder.size > 0) {
+      const { data: pays } = await admin.from("payments").select("order_id, amount_cents, funding_state, voided_at")
+        .eq("client_id", identity.clientId).in("order_id", [...codeByOrder.keys()]);
+      for (const pmt of Array.isArray(pays) ? pays : []) {
+        if (pmt.voided_at || pmt.funding_state === "pending" || pmt.funding_state === "returned") continue;
+        const code = codeByOrder.get(String(pmt.order_id));
+        if (code) settledByCode.set(code, (settledByCode.get(code) ?? 0) + (Number(pmt.amount_cents) || 0));
+      }
+    }
+    const designByCode = new Map(mine.map((d) => [d.short_code, d]));
+    for (const [code, list] of cosByCode) {
+      const d = designByCode.get(code);
+      for (const entry of list) {
+        const co = pendingRawById.get(String(entry.id));
+        if (!co) continue;
+        const projected = orderCentsAfterAck(d?.estimate_lines, [...(ackedByCode.get(code) ?? []), co]);
+        const newTotal = projected == null
+          ? (co.total_after_cents == null ? null : co.total_after_cents / 100)
+          : projected.totalCents / 100;
+        const prior = priorByCode.get(code);
+        entry.newTotal = newTotal;
+        entry.consentText = consentSentenceChangeOrder({
+          invoiceNumber: invNoByCode.get(code),
+          quoteNumber: String(d?.ss_quote_number || code),
+          coNo: co.co_no,
+          newTotal,
+          feeCents: Number(co.fee_cents) || 0,
+          feeTaxCents: Number(co.fee_tax_cents) || 0,
+          priorDate: prior ? new Date(prior.at).toISOString().slice(0, 10) : null,
+          refundCents: projected == null ? 0 : Math.max(0, (settledByCode.get(code) ?? 0) - projected.totalCents),
+        });
+      }
     }
   }
 
