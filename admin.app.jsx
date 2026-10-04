@@ -279,6 +279,18 @@ function AdminApp() {
   const [reassignFrom, setReassignFrom] = useState(null); // email already linked elsewhere: { email, role, fromClient } — drives the one-click Reassign prompt
   const [itemSel, setItemSel] = useState(() => new Set()); // staged layout-item picks (applied together on Save)
   const itemsDirty = useRef(false); // true while itemSel holds unsaved ticks — see the re-sync effect below
+  // The builder on screen RIGHT NOW, readable after an await. Every per-builder read below
+  // (catalog, payments) is a round trip, and the builder dropdown stays live while one is in
+  // flight, so a reply can arrive after the operator has moved on — and, out of order, after
+  // the new builder's own reply. Written into state it would put builder A's catalog (the CSV
+  // template, the item pills) or A's merchant id under builder B's name, and every write on
+  // that screen goes to `sel`, i.e. to B. A reply for a builder that is no longer selected is
+  // dropped instead. A ref, not `sel`: a closure's `sel` is the one from the render it began in.
+  const selRef = useRef("");
+  const refreshCat = async (cid) => {
+    const c = await api("get_client_catalog", pwd, { clientId: cid });
+    if (selRef.current === cid) setCat(c);
+  };
   const [delOpen, setDelOpen] = useState(false);
   const [delConfirm, setDelConfirm] = useState("");
   // Operator-global email sender (Supabase Auth custom SMTP → a Google account).
@@ -350,6 +362,7 @@ function AdminApp() {
   // the new id isn't in it, the billing seed below would read exempt=false / 0%, and one
   // Save would silently wipe the exemption/discount the create form persisted seconds ago.
   const loadClient = async (cid, freshClients) => {
+    selRef.current = cid;
     setSel(cid); setCat(null); setMsg(null); setCsvResult(null); setReassignFrom(null);
     setNewStyleName(""); setNewStyleImg(null); setFileKey((k) => k + 1); // don't carry a half-filled create-style form to another client
     setDelOpen(false); setDelConfirm("");                                // close any open delete confirmation when switching clients
@@ -367,8 +380,8 @@ function AdminApp() {
     setBillUntil(row?.exemptUntil ? String(row.exemptUntil).slice(0, 10) : "");
     if (!cid) return;
     setBusy(true);
-    try { setCat(await api("get_client_catalog", pwd, { clientId: cid })); }
-    catch (e) { flash({ err: e.message }); }
+    try { await refreshCat(cid); }
+    catch (e) { if (selRef.current === cid) flash({ err: e.message }); }
     setBusy(false);
   };
   const createNewClient = async () => {
@@ -446,11 +459,12 @@ function AdminApp() {
     setPayLoaded(null);
     try {
       const r = await api("get_payments", pwd, { clientId: cid });
+      if (selRef.current !== cid) return;   // another builder is on screen now — see selRef
       setPayLoaded(r);
       setPayEnabled(Boolean(r.paymentsEnabled));
       setPayMerchid(String(r.merchid || ""));
       setPayConfirm(false);
-    } catch (e) { setPayLoaded({ error: e.message }); }
+    } catch (e) { if (selRef.current === cid) setPayLoaded({ error: e.message }); }
   };
   const togglePayments = () => {
     const next = !payOpen;
@@ -529,7 +543,7 @@ function AdminApp() {
     try {
       const r = await api("delete_client", pwd, { clientId: id, confirmClientId: delConfirm.trim() });
       const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
-      setDelOpen(false); setDelConfirm(""); setSel(""); setCat(null);
+      selRef.current = ""; setDelOpen(false); setDelConfirm(""); setSel(""); setCat(null);
       const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
       flash({ ok: `Builder "${id}" deleted${parts ? ` (${parts})` : ""}.` });
     } catch (e) { flash({ err: e.message }); }
@@ -542,7 +556,7 @@ function AdminApp() {
     } catch (e) { flash({ err: e.message }); setBusy(false); return; }
     flash({ ok: ok || "Saved" });                   // write succeeded — report it BEFORE refreshing
     try {                                            // refresh reads are best-effort; a failure here must not
-      if (sel) setCat(await api("get_client_catalog", pwd, { clientId: sel }));  // mask the successful write or
+      if (sel) await refreshCat(sel);                                            // mask the successful write or
       const m = await api("get_master", pwd); setMaster(m);                       // corrupt the on-screen pill state
     } catch (_) { /* UI catches up on the next action */ }
     setBusy(false);
@@ -586,7 +600,7 @@ function AdminApp() {
     // the refresh below — that refresh is the one cat change that must re-sync itemSel.
     itemsDirty.current = false;
     flash({ ok: `Saved ${total} change${total === 1 ? "" : "s"}.` });
-    try { setCat(await api("get_client_catalog", pwd, { clientId: sel })); setMaster(await api("get_master", pwd)); }
+    try { await refreshCat(sel); setMaster(await api("get_master", pwd)); }
     catch (_) { /* UI catches up on the next action */ }
     setBusy(false);
   };
@@ -614,7 +628,7 @@ function AdminApp() {
       }
       await api("create_style", pwd, { clientId: sel, label: newStyleName.trim(), imageUrl });
       setNewStyleName(""); setNewStyleImg(null); setFileKey((k) => k + 1);
-      setCat(await api("get_client_catalog", pwd, { clientId: sel }));
+      await refreshCat(sel);
       flash({ ok: "Style created" });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
@@ -667,7 +681,7 @@ function AdminApp() {
       });
       const res = await api("import_pricing_csv", pwd, { clientId: sel, rows });
       setCsvResult(res);
-      setCat(await api("get_client_catalog", pwd, { clientId: sel }));
+      await refreshCat(sel);
       const parts = []; if (res.created) parts.push(`${res.created} added`); if (res.updated) parts.push(`${res.updated} updated`);
       flash({ ok: `Imported ${res.imported || 0} size(s)` + (parts.length ? ` (${parts.join(", ")})` : "") + (res.skipped && res.skipped.length ? `, ${res.skipped.length} skipped` : "") });
     } catch (e) { flash({ err: e.message }); }
