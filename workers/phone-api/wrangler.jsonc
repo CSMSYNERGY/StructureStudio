@@ -54,10 +54,23 @@
     "VOICEMAIL_RETENTION_DAYS": "365",
     // Release 2. "on" adds Twilio transcription to voicemail (<Record transcribe>, about
     // $0.05/minute, English, 2 s to 2 min). Anything else: off.
-    "TRANSCRIBE": "off"
+    "TRANSCRIBE": "off",
+    // Release B2, call recording's kill switch. Exactly "on" lets a business that turned
+    // recording on (Settings › Phone, owner only) have its calls announced and recorded, through
+    // Twilio's REST API on the customer's leg (src/recording.ts). Anything else: no announcement
+    // and no recording for anyone. Needs migration 263 applied first.
+    "CALL_RECORDING": "off",
+    // Release B2. Exactly "on" transcribes recorded calls with Workers AI (the "ai" binding
+    // below, Deepgram nova-3, about $0.005-0.01 per minute) from the minute tick, and asks the
+    // phone-call-summary edge function for a summary of each. Anything else: off.
+    "CALL_TRANSCRIBE": "off"
     // The wallet floor that refuses an outbound call is no longer a var here: it is
     // phone_billing_settings.floor_cents (migration 259), so calls and texts share one number.
   },
+
+  // Workers AI, for call transcripts (cron/transcribe.ts). Billed to this Cloudflare account; no
+  // key to keep. Used only while CALL_TRANSCRIBE is "on".
+  "ai": { "binding": "AI" },
 
   // Runs the Worker next to Supabase (us-east-1). Measured 2026-09-29 on real Twilio calls:
   // without it the Worker ran wherever Twilio's request landed and paid ~950 ms to reach the

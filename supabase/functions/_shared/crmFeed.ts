@@ -276,11 +276,24 @@ export async function buildCrmFeed(
     // have any. It must never be merged into the sms_messages read above — a missing column
     // there would empty the whole texting history instead.
     // Not read at all for someone with no phone access (opts.phone, review SSB-5).
+    //
+    // CALL RECORDINGS (migration 263) ride along the same way: phone_call_recordings.call_id is a
+    // unique FK too. Only what the line needs: the transcript itself is NOT read here (up to
+    // 100,000 characters a call, 80 calls), the portal fetches it from the phone-api Worker on
+    // "Show transcript", with the Worker's own visibility rule.
+    // ⚠️ NOT q() alone, for the reason the email_sends read above gives: before 263 is applied
+    // PostgREST refuses the embed (no such relationship), and q() would turn that into "no calls
+    // at all". On that one refusal the read is tried again without it.
     opts.contactId && phoneScope !== "none"
-      ? q(admin.from("phone_calls")
-          .select("id, direction, status, from_e164, to_e164, started_at, answered_at, duration_s, placed_by, answered_by, transferred_from, rang_user_ids, phone_voicemails(id, duration_s, transcript, listened_at, deleted_at)")
-          .eq("client_id", clientId).eq("contact_id", opts.contactId)
-          .order("started_at", { ascending: false }).limit(80))
+      ? (async () => {
+          const read = (embed: string) => admin.from("phone_calls")
+            .select(`id, direction, status, from_e164, to_e164, started_at, answered_at, duration_s, placed_by, answered_by, transferred_from, rang_user_ids, phone_voicemails(id, duration_s, transcript, listened_at, deleted_at)${embed}`)
+            .eq("client_id", clientId).eq("contact_id", opts.contactId)
+            .order("started_at", { ascending: false }).limit(80);
+          let r = await read(", phone_call_recordings(id, status, duration_s, summary, transcript_status, deleted_at)");
+          if (r?.error && ["PGRST200", "42P01", "42703"].includes(String(r.error.code))) r = await read("");
+          return r?.data ?? [];
+        })().catch(() => [])
       : Promise.resolve([]),
   ]);
 
@@ -618,6 +631,42 @@ export function fmtCallLength(seconds: unknown): string {
 }
 
 /**
+ * A call's recording (its phone_call_recordings embed, migration 263) → what the timeline line
+ * shows and offers. Null when the call has none (or the embed was not read, before 263).
+ *   recordingId     the recording, while its audio exists (null once retention deleted it)
+ *   recordingReady  Twilio has finished it: the portal offers Play (GET /recordings/:id/audio)
+ *   recordingState  live | paused | processing | ready | failed, the phone-api Worker's words
+ *                   (routes/reads.ts recordingOut), so the portal and the apps say the same thing
+ *   summary         2-4 sentences and action items; KEPT after the audio is deleted
+ *   hasTranscript   the portal may offer "Show transcript" (fetched from the Worker on the press)
+ *   transcriptPending  the transcript and summary are still being made
+ */
+// deno-lint-ignore no-explicit-any
+export function recordingMeta(c: any): Record<string, unknown> | null {
+  const r = Array.isArray(c?.phone_call_recordings) ? (c.phone_call_recordings[0] ?? null) : (c?.phone_call_recordings ?? null);
+  if (!r || !r.id) return null;
+  const gone = !!r.deleted_at;
+  const status = String(r.status ?? "");
+  const live = String(c?.status ?? "") === "ringing" || String(c?.status ?? "") === "in_progress";
+  const state = status === "completed" ? "ready"
+    : status === "failed" || status === "absent" ? "failed"
+    : !live ? "processing"
+    : status === "paused" ? "paused" : "live";
+  const ts = String(r.transcript_status ?? "");
+  const summary = typeof r.summary === "string" && r.summary.trim() ? r.summary.trim() : null;
+  return {
+    recordingId: gone ? null : r.id,
+    recordingReady: !gone && status === "completed",
+    recordingState: gone ? null : state,
+    recordingDurationS: !gone && Number(r.duration_s) > 0 ? Number(r.duration_s) : null,
+    recordingDeleted: gone,
+    summary,
+    hasTranscript: !gone && ts === "done",
+    transcriptPending: !gone && (ts === "pending" || ts === "working"),
+  };
+}
+
+/**
  * phone_calls rows (with their phone_voicemails embed) → timeline events.
  *
  * WHICH TYPE, in this order (plan section 7's outcomes, from the customer's side of the line):
@@ -650,6 +699,9 @@ export function callFeedEvents(rows: any[], nameOf: (userId: string) => string):
         // The portal plays a voicemail from the Worker (/voicemails/:id/audio) only while the
         // recording still exists at Twilio; a deleted one keeps its line but has nothing to play.
         voicemailDeleted: !!vm?.deleted_at,
+        // The call's own recording, its summary and whether there is a transcript (migration
+        // 263, recordingMeta above). Absent on a call that was not recorded.
+        ...(recordingMeta(c) ?? {}),
       } as Record<string, unknown>,
     };
     if (c.direction === "out") {

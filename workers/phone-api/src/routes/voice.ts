@@ -2,7 +2,8 @@
 // /voice/status, /voice/voicemail and /voice/transcription. The router has already checked
 // ?key= (and the signature, when TWILIO_AUTH_TOKEN is set). The conference callback
 // (/voice/conference) and hold / warm transfer live in ../conference.ts; the voicemail TwiML in
-// ../voicemail.ts.
+// ../voicemail.ts; call recording, its announcement (/voice/notice) and its callback
+// (/voice/recording) in ../recording.ts.
 //
 // SPEED RULES (plan sections 2 and 8). Twilio waits for these answers before anyone hears a
 // ring, so each one makes the fewest possible round trips, uncached, and everything that is not
@@ -22,6 +23,7 @@ import { UUID_RE } from "../http";
 import { isOpen } from "../hours";
 import { emergencyDigits, isPremiumRate, parseIdentity, phoneDigits, stripClientPrefix, toE164, toIdentity, type ParsedIdentity } from "../identity";
 import { logFault } from "../log";
+import { armedFor, noticeText, recordedParams, startCallRecording, startForCallId, stopCallRecording } from "../recording";
 import type { TwilioParams } from "../twilioSignature";
 import {
   clientNoun, dial, gather, hangup, numberNoun, response, say,
@@ -90,36 +92,51 @@ export function availableMembers(info: RouteInfo, now = Date.now()): RouteMember
     .sort((a, b) => pos(a.user_id) - pos(b.user_id));
 }
 
-function screenUrl(env: Env, callId: string, business: string | null, userId?: string): string {
-  return hook(env, "/voice/screen", { call: callId, user: userId, b: (business ?? "").slice(0, 60) });
+/** `armed` (r=1): the call is being recorded, which the screen tells whoever picks up the cell. */
+function screenUrl(env: Env, callId: string, business: string | null, userId?: string, armed = false): string {
+  return hook(env, "/voice/screen", { call: callId, user: userId, b: (business ?? "").slice(0, 60), r: armed ? 1 : undefined });
 }
 
-/** One <Client> for the member, and their cell (screened) when they chose forwarding. */
-function memberNouns(env: Env, callId: string, m: { user_id: string; identity: string; forward_to_cell: string | null }, business: string | null): string[] {
+/**
+ * One <Client> for the member, and their cell (screened) when they chose forwarding. On an armed
+ * call (../recording.ts) the <Client> carries recorded=1 and the cell's screen says so.
+ */
+function memberNouns(env: Env, callId: string, m: { user_id: string; identity: string; forward_to_cell: string | null }, business: string | null, armed = false): string[] {
   const nouns = [clientNoun({
     identity: m.identity,
     statusCallback: hook(env, "/voice/status", { call: callId, leg: "client" }),
-    params: { call_id: callId },
+    params: { call_id: callId, ...recordedParams(armed) },
   })];
   const cell = toE164(m.forward_to_cell);
   if (cell) {
     nouns.push(numberNoun({
       e164: cell,
-      url: screenUrl(env, callId, business, m.user_id),
+      url: screenUrl(env, callId, business, m.user_id, armed),
       statusCallback: hook(env, "/voice/status", { call: callId, leg: "cell", user: m.user_id }),
     }));
   }
   return nouns;
 }
 
+/**
+ * How a ring answers on a recorded call: `armed` marks the nouns, and `notice` (the first pass
+ * only: the caller hears it once) is said before the <Dial>.
+ */
+interface RecordingTwiml {
+  armed: boolean;
+  notice?: string | null;
+}
+
+const NOT_RECORDED: RecordingTwiml = { armed: false };
+
 /** Forward to the route's number, screened; a forward nobody takes ends in voicemail. */
-function forwardTwiml(env: Env, callId: string, info: RouteInfo, forwardTo: string): string {
-  return response(dial({
+function forwardTwiml(env: Env, callId: string, info: RouteInfo, forwardTo: string, rec: RecordingTwiml = NOT_RECORDED): string {
+  return response(...(rec.notice ? [say(rec.notice)] : []), dial({
     timeout: info.route.ring_seconds,
     action: hook(env, "/voice/after-dial", { call: callId, stage: "fwd" }),
   }, [numberNoun({
     e164: forwardTo,
-    url: screenUrl(env, callId, info.business_name),
+    url: screenUrl(env, callId, info.business_name, undefined, rec.armed),
     statusCallback: hook(env, "/voice/status", { call: callId, leg: "cell" }),
   })]));
 }
@@ -332,11 +349,16 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
     events.push({ type: "click", data: null, at: new Date(clickAt).toISOString() });
   }
   events.push({ type: "twiml_served", data: { ms: Date.now() - t0 } });
+  // Recorded (../recording.ts): the customer hears the announcement as the <Number>'s whisper,
+  // after they pick up and before the bridge, so it lands inside the recording that their answer
+  // starts. The column is written only when true: a call the Worker never armed needs nothing.
+  const armed = armedFor(env, ctx.recording);
   ec.waitUntil(insertCall(admin, {
     id: callId, client_id: ctx.client_id, number_id: ctx.number.id,
     contact_id: contactParam || null, direction: "out",
     from_e164: ctx.number.e164, to_e164: to, client_call_sid: p.CallSid ?? null,
     placed_by: identity.userId, status: "ringing",
+    ...(armed ? { recording_armed: true } : {}),
   }, events));
 
   // Caller ID is ALWAYS the builder's number, set here; the app has no say in it. The action
@@ -347,7 +369,11 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
     answerOnBridge: true, callerId: ctx.number.e164, timeout: OUTBOUND_TIMEOUT,
     action: hook(env, "/voice/after-dial", { call: callId, stage: "out" }),
   }, [
-    numberNoun({ e164: to, statusCallback: hook(env, "/voice/status", { call: callId, leg: "pstn" }) }),
+    numberNoun({
+      e164: to,
+      url: armed ? hook(env, "/voice/notice", { call: callId, c: ctx.client_id }) : undefined,
+      statusCallback: hook(env, "/voice/status", { call: callId, leg: "pstn" }),
+    }),
   ]));
 }
 
@@ -386,17 +412,17 @@ export function ringPlan(info: RouteInfo, now = Date.now(), startAfter = -1): { 
   return null;
 }
 
-function ringTwiml(env: Env, callId: string, info: RouteInfo, plan: { members: RouteMember[]; position: number }): string {
+function ringTwiml(env: Env, callId: string, info: RouteInfo, plan: { members: RouteMember[]; position: number }, rec: RecordingTwiml = NOT_RECORDED): string {
   const nouns: string[] = [];
   for (const m of plan.members) {
-    for (const n of memberNouns(env, callId, m, info.business_name)) {
+    for (const n of memberNouns(env, callId, m, info.business_name, rec.armed)) {
       if (nouns.length < MAX_NOUNS) nouns.push(n);
     }
   }
   const action = info.route.mode === "in_order"
     ? hook(env, "/voice/after-dial", { call: callId, stage: "order", p: plan.position })
     : hook(env, "/voice/after-dial", { call: callId });
-  return response(dial({ timeout: info.route.ring_seconds, action }, nouns));
+  return response(...(rec.notice ? [say(rec.notice)] : []), dial({ timeout: info.route.ring_seconds, action }, nouns));
 }
 
 export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): Promise<string> {
@@ -415,6 +441,14 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
   const callId = crypto.randomUUID();
   let xml: string;
   let rang: string[] = [];
+  // Recorded (../recording.ts): the caller hears the announcement before the first ring, or
+  // before an after-hours forward. Never for the 911 callback window, and never for an answer
+  // that is only voicemail (the caller's message is a recording of its own). `announced` says the
+  // TwiML below really carried it: that, and only that, arms the call.
+  const rec: RecordingTwiml = !emergencyUser && info.phone_status === "on" && armedFor(env, info.recording)
+    ? { armed: true, notice: noticeText(env, info.recording) }
+    : NOT_RECORDED;
+  let announced = false;
 
   if (!emergencyUser && info.phone_status !== "on") {
     // The switch is off (paused, or the SQL panic button) but the number still points here:
@@ -429,15 +463,17 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
     rang = target ? [target.user_id] : [];
   } else if (!isOpen(info.route.business_hours, info.route.time_zone)) {
     const fwd = info.route.after_hours === "forward" ? toE164(info.route.forward_to) : null;
-    xml = fwd ? forwardTwiml(env, callId, info, fwd) : voicemailTwiml(env, callId, info);
+    xml = fwd ? forwardTwiml(env, callId, info, fwd, rec) : voicemailTwiml(env, callId, info);
+    announced = !!fwd && rec.armed;
   } else {
     const plan = ringPlan(info);
     if (!plan) {
       // Everyone is off the team, without access, on DND or on a call: straight to voicemail.
       xml = voicemailTwiml(env, callId, info);
     } else {
-      xml = ringTwiml(env, callId, info, plan);
+      xml = ringTwiml(env, callId, info, plan, rec);
       rang = plan.members.map((m) => m.user_id);
+      announced = rec.armed;
     }
   }
 
@@ -449,7 +485,11 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
       id: callId, client_id: info.client_id, number_id: info.number_id, contact_id: contactId,
       direction: "in", from_e164: from, to_e164: to, twilio_call_sid: p.CallSid ?? null,
       rang_user_ids: rang, status: "ringing",
-    }, [{ type: "twiml_served", data: { ms: servedMs, rang: rang.length } }]);
+      ...(announced ? { recording_armed: true } : {}),
+    }, [
+      { type: "twiml_served", data: { ms: servedMs, rang: rang.length } },
+      ...(announced ? [{ type: "recording_notice", data: { leg: "in" } }] : []),
+    ]);
   })());
   return xml;
 }
@@ -552,7 +592,17 @@ export async function afterDial(env: Env, ec: Ctx, p: TwilioParams, url: URL): P
 
   // 4.
   clearTransfer();
-  if (!info) return voicemailTwiml(env, callId, null);
+  // Re-rings and forwards on a recorded call mark their nouns (the caller has heard the
+  // announcement already, so it is not said again). Before any voicemail the recording is
+  // stopped and AWAITED: after a transfer nobody took (transfer=1) it is running, and the
+  // greeting and the caller's message must stay out of it. A call nobody ever answered has no
+  // recording, so its voicemail waits on no read.
+  const rec: RecordingTwiml = { armed: call.recording_armed === true };
+  const toVoicemail = async (route: RouteInfo | null) => {
+    if (rec.armed && (transfer || call.answered_at)) await stopCallRecording(env, admin, call);
+    return voicemailTwiml(env, callId, route);
+  };
+  if (!info) return toVoicemail(null);
 
   if (stage === "order" && !transfer) {
     const after = intVar(url.searchParams.get("p") ?? "", -1, -1);
@@ -560,15 +610,15 @@ export async function afterDial(env: Env, ec: Ctx, p: TwilioParams, url: URL): P
     if (next) {
       const ids = next.members.map((m) => m.user_id).filter((id) => !call.rang_user_ids.includes(id));
       if (ids.length) ec.waitUntil(patchCall(admin, callId, { rang_user_ids: [...call.rang_user_ids, ...ids] }));
-      return ringTwiml(env, callId, info, next);
+      return ringTwiml(env, callId, info, next, rec);
     }
   }
 
   if (stage !== "fwd" && info.route.no_answer === "forward") {
     const fwd = toE164(info.route.forward_to);
-    if (fwd) return forwardTwiml(env, callId, info, fwd);
+    if (fwd) return forwardTwiml(env, callId, info, fwd, rec);
   }
-  return voicemailTwiml(env, callId, info);
+  return toVoicemail(info);
 }
 
 // ── /voice/screen ────────────────────────────────────────────────────────────────────
@@ -579,18 +629,25 @@ export async function afterDial(env: Env, ec: Ctx, p: TwilioParams, url: URL): P
  * an employee's personal voicemail. Pressing 1 returns an empty document, which bridges the call.
  * Anything else hangs the cell leg up, and the forward Dial's action takes the customer to the
  * builder's own voicemail.
+ *
+ * On a recorded call (r=1) the sentence says so: that is the notice for whoever answers the cell,
+ * and pressing 1 starts the recording, as an app answering does (../recording.ts).
  */
 export async function screen(env: Env, ec: Ctx, p: TwilioParams, url: URL): Promise<string> {
   const callId = url.searchParams.get("call") ?? "";
   const business = (url.searchParams.get("b") ?? "").slice(0, 60);
   const userId = url.searchParams.get("user") ?? "";
+  const recorded = url.searchParams.get("r") === "1";
   if (url.searchParams.get("step") !== "accept") {
+    const words = recorded
+      ? `My Synergy Phone call for ${business || "your business"}. This call is recorded. Press 1 to answer.`
+      : `My Synergy Phone call for ${business || "your business"}, press 1 to answer.`;
     return response(
       gather({
-        action: hook(env, "/voice/screen", { call: callId, user: userId || undefined, b: business, step: "accept" }),
+        action: hook(env, "/voice/screen", { call: callId, user: userId || undefined, b: business, r: recorded ? 1 : undefined, step: "accept" }),
         numDigits: 1,
         timeout: 8,
-      }, [say(`My Synergy Phone call for ${business || "your business"}, press 1 to answer.`)]),
+      }, [say(words)]),
       hangup(),
     );
   }
@@ -607,6 +664,8 @@ export async function screen(env: Env, ec: Ctx, p: TwilioParams, url: URL): Prom
         answered_by: UUID_RE.test(userId) ? userId : null,
       }, (q) => q.in("status", ["ringing"]));
       await addCallEvent(admin, callId, "answered", { leg: "cell", user: UUID_RE.test(userId) ? userId : null }, at);
+      // The row decides (armed or not), not the URL: r=1 only saves a read on calls that aren't.
+      if (recorded) await startForCallId(env, callId);
     })());
   }
   return response();
@@ -689,6 +748,9 @@ export async function applyStatus(env: Env, p: TwilioParams, url: URL, signed = 
     if (!row.twilio_call_sid && sid) await patchCall(admin, id, { twilio_call_sid: sid }, (q) => q.is("twilio_call_sid", null));
     if (status === "in-progress" || status === "answered") {
       await patchCall(admin, id, { status: "in_progress", answered_at: at }, (q) => q.is("answered_at", null));
+      // The customer picked up: an armed call starts recording on their leg now, as its
+      // whisper (/voice/notice) plays them the announcement (../recording.ts).
+      await startCallRecording(env, admin, { ...row, twilio_call_sid: row.twilio_call_sid ?? (sid || null) });
     } else if (status === "completed") {
       await patchCall(admin, id, { status: "completed", ended_at: at, duration_s: finalDuration() }, (q) => q.in("status", ["ringing", "in_progress", "no_answer"]));
     } else if (TERMINAL.has(status)) {
@@ -738,6 +800,9 @@ export async function applyStatus(env: Env, p: TwilioParams, url: URL, signed = 
         ...(row.answered_at ? {} : { answered_at: at }),
         ...(row.transfer_state ? { transfer_state: null } : {}),
       }, (q) => q.is("answered_by", null));
+      // Someone has the customer: an armed call starts recording, or (a cold-transfer teammate
+      // taking a customer who was on hold) its paused recording resumes (../recording.ts).
+      await startCallRecording(env, admin, row);
     } else if (status === "completed" && sid && sid === row.client_call_sid && !inConference) {
       await patchCall(admin, id, { status: "completed", ended_at: at, duration_s: finalDuration() }, (q) => q.in("status", ["ringing", "in_progress"]));
     }

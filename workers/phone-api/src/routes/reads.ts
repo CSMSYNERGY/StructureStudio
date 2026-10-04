@@ -43,6 +43,8 @@ function cursorParam(url: URL): string | null {
 type CallWithJoins = CallRow & {
   crm_contacts: { name: string | null; owner_user_id: string | null } | { name: string | null; owner_user_id: string | null }[] | null;
   phone_voicemails: VoicemailJoin | VoicemailJoin[] | null;
+  /** The call's recording (migration 263). Optional: fixtures from before it need nothing. */
+  phone_call_recordings?: RecordingJoin | RecordingJoin[] | null;
 };
 
 interface VoicemailJoin {
@@ -54,10 +56,61 @@ interface VoicemailJoin {
   transcript?: string | null;
 }
 
+interface RecordingJoin {
+  id: string;
+  status: string;
+  duration_s: number | null;
+  summary: string | null;
+  transcript_status: string;
+  /** Optional: fixtures from before it need nothing. 'off' beside a done transcript = no words. */
+  summary_status?: string;
+  deleted_at: string | null;
+}
+
 const one = <T>(v: T | T[] | null | undefined): T | null => (Array.isArray(v) ? v[0] ?? null : v ?? null);
 
 const VM_SELECT = "phone_voicemails(id, duration_s, listened_at, deleted_at, transcript)";
-const CALL_SELECT = `${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${VM_SELECT}`;
+// ⚠️ migration 263's table: this Worker must not be deployed before it is applied.
+// No transcript here, on purpose: both apps save these rows on the device (the extension's
+// IndexedDB, the phone's query cache), where a copy would outlive the business's retention. The
+// transcript is read on demand, GET /calls/:id/transcript, and kept in memory only.
+const REC_SELECT = "phone_call_recordings(id, status, duration_s, summary, transcript_status, summary_status, deleted_at)";
+const CALL_SELECT = `${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${VM_SELECT}, ${REC_SELECT}`;
+
+export type RecordingState = "live" | "paused" | "processing" | "ready" | "failed";
+
+/**
+ * A call's recording as the apps see it (null: none, or deleted by retention):
+ *   live        recording now (or starting)
+ *   paused      the customer is on hold
+ *   processing  the call is over and Twilio has not finished the file yet
+ *   ready       playable: GET /recordings/:id/audio
+ *   failed      it did not record (Twilio refused, or heard nothing)
+ * Who may see it is who may see the call: the list is already scoped (scopeCalls, isMineCall).
+ */
+export function recordingOut(r: Pick<CallRow, "ended_at">, rec: RecordingJoin | null) {
+  if (!rec || rec.deleted_at) return null;
+  let state: RecordingState;
+  if (rec.status === "completed") state = "ready";
+  else if (rec.status === "failed" || rec.status === "absent") state = "failed";
+  else if (r.ended_at) state = "processing";
+  else state = rec.status === "paused" ? "paused" : "live";
+  return { id: rec.id, duration_s: rec.duration_s ?? null, state };
+}
+
+/**
+ * pending | done | failed for the apps (working is pending to them; off is null). `done` is the
+ * apps' cue for "Show transcript", which reads GET /calls/:id/transcript, so it means there is
+ * text: a call nova-3 heard no words in (done, with its summary left off, cron/transcribe.ts)
+ * is null, like one never transcribed.
+ */
+function transcriptStatusOut(rec: RecordingJoin | null): "pending" | "done" | "failed" | null {
+  if (!rec || rec.deleted_at) return null;
+  if (rec.transcript_status === "pending" || rec.transcript_status === "working") return "pending";
+  if (rec.transcript_status === "done") return rec.summary_status === "off" ? null : "done";
+  if (rec.transcript_status === "failed") return "failed";
+  return null;
+}
 
 /**
  * One call as the apps see it. `warm` (only on a live call in its conference that a warm
@@ -68,10 +121,18 @@ const CALL_SELECT = `${CALL_COLUMNS}, crm_contacts(name, owner_user_id), ${VM_SE
  * `error_code` is why a call was refused before it was placed (wallet_empty, minute_cap,
  * not_your_customer, ...; null for every call that went out or came in), so Recents can say
  * "Not placed: wallet empty" instead of a bare "failed".
+ *
+ * Call recording (release B2, additive: older apps ignore the keys):
+ *   recording          recordingOut above, or null
+ *   summary            2-4 sentences and action items; KEPT after the audio is deleted
+ *   transcript_status  pending | done | failed, or null (not transcribed, no words, or
+ *                      deleted). The transcript itself is never on a call row (REC_SELECT says
+ *                      why): done means GET /calls/:id/transcript has it.
  */
 export function callSummary(r: CallWithJoins, warm?: WarmInfo | null) {
   const contact = one(r.crm_contacts);
   const vm = one(r.phone_voicemails);
+  const rec = one(r.phone_call_recordings);
   return {
     id: r.id,
     direction: r.direction,
@@ -90,6 +151,9 @@ export function callSummary(r: CallWithJoins, warm?: WarmInfo | null) {
     // where to. Null when none is, or the last one is past its 45 s. Outcomes: GET /calls/:id/handoff.
     handoff_state: switchUnderWay(r) ? r.handoff_state ?? null : null,
     handoff_to: switchUnderWay(r) ? r.handoff_to ?? null : null,
+    recording: recordingOut(r, rec),
+    summary: rec?.summary ?? null,
+    transcript_status: transcriptStatusOut(rec),
     ...(warm ? { warm } : {}),
   };
 }
@@ -148,7 +212,7 @@ export async function listCalls(env: Env, req: Request): Promise<Response> {
     // calls / voicemails on contacts I OWN, which ring whoever the route rings, not me.
     const [a, b] = await Promise.all([
       base(CALL_SELECT).or(`placed_by.eq.${me},answered_by.eq.${me},transferred_from.eq.${me},rang_user_ids.cs.{${me}}`),
-      base(`${CALL_COLUMNS}, crm_contacts!inner(name, owner_user_id), ${VM_SELECT}`)
+      base(`${CALL_COLUMNS}, crm_contacts!inner(name, owner_user_id), ${VM_SELECT}, ${REC_SELECT}`)
         .eq("crm_contacts.owner_user_id", me).in("status", ["missed", "voicemail", "ringing"]),
     ]);
     const ra = (must(a, "list my calls") as CallWithJoins[] | null) ?? [];

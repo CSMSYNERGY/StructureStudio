@@ -31,9 +31,12 @@ import { getThread, listCalls, listThreads, search, team } from "./routes/reads"
 import { devices, forgetDevice, health, log, settingsMe, signOutAll, turn } from "./routes/me";
 import { createQuickSend, deleteQuickSend, listQuickSends, quickSendUsed, updateQuickSend } from "./routes/quickSends";
 import { pushText } from "./routes/push";
+import { callTranscript, recordingAudio } from "./routes/recordings";
+import { callTranscribeOn, noticeTwiml, recordingBackstop, recordingCallback } from "./recording";
 import { recordingSweep } from "./cron/sweep";
-import { retention } from "./cron/retention";
+import { recordingRetention, retention } from "./cron/retention";
 import { chargeMonthlyLineFees } from "./cron/lineFee";
+import { runTranscriptions } from "./cron/transcribe";
 import { runUsageCharges, snapshotTwilioUsage } from "./cron/usageCharge";
 
 export const CRON_SWEEP = "*/15 * * * *";
@@ -41,8 +44,9 @@ export const CRON_DAILY = "0 9 * * *";
 // The account's free plan has 5 cron triggers in total and 4 are used by other workers, so the
 // Worker runs ONE every-minute tick: keep-warm every minute, the sweep on minutes divisible by
 // 15, the call and text charges every 5 minutes (minute % 5 == 2, so never on a sweep minute
-// and never at 09:00), and the daily jobs at 09:00 UTC. The two older strings still dispatch
-// (tests, rollback).
+// and never at 09:00), and the daily jobs at 09:00 UTC. While CALL_TRANSCRIBE is "on", every tick
+// also transcribes recorded calls (cron/transcribe.ts), last, so it never holds the others up.
+// The two older strings still dispatch (tests, rollback).
 export const CRON_TICK = "* * * * *";
 /** The minute (mod 5) the usage charges run on. */
 export const USAGE_MINUTE_MOD5 = 2;
@@ -51,7 +55,7 @@ export const USAGE_MINUTE_MOD5 = 2;
 
 const VOICE_PATHS = new Set([
   "/voice/outbound", "/voice/inbound", "/voice/after-dial", "/voice/screen", "/voice/status", "/voice/voicemail",
-  "/voice/conference", "/voice/transcription", "/voice/handoff",
+  "/voice/conference", "/voice/transcription", "/voice/handoff", "/voice/notice", "/voice/recording",
 ]);
 
 async function handleTwilio(req: Request, env: Env, ec: Ctx, path: string, t0: number): Promise<Response> {
@@ -109,6 +113,13 @@ async function handleTwilio(req: Request, env: Env, ec: Ctx, path: string, t0: n
     case "/voice/handoff":
       // The answer URL of the ring that moves a call to the person's phone (handoff.ts).
       return twiml(await voiceHandoff(env, ec, p, url));
+    case "/voice/notice":
+      // The whisper on an armed outbound call: the recording announcement (recording.ts).
+      return twiml(await noticeTwiml(env, ec, url));
+    case "/voice/recording":
+      // A call recording's status callback (recording.ts). Reply first, write after.
+      ec.waitUntil(recordingCallback(env, p, url, check.signed).catch((e) => logFault({ code: "recording_callback_failed", message: (e as Error).message, req })));
+      return noContent();
   }
   return new Response("Not found", { status: 404 });
 }
@@ -121,6 +132,9 @@ const ROUTES: { method: string; re: RegExp; h: Handler }[] = [
   { method: "GET", re: /^\/health$/, h: (r, env) => health(env, new URL(r.url).searchParams.get("warm") === "1") },
   { method: "POST", re: /^\/token$/, h: (r, env, ec) => token(env, ec, r) },
   { method: "GET", re: /^\/voicemails\/([^/]+)\/audio$/, h: (r, env, ec, m) => voicemailAudio(env, ec, r, m[1]) },
+  // Call recordings (routes/recordings.ts): the audio, header bearer only; the whole transcript.
+  { method: "GET", re: /^\/recordings\/([^/]+)\/audio$/, h: (r, env, ec, m) => recordingAudio(env, ec, r, pathParam(m[1])) },
+  { method: "GET", re: /^\/calls\/([^/]+)\/transcript$/, h: (r, env, _ec, m) => callTranscript(env, r, pathParam(m[1])) },
   { method: "GET", re: /^\/media\/([^/]+)\/([^/]+)$/, h: (r, env, _ec, m) => mediaFile(env, r, pathParam(m[1]), pathParam(m[2])) },
   { method: "POST", re: /^\/calls\/([^/]+)\/transfer$/, h: (r, env, ec, m) => transfer(env, ec, r, pathParam(m[1])) },
   { method: "POST", re: /^\/calls\/([^/]+)\/warm-transfer$/, h: (r, env, ec, m) => warmTransfer(env, ec, r, pathParam(m[1])) },
@@ -234,6 +248,8 @@ export default {
       if (tick) await job("keep_warm", () => keepWarm(env));
       if (sweepDue) {
         await job("sweep", () => recordingSweep(env));
+        // Call recordings whose completed callback was lost (recording.ts). One read when none are.
+        await job("recording_backstop", () => recordingBackstop(env, adminClient(env), at));
       }
       if (usageDue) {
         // Each call and text, one wallet line each (or a shadow cost row while disarmed).
@@ -241,8 +257,14 @@ export default {
       }
       if (dailyDue) {
         await job("retention", () => retention(env));
+        // Each business's own retention; runs whatever CALL_RECORDING says, so recordings made
+        // while it was on still expire after it is switched off.
+        await job("recording_retention", () => recordingRetention(env, at));
         await job("twilio_usage", () => snapshotTwilioUsage(env, adminClient(env), at));
         await job("line_fee", () => chargeMonthlyLineFees(env, adminClient(env)));
+      }
+      if (tick && callTranscribeOn(env)) {
+        await job("transcribe", () => runTranscriptions(env, adminClient(env), at));
       }
     };
     ec.waitUntil(run());

@@ -1058,7 +1058,7 @@ describe("POST /token", () => {
   it("says this Worker can move calls (features.handoff), so the apps show the button", async () => {
     const s = await setup();
     const { json } = await call(env, appRequest("POST", "/token", s.token, { platform: "chrome", build_type: "prod", app_version: "1" }));
-    expect(json.features).toEqual({ handoff: true });
+    expect(json.features).toMatchObject({ handoff: true });
   });
 });
 

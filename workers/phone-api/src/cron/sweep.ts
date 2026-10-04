@@ -4,6 +4,17 @@
 // fallback TwiML Bin plays the greeting and records, and nothing tells us. Those calls have no
 // phone_calls row at all, so the sweep creates one from Twilio's own call record, routed by the
 // number that was called. A recording whose number is not one of ours is left alone.
+//
+// ONLY <Record> RECORDINGS ARE VOICEMAILS (source RecordVerb). Twilio lists every recording on
+// the account, and once calls are recorded that includes call recordings (source
+// StartCallRecordingAPI, started by src/recording.ts on the customer's leg of an answered call).
+// One of those carries the call's SID the way a voicemail does, so without the source filter the
+// sweep would file a recorded conversation as a voicemail, flip the call to 'voicemail' and count
+// it in the Calls report. Nothing that is not RecordVerb (a call recording, a <Dial record>, a
+// conference recording) is ever filed.
+//
+// THE LIST IS READ TO THE END (up to LIST_MAX). It used to stop at the newest 200; once calls are
+// recorded, those 200 can all be call recordings, hiding a real voicemail behind them.
 
 import type { Env } from "../env";
 import { adminClient, must, routeForNumber, type Admin } from "../db";
@@ -13,6 +24,13 @@ import { fetchCall, listRecordings, twilioConfigured, type TwilioRecording } fro
 import { fileVoicemail, MIN_VOICEMAIL_SECONDS } from "../routes/voice";
 
 const MAX_PER_RUN = 50;
+/**
+ * Recordings read per run (pages of 100) from the two days the sweep looks at. Far above the
+ * account's volume; a run that reaches it says so (info), because anything past it goes unchecked.
+ */
+export const LIST_MAX = 2000;
+/** The one recording source that is a voicemail: the <Record> verb (Twilio's Recording.source). */
+export const VOICEMAIL_SOURCE = "RecordVerb";
 
 async function callIdForRecording(env: Env, admin: Admin, rec: TwilioRecording, known: Map<string, string>): Promise<string | null> {
   const existing = known.get(rec.call_sid);
@@ -50,8 +68,15 @@ export async function recordingSweep(env: Env, now = new Date()): Promise<{ chec
   const admin = adminClient(env);
   // Twilio filters by DAY, so yesterday is included to cover a run just after midnight UTC.
   const since = new Date(now.getTime() - 86_400_000).toISOString().slice(0, 10);
-  const recs = (await listRecordings(env, since, 200))
-    .filter((r) => r.status === "completed" && Number(r.duration) >= MIN_VOICEMAIL_SECONDS && r.call_sid);
+  const listed = await listRecordings(env, since, LIST_MAX);
+  if (listed.length >= LIST_MAX) {
+    await logFault({
+      code: "recording_sweep_list_capped", severity: "info", throttleMs: 6 * 60 * 60_000,
+      message: `The sweep read its limit of ${LIST_MAX} recordings; older ones in its two days were not checked.`,
+    });
+  }
+  const recs = listed.filter((r) => r.source === VOICEMAIL_SOURCE && r.status === "completed"
+    && Number(r.duration) >= MIN_VOICEMAIL_SECONDS && r.call_sid);
   if (!recs.length) return { checked: 0, filed: 0 };
 
   // Filed means fileVoicemail ran: it is the only writer of duration_s (and of the call's

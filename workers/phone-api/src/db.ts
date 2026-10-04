@@ -45,6 +45,38 @@ export function must<T>(res: { data: T | null; error: { message?: string; code?:
   return res.data;
 }
 
+// ── The business's call recording settings (migration 263) ──────────────────────────
+// Both RPCs return them as `recording`, read from client_settings. Whether a call is ARMED
+// (announced, so it may be recorded) is the Worker's decision: these plus the CALL_RECORDING
+// rail (recording.ts armedFor).
+
+export interface RecordingSettings {
+  /** The business turned recording on (client_settings.phone_record_calls). */
+  on: boolean;
+  /** Play the announcement. Locked on for now: a call is armed only while this is true. */
+  notice: boolean;
+  /** The business's own sentence, or null for the standard one (recording.ts noticeText). */
+  notice_text: string | null;
+  /** Transcripts and summaries, while recording is on. */
+  transcribe: boolean;
+}
+
+/** What a business with no settings (or a database before 263) has: off. */
+export const RECORDING_OFF: RecordingSettings = { on: false, notice: true, notice_text: null, transcribe: true };
+
+/** An RPC's `recording` block. Anything missing or malformed reads as off, never as on. */
+export function recordingSettingsOf(v: unknown): RecordingSettings {
+  if (!v || typeof v !== "object") return { ...RECORDING_OFF };
+  const r = v as Record<string, unknown>;
+  const text = typeof r.notice_text === "string" ? r.notice_text.trim() : "";
+  return {
+    on: r.on === true,
+    notice: r.notice !== false,
+    notice_text: text ? text.slice(0, 300) : null,
+    transcribe: r.transcribe !== false,
+  };
+}
+
 // ── phone_caller_context(p_user_id) ─────────────────────────────────────────────────
 // One row, uncached (SPEC section 2). Null when the user is on no team.
 
@@ -57,6 +89,8 @@ export interface CallerContext {
   device_generation: number;
   number: { id: string; e164: string; voice_enabled: boolean; registration_status: string | null } | null;
   full_name: string | null;
+  /** The business's call recording settings (migration 263). */
+  recording: RecordingSettings;
 }
 
 export async function callerContext(admin: Admin, userId: string): Promise<CallerContext | null> {
@@ -82,6 +116,7 @@ export async function callerContext(admin: Admin, userId: string): Promise<Calle
       }
       : null,
     full_name: data.full_name ?? null,
+    recording: recordingSettingsOf((data as { recording?: unknown }).recording),
   };
 }
 
@@ -124,6 +159,8 @@ export interface RouteInfo {
   members: RouteMember[];
   business_name: string | null;
   recent_emergency_user: string | null;
+  /** The business's call recording settings (migration 263). */
+  recording: RecordingSettings;
 }
 
 export const DEFAULT_ROUTE: PhoneRoute = {
@@ -175,6 +212,7 @@ export async function routeForNumber(admin: Admin, e164: string): Promise<RouteI
       : [],
     business_name: data.business_name ?? null,
     recent_emergency_user: data.recent_emergency_user ? String(data.recent_emergency_user) : null,
+    recording: recordingSettingsOf(data.recording),
   };
 }
 
@@ -215,11 +253,18 @@ export interface CallRow {
   handoff_sid?: string | null;
   /** The leg the call is moving away from. */
   handoff_from_sid?: string | null;
+  /**
+   * The TwiML this call ran carried the recording announcement, so it may be recorded
+   * (migration 263, recording.ts). Optional for the same reason as the handoff columns; absent
+   * reads as not armed, and nothing about recording runs for the call.
+   */
+  recording_armed?: boolean;
 }
 
+// ⚠️ recording_armed is migration 263's: this Worker must not be deployed before it is applied.
 export const CALL_COLUMNS =
   "id, client_id, number_id, contact_id, direction, from_e164, to_e164, twilio_call_sid, client_call_sid, placed_by, answered_by, rang_user_ids, transferred_from, transfer_state, status, started_at, answered_at, ended_at, duration_s, error_code, is_emergency, "
-  + "handoff_state, handoff_to, handoff_key, handoff_at, handoff_sid, handoff_from_sid";
+  + "handoff_state, handoff_to, handoff_key, handoff_at, handoff_sid, handoff_from_sid, recording_armed";
 
 export async function callById(admin: Admin, id: string): Promise<CallRow | null> {
   return must(

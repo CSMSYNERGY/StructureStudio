@@ -1310,6 +1310,42 @@ function phoneFormFrom(d) {
   };
 }
 
+// ── Call recording (migration 263) ──────────────────────────────────────────────────────
+// The standard announcement, word for word portal-settings/phone.ts STANDARD_NOTICE and
+// STANDARD_NOTICE_TRANSCRIBED (tests/phone/callRecordingUi_test.ts pins the two copies). Shown
+// so the owner knows what callers hear when the wording box is left empty; the server stores an
+// empty box as "the standard wording", which follows the transcripts switch.
+const PHONE_REC_STANDARD = "This call will be recorded.";
+const PHONE_REC_STANDARD_TRANSCRIBED = "This call will be recorded and transcribed.";
+// How long recordings are kept: client_settings_phone_recording_retention_chk's five lengths.
+const PHONE_REC_KEEP_WORDS = { 30: "30 days", 90: "90 days", 180: "6 months", 365: "1 year", 730: "2 years" };
+
+function phoneRecFormFrom(r) {
+  return {
+    on: !!(r && r.on),
+    noticeText: (r && r.noticeText) || "",
+    transcribe: !(r && r.transcribe === false),
+    retentionDays: (r && r.retentionDays) || 365,
+  };
+}
+// The wording box as the server will tidy it (one line, single spaces), and the first thing
+// wrong with it, or null. The server checks the same (phone.ts parseRecording) and has the
+// last word; this only lets the owner see it before pressing Save. The two patterns are
+// supabase/functions/_shared/recordingNotice.ts's, word for word: "recorded" as a word of its
+// own, and no "not" / "never" / "no" / "n't" just before it.
+const PHONE_REC_SAYS = /\brecord(?:s|ed|ings?)?\b(?!-)/i;
+const PHONE_REC_DENIES = /(?:\b(?:not|never|no)|n't)\s+(?:[\w']+\s+){0,2}record/i;
+function phoneRecNoticeProblem(text) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  if (!t || t === PHONE_REC_STANDARD || t === PHONE_REC_STANDARD_TRANSCRIBED) return null;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(t)) return "The announcement has a character that can't be spoken.";
+  if (t.length < 10) return "The announcement has to be at least 10 characters.";
+  if (t.length > 300) return "The announcement can be at most 300 characters.";
+  if (!PHONE_REC_SAYS.test(t) || PHONE_REC_DENIES.test(t)) return "The announcement has to tell callers the call is recorded.";
+  return null;
+}
+
 function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onOpenTexting = null }) {
   // ⚠️ HOOKS FIRST, ALL OF THEM, ABOVE EVERY EARLY RETURN — the React #310 rule every screen in
   // this file follows.
@@ -1330,6 +1366,10 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const [trustNote, setTrustNote] = useState(null);    // { ok } | { err }
   const [viOpen, setViOpen] = useState(false);
   const [viForm, setViForm] = useState({ useCase: "Customer Support", employeeCount: "", averageDailyCalls: "", notes: "" });
+  // Call recording (migration 263): its own small form, saved on its own (phone_recording_save),
+  // and what the last save said.
+  const [recForm, setRecForm] = useState(null);
+  const [recNote, setRecNote] = useState(null);      // { ok } | { err }
 
   const load = useCallback(async () => {
     try {
@@ -1339,6 +1379,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       // Seeded from the server only while the form is untouched, so a refresh never wipes what
       // somebody is halfway through choosing.
       setForm((f) => f || (d && d.scope === "team" ? phoneFormFrom(d) : null));
+      setRecForm((f) => f || (d && d.scope === "team" && d.recording ? phoneRecFormFrom(d.recording) : null));
     } catch (e) { setErr(e.message); }
   }, [clientId]);
   useEffect(() => { load(); }, [load]);
@@ -1743,8 +1784,144 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     </div>
   ) : null;
 
+  // ── Call recording (migration 263) ─────────────────────────────────────────────────────
+  // Shown to everyone on the team screen; only the business OWNER can change it (the server's
+  // phone_recording_save rule, reported as canChangeRecording), because recording customers is
+  // the business's own legal decision. The announcement is locked on. It saves on its own, with
+  // its own button, so the routing form's Save never touches it. `recording` is null on a
+  // database before 263: the card says so and offers nothing.
+  // Calls are recorded only while the owner's `on` AND the server's switch (`serverOn`, the
+  // phone-api Worker's CALL_RECORDING rail as portal-settings sees it) are both true. With the
+  // owner's on and the server's off, the card says recording hasn't started yet: never that calls
+  // are recorded while nothing records.
+  const rec = data.recording || null;
+  const recLive = !!(rec && rec.on && rec.serverOn);
+  const recEdit = !!data.canChangeRecording && canEdit && !!recForm;
+  const recProblem = recForm ? phoneRecNoticeProblem(recForm.noticeText) : null;
+  const recDirty = !!(rec && recForm) && (recForm.on !== rec.on || recForm.transcribe !== rec.transcribe
+    || Number(recForm.retentionDays) !== Number(rec.retentionDays)
+    || recForm.noticeText.replace(/\s+/g, " ").trim() !== String(rec.noticeText || ""));
+  const saveRecording = async () => {
+    const keep = Number(recForm.retentionDays);
+    const keepWords = PHONE_REC_KEEP_WORDS[keep] || `${keep} days`;
+    const recWho = `The people who can see a call can play its recording${recForm.transcribe ? " and read its transcript and summary" : ""}.`;
+    if (recForm.on && !rec.on && !window.confirm(rec.serverOn
+      ? `Record calls? From your next call on, every call to and from your business number is announced and then recorded. ${recWho}`
+      : `Record calls? Call recording hasn't started on this account yet. Once it does, every call to and from your business number is announced and then recorded. ${recWho}`)) return;
+    if (keep < Number(rec.retentionDays) && !window.confirm(`Keep recordings for ${keepWords}? Recordings older than that, and their transcripts, are deleted at the next daily clean-up. Their summaries stay with the calls.`)) return;
+    setBusy(true); setRecNote(null);
+    try {
+      const d = await phoneAction("phone_recording_save", {
+        on: recForm.on,
+        noticeText: recForm.noticeText,
+        transcribe: recForm.transcribe,
+        retentionDays: keep,
+      });
+      setData((x) => ({ ...x, recording: d.recording }));
+      setRecForm(phoneRecFormFrom(d.recording));
+      setRecNote({ ok: !(d.recording && d.recording.on) ? "Saved. Calls aren't recorded."
+        : d.recording.serverOn ? "Saved. Calls are announced and recorded from the next call on."
+        : "Saved. Calls will be announced and recorded once call recording starts on this account." });
+    } catch (e) { setRecNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+  const recCard = data.scope !== "team" ? null : !rec || !recForm ? (
+    <div style={PHONE_CARD} data-ss-phone-recording="unavailable">
+      <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Call recording</h4>
+      <div style={{ fontSize: 13, color: "#64748B" }}>Call recording isn&rsquo;t available on this account yet.</div>
+    </div>
+  ) : (() => {
+    const standard = recForm.transcribe ? PHONE_REC_STANDARD_TRANSCRIBED : PHONE_REC_STANDARD;
+    const who = rec.updatedBy ? ((team.find((t) => t.userId === rec.updatedBy) || {}).name || null) : null;
+    const when = phoneWhen(rec.updatedAt);
+    const check = (checked, disabled, onChange, label, sub, key) => (
+      <label key={key} style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, color: "#1E293B", cursor: disabled ? "default" : "pointer" }}>
+        <input type="checkbox" checked={checked} disabled={disabled} onChange={onChange} style={{ marginTop: 3 }} data-ss-phone-recording-check={key} />
+        <span>
+          <span style={{ fontWeight: 700 }}>{label}</span>
+          {sub && <span style={{ display: "block", fontSize: 12, color: "#64748B", lineHeight: 1.45 }}>{sub}</span>}
+        </span>
+      </label>
+    );
+    return (
+      <div style={PHONE_CARD} data-ss-phone-recording={rec.on ? "on" : "off"}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 4 }}>
+          <h4 style={{ margin: 0, fontSize: 14 }}>Call recording</h4>
+          <span data-ss-phone-recording-status={recLive ? "on" : rec.on ? "waiting" : "off"} style={{
+            fontSize: 12, fontWeight: 800, borderRadius: 999, padding: "3px 10px",
+            background: recLive ? "#FEF2F2" : rec.on ? "#FFFBEB" : "#F1F5F9", color: recLive ? "#B91C1C" : rec.on ? "#92400E" : "#475569",
+          }}>
+            {recLive ? "Calls are recorded" : rec.on ? "On, not started yet" : "Off"}
+          </span>
+        </div>
+        {!rec.serverOn && (
+          <p data-ss-phone-recording-waiting style={{ margin: "0 0 8px", fontSize: 12.5, color: "#92400E", lineHeight: 1.5 }}>
+            Call recording hasn&rsquo;t started on this account yet, so no call is announced or recorded. Settings saved here
+            take effect once it starts.
+          </p>
+        )}
+        <p style={{ margin: "0 0 10px", fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
+          When it&rsquo;s on, calls to and from your business number are recorded from the moment someone answers. Callers
+          hear the announcement below before the call rings your team, and on calls your team places, the customer hears it
+          when they pick up. Recording pauses while a customer is on hold, except while the call is being passed to a
+          teammate. Recordings play on the contact&rsquo;s page here and in My Synergy Phone,
+          for the people who can see that call.
+        </p>
+        <div style={{ display: "grid", gap: 10 }}>
+          {check(recForm.on, !recEdit, (e) => setRecForm((f) => ({ ...f, on: e.target.checked })), "Record calls", null, "on")}
+          {check(true, true, () => {}, "Announce it to callers",
+            "Always on: callers are told before anything is recorded.", "notice")}
+          <label style={{ display: "block" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 4 }}>What callers hear (optional)</div>
+            <input value={recForm.noticeText} disabled={!recEdit} maxLength={300} placeholder={standard}
+              onChange={(e) => setRecForm((f) => ({ ...f, noticeText: e.target.value }))}
+              style={S.input} data-ss-phone-recording-notice />
+            <div style={{ fontSize: 11.5, color: recProblem ? "#B91C1C" : "#64748B", marginTop: 4, lineHeight: 1.45 }}>
+              {recProblem || <>Leave it empty for the standard sentence: &ldquo;{standard}&rdquo; Your own wording has to say the call is recorded (10 to 300 characters).</>}
+            </div>
+          </label>
+          {check(recForm.transcribe, !recEdit, (e) => setRecForm((f) => ({ ...f, transcribe: e.target.checked })),
+            "Transcripts and summaries",
+            "A written transcript of each recorded call, and a short summary with any action items, a minute or two after the call ends. Cloudflare writes the transcript and Anthropic's Claude writes the summary.",
+            "transcribe")}
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", flexWrap: "wrap" }}>
+            Keep recordings for
+            <select value={String(recForm.retentionDays)} disabled={!recEdit} data-ss-phone-recording-keep
+              onChange={(e) => setRecForm((f) => ({ ...f, retentionDays: Number(e.target.value) }))}
+              style={{ ...S.input, width: "auto", padding: "5px 8px" }}>
+              {(rec.retentionChoices || [30, 90, 180, 365, 730]).map((d) => <option key={d} value={d}>{PHONE_REC_KEEP_WORDS[d] || `${d} days`}</option>)}
+            </select>
+            <span style={{ fontSize: 12, color: "#64748B" }}>The recording and its transcript are deleted after that. The summary stays with the call.</span>
+          </label>
+        </div>
+        <div data-ss-phone-recording-legal style={{ fontSize: 12, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 10px", marginTop: 12, lineHeight: 1.5 }}>
+          Some states require everyone on a call to agree before it&rsquo;s recorded. The announcement tells every caller, but the
+          rules are yours to follow: check them with your lawyer for the states you and your customers are in.
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
+          {recEdit && (
+            <button type="button" disabled={busy || !recDirty || !!recProblem} onClick={saveRecording} data-ss-phone-recording-save
+              style={{ ...S.btn(ACCENT, "#FFF"), padding: "7px 14px", opacity: busy || !recDirty || recProblem ? 0.55 : 1 }}>
+              {busy ? "Saving…" : "Save call recording"}
+            </button>
+          )}
+          {!recEdit && (
+            <span style={{ fontSize: 12, color: "#64748B" }}>Only the business owner can change call recording.</span>
+          )}
+          {when && (
+            <span style={{ fontSize: 12, color: "#64748B" }}>Last changed {when}{who ? ` by ${who}` : ""}.</span>
+          )}
+          {recNote && recNote.err && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{recNote.err}</span>}
+          {recNote && recNote.ok && <span style={{ fontSize: 12.5, color: "#047857", fontWeight: 700 }}>{recNote.ok}</span>}
+        </div>
+      </div>
+    );
+  })();
+
   // Someone with their OWN calls only: whether it is on, which number customers see, and where
-  // to get the apps. The setup is the team's business (the server did not send it).
+  // to get the apps. The setup is the team's business (the server did not send it), but whether
+  // their calls are recorded is theirs to know (recording {on, serverOn}: said only when both are
+  // true, which is when calls really are recorded).
   if (data.scope !== "team" || !form) {
     return (
       <div data-ss-phone-settings="own">
@@ -1752,6 +1929,12 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
         {numberCard}
         <div style={{ ...PHONE_CARD, fontSize: 13, color: "#475569" }}>
           Your owner chooses who answers the business number. Calls you place and take show on the Calls page.
+          {data.recording && data.recording.on && data.recording.serverOn && (
+            <span data-ss-phone-recording="own" style={{ display: "block", marginTop: 6 }}>
+              Calls on your business number are recorded. Callers hear an announcement first, and recordings play on the
+              contact&rsquo;s page and in My Synergy Phone.
+            </span>
+          )}
         </div>
         {installCard}
       </div>
@@ -1956,6 +2139,9 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           {note && note.ok && <span style={{ fontSize: 12.5, color: "#047857", fontWeight: 700 }}>{note.ok}</span>}
         </div>
       )}
+
+      {/* Below the routing form's Save, not between its cards: it has a Save of its own. */}
+      {recCard}
 
       {installCard}
     </div>

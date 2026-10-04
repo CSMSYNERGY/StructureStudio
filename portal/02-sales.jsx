@@ -2451,6 +2451,105 @@ function SsVoicemailPlayer({ voicemailId }) {
   );
 }
 
+// MY SYNERGY PHONE, CALL RECORDING (migration 263): a recorded call's audio, cloned from
+// SsVoicemailPlayer above and for the same reasons. Nothing is fetched until Play is pressed;
+// then the audio comes from the Worker (GET /recordings/:id/audio) with the sign-in in the
+// Authorization header (ssPhoneFetchRecording) and plays from a blob: URL. The Worker's own
+// sentence is shown when it says no ("The recording isn't ready yet. Try again in a minute.").
+function SsRecordingPlayer({ recordingId, durationS }) {
+  const [src, setSrc] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  useEffect(() => () => { if (src) { try { URL.revokeObjectURL(src); } catch (_e) { /* already gone */ } } }, [src]);
+  const play = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const { data } = await sb.auth.getSession();
+      const token = data && data.session ? data.session.access_token : null;
+      setSrc(await ssPhoneFetchRecording(recordingId, token));
+    } catch (e) { setErr(e && e.message ? e.message : "The recording couldn't be loaded. Try again."); }
+    finally { setBusy(false); }
+  };
+  if (src) {
+    return (
+      <audio controls autoPlay src={src} data-ss-recording={recordingId}
+        style={{ display: "block", width: "100%", maxWidth: 340, height: 34, marginTop: 5 }} />
+    );
+  }
+  const len = Number(durationS) > 0 ? ` · ${Math.max(1, Math.round(Number(durationS) / 60))} min` : "";
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5, flexWrap: "wrap" }}>
+      <button type="button" disabled={busy} onClick={play} data-ss-recording-play={recordingId}
+        style={{ background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 6, padding: "4px 10px", fontSize: 12, fontWeight: 700, color: "#334155", cursor: busy ? "default" : "pointer", fontFamily: "inherit" }}>
+        {busy ? "Loading…" : `▶ Play recording${len}`}
+      </button>
+      {err && <span style={{ fontSize: 12, color: "#B91C1C" }}>{err}</span>}
+    </div>
+  );
+}
+
+// A recorded call on the contact timeline: its summary (in the feed already, crmFeed's
+// recordingMeta, and kept after the audio is deleted), Play recording, and "Show transcript".
+// The transcript is NOT in the feed: it is read from the Worker on the press
+// (ssPhoneFetchTranscript), which applies the same visibility rule as the audio. `canListen` is
+// the voicemail player's rule: phone access, calling on, not an operator in view-as (whose
+// sign-in is not on this builder's team, so the Worker would refuse it).
+function SsCallRecording({ callId, meta, canListen }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const toggle = async () => {
+    if (open) { setOpen(false); return; }
+    setOpen(true);
+    if (text) return;
+    setBusy(true); setErr(null);
+    try {
+      const { data } = await sb.auth.getSession();
+      const token = data && data.session ? data.session.access_token : null;
+      const r = await ssPhoneFetchTranscript(callId, token);
+      setText(r.transcript);
+    } catch (e) { setErr(e && e.message ? e.message : "The transcript couldn't be loaded. Try again."); }
+    finally { setBusy(false); }
+  };
+  const state = meta.recordingState;
+  const note = state === "live" ? "This call is being recorded."
+    : state === "paused" ? "Recording paused while the customer is on hold."
+    : state === "processing" ? "The recording is being saved. It can be played in a minute."
+    : state === "failed" ? "This call wasn't recorded."
+    : meta.transcriptPending ? "The transcript and summary are on their way."
+    : meta.recordingDeleted && meta.summary ? "The recording and transcript were deleted after your keep period. The summary stays."
+    : null;
+  return (
+    <div data-ss-call-recording={callId} style={{ marginTop: 4 }}>
+      {meta.summary && (
+        <div data-ss-call-summary style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 9px", marginTop: 4 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 800, color: "#64748B", letterSpacing: "0.04em", textTransform: "uppercase", marginBottom: 2 }}>Call summary</div>
+          <div style={{ fontSize: 12.5, color: "#1E293B", whiteSpace: "pre-wrap", lineHeight: 1.45 }}>{meta.summary}</div>
+        </div>
+      )}
+      {meta.recordingReady && meta.recordingId && canListen && ssPhoneRecordingAudioUrl(meta.recordingId) && (
+        <SsRecordingPlayer recordingId={meta.recordingId} durationS={meta.recordingDurationS} />
+      )}
+      {note && <div style={{ fontSize: 11.5, color: "#64748B", fontStyle: "italic", marginTop: 4 }}>{note}</div>}
+      {meta.hasTranscript && canListen && (
+        <div style={{ marginTop: 5 }}>
+          <button type="button" onClick={toggle} disabled={busy} data-ss-transcript-toggle={callId}
+            style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12, fontWeight: 700, cursor: busy ? "default" : "pointer", fontFamily: "inherit" }}>
+            {busy ? "Loading the transcript…" : open ? "Hide transcript" : "Show transcript"}
+          </button>
+          {open && text && (
+            <div data-ss-transcript style={{ fontSize: 12.5, color: "#1E293B", whiteSpace: "pre-wrap", lineHeight: 1.5, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 9px", marginTop: 4, maxHeight: 320, overflowY: "auto" }}>
+              {text}
+            </div>
+          )}
+          {open && err && <div style={{ fontSize: 12, color: "#B91C1C", marginTop: 4 }}>{err}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // The record page. One component, two contexts, driven entirely by the registries above.
 //
 // ⚠️ IT MAKES EXACTLY ONE FETCH, and never a direct sb.from(). designs/payments RLS is
@@ -4024,6 +4123,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                       {e.type === "voicemail" && e.meta && e.meta.voicemailId && !e.meta.voicemailDeleted
                         && ctx.canCall && ctx.phone.on && !ctx.viewing && ssPhoneVoicemailAudioUrl(e.meta.voicemailId) && (
                         <SsVoicemailPlayer voicemailId={e.meta.voicemailId} />
+                      )}
+                      {/* MY SYNERGY PHONE, CALL RECORDING (migration 263): a recorded call's
+                          summary, its recording and its transcript. The summary is in the feed
+                          for anyone who sees the call; Play and Show transcript ask the Worker,
+                          so they follow the voicemail player's rule above. */}
+                      {(e.type === "call" || e.type === "call_missed" || e.type === "voicemail") && e.meta && e.meta.callId
+                        && (e.meta.summary || e.meta.recordingId) && (
+                        <SsCallRecording callId={e.meta.callId} meta={e.meta}
+                          canListen={!!(ctx.canCall && ctx.phone.on && !ctx.viewing)} />
                       )}
                     </div>
                   )}

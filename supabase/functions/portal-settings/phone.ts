@@ -11,6 +11,7 @@
 // refused with a sentence the owner can act on, instead of a Postgres constraint name.
 
 import { effectiveAccess, type Level } from "../_shared/access.ts";
+import { noticeSaysRecorded } from "../_shared/recordingNotice.ts";
 
 /** The seven keys business_hours uses, in the order the Settings screen shows them. */
 export const PHONE_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
@@ -198,6 +199,129 @@ export function parseRoute(
       business_hours: hours.value, time_zone: tz, after_hours: afterHours,
       greeting_url: greeting.value,
     },
+  };
+}
+
+// ── Call recording (migration 263) ───────────────────────────────────────────────────────
+//
+// The settings card's form → the client_settings columns, or the first thing wrong with it.
+// The columns' CHECKs are mirrored here so a bad value is refused in words the owner can act on.
+// Decided for Ahsan on 2026-10-04 (Carolyn can change the settings later): recording off until the
+// owner turns it on; the announcement on and LOCKED ON while calls are recorded (this refuses
+// turning it off; the column stays for a later decision); transcripts on; recordings kept 365
+// days unless the owner picks another of the five lengths. The standard wording is the phone-api
+// Worker's (src/recording.ts STANDARD_NOTICE*), repeated here only to show the owner.
+
+/** client_settings_phone_recording_retention_chk. */
+export const RECORDING_RETENTION_DAYS = [30, 90, 180, 365, 730] as const;
+export const DEFAULT_RECORDING_RETENTION_DAYS = 365;
+/** client_settings_phone_recording_notice_text_chk, counted after trimming. */
+export const NOTICE_MIN = 10;
+export const NOTICE_MAX = 300;
+export const STANDARD_NOTICE = "This call will be recorded.";
+export const STANDARD_NOTICE_TRANSCRIBED = "This call will be recorded and transcribed.";
+
+/** The sentence a business with no wording of its own hears (the Worker adds "and transcribed" only while it will happen). */
+export function standardNotice(transcribe: boolean): string {
+  return transcribe ? STANDARD_NOTICE_TRANSCRIBED : STANDARD_NOTICE;
+}
+
+export type RecordingRow = {
+  phone_record_calls: boolean;
+  phone_recording_notice: true;
+  phone_recording_notice_text: string | null;
+  phone_transcribe_calls: boolean;
+  phone_recording_retention_days: number;
+};
+
+/**
+ * { on, noticeText?, transcribe?, retentionDays?, notice? } → the columns to write.
+ *   on            required, true or false
+ *   notice        absent or true. false is refused: the announcement is locked on
+ *   noticeText    blank, or either standard sentence, means the standard wording (stored NULL,
+ *                 so it follows the transcripts switch); otherwise 10-300 characters once spaces
+ *                 are tidied, one line, and it has to say the call is recorded and not deny it
+ *                 (noticeSaysRecorded)
+ *   transcribe    default true
+ *   retentionDays one of 30, 90, 180, 365, 730; default 365
+ */
+export function parseRecording(p: Record<string, unknown>): { ok: true; row: RecordingRow } | { ok: false; error: string } {
+  if (typeof p.on !== "boolean") return { ok: false, error: "Say whether calls should be recorded." };
+  if (p.notice === false) {
+    return { ok: false, error: "The announcement can't be turned off: callers are always told a call is recorded." };
+  }
+  if (p.transcribe !== undefined && p.transcribe !== null && typeof p.transcribe !== "boolean") {
+    return { ok: false, error: "Say whether recorded calls should be transcribed." };
+  }
+  const transcribe = p.transcribe !== false;
+
+  const days = p.retentionDays === undefined || p.retentionDays === null || p.retentionDays === ""
+    ? DEFAULT_RECORDING_RETENTION_DAYS
+    : Number(p.retentionDays);
+  if (!(RECORDING_RETENTION_DAYS as readonly number[]).includes(days)) {
+    return { ok: false, error: "Choose how long recordings are kept: 30, 90, 180, 365 or 730 days." };
+  }
+
+  if (p.noticeText !== undefined && p.noticeText !== null && typeof p.noticeText !== "string") {
+    return { ok: false, error: "The announcement wasn't in a shape we recognise." };
+  }
+  // Tidied the way it will be spoken: one line, single spaces.
+  const raw = String(p.noticeText ?? "").replace(/\s+/g, " ").trim();
+  let text: string | null = raw;
+  if (!raw || raw === STANDARD_NOTICE || raw === STANDARD_NOTICE_TRANSCRIBED) text = null;
+  if (text !== null) {
+    // deno-lint-ignore no-control-regex
+    if (/[\u0000-\u001f\u007f]/.test(text)) return { ok: false, error: "The announcement has a character that can't be spoken." };
+    if (text.length < NOTICE_MIN) return { ok: false, error: `The announcement has to be at least ${NOTICE_MIN} characters.` };
+    if (text.length > NOTICE_MAX) return { ok: false, error: `The announcement can be at most ${NOTICE_MAX} characters.` };
+    // A word of its own, and not denied ("not recorded"): _shared/recordingNotice.ts.
+    if (!noticeSaysRecorded(text)) return { ok: false, error: "The announcement has to tell callers the call is recorded." };
+  }
+
+  return {
+    ok: true,
+    row: {
+      phone_record_calls: p.on,
+      phone_recording_notice: true,
+      phone_recording_notice_text: text,
+      phone_transcribe_calls: transcribe,
+      phone_recording_retention_days: days,
+    },
+  };
+}
+
+/**
+ * Whether calls can be recorded on this server at all: the phone-api Worker's CALL_RECORDING rail,
+ * mirrored as this function's own secret of the same name (set together, workers/phone-api
+ * SETUP.md 7c). Exactly "on", as the Worker reads it. The database can't see the Worker's rail,
+ * so without this the card would say calls are recorded while nothing records.
+ */
+export function recordingServerOn(env: (k: string) => string | undefined): boolean {
+  return env("CALL_RECORDING") === "on";
+}
+
+/**
+ * A client_settings row's recording columns → what the Settings card shows. Missing columns read
+ * as the defaults. `serverOn` is recordingServerOn: calls are recorded only while the owner's
+ * `on` AND it are true; with the owner's on and the server's off, the card says recording hasn't
+ * started yet.
+ */
+export function recordingView(row: Record<string, unknown> | null | undefined, serverOn = false) {
+  const r = row ?? {};
+  const transcribe = r.phone_transcribe_calls !== false;
+  const days = Number(r.phone_recording_retention_days);
+  const text = typeof r.phone_recording_notice_text === "string" && r.phone_recording_notice_text.trim() ? r.phone_recording_notice_text : null;
+  return {
+    on: r.phone_record_calls === true,
+    serverOn: serverOn === true,
+    notice: true,
+    noticeText: text,
+    standardText: standardNotice(transcribe),
+    transcribe,
+    retentionDays: (RECORDING_RETENTION_DAYS as readonly number[]).includes(days) ? days : DEFAULT_RECORDING_RETENTION_DAYS,
+    retentionChoices: [...RECORDING_RETENTION_DAYS],
+    updatedAt: typeof r.phone_recording_updated_at === "string" ? r.phone_recording_updated_at : null,
+    updatedBy: typeof r.phone_recording_updated_by === "string" ? r.phone_recording_updated_by : null,
   };
 }
 

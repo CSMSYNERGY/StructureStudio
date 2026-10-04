@@ -14,6 +14,7 @@ import { logFault } from "../log";
 import { callIsMine, isTeamLevel, mayReadUnknownNumbers, visibleContactIds } from "../scope";
 import { nextTransferState, onTheCall, refuseEmergencyCallback, transferParams } from "../conference";
 import { refuseWhileSwitching } from "../handoff";
+import { pauseCallRecording, resumeCallRecording, stopCallRecording } from "../recording";
 import { clientNoun, dial, response } from "../twiml";
 import { recordingMedia, TwilioError, updateCall } from "../twilioRest";
 import { hook } from "../urls";
@@ -107,9 +108,17 @@ export async function transfer(env: Env, ec: Ctx, req: Request, idParam: string)
       statusCallback: hook(env, "/voice/status", { call: call.id, leg: "client" }),
       params: transferParams(call, c.userId),
     })]));
+  // Straight to voicemail (DND): a recorded call's recording is PAUSED first (PauseBehavior
+  // skip), so the greeting and the message stay out of it, and STOPPED once the redirect has
+  // landed (../recording.ts). Not stopped first: a stopped recording can't be resumed, so a
+  // redirect that fails would leave the rest of the call, still going, unrecorded. A teammate who
+  // is rung and never answers is after-dial's (transfer=1), which stops it before its voicemail.
+  const pausedForVoicemail = targetOnDnd && (await pauseCallRecording(env, c.admin, call)) === "paused";
   try {
     await updateCall(env, customerLeg, { Twiml: xml });
   } catch (e) {
+    // You're still on the call: so is the recording, if this paused it.
+    if (pausedForVoicemail) await resumeCallRecording(env, c.admin, call);
     // Put the row back: the call is still yours, and after-dial must not stand aside.
     await c.admin.from("phone_calls").update({
       transfer_state: call.transfer_state, transferred_from: call.transferred_from, answered_by: call.answered_by,
@@ -123,6 +132,8 @@ export async function transfer(env: Env, ec: Ctx, req: Request, idParam: string)
     }));
     throw new ApiError("twilio_error", "The transfer didn't go through. You're still on the call.");
   }
+
+  if (targetOnDnd) await stopCallRecording(env, c.admin, call);
 
   // 3. Only now end your own leg (usually already gone: leaving the Dial ends it).
   if (myLeg) {

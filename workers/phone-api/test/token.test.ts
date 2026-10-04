@@ -190,6 +190,18 @@ describe("POST /token", () => {
     });
   });
 
+  it("says whether this business's calls are recorded: the owner's choice AND the Worker's CALL_RECORDING rail", async () => {
+    const on = { on: true, notice: true, notice_text: null, transcribe: true };
+    const req = async (auth: Auth) => appRequest("POST", "/token", await auth.token(USER_A), { platform: "android", build_type: "prod", app_version: "1" });
+    const s = await setup(callerCtx({ recording: on }));
+    expect((await call(makeEnv({ CALL_RECORDING: "on" }), await req(s.auth))).json).toMatchObject({ recording: { on: true }, features: { recordings: true } });
+    expect((await call(makeEnv(), await req(s.auth))).json.recording).toEqual({ on: false });
+    s.net.rpc("phone_caller_context", () => callerCtx({ recording: { ...on, on: false } }));
+    expect((await call(makeEnv({ CALL_RECORDING: "on" }), await req(s.auth))).json.recording).toEqual({ on: false });
+    s.net.rpc("phone_caller_context", () => callerCtx()); // a database before 263
+    expect((await call(makeEnv({ CALL_RECORDING: "on" }), await req(s.auth))).json.recording).toEqual({ on: false });
+  });
+
   it("refuses a missing or bad login", async () => {
     const { env } = await setup();
     const none = await call(env, appRequest("POST", "/token", null, { platform: "chrome", build_type: "prod" }));

@@ -244,6 +244,19 @@ verify_jwt = true
 # check is the authentication either way.
 verify_jwt = true
 
+[functions.phone-call-summary]
+# A recorded call's summary (migration 263): the phone-api Worker's transcription cron POSTs
+# {recording_id} here, because ANTHROPIC_API_KEY lives in Supabase secrets only. Server-to-server
+# only. The real gate is inside (summary.ts callerAllowed): the bearer must equal the runtime's
+# SUPABASE_SERVICE_ROLE_KEY or PHONE_SUMMARY_SECRET, compared in constant time, OR a JWT whose
+# role claim is service_role. That third door is proof ONLY because this line has the gateway
+# verify the signature first (summary.ts passes gatewayVerified: true for that reason; a test in
+# tests/phone/callSummary_test.ts pins the two together). With verify_jwt = false, anyone could
+# forge the claim. An `sb_secret_…` key is NOT a JWT and the gateway 401s it before the function
+# runs; if the Worker's key is that format, do all three together: set PHONE_SUMMARY_SECRET to it,
+# change summary.ts to gatewayVerified: false, and only then set this to false.
+verify_jwt = true
+
 # Twilio Event Streams cannot send a Supabase JWT. With verification ON the gateway
 # 401s every delivery BEFORE the function runs — the billing-webhook failure mode,
 # invisible from inside the database. Auth is the shared URL secret.

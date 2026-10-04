@@ -32,6 +32,7 @@ import { refuseWhileSwitching } from "../handoff";
 import { ApiError, ok, readJson, UUID_RE } from "../http";
 import { toIdentity } from "../identity";
 import { logFault } from "../log";
+import { pauseCallRecording, resumeCallRecording } from "../recording";
 import {
   addParticipant, findConference, listParticipants, TwilioError, updateCall, updateParticipant,
 } from "../twilioRest";
@@ -217,6 +218,10 @@ export async function hold(env: Env, ec: Ctx, req: Request, idParam: string): Pr
     }
   }
   ec.waitUntil(addCallEvent(c.admin, call.id, "hold", { user: c.userId, moved: step.move, ...(afterResume ? { after_resume: true } : {}) }));
+  // A recorded call pauses its recording, so the hold music stays out of the audio and the
+  // transcript. Awaited before the answer, so a Resume pressed straight after cannot be
+  // overtaken by this pause (../recording.ts). A failure is logged and never fails the press.
+  await pauseCallRecording(env, c.admin, call);
   return ok({ held: true, call_id: call.id });
 }
 
@@ -266,6 +271,8 @@ export async function resume(env: Env, ec: Ctx, req: Request, idParam: string): 
   // before the answer. A lost mark never fails the press: Twilio has already done it.
   if (starting) await event.catch(() => {});
   else ec.waitUntil(event);
+  // The recording paused by Hold picks up again with the customer (../recording.ts).
+  await resumeCallRecording(env, c.admin, call);
   return ok({ held: false, call_id: call.id });
 }
 

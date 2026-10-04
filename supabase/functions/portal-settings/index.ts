@@ -126,7 +126,7 @@ import { ownContactsOnly, type GateTable } from "../_shared/access.ts";
 // same, so it is the only thing that can tell "my calls" from "the team's calls". Every Team
 // read below (the Calls report's team scope, the setup screen) asks it for the LITERAL level.
 import { ownPhoneOnly } from "../_shared/access.ts";
-import { buildCallsReport, bumpDeviceGeneration, createContactRefusal, isUuid, keepForOwnScope, parseCreateContact, parseRoute, phoneLevelOf, phoneRolloutRefusal, phoneSelfServeOn, signoutPlan, type ReportCall, type ReportText } from "./phone.ts";
+import { buildCallsReport, bumpDeviceGeneration, createContactRefusal, isUuid, keepForOwnScope, parseCreateContact, parseRecording, parseRoute, phoneLevelOf, recordingServerOn, recordingView, phoneRolloutRefusal, phoneSelfServeOn, signoutPlan, type ReportCall, type ReportText } from "./phone.ts";
 // Plan phase 6: a number for calls, bought with portal-sms's own purchase helper (one purchase
 // path, one reconciliation rule) and connected to the phone-api Worker by phoneNumber.ts.
 import {
@@ -486,6 +486,11 @@ const GATES: GateTable = {
   // Who answers the number, ring order, hours, forwarding, greeting. Owners and admins hold
   // phone:edit by preset.
   phone_settings_save: { area: "phone", level: "edit" },
+  // Call recording (migration 263): on/off, the announcement's wording, transcripts, how long
+  // recordings are kept. ⚠️ phone:'edit' IS THE FLOOR: the branch also requires the business
+  // OWNER (role 'owner'), decided 2026-10-04. Recording customers is the business's legal
+  // decision, so an admin, and an operator in view-as, are refused.
+  phone_recording_save: { area: "phone", level: "edit" },
   // The per-tenant switch (client_settings.phone_status, plan D9). Same altitude as the setup
   // it switches on. ⚠️ phone:'edit' IS THE FLOOR, NOT THE RULE, until builder launch: turning
   // calling ON (and the three number actions below) also needs a CSM Synergy operator unless
@@ -8706,14 +8711,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // deno-lint-ignore no-explicit-any
     const n: any = (numRes.data ?? [])[0] ?? null;
 
+    // CALL RECORDING (migration 263), read on its own: a database without the columns still shows
+    // the rest of the Phone tab, with `recording` null ("not available yet"). A real fault is
+    // logged and shows the same. The phone-api Worker's CALL_RECORDING rail can't be seen from
+    // the database, so this function holds a copy as its own secret (recordingServerOn, set with
+    // the Worker var, SETUP 7c): `serverOn` false makes the card say recording hasn't started,
+    // rather than that calls are recorded while nothing records.
+    const recRes = await admin.from("client_settings")
+      .select("phone_record_calls, phone_recording_notice_text, phone_transcribe_calls, phone_recording_retention_days, phone_recording_updated_at, phone_recording_updated_by")
+      .eq("client_id", clientId).maybeSingle();
+    if (recRes.error && !phoneNotReady(recRes.error)) {
+      logEdgeError({ fn: "portal-settings", req, clientId, code: "phone_recording_read_failed", severity: "error",
+        message: `client_settings recording read failed: ${recRes.error.message ?? "unknown"}` }).catch(() => {});
+    }
+    const recording = recRes.error ? null : recordingView(recRes.data as Record<string, unknown> | null, recordingServerOn((k) => Deno.env.get(k)));
+
     // AN 'own' CALLER GETS THEIR OWN SLICE. The gate let them in on `view` because RANK scores
     // own == view; the setup — who answers, when, where calls forward — is the team's business
     // and needs the LITERAL level (plan section 7). They still learn whether calling is on and
-    // which number customers see, which is what they need to use the apps at all.
+    // which number customers see, which is what they need to use the apps at all — and whether
+    // their calls are recorded.
     if (ownPhoneOnly(access)) {
       return json({
         ok: true, available: true, scope: "own", phoneStatus, level: "own", canEdit: false,
         number: n ? { e164: n.phone_number } : null,
+        recording: recording ? { on: recording.on, serverOn: recording.serverOn } : null,
       });
     }
 
@@ -8780,6 +8802,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       voiceSetup: voiceEnv((k) => Deno.env.get(k)).ok,
       callerId,
       canManageCallerId: canEdit("phone") && await callerMayManageCallerId(),
+      // Call recording (migration 263): the settings, and whether THIS caller may change them
+      // (the business owner with phone edit: phone_recording_save's rule).
+      recording,
+      canChangeRecording: !!recording && canEdit("phone") && role === "owner",
       route,
       team,
       // Plan section 7: "At setup the list starts with the owner." Offered, not saved — the
@@ -8809,6 +8835,32 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .maybeSingle();
     if (error) return phoneNotReady(error) ? phoneUnavailable() : dbFail(req, clientId, "save your phone settings", error);
     return json({ ok: true, route: routeOut(saved) });
+  }
+
+  // ── Call recording (migration 263) ─────────────────────────────────────────────────────
+  // The business OWNER only (role 'owner', on top of the gate's phone:'edit'): recording
+  // customers' calls is the business's own legal decision (decided 2026-10-04). An admin and an
+  // operator in view-as are refused in words. parseRecording (phone.ts) decides what is valid,
+  // and refuses turning the announcement off. Who changed it and when are stamped on the row,
+  // for any later question about consent. Nothing records until the phone-api Worker's
+  // CALL_RECORDING rail is on too.
+  if (action === "phone_recording_save") {
+    if (role !== "owner") return json({ error: "Only the business owner can change call recording." }, 403);
+    const parsed = parseRecording((payload ?? {}) as Record<string, unknown>);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const { data, error } = await admin.from("client_settings")
+      .update({ ...parsed.row, phone_recording_updated_at: new Date().toISOString(), phone_recording_updated_by: userId })
+      .eq("client_id", clientId)
+      .select("phone_record_calls, phone_recording_notice_text, phone_transcribe_calls, phone_recording_retention_days, phone_recording_updated_at, phone_recording_updated_by");
+    if (error) {
+      return phoneNotReady(error) ? phoneUnavailable("Call recording isn't set up on this server yet.") : dbFail(req, clientId, "save call recording", error);
+    }
+    if (!data || !data.length) {
+      return json({ error: "This account has no settings saved yet. Save your business details under Company first." }, 409);
+    }
+    audit(parsed.row.phone_record_calls ? "phone_recording_on" : "phone_recording_off", 1,
+      `transcribe=${parsed.row.phone_transcribe_calls} retention_days=${parsed.row.phone_recording_retention_days} wording=${parsed.row.phone_recording_notice_text ? "own" : "standard"}`).catch(() => {});
+    return json({ ok: true, recording: recordingView(data[0] as Record<string, unknown>, recordingServerOn((k) => Deno.env.get(k))) });
   }
 
   // THE SWITCH, and what it does to the number (phoneNumber.ts switchCalling). ON is behind the

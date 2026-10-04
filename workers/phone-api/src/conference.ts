@@ -88,6 +88,7 @@ import {
 import { ApiError, UUID_RE } from "./http";
 import { parseIdentity, stripClientPrefix, toE164 } from "./identity";
 import { logFault } from "./log";
+import { recordedParams, resumeCallRecording, stopCallRecording } from "./recording";
 import type { TwilioParams } from "./twilioSignature";
 import {
   fetchCall, findConference, listParticipants, TwilioError, updateCall, updateParticipant, type TwilioCall,
@@ -230,10 +231,11 @@ export async function redirectChild(env: Env, call: Pick<CallRow, "id" | "direct
  * number, so without customer_e164 the teammate's app would have to look the caller up. A
  * number that isn't a whole North American one (a withheld caller) is left out, as is a
  * contact the call has none of. A cold transfer sends these as <Parameter>s, a warm one on the
- * client address (the Participants API has no <Parameter>).
+ * client address (the Participants API has no <Parameter>). A recorded call adds recorded=1,
+ * so the teammate's app can say so while it rings (./recording.ts).
  */
 export function transferParams(
-  call: Pick<CallRow, "id" | "direction" | "from_e164" | "to_e164" | "contact_id">,
+  call: Pick<CallRow, "id" | "direction" | "from_e164" | "to_e164" | "contact_id" | "recording_armed">,
   transferredBy: string,
 ): Record<string, string> {
   const customer = toE164(call.direction === "in" ? call.from_e164 : call.to_e164);
@@ -242,6 +244,7 @@ export function transferParams(
     transferred_by: transferredBy,
     ...(customer ? { customer_e164: customer } : {}),
     ...(call.contact_id ? { contact_id: call.contact_id } : {}),
+    ...recordedParams(call.recording_armed === true),
   };
 }
 
@@ -355,10 +358,14 @@ function stillIn(parts: TwilioParticipant[]): TwilioParticipant[] {
   return parts.filter((p) => p.status !== "complete" && p.status !== "failed");
 }
 
-/** Take the customer off hold for the teammate who now has the call (HANDED OVER ON HOLD). */
+/**
+ * Take the customer off hold for the teammate who now has the call (HANDED OVER ON HOLD). A
+ * recording paused for the hold resumes with them (./recording.ts).
+ */
 async function handOver(env: Env, admin: Admin, row: CallRow, conferenceSid: string, customer: string): Promise<"handed_over"> {
   await updateParticipant(env, conferenceSid, customer, { Hold: "false" });
   await addCallEvent(admin, row.id, "handed_over", { to: row.answered_by });
+  await resumeCallRecording(env, admin, row);
   return "handed_over";
 }
 
@@ -416,6 +423,9 @@ export async function finishIfAlone(env: Env, admin: Admin, row: CallRow, confer
   try {
     if (waiting) {
       const info = await routeForNumber(admin, row.direction === "in" ? row.to_e164 : row.from_e164);
+      // The call recording stops BEFORE the redirect: the greeting and the message are the
+      // caller's voicemail, not part of the call (./recording.ts).
+      await stopCallRecording(env, admin, row);
       await updateCall(env, customer, { Twiml: voicemailTwiml(env, row.id, info) });
       await addCallEvent(admin, row.id, "conference_voicemail", { prefer });
       return "voicemail";

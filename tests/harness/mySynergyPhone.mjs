@@ -34,6 +34,15 @@
 //      use that number instead of a search, and buy_number goes out with no number picked (the
 //      server adopts it; portal-sms is a STUB here). At number_pending / active with the number
 //      still calling-only (an adoption whose last write failed, review BE-5), it offers to FINISH.
+//   P. Settings -> Phone, Call recording (migration 263): the owner turns it on with their own
+//      wording through phone_recording_save (validated by the REAL parseRecording), a wording that
+//      doesn't say "recorded" is refused before Save, the announcement can't be unticked; anyone
+//      else sees the card read-only; before 263 the card says it is not available; with the
+//      server's switch (the Worker's CALL_RECORDING rail) off, the owner's on reads "On, not
+//      started yet" and never "Calls are recorded".
+//   Q. A recorded call in the contact timeline: its summary shows, Play recording fetches
+//      <PHONE_API_BASE>/recordings/<id>/audio only on the press (header, blob: URL), and "Show
+//      transcript" reads /calls/<id>/transcript the same way; neither in view-as or with calling off.
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine) — the shape
 // crmContactDeal.mjs uses. The extension is stubbed as window.chrome.runtime before the app
@@ -51,12 +60,16 @@
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { launch, reporter, BASE, REF, shotsDir } from "./lib.mjs";
-import { buildCallsReport, parseRoute } from "../../supabase/functions/portal-settings/phone.ts";
+import { buildCallsReport, parseRecording, parseRoute, recordingView } from "../../supabase/functions/portal-settings/phone.ts";
 
 const CLIENT = "demo-tenant";
 const VIEWED = "demo-builder";
 const CONTACT_ID = "4512ed87-fb75-4645-81d6-9268eb73e305";
 const VM_ID = "5f0c1d2e-3a4b-4c5d-8e6f-708192a3b4c5";
+const REC_ID = "6a1b2c3d-4e5f-4061-8172-839405a6b7c8";
+const REC_CALL = "7b2c3d4e-5f60-4172-8283-94a5b6c7d8e9";
+const REC_SUMMARY = "Pat wants a quote for a 10x12 utility shed with a ramp.\nAction items:\n- Send the quote by Friday";
+const REC_TRANSCRIPT = "Customer: Hi, I'm calling about a shed.\nTeam: Sure, what size?";
 const EXT_ID = "abcdefghijklmnopabcdefghijklmnop";
 const REP = "00000000-0000-4000-8000-00000000000b";
 const CREW = "00000000-0000-4000-8000-00000000000c";
@@ -89,7 +102,10 @@ const LIST_ROW = {
 const CONTACT = { id: CONTACT_ID, name: "Pat Example", phone: "(555) 555-0142", email: "pat@example.test", phone_digits: "5555550142", owner_user_id: null, sms_opt_out_at: null, first_seen_at: "2026-09-01T12:00:00Z" };
 const FEED = [
   { id: "pc:1", type: "call_missed", at: "2026-09-28T15:00:00Z", title: "Missed call from +15555550142", body: "Nobody answered", icon: "call_missed" },
-  { id: "pc:2", type: "call", at: "2026-09-28T16:00:00Z", title: "Call to +15555550142", body: "Talked 3m 12s · by Olive Owner", icon: "call" },
+  // A recorded call (migration 263): crmFeed's recordingMeta, ready to play, transcribed and summarised.
+  { id: "pc:2", type: "call", at: "2026-09-28T16:00:00Z", title: "Call to +15555550142", body: "Talked 3m 12s · by Olive Owner", icon: "call",
+    meta: { callId: REC_CALL, recordingId: REC_ID, recordingReady: true, recordingState: "ready", recordingDurationS: 192,
+      recordingDeleted: false, summary: REC_SUMMARY, hasTranscript: true, transcriptPending: false } },
   { id: "pc:3", type: "voicemail", at: "2026-09-27T16:00:00Z", title: "Voicemail from +15555550142", body: "42s message · not listened to yet", icon: "voicemail",
     meta: { callId: "call-3", voicemailId: VM_ID, voicemailDeleted: false, listened: false } },
 ];
@@ -130,6 +146,10 @@ async function scenario(browser, opts) {
     trustOperator = false, trustAvailable = true,
     // Text Messaging (O): the portal-sms status the SMS tab loads, or null for the default stub.
     smsStatus = null,
+    // Call recording (P): the client_settings row's recording columns (null = before migration
+    // 263), whether this caller may change them (the server's owner rule), and the server's
+    // switch (portal-settings' copy of the Worker's CALL_RECORDING rail).
+    recordingRow = {}, canChangeRecording = true, recordingServerOn = true,
   } = opts;
   const ctx = await browser.newContext({ viewport, ...(userAgent ? { userAgent, isMobile: true, hasTouch: true } : {}) });
   await ctx.addInitScript(([ref, s]) => {
@@ -170,6 +190,7 @@ async function scenario(browser, opts) {
     phoneStatus, route: null,
     callerId: { available: trustAvailable, shakenStir: { registered: false, status: null }, voiceIntegrity: { registered: false, status: null }, checkedAt: null },
     sms: smsStatus,
+    recording: recordingRow ? recordingView(recordingRow, recordingServerOn) : null,
     number: opts.noNumber ? null : (numberOverride ?? { id: "num-1", e164: "+15555550199", textingStatus: "registered", voiceReady: false, callingOnly: false }),
   };
   await page.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href), (route) => route.abort());
@@ -182,6 +203,11 @@ async function scenario(browser, opts) {
     const cors = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization", "access-control-allow-methods": "GET, OPTIONS" };
     if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors, body: "" });
     vm.push({ url: req.url(), method: req.method(), authorization: req.headers()["authorization"] || null });
+    // Q. A recorded call's whole transcript (GET /calls/:id/transcript) is JSON; audio is audio.
+    if (/\/calls\/[^/]+\/transcript$/.test(new URL(req.url()).pathname)) {
+      return route.fulfill({ status: 200, headers: { ...cors, "content-type": "application/json" },
+        body: JSON.stringify({ ok: true, call_id: REC_CALL, recording_id: REC_ID, transcript: REC_TRANSCRIPT, summary: REC_SUMMARY }) });
+    }
     return route.fulfill({ status: 200, headers: { ...cors, "content-type": "audio/mpeg" }, body: Buffer.from([0x49, 0x44, 0x33, 0x03, 0, 0, 0, 0, 0, 0]) });
   });
   const handler = async (route) => {
@@ -231,7 +257,18 @@ async function scenario(browser, opts) {
           number: state.number, canBuyNumber: rolloutOpen, numbersForSale: true, voiceSetup: true,
           canSwitchOn: rolloutOpen, canConnect: rolloutOpen, selfServe: false,
           callerId: state.callerId, canManageCallerId: trustOperator,
+          recording: state.recording, canChangeRecording: !!state.recording && canChangeRecording,
           route: state.route, team: TEAM, suggestedMembers: state.route ? null : [USER.id] });
+      // P. Call recording: the owner only (the server's rule; the stub refuses the same way), and
+      // the REAL parseRecording decides what is valid.
+      case "phone_recording_save": {
+        if (!canChangeRecording) return json(route, { error: "Only the business owner can change call recording." }, 403);
+        if (!state.recording) return json(route, { error: "Call recording isn't set up on this server yet." }, 503);
+        const r = parseRecording(body);
+        if (!r.ok) return json(route, { error: r.error }, 400);
+        state.recording = recordingView({ ...r.row, phone_recording_updated_at: new Date().toISOString(), phone_recording_updated_by: USER.id }, recordingServerOn);
+        return json(route, { ok: true, recording: state.recording });
+      }
       // Plan phase 6, caller ID. STUBS: nothing reaches Twilio. The server refuses non-operators;
       // the stub does too, so a button shown to the wrong person would fail a check.
       case "phone_trust_setup": {
@@ -397,6 +434,39 @@ try {
       ok("K5 and the player plays it from a blob: URL", !!src && src.startsWith("blob:"), src);
       ok("K6 no element anywhere carries the session token", !(await s.page.content()).includes(SESSION.access_token));
       await s.page.screenshot({ path: join(shots, "K-voicemail-playing.png") });
+
+      // Q. A recorded call (migration 263): its summary is on the line, and Play recording and
+      // Show transcript ask the Worker only on the press, with the session in the header.
+      const recLine = s.page.locator(`[data-ss-call-recording="${REC_CALL}"]`);
+      ok("Q1 the recorded call's line shows its summary", (await recLine.count()) === 1
+        && (await recLine.locator("[data-ss-call-summary]").innerText().catch(() => "")).includes("Pat wants a quote for a 10x12 utility shed"));
+      const recPlay = s.page.locator(`[data-ss-recording-play="${REC_ID}"]`);
+      ok("Q2 with Play recording and its length", (await recPlay.count()) === 1 && /Play recording · 3 min/.test(await recPlay.innerText().catch(() => "")),
+        await recPlay.innerText().catch(() => "missing"));
+      ok("Q3 nothing about the recording was fetched by opening the record", !s.vm.some((r) => /\/recordings\/|\/transcript$/.test(r.url)), JSON.stringify(s.vm));
+      await recLine.scrollIntoViewIfNeeded().catch(() => {});
+      await recLine.screenshot({ path: join(shots, "Q-recorded-call.png") }).catch(() => {});
+      const before = s.vm.length;
+      await tap(recPlay);
+      const recAudio = s.page.locator(`audio[data-ss-recording="${REC_ID}"]`);
+      await recAudio.waitFor({ timeout: 8000 }).catch(() => {});
+      const gotRec = s.vm.slice(before).find((r) => r.method === "GET");
+      ok("Q4 Play fetched <PHONE_API_BASE>/recordings/<id>/audio with the session in the header and none in the URL",
+        !!gotRec && gotRec.url === `https://phone.structurestudiosuite.com/recordings/${REC_ID}/audio` && gotRec.authorization === `Bearer ${SESSION.access_token}`,
+        JSON.stringify(gotRec));
+      const recSrc = await recAudio.getAttribute("src").catch(() => null);
+      ok("Q5 and plays it from a blob: URL", !!recSrc && recSrc.startsWith("blob:"), recSrc);
+      const toggle = s.page.locator(`[data-ss-transcript-toggle="${REC_CALL}"]`);
+      ok("Q6 Show transcript is offered", (await toggle.count()) === 1 && (await toggle.innerText().catch(() => "")) === "Show transcript");
+      await tap(toggle);
+      await s.page.locator("[data-ss-transcript]").waitFor({ timeout: 8000 }).catch(() => {});
+      const gotT = s.vm.filter((r) => /\/transcript$/.test(r.url)).pop();
+      ok("Q7 it read /calls/<id>/transcript with the session in the header",
+        !!gotT && gotT.url === `https://phone.structurestudiosuite.com/calls/${REC_CALL}/transcript` && gotT.authorization === `Bearer ${SESSION.access_token}`,
+        JSON.stringify(gotT));
+      ok("Q8 and shows the speaker-labelled lines", (await s.page.locator("[data-ss-transcript]").innerText().catch(() => "")).includes("Team: Sure, what size?"));
+      ok("Q9 no element anywhere carries the session token", !(await s.page.content()).includes(SESSION.access_token));
+      await recLine.screenshot({ path: join(shots, "Q-recorded-call-open.png") }).catch(() => {});
     }
 
     // J. Call on the contact LIST.
@@ -487,6 +557,9 @@ try {
       ok("E6 the record read was the VIEWED builder's (targetClientId injected)", !!rec && rec.targetClientId === VIEWED, JSON.stringify(rec));
       ok("E7 no voicemail player in view-as (the operator's token is not on this builder's team)",
         (await s.page.locator("audio[data-ss-voicemail], [data-ss-voicemail-play]").count()) === 0 && s.vm.length === 0);
+      ok("Q10 in view-as a recorded call keeps its summary, with no Play recording or Show transcript",
+        (await s.page.locator(`[data-ss-call-recording="${REC_CALL}"] [data-ss-call-summary]`).count()) === 1
+          && (await s.page.locator("[data-ss-recording-play], [data-ss-transcript-toggle]").count()) === 0);
       await s.page.screenshot({ path: join(shots, "E-view-as-disabled.png") });
     }
     await s.go("/portal/contacts");
@@ -508,6 +581,9 @@ try {
     ok("F3 the Calls chip still shows, because this record HAS call history", (await s.page.locator("button", { hasText: /^Calls \(3\)$/ }).count()) === 1);
     ok("F4 no voicemail player while calling is off (the Worker would refuse it)",
       (await s.page.locator("audio[data-ss-voicemail], [data-ss-voicemail-play]").count()) === 0 && s.vm.length === 0);
+    ok("Q11 with calling off, a recorded call shows its summary but no Play recording or Show transcript",
+      (await s.page.locator("[data-ss-call-summary]").count()) === 1
+        && (await s.page.locator("[data-ss-recording-play], [data-ss-transcript-toggle]").count()) === 0);
     await s.go("/portal/contacts");
     const rowCall = s.page.locator(`[data-ss-list-call="${CONTACT_ID}"]`);
     await rowCall.waitFor({ timeout: 15000 }).catch(() => {});
@@ -579,6 +655,93 @@ try {
       ok("G12 and the result is said plainly, including what it did not do", /disconnected from calls/.test(await s.page.locator("body").innerText()));
       await s.page.screenshot({ path: join(shots, "G-phone-settings-after.png"), fullPage: true });
     }
+    await s.ctx.close();
+  }
+
+  // ── P. Settings → Phone, Call recording (migration 263) ──────────────────────────────────
+  {
+    const s = await scenario(browser, { name: "P" });
+    await s.go("/portal/settings/phone");
+    const card = s.page.locator("[data-ss-phone-recording]").first();
+    await card.waitFor({ timeout: 15000 }).catch(() => {});
+    const rendered = ok("P0 the Phone tab has a Call recording card, off by default", (await s.page.locator('[data-ss-phone-recording="off"]').count()) === 1);
+    if (rendered) {
+      const save = s.page.locator("[data-ss-phone-recording-save]");
+      const words = s.page.locator("[data-ss-phone-recording-notice]");
+      ok("P1 its Save waits for a change", (await save.count()) === 1 && await save.isDisabled());
+      const notice = s.page.locator('[data-ss-phone-recording-check="notice"]');
+      ok("P2 the announcement is ticked and can't be unticked", (await notice.isChecked()) && (await notice.isDisabled()));
+      ok("P3 the wording box shows the standard sentence", (await words.getAttribute("placeholder")) === "This call will be recorded and transcribed.");
+      ok("P4 recordings are kept for a year unless the owner picks otherwise", (await s.page.locator("[data-ss-phone-recording-keep]").inputValue()) === "365");
+      ok("P5 the legal note is on the card", (await s.page.locator("[data-ss-phone-recording-legal]").count()) === 1);
+      await card.scrollIntoViewIfNeeded().catch(() => {});
+      await card.screenshot({ path: join(shots, "P-recording-off.png") }).catch(() => {});
+      await tick(s.page.locator('[data-ss-phone-recording-check="on"]'));
+      await words.fill("Hello and welcome to our shop.");
+      ok("P6 wording that doesn't say the call is recorded is refused before Save",
+        /has to tell callers the call is recorded/.test(await card.innerText()) && (await save.isDisabled()));
+      const mine = "Thanks for calling Demo Builder. This call is recorded so we get your order right.";
+      await words.fill(mine);
+      await s.page.locator("[data-ss-phone-recording-keep]").selectOption("90");
+      ok("P7 good wording lets it save", await save.isEnabled());
+      await tap(save);
+      await s.page.waitForSelector('[data-ss-phone-recording="on"]', { timeout: 8000 }).catch(() => {});
+      const sent = s.calls.filter((c) => c.action === "phone_recording_save").pop();
+      ok("P8 Save sent phone_recording_save with on, the wording, transcripts and the keep length, and never notice:false",
+        !!sent && sent.on === true && sent.noticeText === mine && sent.transcribe === true && sent.retentionDays === 90 && !("notice" in sent),
+        JSON.stringify(sent));
+      const after = await card.innerText().catch(() => "");
+      ok("P9 the real validator took it, and the card says calls are recorded",
+        (await s.page.locator('[data-ss-phone-recording-status="on"]').innerText().catch(() => "")) === "Calls are recorded"
+          && /Saved\. Calls are announced and recorded from the next call on\./.test(after), after.slice(0, 160));
+      ok("P10 and who changed it, and when", /Last changed today by Olive Owner\./.test(after));
+      ok("P11 the routing form's Save was never sent", !s.calls.some((c) => c.action === "phone_settings_save"));
+      await card.screenshot({ path: join(shots, "P-recording-on.png") }).catch(() => {});
+    }
+    await s.ctx.close();
+  }
+  {
+    // Not the owner (an admin with phone edit, or an operator in view-as): read-only.
+    const s = await scenario(browser, { name: "P-admin", canChangeRecording: false, recordingRow: { phone_record_calls: true, phone_recording_retention_days: 180 } });
+    await s.go("/portal/settings/phone");
+    const card = s.page.locator('[data-ss-phone-recording="on"]');
+    await card.waitFor({ timeout: 15000 }).catch(() => {});
+    const inputs = card.locator("input, select");
+    let allOff = (await inputs.count()) > 0;
+    for (let i = 0; i < await inputs.count(); i++) allOff = allOff && await inputs.nth(i).isDisabled();
+    ok("P12 anyone but the owner sees the card read-only, and is told who can change it",
+      (await card.count()) === 1 && allOff && (await s.page.locator("[data-ss-phone-recording-save]").count()) === 0
+        && /Only the business owner can change call recording\./.test(await card.innerText().catch(() => ""))
+        && (await s.page.locator("[data-ss-phone-recording-keep]").inputValue()) === "180");
+    await card.screenshot({ path: join(shots, "P-recording-not-owner.png") }).catch(() => {});
+    await s.ctx.close();
+  }
+  {
+    const s = await scenario(browser, { name: "P-before-263", recordingRow: null });
+    await s.go("/portal/settings/phone");
+    await s.page.waitForSelector('[data-ss-phone-settings="team"]', { timeout: 15000 }).catch(() => {});
+    ok("P13 before migration 263 the card says call recording isn't available, and offers nothing",
+      (await s.page.locator('[data-ss-phone-recording="unavailable"]').count()) === 1 && (await s.page.locator("[data-ss-phone-recording-save]").count()) === 0);
+    await s.ctx.close();
+  }
+  {
+    // The server's switch is off (the Worker's CALL_RECORDING rail): the owner can still choose,
+    // but the card never says calls are recorded, and the save says when it starts.
+    const s = await scenario(browser, { name: "P-not-started", recordingServerOn: false });
+    await s.go("/portal/settings/phone");
+    const card = s.page.locator("[data-ss-phone-recording]").first();
+    await card.waitFor({ timeout: 15000 }).catch(() => {});
+    ok("P14 with the server's switch off the card says recording hasn't started on this account",
+      (await s.page.locator("[data-ss-phone-recording-waiting]").count()) === 1);
+    await tick(s.page.locator('[data-ss-phone-recording-check="on"]'));
+    await tap(s.page.locator("[data-ss-phone-recording-save]"));
+    await s.page.waitForSelector('[data-ss-phone-recording="on"]', { timeout: 8000 }).catch(() => {});
+    const after = await card.innerText().catch(() => "");
+    ok("P15 and after the owner turns it on: 'On, not started yet', never 'Calls are recorded'",
+      (await s.page.locator('[data-ss-phone-recording-status="waiting"]').innerText().catch(() => "")) === "On, not started yet"
+        && !/Calls are recorded/.test(after)
+        && /Saved\. Calls will be announced and recorded once call recording starts on this account\./.test(after), after.slice(0, 200));
+    await card.screenshot({ path: join(shots, "P-recording-not-started.png") }).catch(() => {});
     await s.ctx.close();
   }
 

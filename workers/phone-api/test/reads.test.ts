@@ -855,3 +855,127 @@ describe("GET /search and /team", () => {
     expect(json.members).toEqual([{ user_id: USER_A, full_name: "Avery", identity_base: `u_${USER_A.replace(/-/g, "")}_g2` }]);
   });
 });
+
+describe("call recordings on a call (GET /calls, GET /recordings/:id/audio, GET /calls/:id/transcript)", () => {
+  const REC = "00000000-0000-4000-8000-0000000ae001";
+  const REC_SID = "RE" + "0".repeat(31) + "7";
+  const CALL = "00000000-0000-4000-8000-0000000ca777";
+  const rec = (over: Record<string, unknown> = {}) => ({
+    id: REC, status: "completed", duration_s: 125, transcript: "Customer: Hello.\nTeam: Hi.", summary: "Cam asked about a 12x24.",
+    transcript_status: "done", deleted_at: null, ...over,
+  });
+
+  it("each call carries recording, summary and transcript_status (null when there is none), never the transcript", async () => {
+    const { net, token, env } = await setup(callerCtx({ phone_level: "view" }));
+    net.rest("GET", "phone_calls", () => [
+      callRow("k1", { answered_by: USER_A, phone_call_recordings: rec() }),
+      callRow("k2", { answered_by: USER_A }),
+      callRow("k3", { answered_by: USER_A, ended_at: null, status: "in_progress", phone_call_recordings: [rec({ status: "paused", transcript: null, summary: null, transcript_status: "off", duration_s: null })] }),
+      callRow("k4", { answered_by: USER_A, ended_at: T(0), phone_call_recordings: rec({ status: "recording", transcript: null, summary: null, transcript_status: "off" }) }),
+      callRow("k5", { answered_by: USER_A, phone_call_recordings: rec({ transcript_status: "working", transcript: null, summary: null }) }),
+      callRow("k6", { answered_by: USER_A, phone_call_recordings: rec({ status: "failed", transcript_status: "off", transcript: null, summary: null }) }),
+      // nova-3 heard no words: done, with the summary left off. Nothing to show.
+      callRow("k7", { answered_by: USER_A, phone_call_recordings: rec({ transcript: null, summary: null, summary_status: "off" }) }),
+    ]);
+    const { json } = await call(env, appRequest("GET", "/calls?scope=team", token));
+    const by = Object.fromEntries(json.calls.map((c: { id: string }) => [c.id, c]));
+    expect(by.k1).toMatchObject({
+      recording: { id: REC, duration_s: 125, state: "ready" }, summary: "Cam asked about a 12x24.", transcript_status: "done",
+    });
+    // The transcript is read on demand (GET /calls/:id/transcript): the apps save these rows on
+    // the device, where a copy would outlive the business's retention.
+    for (const c of json.calls) {
+      expect(c).not.toHaveProperty("transcript");
+      expect(c).not.toHaveProperty("transcript_more");
+    }
+    expect(JSON.stringify(json)).not.toContain("Customer: Hello.");
+    expect(by.k2).toMatchObject({ recording: null, summary: null, transcript_status: null });
+    expect(by.k3.recording).toEqual({ id: REC, duration_s: null, state: "paused" });
+    expect(by.k4.recording.state).toBe("processing"); // the call is over, Twilio is finishing the file
+    expect(by.k5.transcript_status).toBe("pending");
+    expect(by.k6.recording.state).toBe("failed");
+    expect(by.k7).toMatchObject({ recording: { state: "ready" }, summary: null, transcript_status: null });
+    expect(net.reads("phone_calls")[0].url.searchParams.get("select")).toContain("phone_call_recordings(id,status,duration_s,summary,transcript_status,summary_status,deleted_at)");
+  });
+
+  it("once retention deleted the audio (and the transcript) only the summary stays", async () => {
+    const { net, token, env } = await setup(callerCtx({ phone_level: "view" }));
+    net.rest("GET", "phone_calls", () => [
+      callRow("l2", { answered_by: USER_A, phone_call_recordings: rec({ deleted_at: T(0), transcript: null }) }),
+    ]);
+    const { json } = await call(env, appRequest("GET", "/calls?scope=team", token));
+    expect(json.calls[0]).toMatchObject({ recording: null, transcript_status: null, summary: "Cam asked about a 12x24." });
+    expect(json.calls[0]).not.toHaveProperty("transcript");
+  });
+
+  it("the 'mine' list's second read (my customers' missed calls) embeds the recording too", async () => {
+    const { net, token, env } = await setup(callerCtx({ phone_level: "own" }));
+    net.rest("GET", "phone_calls", () => []);
+    await call(env, appRequest("GET", "/calls", token));
+    for (const r of net.reads("phone_calls")) expect(r.url.searchParams.get("select")).toContain("phone_call_recordings(");
+  });
+
+  describe("the audio and the whole transcript", () => {
+    const callFor = (over: Record<string, unknown> = {}) => callRow(CALL, { answered_by: USER_A, ...over });
+    async function audioSetup(ctx: Record<string, unknown>, recRow: Record<string, unknown>, row = callFor()) {
+      const s = await setup(ctx);
+      s.net.rest("GET", "phone_call_recordings", () => [recRow]);
+      s.net.rest("GET", "phone_calls", () => [row]);
+      s.net.rest("GET", "crm_contacts", () => [{ owner_user_id: USER_A }]);
+      s.net.on("GET", (u) => u.pathname.endsWith(`/Recordings/${REC_SID}.mp3`), (r) => new Response("mp3", {
+        status: r.headers.get("range") ? 206 : 200,
+        headers: { "content-length": "3", ...(r.headers.get("range") ? { "content-range": "bytes 0-2/3" } : {}) },
+      }));
+      return s;
+    }
+    const full = { id: REC, call_id: CALL, client_id: CLIENT, recording_sid: REC_SID, status: "completed", deleted_at: null };
+
+    it("streams it from Twilio, mixed to one channel, header bearer only, never cached, Range passed through", async () => {
+      const { net, token, env } = await audioSetup(callerCtx({ phone_level: "own" }), full);
+      const { res, text } = await call(env, appRequest("GET", `/recordings/${REC}/audio`, token, undefined, { range: "bytes=0-2" }));
+      expect(res.status).toBe(206);
+      expect(text).toBe("mp3");
+      expect(res.headers.get("content-type")).toBe("audio/mpeg");
+      expect(res.headers.get("cache-control")).toBe("private, no-store");
+      expect(res.headers.get("content-range")).toBe("bytes 0-2/3");
+      const media = net.to(/\.mp3/)[0];
+      expect(media.url.search).toBe(""); // not RequestedChannels=2: both people in both ears
+      expect(media.headers.get("range")).toBe("bytes=0-2");
+      // No ?access_token= door.
+      const q = await call(env, appRequest("GET", `/recordings/${REC}/audio?access_token=${token}`, null));
+      expect(q.res.status).toBe(401);
+    });
+
+    it.each([
+      ["another tenant's recording", { ...full, client_id: OTHER_TENANT }, callFor(), callerCtx({ phone_level: "view" }), "That recording wasn't found."],
+      ["a call the caller may not see (own level, someone else's)", full, callFor({ answered_by: USER_B, rang_user_ids: [USER_B] }), callerCtx({ phone_level: "own" }), "That recording wasn't found."],
+      ["a recording retention deleted", { ...full, deleted_at: T(0) }, callFor(), callerCtx({ phone_level: "view" }), "That recording is no longer available."],
+      ["a recording still going", { ...full, status: "recording" }, callFor(), callerCtx({ phone_level: "view" }), "The recording isn't ready yet. Try again in a minute."],
+    ])("404 for %s, and Twilio is never asked", async (_l, recRow, row, ctx, message) => {
+      const { net, token, env } = await audioSetup(ctx, recRow, row);
+      const { res, json } = await call(env, appRequest("GET", `/recordings/${REC}/audio`, token));
+      expect(res.status).toBe(404);
+      expect(json.error.message).toBe(message);
+      expect(net.to(/\.mp3/)).toEqual([]);
+    });
+
+    it("GET /calls/:id/transcript gives the whole text to whoever may see the call, and nothing once deleted", async () => {
+      const long = `Customer: ${"y".repeat(9000)}`;
+      const s = await audioSetup(callerCtx({ phone_level: "view" }), { id: REC, transcript: long, summary: "S.", deleted_at: null });
+      let r = await call(s.env, appRequest("GET", `/calls/${CALL}/transcript`, s.token));
+      expect(r.json).toEqual({ ok: true, call_id: CALL, recording_id: REC, transcript: long, summary: "S." });
+      expect(filter(s.net.reads("phone_calls")[0], "client_id")).toBe(CLIENT);
+      // Deleted by retention: the transcript went with the audio.
+      s.net.rest("GET", "phone_call_recordings", () => [{ id: REC, transcript: null, summary: "S.", deleted_at: T(0) }]);
+      r = await call(s.env, appRequest("GET", `/calls/${CALL}/transcript`, s.token));
+      expect(r.res.status).toBe(404);
+      // An own-level caller and someone else's call: as if there were none.
+      s.net.rpc("phone_caller_context", () => callerCtx({ phone_level: "own" }));
+      s.net.rest("GET", "phone_call_recordings", () => [{ id: REC, transcript: long, summary: "S.", deleted_at: null }]);
+      s.net.rest("GET", "phone_calls", () => [callFor({ answered_by: USER_B, rang_user_ids: [USER_B] })]);
+      r = await call(s.env, appRequest("GET", `/calls/${CALL}/transcript`, s.token));
+      expect(r.res.status).toBe(404);
+      expect(r.json.error.message).toBe("That call wasn't found.");
+    });
+  });
+});

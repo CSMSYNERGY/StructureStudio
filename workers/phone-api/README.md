@@ -1,6 +1,6 @@
 # phone-api
 
-The My Synergy Phone Worker. It answers Twilio's call webhooks, mints Twilio Access Tokens for the Chrome extension and the phone app, sends texts through the shared texting rules, serves the apps' read endpoints, pushes text alerts to phones, and runs two crons: a recording sweep, and a daily job for voicemail retention and (once armed) billing. It also handles hold and warm transfer (plan 9C, design b), voicemail transcription, and inbound photos.
+The My Synergy Phone Worker. It answers Twilio's call webhooks, mints Twilio Access Tokens for the Chrome extension and the phone app, sends texts through the shared texting rules, serves the apps' read endpoints, pushes text alerts to phones, and runs two crons: a recording sweep, and a daily job for voicemail retention and (once armed) billing. It also handles hold and warm transfer (plan 9C, design b), voicemail transcription, inbound photos, and call recording with transcripts and summaries (release B2, off until switched on).
 
 The contract is `docs/SPEC.md` in the private `structure-studio-phone` repo, section 3. The product plan is `_Extras/Structure Studio Phone Plan 2026-09-28.md` in the vault. Where this Worker reads the contract a particular way, `DEVIATIONS.md` says so. The one-time setup is in `SETUP.md`.
 
@@ -23,7 +23,9 @@ src/routes/me.ts      /settings/me, /devices, /devices/signout-all, /log, /turn,
 src/logPrivacy.ts     what a Chrome extension error report keeps: keyed refs instead of ids, known context keys, numbers and ids redacted
 src/routes/quickSends.ts  /quick-sends: each person's saved messages (list, add, change, delete, used)
 src/routes/push.ts    /push/text (FCM HTTP v1, APNs)
-src/cron/             sweep.ts (*/15), usageCharge.ts (every 5 min: each call and text at Twilio cost x markup; 09:00 UTC: Twilio's daily usage totals), retention.ts and lineFee.ts (daily, 09:00 UTC: monthly line fee)
+src/routes/recordings.ts  GET /recordings/:id/audio, GET /calls/:id/transcript
+src/recording.ts      call recording: armed or not, the announcement, start / pause / resume / stop on the customer's leg, /voice/recording, /voice/notice, the sweep's backstop
+src/cron/             sweep.ts (*/15), usageCharge.ts (every 5 min: each call, text, call recording and transcript at cost x markup; 09:00 UTC: Twilio's daily usage totals), retention.ts and lineFee.ts (daily, 09:00 UTC: voicemail and call recording retention, monthly line fee), transcribe.ts (every minute while CALL_TRANSCRIBE is on: Workers AI transcripts, then the summary request)
 src/conference.ts     the conference design: TwiML, which leg is which, the transfer_state machine, /voice/conference
 src/handoff.ts        moving a live call between the person's devices: the answer, make before break, /voice/handoff
 src/callEvents.ts     what phone_call_events say that the row cannot: a warm transfer's state, a Resume still landing
@@ -67,6 +69,10 @@ Deploy only from a tree that has origin/beta merged in, or from beta itself. A `
 | `PHONE_USAGE_COST_CAPTURE` | `on` | Anything but `off` records what every call and text cost at Twilio, and what it would charge at the current markup, as `shadow` rows in `usage_charges`, while nothing is charged. Also stores Twilio's daily usage totals in `twilio_usage_daily` at 09:00 UTC. |
 | `VOICEMAIL_RETENTION_DAYS` | `365` | Recordings older than this are deleted at Twilio by the daily job. Minimum 30. |
 | `TRANSCRIBE` | `off` | Release 2. `on` adds Twilio transcription to every voicemail (`<Record transcribe>`, about $0.05 a minute, English, 2 s to 2 min); the text lands in `phone_voicemails.transcript` and on the call's `voicemail` summary. |
+| `CALL_RECORDING` | `off` | Release B2, the kill switch. Exactly `on` lets a business whose owner turned recording on (Settings › Phone) have its calls announced ("This call will be recorded.") and recorded: one dual-channel recording per call, on the customer's leg, started through Twilio's REST API when someone answers (`src/recording.ts`). Anything else: no announcement and no recording for anyone; recordings already made still play and still expire. Needs migration 263. Set the Supabase function secret `CALL_RECORDING` to the same value every time (SETUP.md 7c): portal-settings reads it so the Settings card says whether calls really are recorded. |
+| `CALL_TRANSCRIBE` | `off` | Release B2. Exactly `on` transcribes recorded calls with Workers AI (Deepgram nova-3, through the `ai` binding) on the minute tick, for businesses that left transcripts on, and asks the `phone-call-summary` edge function for each summary. The announcement says "and transcribed" only while this is on. |
+
+The `ai` binding (`"ai": { "binding": "AI" }` in `wrangler.jsonc`) is Workers AI, billed to the Cloudflare account; there is no key to set. It is used only while `CALL_TRANSCRIBE` is `on`.
 
 ## Secrets (`npx wrangler secret put <NAME>`)
 
@@ -101,9 +107,13 @@ App endpoints take `Authorization: Bearer <Supabase access token>` and answer `{
 
 | Endpoint | Notes |
 |---|---|
-| `POST /token` | Local JWT check, then one parallel round: `phone_caller_context`, the person's settings, and Auth's session check. |
-| `POST /voice/outbound` | 911/933/112 block, team and generation re-check, tenant check on `ContactId`, daily minute cap, caller ID = the builder's number, `answerOnBridge`, status callback on the `<Number>`. |
-| `POST /voice/inbound` | DND, busy, access, business hours in the route's time zone, `all_at_once` or `in_order`, the 911 callback rule, straight to voicemail when nobody is available. |
+| `POST /token` | Local JWT check, then one parallel round: `phone_caller_context`, the person's settings, and Auth's session check. Answers `recording: {on}` (the business recorded AND `CALL_RECORDING` on) and `features.recordings`. |
+| `POST /voice/outbound` | 911/933/112 block, team and generation re-check, tenant check on `ContactId`, daily minute cap, caller ID = the builder's number, `answerOnBridge`, status callback on the `<Number>`. On a recorded business the `<Number>` also carries the announcement as its whisper `url` (`/voice/notice`) and the row is armed. |
+| `POST /voice/inbound` | DND, busy, access, business hours in the route's time zone, `all_at_once` or `in_order`, the 911 callback rule, straight to voicemail when nobody is available. On a recorded business the announcement is said before the first ring (or an after-hours forward), every `<Client>` carries `recorded=1`, and the row is armed; never for voicemail-only answers or the 911 callback window. |
+| `POST /voice/notice` | The outbound whisper: the business's announcement, `<Say>` only. A read that fails still says the standard sentence. |
+| `POST /voice/recording` | A call recording's status callback (204): `in-progress`, `completed` (queues the transcript), `absent`. Taken only for the row's own recording. |
+| `GET /recordings/:id/audio` | A finished call recording, streamed from Twilio (one channel, both voices) after the voicemail rule for who may see the call. Bearer header only, Range passed through, never cached; 404 once retention deleted it. |
+| `GET /calls/:id/transcript` | The call's transcript, read when someone presses "Show transcript" (`GET /calls` never carries it: the apps save those rows on the device, where a copy would outlive the business's retention). Same rule. |
 | `POST /voice/after-dial` | Plan section 8 steps 1 to 4, decided by `DialBridged`. |
 | `POST /voice/screen` | The press-1 screen for forwarded cells. |
 | `POST /voice/status` | 204 first, then writes `phone_calls` in `waitUntil`. |
@@ -127,5 +137,7 @@ App endpoints take `Authorization: Bearer <Supabase access token>` and answer `{
 | `POST /log` | App errors into `app_errors`, severity kept. Sources `my-synergy-phone-extension` and `my-synergy-phone-mobile`, plus the two codes builds from before the 2026-10-01 rename still send (SETUP.md section 9: deploy this Worker before any renamed build ships). A report from the Chrome extension carries no direct identifier: `client_id` is null, `context` has `user_ref` and `client_ref` instead of `user_id`, only the context keys the extension is known to send (others are dropped and listed by name in `dropped`), and emails, phone numbers, uuids, Twilio identities and SIDs are `[redacted]` in the message, code and context (DEVIATIONS 64). Those rows are pseudonymous, not anonymous, so they and the Worker's own `edge:phone-api` rows are read only in summary (SETUP.md section 10). A mobile app report keeps `client_id` and `context.user_id`. |
 | `GET /turn` | Twilio Network Traversal Service credentials. |
 | `GET /health` | `{ok, version, deployment}`. |
+
+Call recording (release B2, migration 263) adds to every call in `GET /calls` and `GET /threads/:key`: `recording` (`{id, duration_s, state: live | paused | processing | ready | failed}`, or null), `summary` (kept after retention deletes the audio and transcript) and `transcript_status` (`pending | done | failed`, or null; `done` means `GET /calls/:id/transcript` has words). The transcript itself is never on a call row, because both apps save those rows on the device. Hold pauses the recording and Resume resumes it; every redirect to voicemail stops it first. A transcript or summary is never logged, never put in `phone_call_events` and never put in `app_errors`.
 
 Faults are logged through the shared `logEdgeError` and land in `app_errors` with source `edge:phone-api`. They carry business, call and sometimes contact or user ids, and they are written while the Worker serves the Chrome extension's users too, so they are read only in summary unless the person asks for help, for security or for the law (SETUP.md section 10). Refusals a stranger can trigger (a bad webhook key or signature) are logged at `info` and throttled. A fault on a Twilio endpoint answers 500 with no body so Twilio uses the Voice Fallback URL.

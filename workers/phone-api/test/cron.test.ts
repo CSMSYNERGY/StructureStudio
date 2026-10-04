@@ -22,11 +22,11 @@ describe("recording sweep (*/15)", () => {
     const now = new Date("2026-09-29T12:00:00Z");
     net.on("GET", /\/Recordings\.json\?/, () => jsonRes({
       recordings: [
-        { sid: RE(1), call_sid: CA(1), status: "completed", duration: "12", date_created: "Tue, 29 Sep 2026 11:50:00 +0000" }, // already filed
-        { sid: RE(2), call_sid: CA(2), status: "completed", duration: "20", date_created: "Tue, 29 Sep 2026 11:40:00 +0000" }, // missed, row exists
-        { sid: RE(3), call_sid: CA(3), status: "completed", duration: "8", date_created: "Tue, 29 Sep 2026 11:30:00 +0000" }, // fallback: no row
-        { sid: RE(4), call_sid: CA(4), status: "completed", duration: "8", date_created: "Tue, 29 Sep 2026 11:20:00 +0000" }, // not our number
-        { sid: RE(5), call_sid: CA(5), status: "completed", duration: "0", date_created: "Tue, 29 Sep 2026 11:10:00 +0000" }, // a hang-up
+        { sid: RE(1), call_sid: CA(1), source: "RecordVerb", status: "completed", duration: "12", date_created: "Tue, 29 Sep 2026 11:50:00 +0000" }, // already filed
+        { sid: RE(2), call_sid: CA(2), source: "RecordVerb", status: "completed", duration: "20", date_created: "Tue, 29 Sep 2026 11:40:00 +0000" }, // missed, row exists
+        { sid: RE(3), call_sid: CA(3), source: "RecordVerb", status: "completed", duration: "8", date_created: "Tue, 29 Sep 2026 11:30:00 +0000" }, // fallback: no row
+        { sid: RE(4), call_sid: CA(4), source: "RecordVerb", status: "completed", duration: "8", date_created: "Tue, 29 Sep 2026 11:20:00 +0000" }, // not our number
+        { sid: RE(5), call_sid: CA(5), source: "RecordVerb", status: "completed", duration: "0", date_created: "Tue, 29 Sep 2026 11:10:00 +0000" }, // a hang-up
       ],
       next_page_uri: null,
     }));
@@ -68,8 +68,8 @@ describe("recording sweep (*/15)", () => {
     installDenoShim(env);
     net.on("GET", /\/Recordings\.json\?/, () => jsonRes({
       recordings: [
-        { sid: RE(1), call_sid: CA(1), status: "completed", duration: "14", date_created: "Tue, 29 Sep 2026 11:50:00 +0000" },
-        { sid: RE(2), call_sid: CA(2), status: "completed", duration: "9", date_created: "Tue, 29 Sep 2026 11:40:00 +0000" },
+        { sid: RE(1), call_sid: CA(1), source: "RecordVerb", status: "completed", duration: "14", date_created: "Tue, 29 Sep 2026 11:50:00 +0000" },
+        { sid: RE(2), call_sid: CA(2), source: "RecordVerb", status: "completed", duration: "9", date_created: "Tue, 29 Sep 2026 11:40:00 +0000" },
       ],
       next_page_uri: null,
     }));
@@ -94,6 +94,59 @@ describe("recording sweep (*/15)", () => {
     const net = new FakeNet().install();
     expect(await recordingSweep(makeEnv({ TWILIO_API_KEY: undefined, TWILIO_AUTH_TOKEN: undefined }))).toEqual({ checked: 0, filed: 0 });
     expect(net.seen).toEqual([]);
+  });
+
+  it("never files a call recording (or any recording that isn't <Record>) as a voicemail, even on a known call", async () => {
+    const net = new FakeNet().install();
+    const env = makeEnv();
+    installDenoShim(env);
+    net.on("GET", /\/Recordings\.json\?/, () => jsonRes({
+      recordings: [
+        // A recorded conversation on a call we know: the case that would have flipped it to 'voicemail'.
+        { sid: RE(7), call_sid: CA(2), source: "StartCallRecordingAPI", status: "completed", duration: "95", date_created: "Tue, 29 Sep 2026 11:45:00 +0000" },
+        { sid: RE(8), call_sid: CA(2), source: "DialVerb", status: "completed", duration: "40", date_created: "Tue, 29 Sep 2026 11:44:00 +0000" },
+        { sid: RE(9), call_sid: CA(2), status: "completed", duration: "40", date_created: "Tue, 29 Sep 2026 11:43:00 +0000" }, // no source: not proven a voicemail
+      ],
+      next_page_uri: null,
+    }));
+    net.rest("GET", "phone_calls", () => [{ id: KNOWN_CALL, twilio_call_sid: CA(2) }]);
+    net.rest("POST", "app_errors", () => []);
+
+    expect(await recordingSweep(env, new Date("2026-09-29T12:00:00Z"))).toEqual({ checked: 0, filed: 0 });
+    expect(net.writes("phone_voicemails")).toEqual([]);
+    expect(net.writes("phone_calls")).toEqual([]);
+    expect(net.reads("phone_voicemails")).toEqual([]);
+  });
+
+  it("reads the list to the end, past the old 200 cap: a voicemail behind 250 call recordings is still filed", async () => {
+    const net = new FakeNet().install();
+    const env = makeEnv();
+    installDenoShim(env);
+    const calls = (from: number, n: number) => Array.from({ length: n }, (_, i) => (
+      { sid: RE(1000 + from + i), call_sid: CA(500 + from + i), source: "StartCallRecordingAPI", status: "completed", duration: "60", date_created: "Tue, 29 Sep 2026 11:59:00 +0000" }
+    ));
+    const pages: Record<string, unknown>[] = [
+      { recordings: calls(0, 100), next_page_uri: "/2010-04-01/Accounts/AC00000000000000000000000000000000/Recordings.json?PageSize=100&Page=1&PageToken=PA1" },
+      { recordings: calls(100, 100), next_page_uri: "/2010-04-01/Accounts/AC00000000000000000000000000000000/Recordings.json?PageSize=100&Page=2&PageToken=PA2" },
+      {
+        recordings: [...calls(200, 50), { sid: RE(2), call_sid: CA(2), source: "RecordVerb", status: "completed", duration: "20", date_created: "Tue, 29 Sep 2026 11:40:00 +0000" }],
+        next_page_uri: null,
+      },
+    ];
+    let page = 0;
+    net.on("GET", /\/Recordings\.json\?/, () => jsonRes(pages[page++]));
+    net.rest("GET", "phone_voicemails", () => []);
+    net.rest("GET", "phone_calls", (s) => (filter(s, "id") === KNOWN_CALL
+      ? [{ id: KNOWN_CALL, client_id: CLIENT, rang_user_ids: [], transfer_state: null }]
+      : [{ id: KNOWN_CALL, twilio_call_sid: CA(2) }]));
+    net.rest("POST", "phone_voicemails", () => []);
+    net.rest("PATCH", "phone_calls", () => []);
+    net.rest("POST", "phone_call_events", () => []);
+    net.rest("POST", "app_errors", () => []);
+
+    expect(await recordingSweep(env, new Date("2026-09-29T12:00:00Z"))).toEqual({ checked: 1, filed: 1 });
+    expect(net.to(/Recordings\.json/)).toHaveLength(3);
+    expect(net.writes("phone_voicemails").map((s) => s.json)).toEqual([{ call_id: KNOWN_CALL, client_id: CLIENT, recording_sid: RE(2), duration_s: 20 }]);
   });
 });
 

@@ -22,6 +22,7 @@ import { ApiError, ok, readJson } from "../http";
 import { toIdentity } from "../identity";
 import { bearerToken, verifySupabaseJwt } from "../jwt";
 import { logFault } from "../log";
+import { armedFor } from "../recording";
 import { maySendToContacts } from "../scope";
 import { requestAutoTopup, walletFloorCheck, walletStateOf, type WalletState } from "../wallet";
 import { onDnd } from "./voice";
@@ -124,9 +125,14 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
       forward_to_cell: s?.forward_to_cell ?? null,
     },
     wallet,
+    // Are this business's calls recorded (and announced) right now: its owner's choice and this
+    // Worker's CALL_RECORDING rail together (../recording.ts armedFor), so the apps can say
+    // "Calls are recorded" in settings. A single call's own state is GET /calls `recording`.
+    recording: { on: armedFor(env, ctx.recording) },
     // What this Worker can do that older ones could not, so an app shows a button only when
     // the server behind it has the endpoint. handoff: moving a live call to the person's
-    // other device (../handoff.ts, routes/handoff.ts).
-    features: { handoff: true },
+    // other device (../handoff.ts, routes/handoff.ts). recordings: GET /recordings/:id/audio and
+    // GET /calls/:id/transcript, and the recording keys on a call (routes/reads.ts).
+    features: { handoff: true, recordings: true },
   });
 }

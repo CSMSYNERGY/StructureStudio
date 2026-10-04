@@ -901,6 +901,77 @@ async function ssPhoneFetchVoicemail(voicemailId, accessToken, fetchImpl) {
   const blob = await res.blob();
   return URL.createObjectURL(blob);
 }
+// CALL RECORDINGS (migration 263): a recorded call's audio on the Worker (GET /recordings/:id/audio),
+// fetched the voicemail's way: the sign-in in the Authorization header, never in the URL (the
+// Worker refuses ?access_token= here outright), played from a blob: URL. "" when there is nothing
+// to ask for. Unlike a voicemail, playing it marks nothing, so only the press decides when.
+function ssPhoneRecordingAudioUrl(recordingId) {
+  const id = String(recordingId || "");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return "";
+  return `${window.SS_PHONE_API_BASE}/recordings/${encodeURIComponent(id)}/audio`;
+}
+// The Worker's own sentence from a refusal ({ok:false, error:{message}}), or null.
+async function ssPhoneRefusalText(res) {
+  try {
+    const j = await res.json();
+    const m = j && j.error && j.error.message;
+    return typeof m === "string" && m.trim() ? m.trim() : null;
+  } catch (_e) { return null; }
+}
+// Fetch one call recording as the signed-in person → a blob: URL. Throws a sentence; a 404 is the
+// Worker's own ("The recording isn't ready yet. Try again in a minute.", "That recording is no
+// longer available."). The caller revokes the URL.
+async function ssPhoneFetchRecording(recordingId, accessToken, fetchImpl) {
+  const url = ssPhoneRecordingAudioUrl(recordingId);
+  if (!url) throw new Error("That recording isn't available.");
+  if (!accessToken) throw new Error("Sign in again to play this recording.");
+  let res;
+  try {
+    res = await (fetchImpl || fetch)(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+      credentials: "omit",
+    });
+  } catch (_e) {
+    throw new Error("The recording couldn't be loaded. Check your connection and try again.");
+  }
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("Sign in again to play this recording.");
+    const said = res.status === 404 ? await ssPhoneRefusalText(res) : null;
+    throw new Error(said || (res.status === 404 ? "That recording isn't available any more." : "The recording couldn't be loaded. Try again."));
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+// A recorded call's whole transcript and its summary (GET /calls/:id/transcript), read on
+// "Show transcript" only: the timeline carries whether there is one, never the text. Same header
+// rule. → { transcript, summary }. Throws a sentence.
+async function ssPhoneFetchTranscript(callId, accessToken, fetchImpl) {
+  const id = String(callId || "");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("That transcript isn't available.");
+  if (!accessToken) throw new Error("Sign in again to read this transcript.");
+  let res;
+  try {
+    res = await (fetchImpl || fetch)(`${window.SS_PHONE_API_BASE}/calls/${encodeURIComponent(id)}/transcript`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+      credentials: "omit",
+    });
+  } catch (_e) {
+    throw new Error("The transcript couldn't be loaded. Check your connection and try again.");
+  }
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("Sign in again to read this transcript.");
+    if (res.status === 404) throw new Error("This call's transcript isn't available any more.");
+    throw new Error("The transcript couldn't be loaded. Try again.");
+  }
+  let j = null;
+  try { j = await res.json(); } catch (_e) { j = null; }
+  if (!j || typeof j.transcript !== "string") throw new Error("The transcript couldn't be loaded. Try again.");
+  return { transcript: j.transcript, summary: typeof j.summary === "string" ? j.summary : null };
+}
 // Store links, PLACEHOLDERS until the listings are published. A link still carrying PLACEHOLDER
 // is shown as "coming soon" rather than as a button to a page that does not exist.
 const SS_PHONE_LINKS = {
