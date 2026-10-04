@@ -14,7 +14,7 @@ import {
   type StageKind,
 } from "../_shared/inventoryLifecycle.ts";
 import type { GateTable } from "../_shared/access.ts";
-import { numOrNull } from "../_shared/scheduleInput.ts";
+import { calendarDayIn, isTimeZone, numOrNull } from "../_shared/scheduleInput.ts";
 
 // Build Schedule + Delivery Schedule (Load Planner) + Repairs backend.
 // Spec: SCHEDULING_SCOPE.md (mockup approved by Carolyn 2026-08-04).
@@ -386,6 +386,10 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
   // done column), complete_job (the Mark built button) and the delivery override's
   // alsoCompleteBuilds. Wiring only one of them is how you get buildings that are built and
   // have no serial, which is worse than the feature not existing.
+  // The shop's own calendar day for the serial's MMDD block. The portal sends the viewer's IANA
+  // zone as `tz` on every call that can complete a build; without one this is the UTC day, which
+  // is TOMORROW for a US shop marking a build done after 5–8 pm local (see calendarDayIn).
+  const shopTz = isTimeZone(payload?.tz) ? payload.tz : null;
   const mintBuildingSerial = async (job: Record<string, any>, whenIso: string) => {
     try {
       const code = job?.design_short_code;
@@ -399,7 +403,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         p_client_id: clientId,
         p_short_code: code,
         p_order_no: order.order_no,
-        p_built_on: whenIso.slice(0, 10),
+        p_built_on: calendarDayIn(whenIso, shopTz),
       });
       if (!serial) return;
       // `.is(building_serial, null)` makes this idempotent: two people marking the same job

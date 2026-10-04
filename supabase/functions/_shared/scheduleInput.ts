@@ -1,6 +1,10 @@
 // Body-field parsing for portal-schedule, kept here so it can be unit-tested (index.ts calls
 // Deno.serve at import time, so nothing in it can be imported by a test).
 
+// The same IANA-zone validator the wallet CSV export uses (walletLedger.ts has no imports of
+// its own, so this pulls nothing else in).
+export { isTimeZone } from "./walletLedger.ts";
+
 /**
  * A number from a request body, or null when there is none.
  *
@@ -22,4 +26,29 @@ export function numOrNull(v: unknown): number | null {
   if (typeof v !== "number" && typeof v !== "string") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * The calendar day `iso` falls on in IANA zone `tz` — "YYYY-MM-DD" — or its UTC day when no
+ * usable zone was sent.
+ *
+ * WHY: a building serial's first block is the day the building was BUILT (163_building_serials,
+ * MMDD), and it is printed on the physical tag and never re-minted. `whenIso.slice(0, 10)` is
+ * the UTC day, which is already TOMORROW for a US shop from 5–8 pm local (UTC-7…-4), so a
+ * building marked built at the end of the working day was tagged with the next day's date.
+ * The portal sends the viewer's own zone (the shop marking it built), and that day is used.
+ */
+export function calendarDayIn(iso: string, tz: string | null | undefined): string {
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return String(iso ?? "").slice(0, 10);
+  if (tz) {
+    try {
+      const p: Record<string, string> = {};
+      for (const x of new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(d)) {
+        p[x.type] = x.value;
+      }
+      if (p.year && p.month && p.day) return `${p.year}-${p.month}-${p.day}`;
+    } catch { /* unknown zone — fall through to UTC, the old behaviour */ }
+  }
+  return d.toISOString().slice(0, 10);
 }

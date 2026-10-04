@@ -28,6 +28,11 @@ const schedBuildDate = (job) => job.due_date || job.scheduled_start || null;
 // Projects table engine and this tab share one WHEN filter / local-date kernel).
 const schedLocalDate = ssLocalDate;
 const schedLocalIso = ssLocalIso;
+// The viewer's IANA zone, sent with every call that can mark a build done (move_job,
+// complete_job, create_job, the delivery override) so portal-schedule stamps the building
+// serial's MMDD with the SHOP's day. Without it the server used the UTC day, which is already
+// tomorrow for a US shop after 5–8 pm local — and that date is printed on the physical tag.
+const schedTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch (_e) { return null; } };
 // Past due = has a build date, that date is before today, and the stage isn't finished.
 const schedPastDue = (job, kind) => {
   const d = schedBuildDate(job);
@@ -530,7 +535,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   const moveJob = async (job, stageId) => {
     if (!stageId || stageId === job.stage_id) return;
     setData((d) => ({ ...d, jobs: d.jobs.map((j) => j.id === job.id ? { ...j, stage_id: stageId } : j) }));
-    const r = await call({ action: "move_job", jobId: job.id, stageId, position: Date.now() });
+    const r = await call({ action: "move_job", jobId: job.id, stageId, position: Date.now(), tz: schedTz() });
     if (!r) load();
   };
   // Calendar drop = the reschedule (one build date per job; both date columns kept equal).
@@ -548,7 +553,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   };
   const addFromTray = async (body, label) => {
     setBusy(true); setMsg(null);
-    const r = await call({ action: "create_job", ...body }, `${label} added to the board.`);
+    const r = await call({ action: "create_job", ...body, tz: schedTz() }, `${label} added to the board.`);
     setBusy(false); if (r) load();
   };
   // Dragging a tray item (not on the board yet) straight onto a calendar date creates the
@@ -557,7 +562,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     setBusy(true); setMsg(null);
     const extra = { dueDate: iso, scheduledStart: iso };
     if (crewFilter !== "all") extra.crewId = crewFilter;
-    const r = await call({ action: "create_job", ...body, ...extra },
+    const r = await call({ action: "create_job", ...body, ...extra, tz: schedTz() },
       `${label} scheduled for ${schedFmtBuild(iso)}${crewFilter !== "all" ? " with " + ((crewById[crewFilter] || {}).name || "crew") : ""}.`);
     setBusy(false); if (r) load();
   };
@@ -582,7 +587,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     setBusy(true); setMsg(null); setSaveErr(null);
     let r = await call({ action: "update_job", jobId: job.id, ...fields });
     if (r && stageId && stageId !== job.stage_id) {
-      r = await call({ action: "move_job", jobId: job.id, stageId, position: Date.now() });
+      r = await call({ action: "move_job", jobId: job.id, stageId, position: Date.now(), tz: schedTz() });
     }
     if (r && note && note.trim()) {
       r = await call({ action: "add_note", jobId: job.id, note: note.trim() });
@@ -594,7 +599,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   };
   const completeJob = async (job) => {
     setBusy(true); setMsg(null);
-    const r = await call({ action: "complete_job", jobId: job.id }, `${job.customer_name || job.title || "Job"} marked built.`);
+    const r = await call({ action: "complete_job", jobId: job.id, tz: schedTz() }, `${job.customer_name || job.title || "Job"} marked built.`);
     setBusy(false);
     if (!r) return;
     setExpandedId(null);
@@ -2769,6 +2774,7 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
       body.override = true;
       body.overrideReason = withOverride.reason;
       body.alsoCompleteBuilds = !!withOverride.complete;
+      body.tz = schedTz();   // "Also mark as Built" mints serials too
     }
     const r = await callFull(body);
     setBusy(false);
