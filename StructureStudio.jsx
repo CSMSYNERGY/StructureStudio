@@ -23274,7 +23274,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calSetPorch = (kind, depth) => setAdminCal((p) => {
     const roof = { ...p.spec.roof };
     const was = calPorchKind(roof);
-    const d = depth > 0.5 ? depth : was === "projecting" ? roof.porchOutFt : was === "recessed" ? roof.porchDepthFt : 6;
+    // Held to 12 ft, the sanitiser's band for both depths (styleD3.ts CLAMPS porchDepthFt / porchOutFt), so the
+    // preview never draws a porch deeper than Save keeps.
+    const d = Math.min(12, depth > 0.5 ? depth : was === "projecting" ? roof.porchOutFt : was === "recessed" ? roof.porchDepthFt : 6);
     delete roof.porchDepthFt;
     delete roof.porchOutFt;
     if (kind === "recessed") roof.porchDepthFt = d;
@@ -28251,7 +28253,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {calAdvShow("dormer") && (<>
                 {adminCal.spec.roof.type !== "shed" && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer width (ft, 0 = none)
-                    <input type="number" step="0.5" min="0" {...calNumProps("dormerWidthFt", adminCal.spec.roof.dormerWidthFt != null ? adminCal.spec.roof.dormerWidthFt : 0, (n) => calSetRoof({ dormerWidthFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.5" min="0" {...calNumProps("dormerWidthFt", adminCal.spec.roof.dormerWidthFt != null ? adminCal.spec.roof.dormerWidthFt : 0, (n) => calSetRoof({ dormerWidthFt: Math.min(12, n) }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                 )}
                 {/* Shape, not size, so it sits with the other dormer fields and only once
@@ -30057,8 +30059,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {advSeg({ f: "dormerType", label: "Dormer type", value: roof.dormerType === "transom" ? "transom" : "gable", pick: (v) => calSetRoof({ dormerType: v }), full: true,
             opts: [["gable", "Gable"], ["transom", "Transom"]],
             note: roof.dormerType === "transom" ? "A lean-to off the roof." : "Its own little roof, the pitch running across." })}
-          {advNum({ k: "dormerWidthFt", label: "Dormer width (ft)", value: roof.dormerWidthFt != null ? roof.dormerWidthFt : 0, min: 1, max: 16, step: 0.5,
-            commit: (n) => calSetRoof({ dormerWidthFt: n }) })}
+          {/* 12 ft at most, the sanitiser's band (styleD3.ts CLAMPS dormerWidthFt): past it the 3D drew a dormer Save cut back to 12. */}
+          {advNum({ k: "dormerWidthFt", label: "Dormer width (ft)", value: roof.dormerWidthFt != null ? roof.dormerWidthFt : 0, min: 1, max: 12, step: 0.5,
+            commit: (n) => calSetRoof({ dormerWidthFt: Math.min(12, n) }) })}
           {advNum({ k: "dormerRiseFt", label: "Dormer rise (ft)", value: roof.dormerRiseFt != null ? roof.dormerRiseFt : 2.5, min: 0.5, max: 6, step: 0.25,
             commit: (n) => calSetRoof({ dormerRiseFt: n }),
             children: dg ? advSay(dg.clamped ? `Builds ${d3FtIn(dg.face)} on ${sizeWords} — this roof runs out at ${d3FtIn(dg.maxFace)}` : `Builds ${d3FtIn(dg.face)} on ${sizeWords}`, dg.clamped) : null })}
@@ -30119,7 +30122,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       out.push(
         <div key="pc" className="ss-adv-flds">
           {pjEnd && <div key="pjEnd" className="ss-adv-f is-full">{advSay(pjEnd === "end" ? "Not drawn: an end wing is on that end." : "Not drawn: a side-wall porch waits until the end wings are off.", true, { "data-ss-porch-endwing": "" })}</div>}
-          {advNum({ k: key, f: "porchDepth", label: "Depth (ft)", value: roof[key], min: 1, max: 16, step: 0.5,
+          {advNum({ k: key, f: "porchDepth", label: "Depth (ft)", value: roof[key], min: 1, max: 12, step: 0.5,
             commit: (n) => { if (n > 0.5) calSetPorch(kind, n); },
             children: <>
               {kind === "recessed"
