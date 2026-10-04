@@ -4036,7 +4036,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                           words someone typed (migration 261). Every other email body here is
                           one line (a document's subject, or "Emailed to …"), so nothing else
                           changes. */}
-                      {e.body && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2, whiteSpace: e.type === "email" || e.type === "sms" ? "pre-wrap" : undefined }}>{e.body}</div>}
+                      {/* An open activity's body is the server's `Due ${due_at}` — the raw
+                          timestamptz ("Due 2026-09-03T12:00:00+00:00"). The date is formatted
+                          here from meta.dueAt, the same way Focus prints it a few lines up. */}
+                      {e.body && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2, whiteSpace: e.type === "email" || e.type === "sms" ? "pre-wrap" : undefined }}>
+                        {e.type === "activity" && e.meta && !e.meta.done && e.meta.dueAt ? `Due ${fmtDate(e.meta.dueAt)}` : e.body}
+                      </div>}
                       {/* MY SYNERGY PHONE: the voicemail itself, played from the phone-api Worker
                           (GET /voicemails/:id/audio). Only for someone the Worker will serve —
                           phone access, calling on, not an operator in view-as (their token is
