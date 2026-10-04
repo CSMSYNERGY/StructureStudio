@@ -14,6 +14,7 @@ import {
   type StageKind,
 } from "../_shared/inventoryLifecycle.ts";
 import type { GateTable } from "../_shared/access.ts";
+import { numOrNull } from "../_shared/scheduleInput.ts";
 
 // Build Schedule + Delivery Schedule (Load Planner) + Repairs backend.
 // Spec: SCHEDULING_SCOPE.md (mockup approved by Carolyn 2026-08-04).
@@ -146,7 +147,9 @@ class Refusal extends Error {
   }
 }
 const isUuid = (v: unknown) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
-const num = (v: unknown): number | null => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+// Blank → null, never 0 (see numOrNull): the portal sends null for an emptied box, and
+// Number(null) is 0 — which broke every driver saved without a deck length or max width.
+const num = numOrNull;
 const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
 const dateStr = (v: unknown): string | null => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
 
