@@ -923,16 +923,25 @@ function PMSetupAdmin({ canWrite }) {
     .then((d) => setClients(d.clients || [])).catch((e) => setErr(e.message)), []);
   useEffect(() => { loadTpl(); loadClients(); }, [loadTpl, loadClients]);
 
+  // WHOSE list may land. A list read answers whenever it answers: tick a step on one builder
+  // (toggle, then reload) and open the next builder straight away, and the first builder's
+  // reload arrived after the second's list — painting builder A's steps under builder B's
+  // name, where "Remove" and the ticks act on A's rows while the confirm names B. Every
+  // response is checked against the list that is open NOW, not the one open when it was asked.
+  const openRef = useRef(null);
   const openList = (cid) => {
-    if (openClient === cid) { setOpenClient(null); setClientItems(null); return; }
+    if (openClient === cid) { openRef.current = null; setOpenClient(null); setClientItems(null); return; }
+    openRef.current = cid;
     setOpenClient(cid); setClientItems(null); setAdding(null);
     pmCall({ action: "setup_client_items", clientId: cid })
-      .then((d) => setClientItems(d.items || [])).catch((e) => setErr(e.message));
+      .then((d) => { if (openRef.current === cid) setClientItems(d.items || []); }).catch((e) => setErr(e.message));
   };
-  const reloadList = () => (openClient
-    ? pmCall({ action: "setup_client_items", clientId: openClient })
-      .then((d) => setClientItems(d.items || [])).catch((e) => setErr(e.message))
-    : Promise.resolve());
+  const reloadList = () => {
+    const cid = openClient;
+    if (!cid) return Promise.resolve();
+    return pmCall({ action: "setup_client_items", clientId: cid })
+      .then((d) => { if (openRef.current === cid) setClientItems(d.items || []); }).catch((e) => setErr(e.message));
+  };
 
   const run = async (body, after) => {
     setBusy(true); setErr(""); setNote("");
