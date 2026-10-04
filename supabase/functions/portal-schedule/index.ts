@@ -1275,9 +1275,13 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       const source = String(payload?.source ?? "");
       if (!["order", "inventory", "repair", "manual"].includes(source)) return json({ error: "Invalid source." }, 400);
       const stages = await getStages();
+      // No stage named → the first live "waiting" column. If the tenant has archived every
+      // queue-kind stage, fall back to the first LIVE column, never blindly stages[0]: that is
+      // the lowest sort_order, which is the archived Queue itself — every job added from the
+      // tray then landed in a column the Board does not draw.
       const stage = payload?.stageId
         ? await requireRow("schedule_stages", payload.stageId, "Stage")
-        : (stages.find((s) => s.kind === "queue" && !s.archived) ?? stages[0]);
+        : (stages.find((s) => s.kind === "queue" && !s.archived) ?? stages.find((s) => !s.archived) ?? stages[0]);
       // ENTERING A DONE STAGE IS COMPLETING — however the job got there. move_job and
       // complete_job both stamp completed_at, log the activity line and mint the building
       // serial; creating a job straight into a done stage (the board offers "add to this
