@@ -22350,8 +22350,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         const origCyFt = (resizing.origY - mgY) / scale;
         const origW = resizing.origWidthFt;
         const origH = resizing.origHeightFt;
-        let oL = Math.round(origCxFt - origW / 2), oR = oL + origW;
-        let oT = Math.round(origCyFt - origH / 2), oB = oT + origH;
+        // The loft's edges AS THEY ARE, not rounded to the foot. The dragged edge still lands on the
+        // foot grid below; the three edges nobody is dragging must not move. Rounding them was
+        // harmless only while every loft sat on the grid, and the free drag ("NO GRID", below) and
+        // the size-change reflow both leave lofts off it now — so stretching one edge slid the
+        // opposite edge up to half a foot, straight into a loft that had been snapped flush to it.
+        const oL = origCxFt - origW / 2, oR = oL + origW;
+        const oT = origCyFt - origH / 2, oB = oT + origH;
         let nL = oL, nR = oR, nT = oT, nB = oB;
         if (hd === "right") nR = Math.max(oL + 2, Math.min(mouseXft, bldgW));
         else if (hd === "left") nL = Math.min(oR - 2, Math.max(mouseXft, 0));
@@ -22364,14 +22369,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           const ow = (o.widthFt || 6) / 2, oh = (o.heightFt || 4) / 2;
           const ocx = (o.x - mgX) / scale, ocy = (o.y - mgY) / scale;
           const olL = ocx - ow, olR = ocx + ow, olT = ocy - oh, olB = ocy + oh;
-          // Only clamp if the other dimensions overlap (2D check)
-          if (nT < olB && nB > olT) { // vertically overlapping
-            if (hd === "right" && nR > olL && oL < olL) nR = Math.round(olL);
-            if (hd === "left" && nL < olR && oR > olR) nL = Math.round(olR);
+          // Only clamp if the other dimensions overlap (2D check). With the 0.1 ft slack every other
+          // loft-overlap test uses: lofts snapped flush meet at an edge that, read back off the page,
+          // differs by float noise, and two lofts that merely TOUCH must not stop each other.
+          // Stop FLUSH on the other loft's edge, exactly. Rounding it to the foot put the edge up to
+          // half a foot inside a loft whose edge was off the grid (>= .5 rounds up into it), and
+          // left a gap wider than checkLoftAttached's 0.3 ft touch when it rounded the other way.
+          if (nT < olB - 0.1 && nB > olT + 0.1) { // vertically overlapping
+            if (hd === "right" && nR > olL && oL < olL) nR = olL;
+            if (hd === "left" && nL < olR && oR > olR) nL = olR;
           }
-          if (nL < olR && nR > olL) { // horizontally overlapping
-            if (hd === "bottom" && nB > olT && oT < olT) nB = Math.round(olT);
-            if (hd === "top" && nT < olB && oB > olB) nT = Math.round(olB);
+          if (nL < olR - 0.1 && nR > olL + 0.1) { // horizontally overlapping
+            if (hd === "bottom" && nB > olT && oT < olT) nB = olT;
+            if (hd === "top" && nT < olB && oB > olB) nT = olB;
           }
         }
 
