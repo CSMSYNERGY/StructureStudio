@@ -703,6 +703,7 @@ function draftAnswer(
  *
  * `where` completes "Couldn't …" and is the correlation key — keep it short, specific and
  * stable, because it is both user-facing text and the thing you grep app_errors for.
+ * `extra` rides alongside for a caller whose answer already carried a machine field (`reason`).
  */
 function dbFail(
   req: Request,
@@ -711,6 +712,7 @@ function dbFail(
   // deno-lint-ignore no-explicit-any
   err: any,
   status = 500,
+  extra: Record<string, unknown> = {},
 ) {
   logEdgeError({
     fn: "portal-settings",
@@ -723,6 +725,7 @@ function dbFail(
   return json({
     error: `Couldn't ${where}. Please try again — if it keeps happening, tell CSM Synergy and mention "${where}".`,
     ref: where,
+    ...extra,
   }, status);
 }
 
@@ -10866,7 +10869,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       try {
         await auditStrict("operator_verify_tax_attempt", null, `short_code=${shortCode}`);
       } catch (e) {
-        return json({ error: (e as Error).message, reason: "audit_unavailable" }, 503);
+        // auditStrict's message carries the insert's Postgres text after its own prefix.
+        return dbFail(req, clientId, "record this action for audit", e, 503, { reason: "audit_unavailable" });
       }
     }
     {
@@ -12579,7 +12583,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // operator declared a stranger's customer had agreed" must not read the same later.
         await auditStrict(`operator_${action}_attempt`, null, `short_code=${shortCode}`);
       } catch (e) {
-        return json({ error: (e as Error).message }, 503);
+        // auditStrict's message carries the insert's Postgres text after its own prefix.
+        return dbFail(req, clientId, "record this action for audit", e, 503);
       }
     }
 
@@ -13127,7 +13132,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             .rpc("allocate_ss_invoice_number", { p_client_id: clientId });
           if (allocErr) {
             await setClaim({ status: "failed", error: `allocate: ${allocErr.message}`.slice(0, 500) });
-            return json({ error: `Could not allocate an invoice number: ${allocErr.message}` }, 502);
+            return dbFail(req, clientId, "allocate an invoice number", allocErr, 502);
           }
           invNumber = allocated ? String(allocated) : null;
           if (!invNumber) {
