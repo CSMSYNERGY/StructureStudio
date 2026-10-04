@@ -23,7 +23,7 @@
 import type { Ctx, Env } from "../env";
 import { resumeInFlight } from "../callEvents";
 import { requireCaller, type Caller } from "../context";
-import { addCallEvent, callerContext, must, routeForNumber, type CallRow } from "../db";
+import { addCallEvent, callerContext, DEFAULT_ROUTE, must, routeForNumber, type CallRow } from "../db";
 import {
   CONFERENCE_EVENTS, HOLD_MUSIC, conferenceTwiml, hasStarted, heldIn, legsOf, nextTransferState, onTheCall,
   redirectChild, refuseEmergencyCallback, transferParams, type CallAction,
@@ -38,7 +38,10 @@ import {
 } from "../twilioRest";
 import { hook } from "../urls";
 import { resolveCall } from "./calls";
-import { onDnd } from "./voice";
+import { awayFromSettings } from "./voice";
+
+/** A warm transfer to someone outside their own hours (migration 264), said as Do Not Disturb is. */
+export const WARM_OFF_HOURS = "That teammate isn't taking calls at this time of day.";
 
 /**
  * The call, checked the same way for all three: yours, live, not an emergency call, and not
@@ -301,19 +304,23 @@ export async function warmTransfer(env: Env, ec: Ctx, req: Request, idParam: str
 
   const [tctx, tset, info] = await Promise.all([
     callerContext(c.admin, target),
-    c.admin.from("phone_user_settings").select("dnd, dnd_until").eq("user_id", target).maybeSingle(),
+    // ⚠️ ring_hours and ring_hours_tz are migration 264's: this Worker must not be deployed before it is applied.
+    c.admin.from("phone_user_settings").select("dnd, dnd_until, ring_hours, ring_hours_tz").eq("user_id", target).maybeSingle(),
     call.direction === "in" ? routeForNumber(c.admin, call.to_e164) : Promise.resolve(null),
   ]);
   await refuseEmergencyCallback(c.admin, call, info);
   if (!tctx || tctx.client_id !== c.ctx.client_id || tctx.phone_level === "none") {
     throw new ApiError("not_found", "That teammate can't take calls.");
   }
-  const tdnd = (tset.data ?? null) as { dnd?: boolean; dnd_until?: string | null } | null;
-  // Unlike a cold transfer (where DND means voicemail), you are still on the line here, so
-  // the honest answer is to say so and let you choose.
-  if (tdnd && onDnd({ dnd: tdnd.dnd === true, dnd_until: tdnd.dnd_until ?? null })) {
-    throw new ApiError("bad_request", "That teammate is on Do Not Disturb.");
-  }
+  // Unlike a cold transfer (where away means their cover, or voicemail), you are still on the
+  // line here, so the honest answer is to say so and let you choose. Away is DND, or (migration
+  // 264) outside their own hours, read in their zone (saved with them) or else the number's.
+  const away = awayFromSettings(
+    (tset.data ?? null) as { dnd?: boolean; dnd_until?: string | null; ring_hours?: Record<string, unknown> | null; ring_hours_tz?: string | null } | null,
+    info?.route.time_zone ?? DEFAULT_ROUTE.time_zone,
+  );
+  if (away.dnd) throw new ApiError("bad_request", "That teammate is on Do Not Disturb.");
+  if (away.offHours) throw new ApiError("bad_request", WARM_OFF_HOURS);
 
   // A plain call just moved waits on music (not held as a participant) and is connected when
   // the teammate answers; otherwise keepCustomerHeld says.

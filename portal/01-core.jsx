@@ -777,8 +777,16 @@ const SETTINGS_TAB_AREA = {
   billing: "settings_billing",
 };
 // Settings is a hub: show it if ANY of its cards is readable, then each card gates itself.
+// `phone` is here because Phone is a Settings card gated on the phone area itself
+// (SETTINGS_TAB_AREA.phone), and the people who answer the phone are mostly NOT settings
+// holders: the sales_rep, dealer and sales_manager presets grant phone 'own'/'view' and no
+// settings_* area at all. Without it they had no Settings tab, so no "Your calls" card to set
+// their own ring hours or greeting on (migration 264), and both apps' "Change in Structure
+// Studio" link (/portal/settings/phone) clamped them to their fallback page. ssSettingsTabs
+// still filters per card, so such a person's rail is Phone (where calling is offered) and My
+// Profile, and nothing else.
 const SETTINGS_AREAS = ["settings_structures", "settings_options", "settings_branding",
-  "settings_crm", "settings_quickbooks", "settings_team", "settings_billing", "settings_email"];
+  "settings_crm", "settings_quickbooks", "settings_team", "settings_billing", "settings_email", "phone"];
 
 // 'own' counts as read — see canRead in _shared/access.ts. TWO areas speak it now:
 // commissions ("your own payouts") and, since migration 193, contacts ("the customers you
@@ -971,6 +979,84 @@ async function ssPhoneFetchTranscript(callId, accessToken, fetchImpl) {
   try { j = await res.json(); } catch (_e) { j = null; }
   if (!j || typeof j.transcript !== "string") throw new Error("The transcript couldn't be loaded. Try again.");
   return { transcript: j.transcript, summary: typeof j.summary === "string" ? j.summary : null };
+}
+// YOUR CALLS (migration 264): the signed-in person's own phone settings, read and saved on the
+// Worker exactly as My Synergy Phone does (GET and POST /settings/me), with the sign-in in the
+// Authorization header, never the URL. GET /team is who may be chosen. They answer for the
+// signed-in person's OWN business, which is why Settings › Phone doesn't show them to an operator
+// viewing someone else's. Each throws a sentence: the Worker's own when it refused ("That
+// teammate can't take calls."), else a plain one; `status` rides on it so the card can tell an
+// older Worker (405: only POST /settings/me) from a fault.
+async function ssPhoneApi(method, path, accessToken, body, fetchImpl) {
+  const fail = (message, status) => Object.assign(new Error(message), { status: status || 0 });
+  if (!accessToken) throw fail("Sign in again to change this.", 401);
+  let res;
+  try {
+    res = await (fetchImpl || fetch)(`${window.SS_PHONE_API_BASE}${path}`, {
+      method,
+      headers: body ? { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" } : { Authorization: `Bearer ${accessToken}` },
+      body: body ? JSON.stringify(body) : undefined,
+      cache: "no-store",
+      credentials: "omit",
+    });
+  } catch (_e) {
+    throw fail("My Synergy Phone couldn't be reached. Check your connection and try again.");
+  }
+  if (!res.ok) {
+    if (res.status === 401) throw fail("Sign in again to change this.", 401);
+    throw fail((await ssPhoneRefusalText(res)) || "That didn't go through. Try again.", res.status);
+  }
+  let j = null;
+  try { j = await res.json(); } catch (_e) { j = null; }
+  if (!j || j.ok !== true) throw fail("That didn't go through. Try again.", res.status);
+  return j;
+}
+// → {dnd, dnd_until, forward_to_cell, dnd_cover_user_id, ring_hours, ring_hours_tz, greeting}
+async function ssPhoneMySettings(accessToken, fetchImpl) {
+  return (await ssPhoneApi("GET", "/settings/me", accessToken, null, fetchImpl)).settings || null;
+}
+// `patch` is any of those keys; → the row as the Worker saved it.
+async function ssPhoneSaveMySettings(patch, accessToken, fetchImpl) {
+  return (await ssPhoneApi("POST", "/settings/me", accessToken, patch, fetchImpl)).settings || null;
+}
+// → [{user_id, full_name, identity_base}]: everyone on the business with phone access.
+async function ssPhoneTeam(accessToken, fetchImpl) {
+  const j = await ssPhoneApi("GET", "/team", accessToken, null, fetchImpl);
+  return Array.isArray(j.members) ? j.members : [];
+}
+// YOUR VOICEMAIL GREETING (migration 264), recorded by phone: Record asks the Worker to ring the
+// signed-in person's own My Synergy Phone (in Chrome or on their phone), which then records them.
+// It throws the Worker's sentence when it can't ("Your phone is already ringing for your
+// greeting...", "Your business doesn't have a phone number yet."). The saved greeting shows up in
+// ssPhoneMySettings' `greeting` ({set, updated_at}) once the call ends.
+async function ssPhoneRecordGreeting(accessToken, fetchImpl) {
+  await ssPhoneApi("POST", "/settings/me/greeting/record", accessToken, {}, fetchImpl);
+}
+// "Use the standard greeting": the recording is forgotten and deleted. → the settings as saved.
+async function ssPhoneClearGreeting(accessToken, fetchImpl) {
+  return (await ssPhoneApi("POST", "/settings/me/greeting/clear", accessToken, {}, fetchImpl)).settings || null;
+}
+// Play: your own greeting's audio (GET /settings/me/greeting/audio), the sign-in in the header,
+// never the URL → a blob: URL for an <audio> tag. Throws a sentence. The caller revokes the URL.
+async function ssPhoneFetchGreeting(accessToken, fetchImpl) {
+  if (!accessToken) throw new Error("Sign in again to play your greeting.");
+  let res;
+  try {
+    res = await (fetchImpl || fetch)(`${window.SS_PHONE_API_BASE}/settings/me/greeting/audio`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+      credentials: "omit",
+    });
+  } catch (_e) {
+    throw new Error("Your greeting couldn't be loaded. Check your connection and try again.");
+  }
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("Sign in again to play your greeting.");
+    throw new Error((await ssPhoneRefusalText(res)) || "Your greeting couldn't be loaded. Try again.");
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
 }
 // Store links, PLACEHOLDERS until the listings are published. A link still carrying PLACEHOLDER
 // is shown as "coming soon" rather than as a button to a page that does not exist.

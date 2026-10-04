@@ -1,9 +1,13 @@
-// Business hours in the builder's own time zone.
+// Business hours in the builder's own time zone, and (migration 264) each person's own hours in
+// theirs.
 //
 // phone_routes.business_hours is {"mon":[["08:00","17:00"]], ...}; null means always open. A
 // weekday missing from a non-null object is closed all day. A range whose end is at or before its
 // start runs past midnight ("22:00"–"02:00"). A time zone Intl does not know falls back to the
-// column's default rather than failing the call.
+// column's default rather than failing the call. phone_user_settings.ring_hours is the same shape
+// (inRingHours); saving either is checked by _shared/phoneHours.ts, which is stricter than this.
+
+import { validTimeZone } from "../../../supabase/functions/_shared/phoneHours.ts";
 
 const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 const FALLBACK_TZ = "America/Chicago";
@@ -62,4 +66,20 @@ export function isOpen(
   if (inRanges(day, (s, e) => (e > s ? minutes >= s && minutes < e : minutes >= s))) return true;
   // Yesterday's overnight ranges, from midnight until their end.
   return inRanges(prevDay, (s, e) => e <= s && minutes < e);
+}
+
+/**
+ * Inside a person's own ring hours (migration 264)? Null = always. Read in the zone they set them
+ * in, or the number's when they set none (or one this runtime doesn't know), so a zone that went
+ * missing reads the business's clock instead of dropping them from every call. Business hours
+ * are checked before this and stay the outer gate: this only ever narrows them.
+ */
+export function inRingHours(
+  hours: Record<string, unknown> | null | undefined,
+  ownTimeZone: string | null | undefined,
+  numberTimeZone: string,
+  now: Date = new Date(),
+): boolean {
+  if (!hours || typeof hours !== "object") return true;
+  return isOpen(hours, validTimeZone(ownTimeZone) ? ownTimeZone : numberTimeZone, now);
 }

@@ -149,6 +149,31 @@ export interface RouteMember {
   has_access: boolean;
   full_name: string | null;
   forward_to_cell: string | null;
+  /**
+   * Migration 264: the teammate who rings in this person's place while they're away (on DND),
+   * or null for nobody extra. Optional so a database before 264 (and the many fixtures written
+   * before it) reads as no cover.
+   */
+  dnd_cover?: string | null;
+  /**
+   * Migration 264: this row is only here as someone's cover (they are not on the answer list).
+   * It rings only in an away member's place (routes/voice.ts ringSlots), never on its own, and
+   * nothing outside the cover logic reads it.
+   */
+  cover_only?: boolean;
+  /**
+   * Migration 264: the hours this person's phone rings ({"mon":[["08:00","17:00"]], ...}), or
+   * null for always. Outside them they count as away, like DND (routes/voice.ts isAway).
+   * Optional so a database before 264 (and the fixtures written before it) reads as always.
+   */
+  ring_hours?: Record<string, unknown> | null;
+  /** Migration 264: the time zone ring_hours are in, or null for the number's (route.time_zone). */
+  hours_tz?: string | null;
+  /**
+   * Migration 264: this person's own voicemail greeting, a Twilio recording sid, or null. Played
+   * on a line that is only theirs (../voicemail.ts lineOwner). Optional, like the keys above.
+   */
+  greeting_sid?: string | null;
 }
 
 export interface RouteInfo {
@@ -208,6 +233,12 @@ export async function routeForNumber(admin: Admin, e164: string): Promise<RouteI
         has_access: m.has_access === true,
         full_name: m.full_name ?? null,
         forward_to_cell: m.forward_to_cell ? String(m.forward_to_cell) : null,
+        dnd_cover: m.dnd_cover ? String(m.dnd_cover) : null,
+        cover_only: m.cover_only === true,
+        ring_hours: m.ring_hours && typeof m.ring_hours === "object" && !Array.isArray(m.ring_hours) ? m.ring_hours : null,
+        hours_tz: m.hours_tz ? String(m.hours_tz) : null,
+        // Only a real recording sid: the Worker builds a URL from it.
+        greeting_sid: typeof m.greeting_sid === "string" && /^RE[0-9a-f]{32}$/.test(m.greeting_sid) ? m.greeting_sid : null,
       }))
       : [],
     business_name: data.business_name ?? null,

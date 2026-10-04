@@ -4,7 +4,8 @@
 //   /voice/*    Twilio. ?key= first, always, and X-Twilio-Signature whenever TWILIO_AUTH_TOKEN
 //               is set (without it: the key alone, and one warning per isolate). Answers TwiML
 //               (or 204). A fault answers 500 with no body, so Twilio falls over to the
-//               number's Voice Fallback URL and the caller still reaches voicemail.
+//               number's Voice Fallback URL and the caller still reaches voicemail. One GET:
+//               /voice/greeting-audio, the audio a <Play> fetches (greeting.ts), on ?key= alone.
 //   /push/text  the database webhook (x-push-secret). 204.
 //   the rest    the extension and the app: bearer login, JSON {ok, ...}, CORS for the extension
 //               and portal origins.
@@ -20,6 +21,7 @@ import { logFault } from "./log";
 import { verifyTwilioRequest } from "./twilioSignature";
 import { afterDial, applyStatus, inbound, outbound, screen, transcription, voicemail } from "./routes/voice";
 import { conferenceEvent } from "./conference";
+import { greetingAudio, voiceGreeting } from "./greeting";
 import { voiceHandoff } from "./handoff";
 import { cancelHandoff, handoffStatus, pendingHandoff, startHandoff } from "./routes/handoff";
 import { token } from "./routes/token";
@@ -28,9 +30,10 @@ import { hold, resume, warmTransfer } from "./routes/conference";
 import { mediaFile } from "./routes/media";
 import { sendSms } from "./routes/sms";
 import { getThread, listCalls, listThreads, search, team } from "./routes/reads";
-import { devices, forgetDevice, health, log, settingsMe, signOutAll, turn } from "./routes/me";
+import { devices, forgetDevice, health, log, mySettings, settingsMe, signOutAll, turn } from "./routes/me";
 import { createQuickSend, deleteQuickSend, listQuickSends, quickSendUsed, updateQuickSend } from "./routes/quickSends";
 import { pushText } from "./routes/push";
+import { clearGreeting, myGreetingAudio, recordGreeting } from "./routes/greeting";
 import { callTranscript, recordingAudio } from "./routes/recordings";
 import { callTranscribeOn, noticeTwiml, recordingBackstop, recordingCallback } from "./recording";
 import { recordingSweep } from "./cron/sweep";
@@ -56,6 +59,7 @@ export const USAGE_MINUTE_MOD5 = 2;
 const VOICE_PATHS = new Set([
   "/voice/outbound", "/voice/inbound", "/voice/after-dial", "/voice/screen", "/voice/status", "/voice/voicemail",
   "/voice/conference", "/voice/transcription", "/voice/handoff", "/voice/notice", "/voice/recording",
+  "/voice/greeting",
 ]);
 
 async function handleTwilio(req: Request, env: Env, ec: Ctx, path: string, t0: number): Promise<Response> {
@@ -120,6 +124,12 @@ async function handleTwilio(req: Request, env: Env, ec: Ctx, path: string, t0: n
       // A call recording's status callback (recording.ts). Reply first, write after.
       ec.waitUntil(recordingCallback(env, p, url, check.signed).catch((e) => logFault({ code: "recording_callback_failed", message: (e as Error).message, req })));
       return noContent();
+    case "/voice/greeting": {
+      // The ring that records someone's own voicemail greeting (greeting.ts): its TwiML, the
+      // recording's action and callback, and the ring's status (204).
+      const xml = await voiceGreeting(env, ec, p, url);
+      return xml ? twiml(xml) : noContent();
+    }
   }
   return new Response("Not found", { status: 404 });
 }
@@ -153,6 +163,13 @@ const ROUTES: { method: string; re: RegExp; h: Handler }[] = [
   { method: "GET", re: /^\/search$/, h: (r, env) => search(env, r) },
   { method: "GET", re: /^\/team$/, h: (r, env) => team(env, r) },
   { method: "POST", re: /^\/settings\/me$/, h: (r, env) => settingsMe(env, r) },
+  // Your own settings for the portal's "Your calls" card (the apps read them from /token, and
+  // here again to see a greeting they just recorded).
+  { method: "GET", re: /^\/settings\/me$/, h: (r, env) => mySettings(env, r) },
+  // Your own voicemail greeting (routes/greeting.ts): ring to record it, hear it, drop it.
+  { method: "POST", re: /^\/settings\/me\/greeting\/record$/, h: (r, env, ec) => recordGreeting(env, ec, r) },
+  { method: "GET", re: /^\/settings\/me\/greeting\/audio$/, h: (r, env) => myGreetingAudio(env, r) },
+  { method: "POST", re: /^\/settings\/me\/greeting\/clear$/, h: (r, env, ec) => clearGreeting(env, ec, r) },
   { method: "POST", re: /^\/devices$/, h: (r, env) => devices(env, r) },
   { method: "POST", re: /^\/devices\/forget$/, h: (r, env) => forgetDevice(env, r) },
   { method: "POST", re: /^\/devices\/signout-all$/, h: (r, env) => signOutAll(env, r) },
@@ -222,6 +239,15 @@ export default {
           context: { path, stack: String((e as Error)?.stack ?? "").slice(0, 2000) },
         }));
         // No TwiML on purpose: a 500 sends Twilio to the Voice Fallback URL (voicemail).
+        return new Response("Internal error", { status: 500 });
+      }
+    }
+    if (path === "/voice/greeting-audio") {
+      // A <Play>'s GET, outside handleTwilio (POST only): its own ?key= check (greeting.ts).
+      try {
+        return await greetingAudio(req, env, ec);
+      } catch (e) {
+        ec.waitUntil(logFault({ code: "greeting_audio_failed", message: (e as Error)?.message ?? String(e), req }));
         return new Response("Internal error", { status: 500 });
       }
     }

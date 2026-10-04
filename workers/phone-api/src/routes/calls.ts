@@ -7,7 +7,7 @@
 
 import type { Ctx, Env } from "../env";
 import { requireCaller, type Caller } from "../context";
-import { addCallEvent, CALL_COLUMNS, callerContext, must, routeForNumber, type CallRow } from "../db";
+import { addCallEvent, CALL_COLUMNS, callerContext, DEFAULT_ROUTE, must, routeForNumber, type CallRow } from "../db";
 import { ApiError, CALL_SID_RE, ok, readJson, UUID_RE } from "../http";
 import { toIdentity } from "../identity";
 import { logFault } from "../log";
@@ -19,7 +19,7 @@ import { clientNoun, dial, response } from "../twiml";
 import { recordingMedia, TwilioError, updateCall } from "../twilioRest";
 import { hook } from "../urls";
 import { voicemailTwiml } from "../voicemail";
-import { onDnd } from "./voice";
+import { awayFromSettings } from "./voice";
 
 /** The call, on the caller's own tenant, by id or by either leg's CallSid. */
 export async function resolveCall(c: Caller, idOrSid: string): Promise<CallRow | null> {
@@ -38,13 +38,46 @@ function involves(userId: string, call: CallRow): boolean {
 
 // ── POST /calls/:id/transfer ────────────────────────────────────────────────────────
 
+// ⚠️ dnd_cover_user_id, ring_hours, ring_hours_tz and greeting_recording_sid are migration 264's:
+// this Worker must not be deployed before it is applied.
+const AWAY_COLUMNS = "dnd, dnd_until, ring_hours, ring_hours_tz";
+
+type AwayRow = {
+  dnd?: boolean; dnd_until?: string | null; ring_hours?: Record<string, unknown> | null; ring_hours_tz?: string | null;
+};
+
+/**
+ * The teammate a cold transfer rings instead of someone away (migration 264: on DND, or outside
+ * their own hours): their chosen cover, when the cover can take calls on this business (phone
+ * access, same tenant) and is not away themselves (their own DND and hours, read in their zone or
+ * else the number's `routeTz`). Never the person handing the call on: it would ring them back.
+ * Null means nobody, and the customer goes to voicemail as before. One level only, like inbound.
+ */
+async function transferCover(c: Caller, coverId: unknown, routeTz: string): Promise<{ user_id: string; device_generation: number } | null> {
+  const id = typeof coverId === "string" ? coverId.toLowerCase() : "";
+  if (!UUID_RE.test(id) || id === c.userId.toLowerCase()) return null;
+  const [cctx, cset] = await Promise.all([
+    callerContext(c.admin, id),
+    c.admin.from("phone_user_settings").select(AWAY_COLUMNS).eq("user_id", id).maybeSingle(),
+  ]);
+  if (!cctx || cctx.client_id !== c.ctx.client_id || cctx.phone_level === "none") return null;
+  const away = awayFromSettings((cset.data ?? null) as AwayRow | null, routeTz);
+  if (away.dnd || away.offHours) return null;
+  return { user_id: id, device_generation: cctx.device_generation };
+}
+
 /**
  * Cold transfer (plan 9C). Marks the call as transferring FIRST, so the original Dial's
  * after-dial (step 1) knows to stand aside, then redirects the CUSTOMER's leg to a 20-second
  * Dial to the teammate's app identity with after-dial?transfer=1 as the safety net: no answer,
  * a decline, DND or no device online all end in voicemail, never a hang-up and never the
- * teammate's personal cell. Your own leg is ended only after the redirect succeeded; if it
- * failed, the row is put back and you are still on the call.
+ * teammate's personal cell. A teammate who is away (migration 264: on DND, or outside their own
+ * hours) is not rung; their cover is, the same way, when they chose one who can take it
+ * (transferCover), otherwise the customer goes to voicemail. That voicemail is the teammate's:
+ * it plays their own greeting when they recorded one (migration 264, ../voicemail.ts), and so
+ * does the one after-dial plays when nobody answers the transfer (`vt` names them). Your own leg
+ * is ended only after the redirect succeeded; if it failed, the row is put back and you are
+ * still on the call.
  */
 export async function transfer(env: Env, ec: Ctx, req: Request, idParam: string): Promise<Response> {
   const c = await requireCaller(env, req);
@@ -74,18 +107,24 @@ export async function transfer(env: Env, ec: Ctx, req: Request, idParam: string)
   const builderNumber = call.direction === "in" ? call.to_e164 : call.from_e164;
   const [tctx, tset, info] = await Promise.all([
     callerContext(c.admin, target),
-    c.admin.from("phone_user_settings").select("dnd, dnd_until").eq("user_id", target).maybeSingle(),
+    c.admin.from("phone_user_settings").select(`${AWAY_COLUMNS}, dnd_cover_user_id, greeting_recording_sid`).eq("user_id", target).maybeSingle(),
     routeForNumber(c.admin, builderNumber),
   ]);
   await refuseEmergencyCallback(c.admin, call, info);
   if (!tctx || tctx.client_id !== c.ctx.client_id || tctx.phone_level === "none") {
     throw new ApiError("not_found", "That teammate can't take calls.");
   }
-  const tdnd = (tset.data ?? null) as { dnd?: boolean; dnd_until?: string | null } | null;
-  const targetOnDnd = !!tdnd && onDnd({ dnd: tdnd.dnd === true, dnd_until: tdnd.dnd_until ?? null });
+  const trow = (tset.data ?? null) as (AwayRow & { dnd_cover_user_id?: string | null; greeting_recording_sid?: string | null }) | null;
+  // Their own hours are read in their zone, or else the number's (no route: the default zone).
+  const routeTz = info?.route.time_zone ?? DEFAULT_ROUTE.time_zone;
+  const tAway = awayFromSettings(trow, routeTz);
+  const targetAway = tAway.dnd || tAway.offHours;
+  // Who rings: the teammate, or (away) their cover. Nobody: straight to voicemail.
+  const cover = targetAway ? await transferCover(c, trow?.dnd_cover_user_id, routeTz) : null;
+  const ringTo = targetAway ? cover : { user_id: target, device_generation: tctx.device_generation };
 
   // 1. Mark it, conditionally, so two presses cannot both win.
-  const rang = [...new Set([...(call.rang_user_ids ?? []), target])];
+  const rang = [...new Set([...(call.rang_user_ids ?? []), target, ...(cover ? [cover.user_id] : [])])];
   const mark = c.admin.from("phone_calls").update({
     transfer_state: "transferring", transferred_from: c.userId, answered_by: null, client_call_sid: null,
     rang_user_ids: rang,
@@ -97,23 +136,26 @@ export async function transfer(env: Env, ec: Ctx, req: Request, idParam: string)
   if (!claimed?.length) throw new ApiError("bad_request", "A transfer is already under way.");
 
   // 2. Redirect the customer's leg.
-  const xml = targetOnDnd
-    // On DND: the teammate is not rung at all; the customer goes to the builder's voicemail.
-    ? voicemailTwiml(env, call.id, info)
+  const xml = !ringTo
+    // Away with nobody to cover: the teammate is not rung at all; the customer goes to the
+    // builder's voicemail, with the teammate's own greeting when they have one.
+    ? voicemailTwiml(env, call.id, info, { user_id: target, greeting_sid: trow?.greeting_recording_sid ?? null })
     : response(dial({
       timeout: 20,
-      action: hook(env, "/voice/after-dial", { call: call.id, transfer: 1 }),
+      // vt: whose voicemail it is if nobody answers (the teammate picked, even when a cover rings).
+      action: hook(env, "/voice/after-dial", { call: call.id, transfer: 1, vt: target }),
     }, [clientNoun({
-      identity: toIdentity(target, tctx.device_generation),
+      identity: toIdentity(ringTo.user_id, ringTo.device_generation),
       statusCallback: hook(env, "/voice/status", { call: call.id, leg: "client" }),
       params: transferParams(call, c.userId),
     })]));
-  // Straight to voicemail (DND): a recorded call's recording is PAUSED first (PauseBehavior
-  // skip), so the greeting and the message stay out of it, and STOPPED once the redirect has
-  // landed (../recording.ts). Not stopped first: a stopped recording can't be resumed, so a
-  // redirect that fails would leave the rest of the call, still going, unrecorded. A teammate who
-  // is rung and never answers is after-dial's (transfer=1), which stops it before its voicemail.
-  const pausedForVoicemail = targetOnDnd && (await pauseCallRecording(env, c.admin, call)) === "paused";
+  // Straight to voicemail (away, no cover): a recorded call's recording is PAUSED first
+  // (PauseBehavior skip), so the greeting and the message stay out of it, and STOPPED once the
+  // redirect has landed (../recording.ts). Not stopped first: a stopped recording can't be
+  // resumed, so a redirect that fails would leave the rest of the call, still going, unrecorded.
+  // A teammate (or cover) who is rung and never answers is after-dial's (transfer=1), which stops
+  // it before its voicemail.
+  const pausedForVoicemail = !ringTo && (await pauseCallRecording(env, c.admin, call)) === "paused";
   try {
     await updateCall(env, customerLeg, { Twiml: xml });
   } catch (e) {
@@ -133,13 +175,17 @@ export async function transfer(env: Env, ec: Ctx, req: Request, idParam: string)
     throw new ApiError("twilio_error", "The transfer didn't go through. You're still on the call.");
   }
 
-  if (targetOnDnd) await stopCallRecording(env, c.admin, call);
+  if (!ringTo) await stopCallRecording(env, c.admin, call);
 
   // 3. Only now end your own leg (usually already gone: leaving the Dial ends it).
   if (myLeg) {
     ec.waitUntil(updateCall(env, myLeg, { Status: "completed" }).catch(() => {}));
   }
-  ec.waitUntil(addCallEvent(c.admin, call.id, "transfer", { from: c.userId, to: target, dnd: targetOnDnd }));
+  // `to` stays the teammate you picked; `dnd` / `off_hours` say why they weren't rung; `cover` is
+  // who rang in their place (null: nobody did).
+  ec.waitUntil(addCallEvent(c.admin, call.id, "transfer", {
+    from: c.userId, to: target, dnd: tAway.dnd, off_hours: tAway.offHours, cover: cover?.user_id ?? null,
+  }));
   return ok();
 }
 

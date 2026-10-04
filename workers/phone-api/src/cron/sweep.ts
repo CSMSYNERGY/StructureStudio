@@ -11,7 +11,11 @@
 // One of those carries the call's SID the way a voicemail does, so without the source filter the
 // sweep would file a recorded conversation as a voicemail, flip the call to 'voicemail' and count
 // it in the Calls report. Nothing that is not RecordVerb (a call recording, a <Dial record>, a
-// conference recording) is ever filed.
+// conference recording) is ever filed. A person's voicemail GREETING is a RecordVerb recording too
+// (migration 264, ../greeting.ts), but on the ring the Worker placed to their own app: an
+// outbound-api call with no phone_calls row, which callIdForRecording below never files. A STORED
+// greeting is also set aside before the per-run cap: it is never filed, so otherwise every live
+// greeting from the last two days would take one of the MAX_PER_RUN slots on every run.
 //
 // THE LIST IS READ TO THE END (up to LIST_MAX). It used to stop at the newest 200; once calls are
 // recorded, those 200 can all be call recordings, hiding a real voicemail behind them.
@@ -88,7 +92,21 @@ export async function recordingSweep(env: Env, now = new Date()): Promise<{ chec
     "read filed recordings",
   ) as { recording_sid: string; duration_s: number | null }[] | null) ?? [])
     .filter((r) => r.duration_s != null).map((r) => r.recording_sid));
-  const missing = recs.filter((r) => !filed.has(r.sid)).slice(0, MAX_PER_RUN);
+  // Greetings out BEFORE the cap. A team recording theirs on one day (more than MAX_PER_RUN of
+  // them, account-wide, within the two days listed) would otherwise fill every run's slots and push
+  // a real missed voicemail out of reach until it aged out of the listing. A failed read (or a
+  // database before 264) sets nothing aside, as before: callIdForRecording still never files one.
+  const unfiled = recs.filter((r) => !filed.has(r.sid));
+  const greetings = new Set<string>();
+  if (unfiled.length) {
+    const g = await admin.from("phone_user_settings").select("greeting_recording_sid").in("greeting_recording_sid", unfiled.map((r) => r.sid));
+    if (!g.error) {
+      for (const r of (g.data as { greeting_recording_sid: string | null }[] | null) ?? []) {
+        if (r.greeting_recording_sid) greetings.add(r.greeting_recording_sid);
+      }
+    }
+  }
+  const missing = unfiled.filter((r) => !greetings.has(r.sid)).slice(0, MAX_PER_RUN);
   if (!missing.length) return { checked: recs.length, filed: 0 };
 
   const known = new Map<string, string>();

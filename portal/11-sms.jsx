@@ -1289,6 +1289,66 @@ const PHONE_DEFAULT_HOURS = {
   thu: [["08:00", "17:00"]], fri: [["08:00", "17:00"]],
 };
 
+// The weekly hours editor, a time zone and each day's times, shared by the business's hours (the
+// owner's, below) and each person's own (the Your calls card, migration 264). The parent owns
+// the state: `onDay(day, periods)` replaces one day's times (none = that day off), `onTimeZone`
+// the zone. `dayAttr` is the data- attribute each day's row carries; `offWord` is what an empty
+// day says and `addWord` the first "+" button.
+function phoneHoursWithDay(hours, day, periods) {
+  const out = { ...(hours || {}) };
+  if (periods.length) out[day] = periods; else delete out[day];
+  return out;
+}
+function PhoneHoursEditor({
+  hours, timeZone, ro = false, onDay, onTimeZone,
+  dayAttr = "data-ss-phone-day", offWord = "Closed", addWord = "+ open", zoneWord = "Time zone",
+}) {
+  return (
+    <>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 10 }}>
+        {zoneWord}
+        <select value={timeZone} disabled={ro} onChange={(e) => onTimeZone(e.target.value)}
+          style={{ ...S.input, width: "auto", padding: "5px 8px" }}>
+          {!PHONE_TIME_ZONES.some((z) => z[0] === timeZone) && <option value={timeZone}>{timeZone}</option>}
+          {PHONE_TIME_ZONES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+        </select>
+      </label>
+      <div style={{ display: "grid", gap: 6, marginBottom: 12 }}>
+        {PHONE_DAYS.map(([key, label]) => {
+          const periods = (hours || {})[key] || [];
+          return (
+            <div key={key} {...{ [dayAttr]: key }} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ width: 92, fontSize: 13, fontWeight: 700, color: "#334155" }}>{label}</span>
+              {periods.length === 0 && <span style={{ fontSize: 12.5, color: "#94A3B8" }}>{offWord}</span>}
+              {periods.map((p, i) => (
+                <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                  <input type="time" value={p[0]} disabled={ro}
+                    onChange={(e) => onDay(key, periods.map((q, k) => (k === i ? [e.target.value, q[1]] : q)))}
+                    style={{ ...S.input, width: 110, padding: "4px 6px" }} />
+                  <span style={{ fontSize: 12, color: "#64748B" }}>to</span>
+                  <input type="time" value={p[1]} disabled={ro}
+                    onChange={(e) => onDay(key, periods.map((q, k) => (k === i ? [q[0], e.target.value] : q)))}
+                    style={{ ...S.input, width: 110, padding: "4px 6px" }} />
+                  {!ro && (
+                    <button type="button" title="Remove these hours" onClick={() => onDay(key, periods.filter((_q, k) => k !== i))}
+                      style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontWeight: 800, fontSize: 14 }}>×</button>
+                  )}
+                </span>
+              ))}
+              {!ro && periods.length < 4 && (
+                <button type="button" onClick={() => onDay(key, [...periods, periods.length ? ["13:00", "17:00"] : ["08:00", "17:00"]])}
+                  style={{ background: "none", border: "none", color: ACCENT, cursor: "pointer", fontWeight: 700, fontSize: 12, fontFamily: "inherit" }}>
+                  {periods.length ? "+ more hours" : addWord}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
 function phoneFormFrom(d) {
   const r = d && d.route;
   let tz = r && r.timeZone;
@@ -1532,8 +1592,11 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
         )}
       </div>
       <p style={{ margin: 0, fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+        {/* The own view has no answer list below it (a sales rep's, say), so it doesn't point at one. */}
         {on
-          ? "Customers who call your number ring the people chosen below, in My Synergy Phone on their computer and phone."
+          ? (data.scope === "team"
+            ? "Customers who call your number ring the people chosen below, in My Synergy Phone on their computer and phone."
+            : "Customers who call your number ring your team in My Synergy Phone, on their computer and phone.")
           : "While calling is off, My Synergy Phone can't ring or call out for anyone on your team."}
       </p>
       {!on && data.scope === "team" && !data.canSwitchOn && (
@@ -1653,6 +1716,11 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       {numNote && numNote.err && <div style={{ ...S.err, margin: "10px 0 0" }}>{numNote.err}</div>}
     </div>
   );
+
+  // Your own Do Not Disturb cover (migration 264), saved on the Worker for the SIGNED-IN person's
+  // own business: so never while an operator views someone else's, and only while calling is on
+  // (the Worker's team list needs it on).
+  const yourCallsCard = on && !viewingLabel ? <PhoneYourCallsCard /> : null;
 
   const installCard = (
     <div style={PHONE_CARD}>
@@ -1936,6 +2004,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
             </span>
           )}
         </div>
+        {yourCallsCard}
         {installCard}
       </div>
     );
@@ -1978,6 +2047,13 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
               <> · {(t.devices || []).map((d) => `${deviceWord(d.platform)}${phoneWhen(d.lastSeenAt) ? ` (${phoneWhen(d.lastSeenAt)})` : ""}`).join(", ")}</>
             )}
           </div>
+          {/* Their own hours (migration 264): set by them, shown here so the owner knows why they
+              didn't ring. A zone they didn't save reads as the number's. */}
+          {t.ringHours && (
+            <div data-ss-phone-member-hours style={{ fontSize: 11.5, color: "#64748B" }}>
+              Their hours: {phoneHoursSummary(t.ringHours)} ({phoneZoneWord(t.ringHoursTz || (data.route && data.route.timeZone) || form.timeZone, PHONE_TIME_ZONES)})
+            </div>
+          )}
           {outNote && outNote.userId === t.userId && (
             <div style={{ fontSize: 12, marginTop: 4, color: outNote.err ? "#B91C1C" : "#047857", fontWeight: 600 }}>{outNote.err || outNote.ok}</div>
           )}
@@ -1999,11 +2075,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       </div>
     );
   };
-  const setDay = (day, periods) => setForm((f) => {
-    const hours = { ...f.hours };
-    if (periods.length) hours[day] = periods; else delete hours[day];
-    return { ...f, hours };
-  });
+  const setDay = (day, periods) => setForm((f) => ({ ...f, hours: phoneHoursWithDay(f.hours, day, periods) }));
 
   return (
     <div data-ss-phone-settings="team">
@@ -2065,8 +2137,9 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           <input value={form.greetingUrl} disabled={ro} placeholder="https://… link to an audio file"
             onChange={(e) => setF({ greetingUrl: e.target.value })} style={S.input} />
           <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4 }}>
-            Leave it empty for the standard greeting: &ldquo;You&rsquo;ve reached [your business]. We can&rsquo;t take your call
-            right now. Please leave your name, number and a short message after the tone.&rdquo;
+            Plays on calls to the shared number that aren&rsquo;t for one person. Leave it empty for the standard greeting:
+            &ldquo;You&rsquo;ve reached [your business]. We can&rsquo;t take your call right now. Please leave your name, number
+            and a short message after the tone.&rdquo; Everyone can record their own greeting under Your calls.
           </div>
         </label>
       </div>
@@ -2079,46 +2152,8 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
         </div>
         {form.hoursOn && (
           <>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 10 }}>
-              Time zone
-              <select value={form.timeZone} disabled={ro} onChange={(e) => setF({ timeZone: e.target.value })}
-                style={{ ...S.input, width: "auto", padding: "5px 8px" }}>
-                {!PHONE_TIME_ZONES.some((z) => z[0] === form.timeZone) && <option value={form.timeZone}>{form.timeZone}</option>}
-                {PHONE_TIME_ZONES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-              </select>
-            </label>
-            <div style={{ display: "grid", gap: 6, marginBottom: 12 }}>
-              {PHONE_DAYS.map(([key, label]) => {
-                const periods = form.hours[key] || [];
-                return (
-                  <div key={key} data-ss-phone-day={key} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <span style={{ width: 92, fontSize: 13, fontWeight: 700, color: "#334155" }}>{label}</span>
-                    {periods.length === 0 && <span style={{ fontSize: 12.5, color: "#94A3B8" }}>Closed</span>}
-                    {periods.map((p, i) => (
-                      <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                        <input type="time" value={p[0]} disabled={ro}
-                          onChange={(e) => setDay(key, periods.map((q, k) => (k === i ? [e.target.value, q[1]] : q)))}
-                          style={{ ...S.input, width: 110, padding: "4px 6px" }} />
-                        <span style={{ fontSize: 12, color: "#64748B" }}>to</span>
-                        <input type="time" value={p[1]} disabled={ro}
-                          onChange={(e) => setDay(key, periods.map((q, k) => (k === i ? [q[0], e.target.value] : q)))}
-                          style={{ ...S.input, width: 110, padding: "4px 6px" }} />
-                        {!ro && (
-                          <button type="button" title="Remove these hours" onClick={() => setDay(key, periods.filter((_q, k) => k !== i))}
-                            style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontWeight: 800, fontSize: 14 }}>×</button>
-                        )}
-                      </span>
-                    ))}
-                    {!ro && periods.length < 4 && (
-                      <button type="button" onClick={() => setDay(key, [...periods, periods.length ? ["13:00", "17:00"] : ["08:00", "17:00"]])}
-                        style={{ background: "none", border: "none", color: ACCENT, cursor: "pointer", fontWeight: 700, fontSize: 12, fontFamily: "inherit" }}>
-                        {periods.length ? "+ more hours" : "+ open"}
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+            <PhoneHoursEditor hours={form.hours} timeZone={form.timeZone} ro={ro}
+              onDay={setDay} onTimeZone={(tz) => setF({ timeZone: tz })} />
             <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Outside these hours</div>
             <div style={{ display: "grid", gap: 6 }}>
               {radio("ss-phone-after", "voicemail", form.afterHours, "Take a voicemail", (v) => setF({ afterHours: v }))}
@@ -2143,7 +2178,420 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       {/* Below the routing form's Save, not between its cards: it has a Save of its own. */}
       {recCard}
 
+      {yourCallsCard}
+
       {installCard}
+    </div>
+  );
+}
+
+// ── Your voicemail greeting (migration 264) ──────────────────────────────────────────────
+// Each person records their own BY PHONE. Record asks
+// the Worker to ring their own My Synergy Phone (in Chrome or on their phone; 01-core
+// ssPhoneRecordGreeting), they answer and speak after the tone, and the Worker keeps the
+// recording. No file upload: browsers record a format phone calls can't play. Nobody else can
+// record or clear it. It plays when a call meant for them goes to voicemail: a call transferred
+// to them, or a number that rings only them; a shared number keeps the business's greeting (the
+// owner's link below, or the standard sentence). The words are My Synergy Phone's own (phone-core
+// greeting.ts), pinned to the same answers by tests/phone/greeting_test.ts.
+const PHONE_GREETING_WORDS = {
+  where: "It plays when a call meant for you goes to voicemail: a call transferred to you, or a number that rings only you. Calls to the shared business number keep the business's greeting.",
+  ringing: "My Synergy Phone will ring now. Answer it and speak after the tone.",
+  saved: "Your new greeting is saved.",
+  noRing: "No new greeting came through. If My Synergy Phone didn't ring, check it's signed in, then try again.",
+  standardDone: "Done. Callers hear the business's greeting.",
+  confirmStandard: "Delete your greeting? Callers will hear the business's greeting instead.",
+};
+// How long the card watches for the new greeting after Record (the ring, up to a minute of
+// speaking, and the save), and how often it looks.
+const PHONE_GREETING_WAIT_MS = 3 * 60_000;
+const PHONE_GREETING_POLL_MS = 5_000;
+// Is this Worker one that keeps greetings? It sends `greeting` ({set, updated_at}) with the settings.
+function phoneGreetingSupported(settings) {
+  return !!settings && !!settings.greeting && typeof settings.greeting === "object";
+}
+// "Oct 5", in this browser's own calendar.
+function phoneGreetingDay(iso) {
+  const t = Date.parse(iso || "");
+  return Number.isFinite(t) ? new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
+}
+// The card's line: whose greeting callers hear now.
+function phoneGreetingText(g) {
+  if (!g || !g.set) return "You haven't recorded one, so callers hear the business's greeting.";
+  const day = phoneGreetingDay(g.updated_at);
+  return day ? `Your own greeting, recorded ${day}.` : "Your own greeting.";
+}
+// Did a new greeting land since Record was pressed (`before` is the updated_at seen then)?
+function phoneGreetingChanged(before, after) {
+  return !!after && after.set === true && !!after.updated_at && after.updated_at !== (before || null);
+}
+
+function PhoneGreetingSection({ greeting, onSettings }) {
+  // ⚠️ HOOKS FIRST, ALL OF THEM, ABOVE EVERY EARLY RETURN (React #310).
+  const [busy, setBusy] = useState(null);   // "record" | "play" | "clear" | null
+  const [note, setNote] = useState(null);   // { ok } | { err } | { info }
+  const [wait, setWait] = useState(null);   // { before, until } while the ring is on its way
+  const [src, setSrc] = useState(null);     // the greeting's blob: URL once Play was pressed
+  const token = async () => {
+    const { data } = await sb.auth.getSession();
+    return data && data.session ? data.session.access_token : null;
+  };
+  // The blob lives in this tab's memory until it is let go.
+  useEffect(() => () => { if (src) { try { URL.revokeObjectURL(src); } catch (_e) { /* already gone */ } } }, [src]);
+  // After Record: look for the new greeting every few seconds until it lands, or give up.
+  useEffect(() => {
+    if (!wait) return undefined;
+    let live = true;
+    const tick = async () => {
+      if (Date.now() > wait.until) {
+        if (live) { setWait(null); setNote({ err: PHONE_GREETING_WORDS.noRing }); }
+        return;
+      }
+      try {
+        const s = await ssPhoneMySettings(await token());
+        if (live && s && phoneGreetingChanged(wait.before, s.greeting)) {
+          onSettings(s);
+          setWait(null);
+          setSrc(null);
+          setNote({ ok: PHONE_GREETING_WORDS.saved });
+        }
+      } catch (_e) { /* a missed look; the next one tries again */ }
+    };
+    const t = setInterval(tick, PHONE_GREETING_POLL_MS);
+    return () => { live = false; clearInterval(t); };
+  }, [wait]);
+
+  const g = greeting || { set: false, updated_at: null };
+  const record = async () => {
+    setBusy("record"); setNote(null);
+    try {
+      await ssPhoneRecordGreeting(await token());
+      setWait({ before: g.updated_at || null, until: Date.now() + PHONE_GREETING_WAIT_MS });
+      setNote({ info: PHONE_GREETING_WORDS.ringing });
+    } catch (e) { setNote({ err: e.message }); }
+    finally { setBusy(null); }
+  };
+  const play = async () => {
+    setBusy("play"); setNote(null);
+    try { setSrc(await ssPhoneFetchGreeting(await token())); }
+    catch (e) { setNote({ err: e.message }); }
+    finally { setBusy(null); }
+  };
+  const standard = async () => {
+    if (!window.confirm(PHONE_GREETING_WORDS.confirmStandard)) return;
+    setBusy("clear"); setNote(null);
+    try {
+      const saved = await ssPhoneClearGreeting(await token());
+      if (saved) onSettings(saved);
+      setSrc(null);
+      setNote({ ok: PHONE_GREETING_WORDS.standardDone });
+    } catch (e) { setNote({ err: e.message }); }
+    finally { setBusy(null); }
+  };
+  const btn = (primary) => ({ ...S.btn(primary ? ACCENT : "#F1F5F9", primary ? "#FFF" : "#334155"), opacity: busy ? 0.6 : 1 });
+
+  return (
+    <div data-ss-phone-greeting style={{ borderTop: "1px solid #F1F5F9", marginTop: 14, paddingTop: 12 }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: "#334155", marginBottom: 4 }}>Voicemail greeting</div>
+      <div data-ss-phone-greeting-state style={{ fontSize: 12.5, color: "#1E293B", marginBottom: 4 }}>{phoneGreetingText(g)}</div>
+      <div style={{ fontSize: 12, color: "#64748B", lineHeight: 1.5, marginBottom: 10 }}>{PHONE_GREETING_WORDS.where}</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <button type="button" disabled={!!busy || !!wait} onClick={record} data-ss-phone-greeting-record style={btn(true)}>
+          {busy === "record" ? "Ringing…" : wait ? "Waiting for your greeting…" : g.set ? "Record a new greeting" : "Record my greeting"}
+        </button>
+        {g.set && (
+          <button type="button" disabled={!!busy} onClick={play} data-ss-phone-greeting-play style={btn(false)}>
+            {busy === "play" ? "Loading…" : "▶ Play"}
+          </button>
+        )}
+        {g.set && (
+          <button type="button" disabled={!!busy || !!wait} onClick={standard} data-ss-phone-greeting-clear style={btn(false)}>
+            {busy === "clear" ? "Saving…" : "Use the standard greeting"}
+          </button>
+        )}
+      </div>
+      {src && (
+        <audio controls autoPlay src={src} data-ss-phone-greeting-audio
+          style={{ display: "block", width: "100%", maxWidth: 340, height: 34, marginTop: 8 }} />
+      )}
+      {note && note.info && <div data-ss-phone-greeting-note style={{ fontSize: 12.5, color: "#1D4ED8", fontWeight: 700, marginTop: 8 }}>{note.info}</div>}
+      {note && note.ok && <div data-ss-phone-greeting-note style={{ fontSize: 12.5, color: "#047857", fontWeight: 700, marginTop: 8 }}>{note.ok}</div>}
+      {note && note.err && <div data-ss-phone-greeting-note style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700, marginTop: 8 }}>{note.err}</div>}
+    </div>
+  );
+}
+
+// ── Your calls (migration 264) ──────────────────────────────────────────────────────────
+// The signed-in person's OWN phone settings, on Settings › Phone for everyone with phone access
+// (the own view and the team view alike): who rings in their place while they're on Do Not
+// Disturb, the hours their phone rings (below), and their own voicemail greeting
+// (PhoneGreetingSection, above). Read and saved on the phone-api Worker
+// (01-core ssPhoneMySettings / ssPhoneSaveMySettings, the same call My Synergy Phone makes), so
+// the choice ships with this page and needs no app update; the Worker checks it (a teammate on
+// this business with phone access, never yourself) and says "That teammate can't take calls."
+// otherwise. The words are My Synergy Phone's own (its phone-core away.ts and ringHours.ts), so
+// the portal and the apps say the same thing. Pure helpers first (tests/phone/awayCover_test.ts
+// and ringHours_test.ts run them), then the card.
+function phoneCoverState(coverId, team) {
+  if (!coverId) return { kind: "none" };
+  if (!Array.isArray(team)) return { kind: "unknown", userId: coverId };
+  const m = team.find((t) => t && t.user_id === coverId);
+  return m ? { kind: "teammate", userId: coverId, name: m.full_name || "Your teammate" } : { kind: "gone", userId: coverId };
+}
+// The box: No one (""), the saved cover when the team list can't name them, then teammates by name.
+function phoneCoverOptions(coverId, team, myUserId) {
+  const c = phoneCoverState(coverId, team);
+  const out = [{ value: "", label: "No one" }];
+  if (c.kind === "gone") out.push({ value: c.userId, label: "Someone who can't take calls now" });
+  if (c.kind === "unknown") out.push({ value: c.userId, label: "The teammate you chose" });
+  const mates = (Array.isArray(team) ? team : []).filter((t) => t && t.user_id && t.user_id !== myUserId)
+    .sort((a, b) => String(a.full_name || "").localeCompare(String(b.full_name || "")));
+  for (const t of mates) out.push({ value: t.user_id, label: t.full_name || "Teammate" });
+  return out;
+}
+function phoneAwayText(c) {
+  if (c.kind === "teammate") return `While you're on Do Not Disturb, calls skip you and ring ${c.name} in your place.`;
+  if (c.kind === "unknown") return "While you're on Do Not Disturb, calls skip you and ring the teammate you chose in your place.";
+  if (c.kind === "gone") return "While you're on Do Not Disturb, calls skip you. The teammate you chose can't take calls any more, so pick someone else.";
+  return "While you're on Do Not Disturb, calls skip you and ring your teammates, or go to voicemail.";
+}
+function phoneCoverSavedText(c) {
+  if (c.kind === "teammate") return `Saved. While you're away, your calls ring ${c.name}.`;
+  if (c.kind === "none") return "Saved. While you're away, calls skip you and ring your teammates, or go to voicemail.";
+  return "Saved. While you're away, your calls ring the teammate you chose.";
+}
+
+// When my phone rings (migration 264): each person's own hours, business hours' weekly shape
+// ({"mon":[["08:00","17:00"]], ...}; null = always), in the time zone they set them in. Outside
+// them the Worker treats them as away, like Do Not Disturb: their cover rings, or nobody does.
+// They only narrow the business's hours, never widen them. The Worker checks a save with the rule
+// the owner's hours pass (_shared/phoneHours.ts) and needs at least one day and a zone; the card
+// says the "no day" one before it asks. The summary is My Synergy Phone's own (phone-core
+// ringHours.ts ringHoursSummary), so Settings in the apps reads the same.
+const PHONE_DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const PHONE_DAY_SHORT = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
+// "08:00" → "8 AM", "13:30" → "1:30 PM", "00:00" → "12 AM".
+function phoneClockWord(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || ""));
+  if (!m) return String(hhmm || "");
+  const h = Number(m[1]) % 24;
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}${m[2] === "00" ? "" : `:${m[2]}`} ${h < 12 ? "AM" : "PM"}`;
+}
+// {mon..fri: 8-5, sat: 9-12} → "Mon–Fri 8 AM–5 PM; Sat 9 AM–12 PM". Days in a row with the same
+// times are one group. null → "Any time"; no day at all → "No days".
+function phoneHoursSummary(hours) {
+  if (!hours || typeof hours !== "object") return "Any time";
+  const key = (d) => JSON.stringify(Array.isArray(hours[d]) ? hours[d] : []);
+  const groups = [];
+  for (const d of PHONE_DAY_ORDER) {
+    if (!Array.isArray(hours[d]) || !hours[d].length) continue;
+    const last = groups[groups.length - 1];
+    const prev = PHONE_DAY_ORDER[PHONE_DAY_ORDER.indexOf(d) - 1];
+    if (last && last.to === prev && key(last.to) === key(d)) last.to = d;
+    else groups.push({ from: d, to: d });
+  }
+  if (!groups.length) return "No days";
+  return groups.map((g) => {
+    const days = g.from === g.to ? PHONE_DAY_SHORT[g.from] : `${PHONE_DAY_SHORT[g.from]}–${PHONE_DAY_SHORT[g.to]}`;
+    return `${days} ${hours[g.from].map((p) => `${phoneClockWord(p[0])}–${phoneClockWord(p[1])}`).join(", ")}`;
+  }).join("; ");
+}
+// "America/Chicago" → "Central time"; a zone off the list → its city ("Asia/Karachi" → "Karachi time").
+function phoneZoneWord(tz, zones) {
+  const z = (zones || []).find((x) => x[0] === tz);
+  if (z) return `${z[1].replace(/ \(.*\)$/, "")} time`;
+  const city = String(tz || "").split("/").pop().replace(/_/g, " ");
+  return city ? `${city} time` : "the business's time";
+}
+// Is this Worker one that keeps hours? It sends `ring_hours` (null or an object) with the settings.
+function phoneRingHoursSupported(settings) {
+  return !!settings && settings.ring_hours !== undefined;
+}
+// The saved settings → the card's form. A zone of their own, else this browser's, else Central.
+function phoneRingHoursForm(settings, deviceTz, defaults) {
+  const h = settings && settings.ring_hours && typeof settings.ring_hours === "object" ? settings.ring_hours : null;
+  return {
+    on: !!h,
+    hours: h || defaults || {},
+    timeZone: (settings && settings.ring_hours_tz) || deviceTz || "America/Chicago",
+  };
+}
+// The form → POST /settings/me's body. Always: hours null (the zone is left as it was).
+function phoneRingHoursPatch(form) {
+  return form.on ? { ring_hours: form.hours, ring_hours_tz: form.timeZone } : { ring_hours: null };
+}
+// What the Worker would refuse that the card can see first: hours on, but no day has any.
+function phoneRingHoursProblem(form) {
+  if (!form.on) return null;
+  return PHONE_DAY_ORDER.some((d) => Array.isArray(form.hours[d]) && form.hours[d].length) ? null
+    : "Add hours to at least one day, or choose Always.";
+}
+// Outside your hours, as a sentence: who rings in your place (the cover, read like phoneAwayText).
+function phoneOffHoursText(c) {
+  if (c.kind === "teammate") return `Outside your hours, calls skip you and ring ${c.name} in your place.`;
+  if (c.kind === "unknown") return "Outside your hours, calls skip you and ring the teammate you chose in your place.";
+  if (c.kind === "gone") return "Outside your hours, calls skip you.";
+  return "Outside your hours, calls skip you and ring your teammates, or go to voicemail.";
+}
+function phoneRingHoursSavedText(form, zones) {
+  if (!form.on) return "Saved. Your phone rings whenever the business is open.";
+  return `Saved. Your phone rings ${phoneHoursSummary(form.hours)} (${phoneZoneWord(form.timeZone, zones)}).`;
+}
+function phoneDeviceZone() {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch (_e) { return null; }
+}
+
+function PhoneYourCallsCard() {
+  // ⚠️ HOOKS FIRST, ALL OF THEM, ABOVE EVERY EARLY RETURN (React #310).
+  const [st, setSt] = useState(null);      // { settings, team, me } | { unavailable: true }
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState(null);  // { ok } | { err } after a save
+  // When my phone rings (migration 264): the form while it has unsaved changes (null = as saved),
+  // its save, and what the save said.
+  const [hoursEdit, setHoursEdit] = useState(null);   // { on, hours, timeZone } | null
+  const [hoursBusy, setHoursBusy] = useState(false);
+  const [hoursNote, setHoursNote] = useState(null);   // { ok } | { err }
+  const session = async () => {
+    const { data: d } = await sb.auth.getSession();
+    return d && d.session ? d.session : null;
+  };
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const s = await session();
+        const token = s ? s.access_token : null;
+        const [settings, team] = await Promise.all([ssPhoneMySettings(token), ssPhoneTeam(token)]);
+        if (live) setSt({ settings: settings || {}, team, me: s && s.user ? s.user.id : null });
+      } catch (e) {
+        if (!live) return;
+        // A Worker from before 264 has no GET /settings/me: show nothing rather than a fault. It
+        // answers 405, not 404 — POST /settings/me is already routed there, and a path that
+        // matched with the wrong method is "That method isn't allowed here." 404 stays for a
+        // Worker without the path at all.
+        if (e && (e.status === 404 || e.status === 405)) setSt({ unavailable: true });
+        else setErr(e.message);
+      }
+    })();
+    return () => { live = false; };
+  }, []);
+
+  if (st && st.unavailable) return null;
+  if (!st && !err) return <div style={PHONE_CARD}><SkelRows cols={1} rows={2} /></div>;
+
+  const coverId = (st && st.settings && st.settings.dnd_cover_user_id) || "";
+  const cover = phoneCoverState(coverId, st ? st.team : null);
+  const pick = async (value) => {
+    setBusy(true); setNote(null);
+    try {
+      const s = await session();
+      const saved = await ssPhoneSaveMySettings({ dnd_cover_user_id: value || null }, s ? s.access_token : null);
+      setSt((x) => ({ ...x, settings: saved || x.settings }));
+      setNote({ ok: phoneCoverSavedText(phoneCoverState(saved ? saved.dnd_cover_user_id : value, st.team)) });
+    } catch (e) { setNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+
+  // When my phone rings: offered only by a Worker that keeps hours (it sends ring_hours).
+  const hoursOk = !!(st && st.settings && phoneRingHoursSupported(st.settings));
+  const savedHours = hoursOk ? phoneRingHoursForm(st.settings, phoneDeviceZone(), PHONE_DEFAULT_HOURS) : null;
+  const hours = hoursEdit || savedHours;
+  const editHours = (patch) => { setHoursNote(null); setHoursEdit((f) => ({ ...(f || savedHours), ...patch })); };
+  const setMyDay = (day, periods) => {
+    setHoursNote(null);
+    setHoursEdit((f) => { const base = f || savedHours; return { ...base, hours: phoneHoursWithDay(base.hours, day, periods) }; });
+  };
+  const saveHours = async () => {
+    const problem = phoneRingHoursProblem(hours);
+    if (problem) { setHoursNote({ err: problem }); return; }
+    setHoursBusy(true); setHoursNote(null);
+    try {
+      const s = await session();
+      const saved = await ssPhoneSaveMySettings(phoneRingHoursPatch(hours), s ? s.access_token : null);
+      setSt((x) => ({ ...x, settings: saved || x.settings }));
+      setHoursEdit(null);
+      setHoursNote({ ok: phoneRingHoursSavedText(saved ? phoneRingHoursForm(saved, phoneDeviceZone(), PHONE_DEFAULT_HOURS) : hours, PHONE_TIME_ZONES) });
+    } catch (e) { setHoursNote({ err: e.message }); }
+    finally { setHoursBusy(false); }
+  };
+  const hoursRadio = (value, label) => (
+    <label key={value} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
+      <input type="radio" name="ss-phone-my-hours" checked={(hours.on ? "set" : "always") === value} disabled={hoursBusy}
+        onChange={() => editHours({ on: value === "set" })} />
+      {label}
+    </label>
+  );
+
+  return (
+    <div style={PHONE_CARD} data-ss-phone-yours>
+      <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Your calls</h4>
+      <p style={{ margin: "0 0 10px", fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
+        Just for you: everyone on the team picks their own, here or in My Synergy Phone&rsquo;s Settings.
+      </p>
+      {err ? <div style={{ ...S.err, marginBottom: 0 }}>{err}</div> : (
+        <>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", flexWrap: "wrap" }}>
+            While I&rsquo;m on Do Not Disturb, ring
+            <select value={coverId} disabled={busy} data-ss-phone-cover onChange={(e) => pick(e.target.value)}
+              style={{ ...S.input, width: "auto", padding: "5px 8px" }}>
+              {phoneCoverOptions(coverId, st.team, st.me).map((o) => <option key={o.value || "none"} value={o.value}>{o.label}</option>)}
+            </select>
+          </label>
+          <div style={{ fontSize: 12, color: "#64748B", marginTop: 6, lineHeight: 1.5 }}>
+            {phoneAwayText(cover)} A teammate you pick rings even if they aren&rsquo;t on the answer list, unless they&rsquo;re on a call,
+            on Do Not Disturb too{hoursOk ? <>, or outside their own hours</> : null}.
+          </div>
+          {st.settings.dnd && (
+            <div data-ss-phone-dnd-now style={{ fontSize: 12.5, color: "#B45309", fontWeight: 700, marginTop: 8 }}>
+              You&rsquo;re on Do Not Disturb right now. Turn it off in My Synergy Phone.
+            </div>
+          )}
+          {note && note.ok && <div style={{ fontSize: 12.5, color: "#047857", fontWeight: 700, marginTop: 8 }}>{note.ok}</div>}
+          {note && note.err && <div style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700, marginTop: 8 }}>{note.err}</div>}
+
+          {hoursOk && (
+            <div data-ss-phone-my-hours style={{ borderTop: "1px solid #F1F5F9", marginTop: 14, paddingTop: 12 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#334155", marginBottom: 6 }}>When my phone rings</div>
+              <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+                {hoursRadio("always", "Always, whenever the business is open")}
+                {hoursRadio("set", "Only during my hours")}
+              </div>
+              {hours.on && (
+                <PhoneHoursEditor hours={hours.hours} timeZone={hours.timeZone} ro={hoursBusy}
+                  onDay={setMyDay} onTimeZone={(tz) => editHours({ timeZone: tz })}
+                  dayAttr="data-ss-phone-my-day" offWord="Off" addWord="+ add hours" zoneWord="My time zone" />
+              )}
+              <div style={{ fontSize: 12, color: "#64748B", lineHeight: 1.5 }}>
+                {hours.on
+                  ? <>{phoneOffHoursText(cover)} Your hours never go past the business&rsquo;s: when the business is closed, nobody&rsquo;s phone rings.</>
+                  : <>Your phone rings whenever the business is open, unless you&rsquo;re on Do Not Disturb.</>}
+              </div>
+              {hoursEdit && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+                  <button type="button" disabled={hoursBusy} onClick={saveHours} data-ss-phone-my-hours-save
+                    style={{ ...S.btn(ACCENT, "#FFF"), opacity: hoursBusy ? 0.6 : 1 }}>
+                    {hoursBusy ? "Saving…" : "Save my hours"}
+                  </button>
+                  <button type="button" disabled={hoursBusy} onClick={() => { setHoursEdit(null); setHoursNote(null); }}
+                    style={{ ...S.btn("#F1F5F9", "#334155") }}>
+                    Cancel
+                  </button>
+                </div>
+              )}
+              {hoursNote && hoursNote.ok && <div style={{ fontSize: 12.5, color: "#047857", fontWeight: 700, marginTop: 8 }}>{hoursNote.ok}</div>}
+              {hoursNote && hoursNote.err && <div style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700, marginTop: 8 }}>{hoursNote.err}</div>}
+            </div>
+          )}
+
+          {/* Your voicemail greeting: offered only by a Worker that keeps one (it sends `greeting`). */}
+          {phoneGreetingSupported(st.settings) && (
+            <PhoneGreetingSection greeting={st.settings.greeting}
+              onSettings={(saved) => setSt((x) => ({ ...x, settings: saved || x.settings }))} />
+          )}
+        </>
+      )}
     </div>
   );
 }
