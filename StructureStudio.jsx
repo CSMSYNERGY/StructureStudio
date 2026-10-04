@@ -27860,10 +27860,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     Rounded for display because 10/12 round-trips to 9.999999999999998, and
                     a field that shows that after you typed 10 reads as broken. */}
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Pitch (rise, as in 6 for 6:12)
-                  <input type="number" step="0.5" min="0" max="12" {...calNumProps("pitch", Math.round((adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4) * 1200) / 100, (n) => calSetRoof({ pitch: n / 12 }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.5" min="0" max="12" {...calNumProps("pitch", Math.round((adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4) * 1200) / 100, (n) => calSetRoof({ pitch: Math.max(0, Math.min(2, n / 12)) }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Overhang (ft)
-                  <input type="number" step="0.05" {...calNumProps("overhang", adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6, (n) => calSetRoof({ overhang: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.05" {...calNumProps("overhang", adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6, (n) => calSetRoof({ overhang: Math.max(0, Math.min(3, n)) }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 {/* OVERHANG STYLE (2026-09-18). How the tail is FRAMED, which is a different
                     question from how far it projects -- Carolyn drew both off paused walk-around
@@ -27962,7 +27962,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </>)}
                 {calAdvShow("walls") && (<>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height (ft)
-                  <input type="number" step="0.5" {...calNumProps("wallHeightFt", adminCal.spec.wallHeightFt || 8, (n) => calSet({ wallHeightFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.5" {...calNumProps("wallHeightFt", adminCal.spec.wallHeightFt || 8, (n) => calSet({ wallHeightFt: Math.max(5, Math.min(20, n)) }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 {/* The empty "plain" option is gone (2026-08-25). It was the LABEL FOR null,
                     which the renderer draws as panel siding -- so it named a thing the
@@ -28269,7 +28269,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 )}
                 {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer rise (ft)
-                    <input type="number" step="0.25" min="0" {...calNumProps("dormerRiseFt", adminCal.spec.roof.dormerRiseFt != null ? adminCal.spec.roof.dormerRiseFt : 2.5, (n) => calSetRoof({ dormerRiseFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.25" min="0" {...calNumProps("dormerRiseFt", adminCal.spec.roof.dormerRiseFt != null ? adminCal.spec.roof.dormerRiseFt : 2.5, (n) => calSetRoof({ dormerRiseFt: Math.max(0, Math.min(6, n)) }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                     {/* WHAT IT WILL ACTUALLY BUILD. The run is clamped by the eave, so on a
                         short building a big rise is quietly impossible — a 14 ft gable at
                         7:12 turns a requested 5 ft into about 2 ft 6, and before this the box
