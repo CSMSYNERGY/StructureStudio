@@ -2,7 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession, identityForClient } from "../_shared/customerSession.ts";
-import { loadAddressStanding, ownsDesign } from "../_shared/customerIdentity.ts";
+import { loadAddressStanding, loadOwnedDesigns } from "../_shared/customerIdentity.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { amountOwed, subtotalsFromSnapshot, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
@@ -157,32 +157,28 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   // customer accepts (and SIGNS, migration 124) HERE instead of on GHL's hosted page.
   const ssMode = settingsRes.data?.invoice_in_ghl === false;
 
-  // Tenant-wide select, phone match applied IN CODE below. PostgREST cannot filter on the
-  // regexp_replace expression the phone comparison needs (contact->>'phone' is a formatted
-  // display string, so both sides must normalize to digits), and a tenant-wide read matches
-  // existing practice — portal.html loads all tenant designs the same way. Migration 108's
-  // expression index (designs_client_phone_digits_idx) serves future SQL paths that can
-  // state the expression; this path pays one tenant scan instead.
-  const { data: rows, error: designsErr } = await admin
-    .from("designs")
-    .select("short_code, created_at, status, contact, selections, ghl_estimate_number, ghl_estimate_id, image_url, estimate_lines, accepted_snapshot, ss_quote_number, ss_quote_pdf_url, accepted_at, view3d_image_url")
-    .eq("client_id", identity.clientId)
-    .order("created_at", { ascending: false }); // newest first
-  if (designsErr) return dbFail(req, identity.clientId, "load quotes", designsErr);
   // The shared-address rule (customerIdentity.ts, review 2026-09-15): an address this tenant has
-  // filed beside more than one phone owns nothing by email. Its own paged read, never `rows`
-  // above: that read is unpaged, and a row cap there would drop the older design that shows the
-  // address is shared. Reads nothing for a phone-only session.
+  // filed beside more than one phone owns nothing by email. Its own paged read of status and
+  // contact only. Reads nothing for a phone-only session.
   const addr = await loadAddressStanding(admin, identity.clientId, identity);
   if (!addr.standing) return dbFail(req, identity.clientId, "load quotes", addr.error);
   const standing = addr.standing;
 
-  const mine = (rows ?? [])
+  // Tenant-wide, phone/email match applied IN CODE. PostgREST cannot filter on the
+  // regexp_replace expression the phone comparison needs (contact->>'phone' is a formatted
+  // display string, so both sides must normalize to digits). Migration 108's expression index
+  // (designs_client_phone_digits_idx) serves future SQL paths that can state the expression;
+  // this path pays one tenant scan instead, PAGED (loadOwnedDesigns): a single read stops at
+  // PostgREST's 1000-row cap, which dropped every customer's older quotes once a tenant passed
+  // 1000 designs. Only the verified identity's designs come back: a verified phone matches the
+  // design's phone, a verified email the design's email (unless that address is shared), and
+  // neither is ever resolved to the other through a design (customerIdentity.ts, 230).
+  const owned = await loadOwnedDesigns(admin, identity.clientId, identity, standing,
+    "short_code, created_at, status, contact, selections, ghl_estimate_number, ghl_estimate_id, image_url, estimate_lines, accepted_snapshot, ss_quote_number, ss_quote_pdf_url, accepted_at, view3d_image_url");
+  if (!owned.rows) return dbFail(req, identity.clientId, "load quotes", owned.error);
+
+  const mine = owned.rows
     .filter((d) => {
-      // The verified identity — only this customer's designs. A verified phone matches the
-      // design's phone, a verified email the design's email (unless that address is shared),
-      // and neither is ever resolved to the other through a design (customerIdentity.ts, 230).
-      if (!ownsDesign(identity, d?.contact, standing)) return false;
       // 'inventory' is the tenant's own spec-build master designs — internal stock, never
       // something this customer asked for. 'draft' is a silent capture the visitor never
       // knowingly created (saveDraftSilently fires when they open quote Details) — showing
