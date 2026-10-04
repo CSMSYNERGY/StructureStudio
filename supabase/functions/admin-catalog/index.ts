@@ -4,6 +4,7 @@ import { checkAdminPassword } from "../_shared/adminGate.ts";
 import { checkAdminAuth } from "../_shared/adminAuth.ts";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
+import { linkOwnerRow, type LinkRole } from "../_shared/linkOwnerRow.ts";
 import { paidThroughOf } from "../_shared/billingPeriods.ts";
 import { pingAvalara } from "../_shared/salesTax.ts";
 import { finishLookup, insertLookup, PING_CLIENT_ID, pingResponse } from "../_shared/taxLookups.ts";
@@ -1616,13 +1617,15 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // 3. map the user to this client with the chosen role. Refuse to SILENTLY re-home a
         //    login already linked to a different client (operator typo / isolation footgun);
         //    require an explicit reassign:true to move them.
-        const existingLink = await sb.from("client_users").select("client_id").eq("user_id", user.id).maybeSingle();
+        const existingLink = await sb.from("client_users").select("client_id, role").eq("user_id", user.id).maybeSingle();
         if (existingLink.error) throw existingLink.error;
         if (existingLink.data && existingLink.data.client_id && existingLink.data.client_id !== clientId && p.reassign !== true) {
           throw new Error(`"${email}" is already linked to builder "${existingLink.data.client_id}". Pass reassign:true to move them to "${clientId}".`);
         }
+        // Not just `role`: access resolves from title + overrides, which a role-only upsert left
+        // behind from the old builder or the old role — see _shared/linkOwnerRow.ts.
         const up = await sb.from("client_users").upsert(
-          { user_id: user.id, client_id: clientId, role }, { onConflict: "user_id" });
+          linkOwnerRow(existingLink.data, user.id, clientId, role as LinkRole), { onConflict: "user_id" });
         if (up.error) throw up.error;
 
         // 4. always hand back a one-time set-password link (works without SMTP)
