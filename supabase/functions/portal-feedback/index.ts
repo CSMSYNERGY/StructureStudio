@@ -640,7 +640,10 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
         id
         board { id }
         column_values { id text value }
-        updates (limit: 50) { id text_body created_at creator { name } }
+        updates (limit: 50) {
+          id text_body created_at creator { name }
+          replies { id text_body created_at creator { name } }
+        }
       }
     }`;
     // deno-lint-ignore no-explicit-any
@@ -686,19 +689,27 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
       // was immutable and un-retractable in the tenant's My Submissions. Marked → overwrite;
       // unmarked → remove. Deleting on unmark preserves the safety property: internal chatter is
       // still never STORED, this only removes rows.
+      //
+      // A thread node is an update OR one of its REPLIES, exactly as in sync_all. The webhook
+      // mirrors a /client reply under its own replyId, and nothing else ever reads it back:
+      // this button is the only reconcile that runs (sync_all has no scheduler) and the webhook
+      // is not subscribed to edits. Walking top-level updates alone left every mirrored reply
+      // un-editable and un-retractable — and a reply whose webhook was missed never arrived.
       for (const u of it.updates ?? []) {
-        const text: string = u.text_body ?? "";
-        if (!CLIENT_MARKER.test(text)) {
-          await admin.from("feedback_comments").delete().eq("monday_update_id", String(u.id));
-          continue;
+        for (const node of [u, ...(u.replies ?? [])]) {
+          const text: string = node.text_body ?? "";
+          if (!CLIENT_MARKER.test(text)) {
+            await admin.from("feedback_comments").delete().eq("monday_update_id", String(node.id));
+            continue;
+          }
+          await admin.from("feedback_comments").upsert({
+            submission_id: row.id,
+            monday_update_id: String(node.id),
+            author_name: node.creator?.name ?? "Structure Studio",
+            body: text.replace(CLIENT_MARKER, "").trim(),
+            created_at: node.created_at ?? new Date().toISOString(),
+          }, { onConflict: "monday_update_id" });
         }
-        await admin.from("feedback_comments").upsert({
-          submission_id: row.id,
-          monday_update_id: String(u.id),
-          author_name: u.creator?.name ?? "Structure Studio",
-          body: text.replace(CLIENT_MARKER, "").trim(),
-          created_at: u.created_at ?? new Date().toISOString(),
-        }, { onConflict: "monday_update_id" });
       }
     }
     return json({ ok: true, refreshed });

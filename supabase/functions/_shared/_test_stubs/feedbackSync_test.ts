@@ -58,3 +58,19 @@ for (const [label, src] of [["portal-feedback refresh", REFRESH], ["webhook sync
     assert(cap <= 100, `${label} reads ${cap} rows; Monday returns at most 100 items per query`);
   });
 }
+
+// A /client REPLY is mirrored by the webhook under its OWN id (replyId). Both reconcile paths
+// must read replies back, or a mirrored reply can never be edited or retracted: the webhook is
+// not subscribed to edits, and `refresh` is the only reconcile that runs.
+for (const [label, src] of [["portal-feedback refresh", REFRESH], ["webhook sync_all", SYNC_ALL]] as const) {
+  Deno.test(`${label}: replies are fetched and reconciled like their parent updates`, () => {
+    assert(/updates\s*\(limit:\s*\d+\)\s*\{[\s\S]*?replies\s*\{\s*id\s+text_body/.test(src),
+      `${label} does not ask Monday for each update's replies`);
+    assert(/for \(const node of \[u, \.\.\.\(u\.replies \?\? \[\]\)\]\)/.test(src),
+      `${label} does not walk replies alongside their parent update`);
+    assert(/\.delete\([^)]*\)\.eq\("monday_update_id", String\(node\.id\)\)/.test(src),
+      `${label} does not retract an unmarked reply by its own id`);
+    assert(/monday_update_id: String\(node\.id\)/.test(src),
+      `${label} does not upsert a marked reply under its own id`);
+  });
+}
