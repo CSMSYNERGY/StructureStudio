@@ -982,6 +982,24 @@ function Dashboard({ session }) {
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [mirrorView, viewing && viewing.clientId, session.access_token]);
 
+  // ── A purchase or a cancellation refreshes the entitlement (BillingView's ss:entitlement) ──
+  // Both effects above fetch once per token, so without this a builder who paid from the
+  // BillingGate stayed behind it ("…unlock as soon as payment goes through" said the gate) and a
+  // feature bought in Settings → Billing stayed an upsell, until a reload. `target` is the tenant
+  // the status call was made for (the view-as target in that tick, null for your own), and an
+  // answer is only ever filed under that tenant: never your own state from a view-as answer —
+  // the audit 2026-08-20 split above — and never a builder you have since moved off.
+  useEffect(() => {
+    const onEnt = (ev) => {
+      const d = ev && ev.detail;
+      if (!d || !d.entitlement) return;
+      if (!d.target) { if (!viewing) setEntitlement(d.entitlement); return; }
+      setViewedCtx((prev) => (prev && prev.clientId === d.target ? { ...prev, entitlement: d.entitlement } : prev));
+    };
+    window.addEventListener("ss:entitlement", onEnt);
+    return () => window.removeEventListener("ss:entitlement", onEnt);
+  }, [viewing]);
+
   // Keep the address bar honest about where you actually are.
   //
   // Placement is doubly constrained, and BOTH constraints bit once.

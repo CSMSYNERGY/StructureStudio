@@ -1513,11 +1513,21 @@ function BillingView({ viewingLabel = null, section = "all" }) {
   const [autoThreshold, setAutoThreshold] = useState("");
   const [autoAmount, setAutoAmount] = useState("");
 
-  const load = useCallback(async () => {
+  // `announce` (after a purchase or a cancellation): also hand the fresh entitlement to the shell.
+  // The shell fetches its own copy once per token and nothing else ever refreshed it, so a builder
+  // who paid from the billing gate was told "You're subscribed" and left behind the gate, and a
+  // feature bought here stayed an upsell, until a reload. `target` is whose answer this is: the
+  // invoke wrapper injects the view-as target read in this tick, so the shell can file it under
+  // the right tenant (12-shell, the ss:entitlement listener).
+  const load = useCallback(async (announce) => {
     setError(null);
+    const target = ssTargetClientId || null;
     const { data: d, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "status" } });
     if (e || (d && d.error)) { setError((e && e.message) || d.error); setData({}); return; }
     setData(d || {});
+    if (announce === true && d && d.entitlement) {
+      try { window.dispatchEvent(new CustomEvent("ss:entitlement", { detail: { target, entitlement: d.entitlement } })); } catch (_x) { /* no CustomEvent */ }
+    }
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -1832,7 +1842,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
         setMsg({ ok: "You're subscribed — thank you!" });
       }
       setSel({});
-      await load();
+      await load(true);
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
@@ -1847,7 +1857,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "cancel", subscriptionId: s.id } });
       if (e || (r && r.error)) throw new Error((e && e.message) || r.error);
       setMsg({ ok: `${p.name || "Feature"} cancelled.` });
-      await load();
+      await load(true);
     } catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };

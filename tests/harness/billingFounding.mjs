@@ -137,6 +137,11 @@ const TENANTS = {
   }),
 };
 const DECLINE = "Harness stub: the card was declined, and nothing was charged.";
+// f: the new builder's account once Simple Layout is paid for.
+const ACTIVE_AFTER = {
+  ...statusAnswer({ hasCard: true, entitlement: { exempt: false, state: "active", locked: false, reason: "active", features: { ...allFeatures(false), simple_layout: true } } }),
+  subscriptions: [{ id: "sub-harness-1", plan_id: "simple_layout_annual", status: "active", price_cents: 195000, current_period_start: "2026-10-04T00:00:00Z", current_period_end: "2027-10-04T00:00:00Z", canceled_at: null, created_at: "2026-10-04T00:00:00Z", past_due_since: null }],
+};
 // g: a platform operator (own tenant OPS_CLIENT, internal) viewing CLIENT while it is locked.
 const OPS_CLIENT = "harness-ops";
 const LAPSED_WITH_CARD = { ...TENANTS.c, hasCard: true, entitlement: { ...TENANTS.c.entitlement, reason: "cancelled" } };
@@ -498,6 +503,29 @@ try {
     await S.page.evaluate(() => window.scrollTo(0, 0));
     await S.page.screenshot({ path: join(SHOTS, `billing-e-server-refusal${SHOT_TAG}.png`), fullPage: true });
     ok("e: no uncaught page errors", S.pageErrors.length === 0, S.pageErrors.join(" | "));
+    await S.ctx.close();
+  }
+
+  // ── f: paying from the billing gate lifts the gate, with no reload ──
+  // The shell fetches its entitlement once per token. BillingView hands it the fresh one after a
+  // purchase (ss:entitlement); before that the builder was told "You're subscribed" and left behind
+  // the gate ("…unlock as soon as payment goes through", it says) until they reloaded.
+  {
+    const S = await open("f", TENANTS.c, "/portal/designs", {
+      subscribeAnswer: { status: 200, body: { ok: true, subscriptions: [], failed: [] } },
+      statusAfterSubscribe: ACTIVE_AFTER,
+    });
+    const loaded = await waitText(S.page, "Choose your features");
+    ok("f: a new builder lands on the billing gate", loaded && (await text(S.page)).includes("Activate your account"));
+    await S.page.evaluate(() => { window.__sameDocument = true; });
+    const btn = checkoutButton(S.page);
+    if (await btn.count()) { await btn.first().scrollIntoViewIfNeeded(); await btn.first().click(); }
+    const thanked = await waitText(S.page, "You're subscribed", 10000);
+    ok("f: the stubbed checkout succeeds and says so", thanked && actions(S, "subscribe").length === 1, JSON.stringify(actions(S, "subscribe")));
+    const lifted = await S.page.waitForFunction(() => !document.body.innerText.includes("Activate your account"), null, { timeout: 8000 }).then(() => true, () => false);
+    ok("f: the gate lifts by itself, no reload needed", lifted);
+    ok("f: …in the same document (nothing reloaded the page)", (await S.page.evaluate(() => window.__sameDocument === true)));
+    ok("f: no uncaught page errors", S.pageErrors.length === 0, S.pageErrors.join(" | "));
     await S.ctx.close();
   }
 
