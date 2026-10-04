@@ -2689,18 +2689,29 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       { const e = tooMany(lines, "lines"); if (e) { skipped.push(`${styleName} ${width}x${length}: ${e}`); continue; } }
       const rows: Record<string, unknown>[] = [];
       const seen = new Set<string>();
+      // A quantity that is not a number ("12 ea", "two" — null on the wire, see
+      // _shared/rtpImportValues.ts) or is negative used to read as 0 = "not used", and since this
+      // block FULL-REPLACES the size's bill of materials the line was deleted and the building
+      // re-priced without it. saveBom in the portal refuses the same input; here the size is left
+      // as it was and named instead. A blank cell still arrives as 0 and still means "not used".
+      const badQty: string[] = [];
       for (const [i, ln] of (lines as unknown[]).entries()) {
         const l = ln as { material?: unknown; section?: unknown; qty?: unknown };
         const matName = String(l.material ?? "").trim();
         const section = SECTIONS.has(String(l.section ?? "")) ? String(l.section) : "other";
-        const qty = Number(l.qty);
+        const qty = typeof l.qty === "string" && l.qty.trim() === "" ? 0 : rtpImportNumber(l.qty);
         const materialId = idByName.get(matName.toLowerCase());
         if (!materialId) { if (matName) skipped.push(`${styleName} ${width}x${length}: material "${matName}" is not on the Materials sheet`); continue; }
-        if (!Number.isFinite(qty) || qty <= 0) continue; // blank/zero qty = not used on this building
+        if (!Number.isFinite(qty) || qty < 0) { badQty.push(matName); continue; }
+        if (qty === 0) continue; // blank/zero qty = not used on this building
         const key = `${materialId}|${section}`;
         if (seen.has(key)) { skipped.push(`${styleName} ${width}x${length}: "${matName}" listed twice under ${section}`); continue; }
         seen.add(key);
         rows.push({ client_id: clientId, size_id: sizeId, material_id: materialId, section, qty, sort_order: i });
+      }
+      if (badQty.length) {
+        skipped.push(`${styleName} ${width}x${length}: not updated — these quantities aren't usable numbers: ${badQty.join(", ")}`);
+        continue;
       }
       const del = await admin.from("rtp_bom_lines").delete().eq("size_id", sizeId).eq("client_id", clientId);
       if (del.error) { skipped.push(`${styleName} ${width}x${length}: ${del.error.message}`); continue; }
