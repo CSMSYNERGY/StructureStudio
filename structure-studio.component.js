@@ -22784,7 +22784,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       return;
     }
 
-    setItems((p) => p.map((i) => i.id !== selectedId ? i : { ...i, rotation: ((i.rotation || 0) + 90) % 360 }));
+    // Re-clamp into the building at the TURNED footprint, as the drag's rotation-aware clamp does.
+    // A long, thin item (a bicycle is 0.7 x 5.6 ft) parked against a wall and turned used to swing
+    // half its length out through that wall — on the plan, the PDF and the 3D — and stay there
+    // until someone happened to drag it. Notes live in page space and are not the building's.
+    setItems((p) => p.map((i) => {
+      if (i.id !== selectedId) return i;
+      const rot = ((i.rotation || 0) + 90) % 360;
+      if (!c || c.noteType) return { ...i, rotation: rot };
+      const w = i.widthFt || c.width || 0, h = i.heightFt || c.height || 0;
+      const turned = rot === 90 || rot === 270;
+      const hw = (turned ? h : w) / 2, hh = (turned ? w : h) / 2;
+      const cx = Math.max(hw, Math.min((i.x - mgX) / scale, bldgW - hw));
+      const cy = Math.max(hh, Math.min((i.y - mgY) / scale, bldgH - hh));
+      return { ...i, rotation: rot, x: mgX + cx * scale, y: mgY + cy * scale };
+    }));
   };
   // Centre the selected item on its wall. Carolyn relayed the request on 2026-09-03 from a
   // builder about to sign up: "he was asking, oh, can we not have it snap to the center?"

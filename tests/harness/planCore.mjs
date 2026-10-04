@@ -306,5 +306,22 @@ try {
     ok("H: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
     await page.close();
   }
+  if (want("I")) {
+    // A bicycle (0.7 x 5.6 ft) parked upright against the west wall, then turned with Rotate.
+    const bike = { id: 1, type: "prop", propKind: "bike", x: px(0.35), y: py(5), rotation: 0, wall: null, widthFt: 0.7, heightFt: 5.6 };
+    const { page, errors } = await openWith(ctx, [bike]);
+    const b0 = ((await readItems(page)) || [])[0];
+    await clickSvg(page, { x: b0.x, y: b0.y });
+    await page.getByRole("button", { name: /Rotate/ }).first().click();
+    await settle(page, 400);
+    const b1 = ((await readItems(page)) || [])[0];
+    const g = await geom(page);
+    const half = (b1.rotation === 90 || b1.rotation === 270 ? b1.heightFt : b1.widthFt) / 2;
+    const l = g.ftX(b1.x) - half, r = g.ftX(b1.x) + half;
+    ok("I: the bike turned", b1.rotation === 90, `rotation ${b1.rotation}`);
+    ok("I: turning it against the wall keeps it inside the building", l > -0.01 && r < W + 0.01, `spans ${l.toFixed(2)}..${r.toFixed(2)} ft across a ${W} ft building`);
+    ok("I: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
+    await page.close();
+  }
 } finally { await browser.close(); }
 process.exit(failed().length ? 1 : 0);
