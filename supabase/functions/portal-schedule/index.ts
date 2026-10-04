@@ -1050,19 +1050,25 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // it can seed rows, and writes do not belong in a read wave.
       const stages = await getStages();
       const stageById = Object.fromEntries(stages.map((s) => [s.id, s]));
+      // All three are WHOLE-SET reads the Orders column is computed from, so they are PAGED
+      // (see fetchAll). They used to be `.limit(2000)` / unbounded on unordered queries, which
+      // PostgREST silently caps at 1000: past 1000 build jobs, a random slice of scheduled
+      // buildings came back as "Add to build schedule" (create_job then 409s), and past 1000
+      // sold units a random slice of lot sales was offered a BUILD instead of a delivery.
       const [jobsRes, stopsRes, soldUnitsRes] = await Promise.all([
-        admin.from("build_jobs").select("id, design_short_code, inventory_unit_id, stage_id")
-          .eq("client_id", clientId).limit(2000),
+        fetchAll((from, to) => admin.from("build_jobs").select("id, design_short_code, inventory_unit_id, stage_id")
+          .eq("client_id", clientId).order("id").range(from, to)),
         // Which units already ride a load, so a row offers "Schedule delivery" only when
         // there isn't one open already (add_stop would 409).
-        admin.from("delivery_stops").select("inventory_unit_id")
-          .eq("client_id", clientId).is("delivered_at", null),
+        fetchAll((from, to) => admin.from("delivery_stops").select("inventory_unit_id")
+          .eq("client_id", clientId).is("delivered_at", null).order("id").range(from, to)),
         // A LOT SALE looks like any other order on the Orders page — it has its own sale
         // design and its own orders row — but the building already exists, so it goes
         // straight to delivery and must never be offered a build. This map is how Orders
         // tells the two apart: sale design code -> the unit being sold.
-        admin.from("inventory_units").select("id, serial, sold_design_short_code")
-          .eq("client_id", clientId).eq("sale_state", "sold").not("sold_design_short_code", "is", null).limit(2000),
+        fetchAll((from, to) => admin.from("inventory_units").select("id, serial, sold_design_short_code")
+          .eq("client_id", clientId).eq("sale_state", "sold").not("sold_design_short_code", "is", null)
+          .order("id").range(from, to)),
       ]);
       if (jobsRes.error) throw jobsRes.error;
       const jobs = jobsRes.data;
