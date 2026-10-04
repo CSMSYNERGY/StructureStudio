@@ -2656,6 +2656,10 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
   const profName = (p) => p ? (p.display_name || nameOf[p.user_id] || "Driver") : "No driver";
   const terrName = {}; territories.forEach((t) => { terrName[t.id] = t.name; });
   const stopsByLoad = {}; stops.forEach((s) => { (stopsByLoad[s.load_id] = stopsByLoad[s.load_id] || []).push(s); });
+  // One lookup, not loads.find() inside the table's sort comparator — `loads` is the tenant's
+  // whole load history now that the read is paged rather than capped at 500, and a find per
+  // comparison made that sort quadratic in it.
+  const loadById = {}; loads.forEach((l) => { loadById[l.id] = l; });
   Object.keys(stopsByLoad).forEach((k) => stopsByLoad[k].sort((a, b) => a.stop_order - b.stop_order));
 
   // `jobs` = every non-repair building on the build board without a stop (orders,
@@ -3282,10 +3286,10 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
                   30 rows of it at a time. Sorting is a permutation, so stops.length below is
                   the same total either way. */}
               {stops.slice().sort((a, b) => {
-                const la = loads.find((x) => x.id === a.load_id) || {}; const lb = loads.find((x) => x.id === b.load_id) || {};
+                const la = loadById[a.load_id] || {}; const lb = loadById[b.load_id] || {};
                 return String(la.load_date || "9999").localeCompare(String(lb.load_date || "9999")) || a.stop_order - b.stop_order;
               }).slice((curPage - 1) * pageSize, curPage * pageSize).map((s) => {
-                const l = loads.find((x) => x.id === s.load_id) || {};
+                const l = loadById[s.load_id] || {};
                 return (
                   <tr key={s.id}>
                     <td style={{ ...S.td, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{s.serial ? "#" + s.serial : (s.repair_id ? "R" : "—")}</td>
