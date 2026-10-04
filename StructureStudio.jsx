@@ -23496,8 +23496,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // A new wing on `wall` (a building word: left, right, front, back), outside any already there: 8 ft wide,
   // everything else blank.
   const calWingListAdd = (wall) => calEditWingList((list) => list.concat([{ wall, widthFt: 8 }]));
+  // Move and ✕ hand list indices to other wings, so a wing's focus key ("wl<i>-...", lit by a click on the Plan)
+  // would light a different wing: it goes.
+  const calWingListUnfocus = () => { if (typeof calFocus === "string" && /^wl\d+-/.test(calFocus)) setCalFocus(null); };
   // Move in (dir -1, toward the middle) or out (+1): swap places with the next wing in or out on that wall.
-  const calWingListMove = (i, dir) => calEditWingList((list) => {
+  const calWingListMove = (i, dir) => { calWingListUnfocus(); calEditWingList((list) => {
     const w = list[i] && list[i].wall;
     const on = (x) => !!(x && typeof x === "object" && x.wall === w && d3WlNum(x.widthFt) > 0.5);
     let j = i + dir;
@@ -23506,9 +23509,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const out = list.slice();
     out[i] = list[j]; out[j] = list[i];
     return out;
-  });
+  }); };
   // One wing off. The wings outside it move in and meet what it met; nothing else is removed.
-  const calWingListRemove = (i) => calEditWingList((list) => list.filter((_, j) => j !== i));
+  const calWingListRemove = (i) => { calWingListUnfocus(); calEditWingList((list) => list.filter((_, j) => j !== i)); };
   // WHERE A LEAN-TO OR THE WINGS MEET THE BUILDING (roof.leanToAttach / wingAttach, 2026-09-28). The
   // mode and its distance travel together: picking "roof" or "wall" with no distance yet starts it at
   // 1 ft (a switch never leaves an empty field, the calSetWings rule), and "At the eave" / "Automatic"
@@ -29697,9 +29700,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             <span className="ssd-plan-meta">{bldgW} × {bldgH} ft, from above</span>
           </div>
           {d3WingListPlanSVG({ spec, sizeLabel: sel.size, focusKey: calFocus, onPick: (i) => {
-            const e = roof.wingList[i];
-            setCalFocus("wl" + i + "-widthFt");
-            setCalDraft(e && e.widthFt != null ? String(e.widthFt) : "");
+            // A key no box carries, so it lights the card and the drawings and takes over no box's value: as
+            // "wl<i>-widthFt" with a draft, that box kept showing this wing's width after Move or ✕ handed its
+            // index to another wing (and after the wings went off and on), with no box ever focused to clear it.
+            setCalFocus("wl" + i + "-plan");
             const el = document.querySelector('[data-ss-adv-wl="' + i + '"]');
             if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
           } })}
