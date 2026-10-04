@@ -674,6 +674,29 @@ function reflowItems(items, prev, next, ITEMS, gablePlace) {
       if (wFt !== wasW || hFt !== wasH) events.push({ id: it.id, type: it.type, label: labelOf(it), kind: "resized", to: wFt });
       cxFt = Math.max(wFt / 2, Math.min(cxFt, next.w - wFt / 2));
       cyFt = Math.max(hFt / 2, Math.min(cyFt, next.h - hFt / 2));
+      // ⚠️ LOFTS MUST NOT OVERLAP AFTER THE MOVE EITHER. Scaling each loft's centre on its own
+      // keeps it inside the box but not clear of its neighbours: two lofts snapped flush grow a
+      // 4(1-k) ft overlap when the length shrinks by k, and side-by-side lofts collapse into each
+      // other when the width does — silently, and both are summed into the loft square footage on
+      // the quote. Every gesture refuses an overlap (0.1 ft slack, the same as here); this is the
+      // reflow's half. A loft that lands on one already placed goes FLUSH against it, on the
+      // nearest side that fits and is clear (the drag's magnets would put it there too); when no
+      // side does, it is blocked, and the size change is reverted with the reason, like any wall
+      // item that cannot be seated.
+      const others = placed.filter((o) => o.type === "loft").map((o) => {
+        const ocx = (o.x - B.mgX) / B.scale, ocy = (o.y - B.mgY) / B.scale;
+        return { l: ocx - o.widthFt / 2, r: ocx + o.widthFt / 2, t: ocy - o.heightFt / 2, b: ocy + o.heightFt / 2 };
+      });
+      const clearAt = (cx, cy) => !others.some((o) => cx - wFt / 2 < o.r - 0.1 && cx + wFt / 2 > o.l + 0.1 && cy - hFt / 2 < o.b - 0.1 && cy + hFt / 2 > o.t + 0.1);
+      const fitsAt = (cx, cy) => cx >= wFt / 2 - 1e-6 && cx <= next.w - wFt / 2 + 1e-6 && cy >= hFt / 2 - 1e-6 && cy <= next.h - hFt / 2 + 1e-6;
+      if (!clearAt(cxFt, cyFt)) {
+        const cands = [];
+        others.forEach((o) => { cands.push([cxFt, o.b + hFt / 2], [cxFt, o.t - hFt / 2], [o.r + wFt / 2, cyFt], [o.l - wFt / 2, cyFt]); });
+        const best = cands.filter(([cx, cy]) => fitsAt(cx, cy) && clearAt(cx, cy))
+          .sort((a, b) => Math.hypot(a[0] - cxFt, a[1] - cyFt) - Math.hypot(b[0] - cxFt, b[1] - cyFt))[0];
+        if (!best) { events.push({ id: it.id, type: it.type, label: labelOf(it), kind: "blocked" }); byId.set(it.id, it); continue; }
+        cxFt = best[0]; cyFt = best[1];
+      }
       const nit = { ...it, x: B.mgX + cxFt * B.scale, y: B.mgY + cyFt * B.scale, widthFt: wFt, heightFt: hFt };
       byId.set(it.id, nit); placed.push(nit);
       continue;
