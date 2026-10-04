@@ -419,14 +419,23 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Billing posture per tenant, so the console can show at a glance who is comped
         // and who is discounted. client_settings is service-role only — this function is
         // the only place it can be read from.
-        const { data: cs } = await sb.from("client_settings")
+        // ⚠️ All three reads below THROW on error rather than defaulting to empty. The console
+        // seeds editable state from this answer and writes it back whole: an unread
+        // client_settings showed every tenant as billable at 0%, so one Save on the Billing
+        // card (set_billing sends billingExempt every time) cleared a real exemption and locked
+        // that tenant out; an unread grant list showed nobody holding a comp, so the 3D toggle
+        // (set_feature_grants REPLACES the set) revoked every other grant the tenant had. A
+        // console that fails to load is recoverable; a confidently wrong one that saves is not.
+        const { data: cs, error: csErr } = await sb.from("client_settings")
           .select("client_id, billing_exempt, billing_exempt_until, discount_percent, discount_features");
+        if (csErr) throw csErr;
         const byId = new Map((cs ?? []).map((r: any) => [r.client_id, r]));
         // The billable feature list, so the console can offer a per-feature discount
         // picker without hardcoding a copy of the catalogue that would drift from
         // billing_plans. One entry per feature (monthly/annual share a feature).
-        const { data: planRows } = await sb.from("billing_plans")
+        const { data: planRows, error: planErr } = await sb.from("billing_plans")
           .select("feature, name, availability, required, operator_grantable").eq("active", true).order("sort_order", { ascending: false });
+        if (planErr) throw planErr;
         const seenFeature = new Set<string>();
         const features = (planRows ?? []).filter((p: any) => {
           if (!p.feature || seenFeature.has(p.feature)) return false;
@@ -435,8 +444,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         }).map((p: any) => ({ feature: p.feature, name: p.name, availability: p.availability, required: p.required, operatorGrantable: Boolean(p.operator_grantable) }));
         // Operator grants per tenant (migration 109) — the console's "Early access" card.
         // client_feature_grants is service-role only, so this function is the only reader.
-        const { data: grantRows } = await sb.from("client_feature_grants")
+        const { data: grantRows, error: grantErr } = await sb.from("client_feature_grants")
           .select("client_id, feature, expires_at");
+        if (grantErr) throw grantErr;
         const grantsById = new Map<string, any[]>();
         for (const g of (grantRows ?? []) as any[]) {
           const arr = grantsById.get(g.client_id) ?? [];
