@@ -879,7 +879,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       const [stopsRes, jobsAllRes, soldRes, locsRes, openRepairsRes, territories, drivers] =
         await Promise.all([
           fetchAll((from, to) => admin.from("delivery_stops")
-            .select("build_job_id, inventory_unit_id, repair_id, design_short_code, delivered_at, territory_id, dest_city, dest_zip")
+            .select("build_job_id, inventory_unit_id, repair_id, design_short_code, delivered_at, territory_id, dest_city, dest_zip, created_at")
             .eq("client_id", clientId).order("id").range(from, to)),
           fetchAll((from, to) => admin.from("build_jobs").select("*")
             .eq("client_id", clientId).neq("source", "repair").order("id").range(from, to)),
@@ -913,10 +913,19 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // BEFORE it becomes a stop. Same rule add_stop applies on insert — kept in step by
       // being the same two lookups, so the group a building sits in is the territory it
       // will actually get.
+      //
+      // ...over the SAME rows in the SAME order, or "first match wins" picks a different
+      // winner: add_stop reads the 200 newest stops that carry a territory, newest first,
+      // while this loop used to walk every stop in id (random uuid) order. A town whose
+      // corridor had changed — Sedalia moved from West to Central on recent stops — was
+      // grouped under whichever old stop's uuid sorted first, then got the other territory
+      // the moment it was added to a load.
       const terrByZip: Record<string, string> = {};
       const terrByCity: Record<string, string> = {};
-      for (const s of stops ?? []) {
-        if (!s.territory_id) continue;
+      const terrStops = (stops ?? []).filter((s) => s.territory_id)
+        .sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")))
+        .slice(0, 200);
+      for (const s of terrStops) {
         if (s.dest_zip && !terrByZip[s.dest_zip]) terrByZip[s.dest_zip] = s.territory_id;
         const c = s.dest_city ? String(s.dest_city).trim().toLowerCase() : "";
         if (c && !terrByCity[c]) terrByCity[c] = s.territory_id;
