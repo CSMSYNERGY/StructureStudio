@@ -21644,7 +21644,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (pendingRemoval) return;
     const pt = getSvgPt(e);
     if (!activeTool) {
-      const hit = [...items].reverse().find((it) => {
+      // TOPMOST FIRST, in the order the plan DRAWS them: ramps are painted first so the door sits on
+      // top of its ramp (the same sort as the SVG item map and renderExportCanvas), so they must be
+      // hit LAST. Raw reverse order asked the ramp first, because it is added after its door, and a
+      // ramp's box covers the whole door bar it hangs from: clicking the door selected the ramp
+      // under it, and a door with a ramp as wide as itself could not be selected by click at all.
+      const hit = [...items].sort((a, b) => (a.type === "ramp" ? 0 : 1) - (b.type === "ramp" ? 0 : 1)).reverse().find((it) => {
         const c = ITEMS[it.type]; if (!c) return false;
         if (c.lineType) {
           // Distance from click to the line segment
