@@ -49,11 +49,27 @@ export async function settingsMe(env: Env, req: Request): Promise<Response> {
     }
   }
 
-  const row = { user_id: c.userId, client_id: c.ctx.client_id, updated_at: new Date().toISOString(), ...patch };
-  const saved = must(
+  const nowIso = new Date().toISOString();
+  const row = { user_id: c.userId, client_id: c.ctx.client_id, updated_at: nowIso, ...patch };
+  let saved = must(
     await c.admin.from("phone_user_settings").upsert(row, { onConflict: "user_id" }).select("dnd, dnd_until, forward_to_cell").single(),
     "save phone settings",
   ) as { dnd: boolean; dnd_until: string | null; forward_to_cell: string | null } | null;
+  // Turning DND on without an end time must not inherit the end of an earlier timed DND that
+  // has already passed: the upsert keeps the old dnd_until, and a passed one reads as OFF here
+  // and in phone_route_for_number, so the switch did nothing and calls kept ringing. A timer
+  // still running is left alone (only a passed one is cleared, and only if it still is).
+  if (body.dnd === true && body.dnd_until === undefined && saved?.dnd_until) {
+    const until = Date.parse(saved.dnd_until);
+    if (Number.isFinite(until) && until <= Date.now()) {
+      const cleared = must(
+        await c.admin.from("phone_user_settings").update({ dnd_until: null, updated_at: nowIso })
+          .eq("user_id", c.userId).lte("dnd_until", new Date().toISOString()).select("dnd, dnd_until, forward_to_cell"),
+        "clear passed dnd_until",
+      ) as { dnd: boolean; dnd_until: string | null; forward_to_cell: string | null }[] | null;
+      if (cleared?.length) saved = cleared[0];
+    }
+  }
   const s = saved ?? { dnd: false, dnd_until: null, forward_to_cell: null };
   return ok({
     settings: {
