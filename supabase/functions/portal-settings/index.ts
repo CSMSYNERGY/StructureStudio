@@ -11969,10 +11969,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // "Invoice to approve". ⚠️ Selecting it before the column exists 500s this whole read,
       // which empties the Orders tab — migration 229 must be applied BEFORE this deploys.
       : "short_code, contact_id, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at, ss_invoice_requested_at";
-    const { data, error } = await admin.from("designs")
-      .select(cols).eq("client_id", clientId).in("short_code", codes).limit(2000);
-    if (error) return dbFail(req, clientId, "read the designs for these orders", error);
-    const visible = await visibleDesignRows((data || []) as { contact_id?: string | null }[]);
+    // CHUNKED, because `in.(…)` rides in the URL even from here. The browser moved this read
+    // to POST precisely so 2000 codes would fit, but one PostgREST GET carrying them all is
+    // ~16 bytes a code (commas encode as %2C): 500 codes is already an 8 KB request line and
+    // 2000 is 33 KB, past what the gateway accepts — so a tenant with a few hundred orders
+    // lost the WHOLE Orders tab ("Couldn't load orders"). 200 codes is ~3 KB. Parallel, and
+    // each chunk is client-scoped exactly as the single read was.
+    const DESIGN_CHUNK = 200;
+    const chunks: string[][] = [];
+    for (let i = 0; i < codes.length; i += DESIGN_CHUNK) chunks.push(codes.slice(i, i + DESIGN_CHUNK));
+    const reads = await Promise.all(chunks.map((c) =>
+      admin.from("designs").select(cols).eq("client_id", clientId).in("short_code", c).limit(DESIGN_CHUNK)
+    ));
+    const failed = reads.find((r) => r.error);
+    if (failed) return dbFail(req, clientId, "read the designs for these orders", failed.error);
+    const data = reads.flatMap((r) => r.data || []);
+    const visible = await visibleDesignRows(data as { contact_id?: string | null }[]);
     if (!visible) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
     return json({ ok: true, designs: visible });
   }
