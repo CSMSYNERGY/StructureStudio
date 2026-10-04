@@ -22005,6 +22005,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const wFt = (Number(fx.widthIn) || 36) / 12;
       const cur = items.find((it) => it.id === swapId);
       if (!cur || !cur.wall) { setSwapId(null); setDoorPick(null); return; }
+      // ⚠️ A RAISED DOOR IS NOT A RAMP ANCHOR (the loft door — see doorSillStamps). The ramp tool
+      // keeps raised doors out of its pool so a ramp is never priced and drawn on the ground under a
+      // door 7 ft up a gable end; swapping a ramped walk door FOR a loft door was the way round that
+      // rule, carrying the ramp along. Refuse, as the ramp tool refuses a second ramp, rather than
+      // silently deleting a priced item the customer chose.
+      if (ssDoorSillFt(doorSillStamps(fx)) && items.some((it) => it.type === "ramp" && it.snapDoorId === swapId)) {
+        setToast("That door sits up off the floor, so it can't have this door's ramp — remove the ramp first, then swap.");
+        setTimeout(() => setToast(null), 5000);
+        setSwapId(null); setDoorPick(null);
+        return;
+      }
       if (wFt > (cur.wall === "north" || cur.wall === "south" ? pW : pH) / scale + 1e-6) {
         setToast("That door is wider than this wall — pick a narrower door.");
         setTimeout(() => setToast(null), 4000);

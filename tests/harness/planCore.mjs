@@ -42,7 +42,10 @@ const FIXTURES = {
   items: [{ id: "d-dbl", name: "Harness Double Door", price: 600, widthIn: 72, heightIn: 80, category: "door", colorMode: "fixed", planLabel: "DD", sortOrder: 0, imageUrl: null,
     sillIn: null, sillMode: "fixed", opLeft: false, opRight: false, opDouble: true, opSlideUp: false, opDefault: "double", swingIn: false, swingOut: true, swingDefault: null, hasTrimColor: false },
   { id: "d-sgl", name: "Harness Single Door", price: 300, widthIn: 36, heightIn: 80, category: "door", colorMode: "fixed", planLabel: "SD", sortOrder: 1, imageUrl: null,
-    sillIn: null, sillMode: "fixed", opLeft: false, opRight: true, opDouble: false, opSlideUp: false, opDefault: "right", swingIn: false, swingOut: true, swingDefault: null, hasTrimColor: false }],
+    sillIn: null, sillMode: "fixed", opLeft: false, opRight: true, opDouble: false, opSlideUp: false, opDefault: "right", swingIn: false, swingOut: true, swingDefault: null, hasTrimColor: false },
+  // A loft door: 90 in off the floor (doorSillStamps), the one door a ramp can never anchor to.
+  { id: "d-loft", name: "Harness Loft Door", price: 400, widthIn: 36, heightIn: 48, category: "door", colorMode: "fixed", planLabel: "LD", sortOrder: 2, imageUrl: null,
+    sillIn: 90, sillMode: "fixed", opLeft: false, opRight: true, opDouble: false, opSlideUp: false, opDefault: "right", swingIn: false, swingOut: true, swingDefault: null, hasTrimColor: false }],
   windowColors: [],
 };
 const only = (process.env.SS_CASES || "").split(",").filter(Boolean);
@@ -150,6 +153,22 @@ try {
       const d2 = it2.find((i) => i.type === "fixtureDoor"), r2 = it2.find((i) => i.type === "ramp");
       ok("B: after swapping to the 3 ft door its simple ramp is 3 ft wide too", !!d2 && !!r2 && Math.abs(d2.widthFt - 3) < 1e-6 && Math.abs(r2.widthFt - 3) < 1e-6,
         JSON.stringify({ door: d2 && d2.widthFt, ramp: r2 && r2.widthFt }));
+      // G: swapping that ramped walk door for a LOFT door (7'6" up) is refused: no ramp under a raised door.
+      if (d2) {
+        await clickSvg(page, { x: d2.x, y: d2.y });
+        await page.getByRole("button", { name: /Swap/ }).first().click();
+        await settle(page, 300);
+        await page.getByText(FIXTURES.items[2].name, { exact: true }).first().click({ timeout: 10000 });
+        await settle(page, 300);
+        await page.getByRole("button", { name: "Place door" }).click();
+        await settle(page, 600);
+        const it3 = (await readItems(page)) || [];
+        const d3 = it3.find((i) => i.type === "fixtureDoor"), r3 = it3.find((i) => i.type === "ramp");
+        const said = await page.evaluate(() => document.body.innerText.includes("remove the ramp first"));
+        ok("G: a ramped walk door is not swapped for a loft door (the ramp would stand under a raised door)",
+          !!d3 && d3.fixtureItemId === "d-sgl" && !d3.sillFt && !!r3 && r3.snapDoorId === d3.id, JSON.stringify({ door: d3 && d3.fixtureItemId, sill: d3 && d3.sillFt, ramp: !!r3 }));
+        ok("G: ...and the refusal says why", said);
+      }
     }
     ok("B: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
     await page.close();
