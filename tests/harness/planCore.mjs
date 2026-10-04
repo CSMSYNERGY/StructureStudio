@@ -22,9 +22,12 @@ const CONFIG = {
   clientId: CLIENT,
   branding: { companyName: "Harness Sheds", accentColor: "#1D4ED8", headerBg: "#FFFFFF", tagline: null, logo: null },
   contactFields: ["name", "email", "phone"],
-  buildingStyles: [{ value: "utility", label: "Utility", img: null, sizes: [SIZE], sizeInclusions: {}, sizeInclusionQty: {} }],
+  buildingStyles: [{ value: "utility", label: "Utility", img: null, sizes: [SIZE], sizeInclusions: {}, sizeInclusionQty: {} },
+    // 10 ft walls: what a vent's height is measured down from.
+    { value: "tall", label: "Tall Utility", img: null, sizes: [SIZE], sizeInclusions: {}, sizeInclusionQty: {},
+      d3: { roof: { type: "gable", pitch: 0.4, overhang: 0.5 }, siding: "panel", colors: { body: "#eeebe0", trim: "#686c70", roof: "#5f6266" }, wallHeightFt: 10 } }],
   defaultSizes: [SIZE],
-  sizePricing: { utility: { [SIZE]: { widthFt: W, lengthFt: L, basePrice: 9000 } } },
+  sizePricing: { utility: { [SIZE]: { widthFt: W, lengthFt: L, basePrice: 9000 } }, tall: { [SIZE]: { widthFt: W, lengthFt: L, basePrice: 9500 } } },
   options: [], colors: [], claddingOptions: [], wallHeightOptions: {},
   showPricing: true, view3d: false,
   layoutItems: {
@@ -75,11 +78,11 @@ async function clickSvg(page, p) { const s = await svgPoint(page, p.x, p.y); awa
 
 // A design opened from a share link: the only way to start from an exact layout, off the foot grid
 // where a free drag leaves things.
-async function openWith(ctx, items) {
+async function openWith(ctx, items, style = "utility") {
   const page = await ctx.newPage();
   const errors = collectErrors(page);
   const row = {
-    short_code: "SS-HARNPC01", status: "draft", selections: { style: "utility", size: SIZE }, items,
+    short_code: "SS-HARNPC01", status: "draft", selections: { style, size: SIZE }, items,
     contact: { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" },
     paint_colors: { body: "", trim: "" }, custom_options: [], ro_dimensions: {},
   };
@@ -219,6 +222,22 @@ try {
     ok("E: B's top pushed up into A stops flush, not inside it", edges(B2).t >= edges(A2).b - 0.1 && Math.abs(edges(B2).t - edges(A2).b) < 0.31, `A bottom ${edges(A2).b.toFixed(3)} B top ${edges(B2).t.toFixed(3)}`);
     void iw;
     ok("E: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
+    await page.close();
+  }
+  if (want("F")) {
+    // 10 ft walls. A vent at its top spot on the north wall (8'8"..9'8" off the floor), and a 4 ft
+    // tall catalog window (3'6"..7'6") further along the same wall, dragged in under the vent.
+    const vent = { id: 1, type: "window", x: px(7), y: G.mgY, rotation: 0, wall: "north", widthFt: 1, heightFt: 0.5, isVent: true,
+      fixtureItemId: "v-std", windowName: "Harness Vent", planLabel: "VENT", widthIn: 12, heightIn: 12, sillFt: null, sillMode: "fixed" };
+    const win = { id: 2, type: "window", x: px(2), y: G.mgY, rotation: 0, wall: "north", widthFt: 3, heightFt: 0.5,
+      fixtureItemId: "w-48", windowName: "Harness Tall Window", planLabel: "W48", widthIn: 36, heightIn: 48 };
+    const { page, errors } = await openWith(ctx, [vent, win], "tall");
+    const w0 = ((await readItems(page)) || []).find((i) => i.id === 2);
+    await drag(page, { x: w0.x, y: w0.y }, { x: px(7), y: w0.y });
+    const w1 = ((await readItems(page)) || []).find((i) => i.id === 2);
+    const g = await geom(page);
+    ok("F: on a 10 ft wall a 4 ft window drags in under a top-spot vent (as the 3D allows)", w1 && Math.abs(g.ftX(w1.x) - 7) < 0.15, `window centre ${w1 && g.ftX(w1.x).toFixed(2)} ft`);
+    ok("F: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
     await page.close();
   }
 } finally { await browser.close(); }

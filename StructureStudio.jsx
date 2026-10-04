@@ -22530,8 +22530,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // workbench silently succeeded, producing the exact layout the workbench-side toast prevents.
       const dOthers = items.filter((i) => i.id !== dragging.id);
       const dCand = { ...it, ...sn, widthFt: iWidthFt };
-      if (checkDoorCollision(dCand, { ...cfg, width: iWidthFt }, dOthers, ITEMS, scale)) { refuseDrag(SS_REFUSE_WALL); return; }
-      if (checkWallSlabOverlap(sn, iWidthFt * scale, dOthers, ITEMS, scale, dCand)) { refuseDrag(SS_REFUSE_SLAB); return; }
+      // Against the building's REAL plate, as the 3D wallOnly drag passes dH3: a vent's band is
+      // measured down from the plate (ssVentSpan), and without it every vent read as if under an
+      // 8 ft plate. On a 10 ft wall that put a top-spot vent 2 ft lower than drawn, so a 4 ft
+      // window dragged under it was refused here while the 3D let the same move through; on a 7 ft
+      // wall it put the vent a foot HIGHER, so a window could be dragged straight through it.
+      const dH = ventRoof2D().H;
+      if (checkDoorCollision(dCand, { ...cfg, width: iWidthFt }, dOthers, ITEMS, scale, dH)) { refuseDrag(SS_REFUSE_WALL); return; }
+      if (checkWallSlabOverlap(sn, iWidthFt * scale, dOthers, ITEMS, scale, dCand, dH)) { refuseDrag(SS_REFUSE_SLAB); return; }
       // A ramp snapped to this door must follow it (position + wall); otherwise it
       // detaches and the stale geometry is rasterized into the exported PDF. (audit #F4)
       // rampPlacementForDoor honours the ramp's own depth (catalog ramps vary), so it
