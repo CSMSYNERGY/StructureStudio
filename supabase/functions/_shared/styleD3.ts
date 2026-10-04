@@ -70,7 +70,15 @@ const CLAMPS: Record<string, [number, number]> = {
   // off switch, which is why every lower bound here is 0 rather than a real minimum.
   leanToWidthFt: [0, 16],     // feet the appendage projects past the eave wall
   leanToDropFt: [0, 6],       // how far its outer edge falls below the main eave
-  dormerWidthFt: [0, 12],     // along the ridge
+  // Along the ridge, and up to the whole building (2026-10-04). It was 12, so a 16 ft dormer typed on
+  // the Advanced page was saved as 12 without a word. This side never knows the building's size, so
+  // the cap is the longest building anything here draws: the dimensions card's length band
+  // (DIM_BANDS.lengthFt below, the panel's CAL_DIM_BANDS), 100 ft, past the Advanced page's 60
+  // (ADV_MAX_FT), whose dormer box runs to the previewed building's length. A literal, since DIM_BANDS
+  // is declared further down and reading it here would throw at load. The renderer holds the width to
+  // whatever building it is drawn on (d3DormerWidthFt), so a wide dormer on a smaller size stays
+  // inside its gable ends.
+  dormerWidthFt: [0, 100],
   dormerRiseFt: [0, 6],       // above the slope it sits on
   dormerOffsetU: [-1, 1],     // where along the span, as a fraction of the half-span
   // porchTruss has no range: it is a boolean, handled beside porchEnd rather than in the
@@ -230,7 +238,12 @@ function sanitizeWingSides(raw: unknown): Record<string, Record<string, unknown>
 // roof.porchSteps (2026-09-25): where a set of steps leaves the projecting porch's deck, along its
 // FRONT edge, as seen standing in front of the porch facing it (left is the viewer's left, the
 // frame every left/right here is read in). Absent = no steps, which is every porch before today.
-export const D3_PORCH_STEPS = ["left", "center", "right"] as const;
+// "leftSide" / "rightSide" (2026-10-03): one flight off the deck's left or right END instead, centred
+// along it, as seen from the same spot; a projecting porch only, since a recessed porch has no deck
+// end to leave by. A recessed porch takes the three front words (2026-10-03), off the floor's edge
+// in its opening. The production designer before these reads an unknown word as no steps.
+export const D3_PORCH_STEPS_FRONT = ["left", "center", "right"] as const;
+export const D3_PORCH_STEPS = [...D3_PORCH_STEPS_FRONT, "leftSide", "rightSide"] as const;
 // roof.leanToAttach / roof.wingAttach (2026-09-28): does the appendage's roof meet the building ON
 // THE ROOF (above the eave, up the main roof's slope) or ON THE WALL (below the eave)? Carolyn,
 // 09-28 @17:40: "they need to specify if it goes on the roof or if it goes on the sidewall ... I
@@ -378,9 +391,12 @@ export const D3_GRADE_FALL_TOWARD = ["back", "left", "right"] as const;
 // frame (front = south, back = north, left = west, right = east, seen facing the front) -- each how
 // many feet LOWER the ground is at that corner, held to GRADE_FALL_FT; a missing, junk or negative
 // corner is 0. The renderer takes the drops from the HIGHEST corner (the smallest number is its zero)
-// and floorHeightFt is the floor's height over that corner. Raised foundations only, like the fall;
-// stored only when some corner is below 0 ft, as all four numbers; and it REPLACES the fall: beside
-// it gradeFallFt / gradeFallToward are dropped (the renderer ignores them when it is present).
+// and floorHeightFt is the floor's height over that corner. Raised foundations, like the fall, and
+// since 2026-10-03 a slab too (Ahsan: the ground at each corner under a concrete slab), which has no
+// floor height and no fall: its highest corner is where the slab meets the ground, and the renderer
+// carries the pour down to the lower corners. Stored only when some corner is below 0 ft, as all four
+// numbers; and it REPLACES the fall: beside it gradeFallFt / gradeFallToward are dropped (the renderer
+// ignores them when it is present). Skids and no foundation keep no corners.
 export const D3_GRADE_CORNERS = ["fl", "fr", "bl", "br"] as const;
 const isRaisedFoundation = (v: unknown): boolean => (D3_RAISED_FOUNDATIONS as readonly unknown[]).includes(v);
 
@@ -560,10 +576,10 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     // and a renderer that one day reads them there would be reading a leftover.
     delete roof.porchAttachFt;
     delete roof.porchWidthFt;
-    // The porch's posts and its roof's pitch (2026-09-25) are that roof's too.
+    // The porch's posts and its roof's pitch (2026-09-25) are that roof's too. Its steps and their
+    // count are not (2026-10-03): a recessed porch has steps too, held by the steps rule below.
     delete roof.porchPosts;
     delete roof.porchPitch;
-    delete roof.porchStepCount;
   }
 
   // ── v2 ENUMS AND THE ROOF-TYPE RULES (2026-09-24) ──────────────────────────────────────────
@@ -597,11 +613,15 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
     for (const k of D3_WING_KEYS) delete roof[k];
   }
   // Where the porch's steps leave its deck (2026-09-25). The enum posture above, and the porch
-  // rule porchAttachFt follows: steps come off a PROJECTING porch's deck, so without one they
-  // describe nothing and are dropped rather than stored for later.
-  if ((D3_PORCH_STEPS as readonly string[]).includes(String(rawRoof.porchSteps))
-      && typeof roof.porchOutFt === "number" && roof.porchOutFt > 0.5) {
-    roof.porchSteps = String(rawRoof.porchSteps);
+  // rule porchAttachFt follows: steps come off a porch, so without one they describe nothing and
+  // are dropped rather than stored for later. A PROJECTING porch takes any of the five; a RECESSED
+  // one (2026-10-03) only the three along its front, since its sides are the building's walls.
+  const projecting = typeof roof.porchOutFt === "number" && roof.porchOutFt > 0.5;
+  const recessed = !projecting && typeof roof.porchDepthFt === "number" && roof.porchDepthFt > 0.5;
+  const stepsWord = String(rawRoof.porchSteps);
+  if ((projecting && (D3_PORCH_STEPS as readonly string[]).includes(stepsWord))
+      || (recessed && (D3_PORCH_STEPS_FRONT as readonly string[]).includes(stepsWord))) {
+    roof.porchSteps = stepsWord;
   }
   // A step COUNT needs steps to count (2026-09-28). Without porchSteps it describes nothing, and it
   // goes rather than lying in wait for the next porch: the porchAttachFt rule.
@@ -732,6 +752,11 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
       delete d3.gradeFallFt;
       delete d3.gradeFallToward;
     }
+  } else if (d3.foundation === "slab") {
+    // A slab's corners (2026-10-03): the same four numbers, on the same terms. A slab has no fall and
+    // no floor height to keep beside them, so they are all there is.
+    const gc = gradeCorners(src.gradeCornersFt);
+    if (gc) d3.gradeCornersFt = gc;
   }
 
   // Which claddings THIS style offers the customer (2026-08-25). Absent means all four,
@@ -775,11 +800,27 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
 //
 // Mutates `clean` (the sanitised spec about to be written). The stored height is held to the
 // sanitiser's band again, because this is the one place a stored value is written back unread.
-export function carryForwardFoundation(clean: D3Spec, sent: unknown, stored: unknown, frame: unknown): void {
+//
+// A SLAB'S CORNERS (2026-10-03). Every panel before today sends gradeCornersFt null on every save
+// (12-shell's ssD3WithFall, the operator page's calSpecToSend) and never drew a slab's corners, so
+// from a slab that null means "this panel has nothing to say about them", not "level ground". Only a
+// request that says it knows them -- `slabGround: true`, which the panels that draw them put in the
+// body beside frame -- clears them with null. A slab that stays a slab keeps its stored corners over
+// any save that omits the key or sends that older null; an object sent is what is stored (the
+// sanitiser's reading of it); leaving the slab (skids, a raised floor, nothing) carries none.
+export function carryForwardFoundation(clean: D3Spec, sent: unknown, stored: unknown, frame: unknown, slabGround?: boolean): void {
   if (!sent || typeof sent !== "object") return;
   const was = (stored && typeof stored === "object") ? stored as Record<string, unknown> : null;
-  if (!was || !isRaisedFoundation(was.foundation)) return;
   const s = sent as Record<string, unknown>;
+  if (was && was.foundation === "slab" && clean.foundation === "slab") {
+    const told = "gradeCornersFt" in s && (s.gradeCornersFt != null || slabGround === true);
+    if (!told) {
+      const gc = gradeCorners(was.gradeCornersFt);
+      if (gc) clean.gradeCornersFt = gc;
+    }
+    return;
+  }
+  if (!was || !isRaisedFoundation(was.foundation)) return;
   if (frame !== PROMPT_FRAME_FRONT) {
     const incoming = s.foundation;
     if (incoming === undefined || incoming === null || incoming === "slab") {

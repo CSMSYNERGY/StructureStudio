@@ -121,18 +121,25 @@ Deno.test("customer piers: a raised style keeps the floor where it was drawn; on
   assertEquals(STYLES.blocks.d3.foundation, "blocks");
 });
 
-Deno.test("the ground at each corner (2026-09-29): named beside a raised floor, kept onto piers, gone from a style at grade", () => {
+Deno.test("the ground at each corner (2026-09-29): named beside a raised floor or a slab, kept onto piers, gone from skids or nothing said", () => {
   const gc = { fl: 0, fr: 1.5, bl: "0.5", br: 9 };
   const raised = style({ roof: ROOF, siding: "batten", wallHeightFt: 8, foundation: "blocks", floorHeightFt: 1.1, gradeCornersFt: gc });
   const r = resolve(raised);
   assertEquals(r.gradeCornersFt, { fl: 0, fr: 1.5, bl: 0.5, br: 6 }, "all four, held to 0..6");
   assert(r.gradeCornersFt !== gc, "a copy, never the style's own object");
   assertEquals(resolve(raised, "piers").gradeCornersFt, r.gradeCornersFt, "blocks to the customer's piers: the same ground");
-  for (const f of [undefined, "slab", "skids"]) {
+  for (const f of [undefined, "skids"]) {
     const s = style({ roof: ROOF, siding: "batten", wallHeightFt: 8, ...(f ? { foundation: f } : {}), gradeCornersFt: gc });
-    assert(!("gradeCornersFt" in resolve(s)), `${String(f)}: not raised, not named`);
+    assert(!("gradeCornersFt" in resolve(s)), `${String(f)}: level ground, not named`);
     assert(!("gradeCornersFt" in resolve(s, "piers")), `${String(f)}: the customer's piers stand on level ground`);
   }
+  // A SLAB names them (2026-10-03), and the customer's piers keep them (Ahsan): the site the builder
+  // measured, the piers' own 1.5 ft at its highest corner, no floor height and no fall.
+  const slab = style({ roof: ROOF, siding: "batten", wallHeightFt: 8, foundation: "slab", gradeCornersFt: gc, gradeFallFt: 2 });
+  const onSlab = resolve(slab), onPiers = resolve(slab, "piers");
+  assertEquals(onSlab.gradeCornersFt, { fl: 0, fr: 1.5, bl: 0.5, br: 6 }, "a slab: named, all four held to 0..6");
+  assertEquals([onPiers.foundation, onPiers.gradeCornersFt, "floorHeightFt" in onPiers, "gradeFallFt" in onPiers], ["piers", onSlab.gradeCornersFt, false, false], "the customer's piers: the same ground");
+  assertEquals(F.d3GradeFt(onPiers), 1.5);
   // All zeros, or junk, is level ground: not named, so the object is the one it always was.
   for (const junk of [{ fl: 0, fr: 0, bl: 0, br: 0 }, {}, [], "2", null, { fl: -1, br: "x" }]) {
     const s = style({ roof: ROOF, siding: "batten", wallHeightFt: 8, foundation: "piers", floorHeightFt: 2, gradeCornersFt: junk });

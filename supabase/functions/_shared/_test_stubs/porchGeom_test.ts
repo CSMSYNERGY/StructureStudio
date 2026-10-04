@@ -53,7 +53,7 @@ Deno.test("every lifted porch region is byte-identical in the two twins", () => 
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
-const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, d3PorchCapFt, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3WallTops, d3PorchWallTopFt, d3NewFrame, d3Massing, d3EaveFinishDrop, d3PorchFraming, d3PorchStepsGeom, d3PorchAutoStepCount, d3LeanToReadout };`)() as Record<string, Any>;
+const F = new Function(`${blocks.map((b) => b.cmp).join("\n")}; return { d3ProjectingPorch, d3PorchGeom, d3PorchReadout, d3PorchCapFt, ssPorchTrussWall, d3RoofAxes, d3PorchSpan, d3WallTopFt, d3WallTops, d3PorchWallTopFt, d3NewFrame, d3Massing, d3EaveFinishDrop, d3PorchFraming, d3PorchStepsGeom, d3PorchAutoStepCount, d3LeanToReadout, d3LeanTosReadout, d3RecessedPorch, d3RecessedPorchFrame, d3RecessedPorchReadout, d3PorchBlankStepCount, D3_PORCH_STEP_FRONT, D3_PORCH_STEP_SIDES, D3_PORCH_SIDE_STEPS_MIN_FT };`)() as Record<string, Any>;
 
 const PANEL_TRIM = 0.18;   // trimFace on panel cladding: T/2 + 0.03
 
@@ -356,6 +356,12 @@ Deno.test("d3PorchFraming reads the three keys inside the sanitiser's bands, and
   assertEquals(F.d3PorchFraming({ porchPosts: 3.6, porchPitch: 0.9, porchSteps: "middle" }), { posts: 4, pitch: 0.5, steps: null });
   assertEquals(F.d3PorchFraming({ porchPosts: 1, porchPitch: 0.01 }), { posts: null, pitch: 0.05, steps: null });
   assertEquals(F.d3PorchFraming({ porchPosts: 40, porchPitch: "junk", porchSteps: "center" }), { posts: 8, pitch: null, steps: "center" });
+  // A flight off an end of the deck (2026-10-03) is a step word too; anything else is still none.
+  assertEquals(F.d3PorchFraming({ porchSteps: "leftSide" }).steps, "leftSide");
+  assertEquals(F.d3PorchFraming({ porchSteps: "rightSide" }).steps, "rightSide");
+  for (const junk of ["side", "LeftSide", "left side", "frontSide"]) assertEquals(F.d3PorchFraming({ porchSteps: junk }).steps, null, junk);
+  assertEquals([...F.D3_PORCH_STEP_FRONT], ["left", "center", "right"]);
+  assertEquals([...F.D3_PORCH_STEP_SIDES], ["left", "center", "right", "leftSide", "rightSide"]);
 });
 
 Deno.test("⚠️ no framing is today's porch: the same numbers AND the same keys", () => {
@@ -440,6 +446,166 @@ Deno.test("d3PorchStepsGeom: in the outer bay on its side, or the middle, off th
   const l2 = F.d3PorchStepsGeom(g2, 4, "left"), r2 = F.d3PorchStepsGeom(g2, 4, "right");
   assertAlmostEquals(l2.x - l2.w / 2, -(g2.side - g2.sizes.POST), 1e-12);
   assertAlmostEquals(r2.x + r2.w / 2, g2.side - g2.sizes.POST, 1e-12);
+});
+
+// ── STEPS OFF AN END OF THE DECK (leftSide / rightSide, 2026-10-03) ─────────────────────────
+// One flight centred along the deck's left or right end, between the wall and the front corner post,
+// in its own frame (x across it, d out from that end), with the turn the renderer puts it on its end by.
+Deno.test("d3PorchStepsGeom off an end: centred along it, between the wall and the corner, turned onto it", () => {
+  const g = F.d3PorchGeom(16, 10, 6, PANEL_TRIM, Infinity, 8, { posts: 3 });
+  const POST = g.sizes.POST;
+  const Ls = F.d3PorchStepsGeom(g, 6, "leftSide"), Rs = F.d3PorchStepsGeom(g, 6, "rightSide");
+  assertEquals([Ls.where, Ls.turn, Ls.x, Ls.d0, Ls.grade, Ls.count], ["leftSide", -1, 0, 0, -0.35, 1]);
+  assertEquals([Rs.where, Rs.turn, Rs.x, Rs.d0], ["rightSide", 1, 0, 0]);
+  assertAlmostEquals(Ls.edgeX, -g.side, 1e-12);
+  assertAlmostEquals(Rs.edgeX, g.side, 1e-12);
+  // The clear run: the wall's face plus 0.1 to 1 ft short of the deck's edge -- the corner post's inner face
+  // less 0.05 is 0.51 short, but a raised deck's corner support reaches 1 ft in (a 12 in pier, 0.5 ft in)
+  // and past the end (3 in for that pier, 5 in for a block) -- the flight in its middle.
+  const a0 = g.dWall + 0.1, a1 = 6 - 1;
+  assertAlmostEquals(Ls.atD, (a0 + a1) / 2, 1e-12);
+  assertEquals(Ls.w, 3.5, "3.5 ft at most");
+  assert(Ls.atD + Ls.w / 2 <= 6 - POST + 1e-12, "clear of the corner post");
+  assert(Ls.atD + Ls.w / 2 <= 6 - 0.5 - 0.5 + 1e-12 && Ls.atD + Ls.w / 2 <= 6 - 1 / 3 - 4 / 12 + 1e-12, "clear of a corner pier and a corner block");
+  assert(Ls.atD - Ls.w / 2 >= g.dWall, "clear of the wall");
+  // Narrower where the run is: a 3 ft deck takes what is there.
+  const g3 = F.d3PorchGeom(16, 10, 3, PANEL_TRIM, Infinity, 8, null);
+  assertAlmostEquals(F.d3PorchStepsGeom(g3, 3, "rightSide").w, 3 - 1 - (g3.dWall + 0.1), 1e-12);
+  // ⚠️ None below 2.5 ft (2026-10-04), where the panels grey them out and the run is under 1 ft 3 in: a
+  // flight held to a foot there stood in the gable wall (1.5 ft: its back edge 0.125 ft behind the wall's
+  // mid-plane) and on the corner's support. A side word kept from a deeper deck draws nothing.
+  assertEquals(F.D3_PORCH_SIDE_STEPS_MIN_FT, 2.5);
+  for (const D of [0.75, 1, 1.2, 1.5, 2, 2.49]) {
+    const gs = F.d3PorchGeom(16, 10, D, PANEL_TRIM, Infinity, 8, null);
+    for (const w of ["leftSide", "rightSide"]) assertEquals(F.d3PorchStepsGeom(gs, D, w, 1.5, 3), null, `${w} on a ${D} ft deck`);
+    assert(F.d3PorchStepsGeom(gs, D, "center"), `the front steps on a ${D} ft deck are still drawn`);
+  }
+  const g25 = F.d3PorchGeom(16, 10, 2.5, PANEL_TRIM, Infinity, 8, null);
+  const s25 = F.d3PorchStepsGeom(g25, 2.5, "leftSide");
+  assertAlmostEquals(s25.w, 1.25, 1e-12, "a 2.5 ft deck: a usable flight");
+  assert(s25.atD - s25.w / 2 >= g25.dWall, "its back edge clear of the wall");
+  assert(s25.atD + s25.w / 2 <= 2.5 - 1 + 1e-12, "and its front edge clear of the corner's support");
+  // The count and its risers are the front flight's, at any height and with the builder's count.
+  for (const h of [0.35, 1.1, 1.5, 4]) {
+    for (const n of [undefined, 2, 7]) {
+      const side = F.d3PorchStepsGeom(g, 6, "leftSide", h, n), front = F.d3PorchStepsGeom(g, 6, "left", h, n);
+      assertEquals([side.count, side.rise, side.tread, side.grade], [front.count, front.rise, front.tread, front.grade], `${h} ft, ${n}`);
+    }
+  }
+  // Mapped onto its end, (x, d) -> (edgeX + turn d, atD - turn x): every point of the right flight is past
+  // the deck's right side and between the wall and the post; the left one mirrors it.
+  for (const s of [Ls, Rs]) {
+    for (const x of [-s.w / 2, s.w / 2]) {
+      for (const d of [0, s.count * s.tread]) {
+        const px = s.edgeX + s.turn * d, pd = s.atD - s.turn * x;
+        assert(s.turn * px >= g.side - 1e-12, `${s.where}: (${x}, ${d}) lands at x ${px}`);
+        assert(pd > g.dWall && pd <= 6 - 1 + 1e-12, `${s.where}: (${x}, ${d}) lands at d ${pd}`);
+      }
+    }
+  }
+  // The deck's own framing does not move: side steps never add a bay.
+  for (const S of [12, 16]) {
+    assertEquals(F.d3PorchGeom(S, 10, 6, PANEL_TRIM, Infinity, 0, F.d3PorchFraming({ porchSteps: "leftSide" })).bays,
+      F.d3PorchGeom(S, 10, 6, PANEL_TRIM, Infinity, 0, F.d3PorchFraming({})).bays, `${S} ft`);
+  }
+  // ⚠️ THE FRONT FLIGHTS ARE WHAT THEY WERE, the same keys in the same order.
+  for (const w of ["left", "center", "right"]) assertEquals(Object.keys(F.d3PorchStepsGeom(g, 6, w)), ["where", "x", "w", "count", "rise", "tread", "d0", "grade"], w);
+});
+
+// ── A RECESSED PORCH'S STEPS (2026-10-03) ─────────────────────────────────────────────────────
+// d3RecessedPorch restates buildShed3DModel's recessed-porch rule (porchRun / porchDepth / porchOn /
+// porchWall / porchOnEave), which only the renderer had: tests/harness/porchProbe.mjs holds it to the
+// built posts. Here it is held to the renderer's rule written out once more, the truss's
+// (ssPorchTrussWall) and the lean-to readout's, which read the same end.
+Deno.test("d3RecessedPorch: the renderer's rule -- which wall, how deep, and when there is none", () => {
+  const rule = (roof: Any, W: number, Lg: number) => {
+    const ax = F.d3RoofAxes(roof, W, Lg);
+    const run = (F.d3NewFrame(roof) || ax.uAxisIsX) ? Lg : W;
+    const depth = F.d3ProjectingPorch(roof, W, Lg) ? 0 : Math.max(0, Math.min(Number(roof.porchDepthFt) || 0, run - 4));
+    if (!(depth > 0.5) || F.d3Massing(roof, W, Lg, 8).wings.length) return null;
+    const front = (roof.porchEnd || "front") !== "back";
+    return { wall: (F.d3NewFrame(roof) || ax.uAxisIsX) ? (front ? "south" : "north") : (front ? "west" : "east"), depth, onEave: F.d3NewFrame(roof) && !ax.uAxisIsX };
+  };
+  const cases: Array<[Any, number, number, Any]> = [
+    // A portrait gable: the gable ends are north and south, front is south.
+    [{ type: "gable", pitch: 0.4, porchDepthFt: 4 }, 12, 16, { wall: "south", depth: 4, onEave: false }],
+    [{ type: "gambrel", porchDepthFt: 6, porchEnd: "back" }, 16, 24, { wall: "north", depth: 6, onEave: false }],
+    // An old-frame landscape gable: its gable ends are west and east.
+    [{ type: "gable", pitch: 0.4, porchDepthFt: 5 }, 24, 12, { wall: "west", depth: 5, onEave: false }],
+    [{ type: "gable", pitch: 0.4, porchDepthFt: 5, porchEnd: "back" }, 24, 12, { wall: "east", depth: 5, onEave: false }],
+    // The new frame with an eave front: the south wall, an eave wall.
+    [{ type: "gable", front: "eave", pitch: 0.4, porchDepthFt: 4 }, 16, 12, { wall: "south", depth: 4, onEave: true }],
+    [{ type: "shed", highSide: "front", pitch: 0.25, porchDepthFt: 4 }, 16, 10, { wall: "south", depth: 4, onEave: true }],
+    // Held to leave 4 ft of building, and off at or under 0.5 ft.
+    [{ type: "gable", pitch: 0.4, porchDepthFt: 12 }, 12, 14, { wall: "south", depth: 10, onEave: false }],
+    [{ type: "gable", pitch: 0.4, porchDepthFt: 0.5 }, 12, 16, null],
+    [{ type: "gable", pitch: 0.4, porchDepthFt: 6 }, 4, 4.4, null],
+    [{ type: "gable", pitch: 0.4 }, 12, 16, null],
+    // Wings switch it off; a projecting porch wins.
+    [{ type: "gable", pitch: 0.4, porchDepthFt: 4, wingSide: "both", wingWidthFt: 6 }, 16, 24, null],
+    [{ type: "gable", pitch: 0.4, porchDepthFt: 4, porchOutFt: 6 }, 12, 16, null],
+  ];
+  for (const [roof, W, Lg, want] of cases) {
+    const got = F.d3RecessedPorch(roof, W, Lg, 8);
+    assertEquals(got, want, `${JSON.stringify(roof)} at ${W}x${Lg}`);
+    assertEquals(got, rule(roof, W, Lg), `the rule: ${JSON.stringify(roof)} at ${W}x${Lg}`);
+    // The truss stands in the same gable end, where there is one.
+    if (got && !got.onEave && roof.type === "gable") assertEquals(F.ssPorchTrussWall({ ...roof, porchTruss: true }, W, Lg), got.wall);
+    // And the lean-to readout names the same wall.
+    if (got && roof.type !== "shed") {
+      const lt = F.d3LeanTosReadout({ roof: { ...roof, leanTos: [{ wall: { south: "front", north: "back", west: "left", east: "right" }[got.wall as string], widthFt: 6 }] } }, `${W}x${Lg}`);
+      assertEquals(lt && lt[0].porch, "recessed", `${JSON.stringify(roof)}: the lean-to sees it`);
+    }
+  }
+  assertEquals(F.d3RecessedPorch(null, 12, 16), null);
+});
+
+Deno.test("d3RecessedPorchFrame: the drawn posts, a bay more for centre steps on an even eave count", () => {
+  // A gable end: the two corner posts, 0.32 ft, their centres 0.4 + 0.16 in from the span's edges.
+  const gab = F.d3RecessedPorchFrame({ type: "gable", pitch: 0.4, porchDepthFt: 4, porchSteps: "center" }, 12, 16, 8);
+  assertEquals([gab.bays, gab.posts, gab.sizes.POST], [1, 2, 0.32]);
+  assertAlmostEquals(gab.side, 12 / 2 - 0.4, 1e-12);
+  // An eave wall: a bay every 10 ft or less along it; centre steps add one where the count is even.
+  for (const [Lg, rule, centre] of [[8, 1, 1], [16, 2, 3], [20, 2, 3], [24, 3, 3], [36, 4, 5]]) {
+    const roof = { type: "gable", front: "eave", pitch: 0.4, porchDepthFt: 4 };
+    for (const steps of [undefined, "left", "right", "leftSide"]) {
+      assertEquals(F.d3RecessedPorchFrame({ ...roof, porchSteps: steps }, Lg, 12, 8).bays, rule, `${Lg} ft eave, steps ${steps}`);
+    }
+    const c = F.d3RecessedPorchFrame({ ...roof, porchSteps: "center" }, Lg, 12, 8);
+    assertEquals([c.bays, c.posts], [centre, centre + 1], `${Lg} ft eave, centre steps`);
+    assertAlmostEquals(c.side, Lg / 2 - 0.4, 1e-12);
+    // No post centre within the centre flight.
+    const st = F.d3PorchStepsGeom(c, 0.15, "center");
+    const outer = c.side - 0.16;
+    for (let k = 0; k <= c.bays; k++) {
+      const x = -outer + (2 * outer * k) / c.bays;
+      assert(Math.abs(x) >= st.w / 2 + 0.16 - 1e-9, `${Lg} ft: a post at ${x.toFixed(2)} stands on steps ${st.w} wide`);
+    }
+  }
+  assertEquals(F.d3RecessedPorchFrame({ type: "gable", pitch: 0.4 }, 12, 16, 8), null);
+});
+
+Deno.test("d3RecessedPorchReadout: front steps only, between the posts, off the footprint's edge", () => {
+  const roof = { type: "gable", pitch: 0.4, porchDepthFt: 4 };
+  const at = (r: Any, size = "12x16") => F.d3RecessedPorchReadout({ roof: r, wallHeightFt: 8 }, size);
+  assertEquals(at(roof), { wall: "south", onEave: false, posts: 2, steps: null }, "no steps");
+  assertEquals(at({ type: "gable", pitch: 0.4 }), null, "no porch");
+  assertEquals(at({ ...roof, porchOutFt: 6 }), null, "a projecting porch");
+  assertEquals(at({ ...roof, porchSteps: "leftSide" }).steps, null, "a side word draws nothing on a recessed porch");
+  const g = F.d3RecessedPorchFrame(roof, 12, 16, 8);
+  for (const w of ["left", "center", "right"]) {
+    const s = at({ ...roof, porchSteps: w }).steps;
+    assertEquals([s.where, s.d0, s.count, s.grade], [w, 0.15, 1, -0.35], w);
+    // Inside the opening, clear of the corner posts' inner faces.
+    assert(Math.abs(s.x) + s.w / 2 <= g.side - g.sizes.POST + 1e-12, `${w}: ${s.x} ${s.w}`);
+  }
+  assertEquals(at({ ...roof, porchSteps: "left" }).steps.x, -at({ ...roof, porchSteps: "right" }).steps.x);
+  // The builder's count, and the blank box's count, read the same flight.
+  assertEquals(at({ ...roof, porchSteps: "center", porchStepCount: 3 }).steps.count, 3);
+  assertEquals(F.d3PorchBlankStepCount({ roof: { ...roof, porchSteps: "center", porchStepCount: 3 }, foundation: "piers", floorHeightFt: 1.5 }, "12x16"), 3);
+  // An eave wall's readout counts the posts it builds.
+  const eave = F.d3RecessedPorchReadout({ roof: { type: "gable", front: "eave", pitch: 0.4, porchDepthFt: 4, porchSteps: "center" } }, "16x12");
+  assertEquals([eave.wall, eave.onEave, eave.posts], ["south", true, 4]);
 });
 
 Deno.test("d3PorchReadout reports the posts, pitch and steps that are built", () => {

@@ -5357,6 +5357,17 @@ function d3ListCeilingFt(m, x, z) {
   }
   return m.H;
 }
+// HOW WIDE A DORMER IS DRAWN (2026-10-04). roof.dormerWidthFt is the style's, and one style is drawn on
+// every size the builder sells, so a dormer typed the full length of a 12x24 would stand past both gable
+// ends of a 12x16. It is held to L, the ridge's run, less 3 in at each end: a transom's roof runs 3 in
+// past its cheeks, so at the widest its edge stops on the gable walls' line, inside their faces and the
+// rakes, and either shape's cheeks stand just in from the gable ends. Anything narrower is the style's
+// own width, so every dormer that fits its building draws exactly as it did.
+const D3_DORMER_END_IN = 0.25;
+function d3DormerWidthFt(roofCfg, L) {
+  const w = Number(roofCfg && roofCfg.dormerWidthFt) || 0;
+  return Math.min(w, Math.max(0, L - 2 * D3_DORMER_END_IN));
+}
 // A dormer sits at the middle of the ridge, dormerWidthFt long: beside end wings it must stay half a foot
 // inside the middle stretch, or it would reach over an end wing's roof. "end", or null (every other style).
 function d3DormerBlocked(roofCfg, W, L, H) {
@@ -5784,6 +5795,12 @@ function d3RaisedFoundation(spec) {
   const f = spec && spec.foundation;
   return D3_RAISED_FOUNDATIONS.indexOf(f) >= 0 ? f : null;
 }
+// WHAT THE GROUND CAN SLOPE UNDER (gradeCornersFt): blocks or piers (d3RaisedFoundation), and since
+// 2026-10-03 a concrete slab, whose poured edge shows deeper where the ground is lower; null on skids
+// and with no foundation said, which sit on level ground.
+function d3SlopeFoundation(spec) {
+  return d3RaisedFoundation(spec) || (spec && spec.foundation === "slab" ? "slab" : null);
+}
 function d3GradeFt(spec) {
   const f = d3RaisedFoundation(spec);
   if (!f) return D3.FLOOR_T;
@@ -5847,16 +5864,18 @@ function d3GradeFallBlendFt(fallFt, ext) {
 // in four corners." gradeCornersFt is { fl, fr, bl, br } -- front-left, front-right, back-left,
 // back-right, in the fall's frame above (front = south +z, back = north -z, left = west -x, right =
 // east +x) -- each how many feet LOWER the ground is at that corner, 0..6, a missing one 0. Raised
-// floors only, like the fall. The HIGHEST corner is the zero: the drops are taken from the smallest,
-// and floorHeightFt (d3GradeFt) is the floor's height over THAT corner. When the style gives corners
+// floors, and since 2026-10-03 a concrete slab (d3SlopeFoundation). The HIGHEST corner is the zero:
+// the drops are taken from the smallest, and floorHeightFt (d3GradeFt) is the floor's height over
+// THAT corner. A slab has no floor height and no fall: its highest corner is the floor band's own
+// depth (d3GradeFt's D3.FLOOR_T), where the ground has always been drawn. When the style gives corners
 // the fall is ignored (d3GradeFall); without them a stored fall is the same thing said with one
 // number, so it is read as corners here (back: both back corners down by the fall; left: both left
 // ones; right: both right ones) and every consumer of the ground has one shape to follow.
 const D3_GRADE_CORNERS = ["fl", "fr", "bl", "br"];
 // The style's own corners, each held to the sanitiser's 0..6 (blank, junk or below 0 is 0), or null
-// when it gives none, gives only zeros, or does not stand on blocks or piers.
+// when it gives none, gives only zeros, or does not stand on blocks, piers or a slab.
 function d3GradeCornersGiven(spec) {
-  if (!d3RaisedFoundation(spec)) return null;
+  if (!d3SlopeFoundation(spec)) return null;
   const g = spec.gradeCornersFt;
   if (!g || typeof g !== "object" || Array.isArray(g)) return null;
   const out = {};
@@ -5869,7 +5888,8 @@ function d3GradeCornersGiven(spec) {
   return any ? out : null;
 }
 // THE GROUND UNDER THE FOUR CORNERS: { fl, fr, bl, br }, each how far below the HIGHEST corner, so
-// at least one is 0; or null on level ground (no corners and no fall, all four the same, not raised).
+// at least one is 0; or null on level ground (no corners and no fall, all four the same, on skids or
+// nothing said).
 function d3GradeCorners(spec) {
   let c = d3GradeCornersGiven(spec);
   if (!c) {
@@ -5971,6 +5991,18 @@ function d3PorchToRoot(roofCfg, W, L) {
   if (ps.onCap && ps.centerU) o[d3RoofAxes(roofCfg, W, L).uAxisIsX ? 0 : 1] += ps.centerU;
   return (x, d) => [o[0] + n[0] * d + r[0] * x, o[1] + n[1] * d + r[1] * x];
 }
+// The same map for a RECESSED porch (2026-10-03), whose frame is the footprint's own edge on its wall:
+// d3PorchToRoot's formula with the porch always in the middle of that wall (it is off with wings, so
+// there is no centerU), or null without one (d3RecessedPorch). Its steps stand d out past that edge.
+// tests/harness/gradeFall.mjs holds it to the placed steps' own matrices.
+function d3RecessedPorchToRoot(roofCfg, W, L, H) {
+  const rp = d3RecessedPorch(roofCfg, W, L, H);
+  if (!rp) return null;
+  const n = { south: [0, 1], north: [0, -1], east: [1, 0], west: [-1, 0] }[rp.wall];
+  const r = [n[1], -n[0]];
+  const o = [(n[0] * W) / 2, (n[1] * L) / 2];
+  return (x, d) => [o[0] + n[0] * d + r[0] * x, o[1] + n[1] * d + r[1] * x];
+}
 // THE GROUND UNDER THE PORCH STEPS (2026-09-28): the gradeFt d3PorchStepsGeom climbs from. On level
 // ground d3GradeFt's, exactly. Where the ground falls away it is the deepest ground under the flight,
 // from the deck's edge out to the bottom tread and across its width, so the bottom step stands on
@@ -5978,16 +6010,19 @@ function d3PorchToRoot(roofCfg, W, L) {
 // the flight reaches, so it walks out until the count stops changing (each step can only reach
 // deeper, so it settles). `stepsAt(gradeFt)` is the caller's own d3PorchStepsGeom call, and
 // d3PorchStepsOnGround below is the one caller: whatever it passes d3PorchStepsGeom, stepsAt passes.
-function d3PorchStepsGradeFt(spec, W, L, stepsAt) {
+// `toRootIn` (2026-10-03) is the porch frame's map when it is not the projecting porch's: a recessed
+// porch's (d3RecessedStepsOnGround). A flight off an END of the deck (leftSide / rightSide) is read in
+// its own frame and turned onto that end by d3PorchStepsGeom's map; a front flight is read as it was.
+function d3PorchStepsGradeFt(spec, W, L, stepsAt, toRootIn) {
   const grade = d3GradeFt(spec);
   if (!d3GradeCorners(spec)) return grade;
-  const toRoot = d3PorchToRoot(spec.roof, W, L);
+  const toRoot = toRootIn || d3PorchToRoot(spec.roof, W, L);
   if (!toRoot) return grade;
   const under = (s) => {
     let deep = -Infinity;
     for (const x of [s.x - s.w / 2, s.x + s.w / 2]) {
       for (const d of [s.d0, s.d0 + s.count * s.tread]) {
-        const q = toRoot(x, d);
+        const q = s.turn ? toRoot(s.edgeX + s.turn * d, s.atD - s.turn * x) : toRoot(x, d);
         deep = Math.max(deep, d3GradeAt(spec, W, L, q[0], q[1]));
       }
     }
@@ -6013,6 +6048,21 @@ function d3PorchStepsOnGround(spec, W, L, g, D, where) {
   const count = spec && spec.roof ? spec.roof.porchStepCount : undefined;
   const at = (h) => d3PorchStepsGeom(g, D, where, h, count);
   return at(d3PorchStepsGradeFt(spec, W, L, at));
+}
+// A RECESSED PORCH'S STEPS ON THE GROUND UNDER THEM (roof.porchSteps, 2026-10-03): d3PorchStepsOnGround
+// for the porch cut into the building, the one call its readout and the renderer both make. The three
+// front words only (its sides are the building's walls), a flight off the footprint's edge in the
+// opening between its posts (d3RecessedPorchFrame), starting D3.WALL_T / 2 out, where the wall's face
+// and a raised floor's skirt are, and counted on the ground under it through d3RecessedPorchToRoot.
+// Null without a recessed porch the 3D draws, or without front steps.
+function d3RecessedStepsOnGround(spec, W, L) {
+  const roof = (spec && spec.roof) || {};
+  if (D3_PORCH_STEP_FRONT.indexOf(roof.porchSteps) < 0) return null;
+  const H = (spec && spec.wallHeightFt) || D3.WALL_H;
+  const g = d3RecessedPorchFrame(roof, W, L, H);
+  if (!g) return null;
+  const at = (h) => d3PorchStepsGeom(g, D3.WALL_T / 2, roof.porchSteps, h, roof.porchStepCount);
+  return at(d3PorchStepsGradeFt(spec, W, L, at, d3RecessedPorchToRoot(roof, W, L, H)));
 }
 // The model's real top, in feet off the floor: the ridge of the centre when there are wings, the
 // roof's own peak otherwise.
@@ -6135,9 +6185,10 @@ function d3RoofLands(roofCfg, m, W, L, H) {
   const lt = d3LeanToGeom(roofCfg, W, L, H);
   if (lt && lt.mode === "roof" && !lt.noRoof && !lt.cuts && !m.wings.some((g) => g.side === lt.dir)) (out = out || {})[lt.dir] = lt.ua - m.uc;
   // THE LEAN-TO LIST (roof.leanTos, 2026-09-29): each one up the roof of an eave wall covers that eave
-  // along its own run, so it covers a dormer (centred on the ridge's middle, dormerWidthFt long) only
-  // where the two runs overlap. The one landing highest up the roof on a side is the one that counts.
-  const dormW = Number(roofCfg && roofCfg.dormerWidthFt) || 0;
+  // along its own run, so it covers a dormer (centred on the ridge's middle, as wide as d3DormerWidthFt
+  // draws it) only where the two runs overlap. The one landing highest up the roof on a side is the one
+  // that counts.
+  const dormW = d3DormerWidthFt(roofCfg, m.L);
   (d3LeanTosGeom(roofCfg, W, L, H) || []).forEach((q) => {
     if (q.kind !== "eave" || q.mode !== "roof" || q.noRoof || q.cuts || m.wings.some((g) => g.side === q.dir)) return;
     if (q.a1 <= m.L / 2 - dormW / 2 + 1e-9 || q.a0 >= m.L / 2 + dormW / 2 - 1e-9) return;
@@ -6159,7 +6210,7 @@ function d3DormerRoof(roof, wFt, dFt, H) {
   const st = d3RoofStep(roof, wFt, dFt, H);
   if (!st) return { S: m.Sc, profYAt: own, lands };
   const rear = d3MakeProfYAt(d3RoofProfile(st.rearCfg, m.S, st.Hb, m.tallNeg).dedup, st.Hb);
-  return { S: m.Sc, profYAt: d3DormerSeatYAt(own, rear, m.L, (roof && roof.dormerWidthFt) || 0, st.stepFt), lands };
+  return { S: m.Sc, profYAt: d3DormerSeatYAt(own, rear, m.L, d3DormerWidthFt(roof, m.L), st.stepFt), lands };
 }
 // WHICH ROOF A DORMER SITS ON when the roof steps (d3RoofStep): the dormer is centred at L/2 and
 // dormW long along the ridge, local z 0 the back wall and the joint at stepFt. Wholly behind the
@@ -6525,7 +6576,14 @@ function d3PorchGeom(S, H, D, trimFace, capY, attachFt, framing) {
 // 2026-09-25), read once for the renderer and the panel's readout alike. Each is null when the
 // style does not say, and null is today's porch: the 8.5 ft post rule, the 2:12 solver, no steps.
 // Held to the sanitiser's bands here too, so raw data outside them draws what Save would store.
-const D3_PORCH_STEP_SIDES = ["left", "center", "right"];
+// The steps' words (2026-10-03): the three along the deck's FRONT edge, which a recessed porch takes
+// too, and a flight off either END of a projecting porch's deck (leftSide / rightSide).
+const D3_PORCH_STEP_FRONT = ["left", "center", "right"];
+const D3_PORCH_STEP_SIDES = ["left", "center", "right", "leftSide", "rightSide"];
+// The shallowest deck the panels offer a flight along its end on (2026-10-03): 2.5 ft leaves the
+// flight about 1 ft 3 in between the wall and the corner's support (d3PorchStepsGeom's side flight).
+// It is the shallowest one d3PorchStepsGeom draws that flight on, too (2026-10-04).
+const D3_PORCH_SIDE_STEPS_MIN_FT = 2.5;
 function d3PorchFraming(roofCfg) {
   const cfg = roofCfg || {};
   const n = Math.round(Number(cfg.porchPosts));
@@ -6568,6 +6626,23 @@ function d3PorchAutoStepCount(gradeFt) {
 // and the one the panel's readout says. Held to the sanitiser's band, 1..12, and a whole number.
 // The climb does not change, so the risers are still h / (count + 1): more steps, shorter risers.
 // Absent (null, undefined, blank) is the count above, so every porch before it is unchanged.
+// OFF AN END OF THE DECK (leftSide / rightSide, 2026-10-03): one flight centred along the deck's left
+// or right end, between the wall and the front corner, as seen standing in front of the porch: clear of
+// the corner post, and of the support a raised deck stands under it (a 12 in pier centred 0.5 ft in from
+// the deck's edge, so 1 ft in all, poking 3 in past the end; a 16 x 8 in block 1/3 ft in with its long
+// side across, reaching 5 in past the end). A deck deep enough for a middle row of supports leaves that
+// row's support out under the flight (buildShed3DModel), so the flight stays centred.
+// Returned in its OWN frame, the front flights' shape: x 0 across its middle, d0 0 at the deck's end.
+// turn says which way it is turned (+1 off the right end, -1 off the left), edgeX is that end (the
+// posts' outer faces, g.side) and atD how far out from the wall its middle is, so a point (x, d) of
+// the flight stands at (edgeX + turn * d, atD - turn * x) in the porch's frame: the renderer turns the
+// flight a quarter that way, and d3PorchStepsGradeFt reads the ground under it through the same map.
+// As wide as the clear run along the end allows, 3.5 ft at most. None on a deck under
+// D3_PORCH_SIDE_STEPS_MIN_FT deep (2026-10-04), where the panels grey the side words out: the run there
+// is under 1 ft 3 in, and a flight held to any usable width stood in the wall or on the corner's
+// support. A side word kept from a deeper deck draws nothing until the deck is deepened again, so a
+// depth typed a keystroke at a time never loses the pick. g.dWall is absent on a recessed porch's
+// frame, which takes the front words only.
 function d3PorchStepsGeom(g, D, where, gradeFt, stepCount) {
   if (!g || D3_PORCH_STEP_SIDES.indexOf(where) < 0) return null;
   const POST = g.sizes.POST;
@@ -6576,12 +6651,55 @@ function d3PorchStepsGeom(g, D, where, gradeFt, stepCount) {
   const count = isFinite(want) ? Math.round(Math.max(1, Math.min(12, want))) : d3PorchAutoStepCount(h);
   const rise = h / (count + 1);
   const tread = 11 / 12;
+  if (where === "leftSide" || where === "rightSide") {
+    if (!(D >= D3_PORCH_SIDE_STEPS_MIN_FT)) return null;
+    const turn = where === "rightSide" ? 1 : -1;
+    const a0 = (g.dWall || 0) + 0.1, a1 = D - Math.max(POST + 0.05, 1);   // the wall's face to the corner's post and support
+    return { where, x: 0, w: Math.min(3.5, a1 - a0), count, rise, tread, d0: 0, grade: -h,
+      turn, edgeX: turn * g.side, atD: (a0 + a1) / 2 };
+  }
   const outer = g.side - POST / 2;                          // the corner posts' centres
   const pitchX = (2 * outer) / g.bays;                      // post centre to post centre
   const w = Math.min(3.5, pitchX - POST);
   const s = where === "left" ? -1 : 1;
   const x = where === "center" ? 0 : g.bays > 1 ? s * (outer - pitchX / 2) : s * (g.side - POST - w / 2);
   return { where, x, w, count, rise, tread, d0: D, grade: -h };
+}
+// THE RECESSED PORCH THE 3D DRAWS (roof.porchDepthFt), or null where it draws none: buildShed3DModel's
+// own rule, restated pure (2026-10-03) so the panel's readout and the ground under its steps read the
+// porch that is built. Off beside a projecting porch (which wins), with wings (d3WingsOn: its header
+// would stand under a cap no longer at the wall's top), and at or under 0.5 ft once its depth is held
+// to leave 4 ft of building behind it. Its wall is the front (south) or back (north) one in the new
+// frame and on a portrait gable or gambrel, the west or east end on an old-frame landscape footprint;
+// onEave says the new frame put it in an EAVE wall, where its posts stand along the eave line.
+//   { wall, depth, onEave }
+function d3RecessedPorch(roofCfg, W, L, H) {
+  const cfg = roofCfg || {};
+  if (d3ProjectingPorch(cfg, W, L)) return null;
+  const ax = d3RoofAxes(cfg, W, L);
+  const frontBack = d3NewFrame(cfg) || ax.uAxisIsX;
+  const depth = Math.max(0, Math.min(Number(cfg.porchDepthFt) || 0, (frontBack ? L : W) - 4));
+  if (!(depth > 0.5)) return null;
+  if (d3WingsOn(d3Massing(cfg, W, L, H || D3.WALL_H))) return null;
+  const front = (cfg.porchEnd || "front") !== "back";
+  return { wall: frontBack ? (front ? "south" : "north") : (front ? "west" : "east"), depth, onEave: d3NewFrame(cfg) && !ax.uAxisIsX };
+}
+// A RECESSED PORCH'S POSTS AS d3PorchStepsGeom's FRAME (2026-10-03), or null without the porch: the
+// renderer's two 0.32 ft corner posts across a gable end, a single bay, or on an eave wall its posts
+// along the eave line, a bay every 10 ft or less -- and one bay more where that count is even and the
+// steps are "center", so no post stands at the top of them (d3PorchGeom's rule). side is the outer
+// posts' outer faces, from the porch's middle. d3PorchStepsGeom then puts left and right in the
+// outermost bays and center in the middle, as on a projecting porch's front edge.
+//   d3RecessedPorch's { wall, depth, onEave } plus { side, bays, posts, sizes: { POST } }
+function d3RecessedPorchFrame(roofCfg, W, L, H) {
+  const rp = d3RecessedPorch(roofCfg, W, L, H);
+  if (!rp) return null;
+  const ax = d3RoofAxes(roofCfg, W, L);
+  const POST = 0.32, INSET = 0.4;
+  if (!rp.onEave) return { ...rp, side: Math.max(0.5, ax.S / 2 - INSET - POST / 2) + POST / 2, bays: 1, posts: 2, sizes: { POST } };
+  const rule = Math.max(1, Math.ceil(ax.L / 10 - 1e-6));
+  const bays = roofCfg.porchSteps === "center" && rule % 2 === 0 ? rule + 1 : rule;
+  return { ...rp, side: ax.L / 2 - INSET, bays, posts: bays + 1, sizes: { POST } };
 }
 // THE CEILING THE BUILDING ITSELF PUTS OVER A PROJECTING PORCH'S ROOF (2026-09-24 review), in feet off
 // the floor, or Infinity with no projecting porch. ONE function, read by buildShed3DModel and by the
@@ -6698,16 +6816,33 @@ function d3PorchReadout(spec, sizeLabel) {
     // The steps climb from the ground under them (d3PorchStepsOnGround): d3GradeFt on level ground.
     framing, steps: d3PorchStepsOnGround(spec, w, d, g, porch.D, framing.steps) };
 }
+// THE RECESSED PORCH FOR A SPEC AND A SIZE LABEL (2026-10-03), for the calibration panel and "What we
+// drew": the size parsed the way d3PorchReadout parses it, then the porch the renderer draws there
+// (d3RecessedPorchFrame) and its steps on the ground under them (d3RecessedStepsOnGround), the numbers
+// the 3D builds. Null where no recessed porch is drawn: none on the style, a projecting one, wings.
+//   wall    the wall it is cut into; onEave  true when that is an eave wall (the new frame)
+//   posts   how many posts stand in its opening
+//   steps   d3PorchStepsGeom's flight, or null without steps
+function d3RecessedPorchReadout(spec, sizeLabel) {
+  const roof = (spec && spec.roof) || {};
+  const m = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
+  const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
+  const g = d3RecessedPorchFrame(roof, w, d, (spec && spec.wallHeightFt) || D3.WALL_H);
+  if (!g) return null;
+  return { wall: g.wall, onEave: g.onEave, posts: g.posts, steps: d3RecessedStepsOnGround(spec, w, d) };
+}
 // THE COUNT A BLANK STEP BOX DRAWS (review, 2026-09-29): the readout's own flight with the builder's
 // count left out, so it is counted on the ground under that flight (d3PorchStepsOnGround), the way the
 // renderer counts it. Both "blank = N" placeholders say this number. d3PorchAutoStepCount at the
 // front's height, the placeholder's old number, is the same on level ground but short on the downhill
 // side of a fall: a back porch over 2 ft of fall said "blank = 3" beside six drawn steps. It can pass
 // the box's 12: on a steep fall the automatic flight is longer than a typed count may be. Without a
-// projecting porch with steps, d3PorchAutoStepCount at the front's height, as before.
+// projecting porch with steps, d3PorchAutoStepCount at the front's height, as before. A recessed
+// porch's steps (2026-10-03) are counted the same way, on its own readout.
 function d3PorchBlankStepCount(spec, sizeLabel) {
   const roof = (spec && spec.roof) || {};
-  const r = d3PorchReadout({ ...spec, roof: { ...roof, porchStepCount: undefined } }, sizeLabel);
+  const blank = { ...spec, roof: { ...roof, porchStepCount: undefined } };
+  const r = d3PorchReadout(blank, sizeLabel) || d3RecessedPorchReadout(blank, sizeLabel);
   return r && r.steps ? r.steps.count : d3PorchAutoStepCount(d3GradeFt(spec));
 }
 
@@ -7505,9 +7640,9 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     // blocks or piers only, and never defaulted, so every other style resolves to what it always did.
     ...(D3_RAISED_FOUNDATIONS.indexOf(o.foundation) >= 0 && Number(o.gradeFallFt) > 0 ? { gradeFallFt: Number(o.gradeFallFt) } : {}),
     ...(D3_RAISED_FOUNDATIONS.indexOf(o.foundation) >= 0 && D3_GRADE_FALL_TOWARD.indexOf(o.gradeFallToward) >= 0 ? { gradeFallToward: o.gradeFallToward } : {}),
-    // The ground at each corner (2026-09-29, d3GradeCorners): named for the same reason, beside blocks
-    // or piers only, as all four corners held to 0..6 (d3GradeCornersGiven), and only when one of them
-    // is below 0 ft, so every other style resolves to what it always did.
+    // The ground at each corner (2026-09-29, d3GradeCorners): named for the same reason, beside blocks,
+    // piers or (2026-10-03) a slab only, as all four corners held to 0..6 (d3GradeCornersGiven), and
+    // only when one of them is below 0 ft, so every other style resolves to what it always did.
     ...(d3GradeCornersGiven(o) ? { gradeCornersFt: d3GradeCornersGiven(o) } : {}),
     // LEGACY DATA, still named here on purpose. Nothing reads d3.claddingChoices any more —
     // 207 moved the offered set into style_cladding and seeded it from this key — but the
@@ -7530,11 +7665,13 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
   //     the foundation changes), so a blocks style that stores no height stays at the blocks' own
   //     1 ft instead of jumping to the piers' 1.5 ft: all the customer changed is what holds it up.
   //   · It sits at grade (a slab, skids, or nothing said): piers, with no floor height, so the
-  //     renderer's own piers default (1.5 ft) is drawn; and no fall of the ground or corners, which
-  //     only a style that is already raised can have been measured with.
+  //     renderer's own piers default (1.5 ft) is drawn; and no fall of the ground, which only a style
+  //     that is already raised can have been measured with. A SLAB'S CORNERS STAY (Ahsan, 2026-10-03):
+  //     they are the site the builder measured, so the customer's piers stand on that same ground,
+  //     the highest corner at the piers' own height.
   if (D3_FOUNDATIONS.indexOf(customerFoundation) >= 0 && spec.foundation !== customerFoundation) {
     if (D3_RAISED_FOUNDATIONS.indexOf(spec.foundation) >= 0) spec.floorHeightFt = d3GradeFt(spec);
-    else { delete spec.floorHeightFt; delete spec.gradeFallFt; delete spec.gradeFallToward; delete spec.gradeCornersFt; }
+    else { delete spec.floorHeightFt; delete spec.gradeFallFt; delete spec.gradeFallToward; if (spec.foundation !== "slab") delete spec.gradeCornersFt; }
     spec.foundation = customerFoundation;
   }
   return spec;
@@ -8570,6 +8707,14 @@ function buildShed3DModel(THREE, p) {
   // (d3FallenGroundGeometry); the supports, the deck's supports, a lean-to's posts, the porch steps
   // and a ramp reach it at their own spot; the labels and the shade under the building lie on it.
   const FALL = d3GradeCorners(p.styleSpec);
+  // THE SAME GROUND UNDER A CONCRETE SLAB (gradeCornersFt on foundation "slab", 2026-10-03): FALL again,
+  // but only on a slab, and null on every other building. GRADE stays the floor band's depth, the
+  // highest corner's, and the pour goes down to the lower ground in a stem wall round the footprint
+  // (below). SUPPORT_KIND is what stands under the projecting porch's deck: a raised floor's own blocks
+  // or piers (RAISED itself), piers under a slab's deck where the grass falls away below its rim, and
+  // null on every other building.
+  const SLAB_FALL = !RAISED && FALL && p.styleSpec.foundation === "slab" ? FALL : null;
+  const SUPPORT_KIND = RAISED || (SLAB_FALL ? "piers" : null);
   const depthAt = (x, z) => d3GradeAt(p.styleSpec, bldgW, bldgH, x, z);
   // The deepest ground under a footprint of +-hx by +-hz about (x, z), in a frame `toRoot` maps into the
   // building's (none: already in it). A block's or a pier's foot goes down to it so no edge of it
@@ -8740,12 +8885,13 @@ function buildShed3DModel(THREE, p) {
   // Shared by the building's runners and the projecting porch's deck, so the two never differ.
   // Returns the courses drawn (0 for a pier, or where there is no height to fill). `depth` is the
   // ground's depth under it where the ground falls away (supportDepth); GRADE when not given.
-  const concreteMat = RAISED ? mat(RAISED === "piers" ? "#9A988F" : "#9C9B95", { roughness: 0.95 }) : null;
+  // SUPPORT_KIND decides the kind: the raised floor's own, or piers under a slab's porch deck.
+  const concreteMat = RAISED ? mat(RAISED === "piers" ? "#9A988F" : "#9C9B95", { roughness: 0.95 }) : SLAB_FALL ? mat("#9A988F", { roughness: 0.95 }) : null;
   const addSupport = (grp, x, z, y1, longX, depth) => {
     const G = depth === undefined ? GRADE : depth;
     const bh = y1 + G;
-    if (!RAISED || bh < 0.04) return 0;
-    if (RAISED === "piers") {
+    if (!SUPPORT_KIND || bh < 0.04) return 0;
+    if (SUPPORT_KIND === "piers") {
       const pier = cyl(concreteMat, 0.5, bh);
       pier.position.set(x, -G + bh / 2, z);
       pier.userData.ssFoundationPart = "pier";
@@ -8766,7 +8912,7 @@ function buildShed3DModel(THREE, p) {
   // Where the ground falls away: the depth a support at (x, z) stands on, in a frame `toRoot` maps
   // into the building's (none: already in it). The deepest ground under its own foot (depthUnder),
   // the sizes addSupport builds: a 12 in pier, or a 16 x 8 in block, its long side along x when longX.
-  const supportDepth = (x, z, longX, toRoot) => (RAISED === "piers" ? depthUnder(x, z, 0.5, 0.5, toRoot)
+  const supportDepth = (x, z, longX, toRoot) => (SUPPORT_KIND === "piers" ? depthUnder(x, z, 0.5, 0.5, toRoot)
     : longX ? depthUnder(x, z, 8 / 12, 4 / 12, toRoot) : depthUnder(x, z, 4 / 12, 8 / 12, toRoot));
   if (RAISED) {
     const gap = GRADE - D3.FLOOR_T;                        // the floor band's underside to the grass
@@ -8840,6 +8986,59 @@ function buildShed3DModel(THREE, p) {
     // walls' outer faces (where a projecting porch's deck, and its own sheet, begins), in the
     // ENVIRONMENT group so it hides with the grass (the Landscape toggle), a hair above it.
     addUnderShade(0, 0, bldgW + T, bldgH + T);
+  }
+  // ── A SLAB ON GROUND THAT FALLS AWAY: ITS STEM WALL (gradeCornersFt on a slab, 2026-10-03) ─────────
+  // The floor band above is the slab's top, as on every slab, and its highest corner meets the grass
+  // exactly where the ground has always been drawn. Where the ground is lower the pour goes down with
+  // it, as a real slab's edge does on a sloping site, so more concrete shows on the low side: a wall
+  // round the footprint under the band, its outer face flush with the band's (OUT past the walls'
+  // line), STEM_T thick, from the band's underside down to the grass and EMBED into it. One closed
+  // prism a side, drawn in its own (along, y) plane and extruded STEM_T inward (the lean-to walls'
+  // wallPiece), its bottom edge cut every foot or less to the deeper of the grass under its outer and
+  // inner faces, so nowhere along it does the concrete stop above the slope. North and south run
+  // corner to corner; west and east stop at their inner faces, so no two faces share a plane (the
+  // skirt's rule). In the band's own material, so band and stem read as one pour. Recorded on the
+  // model (model.foundation) for tests/harness/foundation.mjs and gradeFall.mjs. Nothing here is
+  // built without the key: SLAB_FALL is null on every other building. Its group is kept, so the shadow
+  // pass below lets the stems take shadows as the band does.
+  let slabStemGroup = null;
+  if (SLAB_FALL) {
+    const OUT = 0.1, STEM_T = 0.5, EMBED = 0.25;
+    const sGroup = new THREE.Group();
+    sGroup.userData.ssFoundation = "slab";
+    const stems = [];
+    // O is the outer face's along = 0 point, U the unit along the wall, N its exterior normal. The
+    // turned shape's own x runs along +U on the north and east walls and along -U on the south and
+    // west ones (`s`), and its z goes in from the outer face.
+    const stemWall = (wall, O, U, N, a0, a1) => {
+      const s = U[0] * -N[1] + U[1] * N[0];
+      const n = Math.max(1, Math.ceil(a1 - a0 - 1e-9));
+      const yb = (a) => -Math.max(depthAt(O[0] + U[0] * a, O[1] + U[1] * a),
+        depthAt(O[0] + U[0] * a - N[0] * STEM_T, O[1] + U[1] * a - N[1] * STEM_T)) - EMBED;
+      const pts = [[s * a0, -D3.FLOOR_T], [s * a1, -D3.FLOOR_T]];
+      let bottom = 0;
+      for (let k = n; k >= 0; k--) {
+        const y = yb(a0 + ((a1 - a0) * k) / n);
+        bottom = Math.min(bottom, y);
+        pts.push([s * (a0 + ((a1 - a0) * k) / n), y]);
+      }
+      const sh = new THREE.Shape();
+      pts.forEach((pt, k) => (k ? sh.lineTo(pt[0], pt[1]) : sh.moveTo(pt[0], pt[1])));
+      const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(sh, { depth: STEM_T, bevelEnabled: false }), floor.material);
+      mesh.rotation.y = Math.atan2(-N[0], -N[1]);
+      mesh.position.set(O[0], 0, O[1]);
+      mesh.userData.ssFoundationPart = "stem";
+      mesh.userData.ssStem = wall;
+      sGroup.add(mesh);
+      stems.push({ wall, top: -D3.FLOOR_T, bottom });
+    };
+    stemWall("north", [-bldgW / 2, -(bldgH / 2 + OUT)], [1, 0], [0, -1], -OUT, bldgW + OUT);
+    stemWall("south", [-bldgW / 2, bldgH / 2 + OUT], [1, 0], [0, 1], -OUT, bldgW + OUT);
+    stemWall("west", [-(bldgW / 2 + OUT), -bldgH / 2], [0, 1], [-1, 0], -OUT + STEM_T, bldgH + OUT - STEM_T);
+    stemWall("east", [bldgW / 2 + OUT, -bldgH / 2], [0, 1], [1, 0], -OUT + STEM_T, bldgH + OUT - STEM_T);
+    root.add(sGroup);
+    slabStemGroup = sGroup;
+    foundationInfo = { kind: "slab", grade: GRADE, stemT: STEM_T, stems };
   }
 
   // Wall frames: O = the wall's along=0 end (in x/z), U = unit vector along the
@@ -10408,10 +10607,16 @@ function buildShed3DModel(THREE, p) {
   // eave porch is the building's whole length, and two posts 24 ft apart hold nothing up. Over the
   // header the roof prism's own face closes the opening -- the shed's tall band, clad, or the gable
   // prism's underside -- because the wall behind it stops at H (d3WallTopFt's setBack).
+  // ITS STEPS (roof.porchSteps, 2026-10-03), off the floor's edge in the opening: d3RecessedStepsOnGround's
+  // flight, the one its readout says, built after the projecting porch below. Null without them.
+  const recessedStepsGeom = porchOn ? d3RecessedStepsOnGround(p.styleSpec, bldgW, bldgH) : null;
   if (porchOnEave) {
     const uIn = (porchWall === "south" ? 1 : -1) * (S / 2 - 0.21);   // south is +u here (u = world z)
     const POST = 0.32, INSET = 0.4;
-    const bays = Math.max(1, Math.ceil(L / 10 - 1e-6));
+    // Centre steps take one bay more where the count is even, so no post stands at the top of them
+    // (d3RecessedPorchFrame, d3PorchGeom's rule). Without steps the count is what it always was.
+    const ruleBays = Math.max(1, Math.ceil(L / 10 - 1e-6));
+    const bays = recessedStepsGeom && recessedStepsGeom.where === "center" && ruleBays % 2 === 0 ? ruleBays + 1 : ruleBays;
     const za = INSET + POST / 2, zb = L - INSET - POST / 2;
     for (let i = 0; i <= bays; i++) {
       const post = box(trimMat, POST, H, POST);
@@ -10552,7 +10757,9 @@ function buildShed3DModel(THREE, p) {
   // lean-to, it comes off of the roof here and comes out here and then drops down."
   //
   // Absent means gable, so every saved style renders exactly as it did.
-  const dormW = roofCfg.dormerWidthFt || 0;
+  // As wide as the style says, held inside the gable ends (d3DormerWidthFt, 2026-10-04): a dormer saved
+  // the full length of a longer building no longer stands out past the ends of a shorter one.
+  const dormW = d3DormerWidthFt(roofCfg, L);
   const dormerIsTransom = roofCfg.dormerType === "transom";
   // Beside END WINGS a dormer that would reach over an end wing's roof is not drawn (d3DormerBlocked; the
   // dormer's tab says so). False on every building without an end wing.
@@ -11509,6 +11716,56 @@ function buildShed3DModel(THREE, p) {
       rg.add(eg);
     });
   }
+  // ── A FLIGHT OF PORCH STEPS (d3PorchStepsGeom's numbers, lifted out of the porch 2026-10-03) ──
+  // Lumber like the deck: a tread per step, a closed riser under each, and a stringer either side cut
+  // to the steps' outline, built in the flight's own frame (x across it, y up, z = d out from the edge
+  // it leaves) in a group tagged ssPorchPart "steps" with the side in ssPorchSteps, so anything that
+  // places things against that edge (the harness, a ramp on that wall) can find them. The caller
+  // places the group: on the projecting porch's deck, turned a quarter onto an end of it for a side
+  // flight, or in a recessed porch's opening. The same code in the same order as when it was inline
+  // in the porch, so a porch's front steps build exactly the meshes they did.
+  const makeStepFlight = (stepsGeom, woodMat, part) => {
+    const { x: sx, w: sw, count, rise, tread, d0, grade } = stepsGeom;
+    const TREAD_T = Math.min(0.09, rise * 0.6), STR_T = 0.125, RISER_T = 0.06, NOSE = 0.03, EPS = 0.005;
+    const topOf = (k) => grade + (count + 1 - k) * rise;          // k = 1 is the step next to the deck
+    const frontOf = (k) => d0 + EPS + k * tread;                  // its front edge, out from the wall
+    const st = new THREE.Group();
+    st.userData.ssPorchPart = "steps";
+    st.userData.ssPorchSteps = stepsGeom.where;
+    // The risers a shade darker than the treads, as they are in daylight under the tread's nose;
+    // in one flat colour a flight of steps read as a single block.
+    const riserMat = woodMat.clone();
+    riserMat.color.multiplyScalar(0.72);
+    for (let k = 1; k <= count; k++) {
+      const t = box(woodMat, sw, TREAD_T, tread);
+      t.position.set(sx, topOf(k) - TREAD_T / 2, frontOf(k) - tread / 2);
+      st.add(part(t, "stepTread"));
+      const rh = topOf(k) - TREAD_T - grade;
+      if (rh > 0.005) {
+        const r = box(riserMat, sw - 2 * STR_T - 0.02, rh, RISER_T);
+        r.position.set(sx, grade + rh / 2, frontOf(k) - NOSE - RISER_T / 2);
+        st.add(part(r, "stepRiser"));
+      }
+    }
+    // The stringer's outline, shape x = d and y = up: along the grass to the bottom step's riser,
+    // then up and back under each tread in turn to the deck's edge.
+    const sh = new THREE.Shape();
+    sh.moveTo(d0 + EPS, grade);
+    sh.lineTo(frontOf(count) - NOSE, grade);
+    for (let k = count; k >= 1; k--) {
+      sh.lineTo(frontOf(k) - NOSE, topOf(k) - TREAD_T);
+      sh.lineTo(k > 1 ? frontOf(k - 1) - NOSE : d0 + EPS, topOf(k) - TREAD_T);
+    }
+    const sg = new THREE.ExtrudeGeometry(sh, { depth: STR_T, bevelEnabled: false });
+    for (const s of [-1, 1]) {
+      const str = new THREE.Mesh(s > 0 ? sg : sg.clone(), woodMat);
+      str.rotation.y = -Math.PI / 2;                    // shape x -> d, extrusion -> -x
+      // Outer faces 0.01 inside the treads' ends, so the two never share a plane.
+      str.position.x = s > 0 ? sx + sw / 2 - 0.01 : sx - sw / 2 + 0.01 + STR_T;
+      st.add(part(str, "stringer"));
+    }
+    return st;
+  };
   // ── PROJECTING PORCH (roof.porchOutFt, 2026-09-17) ──────────────────────────────────────────
   // A deck, posts and a low roof of its own IN FRONT of one gable end, as on the Barnstead
   // walk-around: a 16x24 gambrel with a 6.5 ft porch across its front end. The recessed porch above
@@ -11634,8 +11891,8 @@ function buildShed3DModel(THREE, p) {
     const ang = Math.atan(pitch), cosA = Math.cos(ang), sinA = Math.sin(ang);
     const yTop = (d) => yHigh - pitch * (d - dWall);            // the porch roof's top plane
     const yU = (d) => yTop(d) - (PR_T + SHEATH) / cosA;         // the underside of the ceiling boards
-    // colors.wood colours this porch and nothing else: the recessed porch, the truss, the lean-to
-    // and open-eave tails keep their own materials.
+    // colors.wood colours this porch and, since 2026-10-03, a recessed porch's steps, and nothing else:
+    // the recessed porch's posts, the truss, the lean-to and open-eave tails keep their own materials.
     const woodMat = mat((p.styleSpec && p.styleSpec.colors && p.styleSpec.colors.wood) || D3_COLORS.wood, { roughness: 0.9 });
     const pg = new THREE.Group(), deck = new THREE.Group();
     // Every member is tagged with what it is (userData.ssPorchPart), so porchProbe measures the
@@ -11681,36 +11938,40 @@ function buildShed3DModel(THREE, p) {
       post.position.set(-(side - POST / 2) + (i * 2 * (side - POST / 2)) / geom.bays, geom.postH / 2, dPost);
       pg.add(part(post, "post"));
     }
-    // The front: a wood board over the rafter tails. Its bottom is needed by the cheeks below.
+    // The front: a wood board over the rafter tails. Its bottom is needed by the drip below.
     const boardH = (SHEATH + RAF_D) / cosA;
     const boardBot = yTop(dEnd - FAS_T / 2) - PR_T / cosA - boardH;
-    // A sided cheek each side, from the wall to the board over the rafter tails and down to the post
-    // tops, with no side beam — as on the building. Its faces carry the cladding (wallMat, feet UVs
-    // from the shape); the thin sides and the underside take gableMat, plain body colour, because
-    // the cladding's UVs striped them.
+    // A sided cheek each side, from the wall out to the corner post's outer face and from the post
+    // tops up to the ceiling, with no side beam — as on the building. Its faces carry the cladding
+    // (wallMat, feet UVs from the shape); the thin sides and the underside take gableMat, plain body
+    // colour, because the cladding's UVs striped them.
     //
-    // THE FRONT CORNER. The board's bottom sits above the post tops (0.05 ft at 2:12, more on a
-    // flatter porch roof), so a cheek bottom run at post-top height all the way out to the board
-    // left its body-colour underside and end showing past the post's face: a small light block at
-    // both front corners. Past the post's face the cheek now steps up to the board's bottom, and a
-    // wood block the cheek's thickness fills the step, so post and board read as one piece of
-    // lumber, as on the building. The notch alone left a light step face over the post; stopping
-    // the cheek at the post's face opened a gap under the roof.
+    // THE FRONT CORNER (2026-10-04). The siding stops at the corner post's outer face (D), so the post
+    // stands at the corner; it used to run on past the post to the board over the rafter tails, which
+    // the 10-01 call asked to be "in". Past the post the end of the porch roof is wood, a block the
+    // cheek's thickness from the post top up to the ceiling and out to the board, so post, rafter ends
+    // and board read as the porch's lumber. The block also keeps the corner closed (a cheek stopped at
+    // the post with nothing past it opened a gap under the roof), and no siding shows under the board
+    // (the light block this corner once had).
     const dC = dEnd - FAS_T;
-    const stepUp = boardBot - geom.postH > 0.005 && dC - D > 0.005;
     for (const s of [-1, 1]) {
       const sh = new THREE.Shape();
       sh.moveTo(dWall, geom.postH);
-      if (stepUp) { sh.lineTo(D, geom.postH); sh.lineTo(D, boardBot); sh.lineTo(dC, boardBot); } else sh.lineTo(dC, geom.postH);
-      sh.lineTo(dC, yU(dC)); sh.lineTo(dWall, yU(dWall));
+      sh.lineTo(D, geom.postH);
+      sh.lineTo(D, yU(D)); sh.lineTo(dWall, yU(dWall));
       const cg = new THREE.ExtrudeGeometry(sh, { depth: CHEEK_T, bevelEnabled: false });
       const cheek = new THREE.Mesh(cg, (cg.groups && cg.groups.length === 2) ? [wallMat, gableMat] : wallMat);
       cheek.rotation.y = -Math.PI / 2;                    // shape x -> d, extrusion -> -u
       cheek.position.x = s > 0 ? side : -side + CHEEK_T;
       pg.add(part(cheek, "cheek"));
-      if (stepUp) {
-        const fill = box(woodMat, CHEEK_T, boardBot - geom.postH, dC - D);
-        fill.position.set(s * (side - CHEEK_T / 2), (geom.postH + boardBot) / 2, (D + dC) / 2);
+      if (dC - D > 0.005) {
+        const fs = new THREE.Shape();
+        fs.moveTo(D, geom.postH);
+        fs.lineTo(dC, geom.postH);
+        fs.lineTo(dC, yU(dC)); fs.lineTo(D, yU(D));
+        const fill = new THREE.Mesh(new THREE.ExtrudeGeometry(fs, { depth: CHEEK_T, bevelEnabled: false }), woodMat);
+        fill.rotation.y = -Math.PI / 2;                   // as the cheek: shape x -> d
+        fill.position.x = s > 0 ? side : -side + CHEEK_T;
         pg.add(part(fill, "cornerFill"));
       }
       // The rake trim along the porch roof's side edge.
@@ -11772,17 +12033,27 @@ function buildShed3DModel(THREE, p) {
     // (addSupport), from the rim's underside down to the grass, one under every post along the
     // front rim with its outer face at the rim's, and a second row across the middle of a deck more
     // than 7 ft deep. The wall side rides on the building's ledger. Tagged "deckSupport"; none are
-    // built at grade.
-    if (RAISED) {
+    // built at grade. Under a slab on ground that falls away (SUPPORT_KIND, 2026-10-03) the same rows
+    // are piers, built only where the grass has dropped below the at-grade rim (addSupport's rule).
+    // The steps (below) are worked out first (2026-10-03), so a flight down an end of the deck can
+    // leave out a middle row's support it would stand in. They climb from the ground under the flight
+    // (d3PorchStepsOnGround): GRADE on level ground.
+    const stepsGeom = d3PorchStepsOnGround(p.styleSpec, bldgW, bldgH, geom, D, framing.steps);
+    if (SUPPORT_KIND) {
       const top = -DECK_T - RIM_H;
       const outer = side - POST / 2;
-      const rows = [D - (RAISED === "piers" ? 0.5 : 1 / 3)];
+      const rows = [D - (SUPPORT_KIND === "piers" ? 0.5 : 1 / 3)];
       if (D - dWall > 7) rows.push((dWall + D) / 2);
       // Where the ground falls away (FALL) each reaches it at its own spot, read in the building's
       // frame through d3PorchToRoot, since the deck is only placed onto its wall further down.
       const toRoot = FALL ? d3PorchToRoot(roofCfg, bldgW, bldgH) : null;
-      rows.forEach((dz) => {
+      rows.forEach((dz, r) => {
         for (let i = 0; i <= geom.bays; i++) {
+          // A flight down an end of the deck (2026-10-03) stands where the middle row's support at that
+          // end would, so that one is left out: the flight's stringers carry the rim there. The front
+          // row's (rows[0]) never is: d3PorchStepsGeom keeps the flight clear of it, and the corner post
+          // stands on it.
+          if (r > 0 && stepsGeom && stepsGeom.turn && i === (stepsGeom.turn > 0 ? geom.bays : 0) && Math.abs(dz - stepsGeom.atD) < stepsGeom.w / 2 + 0.5) continue;
           const n0 = deck.children.length;
           const px = -outer + (i * 2 * outer) / geom.bays;
           addSupport(deck, px, dz, top, true, toRoot ? supportDepth(px, dz, true, toRoot) : undefined);
@@ -11791,54 +12062,14 @@ function buildShed3DModel(THREE, p) {
       });
     }
     // STEPS (roof.porchSteps, 2026-09-25): off the deck's FRONT edge, standing on the grass, every
-    // number d3PorchStepsGeom's. Lumber like the deck: a tread per step, a closed riser under each,
-    // and a stringer either side cut to the steps' outline. Their own group in the deck group, so
-    // they sit with the floor (look-inside keeps them) and turn with the porch onto its wall;
-    // tagged ssPorchPart "steps" with the side in ssPorchSteps, so anything that places things
-    // against the deck's edge (the harness, a ramp on that wall) can find them. Nothing is built
-    // without the key, so every porch before it is unchanged.
-    // They climb from the ground under the flight (d3PorchStepsOnGround): GRADE on level ground.
-    const stepsGeom = d3PorchStepsOnGround(p.styleSpec, bldgW, bldgH, geom, D, framing.steps);
+    // number d3PorchStepsGeom's, built by makeStepFlight above. Their own group in the deck group, so
+    // they sit with the floor (look-inside keeps them) and turn with the porch onto its wall. Nothing
+    // is built without the key, so every porch before it is unchanged. stepsGeom is above the supports.
     if (stepsGeom) {
-      const { x: sx, w: sw, count, rise, tread, d0, grade } = stepsGeom;
-      const TREAD_T = Math.min(0.09, rise * 0.6), STR_T = 0.125, RISER_T = 0.06, NOSE = 0.03, EPS = 0.005;
-      const topOf = (k) => grade + (count + 1 - k) * rise;          // k = 1 is the step next to the deck
-      const frontOf = (k) => d0 + EPS + k * tread;                  // its front edge, out from the wall
-      const st = new THREE.Group();
-      st.userData.ssPorchPart = "steps";
-      st.userData.ssPorchSteps = stepsGeom.where;
-      // The risers a shade darker than the treads, as they are in daylight under the tread's nose;
-      // in one flat colour a flight of steps read as a single block.
-      const riserMat = woodMat.clone();
-      riserMat.color.multiplyScalar(0.72);
-      for (let k = 1; k <= count; k++) {
-        const t = box(woodMat, sw, TREAD_T, tread);
-        t.position.set(sx, topOf(k) - TREAD_T / 2, frontOf(k) - tread / 2);
-        st.add(part(t, "stepTread"));
-        const rh = topOf(k) - TREAD_T - grade;
-        if (rh > 0.005) {
-          const r = box(riserMat, sw - 2 * STR_T - 0.02, rh, RISER_T);
-          r.position.set(sx, grade + rh / 2, frontOf(k) - NOSE - RISER_T / 2);
-          st.add(part(r, "stepRiser"));
-        }
-      }
-      // The stringer's outline, shape x = d and y = up: along the grass to the bottom step's riser,
-      // then up and back under each tread in turn to the deck's edge.
-      const sh = new THREE.Shape();
-      sh.moveTo(d0 + EPS, grade);
-      sh.lineTo(frontOf(count) - NOSE, grade);
-      for (let k = count; k >= 1; k--) {
-        sh.lineTo(frontOf(k) - NOSE, topOf(k) - TREAD_T);
-        sh.lineTo(k > 1 ? frontOf(k - 1) - NOSE : d0 + EPS, topOf(k) - TREAD_T);
-      }
-      const sg = new THREE.ExtrudeGeometry(sh, { depth: STR_T, bevelEnabled: false });
-      for (const s of [-1, 1]) {
-        const str = new THREE.Mesh(s > 0 ? sg : sg.clone(), woodMat);
-        str.rotation.y = -Math.PI / 2;                    // shape x -> d, extrusion -> -x
-        // Outer faces 0.01 inside the treads' ends, so the two never share a plane.
-        str.position.x = s > 0 ? sx + sw / 2 - 0.01 : sx - sw / 2 + 0.01 + STR_T;
-        st.add(part(str, "stringer"));
-      }
+      const st = makeStepFlight(stepsGeom, woodMat, part);
+      // OFF AN END OF THE DECK (leftSide / rightSide, 2026-10-03): the flight turned a quarter onto that
+      // end, its first tread at the rim's outer face (d3PorchStepsGeom's map from its frame to the deck's).
+      if (stepsGeom.turn) { st.rotation.y = (stepsGeom.turn * Math.PI) / 2; st.position.set(stepsGeom.edgeX, 0, stepsGeom.atD); }
       deck.add(st);
       porchStepsGroup = st;
       geom.steps = stepsGeom;
@@ -11856,6 +12087,25 @@ function buildShed3DModel(THREE, p) {
     porchCapZ = onCap ? (atZero ? 0 : L) : null;
     return geom;
   })();
+  // ── A RECESSED PORCH'S STEPS (roof.porchSteps, 2026-10-03) ──
+  // The projecting porch's flight (makeStepFlight) on the grass in front of the opening, coloured like
+  // its lumber (colors.wood). Built in a holder on the footprint's edge at the middle of the porch's
+  // wall, turned so its z runs out along that wall's normal (the ramp's rule): the frame
+  // d3RecessedPorchToRoot maps, x to the right of someone standing in front of it. In root with the
+  // floor, so look-inside keeps them. Nothing is built without them.
+  let recessedStepsHolder = null;
+  if (recessedStepsGeom) {
+    const n = { south: [0, 1], north: [0, -1], east: [1, 0], west: [-1, 0] }[porchWall];
+    const woodMat = mat((p.styleSpec && p.styleSpec.colors && p.styleSpec.colors.wood) || D3_COLORS.wood, { roughness: 0.9 });
+    const st = makeStepFlight(recessedStepsGeom, woodMat, (m, name) => { m.userData.ssPorchPart = name; return m; });
+    recessedStepsHolder = new THREE.Group();
+    recessedStepsHolder.userData.ssPorch = "recessedSteps";
+    recessedStepsHolder.position.set((n[0] * bldgW) / 2, 0, (n[1] * bldgH) / 2);
+    recessedStepsHolder.rotation.y = Math.atan2(n[0], n[1]);
+    recessedStepsHolder.add(st);
+    root.add(recessedStepsHolder);
+    porchStepsGroup = st;
+  }
   // ── PLATE BAND (roof.plateBand, 2026-09-17) ──
   // A 0.3 ft trim board across both gable caps at the top of the wall, H - 0.2 to
   // H + SS_PLATE_BAND_TOP: the belly band both gable ends of the Barnstead show, and the line a
@@ -12067,8 +12317,9 @@ function buildShed3DModel(THREE, p) {
       cTop = Math.max(H, Math.min(cH, (rearProf && c[1] < 0 ? rearProf.yAt : profYAt)(uc - Math.sign(uc) * half)));
     }
     // On a raised floor (2026-09-25) the board runs on down over the siding's skirt to its bottom
-    // edge, as the cladding does; 0 on every other building, where it stands on the floor.
-    const cBot = foundationInfo ? -foundationInfo.skirt : 0;
+    // edge, as the cladding does; 0 on every other building, where it stands on the floor (a slab's
+    // stem wall, 2026-10-03, is concrete under the floor band, with no siding on it to cover).
+    const cBot = RAISED ? -foundationInfo.skirt : 0;
     const post = box(cornerMat, half * 2, cTop - cBot, half * 2);
     post.position.set(c[0], (cTop + cBot) / 2, c[1]);
     if (cTop !== H) post.userData.ssCorner = "tall";
@@ -12255,11 +12506,14 @@ function buildShed3DModel(THREE, p) {
     });
     return out;
   };
+  // A RECESSED porch's steps (2026-10-03) the same way: a ramp on its wall starts at the set-back wall
+  // and, past a shallow porch or off a raised floor, runs out over them.
   const porchStepsVsRamps = () => {
-    if (!porchStepsGroup || !porchOut) return;
+    const stepsWall = porchOut ? porchOut.wall : porchWall;
+    if (!porchStepsGroup || !stepsWall) return;
     const st = planBox(porchStepsGroup);
     const hit = interiorGroup.children.some((g) => {
-      if (!(g.userData && g.userData.ssRamp === porchOut.wall)) return false;
+      if (!(g.userData && g.userData.ssRamp === stepsWall)) return false;
       const r = planBox(g);
       return r.x0 < st.x1 - 0.01 && r.x1 > st.x0 + 0.01 && r.z0 < st.z1 - 0.01 && r.z1 > st.z0 + 0.01;
     });
@@ -12510,7 +12764,9 @@ function buildShed3DModel(THREE, p) {
   envGroup.traverse((o) => { if (o.isMesh) o.castShadow = false; });
   ground.receiveShadow = true;
   floor.receiveShadow = true;
+  if (slabStemGroup) slabStemGroup.traverse((o) => { if (o.isMesh) o.receiveShadow = true; });
   if (porchDeckGroup) porchDeckGroup.traverse((o) => { if (o.isMesh) o.receiveShadow = true; });
+  if (recessedStepsHolder) recessedStepsHolder.traverse((o) => { if (o.isMesh) o.receiveShadow = true; });
 
   // Scoped rebuilds for the live drag. sharedMats = the model-lifetime wall and
   // trim materials that per-wall disposal must keep (their maps ride along, so
@@ -12529,6 +12785,9 @@ function buildShed3DModel(THREE, p) {
     cornerRole: d3TrimKeyRole(p.styleSpec && p.styleSpec.colors, "corner"),
     fasciaRole: d3TrimKeyRole(p.styleSpec && p.styleSpec.colors, "fascia"),
     porch: porchGeom ? { ...porchGeom, D: porchOut.D, wall: porchOut.wall, ...((NEW_FRAME || d3WingsOn(mass)) ? { span: d3PorchSpan(roofCfg, bldgW, bldgH).span, onCap: d3PorchSpan(roofCfg, bldgW, bldgH).onCap, centerU: d3PorchSpan(roofCfg, bldgW, bldgH).centerU } : {}) } : null };
+  // recessedSteps: a recessed porch's steps as built (d3RecessedStepsOnGround's flight and the wall it
+  // leaves), only when there are some (2026-10-03). Read by tests/harness/porchProbe.mjs.
+  if (recessedStepsGeom) model.recessedSteps = { ...recessedStepsGeom, wall: porchWall };
   if (NEW_FRAME) {
     // S is the building's full span (mass.S): the roof section's own S is the centre's with wings.
     model.frame = { uAxisIsX, S: mass.S, L, tallNeg, tops: Object.fromEntries(Object.keys(WALLS).map((w) => [w, WALLS[w].top])), porchWall };
@@ -12544,7 +12803,8 @@ function buildShed3DModel(THREE, p) {
   // The roof step as built (d3RoofStep), for tests/harness/roofStep.mjs; absent without one.
   if (STEP) model.roofStep = { stepFt: STEP.stepFt, rise: STEP.rise, Hf: STEP.Hf, Hb: STEP.Hb, pitch: STEP.pitch, pitchB: STEP.pitchB, rearPeak: rearProf.peak };
   // The ground's depth below the floor's top (d3GradeFt) and, on blocks or piers, the skirt, runners
-  // and supports as built, for tests/harness/foundation.mjs; nothing in the app reads them.
+  // and supports as built, or on a slab over falling ground its stem wall ({ kind: "slab", grade,
+  // stemT, stems }), for tests/harness/foundation.mjs; nothing in the app reads them.
   model.grade = GRADE;
   model.foundation = foundationInfo;
   // The ground's fall (d3GradeFall: { fallFt, toward }), null on level ground and beside corners, and
@@ -14849,7 +15109,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             picker is worse than none. */}
         {(() => {
           const roofSpec = (style3d && style3d.roof) || {};
-          const dW = Number(roofSpec.dormerWidthFt) || 0;
+          const dW = d3DormerWidthFt(roofSpec, d3RoofAxes(roofSpec, bldgW, bldgH).L);   // as drawn
           if (!(dW > 0.5) || roofSpec.type === "shed") return null;
           const wins = placeableWindows || [];
           if (!wins.length) return null;
@@ -18605,7 +18865,7 @@ const CAL_DIM_BANDS = { widthFt: [4, 60], lengthFt: [4, 100], wallHeightFt: [3, 
 // The eave, in inches, as chips. `null` is "read it off the video" and is where this starts:
 // it is the only value that means "the model should answer this", and it is not the same thing
 // as 0, which is a flush eave and a real measurement.
-const CAL_OVERHANG_CHIPS = [[null, "Read it from the video"], [0, "Flush"], [2, "2 in"], [6, "6 in"], [12, "12 in"], [16, "16 in"]];
+const CAL_OVERHANG_CHIPS = [[null, "Read it from the video"], [0, "Flush"], [2, "2 in"], [6, "6 in"], [12, "12 in"], [16, "16 in"], [24, "24 in"]];
 // ⚠️ THIS SURFACE HAS NO SSD_CSS. That stylesheet is injected by SSDesignerFrame, which the
 // `calibrationOnly` early return never renders, and importing it here would be worse than
 // useless: it sets --ssd-sticky-top and `position:sticky` rules that assume the designer's own
@@ -18964,18 +19224,45 @@ function ssDrewWords(spec, porchBuilt, stepBuilt, massBuilt) {
         ? `a roof sloping ${in12(pb.pitch)} (lowered from ${in12(roof.porchPitch)} to leave headroom under the beam)`
         : `a roof sloping ${in12(pb ? pb.pitch : roof.porchPitch)}`);
     }
-    const stepsAt = ({ left: "on the left", center: "in the middle", right: "on the right" })[roof.porchSteps];
+    // A flight off an end of the deck (2026-10-03) is said by the end it leaves from, and only where it
+    // is drawn (2026-10-04): the readout's steps, or with no readout (no size yet) a deck at least
+    // D3_PORCH_SIDE_STEPS_MIN_FT deep, the one d3PorchStepsGeom draws it on at any size.
+    const sideUndrawn = (roof.porchSteps === "leftSide" || roof.porchSteps === "rightSide")
+      && !(porchBuilt ? porchBuilt.steps : outFt >= D3_PORCH_SIDE_STEPS_MIN_FT);
+    const stepsAt = sideUndrawn ? undefined : ({ left: "on the left", center: "in the middle", right: "on the right", leftSide: "off its left side", rightSide: "off its right side" })[roof.porchSteps];
     // On a raised floor (2026-09-25) the steps climb its whole height, so how many is worth saying:
-    // the readout's count, built to the same grade. At grade it is always one, and never said --
-    // unless the builder gave the count (roof.porchStepCount, 2026-09-28), which is always said: the
+    // the readout's count, built to the same grade. At grade it is one, and never said; on a slab whose
+    // ground falls away under the flight (gradeCornersFt, 2026-10-03) the readout counts more, and that
+    // is said -- as is the count the builder gave (roof.porchStepCount, 2026-09-28), always: the
     // readout's, which is theirs, or theirs as given when there is no readout.
     const askedSteps = Number(roof.porchStepCount) >= 1 ? Math.round(Math.min(12, Number(roof.porchStepCount))) : 0;
-    const nSteps = (raisedOn || askedSteps) && porchBuilt && porchBuilt.steps ? Math.round(Number(porchBuilt.steps.count)) : askedSteps;
+    const nSteps = (raisedOn || askedSteps || (porchBuilt && porchBuilt.steps && Number(porchBuilt.steps.count) > 1)) && porchBuilt && porchBuilt.steps ? Math.round(Number(porchBuilt.steps.count)) : askedSteps;
     if (stepsAt) built.push(nSteps > 0 ? `${nSteps === 1 ? "one step" : `${nSteps} steps`} ${stepsAt}` : `steps ${stepsAt}`);
     if (built.length) out.push(`It has ${built.length > 1 ? built.slice(0, -1).join(", ") + " and " + built[built.length - 1] : built[0]}.`);
   } else if (inFt > 0.5) {
     out.push(`The porch is cut ${ssFtInWords(inFt)} into the ${end} ${face}.`);
+    // Its steps (2026-10-03), along its front only, counted as the projecting porch's are: said when the
+    // floor is raised, the ground under them takes more than one, or the builder gave the count, from
+    // `porchBuilt`, d3RecessedPorchReadout's here.
+    const stepsIn = ({ left: "on the left", center: "in the middle", right: "on the right" })[roof.porchSteps];
+    const askedIn = Number(roof.porchStepCount) >= 1 ? Math.round(Math.min(12, Number(roof.porchStepCount))) : 0;
+    const nIn = (raisedOn || askedIn || (porchBuilt && porchBuilt.steps && Number(porchBuilt.steps.count) > 1)) && porchBuilt && porchBuilt.steps ? Math.round(Number(porchBuilt.steps.count)) : askedIn;
+    if (stepsIn) out.push(`It has ${nIn > 0 ? (nIn === 1 ? "one step" : `${nIn} steps`) : "steps"} ${stepsIn}.`);
   }
+  // The ground at each corner (2026-09-29, d3GradeCorners): spelt out here so this stays a pure function
+  // of the spec, for a raised floor and (2026-10-03) a slab, the two it is drawn under. Each corner is
+  // said as how much lower it is than the highest, under a foot in inches ("6 in lower", not "0 ft 6 in
+  // lower").
+  const gcRaw = spec && spec.gradeCornersFt && typeof spec.gradeCornersFt === "object" && !Array.isArray(spec.gradeCornersFt) ? spec.gradeCornersFt : null;
+  const gcOf = (k) => { const n = Number(gcRaw[k]); return isFinite(n) && n > 0 ? Math.min(6, n) : 0; };
+  const gcLo = gcRaw ? Math.min(gcOf("fl"), gcOf("fr"), gcOf("bl"), gcOf("br")) : 0;
+  const gc = gcRaw ? [["fl", "front-left"], ["fr", "front-right"], ["bl", "back-left"], ["br", "back-right"]].map(([k, name]) => [name, gcOf(k) - gcLo]) : [];
+  const sloped = gc.some(([, v]) => v > 0);
+  const gcList = (a) => (a.length > 1 ? a.slice(0, -1).join(", ") + " and " + a[a.length - 1] : a[0]);
+  const gcHigh = gc.filter(([, v]) => !(v > 0)).map(([name]) => name);
+  const gcSaid = sloped
+    ? `The ground is highest at the ${gcList(gcHigh)} corner${gcHigh.length > 1 ? "s" : ""}, and ${gcList(gc.filter(([, v]) => v > 0).map(([name, v]) => `${ssFtInWords(v).replace(/^0 ft /, "")} lower at the ${name}`))}`
+    : "";
   // A RAISED FLOOR (2026-09-25): what it stands on and how high, only where the style says. A height
   // it does not give is said as the one drawn, and as not measured.
   if (raisedOn) {
@@ -18984,14 +19271,7 @@ function ssDrewWords(spec, porchBuilt, stepBuilt, massBuilt) {
     // The ground falling away under it (2026-09-28): d3GradeFall's reading, spelt out here so this
     // stays a pure function of the spec. The floor height is the UPHILL edge's, as the panel's box
     // says: the front, or across a left or right fall the other side.
-    // The ground at each corner (2026-09-29, d3GradeCorners): spelt out here for the same reason. A
-    // style that gives corners has no fall; each corner is said as how much lower it is than the
-    // highest, and the floor height is that highest corner's.
-    const gcRaw = spec.gradeCornersFt && typeof spec.gradeCornersFt === "object" && !Array.isArray(spec.gradeCornersFt) ? spec.gradeCornersFt : null;
-    const gcOf = (k) => { const n = Number(gcRaw[k]); return isFinite(n) && n > 0 ? Math.min(6, n) : 0; };
-    const gcLo = gcRaw ? Math.min(gcOf("fl"), gcOf("fr"), gcOf("bl"), gcOf("br")) : 0;
-    const gc = gcRaw ? [["fl", "front-left"], ["fr", "front-right"], ["bl", "back-left"], ["br", "back-right"]].map(([k, name]) => [name, gcOf(k) - gcLo]) : [];
-    const sloped = gc.some(([, v]) => v > 0);
+    // A style that gives corners (above) has no fall, and its floor height is the highest corner's.
     const fallRaw = Number(spec.gradeFallFt);
     const fall = !gcRaw && isFinite(fallRaw) && fallRaw > 0 ? Math.min(6, fallRaw) : 0;
     const toward = spec.gradeFallToward === "left" || spec.gradeFallToward === "right" ? spec.gradeFallToward : "back";
@@ -18999,16 +19279,11 @@ function ssDrewWords(spec, porchBuilt, stepBuilt, massBuilt) {
     out.push(h > 0
       ? `It stands on ${what}, its floor ${ssFtInWords(h)} off the ground ${at}.`
       : `It stands on ${what}; no floor height is given, so its floor is drawn ${ssFtInWords(raisedOn === "blocks" ? 1 : 1.5)} off the ground${fall > 0 || sloped ? ` ${at}` : ""}.`);
-    if (sloped) {
-      const high = gc.filter(([, v]) => !(v > 0)).map(([name]) => name);
-      // Under a foot it is said in inches ("6 in lower", not "0 ft 6 in lower").
-      const low = gc.filter(([, v]) => v > 0).map(([name, v]) => `${ssFtInWords(v).replace(/^0 ft /, "")} lower at the ${name}`);
-      const list = (a) => (a.length > 1 ? a.slice(0, -1).join(", ") + " and " + a[a.length - 1] : a[0]);
-      out.push(`The ground is highest at the ${list(high)} corner${high.length > 1 ? "s" : ""}, and ${list(low)}, so the ${raisedOn === "blocks" ? "blocks" : "piers"} stand taller where it is lower.`);
-    }
+    if (sloped) out.push(`${gcSaid}, so the ${raisedOn === "blocks" ? "blocks" : "piers"} stand taller where it is lower.`);
     if (fall > 0) {
       // Back, left and right are the building's geometry (d3GradeFall), never the porch's, so where
-      // the porch as built (d3PorchReadout's wall) stands on the side the ground falls toward, or on
+      // the porch as built (d3PorchReadout's wall, or since 2026-10-03 a recessed porch's from
+      // d3RecessedPorchReadout) stands on the side the ground falls toward, or on
       // the side it falls away from, the sentence says so: on an old-frame landscape building the
       // porch's "front end" is the side a fall toward the left falls to (review, 2026-09-29).
       const fallWall = { back: "north", left: "west", right: "east" }[toward];
@@ -19017,6 +19292,10 @@ function ssDrewWords(spec, porchBuilt, stepBuilt, massBuilt) {
       const rel = pw === fallWall ? ", where the porch is," : pw === opposite ? ", away from the porch," : ",";
       out.push(`The ground falls ${ssFtInWords(fall)} toward the ${toward}${rel} so the ${raisedOn === "blocks" ? "blocks" : "piers"} on that side stand taller.`);
     }
+  } else if (sloped && spec.foundation === "slab") {
+    // A SLAB ON GROUND THAT FALLS AWAY (2026-10-03): the renderer's stem wall, in the builder's words.
+    // A slab with level corners, or none, says nothing, as it always has.
+    out.push(`It sits on a concrete slab. ${gcSaid}, so more of the slab's concrete edge shows where it is lower.`);
   }
   return out.join(" ");
 }
@@ -19063,7 +19342,7 @@ const SS_CHANGE_WORDS = {
   // The porch's own framing (2026-09-25), in the words the porch controls use.
   "roof.porchPosts": ["How many posts the porch has", (v) => `${Math.round(Number(v))} posts`],
   "roof.porchPitch": ["How steep the porch roof is", (v) => `${Math.round(Number(v) * 120) / 10} in 12`],
-  "roof.porchSteps": ["Where the porch steps are", (v) => ({ left: "on the left", center: "in the middle", right: "on the right" })[String(v)] || String(v)],
+  "roof.porchSteps": ["Where the porch steps are", (v) => ({ left: "on the left", center: "in the middle", right: "on the right", leftSide: "off its left side", rightSide: "off its right side" })[String(v)] || String(v)],
   // The roof step (2026-09-28), in the words its panel controls use: feet from the back wall, and the
   // rear roof edge's rise in inches (a lower one says so).
   "roof.rearStepFt": ["Where the roof steps, from the back wall", (v) => (Number(v) > 0.5 ? ssFtInWords(Number(v)) : "no step")],
@@ -23232,7 +23511,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     : ((roof && roof.porchDepthFt) || 0) > 0.5 ? "recessed" : "none");
   // What only a PROJECTING porch has: where its roof meets the wall, its width, its posts, its
   // roof pitch, its steps and how many (2026-09-28). The sanitiser keeps each only while
-  // porchOutFt is over 0.5.
+  // porchOutFt is over 0.5 -- except the steps along the front and their count, which a recessed
+  // porch keeps too (2026-10-03).
   const CAL_PORCH_OWN_KEYS = ["porchAttachFt", "porchWidthFt", "porchPosts", "porchPitch", "porchSteps", "porchStepCount"];
   // Switches the kind, or sets the depth of the one that is on. The other kind's key is DELETED, not
   // written as 0, so a row carries only the porch it has:
@@ -23253,8 +23533,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // Where a projecting porch's roof meets the wall, and how wide it is, belong to a projecting
     // porch only (2026-09-24): the sanitiser keeps them only while porchOutFt is over 0.5, so on
     // any other kind they would draw in the preview and vanish on Save. Its posts, its roof's pitch
-    // and its steps (2026-09-25) are the projecting porch's too.
-    else { for (const k of CAL_PORCH_OWN_KEYS) delete roof[k]; }
+    // and its steps (2026-09-25) are the projecting porch's too -- but a RECESSED porch has steps
+    // along its front (2026-10-03), so switching to one keeps those and their count; a flight off an
+    // end of the deck goes, since a recessed porch's ends are the building's walls.
+    else {
+      const keepSteps = kind === "recessed" && D3_PORCH_STEP_FRONT.indexOf(roof.porchSteps) >= 0;
+      for (const k of CAL_PORCH_OWN_KEYS) if (!(keepSteps && (k === "porchSteps" || k === "porchStepCount"))) delete roof[k];
+    }
     return { ...p, spec: { ...p.spec, roof } };
   });
   // roof.plateBand: checked writes true, unchecked DELETES the key. Writing false would park
@@ -23265,8 +23550,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     else delete roof.plateBand;
     return { ...p, spec: { ...p.spec, roof } };
   });
-  // colors.wood, the projecting porch's lumber. A blank box DELETES the key and the renderer falls
-  // back to natural wood (D3_COLORS.wood), which is never written into a row.
+  // colors.wood, the projecting porch's lumber, and a recessed porch's steps' (2026-10-03). A blank box
+  // DELETES the key and the renderer falls back to natural wood (D3_COLORS.wood), which is never
+  // written into a row.
   const calSetWood = (v) => setAdminCal((p) => {
     const colors = { ...p.spec.colors };
     if (String(v || "").trim()) colors.wood = v;
@@ -23285,12 +23571,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // height box DELETES floorHeightFt and the renderer draws the kind's own default.
   // The ground's fall (gradeFallFt / gradeFallToward, 2026-09-28) is a raised floor's too, and goes with
   // it the same way: onto skids, a slab or "Not set", and when a video draft's foundation is not raised.
-  // So does the ground at each corner (gradeCornersFt, 2026-09-29).
+  // So does the ground at each corner (gradeCornersFt, 2026-09-29), except onto a slab, which keeps it
+  // (CAL_SLAB_KEEPS, 2026-10-03: the renderer draws a slab's stem wall down to it). Nothing to drop
+  // hands back the same object.
   const CAL_RAISED_ONLY = ["floorHeightFt", "gradeFallFt", "gradeFallToward", "gradeCornersFt"];
+  const CAL_SLAB_KEEPS = ["gradeCornersFt"];
   const calTidyFloor = (spec) => {
-    if (d3RaisedFoundation(spec) || !CAL_RAISED_ONLY.some((k) => k in spec)) return spec;
+    if (d3RaisedFoundation(spec)) return spec;
+    const drop = CAL_RAISED_ONLY.filter((k) => k in spec && !(spec.foundation === "slab" && CAL_SLAB_KEEPS.indexOf(k) >= 0));
+    if (!drop.length) return spec;
     const out = { ...spec };
-    for (const k of CAL_RAISED_ONLY) delete out[k];
+    for (const k of drop) delete out[k];
     return out;
   };
   const calSetFoundation = (v) => setAdminCal((p) => {
@@ -23318,14 +23609,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // as corners (d3GradeCorners), so editing a corner of a style that stores a fall writes the fall's
   // four corners with this one changed and DROPS gradeFallFt / gradeFallToward. All four at 0 is level
   // ground and deletes the key. calSetGroundLevel is the "Level ground" reset: no corners, no fall.
+  // A style that says nothing about its foundation draws a slab, so a corner typed there makes it one
+  // (foundation "slab", Ahsan 2026-10-03): the corners are kept only beside a foundation that has them.
   const calSetGradeCorner = (k, n) => setAdminCal((p) => {
     const spec = { ...p.spec };
     const cur = d3GradeCornersGiven(spec) || d3GradeCorners(spec) || { fl: 0, fr: 0, bl: 0, br: 0 };
     const next = { fl: cur.fl, fr: cur.fr, bl: cur.bl, br: cur.br, [k]: Number(n) > 0 ? Math.min(6, Number(n)) : 0 };
     delete spec.gradeFallFt;
     delete spec.gradeFallToward;
-    if (next.fl > 0 || next.fr > 0 || next.bl > 0 || next.br > 0) spec.gradeCornersFt = next;
-    else delete spec.gradeCornersFt;
+    if (next.fl > 0 || next.fr > 0 || next.bl > 0 || next.br > 0) {
+      spec.gradeCornersFt = next;
+      if (D3_FOUNDATIONS.indexOf(spec.foundation) < 0) spec.foundation = "slab";
+    } else delete spec.gradeCornersFt;
     return { ...p, spec };
   });
   const calSetGroundLevel = () => setAdminCal((p) => {
@@ -23582,12 +23877,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // fix panel and in the full field grid, so the two can never offer different choices. The height
   // box shows only for blocks and piers, the two that raise the floor; blank is the kind's default.
   // THE GROUND AT EACH CORNER (2026-09-29, in place of the fall's two boxes of 2026-09-28): blocks and
-  // piers only. A box per corner, how many feet lower the ground is there, blank or 0 the highest; each
-  // says what it draws ("highest", "1 ft 6 in lower"), and the floor height is taken at the highest.
-  // A style storing a fall opens with the fall's corners in the boxes (d3GradeCorners).
+  // piers, and since 2026-10-03 a slab or nothing said (which draws a slab; a corner typed there makes it
+  // one, calSetGradeCorner). A box per corner, how many INCHES lower the ground is there (Ahsan
+  // 2026-10-03: inches everywhere; stored in feet, the rear-eave-rise pattern), blank or 0 the highest;
+  // each says what it draws ("highest", "1 ft 6 in lower"), and a raised floor's height is taken at the
+  // highest. A style storing a fall opens with the fall's corners in the boxes (d3GradeCorners).
   const calFoundationFields = (idPrefix, labelStyle, inputStyle) => {
     const spec = (adminCal && adminCal.spec) || {};
     const raised = d3RaisedFoundation(spec);
+    const cornersOn = d3SlopeFoundation(spec) || !spec.foundation;
     const grade = d3GradeFt(spec);
     const gcBox = d3GradeCornersGiven(spec) || d3GradeCorners(spec);
     const fall = d3GradeCorners(spec);
@@ -23621,14 +23919,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </span>
           </label>
         )}
-        {raised && (
-          <div style={{ ...labelStyle, gridColumn: "1 / -1" }} data-ss-grade-corners={idPrefix}>Ground at each corner (ft lower)
+        {cornersOn && (
+          <div style={{ ...labelStyle, gridColumn: "1 / -1" }} data-ss-grade-corners={idPrefix}>Ground at each corner (in lower)
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 6, marginTop: 4, maxWidth: 380 }}>
               {[["bl", "Back left"], ["br", "Back right"], ["fl", "Front left"], ["fr", "Front right"]].map(([k, name]) => (
                 <label key={k} style={{ display: "block", fontSize: 11, fontWeight: 700 }}>{name}
-                  <input className="ssc-dim-in" type="number" step="0.25" min="0" max="6" inputMode="decimal" placeholder="0"
-                    aria-label={`Ground at the ${name.toLowerCase()} corner, feet lower`} data-ss-grade-corner={k}
-                    {...calOptNumProps(`${idPrefix}-gc-${k}`, gcBox && gcBox[k] > 0 ? gcBox[k] : null, [0, 6], (n) => calSetGradeCorner(k, n))}
+                  <input className="ssc-dim-in" type="number" step="1" min="0" max="72" inputMode="decimal" placeholder="0"
+                    aria-label={`Ground at the ${name.toLowerCase()} corner (in lower)`} data-ss-grade-corner={k}
+                    {...calOptNumProps(`${idPrefix}-gc-${k}`, gcBox && gcBox[k] > 0 ? Math.round(gcBox[k] * 1200) / 100 : null, [0, 72], (n) => calSetGradeCorner(k, n == null ? null : n / 12))}
                     style={inputStyle} />
                   <span data-ss-grade-corner-say={k} style={{ display: "block", fontWeight: 600, marginTop: 1, fontSize: 11, color: fall && !(fall[k] > 0) ? "#166534" : "#64748B" }}>
                     {!fall ? "level" : fall[k] > 0 ? `${ssFtInWords(fall[k]).replace(/^0 ft /, "")} lower` : "highest"}
@@ -23637,7 +23935,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               ))}
             </div>
             <span style={noteStyle}>
-              0 is the highest corner. Floor height is measured there. The {raised} stand taller where the ground is lower.{/* The
+              {raised
+                ? `0 is the highest corner. Floor height is measured there. The ${raised} stand taller where the ground is lower.`
+                : `0 is the highest corner, where the slab meets the ground. More of the slab's concrete edge shows where the ground is lower.${spec.foundation ? "" : " A number here sets What it stands on to Slab."}`}{/* The
                   directions are the building's own, the sides the 3D's Views menu names (d3GradeCorners),
                   never the porch's: on an old-frame building wider than it is long the porch's
                   "front end" is the left side here (review, 2026-09-29). */}
@@ -23706,7 +24006,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   //       brings its own or none, so a stored attach height never lands on a porch it was not
   //       measured on -- and a recessed porch has neither (the sanitiser keeps them only while
   //       porchOutFt is over 0.5). porchPosts / porchPitch / porchSteps (2026-09-25) are that
-  //       porch's own framing and follow the same rule.
+  //       porch's own framing and follow the same rule, except the two kinds of steps the model is
+  //       never asked about: a recessed porch's along its front (2026-10-03), and a flight off an end
+  //       of a projecting porch's deck, which the prompt tells it to leave out. A draft silent on
+  //       porchSteps keeps the stored ones of its own porch kind and their count, typed or not
+  //       (2026-10-04).
   //   wings  a shape draft always decides them (observed.wings is a required answer), so a draft
   //       that reports a roof and no wings means NO wings, not "keep the stored ones". Otherwise a
   //       redraft of a plain gable would go on drawing the last draft's wings.
@@ -23733,9 +24037,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if ((dr.porchOutFt || 0) > 0.5) {
       delete roof.porchDepthFt; delete roof.porchTruss;
       for (const k of own) if (!(k in dr)) delete roof[k];
+      // A flight off an END of the deck (2026-10-04) is the builder's: the prompt tells the model to
+      // leave it out, so a draft silent on the steps keeps a stored one and its count.
+      if (!("porchSteps" in dr) && stored && (stored.porchSteps === "leftSide" || stored.porchSteps === "rightSide")) {
+        roof.porchSteps = stored.porchSteps;
+        if ("porchStepCount" in stored) roof.porchStepCount = stored.porchStepCount;
+      }
     } else if ((dr.porchDepthFt || 0) > 0.5) {
       delete roof.porchOutFt;
-      for (const k of own) delete roof[k];
+      // A RECESSED porch's steps along its front (2026-10-03) are the builder's: no draft is asked about
+      // them, so a draft silent on them keeps them and their count, and one that gives front steps
+      // brings its own. A typed draft rebuilt the roof without them (2026-10-04), so it takes them back
+      // from a stored recessed porch -- never from a projecting one, whose front steps the draft was
+      // asked about. A flight off an end of a deck goes, with the projecting porch's own framing.
+      if (!("porchSteps" in dr) && stored && !((Number(stored.porchOutFt) || 0) > 0.5) && (Number(stored.porchDepthFt) || 0) > 0.5) {
+        for (const k of ["porchSteps", "porchStepCount"]) if (k in stored) roof[k] = stored[k];
+      }
+      const keepSteps = D3_PORCH_STEP_FRONT.indexOf(roof.porchSteps) >= 0;
+      for (const k of own) if (!(keepSteps && (k === "porchSteps" || k === "porchStepCount"))) delete roof[k];
     }
     if (dr.type) {
       if (!((Number(dr.wingWidthFt) || 0) > 0)) {
@@ -25078,7 +25397,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     : calReadoutW;
   // The porch "What we drew" describes, as BUILT at that same size (ssDrewWords): the renderer's
   // own numbers, so a lowered porch pitch or a capped post count is said as drawn.
-  const calDrewPorch = calReadoutMass ? d3PorchReadout(adminCal.spec, `${calReadoutW}x${calReadoutL}`) : null;
+  // A recessed porch's (2026-10-03) when there is no projecting one: where its steps are, and how many.
+  const calDrewPorch = calReadoutMass ? (d3PorchReadout(adminCal.spec, `${calReadoutW}x${calReadoutL}`) || d3RecessedPorchReadout(adminCal.spec, `${calReadoutW}x${calReadoutL}`)) : null;
   // ...and the roof step as DRAWN at that size (d3RoofStep): null where the renderer draws none there,
   // so the line says nothing about a step that is not on screen.
   const calDrewStep = calReadoutMass ? d3RoofStep(adminCal.spec.roof, calReadoutW, calReadoutL, Number(adminCal.spec.wallHeightFt) || D3.WALL_H) : undefined;
@@ -25319,6 +25639,38 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (key === "porch") {
       const kind = calPorchKind(roof);
       const depth = kind === "projecting" ? roof.porchOutFt : kind === "recessed" ? roof.porchDepthFt : 0;
+      // WHERE ITS STEPS ARE AND HOW MANY, on either kind (2026-10-03): a recessed porch offers the three
+      // along its front, a projecting one those and a flight off either end of its deck, greyed out on
+      // a deck too shallow to fit one between the wall and the corner post (D3_PORCH_SIDE_STEPS_MIN_FT),
+      // saying why: one picked on a deeper deck stays picked there, and is not drawn (2026-10-04).
+      const sideOk = (Number(roof.porchOutFt) || 0) >= D3_PORCH_SIDE_STEPS_MIN_FT;
+      const stepFields = (
+        <>
+          <label style={calFixLabel}>{kind === "projecting" ? "Where its steps are" : "Steps off its front"}
+            <select value={roof.porchSteps || ""} onChange={(e) => calSetPorchSteps(e.target.value)}
+              style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }}>
+              <option value="">No steps</option>
+              <option value="left">On the left</option>
+              <option value="center">In the middle</option>
+              <option value="right">On the right</option>
+              {kind === "projecting" && <option value="leftSide" disabled={!sideOk}>{sideOk ? "Off its left side" : "Off its left side (needs a deck 2 ft 6 in deep)"}</option>}
+              {kind === "projecting" && <option value="rightSide" disabled={!sideOk}>{sideOk ? "Off its right side" : "Off its right side (needs a deck 2 ft 6 in deep)"}</option>}
+            </select>
+          </label>
+          {/* HOW MANY STEPS (2026-09-28), only with steps to count. Blank is the renderer's own
+              count, which the placeholder says, and is stored as nothing: counted on the ground
+              under the flight (d3PorchBlankStepCount) at the size "What we drew" describes, so
+              over falling ground it is the count that line and the 3D give (review, 2026-09-29). */}
+          {roof.porchSteps && (
+            <label style={calFixLabel}>How many steps
+              <input className="ssc-dim-in" type="number" step="1" min="1" max="12" inputMode="numeric" data-ss-step-count="ss-fix"
+                placeholder={`blank = ${d3PorchBlankStepCount(adminCal && adminCal.spec, `${calReadoutW}x${calReadoutL}`)}`}
+                {...calOptNumProps("ssc-fix-porchStepCount", roof.porchStepCount, [1, 12], (n) => calSetRoofOpt("porchStepCount", n == null ? null : Math.round(n)))}
+                style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
+            </label>
+          )}
+        </>
+      );
       return (
         <div style={{ display: "grid", gap: 8 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))", gap: 6 }}>
@@ -25360,27 +25712,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   {...calOptNumProps("ssc-fix-porchPitch", roof.porchPitch == null ? null : Math.round(Number(roof.porchPitch) * 1200) / 100, [0.6, 6], (n) => calSetRoofOpt("porchPitch", n == null ? null : n / 12))}
                   style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
               </label>
-              <label style={calFixLabel}>Steps off its front
-                <select value={roof.porchSteps || ""} onChange={(e) => calSetPorchSteps(e.target.value)}
-                  style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }}>
-                  <option value="">No steps</option>
-                  <option value="left">On the left</option>
-                  <option value="center">In the middle</option>
-                  <option value="right">On the right</option>
-                </select>
-              </label>
-              {/* HOW MANY STEPS (2026-09-28), only with steps to count. Blank is the renderer's own
-                  count, which the placeholder says, and is stored as nothing: counted on the ground
-                  under the flight (d3PorchBlankStepCount) at the size "What we drew" describes, so
-                  over falling ground it is the count that line and the 3D give (review, 2026-09-29). */}
-              {roof.porchSteps && (
-                <label style={calFixLabel}>How many steps
-                  <input className="ssc-dim-in" type="number" step="1" min="1" max="12" inputMode="numeric" data-ss-step-count="ss-fix"
-                    placeholder={`blank = ${d3PorchBlankStepCount(adminCal && adminCal.spec, `${calReadoutW}x${calReadoutL}`)}`}
-                    {...calOptNumProps("ssc-fix-porchStepCount", roof.porchStepCount, [1, 12], (n) => calSetRoofOpt("porchStepCount", n == null ? null : Math.round(n)))}
-                    style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", display: "block" }} />
-                </label>
-              )}
+              {stepFields}
+            </div>
+          )}
+          {/* A RECESSED PORCH'S STEPS (2026-10-03), off the floor's edge in its opening. */}
+          {kind === "recessed" && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))", gap: 6 }}>
+              {stepFields}
             </div>
           )}
           {kind !== "none" && (
@@ -25448,9 +25786,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           ))}
           {/* The porch's own lumber. No prompt in this pipeline ever asks for it, so on a
               projecting porch it will always need setting by hand — surfaced here rather than
-              hidden in a colour loop for exactly that reason. */}
-          {calPorchKind(roof) === "projecting" && (
-            <label style={calFixLabel}>Porch wood
+              hidden in a colour loop for exactly that reason. A recessed porch's steps are built
+              of it too (2026-10-04), so it is here for them, named for what it colours there. */}
+          {(calPorchKind(roof) === "projecting" || (calPorchKind(roof) === "recessed" && roof.porchSteps)) && (
+            <label style={calFixLabel}>{calPorchKind(roof) === "projecting" ? "Porch wood" : "Porch steps wood"}
               <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
                 <input type="text" placeholder="blank = natural wood" value={adminCal.spec.colors.wood || ""} onChange={(e) => calSetWood(e.target.value)}
                   style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
@@ -25541,8 +25880,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // what tells the server to leave the column as it found it.
         // `frame: "front"` (2026-09-25): this editor knows blocks, piers and floorHeightFt, so the
         // server applies what it sends rather than carrying a stored raised floor forward. The
-        // ground's fall goes as two explicit keys, null included (calSpecToSend).
-        body: { adminPassword: adminPwd, clientId: C.clientId, action: "save_style_d3", styleValue: adminCal.styleValue, d3: calSpecToSend(adminCal.spec), d3Photos: adminCal.photos.filter(Boolean), frame: "front" },
+        // ground's fall goes as two explicit keys, null included (calSpecToSend). `slabGround: true`
+        // (2026-10-03) says this editor draws a slab's corners too, so its null clears them on a slab
+        // (carryForwardFoundation keeps them over an older panel's null, which only knew raised floors).
+        body: { adminPassword: adminPwd, clientId: C.clientId, action: "save_style_d3", styleValue: adminCal.styleValue, d3: calSpecToSend(adminCal.spec), d3Photos: adminCal.photos.filter(Boolean), frame: "front", slabGround: true },
       });
       if (error) throw new Error(error.message || "Save failed");
       if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");
@@ -26005,7 +26346,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // back the moment the dormer can hold it again.
           const dSpec = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel));
           const dRoof = (dSpec && dSpec.roof) || {};
-          if (!d3DormerWindowFit(fx, Number(dRoof.dormerWidthFt) || 0, d3DormerFaceFt(dSpec, bldgW, bldgH), sel.dormerWindowOffset)) return [];
+          if (!d3DormerWindowFit(fx, d3DormerWidthFt(dRoof, d3RoofAxes(dRoof, bldgW, bldgH).L), d3DormerFaceFt(dSpec, bldgW, bldgH), sel.dormerWindowOffset)) return [];
           return [{
             name: fx.name || "Window",
             widthIn: fx.widthIn != null ? Number(fx.widthIn) : null,
@@ -28285,6 +28626,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   // sit a little lower (pr.atMost). Amber when the wall is too short for a 2:12 porch
                   // roof over 6'8" posts. It warns and nothing is refused: the porch is still drawn.
                   const pr = kind === "projecting" ? d3PorchReadout(adminCal.spec, sel.size) : null;
+                  // A recessed porch's steps as drawn there (2026-10-03), for the step-rise hint below.
+                  const rr = kind === "recessed" ? d3RecessedPorchReadout(adminCal.spec, sel.size) : null;
+                  const sideOk = (Number(roof.porchOutFt) || 0) >= D3_PORCH_SIDE_STEPS_MIN_FT;
                   const warn = !!(pr && (pr.short || pr.pitchClamped));
                   // A RECESSED porch is not drawn on a building with lower wings (the renderer turns
                   // it off: its header would stand under a cap that is no longer at the wall's top),
@@ -28378,7 +28722,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       )}
                       {/* THE PORCH'S OWN FRAMING (2026-09-25), projecting only like the two above: how
                           many posts stand along its front edge (corners included), its roof's own
-                          slope, and where steps leave its deck. Blank is the renderer's own answer --
+                          slope, and where steps leave its deck (on a recessed porch too since
+                          2026-10-03, below). Blank is the renderer's own answer --
                           a post every 8.5 ft or less, a 2 in 12 roof lowered only to keep a door's
                           height under the beam, no steps -- and is stored as nothing. A pitch the
                           builder gives is their measured porch, lowered only where it would leave
@@ -28400,15 +28745,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           <div style={hint}>Lowered only where it would leave less than 6 ft under the beam.</div>
                         </label>
                       )}
-                      {kind === "projecting" && (
+                      {/* THE STEPS on either kind (2026-10-03): a recessed porch's off the floor's edge in
+                          its opening, along its front only; a projecting porch's off its deck's front
+                          edge or down one of its ends, those two greyed out on a deck too shallow to
+                          fit a flight between the wall and the corner post. One picked on a deeper deck
+                          stays picked there and is not drawn, which the hint says (2026-10-04). */}
+                      {kind !== "none" && (
                         <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch steps
                           <select value={roof.porchSteps || ""} onChange={(e) => calSetPorchSteps(e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
                             <option value="">None</option>
                             <option value="left">Left</option>
                             <option value="center">Center</option>
                             <option value="right">Right</option>
+                            {kind === "projecting" && <option value="leftSide" disabled={!sideOk}>Left side</option>}
+                            {kind === "projecting" && <option value="rightSide" disabled={!sideOk}>Right side</option>}
                           </select>
-                          <div style={hint}>Off the deck's front edge, as seen standing in front of the porch.</div>
+                          <div style={hint}>{kind === "recessed"
+                            ? "Off the floor's edge in the opening, as seen standing in front of the porch."
+                            : sideOk ? "Off the deck's front edge, or down one of its sides, as seen standing in front of the porch."
+                            : roof.porchSteps === "leftSide" || roof.porchSteps === "rightSide" ? "Steps down a side are not drawn until the deck is at least 2 ft 6 in deep. Make it deeper, or pick steps off its front edge."
+                            : "Off the deck's front edge, as seen standing in front of the porch. Steps down a side need a deck 2 ft 6 in deep."}</div>
                         </label>
                       )}
                       {/* HOW MANY STEPS (roof.porchStepCount, 2026-09-28), beside where they are and only
@@ -28425,9 +28781,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           flight (d3PorchBlankStepCount; review, 2026-09-29): over falling ground it
                           is more than the floor height alone gives, and on a steep fall more than
                           the 12 a typed count may be, which the hint then says. */}
-                      {kind === "projecting" && roof.porchSteps && (() => {
+                      {kind !== "none" && roof.porchSteps && (() => {
                         const autoSteps = d3PorchBlankStepCount(adminCal.spec, sel.size);
-                        const st = pr && pr.steps;
+                        const st = pr ? pr.steps : rr && rr.steps;
                         const riseIn = st ? Math.round(st.rise * 120) / 10 : null;
                         const steep = riseIn != null && riseIn > 8 && st.count < 12;
                         const shallow = riseIn != null && riseIn < 4 && st.count > 1;
@@ -28457,9 +28813,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       {/* Its own box, NOT a fourth entry in the colour loop below: that loop offers the
                           catalog, and for any key but body or trim the catalog is ROOFING, so a pick
                           would write a metal roof colour as lumber. Blank means natural wood, and blank
-                          is what is stored (calSetWood deletes the key). */}
-                      {kind === "projecting" && (
-                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wood colour (posts, deck, ceiling)
+                          is what is stored (calSetWood deletes the key). A recessed porch's steps are
+                          built of it too (2026-10-04), so it shows for them, named for them. */}
+                      {(kind === "projecting" || (kind === "recessed" && roof.porchSteps)) && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>{kind === "projecting" ? "Wood colour (posts, deck, ceiling)" : "Wood colour (steps)"}
                           <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
                             <input type="text" placeholder="#C4965A (natural)" value={adminCal.spec.colors.wood || ""} onChange={(e) => calSetWood(e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                             <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #FCD34D", background: adminCal.spec.colors.wood || D3_COLORS.wood, flexShrink: 0 }} />
@@ -29238,7 +29595,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               commit: (n) => calSetRoof({ overhang: Math.round((n / 12) * 10000) / 10000 }), full: true,
               children: (
                 <div className="ss-adv-chips" role="group" aria-label="Overhang presets">
-                  {[[0, "Flush"], [2, "2″"], [6, "6″"], [12, "12″"], [16, "16″"]].map(([n, l]) => (
+                  {[[0, "Flush"], [2, "2″"], [6, "6″"], [12, "12″"], [16, "16″"], [24, "24″"]].map(([n, l]) => (
                     <button key={n} type="button" aria-pressed={Math.abs(ohIn - n) < 0.01} onClick={() => calSetRoof({ overhang: Math.round((n / 12) * 10000) / 10000 })}
                       className={Math.abs(ohIn - n) < 0.01 ? "ssd-chip is-on" : "ssd-chip"} style={advPill}>{l}</button>
                   ))}
@@ -29287,21 +29644,25 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // "highest"), the plan shades the ground darker where it is lower with an arrow down the slope, and
     // the floor height is measured at the highest corner. A style storing a fall (2026-09-28) opens with
     // the fall's corners in the boxes, and editing one writes corners in its place (calSetGradeCorner).
+    // Since 2026-10-03 under a slab too, and with nothing said (a corner typed there makes it a slab), and
+    // the boxes are in INCHES, as the operator panel's are (Ahsan: inches everywhere; stored in feet).
+    const cornersOn = spec ? (d3SlopeFoundation(spec) || !spec.foundation) : null;
     const fall = spec ? d3GradeCorners(spec) : null;
-    const gcBox = spec && raised ? (d3GradeCornersGiven(spec) || fall) : null;
+    const gcBox = spec && cornersOn ? (d3GradeCornersGiven(spec) || fall) : null;
     const grade = spec ? d3GradeFt(spec) : 0;
     const fdCur = spec && D3_FOUNDATIONS.indexOf(spec.foundation) >= 0 ? spec.foundation : "";
-    const gcSay = (k) => (!fall ? "level" : fall[k] > 0 ? `${d3FtIn(fall[k])} lower` : "highest");
+    // Under a foot it is said in inches (5" lower, not 0' 5" lower), as the boxes are typed.
+    const gcSay = (k) => (!fall ? "level" : fall[k] > 0 ? `${d3FtIn(fall[k]).replace(/^0' /, "")} lower` : "highest");
     // The plan's side the style's front end is on, when it is not the south edge marked FRONT.
-    const gcFrontSide = spec && raised ? ({ north: "back", west: "left", east: "right" })[d3FrontGableWall(roof, bldgW, bldgH)] || null : null;
+    const gcFrontSide = spec && cornersOn ? ({ north: "back", west: "left", east: "right" })[d3FrontGableWall(roof, bldgW, bldgH)] || null : null;
     const gcCell = (k, name, cls) => (
       <div key={k} className={"ss-adv-gc-c " + cls} data-ss-adv-corner={k}>
         <span className="ssd-fld-l">{name}</span>
         <span className="ss-adv-gc-in">
-          <input type="number" className="ssd-input ssd-field ss-adv-num" aria-label={`Ground at the ${name.toLowerCase()} corner (ft lower)`}
-            min={0} max={6} step={0.25} inputMode="decimal" placeholder="0"
-            {...calOptNumProps(`adv-gc-${k}`, gcBox && gcBox[k] > 0 ? gcBox[k] : null, [0, 6], (n) => calSetGradeCorner(k, n))} />
-          <span className="ss-adv-unit">ft</span>
+          <input type="number" className="ssd-input ssd-field ss-adv-num" aria-label={`Ground at the ${name.toLowerCase()} corner (in lower)`}
+            min={0} max={72} step={1} inputMode="decimal" placeholder="0"
+            {...calOptNumProps(`adv-gc-${k}`, gcBox && gcBox[k] > 0 ? Math.round(gcBox[k] * 1200) / 100 : null, [0, 72], (n) => calSetGradeCorner(k, n == null ? null : n / 12))} />
+          <span className="ss-adv-unit">in</span>
         </span>
         <span className={"ss-adv-gc-say" + (fall && !(fall[k] > 0) ? " is-hi" : "")} data-ss-adv-corner-say={k}>{advNb(gcSay(k))}</span>
       </div>
@@ -29386,14 +29747,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             {/* "Not set" draws a slab on the ground, so the Slab tile reads as picked until something else is. */}
             {advTiles({ f: "foundation", label: "What it stands on", value: fdCur || "slab", pick: calSetFoundation,
               opts: [["slab", "Slab", "slab"], ["skids", "Skids", "skids"], ["blocks", "Blocks", "blocks"], ["piers", "Piers", "piers"]],
-              note: raised ? null : ["On the ground. The others raise the floor.", "Skids, blocks and piers raise the floor, and the ground can fall away under them."] })}
+              note: raised ? null : ["On the ground. Blocks and piers raise the floor.", "A slab and skids sit on the ground, and blocks and piers raise the floor. The ground can fall away under a slab, blocks or piers, but not under skids."] })}
             {raised && advNum({ k: "adv-floorHeightFt", f: "floorHeightFt", label: fall ? "Floor height at the highest corner (ft)" : "Floor height (ft)", value: spec.floorHeightFt, min: 0.3, max: 6, step: 0.1,
               band: [0.3, 6], write: (n) => calSetFloorHeight(n), fallback: D3_FLOOR_HEIGHT_DEFAULT_FT[raised], placeholder: String(D3_FLOOR_HEIGHT_DEFAULT_FT[raised]), full: true,
               note: [fall ? "Ground to floor at the highest corner." : `Ground to floor at the door. Blank draws ${d3FtIn(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}.`,
                 `Ground to the top of the floor ${fall ? "at the highest corner, where the ground is highest" : "where the door or porch is"}. A door is 6' 8" tall, and each step up is about 7". Blank draws ${d3FtIn(D3_FLOOR_HEIGHT_DEFAULT_FT[raised])}.${fall
                   ? " Porch steps and any ramp a customer adds reach down to the ground where they stand, so on the low side they are taller and longer: a ramp runs 4 ft for every foot it drops."
                   : ` Porch steps climb the whole height, and a ramp a customer adds is drawn ${grade > 0.75 ? d3FtIn(4 * grade) : "3' 0\""} long so it reaches the ground.`}`] })}
-            {raised && (
+            {cornersOn && (
               <div key="gradeCorners" className="ss-adv-f is-full" data-ss-adv-f="gradeCornersFt">
                 <div className="ss-adv-fh">
                   <span className="ssd-fld-l">Ground at each corner</span>
@@ -29406,8 +29767,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   {gcCell("fl", "Front left", "is-fl")}
                   {gcCell("fr", "Front right", "is-fr is-r")}
                 </div>
-                {advNoteEl(["0 is the highest corner. Floor height is taken there.",
-                  `Floor height is measured at the highest corner. Type how many feet lower the ground is at each corner: 1.5 is 18", 2 is two feet. Blank or 0 is the highest ground. The ${raised} stand taller where it is lower, and porch steps and a customer's ramp reach down to the ground where they stand. FRONT is the side the 3D marks FRONT on the ground, the one its Views menu calls F; left and right are as you face it, L and R${calPorchKind(roof) !== "none" ? ", wherever the porch is." : "."}${gcFrontSide ? ` This style's front end (the small bar) is the ${gcFrontSide} side of the plan.` : ""}`])}
+                {advNoteEl([raised ? "0 is the highest corner. Floor height is taken there." : "0 is the highest corner.",
+                  `${raised ? "Floor height is measured at the highest corner. " : ""}Type how many inches lower the ground is at each corner: 18 is 1' 6", 24 is two feet. Blank or 0 is the highest ground${raised ? "" : ", where the slab meets it"}. ${raised ? `The ${raised} stand taller where it is lower` : `More of the slab's concrete edge shows where it is lower${spec.foundation ? "" : " (a number here sets What it stands on to Slab)"}`}, and porch steps and a customer's ramp reach down to the ground where they stand. FRONT is the side the 3D marks FRONT on the ground, the one its Views menu calls F; left and right are as you face it, L and R${calPorchKind(roof) !== "none" ? ", wherever the porch is." : "."}${gcFrontSide ? ` This style's front end (the small bar) is the ${gcFrontSide} side of the plan.` : ""}`])}
               </div>
             )}
           </div>
@@ -30005,6 +30366,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
       const dg = d3DormerReadout(spec, sel.size);
       const dc = d3DormerCovered(spec, sel.size);
+      // UP TO THE BUILDING'S FULL LENGTH (the 10-01 call: a dormer the whole width of the building): the
+      // ridge's run on the size previewed. The drawing holds it 3 in in from each gable end
+      // (d3DormerWidthFt), and says so when that is narrower than the number typed.
+      const dLen = d3RoofAxes(roof, bldgW, bldgH).L;
+      const dDrawn = d3DormerWidthFt(roof, dLen);
       // END WINGS (roof.wingList): a dormer that would reach over an end wing's roof is not drawn (d3DormerBlocked).
       const dEnd = d3DormerBlocked(roof, bldgW, bldgH, wallH);
       out.push(
@@ -30013,8 +30379,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {advSeg({ f: "dormerType", label: "Dormer type", value: roof.dormerType === "transom" ? "transom" : "gable", pick: (v) => calSetRoof({ dormerType: v }), full: true,
             opts: [["gable", "Gable"], ["transom", "Transom"]],
             note: roof.dormerType === "transom" ? "A lean-to off the roof." : "Its own little roof, the pitch running across." })}
-          {advNum({ k: "dormerWidthFt", label: "Dormer width (ft)", value: roof.dormerWidthFt != null ? roof.dormerWidthFt : 0, min: 1, max: 16, step: 0.5,
-            commit: (n) => calSetRoof({ dormerWidthFt: n }) })}
+          {advNum({ k: "dormerWidthFt", label: "Dormer width (ft)", value: roof.dormerWidthFt != null ? roof.dormerWidthFt : 0, min: 1, max: dLen, step: 0.5,
+            commit: (n) => calSetRoof({ dormerWidthFt: n }),
+            children: !dEnd && dDrawn < (Number(roof.dormerWidthFt) || 0) - 1e-9 ? advSay(`Drawn ${d3FtIn(dDrawn)} wide on ${sizeWords}, stopping 3" in from each gable end`, false, { "data-ss-dormer-drawn": "" }) : null })}
           {advNum({ k: "dormerRiseFt", label: "Dormer rise (ft)", value: roof.dormerRiseFt != null ? roof.dormerRiseFt : 2.5, min: 0.5, max: 6, step: 0.25,
             commit: (n) => calSetRoof({ dormerRiseFt: n }),
             children: dg ? advSay(dg.clamped ? `Builds ${d3FtIn(dg.face)} on ${sizeWords} — this roof runs out at ${d3FtIn(dg.maxFace)}` : `Builds ${d3FtIn(dg.face)} on ${sizeWords}`, dg.clamped) : null })}
@@ -30059,13 +30426,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               : `Walls this short leave ${d3FtIn(pr.postH)} under the porch beam. About ${d3FtIn(pr.hNeeded)} walls give a door's height at ${want}`)
           : `Posts ${d3FtIn(pr.postH)} clear · roof meets the wall at ${d3FtIn(pr.yHigh)}${pr.atMost ? " or a little lower" : ""}${built}`;
       })() : null;
-      const autoSteps = kind === "projecting" && roof.porchSteps ? d3PorchBlankStepCount(spec, sel.size) : null;
+      const autoSteps = kind !== "none" && roof.porchSteps ? d3PorchBlankStepCount(spec, sel.size) : null;
       // What Auto draws for the posts is what a BLANK key builds, not the count built now: once a number
       // is typed, pr.posts is that number, and "Auto (3)" would only repeat it.
       const autoPr = pr ? d3PorchReadout({ ...spec, roof: { ...roof, porchPosts: null } }, sel.size) : null;
       const autoPosts = autoPr ? autoPr.posts : null;
-      const st = pr && pr.steps;
+      // A recessed porch's steps (2026-10-03) from its own readout, the flight its 3D builds.
+      const rr = kind === "recessed" ? d3RecessedPorchReadout(spec, sel.size) : null;
+      const st = pr ? pr.steps : rr && rr.steps;
       const riseIn = st ? Math.round(st.rise * 120) / 10 : null;
+      // Steps down a side of the deck need room between the wall and the corner post (2026-10-03).
+      const sideOk = (Number(roof.porchOutFt) || 0) >= D3_PORCH_SIDE_STEPS_MIN_FT;
+      const sideWhy = sideOk ? undefined : "Needs a deck at least 2' 6\" deep";
       const steep = riseIn != null && riseIn > 8 && st.count < 12;
       const shallow = riseIn != null && riseIn < 4 && st.count > 1;
       const pastBox = autoSteps != null && autoSteps > 12 && !(Number(roof.porchStepCount) >= 1);
@@ -30114,9 +30486,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {kind === "projecting" && advCount({ f: "porchPosts", label: "Porch posts", value: roof.porchPosts, band: [2, 8],
             write: (n) => calSetRoofOpt("porchPosts", n), autoLabel: autoPosts != null ? `Auto (${autoPosts})` : "Auto", autoN: autoPosts })}
           {kind === "projecting" && advSeg({ f: "porchSteps", label: "Porch steps", value: roof.porchSteps || "", pick: calSetPorchSteps, full: true,
+            opts: [["", "None"], ["left", "Left"], ["center", "Center"], ["right", "Right"], ["leftSide", "Left side", !sideOk, sideWhy], ["rightSide", "Right side", !sideOk, sideWhy]], unset: true,
+            note: sideOk ? "Off the deck's front edge, or down one of its sides, as seen from in front."
+              : roof.porchSteps === "leftSide" || roof.porchSteps === "rightSide" ? "Steps down a side are not drawn until the deck is at least 2' 6\" deep. Make it deeper, or pick steps off its front edge."
+              : "Off the deck's front edge, as seen from in front. Steps down a side need a deck 2' 6\" deep." })}
+          {kind === "recessed" && advSeg({ f: "porchSteps", label: "Porch steps", value: roof.porchSteps || "", pick: calSetPorchSteps, full: true,
             opts: [["", "None"], ["left", "Left"], ["center", "Center"], ["right", "Right"]], unset: true,
-            note: "Off the deck's front edge, as seen from in front." })}
-          {kind === "projecting" && roof.porchSteps && (
+            note: "Off the floor's edge in the opening, as seen from in front." })}
+          {kind !== "none" && roof.porchSteps && (
             <div key="stepCount" className="ss-adv-f is-full">
               {advCount({ f: "porchStepCount", label: "Number of steps", value: roof.porchStepCount, band: [1, 12],
                 write: (n) => calSetRoofOpt("porchStepCount", n), autoLabel: `Auto (${autoSteps})`, autoN: autoSteps })}
@@ -30124,9 +30501,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 steep || shallow, { "data-ss-step-rise": "adv" })}
             </div>
           )}
-          {kind === "projecting" && (
+          {/* A recessed porch's steps are built of the porch wood too (2026-10-04). */}
+          {(kind === "projecting" || (kind === "recessed" && roof.porchSteps)) && (
             <div key="wood" className="ss-adv-f is-full" data-ss-adv-f="wood">
-              <div className="ss-adv-fh"><span className="ssd-fld-l">Wood color (posts, deck, ceiling)</span></div>
+              <div className="ss-adv-fh"><span className="ssd-fld-l">{kind === "projecting" ? "Wood color (posts, deck, ceiling)" : "Wood color (steps)"}</span></div>
               <div className="ss-adv-pick">
                 <span className="ssd-cs-swatch" style={{ background: advHexOk(wood) ? wood : D3_COLORS.wood }} />
                 <span className="ssd-tb-read">{!wood ? "Natural wood" : (woods.find((w) => w[0] && w[0].toLowerCase() === wood.toLowerCase()) || [0, `Custom ${wood}`])[1]}</span>
