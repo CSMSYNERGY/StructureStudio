@@ -32942,7 +32942,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 setDesignCode(null);
                 setEstimateVersions([]);
                 setViewingVersion(null);
-                if (!embedded) window.history.replaceState({}, "", window.location.pathname);
+                // Drop the design (and version) from the URL, but KEEP ?client=. A bare pathname threw
+                // the tenant away too, so on a ?client= link (the one onboarding hands out) the next
+                // reload had no tenant and no design and was sent to /portal, the business login.
+                // Same shape as resetGate and signOutCustomer.
+                if (!embedded) {
+                  const p = new URLSearchParams(window.location.search);
+                  p.delete("id"); p.delete("v");
+                  window.history.replaceState({}, "", window.location.pathname + (p.toString() ? "?" + p.toString() : ""));
+                }
               }}
               style={{ ...S.btn(accent, pal.onAccent), borderRadius: 4, padding: "10px 24px", fontFamily: "inherit", fontSize: 14, lineHeight: "16px" }}
             >
