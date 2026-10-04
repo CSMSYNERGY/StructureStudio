@@ -29246,7 +29246,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <div key="gamSay" className="ss-adv-f is-full">{advSay(advFtIn(ssRoofInFeet(roof, advSpan, advCentre)))}</div>
               </>
             ) : advNum({ k: "pitch", label: "Pitch", unit: "in 12", value: Math.round((roof.pitch != null ? roof.pitch : 0.4) * 1200) / 100,
-              min: 0, max: 12, step: 0.5, commit: (n) => calSetRoof({ pitch: n / 12 }), ends: ["flat", "steep"], full: true,
+              min: 0, max: 12, step: 0.5, commit: (n) => calSetRoof({ pitch: Math.max(0, Math.min(2, n / 12)) }), ends: ["flat", "steep"], full: true,
               children: advSay(advFtIn(ssRoofInFeet(roof, advSpan, advCentre))) })}
             {/* WHICH WAY THE BUILDING FACES (2026-09-24): the front is the porch or door wall. One control or
                 the other, never both -- the sanitiser keeps front on a gable or gambrel, highSide on a shed. */}
@@ -29276,7 +29276,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             {advSeg({ f: "eave", label: "Roof edge", value: roof.eave === "open" ? "open" : "fascia", pick: (v) => calSetRoofOpt("eave", v === "open" ? "open" : null),
               opts: [["fascia", "Boxed in"], ["open", "Rafter tails"]] })}
             {advNum({ k: "overhang", label: "Overhang", unit: "in", value: ohIn, min: 0, max: 24, step: 1,
-              commit: (n) => calSetRoof({ overhang: Math.round((n / 12) * 10000) / 10000 }), full: true,
+              commit: (n) => calSetRoof({ overhang: Math.round((Math.max(0, Math.min(36, n)) / 12) * 10000) / 10000 }), full: true,
               children: (
                 <div className="ss-adv-chips" role="group" aria-label="Overhang presets">
                   {[[0, "Flush"], [2, "2″"], [6, "6″"], [12, "12″"], [16, "16″"]].map(([n, l]) => (
@@ -29410,8 +29410,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <div className="ssd-card">
           <span className="ssd-card-t">Walls</span>
           <div className="ss-adv-flds">
+            {/* A NUMBER TYPED PAST THE SLIDERS is held to what Save keeps (styleD3.ts): a wall over 20 ft was drawn here
+                and then DROPPED by the sanitiser, so the saved style drew the account's default wall; a pitch past
+                24 in 12, an overhang past 36 in or a dormer rise past 6 ft was drawn and then cut back. */}
             {advNum({ k: "wallHeightFt", label: "Wall height (ft)", value: spec.wallHeightFt || 8, min: 5, max: 20, step: 0.5,
-              commit: (n) => calSet({ wallHeightFt: n }), full: true })}
+              commit: (n) => calSet({ wallHeightFt: Math.max(5, Math.min(20, n)) }), full: true })}
             {advTiles({ f: "siding", label: "Siding", value: d3NormalizeCladding(spec.siding), pick: (v) => calSet({ siding: v }),
               opts: [["panel", "Panel", "panel"], ["lap", "Lap", "lap"], ["batten", "Board & batten", "batten"], ["agpanel", "AG Panel", "agpanel"]],
               note: ["This style's standard siding.", "What the walls look like when a customer keeps the builder's standard siding."] })}
@@ -30069,7 +30072,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {advNum({ k: "dormerWidthFt", label: "Dormer width (ft)", value: roof.dormerWidthFt != null ? roof.dormerWidthFt : 0, min: 1, max: 12, step: 0.5,
             commit: (n) => calSetRoof({ dormerWidthFt: Math.min(12, n) }) })}
           {advNum({ k: "dormerRiseFt", label: "Dormer rise (ft)", value: roof.dormerRiseFt != null ? roof.dormerRiseFt : 2.5, min: 0.5, max: 6, step: 0.25,
-            commit: (n) => calSetRoof({ dormerRiseFt: n }),
+            commit: (n) => calSetRoof({ dormerRiseFt: Math.max(0, Math.min(6, n)) }),
             children: dg ? advSay(dg.clamped ? `Builds ${d3FtIn(dg.face)} on ${sizeWords} — this roof runs out at ${d3FtIn(dg.maxFace)}` : `Builds ${d3FtIn(dg.face)} on ${sizeWords}`, dg.clamped) : null })}
           {advNum({ k: "dormerOffsetU", label: "Dormer position", value: roof.dormerOffsetU != null ? roof.dormerOffsetU : 0.45, min: -1, max: 1, step: 0.05,
             commit: (n) => calSetRoof({ dormerOffsetU: n }), ends: ["one eave", "the other eave"], full: true,
