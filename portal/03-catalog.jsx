@@ -1099,7 +1099,14 @@ function xlsxCellText(v) {
   if (v == null) return "";
   if (typeof v === "object") {
     if (v.text != null) return String(v.text);
-    if (v.result != null) return String(v.result);
+    // An Excel ERROR (#REF!, #N/A, #DIV/0!) — ExcelJS gives { error } for the value itself and
+    // { formula, result: { error } } for a formula that failed. It must come through as its code,
+    // never as "": every importer reads a blank as meaningful — the pricing sheet as "not priced"
+    // (the NULL-base-price contract hides the size from the designer), a fixture's price the same
+    // way, a Real-Time Pricing cost as $0 — while "#REF!" is refused by name and the row is left
+    // as it was. ("[object Object]" from the old String(result) was refused too, but unreadably.)
+    if (v.error != null) return String(v.error);
+    if (v.result != null) return (typeof v.result === "object" && !(v.result instanceof Date)) ? xlsxCellText(v.result) : String(v.result);
     if (Array.isArray(v.richText)) return v.richText.map((t) => t.text).join("");
     if (v.hyperlink != null) return String(v.hyperlink);
     return "";
