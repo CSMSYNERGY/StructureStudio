@@ -449,7 +449,13 @@ const GATE_COPY = {
   },
 };
 
-function BillingGate({ reason, isAdmin }) {
+// `viewingLabel` is the viewed builder's name while an operator is in view-as (null on a tenant's
+// own portal), handed straight to BillingView exactly as Settings → Billing hands it. Without it
+// the embedded picker ran its OWN-ACCOUNT mode on someone else's account: no card on file sent the
+// operator into the Collect.js card form (which portal-billing then refuses, after they have typed
+// the customer's card number), and a card on file was charged, for a plan or a wallet top-up,
+// without the "This bills the card <builder> has on file" confirm.
+function BillingGate({ reason, isAdmin, viewingLabel = null }) {
   const c = GATE_COPY[reason] || GATE_COPY.never_paid;
   return (
     <div>
@@ -465,7 +471,7 @@ function BillingGate({ reason, isAdmin }) {
         </div>
       </div>
       {isAdmin
-        ? <BillingView />
+        ? <BillingView viewingLabel={viewingLabel} />
         : (
           <div style={S.card}>
             <div style={S.h2}>Ask your account owner to activate</div>

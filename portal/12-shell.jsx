@@ -3036,7 +3036,8 @@ function Dashboard({ session }) {
                 operator could be locked. A platform operator gets the embedded plan picker;
                 portal-billing still refuses card entry on a tenant's behalf and only lets an
                 operator subscribe against a card the owner already vaulted. */}
-            {gateLocked && <BillingGate reason={gateEnt.reason} isAdmin={billingActor} />}
+            {gateLocked && <BillingGate reason={gateEnt.reason} isAdmin={billingActor}
+              viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null} />}
             {/* THE PIPEDRIVE-STYLE RECORD PAGE. Carolyn, 2026-08-24: "the view of being in
                 an opportunity and the view of being in a person are different, but they're
                 the same."
