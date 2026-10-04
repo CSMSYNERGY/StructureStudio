@@ -7082,6 +7082,11 @@ function d3WingListSize(sizeLabel) {
   return { w: mm ? parseFloat(mm[1]) : 12, d: mm ? parseFloat(mm[2]) : 16 };
 }
 function d3WingListLit(focusKey, i) { return typeof focusKey === "string" && focusKey.indexOf("wl" + i + "-") === 0; }
+// A wing's number on its wall, as its card on the Wings tab names it ("Left wing 3"): its place among the
+// structural entries on that wall (d3WingListEntries), drawn at this size or not. 0 when it is not one.
+function d3WingListCardNo(roof, bwall, i) {
+  return (d3WingListEntries(roof) || []).filter((x) => x.e.wall === bwall).findIndex((x) => x.i === i) + 1;
+}
 // THE END VIEW OF STACKED WINGS: the lower storey across the whole span, each side wing's own walls up to its
 // outside wall where that stands above the building's, each wing's roof from its outer eave (out past the wall
 // by the overhang) up to the face inside it, the middle's walls and roof over them, and the lean-tos. An end
@@ -7157,7 +7162,7 @@ function d3WingListElevation(spec, sizeLabel, focusKey, frame) {
             <rect x={X(-s2 - OV)} y={Y(t.ya)} width={(S + OV * 2) * sc} height={Math.max(1, (t.ya - lo) * sc)} fill="#FDE68A" fillOpacity="0.9"
               stroke={lit(t.i) ? HL : INK} strokeWidth={lit(t.i) ? 2 : 1.2} />
             <text x={X(0)} y={(Y(t.ya) + Y(lo)) / 2 + 3} textAnchor="middle" style={{ fontSize: fs, fontWeight: 700, fill: lit(t.i) ? HL : INK }}>
-              {`${t.bwall} end wing${t.tier > 1 ? " " + t.tier : ""}, ${in12(t.pitch)} in 12`}
+              {`${t.bwall} end wing${d3WingListCardNo(roof, t.bwall, t.i) > 1 ? " " + d3WingListCardNo(roof, t.bwall, t.i) : ""}, ${in12(t.pitch)} in 12`}
             </text>
           </g>
         );
@@ -7176,7 +7181,7 @@ function d3WingListElevation(spec, sizeLabel, focusKey, frame) {
           <text x={(X(g.u1) + X(g.u0)) / 2} y={Y(0) + 17} textAnchor="middle" style={{ fontSize: fs, fontWeight: 700, fill: lit(g.i) ? HL : INK }}>{d3FtIn(g.w)}</text>
           {g.ye > H + 1e-6 && (
             <text x={(X(g.u1) + X(g.u0)) / 2} y={Y(g.ye) + 11} textAnchor="middle" style={{ fontSize: fs - 0.5, fontWeight: 700, fill: lit(g.i) ? HL : DIM }}>
-              <title>{`${g.bwall} wing ${g.tier}: outside wall ${d3FtIn(g.ye)}`}</title>
+              <title>{`${g.bwall} wing ${d3WingListCardNo(roof, g.bwall, g.i)}: outside wall ${d3FtIn(g.ye)}`}</title>
               {d3FtIn(g.ye)}
             </text>
           )}
@@ -7274,9 +7279,12 @@ function d3WingListPlanSVG({ spec, sizeLabel, focusKey, onPick }) {
     return <polyline points={p3.map((p) => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ")} fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />;
   };
   const named = (bw, end, k) => `${bw.charAt(0).toUpperCase() + bw.slice(1)} ${end ? "end wing" : "wing"} ${k}`;
-  const secs = m.wings.map((g) => ({ i: g.i, short: g.bwall.charAt(0).toUpperCase() + g.tier, name: named(g.bwall, false, g.tier), ye: g.ye,
+  // A section is numbered as its card is, by its place among the wings on its wall: a wing not drawn at this
+  // size still holds its number, so the drawn tier is not the name (d3WingListCardNo).
+  const no = (q) => d3WingListCardNo(roof, q.bwall, q.i);
+  const secs = m.wings.map((g) => ({ i: g.i, short: g.bwall.charAt(0).toUpperCase() + no(g), name: named(g.bwall, false, no(g)), ye: g.ye,
     b: box(Math.min(g.u0, g.u1), Math.max(g.u0, g.u1), m.zA, m.zB), v: vec(g.side, 0) }))
-    .concat((m.ends || []).map((t) => ({ i: t.i, short: t.bwall.charAt(0).toUpperCase() + t.tier, name: named(t.bwall, true, t.tier), ye: t.ye,
+    .concat((m.ends || []).map((t) => ({ i: t.i, short: t.bwall.charAt(0).toUpperCase() + no(t), name: named(t.bwall, true, no(t)), ye: t.ye,
       b: box(-S / 2, S / 2, Math.min(t.zI, t.zO), Math.max(t.zI, t.zO)), v: vec(0, t.sz) })));
   const mid = box(m.uc - m.Sc / 2, m.uc + m.Sc / 2, m.zA, m.zB);
   const pk = m.prof.reduce((a, p) => (p[1] > a[1] ? p : a), m.prof[0]);
@@ -29744,11 +29752,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const wlCard = (e, i, bw, k, n, end) => {
         const name = nameAt(bw, k);
         const r = recOf(i), drop = dropOf(i);
-        const parent = k > 1 ? nameAt(bw, k - 1) : null;
+        // The wing it meets AT THIS SIZE, named as its card is: one not drawn here (listDropped) is out of the
+        // chain, so this one meets the drawn wing inside it, or the middle (d3MassingList). By list place alone,
+        // a wing past a dropped one said "Meets Left wing 2" of a wing whose card says it is not drawn.
+        const pRec = r && r.tier > 1 ? (end ? wm.ends : wm.wings).find((q) => q.bwall === bw && q.tier === r.tier - 1) : null;
+        const parent = r ? (pRec ? nameOf(pRec.i) : null) : k > 1 ? nameAt(bw, k - 1) : null;
         // A tier-1 end wing beside side wings meets under the long walls (the side wings' outside walls over
         // the middle stretch, E), not under the middle's eave: the wings-ends line's subject, at its eMin. With
         // no side wings E is the middle's eave, and the card says "the middle's" (review, 2026-09-30).
-        const longWalls = end && k === 1 && wm.wings.length > 0;
+        const longWalls = end && !parent && wm.wings.length > 0;
         const longSame = Math.abs(wm.E["-1"] - wm.E["1"]) < 1e-6;
         const inner = parent || (longWalls ? "the long walls" : end ? "the middle" : "the middle section");
         const innerPoss = parent ? `${parent}'s` : longWalls ? "the long walls'" : end ? "the middle's" : "the middle section's";
@@ -29766,10 +29778,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           write: (v) => { if (v != null) set({ widthFt: Math.max(1, Math.min(16, v)) }); }, fallback: 8, full: true,
           note: drop ? (drop.why === "room" ? `Not drawn at ${sizeAt}: the middle keeps at least 4 ft. It stays saved.` : "Not drawn yet: wings across an end wall come in the next update. It stays saved.")
             : r && r.shrunk ? `Drawn ${d3FtIn(r.w)} wide: the middle keeps at least 4 ft.` : null }));
-        const meetsLabel = k === 1 ? (end ? "Meets the middle's end wall" : "Meets the middle section") : `Meets ${parent}`;
+        const meetsLabel = !parent ? (end ? "Meets the middle's end wall" : "Meets the middle section") : `Meets ${parent}`;
         // A wing asked "On the roof" that is built Automatic (roofIgnored) shows Automatic pressed, the mode that
         // is built, rather than a pressed and disabled chip (review, 2026-09-30); the sentence says the ask is kept.
-        body.push(advSeg({ f: "wlAttach", label: meetsLabel, aria: `${name} meets ${k === 1 ? (end ? "the middle's end wall" : "the middle section") : parent}`, value: r && r.roofIgnored ? "" : asked, full: true,
+        body.push(advSeg({ f: "wlAttach", label: meetsLabel, aria: `${name} meets ${!parent ? (end ? "the middle's end wall" : "the middle section") : parent}`, value: r && r.roofIgnored ? "" : asked, full: true,
           pick: (v) => set(v ? { attach: v, attachFt: typeof e.attachFt === "number" ? e.attachFt : 1 } : { attach: null }),
           opts: [["", "Automatic"], ["wall", "On the wall"], ["roof", "On the roof", !roofOk, roofOk ? undefined : "Only a wing against the middle can run up onto its roof"]],
           note: longWalls ? (a ? "The long walls keep their height; this wing's slope follows." : ["Hung under the long walls' eaves.", "A steep roof set to Automatic pushes those walls up to fit."])
@@ -29846,7 +29858,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           body.push(
             <div key="wlm" className="ss-adv-f is-full" data-ss-adv-f="wlMove">
               <div className="ss-adv-chips" role="group" aria-label={`${name}: move`} style={{ marginTop: 0 }}>
-                <button type="button" className="ssd-chip" style={advPill} disabled={k === 1} title={k === 1 ? `Already against ${inner}` : `Swap places with ${parent}`}
+                <button type="button" className="ssd-chip" style={advPill} disabled={k === 1} title={k === 1 ? `Already against ${inner}` : `Swap places with ${nameAt(bw, k - 1)}`}
                   onClick={() => calWingListMove(i, -1)}>Move in</button>
                 <button type="button" className="ssd-chip" style={advPill} disabled={k === n} title={k === n ? "Already the outermost" : `Swap places with ${nameAt(bw, k + 1)}`}
                   onClick={() => calWingListMove(i, 1)}>Move out</button>
@@ -29854,7 +29866,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>,
           );
         }
-        const sub = k === 1 ? (end ? `across the ${bw} end, against the middle` : "against the middle section") : `on ${parent}'s outer wall`;
+        const sub = !parent ? (end ? `across the ${bw} end, against the middle` : "against the middle section") : `on ${parent}'s outer wall`;
         const next = k < n ? nameAt(bw, k + 1) : null;
         const xTitle = next ? `Remove ${name}. ${next} moves in and meets ${inner}${n - k > 1 ? ", and the wings outside it move in with it" : ""}.` : `Remove ${name}. Nothing else moves.`;
         return (
