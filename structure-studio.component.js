@@ -22411,12 +22411,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // stopped at 6.04 ft, and the quote's qty cell prints a non-integer to 1 dp. With
       // whole feet back, the width is exactly 6 and it prints "6".
       const mouseFt = isHoriz ? (pt.x - mgX) / scale : (pt.y - mgY) / scale;
-      const mouseFtVal = isRO ? mouseFt : Math.round(mouseFt);
 
+      // ⚠️ THE END THAT IS NOT BEING DRAGGED STAYS EXACTLY WHERE IT IS. It used to be rounded to
+      // the nearest whole foot as well, which was harmless only while slabs sat on the foot grid.
+      // They do not: a click places one wherever the click lands and the drag above never rounds,
+      // so the first stretch of almost any slab slid its OTHER end up to half a foot — into the
+      // door it had been parked beside, because getResizeBounds only ever bounds the end being
+      // moved. "Position does not step at all" is the rule two paragraphs up; the LENGTH
+      // steps, so it is measured in whole feet from the fixed end instead.
       const origCenterFt = isHoriz ? (resizing.origX - mgX) / scale : (resizing.origY - mgY) / scale;
-      const origLeft = isRO
-        ? (origCenterFt - resizing.origWidthFt / 2)
-        : Math.round(origCenterFt - resizing.origWidthFt / 2);
+      const origLeft = origCenterFt - resizing.origWidthFt / 2;
       const origRight = origLeft + resizing.origWidthFt;
 
       const origItem = { ...it, x: resizing.origX, y: resizing.origY, widthFt: resizing.origWidthFt };
@@ -22424,17 +22428,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
       const minWidth = isRO ? 0.5 : 2;
 
-      let newLeft = origLeft, newRight = origRight;
-      // floor/ceil come back with the rounding. They keep a whole-foot edge inside a
-      // fractional bound: without them a slab rounds its edge PAST the wall it is allowed
-      // to reach, which is the corner-overhang the bounds exist to stop.
-      if (resizing.handle === "max") {
-        newRight = Math.max(origLeft + minWidth, Math.min(mouseFtVal, isRO ? maxEdge : Math.floor(maxEdge)));
+      let newLeft = origLeft, newRight = origRight, newWidthFt;
+      if (isRO) {
+        if (resizing.handle === "max") newRight = Math.max(origLeft + minWidth, Math.min(mouseFt, maxEdge));
+        else newLeft = Math.min(origRight - minWidth, Math.max(mouseFt, minEdge));
+        newWidthFt = newRight - newLeft;
       } else {
-        newLeft = Math.min(origRight - minWidth, Math.max(mouseFtVal, isRO ? minEdge : Math.ceil(minEdge)));
+        // Whole feet from the fixed end to the pointer, floored at the bound so a whole-foot
+        // length never reaches PAST the wall end or the neighbour it is allowed to touch (the
+        // corner-overhang the bounds exist to stop). The width is the integer itself, never a
+        // difference of two positions, so the quote and the plan print "5", not 4.999999.
+        const room = resizing.handle === "max" ? maxEdge - origLeft : origRight - minEdge;
+        const reach = resizing.handle === "max" ? mouseFt - origLeft : origRight - mouseFt;
+        newWidthFt = Math.max(minWidth, Math.min(Math.round(reach), Math.floor(room + 1e-6)));
+        if (resizing.handle === "max") newRight = origLeft + newWidthFt;
+        else newLeft = origRight - newWidthFt;
       }
-
-      const newWidthFt = newRight - newLeft;
       const newCenterFt = (newLeft + newRight) / 2;
       const newPos = (isHoriz ? mgX : mgY) + newCenterFt * scale;
 
