@@ -105,6 +105,40 @@ describe("/voice/status", () => {
     expect(patches(net)[0].body).toMatchObject({ status: "busy" });
   });
 
+  it("an outbound answer that lands after the call's end never reopens it", async () => {
+    // Two callbacks of a short call, handled out of order (separate requests, separate
+    // waitUntil tasks): 'completed' has already closed the row, then 'in-progress' arrives.
+    // The row here honours the guards the Worker sends, as PostgREST would.
+    const endedAt = new Date(Date.now() - 2_000).toISOString();
+    const state: Record<string, unknown> = row({
+      direction: "out", from_e164: BUSINESS_NUMBER, to_e164: CUSTOMER, twilio_call_sid: LEG, placed_by: USER_A,
+      client_call_sid: CALL_SID, status: "completed", ended_at: endedAt, duration_s: 3,
+    });
+    const net = setup(state);
+    const matches = (url: URL): boolean => {
+      for (const [col, cond] of url.searchParams) {
+        if (col === "id" || col === "select") continue;
+        const v = state[col];
+        if (cond === "is.null" && v != null) return false;
+        if (cond.startsWith("eq.") && String(v) !== cond.slice(3)) return false;
+        const inList = /^in\.\((.*)\)$/.exec(cond);
+        if (inList && !inList[1].split(",").includes(String(v))) return false;
+      }
+      return true;
+    };
+    net.rest("PATCH", "phone_calls", (s) => {
+      if (!matches(s.url)) return [];
+      Object.assign(state, s.json);
+      return [{ id: CALL_ID }];
+    });
+    await call(env, await twilioPost(env, "/voice/status", { CallSid: LEG, CallStatus: "in-progress" }, { call: CALL_ID, leg: "pstn" }));
+    expect(state.status).toBe("completed");
+    expect(state.ended_at).toBe(endedAt);
+    expect(state.duration_s).toBe(3);
+    // The answer itself is still worth recording.
+    expect(state.answered_at).not.toBeNull();
+  });
+
   it("the inbound customer hanging up while it still rang makes a missed call", async () => {
     const net = setup();
     await call(env, await twilioPost(env, "/voice/status", { CallSid: CALL_SID, CallStatus: "completed" }, { leg: "pstn" }));

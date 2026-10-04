@@ -688,7 +688,12 @@ export async function applyStatus(env: Env, p: TwilioParams, url: URL, signed = 
     // Outbound customer leg.
     if (!row.twilio_call_sid && sid) await patchCall(admin, id, { twilio_call_sid: sid }, (q) => q.is("twilio_call_sid", null));
     if (status === "in-progress" || status === "answered") {
-      await patchCall(admin, id, { status: "in_progress", answered_at: at }, (q) => q.is("answered_at", null));
+      // The callbacks are separate requests handled in separate background tasks, so on a
+      // short call 'completed' can be written first (its filter takes a 'ringing' row). A late
+      // answer must not reopen an ended call: that left it 'in_progress' for good, never queued
+      // for billing, shown as live, and its placer busy to inbound calls for four hours.
+      const opened = await patchCall(admin, id, { status: "in_progress", answered_at: at }, (q) => q.is("answered_at", null).is("ended_at", null));
+      if (!opened) await patchCall(admin, id, { answered_at: at }, (q) => q.is("answered_at", null));
     } else if (status === "completed") {
       await patchCall(admin, id, { status: "completed", ended_at: at, duration_s: finalDuration() }, (q) => q.in("status", ["ringing", "in_progress", "no_answer"]));
     } else if (TERMINAL.has(status)) {
