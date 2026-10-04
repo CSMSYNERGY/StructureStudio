@@ -1404,6 +1404,9 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
   // is not a faster page, it is a page that lies about money and then corrects itself,
   // which is exactly the silent understatement the payment pagination exists to prevent.
   const [moneyReady, setMoneyReady] = useState(false);
+  // The tenant whose pending bank payments this mount has already asked the gateway about —
+  // see "BANK MONEY ONLY MOVES WHEN SOMEBODY ASKS" at the end of load().
+  const reconcileFiredRef = useRef(null);
   const load = useCallback(async () => {
     setError(null);
     setMoneyReady(false);
@@ -1547,6 +1550,29 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
     // never be what a revisit paints from, even behind the pending flag.
     ssCachePut("rest", "orders", clientId, settled);
     setMoneyReady(true);
+
+    // ── BANK MONEY ONLY MOVES WHEN SOMEBODY ASKS ──────────────────────────────────────
+    // portal-payments' `reconcile` is the ONLY code that turns a pending bank payment into
+    // settled (or returned) money — there is no pg_cron — and its header names this tab as
+    // the caller: fire-and-forget on load, never awaited in the paint path, then re-read the
+    // money. Nothing called it, so every ACH payment, from either the customer's pay screen
+    // or the Record-a-payment modal, read "Bank payment clearing" forever, the balance never
+    // closed, and paymentAmountDecision refused every further payment on that order
+    // ("A bank payment on this order is still clearing").
+    // Only when a gateway payment IS pending (the sweep has nothing to do otherwise, and a
+    // tenant without card payments must not file a refusal on every load), and at most once
+    // per mount, so a sweep that reports movement can never become a reload loop.
+    const hasPendingBank = (paysRes.data || []).some((p) =>
+      p.gateway === "cardpointe" && !p.voided_at && p.funding_state === "pending");
+    if (hasPendingBank && reconcileFiredRef.current !== clientId) {
+      reconcileFiredRef.current = clientId;
+      sb.functions.invoke("portal-payments", { body: { action: "reconcile" } }).then(({ data }) => {
+        const moved = data && !data.error && (
+          (Array.isArray(data.updated) && data.updated.length > 0) ||
+          (Array.isArray(data.resolved) && data.resolved.some((x) => x && x.resolved)));
+        if (moved) load();
+      }, () => {});
+    }
   }, [clientId]);
 
   // Refresh = re-read the tables. This used to also pull totals/statuses from GHL
