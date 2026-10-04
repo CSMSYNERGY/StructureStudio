@@ -588,7 +588,12 @@ const SS_WALL_ORDER = { north: ["south", "east", "west"], south: ["north", "east
 // clears the zone, so a vent whose gable the new size took away (a landscape footprint's ends are
 // west/east) or made too small comes back down to the wall rather than being drawn in mid-air.
 // repairLoaded passes nothing, and then a gable vent keeps its zone exactly as saved.
-function reflowItems(items, prev, next, ITEMS, gablePlace) {
+//
+// `wallHeightFt` is optional and reaches only the collision checks below, where a vent's band is
+// measured down from the plate (ssVentSpan). Without it every vent is measured under an 8 ft plate,
+// so on a 10 ft wall a 4 ft window sitting legally under a top-spot vent "collides" and is slid
+// away — on a same-size repairLoaded that moved a saved design's window on every open.
+function reflowItems(items, prev, next, ITEMS, gablePlace, wallHeightFt) {
   const A = pageGeom(prev.w, prev.h), B = pageGeom(next.w, next.h);
   const events = [];
   const byId = new Map();
@@ -619,8 +624,8 @@ function reflowItems(items, prev, next, ITEMS, gablePlace) {
           out = g || { ...sn, ventZone: null, ventRiseFt: null };
           cand = { ...cand, ...out };
         }
-        if (checkDoorCollision(cand, { ...cfg, width: wFt }, placed, ITEMS, B.scale)) continue;
-        if (checkWallSlabOverlap(out, wFt * B.scale, placed, ITEMS, B.scale, cand)) continue;
+        if (checkDoorCollision(cand, { ...cfg, width: wFt }, placed, ITEMS, B.scale, wallHeightFt)) continue;
+        if (checkWallSlabOverlap(out, wFt * B.scale, placed, ITEMS, B.scale, cand, wallHeightFt)) continue;
         return out;
       }
     }
@@ -1536,7 +1541,7 @@ function ssRefitGableVents(items, roofCfg, bldgW, bldgH, wallHeightFt, itemTypes
   if (!Array.isArray(items) || !items.some(ssIsGableVent)) return null;
   const d = { w: bldgW, h: bldgH };
   const out = reflowItems(items, d, d, itemTypes, (cand, sn, g) =>
-    ssGableVentPlace(roofCfg, bldgW, bldgH, wallHeightFt, cand, sn, g.scale, g.mgX, g.mgY, ssVentAlongFt(sn, g.scale, g.mgX, g.mgY), cand.ventRiseFt)).items;
+    ssGableVentPlace(roofCfg, bldgW, bldgH, wallHeightFt, cand, sn, g.scale, g.mgX, g.mgY, ssVentAlongFt(sn, g.scale, g.mgX, g.mgY), cand.ventRiseFt), wallHeightFt).items;
   const G = pageGeom(bldgW, bldgH);
   const wasGable = new Set(items.filter(ssIsGableVent).map((i) => i.id));
   let dropped = 0;
@@ -21151,7 +21156,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const vr = ventRoof2D();
       const { items: reflowed, events } = reflowItems(reflowable, prev, p, ITEMS, (cand, sn, g) =>
         ssGableVentPlace(vr.roof, p.w, p.h, vr.H, cand, sn, g.scale, g.mgX, g.mgY,
-          ((sn.wall === "north" || sn.wall === "south") ? sn.x - g.mgX : sn.y - g.mgY) / g.scale, cand.ventRiseFt));
+          ((sn.wall === "north" || sn.wall === "south") ? sn.x - g.mgX : sn.y - g.mgY) / g.scale, cand.ventRiseFt), vr.H);
       const blocked = events.filter((e) => e.kind === "blocked");
       if (blocked.length) {
         // Nothing has changed yet — put the size back and let them decide.
@@ -21221,10 +21226,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // back. Passing the SAME dimensions in and out makes the geometry conversion an identity,
   // so nothing moves that was already legal; the clamps and collision checks do the repair.
   // Silent by design: someone opening a link did not do anything to be told about.
-  const repairLoaded = (loaded, sizeLabel) => {
+  //
+  // Against the LOADED design's own wall height (its style, wall-height pick and foundation — the
+  // same resolver ventRoof2D reads for the design on screen), or a legal window under a top-spot
+  // vent on a 10 ft wall reads as a collision and is moved every time the design is opened.
+  const repairLoaded = (loaded, sizeLabel, selections) => {
     const d = parseSize(sizeLabel);
     if (!d || !loaded.length) return loaded;
-    try { return reflowItems(loaded, d, d, ITEMS).items; } catch (_e) { return loaded; }
+    try {
+      const s = selections || {};
+      const styleCfg = C.buildingStyles.find((x) => x.value === s.style);
+      const spec = d3ResolveStyleSpec(styleCfg, s.style, C.wallHeightFt, d3SidingOverride(C, s), d3CustomerWallHeightFt(C, styleCfg, s.style, s, d.w), d3CustomerFoundation(C, s));
+      return reflowItems(loaded, d, d, ITEMS, undefined, (spec && spec.wallHeightFt) || D3.WALL_H).items;
+    } catch (_e) { return loaded; }
   };
 
   // ─── Load a saved design by short code ───
@@ -21322,7 +21336,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setRoDimensions(design.ro_dimensions || {});
     // Items must be set after sel.size has propagated; the prevSizeRef guard
     // above keeps the size effect from wiping them.
-    const loadedItems = repairLoaded(Array.isArray(design.items) ? design.items : [], (design.selections || {}).size);
+    const loadedItems = repairLoaded(Array.isArray(design.items) ? design.items : [], (design.selections || {}).size, design.selections);
     setItems(loadedItems);
     // The persistent portal mount can carry a selection/note-edit from the PREVIOUS
     // design; item ids are small integers that collide across designs, so a stale
@@ -21523,7 +21537,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setPaintCustom({ body: false, trim: false });
     setCustomOptions(vrow.custom_options || []);
     setRoDimensions(vrow.ro_dimensions || {});
-    const loadedItems = repairLoaded(Array.isArray(vrow.items) ? vrow.items : [], (vrow.selections || {}).size);
+    const loadedItems = repairLoaded(Array.isArray(vrow.items) ? vrow.items : [], (vrow.selections || {}).size, vrow.selections);
     setItems(loadedItems);
     setSelectedId(null);
     idCounter = Math.max(idCounter, 0, ...loadedItems.map((i) => Number(i.id) || 0)) + 1;

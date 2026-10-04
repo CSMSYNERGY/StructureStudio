@@ -258,6 +258,14 @@ try {
     ok("F: on a 10 ft wall a 4 ft window drags in under a top-spot vent (as the 3D allows)", w1 && Math.abs(g.ftX(w1.x) - 7) < 0.15, `window centre ${w1 && g.ftX(w1.x).toFixed(2)} ft`);
     ok("F: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
     await page.close();
+    // J: that layout SAVED and opened again stays exactly as saved (repairLoaded used to slide the
+    // window out from under the vent on every open, measuring the vent under an 8 ft plate).
+    const reopened = await openWith(ctx, [vent, { ...win, x: px(7) }], "tall");
+    const wj = ((await readItems(reopened.page)) || []).find((i) => i.id === 2);
+    const gj = await geom(reopened.page);
+    ok("J: opening the saved design leaves the window under the vent where it was saved", wj && Math.abs(gj.ftX(wj.x) - 7) < 0.02, `window centre ${wj && gj.ftX(wj.x).toFixed(2)} ft (saved at 7.00)`);
+    ok("J: zero page errors", reopened.errors.length === 0, reopened.errors.join(" | ").slice(0, 300));
+    await reopened.page.close();
   }
   if (want("H")) {
     // The electrical package on a 12x24 (12 outlets, 2 lights, 1 switch), then the customer picks
