@@ -70,9 +70,12 @@ verify_jwt = false
 verify_jwt = false
 
 [functions.postmark-events]
-# Postmark posts delivery/bounce/spam-complaint events here server-to-server. Authenticated
-# by a shared secret in the URL (?key= ⇄ POSTMARK_WEBHOOK_SECRET) compared in constant time —
-# the same pattern as feedback-monday-webhook.
+# RESEND (the name is Postmark's, kept: it is an address) posts delivered / opened / bounced /
+# complained / suppressed / failed events here server-to-server, from a webhook of its own (not
+# the email.received one, which posts to email-inbound). Authenticated by a shared secret in the
+# URL (?key= ⇄ EMAIL_EVENTS_SECRET, the legacy POSTMARK_WEBHOOK_SECRET as fallback) compared in
+# constant time — the same pattern as feedback-monday-webhook. Flip this to true and every open
+# and bounce stops arriving with nothing logged: the gateway 401s Resend before the function runs.
 verify_jwt = false
 
 [functions.admin-save-settings]

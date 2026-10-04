@@ -3,7 +3,8 @@
 // GET /threads/:key.
 import { describe, expect, it } from "vitest";
 import {
-  EMAIL_BODY_CAP, capBody, contactEmailFilter, emailAddress, emailBlock, emailSendingReady, htmlToText, receivedEmail, sendStatus,
+  EMAIL_BODY_CAP, SEND_COLS, SEND_COLS_BEFORE_262, capBody, contactEmailFilter, emailAddress, emailBlock, emailSendingReady, htmlToText,
+  receivedEmail, sendStatus, sentEmail,
 } from "../src/emailThread";
 
 describe("htmlToText", () => {
@@ -64,9 +65,38 @@ describe("capBody", () => {
 });
 
 describe("sendStatus", () => {
-  it("claimed is sending; a delivery receipt reads as sent and a bounce as not sent", () => {
-    expect(["claimed", "sent", "delivered", "failed", "bounced", "weird", null].map(sendStatus))
-      .toEqual(["sending", "sent", "sent", "failed", "failed", null, null]);
+  it("claimed is sending; sent and delivered say so; a bounce reads as not sent", () => {
+    expect(["claimed", "sent", "delivered", "failed", "bounced", "weird", null].map((s) => sendStatus(s)))
+      .toEqual(["sending", "sent", "delivered", "failed", "failed", null, null]);
+  });
+
+  it("opened_at makes a sent or delivered email \"opened\" (migration 262), never a bounced or failed one", () => {
+    const at = "2026-10-04T14:00:00.000Z";
+    expect(["claimed", "sent", "delivered", "failed", "bounced"].map((s) => sendStatus(s, at)))
+      .toEqual(["sending", "opened", "opened", "failed", "failed"]);
+    expect(sendStatus("sent", null)).toBe("sent");
+  });
+});
+
+describe("sentEmail", () => {
+  const row = {
+    id: "o1", kind: "conversation", subject: "Your shed", status: "delivered", created_at: "2026-10-04T12:00:00.000Z",
+    to_email: "jordan@example.test", intended_email: null, body_text: "Hi", sent_by: null, client_temp_id: null,
+    delivered_at: "2026-10-04T12:00:05.000Z",
+  };
+  it("carries opened_at, and the status reads opened once there is one", () => {
+    expect(sentEmail(row)).toMatchObject({ status: "delivered", opened_at: null });
+    expect(sentEmail({ ...row, opened_at: "2026-10-04T14:00:00.000Z" })).toMatchObject({ status: "opened", opened_at: "2026-10-04T14:00:00.000Z" });
+  });
+  it("a read from before migration 262 has no opened_at at all and still maps", () => {
+    expect(sentEmail({ ...row, status: "sent" })).toMatchObject({ status: "sent", opened_at: null });
+  });
+  it("a bounce is failed, even after an open", () => {
+    expect(sentEmail({ ...row, status: "bounced", opened_at: "2026-10-04T14:00:00.000Z" })).toMatchObject({ status: "failed" });
+  });
+  it("the two column lists differ by opened_at alone", () => {
+    expect(SEND_COLS.split(", ").filter((c) => !SEND_COLS_BEFORE_262.split(", ").includes(c))).toEqual(["opened_at"]);
+    expect(SEND_COLS_BEFORE_262.split(", ").filter((c) => !SEND_COLS.split(", ").includes(c))).toEqual([]);
   });
 });
 
@@ -81,7 +111,7 @@ describe("receivedEmail", () => {
   });
 
   it("a missing subject is empty, and a missing name is null", () => {
-    expect(receivedEmail(row)).toMatchObject({ subject: "", from: { name: null, email: "jordan@example.test" }, kind: "conversation" });
+    expect(receivedEmail(row)).toMatchObject({ subject: "", from: { name: null, email: "jordan@example.test" }, kind: "conversation", opened_at: null });
   });
 });
 

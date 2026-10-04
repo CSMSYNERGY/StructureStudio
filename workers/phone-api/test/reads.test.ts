@@ -665,13 +665,13 @@ describe("GET /threads/:key email (emails and compose)", () => {
     const byId = Object.fromEntries(json.emails.map((e: { id: string }) => [e.id, e]));
     expect(byId.o1).toEqual({
       id: "o1", direction: "out", at: T(30), kind: "conversation", subject: "About your shed", body: "Hi Jordan", body_truncated: false,
-      status: "sent", sent_by: USER_A, client_temp_id: "tmp-1", from: null, to_email: "jordan@example.test", sender_verified: null,
+      status: "sent", opened_at: null, sent_by: USER_A, client_temp_id: "tmp-1", from: null, to_email: "jordan@example.test", sender_verified: null,
     });
     expect(byId.o2).toMatchObject({ kind: "estimate", subject: "Your quote", body: null, sent_by: null });
     expect(byId.o3).toMatchObject({ status: "sending", to_email: "jordan@example.test" });
     expect(byId.i1).toEqual({
       id: "i1", direction: "in", at: T(25), kind: "conversation", subject: "Re: About your shed", body: "Sounds good", body_truncated: false,
-      status: null, sent_by: null, client_temp_id: null, from: { name: "Jordan", email: "jordan@example.test" }, to_email: null, sender_verified: true,
+      status: null, opened_at: null, sent_by: null, client_temp_id: null, from: { name: "Jordan", email: "jordan@example.test" }, to_email: null, sender_verified: true,
     });
     expect(byId.i2.sender_verified).toBe(false);
 
@@ -689,6 +689,36 @@ describe("GET /threads/:key email (emails and compose)", () => {
     // Every body had a text part, so no HTML was read at all.
     expect(net.reads("email_inbound")).toHaveLength(1);
     expect(i.url.searchParams.get("select")).not.toContain("body_html");
+  });
+
+  it("an opened email reads \"opened\" with its time; a delivered one \"delivered\" (migration 262)", async () => {
+    const { net, token, env } = await setup(callerCtx());
+    thread(net, {
+      sent: [
+        sentRow("o1", { contact_id: CONTACT_1, status: "delivered", delivered_at: T(2), opened_at: T(3), created_at: T(1) }),
+        sentRow("o2", { contact_id: CONTACT_1, status: "delivered", delivered_at: T(5), opened_at: null, created_at: T(4) }),
+        sentRow("o3", { contact_id: CONTACT_1, status: "bounced", opened_at: T(7), created_at: T(6) }),
+      ],
+    });
+    const { json } = await call(env, read(token));
+    expect(json.emails.map((e: { id: string; status: string; opened_at: string | null }) => [e.id, e.status, e.opened_at]))
+      .toEqual([["o3", "failed", T(7)], ["o2", "delivered", null], ["o1", "opened", T(3)]]);
+    expect(net.reads("email_sends")[0].url.searchParams.get("select")).toContain("opened_at");
+  });
+
+  it("ahead of migration 262 (no opened_at column) the thread still opens: asked again without it", async () => {
+    const { net, token, env } = await setup(callerCtx());
+    thread(net, { sent: [sentRow("o1", { contact_id: CONTACT_1, status: "delivered" })] });
+    net.rest("GET", "email_sends", (s) => (s.url.searchParams.get("select") ?? "").includes("opened_at")
+      ? new Response(JSON.stringify({ code: "42703", message: "column email_sends.opened_at does not exist" }), { status: 400, headers: { "content-type": "application/json" } })
+      : [sentRow("o1", { contact_id: CONTACT_1, status: "delivered" })]);
+    const { res, json } = await call(env, read(token));
+    expect(res.status).toBe(200);
+    expect(json.emails.map((e: { id: string; status: string; opened_at: string | null }) => [e.id, e.status, e.opened_at])).toEqual([["o1", "delivered", null]]);
+    const asked = net.reads("email_sends").map((s) => s.url.searchParams.get("select") ?? "");
+    expect(asked).toHaveLength(2);
+    expect(asked[1]).not.toContain("opened_at");
+    expect(asked[1]).toContain("body_text");
   });
 
   it("a contact with no designs is found by the contact alone", async () => {

@@ -89,8 +89,9 @@ Deno.test("crmFeed before migration 261: no body_text column still shows every s
     storage: { from: () => ({ createSignedUrls: () => Promise.resolve({ data: [] }) }) },
   };
   const feed = await buildCrmFeed(admin, "demo-tenant", { codes: ["SS-DEMO2345"], contactId: CONTACT });
-  assertEquals(asked.length, 2, "asked with body_text, then once more without it");
-  assert(!/\bbody_text\b/.test(asked[1]), `the retry leaves body_text out: ${asked[1]}`);
+  // Three asks since migration 262: with 262's open columns, without them, then without body_text.
+  assertEquals(asked.length, 3, "asked with body_text (and 262's columns), then with fewer until it is left out");
+  assert(!/\bbody_text\b/.test(asked[2]), `the last retry leaves body_text out: ${asked[2]}`);
   const byId = (id: string) => feed.find((e) => e.id === `e:${id}`);
   assertEquals([byId("e1")?.title, byId("e1")?.body], ["Your shed", "Emailed to cam@example.test"], "an email with no words keeps its old line");
   assertEquals(byId("e2")?.title, "Quote emailed to cam@example.test", "document mail is still there");
@@ -131,7 +132,8 @@ Deno.test("crm_send_email hands the conversation to the claim and no longer stam
   assert(send.includes("...(contactFound ? { contactId } : {})"), "contactId goes to sendTenantEmail only when the lookup found it");
   assert(!send.includes("...(contactId ? { contactId } : {})"), "the unconditional contactId is gone");
   const call = slice(send, "const out = await sendTenantEmail(admin, clientId, {", "} as any);", "the sendTenantEmail call");
-  assert(call.includes("bodyText: body,"), "the words go on the claim");
+  // The words as sent: the typed body plus the writer's signature (emailSignature_test pins that).
+  assert(call.includes("bodyText: text,"), "the words go on the claim");
   assert(call.includes("...(userId ? { sentBy: String(userId) } : {})"), "sentBy is the session's user, never the body's");
   assert(call.includes("...(clientTempId ? { clientTempId } : {})"), "the bubble id goes on the claim");
   assert(!/payload\.(sentBy|sent_by)/.test(send), "nothing in the request body names the writer");

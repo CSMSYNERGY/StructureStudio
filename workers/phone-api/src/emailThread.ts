@@ -20,8 +20,13 @@ export const EMAIL_PAGE = 80;
 /** Characters of one body handed to the apps. The rest stays in Structure Studio. */
 export const EMAIL_BODY_CAP = 8000;
 
-/** migration 261 adds body_text, sent_by and client_temp_id. */
-export const SEND_COLS = "id, kind, subject, status, created_at, to_email, intended_email, body_text, sent_by, client_temp_id";
+/** migration 261 adds body_text, sent_by and client_temp_id; 262 adds opened_at (delivered_at is
+ *  107's). */
+export const SEND_COLS = "id, kind, subject, status, created_at, to_email, intended_email, body_text, sent_by, client_temp_id, delivered_at, opened_at";
+/** The same read without 262's opened_at, for a database 262 has not reached yet (reads.ts asks
+ *  again with this on "no such column", so the thread still opens; its emails just never read
+ *  "opened"). */
+export const SEND_COLS_BEFORE_262 = "id, kind, subject, status, created_at, to_email, intended_email, body_text, sent_by, client_temp_id, delivered_at";
 /** body_html is left out on purpose: it is read again, by id, only for mail with no text part. */
 export const INBOUND_COLS = "id, from_email, from_name, subject, body_text, received_at, spam_verdict";
 
@@ -36,6 +41,9 @@ export interface EmailSendRow {
   body_text?: string | null;
   sent_by?: string | null;
   client_temp_id?: string | null;
+  delivered_at?: string | null;
+  /** Migration 262: the earliest open Resend reported. Absent on a read from before 262. */
+  opened_at?: string | null;
 }
 
 export interface EmailInboundRow {
@@ -56,7 +64,9 @@ export interface ThreadEmail {
   subject: string;
   body: string | null;
   body_truncated: boolean;
-  status: "sending" | "sent" | "failed" | null;
+  status: "sending" | "sent" | "delivered" | "opened" | "failed" | null;
+  /** Sent mail only: when the customer first opened it (migration 262), else null. */
+  opened_at: string | null;
   sent_by: string | null;
   client_temp_id: string | null;
   from: { name: string | null; email: string } | null;
@@ -129,12 +139,25 @@ export function hasText(v: string | null | undefined): v is string {
 
 // ── rows ────────────────────────────────────────────────────────────────────────────
 
-/** The ledger's status for the apps. Only "Sent" is known for now: a delivery receipt reads as sent, a bounce as not sent. */
-export function sendStatus(status: string | null | undefined): ThreadEmail["status"] {
+/**
+ * The ledger's status for the apps, now that Resend's delivery events are recorded (migration 262):
+ * claimed → "sending"; sent → "sent"; delivered → "delivered"; opened at least once → "opened",
+ * whether or not the delivery receipt arrived (one can go missing while the open still lands);
+ * failed or bounced → "failed". A bounce stays "failed" even after an open: it is the thing to act on.
+ *
+ * A spam complaint is not a status at all: migration 262 keeps it in complained_at and leaves the
+ * status alone, because the email ARRIVED. So it reads "delivered" or "opened" here, which is true,
+ * and the portal is where the complaint itself is shown (crmFeed's "Marked as spam").
+ *
+ * "delivered" and "opened" are new to the apps. An app built before them shows anything it does
+ * not know as "Sent" (phone repo threads.ts statusLabel), which is still true of both — and why a
+ * bounce is NOT given a word of its own here: an older app would show "Sent" for it.
+ */
+export function sendStatus(status: string | null | undefined, openedAt?: string | null): ThreadEmail["status"] {
   switch (status) {
     case "claimed": return "sending";
     case "sent":
-    case "delivered": return "sent";
+    case "delivered": return openedAt ? "opened" : status;
     case "failed":
     case "bounced": return "failed";
     default: return null;
@@ -156,7 +179,8 @@ export function sentEmail(r: EmailSendRow): ThreadEmail {
     subject: r.subject ?? "",
     body: text?.body ?? null,
     body_truncated: text?.truncated ?? false,
-    status: sendStatus(r.status),
+    status: sendStatus(r.status, r.opened_at),
+    opened_at: r.opened_at ?? null,
     sent_by: r.sent_by ?? null,
     client_temp_id: r.client_temp_id ?? null,
     from: null,
@@ -182,6 +206,7 @@ export function receivedEmail(r: EmailInboundRow, html?: string | null): ThreadE
     body: text?.body ?? null,
     body_truncated: text?.truncated ?? false,
     status: null,
+    opened_at: null,
     sent_by: null,
     client_temp_id: null,
     from: r.from_email ? { name: r.from_name ?? null, email: r.from_email } : null,

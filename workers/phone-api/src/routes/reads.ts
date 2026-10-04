@@ -16,7 +16,7 @@ import { warmStates, type WarmInfo } from "../callEvents";
 import { requireCaller, type Caller } from "../context";
 import { CALL_COLUMNS, DbError, must, type CallRow } from "../db";
 import {
-  EMAIL_PAGE, INBOUND_COLS, LIST_EMAIL_KINDS, SEND_COLS, THREAD_EMAIL_KINDS,
+  EMAIL_PAGE, INBOUND_COLS, LIST_EMAIL_KINDS, SEND_COLS, SEND_COLS_BEFORE_262, THREAD_EMAIL_KINDS,
   contactEmailFilter, emailAddress, emailBlock, hasText, threadEmails,
   type Compose, type EmailInboundRow, type EmailSendRow, type EmailSettings, type ThreadEmail,
 } from "../emailThread";
@@ -27,6 +27,8 @@ import { callIsMine, isTeamLevel, mayReadUnknownNumbers, maySendToContacts, phon
 
 const PAGE = 50;
 const SCAN = 500;
+/** PostgREST / Postgres "no such column" (media.ts's set). */
+const MISSING_COLUMN = new Set(["42703", "PGRST204"]);
 /** Rows read per email table for one page of the list (?channels=…,email). */
 const EMAIL_SCAN = 200;
 
@@ -533,12 +535,20 @@ async function contactEmails(c: Caller, contactId: string): Promise<ThreadEmail[
     "read contact designs",
   ) as { short_code: string | null }[] | null) ?? [];
   const scope = contactEmailFilter(contactId, designs.map((d) => d.short_code));
-  const [sentRes, receivedRes] = await Promise.all([
-    c.admin.from("email_sends").select(SEND_COLS).eq("client_id", client).in("kind", THREAD_EMAIL_KINDS).or(scope)
-      .order("created_at", { ascending: false }).limit(EMAIL_PAGE),
+  const readSent = (cols: string) =>
+    c.admin.from("email_sends").select(cols).eq("client_id", client).in("kind", THREAD_EMAIL_KINDS).or(scope)
+      .order("created_at", { ascending: false }).limit(EMAIL_PAGE);
+  const [firstSent, receivedRes] = await Promise.all([
+    readSent(SEND_COLS),
     c.admin.from("email_inbound").select(INBOUND_COLS).eq("client_id", client).or(scope)
       .order("received_at", { ascending: false }).limit(EMAIL_PAGE),
   ]);
+  // A Worker deployed ahead of migration 262 is refused opened_at ("no such column"), and must()
+  // would fail the WHOLE thread over it — texts and calls included. Asked once more without it,
+  // the thread opens and its emails simply never read "opened".
+  const sentRes = MISSING_COLUMN.has(String((firstSent as { error?: { code?: string } | null }).error?.code ?? ""))
+    ? await readSent(SEND_COLS_BEFORE_262)
+    : firstSent;
   const sent = (must(sentRes as never, "read sent email") as EmailSendRow[] | null) ?? [];
   const received = (must(receivedRes as never, "read received email") as EmailInboundRow[] | null) ?? [];
 

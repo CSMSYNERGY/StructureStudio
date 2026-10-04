@@ -3137,6 +3137,13 @@ function Dashboard({ session }) {
                 userId={session.user ? session.user.id : null}
                 canCall={!viewing && (tenant.role === "owner" || ssCanRead(myAccess, "phone"))}
                 phoneOn={phoneOffered && effPhoneStatus === "on"}
+                /* EMAIL SIGNATURE (My Profile). The SIGNED-IN person's, off the prefs `status`
+                   returned at boot and kept current by My Profile's save (onPrefsSaved), because
+                   crm_send_email adds the signature of whoever is signed in. In view-as there is
+                   no prefs read (status is skipped), so null: the composer shows nothing rather
+                   than a guess. */
+                emailSignature={viewing ? null : ((tenant.prefs && typeof tenant.prefs.emailSignature === "string") ? tenant.prefs.emailSignature : "")}
+                onEditProfile={viewing ? null : () => navigate("settings", "myprofile")}
               />
             ) : null}
             {/* The merged era's two sub-views correct themselves; see DesignsLegacySub. */}
