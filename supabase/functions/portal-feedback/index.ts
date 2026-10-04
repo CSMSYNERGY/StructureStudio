@@ -243,12 +243,16 @@ function statusAfterPush(kind: "bug" | "feature"): string {
 // (mondayChangeIsNewer), so re-reading a stale Monday label is not a write and can
 // never undo the Projects side. The team works in Projects; cutover
 // (MONDAY_PUSH_DISABLED=1, then stripping the Monday code) ends the divergence.
+//
+// Returns whether the submission is on the board (created now, or already there). Callers that
+// still push to Monday ignore it; with MONDAY_PUSH_DISABLED=1 it IS the answer to "did this
+// reach our tracker", which is what the widget's `pushed` flag tells the builder.
 // deno-lint-ignore no-explicit-any
-async function mirrorToProjects(admin: any, row: any): Promise<void> {
+async function mirrorToProjects(admin: any, row: any): Promise<boolean> {
   try {
     const { data: board } = await admin.from("pm_boards").select("id")
       .eq("slug", row.kind === "feature" ? "features" : "bugs").maybeSingle();
-    if (!board) return;
+    if (!board) return false;
     const { data: exists } = await admin.from("pm_items").select("id, monday_item_id")
       .eq("feedback_submission_id", row.id).maybeSingle();
     if (exists) {
@@ -257,7 +261,7 @@ async function mirrorToProjects(admin: any, row: any): Promise<void> {
       if (row.monday_item_id && !exists.monday_item_id) {
         await admin.from("pm_items").update({ monday_item_id: row.monday_item_id }).eq("id", exists.id);
       }
-      return;
+      return true;
     }
     // The board's INTAKE group (migration 150), not "whichever sits first" — the Monday
     // import left two similarly-named intake groups per board, so first-by-position sent
@@ -265,7 +269,7 @@ async function mirrorToProjects(admin: any, row: any): Promise<void> {
     const { data: groups } = await admin.from("pm_groups").select("id, intake")
       .eq("board_id", board.id).order("position");
     const group = (groups || []).find((g: { intake: boolean }) => g.intake) || (groups || [])[0];
-    if (!group) return;
+    if (!group) return false;
     const { data: cols } = await admin.from("pm_columns").select("*").eq("board_id", board.id);
     const values: Record<string, unknown> = {};
     for (const c of cols || []) {
@@ -303,7 +307,7 @@ async function mirrorToProjects(admin: any, row: any): Promise<void> {
     }
     const { data: maxRow } = await admin.from("pm_items").select("position")
       .eq("group_id", group.id).order("position", { ascending: false }).limit(1).maybeSingle();
-    await admin.from("pm_items").insert({
+    const { error: insErr } = await admin.from("pm_items").insert({
       board_id: board.id, group_id: group.id,
       name: String(row.title || "").slice(0, 200), values,
       position: (maxRow?.position || 0) + 1024,
@@ -311,8 +315,13 @@ async function mirrorToProjects(admin: any, row: any): Promise<void> {
       monday_item_id: row.monday_item_id || null,
       created_by: row.submitted_by || null, created_by_email: row.submitter_email || null,
     });
+    // supabase-js RESOLVES a failed insert ({ error }), it does not throw — so the catch below
+    // never saw one and a refused insert passed for a mirrored submission.
+    if (insErr) throw new Error(insErr.message);
+    return true;
   } catch (e) {
     console.error("Projects mirror failed for submission", row.id, e instanceof Error ? e.message : String(e));
+    return false;
   }
 }
 
@@ -459,13 +468,18 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
 
     // Mirror into the internal Projects board FIRST (best-effort, never throws) —
     // before the Monday push, so an unexpected push crash cannot lose the pm_item.
-    await mirrorToProjects(admin, row);
+    const mirrored = await mirrorToProjects(admin, row);
 
     // Cutover switch: MONDAY_PUSH_DISABLED=1 stops the Monday leg without a redeploy.
     // Deliberately NOT an error state — no monday_error is recorded — because the
     // submission's real home (mirror row + Projects item) is already written.
+    //
+    // ⚠️ `pushed` is what the builder's widget reads to decide whether to say "syncing it to
+    // our tracker didn't go through". With Monday switched off the tracker IS Projects, so
+    // the honest answer is whether the Projects item exists. This returned a flat `false`,
+    // which put that error box on EVERY submission from the moment the switch was thrown.
     if (Deno.env.get("MONDAY_PUSH_DISABLED") === "1") {
-      return json({ ok: true, submission: row, pushed: false });
+      return json({ ok: true, submission: row, pushed: mirrored });
     }
 
     if (!token) {
@@ -515,9 +529,9 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
     const { data: row } = await admin.from("feedback_submissions")
       .select("*").eq("id", String(body.id ?? "")).eq("client_id", clientId).maybeSingle();
     if (!row) return json({ error: "Submission not found." }, 404);
-    await mirrorToProjects(admin, row);  // a failed first push may also have raced the mirror
+    const mirrored = await mirrorToProjects(admin, row);  // a failed first push may also have raced the mirror
     if (Deno.env.get("MONDAY_PUSH_DISABLED") === "1") {
-      return json({ ok: true, submission: row, pushed: false });
+      return json({ ok: true, submission: row, pushed: mirrored });   // see `submit`
     }
     if (!token) return json({ error: "Monday is not configured." }, 500);
     if (row.monday_item_id) return json({ ok: true, submission: row, pushed: true });
