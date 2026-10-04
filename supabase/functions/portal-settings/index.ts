@@ -3976,11 +3976,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const rawCap = capRow?.ai_style_daily_cap;
     const dailyCap = (typeof rawCap === "number" && rawCap >= 0) ? rawCap : DEFAULT_DAILY_CAP;
     // Unlimited skips the COUNT entirely rather than running a query whose answer cannot matter.
+    const capSince = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     if (dailyCap > 0) {
-      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       const { count: used, error: capErr } = await admin.from("ai_style_calls")
         .select("id", { count: "exact", head: true })
-        .eq("client_id", clientId).gt("called_at", since);
+        .eq("client_id", clientId).gt("called_at", capSince);
       // Fail OPEN on a broken count (capture-lead's posture): a cap that cannot be read must
       // not brick calibration, and the per-call cost is cents.
       if (capErr) {
@@ -4022,6 +4022,28 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ({ data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert(ledgerInsert).select("id").single());
     }
     if (ledgerErr) return json({ error: "The AI drafting meter is unavailable right now - try again shortly." }, 503);
+    // ── THE CAP, COUNTED AGAIN WITH THIS PRESS'S OWN ROW IN IT ─────────────────────────────────
+    // The count above runs before this press's row exists, so presses sent together all read the
+    // same number, all pass, and all insert: it bounded only presses sent one after another, and
+    // with the meter disarmed (every tenant today) nothing else stops a burst from drafting on our
+    // Anthropic key as many times as it has requests. So it is counted again now, every row in the
+    // window ours included: more than the cap means this press is past it, and its row goes. Two
+    // presses that straddle the cap at the same instant can both refuse — the safe direction for
+    // a spend cap, and the next press lands. Fails open like the count above.
+    if (dailyCap > 0 && ledgerRow?.id) {
+      const { count: withOurs, error: recountErr } = await admin.from("ai_style_calls")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", clientId).gt("called_at", capSince);
+      if (recountErr) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_style_cap_count_failed",
+          message: `AI calibration cap recount failed, allowing the call: ${recountErr.message}`,
+        });
+      } else if ((withOurs ?? 0) > dailyCap) {
+        await admin.from("ai_style_calls").delete().eq("id", ledgerRow.id);
+        return json({ error: `Daily limit reached (${dailyCap} AI drafts). Tune the sliders by hand, or try again tomorrow.` }, 429);
+      }
+    }
 
     // ── WALLET HOLD ────────────────────────────────────────────────────────────────
     // Ordered deliberately: the API-key check, then the daily cap, then the ai_style_calls
