@@ -2119,7 +2119,13 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
           return json({ error: "Invalid repair status." }, 400);
         }
         patch.status = payload.status;
-        patch.completed_at = payload.status === "completed" ? new Date().toISOString() : null;
+        // The completion date is when it was FIRST completed. The repair card's Save always
+        // posts the status, so re-stamping here on every save moved a July completion to
+        // today the moment someone edited its notes or address — it re-entered "Completed ·
+        // 30 days" and lost the real date. Same rule complete_job applies to build jobs.
+        patch.completed_at = payload.status === "completed"
+          ? (repair.status === "completed" && repair.completed_at ? repair.completed_at : new Date().toISOString())
+          : null;
       }
       const { error } = await admin.from("repairs").update(patch).eq("id", repair.id).eq("client_id", clientId);
       if (error) throw error;
