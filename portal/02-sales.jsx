@@ -116,6 +116,32 @@ function withListSelections(r) {
   return { ...rest, selections: { style: sel_style || "", size: sel_size || "" } };
 }
 
+// ── EVERY ROW, NOT THE FIRST THOUSAND ───────────────────────────────────────────────────
+// PostgREST answers at most db-max-rows (1000 on this project) per request and says nothing
+// when it stops there. The Designs and Contacts lists read the whole tenant in ONE request,
+// newest first, so past 1000 rows the OLDEST designs, versions and browsing leads simply
+// vanished — from the list, from the chip counts, from search — with no error anywhere.
+// design_versions crosses the line first (every save writes one, drafts included), and then
+// older designs lose their "▾ versions" expander and drop out of the "2+ versions" filter.
+//
+// So these reads page with .range() until a short page, at a size under the cap so a page can
+// never come back silently short and end the scan early (customerIdentity.ts ADDRESS_SCAN_PAGE,
+// same reasoning). `page(from, to)` must order on a UNIQUE tiebreaker after its real order, or
+// rows sharing a timestamp can swap across a page boundary; `keyOf` drops the duplicate a row
+// inserted mid-read produces. A failed page is an error, never a shorter list.
+const SS_LIST_PAGE = 500;
+async function ssReadAllRows(page, keyOf) {
+  const seen = new Set();
+  const out = [];
+  for (let from = 0; from < SS_LIST_PAGE * 400; from += SS_LIST_PAGE) {
+    const { data, error } = await page(from, from + SS_LIST_PAGE - 1);
+    if (error) return { data: null, error };
+    (data || []).forEach((r) => { const k = keyOf(r); if (!seen.has(k)) { seen.add(k); out.push(r); } });
+    if (!data || data.length < SS_LIST_PAGE) break;
+  }
+  return { data: out, error: null };
+}
+
 // NO SCHEDULING FROM THIS PAGE (Carolyn 2026-08-08). Designs briefly carried an
 // "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
 // and it is from Orders that a sold building goes to the Build or Delivery schedule.
@@ -233,7 +259,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     // Only `selections.style` and `selections.size` are read here — see SEL_LIST_COLS above
     // for why the blob itself never crosses the wire for a list.
     const [dRes, vRes] = await Promise.all([
-      sb.from("designs")
+      // Paged (ssReadAllRows): one request stopped at PostgREST's 1000-row cap.
+      ssReadAllRows((from, to) => sb.from("designs")
         // contact_id (130) is selected for ONE reason: the Pipeline's job is now to open the
         // CUSTOMER, and the customer record is addressed by contact id, not short_code.
         // Carolyn 2026-09-04 @1:07:19, watching it work: "this pipeline click is going to
@@ -249,11 +276,13 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
         // this line silently re-inflates every list payload back to the blob.
         .select(`short_code, created_at, updated_at, status, contact, contact_id, ${SEL_LIST_COLS}, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url, total_cents, expected_close_date`)
         .eq("client_id", clientId)
-        .order("created_at", { ascending: false }),
-      sb.from("design_versions")
+        .order("created_at", { ascending: false }).order("short_code", { ascending: false })
+        .range(from, to), (r) => r.short_code),
+      ssReadAllRows((from, to) => sb.from("design_versions")
         .select(`short_code, version, created_at, ${SEL_LIST_COLS}, image_url, inventory_unit_id`)
         .eq("client_id", clientId)
-        .order("version", { ascending: false })
+        .order("version", { ascending: false }).order("short_code", { ascending: true })
+        .range(from, to), (v) => v.short_code + ":" + v.version)
         .then((r) => r, () => ({ data: [] })),
     ]);
     if (dRes.error) { setError(dRes.error.message); setRows([]); return; }
@@ -1049,13 +1078,16 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     const [dRes, clRes] = await Promise.all([
       // Style and size only (SEL_LIST_COLS) — this list groups people, and the two values it
       // folds into a lead's searchable text are the only part of the plan it ever reads.
-      sb.from("designs")
+      // Both paged (ssReadAllRows) — a single request stopped at PostgREST's 1000-row cap.
+      ssReadAllRows((from, to) => sb.from("designs")
         .select(`short_code, created_at, updated_at, status, contact, ${SEL_LIST_COLS}, ghl_estimate_number, contact_id`)
         .eq("client_id", clientId)
-        .order("created_at", { ascending: false }),
-      sb.from("captured_leads")
+        .order("created_at", { ascending: false }).order("short_code", { ascending: false })
+        .range(from, to), (r) => r.short_code),
+      ssReadAllRows((from, to) => sb.from("captured_leads")
         .select("id, name, phone, phone_digits, email, source, created_at, updated_at, contact_id")
-        .eq("client_id", clientId).order("updated_at", { ascending: false })
+        .eq("client_id", clientId).order("updated_at", { ascending: false }).order("id", { ascending: true })
+        .range(from, to), (l) => l.id)
         .then((r) => r, () => ({ data: [] })),
     ]);
     if (dRes.error) { setError(dRes.error.message); setRows([]); return; }
