@@ -29548,7 +29548,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           ...r.overlaps.map((j) => `It overlaps lean-to ${j + 1} on the ${e.wall} wall. Shorten one or slide it along.`),
           r.porch ? `It runs in front of the ${r.porch === "recessed" ? "porch cut into" : "porch on"} this wall; the porch is drawn under it.` : null,
         ].filter(Boolean) : [];
-        const dcWords = dc && dc.by === "lean-to" && r && r.kind === "eave" && r.mode === "roof" && r.dir === dc.dir ? d3DormerCoveredWords(dc, false) : null;
+        // THIS lean-to's card says the dormer is under it only when THIS lean-to covers it: the same question asked
+        // of it alone (d3DormerCovered with just this entry). Every other lean-to up the roof on that side -- one
+        // elsewhere along the wall, or landing lower down than the dormer -- was told so too, and to pick
+        // "On the wall", which moves nothing off the dormer. The words themselves stay the whole roof's (dc).
+        const dcMine = dc && dc.by === "lean-to" && r && r.kind === "eave" && r.mode === "roof" && r.dir === dc.dir
+          ? d3DormerCovered({ ...spec, roof: { ...roof, leanTos: [e] } }, sel.size) : null;
+        const dcWords = dcMine && dcMine.by === "lean-to" && dcMine.dir === dc.dir ? d3DormerCoveredWords(dc, false) : null;
         const half = Math.max(2, Math.round(len / 2));
         out.push(
           <div key={"lt" + i} className="ssd-card ss-adv-lt" data-ss-adv-lt={i}>
