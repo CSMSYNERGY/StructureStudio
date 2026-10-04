@@ -66,6 +66,8 @@ function json(body: unknown, status = 200) {
 }
 
 const STAGE_RANK: Record<string, number> = { sent: 0, accepted: 1, invoiced: 2, delivered: 3 };
+/** Codes per PostgREST `in.(…)` — the list rides in the URL (see the designs read below). */
+const IN_CHUNK = 200;
 const enc = encodeURIComponent;
 
 async function safeText(r: Response): Promise<string> {
@@ -169,11 +171,24 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
 
   // 3+4. The tenant's designs for these codes, and the tenant's GHL creds. Neither needs the
   // other, and this function sits on the critical path of three tabs, so they go together.
+  //
+  // The designs read is CHUNKED: `in.(…)` rides in the URL, ~16 bytes a code once the commas are
+  // encoded, so the full 500 the Designs tab sends is an ~8 KB request line on its own — the size
+  // at which the gateway starts refusing it, and a refused read here is a 500 that leaves every
+  // status unrefreshed. 200 codes is ~3 KB (the chunking customer-designs and the inventory
+  // serial read already do for the same reason).
+  const codeChunks: string[][] = [];
+  for (let i = 0; i < shortCodes.length; i += IN_CHUNK) codeChunks.push(shortCodes.slice(i, i + IN_CHUNK));
   const [designsRes, settingsRes] = await Promise.all([
-    admin.from("designs")
-      .select("short_code, status, ghl_estimate_id, ghl_opportunity_id, delivered_at, inventory_unit_id, contact, ss_quote_number, accepted_at")
-      .eq("client_id", clientId)
-      .in("short_code", shortCodes),
+    Promise.all(codeChunks.map((c) =>
+      admin.from("designs")
+        .select("short_code, status, ghl_estimate_id, ghl_opportunity_id, delivered_at, inventory_unit_id, contact, ss_quote_number, accepted_at")
+        .eq("client_id", clientId)
+        .in("short_code", c)
+    )).then((rs) => {
+      const bad = rs.find((r) => r.error);
+      return bad ? { data: null, error: bad.error } : { data: rs.flatMap((r) => r.data ?? []), error: null };
+    }),
     admin.from("client_settings")
       .select("ghl_location_id, ghl_api_key, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id")
       .eq("client_id", clientId)
@@ -339,9 +354,14 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   try {
     const codes = (designs ?? []).map((d) => d.short_code);
     if (codes.length) {
-      const { data: orders } = await admin
-        .from("orders").select("id, short_code, total_source, total_cents").eq("client_id", clientId).in("short_code", codes);
-      if (orders && orders.length) {
+      // Chunked for the same URL-length reason as the designs read above.
+      const orders: { id: string; short_code: string; total_source: string | null; total_cents: number | null }[] = [];
+      for (let i = 0; i < codes.length; i += IN_CHUNK) {
+        const { data: part } = await admin
+          .from("orders").select("id, short_code, total_source, total_cents").eq("client_id", clientId).in("short_code", codes.slice(i, i + IN_CHUNK));
+        orders.push(...(part ?? []));
+      }
+      if (orders.length) {
         const estTotalById = new Map<string, number>();
         for (const e of estimates) {
           const id = String(e?._id ?? e?.id ?? "");
