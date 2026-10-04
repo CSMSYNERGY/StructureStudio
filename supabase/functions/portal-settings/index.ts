@@ -3419,12 +3419,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     d3: unknown; d3_photos: unknown; d3_video_frames: unknown; updated_at: string | null;
   };
   const findStyleFor3D = async (styleValue: string, styleId: string) => {
+    // building_styles.id is a uuid, so a malformed one would answer 22P02 and turn a bad id
+    // into a 500; it is simply not one of this tenant's styles.
+    if (styleId && !isUuid(styleId)) return { err: json({ error: "Style not found (or not yours)." }, 404) };
     // d3, the two media columns and updated_at ride along for the late-save guard in
     // save_style_d3 / save_style_media (styleSaveGuard.ts); every other caller ignores them.
     let q = admin.from("building_styles").select("id, key, model_status, model_url, d3, d3_photos, d3_video_frames, updated_at").eq("client_id", clientId);
     q = styleId ? q.eq("id", styleId) : q.eq("key", styleValue);
     const { data, error } = await q.maybeSingle();
-    if (error) return { err: json({ error: error.message }, 500) };
+    if (error) return { err: dbFail(req, clientId, "find that style", error) };
     if (!data) return { err: json({ error: "Style not found (or not yours)." }, 404) };
     return { style: data as Style3D };
   };
@@ -3529,7 +3532,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // has written it since, which closes the gap between that read and this update.
     if (decision === "write") write = found.style!.updated_at ? write.eq("updated_at", found.style!.updated_at) : write.is("updated_at", null);
     const { data: wrote, error, count } = await write.select("updated_at");
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "save that style's 3D setup", error);
     if (!count) {
       if (decision === "write") {
         const again = await findStyleFor3D(styleValue, styleId);
@@ -3652,7 +3655,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       magic = new Uint8Array(await headRes.arrayBuffer());
     } catch (e) {
-      return json({ error: `Could not read that scan: ${e instanceof Error ? e.message : String(e)}` }, 502);
+      return dbFail(req, clientId, "read that scan", { message: e instanceof Error ? e.message : String(e) }, 502);
     }
     // "glTF" — the GLB container magic. Anything else is a renamed .obj/.usdz/.zip.
     const isGlb = magic.length >= 4 && magic[0] === 0x67 && magic[1] === 0x6C && magic[2] === 0x54 && magic[3] === 0x46;
@@ -3664,7 +3667,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       model_url: rawPath, model_status: "uploaded", model_uploaded_at: new Date().toISOString(),
       model_meta: meta, model_locked_at: null, updated_at: new Date().toISOString(),
     }, { count: "exact" }).eq("client_id", clientId).eq("id", found.style!.id);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "record that scan", error);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true, modelPath: rawPath });
   }
@@ -3690,7 +3693,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (status === "none") { patch.model_url = null; patch.model_meta = null; patch.model_uploaded_at = null; }
     const { error, count } = await admin.from("building_styles")
       .update(patch, { count: "exact" }).eq("client_id", clientId).eq("id", found.style!.id);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "change that style's 3D status", error);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true, status });
   }
@@ -3706,7 +3709,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const path = found.style!.model_url;
     if (!path) return json({ ok: true, url: null, status: found.style!.model_status });
     const signed = await admin.storage.from("models").createSignedUrl(path, 600);
-    if (signed.error || !signed.data) return json({ error: `Could not open that scan: ${signed.error?.message ?? "unknown"}` }, 500);
+    if (signed.error || !signed.data) return dbFail(req, clientId, "open that scan", signed.error ?? { message: "no signed URL returned" });
     return json({ ok: true, url: signed.data.signedUrl, status: found.style!.model_status });
   }
 
@@ -3730,7 +3733,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // anon get_config).
     const path = `${clientId}/style-photo-${crypto.randomUUID()}.${ext}`;
     const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
-    if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+    if (up.error) return dbFail(req, clientId, "upload that photo", up.error);
     const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
     return json({ ok: true, url: pub.publicUrl });
   }
