@@ -5395,6 +5395,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     // The style must be this tenant's. clientId comes from the JWT, never the body, so this
     // is what stops a crafted styleId writing heights onto another builder's catalog.
+    // building_styles.id is a uuid: a malformed one would answer 22P02 and file a 500 fault,
+    // when it is simply not one of this tenant's styles (findStyleFor3D's guard).
+    if (!isUuid(styleId)) return json({ error: "That building style is not in your catalog." }, 400);
     const stRes = await admin.from("building_styles").select("id").eq("client_id", clientId).eq("id", styleId).maybeSingle();
     if (stRes.error) return dbFail(req, clientId, "read that style", stRes.error);
     if (!stRes.data) return json({ error: "That building style is not in your catalog." }, 400);
@@ -5523,6 +5526,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     // The style must be this tenant's. clientId comes from the JWT, never the body — this is
     // what stops a crafted styleId writing cladding onto another builder's catalog.
+    // A malformed uuid is not one of their styles either (save_wall_heights' guard).
+    if (!isUuid(styleId)) return json({ error: "That building style is not in your catalog." }, 400);
     const stRes = await admin.from("building_styles").select("id").eq("client_id", clientId).eq("id", styleId).maybeSingle();
     if (stRes.error) return dbFail(req, clientId, "read that style", stRes.error);
     if (!stRes.data) return json({ error: "That building style is not in your catalog." }, 400);
