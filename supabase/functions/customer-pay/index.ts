@@ -349,12 +349,19 @@ Deno.serve(withErrorLog("customer-pay", async (req: Request) => {
     }, 400);
   }
 
-  // Decline throttle. Counted on the ORDER, over an hour.
+  // Decline throttle. Counted on the ORDER, over an hour. Card declines only: invoicePayment.ts
+  // also closes the gateway's rate limiter ("rate limited: …") and our own configuration errors
+  // ("gateway configuration: …") as closed_declined, since neither charged anything — but neither
+  // says anything about a card, and counting them told a customer who retried through a busy
+  // minute "That's several declined attempts in a row" and shut them out for an hour.
   const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const { count: declines } = await admin.from("payment_attempts")
     .select("id", { count: "exact", head: true })
     .eq("client_id", ctx.clientId).eq("order_id", ctx.orderId)
-    .eq("state", "closed_declined").gt("created_at", since);
+    .eq("state", "closed_declined")
+    .not("detail", "like", "rate limited:%")
+    .not("detail", "like", "gateway configuration:%")
+    .gt("created_at", since);
   if ((declines ?? 0) >= MAX_DECLINES_PER_HOUR) {
     return json(
       { error: "That's several declined attempts in a row. Give it an hour, or call your builder." },
