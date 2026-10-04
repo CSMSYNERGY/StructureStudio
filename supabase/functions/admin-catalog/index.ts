@@ -1322,7 +1322,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // is confusing, while a comp this writer refuses is self-explanatory.
         // on_demand_pricing joined 2026-08-28 with the Real-Time Pricing build — pay-only
         // from the start, so no comp can hand out a feature whose whole point is the upcharge.
-        const PAID_ONLY_FEATURES = new Set(["schedule_builds", "quickbooks_sync", "on_demand_pricing"]);
+        // crm joined portal-billing's and featureCheck's sets 2026-08-29 but never this one, so a
+        // CRM comp saved here read as granted while the reader refused to honour it.
+        const PAID_ONLY_FEATURES = new Set(["schedule_builds", "quickbooks_sync", "on_demand_pricing", "crm"]);
 
         const wanted = Array.isArray(p.grants) ? p.grants : [];
         if (wanted.length > 50) throw new Error("Too many grants in one request.");
