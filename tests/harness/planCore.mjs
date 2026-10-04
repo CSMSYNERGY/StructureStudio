@@ -3,13 +3,21 @@
 //
 //   B  a simple ramp added in 2D to a 6 ft catalog double door is as wide as the door (it was
 //      drawn 3 ft wide: the generic "fixtureDoor" config's width, never the door's own), the
-//      same width the 3D viewer gives it
+//      same width the 3D viewer gives it, and follows a door swap; clicking the door's bar selects
+//      the door drawn on top of the ramp, not the ramp under it
+//   G  a ramped walk door cannot be swapped for a loft door (the ramp would stand under it)
 //   C  a 14 ft workbench dragged from a 16 ft wall onto a 10 ft one is refused and stays on its
 //      wall (it used to land there hanging 4 ft past the corner, out through the building)
 //   D  stretching the far end of a workbench that was dragged to a spot off the foot grid leaves
 //      its near end where it is (it used to jump to the nearest whole foot, into the door beside it)
 //   E  stretching a loft that was dragged off the foot grid does not slide its fixed edge into the
 //      loft beside it, and a loft stretched toward another stops flush against it, not inside it
+//   F  on 10 ft walls a 4 ft window drags in under a top-spot vent (the plan measured vents under an
+//      8 ft plate and refused it); J  that layout reopened stays exactly as saved
+//   H  the electrical package is laid out again for a new size instead of carrying the old size's
+//      outlets across (which billed the leftovers as extras)
+//   K  a bench stretches over an outlet, as it can be dragged over one
+//   I  a bicycle turned against a wall stays inside the building
 //   Each: zero page errors.
 //
 //   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
