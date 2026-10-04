@@ -181,7 +181,9 @@ export async function buildCrmFeed(
   //   9 crm_activities 10 email_inbound   11 crm_files    12 sms_messages
   //  13 crm_field_changes                14 phone_calls (+ its voicemail)
   const [designs, versions, emails, accepts, changeOrders, invoices, leads, notes, acts, inbound, custFiles, texts, fieldChanges, calls] = await Promise.all([
-    codes.length ? q(admin.from("designs").select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, accepted_at, contact").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
+    // image_url is the floor-plan PDF the `floor_plan` event below carries. It was missing from
+    // this list, so `d.image_url` was always undefined and no floor plan ever reached History.
+    codes.length ? q(admin.from("designs").select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, accepted_at, contact, image_url").in("short_code", codes).eq("client_id", clientId)) : Promise.resolve([]),
     codes.length ? q(admin.from("design_versions").select("short_code, version, created_at, selections").in("short_code", codes).eq("client_id", clientId).order("version", { ascending: false }).limit(120)) : Promise.resolve([]),
     // Email is the conversation channel, so this read has to cover BOTH scopes: document
     // mail keyed on a design, and conversation mail keyed on the person — which often is
