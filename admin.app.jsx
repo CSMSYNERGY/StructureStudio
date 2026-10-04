@@ -493,7 +493,9 @@ function AdminApp() {
         portalUrl: location.origin + "/portal",
         ...(reassign ? { reassign: true } : {}),
       });
-      const roleLabel = (r && r.role === "user") ? "team member (Designs & Leads only)" : "admin";
+      // Names the role link_owner actually wrote: "owner" (every area, Billing included), never
+      // "admin" — the portal's Admin tab says the same since its 2026-09-06 audit fix.
+      const roleLabel = (r && r.role === "user") ? "sales rep" : "owner";
       const movedFrom = (reassign && reassignFrom) ? reassignFrom.fromClient : null;
       // keep the panel open so the operator can copy the setup link
       setLinkResult({ email, client: sel, roleLabel, created: !!(r && r.created), emailSent: !!(r && r.emailSent), setupLink: (r && r.setupLink) || null, movedFrom });
@@ -935,13 +937,17 @@ function AdminApp() {
                 </div>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                   <input value={ownerEmail} onChange={(e) => { setOwnerEmail(e.target.value); setReassignFrom(null); }} placeholder="owner@theirbusiness.com" style={{ ...S.input, minWidth: 240 }} />
-                  <select value={linkRole} onChange={(e) => setLinkRole(e.target.value)} style={{ ...S.input, width: 230 }}>
-                    <option value="owner">Admin (full access)</option>
-                    <option value="user">Team member (Designs &amp; Leads only)</option>
+                  {/* The labels name what each option CREATES (portal/07-admin.jsx carries the same
+                      wording and its reasoning). "Admin (full access)" minted an OWNER — Billing
+                      included, and the right to pass it on — and "Designs & Leads only" undersold
+                      role 'user', which resolves to the Sales Rep preset: orders and own commission too. */}
+                  <select value={linkRole} onChange={(e) => setLinkRole(e.target.value)} style={{ ...S.input, width: 300 }}>
+                    <option value="owner">Owner — full access, including Billing</option>
+                    <option value="user">Sales Rep — designs, contacts, orders, own commission</option>
                   </select>
                   <button onClick={() => linkOwner(false)} disabled={busy || !ownerEmail.trim()} style={S.btn(busy || !ownerEmail.trim() ? "#9CA3AF" : ACCENT, "#FFF")}>Link to {sel}</button>
                 </div>
-                <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>Admins see Pricing &amp; Settings; team members only see Designs &amp; Leads.</div>
+                <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>An owner sees and changes everything, Billing included. A sales rep gets the Sales Rep preset, which their owner can adjust on the Team screen.</div>
                 {reassignFrom && (
                   <div style={{ marginTop: 12, padding: 12, background: "#DBEAFF", border: "1px solid #75E6DA", borderRadius: 8 }}>
                     <div style={{ fontSize: 13, color: "#1B7895", marginBottom: 8, lineHeight: 1.5 }}>
