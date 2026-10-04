@@ -53,8 +53,10 @@ Deno.test("get_profile returns the cleaned signature for the app ('' when none)"
 
 Deno.test("crm_send_email signs with the signed-in person's signature, text and HTML, and keeps the signed words", () => {
   const send = slice(SETTINGS, `if (action === "crm_send_email") {`, `if (action === "crm_save_note") {`, "crm_send_email");
-  // Read off the JWT's user, one row, in the same read as the reply-to address.
-  assert(send.includes(`.select("prefs").eq("user_id", userId ?? "").limit(1).maybeSingle();`), "the prefs read is keyed on the session's user");
+  // Read off the JWT's user on THIS tenant, one row. (The reply-to address used to come from the
+  // same read; since 2026-10-05 it is _shared/repReplyTo.ts's, which keys on the tenant too.)
+  assert(send.includes(`.select("prefs").eq("user_id", userId ?? "").eq("client_id", clientId).limit(1).maybeSingle();`),
+    "the prefs read is keyed on the session's user and this tenant");
   assert(send.includes("signature = operator ? null : cleanSignature(prefs?.emailSignature);"),
     "the stored signature is cleaned again on the way out, and none in view-as");
   assert(!/payload\.(signature|emailSignature)/.test(send), "nothing in the request body can choose the signature");

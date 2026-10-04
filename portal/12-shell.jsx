@@ -3147,6 +3147,12 @@ function Dashboard({ session }) {
                    than a guess. */
                 emailSignature={viewing ? null : ((tenant.prefs && typeof tenant.prefs.emailSignature === "string") ? tenant.prefs.emailSignature : "")}
                 onEditProfile={viewing ? null : () => navigate("settings", "myprofile")}
+                /* QUICK SENDS (the signed-in person's saved messages, beside the Email and SMS
+                   boxes). Not in view-as: the person signed in is CSM Synergy staff, so the list
+                   would be the operator's OWN, read and seeded under the builder's account.
+                   portal-settings refuses quick_sends_list to an operator as well; this keeps the
+                   button from being offered at all. Same rule as the signature above. */
+                quickSendsOn={!viewing}
               />
             ) : null}
             {/* The merged era's two sub-views correct themselves; see DesignsLegacySub. */}

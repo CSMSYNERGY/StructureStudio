@@ -7,7 +7,8 @@ import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 // redeploying every consumer, and this function is one of them.
 import { canEdit, effectiveAccess } from "../_shared/access.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
-import { changeOrderEmail, estimateEmail } from "../_shared/emailTemplates.ts";
+import { repReplyTo } from "../_shared/repReplyTo.ts";
+import { changeOrderEmail, estimateEmail, tenantStylePhotoUrl } from "../_shared/emailTemplates.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
@@ -389,6 +390,33 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // quote goes out at full price rather than honouring an unverified discount.
     console.warn("submit-estimate: staff check failed:", (e as Error).message);
   }
+
+  // WHO A CUSTOMER'S REPLY TO THIS EMAIL IS COPIED TO (2026-10-05; the rule is
+  // _shared/repReplyTo.ts). callerUserId is the verified session's person, so a rep submitting
+  // from the portal's designer gets the customer's answer in their own inbox as well as on the
+  // record. repReplyTo names them only as a member of THIS tenant who is not a CSM Synergy
+  // operator on a customer's account (an operator in view-as has no membership here); a member
+  // with no usable address gets no copy rather than a colleague's. For anyone else, and for a
+  // shopper's own submit (no session at all), the copy goes to the rep the customer is
+  // assigned to, or to nobody. Membership, not mayPrice: who wrote the quote decides whose inbox,
+  // not what they were allowed to price. Asked only when an email is actually built, and a failed
+  // lookup costs the copy, never the quote.
+  //
+  // `recipient` is where this email goes: the email in the REQUEST, which on a shopper's submit is
+  // whatever they typed. The assigned rep is named only when it is the contact's own address,
+  // because the design is linked to its contact by phone first: a stranger typing a known
+  // customer's number beside their own email must not get back that customer's rep's address.
+  const quoteReplyTo = (recipient: string) => repReplyTo(supabase, clientId, {
+    senderUserId: callerUserId,
+    shortCode: String(designId),
+    recipient,
+    onError: (why) => {
+      logEdgeError({
+        fn: "submit-estimate", req, clientId, code: "reply_to_lookup_failed", severity: "warn",
+        message: `reply copy lookup failed: ${why}`, context: { designId: String(designId) },
+      }).catch(() => {});
+    },
+  });
 
   // 2d. PER-TENANT SUBMIT CAP — see RATE_* at module scope for why this exists and why it
   // refuses rather than dropping quietly. Placed HERE deliberately: after the beta pre-flight
@@ -827,6 +855,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       console.warn("style-image self-heal error:", (e as Error).message);
     }
   }
+  // The same photo for the quote email (2026-10-04): above the details, the way the builder's
+  // own CRM quote email has it. Same switch and same own-folder rule as the line photo, plus
+  // https only (_shared/emailTemplates.ts). Read after the self-heal, so a migrated data: image
+  // shows from its first send. null: no photo, which is every email before this change.
+  const emailStylePhoto = styleShowImage ? tenantStylePhotoUrl(styleImageUrl, supabaseUrl, clientId) : null;
   // Building is line 1. Paint + roof used to ride in this name/description; they are now their
   // own line items (2 = Paint Colors, 3 = Roof) pushed immediately below, so any charge on them
   // shows as a real line rather than buried text.
@@ -3193,6 +3226,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         })
         : estimateEmail({
           templateCopy: settings.email_template_copy,
+          // The {customer} token's name, and the building's photo (its own "Image on estimate"
+          // switch, and only this builder's own upload, as for the line photos above).
+          customerName: String(contact?.name ?? "").trim(),
+          pictureUrl: emailStylePhoto,
           businessName,
           logoUrl: businessLogoUrl || null,
           phone: businessPhone || null,
@@ -3209,6 +3246,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           quoteTerms: quoteTerms || null,
           docWord: "quote",
         });
+      const replyTo = await quoteReplyTo(intendedTo);
       const outcome = await sendTenantEmail(supabase, clientId, {
         kind: changeOrder ? "change_order" : "estimate",
         shortCode: designId,
@@ -3216,6 +3254,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         subject: content.subject,
         html: content.html,
         text: content.text,
+        ...(replyTo ? { replyTo } : {}),
       });
       emailed = outcome.sent;
       if (!outcome.sent) emailReason = outcome.reason || "failed";
@@ -3647,7 +3686,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // (recording the pre-redirect recipient as intended_email), the dark guards,
           // and the email_sends ledger — and it never throws.
           const content = estimateEmail({
-          templateCopy: settings.email_template_copy,
+            templateCopy: settings.email_template_copy,
+            customerName: String(contact?.name ?? "").trim(),
+            pictureUrl: emailStylePhoto,
             businessName,
             logoUrl: businessLogoUrl || null,
             phone: businessPhone || null,
@@ -3663,6 +3704,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             formalPdfUrl,
             quoteTerms: quoteTerms || null,
           });
+          const replyTo = await quoteReplyTo(intendedTo);
           const outcome = await sendTenantEmail(supabase, clientId, {
             kind: "estimate",
             shortCode: designId,
@@ -3670,6 +3712,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             subject: content.subject,
             html: content.html,
             text: content.text,
+            ...(replyTo ? { replyTo } : {}),
           });
           if (outcome.sent) {
             ownDomainHandled = true;

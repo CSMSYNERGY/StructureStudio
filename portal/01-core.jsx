@@ -1126,6 +1126,136 @@ async function ssPhoneStartCall(raw, ids, badNumber) {
   return { kind: "error", text: ssPhoneRefusal(out.reply) };
 }
 
+// ── QUICK SENDS: saved messages, in the record's Email and SMS boxes ─────────────────────
+// Carolyn 2026-09-30: "I think I want to call it quick sends, okay, for them to do quick sends on
+// text and email, both of them, okay, so that they can easily just click and choose the list of
+// things. And obviously putting in first name, last name". The list is each person's OWN and it
+// is the SAME list My Synergy Phone keeps (migration 258, phone_quick_sends), read through
+// portal-settings' quick_sends_list. Insert fills the box and nothing else; the person reads it
+// and presses Send, which goes through crm_send_email / crm_send_sms with all their checks.
+// "Inserting fills the box. Sending is yours."
+//
+// ssFillQuickSend and ssInsertIntoDraft are LINE-FOR-LINE PORTS of fillQuickSend and
+// insertIntoDraft in the phone repo's packages/phone-core/src/quickSends.ts, so a quick send
+// reads the same here as it does in the app. Change both copies together:
+// tests/phone/quickSends_test.ts holds this source to phone-core's own cases
+// (tests/phone/quickSendCases.mjs), and tests/harness/crmQuickSends.mjs holds the COMPILED
+// artifact to the same cases and, when the phone repo is checked out beside this one, to
+// phone-core itself. The helpers below them are ports of the app's mobile/src/logic/quickSends.ts.
+const SS_QUICK_SEND_TOKEN_RE = /\{(first_name|last_name|my_name)\}/g;
+// Digits, +, spaces, dashes, parens (and dots): a number shown where a name would be.
+const SS_QUICK_SEND_PHONE_LIKE = /^[\d+\s\-().]*$/;
+
+function ssQuickSendWords(s) {
+  return String(s == null ? "" : s).trim().split(/\s+/).filter(Boolean);
+}
+
+// A quick send's text with the fill-ins replaced. {first_name} is the first word of contactName
+// and {last_name} the rest; {my_name} is the first word of myName. A fill-in with no value is
+// dropped with one space or ", " before it ("Hey {first_name}, happy" becomes "Hey, happy"), and
+// the gap it leaves is tidied. Other {words} are left as they are, and text without fill-ins
+// comes back unchanged. A phone number standing in for the customer's name counts as no name.
+function ssFillQuickSend(body, fill) {
+  const text = String(body == null ? "" : body);
+  if (!text.includes("{")) return text;
+  const f = fill || {};
+  const contact = SS_QUICK_SEND_PHONE_LIKE.test(String(f.contactName == null ? "" : f.contactName).trim()) ? [] : ssQuickSendWords(f.contactName);
+  const values = {
+    first_name: contact[0] || "",
+    last_name: contact.slice(1).join(" "),
+    my_name: ssQuickSendWords(f.myName)[0] || "",
+  };
+
+  let out = "";
+  let from = 0;
+  for (const m of text.matchAll(SS_QUICK_SEND_TOKEN_RE)) {
+    const at = m.index || 0;
+    out += text.slice(from, at);
+    from = at + m[0].length;
+    const value = values[m[1]];
+    if (value) {
+      out += value;
+      continue;
+    }
+    // Drop one ", " (or a lone comma or space) that led into the missing value.
+    if (out.endsWith(", ")) out = out.slice(0, -2);
+    else if (out.endsWith(",") || out.endsWith(" ")) out = out.slice(0, -1);
+    const rest = text.slice(from);
+    if (out === "" || out.endsWith("\n")) {
+      // At the start of a line the fill-in was a greeting: its own comma or dash goes with it.
+      from += /^[ \t]*(?:[,.!?:;]|[—–-])?[ \t]*/.exec(rest)[0].length;
+      continue;
+    }
+    // Close the gap to one space, or none before punctuation or a line break.
+    const trailing = /[ \t]*$/.exec(out)[0].length;
+    const leading = /^[ \t]*/.exec(rest)[0].length;
+    if (!trailing && !leading) continue;
+    out = out.slice(0, out.length - trailing);
+    from += leading;
+    if (from < text.length && !/^[,.!?\n\r]/.test(text.slice(from))) out += " ";
+  }
+  return out + text.slice(from);
+}
+
+// The box after an Insert. An empty (or blank) box gets the text; otherwise the text goes after
+// what is there, with one space between. Nothing is ever sent from here.
+function ssInsertIntoDraft(draft, text) {
+  const current = String(draft == null ? "" : draft);
+  const add = String(text == null ? "" : text);
+  if (!add.trim()) return current;
+  if (!current.trim()) return add;
+  return `${current.trimEnd()} ${add}`;
+}
+
+// The most each box holds: a text's 1,600 characters (the SMS box's maxLength and the send's
+// limit), an email body's 20,000 (crm_send_email keeps no more).
+const SS_QUICK_SEND_MAX = { sms: 1600, email: 20000 };
+
+// What the box says when Insert refuses a quick send that would run past its limit. Refused, not
+// cut: a cut-off message is easy to send without noticing.
+function ssQuickSendTooLong(channel) {
+  const holds = channel === "email" ? "An email holds up to 20,000" : "A text holds up to 1,600";
+  return `That quick send doesn't fit. ${holds} characters, so shorten what's in the box first.`;
+}
+
+// Insert: the quick send filled in for this customer and added to the box. → the box's new text,
+// or null when it won't fit in this channel's box (the box then stays as it was). Never touches
+// an email's subject; the caller puts this in the BODY only.
+function ssInsertQuickSend(draft, quickSend, fill, channel) {
+  const next = ssInsertIntoDraft(draft, ssFillQuickSend(quickSend && quickSend.body, fill));
+  const max = SS_QUICK_SEND_MAX[channel] || SS_QUICK_SEND_MAX.sms;
+  return next.length > max ? null : next;
+}
+
+// The picker's chips: "All · N" first, then each category in the order it first appears in the
+// list. `category` null is All.
+function ssQuickSendChips(list) {
+  const rows = Array.isArray(list) ? list : [];
+  const chips = [{ category: null, label: `All · ${rows.length}` }];
+  const seen = new Set();
+  for (const q of rows) {
+    const cat = q && typeof q.category === "string" ? q.category.trim() : "";
+    if (!cat || seen.has(cat)) continue;
+    seen.add(cat);
+    chips.push({ category: cat, label: cat });
+  }
+  return chips;
+}
+
+// The rows under a chip, in the list's own order. A chip whose last quick send is gone falls
+// back to All.
+function ssQuickSendsIn(list, category) {
+  const rows = Array.isArray(list) ? list : [];
+  const has = (q, c) => !!q && typeof q.category === "string" && q.category.trim() === c;
+  if (category === null || category === undefined || !rows.some((q) => has(q, category))) return rows.slice();
+  return rows.filter((q) => has(q, category));
+}
+
+// The two phone-core ports, published for tests/harness/crmQuickSends.mjs, which holds the
+// COMPILED artifact to phone-core's own cases (everything else in it is hidden inside the
+// artifact's wrapper). Pure functions of their arguments: calling them changes nothing on the page.
+window.__ssQuickSends = Object.freeze({ fill: ssFillQuickSend, insertIntoDraft: ssInsertIntoDraft });
+
 // ── The Settings sub-pages ───────────────────────────────────────────────────────────────
 // ONE list, read by TWO renderers: the Settings sidebar in 12-shell.jsx and SettingsShell's
 // own body dispatch in 08-integrations.jsx. It lived inside SettingsShell until the sidebar

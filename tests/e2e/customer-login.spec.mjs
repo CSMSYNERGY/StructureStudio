@@ -1314,7 +1314,9 @@ test("portal email wording: {total} is marked not recommended on the Quote wordi
   await expect(hint).toHaveCount(0);                                               // Estimate is the first tab
   await kind("Quote").click();
   await expect(hint).toHaveText("{total} is not recommended for quotes — the quote email leaves the price out, so the customer sees it when they open the quote.");
-  await expect(page.getByPlaceholder("Opening line — e.g. Thanks for designing with {business}! Your quote {number} is ready.")).toBeVisible();
+  // The box has its own "Opening line" label now (2026-10-04), so the placeholder is just the example.
+  await expect(page.getByLabel("Opening line", { exact: true }))
+    .toHaveAttribute("placeholder", "e.g. Thanks for designing with {business}! Your quote {number} is ready.");
   await hint.scrollIntoViewIfNeeded();
   await shot(page, "21-wording-total-hint");
   await kind("Invoice").click();

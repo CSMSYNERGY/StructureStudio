@@ -595,6 +595,29 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
 //   `tracking: true` marks the optional open-tracking record (B4); `openedAt` is migration 262's.
 // `failed` renders the same remediation panel as `pending` (plus lastError): the fix for
 // both is "add the records, check again", so a separate dead-end state helps nobody.
+
+// The wording fields a save's answer left out of what was sent, in the editor's own words. A
+// field the server knows comes back whenever it said something; one it doesn't know (an older
+// server build) is dropped with an ok, and this is the only place that shows. The photo switch
+// is stored only when it is OFF, so only an unticked box can go missing.
+const SS_WORDING_FIELDS = [["subject", "subject"], ["intro", "opening line"], ["closing", "closing message"], ["button", "button text"]];
+function ssWordingDropped(sent, kept) {
+  const out = [];
+  for (const kind of ["estimate", "quote", "invoice"]) {
+    const s = (sent && sent[kind]) || {};
+    const k = (kept && kept[kind]) || {};
+    for (const [f, words] of SS_WORDING_FIELDS) {
+      if (typeof s[f] === "string" && s[f].trim() && !k[f] && out.indexOf(words) === -1) out.push(words);
+    }
+    if (kind !== "invoice" && s.picture === false && k.picture !== false && out.indexOf("photo setting") === -1) out.push("photo setting");
+  }
+  return out;
+}
+// "a", "a and b", "a, b and c".
+function ssJoinWords(list) {
+  return list.length < 2 ? (list[0] || "") : list.slice(0, -1).join(", ") + " and " + list[list.length - 1];
+}
+
 function EmailSendingView({ clientId, viewingLabel = null }) {
   const [status, setStatus] = useState(null);   // email_status response; null = loading
   const [error, setError] = useState(null);
@@ -607,8 +630,13 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   // Verification feedback + per-row copy state (pending state)
   // Tenant wording for the document emails (migration 138). Seeded from email_status.
   const [tplKind, setTplKind] = useState("estimate");
-  const [tpl, setTpl] = useState({});           // { estimate:{subject,intro}, ... }
+  const [tpl, setTpl] = useState({});           // { estimate:{subject,intro,closing,button,picture}, ... }
   const [tplMsg, setTplMsg] = useState(null);
+  const [tplBusy, setTplBusy] = useState(false);
+  // The wording's Preview: { kind, subject, html, photo } or { kind, err }. Kept per kind so a
+  // preview never sits under the wrong tab.
+  const [pv, setPv] = useState(null);
+  const [pvBusy, setPvBusy] = useState(false);
   // Seed the wording boxes ONCE from the server. A ref rather than a "is it empty?" test,
   // and an effect rather than a render-time set: the empty check would have been true
   // forever for a tenant with no saved copy, so setting state on it during render was an
@@ -736,6 +764,44 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     if (e || (d && d.error)) { setTestResult({ err: (e && e.message) || (d && d.error) || "The test send failed." }); return; }
     setTestResult({ ok: "Sent — check the inbox. Delivery status shows in the list below (press ↻ Refresh in a minute)." });
     load();
+  };
+
+  // ── Your wording: save and preview ─────────────────────────────────────────────────
+  // Save sends every tab at once (the server stores the whole map) and then reads the answer:
+  // a server build that predates a field drops it from the map and still says ok, so "Saved."
+  // is only shown when everything that was sent came back (ssWordingDropped). What came back is
+  // put in the boxes, so the builder sees what is actually stored (spaces tidied, and so on);
+  // after a drop, what they typed stays on screen next to the message instead.
+  const saveWording = async () => {
+    const sent = tpl;
+    setTplBusy(true); setTplMsg(null);
+    const { data: r, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "email_save_template", copy: sent } });
+    setTplBusy(false);
+    const e2 = (r && r.error) || (err && err.message);
+    if (e2) { setTplMsg({ err: e2 }); return; }
+    const dropped = ssWordingDropped(sent, r && r.copy);
+    if (dropped.length) {
+      setTplMsg({ err: `Saved, but this server build didn't keep your ${ssJoinWords(dropped)}, so your emails use ours there for now. Tell CSM Synergy.` });
+      return;
+    }
+    setTpl((r && r.copy) || {});
+    setTplMsg({ ok: "Saved." });
+  };
+  // Preview draws the wording in the boxes for the open tab, saved or not, so a builder can try
+  // words before committing them. The server renders the real email (their own header, footer
+  // and photo, a sample customer); it sends nothing.
+  const previewWording = async () => {
+    const kind = tplKind;
+    setPvBusy(true); setPv(null);
+    const { data: r, error: err } = await sb.functions.invoke("portal-settings", {
+      body: { action: "email_preview_template", kind, copy: tpl[kind] || {} },
+    });
+    setPvBusy(false);
+    let e2 = (r && r.error) || (err && err.message);
+    if (!e2 && !(r && typeof r.html === "string")) e2 = "The preview couldn't be made. Try again.";
+    // A server from before Preview existed answers "Unrecognised action".
+    if (e2 && /unrecognised action/i.test(e2)) e2 = "Preview isn't available on this server yet. Tell CSM Synergy.";
+    setPv(e2 ? { kind, err: e2 } : { kind, subject: r.subject || "", html: r.html, photo: r.photo || null });
   };
 
   const fmtWhen = (iso) => {
@@ -1417,18 +1483,23 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
             )}
             {/* ── YOUR WORDING ────────────────────────────────────────────────────────
                 Carolyn, 2026-08-21: "I don't know what it's going to take to create like a
-                template that they can edit."
+                template that they can edit, you know, for images and all of that stuff too."
+                Her CRM quote email is a picture, the details, then a "View Shed Quote" button.
 
-                What is editable is the SUBJECT and the OPENING LINE — the two things that
-                are genuinely the builder's voice. The branded header, the quote/total rows,
-                the buttons and the PDF links stay ours, because those are the parts that DO
-                something and a wording edit has no business near them. Logo and colours are
-                already theirs under Branding, which is the "images" half of the ask.
-                Plain text only: markup is refused with a message, not silently stripped. */}
-            <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
+                What is editable is the builder's voice: the SUBJECT, the OPENING LINE, a
+                CLOSING MESSAGE under the links, the BUTTON'S WORDS, and whether the BUILDING
+                PHOTO shows (quotes and estimates; it is the style's own photo, behind its
+                "Image on estimate" switch under Structures). The branded header, the quote/total
+                rows, where the button goes and the PDF links stay ours, because those are the
+                parts that DO something and a wording edit has no business near them. Logo and
+                colours are already theirs under Branding.
+                Plain text only: markup is refused with a message, not silently stripped. The
+                limits match the server's (_shared/emailTemplates.ts TEMPLATE_LIMITS), so what is
+                saved is what was typed. */}
+            <div data-ss-email-wording style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
               <div style={S.lbl}>Your wording</div>
               <div style={{ fontSize: 12, color: "#64748B", margin: "2px 0 8px" }}>
-                Leave blank to use ours. Use {"{business}"}, {"{number}"}, {"{total}"}, {"{building}"} and they fill in automatically.
+                Leave blank to use ours. Use {"{business}"}, {"{number}"}, {"{total}"}, {"{building}"}, {"{customer}"} (the customer's name) and they fill in automatically.
                 {/* Plan 3.1 (Carolyn 2026-09-14, the quote email she highlighted): the quote
                     email no longer prints the total, so the customer meets the price on the
                     quote itself. {total} still fills in — saved wording must never print a
@@ -1443,31 +1514,100 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                     style={{ background: tplKind === k ? ACCENT : "#FFF", color: tplKind === k ? "#FFF" : "#334155", border: "1px solid " + (tplKind === k ? ACCENT : "#E2E8F0"), borderRadius: 8, padding: "5px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                 ))}
               </div>
-              <input
-                value={(tpl[tplKind] && tpl[tplKind].subject) || ""}
-                onChange={(e) => setTpl((p) => ({ ...p, [tplKind]: { ...(p[tplKind] || {}), subject: e.target.value } }))}
-                placeholder={"Subject — e.g. Your " + tplKind + " {number} from {business}"}
-                style={{ ...S.input, marginBottom: 6 }} />
-              <textarea
-                value={(tpl[tplKind] && tpl[tplKind].intro) || ""}
-                onChange={(e) => setTpl((p) => ({ ...p, [tplKind]: { ...(p[tplKind] || {}), intro: e.target.value } }))}
-                rows={3}
-                placeholder={tplKind === "quote"
-                  ? "Opening line — e.g. Thanks for designing with {business}! Your quote {number} is ready."
-                  : "Opening line — e.g. Thanks for designing with {business}! Your {total} quote is ready."}
-                style={{ ...S.input, resize: "vertical" }} />
-              <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
-                <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")}
-                  onClick={async () => {
-                    setBusy(true); setTplMsg(null);
-                    const { data: r, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "email_save_template", copy: tpl } });
-                    setBusy(false);
-                    const e2 = (r && r.error) || (err && err.message);
-                    setTplMsg(e2 ? { err: e2 } : { ok: "Saved." });
-                  }}>Save wording</button>
+              {(() => {
+                const cur = tpl[tplKind] || {};
+                const setField = (f, v) => setTpl((p) => ({ ...p, [tplKind]: { ...(p[tplKind] || {}), [f]: v } }));
+                const fieldLbl = { fontSize: 11.5, fontWeight: 700, color: "#475569", margin: "6px 0 3px" };
+                const docWord = tplKind === "invoice" ? "invoice" : tplKind;
+                return (
+                  <>
+                    <div style={fieldLbl}>Subject</div>
+                    <input data-ss-wording="subject" aria-label="Subject" maxLength={300}
+                      value={cur.subject || ""}
+                      onChange={(e) => setField("subject", e.target.value)}
+                      placeholder={"e.g. Your " + tplKind + " {number} from {business}"}
+                      style={S.input} />
+                    <div style={fieldLbl}>Opening line</div>
+                    <textarea data-ss-wording="intro" aria-label="Opening line" maxLength={300}
+                      value={cur.intro || ""}
+                      onChange={(e) => setField("intro", e.target.value)}
+                      rows={3}
+                      placeholder={tplKind === "quote"
+                        ? "e.g. Thanks for designing with {business}! Your quote {number} is ready."
+                        : "e.g. Thanks for designing with {business}! Your {total} quote is ready."}
+                      style={{ ...S.input, resize: "vertical" }} />
+                    <div style={fieldLbl}>Closing message <span style={{ fontWeight: 500, color: "#94A3B8" }}>(under the button)</span></div>
+                    <textarea data-ss-wording="closing" aria-label="Closing message" maxLength={1000}
+                      value={cur.closing || ""}
+                      onChange={(e) => setField("closing", e.target.value)}
+                      rows={3}
+                      placeholder={"e.g. Questions about your " + docWord + "? Just reply to this email or give us a call."}
+                      style={{ ...S.input, resize: "vertical" }} />
+                    <div style={fieldLbl}>Button text</div>
+                    <input data-ss-wording="button" aria-label="Button text" maxLength={40}
+                      value={cur.button || ""}
+                      onChange={(e) => setField("button", e.target.value)}
+                      placeholder={tplKind === "invoice" ? "e.g. Review & Sign Your Invoice" : tplKind === "quote" ? "e.g. View Shed Quote" : "e.g. View Your Estimate"}
+                      style={{ ...S.input, maxWidth: 340 }} />
+                    {tplKind !== "invoice" && (
+                      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 10, fontSize: 12.5, color: "#334155", cursor: "pointer" }}>
+                        <input data-ss-wording="picture" type="checkbox" checked={cur.picture !== false}
+                          onChange={(e) => setField("picture", e.target.checked)}
+                          style={{ width: 15, height: 15, marginTop: 1, cursor: "pointer", flexShrink: 0 }} />
+                        <span>
+                          <b>Show the building photo</b>
+                          <span style={{ display: "block", color: "#64748B", fontSize: 12, marginTop: 1 }}>
+                            The photo of the style they picked, above the details. It shows only for styles with “Image on estimate” ticked under Structures.
+                          </span>
+                        </span>
+                      </label>
+                    )}
+                  </>
+                );
+              })()}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+                <button type="button" disabled={tplBusy} onClick={saveWording}
+                  style={{ ...S.btn(ACCENT, "#FFF"), opacity: tplBusy ? 0.6 : 1 }}>{tplBusy ? "Saving…" : "Save wording"}</button>
+                <button type="button" disabled={pvBusy} onClick={previewWording}
+                  style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", opacity: pvBusy ? 0.6 : 1 }}>{pvBusy ? "Making preview…" : "Preview"}</button>
                 {tplMsg && tplMsg.ok && <span style={{ fontSize: 12.5, color: "#065F46", fontWeight: 700 }}>{tplMsg.ok}</span>}
                 {tplMsg && tplMsg.err && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{tplMsg.err}</span>}
               </div>
+              {/* THE PREVIEW IS THE SERVER'S RENDER of the real email, so it cannot drift from what
+                  a customer gets. It is drawn in a frame with sandbox="" (no scripts, no forms,
+                  links that can't open) from srcdoc, so nothing in it can reach this page. */}
+              {pv && pv.kind === tplKind && (
+                <div data-ss-email-preview style={{ marginTop: 12 }}>
+                  {pv.err ? (
+                    <div style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{pv.err}</div>
+                  ) : (
+                    <>
+                      <div style={{ fontSize: 12.5, color: "#334155", marginBottom: 6, wordBreak: "break-word" }}>
+                        <span style={{ color: "#64748B", fontWeight: 700 }}>Subject:</span> <b data-ss-preview-subject>{pv.subject}</b>
+                      </div>
+                      {pv.photo === "none" && (
+                        <div style={{ fontSize: 12, color: "#B45309", marginBottom: 6 }}>
+                          No building photo yet: none of your styles has a photo with “Image on estimate” ticked. Add one under Settings → Structures.
+                        </div>
+                      )}
+                      {/* "not_own": the photos ARE there and ticked, but were copied from another
+                          account's catalog, so they live in that account's folder and no email (or
+                          estimate) may show them. The "none" sentence would send them to a screen
+                          where every tick is already on. */}
+                      {pv.photo === "not_own" && (
+                        <div style={{ fontSize: 12, color: "#B45309", marginBottom: 6 }}>
+                          No building photo: your style photos were copied from another account, so they can't go in emails. Upload them again under Settings → Structures.
+                        </div>
+                      )}
+                      <iframe title={"Preview of your " + tplKind + " email"} sandbox="" srcDoc={pv.html}
+                        style={{ display: "block", width: "100%", height: 560, border: "1px solid #E2E8F0", borderRadius: 8, background: "#F1F5F9" }} />
+                      <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>
+                        A made-up customer and number, with your own business details. Nothing is sent. Save to use these words.
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
             {sends.length > 0 && (
               <div style={{ marginTop: 14 }}>
@@ -2947,11 +3087,17 @@ function CommissionsReport({ clientId }) {
 // The column is jsonb and save_prefs already accepts a cardOrder key, so the storage is
 // waiting; the UI is not built because she scoped it out.
 //
-// ⚠️ THE REPLY-TO CARD BELOW DOES NOT WORK YET, and it says so on screen when it doesn't.
-// save_prefs rebuilds prefs from a WHITELIST and writes the result over the whole column, so
-// `replyToEmail` is accepted and discarded until the server edit in
-// .temp/HANDOFF-reply-to-prefs.md lands. That file is owned by someone else; this half was
-// deliberately shipped first so the two can land independently.
+// THE REPLY-TO CARD BELOW has worked since 2026-09-06, when save_prefs learned to keep
+// `replyToEmail`. Since 2026-10-05 it covers every email a customer gets from us, not only the
+// ones typed in a record: a quote, an invoice or a change order carries the address of whoever
+// sent it, and a confirmation the customer set off themselves carries their assigned rep's
+// (supabase/functions/_shared/repReplyTo.ts has the rule, and why an operator is never named).
+// If save_prefs ever stops keeping the key, the card still says so on screen rather than "Saved."
+//
+// The address goes into a mail header, so this box and the server check it with the SAME rule:
+// REPLY_ADDRESS_RE is a copy of the one in _shared/repReplyTo.ts, and
+// _shared/repReplyToSenders.test.ts fails if the two differ. Change both together.
+const REPLY_ADDRESS_RE = /^[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null }) {
   const [val, setVal] = useState((prefs && prefs.designsView) === "pipeline" ? "pipeline" : "list");
   const [busy, setBusy] = useState(false);
@@ -2991,10 +3137,11 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
     setBusy(false);
   };
 
-  // Same shape the server applies to a recipient address in crm_send_email. Checked here so
-  // a typo is caught while the person is still looking at the field -- server-side it is
-  // dropped silently, which would read as the setting refusing to save for no reason.
-  const looksLikeEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v);
+  // The server's own rule (REPLY_ADDRESS_RE above, 320 characters at most). Checked here so a
+  // typo, a name in angle brackets or a second address is caught while the person is still
+  // looking at the field -- server-side it is dropped silently, which would read as the setting
+  // refusing to save for no reason.
+  const looksLikeEmail = (v) => v.length <= 320 && REPLY_ADDRESS_RE.test(v);
 
   const saveAddr = async () => {
     const next = addr.trim();
@@ -3006,10 +3153,10 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
       // ⚠️ THE WHITELIST CHECK, and it is not defensive padding -- it is the one signal that
       // separates "saved" from "accepted and thrown away". save_prefs rebuilds the prefs blob
       // from a fixed list of keys and writes the result over the whole column, so a key it
-      // does not know is dropped with an { ok: true } response and no error anywhere. Until
-      // the server edit in .temp/HANDOFF-reply-to-prefs.md lands, EVERY save of this field
-      // takes that path. Reporting it plainly costs four lines; not reporting it costs
-      // somebody an afternoon on a setting that says "Saved." and does nothing.
+      // does not know is dropped with an { ok: true } response and no error anywhere. Every
+      // server since 2026-09-06 keeps this one; an older build, or one that refuses the
+      // address, still lands here. Reporting it plainly costs four lines; not reporting it
+      // costs somebody an afternoon on a setting that says "Saved." and does nothing.
       if (next && kept !== next) {
         setAddrMsg({ err: "Saved, but this server build didn't keep the address — replies will keep going to your login email for now. Tell CSM Synergy." });
       } else {
@@ -3081,13 +3228,36 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           address: the customer's reply reaches this address AND the customer's record in
           StructureStudio. Wording it as "send replies here" would describe GoHighLevel's
           behaviour, which is what she was comparing us to, and the first person to notice a
-          reply still landing in the app would reasonably call it a bug. */}
+          reply still landing in the app would reasonably call it a bug.
+
+          WHICH EMAILS (2026-10-05). Every email a customer gets from us: the ones typed in a
+          record, and the quotes, invoices and change orders a person sends. The confirmations a
+          customer sets off themselves (accepting a quote, signing an invoice) go to the rep the
+          customer is assigned to, so the card says that too. The rule is the server's
+          (_shared/repReplyTo.ts); keep this wording in step with it.
+
+          WHAT IT CAN'T PROMISE ON EVERY ACCOUNT. The card shows on every tenant, but the copy
+          only rides on email StructureStudio itself sends: on a CRM tenant the quotes and
+          invoices go out from GoHighLevel, which this setting never touches. And a reply lands
+          on the record only once the company has set up replies (Settings → Email Settings);
+          until then it reaches the inbox alone. Most customers have no assigned rep yet, so the
+          confirmation line says "if they have one". Worded to be true everywhere rather than
+          switched per tenant, because a rep has no right to read the email settings it would
+          need. */}
       <div style={S.card}>
         <div style={S.h2}>Where replies to your emails go</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-          When you email a customer from StructureStudio and they hit Reply, their reply lands on
-          the customer's record here — and, if you fill this in, in your own inbox at the same
-          time. Leave it blank to use the email address you sign in with.
+          When a customer hits Reply on an email you sent them from StructureStudio, whether it's a
+          message, a quote, an invoice or a change order, their reply comes to your own inbox too,
+          and lands on the customer's record here once your company has set up replies under
+          Settings → Email Settings. Leave this blank to use the email address you sign in with, or
+          fill it in to get those replies somewhere else.
+        </p>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          This is for email StructureStudio sends. A quote or invoice your CRM sends for you follows
+          the CRM's own settings. A customer's reply to the confirmation they get after accepting a
+          quote or signing an invoice goes to the person that customer is assigned to, if they have
+          one.
         </p>
         <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
           <input
