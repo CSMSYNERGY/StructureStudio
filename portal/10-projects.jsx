@@ -1563,6 +1563,10 @@ function ProjectsTab({ sub, onSub }) {
         if (!col) continue;
         const v = r.values ? r.values[colId] : null;
         if (col.type === "people") { if (!(Array.isArray(v) && v.includes(want))) return false; }
+        // A multi-select dropdown holds several option ids, and groupKeyOf answers with the
+        // FIRST only (it is the grouping key, one bucket per row) — so filtering on it dropped
+        // every row carrying the chosen option second or later. Membership, like people.
+        else if (col.type === "dropdown") { if (!(Array.isArray(v) ? v : (v ? [v] : [])).includes(want)) return false; }
         else if (pmType(col).groupKeyOf(v) !== want) return false;
       }
       if (whenCond !== "any" && whenColId) {
