@@ -208,15 +208,21 @@ const pmExt = (name) => String(name || "").split(".").pop().toLowerCase();
 const pmIsImage = (a) => String(a.mime || "").startsWith("image/") || ["png", "jpg", "jpeg", "gif", "webp"].includes(pmExt(a.name || a.path));
 const pmFileIcon = (a) => (pmIsImage(a) ? "🖼️" : (pmExt(a.name || a.path) === "pdf" ? "📄" : "📎"));
 
+// Why the bucket would refuse this file, or null. Split out so the composer can ask BEFORE it
+// posts the note the file belongs to — see PMItemPanel's post().
+function pmFileRefusal(file) {
+  if (!PM_FILE_MIME[pmExt(file.name)]) return `"${file.name}" is not a kind of file we can attach (images, video or PDF).`;
+  if (file.size > PM_MAX_FILE) return `"${file.name}" is larger than 25 MB.`;
+  return null;
+}
 // Upload one file to an item and record it on an update. The signed upload URL comes from
 // portal-projects (the bucket has no browser policies at all), the bytes go straight to
 // storage, and attach_meta writes the row — so a large screenshot never travels through
 // the edge function.
 async function pmUploadTo(itemId, updateId, file) {
-  const ext = pmExt(file.name);
-  const mime = PM_FILE_MIME[ext];
-  if (!mime) throw new Error(`"${file.name}" is not a kind of file we can attach (images, video or PDF).`);
-  if (file.size > PM_MAX_FILE) throw new Error(`"${file.name}" is larger than 25 MB.`);
+  const refusal = pmFileRefusal(file);
+  if (refusal) throw new Error(refusal);
+  const mime = PM_FILE_MIME[pmExt(file.name)];
   const signed = await pmCall({ action: "upload_attachment", itemId, name: file.name });
   const up = await sb.storage.from("pm-attachments").uploadToSignedUrl(signed.path, signed.token, file, { contentType: mime });
   if (up.error) throw new Error(up.error.message);
@@ -306,18 +312,32 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
       const who = sub ? (sub.client_id || "this client") : "this client";
       if (!window.confirm(`Publish this update to ${who}? They will see it in My Requests.`)) return;
     }
+    // A file the bucket will not take is refused BEFORE the note is posted. Checked only
+    // after the post, it threw with the note already created and the composer still full,
+    // so the obvious recovery — drop the file, press Post again — posted the note twice,
+    // and on a client card published it to the builder twice. An iPhone .heic is enough.
+    const refusal = files.map(pmFileRefusal).find(Boolean);
+    if (refusal) { setErr(refusal); return; }
     setBusy(true); setErr("");
+    const staged = files;
+    let d;
     try {
-      const d = await pmCall({ action: "add_update", itemId: item.id, body, clientVisible: toClient });
-      // Files attach to the update that was just created, so a failed upload leaves the
-      // note itself intact and says which file did not make it.
-      for (const f of files) await pmUploadTo(item.id, d.update.id, f);
-      // Back to the card's own default, NOT to false — resetting to false after each post
-      // re-creates the original bug one reply later, which is exactly how it would come back.
-      setCompose(""); setToClient(Boolean(item && item.feedback_submission_id)); setFiles([]);
-      if (fileRef.current) fileRef.current.value = "";
-      loadDetail();
-    } catch (e) { setErr(e.message); loadDetail(); }
+      d = await pmCall({ action: "add_update", itemId: item.id, body, clientVisible: toClient });
+    } catch (e) { setErr(e.message); loadDetail(); setBusy(false); return; }
+    // The note EXISTS from here on, so the composer is cleared whatever happens to its files.
+    // Back to the card's own default, NOT to false — resetting to false after each post
+    // re-creates the original bug one reply later, which is exactly how it would come back.
+    setCompose(""); setToClient(Boolean(item && item.feedback_submission_id)); setFiles([]);
+    if (fileRef.current) fileRef.current.value = "";
+    // Files attach to the update that was just created, so a failed upload leaves the
+    // note itself intact and says which file did not make it.
+    const failed = [];
+    for (const f of staged) {
+      try { await pmUploadTo(item.id, d.update.id, f); }
+      catch (e) { failed.push(e.message || `"${f.name}" did not upload.`); }
+    }
+    if (failed.length) setErr(`Your note was posted, but not every file made it: ${failed.join(" ")}`);
+    loadDetail();
     setBusy(false);
   };
   const publishExisting = async (u) => {
