@@ -1630,6 +1630,11 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
     if (sale) {
       // Already built and sitting on a lot — it never touches the build board, it just
       // needs a truck. Serial shown because that is how the yard refers to it.
+      // DELIVERED first: `onLoad` only counts an OPEN stop, so once the sale stop was marked
+      // delivered this row fell through to "Schedule delivery →" again — for a building
+      // standing in the buyer's yard. Marking that stop delivered writes 'delivered' onto
+      // this very design (portal-schedule writeBackDelivered), so the row already knows.
+      if (normStatus(r.d.status) === "delivered") return <span style={schedChipStyle("#F0FDF4", "#15803D")}>Delivered ✓</span>;
       if (sale.onLoad) return <span style={schedChipStyle("#EEF2FF", "#3D3672")}>On a load</span>;
       if (!deliverOn) return <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>#{sale.serial} · needs a load</span>;
       return schedLinkBtn("Schedule delivery →", `Building #${sale.serial} is on the lot — take it to the Delivery Schedule`,
