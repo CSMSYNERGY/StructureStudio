@@ -214,7 +214,14 @@ function PMCellInput({ col, value, onCommit, onClose }) {
   const base = { ...S.input, padding: "4px 6px", fontSize: 12.5 };
   const commit = () => {
     if (col.type === "number") onCommit(text.trim() === "" ? null : Number(text));
-    else if (isLink) onCommit(text.trim() ? { url: text.trim(), text: (value && value.text) || "" } : null);
+    else if (isLink) {
+      // A bare "acme.com/spec.pdf" — what people actually type — gets https:// in front. The
+      // server keeps http(s) links only and DROPS anything else without an error, so a
+      // scheme-less address showed as saved here (the optimistic patch) and was gone on reload.
+      const t = text.trim();
+      const url = t && !/^[a-z][a-z0-9+.-]*:/i.test(t) ? "https://" + t : t;
+      onCommit(url ? { url, text: (value && value.text) || "" } : null);
+    }
     else onCommit(text);
     onClose();
   };
