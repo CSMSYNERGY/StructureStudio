@@ -11103,6 +11103,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "amendment_status") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const gate = await amendmentGate(shortCode);
     const [liveRes, unlockRes, csRes] = await Promise.all([
@@ -11141,6 +11143,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const shortCode = String(payload?.shortCode ?? "").trim();
     const reason = String(payload?.reason ?? "").trim().slice(0, 500);
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
     // The reason is not paperwork: it is what the approver reads before deciding, and it
     // lands permanently on the order's amendment trail.
     if (!reason) return json({ error: "Say what needs changing -- whoever unlocks it will read this." }, 400);
@@ -11208,6 +11212,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const decision = payload?.decision === "declined" ? "declined" : "granted";
     const note = String(payload?.note ?? "").trim().slice(0, 500) || null;
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: cs } = await admin.from("client_settings")
       .select("co_unlock_hours").eq("client_id", clientId).maybeSingle();
@@ -11266,6 +11272,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "open_amendment") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: d } = await admin.from("designs")
       .select("short_code, ss_quote_number, accepted_at, estimate_lines, selections, paint_colors")
@@ -11352,6 +11360,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, clientId, "load that change", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
+    // ROW SCOPE (207), as send_invoice, on the design this change order belongs to.
+    { const refused = await refuseUnlessDesignVisible(String(co.short_code ?? "")); if (refused) return refused; }
     if (co.status === "pending_ack") {
       return json({ ok: true, already: true, changeOrder: co });
     }
@@ -11460,6 +11470,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, clientId, "load that change", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
+    // ROW SCOPE (207), as send_invoice, on the design this change order belongs to.
+    { const refused = await refuseUnlessDesignVisible(String(co.short_code ?? "")); if (refused) return refused; }
     if (co.status === "acknowledged") return json({ ok: true, already: true });
     if (co.status !== "pending_ack") {
       return json({
@@ -11698,6 +11710,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "reissue_invoice") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: d, error: dErr } = await admin.from("designs")
       .select("short_code, status, ss_quote_number, image_url, estimate_lines, accepted_snapshot, contact")
@@ -11908,6 +11922,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, clientId, "load that change order", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
+    // ROW SCOPE (207), as send_invoice, on the design this change order belongs to.
+    { const refused = await refuseUnlessDesignVisible(String(co.short_code ?? "")); if (refused) return refused; }
     if (co.status !== "pending_ack") {
       return json({
         error: co.status === "draft"
@@ -11993,6 +12009,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "order_paperwork") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
     const { data: cs, error: csErr } = await admin.from("client_settings")
       .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, quote_terms")
       .eq("client_id", clientId).maybeSingle();
@@ -12077,6 +12095,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "stage_order_attribute_change") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
     const attrs = (payload?.attrs && typeof payload.attrs === "object") ? payload.attrs : {};
     const dryRun = payload?.dryRun === true;
     const has = (k: string) => Object.prototype.hasOwnProperty.call(attrs, k);
@@ -12551,6 +12571,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, clientId, "load that change order", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
+    // ROW SCOPE (207), as send_invoice, on the design this change order belongs to.
+    { const refused = await refuseUnlessDesignVisible(String(co.short_code ?? "")); if (refused) return refused; }
     // A DRAFT IS DISCARDABLE -- that is what the rep's "Discard the change" does, and it is
     // also what releases the unlock they spent (the guard trigger's void branch).
     if (co.status !== "pending_ack" && co.status !== "draft") {
@@ -13940,6 +13962,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Owner/admin by omission from READ_ACTIONS.
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: row } = await admin.from("invoice_sends")
       .select("status, invoice_number, qbo_invoice_id")
