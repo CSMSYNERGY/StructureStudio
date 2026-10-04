@@ -11372,7 +11372,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const detail = String((outcome as { error?: unknown }).error ?? "");
     const reason = outcome.reason === "not_active"
       ? "your sending domain isn't live yet — check Settings → Branding → Email"
-      : /4(0[0-9]|2[0-9])|validation|invalid|recipient/i.test(detail)
+      : /\b4(0[0-9]|2[0-9])\b|validation|invalid|recipient/i.test(detail)
         ? `that email address was rejected (${to})`
         : "the send didn't go through";
     return { sent: false, reason };
