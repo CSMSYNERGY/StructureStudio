@@ -623,7 +623,8 @@ export function fmtCallLength(seconds: unknown): string {
  * WHICH TYPE, in this order (plan section 7's outcomes, from the customer's side of the line):
  *   outbound, any outcome          → `call`. The builder placed it; "no answer" is how it went,
  *                                    not a missed call — a MISSED call is one the customer made.
- *   inbound, somebody answered     → `call`.
+ *   inbound, somebody answered     → `call` — unless a message was left on it after all (a
+ *                                    transfer nobody took), which is the `voicemail` line below.
  *   inbound, still ringing/on-line → `call`, said as such (the feed can be opened mid-call).
  *   inbound, a message was left    → `voicemail` (the embed, or status 'voicemail').
  *   inbound, anything else         → `call_missed`.
@@ -664,7 +665,11 @@ export function callFeedEvents(rows: any[], nameOf: (userId: string) => string):
       continue;
     }
     const num = c.from_e164 || "an unknown number";
-    if (c.answered_by || (c.answered_at && !live)) {
+    // A MESSAGE LEFT IS THE LINE, even on a call that was answered first: a cold transfer nobody
+    // took goes to the builder's voicemail on the SAME call, which the Worker keeps answered
+    // (fileVoicemail). Read as "Answered", the message had no player and no transcript here,
+    // while the apps show it (reads.ts callSummary carries the voicemail whatever the status).
+    if ((c.answered_by || (c.answered_at && !live)) && !vm) {
       const who = c.answered_by ? `Answered by ${nameOf(c.answered_by)}` : "Answered";
       out.push({ ...base, type: "call", icon: "call", title: `Call from ${num}`, body: dur > 0 ? `${who} · talked ${fmtCallLength(dur)}` : who, actor: c.answered_by ?? null });
     } else if (live) {
