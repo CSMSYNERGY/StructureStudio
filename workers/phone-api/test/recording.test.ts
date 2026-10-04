@@ -11,7 +11,7 @@ import {
   startCallRecording, stopCallRecording,
 } from "../src/recording";
 import {
-  Auth, BUSINESS_NUMBER, CALL_SID, CLIENT, CUSTOMER, FakeNet, NUMBER_ID, USER_A, USER_B,
+  Auth, BUSINESS_NUMBER, CALL_SID, CLIENT, CUSTOMER, FakeNet, NUMBER_ID, USER_A, USER_B, USER_C,
   appRequest, attr, call, callerCtx, clientsIn, filter, jsonRes, makeEnv, member, routeInfo, twilioPost, type Seen,
 } from "./helpers";
 
@@ -465,6 +465,17 @@ describe("hold, resume and voicemail", () => {
     const xml = new URLSearchParams(net.seen.find((s) => s.method === "POST" && s.url.pathname.endsWith(`/Calls/${CALL_SID}.json`))!.body).get("Twiml")!;
     expect(xml).toContain("<Parameter name=\"recorded\" value=\"1\"/>");
     expect(recUpdates(net)).toEqual([]); // the recording goes on through the ring
+  });
+
+  it("a cold transfer to a teammate on DND who chose a cover rings the cover, recorded=1, and never pauses (migration 264)", async () => {
+    const { net, token } = await appSetup(liveCall());
+    net.rest("GET", "phone_user_settings", (s) => (filter(s, "user_id") === USER_B ? [{ dnd: true, dnd_until: null, dnd_cover_user_id: USER_C }] : []));
+    const { res } = await press(token, "transfer", { to_user_id: USER_B });
+    expect(res.status).toBe(200);
+    const xml = new URLSearchParams(net.seen.find((s) => s.method === "POST" && s.url.pathname.endsWith(`/Calls/${CALL_SID}.json`))!.body).get("Twiml")!;
+    expect(clientsIn(xml)).toEqual([`u_${USER_C.replace(/-/g, "")}_g3`]);
+    expect(xml).toContain("<Parameter name=\"recorded\" value=\"1\"/>");
+    expect(recUpdates(net)).toEqual([]);
   });
 
   it("a customer left alone in the conference: stopped BEFORE the voicemail redirect", async () => {

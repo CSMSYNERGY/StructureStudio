@@ -25,6 +25,7 @@ import { logFault } from "../log";
 import { armedFor } from "../recording";
 import { maySendToContacts } from "../scope";
 import { requestAutoTopup, walletFloorCheck, walletStateOf, type WalletState } from "../wallet";
+import { greetingOut } from "./me";
 import { onDnd } from "./voice";
 
 export const TOKEN_TTL = 3600;
@@ -60,7 +61,11 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
 
   const [ctx, settingsRes, alive] = await Promise.all([
     callerContext(admin, claims.sub),
-    admin.from("phone_user_settings").select("dnd, dnd_until, forward_to_cell").eq("user_id", claims.sub).maybeSingle(),
+    // ⚠️ dnd_cover_user_id, ring_hours, ring_hours_tz and the greeting columns are migration 264's:
+    // this Worker must not be deployed before it is applied.
+    admin.from("phone_user_settings")
+      .select("dnd, dnd_until, forward_to_cell, dnd_cover_user_id, ring_hours, ring_hours_tz, greeting_recording_sid, greeting_updated_at")
+      .eq("user_id", claims.sub).maybeSingle(),
     sessionAlive(env, jwt),
   ]);
   if (alive === false) throw new ApiError("unauthorized", "You were signed out. Please sign in again.");
@@ -102,7 +107,11 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
       },
   });
 
-  const s = (settingsRes.data ?? null) as { dnd?: boolean; dnd_until?: string | null; forward_to_cell?: string | null } | null;
+  const s = (settingsRes.data ?? null) as {
+    dnd?: boolean; dnd_until?: string | null; forward_to_cell?: string | null; dnd_cover_user_id?: string | null;
+    ring_hours?: Record<string, unknown> | null; ring_hours_tz?: string | null;
+    greeting_recording_sid?: string | null; greeting_updated_at?: string | null;
+  } | null;
   return ok({
     token: jwtOut,
     identity,
@@ -123,6 +132,15 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
     settings: {
       dnd: s ? onDnd({ dnd: s.dnd === true, dnd_until: s.dnd_until ?? null }) : false,
       forward_to_cell: s?.forward_to_cell ?? null,
+      // Who rings in this person's place while they're away (migration 264), or null.
+      dnd_cover_user_id: s?.dnd_cover_user_id ?? null,
+      // The hours this person's phone rings and their zone (migration 264), or null for always.
+      // The apps show them; they're changed in Structure Studio.
+      ring_hours: s?.ring_hours && typeof s.ring_hours === "object" && !Array.isArray(s.ring_hours) ? s.ring_hours : null,
+      ring_hours_tz: s?.ring_hours_tz ?? null,
+      // Their own voicemail greeting (migration 264): whether they recorded one, and when. The
+      // apps offer Record, Play and "Use the standard greeting" when this is here.
+      greeting: greetingOut(s),
     },
     wallet,
     // Are this business's calls recorded (and announced) right now: its owner's choice and this

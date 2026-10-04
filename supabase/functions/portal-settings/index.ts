@@ -8807,7 +8807,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       });
     }
 
-    const [teamOut, routeRes, devRes] = await Promise.all([
+    const [teamOut, routeRes, devRes, hoursRes] = await Promise.all([
       phoneTeam(),
       n
         ? admin.from("phone_routes")
@@ -8819,6 +8819,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin.from("phone_devices")
         .select("user_id, platform, app_version, last_seen_at").eq("client_id", clientId)
         .order("last_seen_at", { ascending: false }).limit(500),
+      // Each person's own hours (migration 264: set by them in the phone-api Worker, shown here
+      // so the owner can see why someone wasn't rung). The same courtesy: a database before 264,
+      // or a failed read, shows no hours.
+      admin.from("phone_user_settings")
+        .select("user_id, ring_hours, ring_hours_tz").eq("client_id", clientId).limit(500),
     ]);
     if (teamOut.error) return dbFail(req, clientId, "load your team", teamOut.error);
     if (routeRes.error) return phoneNotReady(routeRes.error) ? json({ ok: true, available: false }) : dbFail(req, clientId, "load your phone settings", routeRes.error);
@@ -8830,7 +8835,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       list.push({ platform: d.platform, appVersion: d.app_version ?? null, lastSeenAt: d.last_seen_at ?? null });
       devicesBy.set(k, list);
     }
-    const team = teamOut.team.map((t) => ({ ...t, devices: devicesBy.get(t.userId) ?? [] }));
+    const hoursBy = new Map<string, { ringHours: Record<string, unknown>; ringHoursTz: string | null }>();
+    // deno-lint-ignore no-explicit-any
+    for (const h of ((hoursRes as any).error ? [] : ((hoursRes as any).data ?? [])) as any[]) {
+      if (!h.ring_hours || typeof h.ring_hours !== "object" || Array.isArray(h.ring_hours)) continue;
+      hoursBy.set(String(h.user_id).toLowerCase(), { ringHours: h.ring_hours, ringHoursTz: h.ring_hours_tz ?? null });
+    }
+    const team = teamOut.team.map((t) => ({
+      ...t, devices: devicesBy.get(t.userId) ?? [],
+      ringHours: hoursBy.get(t.userId)?.ringHours ?? null, ringHoursTz: hoursBy.get(t.userId)?.ringHoursTz ?? null,
+    }));
     const route = routeOut(routeRes.data);
     // What the rollout lets this caller do (the same check the three writes make), so the screen
     // offers "Turn calling on", Connect and Buy only where they will work. Turning calling OFF,

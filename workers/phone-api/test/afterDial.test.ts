@@ -1,5 +1,5 @@
 // Every branch of /voice/after-dial, in plan section 8's order.
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BUSINESS_NUMBER, CALL_SID, CLIENT, CUSTOMER, FakeNet, NUMBER_ID, USER_A, USER_B, USER_C,
   attr, call, clientsIn, filter, makeEnv, member, numbersIn, routeInfo, twilioPost,
@@ -109,6 +109,78 @@ describe("/voice/after-dial", () => {
     expect(patches(net)).toEqual([{ rang_user_ids: [USER_A, USER_C] }]);
   });
 
+  // Migration 264: a cover rang in an away member's place (p = that member's position).
+  const COVER = "00000000-0000-4000-8000-0000000000e5";
+  const coverRow = member(COVER, { cover_only: true });
+
+  it("4. in_order carries on past a cover's place to the next member, and records them", async () => {
+    const info = routeInfo({ members: [member(USER_A, { dnd: true, dnd_cover: COVER }), member(USER_B), member(USER_C), coverRow] }, { mode: "in_order" });
+    const net = setup(row({ rang_user_ids: [COVER] }), info);
+    const { text } = await afterDial({ stage: "order", p: "0" }, { DialCallStatus: "no-answer", DialBridged: "false" });
+    expect(clientsIn(text)).toEqual([id(USER_B)]);
+    expect(attr(text, "Dial", "action")).toMatch(/stage=order&p=1/);
+    expect(patches(net)).toEqual([{ rang_user_ids: [COVER, USER_B] }]);
+  });
+
+  it("4. in_order reaches a later away member's cover in that member's place", async () => {
+    const info = routeInfo({ members: [member(USER_A), member(USER_B, { dnd: true, dnd_cover: COVER }), member(USER_C), coverRow] }, { mode: "in_order" });
+    const net = setup(row({ rang_user_ids: [USER_A] }), info);
+    const { text } = await afterDial({ stage: "order", p: "0" }, { DialCallStatus: "no-answer", DialBridged: "false" });
+    expect(clientsIn(text)).toEqual([id(COVER)]);
+    expect(attr(text, "Dial", "action")).toMatch(/stage=order&p=1/);
+    expect(patches(net)).toEqual([{ rang_user_ids: [USER_A, COVER] }]);
+  });
+
+  it("4. in_order never rings one cover twice for two away members: after them, voicemail", async () => {
+    const info = routeInfo({
+      members: [member(USER_A, { dnd: true, dnd_cover: COVER }), member(USER_B, { dnd: true, dnd_cover: COVER }), coverRow],
+    }, { mode: "in_order", members: [USER_A, USER_B] });
+    setup(row({ rang_user_ids: [COVER] }), info);
+    const { text } = await afterDial({ stage: "order", p: "0" }, { DialCallStatus: "no-answer", DialBridged: "false" });
+    expect(clientsIn(text)).toEqual([]);
+    expect(text).toContain("<Record");
+  });
+
+  // Migration 264: outside their own hours is away, like DND, when after-dial picks the next place.
+  describe("someone outside their own hours", () => {
+    const outsideHours = { ring_hours: { tue: [["13:00", "17:00"]] }, hours_tz: "America/Chicago" };
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-29T15:00:00Z")); // Tuesday 10:00 in Chicago
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("4. in_order passes over them to the next member, and records who rang", async () => {
+      const info = routeInfo({ members: [member(USER_A), member(USER_B, outsideHours), member(USER_C)] }, { mode: "in_order" });
+      const net = setup(row({ rang_user_ids: [USER_A] }), info);
+      const { text } = await afterDial({ stage: "order", p: "0" }, { DialCallStatus: "no-answer", DialBridged: "false" });
+      expect(clientsIn(text)).toEqual([id(USER_C)]);
+      expect(attr(text, "Dial", "action")).toMatch(/stage=order&p=2/);
+      expect(patches(net)).toEqual([{ rang_user_ids: [USER_A, USER_C] }]);
+    });
+
+    it("4. in_order rings their cover in their place", async () => {
+      const info = routeInfo({ members: [member(USER_A), member(USER_B, { ...outsideHours, dnd_cover: COVER }), member(USER_C), coverRow] }, { mode: "in_order" });
+      const net = setup(row({ rang_user_ids: [USER_A] }), info);
+      const { text } = await afterDial({ stage: "order", p: "0" }, { DialCallStatus: "no-answer", DialBridged: "false" });
+      expect(clientsIn(text)).toEqual([id(COVER)]);
+      expect(attr(text, "Dial", "action")).toMatch(/stage=order&p=1/);
+      expect(patches(net)).toEqual([{ rang_user_ids: [USER_A, COVER] }]);
+    });
+
+    it("4. nobody else left: the route's no-answer forward, as before", async () => {
+      const info = routeInfo({ members: [member(USER_A), member(USER_B, outsideHours)] }, {
+        mode: "in_order", members: [USER_A, USER_B], no_answer: "forward", forward_to: "+15555550166",
+      });
+      setup(row({ rang_user_ids: [USER_A] }), info);
+      const { text } = await afterDial({ stage: "order", p: "0" }, { DialCallStatus: "no-answer", DialBridged: "false" });
+      expect(clientsIn(text)).toEqual([]);
+      expect(numbersIn(text)).toEqual(["+15555550166"]);
+    });
+  });
+
   it("4. in_order with nobody left goes to voicemail", async () => {
     setup(row(), routeInfo({}, { mode: "in_order" }));
     const { text } = await afterDial({ stage: "order", p: "2" }, { DialCallStatus: "no-answer", DialBridged: "false" });
@@ -121,6 +193,55 @@ describe("/voice/after-dial", () => {
     expect(text).toContain("<Record");
     expect(clientsIn(text)).toEqual([]);
     expect(patches(net)).toEqual([{ transfer_state: null }]);
+  });
+
+  // Migration 264: a transfer's voicemail is the teammate's (`vt`): their own greeting plays.
+  describe("4. a transfer nobody took plays the teammate's own greeting (vt)", () => {
+    const SID = "RE" + "0".repeat(31) + "e";
+    const LINE_SID = "RE" + "0".repeat(31) + "f";
+    const transferred = () => row({ transfer_state: "transferring", status: "in_progress", transferred_from: USER_A });
+    const own = (u: string, sid: string) => `<Play>https://phone.example.test/voice/greeting-audio?u=${u}&amp;v=${sid}&amp;key=test-webhook-key</Play>`;
+
+    it("the teammate's greeting, read from their own row, over the number's link and the line owner's", async () => {
+      const net = setup(transferred(), routeInfo({ members: [member(USER_A, { greeting_sid: LINE_SID })] }, { members: [USER_A], greeting_url: "https://cdn.example.test/g.mp3" }));
+      net.rest("GET", "phone_user_settings", (s) => (filter(s, "user_id") === USER_B ? [{ client_id: CLIENT, greeting_recording_sid: SID }] : []));
+      const { text } = await afterDial({ transfer: "1", vt: USER_B }, { DialCallStatus: "no-answer", DialBridged: "false" });
+      expect(text).toContain(own(USER_B, SID));
+      expect(text).toContain("<Record");
+      expect(net.reads("phone_user_settings").map((r) => filter(r, "user_id"))).toEqual([USER_B]);
+    });
+
+    it("a teammate with no greeting: the number's link, never the line owner's greeting", async () => {
+      const net = setup(transferred(), routeInfo({ members: [member(USER_A, { greeting_sid: LINE_SID })] }, { members: [USER_A], greeting_url: "https://cdn.example.test/g.mp3" }));
+      net.rest("GET", "phone_user_settings", () => [{ client_id: CLIENT, greeting_recording_sid: null }]);
+      const { text } = await afterDial({ transfer: "1", vt: USER_B }, { DialCallStatus: "no-answer", DialBridged: "false" });
+      expect(text).toContain("<Play>https://cdn.example.test/g.mp3</Play>");
+      expect(text).not.toContain("greeting-audio");
+    });
+
+    it("someone on another business, an after-dial URL without vt, or a failed read: nobody's greeting", async () => {
+      const info = routeInfo({ members: [member(USER_A, { greeting_sid: LINE_SID })] }, { members: [USER_A] });
+      let net = setup(transferred(), info);
+      net.rest("GET", "phone_user_settings", () => [{ client_id: "other-tenant", greeting_recording_sid: SID }]);
+      expect((await afterDial({ transfer: "1", vt: USER_B }, { DialCallStatus: "no-answer", DialBridged: "false" })).text).not.toContain("greeting-audio");
+      net = setup(transferred(), info);
+      const old = await afterDial({ transfer: "1" }, { DialCallStatus: "no-answer", DialBridged: "false" });
+      expect(old.text).not.toContain("greeting-audio");
+      expect(old.text).toContain("You've reached Demo Sheds.");
+      expect(net.reads("phone_user_settings")).toEqual([]);
+      net = setup(transferred(), info);
+      net.rest("GET", "phone_user_settings", () => new Response(JSON.stringify({ message: "boom" }), { status: 500 }));
+      const failed = await afterDial({ transfer: "1", vt: USER_B }, { DialCallStatus: "no-answer", DialBridged: "false" });
+      expect(failed.text).toContain("<Record");
+      expect(failed.text).not.toContain("greeting-audio");
+    });
+
+    it("a plain call nobody answered on a one-person line plays that person's greeting (no vt read)", async () => {
+      const net = setup(row(), routeInfo({ members: [member(USER_A, { greeting_sid: LINE_SID })] }, { members: [USER_A] }));
+      const { text } = await afterDial({}, { DialCallStatus: "no-answer", DialBridged: "false" });
+      expect(text).toContain(own(USER_A, LINE_SID));
+      expect(net.reads("phone_user_settings")).toEqual([]);
+    });
   });
 
   it("routes a transferred OUTBOUND call by its caller-ID number", async () => {

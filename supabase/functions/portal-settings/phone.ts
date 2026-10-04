@@ -12,19 +12,20 @@
 
 import { effectiveAccess, type Level } from "../_shared/access.ts";
 import { noticeSaysRecorded } from "../_shared/recordingNotice.ts";
+import { type BusinessHours, parseBusinessHours, validTimeZone } from "../_shared/phoneHours.ts";
 
-/** The seven keys business_hours uses, in the order the Settings screen shows them. */
-export const PHONE_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
-export type PhoneDay = typeof PHONE_DAYS[number];
-export type BusinessHours = Partial<Record<PhoneDay, [string, string][]>>;
+// The hours rules moved to _shared/phoneHours.ts (migration 264), because the phone-api Worker
+// checks a person's own ring hours with them too. Re-exported, so everything that imported them
+// from here (index.ts, tests/phone/phoneSettings_test.ts) is unchanged.
+export {
+  type BusinessHours, parseBusinessHours, PHONE_DAYS, type PhoneDay, validTimeZone,
+} from "../_shared/phoneHours.ts";
 
 /** Twilio rings at most ten <Client>s in one <Dial> (plan section 8). */
 export const MAX_ROUTE_MEMBERS = 10;
 /** phone_routes.ring_seconds CHECK (ring_seconds between 5 and 60). */
 export const RING_MIN = 5;
 export const RING_MAX = 60;
-/** More opening periods than this in one day is a typo, not a timetable. */
-const MAX_PERIODS_PER_DAY = 4;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const isUuid = (v: unknown): v is string => typeof v === "string" && UUID.test(v);
@@ -42,60 +43,6 @@ export function nanpE164(raw: unknown): string | null {
   const ten = d.length === 11 && d.startsWith("1") ? d.slice(1) : d;
   if (!/^[2-9]\d{2}[2-9]\d{6}$/.test(ten)) return null;
   return `+1${ten}`;
-}
-
-/** Is this an IANA time zone this runtime can actually compute business hours in? */
-export function validTimeZone(tz: unknown): tz is string {
-  if (typeof tz !== "string" || !tz || tz.length > 64 || !/^[A-Za-z_]+(\/[A-Za-z0-9_+-]+)*$/.test(tz)) return false;
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: tz });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
-const DAY_LABEL: Record<PhoneDay, string> = {
-  mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday", sun: "Sunday",
-};
-
-/**
- * business_hours as the owner sent it → the stored jsonb, or a sentence saying what is wrong.
- *
- * null means ALWAYS OPEN (SPEC: "null = always open"), which is different from an object whose
- * every day is empty — that one is "closed all week", and every call goes to the after-hours
- * action. Both are legitimate, so the two are never collapsed into each other.
- *
- * A day that is missing or empty is closed. Periods must run forward within the day: an
- * overnight period (22:00-06:00) is written as two, one on each day, which is what a builder
- * with a night shift would expect the screen to show anyway.
- */
-export function parseBusinessHours(raw: unknown): { ok: true; value: BusinessHours | null } | { ok: false; error: string } {
-  if (raw === null || raw === undefined) return { ok: true, value: null };
-  if (typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "Business hours were not in a shape we recognise." };
-  const out: BusinessHours = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (!(PHONE_DAYS as readonly string[]).includes(k)) return { ok: false, error: "Business hours were not in a shape we recognise." };
-    const day = k as PhoneDay;
-    if (!Array.isArray(v)) return { ok: false, error: `${DAY_LABEL[day]}'s hours were not in a shape we recognise.` };
-    if (v.length > MAX_PERIODS_PER_DAY) return { ok: false, error: `${DAY_LABEL[day]} has more than ${MAX_PERIODS_PER_DAY} opening periods.` };
-    const periods: [string, string][] = [];
-    for (const p of v) {
-      if (!Array.isArray(p) || p.length !== 2 || !HHMM.test(String(p[0])) || !HHMM.test(String(p[1]))) {
-        return { ok: false, error: `${DAY_LABEL[day]} has a time that isn't in hours and minutes.` };
-      }
-      const [open, close] = [String(p[0]), String(p[1])];
-      if (open >= close) return { ok: false, error: `On ${DAY_LABEL[day]}, the closing time has to be after the opening time.` };
-      periods.push([open, close]);
-    }
-    periods.sort((a, b) => (a[0] < b[0] ? -1 : 1));
-    for (let i = 1; i < periods.length; i++) {
-      if (periods[i][0] < periods[i - 1][1]) return { ok: false, error: `${DAY_LABEL[day]}'s opening periods overlap.` };
-    }
-    if (periods.length) out[day] = periods;
-  }
-  return { ok: true, value: out };
 }
 
 /** A greeting the phone can play: https, and a length Twilio will accept in <Play>. */

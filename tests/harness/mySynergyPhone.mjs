@@ -43,6 +43,22 @@
 //   Q. A recorded call in the contact timeline: its summary shows, Play recording fetches
 //      <PHONE_API_BASE>/recordings/<id>/audio only on the press (header, blob: URL), and "Show
 //      transcript" reads /calls/<id>/transcript the same way; neither in view-as or with calling off.
+//   R. Settings -> Phone, Your calls, "When my phone rings" (migration 264): Always or my own hours
+//      in the business hours' weekly editor, in this browser's time zone; Save sends POST
+//      <PHONE_API_BASE>/settings/me (the session in the header) and a stub Worker checks it with
+//      the REAL _shared/phoneHours.ts rule; its refusals reach the screen; "no day at all" is
+//      caught before asking; the team screen shows each person's own hours; a Worker that doesn't
+//      keep hours shows no such section.
+//   V. Settings -> Phone, Your calls, "Voicemail greeting" (migration 264): Record sends POST
+//      <PHONE_API_BASE>/settings/me/greeting/record (the session in the header; the stub Worker
+//      rings nothing) and says the phone will ring; the card notices the recording landing on its
+//      own; Play fetches the audio with the header into a blob: URL; "Use the standard greeting"
+//      clears it after a confirm; the Worker's refusal reaches the screen; the owner's link field
+//      says it is for the shared number; a Worker that doesn't keep greetings shows no section.
+//   W. Who reaches Your calls: a sales rep (phone 'own', no settings area: the real title preset)
+//      gets Settings with exactly Phone and My Profile, and the card, at /portal/settings/phone
+//      (the apps' "Change in Structure Studio" link); and an older Worker, which answers GET
+//      /settings/me with 405 (it routes only POST there), hides the card instead of showing a fault.
 //
 // Supabase is stubbed at the network layer (no login, nothing leaves the machine) — the shape
 // crmContactDeal.mjs uses. The extension is stubbed as window.chrome.runtime before the app
@@ -61,6 +77,8 @@ import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { launch, reporter, BASE, REF, shotsDir } from "./lib.mjs";
 import { buildCallsReport, parseRecording, parseRoute, recordingView } from "../../supabase/functions/portal-settings/phone.ts";
+import { parseBusinessHours, RING_HOURS_WORDS, validTimeZone } from "../../supabase/functions/_shared/phoneHours.ts";
+import { PRESETS } from "../../supabase/functions/_shared/access.ts";
 
 const CLIENT = "demo-tenant";
 const VIEWED = "demo-builder";
@@ -150,8 +168,15 @@ async function scenario(browser, opts) {
     // 263), whether this caller may change them (the server's owner rule), and the server's
     // switch (portal-settings' copy of the Worker's CALL_RECORDING rail).
     recordingRow = {}, canChangeRecording = true, recordingServerOn = true,
+    // Your calls (R): the signed-in person's own settings the stub Worker answers GET and POST
+    // /settings/me with (null = the stub answers those paths as it always has), the team screen's
+    // list, and the browser's time zone.
+    my = null, team = TEAM, timezoneId = undefined,
+    // Who reaches it (W): the signed-in person's tenant role and access map (the owner's by
+    // default), and a Worker from before 264 (GET /settings/me answers 405, as the real one does).
+    role = "owner", access = OWNER_ACCESS, oldWorker = false,
   } = opts;
-  const ctx = await browser.newContext({ viewport, ...(userAgent ? { userAgent, isMobile: true, hasTouch: true } : {}) });
+  const ctx = await browser.newContext({ viewport, ...(timezoneId ? { timezoneId } : {}), ...(userAgent ? { userAgent, isMobile: true, hasTouch: true } : {}) });
   await ctx.addInitScript(([ref, s]) => {
     try { localStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(s)); } catch (_e) { /* storage blocked */ }
   }, [REF, SESSION]);
@@ -192,6 +217,7 @@ async function scenario(browser, opts) {
     sms: smsStatus,
     recording: recordingRow ? recordingView(recordingRow, recordingServerOn) : null,
     number: opts.noNumber ? null : (numberOverride ?? { id: "num-1", e164: "+15555550199", textingStatus: "registered", voiceReady: false, callingOnly: false }),
+    my,
   };
   await page.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href), (route) => route.abort());
   // THE phone-api WORKER's voicemail audio, stubbed (registered after the abort-everything route,
@@ -200,9 +226,45 @@ async function scenario(browser, opts) {
   const vm = [];
   await page.route("https://phone.structurestudiosuite.com/**", (route) => {
     const req = route.request();
-    const cors = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization", "access-control-allow-methods": "GET, OPTIONS" };
+    const cors = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization, content-type", "access-control-allow-methods": "GET, POST, OPTIONS" };
     if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors, body: "" });
-    vm.push({ url: req.url(), method: req.method(), authorization: req.headers()["authorization"] || null });
+    vm.push({ url: req.url(), method: req.method(), authorization: req.headers()["authorization"] || null, body: req.postData() || null });
+    // R. Your calls: GET and POST /settings/me, and GET /team, when the scenario gives the person's
+    // settings. A save is checked as the Worker does (routes/me.ts hoursPatch: the REAL rule, then
+    // at least one day and a zone), and refused in the Worker's shape.
+    const wpath = new URL(req.url()).pathname;
+    const wjson = (body, status = 200) => route.fulfill({ status, headers: { ...cors, "content-type": "application/json" }, body: JSON.stringify(body) });
+    // W. The Worker before 264 routes POST /settings/me only, so a GET there is index.ts
+    // handleApp's method mismatch, not a 404.
+    if (oldWorker && wpath === "/settings/me" && req.method() === "GET") {
+      return wjson({ ok: false, error: { code: "bad_request", message: "That method isn't allowed here." } }, 405);
+    }
+    // V. Your voicemail greeting (routes/greeting.ts), when the scenario's settings carry `greeting`:
+    // Record "rings" (nothing is placed) and the recording lands on the next GET /settings/me, the
+    // way the real one shows up once the call ends; Play is audio; the standard greeting clears it.
+    if (state.my && state.my.greeting && wpath === "/settings/me/greeting/record") {
+      if (state.greetRefuse) return wjson({ ok: false, error: { code: "bad_request", message: state.greetRefuse } }, 429);
+      state.greetPending = { set: true, updated_at: "2026-10-05T17:00:00Z" };
+      return wjson({ ok: true, ringing: true });
+    }
+    if (state.my && state.my.greeting && wpath === "/settings/me/greeting/clear") {
+      state.my = { ...state.my, greeting: { set: false, updated_at: null } };
+      return wjson({ ok: true, settings: state.my });
+    }
+    if (state.my && state.my.greeting && wpath === "/settings/me/greeting/audio" && !state.my.greeting.set) {
+      return wjson({ ok: false, error: { code: "not_found", message: "You haven't recorded a greeting." } }, 404);
+    }
+    if (state.my && wpath === "/settings/me") {
+      if (req.method() === "GET" && state.greetPending) { state.my = { ...state.my, greeting: state.greetPending }; state.greetPending = null; }
+      if (req.method() === "GET") return wjson({ ok: true, settings: state.my });
+      const r = workerSaveSettings(state.my, JSON.parse(req.postData() || "{}"));
+      if (r.error) return wjson({ ok: false, error: { code: "bad_request", message: r.error } }, 400);
+      state.my = r.settings;
+      return wjson({ ok: true, settings: state.my });
+    }
+    if (state.my && wpath === "/team") {
+      return wjson({ ok: true, members: team.filter((t) => t.phoneLevel !== "none").map((t) => ({ user_id: t.userId, full_name: t.name, identity_base: "u_x_g1" })) });
+    }
     // Q. A recorded call's whole transcript (GET /calls/:id/transcript) is JSON; audio is audio.
     if (/\/calls\/[^/]+\/transcript$/.test(new URL(req.url()).pathname)) {
       return route.fulfill({ status: 200, headers: { ...cors, "content-type": "application/json" },
@@ -218,7 +280,7 @@ async function scenario(browser, opts) {
     try { body = JSON.parse(req.postData() || "{}"); } catch (_e) { /* not JSON */ }
     if (url.includes("/rest/v1/rpc/is_operator")) return json(route, operator);
     if (url.includes("/rest/v1/rpc/")) return json(route, url.includes("log_error") ? null : false);
-    if (url.includes("/rest/v1/client_users")) return json(route, [{ client_id: CLIENT, role: "owner", user_id: USER.id }]);
+    if (url.includes("/rest/v1/client_users")) return json(route, [{ client_id: CLIENT, role, user_id: USER.id }]);
     if (url.includes("/rest/v1/designs")) return json(route, [LIST_ROW]);
     if (url.includes("/rest/v1/")) return json(route, []);
     if (url.includes("/auth/v1/user")) return json(route, USER);
@@ -244,7 +306,7 @@ async function scenario(browser, opts) {
     const clientId = body.targetClientId || CLIENT;
     switch (body.action) {
       case "status":
-        return json(route, { ok: true, clientId, role: "owner", operatorMode: !!body.targetClientId, access: OWNER_ACCESS, prefs: null,
+        return json(route, { ok: true, clientId, role, operatorMode: !!body.targetClientId, access, prefs: null,
           phoneStatus: state.phoneStatus, configured: false, invoiceInGhl: false, ghlInvoicingAllowed: false, businessAddress: {}, branding: { companyName: "Demo Tenant" }, emailReady: true });
       case "crm_record":
         return json(route, {
@@ -253,12 +315,17 @@ async function scenario(browser, opts) {
           build: [], stages: [], delivery: [], repairs: [],
         });
       case "phone_settings_get":
+        // An 'own' caller gets their own slice (portal-settings' ownPhoneOnly branch).
+        if (access.phone !== "view" && access.phone !== "edit") {
+          return json(route, { ok: true, available: true, scope: "own", phoneStatus: state.phoneStatus, level: "own", canEdit: false,
+            number: state.number ? { e164: state.number.e164 } : null, recording: null });
+        }
         return json(route, { ok: true, available: true, scope: "team", phoneStatus: state.phoneStatus, level: "edit", canEdit: true,
           number: state.number, canBuyNumber: rolloutOpen, numbersForSale: true, voiceSetup: true,
           canSwitchOn: rolloutOpen, canConnect: rolloutOpen, selfServe: false,
           callerId: state.callerId, canManageCallerId: trustOperator,
           recording: state.recording, canChangeRecording: !!state.recording && canChangeRecording,
-          route: state.route, team: TEAM, suggestedMembers: state.route ? null : [USER.id] });
+          route: state.route, team, suggestedMembers: state.route ? null : [USER.id] });
       // P. Call recording: the owner only (the server's rule; the stub refuses the same way), and
       // the REAL parseRecording decides what is valid.
       case "phone_recording_save": {
@@ -351,7 +418,29 @@ async function scenario(browser, opts) {
     await page.waitForTimeout(1200);
   };
   const sent = () => page.evaluate(() => (window.__sssSent || []).map((s) => ({ id: s.id, ...s.msg })));
-  return { ctx, page, calls, go, sent, vm };
+  return { ctx, page, calls, go, sent, vm, state };
+}
+
+// R. The phone-api Worker's POST /settings/me for the person's own hours (routes/me.ts
+// hoursPatch), with the REAL shared rule. Only the keys the Your calls card sends.
+function workerSaveSettings(my, body) {
+  const out = { ...my };
+  if (body.dnd_cover_user_id !== undefined) out.dnd_cover_user_id = body.dnd_cover_user_id || null;
+  let hoursSet = false;
+  if (body.ring_hours !== undefined) {
+    const h = parseBusinessHours(body.ring_hours, RING_HOURS_WORDS);
+    if (!h.ok) return { error: h.error };
+    if (h.value && !Object.keys(h.value).length) return { error: "Add hours to at least one day, or choose Always." };
+    out.ring_hours = h.value;
+    hoursSet = !!h.value;
+  }
+  if (body.ring_hours_tz !== undefined) {
+    if (body.ring_hours_tz === null || body.ring_hours_tz === "") out.ring_hours_tz = null;
+    else if (!validTimeZone(body.ring_hours_tz)) return { error: "That time zone isn't one we know. Pick it from the list." };
+    else out.ring_hours_tz = body.ring_hours_tz;
+  }
+  if (hoursSet && !(body.ring_hours_tz && validTimeZone(body.ring_hours_tz))) return { error: "Choose the time zone your hours are in." };
+  return { settings: out };
 }
 
 // A click that cannot abort the run: a control that is missing or disabled is a FAILED CHECK
@@ -983,6 +1072,174 @@ try {
     ok("I3 the app link carries the four fields and ts, the moment it was made", Number.isInteger(ts) && Math.abs(Date.now() - ts) < 60000,
       deep || `navigations seen: ${JSON.stringify(navs)}`);
     await s.page.screenshot({ path: join(shots, "I-phone-browser.png") });
+    await s.ctx.close();
+  }
+
+  // ── R. Your calls: when my phone rings (migration 264) ──────────────────────────────────
+  {
+    const WEEKDAYS = Object.fromEntries(["mon", "tue", "wed", "thu", "fri"].map((d) => [d, [["08:00", "17:00"]]]));
+    const my = { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null };
+    const team = TEAM.map((t) => (t.userId === REP ? { ...t, ringHours: WEEKDAYS, ringHoursTz: "America/Chicago" } : { ...t, ringHours: null, ringHoursTz: null }));
+    const s = await scenario(browser, { name: "R", my, team, timezoneId: "America/Denver" });
+    await s.go("/portal/settings/phone");
+    await s.page.waitForSelector("[data-ss-phone-my-hours]", { timeout: 15000 }).catch(() => {});
+    const card = s.page.locator("[data-ss-phone-my-hours]");
+    const radio = (label) => card.locator("label", { hasText: label }).locator("input");
+    const said = () => card.innerText().catch(() => "");
+    const posts = () => s.vm.filter((r) => r.method === "POST" && new URL(r.url).pathname === "/settings/me");
+    const rendered = ok("R0 Your calls has 'When my phone rings', on Always (nothing saved yet)",
+      (await card.count()) === 1 && await radio("Always, whenever the business is open").isChecked().catch(() => false), (await said()).slice(0, 120));
+    if (rendered) {
+      const repRow = await s.page.locator(`[data-ss-phone-member="${REP}"]`).innerText().catch(() => "");
+      ok("R1 the team screen shows the rep's own hours, in their zone", /Their hours: Mon–Fri 8 AM–5 PM \(Central time\)/.test(repRow), repRow.replace(/\s+/g, " "));
+      ok("R1b and nothing for someone who set none", !/Their hours/.test(await s.page.locator(`[data-ss-phone-member="${USER.id}"]`).innerText().catch(() => "")));
+      await tick(radio("Only during my hours"));
+      const day = (d) => card.locator(`[data-ss-phone-my-day="${d}"]`);
+      ok("R2 'Only during my hours' opens the weekly editor: seven days, weekdays 8 to 5, in this browser's zone",
+        (await card.locator("[data-ss-phone-my-day]").count()) === 7 && (await card.locator("select").inputValue()) === "America/Denver"
+          && (await day("mon").locator("input[type=time]").first().inputValue()) === "08:00" && /Off/.test(await day("sat").innerText()),
+        `${await card.locator("select").inputValue().catch(() => "?")}`);
+      // Saturday morning as well.
+      await tap(day("sat").locator("button", { hasText: "+ add hours" }));
+      await day("sat").locator("input[type=time]").nth(0).fill("09:00");
+      await day("sat").locator("input[type=time]").nth(1).fill("12:00");
+      await tap(card.locator("[data-ss-phone-my-hours-save]"));
+      await s.page.waitForFunction(() => document.body.innerText.includes("Saved. Your phone rings"), null, { timeout: 8000 }).catch(() => {});
+      const p1 = posts().pop();
+      const b1 = p1 ? JSON.parse(p1.body || "{}") : null;
+      ok("R3 Save sent POST <PHONE_API_BASE>/settings/me with the hours and the zone, the session in the header and not the URL",
+        !!b1 && b1.ring_hours_tz === "America/Denver" && JSON.stringify(b1.ring_hours.sat) === JSON.stringify([["09:00", "12:00"]])
+          && JSON.stringify(b1.ring_hours.mon) === JSON.stringify([["08:00", "17:00"]]) && !b1.ring_hours.sun
+          && p1.authorization === `Bearer ${SESSION.access_token}` && !p1.url.includes(SESSION.access_token), JSON.stringify(b1));
+      ok("R4 the real rule accepted it, and the card says so in words",
+        /Saved\. Your phone rings Mon–Fri 8 AM–5 PM; Sat 9 AM–12 PM \(Mountain time\)\./.test(await said()), (await said()).slice(-160));
+      ok("R4b outside them, it says who rings (nobody chosen: the team, or voicemail)",
+        /Outside your hours, calls skip you and ring your teammates, or go to voicemail\./.test(await said()));
+      await s.page.screenshot({ path: join(shots, "R-your-hours.png"), fullPage: true });
+
+      // A refusal from the rule reaches the screen in its words.
+      await day("tue").locator("input[type=time]").nth(0).fill("18:00");
+      await tap(card.locator("[data-ss-phone-my-hours-save]"));
+      await s.page.waitForFunction(() => document.body.innerText.includes("closing time has to be after"), null, { timeout: 8000 }).catch(() => {});
+      ok("R5 a closing time before the opening is refused with the rule's sentence",
+        /On Tuesday, the closing time has to be after the opening time\./.test(await said()), (await said()).slice(-160));
+      await tap(card.locator("button", { hasText: "Cancel" }));
+      ok("R6 Cancel puts back what is saved", (await day("tue").locator("input[type=time]").nth(0).inputValue()) === "08:00");
+
+      // No day at all is caught before anything is sent.
+      const before = posts().length;
+      await tick(radio("Only during my hours"));
+      for (let i = 0; i < 12 && (await card.locator('button[title="Remove these hours"]').count()); i++) {
+        await tap(card.locator('button[title="Remove these hours"]').first());
+      }
+      await tap(card.locator("[data-ss-phone-my-hours-save]"));
+      await s.page.waitForTimeout(300);
+      ok("R7 a week with no day at all is refused on the page, and nothing is sent",
+        /Add hours to at least one day, or choose Always\./.test(await said()) && posts().length === before, `posts ${before} -> ${posts().length}`);
+
+      // Always: clears them.
+      await tick(radio("Always, whenever the business is open"));
+      await tap(card.locator("[data-ss-phone-my-hours-save]"));
+      await s.page.waitForFunction(() => document.body.innerText.includes("whenever the business is open."), null, { timeout: 8000 }).catch(() => {});
+      const b2 = posts().length > before ? JSON.parse(posts().pop().body || "{}") : null;
+      ok("R8 Always sends ring_hours null and says so", !!b2 && b2.ring_hours === null && !("ring_hours_tz" in b2)
+        && /Saved\. Your phone rings whenever the business is open\./.test(await said()), JSON.stringify(b2));
+    }
+    await s.ctx.close();
+  }
+  {
+    // A Worker that keeps covers but not hours: the card has no hours section.
+    const s = await scenario(browser, { name: "R9", my: { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null } });
+    await s.go("/portal/settings/phone");
+    await s.page.waitForSelector("[data-ss-phone-cover]", { timeout: 15000 }).catch(() => {});
+    ok("R9 a Worker that doesn't keep hours: the cover shows, 'When my phone rings' doesn't",
+      (await s.page.locator("[data-ss-phone-cover]").count()) === 1 && (await s.page.locator("[data-ss-phone-my-hours]").count()) === 0);
+    ok("V6 nor does a Worker that doesn't keep greetings show 'Voicemail greeting'", (await s.page.locator("[data-ss-phone-greeting]").count()) === 0);
+    await s.ctx.close();
+  }
+
+  // ── V. Your calls: your own voicemail greeting, recorded by phone (migration 264) ────────────
+  {
+    const my = { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } };
+    const s = await scenario(browser, { name: "V", my, timezoneId: "America/Denver" });
+    await s.go("/portal/settings/phone");
+    await s.page.waitForSelector("[data-ss-phone-greeting]", { timeout: 15000 }).catch(() => {});
+    const sec = s.page.locator("[data-ss-phone-greeting]");
+    const said = () => sec.innerText().catch(() => "");
+    const reqs = (p, method) => s.vm.filter((r) => r.method === method && new URL(r.url).pathname === p);
+    const rendered = ok("V0 Your calls has 'Voicemail greeting': none yet, Record only (no Play, no standard-greeting button)",
+      (await sec.count()) === 1 && /You haven't recorded one, so callers hear the business's greeting\./.test(await said())
+        && /Record my greeting/.test(await said()) && (await sec.locator("[data-ss-phone-greeting-play]").count()) === 0
+        && (await sec.locator("[data-ss-phone-greeting-clear]").count()) === 0, (await said()).slice(0, 160));
+    ok("V7 the owner's link field says it plays on the shared number, and that everyone records their own",
+      /Plays on calls to the shared number that aren.t for one person\./.test(await s.page.innerText("body").catch(() => ""))
+        && /Everyone can record their own greeting under Your calls\./.test(await s.page.innerText("body").catch(() => "")));
+    if (rendered) {
+      await tap(sec.locator("[data-ss-phone-greeting-record]"));
+      await s.page.waitForFunction(() => document.body.innerText.includes("My Synergy Phone will ring now"), null, { timeout: 8000 }).catch(() => {});
+      const rec = reqs("/settings/me/greeting/record", "POST").pop();
+      ok("V1 Record sent POST <PHONE_API_BASE>/settings/me/greeting/record, the session in the header and not the URL, and says the phone will ring",
+        !!rec && rec.authorization === `Bearer ${SESSION.access_token}` && !rec.url.includes(SESSION.access_token)
+          && /My Synergy Phone will ring now\. Answer it and speak after the tone\./.test(await said()), (await said()).slice(-160));
+      // The card looks for the new greeting every few seconds (PHONE_GREETING_POLL_MS).
+      await s.page.waitForFunction(() => document.body.innerText.includes("Your new greeting is saved."), null, { timeout: 15000 }).catch(() => {});
+      ok("V2 once the recording lands it says so, and when it was recorded",
+        /Your new greeting is saved\./.test(await said()) && /Your own greeting, recorded Oct 5\./.test(await said())
+          && /Record a new greeting/.test(await said()), (await said()).slice(0, 200));
+      await tap(sec.locator("[data-ss-phone-greeting-play]"));
+      await s.page.waitForSelector("[data-ss-phone-greeting-audio]", { timeout: 8000 }).catch(() => {});
+      const audio = reqs("/settings/me/greeting/audio", "GET").pop();
+      const src = await sec.locator("[data-ss-phone-greeting-audio]").getAttribute("src").catch(() => "");
+      ok("V3 Play fetches GET <PHONE_API_BASE>/settings/me/greeting/audio with the session in the header, and plays a blob: URL",
+        !!audio && audio.authorization === `Bearer ${SESSION.access_token}` && !audio.url.includes(SESSION.access_token) && /^blob:/.test(src || ""), src || "no <audio>");
+      await s.page.screenshot({ path: join(shots, "V-your-greeting.png"), fullPage: true });
+      await tap(sec.locator("[data-ss-phone-greeting-clear]"));
+      await s.page.waitForFunction(() => document.body.innerText.includes("Done. Callers hear the business's greeting."), null, { timeout: 8000 }).catch(() => {});
+      ok("V4 'Use the standard greeting' (after a confirm) sends POST .../greeting/clear and the card goes back to none",
+        reqs("/settings/me/greeting/clear", "POST").length === 1 && /You haven't recorded one/.test(await said())
+          && (await sec.locator("[data-ss-phone-greeting-audio]").count()) === 0, (await said()).slice(0, 200));
+      s.state.greetRefuse = "Your phone is already ringing for your greeting. Try again in half a minute.";
+      await tap(sec.locator("[data-ss-phone-greeting-record]"));
+      await s.page.waitForFunction(() => document.body.innerText.includes("already ringing for your greeting"), null, { timeout: 8000 }).catch(() => {});
+      ok("V5 a refusal reaches the screen in the Worker's own words, and nothing waits on it",
+        /Your phone is already ringing for your greeting\. Try again in half a minute\./.test(await said()) && /Record my greeting/.test(await said()), (await said()).slice(-160));
+    }
+    await s.ctx.close();
+  }
+
+  // ── W. Who reaches Your calls ─────────────────────────────────────────────────────────────
+  {
+    // A sales rep: phone 'own' and no settings area at all (the real preset). The apps' "Change in
+    // Structure Studio" button opens /portal/settings/phone; before Phone joined SETTINGS_AREAS
+    // that clamped them to Designs, with no Settings anywhere.
+    const my = { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } };
+    const s = await scenario(browser, { name: "W", role: "user", access: PRESETS.sales_rep, my, timezoneId: "America/Denver" });
+    await s.go("/portal/settings/phone");
+    await s.page.waitForSelector("[data-ss-phone-my-hours]", { timeout: 15000 }).catch(() => {});
+    const path = await s.page.evaluate(() => location.pathname);
+    const rail = await s.page.evaluate(() => [...document.querySelectorAll(".ss-side.ss-side-settings .ss-nav a")]
+      .map((a) => new URL(a.href).pathname).filter((p) => p.startsWith("/portal/settings/")));
+    ok("W1 a sales rep's /portal/settings/phone stays put (not their fallback page)", path === "/portal/settings/phone", path);
+    ok("W2 their Settings rail is exactly Phone and My Profile", JSON.stringify(rail) === JSON.stringify(["/portal/settings/phone", "/portal/settings/myprofile"]), JSON.stringify(rail));
+    ok("W3 the Phone tab is their own view, with Your calls: who covers, their hours and their greeting",
+      (await s.page.locator('[data-ss-phone-settings="own"]').count()) === 1 && (await s.page.locator("[data-ss-phone-cover]").count()) === 1
+        && (await s.page.locator("[data-ss-phone-my-hours]").count()) === 1 && (await s.page.locator("[data-ss-phone-greeting]").count()) === 1);
+    await s.page.screenshot({ path: join(shots, "W-sales-rep-your-calls.png"), fullPage: true });
+    await s.go("/portal/settings");
+    ok("W4 a bare /portal/settings is Settings for them too, landing on Phone", (await s.page.evaluate(() => location.pathname)).startsWith("/portal/settings")
+      && (await s.page.locator("[data-ss-phone-yours]").count()) === 1, await s.page.evaluate(() => location.pathname));
+    await s.ctx.close();
+  }
+  {
+    // A Worker from before 264: GET /settings/me is 405 "That method isn't allowed here."
+    const s = await scenario(browser, { name: "W5", my: { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null }, oldWorker: true });
+    await s.go("/portal/settings/phone");
+    await s.page.waitForSelector('[data-ss-phone-settings="team"]', { timeout: 15000 }).catch(() => {});
+    await s.page.waitForTimeout(800);
+    const body = await s.page.innerText("body").catch(() => "");
+    ok("W5 an older Worker (405 on GET /settings/me): the Phone tab renders, with no Your calls card and no fault on screen",
+      (await s.page.locator('[data-ss-phone-settings="team"]').count()) === 1 && (await s.page.locator("[data-ss-phone-yours]").count()) === 0
+        && !/isn't allowed/.test(body), (body.match(/.{0,60}isn't allowed.{0,20}/) || [""])[0]);
     await s.ctx.close();
   }
 

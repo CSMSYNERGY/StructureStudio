@@ -118,6 +118,59 @@ describe("recording sweep (*/15)", () => {
     expect(net.reads("phone_voicemails")).toEqual([]);
   });
 
+  it("never files a voicemail GREETING (migration 264): a <Record> on the ring the Worker placed (outbound-api) is not a voicemail", async () => {
+    const net = new FakeNet().install();
+    const env = makeEnv();
+    installDenoShim(env);
+    net.on("GET", /\/Recordings\.json\?/, () => jsonRes({
+      recordings: [
+        { sid: RE(11), call_sid: CA(11), source: "RecordVerb", status: "completed", duration: "9", date_created: "Tue, 29 Sep 2026 11:45:00 +0000" },
+      ],
+      next_page_uri: null,
+    }));
+    net.rest("GET", "phone_voicemails", () => []);
+    net.rest("GET", "phone_calls", () => []); // the ring has no phone_calls row
+    // From the business number To the person's own app, placed through the REST API.
+    net.on("GET", /\/Calls\/CA0+11\.json$/, () => jsonRes({
+      sid: CA(11), from: BUSINESS_NUMBER, to: "client:u_000000000000400080000000000000a1_g1", direction: "outbound-api", status: "completed", start_time: null,
+    }));
+    net.rpc("phone_route_for_number", () => routeInfo());
+    net.rest("POST", "app_errors", () => []);
+
+    expect(await recordingSweep(env, new Date("2026-09-29T12:00:00Z"))).toEqual({ checked: 1, filed: 0 });
+    expect(net.writes("phone_voicemails")).toEqual([]);
+    expect(net.writes("phone_calls")).toEqual([]);
+    expect(net.rpcCalls("phone_route_for_number")).toEqual([]);
+  });
+
+  it("stored greetings never take the per-run slots: a missed voicemail behind 60 newer greetings is still filed", async () => {
+    const net = new FakeNet().install();
+    const env = makeEnv();
+    installDenoShim(env);
+    // 60 people's stored greetings (more than MAX_PER_RUN), newest first, then one missed voicemail.
+    const greets = Array.from({ length: 60 }, (_, i) => (
+      { sid: RE(2000 + i), call_sid: CA(2000 + i), source: "RecordVerb", status: "completed", duration: "9", date_created: "Tue, 29 Sep 2026 11:59:00 +0000" }
+    ));
+    net.on("GET", /\/Recordings\.json\?/, () => jsonRes({
+      recordings: [...greets, { sid: RE(2), call_sid: CA(2), source: "RecordVerb", status: "completed", duration: "20", date_created: "Tue, 29 Sep 2026 11:40:00 +0000" }],
+      next_page_uri: null,
+    }));
+    net.rest("GET", "phone_voicemails", () => []);
+    net.rest("GET", "phone_user_settings", () => greets.map((g) => ({ greeting_recording_sid: g.sid })));
+    net.rest("GET", "phone_calls", (s) => (filter(s, "id") === KNOWN_CALL
+      ? [{ id: KNOWN_CALL, client_id: CLIENT, rang_user_ids: [], transfer_state: null }]
+      : [{ id: KNOWN_CALL, twilio_call_sid: CA(2) }]));
+    net.rest("POST", "phone_voicemails", () => []);
+    net.rest("PATCH", "phone_calls", () => []);
+    net.rest("POST", "phone_call_events", () => []);
+    net.rest("POST", "app_errors", () => []);
+
+    expect(await recordingSweep(env, new Date("2026-09-29T12:00:00Z"))).toEqual({ checked: 61, filed: 1 });
+    expect(net.writes("phone_voicemails").map((s) => s.json)).toEqual([{ call_id: KNOWN_CALL, client_id: CLIENT, recording_sid: RE(2), duration_s: 20 }]);
+    expect(net.reads("phone_user_settings")[0].url.searchParams.get("select")).toBe("greeting_recording_sid");
+    expect(net.to(/\/Calls\/CA[0-9]+\.json$/)).toEqual([]); // no Twilio call lookups spent on greetings
+  });
+
   it("reads the list to the end, past the old 200 cap: a voicemail behind 250 call recordings is still filed", async () => {
     const net = new FakeNet().install();
     const env = makeEnv();

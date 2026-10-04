@@ -1,8 +1,8 @@
-// /health, CORS, /settings/me, /devices, /devices/forget, /devices/signout-all, /log, /turn, /calls/:id/events,
+// /health, CORS, /settings/me (POST and GET), /devices, /devices/forget, /devices/signout-all, /log, /turn, /calls/:id/events,
 // /voicemails/:id/audio.
 import { describe, expect, it } from "vitest";
 import {
-  Auth, BASE, BUSINESS_NUMBER, CLIENT, CUSTOMER, FakeNet, USER_A, USER_B,
+  Auth, BASE, BUSINESS_NUMBER, CLIENT, CUSTOMER, FakeNet, USER_A, USER_B, USER_C,
   appRequest, call, callerCtx, filter, jsonRes, makeEnv,
 } from "./helpers";
 import { logRef } from "../src/logPrivacy";
@@ -71,7 +71,7 @@ describe("POST /settings/me", () => {
     const { net, token, env } = await setup();
     net.rest("POST", "phone_user_settings", (s) => [{ dnd: s.json.dnd, dnd_until: null, forward_to_cell: s.json.forward_to_cell }]);
     const { json } = await call(env, appRequest("POST", "/settings/me", token, { dnd: true, forward_to_cell: "(555) 555-0177" }));
-    expect(json).toEqual({ ok: true, settings: { dnd: true, dnd_until: null, forward_to_cell: "+15555550177" } });
+    expect(json).toEqual({ ok: true, settings: { dnd: true, dnd_until: null, forward_to_cell: "+15555550177", dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } } });
     const w = net.writes("phone_user_settings")[0];
     expect(w.json).toMatchObject({ user_id: USER_A, client_id: CLIENT, dnd: true, forward_to_cell: "+15555550177" });
     expect(w.url.searchParams.get("on_conflict")).toBe("user_id");
@@ -87,6 +87,156 @@ describe("POST /settings/me", () => {
     const { token, env } = await setup();
     const { json } = await call(env, appRequest("POST", "/settings/me", token, body));
     expect(json.error).toEqual({ code: "bad_request", message });
+  });
+
+  // Migration 264: who rings in your place while you're away.
+  describe("the cover (dnd_cover_user_id)", () => {
+    async function coverSetup(cover: Record<string, unknown> | null = callerCtx({ full_name: "Cora Cover" })) {
+      const s = await setup();
+      // The caller is USER_A; anyone else asked about is the cover.
+      s.net.rpc("phone_caller_context", (q) => (q.json.p_user_id === USER_A ? callerCtx() : cover));
+      s.net.rest("POST", "phone_user_settings", (q) => [{ dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: q.json.dnd_cover_user_id ?? null }]);
+      return s;
+    }
+
+    it("saves a teammate on the same business with phone access, and echoes them", async () => {
+      const { net, token, env } = await coverSetup();
+      const { json } = await call(env, appRequest("POST", "/settings/me", token, { dnd_cover_user_id: USER_C.toUpperCase() }));
+      expect(json).toEqual({ ok: true, settings: { dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: USER_C, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } } });
+      expect(net.writes("phone_user_settings")[0].json).toMatchObject({ user_id: USER_A, client_id: CLIENT, dnd_cover_user_id: USER_C });
+      // Checked against the cover's own context, not trusted from the body.
+      expect(net.rpcCalls("phone_caller_context").map((r) => r.json.p_user_id)).toContain(USER_C);
+    });
+
+    it.each([null, ""])("%j clears it, with no check to make", async (v) => {
+      const { net, token, env } = await coverSetup();
+      const { json } = await call(env, appRequest("POST", "/settings/me", token, { dnd_cover_user_id: v }));
+      expect(json.settings.dnd_cover_user_id).toBeNull();
+      expect(net.writes("phone_user_settings")[0].json.dnd_cover_user_id).toBeNull();
+      expect(net.rpcCalls("phone_caller_context").map((r) => r.json.p_user_id)).toEqual([USER_A]);
+    });
+
+    it("leaves it alone when the body doesn't mention it (an older app saving DND)", async () => {
+      const { net, token, env } = await coverSetup();
+      await call(env, appRequest("POST", "/settings/me", token, { dnd: true }));
+      expect("dnd_cover_user_id" in net.writes("phone_user_settings")[0].json).toBe(false);
+    });
+
+    it.each([
+      ["yourself", USER_A, callerCtx()],
+      ["not an id", "Cora", callerCtx()],
+      ["a number", 42, callerCtx()],
+      ["someone on another business", USER_C, callerCtx({ client_id: "other-tenant" })],
+      ["a teammate without phone access", USER_C, callerCtx({ phone_level: "none" })],
+      ["someone on no team", USER_C, null],
+    ])("refuses %s, and saves nothing", async (_l, v, cover) => {
+      const { net, token, env } = await coverSetup(cover);
+      const { json } = await call(env, appRequest("POST", "/settings/me", token, { dnd: true, dnd_cover_user_id: v }));
+      expect(json.error).toEqual({ code: "bad_request", message: "That teammate can't take calls." });
+      expect(net.writes("phone_user_settings")).toEqual([]);
+    });
+  });
+
+  // Migration 264: the hours your phone rings, in the zone you set them in.
+  describe("your own hours (ring_hours, ring_hours_tz)", () => {
+    async function hoursSetup() {
+      const s = await setup();
+      s.net.rest("POST", "phone_user_settings", (q) => [{
+        dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null,
+        ring_hours: q.json.ring_hours ?? null, ring_hours_tz: q.json.ring_hours_tz ?? null,
+      }]);
+      return s;
+    }
+    const save = async (body: Record<string, unknown>) => {
+      const s = await hoursSetup();
+      const out = await call(s.env, appRequest("POST", "/settings/me", s.token, body));
+      return { ...out, net: s.net };
+    };
+
+    it("saves hours with their zone, each day's times in order, and echoes them", async () => {
+      const { json, net } = await save({ ring_hours: { fri: [["13:00", "16:00"], ["08:00", "12:00"]], mon: [["08:00", "17:00"]], sun: [] }, ring_hours_tz: "America/Denver" });
+      const hours = { fri: [["08:00", "12:00"], ["13:00", "16:00"]], mon: [["08:00", "17:00"]] };
+      expect(json.settings).toEqual({ dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: hours, ring_hours_tz: "America/Denver", greeting: { set: false, updated_at: null } });
+      expect(net.writes("phone_user_settings")[0].json).toMatchObject({ user_id: USER_A, client_id: CLIENT, ring_hours: hours, ring_hours_tz: "America/Denver" });
+    });
+
+    it("null is always: it clears the hours (the zone may stay)", async () => {
+      const { json, net } = await save({ ring_hours: null });
+      expect(json.settings.ring_hours).toBeNull();
+      expect(net.writes("phone_user_settings")[0].json.ring_hours).toBeNull();
+      expect("ring_hours_tz" in net.writes("phone_user_settings")[0].json).toBe(false);
+    });
+
+    it("leaves them alone when the body doesn't mention them (an app saving DND)", async () => {
+      const { net } = await save({ dnd: true });
+      const w = net.writes("phone_user_settings")[0].json;
+      expect("ring_hours" in w || "ring_hours_tz" in w).toBe(false);
+    });
+
+    it("a zone on its own is saved, and \"\" clears it", async () => {
+      expect((await save({ ring_hours_tz: "America/Phoenix" })).net.writes("phone_user_settings")[0].json.ring_hours_tz).toBe("America/Phoenix");
+      expect((await save({ ring_hours_tz: "" })).net.writes("phone_user_settings")[0].json.ring_hours_tz).toBeNull();
+    });
+
+    it.each([
+      ["times that overlap", { ring_hours: { wed: [["08:00", "12:00"], ["11:00", "15:00"]] }, ring_hours_tz: "America/Chicago" }, "Wednesday's times overlap."],
+      ["a list instead of days", { ring_hours: [["08:00", "17:00"]], ring_hours_tz: "America/Chicago" }, "Your hours were not in a shape we recognise."],
+      ["a word instead of hours", { ring_hours: "weekdays", ring_hours_tz: "America/Chicago" }, "Your hours were not in a shape we recognise."],
+      ["a day that isn't one", { ring_hours: { funday: [["08:00", "17:00"]] }, ring_hours_tz: "America/Chicago" }, "Your hours were not in a shape we recognise."],
+      ["a closing time before the opening", { ring_hours: { tue: [["17:00", "08:00"]] }, ring_hours_tz: "America/Chicago" }, "On Tuesday, the closing time has to be after the opening time."],
+      ["a time that isn't hours and minutes", { ring_hours: { thu: [["8am", "5pm"]] }, ring_hours_tz: "America/Chicago" }, "Thursday has a time that isn't in hours and minutes."],
+      ["no day at all", { ring_hours: {}, ring_hours_tz: "America/Chicago" }, "Add hours to at least one day, or choose Always."],
+      ["only empty days", { ring_hours: { mon: [], tue: [] }, ring_hours_tz: "America/Chicago" }, "Add hours to at least one day, or choose Always."],
+      ["a zone nobody knows", { ring_hours: { mon: [["08:00", "17:00"]] }, ring_hours_tz: "Mars/Olympus_Mons" }, "That time zone isn't one we know. Pick it from the list."],
+      ["a zone that isn't a name", { ring_hours_tz: 42 }, "That time zone isn't one we know. Pick it from the list."],
+      ["hours without a zone", { ring_hours: { mon: [["08:00", "17:00"]] } }, "Choose the time zone your hours are in."],
+      ["hours with the zone cleared", { ring_hours: { mon: [["08:00", "17:00"]] }, ring_hours_tz: null }, "Choose the time zone your hours are in."],
+    ])("refuses %s, and saves nothing", async (_l, body, message) => {
+      const { json, net } = await save({ dnd: true, ...body });
+      expect(json.error).toEqual({ code: "bad_request", message });
+      expect(net.writes("phone_user_settings")).toEqual([]);
+    });
+  });
+});
+
+describe("GET /settings/me", () => {
+  it("reads your own row, cover included, even while calling is off", async () => {
+    const { net, token, env } = await setup(callerCtx({ phone_status: "off" }));
+    net.rest("GET", "phone_user_settings", () => [{ dnd: true, dnd_until: null, forward_to_cell: "+15555550177", dnd_cover_user_id: USER_B }]);
+    const { json } = await call(env, appRequest("GET", "/settings/me", token));
+    expect(json).toEqual({ ok: true, settings: { dnd: true, dnd_until: null, forward_to_cell: "+15555550177", dnd_cover_user_id: USER_B, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } } });
+    expect(filter(net.reads("phone_user_settings")[0], "user_id")).toBe(USER_A);
+  });
+
+  it("reads your own hours and their zone (migration 264)", async () => {
+    const { net, token, env } = await setup();
+    const hours = { mon: [["08:00", "17:00"]], tue: [["08:00", "12:00"]] };
+    net.rest("GET", "phone_user_settings", () => [{ dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: hours, ring_hours_tz: "America/Denver" }]);
+    const { json } = await call(env, appRequest("GET", "/settings/me", token));
+    expect(json.settings).toMatchObject({ ring_hours: hours, ring_hours_tz: "America/Denver" });
+    expect(net.reads("phone_user_settings")[0].url.searchParams.get("select")).toContain("ring_hours_tz");
+  });
+
+  it("someone who never saved anything reads the defaults", async () => {
+    const { net, token, env } = await setup();
+    net.rest("GET", "phone_user_settings", () => []);
+    const { json } = await call(env, appRequest("GET", "/settings/me", token));
+    expect(json.settings).toEqual({ dnd: false, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } });
+  });
+
+  it("an ended DND reads off, and someone without phone access is refused", async () => {
+    const { net, token, env } = await setup();
+    net.rest("GET", "phone_user_settings", () => [{ dnd: true, dnd_until: "2000-01-01T00:00:00Z", forward_to_cell: null, dnd_cover_user_id: null }]);
+    expect((await call(env, appRequest("GET", "/settings/me", token))).json.settings.dnd).toBe(false);
+    const none = await setup(callerCtx({ phone_level: "none" }));
+    expect((await call(none.env, appRequest("GET", "/settings/me", none.token))).json.error.code).toBe("no_phone_access");
+  });
+
+  it("answers the portal's origin (the Your calls card reads it from there)", async () => {
+    const { net, token, env } = await setup();
+    net.rest("GET", "phone_user_settings", () => []);
+    const { res } = await call(env, appRequest("GET", "/settings/me", token, undefined, { origin: "https://beta.structurestudiosuite.com" }));
+    expect(res.headers.get("access-control-allow-origin")).toBe("https://beta.structurestudiosuite.com");
   });
 });
 
