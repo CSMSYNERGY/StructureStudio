@@ -2649,6 +2649,16 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     ? ([sel.style, sel.size].filter(Boolean).join(" ") || (record && record.short_code) || "Design")
     : cname;
 
+  // A composer renders only while ITS TAB IS ENABLED, not merely while it is the remembered
+  // `tab`. The two drift apart in ordinary use: `tab` starts on "note", so a contact opened
+  // with no deal picked showed a live note box under a greyed Notes tab whose hint says to pick
+  // a deal first — and saved the note with shortCode null, the exact thing the picker exists to
+  // stop. Clearing a pick, or picking a deal that is not accepted while Invoice is open, left
+  // the old tab's panel live the same way. The tab's own predicate is the one answer.
+  const tabOn = (key) => {
+    const t = CRM_TABS.find((x) => x.key === key);
+    return !!t && (!t.when || t.when(ctx)) && t.enabled(ctx);
+  };
   const chips = CRM_CHIPS.filter((c) => !c.when || c.when(ctx));
   const active = chips.find((c) => c.key === chip) || chips[0];
   const feed = (data.feed || []).filter((e) => !active.types || active.types.indexOf(e.type) !== -1);
@@ -3597,7 +3607,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
 
             {/* The thread opened in My Synergy Phone instead of here. One link back to the composer,
                 because a person who wants to type it here should never be stuck. */}
-            {tab === "sms" && canEdit && data.contact && data.contact.phone && smsViaPhone && (
+            {tab === "sms" && tabOn("sms") && canEdit && data.contact && data.contact.phone && smsViaPhone && (
               <div style={{ marginBottom: 12 }} data-ss-phone-panel="text">
                 {phoneUi.kind === "checking" ? (
                   <div style={{ fontSize: 12.5, color: "#64748B" }}>Opening the conversation in My Synergy Phone…</div>
@@ -3612,7 +3622,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 )}
               </div>
             )}
-            {tab === "sms" && canEdit && data.contact && data.contact.phone && !smsViaPhone && (
+            {tab === "sms" && tabOn("sms") && canEdit && data.contact && data.contact.phone && !smsViaPhone && (
               <div style={{ marginBottom: 12 }}>
                 {/* Why the composer is here rather than My Synergy Phone, when that is news. */}
                 {phoneUi && phoneUi.what === "text" && phoneUi.kind === "install" && <SsPhoneInstallCard what="text" compact />}
@@ -3719,7 +3729,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 )}
               </div>
             )}
-            {tab === "email" && canEdit && data.contact && data.contact.email && (
+            {tab === "email" && tabOn("email") && canEdit && data.contact && data.contact.email && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 5 }}>
                   To <strong>{data.contact.email}</strong> — replies come back to you, not to a no-reply address.
@@ -3752,7 +3762,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 untouched. Tenants have meeting and lunch rows already logged, and a chip
                 the composer no longer offers is not the same thing as a kind the history
                 can no longer render. Removing them server-side would blank those rows. */}
-            {tab === "activity" && canEdit && (
+            {tab === "activity" && tabOn("activity") && canEdit && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
                   {["call", "task", "deadline"].map((k) => (
@@ -3787,7 +3797,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 (Carolyn 2026-08-26 24:01: "the top part is about things to do. The bottom
                 part is about history"). Uploading IS something you do, so the button stays
                 here; the files it produces belong down there. */}
-            {tab === "files" && canEdit && data.contact && data.contact.id && (
+            {tab === "files" && tabOn("files") && canEdit && data.contact && data.contact.id && (
               <div style={{ marginBottom: 12 }}>
                 <label style={{
                   display: "inline-block", ...S.btn(ACCENT, "#FFF"),
@@ -3809,7 +3819,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 and the schedule already are — a second invoice button on a second screen is
                 how two sources of truth for money get built. So this routes rather than
                 duplicates, and says plainly what the customer still has to do. */}
-            {tab === "invoice" && (kind === "design" ? record : activeDeal) && (
+            {tab === "invoice" && tabOn("invoice") && (kind === "design" ? record : activeDeal) && (
               <div style={{ marginBottom: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 13px" }}>
                 <div style={{ fontSize: 12.5, color: "#475569" }}>
                   This quote is accepted, so it can be invoiced. Invoicing happens on the order — with the
@@ -3837,7 +3847,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 2026-09-02: "this black outline ... is sooo annoying." The SMS composer a
                 few lines up was written later against the real token, which is why that
                 one alone looked right. */}
-            {tab === "note" && canEdit && (
+            {tab === "note" && tabOn("note") && canEdit && (
               <div style={{ marginBottom: 12 }}>
                 <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={2}
                   placeholder="Click here to add a note…"
