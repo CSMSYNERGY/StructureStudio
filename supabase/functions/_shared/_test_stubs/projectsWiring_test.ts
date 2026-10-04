@@ -39,3 +39,21 @@ Deno.test("reorder_item refuses a group on another board BEFORE it reads or writ
 Deno.test("move_items still never moves across boards", () => {
   assert(/\.eq\("board_id", dest\.board_id\)/.test(MOVE), "move_items lost its board_id filter");
 });
+
+// A cross-app report (app-feedback, migration 161) has client_id NULL, so no tenant can ever
+// read a comment on it. Both publishing paths must refuse BEFORE writing the feedback_comments
+// copy, or the drawer reports VISIBLE TO CLIENT for a note nobody will see.
+const ADD = block(PROJECTS, 'case "add_update": {', 'case "publish_update": {', "add_update");
+const PUBLISH = block(PROJECTS, 'case "publish_update": {', 'case "edit_update": {', "publish_update");
+const AUDIENCE = block(PROJECTS, "const noAudienceRefusal = async", "\n  };\n", "noAudienceRefusal");
+
+Deno.test("publishing to a submission with no tenant is refused before the client copy is written", () => {
+  assert(/\.select\("client_id, source_app"\)/.test(AUDIENCE) && /if \(sub && sub\.client_id\) return null;/.test(AUDIENCE),
+    "noAudienceRefusal no longer lets through only a submission that has a client_id");
+  for (const [label, src] of [["add_update", ADD], ["publish_update", PUBLISH]] as const) {
+    const check = src.indexOf("noAudienceRefusal(item.feedback_submission_id)");
+    const copy = src.indexOf('.from("feedback_comments").insert(');
+    assert(check >= 0, `${label} no longer asks noAudienceRefusal`);
+    assert(copy > check, `${label} writes the client copy before checking anyone can read it`);
+  }
+});

@@ -484,6 +484,23 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
     if (!clientId || internal) return null;
     return `${who} signs in as a member of the "${clientId}" account, so they cannot be given operator access — that would let one builder's staff open every other builder's account. Give them a separate CSM Synergy login first.`;
   };
+  // Who would read a note published on this submission? Returns a refusal sentence, or null.
+  //
+  // A report from another PRODUCT (app-feedback, migration 161) carries client_id NULL, and
+  // feedback_comments is readable only through `client_id = current_client_id()`, which NULL
+  // never satisfies — nor do those apps have any read path back. A "client-visible" note there
+  // reaches nobody, while the drawer tagged it VISIBLE TO CLIENT ✓ after a confirm promising
+  // "They will see it in My Requests". Refused, so an operator never believes a FramedUp or
+  // BuildBridge reporter was answered when they were not.
+  const noAudienceRefusal = async (submissionId: string): Promise<string | null> => {
+    const { data: sub, error } = await admin.from("feedback_submissions")
+      .select("client_id, source_app").eq("id", submissionId).maybeSingle();
+    if (error) throw error;
+    if (sub && sub.client_id) return null;
+    const app = sub ? (APP_LABELS_ORIGIN[String(sub.source_app)] || String(sub.source_app || "")) : "";
+    return `${app ? `This was reported in ${app}, which` : "This submission"} has no client portal to publish to — keep the note internal.`;
+  };
+
   // deno-lint-ignore no-explicit-any
   const getItem = async (id: string): Promise<any> => {
     const { data, error } = await admin.from("pm_items").select("*").eq("id", str(id, 40)).maybeSingle();
@@ -1770,6 +1787,10 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (clientVisible && !item.feedback_submission_id) {
           return json({ error: "This item isn't linked to a client submission — there is nobody to publish to." }, 400);
         }
+        if (clientVisible) {
+          const refusal = await noAudienceRefusal(item.feedback_submission_id);
+          if (refusal) return json({ error: refusal }, 400);
+        }
         let feedbackCommentId: string | null = null;
         if (clientVisible) {
           const { data: comment, error } = await admin.from("feedback_comments").insert({
@@ -1801,6 +1822,8 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (!item.feedback_submission_id) {
           return json({ error: "This item isn't linked to a client submission — there is nobody to publish to." }, 400);
         }
+        const pubRefusal = await noAudienceRefusal(item.feedback_submission_id);
+        if (pubRefusal) return json({ error: pubRefusal }, 400);
         const { data: comment, error: cErr } = await admin.from("feedback_comments").insert({
           submission_id: item.feedback_submission_id, monday_update_id: null,
           author_name: "CSM Synergy", body: u.body,

@@ -305,6 +305,14 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
   useEffect(() => { loadDetail(); }, [loadDetail]);
 
   const sub = detail && detail.submission;
+  // A report from another PRODUCT (Framed UP, BuildBridge, CSM Studio — migration 161) is linked
+  // exactly like a builder's, but carries no client_id: no portal will ever show it a note, and
+  // portal-projects refuses to publish there. Defaulting those cards to "Visible to client" put
+  // a false "They will see it in My Requests" confirm on every reply. Until get_item answers,
+  // a linked card is assumed to be a builder's, as before.
+  const crossApp = !!(sub && !sub.client_id);
+  const canPublish = !!item.feedback_submission_id && !crossApp;
+  useEffect(() => { if (crossApp) setToClient(false); }, [crossApp]);
   const post = async () => {
     const body = compose.trim();
     if (!body || busy) return;
@@ -327,7 +335,7 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
     // The note EXISTS from here on, so the composer is cleared whatever happens to its files.
     // Back to the card's own default, NOT to false — resetting to false after each post
     // re-creates the original bug one reply later, which is exactly how it would come back.
-    setCompose(""); setToClient(Boolean(item && item.feedback_submission_id)); setFiles([]);
+    setCompose(""); setToClient(canPublish); setFiles([]);
     if (fileRef.current) fileRef.current.value = "";
     // Files attach to the update that was just created, so a failed upload leaves the
     // note itself intact and says which file did not make it.
@@ -414,9 +422,11 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
             <textarea rows={3} placeholder="Add a note or update…" style={{ ...S.input, resize: "vertical", fontWeight: 500 }}
               value={compose} onChange={(e) => setCompose(e.target.value)} />
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-              <label style={{ fontSize: 12, fontWeight: 600, color: item.feedback_submission_id ? "#334155" : "#94A3B8", display: "flex", alignItems: "center", gap: 5 }}
-                title={item.feedback_submission_id ? "Publishes this one note to the client's My Requests feed" : "This item isn't linked to a client submission"}>
-                <input type="checkbox" checked={toClient} disabled={!item.feedback_submission_id}
+              <label style={{ fontSize: 12, fontWeight: 600, color: canPublish ? "#334155" : "#94A3B8", display: "flex", alignItems: "center", gap: 5 }}
+                title={canPublish ? "Publishes this one note to the client's My Requests feed"
+                  : crossApp ? "Reported in another app — there is no client portal to publish to"
+                  : "This item isn't linked to a client submission"}>
+                <input type="checkbox" checked={toClient} disabled={!canPublish}
                   onChange={(e) => setToClient(e.target.checked)} />
                 Visible to client
               </label>
@@ -460,7 +470,7 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
               <span style={{ fontSize: 11.5, color: "#94A3B8" }}>{pmStamp(u.created_at)}{u.edited_at ? " · edited" : ""}</span>
               {fromClient ? tag("#E0E7FF", "#4338CA", "FROM CLIENT")
                 : u.client_visible ? tag("#CCF1EC", "#0F766E", "VISIBLE TO CLIENT ✓") : tag("#F1F5F9", "#64748B", "INTERNAL")}
-              {canWrite && !u.client_visible && item.feedback_submission_id && (
+              {canWrite && !u.client_visible && canPublish && (
                 <button type="button" style={{ background: "none", border: "none", color: "#1B7895", fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0 }}
                   onClick={() => publishExisting(u)}>Publish to client…</button>
               )}
