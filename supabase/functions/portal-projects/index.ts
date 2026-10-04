@@ -1108,6 +1108,19 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const item = await getItem(payload.id);
         const beforeId = str(payload.beforeId, 40);  // the row the item lands ABOVE
         const groupId = str(payload.groupId, 40) || item.group_id;
+        // ⚠️ NEVER ACROSS BOARDS — the rule move_items enforces with its board_id filter, which
+        // this action never had. On an overlay board every row is draggable, so dropping a card
+        // pulled in from Bugs onto one of the working board's own rows sent THAT row's group,
+        // and the Bugs card was rewritten into another board's group: still board_id = Bugs, so
+        // on the board its reporter's team works it fell out of its group into the unnamed "—"
+        // bucket. The reverse drop sent the synthetic "overlay:<slug>" group id and died as a
+        // raw uuid-cast 500. Either way the answer is a refusal, before anything is written.
+        if (groupId !== item.group_id) {
+          const { data: dest } = await admin.from("pm_groups").select("id, board_id").eq("id", groupId).maybeSingle();
+          if (!dest || dest.board_id !== item.board_id) {
+            return json({ error: "That row lives on another board — reorder it on its own board." }, 400);
+          }
+        }
         const { data: rows, error: rErr } = await admin.from("pm_items")
           .select("id, position").eq("group_id", groupId).is("archived_at", null).order("position");
         if (rErr) throw rErr;

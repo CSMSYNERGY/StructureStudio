@@ -1379,9 +1379,22 @@ function ProjectsTab({ sub, onSub }) {
     });
     return addItem(name, null, values);
   };
+  // A row pulled in from another board (item.overlay) keeps its REAL group on its own board;
+  // the groups shown here are this board's. Moving or reordering one by group would either do
+  // nothing server-side while the optimistic patch showed it moved (move_items filters on
+  // board_id), or — before reorder_item refused it — rewrite the card into a group on a board
+  // it does not live on. Column-bucket drops are fine: they are value edits, remapped by
+  // update_item through fromBoardId.
+  const overlayGroupRefusal = (item, target) => {
+    const foreign = item && item.overlay ? item : (target && target.overlay ? target : null);
+    if (!foreign) return false;
+    setErr(`"${foreign.name}" lives on ${foreign.home_board_name || "another board"} — move or reorder it there. Here you can change its cells.`);
+    return true;
+  };
   const onDropToGroup = (item, g) => {
     if (view.groupBy === "groups") {
       if (!g.isRealGroup || g.key === item.group_id) return;
+      if (overlayGroupRefusal(item, null)) return;
       callOrReload({ action: "move_items", ids: [item.id], groupId: g.key },
         () => mutateItem(item.id, { group_id: g.key }));
     } else {
@@ -1396,6 +1409,7 @@ function ProjectsTab({ sub, onSub }) {
   };
   const onDropOnRow = (item, target) => {
     if (view.groupBy === "groups") {
+      if (overlayGroupRefusal(item, target)) return;
       pmCall({ action: "reorder_item", id: item.id, beforeId: target.id, groupId: target.group_id })
         .then(reload)
         .catch((e) => { setErr(e.message); reload(); });
