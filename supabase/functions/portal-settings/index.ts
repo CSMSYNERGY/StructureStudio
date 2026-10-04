@@ -78,6 +78,7 @@ import { WALK_FRAME_MAX, wingsAgreementWarning, wantsV2Prompt } from "../_shared
 // A raised foundation's save carry-forward (2026-09-25), on its own line for the same reason.
 import { carryForwardFoundation } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
+import { rtpImportNumber, rtpImportOverhead } from "../_shared/rtpImportValues.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { runAutoTopup } from "../_shared/walletAutoTopup.ts";
 // The multi-round self-check (v2), on its own line so the generation's import above stays untouched.
@@ -2647,9 +2648,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const m = raw as { category?: unknown; name?: unknown; unitCost?: unknown };
       const name = String(m.name ?? "").trim();
       const category = String(m.category ?? "").trim();
-      const unitCost = Number(m.unitCost);
+      // rtpImportNumber, not Number(): a cell the browser could not parse arrives as null
+      // (JSON's NaN), which Number() reads as a valid $0 — see _shared/rtpImportValues.ts.
+      const unitCost = rtpImportNumber(m.unitCost);
       if (!name) continue;
-      if (!Number.isFinite(unitCost) || unitCost < 0) { skipped.push(`material "${name}": invalid cost "${m.unitCost}"`); continue; }
+      if (!Number.isFinite(unitCost) || unitCost < 0) {
+        skipped.push(`material "${name}": the cost isn't a usable number — ${idByName.has(name.toLowerCase()) ? "kept its current cost" : "not added"}`);
+        continue;
+      }
       const existingId = idByName.get(name.toLowerCase());
       const res = existingId
         ? await admin.from("rtp_materials").update({ category, unit_cost: unitCost, active: true, updated_at: new Date().toISOString() }).eq("id", existingId).select("id").maybeSingle()
@@ -2706,22 +2712,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     // ── Overhead: replace only when the sheet is present in the upload ──
+    // All or nothing (rtpImportOverhead): the lines are one ordered formula, so a bad line
+    // leaves the CURRENT overhead in place rather than replacing it with the rest of the sheet.
     if (overhead) {
-      const KINDS = new Set(["multiplier", "percent_of_price", "flat"]);
-      const rows: Record<string, unknown>[] = [];
-      for (const [i, ln] of (overhead as unknown[]).entries()) {
-        const l = ln as { label?: unknown; kind?: unknown; value?: unknown };
-        const label = String(l.label ?? "").trim();
-        const kind = String(l.kind ?? "");
-        const value = Number(l.value);
-        if (!label || !KINDS.has(kind) || !Number.isFinite(value) || value < 0) { skipped.push(`overhead line ${i + 1}: invalid`); continue; }
-        rows.push({ client_id: clientId, label, kind, value, sort_order: i, active: true });
-      }
-      const del = await admin.from("rtp_overhead_lines").delete().eq("client_id", clientId);
-      if (del.error) return dbFail(req, clientId, "replace your overhead lines", del.error);
-      if (rows.length) {
-        const ins = await admin.from("rtp_overhead_lines").insert(rows);
-        if (ins.error) return dbFail(req, clientId, "save your overhead lines", ins.error);
+      const ovh = rtpImportOverhead(overhead as unknown[]);
+      if (ovh.invalid.length) {
+        // First, not last: the portal shows only the first few skipped lines.
+        skipped.unshift("Overhead sheet NOT applied — your current overhead lines are unchanged. Fix these and upload again:", ...ovh.invalid);
+      } else {
+        const rows = ovh.rows.map((r) => ({ client_id: clientId, ...r, active: true }));
+        const del = await admin.from("rtp_overhead_lines").delete().eq("client_id", clientId);
+        if (del.error) return dbFail(req, clientId, "replace your overhead lines", del.error);
+        if (rows.length) {
+          const ins = await admin.from("rtp_overhead_lines").insert(rows);
+          if (ins.error) return dbFail(req, clientId, "save your overhead lines", ins.error);
+        }
       }
     }
 
