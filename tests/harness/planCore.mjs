@@ -48,6 +48,16 @@ const FIXTURES = {
     sillIn: 90, sillMode: "fixed", opLeft: false, opRight: true, opDouble: false, opSlideUp: false, opDefault: "right", swingIn: false, swingOut: true, swingDefault: null, hasTrimColor: false }],
   windowColors: [],
 };
+// The electrical package (Outlet 18in, Light Switch 48in, Light on the ceiling), as electrical.mjs has it.
+const ELEC_PKG = {
+  electrical: { label: "Electrical Package", price: 850, includePanel: false, outletItemId: "e-out", switchItemId: "e-sw", lightItemId: "e-lt",
+    outletSpacingFt: 6, lightSpacingFt: 10, outletHeightIn: 18, switchHeightIn: 48, outletAboveBenchIn: 42 },
+  electricalItems: [
+    { id: "e-out", icon: "🔌", name: "Outlet", mount: "wall", withPackage: true, standalone: false, priceWithPackage: 45, priceStandalone: null, heightOffFloorIn: 18 },
+    { id: "e-sw", icon: "🎚️", name: "Light Switch", mount: "wall", withPackage: true, standalone: false, priceWithPackage: 35, priceStandalone: null, heightOffFloorIn: 48 },
+    { id: "e-lt", icon: "💡", name: "Light", mount: "ceiling", withPackage: true, standalone: false, priceWithPackage: 65, priceStandalone: null, heightOffFloorIn: 96 },
+  ],
+};
 const only = (process.env.SS_CASES || "").split(",").filter(Boolean);
 const want = (id) => !only.length || only.includes(id);
 const settle = (page, ms = 400) => page.waitForTimeout(ms);
@@ -81,17 +91,17 @@ async function clickSvg(page, p) { const s = await svgPoint(page, p.x, p.y); awa
 
 // A design opened from a share link: the only way to start from an exact layout, off the foot grid
 // where a free drag leaves things.
-async function openWith(ctx, items, style = "utility") {
+async function openWith(ctx, items, style = "utility", config = CONFIG, extraSel = {}) {
   const page = await ctx.newPage();
   const errors = collectErrors(page);
   const row = {
-    short_code: "SS-HARNPC01", status: "draft", selections: { style, size: SIZE }, items,
+    short_code: "SS-HARNPC01", status: "draft", selections: { style, size: SIZE, ...extraSel }, items,
     contact: { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" },
     paint_colors: { body: "", trim: "" }, custom_options: [], ro_dimensions: {},
   };
-  await stubSupabase(page, { config: CONFIG, fixtures: FIXTURES, rpc: { load_design: [row] } });
-  await bypassGate(page, CLIENT);
-  await page.goto(`${BASE}/?client=${encodeURIComponent(CLIENT)}&id=SS-HARNPC01`, { waitUntil: "domcontentloaded" });
+  await stubSupabase(page, { config, fixtures: FIXTURES, rpc: { load_design: [row] } });
+  await bypassGate(page, config.clientId);
+  await page.goto(`${BASE}/?client=${encodeURIComponent(config.clientId)}&id=SS-HARNPC01`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true, null, { timeout: 60000 });
   await planReady(page);
   for (let k = 0; k < 40; k++) { const it = await readItems(page); if (it && it.length === items.length) break; await settle(page, 250); }
@@ -211,6 +221,12 @@ try {
     ok("D: ...so it is still clear of the door (door ends at 4.2 ft)", left1 > 4.2, `near end ${left1.toFixed(3)}`);
     ok("D: the length still steps by whole feet", Math.abs(b1.widthFt - Math.round(b1.widthFt)) < 1e-9 && b1.widthFt > b0.widthFt, `width ${b1.widthFt}`);
     ok("D: and the far end stays on the wall", right1 <= W + 0.01, `far end ${right1.toFixed(3)}`);
+    // The door still stops the NEAR end: stretched toward it, the bench ends short of 4.2 ft.
+    const iw1 = b1.widthFt * g.sc, endZ1 = Math.min(Math.max(iw1 / 4, 16), 30, iw1 * 0.45);
+    await drag(page, { x: b1.x - iw1 / 2 + endZ1 / 2, y: b1.y }, { x: px(1), y: b1.y });
+    const b2 = ((await readItems(page)) || []).find((i) => i.type === "workbench");
+    const left2 = g.ftX(b2.x) - b2.widthFt / 2;
+    ok("D: stretched toward the door, the near end stops clear of it", left2 >= 4.2 - 1e-6, `near end ${left2.toFixed(3)} (door ends at 4.2)`);
     ok("D: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
     await page.close();
   }
@@ -277,13 +293,7 @@ try {
       buildingStyles: [{ value: "utility", label: "Utility", img: null, sizes: [BIG, SMALL], sizeInclusions: {}, sizeInclusionQty: {} }],
       defaultSizes: [BIG, SMALL],
       sizePricing: { utility: { [BIG]: { widthFt: 12, lengthFt: 24, basePrice: 9000 }, [SMALL]: { widthFt: 10, lengthFt: 12, basePrice: 6000 } } },
-      electrical: { label: "Electrical Package", price: 850, includePanel: false, outletItemId: "e-out", switchItemId: "e-sw", lightItemId: "e-lt",
-        outletSpacingFt: 6, lightSpacingFt: 10, outletHeightIn: 18, switchHeightIn: 48, outletAboveBenchIn: 42 },
-      electricalItems: [
-        { id: "e-out", icon: "🔌", name: "Outlet", mount: "wall", withPackage: true, standalone: false, priceWithPackage: 45, priceStandalone: null, heightOffFloorIn: 18 },
-        { id: "e-sw", icon: "🎚️", name: "Light Switch", mount: "wall", withPackage: true, standalone: false, priceWithPackage: 35, priceStandalone: null, heightOffFloorIn: 48 },
-        { id: "e-lt", icon: "💡", name: "Light", mount: "ceiling", withPackage: true, standalone: false, priceWithPackage: 65, priceStandalone: null, heightOffFloorIn: 96 },
-      ],
+      ...ELEC_PKG,
     };
     const page = await ctx.newPage();
     const errors = collectErrors(page);
@@ -314,6 +324,27 @@ try {
     ok("H: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
     await page.close();
   }
+  if (want("K")) {
+    // North wall, package on: outlets at 3 ft and 9 ft (18in up), a 4 ft bench between them at
+    // 4..8. A bench may be DRAGGED over an outlet (an outlet goes above a bench, electrical.mjs),
+    // so stretching it over one must not stop dead at the outlet either.
+    const KCFG = { ...CONFIG, clientId: "harness-plan-stretch", ...ELEC_PKG };
+    const outlet = (id, xFt) => ({ id, type: "e-out", electricalItemId: "e-out", x: px(xFt), y: G.mgY + 0.15 * G.scale, rotation: 0, wall: "north", widthFt: 0.5, heightFt: 0.3, heightOffFloorIn: 18, elecAuto: true });
+    const bench = { id: 3, type: "workbench", x: px(6), y: G.mgY + 1 * G.scale, rotation: 0, wall: "north", widthFt: 4, heightFt: 2, depthIn: 24, heightOffFloorIn: 36 };
+    const { page, errors } = await openWith(ctx, [outlet(1, 3), outlet(2, 9), bench], "utility", KCFG, { electrical: true });
+    const g = await geom(page);
+    const b0 = ((await readItems(page)) || []).find((i) => i.id === 3);
+    ok("K: the bench opens between the two outlets at 4..8 ft", b0 && Math.abs(g.ftX(b0.x) - 6) < 0.02 && b0.widthFt === 4, JSON.stringify(b0 && { x: g.ftX(b0.x), w: b0.widthFt }));
+    await clickSvg(page, { x: b0.x, y: b0.y });
+    const iw = b0.widthFt * g.sc, endZ = Math.min(Math.max(iw / 4, 16), 30, iw * 0.45);
+    await drag(page, { x: b0.x + iw / 2 - endZ / 2, y: b0.y }, { x: px(10.2), y: b0.y });
+    const b1 = ((await readItems(page)) || []).find((i) => i.id === 3);
+    const right = g.ftX(b1.x) + b1.widthFt / 2;
+    ok("K: stretching the bench's far end carries it over the 9 ft outlet, as a drag would", right > 9.5, `far end ${right.toFixed(2)} ft, width ${b1.widthFt}`);
+    ok("K: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
+    await page.close();
+  }
+
   if (want("I")) {
     // A bicycle (0.7 x 5.6 ft) parked upright against the west wall, then turned with Rotate.
     const bike = { id: 1, type: "prop", propKind: "bike", x: px(0.35), y: py(5), rotation: 0, wall: null, widthFt: 0.7, heightFt: 5.6 };

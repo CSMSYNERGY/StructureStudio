@@ -22341,10 +22341,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     let maxEdge = wallLen; // wall end in ft
     
     // Find obstacles on same wall
+    //
+    // ⚠️ ONLY THINGS THAT WOULD ACTUALLY REFUSE IT. Every item on the wall used to count, so an
+    // outlet stopped a bench being stretched over it although the bench may be DRAGGED over that
+    // outlet (an outlet goes above a bench), and a door stopped a shelf mounted clear above it. With
+    // the electrical package on, outlets every 6 ft capped a workbench at the gap between two of
+    // them. Each candidate is asked the drag's own two questions, with the stretched item probed AT
+    // the obstacle's spot along the wall, so only the height bands decide.
+    const cfg = ITEMS[item.type] || {};
+    const wallH = ventRoof2D().H;
     items.forEach((other) => {
       if (other.id === item.id || other.wall !== item.wall) return;
       const oCfg = ITEMS[other.type];
       if (!oCfg) return;
+      const probe = isHoriz ? { ...item, x: other.x } : { ...item, y: other.y };
+      const probeW = probe.widthFt || cfg.width;
+      if (!checkDoorCollision(probe, { ...cfg, width: probeW }, [other], ITEMS, scale, wallH)
+        && !checkWallSlabOverlap(probe, probeW * scale, [other], ITEMS, scale, probe, wallH)) return;
       const oW = other.widthFt || oCfg.width;
       const oPos = isHoriz ? (other.x - mgX) / scale : (other.y - mgY) / scale;
       const oLeft = oPos - oW / 2;
