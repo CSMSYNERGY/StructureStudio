@@ -33198,6 +33198,11 @@ function StructureStudio({ config: configProp = null, clientId: clientIdProp = n
           }
         }
         if (!clientId) clientId = DEFAULT_CLIENT_ID;
+        // The tenant index.mount.jsx's ssLogError files every row under. It reads this global
+        // before ?client=, and nothing assigned it, so a tenant SUBDOMAIN or a bare ?id= share
+        // link (no ?client= in the URL) filed every designer error with client_id NULL.
+        // Public page only: in the portal the host's own logger owns the tenant.
+        if (!embedded) window.__SS_CLIENT_ID__ = clientId;
         // Fetch this tenant's config via the get_config RPC (capability read),
         // not a direct client_configs table query: anon can no longer bulk-read
         // every tenant's config — only the one client_id it asks for. The RPC is
