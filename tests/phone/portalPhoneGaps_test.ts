@@ -210,3 +210,21 @@ Deno.test("the Phone tab offers Connect and a calling-only number, each only whe
   const firstReturn = view.indexOf("if (err && !data) return");
   assert(view.indexOf("useState(\"\")") > 0 && view.indexOf("useState(\"\")") < firstReturn);
 });
+
+// ── Settings → Phone: the form seeded from a saved route ───────────────────────────────────
+Deno.test("the Phone form drops a route member who has LEFT the team, so Save is not refused for someone it cannot show", () => {
+  const zones = slice(SMS, "const PHONE_TIME_ZONES = [", "\n];\n", "PHONE_TIME_ZONES") + "\n];";
+  const display = slice(SMS, "function phoneDisplay(e164) {", "\n}\n", "phoneDisplay") + "\n}";
+  const seed = slice(SMS, "const PHONE_DEFAULT_HOURS = {", "function PhoneSettingsView(", "phoneFormFrom");
+  const phoneFormFrom = new Function("Intl", `${zones}\n${display}\n${seed}; return phoneFormFrom;`)(Intl) as
+    (d: unknown) => { members: string[] };
+  const A = "00000000-0000-4000-8000-00000000000a", B = "00000000-0000-4000-8000-00000000000b";
+  const GONE = "00000000-0000-4000-8000-0000000000ff";
+  const route = { mode: "in_order", members: [A, GONE, B], ringSeconds: 20, timeZone: "America/Chicago" };
+  // A and B are on the team (B without Phone access: still listed, still ticked, and the server
+  // names them); GONE was removed from the team after the route was saved.
+  const team = [{ userId: A, phoneLevel: "edit" }, { userId: B, phoneLevel: "none" }];
+  assertEquals(phoneFormFrom({ route, team }).members, [A, B]);
+  // After a save the route is the server's own answer, already validated: kept as it came.
+  assertEquals(phoneFormFrom({ route: { ...route, members: [B, A] } }).members, [B, A]);
+});

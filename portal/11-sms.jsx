@@ -1296,9 +1296,17 @@ function phoneFormFrom(d) {
     try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (_e) { tz = null; }
     if (!PHONE_TIME_ZONES.some((z) => z[0] === tz)) tz = "America/Chicago";
   }
+  // A saved route can still name someone who has since LEFT the team: nothing prunes
+  // phone_routes.members when a person is removed (the Worker just skips them at ring time). They
+  // are not in `team`, so the list below cannot show them or untick them, yet Save would send them
+  // and phone_settings_save refuses any member who is not on the team, so every save failed with
+  // a sentence naming nobody. Seeded from the team, they drop out on the next Save. (Someone still
+  // on the team without Phone access stays: they are listed, ticked, and the server names them.)
+  const team = d && Array.isArray(d.team) ? d.team : null;
+  const onTeam = (id) => !team || team.some((t) => t.userId === id);
   return {
     mode: (r && r.mode) || "all_at_once",
-    members: r ? (r.members || []) : ((d && d.suggestedMembers) || []),
+    members: r ? (r.members || []).filter(onTeam) : ((d && d.suggestedMembers) || []),
     ringSeconds: (r && r.ringSeconds) || 20,
     noAnswer: (r && r.noAnswer) || "voicemail",
     forwardTo: r && r.forwardTo ? phoneDisplay(r.forwardTo) : "",
