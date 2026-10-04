@@ -9,6 +9,7 @@ import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
 import { acceptanceEmail, invoiceRequestEmail } from "../_shared/emailTemplates.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
+import { repReplyTo } from "../_shared/repReplyTo.ts";
 import { rsSendEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
 import { portalOrderUrl } from "../_shared/customerPortalUrl.ts";
 import { consentSentence, consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
@@ -96,6 +97,31 @@ function dbFail(req: Request, clientId: string | null, where: string, err: any) 
     context: { where, pgCode: err?.code ?? null, details: err?.details ?? null, hint: err?.hint ?? null },
   }).catch(() => {});
   return json({ error: "Something went wrong on our side. Please try again in a moment." }, 500);
+}
+
+// WHO A CUSTOMER'S REPLY TO A CONFIRMATION IS COPIED TO (2026-10-05; the rule is
+// _shared/repReplyTo.ts). Every email this function sends to a customer is one THEY set off by
+// accepting, signing or approving, so there is no staff sender to name: the copy goes to the rep
+// the customer is assigned to (the design's contact's owner), when that person still works here,
+// and otherwise to nobody, which is the routing address alone, as before. A failed lookup is
+// logged and costs the copy, never the confirmation.
+//
+// `recipient` is where the confirmation goes (the design's contact email, as the shopper typed
+// it). The rep is named only when that is the contact's own address: a design is linked to its
+// contact by phone first, so a stranger who typed a known customer's number beside their own
+// email must not learn that customer's rep, or the rep's address, by accepting their own quote.
+// deno-lint-ignore no-explicit-any
+function assignedRepReplyTo(admin: any, req: Request, clientId: string, shortCode: string, recipient: string): Promise<string | null> {
+  return repReplyTo(admin, clientId, {
+    shortCode,
+    recipient,
+    onError: (why) => {
+      logEdgeError({
+        fn: "customer-accept", req, clientId, code: "reply_to_lookup_failed", severity: "warn",
+        message: `reply copy lookup failed: ${why}`, context: { shortCode },
+      }).catch(() => {});
+    },
+  });
 }
 
 // The exact sentence the customer agrees to is composed on the SERVER, never trusted from the
@@ -568,9 +594,11 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
         pdfUrl: null,
         quoteTerms: cs?.quote_terms || null,
       });
+      const replyTo = await assignedRepReplyTo(admin, req, identity.clientId, String(co.short_code), to);
       await sendTenantEmail(admin, identity.clientId, {
         kind: "acceptance", shortCode: co.short_code, to,
         subject: content.subject, html: content.html, text: content.text,
+        ...(replyTo ? { replyTo } : {}),
       });
     }
 
@@ -833,6 +861,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
         docWord: "invoice",
         method: method as "drawn" | "typed",
       });
+      const replyTo = await assignedRepReplyTo(admin, req, identity.clientId, code, to);
       await sendTenantEmail(admin, identity.clientId, {
         kind: "acceptance",
         shortCode: code,
@@ -840,6 +869,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
         subject: content.subject,
         html: content.html,
         text: content.text,
+        ...(replyTo ? { replyTo } : {}),
       });
     }
 
@@ -1180,6 +1210,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       quoteTerms: settings.quote_terms || null,
       method,
     });
+    const replyTo = await assignedRepReplyTo(admin, req, identity.clientId, quoteRef, to);
     await sendTenantEmail(admin, identity.clientId, {
       kind: "acceptance",
       shortCode: quoteRef,
@@ -1187,6 +1218,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       subject: content.subject,
       html: content.html,
       text: content.text,
+      ...(replyTo ? { replyTo } : {}),
     });
   }
 

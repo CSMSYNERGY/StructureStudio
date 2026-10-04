@@ -16,10 +16,14 @@ import {
   resendConfigured, ResendApiError, ResendNotConfigured, type RsDomain,
 } from "../_shared/resend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
+// The routing Reply-To sendTenantEmail adds, asked here only to refuse a view-as email no reply can reach.
+import { buildReplyAddress } from "../_shared/emailInbound.ts";
 import { cleanSignature, signatureHtml, signText } from "../_shared/emailSignature.ts";
+// Whose inbox a customer's reply is copied to: the person who sent it, or the customer's rep.
+import { cleanReplyAddress, repReplyTo } from "../_shared/repReplyTo.ts";
 import { isPlaceholderRecipient } from "../_shared/placeholderRecipient.ts";
 import { sendTenantSms } from "../_shared/smsSend.ts";
-import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
+import { changeOrderEmail, cleanTemplateCopy, estimateEmail, invoiceEmail, templatePreviewEmail, TEMPLATE_KINDS, tenantStylePhotoUrl, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 import { amendedInvoiceDocument, amountOwed, deHtml, designTotalCents, orderCentsAfterAck, orderCentsFromSnapshot, subtotalsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
@@ -146,6 +150,8 @@ import {
 } from "./phoneTrust.ts";
 import { isInternalTenant } from "../_shared/internalTenant.ts";
 import { isQboLineKind } from "../_shared/qboLineKinds.ts";
+// Quick sends in the CRM composer: My Synergy Phone's list (migration 258), read and counted here.
+import { countQuickSendUse, QUICK_SEND_NOT_FOUND, QUICK_SENDS_VIEW_AS, readQuickSends } from "./quickSends.ts";
 
 // WHAT EACH ACTION REQUIRES (migration 100). resolveTenant checks this BEFORE dispatch and
 // refuses anything absent, so adding a branch without adding a line here 403s on the first
@@ -170,6 +176,14 @@ const GATES: GateTable = {
   // ── Your own account ─────────────────────────────────────────────────────
   get_profile: "self",
   save_profile: "self",
+  // Quick sends (Carolyn 2026-09-30): each person's OWN saved messages, the list My Synergy Phone
+  // keeps, read and counted for the record's Email and SMS boxes. "self", not a contacts gate and
+  // not a crm_ name: they are per person, not per customer (a contacts:'edit' gate would need a
+  // CONTACT_ROW_SCOPE entry and there is no contact to find), and the handler keys strictly off
+  // the session's userId and clientId. "self" counts as a write, so a read-only operator is
+  // refused too; the branch refuses every operator in view-as (see QUICK SENDS below).
+  quick_sends_list: "self",
+  quick_send_used: "self",
 
   // ── Structures ───────────────────────────────────────────────────────────
   // `catalog` is one payload serving both Settings groups (styles+sizes+prices AND
@@ -326,6 +340,9 @@ const GATES: GateTable = {
   email_status:         { area: "settings_email", level: "view" },
   email_connect_domain: { area: "settings_email", level: "edit" },
   email_save_template: { area: "settings_email", level: "edit" },
+  // The wording screen's Preview: draws the wording in the boxes (saved or not) around sample
+  // data and the builder's own header and footer. A read: it writes nothing and sends nothing.
+  email_preview_template: { area: "settings_email", level: "view" },
   email_verify_domain:  { area: "settings_email", level: "edit" },
   email_activate:       { area: "settings_email", level: "edit" },
   email_send_test:      { area: "settings_email", level: "edit" },
@@ -1752,7 +1769,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // alongside the CRM routing address — so it is validated rather than merely trimmed, and an
     // unusable value is DROPPED rather than stored: a malformed address in a header is a send
     // Resend may 422 outright, and a 422 is a permanent verdict, so the whole email is lost
-    // rather than retried.
+    // rather than retried. The check is _shared/repReplyTo.ts's cleanReplyAddress, the same one
+    // every sender applies on the way OUT (since 2026-10-05) and the My Profile box applies
+    // before it saves, so the three can't disagree about what counts as an address.
     //
     // ⚠️ THE WHITELIST IS THE ONLY REGISTER OF WHAT SURVIVES. `clean` is rebuilt from scratch
     // and the update below REPLACES the whole jsonb blob, so a key that is not listed here does
@@ -1762,9 +1781,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     //
     // 320 is the RFC 5321 maximum address length and matches the beta_email cap. An empty
     // string is how the UI clears it, and correctly arrives here as "drop the key".
-    if (typeof raw.replyToEmail === "string") {
-      const addr = raw.replyToEmail.trim().slice(0, 320);
-      if (addr && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) clean.replyToEmail = addr;
+    {
+      const addr = cleanReplyAddress(raw.replyToEmail);
+      if (addr) clean.replyToEmail = addr;
     }
     // The person's email signature (Carolyn 2026-10-01: "be able to set up email signatures in
     // the settings"). Plain text, at most 1,000 characters, trimmed; crm_send_email and
@@ -8165,6 +8184,68 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true });
   }
 
+  // ── QUICK SENDS: saved messages for the record's Email and SMS boxes ───────────────────────
+  // Carolyn 2026-09-30: "quick sends on text and email, both of them … so that they can easily
+  // just click and choose the list of things." The list is My Synergy Phone's (migration 258),
+  // each person's own, and the rules are in ./quickSends.ts. NOTHING HERE SENDS: the portal's
+  // Insert fills the box, and the email or text still goes out through crm_send_email /
+  // crm_send_sms below, with every one of their checks.
+  //
+  // REFUSED IN VIEW-AS. The person signed in is CSM Synergy staff, so the list would be the
+  // operator's OWN, and the first open would seed the starter set for them under the builder's
+  // account. The same reasoning as the signature in crm_send_email; the shell hides the button
+  // there too (quickSendsOn). A refusal, marked so, exposed so the browser can read the mark.
+  if (action === "quick_sends_list" || action === "quick_send_used") {
+    if (operator) {
+      const r = json({ error: QUICK_SENDS_VIEW_AS }, 403);
+      r.headers.set(SS_REFUSAL_HEADER, "1");
+      r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
+      return r;
+    }
+    // Both keys from the verified session: the JWT's user and the tenant resolveTenant settled on.
+    const who = { userId, clientId };
+    if (action === "quick_sends_list") {
+      const out = await readQuickSends(admin, who, (why) => logEdgeError({
+        fn: "portal-settings", req, clientId, code: "quick_send_seed_failed", severity: "warn",
+        message: `phone_seed_quick_sends failed: ${why}`,
+      }));
+      if ("dbError" in out) return dbFail(req, clientId, "load your quick sends", out.dbError);
+      return json({ ok: true, quick_sends: out.quick_sends, my_name: out.my_name });
+    }
+    const used = await countQuickSendUse(admin, payload?.id, who);
+    if (used === "counted") return json({ ok: true });
+    if (used === "not_found") return json({ error: QUICK_SEND_NOT_FOUND }, 404);
+    return dbFail(req, clientId, "count that quick send", used.dbError);
+  }
+
+  // ── WHO A CUSTOMER'S REPLY IS COPIED TO (2026-10-05) ───────────────────────────────────
+  // Every email this function sends is set off by the person signed in: crm_send_email below,
+  // and the quote re-send and re-price, the change order and the invoice sends, re-issues and
+  // retries further down. So the reply copy names THEM (their My Profile address, else their
+  // sign-in email), and in view-as the customer's assigned rep instead, never the operator. The
+  // rule and its reasons are _shared/repReplyTo.ts. The senders take a ReplySender rather than
+  // reading the session themselves (sendQuoteEmail and restampQuoteTax take it as a parameter),
+  // so a sender added later has to say whose email it is. `recipient` is the address the email
+  // goes to, and is required: the assigned rep is named only for their customer's own address.
+  // A failed lookup is logged and the email goes with the routing address only, as every
+  // document email did before.
+  type ReplySender = { userId: string | null; operator: boolean };
+  const signedIn: ReplySender = { userId: userId ? String(userId) : null, operator: Boolean(operator) };
+  const replyCopy = (sender: ReplySender, ref: { shortCode?: string | null; contactId?: string | null; recipient: string }) =>
+    repReplyTo(admin, clientId, {
+      senderUserId: sender.userId,
+      operator: sender.operator,
+      shortCode: ref.shortCode ?? null,
+      contactId: ref.contactId ?? null,
+      recipient: ref.recipient,
+      onError: (why) => {
+        logEdgeError({
+          fn: "portal-settings", req, clientId, code: "reply_to_lookup_failed", severity: "warn",
+          message: `reply copy lookup failed: ${why}`, context: { action },
+        }).catch(() => {});
+      },
+    });
+
   if (action === "crm_send_email") {
     const claimedTo = String(payload.to ?? "").trim().slice(0, 320);
     const subject = String(payload.subject ?? "").trim().slice(0, 200);
@@ -8225,55 +8306,54 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return json({ error: "That address doesn't match this customer's — reopen the record and try again." }, 400);
     }
 
-    // REPLY-TO FALLBACK ONLY: the staff member who wrote it. There is no `business_email`
-    // column to default a reply address from (emailSend.ts says so in as many words), and the
-    // tenant's sending address is a no-reply-shaped local part, so a customer hitting Reply
-    // needs somewhere real to land. The signed-in sender is the right answer, and it is
-    // resolved SERVER-SIDE from the JWT rather than trusted from the body, so nobody can
-    // route a customer's replies at a third party.
+    // REPLY-TO: the person who wrote it, resolved SERVER-SIDE from the verified session and
+    // never from the body, so nobody can route a customer's replies at a third party. There is
+    // no `business_email` column to default one from (emailSend.ts says so in as many words),
+    // and the tenant's sending address is a no-reply-shaped local part, so without this a
+    // customer hitting Reply on a tenant with no reply domain had nowhere real to land.
     //
-    // The ROUTABLE address (`d.SS-…@reply.jrbarns.com`) used to be computed right here and is
-    // now derived inside sendTenantEmail, where it covers all ten send paths instead of this
-    // one. That move is the point: a customer replying to their QUOTE was never routed
-    // anywhere, because quotes go through submit-estimate and only this branch had the code.
-    // Do not reintroduce it here — sendTenantEmail prefers its own and falls back to this.
-    let replyTo: string | undefined;
-    try {
-      const { data: u } = await admin.auth.admin.getUserById(userId ?? "");
-      const addr = u?.user?.email;
-      if (typeof addr === "string" && addr.includes("@")) replyTo = addr;
-    } catch (_) { /* no reply-to is worse than failing to send, but not by much */ }
-    // The person's OWN choice beats their login address (Settings → My View). A login and the
-    // address someone wants customer replies at are often different — a shared `office@` login,
-    // a personal alias, a role address — which is the gap Carolyn was describing.
+    // The ROUTABLE address (`d.SS-…@reply.<their domain>`) is not computed here: sendTenantEmail
+    // derives it for every send path and puts BOTH in Reply-To, routing first. Do not reintroduce
+    // it here.
     //
-    // Their auth email stays the fallback: someone who has never opened that card must not lose
-    // the reply address they have had all along. Read from client_users keyed on the JWT's
-    // userId and NEVER on anything in the body, the same rule the auth lookup above follows —
-    // which is why this is a second query rather than a field the browser could send.
+    // WHOSE ADDRESS is _shared/repReplyTo.ts, the one rule every quote, invoice and change-order
+    // sender below follows too (2026-10-05): the writer's own choice in My Profile, else their
+    // sign-in email. Two things changed for this branch when it moved there. The preference is
+    // read on THIS tenant (it used to be limit(1) on the user alone). And in view-as the writer is
+    // CSM Synergy staff, whose address must never go on a builder's email: it used to be the
+    // operator's own sign-in address, and is now the customer's assigned rep, or nobody. The
+    // address is validated on the way out as well as at save_prefs, because it goes into a header.
+    const replyTo = await replyCopy(signedIn, { shortCode, contactId: contactFound ? contactId : null, recipient: to });
+    // VIEW-AS WITH NOWHERE FOR A REPLY TO GO IS REFUSED. Until 2026-10-05 the operator's own
+    // address was on this email, so a reply always reached somebody. Without it, an operator
+    // writing to a customer with no assigned rep to name, on an account whose replies aren't
+    // routed to the record (no active reply domain), would send with no Reply-To at all: the
+    // customer's answer goes to the From address and reaches no person and no record. Said
+    // before anything is sent. Only view-as: a member writing as themselves is not refused here.
+    if (operator && !replyTo) {
+      const { data: rs, error: rsErr } = await admin.from("client_settings")
+        .select("inbound_domain, inbound_status").eq("client_id", clientId).maybeSingle();
+      if (rsErr) return dbFail(req, clientId, "check where replies to this email would go", rsErr);
+      if (!buildReplyAddress(rs?.inbound_domain, rs?.inbound_status, { shortCode, contactId: contactFound ? contactId : null })) {
+        return json({ error: "A reply to this email would reach nobody. In view-as your own address can't go on it, this customer has no assigned rep to send replies to, and replies aren't routed to the record on this account yet. Assign the customer to someone on the team first." }, 400);
+      }
+    }
+    // The writer's EMAIL SIGNATURE (My Profile; Carolyn 2026-10-01). It is this person's own,
+    // keyed on the JWT and on this tenant, so a rep's emails carry their name and never a
+    // colleague's. A failed read costs the signature, never the email.
     //
-    // save_prefs validates this on the way IN, so it is not re-validated here. If that
-    // whitelist is ever relaxed, re-validate at this end too: it goes into a mail header.
-    //
-    // The same read gives the writer's EMAIL SIGNATURE (My Profile; Carolyn 2026-10-01). It is
-    // this person's own, keyed on the JWT like the reply-to, so a rep's emails carry their name
-    // and never a colleague's. limit(1) because save_prefs writes every row the person has, and
-    // a person on two tenants would otherwise make maybeSingle() fail and quietly drop both.
-    // A failed read costs the signature, never the email.
-    //
-    // NO signature in view-as: the person writing is CSM Synergy staff, not the builder, and
-    // this read would find the operator's OWN prefs (every operator has a membership of their
-    // own) — so a builder's customer would get CSM Synergy's name under the builder's email.
-    // The composer shows no signature line in view-as either, so nothing is added.
+    // NO signature in view-as: the person writing is CSM Synergy staff, not the builder. Keyed on
+    // the user alone, this read used to find the operator's OWN prefs (every operator has a
+    // membership of their own), so a builder's customer would have got CSM Synergy's name under
+    // the builder's email. Keyed on this tenant it finds no row for them now; the operator check
+    // stays as the plain statement of the rule. The composer shows no signature in view-as either.
     let signature: string | null = null;
     try {
       const { data: pu } = await admin.from("client_users")
-        .select("prefs").eq("user_id", userId ?? "").limit(1).maybeSingle();
+        .select("prefs").eq("user_id", userId ?? "").eq("client_id", clientId).limit(1).maybeSingle();
       const prefs = pu?.prefs as Record<string, unknown> | null;
-      const own = prefs?.replyToEmail;
-      if (typeof own === "string" && own.includes("@")) replyTo = own.trim();
       signature = operator ? null : cleanSignature(prefs?.emailSignature);
-    } catch (_) { /* fall through to the auth email, and no signature */ }
+    } catch (_) { /* no signature */ }
 
     // Plain text, escaped into a minimal HTML body. Deliberately NOT a rich template: a
     // conversation should look like a person typed it, not like a system notification, and
@@ -10014,42 +10094,104 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     });
   }
 
-  // Per-tenant SUBJECT / INTRO copy for the document emails (migration 138).
+  // Per-tenant WORDING for the document emails (migration 138; widened 2026-10-04): subject,
+  // opening line, closing message, button text and the building-photo switch, per kind.
   //
   // ⚠️ COPY ONLY. The stored value is plain text with {token} placeholders — never HTML.
   // A free-HTML template authored by a tenant would be an injection surface pointed at a
   // customer's inbox, and would also let a wording edit silently break the quote link and
-  // the totals table, which are the parts of the email that actually do something.
-  // tenantCopy() in _shared/emailTemplates.ts re-validates on the way OUT as well, so a row
-  // written before this check existed still cannot inject.
+  // the totals table, which are the parts of the email that actually do something. The rules
+  // (which fields, how long, markup refused out loud) are cleanTemplateCopy's, in
+  // _shared/emailTemplates.ts beside tenantCopy(), which re-validates on the way OUT as well,
+  // so a row written before a rule existed still cannot inject.
+  //
+  // The answer echoes what was KEPT. The editor compares it with what it sent, so a field this
+  // build doesn't know (an older server, a newer screen) is reported, never shown as "Saved.".
   if (action === "email_save_template") {
-    const KINDS = ["estimate", "quote", "invoice"];
-    const raw = payload?.copy;
-    if (!raw || typeof raw !== "object") return json({ error: "Nothing to save." }, 400);
-    const clean: Record<string, { subject?: string; subjectLen?: number; intro?: string }> = {};
-    for (const kind of KINDS) {
-      const v = (raw as any)[kind];
-      if (!v || typeof v !== "object") continue;
-      const take = (x: unknown) => {
-        const t = typeof x === "string" ? x.replace(/\s+/g, " ").trim() : "";
-        if (!t) return "";
-        // Refuse LOUDLY rather than stripping: a builder who pasted markup needs to be told,
-        // not to have it silently vanish and wonder which half saved.
-        if (/[<>]/.test(t)) throw new Error(`Remove the < > characters from the ${kind} ${x === v.subject ? "subject" : "message"} — this is plain text, not HTML.`);
-        return t.slice(0, 300);
-      };
-      try {
-        const subject = take(v.subject), intro = take(v.intro);
-        if (subject || intro) clean[kind] = { ...(subject ? { subject } : {}), ...(intro ? { intro } : {}) };
-      } catch (e) {
-        return json({ error: e instanceof Error ? e.message : "That template could not be saved." }, 400);
-      }
-    }
+    const cleaned = cleanTemplateCopy(payload?.copy);
+    if ("error" in cleaned) return json({ error: cleaned.error }, 400);
+    const clean = cleaned.copy;
     const { error } = await admin.from("client_settings")
       .update({ email_template_copy: Object.keys(clean).length ? clean : null })
       .eq("client_id", clientId);
     if (error) return dbFail(req, clientId, "save that email wording", error);
     return json({ ok: true, copy: clean });
+  }
+
+  // ── The building photo on a quote email (2026-10-04) ──────────────────────────────
+  // A style's own photo, behind that style's own "Image on estimate" switch, and only an
+  // upload in this builder's own storage folder (tenantStylePhotoUrl): submit-estimate's rule
+  // for the photo on the estimate's building line, so the email and the quote agree about which
+  // picture is theirs. Catalogs copied from another account point at THAT account's folder and
+  // get no photo, exactly as their estimate lines get none. A failed read costs the photo,
+  // never the email.
+  // deno-lint-ignore no-explicit-any
+  const emailStyles = async (): Promise<any[]> => {
+    try {
+      const { data, error } = await admin.from("building_styles")
+        .select("key, label, image_url, show_image_on_estimate, active, sort_order")
+        .eq("client_id", clientId).order("sort_order", { ascending: true }).limit(500);
+      return error ? [] : (data ?? []);
+    } catch (_) {
+      return [];
+    }
+  };
+  // deno-lint-ignore no-explicit-any
+  const styleEmailPhoto = (row: any): string | null =>
+    row && row.show_image_on_estimate !== false
+      ? tenantStylePhotoUrl(row.image_url, Deno.env.get("SUPABASE_URL") ?? "", clientId)
+      : null;
+
+  // The wording screen's Preview. `copy` is ONE kind's wording as the boxes hold it, saved or
+  // not, held to the save's own rules (so a preview refuses markup with the save's sentence).
+  // It is drawn around the builder's real name, logo, phone, website and terms, a sample
+  // customer and document, and their first building style whose photo is switched on for
+  // quotes. Sends nothing, writes nothing. `photo` tells the screen why there is or isn't a
+  // picture: "shown", "off" (they unticked it), "not_own" (styles have a photo with "Image on
+  // estimate" ticked, but none of those photos is in this account's own folder: a catalog
+  // copied from another account, whose estimate lines get no photo either) or "none" (no
+  // active style has a photo ticked at all). Two different fixes, so two different sentences.
+  if (action === "email_preview_template") {
+    const kind = String(payload?.kind ?? "");
+    if (!(TEMPLATE_KINDS as readonly string[]).includes(kind)) return json({ error: "Pick Estimate, Quote or Invoice to preview." }, 400);
+    const k = kind as typeof TEMPLATE_KINDS[number];
+    const cleaned = cleanTemplateCopy({ [k]: payload?.copy ?? {} });
+    if ("error" in cleaned) return json({ error: cleaned.error }, 400);
+    const copy = cleaned.copy[k] ?? {};
+    const { data: cs, error: csErr } = await admin.from("client_settings")
+      .select("business_name, business_logo_url, business_phone, business_website, quote_terms, invoice_in_ghl")
+      .eq("client_id", clientId).maybeSingle();
+    if (csErr) return dbFail(req, clientId, "read your business details for the preview", csErr);
+    let pictureUrl: string | null = null;
+    let styleLabel: string | null = null;
+    let photo: "shown" | "off" | "not_own" | "none" | null = null;
+    if (k !== "invoice") {
+      if (copy.picture === false) {
+        photo = "off";
+      } else {
+        const ticked = (await emailStyles()).filter((r) =>
+          r.active !== false && r.show_image_on_estimate !== false && typeof r.image_url === "string" && r.image_url.trim());
+        const row = ticked.find((r) => styleEmailPhoto(r));
+        pictureUrl = row ? styleEmailPhoto(row) : null;
+        styleLabel = row?.label ? String(row.label) : null;
+        photo = pictureUrl ? "shown" : ticked.length ? "not_own" : "none";
+      }
+    }
+    const content = templatePreviewEmail({
+      kind: k,
+      copy,
+      businessName: String(cs?.business_name ?? "").trim() || clientId,
+      logoUrl: cs?.business_logo_url || null,
+      phone: cs?.business_phone || null,
+      website: cs?.business_website || null,
+      quoteTerms: cs?.quote_terms || null,
+      pictureUrl,
+      styleLabel,
+      // StructureStudio invoicing (invoice_in_ghl = false) sends the sign-on-the-quote-page
+      // invoice; the CRM path sends the hosted one. Preview the one this builder's customers get.
+      invoiceToSign: cs?.invoice_in_ghl === false,
+    });
+    return json({ ok: true, clientId, kind: k, subject: content.subject, html: content.html, photo });
   }
 
   if (action === "email_connect_domain") {
@@ -10631,8 +10773,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // just re-priced it sends the new total. It checks no row scope — every caller does that
   // first. `refused` carries this action's own refusals, unchanged. `noEmail` is for the
   // re-stamp's own wording only; resend_quote_email answers with `sent` and `reason` as before.
+  // `sender` is whoever set the send off, for the reply copy (replyCopy above): a customer who
+  // answers the quote reaches the record and that person's inbox.
   const sendQuoteEmail = async (
     shortCode: string,
+    sender: ReplySender,
   ): Promise<{ refused: Response } | { sent: boolean; reason: string | null; noEmail?: true }> => {
     const { data: d, error: dErr } = await admin
       .from("designs")
@@ -10644,7 +10789,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     const { data: cs, error: csErr } = await admin
       .from("client_settings")
-      .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, quote_terms")
+      .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, quote_terms, email_template_copy")
       .eq("client_id", clientId).maybeSingle();
     if (csErr) return { refused: dbFail(req, clientId, "read your settings", csErr) };
     if (!cs || cs.invoice_in_ghl !== false) {
@@ -10656,14 +10801,24 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     const total = totalFromSnapshot(d.estimate_lines);
     const sel = d.selections || {};
+    // The style row submit-estimate read for the first send (key OR label, the same norm), for
+    // its name and its photo: a re-send or a re-price must say and show what the first send
+    // did. No row (renamed, or the read failed): the stored key and no photo, as before.
+    const want = attrNorm(sel.style);
+    const styleRow = want ? (await emailStyles()).find((r) => attrNorm(r.key) === want || attrNorm(r.label) === want) : null;
     const content = estimateEmail({
+      // The builder's own wording (migration 138) and the {customer} it may name. Until
+      // 2026-10-04 a re-send passed neither, so it said different words from the first send.
+      templateCopy: cs.email_template_copy,
+      customerName: String(d?.contact?.name ?? "").trim(),
+      pictureUrl: styleEmailPhoto(styleRow),
       businessName: cs.business_name || clientId,
       logoUrl: cs.business_logo_url || null,
       phone: cs.business_phone || null,
       website: cs.business_website || null,
       estimateNumber: String(d.ss_quote_number),
       total: total == null ? "" : total,
-      styleLabel: sel.style || null,
+      styleLabel: styleRow?.label || sel.style || null,
       sizeLabel: sel.size || null,
       estimateUrl: myQuotesUrl(clientId, req),
       pdfUrl: d.image_url || null,
@@ -10671,6 +10826,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       quoteTerms: cs.quote_terms || null,
       docWord: "quote",
     });
+    const replyTo = await replyCopy(sender, { shortCode, recipient: to });
     const outcome = await sendTenantEmail(admin, clientId, {
       kind: "estimate",
       shortCode,
@@ -10678,6 +10834,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       subject: content.subject,
       html: content.html,
       text: content.text,
+      ...(replyTo ? { replyTo } : {}),
     });
     if (outcome.sent) {
       await admin.from("designs")
@@ -10696,7 +10853,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // even read, so a refusal costs nothing and cannot leak timing.
     { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
-    const out = await sendQuoteEmail(shortCode);
+    const out = await sendQuoteEmail(shortCode, signedIn);
     if ("refused" in out) return out.refused;
     return json({ ok: true, sent: out.sent, reason: out.reason });
   }
@@ -10793,7 +10950,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // deno-lint-ignore no-explicit-any
     d: any,
     tax: Record<string, unknown>,
-    opts: { confirmResend: boolean; alsoSet?: Record<string, unknown>; where: string; afterWrite?: () => Promise<void> },
+    opts: {
+      confirmResend: boolean; alsoSet?: Record<string, unknown>; where: string; afterWrite?: () => Promise<void>;
+      // Whose re-price this is, for the re-sent quote's reply copy (sendQuoteEmail).
+      sender: ReplySender;
+    },
   ): Promise<
     | { ok: false; response: Response }
     | {
@@ -10896,7 +11057,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const gate = restampResend({ resend: plan.resend, quoteNumber: fresh.ss_quote_number, quotePdfUrl, movedOn });
     let resendReason: string | null = gate.send ? null : gate.reason;
     if (gate.send) {
-      const sent = await sendQuoteEmail(shortCode);
+      const sent = await sendQuoteEmail(shortCode, opts.sender);
       ({ resent, resendReason } = restampSendOutcome("refused" in sent ? "refused" : sent));
     }
     return {
@@ -10988,6 +11149,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     const out = await restampQuoteTax(d, tax, {
       confirmResend, alsoSet: { sales_location_id: locationId }, where: "set this quote's sales location",
+      sender: signedIn,
     });
     if (!out.ok) return out.response;
     await audit("portal_set_design_sales_location", 1,
@@ -11093,6 +11255,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const out = await restampQuoteTax(d, tax, {
       confirmResend,
       where: "save the verified tax rate",
+      sender: signedIn,
       afterWrite: async () => {
         charge = await chargeLookup(admin, lookup, {
           clientId, kind: "tax_lookup", refType: "design", refId: shortCode,
@@ -11189,9 +11352,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       reviewUrl: myQuotesUrl(clientId, req),
       quoteTerms: cs?.quote_terms,
     });
+    // The rep who raised or re-sent it gets the customer's answer too (replyCopy above).
+    const replyTo = await replyCopy(signedIn, { shortCode: String(co.short_code), recipient: to });
     const outcome = await sendTenantEmail(admin, clientId, {
       kind: "change_order", shortCode: co.short_code, to,
       subject: content.subject, html: content.html, text: content.text,
+      ...(replyTo ? { replyTo } : {}),
     });
     // ⚠️ "failed" IS NOT A REASON, it is a status repeated back (found while testing the
     // whole flow on beta, 2026-09-08). The rep's screen said "not emailed (failed)", which
@@ -11799,7 +11965,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin.from("orders").select("total_cents, pretax_subtotal_cents")
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
       admin.from("client_settings")
-        .select("business_name, business_phone, business_website, business_address, quote_terms, co_fee_label")
+        .select("business_name, business_phone, business_website, business_address, quote_terms, co_fee_label, email_template_copy")
         .eq("client_id", clientId).maybeSingle(),
     ]);
     const feeLabel = String(csRes.data?.co_fee_label ?? "").trim() || "Change order fee";
@@ -11932,6 +12098,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (payload?.sendEmail !== false && isEmail(to)) {
       const owed = amountOwed(agreedLines, acked, ordRes.data?.total_cents == null ? null : Number(ordRes.data.total_cents));
       const content = invoiceEmail({
+        // The builder's invoice wording (138) and the {customer} it may name. Until 2026-10-04 no
+        // invoice sender passed either, so saved invoice wording never reached a customer.
+        templateCopy: csRes.data?.email_template_copy,
+        customerName: String((d.contact as { name?: unknown } | null)?.name ?? "").trim(),
         businessName: String(csRes.data?.business_name ?? "").trim() || clientId,
         logoUrl: null, phone: csRes.data?.business_phone, website: csRes.data?.business_website,
         invoiceNumber: String(inv.invoice_number),
@@ -11940,8 +12110,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         quoteTerms: csRes.data?.quote_terms,
         signUrl: myQuotesUrl(clientId, req),
       });
+      const replyTo = await replyCopy(signedIn, { shortCode, recipient: to });
       const out = await sendTenantEmail(admin, clientId, {
         kind: "invoice", shortCode, to, subject: content.subject, html: content.html, text: content.text,
+        ...(replyTo ? { replyTo } : {}),
       });
       sent = out.sent;
       if (out.sent) {
@@ -12777,7 +12949,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // convert/send machinery below stays byte-identical for every invoice_in_ghl tenant.
     {
       const { data: cur0 } = await admin.from("client_settings")
-        .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, business_address, quote_terms")
+        .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, business_address, quote_terms, email_template_copy")
         .eq("client_id", clientId).maybeSingle();
       if (cur0?.invoice_in_ghl === false) {
         // The design: the SS quote is the prerequisite, and the acceptance evidence is OUR
@@ -12921,7 +13093,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               return json({ error: `Invoice ${prior.invoice_number} is complete, but this design has no email address — print the invoice PDF instead.`, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, sent: false }, 400);
             }
             const { data: cs2 } = await admin.from("client_settings")
-              .select("business_name, business_phone, business_website, business_logo_url, quote_terms, beta_mode, beta_email")
+              .select("business_name, business_phone, business_website, business_logo_url, quote_terms, beta_mode, beta_email, email_template_copy")
               .eq("client_id", clientId).maybeSingle();
             // A PLACEHOLDER ADDRESS (example.com, .test, ...) can never receive this, and the
             // provider's rejection used to come back here as a 502 fault row reading only
@@ -12947,9 +13119,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               });
             }
             const amend2 = await loadAmendments();
+            const replyTo2 = await replyCopy(signedIn, { shortCode, recipient: to2 });
             const out2 = await sendTenantEmail(admin, clientId, {
               kind: "invoice", shortCode, to: to2,
+              ...(replyTo2 ? { replyTo: replyTo2 } : {}),
               ...invoiceEmail({
+                templateCopy: cs2?.email_template_copy,
+                customerName: String((c2?.contact as { name?: unknown } | null)?.name ?? "").trim(),
                 businessName: String(cs2?.business_name ?? "").trim() || clientId,
                 logoUrl: cs2?.business_logo_url, phone: cs2?.business_phone, website: cs2?.business_website,
                 invoiceNumber: String(prior.invoice_number),
@@ -13439,11 +13615,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         let sent = false;
         let sendReason: string | null = null;
         if (isEmail(to)) {
+          const replyTo = await replyCopy(signedIn, { shortCode, recipient: to });
           const out = await sendTenantEmail(admin, clientId, {
             kind: "invoice",
             shortCode,
             to,
+            ...(replyTo ? { replyTo } : {}),
             ...invoiceEmail({
+              templateCopy: cur0?.email_template_copy,
+              customerName: String((c?.contact as { name?: unknown } | null)?.name ?? "").trim(),
               businessName: String(cur0?.business_name ?? "").trim() || clientId,
               logoUrl: cur0?.business_logo_url,
               phone: cur0?.business_phone,
@@ -13641,7 +13821,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .from("client_settings")
       // email_* + business_* ride along for the own-domain email branch below — the
       // Resend-active check and the branded invoice email's identity fields.
-      .select("ghl_location_id, ghl_api_key, email_provider, email_domain_status, business_name, business_phone, business_website, business_logo_url, quote_terms")
+      .select("ghl_location_id, ghl_api_key, email_provider, email_domain_status, business_name, business_phone, business_website, business_logo_url, quote_terms, email_template_copy")
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return dbFail(req, clientId, "read your CRM credentials", curErr);
     if (!cur?.ghl_location_id || !cur?.ghl_api_key) {
@@ -13725,11 +13905,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         body: JSON.stringify({ altId: locationId, altType: "location", action: "send_manually", liveMode: true, userId: senderUserId }),
       });
       if (!manual.ok) return false;
+      // senderUserId above is the GoHighLevel user the send is made as; the reply copy is ours.
+      const replyTo = await replyCopy(signedIn, { shortCode, recipient: to });
       const out = await sendTenantEmail(admin, clientId, {
         kind: "invoice",
         shortCode,
         to,
+        ...(replyTo ? { replyTo } : {}),
         ...invoiceEmail({
+          templateCopy: cur.email_template_copy,
+          customerName: String((c?.contact as { name?: unknown } | null)?.name ?? "").trim(),
           businessName: String(cur.business_name ?? "").trim() || clientId,
           logoUrl: cur.business_logo_url,
           phone: cur.business_phone,

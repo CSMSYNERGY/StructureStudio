@@ -2599,6 +2599,130 @@ function SsCallRecording({ callId, meta, canListen }) {
   );
 }
 
+// QUICK SENDS, the button and its list beside the record's Email and SMS boxes (Carolyn
+// 2026-09-30; the rules are in 01-core beside ssFillQuickSend). The same list, the same chips and
+// the same rows as My Synergy Phone's picker: "All · N" and each category, then every quick send
+// with its name, a two-line preview filled in for THIS customer, "used N×" and Insert. Insert only
+// fills the box (CrmRecord's insertQuickSend); nothing here sends.
+//
+// `quick` is CrmRecord's: null until the first open asks for the list (onOpen), "loading", the
+// list, or "off" — a failed read hides the button entirely, with no banner, because the box works
+// the same without it. Adding and editing quick sends stays in the app for now, so the empty
+// state says where.
+function CrmQuickSendPicker({ channel, quick, onOpen, onInsert, fill }) {
+  const [open, setOpen] = useState(false);
+  const [picked, setPicked] = useState(null);
+  // Where the list sits, worked out as it opens: under the button, moved left just enough to stay
+  // on screen. On a phone the button starts a third of the way across, and a list anchored to
+  // it ran off the right edge and scrolled the page sideways.
+  const [place, setPlace] = useState({ left: 0, width: 380 });
+  const wrap = useRef(null);
+  const button = useRef(null);
+  // A click anywhere else, or Escape, closes it (Escape hands focus back to the button).
+  useEffect(() => {
+    if (!open) return undefined;
+    const down = (e) => { if (wrap.current && !wrap.current.contains(e.target)) setOpen(false); };
+    const key = (e) => {
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      if (button.current) button.current.focus();
+    };
+    document.addEventListener("mousedown", down);
+    document.addEventListener("keydown", key);
+    return () => { document.removeEventListener("mousedown", down); document.removeEventListener("keydown", key); };
+  }, [open]);
+  if (quick === "off") return null;
+
+  const list = quick && Array.isArray(quick.list) ? quick.list : null;
+  const chips = list ? ssQuickSendChips(list) : [];
+  const current = list && picked !== null && chips.some((c) => c.category === picked) ? picked : null;
+  const rows = list ? ssQuickSendsIn(list, current) : [];
+  const toggle = () => {
+    if (!open) {
+      onOpen();
+      const vw = document.documentElement.clientWidth || window.innerWidth || 0;
+      const at = button.current ? button.current.getBoundingClientRect().left : 0;
+      const width = Math.max(240, Math.min(380, vw - 16));
+      // 8px inside the right edge if it can, and never past 8px from the left.
+      setPlace({ left: Math.max(8 - at, Math.min(0, vw - 8 - at - width)), width });
+    }
+    setOpen(!open);
+  };
+
+  return (
+    <div ref={wrap} style={{ position: "relative", display: "inline-block" }}>
+      <button ref={button} type="button" onClick={toggle} data-ss-quick-sends={channel}
+        aria-haspopup="dialog" aria-expanded={open}
+        title="Put a saved message in the box"
+        style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>
+        Quick sends
+      </button>
+      {open && (
+        <div role="dialog" aria-label="Quick sends" data-ss-quick-send-picker={channel}
+          style={{
+            position: "absolute", left: place.left, top: "calc(100% + 6px)", zIndex: 30, width: place.width,
+            background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, boxShadow: "0 10px 28px rgba(15,23,42,0.16)",
+            textAlign: "left",
+          }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 12px 4px" }}>
+            <span style={{ fontSize: 13.5, fontWeight: 800, color: "#1E293B" }}>Quick sends</span>
+            <button type="button" onClick={() => setOpen(false)} aria-label="Close quick sends"
+              style={{ background: "none", border: "none", padding: "2px 4px", color: "#64748B", fontSize: 16, lineHeight: 1, cursor: "pointer", fontFamily: "inherit" }}>
+              ×
+            </button>
+          </div>
+          {!list ? (
+            <div style={{ padding: "10px 12px 12px", fontSize: 12.5, color: "#64748B" }}>Loading your quick sends…</div>
+          ) : !list.length ? (
+            <div data-ss-quick-send-empty style={{ padding: "8px 12px 12px", fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
+              No quick sends yet. Add them in My Synergy Phone, under Settings → Quick sends.
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", padding: "4px 12px 8px" }}>
+                {chips.map((c) => {
+                  const on = c.category === current;
+                  return (
+                    <button key={c.category === null ? "" : "c:" + c.category} type="button" onClick={() => setPicked(c.category)}
+                      data-ss-quick-send-chip={c.category === null ? "" : c.category} aria-pressed={on}
+                      style={{
+                        background: on ? ACCENT : "#F1F5F9", color: on ? "#FFF" : "#475569",
+                        border: "none", borderRadius: 999, padding: "3px 11px", fontSize: 11.5, fontWeight: 700, cursor: "pointer",
+                      }}>{c.label}</button>
+                  );
+                })}
+              </div>
+              <div style={{ maxHeight: 320, overflowY: "auto", borderTop: "1px solid #F1F5F9" }}>
+                {rows.map((q) => (
+                  <div key={q.id} data-ss-quick-send={q.id}
+                    style={{ display: "flex", gap: 10, alignItems: "center", padding: "9px 12px", borderBottom: "1px solid #F1F5F9" }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.name}</div>
+                      <div data-ss-quick-send-preview
+                        style={{ fontSize: 12.5, color: "#475569", lineHeight: 1.45, marginTop: 2, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", overflowWrap: "anywhere" }}>
+                        {ssFillQuickSend(q.body, fill)}
+                      </div>
+                      <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>used {Math.max(0, Math.floor(Number(q.usage_count) || 0))}×</div>
+                    </div>
+                    <button type="button" aria-label={`Insert ${q.name}`}
+                      onClick={() => { setOpen(false); onInsert(q); }}
+                      style={{ ...S.btn("#FFF", ACCENT), border: "1px solid " + ACCENT, padding: "6px 12px", fontSize: 12.5, flex: "0 0 auto" }}>
+                      Insert
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          <div style={{ padding: "7px 12px 9px", fontSize: 11.5, color: "#64748B", textAlign: "center" }}>
+            Inserting fills the box. Sending is yours.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // The record page. One component, two contexts, driven entirely by the registries above.
 //
 // ⚠️ IT MAKES EXACTLY ONE FETCH, and never a direct sb.from(). designs/payments RLS is
@@ -2616,7 +2740,11 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // The signed-in person's email signature (My Profile), shown under the Email box because the
   // server adds it to what they send: "" when they have none, null when it isn't known (view-as),
   // which shows nothing. onEditProfile opens My Profile, where it is changed.
-  emailSignature = null, onEditProfile = null }) {
+  emailSignature = null, onEditProfile = null,
+  // Quick sends (the signed-in person's saved messages, the list My Synergy Phone keeps) beside
+  // the Email and SMS boxes. Off in view-as: the list would be the OPERATOR's own, and the server
+  // refuses it there too.
+  quickSendsOn = false }) {
   // THE SUBSCRIPTION IS AN EDIT GATE, NOT A TAB GATE, and it has to be applied here rather
   // than tab by tab. Every WRITE this page makes is a `crm_*` action — crm_save_note,
   // crm_save_activity, crm_complete_activity, crm_send_email, crm_send_sms, crm_save_contact,
@@ -2643,6 +2771,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   const [busy, setBusy] = useState(false);
   const [mail, setMail] = useState({ subject: "", body: "" });
   const [mailMsg, setMailMsg] = useState(null);
+  // QUICK SENDS, read the first time a picker opens and never when the record opens:
+  // null (not asked yet) → "loading" → { list, myName }, or "off" when the server would not give
+  // them (an older server that doesn't know the action, a refusal, a blip), which hides the
+  // button for the rest of this record without a banner. One read serves the Email and SMS
+  // boxes both. The two refs are the boxes Insert hands focus back to. Up here with the other
+  // hooks: CrmRecord returns early on `!data`, and a hook below that is React #310 (13ca37e).
+  const [quick, setQuick] = useState(null);
+  const mailBodyRef = useRef(null);
+  const textBoxRef = useRef(null);
   // ⚠️ These live in the TOP hook block, not beside sendSms below. CrmRecord returns early
   // on `!data`, so a hook declared next to its handler runs only on the renders that get
   // past the guard — React #310, and the whole record page goes white the instant its data
@@ -3122,6 +3259,52 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     setMail({ subject: "", body: "" });
     setMailMsg({ ok: "Sent." });
     load();
+  };
+
+  // ── QUICK SENDS (Carolyn 2026-09-30; the helpers and the why are in 01-core) ─────────────────
+  // The list, once per record, the first time either picker opens.
+  const loadQuickSends = async () => {
+    if (quick !== null) return;
+    setQuick("loading");
+    let r = null, failed = false;
+    try {
+      const res = await sb.functions.invoke("portal-settings", { body: { action: "quick_sends_list" } });
+      r = res.data;
+      failed = !!res.error;
+    } catch (_e) { failed = true; }
+    if (failed || !r || r.error || !Array.isArray(r.quick_sends)) { setQuick("off"); return; }
+    setQuick({ list: r.quick_sends, myName: typeof r.my_name === "string" ? r.my_name : "" });
+  };
+
+  // INSERT FILLS THE BOX, AND THAT IS ALL IT DOES. The quick send, filled in for this customer,
+  // goes into the BODY (after anything already typed; an email's subject is never touched), focus
+  // goes back to the box, and Send stays the person's own press. One that would run past the
+  // box's limit is refused with the box left as it was, never cut. The use is counted in the
+  // background, and a failure there is ignored: it is only "used N×".
+  const insertQuickSend = (q, channel) => {
+    if (!quick || !quick.list || !q) return;
+    const email = channel === "email";
+    const fill = { contactName: data.contact && data.contact.name, myName: quick.myName };
+    const next = ssInsertQuickSend(email ? mail.body : text, q, fill, channel);
+    const say = email ? setMailMsg : setTextMsg;
+    if (next === null) { say({ err: ssQuickSendTooLong(channel) }); return; }
+    if (email) setMail((p) => ({ ...p, body: next })); else setText(next);
+    say(null);
+    const box = email ? mailBodyRef.current : textBoxRef.current;
+    setTimeout(() => {
+      if (!box) return;
+      box.focus();
+      try { box.setSelectionRange(next.length, next.length); } catch (_e) { /* not a text box */ }
+      box.scrollTop = box.scrollHeight;
+    }, 0);
+    Promise.resolve(sb.functions.invoke("portal-settings", { body: { action: "quick_send_used", id: q.id } }))
+      .then((res) => {
+        if (!res || res.error || !res.data || !res.data.ok) return;
+        setQuick((cur) => (cur && cur.list
+          ? { ...cur, list: cur.list.map((x) => (x.id === q.id ? { ...x, usage_count: (Number(x.usage_count) || 0) + 1 } : x)) }
+          : cur));
+      })
+      .catch(() => { /* only a count */ });
   };
 
   const renderSection = (key) => {
@@ -3835,11 +4018,16 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                   </div>
                 ) : (
                   <>
-                    <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4}
+                    <textarea ref={textBoxRef} value={text} onChange={(e) => setText(e.target.value)} rows={4}
                       maxLength={1600}
                       placeholder="Text this customer…"
                       style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
                     <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5, flexWrap: "wrap" }}>
+                      {quickSendsOn && (
+                        <CrmQuickSendPicker channel="sms" quick={quick} onOpen={loadQuickSends}
+                          onInsert={(q) => insertQuickSend(q, "sms")}
+                          fill={{ contactName: data.contact && data.contact.name, myName: quick && quick.myName }} />
+                      )}
                       <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !text.trim()} onClick={sendSms}>
                         {busy ? "Sending…" : "Send text"}
                       </button>
@@ -3873,12 +4061,19 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             )}
             {tab === "email" && canEdit && data.contact && data.contact.email && (
               <div style={{ marginBottom: 12 }}>
+                {/* WHERE A REPLY GOES follows the server's rule (_shared/repReplyTo.ts): the writer's
+                    own address, except in view-as, where CSM Synergy staff are never put on a
+                    builder's email and the copy goes to the customer's assigned rep instead (or the
+                    send is refused when no reply could reach anyone). viewingLabel is set only in
+                    view-as. */}
                 <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 5 }}>
-                  To <strong>{data.contact.email}</strong> — replies come back to you, not to a no-reply address.
+                  {viewingLabel
+                    ? <>To <strong>{data.contact.email}</strong> — you're viewing as {viewingLabel}, so replies won't come to you. They go to this customer's assigned rep, if they have one.</>
+                    : <>To <strong>{data.contact.email}</strong> — replies come back to you, not to a no-reply address.</>}
                 </div>
                 <input value={mail.subject} onChange={(e) => setMail((p) => ({ ...p, subject: e.target.value }))}
                   placeholder="Subject" style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
-                <textarea value={mail.body} onChange={(e) => setMail((p) => ({ ...p, body: e.target.value }))} rows={5}
+                <textarea ref={mailBodyRef} value={mail.body} onChange={(e) => setMail((p) => ({ ...p, body: e.target.value }))} rows={5}
                   placeholder="Write to this customer…"
                   style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
                 {/* THE SIGNATURE, WHERE SHE IS TYPING. Carolyn 2026-10-01: "if I'm sitting here
@@ -3908,7 +4103,13 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                     )}
                   </div>
                 )}
-                <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5, flexWrap: "wrap" }}>
+                  {/* QUICK SENDS. Insert fills the body above; Send email is still the only way out. */}
+                  {quickSendsOn && (
+                    <CrmQuickSendPicker channel="email" quick={quick} onOpen={loadQuickSends}
+                      onInsert={(q) => insertQuickSend(q, "email")}
+                      fill={{ contactName: data.contact && data.contact.name, myName: quick && quick.myName }} />
+                  )}
                   <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !mail.subject.trim() || !mail.body.trim()} onClick={sendEmail}>
                     {busy ? "Sending…" : "Send email"}
                   </button>
