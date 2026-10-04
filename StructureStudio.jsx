@@ -368,6 +368,14 @@ function slabDepthFt(cfg, it) {
 const SS_REFUSE_WALL = "Something else is already on that part of the wall.";
 const SS_REFUSE_SLAB = "A workbench or shelf is in the way at that height — slide it along the wall, or raise it.";
 const SS_REFUSE_LOFT = "Lofts can't overlap — drop this one clear of the other.";
+// A wall SHORTER than the item being dragged onto it. snapToWall / snapToWallInterior clamp the
+// centre between half-widths from each corner, and when the item is longer than the wall that
+// clamp degenerates and parks it hanging past the far corner — out through the building on the
+// plan, the PDF and the 3D. Every placement path already refuses this case (both pickers, the
+// included chip, the size-change reflow's seat); a drag across to a short wall was the way round
+// all of them. Shared by the 2D and 3D drags like the three above.
+const SS_REFUSE_TOO_LONG = "That wall is too short for it — it stays on a wall it fits.";
+const ssLongerThanWall = (widthFt, wall, bldgW, bldgH) => Number(widthFt) > ((wall === "north" || wall === "south") ? bldgW : bldgH) + 1e-6;
 
 // ✅ THE 2026-09-04 GAP IS CLOSED (2026-09-09). It read: a wallOnly caller passes no `cand`, so
 // its candidate band defaults to full height and a RAISED door — or a transom — is refused
@@ -14246,6 +14254,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const pageY = mgY + (p.z + bldgH / 2) * scale;
             const wFt = it.widthFt || c.width || 3;
             const w = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
+            if (ssLongerThanWall(wFt, w, bldgW, bldgH)) { flash3(SS_REFUSE_TOO_LONG); return; }
             const sn0 = snapToWall(w, pageX, pageY, wFt * scale, (c.height || 0.5) * scale, pWpx, pHpx, mgX, mgY);
             // A VENT MOVES UP AND DOWN as well as along (Carolyn, 2026-09-14: the vent had to be
             // "draggable up"). The wall-plane hit's height is the vent's. Carried a quarter foot past
@@ -14339,6 +14348,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const pageY = mgY + (p.z + bldgH / 2) * scale;
             const wFt = it.widthFt || c.width || 6;
             const nw = getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
+            if (ssLongerThanWall(wFt, nw, bldgW, bldgH)) { flash3(SS_REFUSE_TOO_LONG); return; }
             const sn = snapToWallInterior(nw, pageX, pageY, wFt * scale, slabDepthFt(c, it) * scale, pWpx, pHpx, mgX, mgY);
             const others = liveItems.filter((i) => i.id !== it.id);
             // ⚠️ THE TENTH REFUSAL PATH, and it was missed the first time round. Nine drag
@@ -22462,6 +22472,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // and doesn't get stuck off-wall. The door's ramp (if any) follows too —
       // its placement is derived from the door's position/wall.
       const w = getWallFromClick(rx, ry, pW, pH, mgX, mgY) || getNearestWall(rx, ry, pW, pH, mgX, mgY);
+      if (ssLongerThanWall(iWidthFt, w, bldgW, bldgH)) { refuseDrag(SS_REFUSE_TOO_LONG); return; }
       const sn0 = snapToWall(w, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY);
       // A vent in the gable slides along it, re-fitted under the rakes; dragged onto a wall with no
       // gable above it (or too small a one) it comes down to that wall. The 3D drag's rule.
@@ -22493,6 +22504,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }));
     } else if (cfg.wallSnap) {
       const nw = getNearestWall(rx, ry, pW, pH, mgX, mgY);
+      if (ssLongerThanWall(iWidthFt, nw, bldgW, bldgH)) { refuseDrag(SS_REFUSE_TOO_LONG); return; }
       const sn = snapToWallInterior(nw, rx, ry, iWidthFt * scale, slabDepthFt(cfg, it) * scale, pW, pH, mgX, mgY);
       const cand = { ...it, ...sn };
       // Check collision with doors AND other workbenches on same wall
