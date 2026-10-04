@@ -12456,8 +12456,17 @@ function buildShed3DModel(THREE, p) {
       // floor height line says ramps are drawn longer. On a slab or skids drop is D3.FLOOR_T and the
       // run 3, exactly as before.
       // On a projecting porch's wall it starts at the deck's edge. The deck top is the floor, so the
-      // drop is unchanged. (The 2D plan still draws it at the wall.)
-      const rampOut = porchOut && it.wall === porchOut.wall ? porchOut.D : T / 2;
+      // drop is unchanged. (The 2D plan still draws it at the wall.) Only in front of the deck: a
+      // porch narrower than its wall (roof.porchWidthFt, or the centre section between wings) leaves
+      // the rest of the wall with no deck, and a ramp there starts at the wall like any other, rather
+      // than D out in mid-air. In front means its middle is within the deck's outer post faces
+      // (porchGeom.side either side of the porch's middle, d3PorchToRoot's origin on the wall line).
+      let rampOut = T / 2;
+      if (porchOut && porchGeom && it.wall === porchOut.wall) {
+        const pm = d3PorchToRoot(roofCfg, bldgW, bldgH)(0, 0);
+        const mid = (pm[0] - wf.O[0]) * wf.U[0] + (pm[1] - wf.O[1]) * wf.U[1];
+        if (Math.abs(along - mid) < porchGeom.side) rampOut = porchOut.D;
+      }
       // Where the ground falls away (FALL) the drop is the ground's depth at the ramp's own foot, and
       // the run that depth sets (rampOnGround).
       let drop = GRADE, run = Math.max(3, 4 * drop);
