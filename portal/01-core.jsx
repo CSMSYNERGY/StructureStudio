@@ -1515,10 +1515,17 @@ const SS_WHEN = [
 ];
 const SS_WHEN_PARAM = Object.fromEntries(SS_WHEN.map(([k, _l, p]) => [k, p]));
 // ISO date + or - N days/weeks/months, in local time.
+// Months CLAMP to the target month's last day: a bare setMonth() overflows from the 29th–31st,
+// so "In the last 1 month" on Mar 31 started at Mar 3 (Feb 31 rolled over) and "In the next
+// 1 month" on Jan 31 ran to Mar 3.
 const ssShiftIso = (iso, n, unit) => {
   const d = ssLocalDate(iso);
-  if (unit === "months") d.setMonth(d.getMonth() + n);
-  else d.setDate(d.getDate() + n * (unit === "weeks" ? 7 : 1));
+  if (unit === "months") {
+    const day = d.getDate();
+    d.setDate(1);
+    d.setMonth(d.getMonth() + n);
+    d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
+  } else d.setDate(d.getDate() + n * (unit === "weeks" ? 7 : 1));
   return ssLocalIso(d);
 };
 // Does a date pass the condition? p = { a, b, month, n, unit }. A condition whose parameter
