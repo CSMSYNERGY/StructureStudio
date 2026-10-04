@@ -1423,7 +1423,10 @@ function ssFallbackTab(access) {
 // `advancedOn` (2026-09-28) says whether the Advanced page may resolve at all — the shell passes
 // ssAdvancedOn(...) for the tenant on screen. It defaults to FALSE for the same reason as
 // canProjects' default: a call site that forgets it refuses the page rather than offering it.
-function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator, advancedOn = false) {
+// `sub` (2026-10-04) is the route's sub-page, read for ONE purpose: /portal/settings/myprofile.
+// The shell's two route clamps pass it; every other caller asks about a non-settings tab and
+// leaves it null, which changes nothing for them.
+function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator, advancedOn = false, sub = null) {
   // FIRST, above `if (canAdmin) return tab`: owners and operators are not an exception. A tenant
   // without Advanced lands on the Designer (the page it grew out of), clamped like any other ask.
   if (tab === "advanced" && !advancedOn) return ssClampTab("designer", isOperator, canAdmin, access, supportView, canProjects);
@@ -1447,6 +1450,14 @@ function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canP
   // Team without any access to builders' accounts. `!supportView` still applies to both —
   // someone standing in a builder's shoes has no business in either console.
   if (tab === "projects") return (canProjects && !supportView) ? tab : ssFallbackTab(access);
+  // MY PROFILE IS EVERY ROLE'S. It is the one Settings sub-page with no permission area
+  // (ssSettingsTabs), the account menu offers it to everyone, the needsDetails nudge sends
+  // people there, and its two actions (save_prefs / save_profile) are "self" on the server.
+  // The tab-level rule below asks for a settings_* area, which most titles hold none of, so
+  // without this line My Profile and "Add details" bounced a sales rep, dealer, scheduler,
+  // crew member or driver straight back to their fallback page. Only the route: the Settings
+  // nav item still follows ssCanSeeTab, so nobody gains a rail entry.
+  if (tab === "settings" && sub === "myprofile") return tab;
   // Owners, admins and operators are never clamped — an owner locked out of their own
   // portal by a permission bug is the one failure this feature must not have.
   if (canAdmin) return tab;

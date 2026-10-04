@@ -1042,7 +1042,7 @@ function Dashboard({ session }) {
   // projects branches, so passing it here refuses those two routes to a support account on
   // its own portal and changes nothing else. `canAdminForUrl` above keeps plain supportView.
   const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
-    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects, advancedClampOn);
+    (tenant && tenant !== "none") ? tenant.access : null, consolesBarred, canProjects, advancedClampOn, sub);
   useEffect(() => {
     // Popout windows never normalise the URL: a resolved refusal (canProjects false, or a
     // hand-typed non-projects path) would replaceState to the fallback tab, and that URL
@@ -2314,7 +2314,7 @@ function Dashboard({ session }) {
   // consolesBarred, not supportView, for the same reason as resolvedTab's clamp above. The
   // other ssClampTab calls ask about designer/orders tabs, never read that argument, and keep
   // plain supportView.
-  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects, advancedClampOn);
+  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, consolesBarred, canProjects, advancedClampOn, sub);
   // The Advanced route while it is HELD (see advancedClampOn): nobody has been given the page yet,
   // so the topbar must not name it either — for a builder without Advanced that was a flash of it.
   const advancedHeld = activeTab === "advanced" && !advancedOn;
@@ -2539,8 +2539,10 @@ function Dashboard({ session }) {
   //   settingsPage — are we RENDERING a settings page? (drives the topbar and the sub-tab clamp)
   //   settingsMode — is the settings RAIL up? (drives the chrome)
   // They agree everywhere except one page.
+  // My Profile needs no settings area — the clamp lets that one sub-page through for everyone
+  // (ssClampTab), so this predicate and the body render below must too, or it renders blank.
   const settingsPage = !gateLocked && activeTab === "settings"
-    && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a)));
+    && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a)) || (sub || "") === "myprofile");
   // ── MY PROFILE DOES NOT DECIDE THE RAIL ───────────────────────────────────────────────
   // Carolyn 2026-09-11, on clicking it from a workspace page: "it switches you to the
   // settings and I feel like people will be confused .... but then the same is true the other
@@ -3324,7 +3326,7 @@ function Dashboard({ session }) {
                 left those people a Settings topbar over an empty body (audit 2026-08-20).
                 SettingsShell filters its own sub-tabs by area for non-admins, and
                 portal-settings re-checks every action per-area regardless. */}
-            {!gateLocked && activeTab === "settings" && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a))) && (
+            {!gateLocked && activeTab === "settings" && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a)) || (sub || "") === "myprofile") && (
               <SettingsShell key={"t-" + effClientId} clientId={effClientId}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
                 /* The SAME three values the rail's tab list is built from — see
