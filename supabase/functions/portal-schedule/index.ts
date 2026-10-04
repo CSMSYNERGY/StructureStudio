@@ -908,6 +908,21 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // build_job_id, so filtering on that alone left the building sitting in the pool with
       // an "Add to load…" control that 409'd every single time it was used.
       const stopDesign = new Set((stops ?? []).map((s) => s.design_short_code).filter(Boolean));
+      // ...and by INVENTORY UNIT, for the same reason one level over. A spec build sold before
+      // it was hauled sits here twice — its build job ("spec build → haul to the sales lot") and
+      // the sold unit ("deliver to the buyer"). Add the UNIT row and the sale stop carries the
+      // unit id but no build_job_id (and an inventory job's design code is always null), so the
+      // job row stayed: its "Add to load…" 409'd ("already on a load") while the stop was open,
+      // and once the building reached the buyer it sat here for good, still saying "haul to the
+      // sales lot". Same test the sold-unit list below applies: an OPEN stop for the unit, or
+      // its SALE stop (the one carrying the buyer's design code) in any state. A delivered haul
+      // stop on an unsold unit deliberately does not count — that is today's behaviour.
+      const soldCodeByUnit: Record<string, string> = {};
+      for (const u of sold ?? []) if (u.sold_design_short_code) soldCodeByUnit[u.id] = u.sold_design_short_code;
+      const stopUnit = new Set((stops ?? []).filter((s) => s.inventory_unit_id && (
+        !s.delivered_at
+        || (soldCodeByUnit[s.inventory_unit_id] && s.design_short_code === soldCodeByUnit[s.inventory_unit_id])
+      )).map((s) => s.inventory_unit_id));
 
       // Where this tenant has delivered before, so a pool row can be grouped by corridor
       // BEFORE it becomes a stop. Same rule add_stop applies on insert — kept in step by
@@ -932,7 +947,8 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       }
 
       const poolJobRows = (jobsAll ?? []).filter((j) =>
-        !stopJob.has(j.id) && !(j.design_short_code && stopDesign.has(j.design_short_code)));
+        !stopJob.has(j.id) && !(j.design_short_code && stopDesign.has(j.design_short_code))
+        && !(j.inventory_unit_id && stopUnit.has(j.inventory_unit_id)));
       // One query for every destination, not one per row.
       const poolCodes = [...new Set(poolJobRows.map((j) => j.design_short_code).filter(Boolean))];
       // The pool row used to label every sold unit "Sold lot building" — the same generic
