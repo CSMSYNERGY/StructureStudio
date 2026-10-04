@@ -628,8 +628,15 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
     const byItem = new Map((rows ?? []).map((r: any) => [String(r.monday_item_id), r]));
     // board { id } + value.index: label ids collide across boards, and `text` is only
     // a display name the team can rename out from under us.
+    //
+    // ⚠️ `limit` IS NOT OPTIONAL. Monday's `items` query defaults to limit 25 EVEN WHEN
+    // `ids` is given, and returns the matches in ascending id order — so a tenant with more
+    // than 25 pushed submissions had their NEWEST ones (the highest ids, the ones still
+    // moving) silently dropped from every "Check for updates". Verified against the live API
+    // 2026-10-04: 30 ids in, 25 back, the five newest missing; `limit: 100` returned all 30.
+    // 100 is Monday's maximum and covers the 40 rows read above.
     const q = `query ($ids: [ID!]) {
-      items (ids: $ids) {
+      items (ids: $ids, limit: 100) {
         id
         board { id }
         column_values { id text value }
