@@ -1962,10 +1962,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // and the designer's preview does the same, which is the property that actually matters.
     //
     // ⚠ QuickBooks: these arrive as kind "layout_item" with item_key "shutters"/"flowerBox".
-    // qboInvoice falls back to the tenant's kind-level `layout_item||` mapping, which is how
-    // these maps are normally set up — but a tenant who mapped every item_key individually and
-    // set no kind-level default will get a loud "unmapped: layout_item:shutters" and a Retry
-    // button, not a silent wrong invoice.
+    // Neither can be mapped on its own yet (no layout item exists for either key, so the grid has
+    // no row for them and save_item_map refuses the key), and there is no kind-level
+    // `layout_item||` default to catch them: 066's key-shape CHECK refuses that row. So
+    // qboInvoice bills them as the tenant's `fallback` item, and a tenant with no fallback gets a
+    // loud "unmapped: layout_item:shutters" and a Retry button, not a silent wrong invoice.
     for (const spec of [
       { itemKey: "shutters", name: "Shutters", on: "shutters", cid: "shutterColorId", clab: "shutterColorLabel" },
       { itemKey: "flowerBox", name: "Flower Box", on: "flowerBox", cid: "flowerBoxColorId", clab: "flowerBoxColorLabel" },

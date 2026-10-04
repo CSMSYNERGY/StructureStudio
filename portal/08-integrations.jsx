@@ -38,13 +38,24 @@ const QBO_REASONS = {
   realm_in_use: "That QuickBooks company is already connected to a different StructureStudio account. Disconnect it there first, or choose a different company at Intuit.",
   unconfigured: "QuickBooks isn't fully set up on the server yet. Tell CSM Synergy.",
   save: "The connection couldn't be saved. Try again, and tell CSM Synergy if it persists.",
-  // Connected, but the previous company's item mappings couldn't be cleared — so they are stale
-  // against the new company and would bill lines against whatever shares those ids.
-  item_map_stale: "Connected, but the old company's item mappings couldn't be cleared. Re-check the mappings below before sending an invoice.",
+  // Connected, but leftover item mappings (another company's, or ones saved before migration 265
+  // that say no company) couldn't be tidied up. Since 265 they are ignored (the grid and the
+  // invoice push read only the connected company's rows), so the risk is gone; what is left is a
+  // grid that may need filling in. Worded for no company in particular: the tidy-up runs on every
+  // connect, so a SAME-company reconnect can land here too, with no "old company" to speak of.
+  item_map_stale: "Connected, but some leftover item mappings couldn't be tidied up. They won't be used. Check the mappings below before sending an invoice.",
+  // Connected to a DIFFERENT company than the mappings were made for, so those were cleared
+  // (item numbers belong to one company's books). Without this the owner lands on an emptier
+  // grid than they left, with nothing saying why.
+  company_changed: "Connected to a different QuickBooks company, so the item mappings for the old one were cleared. Pick your items below before sending an invoice.",
   // Success, but with a consequence on an account this user can't see (migration 084). Worth
   // saying plainly: the usual cause is picking the wrong company at Intuit, and that is undone
   // by reconnecting the right one. The other account is never named.
   displaced_other: "Connected. This QuickBooks company was moved here from another StructureStudio account, so it no longer syncs there. If that wasn't intended, reconnect and choose a different company at Intuit.",
+  // Both at once: the company came from another account AND this account was mapped against a
+  // different one, so those mappings were cleared. displaced_other alone left the owner on an
+  // emptied grid with nothing saying why, the very case company_changed exists for.
+  displaced_company_changed: "Connected. This QuickBooks company was moved here from another StructureStudio account, so it no longer syncs there. The item mappings for the company you used before were cleared, so pick your items below before sending an invoice. If that wasn't intended, reconnect and choose a different company at Intuit.",
 };
 
 // realm_in_use optionally carries `company` — the QuickBooks company the user just authorised
@@ -68,8 +79,17 @@ function qboReasonText(reason, company) {
 // fetch landed, and focus was lost after every pick. Everything it reads arrives as props
 // (mappedId/setMapped/qboItems/mappings); it closes over nothing from the view. Qbo-prefixed
 // because the portal parts concatenate into one shared scope, like QBO_KINDS above.
-function QboItemSelect({ kind, itemKey, styleId, placeholder, mappedId, setMapped, qboItems, mappings }) {
+function QboItemSelect({ kind, itemKey, styleId, placeholder, mappedId, setMapped, qboItems, mappings, fallbackLabel }) {
   const val = mappedId(kind, itemKey, styleId);
+  // What the EMPTY choice means, said where it is picked. A line with no mapping of its own bills
+  // as the Fallback item, so "— not mapped —" on Delivery (left unmapped on purpose) read as
+  // "delivery doesn't go into QuickBooks" when it does, as the Fallback item: Carolyn's "a lot of
+  // options in here that are not going into QuickBooks" (2026-09-10). Two rows keep "— not
+  // mapped —": Fallback itself, and Discount, which the push never bills as an item (it sends
+  // QuickBooks' own discount line). With no Fallback picked, "not mapped" is true for every row:
+  // an unmapped line then stops the push.
+  const empty = placeholder
+    || (fallbackLabel && kind !== "fallback" && kind !== "discount" ? fallbackLabel : "— not mapped —");
   const items = qboItems || [];
   // Group by the item's QuickBooks CATEGORY, taken from the qualified path — that is how
   // a builder's own list is organised ("Options:Doors" / "Buildings:Cabins"), so it is the
@@ -88,7 +108,7 @@ function QboItemSelect({ kind, itemKey, styleId, placeholder, mappedId, setMappe
   return (
     <select value={val} onChange={(e) => setMapped(kind, itemKey, styleId, e.target.value)}
       style={{ ...S.input, maxWidth: 340 }}>
-      <option value="">{placeholder || "— not mapped —"}</option>
+      <option value="">{empty}</option>
       {stale && <option value={val}>{(savedRow && savedRow.qbo_item_name) || val} (saved)</option>}
       {Object.keys(byGroup).sort().map((g) => (
         <optgroup key={g} label={g}>
@@ -175,7 +195,14 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "retry_qbo_push", shortCode } });
     setRetrying(null);
     if (e || (d && d.error)) { setMsg({ err: (e && e.message) || d.error }); return; }
-    setMsg({ ok: d && d.alreadyPushed ? "That invoice is already in QuickBooks." : "Pushed to QuickBooks." });
+    // otherCompany (migration 265): it went into the company this account was connected to
+    // before a switch. It stays there and is not copied into the new books; say where it is.
+    // Only reachable from a list gone stale in an open tab (pushed, then a switch, then Retry):
+    // qbo_pending lists invoices with no QuickBooks id, so a fresh page never offers one. The
+    // standing answer is the connection card's otherCompanyInvoices line.
+    setMsg({ ok: d && d.alreadyPushed
+      ? (d.otherCompany ? "That invoice is already in the QuickBooks company you were connected to before." : "That invoice is already in QuickBooks.")
+      : "Pushed to QuickBooks." });
     loadPending();
   };
 
@@ -271,7 +298,11 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     // Style overrides for the building line.
     (grid.styles || []).forEach((s) => pushRow("building", "", s.id));
     if (!rows.length) { setSaving(false); setMsg({ ok: "Nothing to save." }); return; }
-    const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "save_item_map", rows } });
+    // companyTag: the company this grid was loaded against (list_item_map). The server refuses the
+    // save if the account has switched company since, rather than stamp these item ids, picked
+    // from the old company's list, as the new one's. Sent only when the grid carried one.
+    const tag = Object.prototype.hasOwnProperty.call(grid, "companyTag") ? { companyTag: grid.companyTag } : {};
+    const { data: d, error: e } = await sb.functions.invoke("portal-settings", { body: { action: "save_item_map", rows, ...tag } });
     setSaving(false);
     if (e || (d && d.error)) { setMsg({ err: (d && d.error) || e.message }); return; }
     const parts = [];
@@ -296,7 +327,18 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   // Wiring for the module-scope QboItemSelect (hoisted — see its comment). The functions
   // are re-created each render, which is fine as PROPS: the component TYPE stays stable, so
   // nothing remounts.
-  const selProps = { mappedId, setMapped, qboItems, mappings: grid && grid.mappings };
+  // The Fallback row's CURRENT pick, unsaved edits included, so every other row's empty choice
+  // follows it as it changes. Named by its leaf, as the dropdowns list items; a saved name can be
+  // the full "Category:Item" path. No name to be had (an item gone from QuickBooks with no saved
+  // name) still says where the line goes, just without the name.
+  const fallbackPick = grid ? mappedId("fallback", "", null) : "";
+  const fallbackName = fallbackPick
+    ? String(((qboItems || []).find((i) => i.id === fallbackPick) || {}).name
+        || (((grid && grid.mappings) || []).find((m) => m.line_kind === "fallback" && m.qbo_item_id === fallbackPick) || {}).qbo_item_name
+        || "").split(":").pop().trim()
+    : "";
+  const fallbackLabel = fallbackPick ? (fallbackName ? `— use Fallback (${fallbackName}) —` : "— use Fallback —") : null;
+  const selProps = { mappedId, setMapped, qboItems, mappings: grid && grid.mappings, fallbackLabel };
 
   // The two cards in the shape they will occupy while qbo_status is out, rather than the word
   // "Loading" on an empty page — the SkelBar rationale in 01-core.jsx applies here verbatim.
@@ -399,6 +441,17 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
                 <button onClick={connect} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 8 }}>
                   {busy ? "Starting…" : "Reconnect QuickBooks"}
                 </button>
+              </div>
+            )}
+            {/* Invoices that went into the company this account used before a switch (migration
+                265). They stay there and are never pushed again; this is where the owner hears
+                it, since the "didn't reach QuickBooks" card below lists only invoices that never
+                got in anywhere. Counted by qbo_status from where each invoice was recorded. */}
+            {status.otherCompanyInvoices > 0 && (
+              <div style={{ fontSize: 12.5, color: "#475569", marginTop: 10 }}>
+                {status.otherCompanyInvoices === 1 ? "1 earlier invoice stays" : `${status.otherCompanyInvoices} earlier invoices stay`} in
+                the QuickBooks company you were connected to before. {status.otherCompanyInvoices === 1 ? "It wasn't" : "They weren't"} copied
+                into this one.
               </div>
             )}
           </div>

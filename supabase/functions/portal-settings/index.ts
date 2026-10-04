@@ -146,6 +146,7 @@ import {
 } from "./phoneTrust.ts";
 import { isInternalTenant } from "../_shared/internalTenant.ts";
 import { isQboLineKind } from "../_shared/qboLineKinds.ts";
+import { companyTagOf, mapRowsForRealm, pushedToOtherCompany } from "../_shared/qboRealm.ts";
 
 // WHAT EACH ACTION REQUIRES (migration 100). resolveTenant checks this BEFORE dispatch and
 // refuses anything absent, so adding a branch without adding a line here 403s on the first
@@ -9632,10 +9633,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (error) return dbFail(req, clientId, "load your QuickBooks connection", error);
 
     const connected = !!data?.qbo_realm_id && !!data?.qbo_connected_at;
-    const { count } = await admin
-      .from("qbo_item_map")
-      .select("id", { count: "exact", head: true })
-      .eq("client_id", clientId);
+    // Only the mappings for the company on file count (migration 265; the same rule as
+    // mapRowsForRealm, as a filter: `eq` never matches a NULL, so an unstamped row is not counted
+    // either). No company on file, no mappings.
+    // Beside it, how many invoices already went into a DIFFERENT company, one this account was
+    // connected to before a switch. They stay there and are never pushed again (the default chosen
+    // for the reconnect card's "what should happen to invoices that were already sent to the OLD
+    // one?"), and the connection card is where the owner hears it: Retry never offers them, since
+    // qbo_pending lists only invoices with no QuickBooks id. `neq` never matches a NULL, so an
+    // invoice nobody could place (pushed before 265 with no company on file) is not counted.
+    const realm: string | null = data?.qbo_realm_id ?? null;
+    const [{ count }, { count: elsewhere }] = realm
+      ? await Promise.all([
+        admin
+          .from("qbo_item_map")
+          .select("id", { count: "exact", head: true })
+          .eq("client_id", clientId)
+          .eq("realm_id", realm),
+        admin
+          .from("invoice_sends")
+          .select("short_code", { count: "exact", head: true })
+          .eq("client_id", clientId)
+          .not("qbo_invoice_id", "is", null)
+          .neq("qbo_realm_id", realm),
+      ])
+      : [{ count: 0 }, { count: 0 }];
 
     // Never tokens, never the full realm id. The company NAME is the human handle.
     return json({
@@ -9654,13 +9676,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // explanation for why their invoices quietly stopped syncing.
       disconnectReason: data?.qbo_connected_at ? null : (data?.qbo_disconnect_reason ?? null),
       mappedCount: count ?? 0,
+      otherCompanyInvoices: elsewhere ?? 0,
     });
   }
 
   if (action === "list_item_map") {
-    const [maps, styles, items, types] = await Promise.all([
+    const [maps, styles, items, types, cs] = await Promise.all([
       admin.from("qbo_item_map")
-        .select("id, line_kind, item_key, style_id, qbo_item_id, qbo_item_name")
+        .select("id, line_kind, item_key, style_id, qbo_item_id, qbo_item_name, realm_id")
         .eq("client_id", clientId),
       admin.from("building_styles")
         .select("id, label, active").eq("client_id", clientId).eq("active", true),
@@ -9679,8 +9702,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // The designer's built-in names, so the grid reads "Rough Opening" rather than the raw
       // `roughOpening` key. Same three-step fallback the `catalog` action above already uses.
       admin.from("layout_item_types").select("item_key, label"),
+      // Which company the mappings must belong to (migration 265). The disconnect tombstone counts,
+      // as in save_item_map: it is still the company those rows were picked from.
+      admin.from("client_settings").select("qbo_realm_id").eq("client_id", clientId).maybeSingle(),
     ]);
     if (maps.error) return dbFail(req, clientId, "load your QuickBooks mappings", maps.error);
+    if (cs.error) return dbFail(req, clientId, "load your QuickBooks connection", cs.error);
     // Checked, not `?? []`-swallowed: an empty layoutItems list is indistinguishable from a
     // tenant with none, which is exactly how the bug above stayed invisible. Same for styles —
     // a silent empty there hides every per-style building override.
@@ -9692,7 +9719,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     return json({
       clientId,
-      mappings: maps.data ?? [],
+      // Only this company's rows (the push reads the same set, so the grid shows exactly what an
+      // invoice will use). A row left from another company reads as "— not mapped —", which is
+      // also how the push treats it. realm_id itself is dropped: qbo_status masks the realm id,
+      // and this must not hand the browser the whole one beside it.
+      mappings: mapRowsForRealm(maps.data as any[] | null, cs.data?.qbo_realm_id ?? null)
+        .map(({ realm_id: _realm, ...m }: any) => m),
+      // Which company this grid was loaded against, as an opaque tag (qboRealm.ts). The page sends
+      // it back with save_item_map, which refuses the save if the company changed since.
+      companyTag: await companyTagOf(cs.data?.qbo_realm_id ?? null),
       styles: styles.data ?? [],
       layoutItems: (items.data ?? []).map((li: any) => ({
         item_key: li.item_key,
@@ -9718,15 +9753,42 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     // Validate against the tenant's OWN catalog — an item key or style id from another
     // tenant must not be writable here.
-    const [itemsRes, stylesRes, exRes] = await Promise.all([
+    const [itemsRes, stylesRes, exRes, csRes] = await Promise.all([
       admin.from("client_layout_items").select("item_key").eq("client_id", clientId).eq("active", true),
       admin.from("building_styles").select("id").eq("client_id", clientId),
       admin.from("qbo_item_map").select("id, line_kind, item_key, style_id").eq("client_id", clientId),
+      // The QuickBooks company these item ids come from (migration 265). The disconnect tombstone
+      // counts: a tenant who disconnected is still mapping against that company's items, and
+      // reconnecting it keeps them.
+      admin.from("client_settings").select("qbo_realm_id").eq("client_id", clientId).maybeSingle(),
     ]);
     if (exRes.error) return dbFail(req, clientId, "read your current QuickBooks mappings", exRes.error);
+    if (csRes.error) return dbFail(req, clientId, "read your QuickBooks connection", csRes.error);
+    const realmId: string | null = csRes.data?.qbo_realm_id ?? null;
+    // The item ids in `rows` were picked from the list the page loaded, but the stamp below is the
+    // company on file NOW. A page left open across a company switch (another tab, a teammate)
+    // would write the old company's ids stamped as the new one's, and the push would bill them.
+    // So the page hands back the tag list_item_map gave it, and a mismatch is refused whole,
+    // before anything is written, blank-id deletes included. A page built before the tag existed
+    // sends no tag at all and is let through as before.
+    if (Object.prototype.hasOwnProperty.call(payload, "companyTag")
+        && (payload.companyTag ?? null) !== await companyTagOf(realmId)) {
+      return json({ error: "Your QuickBooks company changed since this page loaded. Reload the page, then pick your items." }, 409);
+    }
+    // A mapping names an item in ONE company's books, so with no company on file there is nothing
+    // to stamp it with, and an unstamped row is one the push ignores (qboRealm.ts). Refused whole,
+    // before anything is written, rather than saved into a grid that can never use it. Clearing a
+    // mapping (a blank id) still goes through: removing a row needs no company.
+    if (!realmId && payload.rows.some((row: any) => String(row?.qboItemId ?? "").trim() !== "")) {
+      return json({ error: "Connect QuickBooks first, then pick your items." }, 409);
+    }
     const validKeys = new Set((itemsRes.data ?? []).map((i: any) => i.item_key));
     const validStyles = new Set((stylesRes.data ?? []).map((s: any) => s.id));
     const keyOf = (k: string, ik: string, sid: string | null) => `${k}|${ik}|${sid ?? ""}`;
+    // EVERY row of the tenant's, whatever company it names, on purpose. The unique indexes are per
+    // (tenant, kind, key[, style]) with no realm in them, so a row left from another company (a
+    // wipe in qbo-oauth-callback that failed) still holds its slot: saving that slot has to UPDATE
+    // it, which re-stamps it with this company, rather than INSERT beside it and hit the index.
     const idByKey = new Map<string, string>();
     for (const r of exRes.data ?? []) idByKey.set(keyOf(r.line_kind, r.item_key, r.style_id), r.id);
 
@@ -9754,12 +9816,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }
         continue;
       }
+      // realm_id on both writes: the row names an item in THIS company (see the refusal above).
       const res = existingId
         ? await admin.from("qbo_item_map")
-            .update({ qbo_item_id: qboItemId, qbo_item_name: qboItemName, updated_at: new Date().toISOString() })
+            .update({ qbo_item_id: qboItemId, qbo_item_name: qboItemName, realm_id: realmId, updated_at: new Date().toISOString() })
             .eq("id", existingId)
         : await admin.from("qbo_item_map")
-            .insert({ client_id: clientId, line_kind: lineKind, item_key: itemKey, style_id: styleId, qbo_item_id: qboItemId, qbo_item_name: qboItemName });
+            .insert({ client_id: clientId, line_kind: lineKind, item_key: itemKey, style_id: styleId, qbo_item_id: qboItemId, qbo_item_name: qboItemName, realm_id: realmId });
       if (res.error) { skipped.push(`${lineKind}: ${res.error.message}`); continue; }
       saved++;
     }
@@ -9918,10 +9981,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     // KEEP qbo_realm_id (tombstone) and KEEP qbo_item_map: reconnecting the SAME company
-    // must not lose mapping work — the callback only wipes the map when the realm CHANGES.
-    // Side effect of the tombstone + unique index: this company cannot be attached to a
-    // DIFFERENT tenant while the tombstone stands; moving a company between tenants means
-    // clearing qbo_realm_id here first. That friction is intentional.
+    // must not lose mapping work. Every mapping row is stamped with the company it names
+    // (migration 265), so the callback keeps exactly that company's rows on a reconnect and
+    // clears everything else when a different company is connected.
+    // The tombstone still holds this company under the unique index, but that no longer needs
+    // clearing by hand to move a company between tenants: since 084, connecting it from another
+    // tenant takes it over (qbo_displace_realm), and 265 means a map left behind by a takeover
+    // can never bill against the next company this tenant connects.
     const { error } = await admin.from("client_settings").update({
       qbo_access_token: null,
       qbo_access_token_expires_at: null,
@@ -13978,11 +14044,26 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
 
     const { data: row } = await admin.from("invoice_sends")
-      .select("status, invoice_number, qbo_invoice_id")
+      .select("status, invoice_number, qbo_invoice_id, qbo_realm_id")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
     if (!row) return json({ error: "No invoice has been sent for this design." }, 404);
     if (row.status !== "sent") return json({ error: "The invoice email hasn't gone out yet — retry that first." }, 400);
-    if (row.qbo_invoice_id) return json({ ok: true, alreadyPushed: true, qboInvoiceId: row.qbo_invoice_id, clientId });
+    if (row.qbo_invoice_id) {
+      // Already in a company's books — but since the tenant can switch companies, possibly NOT the
+      // one connected now (migration 265 records which). Either way it is not pushed again: copying
+      // an invoice into a second company's books is a bookkeeper's call (the default chosen for
+      // Carolyn's open question on the reconnect card), so the answer just says where it is.
+      // The portal only reaches this from a pending list gone stale in an open tab (qbo_pending
+      // lists invoices with no QuickBooks id); qbo_status's otherCompanyInvoices is the standing
+      // answer on the connection card.
+      const { data: cs } = await admin.from("client_settings")
+        .select("qbo_realm_id").eq("client_id", clientId).maybeSingle();
+      return json({
+        ok: true, alreadyPushed: true, qboInvoiceId: row.qbo_invoice_id,
+        otherCompany: pushedToOtherCompany(row.qbo_realm_id ?? null, cs?.qbo_realm_id ?? null),
+        clientId,
+      });
+    }
 
     await pushQboInvoice(admin, clientId, { shortCode, docNumber: row.invoice_number ?? null });
 

@@ -17,11 +17,18 @@
  * tenant's qbo_item_map (most-specific-wins, ending at the 'fallback' kind), the WHOLE
  * push is aborted with qbo_error = 'unmapped: …'. A book entry that quietly drops lines
  * is worse than no entry.
+ *
+ * ONLY THE CONNECTED COMPANY'S MAPPINGS COUNT (migration 265). Item ids are per-company, so a
+ * row stamped with another company's realm, or with none, is treated as not mapped at all
+ * (qboRealm.ts). That turns a mapping left over from a previous company into the loud abort
+ * above instead of a line billed as whatever shares its id in the new books. The invoice row
+ * records which company it went into (invoice_sends.qbo_realm_id).
  */
 
 // deno-lint-ignore-file no-explicit-any
 import { getQboConnection, qboFetch, QboApiError, QboBroken, QboNotConnected } from "./qboToken.ts";
 import { logEdgeError } from "./logError.ts";
+import { mapRowsForRealm } from "./qboRealm.ts";
 
 /** QBO query-language string literal. Backslash is the ESCAPE character in that dialect, so it
  *  has to be doubled FIRST — escaping only the quote left a caller-supplied trailing backslash
@@ -96,15 +103,33 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
     };
 
     // ── Resolve every line to a QuickBooks item BEFORE touching QuickBooks ────────
-    const { data: maps } = await admin.from("qbo_item_map")
-      .select("line_kind, item_key, style_id, qbo_item_id, qbo_item_name")
+    // Only rows stamped with THIS company's realm (see the header): a mapping from a company the
+    // tenant used before is dropped here, so its lines fall through to `unmapped` below.
+    const { data: maps, error: mapsErr } = await admin.from("qbo_item_map")
+      .select("line_kind, item_key, style_id, qbo_item_id, qbo_item_name, realm_id")
       .eq("client_id", clientId);
+    // A read that FAILED is not an empty map. Swallowed, it came back null, every line landed in
+    // `unmapped` below, and the owner was told to map lines that were mapped (and Retry failed the
+    // same way). Since 265 the select names realm_id, so a schema out of step with the functions
+    // (deployed before 265, or 265 rolled back first) fails here too. Say what actually happened.
+    if (mapsErr) {
+      await logEdgeError({
+        fn: "qbo-invoice-push", clientId, code: "qbo_item_map_read_failed",
+        message: `Reading the QuickBooks item mappings failed: ${mapsErr.message}`,
+        context: { shortCode, attempt, pgCode: mapsErr.code ?? null },
+      });
+      await fail("couldn't read your QuickBooks item mappings — Retry in a minute");
+      return;
+    }
     const byKey = new Map<string, { id: string; name: string | null }>();
-    for (const m of maps ?? []) {
+    for (const m of mapRowsForRealm(maps as any[] | null, realmId)) {
       byKey.set(`${m.line_kind}|${m.item_key || ""}|${m.style_id || ""}`,
         { id: String(m.qbo_item_id), name: m.qbo_item_name ?? null });
     }
     const styleId = snap.styleId ? String(snap.styleId) : "";
+    // A layout item with no row of its own goes straight to `fallback`. There is no kind-level
+    // `layout_item||` default to try first: 066's qbo_item_map_key_shape CHECK refuses a
+    // layout_item row with an empty key, and save_item_map refuses one too.
     const resolve = (kind: string, itemKey: string) => {
       const k = String(kind || "fallback");
       const key = String(itemKey || "");
@@ -113,7 +138,6 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
         ((k === "building" || k === "layout_item") && styleId
           ? byKey.get(`${k}|${key}|${styleId}`) : undefined) ??
         byKey.get(`${k}|${key}|`) ??             // the kind's (or item's) default
-        (k === "layout_item" ? byKey.get("layout_item||") : undefined) ??
         byKey.get("fallback||")                   // tenant-wide safety net
       );
     };
@@ -169,6 +193,9 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
         await admin.from("invoice_sends").update({
           qbo_invoice_id: String(existing.Id),
           qbo_doc_number: docNumber,
+          // Which company's books hold it (migration 265). Read back by retry_qbo_push after a
+          // switch, so an invoice already in the OLD company reads as just that.
+          qbo_realm_id: realmId,
           qbo_pushed_at: new Date().toISOString(),
           qbo_error: null,
           qbo_attempts: attempt,
@@ -278,6 +305,7 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
     const record = () => admin.from("invoice_sends").update({
       qbo_invoice_id: String(created.Id),
       qbo_doc_number: created.DocNumber ? String(created.DocNumber) : docNumber,
+      qbo_realm_id: realmId,   // the company it went into, as on the adopt write above
       qbo_pushed_at: new Date().toISOString(),
       qbo_error: note,
       qbo_tid: createMeta.tid ?? null,
@@ -293,7 +321,9 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
       await logEdgeError({
         fn: "qbo-invoice-push", clientId, code: "qbo_ledger_write_failed",
         message: `QuickBooks invoice created but invoice_sends could not record it: ${wrote.error.message}`,
-        context: { shortCode, qboInvoiceId: String(created.Id), docNumber: created.DocNumber ?? docNumber, attempt },
+        // realmId too: since 265 a tenant's invoices can sit in more than one company's books, and
+        // reconciling by hand starts with knowing which.
+        context: { shortCode, qboInvoiceId: String(created.Id), docNumber: created.DocNumber ?? docNumber, attempt, realmId },
       });
     }
   } catch (e) {
