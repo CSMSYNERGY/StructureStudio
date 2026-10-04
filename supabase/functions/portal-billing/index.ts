@@ -785,7 +785,14 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
           hasCard: Boolean(vaultId),
           discount: { percent: discountPct, features: discountFeatures },
           plans: publicPlans,
-          subscriptions: subs,
+          // `paid_through` rides along because current_period_end is NOT the next renewal once
+          // the gateway has renewed once (only checkout writes it; see paidThrough above), so
+          // the Billing tab printed "renews <a date already gone>" on every monthly plan past
+          // its first month. Same roll-forward admin-catalog's billing overview shows operators.
+          subscriptions: subs.map((s) => {
+            const pt = paidThrough(s);
+            return { ...s, paid_through: Number.isFinite(pt) ? new Date(pt).toISOString() : null };
+          }),
           checkout: configured
             ? { tokenizationKey: TOKENIZATION_KEY, collectJsUrl: `${GATEWAY}/token/Collect.js` }
             : null,

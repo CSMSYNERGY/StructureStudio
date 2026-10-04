@@ -2148,7 +2148,10 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       {data && liveSubs.length > 0 && (() => {
         const moSum = liveSubs.filter((s) => (planById[s.plan_id] || {}).billing_interval !== "annual").reduce((a, s) => a + (s.price_cents || 0), 0);
         const yrSum = liveSubs.filter((s) => (planById[s.plan_id] || {}).billing_interval === "annual").reduce((a, s) => a + (s.price_cents || 0), 0);
-        const nextRenew = liveSubs.map((s) => s.current_period_end).filter(Boolean).sort()[0] || null;
+        // paid_through (portal-billing, rolled forward past each renewal) before the stored
+        // current_period_end, which stays on the FIRST renewal date for good; the fallback is
+        // only for an older portal-billing that does not send it.
+        const nextRenew = liveSubs.map((s) => s.paid_through || s.current_period_end).filter(Boolean).sort()[0] || null;
         const headStatus = liveSubs.some((s) => s.status === "past_due") ? "past_due" : liveSubs.some((s) => s.status === "paused") ? "paused" : "active";
         const hb = SUB_BADGE[headStatus] || SUB_BADGE.active;
         const spend = [moSum ? `${fmt$(moSum)}/mo` : null, yrSum ? `${fmt$(yrSum)}/yr` : null].filter(Boolean).join(" + ") || "—";
@@ -2191,7 +2194,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                   <span style={{ background: b.bg, color: b.fg, borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>{b.label}</span>
                   <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
                     {s.price_cents != null && <>{fmt$(s.price_cents)}{p.billing_interval === "annual" ? "/yr" : "/mo"} · </>}
-                    started {fmtDate(s.current_period_start)}{s.current_period_end ? ` · renews ${fmtDate(s.current_period_end)}` : ""}
+                    started {fmtDate(s.current_period_start)}{(s.paid_through || s.current_period_end) ? ` · renews ${fmtDate(s.paid_through || s.current_period_end)}` : ""}
                   </div>
                 </div>
                 <button type="button" onClick={() => cancel(s)} disabled={busy}
