@@ -33,7 +33,8 @@
 //   7. ⚠️ LEVEL GROUND IS TODAY'S, BYTE FOR BYTE: a style with no fall, one whose fall is 0, and a slab
 //      carrying a fall it cannot have, each build a scene (every node's matrix, every mesh's geometry
 //      and material) identical to the one the designer at SS_LEVEL_BASE (default 5345037, the commit
-//      before this) builds from the same style, and the same camera
+//      before this) builds from the same style, and the same camera (a projecting porch's cheeks and the
+//      wood past its corner posts aside: 2026-10-04 changed those on purpose, see digest)
 //   8. THE PANEL (?admin=1): blocks and piers show "Ground falls away (ft)"; an untouched level style
 //      saves no fall (both keys sent as an explicit null, review BC-1 2026-09-29), and a style storing
 //      a fall saves it back exactly; a typed fall saves, "Toward" appears with its hint and saves its
@@ -54,7 +55,8 @@
 // read as corners. This proves, on top of the above:
 //   10. ⚠️ A STORED FALL RENDERS AS IT DID: cases K, Lf, Bk and O build a scene identical, node for node
 //      but the grass (a grid now, not rows; held to d3GradeAt by 1 above), to the designer at
-//      SS_FALL_BASE (default 5fb622a, the commit before the corners), and the same camera
+//      SS_FALL_BASE (default 5fb622a, the commit before the corners), and the same camera (the porch's
+//      two front-corner parts aside, as in 7)
 //   11. four-corner cases (C1..C4): model.gradeCorners is d3GradeCorners (the highest corner the zero),
 //      model.gradeFall null; the drawn grass is d3GradeAt's bilinear surface over and round the
 //      footprint (within 0.01 ft); ⚠️ every support's foot is on the drawn grass at its own spot; the
@@ -62,15 +64,27 @@
 //      supports, the steps, a lean-to's posts, a ramp, the shade and the labels are on the grass; the
 //      editor frames every foot; the self-check's phone stands on the grass
 //   12. level corners (all 0) are today's level ground, node for node (LV5, LV6 in 7)
-//   8.  THE PANEL (rewritten 2026-09-29): "Ground at each corner (ft lower)", four boxes; each types,
-//      reads out ("highest", "2 ft lower"), saves the four corners and sends the fall keys null; "Level
-//      ground" and leaving piers send gradeCornersFt null; a style storing a fall opens with its corners,
-//      saves the fall back untouched, and an edited corner saves corners in its place; the preview
-//      draws them
+//   8.  THE PANEL (rewritten 2026-09-29): "Ground at each corner (in lower)", four boxes in INCHES since
+//      2026-10-03 (stored in feet); each types, reads out ("highest", "2 ft lower"), saves the four
+//      corners and sends the fall keys null; "Level ground" and leaving piers send gradeCornersFt null;
+//      a style storing a fall opens with its corners, saves the fall back untouched, and an edited corner
+//      saves corners in its place; the preview draws them. A slab keeps the boxes, a typed corner saves
+//      on it, and every save says slabGround: true
+//   13. A SLAB ON GROUND THAT FALLS AWAY (gradeCornersFt on a slab, 2026-10-03, case SL): model.grade the
+//      band's 0.35 at the highest corner, model.foundation the slab's; the grass is d3GradeAt's surface;
+//      ⚠️ the stem wall's tops at -0.35 and every vertex of its bottom edge under the drawn grass; no
+//      skirt, runners, supports under the building or shade; the porch deck's piers, the steps, a lean-
+//      to's posts and a ramp reach the drawn grass; the labels lie on it; the cameras frame the drop
+//   14. STEPS OFF A DECK'S END AND A RECESSED PORCH'S STEPS (2026-10-03, cases F*): on a fall and on
+//      corners, front, back, eave and old-frame walls, raised and on a slab. ⚠️ The placed flight's own
+//      matrix is the pure map: a point (x, d) of the flight lands where d3PorchToRoot puts
+//      (edgeX + turn d, atD - turn x) off a deck's end, and where d3RecessedPorchToRoot puts (x, d) in a
+//      recessed porch's opening; its foot is on the drawn grass; its treads rise evenly in risers of
+//      7.5 in or less; and the panel's readout (d3PorchReadout / d3RecessedPorchReadout) counts the same
 //
 //   python -m http.server 8142 --bind 127.0.0.1 --directory <repo root>
 //   SS_BASE=http://127.0.0.1:8142 node tests/harness/gradeFall.mjs
-//   SS_CASES=K,level,panel,panelSteps,corners,C1,legacy ...   (a subset)  SS_SHOTS=<dir>  (side views, before and after)
+//   SS_CASES=K,level,panel,panelSteps,corners,C1,legacy,flights,F1 ...   (a subset)  SS_SHOTS=<dir>  (side views, before and after)
 //
 // Exit 0 = every assertion held.
 import { execFileSync } from "node:child_process";
@@ -98,7 +112,7 @@ function pure() {
     ["function d3PorchGeom(", "function d3PorchReadout("],
     ["function d3PorchReadout(", "// A dimensioned end-elevation of the style"],
   ].map(([a, b]) => lift(a, b)).join("\n");
-  return new Function(`${body}; return { D3, d3GradeFt, d3GradeAt, d3GradeFall, d3GradeFallAxis, d3GradeFallBlendFt, d3GradeMaxFt, d3GradeLiftFt, d3FrameHeightFt, d3PorchToRoot, d3PorchReadout, d3GradeCorners };`)();
+  return new Function(`${body}; return { D3, d3GradeFt, d3GradeAt, d3GradeFall, d3GradeFallAxis, d3GradeFallBlendFt, d3GradeMaxFt, d3GradeLiftFt, d3FrameHeightFt, d3PorchToRoot, d3PorchReadout, d3GradeCorners, d3RecessedPorchToRoot, d3RecessedPorchReadout };`)();
 }
 const PURE = pure();
 // The self-check's cameras (ssSelfCheckCameras), from this checkout or from another revision's source.
@@ -173,10 +187,11 @@ const LEVEL = [
   { id: "LV2", label: "Level Piers Zero Fall", size: "16x24", d3: tri({ porchEnd: "back", porchSteps: "center" }, { gradeFallFt: 0, gradeFallToward: "left" }) },
   { id: "LV3", label: "Level Slab With Fall", size: "12x16", d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6, porchOutFt: 6, porchSteps: "left" }, siding: "batten", colors: PLAIN, wallHeightFt: 8, foundation: "slab", gradeFallFt: 2, gradeFallToward: "back" } },
   { id: "LV4", label: "Level Farm Blocks", size: "16x10", d3: { roof: FARM_ROOF, siding: "batten", colors: FARM_COLORS, wallHeightFt: 7.3, roofMaterial: "metal", foundation: "blocks", floorHeightFt: 1.1 } },
-  // 12. Corners that make no slope (2026-09-29): all 0, all the same, and corners on a slab.
+  // 12. Corners that make no slope (2026-09-29): all 0, all the same, and corners on a style that says
+  //     nothing about its foundation (a slab's own corners slope since 2026-10-03: case SL).
   { id: "LV5", label: "Level Corners Zero", size: "16x24", d3: tri({ porchEnd: "back", porchSteps: "center" }, { gradeCornersFt: { fl: 0, fr: 0, bl: 0, br: 0 } }) },
   { id: "LV6", label: "Level Corners Same", size: "16x24", d3: tri({ porchEnd: "back", porchSteps: "center" }, { gradeCornersFt: { fl: 2, fr: 2, bl: 2, br: 2 } }) },
-  { id: "LV7", label: "Level Slab With Corners", size: "12x16", d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6, porchOutFt: 6, porchSteps: "left" }, siding: "batten", colors: PLAIN, wallHeightFt: 8, foundation: "slab", gradeCornersFt: { fl: 0, br: 3 } } },
+  { id: "LV7", label: "Level No Foundation Corners", size: "12x16", d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6, porchOutFt: 6, porchSteps: "left" }, siding: "batten", colors: PLAIN, wallHeightFt: 8, gradeCornersFt: { fl: 0, br: 3 } } },
 ];
 // ── 11. THE GROUND AT EACH CORNER (2026-09-29): drops in feet below... as typed; the highest is the zero.
 const CORNER_CASES = [
@@ -194,8 +209,34 @@ const CORNER_CASES = [
   { id: "C4", label: "Corners Old Frame", size: "24x12", kind: "piers", wall: "west",
     d3: { roof: { type: "gable", pitch: 0.4, overhang: 0.6, porchOutFt: 5, porchSteps: "left" }, siding: "panel", colors: PLAIN, wallHeightFt: 8, foundation: "piers", floorHeightFt: 1.5, gradeCornersFt: { fl: 2.5, fr: 0, bl: 1, br: 0.75 } } },
 ];
+// ── 13. A SLAB ON GROUND THAT FALLS AWAY (2026-10-03): a back porch with centre steps, a lean-to off the
+// left, a ramp on the east, the ground lowest at the back-right corner.
+const SLAB_CASES = [
+  { id: "SL", label: "Corners Slab", size: "16x24", wall: "north", leanTo: true, ramp: true, selfCheck: true,
+    d3: { roof: { ...TRI, porchEnd: "back", porchSteps: "center" }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal", foundation: "slab", gradeCornersFt: { fl: 0, fr: 0.5, bl: 1.5, br: 2.5 } } },
+];
 // ── 10. A STORED FALL, as the designer before the corners drew it.
 const LEGACY = ["K", "Lf", "Bk", "O"];
+// ── 14. STEPS OFF A DECK'S END, AND A RECESSED PORCH'S STEPS (2026-10-03), on ground that falls away.
+// `recessed` marks a porch cut into the building; `wall` is the porch's.
+const FLIGHT_CASES = [
+  { id: "F1", label: "Flight Side Left Fall", size: "16x24", wall: "south",
+    d3: tri({ porchEnd: "front", porchSteps: "leftSide", leanToWidthFt: 0 }, { gradeFallFt: 2, gradeFallToward: "left" }) },
+  { id: "F2", label: "Flight Side Right Corners", size: "16x24", wall: "north",
+    d3: tri({ porchEnd: "back", porchSteps: "rightSide", leanToWidthFt: 0 }, { gradeCornersFt: { fl: 0, fr: 0.5, bl: 1.5, br: 3 } }) },
+  { id: "F3", label: "Flight Side Farm Blocks", size: "16x10", wall: "south",
+    d3: { roof: { ...FARM_ROOF, porchSteps: "rightSide" }, siding: "batten", colors: FARM_COLORS, wallHeightFt: 7.3, roofMaterial: "metal", foundation: "blocks", floorHeightFt: 1.1, gradeFallFt: 1.5, gradeFallToward: "right" } },
+  { id: "F4", label: "Flight Side Old Frame", size: "24x12", wall: "west",
+    d3: { roof: { type: "gable", pitch: 0.4, overhang: 0.6, porchOutFt: 5, porchSteps: "leftSide" }, siding: "panel", colors: PLAIN, wallHeightFt: 8, foundation: "piers", floorHeightFt: 1.5, gradeCornersFt: { fl: 2.5, fr: 0, bl: 1, br: 0.75 } } },
+  { id: "F5", label: "Flight Recessed Front Piers", size: "16x24", wall: "south", recessed: true,
+    d3: { roof: { type: "gable", pitch: 0.42, overhang: 0.8, porchDepthFt: 5, porchSteps: "center" }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5, gradeCornersFt: { fl: 2, fr: 1, bl: 0, br: 0 } } },
+  { id: "F6", label: "Flight Recessed Old Frame", size: "24x12", wall: "west", recessed: true,
+    d3: { roof: { type: "gable", pitch: 0.4, overhang: 0.6, porchDepthFt: 5, porchSteps: "left" }, siding: "panel", colors: PLAIN, wallHeightFt: 8, foundation: "piers", floorHeightFt: 1.5, gradeFallFt: 2, gradeFallToward: "left" } },
+  { id: "F7", label: "Flight Recessed Eave Blocks", size: "16x12", wall: "south", recessed: true,
+    d3: { roof: { type: "gable", front: "eave", pitch: 0.4, overhang: 0.6, porchDepthFt: 4, porchSteps: "right" }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal", foundation: "blocks", floorHeightFt: 1.1, gradeFallFt: 1.5, gradeFallToward: "right" } },
+  { id: "F8", label: "Flight Recessed Back Slab", size: "12x16", wall: "north", recessed: true,
+    d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6, porchDepthFt: 4, porchEnd: "back", porchSteps: "center" }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal", foundation: "slab", gradeCornersFt: { fl: 0, fr: 0, bl: 1.5, br: 2 } } },
+];
 
 const configFor = (c) => {
   const [w, l] = c.size.split("x").map(Number);
@@ -314,14 +355,20 @@ async function openCase(ctx, c, ok, tag, bundle) {
 // Every node of the model: its world matrix and, on a mesh, its geometry (type, parameters, a hash of
 // every vertex) and material. Two builds with equal digests are the same scene. `skipGround` leaves
 // the grass out (10: a fall's grass is a grid now, held to d3GradeAt by 1).
+// A projecting porch's two front-corner parts are left out on BOTH sides (2026-10-04): the sided cheek
+// now stops at the corner post's outer face and the wood past it reaches the ceiling, on purpose (the
+// 10-01 call), so no older build draws them. porchProbe holds both; `corner` counts what was left out.
+const PORCH_CORNER = ["cheek", "cornerFill"];
 async function digest(page, skipGround = false) {
-  return page.evaluate((skipGround) => {
+  return page.evaluate(({ skipGround, PORCH_CORNER }) => {
     const E = window.__ss3dEngine, M = E.model;
     M.root.updateMatrixWorld(true);
     const r6 = (v) => Math.round(v * 1e6) / 1e6;
     const out = [];
+    let corner = 0;
     M.root.traverse((o) => {
       if (skipGround && o.userData && o.userData.ssGround) return;
+      if (o.userData && PORCH_CORNER.includes(o.userData.ssPorchPart)) { corner++; return; }
       let s = `${o.type}|${o.matrixWorld.elements.map(r6).join(",")}|${o.visible}`;
       if (o.isMesh) {
         const g = o.geometry, pa = g.attributes.position;
@@ -333,8 +380,8 @@ async function digest(page, skipGround = false) {
       }
       out.push(s);
     });
-    return { lines: out, cam: [...E.camera.position.toArray(), ...E.controls.target.toArray()].map(r6) };
-  }, skipGround);
+    return { lines: out, corner, cam: [...E.camera.position.toArray(), ...E.controls.target.toArray()].map(r6) };
+  }, { skipGround, PORCH_CORNER });
 }
 
 // Everything the fall assertions read, in world space, in one pass; `P` is what the pure functions say.
@@ -384,7 +431,9 @@ async function measure(page, W, L) {
       if (n.y > 0) upFaces++; else downFaces++;
     }
     const lowestGrass = (cx, cz, hx, hz) => Math.min(grassAt(cx - hx, cz - hz), grassAt(cx + hx, cz - hz), grassAt(cx - hx, cz + hz), grassAt(cx + hx, cz + hz));
-    const out = { grade: M.grade, gradeFall: M.gradeFall || null, foundation: M.foundation || null, groundType: ground.geometry.type, upFaces, downFaces };
+    const out = { grade: M.grade, gradeFall: M.gradeFall || null, foundation: M.foundation || null, groundType: ground.geometry.type, upFaces, downFaces,
+      // The steps as built (14): the projecting porch's (d3PorchStepsGeom on the drawn porch) and a recessed one's.
+      porchSteps: (M.porch && M.porch.steps) || null, recessedSteps: M.recessedSteps || null };
     // The grass along the fall's axis through the middle, and across it, for the profile checks.
     out.grassProbe = [];
     for (let k = -30; k <= 30; k++) {
@@ -425,8 +474,28 @@ async function measure(page, W, L) {
       const fx0 = Math.min(...treads.map((t) => t.mn[0])), fx1 = Math.max(...treads.map((t) => t.mx[0]));
       const fz0 = Math.min(...treads.map((t) => t.mn[2])), fz1 = Math.max(...treads.map((t) => t.mx[2]));
       const corners = [[fx0, fz0], [fx1, fz0], [fx0, fz1], [fx1, fz1]].map(([x, z]) => grassAt(x, z));
-      out.steps.push({ bottom: b.mn[1], top: b.mx[1], treads: treads.length, risers: partsIn(q, "stepRiser").length, treadTops: treads.map((t) => t.mx[1]).sort((p, r) => p - r), grassMin: Math.min(...corners), grassMax: Math.max(...corners) });
+      // The flight's own frame (x across it, z = d out from the edge it leaves), as placed: where its
+      // points land in the building's x, z (14).
+      const map = [[0, 0], [1, 0], [0, 1], [-1.2, 2.5]].map(([x, d]) => { const v = new V(x, 0, d).applyMatrix4(q.matrixWorld); return { x, d, at: [v.x, v.z] }; });
+      out.steps.push({ bottom: b.mn[1], top: b.mx[1], treads: treads.length, risers: partsIn(q, "stepRiser").length, treadTops: treads.map((t) => t.mx[1]).sort((p, r) => p - r), grassMin: Math.min(...corners), grassMax: Math.max(...corners),
+        where: q.userData.ssPorchSteps, map });
     });
+    // A slab's stem wall (2026-10-03): its top, and every vertex of its bottom edge against the grass there.
+    out.stems = fpart("stem").map((q) => {
+      const pa = q.geometry.attributes.position;
+      let top = -Infinity, worst = -Infinity, n = 0;
+      for (let i = 0; i < pa.count; i++) {
+        const v = new V().fromBufferAttribute(pa, i).applyMatrix4(q.matrixWorld);
+        top = Math.max(top, v.y);
+        if (v.y < -0.35 - 1e-6) {
+          const gy = grassAt(v.x, v.z);
+          if (Number.isFinite(gy)) { worst = Math.max(worst, v.y - gy); n++; }
+        }
+      }
+      return { wall: q.userData.ssStem, top, worst, n, inSlab: !!(q.parent && q.parent.userData && q.parent.userData.ssFoundation === "slab") };
+    });
+    out.skirtN = fpart("skirt").length;
+    out.runnerN = fpart("runner").length;
     // Lean-to posts.
     out.leanPosts = all((q) => q.userData && q.userData.ssLeanToPost).map((q) => { const b = bbOf(q); return { bottom: b.mn[1], grassLow: lowestGrass(b.cx, b.cz, 0.15, 0.15), grassC: grassAt(b.cx, b.cz) }; });
     // Ramps: the lowest point, its far end, and the grass under its two far corners.
@@ -738,7 +807,7 @@ async function runLevel(ctx, c, ok, base, shots) {
     const marks = await Promise.all([now.page, then.page].map((pg) => pg.evaluate(() => ("gradeFall" in window.__ss3dEngine.model ? window.__ss3dEngine.model.gradeFall : "absent"))));
     ok(`${tag}: this build says gradeFall null, the ${base.rev} designer has no such field (it really is the old bundle)`, marks[0] === null && marks[1] === "absent", JSON.stringify(marks));
     const i = a.lines.findIndex((l, k) => l !== b.lines[k]);
-    ok(`${tag}: ⚠️ THE SCENE IS ${base.rev}'S, NODE FOR NODE (${a.lines.length} nodes: matrices, geometry, materials)`,
+    ok(`${tag}: ⚠️ THE SCENE IS ${base.rev}'S, NODE FOR NODE (${a.lines.length} nodes: matrices, geometry, materials; ${a.corner} porch-corner parts left out)`,
       a.lines.length === b.lines.length && i < 0, i >= 0 ? `node ${i}: now ${a.lines[i] && a.lines[i].slice(0, 160)} | then ${b.lines[i] && b.lines[i].slice(0, 160)}` : `${a.lines.length} vs ${b.lines.length}`);
     ok(`${tag}: ...and the camera and its target`, JSON.stringify(a.cam) === JSON.stringify(b.cam), `${JSON.stringify(a.cam)} vs ${JSON.stringify(b.cam)}`);
     if (shots && c.id === "LV1") {
@@ -778,7 +847,7 @@ async function runLegacy(ctx, c, ok, base) {
     ok(`${tag}: this build reads the fall as corners, the ${base.rev} designer has no such field (it really is the old bundle)`,
       marks[0] && typeof marks[0] === "object" && marks[1] === "absent", JSON.stringify(marks));
     const i = a.lines.findIndex((l, k) => l !== b.lines[k]);
-    ok(`${tag}: ⚠️ EVERY NODE BUT THE GRASS IS ${base.rev}'S (${a.lines.length} nodes: supports, deck, steps, posts, ramp, shade, labels)`,
+    ok(`${tag}: ⚠️ EVERY NODE BUT THE GRASS IS ${base.rev}'S (${a.lines.length} nodes: supports, deck, steps, posts, ramp, shade, labels; ${a.corner} porch-corner parts left out)`,
       a.lines.length === b.lines.length && i < 0, i >= 0 ? `node ${i}: now ${a.lines[i] && a.lines[i].slice(0, 160)} | then ${b.lines[i] && b.lines[i].slice(0, 160)}` : `${a.lines.length} vs ${b.lines.length}`);
     ok(`${tag}: ...and the camera and its target`, JSON.stringify(a.cam) === JSON.stringify(b.cam), `${JSON.stringify(a.cam)} vs ${JSON.stringify(b.cam)}`);
     ok(`${tag}: zero page errors`, now.errors.length === 0 && then.errors.length === 0, [...now.errors, ...then.errors].slice(0, 3).join(" | "));
@@ -896,6 +965,128 @@ async function runCornerCase(ctx, c, ok, shots) {
   }
 }
 
+// ── 13. A SLAB ON GROUND THAT FALLS AWAY ──
+async function runSlabCase(ctx, c, ok, shots) {
+  const gc = c.d3.gradeCornersFt;
+  const tag = `${c.id} ${c.label} ${c.size} (slab, corners ${gc.fl}/${gc.fr}/${gc.bl}/${gc.br})`;
+  let page = null;
+  try {
+    const o = await openCase(ctx, c, ok, tag, null);
+    page = o.page;
+    const { W, L, errors } = o;
+    const m = await measure(page, W, L);
+    const want = PURE.d3GradeCorners(c.d3);
+    const depth = (x, z) => PURE.d3GradeAt(c.d3, W, L, x, z);
+    const mc = await page.evaluate(() => ({ gc: window.__ss3dEngine.model.gradeCorners, gf: window.__ss3dEngine.model.gradeFall }));
+    ok(`${tag}: model.grade is the slab band's 0.35 at the highest corner; model.gradeCorners the corners; no fall`,
+      near(m.grade, 0.35, 1e-9) && mc.gc && ["fl", "fr", "bl", "br"].every((k) => near(mc.gc[k], want[k], 1e-12)) && mc.gf === null, JSON.stringify(mc));
+    ok(`${tag}: model.foundation is the slab's stem wall, four sides`, m.foundation && m.foundation.kind === "slab" && m.foundation.stems.length === 4, JSON.stringify(m.foundation));
+    ok(`${tag}: the grass is bent, every face under and round the building looking up`, m.groundType !== "CircleGeometry" && m.upFaces > 50 && m.downFaces === 0, `${m.groundType} up ${m.upFaces} down ${m.downFaces}`);
+    const pts = [];
+    for (let x = -W / 2 - 6; x <= W / 2 + 6; x += 0.75) for (let z = -L / 2 - 6; z <= L / 2 + 6; z += 0.8) pts.push([x, z]);
+    const grass = await grassUnder(page, pts);
+    const gBad = pts.map((p, i) => ({ p, y: grass[i], want: -depth(p[0], p[1]) })).filter((q) => !near(q.y, q.want, 0.01));
+    ok(`${tag}: the drawn grass is d3GradeAt's surface, the highest corner at the band's -0.35 (${pts.length} points)`,
+      gBad.length === 0 && near(-depth(-W / 2, L / 2), -0.35, 1e-12), gBad.slice(0, 3).map((q) => `(${f3(q.p[0])},${f3(q.p[1])}) ${f3(q.y)} want ${f3(q.want)}`).join(" | "));
+    // ── the stem wall ──
+    const S = m.stems;
+    ok(`${tag}: ⚠️ THE STEM WALL'S TOPS ARE AT THE BAND'S UNDERSIDE (-0.35), IN THE GROUP MARKED "slab"`,
+      S.length === 4 && S.every((s) => near(s.top, -0.35, 1e-6) && s.inSlab), S.map((s) => `${s.wall} ${f3(s.top)}`).join(" "));
+    ok(`${tag}: ⚠️ EVERY VERTEX OF ITS BOTTOM EDGE IS UNDER THE DRAWN GRASS (by its 3 in embed, a foot apart or less)`,
+      S.every((s) => s.n >= 2 * (W / 2) && s.worst <= -0.2), S.map((s) => `${s.wall} ${s.n} verts, worst ${f3(s.worst)}`).join(" | "));
+    ok(`${tag}: no skirt, no runners, no supports under the building, no shade`, m.skirtN === 0 && m.runnerN === 0 && m.supports.length === 0 && m.shades.length === 0,
+      `${m.skirtN} ${m.runnerN} ${m.supports.length} ${m.shades.length}`);
+    // ── the porch, the lean-to, the ramp ──
+    const DS = m.deckSupports;
+    const dBad = DS.filter((t) => !(near(t.bottom, t.grassLow, 0.015) && t.bottom <= t.grassC + 0.015 && near(t.top, m.rimBottom, 0.002)));
+    ok(`${tag}: ⚠️ THE DECK'S PIERS STAND ON THE DRAWN GRASS, FROM THE AT-GRADE RIM (${DS.length})`, DS.length >= 2 && dBad.length === 0 && near(m.rimBottom, -0.32, 0.002),
+      dBad.slice(0, 3).map((t) => `(${f3(t.cx)},${f3(t.cz)}) ${f3(t.bottom)}..${f3(t.top)} grass ${f3(t.grassLow)}`).join(" | ") + ` rim ${f3(m.rimBottom)}`);
+    const st = m.steps[0];
+    const rd = PURE.d3PorchReadout(c.d3, c.size);
+    const count = st ? st.treads : 0, h = st ? -st.bottom : NaN, rise = h / (count + 1);
+    ok(`${tag}: ⚠️ THE STEPS' FOOT IS ON THE GRASS: at the lowest grass under the flight`,
+      st && near(st.bottom, st.grassMin, 0.015) && st.bottom <= st.grassMax + 0.015, st && `foot ${f3(st.bottom)} grass ${f3(st.grassMin)}..${f3(st.grassMax)}`);
+    ok(`${tag}: ${count} steps down to it, risers of ${f3(rise * 12)} in (7.5 in or less), the panel's readout counting the same`,
+      st && count >= 2 && rise <= 7.5 / 12 + 1e-9 && rd && rd.steps && rd.steps.count === count && near(-rd.steps.grade, h, 0.02), rd && rd.steps && `${rd.steps.count} at ${f3(-rd.steps.grade)}`);
+    const lp = m.leanPosts;
+    ok(`${tag}: the lean-to's posts stand on the drawn grass at their own foot (${lp.length})`, lp.length >= 2 && lp.every((q) => near(q.bottom, q.grassLow, 0.015) && q.bottom <= q.grassC + 0.015),
+      lp.map((q) => `${f3(q.bottom)}/${f3(q.grassLow)}`).join(" "));
+    const r = m.ramps.find((q) => q.wall === "east");
+    ok(`${tag}: ⚠️ THE RAMP RUNS FROM THE FLOOR TO THE DRAWN GRASS AT ITS FOOT, 1 in 4 or gentler`,
+      r && near(r.bottom, r.grassFar, 0.08) && r.top <= 0.13 && r.out >= Math.max(3, 4 * -r.grassFar) - 0.15, r && `${f3(r.bottom)} grass ${f3(r.grassFar)} out ${f3(r.out)}`);
+    ok(`${tag}: the ground labels lie on it`, m.labels.length >= 2 && m.labels.every((s) => s.n > 4 && s.min >= 0.028 && s.max <= 0.052), m.labels.map((s) => `${f3(s.min)}..${f3(s.max)}`).join(" "));
+    // ── the camera ──
+    const deep = Math.max(want.fl, want.fr, want.bl, want.br), maxLift = PURE.d3GradeLiftFt(c.d3), fH = PURE.d3FrameHeightFt(c.d3, W, L);
+    ok(`${tag}: the cameras frame from the deepest corner (lift ${f3(maxLift)} = its drop), the orbit target down with it`,
+      near(maxLift, deep, 1e-9) && near(m.target[1], fH * 0.45 - maxLift, 1e-6), f3(m.target[1]));
+    const inNdc = (p) => Math.abs(p[0]) <= 1 && Math.abs(p[1]) <= 1 && p[2] < 1;
+    ok(`${tag}: the 3D editor frames every deck pier's foot`, m.framed.every(inNdc), m.framed.filter((p) => !inNdc(p)).slice(0, 3).map((p) => p.map(f3).join(",")).join(" | "));
+    if (c.selfCheck) {
+      const wantEye = SELF.SS_SHOT.EYE_FT + SELF.D3.FLOOR_T;
+      const cams = SELF.ssSelfCheckCameras({ bldgW: W, bldgH: L, style3d: c.d3 }, WALK_MAP).filter((q) => q.viewpoint !== "eaveCorner");
+      const gu = await grassUnder(page, cams.map((q) => [q.eye[0], q.eye[2]]));
+      const gaps = cams.map((q, i) => ({ v: q.viewpoint, gap: q.eye[1] - gu[i] }));
+      ok(`${tag}: the self-check's phone stands on the grass: every walk view's eye ${f3(wantEye)} ft over the drawn grass under it`,
+        cams.length === 5 && gaps.every((q) => near(q.gap, wantEye, 0.01)), gaps.map((q) => `${q.v} ${f3(q.gap)}`).join(" "));
+    }
+    if (shots) {
+      const R = Math.max(W, L);
+      await aim(page, join(shots, `${c.id}-slab-deep.png`), [R * 1.3, 3 - deep / 2, -R * 1.5], [0, 0.4 - deep / 2, -2]);
+      await aim(page, join(shots, `${c.id}-slab-side.png`), [R * 2.1, 1.6 - deep / 2, 0], [0, 0.2 - deep / 2, 0]);
+    }
+    ok(`${tag}: zero page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  } catch (e) {
+    ok(`${tag}: ran`, false, e && e.message ? e.message.split("\n")[0] : String(e));
+  } finally {
+    if (page) await page.close();
+  }
+}
+
+// ── 14. STEPS OFF A DECK'S END, AND A RECESSED PORCH'S STEPS ────────────────────────────────────
+async function runFlightCase(ctx, c, ok, shots) {
+  const tag = `${c.id} ${c.label} ${c.size} (${c.recessed ? "recessed" : "deck end"}, ${c.wall})`;
+  let page = null;
+  try {
+    const o = await openCase(ctx, c, ok, tag, null);
+    page = o.page;
+    const { W, L, errors } = o;
+    const m = await measure(page, W, L);
+    const st = m.steps[0];
+    const rd = c.recessed ? PURE.d3RecessedPorchReadout(c.d3, c.size) : PURE.d3PorchReadout(c.d3, c.size);
+    const s = rd && rd.steps;
+    ok(`${tag}: one flight, "${c.d3.roof.porchSteps}", and the readout has it`, m.steps.length === 1 && st.where === c.d3.roof.porchSteps && !!s && s.where === st.where,
+      JSON.stringify({ n: m.steps.length, where: st && st.where, readout: s && s.where }));
+    if (!st || !s) return;
+    // ⚠️ THE PLACED FLIGHT IS THE PURE MAP. A flight off a deck's end is turned onto it, by the turn, end and
+    // middle of the flight as built (model.porch.steps: the drawn porch's side, which on a cladding other
+    // than panel is a hair wider than the readout's); a recessed one is not turned.
+    const b = c.recessed ? m.recessedSteps : m.porchSteps;
+    const toRoot = c.recessed ? PURE.d3RecessedPorchToRoot(c.d3.roof, W, L, c.d3.wallHeightFt) : PURE.d3PorchToRoot(c.d3.roof, W, L);
+    const pureAt = (x, d) => (b.turn ? toRoot(b.edgeX + b.turn * d, b.atD - b.turn * x) : toRoot(x, d));
+    const mapBad = b ? st.map.filter((q) => { const w = pureAt(q.x, q.d); return !(near(w[0], q.at[0], 1e-6) && near(w[1], q.at[1], 1e-6)); }) : [];
+    ok(`${tag}: ⚠️ THE PLACED FLIGHT LANDS WHERE ${c.recessed ? "d3RecessedPorchToRoot" : "d3PorchToRoot, TURNED ONTO THE DECK'S END,"} PUTS IT`,
+      !!b && !!toRoot && mapBad.length === 0 && (c.recessed ? !b.turn : !!b.turn && b.turn === s.turn && near(Math.abs(b.edgeX), Math.abs(s.edgeX), 0.1)),
+      b ? mapBad.slice(0, 2).map((q) => `(${q.x},${q.d}) drawn ${q.at.map(f3)} pure ${pureAt(q.x, q.d).map(f3)}`).join(" | ") : "no model steps");
+    const count = st.treads, h = -st.bottom, rise = h / (count + 1);
+    ok(`${tag}: ⚠️ THE STEPS' FOOT IS ON THE GRASS: at the lowest grass under the flight, nothing floating`,
+      near(st.bottom, st.grassMin, 0.015) && st.bottom <= st.grassMax + 0.015, `foot ${f3(st.bottom)} grass ${f3(st.grassMin)}..${f3(st.grassMax)}`);
+    ok(`${tag}: ${count} steps, risers of ${f3(rise * 12)} in (7.5 in or less), treads rising evenly`,
+      count >= 1 && st.risers === count && rise <= 7.5 / 12 + 1e-9 && st.treadTops.every((y, i) => near(y, -h + (i + 1) * rise, 0.003)), st.treadTops.map(f3).join(" "));
+    ok(`${tag}: the panel's readout counts the same steps on the same ground (${s.count} at ${f3(-s.grade)})`, s.count === count && near(-s.grade, h, 0.02), `${count} at ${f3(h)}`);
+    ok(`${tag}: deeper than the floor's own grade: the flight reaches the lower ground`, h > m.grade + 0.2, `${f3(h)} vs grade ${f3(m.grade)}`);
+    if (shots) {
+      const n = { south: [0, 1], north: [0, -1], east: [1, 0], west: [-1, 0] }[c.wall];
+      const R = Math.max(W, L);
+      await aim(page, join(shots, `${c.id}-flight.png`), [n[0] * R * 1.2 + n[1] * R * 0.6, 3 - h / 2, n[1] * R * 1.2 - n[0] * R * 0.6], [n[0] * W / 2, -h / 2, n[1] * L / 2]);
+    }
+    ok(`${tag}: zero page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+  } catch (e) {
+    ok(`${tag}: ran`, false, e && e.message ? e.message.split("\n")[0] : String(e));
+  } finally {
+    if (page) await page.close();
+  }
+}
+
 // ── 8. THE PANEL ────────────────────────────────────────────────────────────────────────────
 const PANEL_STYLES = [
   { value: "cabin", label: "Harness Fall Cabin", d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.8 }, siding: "batten", colors: PLAIN, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
@@ -971,8 +1162,8 @@ async function runPanel(ctx, ok, shots) {
       fhLevel.includes("Blank draws 1 ft 6 in. Porch steps climb the whole height, and a ramp a customer adds is drawn 6 ft long so it reaches the ground.") && !fhLevel.includes("4 ft for every foot"), fhLevel);
     ok("panel: ...and its label says at the front", /^Floor height off the ground, at the front \(ft\)/.test(fhLevel), fhLevel.slice(0, 60));
     const gText = (await group().innerText()).replace(/\s+/g, " ").trim();
-    ok("panel: piers show 'Ground at each corner (ft lower)', four blank boxes (placeholder 0), each reading 'level', no 'Level ground' button",
-      (await group().count()) === 1 && /^Ground at each corner \(ft lower\)/.test(gText) && same(await values(), { fl: "", fr: "", bl: "", br: "" })
+    ok("panel: piers show 'Ground at each corner (in lower)', four blank boxes (placeholder 0), each reading 'level', no 'Level ground' button",
+      (await group().count()) === 1 && /^Ground at each corner \(in lower\)/.test(gText) && same(await values(), { fl: "", fr: "", bl: "", br: "" })
       && (await box("fl").getAttribute("placeholder")) === "0" && same(await says(), { fl: "level", fr: "level", bl: "level", br: "level" }) && (await levelBtn().count()) === 0, gText);
     ok("panel: ...in plain words: 0 is the highest corner, the floor height measured there, the directions the 3D Views'",
       gText.includes("0 is the highest corner. Floor height is measured there. The piers stand taller where the ground is lower. Front, back, left and right are the sides the 3D's Views menu calls F, B, L and R."), gText);
@@ -981,7 +1172,9 @@ async function runPanel(ctx, ok, shots) {
     ok("panel: ⚠️ AN UNTOUCHED LEVEL STYLE SAVES NO SLOPE: gradeCornersFt and both fall keys sent as an explicit null",
       sentNull(body.d3, "gradeCornersFt") && sentNull(body.d3, "gradeFallFt") && sentNull(body.d3, "gradeFallToward") && body.d3.foundation === "piers" && body.d3.floorHeightFt === 1.5,
       JSON.stringify({ c: body.d3.gradeCornersFt, f: body.d3.gradeFallFt, t: body.d3.gradeFallToward }));
-    await typeCorner("fr", 2);
+    ok("panel: ...and every save says slabGround: true beside frame \"front\" (2026-10-03)", body.slabGround === true && body.frame === "front", JSON.stringify({ s: body.slabGround, f: body.frame }));
+    // The boxes take INCHES (2026-10-03); the corners are stored, and read out, in feet.
+    await typeCorner("fr", 24);
     ok("panel: a typed front-right 2 reads '2 ft lower' there and 'highest' at the other three",
       same(await says(), { fl: "highest", fr: "2 ft lower", bl: "highest", br: "highest" }), JSON.stringify(await says()));
     const fhSlope = await fhText();
@@ -993,14 +1186,15 @@ async function runPanel(ctx, ok, shots) {
     body = await save();
     ok("panel: ⚠️ it saves all four corners, and the fall keys as null", same(body.d3.gradeCornersFt, { fl: 0, fr: 2, bl: 0, br: 0 }) && sentNull(body.d3, "gradeFallFt") && sentNull(body.d3, "gradeFallToward"),
       JSON.stringify(body.d3.gradeCornersFt));
-    await typeCorner("bl", 1.5);
-    await typeCorner("br", 2.5);
-    ok("panel: back-left 1.5 and back-right 2.5 read '1 ft 6 in lower' and '2 ft 6 in lower'",
+    ok("panel: ...the box shows the 24 in typed", (await box("fr").inputValue()) === "24", await box("fr").inputValue());
+    await typeCorner("bl", 18);
+    await typeCorner("br", 30);
+    ok("panel: back-left 18 in and back-right 30 in read '1 ft 6 in lower' and '2 ft 6 in lower'",
       same(await says(), { fl: "highest", fr: "2 ft lower", bl: "1 ft 6 in lower", br: "2 ft 6 in lower" }), JSON.stringify(await says()));
     body = await save();
     ok("panel: ...and save as typed", same(body.d3.gradeCornersFt, { fl: 0, fr: 2, bl: 1.5, br: 2.5 }), JSON.stringify(body.d3.gradeCornersFt));
-    await typeCorner("fl", 9);
-    ok("panel: past the band a corner is held at 6; the highest (zero) corner moves to back-left; under a foot is said in inches",
+    await typeCorner("fl", 108);
+    ok("panel: past the band (72 in) a corner is held at 6 ft; the highest (zero) corner moves to back-left; under a foot is said in inches",
       same(await says(), { fl: "4 ft 6 in lower", fr: "6 in lower", bl: "highest", br: "1 ft lower" }), JSON.stringify(await says()));
     body = await save();
     ok("panel: ...saved at 6", body.d3.gradeCornersFt && body.d3.gradeCornersFt.fl === 6, JSON.stringify(body.d3.gradeCornersFt));
@@ -1014,7 +1208,7 @@ async function runPanel(ctx, ok, shots) {
       same(await values(), { fl: "", fr: "", bl: "", br: "" }) && same(await says(), { fl: "level", fr: "level", bl: "level", br: "level" }) && (await levelBtn().count()) === 0);
     body = await save();
     ok("panel: ⚠️ ...AND SENDS gradeCornersFt null, an explicit clear", sentNull(body.d3, "gradeCornersFt") && sentNull(body.d3, "gradeFallFt"), JSON.stringify(body.d3.gradeCornersFt));
-    await typeCorner("br", 1);
+    await typeCorner("br", 12);
     // As a builder does it: a click on the select (which leaves the box it was in), then the pick.
     await select().focus();
     await select().selectOption("skids");
@@ -1022,17 +1216,27 @@ async function runPanel(ctx, ok, shots) {
     ok("panel: skids hides the corners", (await group().count()) === 0);
     body = await save();
     ok("panel: ⚠️ LEAVING PIERS CLEARS THE CORNERS (sent as null)", body.d3.foundation === "skids" && sentNull(body.d3, "gradeCornersFt") && sentNull(body.d3, "gradeFallFt"), JSON.stringify(body.d3.gradeCornersFt));
+    // A SLAB keeps the boxes (2026-10-03): a typed corner saves on it, with no floor height.
+    await select().focus();
+    await select().selectOption("slab");
+    await settle(page);
+    const slabText = (await group().innerText()).replace(/\s+/g, " ").trim();
+    ok("panel: a slab shows the corners, with the slab's own sentence", (await group().count()) === 1 && slabText.includes("0 is the highest corner, where the slab meets the ground. More of the slab's concrete edge shows where the ground is lower."), slabText);
+    await typeCorner("br", 12);
+    body = await save();
+    ok("panel: ⚠️ ...AND A CORNER TYPED ON A SLAB SAVES THERE, slabGround true, no floor height",
+      body.d3.foundation === "slab" && same(body.d3.gradeCornersFt, { fl: 0, fr: 0, bl: 0, br: 1 }) && !has(body.d3, "floorHeightFt") && body.slabGround === true, JSON.stringify({ f: body.d3.foundation, c: body.d3.gradeCornersFt, h: body.d3.floorHeightFt, s: body.slabGround }));
 
     // A style storing a FALL (2 ft toward the left): it opens as corners, saves the fall back untouched,
     // and an edited corner saves corners in its place.
     await openStyle("Harness Fall Tri");
-    ok("panel: a style storing a 2 ft fall to the left opens with it as corners: both left corners 2",
-      same(await values(), { fl: "2", fr: "", bl: "2", br: "" }) && same(await says(), { fl: "2 ft lower", fr: "highest", bl: "2 ft lower", br: "highest" }), JSON.stringify(await values()));
+    ok("panel: a style storing a 2 ft fall to the left opens with it as corners: both left corners 24 in",
+      same(await values(), { fl: "24", fr: "", bl: "24", br: "" }) && same(await says(), { fl: "2 ft lower", fr: "highest", bl: "2 ft lower", br: "highest" }), JSON.stringify(await values()));
     body = await save();
     ok("panel: ⚠️ ...AND SAVES THE FALL BACK EXACTLY, untouched, with no corners",
       body.d3.gradeFallFt === 2 && body.d3.gradeFallToward === "left" && sentNull(body.d3, "gradeCornersFt") && body.frame === "front",
       JSON.stringify({ c: body.d3.gradeCornersFt, f: body.d3.gradeFallFt, t: body.d3.gradeFallToward, frame: body.frame }));
-    await typeCorner("br", 0.5);
+    await typeCorner("br", 6);
     body = await save();
     ok("panel: ⚠️ editing a corner of it writes the four corners and drops the fall",
       same(body.d3.gradeCornersFt, { fl: 2, fr: 0, bl: 2, br: 0.5 }) && sentNull(body.d3, "gradeFallFt") && sentNull(body.d3, "gradeFallToward"),
@@ -1081,10 +1285,11 @@ async function runPanelSteps(ctx, ok, shots) {
   };
   const count = () => page.locator('input[data-ss-step-count="ss-grid"]');
   const rise = async () => (await page.locator('div[data-ss-step-rise="ss-grid"]').innerText()).replace(/\s+/g, " ").trim();
-  // The fall to the back is typed as its two back corners (2026-09-29: a box per corner).
+  // The fall to the back is typed as its two back corners (2026-09-29: a box per corner), in inches
+  // (2026-10-03): `ft` feet is typed as ft x 12.
   const cornerBox = (k) => page.locator(`[data-ss-grade-corners="ss-grid"] input[data-ss-grade-corner="${k}"]`);
   const fill = async (loc, v) => { await loc.click(); await loc.fill(String(v)); await page.keyboard.press("Tab"); await settle(page, 300); };
-  const fallBack = async (v) => { await fill(cornerBox("bl"), v); await fill(cornerBox("br"), v); };
+  const fallBack = async (ft) => { await fill(cornerBox("bl"), ft * 12); await fill(cornerBox("br"), ft * 12); };
   const spec = PANEL_STYLES.find((s) => s.value === "porch").d3;
   // The count the drawn flight has with the box blank, from the designer's own readout at the style's size.
   const drawnAt = (fall) => PURE.d3PorchReadout({ ...spec, gradeFallFt: fall }, "16x24").steps.count;
@@ -1176,6 +1381,8 @@ try {
   }
   if (!only || only.includes("corners")) CORNER_CASES.forEach((c) => q.push(() => runCornerCase(ctx, c, ok, shots)));
   else CORNER_CASES.filter((c) => only.includes(c.id)).forEach((c) => q.push(() => runCornerCase(ctx, c, ok, shots)));
+  SLAB_CASES.filter((c) => !only || only.includes("slab") || only.includes(c.id)).forEach((c) => q.push(() => runSlabCase(ctx, c, ok, shots)));
+  FLIGHT_CASES.filter((c) => !only || only.includes("flights") || only.includes(c.id)).forEach((c) => q.push(() => runFlightCase(ctx, c, ok, shots)));
   if (!only || only.includes("legacy")) {
     const fb = fallBaseBundle();
     if (fb.js) CASES.filter((c) => LEGACY.includes(c.id)).forEach((c) => q.push(() => runLegacy(ctx, c, ok, fb)));

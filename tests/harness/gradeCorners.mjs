@@ -3,8 +3,13 @@
 //
 // Carolyn, 09-29 (Fathom 187837290), drawing on the Advanced page: "we need to be able to put in where
 // the zero is ... this is a zero, this is two ... put in four points ... which one is that zero, and then
-// if it drops down like 18 inches, two feet, they put in four corners." This proves:
-//   1  Walls & foundation → Foundation: on blocks or piers (only), "Ground at each corner" replaces the
+// if it drops down like 18 inches, two feet, they put in four corners." The boxes take INCHES since
+// 2026-10-03 (Ahsan: inches everywhere; stored in feet). This proves:
+//   0  ⚠️ A SLAB (2026-10-03): with nothing said the control is there, under the slab's own one-line hint;
+//      typed 0, 5, 8 and 18 in, the 3D draws model.gradeCorners { 0, 5/12, 8/12, 1.5 } on a slab
+//      (model.foundation.kind "slab", its stem wall drawn), the style becomes a slab, and Save as a new
+//      style sends those corners on foundation "slab" with slabGround: true
+//   1  skids has no corner control; on blocks or piers "Ground at each corner" replaces the
 //      fall's "Ground falls away" and "Toward": a top view of the footprint drawn to its width and length
 //      (FRONT on its front edge, with the door mark, BACK at the top), a number box at each corner and a
 //      readout under each ("level" on level ground); "Level ground" is off until there is a slope; the
@@ -157,7 +162,7 @@ async function open(path, viewport = { width: 1440, height: 1000 }) {
 const radio = (page, group, name) => page.getByRole("radiogroup", { name: group, exact: true }).getByRole("radio", { name, exact: true });
 const field = (page) => page.locator('[data-ss-adv-f="gradeCornersFt"]');
 const NAMES = { fl: "front left", fr: "front right", bl: "back left", br: "back right" };
-const box = (page, k) => page.getByLabel(`Ground at the ${NAMES[k]} corner (ft lower)`, { exact: true });
+const box = (page, k) => page.getByLabel(`Ground at the ${NAMES[k]} corner (in lower)`, { exact: true });
 const nb = (s) => String(s || "").replace(/ /g, " ").replace(/\s+/g, " ").trim();
 const says = async (page) => {
   const o = {};
@@ -219,9 +224,55 @@ try {
   const { ctx, page, errors, calls } = await open("/portal/advanced");
   const W = 12, L = 16;
 
-  // 1 ── the control, on raised floors only ──
+  // 0 ── a slab (2026-10-03): nothing said draws one, and its ground can fall away too ──
   await page.locator("#ss-step-adv-walls").scrollIntoViewIfNeeded();
-  ok("1: on a slab there is no corner control", (await field(page).count()) === 0);
+  const slabNote = async () => page.evaluate(() => {
+    const el = document.querySelector('[data-ss-adv-f="gradeCornersFt"]'), n = el && el.querySelector(".ss-adv-note");
+    return n ? { text: n.firstChild.textContent, h: Math.round(n.getBoundingClientRect().height), more: n.querySelector(".ss-adv-why-t").textContent } : null;
+  });
+  const sn = await slabNote();
+  ok("0: with nothing said (a slab) the corner control is there, every corner 'level', under the slab's one-line hint",
+    (await field(page).count()) === 1 && same(await says(page), { fl: "level", fr: "level", bl: "level", br: "level" }) && sn && nb(sn.text) === "0 is the highest corner." && sn.h <= 20, JSON.stringify(sn));
+  ok("0: ...its (i) says the boxes are inches, and that a number makes it a slab",
+    sn && nb(sn.more).includes("Type how many inches lower the ground is at each corner: 18 is 1' 6\", 24 is two feet.") && nb(sn.more).includes("(a number here sets What it stands on to Slab)") && !/Floor height/.test(sn.more), sn && sn.more);
+  await type(page, "fl", 0);
+  await type(page, "fr", 5);
+  await type(page, "bl", 8);
+  await type(page, "br", 18);
+  ok("0: the boxes keep the inches typed and read them out in feet and inches",
+    same(await values(page), { fl: "", fr: "5", bl: "8", br: "18" }) && same(await says(page), { fl: "highest", fr: "5\" lower", bl: "8\" lower", br: "1' 6\" lower" }), JSON.stringify([await values(page), await says(page)]));
+  await panelModel(page, (M) => !!(M.gradeCorners && M.gradeCorners.fl === 0 && M.gradeCorners.fr === 5 / 12 && M.gradeCorners.bl === 8 / 12 && M.gradeCorners.br === 1.5
+    && M.foundation && M.foundation.kind === "slab"));
+  const slab3d = await page.evaluate(() => {
+    const M = window.__ss3dPanel.model;
+    let stems = 0;
+    M.root.traverse((q) => { if (q.userData && q.userData.ssFoundationPart === "stem") stems++; });
+    return { stems, grade: M.grade, kind: M.foundation && M.foundation.kind };
+  });
+  ok("0: ⚠️ THE 3D DRAWS THE SLAB OVER THOSE CORNERS: model.gradeCorners { 0, 5/12, 8/12, 1.5 }, a slab with its four-sided stem wall, the highest corner at the band",
+    slab3d.stems === 4 && slab3d.kind === "slab" && near(slab3d.grade, 0.35, 1e-9), JSON.stringify(slab3d));
+  ok("0: ...and the Slab tile is the pick", (await radio(page, "What it stands on", "Slab").getAttribute("aria-checked")) === "true");
+  await page.locator("#ss-step-adv-walls").scrollIntoViewIfNeeded();
+  await page.evaluate(() => { const el = document.querySelector('[data-ss-adv-f="gradeCornersFt"]'); window.scrollBy(0, el.getBoundingClientRect().top - 330); });
+  await settle(page, 400);
+  await aimPanel(page, [20, 2, -24], [0, -0.4, -2]);
+  await settle(page, 300);
+  await page.screenshot({ path: join(SHOTS, "advanced-slab-corners-1440.png") });
+  await page.getByLabel("New style name").fill("Harness Slab Cabin");
+  await page.getByRole("button", { name: "Save as a new style" }).click();
+  await page.waitForFunction(() => { const x = document.querySelector('[data-ss-adv="msg"]'); return x && /Saved as|failed|Couldn|isn't/.test(x.innerText); }, null, { timeout: 60000 });
+  const sdSlab = calls.filter((c) => c.action === "save_style_d3").pop();
+  ok("0: ⚠️ SAVE SENDS THOSE CORNERS (in feet) ON A SLAB, WITH slabGround: true",
+    sdSlab && sdSlab.body.d3.foundation === "slab" && same(sdSlab.body.d3.gradeCornersFt, { fl: 0, fr: 5 / 12, bl: 8 / 12, br: 1.5 }) && sdSlab.body.slabGround === true && !("floorHeightFt" in sdSlab.body.d3),
+    sdSlab && JSON.stringify({ f: sdSlab.body.d3.foundation, c: sdSlab.body.d3.gradeCornersFt, s: sdSlab.body.slabGround }));
+  await page.locator('[data-ss-adv-f="groundLevel"]').click();
+  await settle(page, 300);
+
+  // 1 ── skids has none; blocks and piers have it ──
+  await page.locator("#ss-step-adv-walls").scrollIntoViewIfNeeded();
+  await radio(page, "What it stands on", "Skids").click();
+  await settle(page, 300);
+  ok("1: skids has no corner control", (await field(page).count()) === 0);
   await radio(page, "What it stands on", "Piers").click();
   await settle(page, 300);
   const f = await page.evaluate(() => {
@@ -254,9 +305,9 @@ try {
     same(await says(page), { fl: "level", fr: "level", bl: "level", br: "level" }) && same(await values(page), { fl: "", fr: "", bl: "", br: "" }) && !f.fall);
 
   // 2 ── typed corners read out live ──
-  await type(page, "bl", 1.5);
-  await type(page, "br", 2);
-  ok("2: back-left 1.5 and back-right 2 read 1' 6\" lower and 2' 0\" lower, the front two 'highest'",
+  await type(page, "bl", 18);
+  await type(page, "br", 24);
+  ok("2: back-left 18 in and back-right 24 in read 1' 6\" lower and 2' 0\" lower, the front two 'highest'",
     same(await says(page), { fl: "highest", fr: "highest", bl: "1' 6\" lower", br: "2' 0\" lower" }), JSON.stringify(await says(page)));
   const plan = await page.evaluate(() => {
     const svg = document.querySelector("svg[data-ss-adv-corner-plan]");
@@ -330,10 +381,10 @@ try {
   await page.locator('[data-ss-adv="start"] [data-ss-style="hfall"]').click();
   await settle(page, 1200);
   await page.locator("#ss-step-adv-walls").scrollIntoViewIfNeeded();
-  ok("6: a style storing a 2 ft fall to the back opens with it as corners: both back corners 2",
-    same(await values(page), { fl: "", fr: "", bl: "2", br: "2" }) && same(await says(page), { fl: "highest", fr: "highest", bl: "2' 0\" lower", br: "2' 0\" lower" }), JSON.stringify(await values(page)));
+  ok("6: a style storing a 2 ft fall to the back opens with it as corners: both back corners 24 in",
+    same(await values(page), { fl: "", fr: "", bl: "24", br: "24" }) && same(await says(page), { fl: "highest", fr: "highest", bl: "2' 0\" lower", br: "2' 0\" lower" }), JSON.stringify(await values(page)));
   await panelModel(page, (M) => !!(M.gradeCorners && M.gradeCorners.bl === 2 && M.gradeCorners.br === 2 && M.gradeFall && M.gradeFall.fallFt === 2));
-  await type(page, "fr", 0.5);
+  await type(page, "fr", 6);
   await panelModel(page, (M) => !!(M.gradeCorners && M.gradeCorners.fr === 0.5 && M.gradeFall === null));
   ok("6: an edited corner draws corners in place of the fall (model.gradeFall null)", true);
   await page.getByLabel("New style name").fill("Harness Hillside Two");
@@ -381,9 +432,9 @@ try {
   await radio(ph.page, "What it stands on", "Piers").click();
   await settle(ph.page, 300);
   await type(ph.page, "fl", 0);
-  await type(ph.page, "fr", 2);
-  await type(ph.page, "bl", 1.5);
-  await type(ph.page, "br", 2);
+  await type(ph.page, "fr", 24);
+  await type(ph.page, "bl", 18);
+  await type(ph.page, "br", 24);
   await field(ph.page).scrollIntoViewIfNeeded();
   const fit = await ph.page.evaluate(() => {
     const el = document.querySelector('[data-ss-adv-f="gradeCornersFt"]');

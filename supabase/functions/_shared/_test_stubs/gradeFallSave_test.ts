@@ -39,12 +39,13 @@ const SENDERS: [string, Send][] = [
   ["structure-studio.component.js calSpecToSend", lift(CMP, "structure-studio.component.js", "calSpecToSend")],
 ];
 
-// What save_style_d3 does with a body: sanitise, then carry forward from the stored row.
-const land = (sent: Record<string, unknown>, stored: unknown, frame: unknown) => {
+// What save_style_d3 does with a body: sanitise, then carry forward from the stored row. `slabGround` is
+// the body's own flag beside frame (2026-10-03), which the panels that draw a slab's corners send.
+const land = (sent: Record<string, unknown>, stored: unknown, frame: unknown, slabGround?: boolean) => {
   const clean = sanitizeD3Spec(sent);
   assert(clean.ok, JSON.stringify(sent));
   if (!clean.ok) throw new Error("unreachable");
-  carryForwardFoundation(clean.d3, sent, stored, frame);
+  carryForwardFoundation(clean.d3, sent, stored, frame, slabGround);
   return clean.d3 as Record<string, unknown>;
 };
 
@@ -76,12 +77,13 @@ Deno.test("both senders put BOTH fall keys on every save, null when there is non
   }
 });
 
-Deno.test("⚠️ the two senders are wired into the saves", () => {
-  assert(SHELL.includes(`const body = { action: "save_style_d3", styleValue, d3: ssD3WithFall(d3), d3Photos, frame: "front" };`),
-    "12-shell onSaveSpec must send ssD3WithFall(d3)");
+Deno.test("⚠️ the two senders are wired into the saves, each saying it knows a slab's corners", () => {
+  assert(SHELL.includes(`const body = { action: "save_style_d3", styleValue, d3: ssD3WithFall(d3), d3Photos, frame: "front", slabGround: true };`),
+    "12-shell onSaveSpec must send ssD3WithFall(d3) and slabGround: true");
   for (const [file, src] of [["StructureStudio.jsx", JSX], ["structure-studio.component.js", CMP]]) {
     assert(src.includes(`action: "save_style_d3", styleValue: adminCal.styleValue, d3: calSpecToSend(adminCal.spec),`),
       `${file}: the operator page's save must send calSpecToSend(adminCal.spec)`);
+    assert(src.includes(`d3Photos: adminCal.photos.filter(Boolean), frame: "front", slabGround: true },`), `${file}: the operator page's save must send slabGround: true`);
   }
 });
 
@@ -153,6 +155,62 @@ Deno.test("⚠️ end to end: corners saved, kept by an older designer's save, c
   }
   const both = sanitizeD3Spec({ ...FALLING, gradeCornersFt: { fl: "1", br: 7 } });
   assert(both.ok && JSON.stringify(both.d3.gradeCornersFt) === JSON.stringify({ fl: 1, fr: 0, bl: 0, br: 6 }) && !("gradeFallFt" in both.d3) && !("gradeFallToward" in both.d3), JSON.stringify(both));
+  // A slab keeps them since 2026-10-03 (below); skids still do not.
   const slab = sanitizeD3Spec({ ...LEVEL, foundation: "slab", gradeCornersFt: CORNERS });
-  assert(slab.ok && !("gradeCornersFt" in slab.d3), JSON.stringify(slab));
+  assert(slab.ok && JSON.stringify(slab.d3.gradeCornersFt) === JSON.stringify(CORNERS) && !("floorHeightFt" in slab.d3), JSON.stringify(slab));
+  const onSkids = sanitizeD3Spec({ ...LEVEL, foundation: "skids", gradeCornersFt: CORNERS });
+  assert(onSkids.ok && !("gradeCornersFt" in onSkids.d3), JSON.stringify(onSkids));
+});
+
+// ── A SLAB'S CORNERS ON THE WIRE (2026-10-03) ─────────────────────────────────────────────────────────
+// Every panel before today sends gradeCornersFt null on every save and never drew a slab's corners, so on a
+// slab that null cannot clear them. The panels that draw them say so with slabGround: true in the body, and
+// only then is null a clear. The raised floor's rules are untouched by the flag.
+const SLAB_ROW = { roof, siding: "lap", colors: { body: "#9B2F2F" }, wallHeightFt: 8, foundation: "slab" };
+const SLAB_STORED = { ...SLAB_ROW, gradeCornersFt: CORNERS };
+Deno.test("⚠️ a slab's corners: kept over a save that omits them or sends an older panel's null, cleared only by a panel that says it draws them", () => {
+  for (const frame of ["front", undefined]) {
+    // Absent: an older designer that has never heard of the key.
+    assertEquals(land(SLAB_ROW, SLAB_STORED, frame).gradeCornersFt, CORNERS, `${String(frame)}: absent is carried`);
+    // An older panel's null (ssD3WithFall / calSpecToSend before today): carried, with or without the flag false.
+    for (const flag of [undefined, false]) {
+      assertEquals(land({ ...SLAB_ROW, gradeCornersFt: null }, SLAB_STORED, frame, flag).gradeCornersFt, CORNERS, `${String(frame)} ${String(flag)}: null without the flag is carried`);
+    }
+    // The panels that draw them: their null is "level ground".
+    const cleared = land({ ...SLAB_ROW, gradeCornersFt: null }, SLAB_STORED, frame, true);
+    assert(!("gradeCornersFt" in cleared), `${String(frame)}: null with the flag clears: ${JSON.stringify(cleared)}`);
+    // An object sent is what is stored, flag or not.
+    for (const flag of [undefined, true]) {
+      assertEquals(land({ ...SLAB_ROW, gradeCornersFt: { fl: 0, fr: 0, bl: 2, br: 0.5 } }, SLAB_STORED, frame, flag).gradeCornersFt, { fl: 0, fr: 0, bl: 2, br: 0.5 }, `${String(frame)}: replaced`);
+      // An all-zero object is level ground, said out loud.
+      assert(!("gradeCornersFt" in land({ ...SLAB_ROW, gradeCornersFt: { fl: 0, fr: 0, bl: 0, br: 0 } }, SLAB_STORED, frame, flag)), `${String(frame)}: zeros clear`);
+    }
+    // A carried value is re-held to the band.
+    assertEquals(land(SLAB_ROW, { ...SLAB_STORED, gradeCornersFt: { ...CORNERS, br: 11 } }, frame).gradeCornersFt, { ...CORNERS, br: 6 });
+    // Leaving the slab carries nothing: skids, or no foundation at all.
+    for (const f of ["skids", null]) {
+      const out = land({ ...SLAB_ROW, foundation: f }, SLAB_STORED, frame);
+      assert(!("gradeCornersFt" in out), `${String(frame)}: slab -> ${String(f)} drops them: ${JSON.stringify(out)}`);
+    }
+  }
+  // Onto a raised floor nothing comes over from the slab: the raised floor's carry starts from a stored raised floor.
+  const piers = land({ ...SLAB_ROW, foundation: "piers", floorHeightFt: 1.5 }, SLAB_STORED, "front", true);
+  assertEquals([piers.foundation, "gradeCornersFt" in piers], ["piers", false], JSON.stringify(piers));
+  // A stored slab with no corners: nothing is invented.
+  assert(!("gradeCornersFt" in land(SLAB_ROW, SLAB_ROW, "front")));
+  // Both senders, end to end: an untouched slab with corners saves them back; "Level ground" clears them.
+  for (const [who, send] of SENDERS) {
+    assertEquals(land(send(SLAB_STORED), SLAB_STORED, "front", true).gradeCornersFt, CORNERS, `${who}: kept`);
+    assert(!("gradeCornersFt" in land(send(SLAB_ROW), SLAB_STORED, "front", true)), `${who}: the panel's clear lands`);
+    assertEquals(land(send(SLAB_ROW), SLAB_STORED, "front").gradeCornersFt, CORNERS, `${who}: the same body from before the flag keeps them`);
+  }
+});
+
+Deno.test("⚠️ the slab flag never moves a raised floor's corners", () => {
+  for (const flag of [undefined, false, true]) {
+    for (const frame of ["front", undefined]) {
+      assertEquals(land(LEVEL, STORED, frame, flag).gradeCornersFt, CORNERS, `${String(flag)} ${String(frame)}: absent is carried`);
+      assert(!("gradeCornersFt" in land({ ...LEVEL, gradeCornersFt: null }, STORED, frame, flag)), `${String(flag)} ${String(frame)}: a raised floor's null clears, as before`);
+    }
+  }
 });

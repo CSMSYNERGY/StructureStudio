@@ -88,7 +88,7 @@ Deno.serve(withErrorLog("admin-save-settings", async (req: Request) => {
   // teaches get_config to emit it; the validation now lives in _shared/styleD3.ts so
   // this and portal-settings' builder-facing twin cannot drift apart.
   if (action === "save_style_d3") {
-    const { styleValue, d3, d3Photos, d3VideoFrames, frame } = payload || {};
+    const { styleValue, d3, d3Photos, d3VideoFrames, frame, slabGround } = payload || {};
     if (!styleValue || typeof styleValue !== "string") {
       return json({ error: "styleValue is required." }, 400);
     }
@@ -131,7 +131,8 @@ Deno.serve(withErrorLog("admin-save-settings", async (req: Request) => {
     // A raised foundation (blocks / piers and floorHeightFt, 2026-09-25): an operator page served by
     // an older bundle sends foundation null and no floor height, and must not erase the stored pair;
     // the current editor sends frame "front" and gets what it sent. See carryForwardFoundation.
-    carryForwardFoundation(clean.d3, d3, lockRow?.d3, frame);
+    // `slabGround` (2026-10-03): the editor draws a slab's corners, so its null clears them there.
+    carryForwardFoundation(clean.d3, d3, lockRow?.d3, frame, slabGround === true);
 
     // Matched on the style KEY, which is what the editor knows as `value`;
     // (client_id, key) is unique, so this touches exactly one row.

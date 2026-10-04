@@ -21,7 +21,9 @@
 //      until set and saved as nothing while blank; a typed post count saves rounded, the pitch as
 //      rise/run, the steps as their word; the readout line ends with the posts and pitch built, and
 //      a pitch the wall cannot carry says it was lowered and to what; clearing deletes each key, and
-//      switching the porch to recessed deletes all three
+//      switching the porch to recessed deletes the posts and the pitch -- and since 2026-10-03 keeps
+//      centre steps, which a recessed porch offers (left, center, right, no side flights), saving them
+//      beside porchDepthFt; a projecting porch offers steps down either side too
 //   4. corner and fascia: "Same as walls" / "Same as roof" store that hex, "Same as trim" deletes
 //   5. switching to a gable drops highSide and offers "Front wall"; "Long side" saves front "eave"
 //   6. wings: a width with no side says so (and that blank draws both); "Both sides" saves width
@@ -166,6 +168,8 @@ export async function main() {
     const steps = field(page, /^Porch steps/).locator("select");
     ok("a projecting porch offers its posts, its roof's pitch and its steps",
       (await posts.count()) === 1 && (await ppitch.count()) === 1 && (await steps.count()) === 1);
+    ok("...its steps along the front or down either side (2026-10-03)",
+      (await steps.locator("option").evaluateAll((os) => os.map((o) => o.value))).join("|") === "|left|center|right|leftSide|rightSide");
     ok("...all blank until set, saying what blank draws",
       (await posts.inputValue()) === "" && /8\.5 ft/.test((await posts.getAttribute("placeholder")) || "")
         && (await ppitch.inputValue()) === "" && /2 in 12/.test((await ppitch.getAttribute("placeholder")) || "")
@@ -205,11 +209,20 @@ export async function main() {
     await porchSelect(page).selectOption("recessed");
     await settle(page);
     ok("a recessed porch offers neither", (await field(page, "Porch roof meets the wall at (ft up)").count()) === 0 && (await field(page, "Porch width (ft)").count()) === 0);
-    ok("...and none of the porch's own framing", (await field(page, /^Porch posts/).count()) === 0 && (await field(page, /^Porch steps/).count()) === 0);
+    ok("...nor posts or a roof pitch of its own", (await field(page, /^Porch posts/).count()) === 0 && (await field(page, /^Porch roof pitch/).count()) === 0);
+    // A RECESSED PORCH HAS STEPS (2026-10-03): along its front only, and the centre steps carried over.
+    const rSteps = field(page, /^Porch steps/).locator("select");
+    ok("...but it offers steps along its front, and keeps the centre steps it had",
+      (await rSteps.count()) === 1 && (await rSteps.locator("option").evaluateAll((os) => os.map((o) => o.value))).join("|") === "|left|center|right"
+        && (await rSteps.inputValue()) === "center");
     d3 = await save(page, calls);
     ok("⚠️ AND SAVES NEITHER — they belong to a projecting porch only",
       !has(d3.roof, "porchAttachFt") && !has(d3.roof, "porchWidthFt") && d3.roof.porchDepthFt === 6, keys(d3.roof));
-    ok("⚠️ ...nor its posts, pitch or steps", !has(d3.roof, "porchPosts") && !has(d3.roof, "porchPitch") && !has(d3.roof, "porchSteps"), keys(d3.roof));
+    ok("⚠️ ...nor its posts or pitch, and saves its steps", !has(d3.roof, "porchPosts") && !has(d3.roof, "porchPitch") && d3.roof.porchSteps === "center", keys(d3.roof));
+    await rSteps.selectOption("");
+    await settle(page);
+    d3 = await save(page, calls);
+    ok("No steps on a recessed porch deletes the key", !has(d3.roof, "porchSteps") && !has(d3.roof, "porchStepCount") && d3.roof.porchDepthFt === 6, keys(d3.roof));
     const porchEnd = field(page, /^Porch end/).locator("select");
     ok("in the new frame the porch end names a WALL, not a gable end",
       (await porchEnd.locator("option").allTextContents()).join("|") === "Front wall|Back wall",

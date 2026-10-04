@@ -16,10 +16,11 @@
 //      sheet, its ends inside the cheeks
 //   5. the frame: the rafters (model.porch.nRaf) hang from the ceiling boards inside the cheeks,
 //      the ledger's top is ceilWall + RAF_D on the wall, and a cheek each side runs from the wall
-//      to the front board and from the post tops to the ceiling; no rafter reaches a cheek's inner
-//      face (flush, the two faces flickered as grey dots along the cheek)
-//   6. the front corners: no cheek past the post's face below the front board (the light block),
-//      and the step there is closed in wood from the post top to the board
+//      to the corner post's outer face (D) and from the post tops to the ceiling; no rafter reaches
+//      a cheek's inner face (flush, the two faces flickered as grey dots along the cheek)
+//   6. the front corners (2026-10-04, the 10-01 call: the siding "needs to be in", the post at the
+//      corner): no cheek past the post's face at all, and past it, out to the front board, the
+//      corner is closed in wood from the post top to the ceiling
 //   7. no recessed set-back: the porch-end wall spans the footprint, flush with it
 //   8. the ground label on the porch wall stands more than D + 2 out
 //   9. a ramp on the porch wall starts at the deck's edge; a flood light there hangs under the
@@ -38,6 +39,18 @@
 //  16. steps (roof.porchSteps) and a customer's ramp on the porch wall never both show where they
 //      overlap: centre steps under a ramp to a centred door are hidden (userData.ssHiddenBy "ramp"),
 //      left steps beside it stay; centre steps with no porchPosts take a middle bay (4 posts at 16 ft)
+//  17. steps off an END of the deck (leftSide / rightSide, 2026-10-03), on a front, a back and an eave
+//      wall (cases S*): one flight turned a quarter onto that end, its first tread at the side rim's
+//      outer face, between the wall and the corner post, on the grass, the count model.porch.steps
+//      says; the posts are the ones the same porch builds without steps; clear of every deck support,
+//      a shallow deck's corner pier and a deep deck's middle row (whose support at that end is left out);
+//      on the shallowest deck the panels offer it on (2.5 ft) every front pier stands, the one under the
+//      corner post included (the front row is never left out, 2026-10-04)
+//  18. a RECESSED porch's steps (2026-10-03), left / centre / right on a gable end and on an eave wall
+//      (cases R*): one flight in a holder in root (not the roof), its first tread 0.15 ft past the
+//      footprint's edge, inside the opening and clear of every post, on the grass, climbing a raised
+//      floor's whole height; centre steps on an even eave count add a bay (d3RecessedPorchFrame); a
+//      ramp run out over them hides them, and a live rebuild without it brings them back
 //
 // The porch groups and bands are found by userData.ssPorch, and every member inside them by
 // userData.ssPorchPart, never by size or draw order: a 16x24's porch sheet is as big as a main roof
@@ -49,7 +62,7 @@
 //
 // Exit 0 = every assertion held.
 import { pathToFileURL } from "node:url";
-import { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, revealTool } from "./lib.mjs";
+import { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, revealTool, purePorch } from "./lib.mjs";
 
 // The renderer's natural lumber when a style sets no colors.wood (D3_COLORS.wood).
 const WOOD_FALLBACK = "#c4965a";
@@ -100,6 +113,51 @@ const CASES = [
     d3: { roof: { ...GAMBREL, porchOutFt: 6.5, porchEnd: "front", plateBand: true, porchSteps: "center" }, siding: null, colors: { ...COLORS, wood: "#C4965A" }, wallHeightFt: 9, roofMaterial: "metal", foundation: "skids" } },
   { id: "L", label: "Harness Steps Left", size: "16x24", H: 9, posts: 3, metal: true, wood: "#c4965a", place: true, bands: 2, steps: "left", stepsHidden: false,
     d3: { roof: { ...GAMBREL, porchOutFt: 6.5, porchEnd: "front", plateBand: true, porchSteps: "left" }, siding: null, colors: { ...COLORS, wood: "#C4965A" }, wallHeightFt: 9, roofMaterial: "metal", foundation: "skids" } },
+];
+
+// ── 17 / 18. STEPS OFF A DECK'S END, AND A RECESSED PORCH'S STEPS (2026-10-03) ──────────────────────
+// Each its own building, measured by stepsRun below. `wall` is where the porch is; `posts` how many
+// posts the porch stands (the recessed eave's centre-step bay included); `place` puts a door and ramp
+// in the middle of that (south) wall, over centre steps.
+const SIDE_GABLE = { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6, eave: "fascia", porchOutFt: 6 };
+const STEP_CASES = [
+  { id: "S1", label: "Harness Side Steps Front", size: "16x24", wall: "south", steps: "leftSide",
+    d3: { roof: { ...SIDE_GABLE, porchSteps: "leftSide" }, siding: "batten", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
+  { id: "S2", label: "Harness Side Steps Back", size: "16x24", wall: "north", steps: "rightSide",
+    d3: { roof: { ...SIDE_GABLE, porchEnd: "back", porchSteps: "rightSide" }, siding: "batten", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
+  { id: "S3", label: "Harness Side Steps Eave", size: "16x10", wall: "south", steps: "rightSide",
+    d3: { roof: { type: "shed", highSide: "front", pitch: 0.22, overhang: 0.8, eave: "fascia", porchOutFt: 5, porchAttachFt: 8, porchSteps: "rightSide", porchStepCount: 2 }, siding: "panel", colors: COLORS, wallHeightFt: 7.3, roofMaterial: "metal", foundation: "blocks", floorHeightFt: 1.1 } },
+  // A shallow deck on blocks: the flight takes the whole run between the wall and the corner post.
+  { id: "S4", label: "Harness Side Steps Shallow", size: "12x16", wall: "south", steps: "leftSide",
+    d3: { roof: { ...SIDE_GABLE, porchOutFt: 3, porchSteps: "leftSide" }, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal", foundation: "blocks", floorHeightFt: 2 } },
+  // ...and on piers, whose 12 in corner pier reaches a foot in from the deck's edge and 3 in past its end.
+  { id: "S5", label: "Harness Side Steps Shallow Piers", size: "12x16", wall: "south", steps: "rightSide",
+    d3: { roof: { ...SIDE_GABLE, porchOutFt: 3, porchSteps: "rightSide" }, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
+  // The shallowest deck the panels offer a side flight on (2026-10-04): its front pier under the corner
+  // post stands, though the flight's middle is just over a pier's reach from it.
+  { id: "S7", label: "Harness Side Steps Shallowest Piers", size: "12x16", wall: "south", steps: "rightSide",
+    d3: { roof: { ...SIDE_GABLE, porchOutFt: 2.5, porchSteps: "rightSide" }, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
+  // A deck over 7 ft deep stands a middle row of supports; the one at the flight's end is left out.
+  { id: "S6", label: "Harness Side Steps Deep Piers", size: "16x24", wall: "south", steps: "leftSide",
+    d3: { roof: { ...SIDE_GABLE, porchOutFt: 8, porchSteps: "leftSide" }, siding: "batten", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
+  { id: "RGL", label: "Harness Recessed Left", size: "12x16", wall: "south", steps: "left", recessed: true, posts: 2,
+    d3: { roof: { type: "gable", pitch: 0.42, overhang: 0.8, eave: "fascia", porchDepthFt: 4, porchTruss: true, porchSteps: "left" }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  { id: "RGC", label: "Harness Recessed Centre Piers", size: "24x12", wall: "west", steps: "center", recessed: true, posts: 2,
+    d3: { roof: { type: "gable", pitch: 0.42, overhang: 0.8, eave: "fascia", porchDepthFt: 5, porchSteps: "center" }, siding: "lap", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
+  { id: "RGR", label: "Harness Recessed Right Back", size: "12x16", wall: "north", steps: "right", recessed: true, posts: 2,
+    d3: { roof: { type: "gambrel", pitch: 1.2, overhang: 0.4, kneeU: 0.72, kneeRise: 0.72, ridgeRise: 1, eave: "fascia", porchDepthFt: 4, porchEnd: "back", porchSteps: "right", porchStepCount: 2 }, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "shingle" } },
+  { id: "REL", label: "Harness Recessed Eave Left", size: "20x12", wall: "south", steps: "left", recessed: true, eave: true, posts: 3,
+    d3: { roof: { type: "gable", front: "eave", pitch: 0.4, overhang: 0.6, eave: "fascia", porchDepthFt: 4, porchSteps: "left" }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  // 16 ft of eave: the rule's 2 bays stand a post in the middle, so centre steps take a third.
+  { id: "REC", label: "Harness Recessed Eave Centre", size: "16x12", wall: "south", steps: "center", recessed: true, eave: true, posts: 4,
+    d3: { roof: { type: "gable", front: "eave", pitch: 0.4, overhang: 0.6, eave: "fascia", porchDepthFt: 4, porchSteps: "center" }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal", foundation: "blocks", floorHeightFt: 1.1 } },
+  { id: "RER", label: "Harness Recessed Eave Right", size: "16x12", wall: "north", steps: "right", recessed: true, eave: true, posts: 3,
+    d3: { roof: { type: "shed", highSide: "back", pitch: 0.25, overhang: 0.6, eave: "fascia", porchDepthFt: 4, porchEnd: "back", porchSteps: "right" }, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  // A ramp to a door in the middle of a shallow recessed porch on piers runs out past the footprint's
+  // edge, over its centre steps: they hide, as on a projecting porch. (No "Ramp" in the label: the ramp
+  // tool is found by that word.)
+  { id: "RRP", label: "Harness Recessed Steps Hidden", size: "16x24", wall: "south", steps: "center", recessed: true, posts: 2, place: true, at: 8, stepsHidden: true,
+    d3: { roof: { type: "gable", pitch: 0.42, overhang: 0.8, eave: "fascia", porchDepthFt: 3, porchSteps: "center" }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
 ];
 
 const configFor = (c) => {
@@ -277,8 +335,8 @@ async function measure(page, W, L) {
     let untagged = 0;
     pg.traverse((q) => { if (q.isMesh && !(q.userData && q.userData.ssPorchPart)) untagged++; });
     out.untagged = untagged;
-    // THE FRONT CORNERS: every cheek vertex out past the posts' face (d > D) that sits below the
-    // front board's bottom. Each one is body-colour cheek showing under the board: the light block.
+    // THE FRONT CORNERS: every cheek vertex out past the posts' face (d > D). The siding stops at the
+    // corner post's outer face (2026-10-04); before that, one below the board's bottom was the light block.
     const boards = partsOf("board");
     const boardBot = boards.length ? Math.min(...boards.map((q) => bbOf(q).mn[1])) : null;
     out.boardBot = boardBot;
@@ -288,7 +346,7 @@ async function measure(page, W, L) {
       for (let i = 0; i < pos.count; i++) {
         const v = new V(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(q.matrixWorld);
         const d = dOf(v);
-        if (d > P.D + 0.005 && v.y < boardBot - 0.005) out.cheekStub.push([+d.toFixed(3), +v.y.toFixed(3)]);
+        if (d > P.D + 0.005) out.cheekStub.push([+d.toFixed(3), +v.y.toFixed(3)]);
       }
     });
     // The sheet.
@@ -381,6 +439,180 @@ async function measure(page, W, L) {
   }, { W, L });
 }
 
+// 17 / 18: the steps, measured in their own frames. The flight's group (ssPorchPart "steps") sits in the
+// projecting porch's deck frame (x across, z = d out from the wall's mid-plane) or a recessed porch's
+// holder (x across, z = d out from the footprint's edge); every vertex is read into that frame and the
+// world, so each check is the number it is about.
+async function measureSteps(page, W, L, H) {
+  return page.evaluate(({ W, L, H }) => {
+    const E = window.__ss3dEngine, M = E.model, V = E.camera.position.constructor, M4 = E.camera.matrixWorld.constructor;
+    E.scene.updateMatrixWorld(true);
+    const boxIn = (o, inv) => {
+      const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+      o.traverse((q) => {
+        if (!q.isMesh || !q.geometry) return;
+        const pos = q.geometry.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+          const v = new V().fromBufferAttribute(pos, i).applyMatrix4(q.matrixWorld);
+          if (inv) v.applyMatrix4(inv);
+          [v.x, v.y, v.z].forEach((c, k) => { mn[k] = Math.min(mn[k], c); mx[k] = Math.max(mx[k], c); });
+        }
+      });
+      return { mn, mx };
+    };
+    const groups = [];
+    M.root.traverse((q) => { if (q.userData && q.userData.ssPorchPart === "steps") groups.push(q); });
+    const out = { n: groups.length, grade: M.grade, porch: M.porch ? { steps: M.porch.steps || null, posts: M.porch.posts, side: M.porch.side, D: M.porch.D, dWall: M.porch.dWall, POST: M.porch.sizes.POST } : null,
+      recessedSteps: M.recessedSteps || null };
+    if (!groups.length) return out;
+    const st = groups[0], frame = st.parent;
+    const inv = new M4().copy(frame.matrixWorld).invert();
+    const chainShown = (q) => { let n = q; while (n) { if (!n.visible) return false; n = n.parent; } return true; };
+    const local = boxIn(st, inv), world = boxIn(st, null);
+    const treads = [];
+    st.traverse((q) => { if (q.isMesh && q.userData.ssPorchPart === "stepTread") treads.push(boxIn(q, null).mx[1]); });
+    const under = (q, anc) => { let n = q; while (n) { if (n === anc) return true; n = n.parent; } return false; };
+    Object.assign(out, {
+      where: st.userData.ssPorchSteps, visible: chainShown(st), hiddenBy: st.userData.ssHiddenBy || null,
+      frameTag: frame.userData.ssPorch || null, frameInRoot: frame.parent === M.root, inRoofGroup: under(st, M.roofGroup),
+      local: { x: [local.mn[0], local.mx[0]], z: [local.mn[2], local.mx[2]] }, world: { y: [world.mn[1], world.mx[1]] },
+      treads: treads.sort((a, b) => b - a),
+      // Out from the footprint's line on each wall, the steps' nearest and farthest points.
+      near: { south: world.mn[2] - L / 2, north: -L / 2 - world.mx[2], east: world.mn[0] - W / 2, west: -W / 2 - world.mx[0] },
+    });
+    // The projecting deck's side rims (their outer faces are the deck's ends) and its posts, in the deck frame.
+    out.rims = []; out.deckPosts = []; out.deckSupports = [];
+    if (frame.userData.ssPorch !== "recessedSteps") {
+      frame.traverse((q) => { if (q.isMesh && q.userData.ssPorchPart === "rim") { const b = boxIn(q, inv); if (b.mx[2] - b.mn[2] > 1) out.rims.push([b.mn[0], b.mx[0]]); } });
+      frame.traverse((q) => { if (q.isMesh && q.userData.ssPorchPart === "deckSupport") { const b = boxIn(q, inv); out.deckSupports.push([b.mn[0], b.mx[0], b.mn[2], b.mx[2]]); } });
+      M.roofGroup.traverse((q) => { if (q.isMesh && q.userData.ssPorchPart === "post") { const b = boxIn(q, inv); out.deckPosts.push([(b.mn[0] + b.mx[0]) / 2, b.mn[2], b.mx[2]]); } });
+    }
+    // A recessed porch's posts, in the holder's frame: the eave line's tagged ones, and a gable end's two
+    // corner posts, found by their size (0.32 ft square and the wall's height: nothing else is).
+    out.recPosts = [];
+    M.roofGroup.traverse((q) => {
+      if (!q.isMesh || !q.geometry || q.geometry.type !== "BoxGeometry") return;
+      const g = q.geometry.parameters;
+      const tagged = q.userData && q.userData.ssRecessedEave === "post";
+      if (!tagged && !(Math.abs(g.width - 0.32) < 1e-9 && Math.abs(g.depth - 0.32) < 1e-9 && Math.abs(g.height - H) < 1e-6)) return;
+      const b = boxIn(q, inv);
+      out.recPosts.push([b.mn[0], b.mx[0], b.mn[2], b.mx[2]]);
+    });
+    return out;
+  }, { W, L, H });
+}
+
+async function stepsRun(ctx, c, ok, shots) {
+  const [W, L] = c.size.split("x").map(Number);
+  const config = configFor(c);
+  const page = await ctx.newPage();
+  const errors = collectErrors(page);
+  await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
+  await stubSupabase(page, { config, fixtures: FIXTURES });
+  const tag = `${c.id} ${c.label} ${c.size}`;
+  const PURE = purePorch();
+  try {
+    await openDesigner(page, config.clientId);
+    await page.waitForFunction(() => [...document.querySelectorAll("svg rect")].some((r) => r.getAttribute("stroke") === "#1E293B"), null, { timeout: 30000 });
+    await pickStyle(page, c.label);
+    await chooseSize(page, c.size);
+    if (c.place) await placeOnPorchWall(page, ok, W, L, c.at);
+    await openEditor(page);
+    const H = c.d3.wallHeightFt;
+    const m = await measureSteps(page, W, L, H);
+    const g = c.recessed ? m.recessedSteps : m.porch && m.porch.steps;
+    ok(`${tag}: one flight of steps, "${c.steps}"`, m.n === 1 && m.where === c.steps && !!g && g.where === c.steps, JSON.stringify({ n: m.n, where: m.where, model: g && g.where }));
+    if (!g || m.n !== 1) return;
+    console.log(`   ${tag}: count ${g.count} rise ${f3(g.rise)} w ${f3(g.w)} grade ${f3(-g.grade)} local x ${m.local.x.map(f3)} z ${m.local.z.map(f3)}`);
+    ok(`${tag}: ${g.count} treads, each a rise lower than the one before, the top one a rise under the floor`,
+      m.treads.length === g.count && m.treads.every((y, k) => Math.abs(y - (g.grade + (g.count - k) * g.rise)) < 0.005), `${m.treads.map(f3).join(" ")} rise ${f3(g.rise)}`);
+    ok(`${tag}: it stands on the grass (the model's grade, level ground)`, Math.abs(m.world.y[0] + m.grade) < 0.005 && Math.abs(-g.grade - m.grade) < 1e-9, `bottom ${f3(m.world.y[0])} grade ${f3(m.grade)}`);
+    ok(`${tag}: no riser over 7.5 in`, g.rise <= 7.5 / 12 + 1e-9 || g.count === Number(c.d3.roof.porchStepCount), f3(g.rise * 12));
+    if (!c.recessed) {
+      const P = m.porch;
+      const turn = c.steps === "rightSide" ? 1 : -1;
+      ok(`${tag}: model.porch.steps is turned onto the ${turn > 0 ? "right" : "left"} end`, g.turn === turn && Math.abs(g.edgeX - turn * P.side) < 1e-9, JSON.stringify({ turn: g.turn, edgeX: g.edgeX, side: P.side }));
+      ok(`${tag}: in the deck's group, beside the deck (not the roof)`, m.frameTag === null && !m.inRoofGroup);
+      // The deck's end: the side rim's outer face. The first tread starts EPS past it.
+      const rim = m.rims.find((r) => (turn > 0 ? r[1] > 0 : r[0] < 0));
+      const rimFace = rim ? (turn > 0 ? rim[1] : rim[0]) : null;
+      const inner = turn > 0 ? m.local.x[0] : m.local.x[1];
+      ok(`${tag}: its first tread starts at the side rim's outer face`, rimFace != null && Math.abs(rimFace - turn * P.side) < 0.005 && Math.abs(inner - (rimFace + turn * 0.005)) < 0.005,
+        `flight inner face ${f3(inner)} rim face ${f3(rimFace)} side ${f3(P.side)}`);
+      ok(`${tag}: it runs out from that end, count x tread`, Math.abs((turn > 0 ? m.local.x[1] - m.local.x[0] : m.local.x[1] - m.local.x[0]) - (0.005 + g.count * g.tread)) < 0.01,
+        `${f3(m.local.x[1] - m.local.x[0])} vs ${f3(0.005 + g.count * g.tread)}`);
+      ok(`${tag}: along the end, between the wall and the corner post's inner face`, m.local.z[0] >= P.dWall - 1e-6 && m.local.z[1] <= P.D - P.POST + 1e-6 && Math.abs((m.local.z[0] + m.local.z[1]) / 2 - g.atD) < 0.005,
+        `d ${m.local.z.map(f3)} wall ${f3(P.dWall)} post ${f3(P.D - P.POST)} atD ${f3(g.atD)}`);
+      // ...and clear of every deck support (a corner block reaches 5 in past the deck's end), in plan.
+      const sClash = m.deckSupports.filter((q) => q[0] < m.local.x[1] - 1e-6 && q[1] > m.local.x[0] + 1e-6 && q[2] < m.local.z[1] - 1e-6 && q[3] > m.local.z[0] + 1e-6);
+      ok(`${tag}: ...and clear of the deck's supports (${m.deckSupports.length})`, sClash.length === 0, JSON.stringify(sClash.slice(0, 2)));
+      // On piers (one mesh each) every support the deck stands is there, but a middle row's at the end the
+      // flight leaves from, where the flight stands instead (a deck over 7 ft deep past the wall).
+      if (c.d3.foundation === "piers") {
+        const mid = P.D - P.dWall > 7 ? (P.dWall + P.D) / 2 : null;
+        const dropped = mid != null && Math.abs(mid - g.atD) < g.w / 2 + 0.5 ? 1 : 0;
+        const want = (mid != null ? 2 : 1) * P.posts - dropped;
+        ok(`${tag}: ${want} piers under the deck${dropped ? ", the middle row's under the flight left out" : ""}`, m.deckSupports.length === want, `found ${m.deckSupports.length}`);
+      }
+      // The posts are the same porch's without steps: side steps never add a bay.
+      const roofNo = { ...c.d3.roof }; delete roofNo.porchSteps; delete roofNo.porchStepCount;
+      const plain = PURE.d3PorchReadout({ ...c.d3, roof: roofNo }, c.size);
+      const outer = P.side - P.POST / 2;
+      const want = Array.from({ length: plain.posts }, (_, k) => -outer + (2 * outer * k) / plain.bays);
+      const got = m.deckPosts.map((q) => q[0]).sort((a, b) => a - b);
+      ok(`${tag}: the posts are the ones the porch builds without steps (${plain.posts})`, P.posts === plain.posts && got.length === want.length && got.every((x, k) => Math.abs(x - want[k]) < 0.005),
+        `drawn ${got.map(f3).join(" ")} want ${want.map(f3).join(" ")}`);
+    } else {
+      const fr = PURE.d3RecessedPorchFrame(c.d3.roof, W, L, H);
+      ok(`${tag}: the pure frame is this porch (${c.wall}${c.eave ? ", an eave wall" : ""}, ${c.posts} posts)`, !!fr && fr.wall === c.wall && fr.onEave === !!c.eave && fr.posts === c.posts && g.wall === c.wall,
+        JSON.stringify(fr && { wall: fr.wall, onEave: fr.onEave, posts: fr.posts, model: g.wall }));
+      ok(`${tag}: in its own holder in root, not in the roof (look-inside keeps it)`, m.frameTag === "recessedSteps" && m.frameInRoot && !m.inRoofGroup);
+      ok(`${tag}: its first tread starts 0.15 ft past the footprint's edge`, Math.abs(m.local.z[0] - (0.15 + 0.005)) < 0.005 && Math.abs(m.near[c.wall] - (0.15 + 0.005)) < 0.005,
+        `local ${f3(m.local.z[0])} world ${f3(m.near[c.wall])}`);
+      ok(`${tag}: ...and runs out count x tread from there`, Math.abs(m.local.z[1] - (0.155 + g.count * g.tread)) < 0.01, `${f3(m.local.z[1])} vs ${f3(0.155 + g.count * g.tread)}`);
+      ok(`${tag}: ${c.posts} posts stand in the opening`, m.recPosts.length === c.posts, `found ${m.recPosts.length}`);
+      const clash = m.recPosts.filter((q) => q[0] < m.local.x[1] - 1e-6 && q[1] > m.local.x[0] + 1e-6);
+      ok(`${tag}: the flight stands clear of every post`, m.recPosts.length > 0 && clash.length === 0,
+        `flight x ${m.local.x.map(f3)} posts ${m.recPosts.map((q) => `${f3(q[0])}..${f3(q[1])}`).join(" ")}`);
+      const halfOpen = Math.max(...m.recPosts.map((q) => Math.max(Math.abs(q[0]), Math.abs(q[1]))));
+      ok(`${tag}: ...and inside the opening, on its ${c.steps === "center" ? "middle" : c.steps} side`,
+        m.local.x[0] > -halfOpen && m.local.x[1] < halfOpen && (c.steps === "center" ? Math.abs(m.local.x[0] + m.local.x[1]) < 0.01 : (c.steps === "left" ? m.local.x[1] < 0 : m.local.x[0] > 0)),
+        `x ${m.local.x.map(f3)} opening ${f3(halfOpen)}`);
+      // The holder's x runs to the right of someone standing in front of it: on the north wall that is -x.
+      const pr = PURE.d3RecessedPorchReadout(c.d3, c.size);
+      ok(`${tag}: model.recessedSteps is the readout's flight`, !!pr && JSON.stringify(pr.steps) === JSON.stringify({ ...g, wall: undefined }), JSON.stringify({ pure: pr && pr.steps, model: g }));
+    }
+    if (c.stepsHidden) {
+      ok(`${tag}: a ramp run out over them hides them, saying the ramp did it`, m.visible === false && m.hiddenBy === "ramp", JSON.stringify({ visible: m.visible, hiddenBy: m.hiddenBy }));
+      const items = (await readItems(page)) || [];
+      const shown = (list) => page.evaluate((list) => {
+        const M = window.__ss3dEngine.model;
+        M.rebuildInterior(list);
+        let vis = null;
+        M.root.traverse((q) => {
+          if (!(q.userData && q.userData.ssPorchPart === "steps")) return;
+          let n = q, v = true;
+          while (n) { if (!n.visible) v = false; n = n.parent; }
+          vis = v;
+        });
+        return vis;
+      }, list);
+      ok(`${tag}: a live rebuild without the ramp brings them back`, (await shown(items.filter((i) => i.type !== "ramp"))) === true);
+      ok(`${tag}: ...and with it, hides them again`, (await shown(items)) === false);
+    } else ok(`${tag}: the steps are drawn`, m.visible === true && m.hiddenBy === null);
+    const n = { south: [0, 1], north: [0, -1], east: [1, 0], west: [-1, 0] }[c.wall];
+    const reach = c.recessed ? 0 : (m.porch ? m.porch.D : 0);
+    // From in front, off to the side the steps are on, so a flight off an end is in the frame.
+    const sg = /left/i.test(c.steps) ? -1 : 1, r = [sg * n[1], -sg * n[0]];
+    await shot(page, `${shots}/${c.id}-steps.png`, [n[0] * (W / 2 + reach + 10) + r[0] * 11, H * 0.7, n[1] * (L / 2 + reach + 10) + r[1] * 11], [n[0] * (W / 2 + reach * 0.6) + r[0] * 4, 0, n[1] * (L / 2 + reach * 0.6) + r[1] * 4]);
+    ok(`${tag}: no page errors`, errors.length === 0, JSON.stringify(errors).slice(0, 300));
+  } catch (e) {
+    ok(`${tag}: ran to the end`, false, e && e.message ? e.message.split("\n")[0] : String(e));
+  } finally {
+    await page.close();
+  }
+}
+
 async function shot(page, path, eye, at) {
   const clip = await page.evaluate(({ eye, at }) => {
     const E = window.__ss3dEngine;
@@ -464,8 +696,8 @@ async function runCase(ctx, c, ok, shots, seen) {
       ok(`${tag}: the ledger is on the wall with its top at ceilWall + RAF_D`, !!Lg && Math.abs(Lg.maxY - (P.ceilWall + Z.RAF_D)) < 0.005 && Math.abs(Lg.near) < 0.005,
         Lg ? `top ${f3(Lg.maxY)} want ${f3(P.ceilWall + Z.RAF_D)} near ${f3(Lg.near)}` : "no ledger");
       const ch = [...parts.cheek].sort((a, b) => (a.across[0] + a.across[1]) - (b.across[0] + b.across[1]));
-      ok(`${tag}: a cheek each side, wall to front board, post tops to the ceiling, flush with the posts' outer faces`,
-        ch.length === 2 && ch.every((q) => Math.abs(q.minY - P.postH) < 0.005 && Math.abs(q.maxY - yU(P.dWall)) < 0.01 && Math.abs(q.near - P.dWall) < 0.005 && Math.abs(q.out - dC) < 0.005 && Math.abs(q.across[1] - q.across[0] - Z.CHEEK_T) < 0.005)
+      ok(`${tag}: a cheek each side, wall to the corner post's outer face (D), post tops to the ceiling, flush with the posts' outer faces`,
+        ch.length === 2 && ch.every((q) => Math.abs(q.minY - P.postH) < 0.005 && Math.abs(q.maxY - yU(P.dWall)) < 0.01 && Math.abs(q.near - P.dWall) < 0.005 && Math.abs(q.out - P.D) < 0.005 && Math.abs(q.across[1] - q.across[0] - Z.CHEEK_T) < 0.005)
           && Math.abs(Math.abs(ch[0].across[0]) - P.side) < 0.005 && Math.abs(Math.abs(ch[1].across[1]) - P.side) < 0.005,
         ch.map((q) => `y ${f3(q.minY)}..${f3(q.maxY)} d ${f3(q.near)}..${f3(q.out)} u ${q.across.map(f3)}`).join(" | "));
       // THE CHEEK STIPPLE. An outer rafter laid flush against a cheek put its face in the cheek's inner
@@ -475,11 +707,12 @@ async function runCase(ctx, c, ok, shots, seen) {
       const rafReach = parts.rafter.length ? Math.max(...parts.rafter.map((r) => Math.max(Math.abs(r.across[0]), Math.abs(r.across[1])))) : null;
       ok(`${tag}: no rafter reaches a cheek's inner face (the stipple)`, cheekInner != null && rafReach != null && rafReach <= cheekInner - 0.005,
         `rafters reach |u| ${f3(rafReach)}, cheek inner face |u| ${f3(cheekInner)}`);
-      ok(`${tag}: no cheek shows below the front board past the posts' face (the corner block)`, m.boardBot != null && m.cheekStub.length === 0, `board bottom ${f3(m.boardBot)} stub ${JSON.stringify(m.cheekStub.slice(0, 4))}`);
+      ok(`${tag}: the siding stops at the corner post's outer face: no cheek past D (10-01)`, m.boardBot != null && m.cheekStub.length === 0, `stub ${JSON.stringify(m.cheekStub.slice(0, 4))}`);
       const fills = parts.cornerFill;
-      ok(`${tag}: ...and each front corner is closed in wood from the post top to the board`,
-        fills.length === 2 && m.boardBot > P.postH && fills.every((q) => Math.abs(q.minY - P.postH) < 0.005 && Math.abs(q.maxY - m.boardBot) < 0.005 && Math.abs(q.near - P.D) < 0.005 && Math.abs(q.out - dC) < 0.005 && q.color === c.wood),
-        fills.map((q) => `y ${f3(q.minY)}..${f3(q.maxY)} d ${f3(q.near)}..${f3(q.out)} ${q.color}`).join(" | "));
+      ok(`${tag}: ...and past it each front corner is closed in wood, from the post top to the ceiling and out to the board`,
+        fills.length === 2 && fills.every((q) => Math.abs(q.minY - P.postH) < 0.005 && Math.abs(q.maxY - yU(P.D)) < 0.005 && Math.abs(q.near - P.D) < 0.005 && Math.abs(q.out - dC) < 0.005
+          && ch.some((k) => Math.abs(k.across[0] - q.across[0]) < 0.005 && Math.abs(k.across[1] - q.across[1]) < 0.005) && q.color === c.wood),
+        fills.map((q) => `y ${f3(q.minY)}..${f3(q.maxY)} d ${f3(q.near)}..${f3(q.out)} u ${q.across.map(f3)} ${q.color}`).join(" | "));
       ok(`${tag}: no recessed set-back: the porch-end wall spans the footprint, flush`,
         m.wallAcross && (m.wallAcross[1] - m.wallAcross[0]) > ((P.wall === "south" || P.wall === "north") ? W : L) - 0.05 && Math.abs(m.wallOut) < 0.3,
         `across ${m.wallAcross && m.wallAcross.map(f3)} out ${f3(m.wallOut)}`);
@@ -580,6 +813,10 @@ export async function main() {
     for (const c of CASES) {
       if (only.length && !only.includes(c.id)) continue;
       await runCase(ctx, c, ok, shots, seen);
+    }
+    for (const c of STEP_CASES) {
+      if (only.length && !only.includes(c.id)) continue;
+      await stepsRun(ctx, c, ok, shots);
     }
   } finally {
     await browser.close();

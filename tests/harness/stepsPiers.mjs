@@ -24,6 +24,9 @@
 //      untouched style saves no count; a typed count saves rounded and held to 1..12; a cleared box
 //      deletes it; "None" for the steps deletes the count too; the rule's own count warns too when it
 //      comes out shallow (0.75 ft of floor: two 3 in steps); the 3D preview draws the typed count.
+//      A flight down a side of the deck (2026-10-03) counts the same way; a RECESSED porch's steps
+//      (2026-10-03) show the box too, "blank = 3" on the same piers, and a typed count saves beside
+//      porchDepthFt; switching back to projecting keeps the steps and their count.
 //   D. zero page errors.
 //
 //   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
@@ -479,6 +482,30 @@ async function runPanel(ctx, ok, shots) {
     await setFloor(1.5);
     r = await riseText();
     ok(`${tag}: back on 1.5 ft, the rule's 4.5 in steps do not warn`, r.text === "Each step rises 4.5 in." && r.color !== AMBER, JSON.stringify(r));
+    // A FLIGHT DOWN A SIDE OF THE DECK (2026-10-03) counts the same flight height.
+    await stepsSel().selectOption("leftSide");
+    await settle(page);
+    ok(`${tag}: steps down a side show the box, "blank = 3" on the same piers`, (await count().count()) === 1 && (await count().getAttribute("placeholder")) === "blank = 3", await count().getAttribute("placeholder"));
+    r = await riseText();
+    ok(`${tag}: ...each rising 4.5 in`, r.text === "Each step rises 4.5 in." && r.color !== AMBER, JSON.stringify(r));
+    d3 = await save();
+    ok(`${tag}: ...and save their word, no count`, d3.roof.porchSteps === "leftSide" && !has(d3.roof, "porchStepCount"), JSON.stringify(d3.roof));
+    // A RECESSED PORCH'S STEPS (2026-10-03): the same box, the same count, beside porchDepthFt.
+    const porchSel = () => page.locator("label").filter({ has: page.locator('option[value="projecting"]') }).locator("select");
+    await stepsSel().selectOption("center");
+    await settle(page);
+    await porchSel().selectOption("recessed");
+    await settle(page);
+    ok(`${tag}: a recessed porch keeps the centre steps and shows the box, "blank = 3" on the same piers`,
+      (await stepsSel().inputValue()) === "center" && (await count().count()) === 1 && (await count().getAttribute("placeholder")) === "blank = 3", await count().getAttribute("placeholder"));
+    r = await riseText();
+    ok(`${tag}: ...its hint the same 4.5 in rise`, r.text === "Each step rises 4.5 in." && r.color !== AMBER, JSON.stringify(r));
+    await typeCount(4);
+    d3 = await save();
+    ok(`${tag}: ⚠️ a typed 4 saves beside porchDepthFt, the steps with it`, d3.roof.porchDepthFt > 0.5 && !has(d3.roof, "porchOutFt") && d3.roof.porchSteps === "center" && d3.roof.porchStepCount === 4, JSON.stringify(d3.roof));
+    await porchSel().selectOption("projecting");
+    await settle(page);
+    ok(`${tag}: back to projecting, the steps and their count stay`, (await stepsSel().inputValue()) === "center" && (await count().inputValue()) === "4");
     // The preview draws the DRAFT: type the count, then open it.
     await typeCount(6);
     await page.getByRole("button", { name: /Preview in 3D/ }).first().click();

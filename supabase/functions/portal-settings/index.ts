@@ -3551,8 +3551,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // foundation null (or a draft's "slab") and never floorHeightFt, so a save without frame
     // "front" keeps the stored pair (carryForwardFoundation). The current panel sends frame "front"
     // and gets what it sent. Before the guard too, so an old panel's re-save of a raised style
-    // compares as the duplicate it is.
-    carryForwardFoundation(clean.d3, payload.d3, found.style!.d3, payload.frame);
+    // compares as the duplicate it is. `slabGround` (2026-10-03): the panel draws a slab's corners, so
+    // its null clears them there; an older panel's null keeps them.
+    carryForwardFoundation(clean.d3, payload.d3, found.style!.d3, payload.frame, payload.slabGround === true);
     // THE LATE-SAVE GUARD, BY VERSION (see _shared/styleSaveGuard.ts, and why content alone was
     // not enough). A caller that sent no baseVersion — an older bundle, the operator ?admin=1
     // page — writes unconditionally, exactly as before. A DUPLICATE (this exact save already

@@ -1670,7 +1670,10 @@ function Dashboard({ session }) {
         // the server carries a stored blocks/piers foundation and its floor height forward over the
         // null an older panel sends (carryForwardFoundation), and with it this save can clear them.
         // The ground's fall is not in that promise: it rides as two explicit keys (ssD3WithFall).
-        const body = { action: "save_style_d3", styleValue, d3: ssD3WithFall(d3), d3Photos, frame: "front" };
+        // `slabGround: true` (2026-10-03) says this panel draws a slab's corners too, so the null
+        // ssD3WithFall sends for level ground clears them on a slab; an older panel's null, which only
+        // knew raised floors, keeps them (carryForwardFoundation).
+        const body = { action: "save_style_d3", styleValue, d3: ssD3WithFall(d3), d3Photos, frame: "front", slabGround: true };
         if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
         // ALWAYS PRESENT, null included (review wf_5199a3e0-d65, high). 01-core's wrapper injects
         // the view-as target whenever this key is absent, and it reads the target when the call

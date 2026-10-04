@@ -100,6 +100,13 @@ Deno.test("d3GradeFt: at grade (D3.FLOOR_T) unless blocks or piers raise it", ()
   // Never less than the floor band itself: a 0.3 ft floor draws the ground where it always was.
   assertEquals(F.d3GradeFt({ foundation: "blocks", floorHeightFt: 0.3 }), 0.35);
   assertAlmostEquals(F.d3GradeLiftFt({ foundation: "blocks", floorHeightFt: 1.1 }), 0.75, 1e-12);
+  // A slab with the ground at each corner (2026-10-03) is still not raised: its highest corner is the
+  // floor band's depth, a floor height beside it means nothing, and only the cameras frame down further.
+  for (const slab of [{ foundation: "slab", gradeCornersFt: { fl: 0, fr: 0, bl: 1, br: 2 } }, { foundation: "slab", floorHeightFt: 3, gradeCornersFt: { br: 2 } }]) {
+    assertEquals(F.d3RaisedFoundation(slab), null, JSON.stringify(slab));
+    assertEquals(F.d3GradeFt(slab), 0.35, JSON.stringify(slab));
+    assertAlmostEquals(F.d3GradeLiftFt(slab), 2, 1e-12, `${JSON.stringify(slab)}: framed to its deepest corner`);
+  }
 });
 
 // ── THE PORCH STEPS CLIMB THE WHOLE HEIGHT ───────────────────────────────────────────────────

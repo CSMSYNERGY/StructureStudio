@@ -231,6 +231,34 @@ Deno.test("lean-to and dormer round-trip as additive roof keys, clamped", () => 
   assert(s.ok && !("leanToSide" in s.d3.roof), "an unknown side never persists");
 });
 
+Deno.test("a dormer as long as the building is saved as typed, up to the longest building, 100 ft (10-01 call)", () => {
+  // The cap was 12, so a 16 ft dormer typed on the Advanced page came back 12 after Save, with no word
+  // said. The page's box now runs to the previewed building's length; this side does not know the size,
+  // so the cap is the longest building the dimensions card takes (its length band, 100 ft, past the
+  // Advanced page's 60), and the renderer holds a wide dormer inside the gable ends of whatever building
+  // it is drawn on (d3DormerWidthFt, dormerWidth_test).
+  for (const w of [12, 16, 23.5, 24, 40, 60, 70, 100]) {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, dormerWidthFt: w } });
+    assert(r.ok, `${w} ft should be accepted`);
+    if (!r.ok) return;
+    assertEquals(r.d3.roof.dormerWidthFt, w, `${w} ft is kept`);
+  }
+  const over = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, dormerWidthFt: 125 } });
+  assert(over.ok && over.d3.roof.dormerWidthFt === 100, "past the longest building it is clamped, not refused");
+  // The cap is the dimensions card's length band: its longest building takes a full-length dormer, and
+  // it takes nothing longer.
+  assert(parseKnownDims({ widthFt: 30, lengthFt: 100, wallHeightFt: 10 }).ok, "a 100 ft building is accepted");
+  assert(!parseKnownDims({ widthFt: 30, lengthFt: 100.5, wallHeightFt: 10 }).ok, "...and nothing longer");
+});
+
+Deno.test("a 24 in overhang is kept, as the panel's chip and the Advanced page's preset send it (10-01 call)", () => {
+  // The Advanced page writes round(24 / 12 * 10000) / 10000 = 2 ft; the calibration chip sends overhangIn 24.
+  const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, overhang: 2 } });
+  assert(r.ok && r.d3.roof.overhang === 2, "2 ft is inside the overhang band");
+  const k = parseKnownDims({ widthFt: 12, lengthFt: 24, wallHeightFt: 8, overhangIn: 24 });
+  assert(k.ok && k.dims && k.dims.overhangIn === 24, "the chip's 24 in is a known dimension");
+});
+
 Deno.test("dormerType round-trips transom, defaults by ABSENCE, and drops junk", () => {
   // Carolyn, 2026-08-28 @52:43, naming the second shape: "we have two different dormers.
   // This one runs the pitch that way, the other works like a lean-to."
@@ -412,11 +440,12 @@ Deno.test("floorHeightFt: kept only with blocks or piers, clamped to 0.3..6, a u
 
 Deno.test("⚠️ a raised foundation survives an older panel's save; the current panel sets and clears it", () => {
   const stored = { roof: { type: "shed" }, foundation: "blocks", floorHeightFt: 1.1 };
-  const save = (sent: Record<string, unknown>, frame?: unknown, was: unknown = stored) => {
+  // slabGround (2026-10-03): the body's flag beside frame; a raised floor never reads it.
+  const save = (sent: Record<string, unknown>, frame?: unknown, was: unknown = stored, slabGround?: boolean) => {
     const clean = sanitizeD3Spec(sent);
     assert(clean.ok, JSON.stringify(sent));
     if (!clean.ok) throw new Error("unreachable");
-    carryForwardFoundation(clean.d3, sent, was, frame);
+    carryForwardFoundation(clean.d3, sent, was, frame, slabGround);
     return clean.d3 as Record<string, unknown>;
   };
   const roof = { type: "shed", pitch: 0.25 };
@@ -453,6 +482,14 @@ Deno.test("⚠️ a raised foundation survives an older panel's save; the curren
   const d3 = { roof, siding: null, colors: {} } as D3Spec;
   carryForwardFoundation(d3, undefined, stored, undefined);
   assert(!("foundation" in d3), "no d3 sent, nothing carried");
+  // The slab flag (2026-10-03) moves nothing on a raised floor, either way.
+  for (const flag of [true, false]) {
+    for (const sent of [{ roof, foundation: null }, { roof }, { roof, foundation: "slab" }]) {
+      const out = save(sent, undefined, stored, flag);
+      assertEquals([out.foundation, out.floorHeightFt], ["blocks", 1.1], `${flag} ${JSON.stringify(sent)}`);
+    }
+    assertEquals(save({ roof, foundation: "piers", floorHeightFt: 1.5 }, "front", stored, flag).foundation, "piers");
+  }
 });
 
 Deno.test("a full video reply carries the eave, vent and foundation through the sanitiser", () => {
@@ -2054,7 +2091,8 @@ Deno.test("porchPosts, porchPitch and porchSteps round-trip, clamp, and exist on
   const on = (extra: Record<string, unknown>) => roofOf({ type: "shed", pitch: 0.23, porchOutFt: 4, ...extra });
   const r = on({ porchPosts: 4, porchPitch: 0.25, porchSteps: "left" });
   assertEquals([r.porchPosts, r.porchPitch, r.porchSteps], [4, 0.25, "left"], "all three pass through");
-  for (const v of ["left", "center", "right"]) assertEquals(on({ porchSteps: v }).porchSteps, v, `steps "${v}"`);
+  // The front three, and a flight off either end of the deck (2026-10-03).
+  for (const v of ["left", "center", "right", "leftSide", "rightSide"]) assertEquals(on({ porchSteps: v }).porchSteps, v, `steps "${v}"`);
   // A post count is a whole number: rounded, after the clamp.
   assertEquals(on({ porchPosts: 3.6 }).porchPosts, 4, "3.6 posts is 4");
   assertEquals(on({ porchPosts: 3.4 }).porchPosts, 3, "3.4 posts is 3");
@@ -2069,7 +2107,7 @@ Deno.test("porchPosts, porchPitch and porchSteps round-trip, clamp, and exist on
     const j = on({ porchPosts: junk, porchPitch: junk });
     assert(!("porchPosts" in j) && !("porchPitch" in j), `${JSON.stringify(junk)} is dropped`);
   }
-  for (const junk of ["Left", "middle", "front", "", 1, null, true]) {
+  for (const junk of ["Left", "middle", "front", "", 1, null, true, "side", "LeftSide", "left side", "frontSide"]) {
     assert(!("porchSteps" in on({ porchSteps: junk })), `steps ${JSON.stringify(junk)} is dropped`);
   }
   // THE VALIDITY RULE: without a projecting porch they describe framing that does not exist.
@@ -2077,9 +2115,23 @@ Deno.test("porchPosts, porchPitch and porchSteps round-trip, clamp, and exist on
     const x = roofOf({ type: "gable", pitch: 0.4, porchOutFt, porchPosts: 4, porchPitch: 0.25, porchSteps: "left" });
     for (const k of ["porchPosts", "porchPitch", "porchSteps"]) assert(!(k in x), `porchOutFt ${porchOutFt} drops ${k}`);
   }
-  const recessed = roofOf({ type: "gable", pitch: 0.4, porchDepthFt: 6, porchPosts: 4, porchPitch: 0.25, porchSteps: "center" });
-  for (const k of ["porchPosts", "porchPitch", "porchSteps"]) assert(!(k in recessed), `a recessed porch drops ${k}`);
+  // A RECESSED porch (2026-10-03) has no posts row or roof of its own, but it has steps along its front:
+  // the three front words stay, with their count; a flight off an end of a deck it does not have goes.
+  const recessed = roofOf({ type: "gable", pitch: 0.4, porchDepthFt: 6, porchPosts: 4, porchPitch: 0.25, porchSteps: "center", porchStepCount: 3 });
+  for (const k of ["porchPosts", "porchPitch"]) assert(!(k in recessed), `a recessed porch drops ${k}`);
+  assertEquals([recessed.porchSteps, recessed.porchStepCount], ["center", 3], "a recessed porch keeps its front steps and their count");
   assertEquals(recessed.porchDepthFt, 6, "and the recessed porch itself is untouched");
+  for (const v of ["left", "right"]) assertEquals(roofOf({ type: "gable", porchDepthFt: 6, porchSteps: v }).porchSteps, v, `recessed "${v}"`);
+  for (const v of ["leftSide", "rightSide"]) {
+    const x = roofOf({ type: "gable", porchDepthFt: 6, porchSteps: v, porchStepCount: 3 });
+    assert(!("porchSteps" in x) && !("porchStepCount" in x), `a recessed porch drops "${v}" and its count`);
+  }
+  // At or under 0.5 ft a recessed porch is off, and its steps with it.
+  assert(!("porchSteps" in roofOf({ type: "gable", porchDepthFt: 0.5, porchSteps: "left" })), "no recessed porch, no steps");
+  // Recessed key order: the count where the numbers are, the steps after every older key, as on a
+  // projecting porch, whatever order they arrive in.
+  const rAll = roofOf({ porchSteps: "left", porchStepCount: 2, porchTruss: true, type: "gable", porchDepthFt: 5, pitch: 0.4 });
+  assertEquals(Object.keys(rAll), ["type", "pitch", "porchDepthFt", "porchStepCount", "porchTruss", "porchSteps"], "recessed key order");
   const just = roofOf({ type: "gable", pitch: 0.4, porchOutFt: 0.6, porchPosts: 2, porchSteps: "right" });
   assertEquals([just.porchPosts, just.porchSteps], [2, "right"], "just past the 0.5 off switch is a porch, so they stay");
   // NEVER A DEFAULT: a projecting porch that names none of them gains none of them, and the keys it
@@ -2197,8 +2249,12 @@ Deno.test("porchStepCount rounds, clamps, and exists only with a projecting porc
     const x = roofOf({ type: "gable", pitch: 0.4, porchOutFt, porchSteps: "left", porchStepCount: 3 });
     assert(!("porchStepCount" in x) && !("porchSteps" in x), `porchOutFt ${porchOutFt} drops both`);
   }
-  const recessed = roofOf({ type: "gable", pitch: 0.4, porchDepthFt: 6, porchSteps: "left", porchStepCount: 3 });
-  assert(!("porchStepCount" in recessed), "a recessed porch drops it");
+  // A recessed porch's front steps keep their count (2026-10-03); a side word, which it cannot have, takes it.
+  assertEquals(roofOf({ type: "gable", pitch: 0.4, porchDepthFt: 6, porchSteps: "left", porchStepCount: 3 }).porchStepCount, 3, "a recessed porch keeps it");
+  assert(!("porchStepCount" in roofOf({ type: "gable", pitch: 0.4, porchDepthFt: 6, porchSteps: "leftSide", porchStepCount: 3 })), "a side word on a recessed porch drops it");
+  assert(!("porchStepCount" in roofOf({ type: "gable", pitch: 0.4, porchDepthFt: 6, porchStepCount: 3 })), "a recessed porch without steps drops it");
+  // A side flight's count on a projecting porch is kept like any other.
+  assertEquals(roofOf({ type: "shed", pitch: 0.23, porchOutFt: 4, porchSteps: "rightSide", porchStepCount: 4 }).porchStepCount, 4, "side steps keep it");
   // Appended after every older key: a spec carrying it still lists its older keys first.
   const all = roofOf({ porchStepCount: 2, porchSteps: "left", type: "shed", porchOutFt: 4, pitch: 0.2 });
   assertEquals(Object.keys(all), ["type", "pitch", "porchOutFt", "porchStepCount", "porchSteps"], "key order");
@@ -2239,11 +2295,12 @@ Deno.test("gradeFallFt / gradeFallToward: raised floors only, 0 is level, and ne
 Deno.test("⚠️ the ground's fall survives any save that omits it, whatever the frame; the current panel sets and clears it with explicit nulls (2026-09-29)", () => {
   const roof = { type: "gable", pitch: 0.4 };
   const stored = { roof, foundation: "piers", floorHeightFt: 1.5, gradeFallFt: 2.5, gradeFallToward: "left" };
-  const save = (sent: Record<string, unknown>, frame?: unknown, was: unknown = stored) => {
+  // slabGround (2026-10-03): the body's flag beside frame; a raised floor never reads it.
+  const save = (sent: Record<string, unknown>, frame?: unknown, was: unknown = stored, slabGround?: boolean) => {
     const clean = sanitizeD3Spec(sent);
     assert(clean.ok, JSON.stringify(sent));
     if (!clean.ok) throw new Error("unreachable");
-    carryForwardFoundation(clean.d3, sent, was, frame);
+    carryForwardFoundation(clean.d3, sent, was, frame, slabGround);
     return clean.d3 as Record<string, unknown>;
   };
   // The older panel never sends either key, and its foundation can come back null, absent or "slab".
@@ -2292,6 +2349,46 @@ Deno.test("⚠️ the ground's fall survives any save that omits it, whatever th
   // A stored row with no fall carries none.
   const none = save({ roof, foundation: null }, undefined, { roof, foundation: "blocks", floorHeightFt: 1 });
   assert(!("gradeFallFt" in none) && !("gradeFallToward" in none), "nothing invented");
+});
+
+Deno.test("gradeCornersFt on a slab (2026-10-03): all four, after the foundation, round-tripped; never beside skids or nothing said", () => {
+  const top = (extra: Record<string, unknown>) => {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, ...extra });
+    assert(r.ok, JSON.stringify(extra));
+    return (r.ok ? r.d3 : {}) as Record<string, unknown>;
+  };
+  // Held to the band, a string read as its number; a slab keeps no floor height and no fall beside them.
+  const r = top({ foundation: "slab", floorHeightFt: 2, gradeFallFt: 2, gradeFallToward: "back", gradeCornersFt: { fl: 0, fr: "0.5", bl: 1.5, br: 9 } });
+  assertEquals(r.gradeCornersFt, { fl: 0, fr: 0.5, bl: 1.5, br: 6 });
+  assert(!("floorHeightFt" in r) && !("gradeFallFt" in r) && !("gradeFallToward" in r), JSON.stringify(r));
+  // Key order: straight after the foundation, before the claddings, whatever order they were sent in.
+  assertEquals(Object.keys(top({ claddingChoices: ["lap"], gradeCornersFt: { br: 1 }, foundation: "slab" })).slice(-3), ["foundation", "gradeCornersFt", "claddingChoices"], "key order");
+  // A stored row sanitises back to itself, byte for byte: inches typed on the page are stored as feet.
+  const once = top({ foundation: "slab", gradeCornersFt: { fl: 0, fr: 5 / 12, bl: 8 / 12, br: 1.5 } });
+  assertEquals(once.gradeCornersFt, { fl: 0, fr: 5 / 12, bl: 8 / 12, br: 1.5 });
+  assertEquals(JSON.stringify(top(once)), JSON.stringify(once), "round trip");
+  // Level, junk, or a foundation that cannot have them: nothing stored, and the row is what it always was.
+  for (const level of [{ fl: 0, fr: 0, bl: 0, br: 0 }, {}, null, "2", [1, 2]]) {
+    assertEquals(JSON.stringify(top({ foundation: "slab", gradeCornersFt: level })), JSON.stringify(top({ foundation: "slab" })), JSON.stringify(level));
+  }
+  for (const foundation of ["skids", undefined, "junk"]) {
+    assert(!("gradeCornersFt" in top({ foundation, gradeCornersFt: { br: 2 } })), `${String(foundation)}: none`);
+  }
+  // The save path: an older panel's null keeps them; a panel that draws them (slabGround) clears with it.
+  const stored = { roof: { type: "gable", pitch: 0.4 }, foundation: "slab", gradeCornersFt: { fl: 0, fr: 0, bl: 1, br: 2 } };
+  const save = (sent: Record<string, unknown>, slabGround?: boolean) => {
+    const clean = sanitizeD3Spec(sent);
+    assert(clean.ok, JSON.stringify(sent));
+    if (!clean.ok) throw new Error("unreachable");
+    carryForwardFoundation(clean.d3, sent, stored, "front", slabGround);
+    return clean.d3 as Record<string, unknown>;
+  };
+  const roof = { type: "gable", pitch: 0.4 };
+  assertEquals(save({ roof, foundation: "slab" }).gradeCornersFt, stored.gradeCornersFt, "absent: kept");
+  assertEquals(save({ roof, foundation: "slab", gradeCornersFt: null }).gradeCornersFt, stored.gradeCornersFt, "an older panel's null: kept");
+  assert(!("gradeCornersFt" in save({ roof, foundation: "slab", gradeCornersFt: null }, true)), "the panel's level ground: cleared");
+  assertEquals(save({ roof, foundation: "slab", gradeCornersFt: { br: 0.5 } }).gradeCornersFt, { fl: 0, fr: 0, bl: 0, br: 0.5 }, "sent: replaced");
+  assert(!("gradeCornersFt" in save({ roof, foundation: "skids" })), "onto skids: gone");
 });
 
 Deno.test("colors.corner and colors.fascia keep a hex, drop anything else, and are never defaulted", () => {
@@ -3591,15 +3688,25 @@ Deno.test("⚠️ v2: porch placement only lands on a projecting porch, and is c
 });
 
 Deno.test("⚠️ v2: the porch's posts, pitch and steps land on a projecting porch only, clamped and rounded", () => {
+  // A recessed porch has no posts row, roof or deck of its own, so a flight off a deck's end cannot land
+  // on it either; steps along its front can (2026-10-03), below.
   const onRecessed = applySelfCheck(DRAFT, readOf({
     verdict: "corrections",
-    corrections: { roof: { porchPosts: 4, porchPitch: 0.25, porchSteps: "left" } },
+    corrections: { roof: { porchPosts: 4, porchPitch: 0.25, porchSteps: "leftSide" } },
     changed: [change("roof.porchPosts"), change("roof.porchPitch"), change("roof.porchSteps")],
   }));
   assert(onRecessed.ok, "usable");
   if (!onRecessed.ok) return;
   assertEquals(onRecessed.verdict, "matches", "a recessed porch has no posts row, roof or deck of its own");
   assertEquals(onRecessed.dropped, ["roof.porchPosts", "roof.porchPitch", "roof.porchSteps"]);
+  const frontOnRecessed = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections",
+    corrections: { roof: { porchPosts: 4, porchSteps: "left" } },
+    changed: [change("roof.porchPosts"), change("roof.porchSteps")],
+  }));
+  assert(frontOnRecessed.ok && frontOnRecessed.verdict === "corrections", "front steps land on a recessed porch");
+  if (!frontOnRecessed.ok) return;
+  assertEquals([frontOnRecessed.d3.roof.porchSteps, frontOnRecessed.dropped], ["left", ["roof.porchPosts"]]);
 
   const r = applySelfCheck(SHED_BACK_HIGH, readOf({
     verdict: "corrections",

@@ -25,6 +25,12 @@
 //   7. a slab, skids and no foundation at all are untouched: the grass at -0.35, no skirt, runners
 //      under a deck or supports, corner boards on the floor, one porch step, a 3 ft ramp, and
 //      model.foundation null
+//   7b. A SLAB ON GROUND THAT FALLS AWAY (gradeCornersFt on a slab, 2026-10-03, case SC): no skirt, no
+//      runners, no supports and no shade; a stem wall instead, four closed prisms of the floor band's own
+//      material in a group marked ssFoundation "slab", tops at the band's underside (-0.35), outer faces
+//      flush with the band, down past the grass on the low side, taking shadows as the band does (2026-10-04);
+//      corner boards on the floor; the grass's highest corner at -0.35 and the cameras' target down by
+//      the deepest drop
 //   8. THE PANEL (?admin=1): "What it stands on" offers the four kinds; blocks and piers show a floor
 //      height box whose blank says the default drawn; an untouched style saves no foundation key; the
 //      height saves as typed, clamped to 0.3..6, and a cleared box deletes it; leaving blocks/piers
@@ -54,7 +60,7 @@ function pure() {
     ["const D3 = {", "// The casing reveal every opening"],
     ["function d3RoofAxes(", "function d3FtIn("],
   ].map(([a, b]) => lift(a, b)).join("\n");
-  return new Function(`${body}; return { d3GradeFt, d3GradeLiftFt, d3FrameHeightFt };`)();
+  return new Function(`${body}; return { d3GradeFt, d3GradeLiftFt, d3FrameHeightFt, d3GradeAt };`)();
 }
 const PURE = pure();
 
@@ -80,6 +86,9 @@ const CASES = [
     d3: { roof: GABLE_PORCH, siding: "batten", colors: PLAIN, wallHeightFt: 8, foundation: "skids", floorHeightFt: 2 } },
   { id: "N", label: "Found No Foundation", size: "12x16", grade: 0.35, kind: null, porch: true, steps: 1,
     d3: { roof: GABLE_PORCH, siding: "batten", colors: PLAIN, wallHeightFt: 8 } },
+  // 7b. A slab on ground that falls away to the back right (2026-10-03).
+  { id: "SC", label: "Found Slab Corners", size: "12x16", grade: 0.35, kind: null, slabCorners: true,
+    d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6 }, siding: "batten", colors: PLAIN, wallHeightFt: 8, foundation: "slab", gradeCornersFt: { fl: 0, fr: 0, bl: 1, br: 2 } } },
 ];
 
 const configFor = (c) => {
@@ -192,8 +201,8 @@ async function measure(page, W, L) {
     const under = (q, anc) => { let n = q; while (n) { if (n === anc) return true; n = n.parent; } return false; };
     const all = (pred) => { const a = []; M.root.traverse((q) => { if (q.isMesh && pred(q)) a.push(q); }); return a; };
     const fpart = (name) => all((q) => q.userData && q.userData.ssFoundationPart === name);
-    // The grass: the envGroup's CircleGeometry.
-    const ground = all((q) => under(q, M.envGroup) && q.geometry.type === "CircleGeometry")[0];
+    // The grass: the envGroup's CircleGeometry, or the bent disc where the ground falls away (ssGround).
+    const ground = all((q) => under(q, M.envGroup) && q.geometry.type === "CircleGeometry")[0] || all((q) => q.userData && q.userData.ssGround)[0];
     ground.updateMatrixWorld(true);
     const labels = all((q) => under(q, M.envGroup) && q !== ground && !(q.userData && q.userData.ssFoundationPart));
     const out = {
@@ -213,6 +222,13 @@ async function measure(page, W, L) {
     out.deckSupports = all(inDeck).map(box);
     out.shades = fpart("shade").map((q) => ({ y: new V().setFromMatrixPosition(q.matrixWorld).y, inEnv: under(q, M.envGroup), transparent: !!q.material.transparent }));
     out.anyFoundationPart = all((q) => q.userData && q.userData.ssFoundationPart).length;
+    // A slab's stem wall (2026-10-03): each prism's box, whether it wears the floor band's material and
+    // sits in the group marked "slab", and every vertex's height for the lowest.
+    const band = all((q) => q.geometry.type === "BoxGeometry" && Math.abs(q.geometry.parameters.width - (W + 0.2)) < 1e-9
+      && Math.abs(q.geometry.parameters.height - 0.35) < 1e-9 && Math.abs(q.geometry.parameters.depth - (L + 0.2)) < 1e-9)[0];
+    out.stems = fpart("stem").map((q) => ({ ...box(q), wall: q.userData.ssStem, geoType: q.geometry.type, bandMat: !!band && q.material === band.material,
+      inSlab: !!(q.parent && q.parent.userData && q.parent.userData.ssFoundation === "slab"), receive: q.receiveShadow }));
+    out.bandReceives = band ? band.receiveShadow : null;
     // Corner boards: the roofGroup's tall thin boxes standing on the footprint's corners.
     out.corners = [];
     M.roofGroup.children.forEach((q) => {
@@ -304,9 +320,31 @@ async function runCase(ctx, c, ok, shots) {
     const g = c.grade;
     ok(`${tag}: model.grade ${g}`, near(m.grade, g, 1e-9), f3(m.grade));
     ok(`${tag}: the grass is at -${g}, and still takes shadows`, near(m.groundY, -g, 1e-6) && m.groundReceives === true, f3(m.groundY));
-    ok(`${tag}: the ground labels lie on it`, m.labelYs.length >= 2 && m.labelYs.every((y) => near(y, -g + 0.04, 0.01)), m.labelYs.map(f3).join(" "));
+    // (On a slab whose ground falls away the labels are draped over the bent grass: gradeFall.mjs holds them.)
+    if (!c.slabCorners) ok(`${tag}: the ground labels lie on it`, m.labelYs.length >= 2 && m.labelYs.every((y) => near(y, -g + 0.04, 0.01)), m.labelYs.map(f3).join(" "));
 
-    if (!c.kind) {
+    if (c.slabCorners) {
+      // ── 7b. a slab on ground that falls away: a stem wall, nothing else ──
+      const F = m.foundation, lift = PURE.d3GradeLiftFt(c.d3), fH = PURE.d3FrameHeightFt(c.d3, W, L);
+      ok(`${tag}: model.foundation is the slab's: grade 0.35, a 0.5 ft stem, four sides`,
+        F && F.kind === "slab" && near(F.grade, 0.35, 1e-9) && F.stemT === 0.5 && JSON.stringify(F.stems.map((s) => s.wall)) === JSON.stringify(["north", "south", "west", "east"]), JSON.stringify(F));
+      ok(`${tag}: no skirt, no runners, no supports and no shade`,
+        m.skirt.length === 0 && m.runners.length === 0 && m.blocks.length === 0 && m.piers.length === 0 && m.shades.length === 0, `${m.skirt.length} ${m.runners.length} ${m.blocks.length} ${m.piers.length} ${m.shades.length}`);
+      ok(`${tag}: four stem prisms of the floor band's own material, in the group marked "slab"`,
+        m.stems.length === 4 && m.stems.every((s) => s.geoType === "ExtrudeGeometry" && s.bandMat && s.inSlab), JSON.stringify(m.stems.map((s) => [s.wall, s.geoType, s.bandMat, s.inSlab])));
+      // ...taking shadows as the band does (2026-10-04), so a roof's shadow on the band carries on down
+      // the stem under it instead of stopping in a hard line at the band's underside.
+      ok(`${tag}: the stems receive shadows, as the band does`, m.bandReceives === true && m.stems.every((s) => s.receive === true), JSON.stringify([m.bandReceives, m.stems.map((s) => s.receive)]));
+      ok(`${tag}: their tops at the band's underside (-0.35), their outer faces flush with the band`,
+        m.stems.every((s) => near(s.mx[1], -0.35, 1e-6)) && near(Math.min(...m.stems.map((s) => s.mn[0])), -W / 2 - 0.1, 1e-6) && near(Math.max(...m.stems.map((s) => s.mx[0])), W / 2 + 0.1, 1e-6)
+          && near(Math.min(...m.stems.map((s) => s.mn[2])), -L / 2 - 0.1, 1e-6) && near(Math.max(...m.stems.map((s) => s.mx[2])), L / 2 + 0.1, 1e-6),
+        m.stems.map((s) => `${s.wall} ${s.mn.map(f3)}..${s.mx.map(f3)}`).join(" | "));
+      const deepest = Math.min(...m.stems.map((s) => s.mn[1])), want = -PURE.d3GradeAt(c.d3, W, L, W / 2 + 0.1, -L / 2 - 0.1) - 0.25;
+      ok(`${tag}: ⚠️ DOWN PAST THE GRASS AT THE DEEP CORNER (${f3(deepest)} ft, the grass there ${f3(want + 0.25)})`, deepest <= want + 0.01 && deepest < -2.3, f3(deepest));
+      ok(`${tag}: the corner boards stand on the floor`, m.corners.length === 4 && m.corners.every((q) => near(q.bottom, 0, 1e-6)), m.corners.map((q) => f3(q.bottom)).join(" "));
+      ok(`${tag}: the orbit target comes down by the deepest drop (${f3(lift)}), in the editor and the dock`,
+        near(lift, 2, 1e-9) && m.target && near(m.target[1], fH * 0.45 - lift, 1e-6) && near(dock.target, Math.max(8, fH) * 0.45 - lift, 1e-6), m.target && `${f3(m.target[1])} dock ${f3(dock.target)}`);
+    } else if (!c.kind) {
       // ── 7. at grade: untouched ──
       ok(`${tag}: no skirt, no supports, no shade; model.foundation null`, m.anyFoundationPart === 0 && m.foundation === null, `${m.anyFoundationPart} parts`);
       ok(`${tag}: the corner boards stand on the floor`, m.corners.length === 4 && m.corners.every((q) => near(q.bottom, 0, 1e-6)), m.corners.map((q) => f3(q.bottom)).join(" "));
