@@ -3114,11 +3114,24 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 {open && (
                   <div style={{ border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderTop: "none",
                     borderRadius: "0 0 6px 6px", background: "#FFF", padding: "7px 10px 9px" }}>
-                    {fieldRow("Expected close", canEdit ? (
-                      <input type="date" value={String(d.expected_close_date || "").slice(0, 10)} disabled={dealBusy}
-                        onChange={(e) => saveDealClose(d.short_code, e.target.value)}
-                        style={{ ...S.input, padding: "4px 7px", fontSize: 12.5, width: 158 }} />
-                    ) : (d.expected_close_date ? fmtDate(d.expected_close_date) : "—"))}
+                    {/* Saved on blur or Enter, the way the Pipeline card's close date is — NOT on
+                        change. A date input fires change once per keystroke with whatever its
+                        segments hold so far: typing the month "12" reports January first and the
+                        first digit of a year reports year 0002, so a change-save stored January
+                        (and the save disabled the box before the "2" could land). Keyed on the
+                        stored value so a save or a reload repaints it; Escape puts it back. */}
+                    {fieldRow("Expected close", canEdit ? (() => {
+                      const stored = String(d.expected_close_date || "").slice(0, 10);
+                      return (
+                        <input type="date" key={`${d.short_code}:${stored}`} defaultValue={stored} disabled={dealBusy}
+                          onBlur={(e) => { if (e.target.value !== stored) saveDealClose(d.short_code, e.target.value); }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") e.currentTarget.blur();
+                            if (e.key === "Escape") { e.currentTarget.value = stored; e.currentTarget.blur(); }
+                          }}
+                          style={{ ...S.input, padding: "4px 7px", fontSize: 12.5, width: 158 }} />
+                      );
+                    })() : (d.expected_close_date ? fmtDate(d.expected_close_date) : "—"))}
                     {fieldRow("Style", s.style || "—")}
                     {fieldRow("Size", s.size || "—")}
                     {fieldRow("Total", d.total_cents != null ? fmtMoneyWhole(d.total_cents) : "—")}

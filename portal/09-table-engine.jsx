@@ -219,9 +219,15 @@ function PMCellInput({ col, value, onCommit, onClose }) {
     onClose();
   };
   if (col.type === "date") {
-    return <input autoFocus type="date" style={{ ...base, minWidth: 130 }} value={value || ""}
-      onChange={(e) => { onCommit(e.target.value || null); onClose(); }}
-      onBlur={onClose} onKeyDown={(e) => { if (e.key === "Escape") onClose(); }} />;
+    // Committed on Enter or blur like the typed fields, NOT on change. A date input fires its
+    // change event once per keystroke with whatever the segments hold so far — typing the month
+    // "12" reports January first, and the first digit of a year reports year 0002 — so
+    // committing on change saved a date nobody chose and closed the editor before the second
+    // digit could land. Unchanged, nothing is written.
+    const commitDate = () => { const v = text || null; if (v !== (value || null)) onCommit(v); onClose(); };
+    return <input autoFocus type="date" style={{ ...base, minWidth: 130 }} value={text}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commitDate} onKeyDown={(e) => { if (e.key === "Enter") commitDate(); if (e.key === "Escape") onClose(); }} />;
   }
   if (col.type === "long_text") {
     return <textarea autoFocus rows={3} style={{ ...base, width: "100%", minWidth: 220, resize: "vertical", fontWeight: 500 }}
