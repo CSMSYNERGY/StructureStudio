@@ -21862,7 +21862,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         return;
       }
       const doorCfg = ITEMS[closest.type];
-      const doorW = doorCfg ? doorCfg.width : 3;
+      // The DOOR'S OWN width first, as the 3D viewer's same branch has it. Every catalog door is a
+      // "fixtureDoor", whose shared config says 3 ft whatever the door measures, so reading the
+      // config alone drew a 3 ft ramp under a 6 ft double door on the plan, the PDF and the 3D.
+      const doorW = closest.widthFt || (doorCfg ? doorCfg.width : 3);
       const rampDepth = RAMP_SPACE_FT; // visual ramp depth in feet
       const rp = rampPlacementForDoor(closest, rampDepth, pW, pH, mgX, mgY, scale);
       if (!rp) return;
@@ -22019,7 +22022,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // exactly like the drag path — else it detaches into the rasterized PDF.
         if (it.type === "ramp" && it.snapDoorId === swapId) {
           const rp = rampPlacementForDoor(sn, it.heightFt, pW, pH, mgX, mgY, scale);
-          return rp ? { ...it, ...rp } : it;
+          // A SIMPLE ramp (no catalog row) is as wide as its door, so it takes the new door's
+          // width too; a catalog ramp keeps the width its own style snapshotted.
+          return rp ? { ...it, ...rp, ...(it.fixtureItemId ? {} : { widthFt: wFt }) } : it;
         }
         return it;
       }));
