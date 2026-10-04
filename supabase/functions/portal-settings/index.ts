@@ -8301,9 +8301,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
     if (!contactId && !shortCode) return json({ error: "An activity must attach to a contact or a design." }, 400);
     { const bad = await mismatchedPair(contactId, shortCode); if (bad) return bad; }
+    // Checked before toISOString(), which THROWS on an invalid date and turned a bad dueAt
+    // into an unhandled 500.
+    const dueMs = payload.dueAt ? Date.parse(String(payload.dueAt)) : null;
+    if (dueMs !== null && !Number.isFinite(dueMs)) return json({ error: "That due date isn't a date we can read." }, 400);
     const row: Record<string, unknown> = {
       client_id: clientId, kind, subject,
-      due_at: payload.dueAt ? new Date(String(payload.dueAt)).toISOString() : null,
+      due_at: dueMs !== null ? new Date(dueMs).toISOString() : null,
       assignee_user_id: userId ?? null, created_by: userId ?? null,
     };
     if (contactId) row.contact_id = contactId;
