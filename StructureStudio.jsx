@@ -26161,6 +26161,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
       if (result.estimateNumber) ghlEstimateNumberRef.current = result.estimateNumber;
 
+      // Push to Invoice acts on "the quote just submitted" (see pushed), so a new submit starts
+      // it over. Left alone, the previous quote's invoice was printed under this one and its
+      // Push to Invoice button stayed hidden (`!pushed`).
+      setPushed(null); setPushErr("");
       setSavedDesign({
         code: shortCode,
         viewUrl,
@@ -32895,6 +32899,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 const madeQuote = savedDesign && savedDesign.ssQuote && savedDesign.estimateNumber;
                 setSubmitted(false);
                 setSavedDesign(null);
+                setPushed(null); setPushErr("");
                 setItems([]);
                 setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
                 if (!keepPerson) setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
