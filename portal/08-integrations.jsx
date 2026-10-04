@@ -537,8 +537,9 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
 // settings_email) is the enforcement point — this component only decides what to show.
 // email_status contract (portal-settings): { platformReady, domainStatus:
 //   "not_configured"|"pending"|"verified"|"failed", domain, fromName, fromLocal,
-//   fromAddress, verifiedAt, lastError, active, dnsRecords: [{type,host,value,verified}],
-//   recentSends: [{id?, kind, to, status, error?, bounceReason?, createdAt}] }.
+//   fromAddress, verifiedAt, lastError, active, dnsRecords: [{type,host,value,verified,tracking?}],
+//   recentSends: [{id?, kind, to, status, error?, bounceReason?, createdAt, openedAt, complainedAt}] }.
+//   `tracking: true` marks the optional open-tracking record (B4); `openedAt` is migration 262's.
 // `failed` renders the same remediation panel as `pending` (plus lastError): the fix for
 // both is "add the records, check again", so a separate dead-end state helps nobody.
 function EmailSendingView({ clientId, viewingLabel = null }) {
@@ -645,6 +646,28 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     else setInboundNote("Not working yet — mail records can take up to an hour. Check again shortly.");
   });
 
+  // ── See when emails are opened (B4, migration 262) ─────────────────────────────────
+  // One button for the whole card: it switches open tracking on when it is off, and otherwise
+  // asks whether the tracking record is in DNS yet. The server never lets this touch the
+  // domain's sending status (portal-settings email_tracking_check).
+  //
+  // "checking" means Resend is looking right now (this press asked, or an earlier one did and it
+  // is not done). Another press before it finishes would only restart that look, so the note says
+  // when to come back instead of "not seen yet", which reads as "press it again".
+  // "not_found" means the last look is over and Resend did not see the record (it has been asked
+  // again). Saying "checking" there too would have the builder wait on a missing, mistyped or
+  // proxied record for good, so this note sends them back to what they added.
+  const [trackNote, setTrackNote] = useState(null);
+  const trackingCheck = () => {
+    setTrackNote(null);
+    act({ action: "email_tracking_check" }, (d) => {
+      if (d.openTracking === "on") setMsg({ ok: "Email opens are on — opened emails now show “Opened” on the customer's record." });
+      else if (d.openTracking === "not_found") setTrackNote("Our last look didn't find this record. Check it's added exactly as shown, and on Cloudflare set it to DNS only (the grey cloud). We've asked again, so press Check it in about 5 minutes.");
+      else if (d.openTracking === "checking") setTrackNote("Checking now. This takes a few minutes, so press Check it again in about 5 minutes.");
+      else setTrackNote("Not seen yet — add the record above at your DNS host, then check again. It can take up to an hour to appear.");
+    });
+  };
+
   const inboundDisconnect = () => {
     if (!window.confirm(
       "Turn off replies in the portal?\n\nCustomer replies go back to the inbox of whoever sent the email. Your quotes and invoices are not affected.",
@@ -668,8 +691,8 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     catch { return iso; }
   };
   const chipStyle = (s) => {
-    const good = s === "sent" || s === "delivered";
-    const bad = s === "failed" || s === "bounced";
+    const good = s === "sent" || s === "delivered" || s === "opened";
+    const bad = s === "failed" || s === "bounced" || s === "marked as spam";
     return {
       background: good ? "#F0FDF4" : bad ? "#FEF2F2" : "#F1F5F9",
       color: good ? "#15803D" : bad ? "#DC2626" : "#475569",
@@ -752,6 +775,12 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   // (Carolyn: "so many people are going to be like, I don't know anything about this").
   // Ordered before the advisory row so the required records stay together.
   const dnsRows = dns.concat(inboundRows, dnsAdvisory);
+  // The open-tracking record (B4) rides in `dns` with `tracking: true`. It is OPTIONAL — mail
+  // sends the same without it, only the opens go uncounted — so every place that lists it says
+  // so, and the verified screen gives it a card of its own. No tracking row at all means open
+  // tracking was never switched on (a domain verified before it existed).
+  const trackRows = dns.filter((r) => r.tracking);
+  const trackSt = trackRows.length === 0 ? "off" : trackRows.every((r) => r.verified) ? "on" : "waiting";
 
   // ── "Email this to my webmaster" (Carolyn, 2026-08-25) ──────────────────────────────
   // Her words: "so many people are going to be like, I don't know anything about this."
@@ -772,9 +801,14 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   const webmasterMailto = (() => {
     if (dnsRows.length === 0) return "";
     const dom = dnsApex || status.domain || "our domain";
-    const lines = dnsRows.map((r, i) => {
+    // The open-tracking row(s) (B4). Its per-row label stays SHORT because every version of this
+    // email below repeats it, and that budget is what keeps the required records in. The longer
+    // Cloudflare sentence is said once, in the full email's prose (the terse one drops it).
+    const optRows = dnsRows.filter((r) => r.tracking);
+    const oneOpt = optRows.length === 1;
+    const listOf = (rows) => rows.map((r, i) => {
       const bits = [
-        `${i + 1}. ${r.type} record${r.advisory ? "  (recommended — see note below)" : ""}`,
+        `${i + 1}. ${r.type} record${r.advisory ? "  (recommended — see note below)" : r.tracking ? "  (optional, email opens; DNS only on Cloudflare)" : ""}`,
         `   Name/Host: ${r.host}`,
         `   Value:     ${r.value}`,
       ];
@@ -782,6 +816,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
       if (r.priority != null) bits.push(`   Priority:  ${r.priority}`);
       return bits.join("\n");
     }).join("\n\n");
+    const lines = listOf(dnsRows);
     const body = [
       `Hi,`,
       ``,
@@ -794,6 +829,10 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
       dnsAdvisory.length > 0
         ? `Note on the DMARC record: it is marked recommended rather than required. Our provider\ndoes not check it, so nothing will report it missing — but without it mail from a new\ndomain frequently lands in spam. "p=none" only asks for reports; it never blocks mail.`
         : ``,
+      // Cloudflare proxies a new CNAME by default, and a proxied one is invisible to the provider.
+      ...(optRows.length > 0
+        ? [``, `Note on the ${oneOpt ? "record" : "records"} marked optional: ${oneOpt ? "it lets" : "they let"} us see when our emails are opened.\nIf our DNS is on Cloudflare, set ${oneOpt ? "it" : "them"} to "DNS only" (the grey cloud), not "Proxied" —\nwith the proxy on, our provider can't see ${oneOpt ? "it" : "them"}.`]
+        : []),
       ``,
       `Nothing else needs changing — this does not affect the website or existing email.`,
       `Please let me know once they are in and I will run the verification check.`,
@@ -809,25 +848,46 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     // 1024-bit DKIM value alone is ~218 chars and percent-encoding inflates every newline
     // to 3. So the prose is what gets dropped, never a record: the records ARE the email.
     if (full.length <= 1900) return full;
-    const terse = [
+    const terseOf = (list, extra) => build([
       `Hi,`,
       ``,
       `Please add these DNS records for ${dom}:`,
       ``,
-      lines,
+      list,
       ``,
       dnsAdvisory.length > 0 ? `The DMARC record is recommended, not required — without it mail from a new domain\noften lands in spam. "p=none" only asks for reports; it never blocks mail.` : ``,
+      ...(extra ? [``, extra] : []),
       ``,
       `This does not affect the website or existing email. Thanks!`,
-    ].filter((l) => l !== undefined).join("\n");
-    const short = build(terse);
-    // Even terse can overflow (many records, or a long domain). Better a short email the
+    ].filter((l) => l !== undefined).join("\n"));
+    const short = terseOf(lines);
+    if (short.length <= 1900) return short;
+    // Still too long. The open-tracking record is the one OPTIONAL row (mail sends the same
+    // without it), so it goes before any required one does: a webmaster with SPF, DKIM, the
+    // reply MX and DMARC can finish the part that matters. The opens card still shows it, with
+    // its Copy button, and says the email left it out (webmasterHasTracking). The line saying so
+    // goes next if it has to: without it this is exactly the email a domain with no tracking
+    // record gets, so switching opens on never costs a required record.
+    if (optRows.length > 0) {
+      const required = listOf(dnsRows.filter((r) => !r.tracking));
+      for (const extra of [
+        oneOpt
+          ? `One more record is optional: it lets us see when emails are opened. I will send it separately.`
+          : `${optRows.length} more records are optional: they let us see when emails are opened. I will send them separately.`,
+        null,
+      ]) {
+        const m = terseOf(required, extra);
+        if (m.length <= 1900) return m;
+      }
+    }
+    // Even that can overflow (many records, or a long domain). Better a short email the
     // webmaster can reply to than a long one that arrives cut in half -- the on-screen
     // table with its per-row Copy buttons is still the complete source.
-    return short.length <= 1900
-      ? short
-      : build(`Hi,\n\nPlease add the DNS records for ${dom} that I am sending separately —\nthere are ${dnsRows.length} of them and they are too long for one email.\n\nThanks!`);
+    return build(`Hi,\n\nPlease add the DNS records for ${dom} that I am sending separately —\nthere are ${dnsRows.length} of them and they are too long for one email.\n\nThanks!`);
   })();
+  // Whether that email carries the open-tracking record, so the opens card does not promise it
+  // when a long domain pushed it out.
+  const webmasterHasTracking = trackRows.length > 0 && trackRows.every((r) => webmasterMailto.includes(encodeURIComponent(`Name/Host: ${r.host}`)));
   const sends = Array.isArray(status.recentSends) ? status.recentSends : [];
 
   const fromAddress = status.fromAddress || (status.fromLocal && status.domain ? `${status.fromLocal}@${status.domain}` : "");
@@ -947,6 +1007,19 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                       </td>
                       <td style={{ ...S.td, fontWeight: 700, whiteSpace: "nowrap" }}>
                         {r.type}
+                        {/* The open-tracking CNAME (B4) is optional: verification never waits on it.
+                            Cloudflare proxies a new CNAME by default, which hides it from Resend,
+                            so the one host most builders use gets named. */}
+                        {r.tracking && (
+                          <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: "#1B7895" }}>
+                            optional · email opens
+                          </span>
+                        )}
+                        {r.tracking && (
+                          <span style={{ display: "block", fontSize: 10.5, fontWeight: 600, color: "#64748B" }}>
+                            DNS only (grey cloud) on Cloudflare
+                          </span>
+                        )}
                         {/* An MX WITHOUT its priority cannot be created — the tenant DNS panel refuses
                             it, so the number has to sit on screen next to the type. */}
                         {r.priority != null && (
@@ -1176,6 +1249,99 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
             )}
           </div>
 
+          {/* ── See when emails are opened (B4) ──────────────────────────────────────────
+              Carolyn, 2026-10-01: a prospective client "asked to be able to see if an email is
+              read or not." Only rendered once sending is verified: the tracking record lives on
+              the sending domain, so there is nothing to offer before that. */}
+          <div style={S.card}>
+            <div style={S.h2}>See when emails are opened</div>
+            {trackSt === "off" && (
+              <div>
+                <p style={{ fontSize: 13, color: "#475569", marginTop: 0, marginBottom: 12, lineHeight: 1.6 }}>
+                  Switch this on and an email you send shows <strong>Opened</strong> on the customer's
+                  record — in the portal and in the phone app — once they open it. It needs one more
+                  record at your DNS host. Your email keeps sending the same either way.
+                </p>
+                <button type="button" onClick={trackingCheck} disabled={busy}
+                  style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>
+                  {busy ? "Switching on…" : "Turn on"}
+                </button>
+                {trackNote && <div style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600, marginTop: 8 }}>{trackNote}</div>}
+              </div>
+            )}
+            {trackSt === "waiting" && (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: 5, background: "#F59E0B", flexShrink: 0 }} />
+                  <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>One record to add</div>
+                </div>
+                <p style={{ fontSize: 12.5, color: "#475569", marginTop: 0, marginBottom: 10, lineHeight: 1.6 }}>
+                  Add this at the same place you added the others. If your DNS is on Cloudflare, set
+                  it to <strong>DNS only</strong> (the grey cloud), not Proxied. Cloudflare turns the
+                  proxy on by default, and with it on we can't see the record. Until it is in place
+                  nothing is counted as opened — your email keeps sending the same either way.
+                </p>
+                <div style={{ overflowX: "auto", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8 }}>
+                  <table style={{ borderCollapse: "collapse", width: "100%" }}>
+                    <thead>
+                      <tr>
+                        <th style={S.th}>Type</th>
+                        <th style={S.th}>Host</th>
+                        <th style={S.th}>Value</th>
+                        <th style={{ ...S.th, width: 90 }} aria-label="Copy" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {trackRows.map((r, i) => (
+                        <tr key={i}>
+                          <td style={{ ...S.td, fontWeight: 700, whiteSpace: "nowrap" }}>
+                            {r.type}
+                            {r.verified && <span title="In place" style={{ color: "#16A34A", fontWeight: 800, marginLeft: 6 }}>✓</span>}
+                          </td>
+                          <td style={{ ...S.td, fontFamily: "ui-monospace, monospace", fontSize: 11.5, wordBreak: "break-all" }}>{r.host}</td>
+                          <td style={{ ...S.td, fontFamily: "ui-monospace, monospace", fontSize: 11.5, wordBreak: "break-all" }}>{r.value}</td>
+                          <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                            <button type="button" onClick={() => copy(r.value, "tr" + i)}
+                              style={{ ...S.btn(copied === "tr" + i ? "#15803D" : "#F1F5F9", copied === "tr" + i ? "#FFF" : "#334155"), border: "1px solid #E2E8F0", padding: "5px 10px", fontSize: 11.5 }}>
+                              {copied === "tr" + i ? "✓ Copied" : copied === "fail:tr" + i ? "Copy failed" : "Copy"}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12, flexWrap: "wrap" }}>
+                  <button type="button" onClick={trackingCheck} disabled={busy}
+                    style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>
+                    {busy ? "Checking…" : "Check it"}
+                  </button>
+                  {trackNote && <span style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600 }}>{trackNote}</span>}
+                </div>
+                <p style={{ fontSize: 12, color: "#64748B", marginTop: 10, marginBottom: 0, lineHeight: 1.5 }}>
+                  {webmasterHasTracking
+                    ? <>Someone else manages your DNS? The “Email these records to my webmaster” button
+                      above includes this one too.</>
+                    : <>Someone else manages your DNS? Copy this record to them yourself: your domain
+                      name is long, so the “Email these records to my webmaster” email above has no
+                      room for it.</>}
+                </p>
+              </div>
+            )}
+            {trackSt === "on" && (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <span style={{ width: 10, height: 10, borderRadius: 5, background: "#16A34A", flexShrink: 0 }} />
+                <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>On — opened emails show “Opened” on the customer's record</div>
+              </div>
+            )}
+            {/* THE CAVEAT IS PART OF THE FEATURE. An open is the provider's guess from a tracking
+                image: a builder who reads "Opened" as proof, or "not opened" as "never read",
+                will chase the wrong customer. Same sentence as the record page's tooltip. */}
+            <p style={{ fontSize: 12, color: "#64748B", marginTop: 12, marginBottom: 0, lineHeight: 1.5 }}>
+              Opens are approximate: some mail apps block the tracking image, and some open emails automatically.
+            </p>
+          </div>
+
           <div style={S.card}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
               <div style={S.h2}>Send a test email</div>
@@ -1258,7 +1424,17 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                     <div key={sd.id || i} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", border: "1px solid #F1F5F9", borderRadius: 8, padding: "7px 10px" }}>
                       <span style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, minWidth: 56 }}>{sd.kind || "email"}</span>
                       <span style={{ fontSize: 12.5, color: "#1E293B", fontWeight: 600, flex: "1 1 180px", minWidth: 0, wordBreak: "break-all" }}>{sd.to}</span>
-                      <span style={chipStyle(sd.status)}>{sd.status || "—"}</span>
+                      {/* "opened" once the customer opened it (migration 262) — unless it bounced
+                          since, which is the news that matters. "marked as spam" beats both: the
+                          email arrived, and the one thing to do is not email them again. */}
+                      {(() => {
+                        const shown = sd.complainedAt ? "marked as spam"
+                          : sd.openedAt && sd.status !== "bounced" ? "opened" : sd.status;
+                        const tip = shown === "marked as spam" ? "They marked this email as spam. Don't email them again."
+                          : shown === "opened" ? "Opens are approximate: some mail apps block the tracking image, and some open emails automatically."
+                          : undefined;
+                        return <span style={chipStyle(shown)} title={tip}>{shown || "—"}</span>;
+                      })()}
                       <span style={{ fontSize: 11.5, color: "#94A3B8", flexShrink: 0 }}>{fmtWhen(sd.createdAt)}</span>
                       {(sd.status === "failed" || sd.status === "bounced") && (sd.error || sd.bounceReason) && (
                         <span style={{ fontSize: 11.5, color: "#DC2626", flexBasis: "100%" }}>{sd.error || sd.bounceReason}</span>
@@ -2736,6 +2912,12 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
   const [addrBusy, setAddrBusy] = useState(false);
   const [addrMsg, setAddrMsg] = useState(null);
   const savedAddr = (prefs && prefs.replyToEmail) || "";
+  // ── The email signature card's own state ────────────────────────────────────────
+  // Seeded from prefs and not re-synced, for the same reason as the reply-to address above.
+  const [sig, setSig] = useState(((prefs && prefs.emailSignature) || ""));
+  const [sigBusy, setSigBusy] = useState(false);
+  const [sigMsg, setSigMsg] = useState(null);
+  const savedSig = (prefs && prefs.emailSignature) || "";
 
   // One writer for both cards. save_prefs takes the WHOLE prefs map and replaces the stored
   // blob with it, so every save has to carry the keys it is not changing -- hence the spread.
@@ -2782,6 +2964,26 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
       }
     } catch (e) { setAddrMsg({ err: e.message }); }
     setAddrBusy(false);
+  };
+
+  // The server trims it and keeps at most 1,000 characters (_shared/emailSignature.ts); the box
+  // stops at the same length, so what is saved is what was typed. The kept value is shown back
+  // all the same, and an empty answer to a non-empty save is the whitelist check again: an older
+  // server build drops the key and still says ok.
+  const saveSig = async () => {
+    const next = sig.trim();
+    setSigBusy(true); setSigMsg(null);
+    try {
+      const back = await commit({ emailSignature: next });
+      const kept = (back && back.emailSignature) || "";
+      if (next && !kept) {
+        setSigMsg({ err: "Saved, but this server build didn't keep the signature — your emails go out without one for now. Tell CSM Synergy." });
+      } else {
+        setSig(kept);
+        setSigMsg({ ok: next ? "Saved. It goes under every email you send a customer." : "Removed — your emails go out without a signature." });
+      }
+    } catch (e) { setSigMsg({ err: e.message }); }
+    setSigBusy(false);
   };
 
   return (
@@ -2852,6 +3054,43 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
           </button>
         </div>
         {addrMsg && <div style={{ marginTop: 10, fontSize: 12, color: addrMsg.err ? "#DC2626" : "#15803D" }}>{addrMsg.err || addrMsg.ok}</div>}
+      </div>
+
+      {/* ── YOUR EMAIL SIGNATURE — Carolyn 2026-10-01 ─────────────────────────────────
+          "The other thing that is like super, super important in this is to be able to set up
+          email signatures in the settings ... if I'm sitting here typing a message, I want to
+          see my signature right here."
+
+          Per PERSON, so it lives in My Profile beside the reply-to address: each rep signs their
+          own emails. It goes under the emails a person writes (a record's Email tab, My Synergy
+          Phone) and under test emails. Quotes and invoices are NOT signed: they have their own
+          branded footer, and signing them is a later change. Plain text on purpose; the server
+          escapes it into the HTML, so no signature can carry markup into a customer's inbox. */}
+      <div style={S.card}>
+        <div style={S.h2}>Your email signature</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          Added to the end of every email you write to a customer, and to test emails. Plain
+          text, up to 1,000 characters. Quotes and invoices keep their own footer.
+        </p>
+        <textarea
+          value={sig}
+          disabled={sigBusy}
+          maxLength={1000}
+          rows={4}
+          onChange={(e) => { setSig(e.target.value); setSigMsg(null); }}
+          placeholder={"Jane Smith\nSales, Your Company\n(555) 201-8890"}
+          style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5, opacity: sigBusy ? 0.6 : 1 }}
+        />
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+          <button
+            onClick={saveSig}
+            disabled={sigBusy || sig.trim() === savedSig}
+            style={{ ...S.btn(ACCENT, "#FFF"), opacity: (sigBusy || sig.trim() === savedSig) ? 0.5 : 1 }}>
+            Save
+          </button>
+          <span style={{ fontSize: 11.5, color: "#94A3B8" }}>{sig.length}/1000</span>
+        </div>
+        {sigMsg && <div style={{ marginTop: 10, fontSize: 12, color: sigMsg.err ? "#DC2626" : "#15803D" }}>{sigMsg.err || sigMsg.ok}</div>}
       </div>
     </div>
   );

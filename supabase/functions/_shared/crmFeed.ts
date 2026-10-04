@@ -191,7 +191,9 @@ export async function buildCrmFeed(
     // ⚠️ NOT q(), because q() turns ANY read error into []: a crmFeed deployed ahead of
     // migration 261 would be refused body_text (no such column), and every sent email would
     // vanish from every record page with nothing logged. On that one error the read is tried
-    // again without body_text; those rows have no words and keep the "Emailed to …" line below.
+    // again with fewer columns, newest migration first: without 262's opened_at / open_count /
+    // complained_at (the email shows no "Opened" or "Marked as spam"), then without 261's body_text too (no words, so the
+    // "Emailed to …" line below). delivered_at and bounced_at are 107's and always there.
     (codes.length || opts.contactId)
       ? (async () => {
           const read = (cols: string) => admin.from("email_sends")
@@ -202,9 +204,11 @@ export async function buildCrmFeed(
               opts.contactId ? `contact_id.eq.${opts.contactId}` : null,
             ].filter(Boolean).join(","))
             .order("created_at", { ascending: false }).limit(80);
-          let r = await read("id, short_code, contact_id, kind, to_email, subject, status, created_at, body_text");
-          if (r?.error && ["42703", "PGRST204"].includes(String(r.error.code))) {
-            r = await read("id, short_code, contact_id, kind, to_email, subject, status, created_at");
+          const BASE = "id, short_code, contact_id, kind, to_email, subject, status, created_at, delivered_at, bounced_at";
+          let r: any = null;
+          for (const cols of [`${BASE}, body_text, opened_at, open_count, complained_at`, `${BASE}, body_text`, BASE]) {
+            r = await read(cols);
+            if (!(r?.error && ["42703", "PGRST204"].includes(String(r.error.code)))) break;
           }
           return r?.data ?? [];
         })().catch(() => [])
@@ -362,7 +366,13 @@ export async function buildCrmFeed(
   // email_sends is the table that makes the Emails chip REAL. Nothing in the portal reads
   // it today, so every quote and invoice email we have ever sent is invisible in the UI.
   for (const e of emails as any[]) {
-    const st = e.status && e.status !== "sent" ? ` (${e.status})` : "";
+    // What happened after it left (migration 262) is a label of its own — Opened, Delivered,
+    // Bounced or Marked as spam, in `meta.delivery`, which the record page draws beside the title.
+    // So those states no longer ride in the text; a send that is still going out or never went ("claimed",
+    // "failed") still says so there, as it always has.
+    const delivery = emailDelivery(e);
+    const st = e.status && !["sent", "delivered", "bounced"].includes(e.status) ? ` (${e.status})` : "";
+    const meta = delivery ? { delivery: delivery.label, openedAt: delivery.openedAt, openCount: delivery.openCount } : null;
     // A conversation reads as the SUBJECT, because that is what someone actually wrote and
     // what they will scan for. A document reads as its kind, because "Quote emailed to
     // jane@…" is the useful line and its subject is boilerplate.
@@ -374,8 +384,8 @@ export async function buildCrmFeed(
     // reads like a sent one is the builder finding out from the customer.
     const words = typeof e.body_text === "string" && e.body_text.trim() ? e.body_text : null;
     push(e.kind === "conversation"
-      ? { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${e.subject || "(no subject)"}${words ? st : ""}`, body: words ?? `Emailed to ${e.to_email || "customer"}${st}`, code: e.short_code, icon: "email" }
-      : { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${labelKind(e.kind)} emailed to ${e.to_email || "customer"}${st}`, body: e.subject || null, code: e.short_code, icon: "email" });
+      ? { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${e.subject || "(no subject)"}${words ? st : ""}`, body: words ?? `Emailed to ${e.to_email || "customer"}${st}`, code: e.short_code, icon: "email", meta }
+      : { id: `e:${e.id}`, type: "email", at: iso(e.created_at), title: `${labelKind(e.kind)} emailed to ${e.to_email || "customer"}${st}`, body: e.subject || null, code: e.short_code, icon: "email", meta });
   }
   for (const a of accepts as any[]) {
     push({ id: `sig:${a.id}`, type: "accepted", at: iso(a.created_at), title: `${a.subject === "change_order" ? "Change order" : "Quote"} signed by ${a.signer_name || "customer"}`, body: a.quote_number ? `Quote ${a.quote_number} · ${a.method}` : a.method, code: a.short_code, icon: "accept" });
@@ -548,6 +558,40 @@ export async function buildCrmFeed(
 
   out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   return out.slice(0, opts.limit || 200);
+}
+
+/**
+ * What happened to one email after it left (Resend's events, recorded by migration 262's
+ * record_email_event), as the label the record page shows beside it. Pure — exported for the tests.
+ *   complained_at set                               → "Marked as spam" (262 keeps a complaint
+ *                                                     there, NOT as a bounce: the email arrived)
+ *   bounced                                         → "Bounced"
+ *   opened at least once                            → "Opened", with the first time and the count
+ *   delivered                                       → "Delivered"
+ *   anything else                                   → null (sent, still sending, or failed:
+ *                                                     the title says those)
+ * A complaint outranks everything: it is the one thing the builder must act on (don't email them
+ * again). It is NOT a bounce, though: the email arrived (often it was opened first), so "Bounced,
+ * check the address and send again" would be false, and sending again to someone who just reported
+ * them is what hurts their sending domain most. A bounce outranks an open: an open recorded before a
+ * late bounce does not make the bounce any less the thing to act on. An open outranks a delivery
+ * whatever the status says, because a delivery receipt can go missing while the open still arrives.
+ *
+ * Opens are approximate: some mail apps block the tracking image, and some open mail by
+ * themselves. The record page says so where the label is shown.
+ */
+// deno-lint-ignore no-explicit-any
+export function emailDelivery(e: any): { label: "Opened" | "Delivered" | "Bounced" | "Marked as spam"; openedAt: string | null; openCount: number } | null {
+  if (!e) return null;
+  const openedAt = typeof e.opened_at === "string" && e.opened_at ? e.opened_at : null;
+  const openCount = Math.max(Number(e.open_count) || 0, openedAt ? 1 : 0);
+  if (typeof e.complained_at === "string" && e.complained_at) return { label: "Marked as spam", openedAt, openCount };
+  if (e.status === "bounced") return { label: "Bounced", openedAt, openCount };
+  if (openedAt) return { label: "Opened", openedAt, openCount };
+  if (e.status === "delivered" || (e.delivered_at && e.status !== "failed" && e.status !== "claimed")) {
+    return { label: "Delivered", openedAt: null, openCount: 0 };
+  }
+  return null;
 }
 
 /**

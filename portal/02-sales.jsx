@@ -1726,6 +1726,55 @@ const CRM_CHIPS = [
     "change_order", "invoice_created", "invoice_sent", "lead_captured", "field_change", "owner_change"] },
 ];
 
+// WHAT HAPPENED TO ONE OF OUR EMAILS AFTER IT LEFT (B4, migration 262). Carolyn, 2026-10-01: a
+// prospective client "asked to be able to see if an email is read or not." crmFeed puts the
+// answer in `meta.delivery` (Opened, Delivered, Bounced or Marked as spam; nothing while it is only
+// sent) and this draws it beside the title, the way the History already flags a failed send.
+//
+// "Marked as spam" is its own chip, not a kind of Bounced: the email ARRIVED (often it was opened
+// first), so "check the address and send again" would be false, and sending again to someone who
+// just reported the builder is what hurts their sending domain most.
+//
+// An open is a guess the provider makes from a tracking image, so the tooltip says so in the same
+// words as Settings → Email Settings: some mail apps block the image (a real open never shows) and
+// some fetch it by themselves (an open shows that nobody made). A builder who reads "Opened" as
+// proof is the failure this sentence is for.
+const SS_DELIVERY_TONE = {
+  Opened: { bg: "#F0FDF4", fg: "#15803D", bd: "#BBF7D0" },
+  Delivered: { bg: "#F1F5F9", fg: "#475569", bd: "#E2E8F0" },
+  Bounced: { bg: "#FEF2F2", fg: "#DC2626", bd: "#FECACA" },
+  "Marked as spam": { bg: "#FEF2F2", fg: "#DC2626", bd: "#FECACA" },
+};
+function SsEmailDeliveryChip({ meta }) {
+  const tone = meta && SS_DELIVERY_TONE[meta.delivery];
+  if (!tone) return null;
+  let tip = "The customer's mail server accepted it.";
+  if (meta.delivery === "Bounced") {
+    // A suppressed send is recorded as a bounce too (postmark-events): the email provider skipped
+    // it because an earlier email to the address bounced or was reported, maybe another builder's.
+    tip = "The customer's mail server refused it, or it wasn't sent because an earlier email to this address bounced or was marked as spam. Check the address before sending again.";
+  } else if (meta.delivery === "Marked as spam") {
+    tip = "They marked this email as spam. Don't email them again.";
+  } else if (meta.delivery === "Opened") {
+    let when = "";
+    try {
+      when = new Date(meta.openedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    } catch (_e) { when = ""; }
+    // 25 is where the server stops counting (migration 262), so 25 means "25 or more".
+    const n = Number(meta.openCount) || 1;
+    tip = `${when ? `First opened ${when}` : "Opened"}${n > 1 ? ` · opened ${n >= 25 ? "25+" : n} times` : ""}. `
+      + "Opens are approximate: some mail apps block the tracking image, and some open emails automatically.";
+  }
+  return (
+    <span title={tip} style={{
+      marginLeft: 6, display: "inline-block", verticalAlign: "1px", fontSize: 10, fontWeight: 800,
+      color: tone.fg, background: tone.bg, border: "1px solid " + tone.bd, borderRadius: 4, padding: "0 5px",
+    }}>
+      {meta.delivery}
+    </span>
+  );
+}
+
 // Street / City / State / ZIP for the contact editor, which renders in TWO places (the
 // contact record's Person card and a deal record's Person drop-down). It was copy-pasted
 // between them, and adding the billing pair (2026-09-04) would have made that four identical
@@ -2464,7 +2513,11 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   clientId = null, viewingLabel = null, canEditDesigns = false, canReadTaxSettings = false, canVerifyTax = false,
   // My Synergy Phone: the signed-in person (the extension refuses a call for anybody else), whether
   // their access includes calling, and whether calling is switched on for the account.
-  userId = null, canCall = false, phoneOn = false }) {
+  userId = null, canCall = false, phoneOn = false,
+  // The signed-in person's email signature (My Profile), shown under the Email box because the
+  // server adds it to what they send: "" when they have none, null when it isn't known (view-as),
+  // which shows nothing. onEditProfile opens My Profile, where it is changed.
+  emailSignature = null, onEditProfile = null }) {
   // THE SUBSCRIPTION IS AN EDIT GATE, NOT A TAB GATE, and it has to be applied here rather
   // than tab by tab. Every WRITE this page makes is a `crm_*` action — crm_save_note,
   // crm_save_activity, crm_complete_activity, crm_send_email, crm_send_sms, crm_save_contact,
@@ -3729,6 +3782,33 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 <textarea value={mail.body} onChange={(e) => setMail((p) => ({ ...p, body: e.target.value }))} rows={5}
                   placeholder="Write to this customer…"
                   style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+                {/* THE SIGNATURE, WHERE SHE IS TYPING. Carolyn 2026-10-01: "if I'm sitting here
+                    typing a message, I want to see my signature right here." crm_send_email adds
+                    it server-side (_shared/emailSignature.ts), so this is a preview of what goes
+                    out, on one line; the full text is in the tooltip. Leaving for My Profile
+                    asks first when the email has words in it, because the record unmounts and
+                    the draft is not kept anywhere. */}
+                {emailSignature !== null && (
+                  <div style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 11.5, color: "#94A3B8", marginTop: 4 }}>
+                    <span title={emailSignature || undefined}
+                      style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {emailSignature
+                        ? "Your signature is added: " + emailSignature.split("\n").map((l) => l.trim()).filter(Boolean).join(" · ")
+                        : "No email signature yet."}
+                    </span>
+                    {onEditProfile && (
+                      <a href={ssPagePath("settings", "myprofile")}
+                        onClick={ssNavClick(() => {
+                          if ((mail.subject.trim() || mail.body.trim())
+                            && !window.confirm("Leave this email for My Profile? What you've written here won't be kept.")) return;
+                          onEditProfile();
+                        })}
+                        style={{ color: ACCENT, fontWeight: 700, whiteSpace: "nowrap", textDecoration: "none" }}>
+                        {emailSignature ? "Edit in My Profile" : "Add one in My Profile"}
+                      </a>
+                    )}
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5 }}>
                   <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !mail.subject.trim() || !mail.body.trim()} onClick={sendEmail}>
                     {busy ? "Sending…" : "Send email"}
@@ -4007,7 +4087,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                     <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 6, padding: "6px 8px", fontSize: 13, color: "#1E293B" }}>{e.body}</div>
                   ) : (
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "#1E293B" }}>{e.title}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
+                        {e.title}
+                        {/* Opened / Delivered / Bounced (migration 262). Only our own emails
+                            carry it; the customer's replies are drawn above. */}
+                        {e.type === "email" && <SsEmailDeliveryChip meta={e.meta} />}
+                      </div>
                       {/* Our own emails and texts keep their line breaks, the way the
                           customer's replies above do: a conversation email's body is the
                           words someone typed (migration 261). Every other email body here is

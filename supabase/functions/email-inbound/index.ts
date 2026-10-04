@@ -72,6 +72,17 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
   let payload: any;
   try { payload = await req.json(); } catch { return json({ ok: true, ignored: "unparseable" }); }
 
+  // ⚠️ ONLY `email.received` IS AN INBOUND EMAIL. A Resend webhook posts every event it is
+  // subscribed to to ONE url, and the delivery events (email.delivered / opened / bounced /
+  // complained, migration 262) belong to postmark-events on a webhook of their own. Ticked on
+  // THIS webhook by mistake, their payloads carry `data.from` (the builder's own sending address)
+  // and `data.email_id` (a SENT email's id), and everything below would fetch a "received" email
+  // by that id, fail, and file the builder's own outgoing mail as a customer reply on every open.
+  // So a payload that names a type other than email.received is answered 200 and dropped; a
+  // payload with no type at all (another provider's shape) is read exactly as before.
+  const eventType = typeof payload?.type === "string" ? payload.type : "";
+  if (eventType && eventType !== "email.received") return json({ ok: true, ignored: "not an inbound email" });
+
   // Providers wrap the message differently (`data`, `email`, or the root). Take the first
   // shape that carries a sender rather than hard-coding one vendor's envelope.
   let m = payload?.data ?? payload?.email ?? payload ?? {};

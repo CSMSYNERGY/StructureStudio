@@ -496,3 +496,21 @@ Deno.test("absent, blank or wrong-kind invoice copy keeps the shipped wording by
     assert(o.text === shipped.text, `text drifted for ${JSON.stringify(templateCopy)}`);
   }
 });
+
+Deno.test("test email: the sender's signature sits under the message, escaped, after \"-- \" in the text", () => {
+  // My Profile's email signature (2026-10-04). A test shows the sender how their emails end.
+  const base = { businessName: "Acme Sheds", fromAddress: "info@acme-sheds.example.com" };
+  const o = testEmail({ ...base, signature: `Pat <b>Lee</b>\r\nSales & delivery` });
+  assertIncludes(o.html, "Pat &lt;b&gt;Lee&lt;/b&gt;<br>Sales &amp; delivery", "escaped, line by line");
+  assertNotIncludes(o.html, "<b>Lee</b>", "markup in a signature never reaches the html");
+  assert(o.html.indexOf("your sending domain is set up correctly") < o.html.indexOf("Pat &lt;b&gt;"), "under the message");
+  assert(o.text.endsWith("set up correctly.\n\n-- \nPat <b>Lee</b>\nSales & delivery\n"), `text: ${JSON.stringify(o.text.slice(-80))}`);
+  // None (or blank): the test email is byte for byte what it was before signatures.
+  const plain = testEmail(base);
+  for (const signature of [null, "", "   "]) {
+    const t = testEmail({ ...base, signature });
+    assertEq(t.html, plain.html, `html with signature ${JSON.stringify(signature)}`);
+    assertEq(t.text, plain.text, `text with signature ${JSON.stringify(signature)}`);
+  }
+  assertNotIncludes(plain.text, "-- ", "no signature line without a signature");
+});

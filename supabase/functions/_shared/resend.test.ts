@@ -22,13 +22,20 @@ import {
   rsCreateDomain,
   rsDeleteDomain,
   rsDomainVerified,
+  rsEnableOpenTracking,
   rsGetDomain,
   rsGetReceivedEmail,
   rsInboundReady,
   rsInboundRecords,
+  rsOpenTrackingActive,
+  rsOpenTrackingConfigured,
   rsReceivingEnabled,
   rsSendEmail,
+  rsTrackingRecords,
+  rsCheckOpenTracking,
   rsVerifyDomain,
+  TRACKING_RECHECK_MS,
+  TRACKING_SUBDOMAIN,
   type RsDomain,
 } from "./resend.ts";
 
@@ -881,6 +888,248 @@ Deno.test("a ROOT sending domain is unaffected by the overlap strip", async () =
     const d = await rsGetDomain("root-1");
     assertEquals(d.records[0].fqdn, "resend._domainkey.juniorbarns.com");
     assertEquals(d.records[1].fqdn, "send.juniorbarns.com");
+  } finally {
+    teardown();
+  }
+});
+
+// ── Open tracking (B4, 2026-10-04) ─────────────────────────────────────────────────────────
+// The domain read once tracking is on, as Resend's get-domain docs show it: the three switches
+// at the top level, and a `Tracking` CNAME whose name is already absolute.
+const TRACKED_DOMAIN = {
+  ...VERIFIED_DOMAIN,
+  open_tracking: true,
+  click_tracking: false,
+  tracking_subdomain: "links",
+  records: [
+    ...VERIFIED_DOMAIN.records,
+    { record: "Tracking", name: "links.mail.example.com", type: "CNAME", value: "links1.resend-dns.com", ttl: "Auto", status: "not_started" },
+  ],
+};
+
+Deno.test("tracking: a read that says nothing about tracking is not read as \"off\"", async () => {
+  setup();
+  try {
+    stub(() => jsonResponse(VERIFIED_DOMAIN));
+    const d = await rsGetDomain(DOMAIN_ID);
+    assertEquals(d.tracking, undefined, "no tracking keys, no tracking field");
+    assertEquals(rsOpenTrackingConfigured(d), false);
+    assertEquals(rsTrackingRecords(d).length, 0);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("tracking: the switches and the Tracking CNAME are read; configured is not the same as active", async () => {
+  setup();
+  try {
+    stub(() => jsonResponse(TRACKED_DOMAIN));
+    const d = await rsGetDomain(DOMAIN_ID);
+    assertEquals(JSON.stringify(d.tracking), JSON.stringify({ open: true, click: false, subdomain: "links" }));
+    const recs = rsTrackingRecords(d);
+    assertEquals(recs.length, 1);
+    assertEquals(recs[0].fqdn, "links.mail.example.com", "an absolute name is not appended to again");
+    assertEquals(recs[0].type, "CNAME");
+    assertEquals(rsOpenTrackingConfigured(d), true);
+    assertEquals(rsOpenTrackingActive(d), false, "the CNAME is not in DNS yet, so nothing is counted");
+    // The sending verdict is untouched by a pending tracking record.
+    assertEquals(rsDomainVerified(d), true);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("tracking: active only when the switch is on AND every tracking record is verified", () => {
+  const rec = (purpose: string, type: string, verified: boolean) =>
+    ({ purpose, host: "h", fqdn: "h.example.com", type, value: "v", verified });
+  const dom = (open: boolean, records: ReturnType<typeof rec>[]): RsDomain =>
+    ({ id: DOMAIN_ID, status: "verified", records, tracking: { open, click: false, subdomain: "links" } });
+  assertEquals(rsOpenTrackingActive(dom(true, [rec("DKIM", "TXT", true), rec("Tracking", "CNAME", true)])), true);
+  assertEquals(rsOpenTrackingActive(dom(true, [rec("Tracking", "CNAME", true), rec("Tracking", "CAA", false)])), false,
+    "a CAA row the certificate needs counts too");
+  assertEquals(rsOpenTrackingActive(dom(false, [rec("Tracking", "CNAME", true)])), false, "the switch off counts nothing");
+  assertEquals(rsOpenTrackingActive(dom(true, [rec("DKIM", "TXT", true)])), false, "no tracking record, nothing counted");
+});
+
+Deno.test("rsEnableOpenTracking PATCHes open tracking + the subdomain, then GETs the fresh shape", async () => {
+  setup();
+  try {
+    const calls = stub((c) => c.method === "PATCH" ? jsonResponse({ object: "domain", id: DOMAIN_ID }) : jsonResponse(TRACKED_DOMAIN));
+    const before = { id: DOMAIN_ID, status: "verified", records: [] } as RsDomain;
+    const d = await rsEnableOpenTracking(DOMAIN_ID, before);
+    assertEquals(calls.length, 2);
+    assertEquals(calls[0].method, "PATCH");
+    assertEquals(calls[0].url, `https://api.resend.com/domains/${DOMAIN_ID}`);
+    assertEquals(calls[0].headers.get("Content-Type"), "application/json");
+    assertEquals(calls[0].body, JSON.stringify({ open_tracking: true, tracking_subdomain: TRACKING_SUBDOMAIN }));
+    assert(!String(calls[0].body).includes("click_tracking"), "click tracking rewrites every link: never touched");
+    assertEquals(calls[1].method, "GET");
+    assertEquals(rsOpenTrackingConfigured(d), true, "the result is the GET, not the PATCH ack");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("rsEnableOpenTracking never replaces a subdomain the domain already has (it can't be taken back)", async () => {
+  setup();
+  try {
+    const calls = stub((c) => c.method === "PATCH" ? jsonResponse({ object: "domain", id: DOMAIN_ID }) : jsonResponse(TRACKED_DOMAIN));
+    const chosen = { id: DOMAIN_ID, status: "verified", records: [], tracking: { open: false, click: false, subdomain: "go" } } as RsDomain;
+    await rsEnableOpenTracking(DOMAIN_ID, chosen);
+    assertEquals(calls[0].body, JSON.stringify({ open_tracking: true }));
+    // A read with no switches but a Tracking record already there counts as having one too.
+    const withRecord = {
+      id: DOMAIN_ID, status: "verified",
+      records: [{ purpose: "Tracking", host: "t", fqdn: "t.example.com", type: "CNAME", value: "x", verified: false }],
+    } as RsDomain;
+    await rsEnableOpenTracking(DOMAIN_ID, withRecord);
+    assertEquals(calls[2].body, JSON.stringify({ open_tracking: true }));
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("rsEnableOpenTracking: a refused PATCH is a ResendApiError with the verdict, and no GET follows", async () => {
+  setup();
+  try {
+    const calls = stub(() => jsonResponse({ name: "validation_error", message: "bad links.x@y.z" }, 400));
+    const e = await expectApiError(() => rsEnableOpenTracking(DOMAIN_ID, { id: DOMAIN_ID, status: "verified", records: [] }), "patch");
+    assertEquals(e.permanent, true);
+    assert(!e.message.includes("@"), "the provider message never surfaces");
+    assertEquals(calls.length, 1);
+  } finally {
+    teardown();
+  }
+});
+
+// ── rsCheckOpenTracking: the opens card's "Check it" ─────────────────────────────────────
+// The verify POST re-parks the whole domain at "pending" while Resend re-checks (live 2026-10-02),
+// so a press must never POST while a check is running, nor more than once per TRACKING_RECHECK_MS.
+
+const TRACKING_ACTIVE = {
+  ...TRACKED_DOMAIN,
+  records: TRACKED_DOMAIN.records.map((r) => ({ ...r, status: "verified" })),
+};
+const TRACKING_PENDING_CHECK = { ...TRACKED_DOMAIN, status: "pending" };
+
+/** Answer GETs with `domain`, and the verify POST / PATCH with the bare ack Resend gives. */
+function domainStub(domain: unknown): Call[] {
+  return stub((c) => (c.method === "GET" ? jsonResponse(domain) : jsonResponse({ object: "domain", id: DOMAIN_ID })));
+}
+const posts = (calls: Call[]) => calls.filter((c) => c.method === "POST");
+
+Deno.test("rsCheckOpenTracking: tracking already counting is only read", async () => {
+  setup();
+  try {
+    const calls = domainStub(TRACKING_ACTIVE);
+    const r = await rsCheckOpenTracking(DOMAIN_ID);
+    assertEquals(calls.length, 1, "one GET");
+    assertEquals(calls[0].method, "GET");
+    assertEquals(r.checking, false);
+    assertEquals(r.asked, false);
+    assertEquals(rsOpenTrackingActive(r.domain), true);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("rsCheckOpenTracking: off is switched on, and nothing is asked to verify", async () => {
+  setup();
+  try {
+    const calls: Call[] = stub((c) => (c.method === "PATCH" ? jsonResponse({ object: "domain", id: DOMAIN_ID })
+      : jsonResponse(calls.length > 1 ? TRACKED_DOMAIN : VERIFIED_DOMAIN)));
+    const r = await rsCheckOpenTracking(DOMAIN_ID);
+    assertEquals(calls.map((c) => c.method).join(","), "GET,PATCH,GET");
+    assertEquals(posts(calls).length, 0, "no verify POST on the switch-on");
+    assertEquals([r.checking, r.asked].join(","), "false,false");
+    assertEquals(rsOpenTrackingConfigured(r.domain), true);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("rsCheckOpenTracking: waiting on its record on a verified domain asks ONCE, and reports the read from before it", async () => {
+  setup();
+  try {
+    const calls = domainStub(TRACKED_DOMAIN);
+    const r = await rsCheckOpenTracking(DOMAIN_ID, null, Date.parse("2026-10-04T12:00:00Z"));
+    assertEquals(posts(calls).length, 1, "exactly one verify POST");
+    assertEquals(posts(calls)[0].url, `https://api.resend.com/domains/${DOMAIN_ID}/verify`);
+    assertEquals(calls[0].method, "GET", "the GET comes first");
+    assertEquals([r.checking, r.asked].join(","), "true,true");
+    assertEquals(r.domain.status, "verified", "the snapshot is the read from BEFORE the POST");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("rsCheckOpenTracking: a domain Resend is still checking (\"pending\") is only read, never POSTed again", async () => {
+  setup();
+  try {
+    const calls = domainStub(TRACKING_PENDING_CHECK);
+    const r = await rsCheckOpenTracking(DOMAIN_ID);
+    assertEquals(calls.length, 1, "one GET, no POST");
+    assertEquals(posts(calls).length, 0);
+    assertEquals([r.checking, r.asked].join(","), "true,false");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("rsCheckOpenTracking: at most one POST per TRACKING_RECHECK_MS, even when the domain no longer reads pending", async () => {
+  setup();
+  try {
+    const now = Date.parse("2026-10-04T12:00:00Z");
+    let calls = domainStub(TRACKED_DOMAIN);
+    let r = await rsCheckOpenTracking(DOMAIN_ID, now - 60_000, now);
+    assertEquals(posts(calls).length, 0, "asked a minute ago: only read");
+    assertEquals([r.checking, r.asked].join(","), "true,false");
+
+    calls = domainStub(TRACKED_DOMAIN);
+    r = await rsCheckOpenTracking(DOMAIN_ID, now - TRACKING_RECHECK_MS, now);
+    assertEquals(posts(calls).length, 1, "the window is over: ask again");
+    assertEquals(r.asked, true);
+
+    calls = domainStub(TRACKED_DOMAIN);
+    r = await rsCheckOpenTracking(DOMAIN_ID, now + 3_600_000, now);
+    assertEquals(posts(calls).length, 1, "a stamp in the future is not 'recent', so it can never stop the button for good");
+    assertEquals(r.notFound, false, "nor is it an earlier look that found nothing");
+
+    calls = domainStub(TRACKING_ACTIVE);
+    r = await rsCheckOpenTracking(DOMAIN_ID, now - 1_000, now);
+    assertEquals([r.checking, r.asked, posts(calls).length].join(","), "false,false,0", "counting is counting, window or not");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("rsCheckOpenTracking: a finished look that did not find the record says notFound, and asks again once", async () => {
+  // Before this every press after the first answered "checking", so a missing, mistyped or proxied
+  // CNAME read "come back in 5 minutes" for good.
+  setup();
+  try {
+    const now = Date.parse("2026-10-04T12:00:00Z");
+    let calls = domainStub(TRACKED_DOMAIN);
+    let r = await rsCheckOpenTracking(DOMAIN_ID, now - 2 * TRACKING_RECHECK_MS, now);
+    assertEquals(posts(calls).length, 1, "one verify POST");
+    assertEquals([r.checking, r.asked, r.notFound].join(","), "true,true,true");
+    assertEquals(r.domain.status, "verified", "the snapshot is still the read from BEFORE the POST");
+
+    calls = domainStub(TRACKED_DOMAIN);
+    r = await rsCheckOpenTracking(DOMAIN_ID, null, now);
+    assertEquals([r.asked, r.notFound].join(","), "true,false", "the first ask is not a miss: nobody has looked yet");
+
+    calls = domainStub(TRACKED_DOMAIN);
+    r = await rsCheckOpenTracking(DOMAIN_ID, now - 60_000, now);
+    assertEquals([posts(calls).length, r.notFound].join(","), "0,false", "inside the window it is still checking");
+
+    calls = domainStub(TRACKING_PENDING_CHECK);
+    r = await rsCheckOpenTracking(DOMAIN_ID, now - 2 * TRACKING_RECHECK_MS, now);
+    assertEquals([posts(calls).length, r.checking, r.notFound].join(","), "0,true,false", "a look still running is not over");
+
+    calls = domainStub(TRACKING_ACTIVE);
+    r = await rsCheckOpenTracking(DOMAIN_ID, now - 2 * TRACKING_RECHECK_MS, now);
+    assertEquals([posts(calls).length, r.notFound].join(","), "0,false", "found is found");
   } finally {
     teardown();
   }

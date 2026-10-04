@@ -12,9 +12,11 @@ import { invoiceTypeFor } from "../_shared/invoiceType.ts";
 import {
   rsCreateDomain, rsDeleteDomain, rsGetDomain, rsVerifyDomain, rsDomainVerified,
   rsInboundRecords, rsReceivingEnabled, rsInboundReady,
+  rsEnableOpenTracking, rsOpenTrackingActive, rsOpenTrackingConfigured, rsTrackingRecords, rsCheckOpenTracking,
   resendConfigured, ResendApiError, ResendNotConfigured, type RsDomain,
 } from "../_shared/resend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
+import { cleanSignature, signatureHtml, signText } from "../_shared/emailSignature.ts";
 import { isPlaceholderRecipient } from "../_shared/placeholderRecipient.ts";
 import { sendTenantSms } from "../_shared/smsSend.ts";
 import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
@@ -334,6 +336,10 @@ const GATES: GateTable = {
   email_inbound_connect:    { area: "settings_email", level: "edit" },
   email_inbound_verify:     { area: "settings_email", level: "edit" },
   email_inbound_disconnect: { area: "settings_email", level: "edit" },
+  // "See when emails are opened" (B4, migration 262): switches Resend's open tracking on for the
+  // verified sending domain and checks its tracking record. Same area: it changes every email the
+  // business sends (each carries the tracking image once it is on).
+  email_tracking_check:     { area: "settings_email", level: "edit" },
 
   // ── Workspace ────────────────────────────────────────────────────────────
   contact_activity: { area: "contacts", level: "view" },
@@ -734,8 +740,12 @@ function maskId(v: string | null): string | null {
 // ── Email sending helpers ───────────────────────────────────────────────────────
 // The Settings → Email DNS table's rows, snapshotted onto client_settings.email_dns_records
 // so email_status can render without a Resend round trip. Shape is the EmailSendingView
-// contract: [{type, host, value, verified}] plus an optional MX priority. Resend's set is DKIM TXT + SPF TXT + SPF MX.
-type DnsRow = { type: string; host: string; value: string; verified: boolean; priority?: number };
+// contract: [{type, host, value, verified}] plus an optional MX priority. Resend's set is DKIM TXT + SPF TXT + SPF MX,
+// and, once open tracking is switched on (B4), the tracking CNAME, marked `tracking: true`: the
+// screen shows it apart from the sending records and as optional, because email sends the same
+// without it — only the opens go uncounted. A tracking row may also carry `askedAt`: when
+// email_tracking_check last asked Resend to look for it (see trackingAskedAt).
+type DnsRow = { type: string; host: string; value: string; verified: boolean; priority?: number; tracking?: true; askedAt?: string };
 function dnsRecordsOf(d: RsDomain): DnsRow[] {
   // Resend returns a VARIABLE list (today: DKIM TXT + SPF TXT + SPF MX), not a fixed pair,
   // so this maps rather than hand-builds. resend.ts already normalised the shape.
@@ -745,6 +755,7 @@ function dnsRecordsOf(d: RsDomain): DnsRow[] {
   //
   // priority is carried because an MX WITHOUT one cannot be created — dropping it would hand
   // the tenant a record their DNS panel refuses.
+  const tracking = new Set(rsTrackingRecords(d));
   return d.records
     .map((r) => ({
       type: r.type,
@@ -752,10 +763,40 @@ function dnsRecordsOf(d: RsDomain): DnsRow[] {
       value: r.value,
       verified: r.verified,
       ...(r.priority != null ? { priority: r.priority } : {}),
+      ...(tracking.has(r) ? { tracking: true as const } : {}),
     }))
     // A row with no host is a shape we can't render or copy — drop it rather than showing
     // an empty record a tenant would dutifully paste into their DNS.
     .filter((r) => r.host && r.value);
+}
+
+/** Where open tracking stands on a domain read, in the words the opens card uses: "off" (never
+ *  switched on), "waiting" (on, but its record is not in DNS yet, so nothing is counted) or
+ *  "on" (opens are being counted). */
+function openTrackingState(d: RsDomain): "off" | "waiting" | "on" {
+  return rsOpenTrackingActive(d) ? "on" : rsOpenTrackingConfigured(d) ? "waiting" : "off";
+}
+
+/** When email_tracking_check last asked Resend to look for the tracking record, as epoch ms, read
+ *  off the stored snapshot's tracking rows (null when it never did, or a newer snapshot from another
+ *  action dropped the stamp: then the "pending" gate in rsCheckOpenTracking is the only one). Kept
+ *  on the snapshot so the "once per few minutes" rule holds across isolates without a column. */
+function trackingAskedAt(rows: unknown): number | null {
+  if (!Array.isArray(rows)) return null;
+  let at: number | null = null;
+  for (const r of rows) {
+    const row = (r && typeof r === "object" ? r : {}) as Partial<DnsRow>;
+    const t = row.tracking === true && typeof row.askedAt === "string" ? Date.parse(row.askedAt) : NaN;
+    if (Number.isFinite(t) && (at == null || t > at)) at = t;
+  }
+  return at;
+}
+
+/** A Resend failure as the enum-ish text app_errors may hold (never the provider message). */
+function rsErrText(e: unknown): string {
+  return e instanceof ResendApiError
+    ? `resend ${e.status}/${e.name_ || "unknown"}`
+    : String((e as Error)?.message ?? e ?? "unknown error").slice(0, 300);
 }
 
 /**
@@ -1445,7 +1486,7 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
   // it (see SELF_ACTIONS): a "user" account still needs to be able to fill in its own name.
   if (action === "get_profile") {
     const { data, error } = await admin
-      .from("client_users").select("full_name, phone, role").eq("user_id", userId).maybeSingle();
+      .from("client_users").select("full_name, phone, role, prefs").eq("user_id", userId).maybeSingle();
     if (error) return dbFail(req, clientId, "load your profile", error);
     return json({
       fullName: data?.full_name ?? "",
@@ -1454,6 +1495,10 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
       email: userEmail,
       // Drives the one-time nudge: users predating migration 060 have neither.
       needsDetails: !(data?.full_name || "").trim(),
+      // The signature crm_send_email puts under this person's emails, exactly as it will go out
+      // (cleanSignature is what the send runs too). My Synergy Phone shows it under its Email box;
+      // the portal reads it off the prefs `status` already returns. "" when there is none.
+      emailSignature: cleanSignature((data?.prefs as Record<string, unknown> | null)?.emailSignature) ?? "",
     });
   }
 
@@ -1716,6 +1761,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const addr = raw.replyToEmail.trim().slice(0, 320);
       if (addr && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) clean.replyToEmail = addr;
     }
+    // The person's email signature (Carolyn 2026-10-01: "be able to set up email signatures in
+    // the settings"). Plain text, at most 1,000 characters, trimmed; crm_send_email and
+    // email_send_test put it under what this person sends. Same rule as the reply-to above: an
+    // empty value is how the UI clears it, and arrives here as "drop the key".
+    const emailSignature = cleanSignature(raw.emailSignature);
+    if (emailSignature) clean.emailSignature = emailSignature;
     // Card order is a list of section keys. Unknown keys are kept rather than dropped here
     // and filtered at RENDER time instead -- the server would otherwise silently delete a
     // card belonging to a newer frontend than itself, and the user would watch their layout
@@ -8198,29 +8249,46 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     //
     // save_prefs validates this on the way IN, so it is not re-validated here. If that
     // whitelist is ever relaxed, re-validate at this end too: it goes into a mail header.
+    //
+    // The same read gives the writer's EMAIL SIGNATURE (My Profile; Carolyn 2026-10-01). It is
+    // this person's own, keyed on the JWT like the reply-to, so a rep's emails carry their name
+    // and never a colleague's. limit(1) because save_prefs writes every row the person has, and
+    // a person on two tenants would otherwise make maybeSingle() fail and quietly drop both.
+    // A failed read costs the signature, never the email.
+    //
+    // NO signature in view-as: the person writing is CSM Synergy staff, not the builder, and
+    // this read would find the operator's OWN prefs (every operator has a membership of their
+    // own) — so a builder's customer would get CSM Synergy's name under the builder's email.
+    // The composer shows no signature line in view-as either, so nothing is added.
+    let signature: string | null = null;
     try {
       const { data: pu } = await admin.from("client_users")
-        .select("prefs").eq("user_id", userId ?? "").maybeSingle();
-      const own = (pu?.prefs as Record<string, unknown> | null)?.replyToEmail;
+        .select("prefs").eq("user_id", userId ?? "").limit(1).maybeSingle();
+      const prefs = pu?.prefs as Record<string, unknown> | null;
+      const own = prefs?.replyToEmail;
       if (typeof own === "string" && own.includes("@")) replyTo = own.trim();
-    } catch (_) { /* fall through to the auth email */ }
+      signature = operator ? null : cleanSignature(prefs?.emailSignature);
+    } catch (_) { /* fall through to the auth email, and no signature */ }
 
     // Plain text, escaped into a minimal HTML body. Deliberately NOT a rich template: a
     // conversation should look like a person typed it, not like a system notification, and
-    // the branded template already exists for the documents that want one.
+    // the branded template already exists for the documents that want one. The signature goes
+    // under it: "-- " and the signature in the text, its own block in the HTML (escaped too).
     const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const html = `<div style="font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:15px;line-height:1.5;color:#1E293B;white-space:pre-wrap">${esc(body)}</div>`;
+    const html = `<div style="font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:15px;line-height:1.5;color:#1E293B;white-space:pre-wrap">${esc(body)}</div>${signatureHtml(signature)}`;
+    const text = signText(body, signature);
 
     const out = await sendTenantEmail(admin, clientId, {
       kind: "conversation",
       to,
       subject,
       html,
-      text: body,
+      text,
       // The words, the writer and the app's bubble id go on the ledger row (migration 261), so
       // the conversation shows what was said and who said it. sentBy is the signed-in person
-      // from the JWT, never anything in the body.
-      bodyText: body,
+      // from the JWT, never anything in the body. The words are the whole text that went out,
+      // signature included, so the record and the phone show the email as the customer got it.
+      bodyText: text,
       ...(userId ? { sentBy: String(userId) } : {}),
       ...(clientTempId ? { clientTempId } : {}),
       ...(replyTo ? { replyTo } : {}),
@@ -9837,12 +9905,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your email sending settings", error);
-    const { data: sends, error: sendsErr } = await admin
+    // opened_at and complained_at are migration 262's (B4). Read with them, and once more without
+    // them on "no such column", so a deploy ahead of 262 still shows this screen instead of failing
+    // it whole — crmFeed's rule for body_text.
+    const readSends = (cols: string) => admin
       .from("email_sends")
-      .select("id, kind, to_email, status, error, bounce_reason, created_at")
+      .select(cols)
       .eq("client_id", clientId)
       .order("created_at", { ascending: false })
       .limit(10);
+    let { data: sends, error: sendsErr } = await readSends("id, kind, to_email, status, error, bounce_reason, created_at, opened_at, complained_at");
+    if (sendsErr && ["42703", "PGRST204"].includes(String(sendsErr.code))) {
+      ({ data: sends, error: sendsErr } = await readSends("id, kind, to_email, status, error, bounce_reason, created_at"));
+    }
     if (sendsErr) return dbFail(req, clientId, "load your recent emails", sendsErr);
     const domain = s?.email_domain ?? null;
     const fromLocal = (typeof s?.email_from_local === "string" && s.email_from_local.trim()) || "info";
@@ -9878,6 +9953,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       recentSends: (sends ?? []).map((r: any) => ({
         id: r.id, kind: r.kind, to: r.to_email, status: r.status,
         error: r.error ?? null, bounceReason: r.bounce_reason ?? null, createdAt: r.created_at,
+        // When the customer first opened it (migration 262), or null. Approximate: see the
+        // Email Settings opens card.
+        openedAt: r.opened_at ?? null,
+        // When they marked it as spam (262), or null. Not a bounce: the email arrived.
+        complainedAt: r.complained_at ?? null,
       })),
     });
   }
@@ -10068,7 +10148,33 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // path into customer-visible headers). A check that simply finds the records absent
     // is NOT an error — the per-record flags refresh and the status stays pending.
     const verified = rsDomainVerified(d);
-    const dnsRecords = dnsRecordsOf(d);
+
+    // ── OPEN TRACKING (B4) — switched on the moment the domain is verified ──────────────
+    // Carolyn, 2026-10-01: a prospective client "asked to be able to see if an email is read or
+    // not". Resend counts opens only once the domain's tracking subdomain has its own CNAME in DNS
+    // (resend.ts rsEnableOpenTracking), so switching it on here hands the builder that one record
+    // with the others; the Email Settings opens card shows it, and email_tracking_check checks it.
+    //
+    // ⚠️ THE VERDICT ABOVE IS TAKEN FROM THE READ BEFORE THIS, and must stay that way. Whether a
+    // pending tracking CNAME moves Resend's domain-level status is not documented; taking the
+    // verdict afterwards could store "pending" for a domain that sends perfectly well, and that
+    // stored status is what sendTenantEmail gates every email on. The records shown come from the
+    // read after, so the new CNAME is on screen at once.
+    //
+    // BEST-EFFORT: a refusal here costs the opens, never the verification. It is logged (warn:
+    // the domain still verified) and the button in the opens card tries again.
+    let shown = d;
+    if (verified && !rsOpenTrackingConfigured(d)) {
+      try {
+        shown = await rsEnableOpenTracking(String(cur.resend_domain_id), d);
+      } catch (e) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "email_open_tracking_failed", severity: "warn",
+          message: `open tracking could not be switched on after verification: ${rsErrText(e)}`,
+        });
+      }
+    }
+    const dnsRecords = dnsRecordsOf(shown);
     // ⚠️ DO NOT COLLAPSE EVERY NON-VERIFIED STATE INTO "pending". Resend's domain enum is
     // not_started | pending | verified | failed | temporary_failure, and this used to map
     // all four failures to "pending" — so a domain Resend had GIVEN UP on displayed as
@@ -10093,7 +10199,57 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       updated_at: new Date().toISOString(),
     }).eq("client_id", clientId);
     if (upErr) return dbFail(req, clientId, "save your domain's verification state", upErr);
-    return json({ ok: true, verified, domainStatus, providerStatus, dnsRecords });
+    return json({ ok: true, verified, domainStatus, providerStatus, dnsRecords, openTracking: openTrackingState(shown) });
+  }
+
+  // ── "See when emails are opened" (B4) ──────────────────────────────────────────────
+  // The opens card's one button. For a verified sending domain: switch Resend's open tracking on
+  // if it is not yet (every domain verified before B4, and any where the switch-on at verify
+  // failed); otherwise, while its tracking record is not in DNS yet, ask Resend to look for it.
+  //
+  // ⚠️ IT NEVER WRITES email_domain_status, OR ANYTHING BUT THE RECORD SNAPSHOT. The verify POST
+  // below re-parks the WHOLE domain at "pending" at Resend for a few minutes while it re-crawls
+  // (seen live 2026-10-02, the reason email_verify_domain reads first). Storing anything read
+  // after it as the sending verdict would switch the business's email off over an optional
+  // record. The snapshot is safe to refresh: on a verified domain it feeds only the webmaster
+  // email and this card.
+  //
+  // The POST runs only while the tracking record is unverified, so a domain whose opens already
+  // work is only read — and never while Resend is still checking from the last press (the domain
+  // reads "pending"), nor within a few minutes of the last ask (TRACKING_RECHECK_MS), or every
+  // press would restart that check and the card would never reach "On". rsCheckOpenTracking owns
+  // that rule; "checking" tells the card to say "come back in a few minutes" rather than "not seen
+  // yet", and "not_found" that the last look is over and did not find the record (it has asked
+  // again), so the builder checks what they added instead of waiting on it forever. The time of
+  // the last ask rides on the snapshot's tracking rows (trackingAskedAt), and is carried forward
+  // while the window lasts. The snapshot is the read from BEFORE any POST.
+  if (action === "email_tracking_check") {
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings").select("resend_domain_id, email_domain_status, email_dns_records")
+      .eq("client_id", clientId).maybeSingle();
+    if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
+    if (!cur?.resend_domain_id) return json({ error: "Connect a domain first." }, 400);
+    if (cur.email_domain_status !== "verified") {
+      return json({ error: "Verify your domain first — then you can see when emails are opened." }, 409);
+    }
+    const askedAt = trackingAskedAt(cur.email_dns_records);
+    let d: RsDomain;
+    let checking: boolean;
+    let asked: boolean;
+    let notFound: boolean;
+    try {
+      ({ domain: d, checking, asked, notFound } = await rsCheckOpenTracking(String(cur.resend_domain_id), askedAt));
+    } catch (e) {
+      return rsFail(req, clientId, "check email open tracking", e);
+    }
+    const stamp = asked ? new Date().toISOString() : checking && askedAt != null ? new Date(askedAt).toISOString() : null;
+    const dnsRecords = dnsRecordsOf(d).map((r) => (r.tracking && stamp ? { ...r, askedAt: stamp } : r));
+    const { error: upErr } = await admin.from("client_settings").update({
+      email_dns_records: dnsRecords,
+      updated_at: new Date().toISOString(),
+    }).eq("client_id", clientId);
+    if (upErr) return dbFail(req, clientId, "save your email open tracking", upErr);
+    return json({ ok: true, openTracking: notFound ? "not_found" : checking ? "checking" : openTrackingState(d), dnsRecords });
   }
 
   if (action === "email_activate") {
@@ -10144,6 +10300,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         .order("updated_at", { ascending: false }).limit(1).maybeSingle();
       if (c?.id) contactId = String(c.id);
     } catch (_) { /* no routing is fine for a test */ }
+    // The sender's own signature, so the test shows how their emails will end — the same one
+    // crm_send_email adds, read the same way (keyed on the JWT, limit(1)). A failed read just
+    // sends the test without it. None in view-as, as there: the person writing is CSM Synergy
+    // staff, not the builder, and the composer shows no signature, so none is added.
+    let signature: string | null = null;
+    try {
+      const { data: pu } = await admin.from("client_users")
+        .select("prefs").eq("user_id", userId ?? "").limit(1).maybeSingle();
+      signature = operator ? null : cleanSignature((pu?.prefs as Record<string, unknown> | null)?.emailSignature);
+    } catch (_) { /* no signature is fine for a test */ }
     // sendTenantEmail owns the ledger row, the beta redirect and the dark guards — it
     // never throws; the verdict below is the whole outcome. It also writes the contact (and
     // who sent the test) on the ledger row at the claim (migration 261), so the test sits in
@@ -10154,7 +10320,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       to,
       ...(contactId ? { contactId } : {}),
       ...(userId ? { sentBy: String(userId) } : {}),
-      ...testEmail({ businessName, fromAddress: `${fromLocal}@${cur.email_domain}` }),
+      ...testEmail({ businessName, fromAddress: `${fromLocal}@${cur.email_domain}`, signature }),
     });
     if (out.sent) {
       return json({ ok: true, messageId: out.messageId });

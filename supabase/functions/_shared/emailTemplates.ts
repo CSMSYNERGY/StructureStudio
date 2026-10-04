@@ -127,6 +127,9 @@ export interface InvoiceEmailInput {
 export interface TestEmailInput {
   businessName: string;
   fromAddress: string;
+  /** The sender's own email signature (My Profile; cleaned by _shared/emailSignature.ts), so a
+   *  test shows how their emails will end. Plain text: escaped here, line breaks kept. */
+  signature?: string | null;
 }
 
 export interface InvoiceRequestEmailInput {
@@ -668,9 +671,16 @@ export function invoiceRequestEmail(input: InvoiceRequestEmailInput): EmailConte
 export function testEmail(input: TestEmailInput): EmailContent {
   const name = oneLine(input.businessName);
   const from = oneLine(input.fromAddress);
+  const signature = String(input.signature ?? "").replace(/\r\n?/g, "\n").trim();
+  // The sender's signature, the way their conversation emails end: inside the card, under the
+  // message, drawn the way the quote terms are (escaped, line by line).
+  const signatureHtml = signature
+    ? `
+            <p style="margin:16px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;">${esc(signature).replace(/\n/g, "<br>")}</p>`
+    : "";
 
   const bodyHtml = `<p style="margin:0 0 14px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">This is a test message confirming that email sending for ${esc(name)} is working.</p>
-            <p style="margin:0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">It was sent from <strong style="color:#1F2937;">${esc(from)}</strong>. If it landed in your inbox with that sender showing, your sending domain is set up correctly.</p>`;
+            <p style="margin:0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">It was sent from <strong style="color:#1F2937;">${esc(from)}</strong>. If it landed in your inbox with that sender showing, your sending domain is set up correctly.</p>${signatureHtml}`;
 
   const text = [
     name,
@@ -678,6 +688,8 @@ export function testEmail(input: TestEmailInput): EmailContent {
     `This is a test message confirming that email sending for ${name} is working.`,
     `It was sent from ${from}. If it landed in your inbox with that sender showing, your sending domain is set up correctly.`,
   ];
+  // "-- " (dash, dash, space) is the line mail programs recognise as the start of a signature.
+  if (signature) text.push("", "-- ", signature);
 
   return {
     subject: `Test email from ${name}`,
