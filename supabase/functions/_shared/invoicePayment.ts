@@ -663,6 +663,27 @@ export async function resolveUnknownAttempt(
   // via payments_gateway_txn_uniq, so this is safe to run more than once.
   const retref = String(found.retref);
   const chargedCents = cpCents(found.amount) ?? Number(att.amount_cents);
+
+  // A RECORD SHORT OF THE ASK IS NOT THE PAYMENT THIS ATTEMPT WAS FOR. The charge path never
+  // turns a partial approval into a payment (4e: it voids it, and a void that fails closes the
+  // attempt closed_unknown WITH the partial's retref). Recovering that attempt here used to find
+  // the partial at the gateway and record att.amount_cents — the WHOLE ask — so a $500 partial
+  // on a $1,000 balance (one possibly released by hand at the gateway since) marked the order
+  // paid in full. There is no split-tender model to record it under, so it is left for a human,
+  // and the attempt keeps blocking the order exactly as the charge path's own message promised.
+  if (chargedCents < Number(att.amount_cents)) {
+    await admin.from("app_errors").insert({
+      source: "edge:invoice-payment",
+      severity: "error",
+      code: "payment_partial_unresolved",
+      message:
+        `${clientId}: reconciliation found retref ${retref} on order ${att.order_id} for ${chargedCents} of the ${att.amount_cents} cents attempt ${att.id} asked for. ` +
+        `Not recorded — check it at the gateway (void or refund the partial), then close attempt ${att.id} by hand. The attempt stays blocking until then, on purpose.`,
+      client_id: clientId,
+    }).then(() => undefined, () => undefined);
+    return { resolved: false, reason: "partial" };
+  }
+
   const surcharge = chargedCents > Number(att.amount_cents) ? chargedCents - Number(att.amount_cents) : null;
   const nowIso = new Date().toISOString();
 
