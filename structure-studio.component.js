@@ -26167,6 +26167,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // it over. Left alone, the previous quote's invoice was printed under this one and its
       // Push to Invoice button stayed hidden (`!pushed`).
       setPushed(null); setPushErr("");
+      // Likewise the last change order's "Sent" / error line: it belongs to that change, not to
+      // the draft panel this submit may open for another one.
+      setAmendMsg(null);
       setSavedDesign({
         code: shortCode,
         viewUrl,
@@ -32902,6 +32905,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 setSubmitted(false);
                 setSavedDesign(null);
                 setPushed(null); setPushErr("");
+                // The change to a signed order ends with the building it was made on. Left set, the
+                // amber "Changing a signed order — CO-n" bar and its fee sat over the next, unrelated
+                // quote and its button read "Save the change" (openDesign clears it the same way).
+                setAmendment(null); setAmendMsg(null);
                 setItems([]);
                 setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
                 if (!keepPerson) setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
