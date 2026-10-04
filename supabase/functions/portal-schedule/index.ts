@@ -58,7 +58,13 @@ const GATES: GateTable = {
   // "Is this building already scheduled?" — what the Designs and Inventory rows need to
   // decide between offering "Add to build schedule" and showing the stage it's already in.
   // Deliberately its own tiny action rather than making those tabs fetch the whole board.
-  schedule_links: { area: "build_schedule", level: "view" },
+  // EITHER board: Orders asks for this whenever the viewer can schedule a build OR a delivery
+  // (schedOn || deliverOn), and its lot-sale half — "this order sold building #N, take it to a
+  // load" — exists precisely for the delivery side. Gated on build_schedule alone, a Driver
+  // (delivery_schedule:edit, no build access) got a 403 that Orders swallows, so every lot sale
+  // lost its "Schedule delivery →" and every scheduled build read "Not scheduled". Nothing here
+  // is wider than `pool` / `loads` already show a delivery viewer (build stage names included).
+  schedule_links: { any: [{ area: "build_schedule", level: "view" }, { area: "delivery_schedule", level: "view" }] },
   move_job:     { area: "build_schedule", level: "edit" },
   // "We have re-read the plans" (migration 219). Gated at EDIT because it is a claim about
   // work, not a preference: the crew leader who says the flag can come down is asserting
