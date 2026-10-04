@@ -1033,13 +1033,32 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       // grouping itself uses. A browsing lead who later submits simply becomes their design
       // row; the browsing entry disappears rather than duplicating them.
       const groupEmails = new Set([...groups.values()].map((g) => String(g.email || "").trim().toLowerCase()).filter(Boolean));
+      // ONE BROWSING ROW PER PERSON. captured_leads is unique on the RAW digits, so the same
+      // visitor captured once as "+1 512…" (browser autofill keeps the +1, and the gate accepts
+      // it) and once as "512…" is two rows there — and was two identical "Browsing" rows here,
+      // both opening the same contact. Newest first (the read orders on updated_at), so the row
+      // kept is the latest; the older one only fills in what the kept one lacks.
+      const browsingByPhone = new Map();
       browsingIn.forEach((l) => {
         const em = String(l.email || "").trim().toLowerCase();
         // captured_leads.phone_digits is the raw digit filter (capture-lead), so it has to
         // go through the same key or a lead captured as "+1 …" survives as a third row for
         // a person who has already submitted designs.
         if (groups.has(normPhone(l.phone_digits)) || (em && groupEmails.has(em))) return;
-        groups.set("lead-" + l.id, {
+        const pk = normPhone(l.phone_digits);
+        const kept = pk ? browsingByPhone.get(pk) : null;
+        if (kept) {
+          if (!kept.contactId && l.contact_id) kept.contactId = l.contact_id;
+          if (!kept.name && l.name) kept.name = l.name;
+          if (!kept.email && l.email) kept.email = l.email;
+          if (l.created_at && l.created_at < kept.firstSeen) kept.firstSeen = l.created_at;
+          if (l.source === "details" && kept.source !== "details") {
+            kept.source = "details";
+            kept.search = " browsing lead viewed pricing quote details";
+          }
+          return;
+        }
+        const lead = {
           key: "lead-" + l.id, browsing: true, source: l.source,
           // A browsing lead is a PERSON too, so its name links to the record like every
           // other row. captured_leads.contact_id is stamped by capture-lead (and by 130's
@@ -1051,7 +1070,9 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
           latestCode: null, topStatus: "browsing",
           search: " browsing lead" + (l.source === "details" ? " viewed pricing quote details" : ""),
           codes: [],
-        });
+        };
+        groups.set(lead.key, lead);
+        if (pk) browsingByPhone.set(pk, lead);
       });
       const out = [...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0));
       setRows(out);
