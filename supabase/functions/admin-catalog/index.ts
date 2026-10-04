@@ -777,11 +777,15 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           const counts: Record<string, number> = {};
 
           // 1. building_styles → old id → new id (matched by stable per-client key)
-          const stSrc = await sb.from("building_styles").select("key, label, image_url, sort_order, active").eq("client_id", T);
+          // taxable (158) and show_image_on_estimate (037) ride along: both default TRUE, so leaving
+          // them out silently reversed a template's "not taxable" / "no photo on the estimate"
+          // on every cloned style — tax charged on a building line the template exempted.
+          const stSrc = await sb.from("building_styles").select("key, label, image_url, sort_order, active, taxable, show_image_on_estimate").eq("client_id", T);
           if (stSrc.error) throw new Error(`clone styles read: ${stSrc.error.message}`);
           if ((stSrc.data ?? []).length) {
             const r = await sb.from("building_styles").insert((stSrc.data ?? []).map((s: any) => ({
               client_id: Cc, key: s.key, label: s.label, image_url: s.image_url, sort_order: s.sort_order, active: s.active,
+              taxable: s.taxable !== false, show_image_on_estimate: s.show_image_on_estimate !== false,
             })));
             if (r.error) throw new Error(`clone styles: ${r.error.message}`);
           }
@@ -862,8 +866,13 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           counts.building_size_inclusions = incRows.length;
           if (incDropped) counts.building_size_inclusions_dropped = incDropped;
 
-          // 5. client_layout_items (no style FK)
-          const liSrc = await sb.from("client_layout_items").select("item_key, active, sort_order, label_override, width_override, height_override, short_label_override").eq("client_id", T);
+          // 5. client_layout_items (no style FK). The per-row flags are copied too — each column
+          // defaults to the permissive value, so dropping it changed what the clone SELLS:
+          // archived (075) brought a retired option back onto the palette, internal_only (082)
+          // put a rep-only option in front of the new builder's public shoppers, taxable (158)
+          // taxed an option the template exempted, and the shelf dimensions (171) fell back to
+          // the master defaults.
+          const liSrc = await sb.from("client_layout_items").select("item_key, active, sort_order, label_override, width_override, height_override, short_label_override, archived, internal_only, taxable, depth_in, height_off_floor_in").eq("client_id", T);
           if (liSrc.error) throw new Error(`clone items read: ${liSrc.error.message}`);
           if ((liSrc.data ?? []).length) {
             const r = await sb.from("client_layout_items").insert((liSrc.data ?? []).map((i: any) => ({ client_id: Cc, ...i })));
