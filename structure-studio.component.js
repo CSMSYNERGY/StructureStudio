@@ -12446,7 +12446,10 @@ function buildShed3DModel(THREE, p) {
       const wf = WALLS[it.wall];
       if (!wf) return;
       const w = it.widthFt || 3;
-      const along = wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale;
+      // The plan's frame shifted into this wall's own, as buildOneWall shifts its door: a wall a
+      // recessed porch shortened at its along=0 end starts a0Ft further along (WALLS), and without
+      // the subtraction the ramp stood a porch-depth along the wall from its door.
+      const along = (wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale) - (wf.a0Ft || 0);
       // A RAISED FLOOR LENGTHENS THE RAMP (2026-09-25): it always runs from the floor down to the
       // grass, at 1 in 4 or gentler -- 3 ft as it has always been while that holds (a floor up to
       // 0.75 ft), and 4 ft of run for every foot of drop past it, so a 1.1 ft floor's ramp is 4.4 ft
