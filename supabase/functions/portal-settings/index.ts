@@ -1066,7 +1066,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     }
     const w = wv.n, l = lv.n;
     const pr = num(row?.price);
-    if (!pr.blank && !Number.isFinite(pr.n)) { skipped.push(`${styleName} ${w}x${l}: invalid price "${row?.price}"`); continue; }
+    // Negative is refused with the unparseable: nothing in the product means a building priced
+    // below zero: submit-estimate would email it as a negative building line, while the
+    // designer's preview clamps the line to $0, so the customer saw one number and got another.
+    if (!pr.blank && (!Number.isFinite(pr.n) || pr.n < 0)) { skipped.push(`${styleName} ${w}x${l}: invalid price "${row?.price}"`); continue; }
     const price = pr.blank ? null : pr.n;
     const active = !inactiveWord(row?.active) && price != null;   // active intent AND priced
     const label = `${fmt(w)}x${fmt(l)}`;

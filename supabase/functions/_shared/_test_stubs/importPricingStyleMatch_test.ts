@@ -75,6 +75,21 @@ for (const rel of ["../../admin-catalog/index.ts", "../../portal-settings/index.
     assert(out.skipped.length === 1 && /more than one building style/.test(out.skipped[0]), JSON.stringify(out.skipped));
   });
 
+  Deno.test(`${rel.split("/")[2]}: a negative price is refused and the size left alone; 0 is a real (free) price`, async () => {
+    const importPricingRows = await lift(rel);
+    const { sb, writes } = fakeSb({ building_styles: [{ id: "st-shed", key: "shed", label: "Shed" }], building_sizes: SIZES.slice(2), building_size_inclusions: [] });
+    const out = await importPricingRows(sb, "acme", [
+      { style: "Shed", width: "8", length: "10", price: "-4995", active: "yes", inclusions: {} },
+      { style: "Shed", width: "8", length: "12", price: "0", active: "yes", inclusions: {} },
+    ]);
+    const sizeWrites = writes.filter((w) => w.table === "building_sizes");
+    assertEquals(sizeWrites.length, 1, "only the $0 row may write");
+    assertEquals(sizeWrites[0].op, "insert");
+    assertEquals(sizeWrites[0].row.base_price, 0);
+    assertEquals(sizeWrites[0].row.active, true);
+    assert(out.skipped.length === 1 && /invalid price "-4995"/.test(out.skipped[0]), JSON.stringify(out.skipped));
+  });
+
   Deno.test(`${rel.split("/")[2]}: a style's own label and key are one claim, not two`, async () => {
     const importPricingRows = await lift(rel);
     const { sb, writes } = fakeSb({ building_styles: [{ id: "st-1", key: "shed", label: "Shed" }], building_sizes: [], building_size_inclusions: [] });
