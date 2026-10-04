@@ -3153,6 +3153,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "set_expected_close") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!/^SS-[A-HJ-NP-Z2-9]{6,12}$/.test(shortCode)) return json({ error: "Unknown design." }, 400);
+    // ROW SCOPE (207), the same check every other designs:edit write here makes. A Dealer holds
+    // designs:edit with contacts:'own', so the gate alone let them move the close date on a
+    // colleague's deal they cannot see in any list, by posting its short code.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     // null clears the date; anything else must be a real calendar date. The check is not
     // cosmetic: `new Date("2026-02-31")` rolls into March rather than failing, so a typo
