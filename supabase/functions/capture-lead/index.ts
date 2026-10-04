@@ -148,9 +148,22 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   // to judge novelty, by the upsert below to enrich-never-blank, and by the GHL leg to find
   // the contact it already linked.
   const source = body?.source === "details" ? "details" : "gate";
-  const { data: existingLead } = await sb.from("captured_leads")
-    .select("id, name, email, street, city, state, zip, ghl_contact_id, source, updated_at")
-    .eq("client_id", clientId).eq("phone_digits", phoneDigits).maybeSingle();
+  // ⚠️ ONE PERSON, TWO SPELLINGS. phone_digits is the RAW digit run, so "+1 816 555 0100"
+  // (browser autofill keeps the +1, and the gate accepts it) is 18165550100 while a typed
+  // "816-555-0100" is 8165550100 — and the unique (client_id, phone_digits) key let one
+  // visitor become two leads: two Browsing rows in Contacts, the debounce and the
+  // enrich-never-blank merge each judged against the wrong row. So a NANP number (ten digits,
+  // or eleven with a leading 1 — the same rule as `ten` and crm_phone_key) is matched in both
+  // forms, newest row first, and the write below lands on that row's own key. Anything else
+  // (an international number) is matched exactly as before: collapsing it would fuse two
+  // genuinely different people, which is 132's reason for the same restriction.
+  const nanp = phoneDigits.length === 10 || (phoneDigits.length === 11 && phoneDigits.startsWith("1"));
+  const leadKeys = nanp ? [phoneKey10, "1" + phoneKey10] : [phoneDigits];
+  const { data: leadMatches } = await sb.from("captured_leads")
+    .select("id, phone_digits, name, email, street, city, state, zip, ghl_contact_id, source, updated_at")
+    .eq("client_id", clientId).in("phone_digits", leadKeys)
+    .order("updated_at", { ascending: false }).limit(1);
+  const existingLead = (leadMatches ?? [])[0] ?? null;
 
   // ── GUARD 2: per-lead debounce (the same-phone flood) ───────────────────────
   // Judged against the row as it stands right now, before anything is written. "Adds
@@ -248,7 +261,8 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   const leadRow = {
     client_id: clientId,
     name,
-    phone_digits: phoneDigits,
+    // The matched row's own key, so a second spelling enriches that lead instead of making one.
+    phone_digits: existingLead?.phone_digits || phoneDigits,
     phone: phoneRaw,
     email: email || existingLead?.email || null,
     street: street || existingLead?.street || null,
