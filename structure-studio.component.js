@@ -21225,7 +21225,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (isCancelled()) return false;
     setViewingVersion(Number.isFinite(vParam) && vParam > 0 ? vParam : null);
 
-    setContact(data.contact || { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
+    // Merged OVER the blank shape, never used bare. Every inventory master is stored with
+    // contact: {} (portal-settings save_inventory), and a design saved before the address
+    // fields existed has no street/city/state/zip, so a bare row left contact.name undefined:
+    // Floorplan PDF -> Download PDF / PNG then threw on contact.name.trim() and saved nothing.
+    setContact({ name: "", email: "", phone: "", street: "", city: "", state: "", zip: "", ...(data.contact || {}) });
     // Pre-set prevSizeRef to what sel.size is ABOUT to become, so the size effect doesn't
     // treat this load as a user size-change and wipe the items set below (same guard
     // openVersion uses). "" (not the old size) because sel is REBUILT below, not merged.
