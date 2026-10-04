@@ -164,6 +164,12 @@ async function withCallRow(admin: Admin, id: string, tries = 4): Promise<CallRow
 
 // ── /voice/outbound ──────────────────────────────────────────────────────────────────
 
+/**
+ * The most a call can still be going for: Twilio's default <Dial> timeLimit (4 hours), the same
+ * bound phone_route_for_number puts on 'busy' (migration 254 DEVIATION 2) for the same reason.
+ */
+const MAX_LIVE_CALL_MINUTES = 240;
+
 /** Outbound minutes today (UTC), rounded up per call the way Twilio bills. */
 async function minutesUsedToday(admin: Admin, clientId: string, now = new Date()): Promise<number> {
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
@@ -176,9 +182,11 @@ async function minutesUsedToday(admin: Admin, clientId: string, now = new Date()
   for (const r of rows ?? []) {
     if (typeof r.duration_s === "number" && r.duration_s > 0) minutes += Math.ceil(r.duration_s / 60);
     else if (r.answered_at && !r.ended_at) {
-      // A call still going counts for what it has used so far.
+      // A call still going counts for what it has used so far. A row whose final status
+      // callback was lost never gets ended_at; uncapped, it would keep "using" a minute a minute
+      // until midnight UTC and lock the builder out of calling (600 minutes is 10 hours).
       const ms = now.getTime() - Date.parse(r.answered_at);
-      if (Number.isFinite(ms) && ms > 0) minutes += Math.ceil(ms / 60_000);
+      if (Number.isFinite(ms) && ms > 0) minutes += Math.min(MAX_LIVE_CALL_MINUTES, Math.ceil(ms / 60_000));
     }
   }
   return minutes;
