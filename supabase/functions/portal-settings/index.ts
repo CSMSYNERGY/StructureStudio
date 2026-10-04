@@ -475,6 +475,10 @@ const GATES: GateTable = {
   // the approve area: attesting is part of raising a change, not part of allowing one, and
   // Carolyn asked for those to be separate switches.
   attest_change_order: { area: "change_orders", level: "edit" },
+  // The order's money after the Change orders card acknowledges a change in the browser —
+  // attest_change_order's money block on its own. Takes no money from the caller; it
+  // recomputes from what is already acknowledged, so it sits with the card's own writes.
+  apply_change_order_money: { area: "change_orders", level: "edit" },
 
   // ── My Synergy Phone (calling settings + the Calls report) ───────────────────────────
   // The `phone` area (none/own/view/edit), which _shared/access.ts and area_level_for carry.
@@ -11621,6 +11625,54 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ok: true, acknowledgedAt: ackAtIso, coNo: co.co_no,
       total: newTotal, refundCents, quotePdfUrl, consentText,
     });
+  }
+
+  // ── apply_change_order_money: the order's money once a change is acknowledged ──────────
+  //
+  // The Orders tab's Change orders card acknowledges a change in the browser (a manual change
+  // recorded as already confirmed, or "Record verbal" on a pending one) and then has to move
+  // the order's money. It did that by writing `orders.total_cents = co.total_after_cents`
+  // ALONE — the exact write customer-accept and attest_change_order stopped making on
+  // 2026-09-07 (see orderCentsAfterAck): pretax_subtotal_cents and tax_cents stayed at the
+  // accepted figures and every earlier change-order FEE (and this change's own) was dropped.
+  // send_invoice reconciles the printed lines against pretax_subtotal_cents, so the invoice
+  // and its email billed the PRE-change amount — "Change order CO-1 $250 / Order adjustment
+  // −$250" — while the balance, the pay screen and the sentence the customer signs all named
+  // the new one.
+  //
+  // This is that block of attest_change_order, on its own: no input money at all, only the
+  // agreed lines and the acknowledged change orders already in the database, so the browser
+  // can ask for it but cannot steer it. Same gate as the card's own change_orders writes.
+  if (action === "apply_change_order_money") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
+    const [{ data: freshD, error: dErr }, { data: allAcked, error: cErr }] = await Promise.all([
+      admin.from("designs").select("estimate_lines, accepted_snapshot")
+        .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+      admin.from("change_orders")
+        .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
+        .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "acknowledged"),
+    ]);
+    if (dErr) return dbFail(req, clientId, "load that design", dErr);
+    if (cErr) return dbFail(req, clientId, "load its change orders", cErr);
+    if (!freshD) return json({ error: "Design not found." }, 404);
+    const money = orderCentsAfterAck(agreedBaseline(freshD).lines, allAcked ?? []);
+    // No usable snapshot: nothing to compute from, and writing a fabricated figure over a real
+    // order total is the worst outcome available (orderCentsAfterAck's own rule).
+    if (money == null) return json({ ok: true, applied: false });
+    const { error: totErr } = await admin.from("orders")
+      .update({
+        total_cents: money.totalCents,
+        pretax_subtotal_cents: money.pretaxCents,
+        tax_cents: money.taxCents,
+        // 'manual' also shields it from sync-design-status' GHL repricer.
+        total_source: "manual",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("client_id", clientId).eq("short_code", shortCode);
+    if (totErr) return dbFail(req, clientId, "update the order total", totErr);
+    return json({ ok: true, applied: true, totalCents: money.totalCents });
   }
 
   // ── reissue_invoice: rebuild the invoice document after an approved change ────────────

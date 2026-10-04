@@ -2021,14 +2021,31 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, rel
   // verbally" banner painted straight over this error and the operator walked away from
   // an acknowledged, frozen CO with the order still at its old total and nothing saying so.
   const applyAckedTotal = async (co) => {
-    // The acknowledged total becomes the order's total; 'manual' also shields it from the
-    // GHL repricer (sync-design-status skips manual rows).
-    if (co.total_after_cents == null) return true;
-    const { error } = await sb.from("orders")
-      .update({ total_cents: co.total_after_cents, total_source: "manual", updated_at: new Date().toISOString() })
-      .eq("client_id", clientId).eq("short_code", shortCode);
-    if (error) { setMsg({ err: `Change recorded, but the order total didn't update: ${error.message}` }); return false; }
-    return true;
+    // THE SERVER WORKS OUT THE MONEY (portal-settings apply_change_order_money), with the one
+    // arithmetic customer-accept and attest_change_order use. This used to write
+    // `total_cents = co.total_after_cents` alone, which left pretax_subtotal_cents and
+    // tax_cents at the accepted figures and dropped every change-order fee — so the invoice
+    // (reconciled against the pre-tax column) billed the OLD amount with a "Change order /
+    // Order adjustment" pair that cancelled out, while the balance and the pay screen asked
+    // for the new one. Called even for a change with no new total: a fee is still owed.
+    const { data, error } = await sb.functions.invoke("portal-settings", {
+      body: { action: "apply_change_order_money", shortCode },
+    });
+    let m = (data && data.error) || null;
+    if (error && !m) m = await fnError(error);
+    if (!m) return true;
+    // A portal-settings that predates the action answers "Unrecognised action" — keep the old
+    // single-column write for that window rather than leave the order on its pre-change total.
+    if (/Unrecognised action/i.test(String(m))) {
+      if (co.total_after_cents == null) return true;
+      const { error: legacyErr } = await sb.from("orders")
+        .update({ total_cents: co.total_after_cents, total_source: "manual", updated_at: new Date().toISOString() })
+        .eq("client_id", clientId).eq("short_code", shortCode);
+      if (!legacyErr) return true;
+      m = legacyErr.message;
+    }
+    setMsg({ err: `Change recorded, but the order total didn't update: ${m}` });
+    return false;
   };
 
   const createCo = async () => {
