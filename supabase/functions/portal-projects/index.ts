@@ -1618,9 +1618,25 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
 
       // Who is set up, and who is stuck — every tenant with a list, plus the ones with none.
       case "setup_overview": {
-        const { data: rows, error } = await admin.from("tenant_setup_items")
-          .select("client_id, completed_at, template_item_id");
-        if (error) throw error;
+        // EVERY builder's every step, so PAGED. PostgREST answers at most 1000 rows a request on
+        // this project and truncates silently, and this read is the whole denominator: at ~20
+        // steps a builder, about the 50th builder with a list takes it past 1000, and from then
+        // an arbitrary slice of rows (the read was unordered) simply vanished — builders shown
+        // with too few steps, the wrong done count, or "No setup list" with an Assign button
+        // that then 409s.
+        // Ordered by id so range paging neither repeats nor skips; the offset advances by what
+        // came back and stops on an EMPTY page, so a max-rows below 1000 cannot end it early.
+        const rows: Array<{ client_id: string; completed_at: string | null; template_item_id: string | null }> = [];
+        for (let offset = 0; offset < 200_000;) {
+          const { data: page, error } = await admin.from("tenant_setup_items")
+            .select("id, client_id, completed_at, template_item_id")
+            .order("id", { ascending: true })
+            .range(offset, offset + 999);
+          if (error) throw error;
+          if (!page || !page.length) break;
+          rows.push(...page);
+          offset += page.length;
+        }
         const { data: clients, error: cErr } = await admin.from("client_configs").select("client_id");
         if (cErr) throw cErr;
         // Steps we have not finished building are not counted, so this card reads the same

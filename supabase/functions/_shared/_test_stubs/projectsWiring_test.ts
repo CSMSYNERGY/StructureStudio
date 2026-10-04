@@ -57,3 +57,16 @@ Deno.test("publishing to a submission with no tenant is refused before the clien
     assert(copy > check, `${label} writes the client copy before checking anyone can read it`);
   }
 });
+
+// setup_overview reads EVERY builder's every step — a whole-set read past PostgREST's 1000-row
+// cap, which truncates silently. It must page, deterministically ordered, until an empty page.
+const OVERVIEW = block(PROJECTS, 'case "setup_overview": {', 'case "setup_client_items": {', "setup_overview");
+
+Deno.test("setup_overview pages tenant_setup_items instead of trusting one capped read", () => {
+  const read = OVERVIEW.slice(OVERVIEW.indexOf('.from("tenant_setup_items")'));
+  assert(read.length > 0 && /\.order\("id", \{ ascending: true \}\)\s*\.range\(offset, offset \+ 999\)/.test(read),
+    "setup_overview's tenant_setup_items read is no longer an id-ordered range page");
+  assert(/for \(let offset = 0;/.test(OVERVIEW) && /offset \+= page\.length;/.test(OVERVIEW),
+    "setup_overview no longer loops pages, advancing by what came back");
+  assert(/if \(!page \|\| !page\.length\) break;/.test(OVERVIEW), "setup_overview must stop on an EMPTY page");
+});
