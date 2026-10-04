@@ -3101,7 +3101,11 @@ function Dashboard({ session }) {
                 kind={sub.charAt(0) === "c" ? "contact" : "design"}
                 recordId={sub.slice(2)}
                 isAdmin={mirrorAdmin}
-                canEdit={canAdmin || !!(myAccess && myAccess.contacts === "edit")}
+                /* ssCanWrite, not `contacts === "edit"`: since 2026-09-07 contacts:'own' WRITES
+                   (a Dealer edits their own customers — OWN_WRITE_AREAS in 01-core), and the
+                   literal compare left every write tab on a dealer's own record greyed with
+                   "You don't have permission" while the server would have taken the write. */
+                canEdit={canAdmin || ssCanWrite(myAccess, "contacts")}
                 /* The DESIGN record reaches this line without a subscription — the branch
                    above turns a CONTACT record away, but a design record is what the free
                    Pipeline list opens and it has to keep working. Its READ is exempt from the
