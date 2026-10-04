@@ -1114,7 +1114,10 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     var frameWrap = document.createElement("div");
     frameWrap.style.cssText = "margin-top:10px";
     var errEl = document.createElement("div");
-    errEl.className = "err";
+    // "error", the class the stylesheet styles (as the sign and accept panels use); "err" matched
+    // nothing, so a refused payment printed as bare text under the button.
+    errEl.className = "error";
+    errEl.hidden = true;
     errEl.style.cssText = "margin-top:8px";
     var payToken = null, payExpiry = null;
 
@@ -1197,13 +1200,15 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     ["card", "ach"].forEach(function (id) {
       var t = document.createElement("button");
       t.type = "button";
-      t.className = "sign-tab" + (id === rail ? " is-on" : "");
+      // "active" is the class .sign-tab styles for the picked tab (the signature tabs use it too);
+      // "is-on" matched nothing, so Card / Bank account never showed which one was chosen.
+      t.className = "sign-tab" + (id === rail ? " active" : "");
       t.textContent = id === "card" ? "Card" : "Bank account";
       t.addEventListener("click", function () {
         rail = id;
         var all = tabs.querySelectorAll(".sign-tab");
         for (var j = 0; j < all.length; j++) all[j].className = "sign-tab";
-        t.className = "sign-tab is-on";
+        t.className = "sign-tab active";
         feeEl.textContent = "";
         payBtn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
         // A reload rather than a field toggle: the two rails need different tokenizer
