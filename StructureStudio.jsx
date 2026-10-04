@@ -2404,7 +2404,9 @@ function electricalAutoItems(cfg, o) {
       : fw === "west" ? { xFt: 0, yFt: d } : { xFt: W, yFt: d };
     const switchId = elecRoleItemId(cfg, "lightSwitch");
     if (!switchId) break;
-    if (tryWall(switchId, pt.xFt, pt.yFt, fw, cfg.switchHeightIn != null ? Number(cfg.switchHeightIn) : null)) break;
+    // A LIST, like the outlets' heights: tryWall reads `heights.length`, so a bare number here was
+    // read as no height at all and the builder's switchHeightIn never reached the switch.
+    if (tryWall(switchId, pt.xFt, pt.yFt, fw, cfg.switchHeightIn != null ? [Number(cfg.switchHeightIn)] : null)) break;
   }
   return out;
 }
