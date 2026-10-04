@@ -1000,8 +1000,25 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
   if (st.error) throw st.error;
   const sz = await sb.from("building_sizes").select("id, style_id, width_ft, length_ft, sort_order").eq("client_id", clientId);
   if (sz.error) throw sz.error;
+  // A cell resolves against every style's label OR key, hidden styles included — and nothing
+  // makes a label unique (create_style only uniquifies the key). So with a hidden "Barn" and a
+  // fresh "Barn", last-writer-wins sent a whole sheet of prices to whichever came back last,
+  // possibly the hidden one, while the live style kept quoting the old numbers and the banner
+  // reported them imported. A name more than one style answers to now resolves to nobody and
+  // its rows are skipped by name. (The portal's Structures upload refuses the same case before
+  // sending; both operator consoles reach admin-catalog's copy with no such guard.)
   const styleByName = new Map<string, any>();
-  for (const s of st.data ?? []) { styleByName.set(String(s.label).toLowerCase(), s); styleByName.set(String(s.key).toLowerCase(), s); }
+  const claimedBy = new Map<string, Set<string>>();   // lowercased label/key -> style ids
+  for (const s of st.data ?? []) {
+    for (const tok of [s.label, s.key]) {
+      const t = String(tok ?? "").trim().toLowerCase();
+      if (!t) continue;
+      styleByName.set(t, s);
+      const ids = claimedBy.get(t) ?? new Set<string>();
+      ids.add(String(s.id));
+      claimedBy.set(t, ids);
+    }
+  }
   const sizeByDims = new Map<string, any>();   // `${style_id}|${w}|${l}` -> row
   const maxSort = new Map<string, number>();   // style_id -> highest sort_order
   for (const z of sz.data ?? []) {
@@ -1036,6 +1053,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const styleName = String(row?.style ?? "").trim();
     const wv = num(row?.width), lv = num(row?.length);
     if (!styleName && wv.blank && lv.blank) continue;   // wholly blank line
+    if ((claimedBy.get(styleName.toLowerCase())?.size ?? 0) > 1) {
+      skipped.push(`${styleName}: more than one building style answers to this name (a hidden style counts) — rename one of them, then import again`);
+      continue;
+    }
     const style = styleByName.get(styleName.toLowerCase());
     if (!style) { skipped.push(`${styleName || "(blank)"}: unknown style`); continue; }
     if (wv.blank && lv.blank) { skipped.push(`${styleName}: missing width & length`); continue; }
