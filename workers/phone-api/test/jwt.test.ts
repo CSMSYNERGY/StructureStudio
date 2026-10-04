@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { verifySupabaseJwt } from "../src/jwt";
 import { b64urlEncodeString } from "../src/b64";
-import { Auth, FakeNet, SUPABASE_URL, USER_A, makeEnv } from "./helpers";
+import { Auth, FakeNet, SUPABASE_URL, USER_A, appRequest, call, makeEnv } from "./helpers";
 
 async function setup() {
   const net = new FakeNet().install();
@@ -76,6 +76,26 @@ describe("ES256 login tokens", () => {
     const now = Math.floor(Date.now() / 1000);
     const t = `${b64urlEncodeString(JSON.stringify({ alg: "none" }))}.${b64urlEncodeString(JSON.stringify({ sub: USER_A, aud: "authenticated", iss: `${SUPABASE_URL}/auth/v1`, exp: now + 60 }))}.`;
     await expect(verifySupabaseJwt(env, t)).rejects.toMatchObject({ code: "unauthorized" });
+  });
+
+  it.each([
+    ["a null header", "null", "{}"],
+    ["an array header", "[]", "{}"],
+    ["null claims", JSON.stringify({ alg: "ES256", kid: "k" }), "null"],
+  ])("refuses a token with %s as unauthorized, not a fault", async (_label, header, claims) => {
+    const { env } = await setup();
+    const t = `${b64urlEncodeString(header)}.${b64urlEncodeString(claims)}.AA`;
+    await expect(verifySupabaseJwt(env, t)).rejects.toMatchObject({ code: "unauthorized" });
+  });
+
+  it("a stranger's malformed bearer is a 401, and files no error row", async () => {
+    const { net, env } = await setup();
+    net.rest("POST", "app_errors", () => []);
+    const t = `${b64urlEncodeString("null")}.${b64urlEncodeString("{}")}.AA`;
+    const { res, json } = await call(env, appRequest("GET", "/calls", t));
+    expect(res.status).toBe(401);
+    expect(json.error.code).toBe("unauthorized");
+    expect(net.writes("app_errors")).toHaveLength(0);
   });
 
   it("accepts HS256 only when the legacy secret is configured", async () => {
