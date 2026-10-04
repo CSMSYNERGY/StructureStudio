@@ -2819,7 +2819,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const r = await fetch(`https://services.leadconnectorhq.com/products/?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
       prodStatus = r.status; prodOk = r.ok; prodBody = (await r.text()).slice(0, 600);
     } catch (e) {
-      return json({ error: `Couldn't reach GoHighLevel to verify: ${(e as Error).message}` }, 502);
+      // The runtime's network text (it names the URL it failed on) goes to app_errors, the same
+      // as the body below; the builder gets our sentence. Filed here, so the wrapper adds no copy.
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ghl_unreachable",
+        message: `verify_save_ghl: GoHighLevel could not be reached: ${String((e as Error)?.message ?? e).slice(0, 300)}`,
+        context: { action: "verify_save_ghl" },
+      }).catch(() => {});
+      const unreachable = json({ error: "Couldn't reach GoHighLevel to verify — try again in a few minutes." }, 502);
+      filedAtReturnSite.add(unreachable);
+      return unreachable;
     }
     if (!prodOk) {
       // An authored hint, never GoHighLevel's raw body. This used to paste 600 characters
@@ -2913,7 +2922,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     try {
       r = await fetch(`https://services.leadconnectorhq.com/opportunities/pipelines?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
     } catch (e) {
-      return json({ error: `Couldn't reach GoHighLevel: ${(e as Error).message}` }, 502);
+      // Network text to app_errors, our sentence to the builder — as verify_save_ghl above.
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ghl_unreachable",
+        message: `list_ghl_pipelines: GoHighLevel could not be reached: ${String((e as Error)?.message ?? e).slice(0, 300)}`,
+        context: { action: "list_ghl_pipelines" },
+      }).catch(() => {});
+      const unreachable = json({ error: "Couldn't reach GoHighLevel — try Refresh again shortly." }, 502);
+      filedAtReturnSite.add(unreachable);
+      return unreachable;
     }
     if (!r.ok) {
       // Authored hint, not GoHighLevel's raw body — same reasoning as verify_save_ghl above.
@@ -8518,9 +8535,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     // Invoice-send ledger state for these designs (migration 052). Lets the drawer show
     // "invoice created but not emailed — retry" instead of silently looking invoiced.
+    // Not `error`: send_invoice parks the CRM's own reply text and Postgres messages there for
+    // support, and nothing in the browser reads it — that column is not ours to put on the wire.
     const { data: sends } = await admin
       .from("invoice_sends")
-      .select("short_code, status, invoice_number, error, updated_at")
+      .select("short_code, status, invoice_number, updated_at")
       .eq("client_id", clientId).in("short_code", codes);
 
     return json({ ok: true, designs: dRes.data ?? [], versions: vRes.data ?? [], estimates, invoiceSends: sends ?? [] });
@@ -13495,6 +13514,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         return { ok: false, status: 0, body: null, netErr: (e as Error)?.message || "network error" };
       }
     };
+    // A GoHighLevel call failed. Its body and the runtime's network text are not ours to show
+    // (dbFail's contract, applied to the CRM the way verify_save_ghl does): both go to app_errors
+    // under `step`, and the builder is shown the status alone. The caller marks its 502 filedHere,
+    // so the wrapper does not add a second row without the detail.
+    // deno-lint-ignore no-explicit-any
+    const ghlFailed = (step: string, r: { status: number; body: any; netErr?: string }): string => {
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: r.status || "ghl_unreachable",
+        message: `send_invoice: GoHighLevel ${step} failed (${r.status ? `HTTP ${r.status}` : "no answer"})`,
+        context: {
+          step, shortCode,
+          body: r.body?.message != null ? String(r.body.message).slice(0, 300) : null,
+          netErr: r.netErr ? String(r.netErr).slice(0, 300) : null,
+        },
+      }).catch(() => {});
+      return r.status ? `HTTP ${r.status}` : "your CRM didn't answer";
+    };
     const STALE_CLAIM_MS = 3 * 60 * 1000;
 
     // ── Own-domain email branch (Resend-active tenants) ────────────────────────
@@ -13625,7 +13661,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         const r = await ghl(`https://services.leadconnectorhq.com/invoices/estimate/list?altId=${encodeURIComponent(locationId)}&altType=location&limit=${limit}&offset=${offset}`, { headers: ghlHeaders });
         if (!r.ok) {
           await setClaim({ status: "failed", error: `estimate list ${r.status}` });
-          return json({ error: `Could not read estimates from your CRM (${r.status || r.netErr}).` }, 502);
+          return filedHere(json({ error: `Could not read estimates from your CRM (${ghlFailed("estimate list", r)}).` }, 502));
         }
         const arr: any[] = Array.isArray(r.body?.estimates) ? r.body.estimates : [];
         est = arr.find((e) => String(e?._id ?? "") === String(design.ghl_estimate_id)) ?? null;
@@ -13680,7 +13716,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       });
       if (!convRes.ok) {
         await setClaim({ status: "failed", error: `convert ${convRes.status}` });
-        return json({ error: `Creating the invoice failed: ${convRes.body?.message ?? convRes.status ?? convRes.netErr}` }, 502);
+        return filedHere(json({ error: `Creating the invoice failed (${ghlFailed("convert", convRes)}).` }, 502));
       }
       const invoice = convRes.body?.invoice ?? convRes.body ?? {};
       invoiceId = String(invoice?._id ?? invoice?.id ?? "");
@@ -13716,10 +13752,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         });
         if (!sendRes.ok) {
           await setClaim({ status: "created", error: `send ${sendRes.status || sendRes.netErr}: ${sendRes.body?.message ?? ""}`.slice(0, 500) });
-          return json({
-            error: `Invoice ${invoiceNumber ?? ""} was created in your CRM but the email didn't go out (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). Click Send invoice on this design again to retry the email — it will NOT create a second invoice.`,
+          return filedHere(json({
+            error: `Invoice ${invoiceNumber ?? ""} was created in your CRM but the email didn't go out (${ghlFailed("send", sendRes)}). Click Send invoice on this design again to retry the email — it will NOT create a second invoice.`,
             invoiceId, invoiceNumber, created: true, sent: false,
-          }, 502);
+          }, 502));
         }
       }
     } else {
@@ -13746,7 +13782,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         });
         if (!sendRes.ok) {
           await setClaim({ status: "created", error: `resend ${sendRes.status || sendRes.netErr}`.slice(0, 500) });
-          return json({ error: `Retrying the email for invoice ${invoiceNumber ?? ""} failed (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). You can send it from your CRM.`, invoiceId, invoiceNumber, created: true, sent: false }, 502);
+          return filedHere(json({ error: `Retrying the email for invoice ${invoiceNumber ?? ""} failed (${ghlFailed("resend", sendRes)}). You can send it from your CRM.`, invoiceId, invoiceNumber, created: true, sent: false }, 502));
         }
       }
     }
