@@ -148,6 +148,21 @@ describe("/voice/status", () => {
     expect(filter(net.reads("phone_calls")[0], "twilio_call_sid")).toBe(CALL_SID);
   });
 
+  it("a caller who hangs up before /voice/inbound's row has landed still makes a missed call", async () => {
+    // The row is written in waitUntil after the TwiML; a caller who hangs up at once (or while
+    // a cold isolate is still answering) sends the parent leg's 'completed' before it exists.
+    const net = setup();
+    let lookups = 0;
+    net.rest("GET", "phone_calls", (s) => {
+      const bySid = filter(s, "twilio_call_sid");
+      if (bySid) return ++lookups === 1 ? [] : bySid === CALL_SID ? [{ id: CALL_ID }] : [];
+      return [row()];
+    });
+    await call(env, await twilioPost(env, "/voice/status", { CallSid: CALL_SID, CallStatus: "completed" }, { leg: "pstn" }));
+    expect(lookups).toBeGreaterThan(1);
+    expect(patches(net)[0]?.body).toMatchObject({ status: "missed" });
+  });
+
   it("the customer's leg ending closes a call still marked in progress (a transfer that ended in voicemail)", async () => {
     // Whole seconds: Twilio's Timestamp (RFC 2822) carries no milliseconds.
     const answeredAt = new Date(Math.floor(Date.now() / 1000) * 1000 - 90_000).toISOString();

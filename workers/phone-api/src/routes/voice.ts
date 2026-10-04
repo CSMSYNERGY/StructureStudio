@@ -655,9 +655,17 @@ export async function applyStatus(env: Env, p: TwilioParams, url: URL, signed = 
     row = await withCallRow(admin, callId);
   } else if (sid) {
     const col = leg === "client" ? "client_call_sid" : "twilio_call_sid";
-    const { data } = await admin.from("phone_calls").select("id").eq(col, sid).maybeSingle();
-    const id = (data as { id?: string } | null)?.id;
-    row = id ? await callById(admin, id) : null;
+    // The row is inserted in waitUntil after the TwiML, so a leg's FINAL callback can beat it:
+    // an inbound caller who hangs up at once, or while a cold isolate is still answering.
+    // Dropped, that call would stay 'ringing' for good. Ending is the one event worth the
+    // short wait withCallRow gives callbacks that carry a call id; the others are not.
+    const tries = TERMINAL.has(status) ? 4 : 1;
+    for (let i = 0; i < tries && !row; i++) {
+      if (i) await new Promise((r) => setTimeout(r, 150 * 2 ** (i - 1)));
+      const { data } = await admin.from("phone_calls").select("id").eq(col, sid).maybeSingle();
+      const id = (data as { id?: string } | null)?.id;
+      row = id ? await callById(admin, id) : null;
+    }
   }
   if (!row) return; // a leg we never recorded (a refused call, or another product's call)
   const id = row.id;
