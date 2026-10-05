@@ -257,6 +257,22 @@ describe("POST /devices", () => {
     expect(up.json).toMatchObject({ user_id: USER_A, client_id: CLIENT, platform: "android", push_kind: "fcm", build_type: "prod" });
   });
 
+  it("registers an iPhone's APNs token (hex, as expo-notifications gives it) as apns, with its build type", async () => {
+    const { net, token, env } = await setup();
+    net.rest("DELETE", "phone_devices", () => []);
+    net.rest("POST", "phone_devices", () => []);
+    const apnsToken = "0f".repeat(32);
+    for (const build_type of ["prod", "dev"]) {
+      const { json } = await call(env, appRequest("POST", "/devices", token, { platform: "ios", build_type, push_token: apnsToken, push_kind: "apns", app_version: "1.0.0 (3)" }));
+      expect(json).toEqual({ ok: true });
+    }
+    // build_type is what /push/text reads to pick Apple's host and the topic for this phone.
+    expect(net.writes("phone_devices", "POST").map((s) => s.json)).toMatchObject([
+      { platform: "ios", push_token: apnsToken, push_kind: "apns", build_type: "prod" },
+      { platform: "ios", push_token: apnsToken, push_kind: "apns", build_type: "dev" },
+    ]);
+  });
+
   it("keeps one row per person for the extension (no token)", async () => {
     const { net, token, env } = await setup();
     net.rest("GET", "phone_devices", () => [{ id: "d1" }]);

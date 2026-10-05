@@ -108,6 +108,46 @@ describe("POST /token", () => {
     expect(decode(chrome.json.token).payload.grants.voice.push_credential_sid).toBeUndefined();
   });
 
+  it("incoming_push: true when a phone's token carries its push credential, null where push isn't involved", async () => {
+    const { auth, env } = await setup();
+    const ask = async (body: Record<string, unknown>) =>
+      (await call(env, appRequest("POST", "/token", await auth.token(USER_A), { app_version: "1", ...body }))).json.incoming_push;
+    expect(await ask({ platform: "ios", build_type: "prod" })).toBe(true);
+    expect(await ask({ platform: "ios", build_type: "dev" })).toBe(true);
+    expect(await ask({ platform: "android", build_type: "prod" })).toBe(true);
+    expect(await ask({ platform: "chrome", build_type: "prod" })).toBeNull();
+    expect(await ask({ platform: "ios", build_type: "prod", preflight: true })).toBeNull();
+  });
+
+  it.each([
+    ["ios", "prod", "TWILIO_PUSH_CREDENTIAL_APNS_PROD"],
+    ["ios", "dev", "TWILIO_PUSH_CREDENTIAL_APNS_SANDBOX"],
+    ["android", "prod", "TWILIO_PUSH_CREDENTIAL_FCM"],
+  ] as const)("%s %s with %s unset still signs in: a token without a push credential, incoming_push false, one warning", async (platform, build_type, secret) => {
+    const { net, auth } = await setup();
+    net.rest("POST", "app_errors", () => []);
+    const env = makeEnv({ [secret]: undefined });
+    const req = async () => appRequest("POST", "/token", await auth.token(USER_A), { platform, build_type, app_version: "1" });
+    const { res, json } = await call(env, await req());
+    expect(res.status).toBe(200);
+    expect(json.incoming_push).toBe(false);
+    const voice = decode(json.token).payload.grants.voice;
+    expect(voice).toEqual({ incoming: { allow: true }, outgoing: { application_sid: env.TWILIO_TWIML_APP_SID } });
+    // Named by its secret, as a warning, and once (throttled) however often phones ask.
+    await call(env, await req());
+    const logs = net.writes("app_errors").map((s) => s.json);
+    expect(logs.map((l) => [l.code, l.severity])).toEqual([[`token_no_${secret.toLowerCase()}`, "warn"]]);
+    expect(logs[0].message).toMatch(new RegExp(`^${secret} is not set`));
+  });
+
+  it("a push credential SID pasted with a newline is used without it", async () => {
+    const { auth } = await setup();
+    const env = makeEnv({ TWILIO_PUSH_CREDENTIAL_APNS_PROD: `CR${"0".repeat(31)}2\r\n` });
+    const { json } = await call(env, appRequest("POST", "/token", await auth.token(USER_A), { platform: "ios", build_type: "prod", app_version: "1" }));
+    expect(decode(json.token).payload.grants.voice.push_credential_sid).toBe(`CR${"0".repeat(31)}2`);
+    expect(pushCredentialFor({ TWILIO_PUSH_CREDENTIAL_FCM: "   " }, "android", "prod")).toBeUndefined();
+  });
+
   it("preflight mode uses the echo TwiML App with incoming calls off and a short life", async () => {
     const { auth, env } = await setup();
     const { json } = await call(env, appRequest("POST", "/token", await auth.token(USER_A), { platform: "chrome", build_type: "prod", app_version: "1", preflight: true }));

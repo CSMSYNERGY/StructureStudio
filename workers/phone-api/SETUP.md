@@ -62,7 +62,7 @@ npx wrangler secret put LOG_PSEUDONYM_KEY
 
 Paste the value at the prompt. Set it once and leave it: a new key gives everyone new refs, so a person's reports from before the change can only be found with the old key.
 
-APNs topics: `APNS_BUNDLE_ID` is the topic for `prod` devices, `APNS_BUNDLE_ID_DEV` for `dev` ones. While both builds use the `.dev` bundle id (the individual Apple account), set only `APNS_BUNDLE_ID` to it; dev devices fall back to it. When the store build moves to the final bundle id, set `APNS_BUNDLE_ID` to that and `APNS_BUNDLE_ID_DEV` to the `.dev` id.
+APNs topics: set `APNS_BUNDLE_ID` to the App Store bundle id. It is the topic for `prod` devices (TestFlight and App Store builds), and development builds (`dev` devices) get it with `.dev` added, which is the id the app gives them. `APNS_BUNDLE_ID_DEV` overrides that and is normally left unset. Secrets set with a pasted newline are trimmed.
 
 ## 4. First deploy, on workers.dev
 

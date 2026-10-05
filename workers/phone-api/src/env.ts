@@ -80,9 +80,12 @@ export interface Env {
   APNS_KEY_P8?: string;
   APNS_KEY_ID?: string;
   APNS_TEAM_ID?: string;
-  /** The apns-topic for devices registered with build_type "prod". */
+  /** The apns-topic for devices registered with build_type "prod": the App Store bundle id. */
   APNS_BUNDLE_ID?: string;
-  /** The apns-topic for build_type "dev". Unset falls back to APNS_BUNDLE_ID (one bundle id). */
+  /**
+   * The apns-topic for build_type "dev". Unset: APNS_BUNDLE_ID + ".dev", the app's own rule for
+   * its development builds (an APNS_BUNDLE_ID already ending in ".dev" is used as it is).
+   */
   APNS_BUNDLE_ID_DEV?: string;
 
   // ── bindings ──────────────────────────────────────────────────────────────────────
