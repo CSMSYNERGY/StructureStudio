@@ -197,10 +197,11 @@ async function settingsDesigner(page) {
     return t.includes("3D Style Calibration") || t.includes("3D isn't on for this account yet") || t.includes("3D is on for this account");
   }, null, { timeout: 60000 }).catch(() => {});
 }
-// Is the Advanced mode card above the 3D card?
+// Is the Advanced mode card above the 3D card? With 3D on, the 3D card is the calibration page itself
+// since 2026-10-05 (06-3d.jsx data-ss-cal-page, the Advanced page's form); without it, the "3D" card.
 const cardAbove3d = (page) => page.evaluate(() => {
   const c = document.querySelector("[data-ss-adv-mode]");
-  const t = [...document.querySelectorAll("div")].find((d) => d.children.length === 0 && d.textContent.trim() === "3D");
+  const t = document.querySelector("[data-ss-cal-page]") || [...document.querySelectorAll("div")].find((d) => d.children.length === 0 && d.textContent.trim() === "3D");
   return !!(c && t && (c.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING));
 });
 const waitFor = (page, fnBody, arg, timeout = 15000) => page.waitForFunction(fnBody, arg, { timeout }).then(() => true, () => false);

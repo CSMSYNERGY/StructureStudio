@@ -20309,16 +20309,64 @@ const CAL_DIM_BANDS = { widthFt: [4, 60], lengthFt: [4, 100], wallHeightFt: [3, 
 // it is the only value that means "the model should answer this", and it is not the same thing
 // as 0, which is a flush eave and a real measurement.
 const CAL_OVERHANG_CHIPS = [[null, "Read it from the video"], [0, "Flush"], [2, "2 in"], [6, "6 in"], [12, "12 in"], [16, "16 in"], [24, "24 in"]];
-// ⚠️ THIS SURFACE HAS NO SSD_CSS. That stylesheet is injected by SSDesignerFrame, which the
-// `calibrationOnly` early return never renders, and importing it here would be worse than
-// useless: it sets --ssd-sticky-top and `position:sticky` rules that assume the designer's own
-// scroll container. So the one rule this card genuinely cannot express inline gets its own
-// sheet, under its own `ssc-` prefix (grep says nothing else in either twin uses it).
-//
-// The rule is the iOS zoom: Safari zooms the page on focusing an input whose font-size is under
-// 16px, and every other field on this panel spreads S.sel's inline fontSize 13. An inline style
-// beats a class, so these three inputs deliberately drop it and take their size from here.
+// The iOS zoom: Safari zooms the page on focusing an input whose font-size is under 16px. An inline
+// style beats a class, so the `ssc-dim-in` boxes (the size of the building filmed, the ground at each
+// corner) carry no inline size and take it from here. Its own `ssc-` prefix, from when the
+// calibration panel had no SSD_CSS at all; since 2026-10-05 Settings → Designer → 3D is in the
+// Designer's frame, and this sheet stays for the boxes the operator's ?admin=1 panel still draws.
 const SSC_CAL_CSS = ".ssc-dim-in{font-size:13px}@media (pointer:coarse){.ssc-dim-in{font-size:16px}}";
+// THE CALIBRATION CARDS IN THE DESIGNER'S LOOK (2026-10-05). Ahsan: "re design the designer settings
+// tab similar to what we have done with advance tab". The cards (the calCard* consts in the component)
+// are SSD_CSS's .ssd-card / .ssd-chip / .ssd-tb-btn, and these are the few rules that kit has no class
+// for: a title row with a badge, body copy, the size boxes' grid, the paid button's block and its
+// progress card, and the amber banner. `ss-cal-` is used by nothing else in either twin (grep; the
+// data-ss-cal-* attributes are not classes). Not scoped to .ss-adv: the photos card is also drawn by
+// the operator's ?admin=1 panel, which is inside the Designer's frame but not the Advanced page's
+// wrapper, and the colours are the frame's own variables, which both have.
+const SS_CAL_CSS = [
+  // The page's own title row (Settings → Designer → 3D), a note row above 01.
+  ".ss-cal-intro{max-width:760px;padding:2px 0 4px}",
+  ".ss-cal-title{margin:0 0 4px;font-size:17px;font-weight:800;line-height:1.25;letter-spacing:-.01em;color:var(--ss-ink)}",
+  ".ss-cal-card + .ss-cal-card{margin-top:12px}",
+  ".ss-cal-head{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;margin:0 0 8px;min-width:0}",
+  ".ss-cal-head > .ssd-card-t{margin:0;white-space:normal}",
+  ".ss-cal-badge{display:inline-flex;align-items:center;height:18px;padding:0 7px;border-radius:999px;font-size:10.5px;font-weight:700;line-height:1;white-space:nowrap;letter-spacing:0;text-transform:none}",
+  ".ss-cal-badge.is-ok{background:#ECFDF5;color:#047857}",
+  ".ss-cal-badge.is-req{background:#FEF3C7;color:#B45309}",
+  ".ss-cal-badge.is-opt{background:var(--ss-surface);border:1px solid var(--ss-line-card);color:var(--ss-muted)}",
+  ".ss-cal-p{margin:0 0 10px;font-size:12px;font-weight:400;line-height:1.55;color:var(--ss-muted)}",
+  ".ss-cal-p b,.ss-cal-p strong{font-weight:700;color:var(--ss-ink)}",
+  ".ss-cal-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}",
+  ".ss-cal-sub{margin:0 0 6px;font-size:11.5px;font-weight:700;line-height:1.4;color:var(--ss-ink)}",
+  ".ss-cal-sub > .ss-cal-badge{margin-left:6px;vertical-align:1px}",
+  ".ss-cal-dims{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,170px),1fr));gap:10px;margin:0 0 4px}",
+  ".ss-cal-lbl{display:block;min-width:0;font-size:11px;font-weight:600;line-height:1.35;color:var(--ss-muted)}",
+  ".ss-cal-lbl > .ssd-input{margin-top:4px}",
+  ".ss-cal-hint{display:block;margin-top:3px;font-size:11px;font-weight:600;line-height:1.4;color:var(--ss-subtle)}",
+  ".ss-cal-hint.is-warn{color:#B45309}",
+  ".ss-cal-warn{margin:0 0 6px;font-size:12px;font-weight:600;line-height:1.5;color:#B45309}",
+  ".ss-cal-err{margin-top:8px;font-size:12px;font-weight:600;line-height:1.45;color:var(--ss-danger,#DC2626)}",
+  ".ss-cal-thumbs{display:flex;flex-wrap:wrap;gap:6px}",
+  ".ss-cal-thumbs img{display:block;object-fit:cover;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface)}",
+  ".ss-cal-x{position:absolute;top:-7px;right:-7px;width:20px;height:20px;margin:0;padding:0;border:1px solid var(--ss-line);border-radius:50%;background:var(--ss-surface);color:var(--ss-muted);font-family:inherit;font-size:12px;font-weight:800;line-height:1}",
+  ".ss-cal-x:hover{border-color:#DC2626;color:#DC2626;background:#FEF2F2}",
+  "label.ss-cal-file{margin:0;cursor:pointer}",
+  // A card's buttons wrap their words on a phone ("Show it on 16 × 24 (the one you filmed)" is wider than
+  // a 375 px card), where the kit's toolbar button never wraps.
+  ".ss-cal-card .ssd-tb-btn,.ss-cal-banner .ssd-tb-btn{white-space:normal;height:auto;min-height:var(--ssd-tb-h);max-width:100%;padding-top:4px;padding-bottom:4px;line-height:1.3;text-align:left}",
+  ".ssd-tb-btn.ss-cal-big{height:36px;padding:0 18px;font-size:13.5px}",
+  ".ssd-tb-btn.ss-cal-big:disabled{background:var(--ss-line-card);border-color:var(--ss-line-card);color:var(--ss-subtle);filter:none}",
+  ".ss-cal-gen{margin-top:12px;padding-top:12px;border-top:1px solid var(--ss-line-card)}",
+  ".ss-cal-why{margin-top:7px;font-size:12px;font-weight:600;line-height:1.5}",
+  ".ss-cal-why.is-ok{color:#166534}",
+  ".ss-cal-why.is-warn{color:#B45309}",
+  ".ss-cal-progress{margin-top:12px;padding:11px 13px;border:1px solid var(--ss-primary-line);border-radius:4px;background:var(--ss-primary-faint)}",
+  ".ss-cal-progress-t{margin:0 0 6px;font-size:12.5px;font-weight:800;color:var(--ss-primary)}",
+  ".ss-cal-progress-n{margin-top:6px;font-size:11.5px;line-height:1.5;color:var(--ss-primary)}",
+  ".ss-cal-progress-money{margin-top:8px;padding-top:8px;border-top:1px solid var(--ss-primary-line);font-size:11.5px;font-weight:700;line-height:1.5;color:var(--ss-ink)}",
+  ".ss-cal-saw{margin-top:12px;padding-top:10px;border-top:1px solid var(--ss-line-card)}",
+  ".ss-cal-banner{margin-top:8px;padding:9px 12px;border:1px solid #FCD34D;border-radius:4px;background:#FEF3C7;color:#92400E;font-size:12px;font-weight:600;line-height:1.5}",
+].join("\n");
 // ─── THE FREE SECOND PASS, AS THE BUILDER EXPERIENCES IT (2026-09-19; rounds 2026-09-24) ───
 // One press is one hold is one charge. The clocks below are the whole of the wait a builder
 // can be asked to sit through, and they are deliberately not the same as the server's.
@@ -28631,9 +28679,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   //     portal, which is the point of the feature. Deliberately a sibling of the admin
   //     panel rather than a child: that panel also carries the GHL credentials, which
   //     must never surface inside a tenant portal.
-  // Held in a variable rather than written inline: Settings → Designer → 3D mounts
-  // this component with `calibrationOnly` and renders ONLY this panel, so the panel
-  // has to be reachable from two different returns.
+  // Held in a variable rather than written inline. Until 2026-10-05 Settings → Designer → 3D
+  // (`calibrationOnly`) rendered this same panel from its own return; since then that page is
+  // built from the Advanced page's form (the shared return below the calibrationOnly comment), and
+  // this panel is the operator's ?admin=1 one alone. The cards both pages need are calCard* consts.
   // Frames from a walk-around are views 1-4 of one lap, not four staged elevations —
   // labelling them Front/Back/Left/Right would be a guess about where the walk started.
   // A plain const, deliberately: everything from here down is JSX held in a variable, and
@@ -28663,10 +28712,988 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calAdvNoRidge = Boolean(adminCal && adminCal.spec && adminCal.spec.roof && adminCal.spec.roof.type === "shed");
   const calAdvSecOn = calAdvNoRidge && (calAdvSec === "wings" || calAdvSec === "dormer") ? "roof" : calAdvSec;
   const calAdvShow = (k) => !advancedOnly || calAdvSecOn === k;
+  // ── THE CALIBRATION CARDS, as consts (2026-10-05) ─────────────────────────────────────────────
+  // Settings → Designer → 3D is built from the Advanced page's form since 2026-10-05, and these five cards
+  // are its "Video & photos" section: the walk-around, the size of the building filmed, the photos with
+  // the one paid button, the check against the video, and the scan. They lived inside cal3dPanel until
+  // then. Each is a plain const (JSX in a variable, no hook), so it can sit below the hooks and above both
+  // returns. cal3dPanel is now only the operator's ?admin=1 panel, which has no setup3d: of the five it
+  // only ever drew the photos card (URL paste), so that one is shared and the rest are the new page's.
+  // Their look is SSD_CSS's card, chip and button classes plus SS_CAL_CSS (module scope), which both
+  // surfaces inject. A chip is the Advanced page's pill size.
+  const calPill = { ...S.pill, padding: "4px 9px", fontSize: 11.5, lineHeight: "14px" };
+    /* ── Building scan. Only in the portal: it needs the builder's own session to
+        upload into a private bucket, and a scan is theirs, not ours. The scan is a
+        REFERENCE — we measure it and build the parametric model from the numbers,
+        because the mesh itself cannot be edited, priced or quoted. ── */
+    /* ── STEP 1: the walk-around video. The low-friction path: any phone, no app,
+        no export step. It reads the SHAPE only — size, colour and material are
+        settings the customer changes afterwards, so nothing here needs to be
+        measured.
+
+        ⚠️ THIS CARD NO LONGER GENERATES ANYTHING (2026-09-10, Ahsan: "I want them
+        to be able to upload a video in here and also add another section in which
+        they can upload images. And once they have uploaded both a video and four
+        images, then they can generate the 3D model"). Until today, PICKING A VIDEO
+        FILE WAS ITSELF A PAID GENERATION — `onChange` called straight through to
+        `onDraftFromVideo`, with no button, no confirmation and a $20 wallet hold.
+        Adding a Generate button on top of that would have charged a builder TWICE
+        for one building, which is the exact "oh, this is fun. Click." spend the
+        meter was armed to prevent (Carolyn, 2026-09-04 @20:47). So the video card
+        now only cuts frames and uploads them; one press of Generate below is one
+        hold is one charge.
+
+        Gated on onUploadPhoto alone now, not onUploadPhoto && onDraftFromVideo:
+        this card no longer calls the drafter. That also fixes a live defect — the
+        card was never gated on `scan.aiReady`, so with ANTHROPIC_API_KEY unset a
+        builder could watch eight frames upload and then receive a 500. Uploading
+        frames does not touch the AI, so there is nothing left to fail.
+
+        REQUIRED since 2026-09-16 (Ahsan: "make video compulsory and images optional
+        to generate the 3d model"), which is why its badge reads "required" and the
+        photos step's reads "optional". It stopped being the ONLY required step on
+        2026-09-19, when the size joined it — see step 2. ── */
+  // In the Designer's look since 2026-10-05: a .ssd-card with its uppercase title, and the steps are
+  // numbered 1 to 4 inside "Video & photos" (the page's own section numbers are the 01 · 02 ones).
+  const calCardVideo = !advancedOnly && setup3d && setup3d.onUploadPhoto && Boolean(adminCal) && (
+      <div className="ssd-card ss-cal-card" data-ssc-card="video">
+        <div className="ss-cal-head">
+          <span className="ssd-card-t">1 · Walk-around video</span>
+          {calVideoReady
+            ? <span className="ss-cal-badge is-ok">✓ {calVideoFrames.length} views ready</span>
+            : <span className="ss-cal-badge is-req">required</span>}
+        </div>
+        <p className="ss-cal-p">
+          Film one slow lap of a real building — phone sideways, whole building in frame, about 30 to 60 seconds.
+          We cut a few still frames out of it and read the roof shape, pitch, overhang and wall height off them.
+          <b> The video stays on your phone</b> — only the still frames are sent.
+          {" "}Nothing is read yet: the shape is drafted once, when you press <b>Generate</b> in step 3.
+        </p>
+        <div className="ss-cal-row">
+          <label className="ssd-tb-btn is-primary ss-cal-file" style={{ cursor: adminCalVideo.busy || scan.status === "locked" ? "default" : "pointer", opacity: scan.status === "locked" ? 0.5 : 1 }}>
+            {adminCalVideo.busy ? (adminCalVideo.step || "Working…") : (calVideoReady ? "Choose a different video" : "Choose a walk-around video")}
+            {/* adminCalPhotos.busy is deliberately absent: uploading images must not
+                grey out the video picker, which is the same coupling in reverse. */}
+            <input type="file" accept="video/*" disabled={adminCalVideo.busy || adminCalBusy || scan.status === "locked"}
+              onChange={(e) => {
+                const f = e.target.files && e.target.files[0];
+                e.target.value = "";
+                if (!f) return;
+                calStageVideo(f);
+              }}
+              style={{ display: "none" }} />
+          </label>
+          {calVideoReady && !adminCalVideo.busy && (
+            <button type="button" onClick={calClearVideo} disabled={adminCalBusy || scan.status === "locked"}
+              title="Forget these frames — you would need to choose a video again before you can generate."
+              className="ssd-tb-btn">Remove the video</button>
+          )}
+        </div>
+        {adminCalVideo.err && <div className="ss-cal-err">{adminCalVideo.err}</div>}
+        {/* The frames themselves, unlabelled and in walk order. They are NOT the four
+            named slots below and must never be spread into them again: until today a
+            video import stride-filled Front/Left/Right/Back, so a builder who staged
+            four photographs and then filmed a lap silently lost all four. They are
+            also views 1-N of one lap, not four staged elevations — labelling them
+            Front/Back/Left/Right would be a guess about where the walk started. */}
+        {calVideoReady && !adminCalVideo.busy && (
+          <div style={{ marginTop: 10 }}>
+            <div className="ss-cal-sub">What we cut out of your lap, in walk order:</div>
+            <div className="ss-cal-thumbs">
+              {calVideoFrames.map((u, i) => (
+                <img key={"cal-frame-" + i} src={u} alt={"View " + (i + 1)} title={"View " + (i + 1)}
+                  style={{ width: 78, height: 50 }} />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+    /* ── STEP 2: THE SIZE OF THE BUILDING THAT WAS FILMED (2026-09-19). Required,
+        all three, and it is Ahsan's call: "the three dimension fields are required".
+
+        WHY THIS CARD EXISTS AT ALL. Wall height came back 7 in 74 % of every recorded
+        generation and was never once above 8, on buildings whose walls measure 9 —
+        and 1.0 ft came back for the overhang in 53 % of them, on a building whose
+        eave measures 0.15 ft. Zero variance at a wrong value is the signature of a
+        default, not of a measurement. A phone at chest height has no datum in frame:
+        no roof plane, no level line, and the only scale is a door whose height it has
+        to guess first. The builder knows all three numbers. Asking is cheaper, more
+        accurate and faster than any amount of prompt.
+
+        WHAT IT IS NOT. It does not store a width or a length anywhere. One style
+        sells at up to 21 sizes and the renderer takes its width from the customer's
+        pick, so a width saved on the style would be a second, lying answer to a
+        question the catalog already answers. These are the ruler for ONE reading. The
+        wall height is the exception and it is not an exception really: `wallHeightFt`
+        is an existing d3 key that already means exactly this, so the field below and
+        this one edit the same slice.
+
+        NEVER PRE-FILLED FROM `C.defaultSizes`. A tenant-wide default set says nothing
+        about the building in front of this builder, and the blocking case is real: a
+        style with no sizes of its own also has no "Preview on" picker, so a pre-filled
+        guess would be compared against a preview whose size is nowhere on screen. With
+        no sizes the fields start BLANK and the card says why in words.
+
+        ⚠️ NO SSD_CSS ON THIS SURFACE. See SSC_CAL_CSS at module scope. ── */
+    /* GATED EXACTLY LIKE STEP 1, and for the same reason. The public ?admin=1
+        operator page has no `setup3d`, so it renders no step 1 card and no Generate
+        button -- and this card was left ungated, so that surface showed a "Step 2"
+        with no step 1, an amber "required" badge that gated nothing, and copy about
+        "the building you filmed" for an operator who filmed nothing. Two of its
+        three fields were pure local state there and were silently discarded on the
+        next style click. Step 3 is ungated on purpose (pasting photo URLs still
+        works there); there is nothing on the operator surface that consumes these
+        numbers, and it already has its own "Wall height (ft)" field below.
+
+        `data-ssc-card` is a TEST HOOK and nothing else. tests/harness/calDims.mjs
+        photographs this card in each of its states, and locating it by its heading
+        text would make a reworded heading look like a broken harness. */
+  const calCardDims = !advancedOnly && setup3d && setup3d.onUploadPhoto && Boolean(adminCal) && (
+    <div data-ssc-card="dims" className="ssd-card ss-cal-card">
+      <style>{SSC_CAL_CSS}</style>
+      <div className="ss-cal-head">
+        <span className="ssd-card-t">2 · The size of the building you filmed</span>
+        {calDimsReady
+          ? <span className="ss-cal-badge is-ok">✓ {calDimW} × {calDimL} ft, {calDimH} ft walls</span>
+          : <span className="ss-cal-badge is-req">required</span>}
+      </div>
+      <p className="ss-cal-p">
+        A video shows us the <b>shape</b>. It cannot show us the <b>size</b> — there is nothing in the frame to
+        measure against, so we would be guessing, and a guess here bends every other number. Type the three
+        measurements off the building you filmed and they become the ruler everything else is read against.
+        {" "}<b>Width is the FRONT wall</b> — the side with the porch, or the main door if there is no porch — and
+        <b> length runs front to back</b>. On a building with lower wings, measure the whole thing, wings included.
+        {adminCal && !calOwnSizes(adminCal.styleValue).length
+          ? <><br /><b>This style has no sizes set up yet</b>, so there is nothing to start you off — type the size of the building you filmed.</>
+          : null}
+      </p>
+      <div className="ss-cal-dims">
+        {/* ⚠️ AMBER UNTIL IT HAS BEEN LOOKED AT, exactly like the wall height below and
+            for exactly the same reason. These two are pre-filled from the MEDIAN ROW
+            OF THE PRICE LIST, which is a number about what this style sells and not
+            about the building in the video -- and the server states all three to the
+            model as measurements the builder took. Grey on white read as a finished
+            answer, and one tap on the wall height turned the badge green over all
+            three. The seed stays; the tick waits. */}
+        <label className="ss-cal-lbl">Width (ft) — the FRONT wall (the side with the porch or main door)
+          {/* No inline fontSize on purpose: an inline size beats the class, and the class is
+              what carries the 16px that stops iOS zooming on every tap (SSC_CAL_CSS). The amber
+              border and fill stay inline: they are this box's state, not its look. */}
+          <input className="ssc-dim-in ssd-input ssd-field" type="number" step="0.5" min="4" inputMode="decimal" placeholder="e.g. 12"
+            {...calDimProps("widthFt", adminCalDims.widthFt)}
+            style={{ borderColor: (calWidthNeedsLook || !calDimInBand("widthFt", calDimW)) ? "#F59E0B" : undefined, background: calWidthNeedsLook ? "#FFFBEB" : undefined }} />
+          {calWidthNeedsLook && (
+            <span className="ss-cal-hint is-warn">
+              From your price list — tap to confirm it matches what you filmed.
+            </span>
+          )}
+        </label>
+        <label className="ss-cal-lbl">Length (ft) — front to back
+          <input className="ssc-dim-in ssd-input ssd-field" type="number" step="0.5" min="4" inputMode="decimal" placeholder="e.g. 24"
+            {...calDimProps("lengthFt", adminCalDims.lengthFt)}
+            style={{ borderColor: (calLengthNeedsLook || !calDimInBand("lengthFt", calDimL)) ? "#F59E0B" : undefined, background: calLengthNeedsLook ? "#FFFBEB" : undefined }} />
+          {calLengthNeedsLook && (
+            <span className="ss-cal-hint is-warn">
+              From your price list — tap to confirm it matches what you filmed.
+            </span>
+          )}
+        </label>
+        {/* THE SAME SLICE AS THE "Wall height (ft)" FIELD FURTHER DOWN, said out loud
+            right under the box so nobody edits one and wonders why the other moved.
+            The label is deliberately NOT "Wall height (ft) — at the eave": that reads
+            the same to a person and is ambiguous to a locator, and it broke
+            tests/harness/porchPanel.mjs, which reaches the field below by
+            /^Wall height \(ft\)/. Putting the qualifier before the unit is clearer
+            anyway -- the eave is where a builder has to hold the tape. */}
+        <label className="ss-cal-lbl">Wall height at the eave (ft) — the outside walls (single-slope roof: the LOW side)
+          <input className="ssc-dim-in ssd-input ssd-field" type="number" step="0.5" min="3" inputMode="decimal" placeholder="e.g. 9"
+            {...calDimProps("wallHeightFt", calDimH)}
+            style={{ borderColor: (calWallNeedsLook || !calDimInBand("wallHeightFt", calDimH)) ? "#F59E0B" : undefined, background: (calWallNeedsLook || calWallBad != null) ? "#FFFBEB" : undefined }} />
+          <span className={"ss-cal-hint" + ((calWallNeedsLook || calWallBad != null) ? " is-warn" : "")}>
+            {calWallBad != null
+              ? `We can only store a wall between ${CAL_DIM_BANDS.wallHeightFt[0]} and ${CAL_DIM_BANDS.wallHeightFt[1]} ft, so this one is not saved yet.`
+              : calWallNeedsLook
+                ? "From this style's settings — tap to confirm it matches what you filmed."
+                : "The same wall height as the field further down."}
+          </span>
+        </label>
+      </div>
+      {/* THE EAVE, OPTIONAL. Chips and not a box: the answers that matter are far apart
+          (flush against 16 in) and a builder who has to type a number into an empty
+          field will either skip it or guess. "Read it from the video" is where this
+          starts and it is a real answer — the prompt asks in inches now and names the
+          flush case, so the model has a fair chance at it. 0 is NOT that: 0 is a flush
+          eave the builder looked at and measured. */}
+      <div className="ss-cal-sub" style={{ marginTop: 12 }}>How far does the roof stick out past the wall? <span className="ss-cal-badge is-opt">optional</span></div>
+      <div className="ss-cal-row" role="group" aria-label="How far the roof sticks out on the building you filmed" style={{ gap: 5, marginBottom: 8 }}>
+        {CAL_OVERHANG_CHIPS.map(([v, lbl]) => (
+          <button key={"cal-oh-" + String(v)} type="button" aria-pressed={adminCalDims.overhangIn === v} onClick={() => setAdminCalDims((p) => ({ ...p, overhangIn: v }))}
+            className={adminCalDims.overhangIn === v ? "ssd-chip is-on" : "ssd-chip"} style={calPill}>
+            {lbl}
+          </button>
+        ))}
+      </div>
+      {/* WARNINGS, NOT REFUSALS. Amber and readable, and the button stays live under
+          them: a builder calibrating against a real building on their own lot may well
+          have filmed a size their catalog does not sell yet. */}
+      {calDimWarnings.map((w, i) => (
+        <div key={"cal-dim-warn-" + i} className="ss-cal-warn">⚠ {w}</div>
+      ))}
+      {/* ALWAYS NAME THE PREVIEWED SIZE, even where there is no picker to change it
+          with (brief S2-D). A style with no sizes has no "Preview on" control at all,
+          so without this line the builder compares their building against a 3D of
+          completely unknown size — which is how a good draft reads as a wrong one.
+          calibrationOnly, exactly like calSetSize: over the full designer this panel
+          sits above a customer's plan and moving the size would clear it. */}
+      {calibrationOnly && (
+        <div className="ss-cal-row ss-cal-p" style={{ margin: 0 }}>
+          <span>{sel.size ? <>The 3D preview is showing a <b>{sel.size}</b>.</> : <>The 3D preview has no size set yet.</>}</span>
+          {calDimPreviewLabel && calDimPreviewLabel !== sel.size && (
+            <button type="button" onClick={() => calSetSize(calDimPreviewLabel)}
+              title="Render the preview at the size you typed, whether or not this style sells it"
+              className="ssd-tb-btn is-soft">
+              Show it on {Math.round(calDimW)} × {Math.round(calDimL)} (the one you filmed)
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+    );
+    /* ── STEP 3: the builder's own photos (OPTIONAL since 2026-09-16), and the one
+        button that spends money. ──
+        Carolyn 2026-09-04 @16:05: "we put a thing in here that says, you know, front
+        side, left side, right side. And it tells them to get a photo of that." A
+        builder shooting their own building needs to be told WHAT to shoot; four
+        numbered boxes told them only how many.
+
+        This card is NOT gated on setup3d: the public ?admin=1 operator page has no
+        session to upload with, so each slot falls back to pasting a URL there — the
+        same split calUploadPhotos / calAddPhotoUrl already make. Only the Generate button inside it
+        needs the portal's authenticated callbacks. ── */
+  const calCardPhotos = !advancedOnly && Boolean(adminCal) && (
+    <div className="ssd-card ss-cal-card" data-ssc-card="photos">
+      <div className="ss-cal-head">
+        {/* NO STEP NUMBER WHERE THERE ARE NO OTHER STEPS. Steps 1 and 2 are gated on
+            `setup3d.onUploadPhoto`, which the public ?admin=1 operator page does not
+            have, so this card was left announcing "Step 3" as the only card on the
+            page. (It read "Step 2" there before the dimensions card took that
+            number: an off-by-one that had been there a while and got wider.) The
+            card is ungated on purpose -- pasting photo URLs still works there -- so
+            it is the NUMBER that goes, and the copy with it: an operator filmed
+            nothing and has no Generate button to make sharper. */}
+        <span className="ssd-card-t">{setup3d && setup3d.onUploadPhoto ? "3 · " : ""}Photos of the same building</span>
+        {/* "optional" in GREY, not the amber "N of 4 added" it replaced (2026-09-16):
+            amber on this surface means something is still missing, and nothing is. */}
+        {calPhotoCount > 0
+          ? <span className="ss-cal-badge is-ok">✓ {calPhotoCount} image{calPhotoCount === 1 ? "" : "s"}</span>
+          : <span className="ss-cal-badge is-opt">optional</span>}
+      </div>
+      <p className="ss-cal-p">
+        <b>Optional.</b> {setup3d && setup3d.onUploadPhoto
+          ? <>The video alone is enough to generate; photos make the read sharper. Stand back and
+            photograph the <b>same building you filmed</b>: straight on, whole building in frame, in daylight.</>
+          : <>Reference photos of one real building of this style, for tuning the spec against. Straight on,
+            whole building in frame, in daylight.</>}
+        <b> One of each side</b> is the most useful set (front, left, right, back). Pick them all at once. Stills
+        are sharper than video frames, so the roof pitch and the eave read best from these.
+      </p>
+      {/* ONE UPLOAD, MANY FILES, NO NAMED SLOTS (2026-09-10). Ahsan: "I want to be
+          able to upload multiple pictures at a single time, remove the option of left
+          right front and back, just use upload images where user can upload different
+          images."
+
+          This is the THIRD shape this surface has had and the second reversal, so the
+          reasoning it overturns is kept rather than deleted. Carolyn asked for the four
+          labelled boxes on 09-04 (@16:05) for a reason that was right: "we put a thing
+          in here that says, you know, front side, left side, right side. And it tells
+          them to get a photo of that" — four numbered boxes told a builder how many
+          photos to take and not which ones. That instruction now lives in the copy
+          above, which can say more than a box label ever could.
+
+          What actually goes is the CLAIM that the second photo is the left side. A
+          multi-select picker returns files in whatever order the OS gives them, so a
+          positional label would be a guess — and a wrong label is worse than none,
+          because it tells the model a photo shows a side it never shows. */}
+      <div className="ss-cal-row" style={{ marginBottom: 8 }}>
+        {setup3d && setup3d.onUploadPhoto ? (
+          /* Disabled on adminCalPhotos.busy (its OWN work) and adminCalBusy (a generation
+             or a save, which would be writing the same spec) — but NOT on
+             adminCalVideo.busy, so images can be picked while a lap uploads.
+
+             A PLAIN BLOCK COMMENT, not a braced JSX one: this sits inside a ternary
+             branch, which must be ONE expression, so a JSX comment node beside the
+             element parses as a second child and fails with "Unexpected token, expected
+             comma". In children position the braced form is the correct one. */
+          <label className="ssd-tb-btn is-primary ss-cal-file" style={{ cursor: adminCalPhotos.busy || adminCalBusy ? "wait" : "pointer", opacity: adminCalPhotos.busy || adminCalBusy ? 0.6 : 1 }}>
+            {adminCalPhotos.busy ? (adminCalPhotos.step || "Uploading…") : (calPhotoCount ? "Add more images" : "Choose images")}
+            {/* `multiple` is the whole ask. accept="image/*" keeps the picker on images;
+                the shrink and the server's type gate do the real enforcing. */}
+            <input type="file" accept="image/*" multiple disabled={adminCalPhotos.busy || adminCalBusy} style={{ display: "none" }}
+              onChange={(e) => {
+                // COPIED BEFORE THE RESET, and that order is the whole bug this line
+                // once had. `e.target.files` is a LIVE FileList, not a snapshot, so
+                // `e.target.value = ""` empties the very object the handler is holding:
+                // `fs.length` read 0 immediately afterwards and nothing uploaded, with no
+                // error anywhere. The single-file version got away with it because it
+                // pulled `files[0]` out first. The reset itself has to stay, or picking
+                // the same file twice fires no change event at all.
+                const fs = Array.prototype.slice.call(e.target.files || []);
+                e.target.value = "";
+                if (fs.length) calUploadPhotos(fs);
+              }} />
+          </label>
+        ) : (
+          /* No session on the public ?admin=1 page, so a URL is pasted. One box that
+             appends, rather than one box per slot — there are no slots left to sit in.
+             Enter submits, because a form field that only works via a button beside it
+             is the kind of thing people report as broken. */
+          <>
+            {/* The Designer's .ssd-input since 2026-10-05 (it was S.sel; there is no S.input,
+                and an older block that spread one rendered this field unstyled). */}
+            <input id="cal-photo-url" placeholder="https://…/photo.jpg" className="ssd-input" style={{ width: 260, maxWidth: "100%" }}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                e.preventDefault();
+                if (calAddPhotoUrl(e.currentTarget.value)) e.currentTarget.value = "";
+              }} />
+            <button type="button" className="ssd-tb-btn"
+              onClick={() => {
+                const el = document.getElementById("cal-photo-url");
+                if (el && calAddPhotoUrl(el.value)) el.value = "";
+              }}>Add image</button>
+          </>
+        )}
+        <span className="ss-cal-hint" style={{ marginTop: 0 }}>
+          {calPhotoCount
+            ? `${calPhotoCount} of ${CAL_PHOTO_MAX} used`
+            : `Pick several at once, up to ${CAL_PHOTO_MAX}.`}
+        </span>
+      </div>
+      {/* Step 3's own error line. It used to share adminCalMsg with the video path and
+          the generation, so two concurrent uploads overwrote each other's news. */}
+      {adminCalPhotos.err && <div className="ss-cal-err" style={{ margin: "0 0 8px" }}>{adminCalPhotos.err}</div>}
+      {calPhotoCount > 0 && (
+        <div className="ss-cal-thumbs" style={{ gap: 8, margin: "4px 0 8px" }}>
+          {adminCal.photos.filter(Boolean).map((url, i) => (
+            <div key={"cal-photo-" + url} style={{ position: "relative" }}>
+              {/* "Image N of M", never a side name — see the block comment above. */}
+              <img src={url} alt={`Image ${i + 1} of ${calPhotoCount}`} title={`Image ${i + 1} of ${calPhotoCount}`}
+                style={{ width: 108, height: 72 }} />
+              {/* Removed by URL, not by index. The two agree today because calTrimPhotos
+                  leaves no blanks, so `.filter(Boolean)` returns the array itself — but
+                  that is an invariant held somewhere else, and an off-by-one here deletes
+                  the wrong photo silently. */}
+              <button type="button" onClick={() => calRemovePhoto(url)} disabled={adminCalPhotos.busy || adminCalBusy}
+                title="Remove this image"
+                className="ss-cal-x" style={{ cursor: adminCalBusy ? "wait" : "pointer" }}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+      {/* THE ONE PAID BUTTON. It moved here from the action row beside Save on
+          2026-09-10, because the steps it belongs to — film, photograph, generate —
+          read top to bottom in one place. Its gate is Ahsan's of 2026-09-16: "make
+          video compulsory and images optional to generate the 3d model", which
+          replaced the 09-10 "both a video and four images". It still sits in step 3's
+          card, so a builder with a walk-around and no photos reads past an optional
+          step to reach it; the badge and the line underneath both say it is optional.
+
+          RENDERED DISABLED, NEVER HIDDEN. A button that simply is not there tells a
+          builder nothing about what is missing, and this repo has been bitten by
+          disabled controls that fail silently; the line underneath always names the
+          thing still to do.
+
+          ⚠️ The CHARGE is not decided here and must not be. `calibrate_style_ai`
+          takes the wallet hold server-side, ordered after the daily cap and before
+          the model call, and the wallet deliberately FAILS CLOSED — failing open
+          means performing a paid service free with no record of it. A browser button
+          that thought it knew the price would be a second opinion about money. The
+          money line below only REPEATS the server's own answer (scan.charge, from
+          calChargeOf) and gates nothing. */}
+      {setup3d && setup3d.onDraftFromCombined && scan.aiReady !== false && (
+        <div className="ss-cal-gen">
+          <button type="button" onClick={calGenerate} disabled={adminCalBusy || adminCalVideo.busy || adminCalPhotos.busy || !calCanGenerate}
+            title={calCanGenerate
+              ? (calPhotoCount
+                ? "Read this building's shape from every view above — the walk-around frames and your own photos together"
+                : "Read this building's shape from the walk-around frames above")
+              /* The gate's OWN words, so a disabled button and the tooltip on it
+                 cannot say different things about what is missing. The hard-coded
+                 string named only the video, which stopped being the whole answer
+                 when the size joined the gate on 2026-09-19. */
+              : calGenerateWhy}
+            className="ssd-tb-btn is-primary ss-cal-big" style={{ cursor: adminCalBusy ? "wait" : (calCanGenerate ? "pointer" : "not-allowed") }}>
+            {adminCalBusy ? "Working…" : "✨ Generate the 3D model"}
+          </button>
+          <div className={"ss-cal-why" + (calCanGenerate ? " is-ok" : " is-warn")}>
+            {calGenerateWhy}
+          </div>
+          {/* ── WHAT ONE PRESS IS DOING, in four honest lines ────────────────────
+              A builder who watches a four-step bar with no explanation assumes four
+              charges. The money line under the rule is what makes "the check
+              always runs" safe to ship, and it is shown every single time rather
+              than only on the slow path.
+
+              Steps 1 and 2 are two halves of ONE paid call: the model looks at the
+              views and drafts in the same request, so 1 stands for the whole of it
+              and 2 completes when the draft lands. Two ticks appearing together is
+              honest; a second progress bar for something that was never a second
+              request would not be. ── */}
+          {adminCalBusy && adminCalCheck && (
+            <div data-ssc-card="progress" className="ss-cal-progress">
+              <div className="ss-cal-progress-t">Reading your building…</div>
+              <ol style={{ margin: 0, padding: 0, listStyle: "none", display: "grid", gap: 4 }} aria-live="polite">
+                {[
+                  ["draft", `Looking at your ${adminCalCheck.views || 0} views`, `Looked at your ${adminCalCheck.views || 0} views`],
+                  ["draft", "Drawing a first 3D from what they show", "Drew a first 3D from what they show"],
+                  /* THE ROUND IS SAID OUT LOUD once a check is running (2026-09-24). Up to
+                     SS_CHECK_ROUNDS of them, each a render and a check, so without it the
+                     card sits on one line for two minutes and reads as stuck. */
+                  ["check", adminCalCheck.round
+                    ? `Checking its work — round ${adminCalCheck.round} of ${SS_CHECK_ROUNDS}`
+                    : "Checking our 3D against your video, side by side", "Checked our 3D against your video"],
+                  ["done", "Correcting anything that doesn't line up", "Correcting anything that doesn't line up"],
+                ].map(([owns, doing, done], i) => {
+                  const order = ["draft", "render", "check", "done"];
+                  const at = order.indexOf(adminCalCheck.step);
+                  const mine = order.indexOf(owns);
+                  const state = at > mine ? "done" : at === mine ? "now" : "next";
+                  return (
+                    <li key={"ssc-step-" + i} aria-current={state === "now" ? "step" : undefined}
+                      style={{ fontSize: 12, lineHeight: 1.5, fontWeight: state === "next" ? 500 : 700, color: state === "done" ? "#047857" : state === "now" ? "var(--ss-primary)" : "var(--ss-subtle)" }}>
+                      {state === "done" ? "✓ " : state === "now" ? "› " : "  "}{state === "done" ? done : doing}
+                    </li>
+                  );
+                })}
+              </ol>
+              {/* THE AUTOMATIC SECOND READ, said while it happens. Without this line the
+                  first step simply takes twice as long and nothing says why; with it, the
+                  builder knows the first read was thrown away and that it cost nothing. */}
+              {adminCalCheck.retry && adminCalCheck.step === "draft" && (
+                <div className="ss-cal-progress-n" style={{ fontWeight: 700 }}>
+                  {adminCalCheck.retry === "upstream"
+                    ? "The AI service couldn't finish the first read, so we are reading your views again. It is still one generation."
+                    : "The first read ran out of room before it finished, so we are reading your views again with a shorter answer. It is still one generation."}
+                </div>
+              )}
+              {/* THE PICKUP, said while it happens (2026-09-25). The answer this press was
+                  waiting on dropped, and the draft is being read back off the server; no
+                  "try again", because pressing again is the one thing that would not help. */}
+              {adminCalCheck.recovering && adminCalCheck.step === "draft" && (
+                <div data-ssc-recovering="1" className="ss-cal-progress-n" style={{ fontWeight: 700 }}>
+                  Your connection dropped — picking the draft up from the server… Keep this page open. It is still one generation.
+                </div>
+              )}
+              <div className="ss-cal-progress-n">
+                {adminCalSlow
+                  ? "Still going. Big videos take longer — don't close the page."
+                  : "Usually four to six minutes — it studies your video carefully. You can leave this page open and come back."}
+              </div>
+              {/* THE MONEY LINE. Under a rule, on every render of this card. What it
+                  says about money follows the meter (calChargeOf, 2026-10-05): the
+                  price when one is charged, "free" when nothing is, and no money claim
+                  when the server has not said. data-ssc-charge names which. */}
+              <div data-ssc-charge={scan.charge ? (scan.charge.cents ? "priced" : "free") : "unknown"} className="ss-cal-progress-money">
+                {scan.charge && scan.charge.cents
+                  ? `This is one generation. The check and the correction are part of it — you are charged ${scan.charge.said} once, however much we have to fix.`
+                  : scan.charge && scan.charge.free
+                    ? "This is one generation. The check and the correction are part of it. Generating is free right now, so nothing comes out of your wallet."
+                    : "This is one generation. The check and the correction are part of it."}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      {/* The model's own reading of the building, in plain words. It used to sit in
+          the video card, bound to `adminCalVideo.observed` AND gated on
+          `adminCalVideo.read > 0` — both of which only `calibrateFromVideo` ever
+          set. With the video path no longer drafting, those notes would have
+          rendered for nobody while the server still spent the extra 200 max_tokens
+          producing them. `calGenerate` sets both fields now, which also closes the
+          09-04 log's open item ("Show the observed notes on the combined draft"). */}
+      {adminCalVideo.read > 0 && !adminCalBusy && adminCalVideo.observed && (
+        <div className="ss-cal-saw">
+          <div className="ss-cal-sub">What the model saw</div>
+          <div style={{ display: "grid", gap: 3, fontSize: 12, color: "var(--ss-ink)" }}>
+            {/* `roofNote` is the field the server composes its machine warnings into,
+                so it carries the porch and wall-height ones as well. Labelling all
+                three "Roof:" files two of them under the wrong heading. */}
+            {adminCalVideo.observed.roofNote && <div><b>{calWarnQuestion === "porch" ? "Porch:" : calWarnQuestion === "walls" ? "Wall height:" : "Roof:"}</b> {adminCalVideo.observed.roofNote}</div>}
+            {adminCalVideo.observed.eave && <div><b>Eave:</b> {adminCalVideo.observed.eave}</div>}
+            {adminCalVideo.observed.doors && <div><b>Doors:</b> {adminCalVideo.observed.doors}</div>}
+            {adminCalVideo.observed.windows && <div><b>Windows:</b> {adminCalVideo.observed.windows}</div>}
+            {adminCalVideo.observed.vents && <div><b>Vents:</b> {adminCalVideo.observed.vents}</div>}
+            {adminCalVideo.observed.confidence && (
+              <div style={{ color: adminCalVideo.observed.confidence === "low" ? "#B45309" : "var(--ss-muted)" }}>
+                Confidence: <b>{adminCalVideo.observed.confidence}</b>
+                {adminCalVideo.observed.confidence !== "high" ? " — check the roof numbers below against the building." : ""}
+              </div>
+            )}
+          </div>
+          {/* Said every time, not only on low confidence: a ground-level camera
+              NEVER sees the roof planes, and the two roof shapes the spec cannot
+              express are the two a builder is most likely to film. */}
+          <div className="ss-cal-warn" style={{ margin: "6px 0 0", fontWeight: 400 }}>
+            Roofs are read from the ground, so check the pitch below. Doors, windows and vents are placed in the designer — this only sets the building's shape.
+          </div>
+        </div>
+      )}
+    </div>
+    );
+    /* ── STEP 4: DOES THIS MATCH YOUR BUILDING? ────────────────────────────────
+        The builder's own frames beside our 3D of the same view, turned to face the
+        same way, and four questions that are not generic reassurance: they are the
+        measured failure list. Roof shape (a drafted gambrel that rendered as a
+        gable), the porch (`porchOutFt` came back 0 times in 19 recorded
+        generations), the wall height (7 in 74 % of them, on buildings measuring 9)
+        and the colours.
+
+        ⚠️ NOTHING HERE IS SAVED. This card sits above the existing field grid and
+        the Save button, and every control in it writes the same draft spec those
+        do. Save is one deliberate press, after four answers.
+
+        NO SSD_CSS ON THIS SURFACE — see SSC_CAL_CSS. Inline styles, and the one
+        responsive rule that cannot be written inline (side-by-side on a panel,
+        stacked on a phone) is an auto-fit grid rather than a media query, so it
+        reflows on the CONTAINER and needs nothing measured in JavaScript. ── */
+  const calCardCheck = !advancedOnly && adminCalCheck && !adminCalBusy && adminCalCheck.step === "done" && Boolean(adminCal) && (
+      <div data-ssc-card="compare" className="ssd-card ss-cal-card">
+        <div className="ss-cal-head">
+          <span className="ssd-card-t">4 · Does this match your building?</span>
+          <span style={{ fontSize: 11, color: "#64748B", fontWeight: 700 }}>
+            {calPairs.length ? `${calPairs.length} view${calPairs.length === 1 ? "" : "s"} · ` : ""}nothing is saved yet
+          </span>
+        </div>
+        {/* ⚠️ PROMOTED OUT OF THE GREY NOTES LIST INTO A BANNER. This message used to
+            land under four other lines in "What the model saw", which is the
+            quietest place on the panel for the loudest thing on it. Its button arms
+            the question it is about, so a builder is never left working out which of
+            the four the warning meant. */}
+        {calWarnBanner && (
+          <div role="alert" className="ss-cal-banner">
+            {calWarnBanner}
+            <div style={{ marginTop: 6 }}>
+              {/* ⚠️ WITH PAIRS ON SCREEN THIS BUTTON HAD NO VISIBLE EFFECT AT ALL.
+                  The panel it opens renders inside its own question's row, roughly a
+                  thousand pixels below the banner and off the bottom of the window;
+                  nothing scrolled, nothing near the button changed, and the label was
+                  gated on `!calPairs.length` so it could never read "Hide". The
+                  natural response -- press it again -- shut what the first press had
+                  opened. So: scroll the row into view, and let the label say which
+                  way the toggle is pointing. aria-expanded/aria-controls close the
+                  same gap for anyone who cannot see the scroll. */}
+              <button type="button"
+                aria-expanded={adminCalFix === calWarnQuestion}
+                aria-controls={"ssc-fix-" + calWarnQuestion}
+                onClick={() => {
+                  const opening = adminCalFix !== calWarnQuestion;
+                  setAdminCalFix(opening ? calWarnQuestion : null);
+                  // After the commit, not during it: the row is taller once the panel
+                  // is in it. setTimeout rather than requestAnimationFrame because a
+                  // hidden tab starves rAF and the scroll would never happen.
+                  if (opening && calPairs.length) {
+                    setTimeout(() => {
+                      const row = document.querySelector('[data-ssc-question="' + calWarnQuestion + '"]');
+                      if (row && row.scrollIntoView) row.scrollIntoView({ block: "center", behavior: "smooth" });
+                    }, 0);
+                  }
+                }}
+                className="ssd-tb-btn is-warn">
+                {adminCalFix === calWarnQuestion ? "Hide" : "Open"} the {SS_FIX_WORDS[calWarnQuestion] || "roof"} controls
+              </button>
+            </div>
+            {/* ⚠️ WITH NO PAIRS THERE ARE NO QUESTIONS, so the panel this button
+                arms has nowhere to render and the button did nothing at all: no
+                scroll, no message, not one node changed. That is the state the
+                banner was promoted out of the grey notes list FOR -- the model could
+                not line the frames up, or the device could not render, and the
+                warning is all the builder has. So the panel opens here instead.
+                With pairs on screen it opens in its own question's row, which keeps
+                the fix next to the pictures the answer is about. */}
+            {!calPairs.length && adminCalFix === calWarnQuestion && (
+              <div id={"ssc-fix-" + calWarnQuestion} style={{ marginTop: 8, background: "#FFF", border: "1px solid #FDE68A", borderRadius: 6, padding: "8px 10px" }}>
+                {calFixPanel(calWarnQuestion)}
+              </div>
+            )}
+          </div>
+        )}
+        {/* WHAT THE CHECK DID, in one quiet line or one honest list. A failed check
+            says the CHECK could not run and never that the generation did: the
+            builder has their draft and has been charged once either way. */}
+        <div style={{ marginTop: 8, fontSize: 11.5, lineHeight: 1.5, fontWeight: 600, color: adminCalCheck.verdict === "matches" ? "#047857" : adminCalCheck.verdict === "corrections" ? "var(--ss-primary)" : "#B45309" }}>
+          {adminCalCheck.verdict === "matches" && <>✓ Checked against your video — the draft already matches. Look at it yourself anyway; you are the one who has seen the building.</>}
+          {/* HOW MANY ROUNDS, when there was more than one: "corrected 3 things" after
+              two looks is a different claim from after one, and the list below is the
+              net of all of them (ssMergeChanges). */}
+          {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length > 0 && <>We checked our own 3D against your video{(adminCalCheck.rounds || 1) > 1 ? ` ${adminCalCheck.rounds} times` : ""} and corrected {adminCalCheck.changed.length} thing{adminCalCheck.changed.length === 1 ? "" : "s"}:</>}
+          {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length === 0 && <>We checked our own 3D against your video{(adminCalCheck.rounds || 1) > 1 ? ` ${adminCalCheck.rounds} times` : ""}, and its corrections cancelled each other out, so what you see is the first read. Look at it carefully against your pictures.</>}
+          {adminCalCheck.verdict === "rejected_too_many" && <>Our check thought too much of the draft was wrong to patch safely, so it changed nothing. Go through the four questions below carefully.</>}
+          {/* "Charged once" only on a priced meter (calChargeOf): with the meter off it
+              was a claim about money nobody paid. */}
+          {(adminCalCheck.verdict === "skipped" || adminCalCheck.verdict === "failed") && <>We couldn't run our own check this time, so what you see is the first read. Look at it carefully against your pictures before you save.{scan.charge && scan.charge.cents ? " You were charged once, as usual." : ""}</>}
+        </div>
+        {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length > 0 && (
+          <ul style={{ margin: "6px 0 0", paddingLeft: 18, display: "grid", gap: 3 }}>
+            {adminCalCheck.changed.map((ch, i) => {
+              const line = ssChangeLine(ch);
+              return (
+                <li key={"ssc-chg-" + i} style={{ fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
+                  <b>{line.label}</b> — {line.text}
+                  {ch.why ? <span style={{ color: "#64748B" }}> · {ch.why}</span> : null}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {adminCalCheck.note ? <div style={{ marginTop: 4, fontSize: 11.5, color: "#64748B", lineHeight: 1.5 }}>{adminCalCheck.note}</div> : null}
+        {/* ── THE PAIRS ──────────────────────────────────────────────────────────
+            One per viewpoint the FIRST pass labelled, and no more: a pair we could
+            only make by guessing an angle would show the builder a mismatch we
+            invented and ask them to judge it. */}
+        {calPairs.length > 0 && (
+          <p style={{ margin: "10px 0 6px", fontSize: 11.5, color: "#475569", lineHeight: 1.5 }}>
+            Your pictures beside the 3D, turned to face the same way. <b>If the 3D is facing the wrong way, drag it round</b> — that is a camera we matched by machine, not a mistake in the building.
+          </p>
+        )}
+        {calPairs.map((pair, i) => {
+          const word = SS_VIEW_WORDS[pair.viewpoint] || pair.viewpoint;
+          const spun = adminCalSpin[pair.viewpoint] || 0;
+          const show = adminCalPairView[pair.viewpoint] || "both";
+          const half = (kind) => (show === "both" || show === kind);
+          return (
+            <div key={"ssc-pair-" + pair.viewpoint} role="group" aria-label={`Comparison ${i + 1} of ${calPairs.length}: ${word}`}
+              data-ssc-pair={pair.viewpoint}
+              style={{ marginTop: 8, border: "1px solid #E2E8F0", borderRadius: 6, padding: 8 }}>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 800, color: "#0F172A" }}>{word}</span>
+                <span style={{ fontSize: 10.5, color: "#94A3B8", fontWeight: 600 }}>
+                  {calLapNumber(pair.frameUrl)
+                    ? `matched from your view ${calLapNumber(pair.frameUrl)}`
+                    : "matched from one of your pictures"}
+                </span>
+                <span style={{ flex: 1 }} />
+                {/* One full-width image at a time, for a phone or for a closer look.
+                    "Both" still stacks rather than shrinking at narrow widths — see
+                    the grid below — so nothing here is ever 170 px wide. */}
+                {[["both", "Side by side"], ["photo", "Your photo"], ["3d", "Your 3D"]].map(([k, lbl]) => (
+                  <button key={"ssc-pv-" + pair.viewpoint + k} type="button"
+                    aria-pressed={show === k}
+                    onClick={() => setAdminCalPairView((p) => ({ ...p, [pair.viewpoint]: k }))}
+                    className={show === k ? "ssd-chip is-on" : "ssd-chip"} style={calPill}>
+                    {lbl}
+                  </button>
+                ))}
+                {/* THE ONE THAT ESCAPES THE COLUMN. On a phone the two halves above
+                    are 161 px wide whichever of the three is pressed; this opens them
+                    at the width of the window. A button rather than a tap on the
+                    image: the 3D half already owns pointerdown for the drag. */}
+                <button type="button" data-ssc-zoom-open={pair.viewpoint}
+                  onClick={() => setAdminCalZoom(pair.viewpoint)}
+                  className="ssd-tb-btn">
+                  ⤢ Bigger
+                </button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: show === "both" ? "repeat(auto-fit, minmax(min(240px, 100%), 1fr))" : "1fr", gap: 8 }}>
+                {half("photo") && (
+                  <div>
+                    <div style={{ fontSize: 10, fontWeight: 800, color: "#64748B", letterSpacing: 0.4, marginBottom: 3 }}>YOUR VIDEO</div>
+                    <img src={pair.frameUrl} alt={`Your video, ${word.toLowerCase()}`}
+                      style={{ width: "100%", aspectRatio: "4 / 3", objectFit: "contain", background: "#0F172A", borderRadius: 6, display: "block" }} />
+                  </div>
+                )}
+                {half("3d") && (
+                  <div>
+                    <div style={{ fontSize: 10, fontWeight: 800, color: "var(--ss-primary)", letterSpacing: 0.4, marginBottom: 3 }}>YOUR 3D</div>
+                    {/* DRAG TO ROTATE, AND ARROW KEYS TOO. A drag-only affordance
+                        would shut keyboard users out of the one control that
+                        rescues a pairing the labels got wrong. The drag COMMITS on
+                        release rather than following the pointer: each new angle is
+                        a fresh render, and re-rendering per pointermove would make
+                        the panel unusable to save nobody any time. */}
+                    <div tabIndex={0} role="img" data-ssc-spin={pair.viewpoint}
+                      aria-label={`The 3D we built, ${word.toLowerCase()}. Left and right arrow keys turn it; Home puts it back.`}
+                      onPointerDown={(e) => { calDragRef.current = { viewpoint: pair.viewpoint, x: e.clientX, from: calSpinReqRef.current[pair.viewpoint] || 0 }; }}
+                      onPointerUp={(e) => {
+                        const d = calDragRef.current;
+                        calDragRef.current = null;
+                        if (!d || d.viewpoint !== pair.viewpoint) return;
+                        // 2 px of travel to the degree, so a lap is a comfortable
+                        // drag rather than a flick, and a click that moved a pixel
+                        // does not re-render anything.
+                        const moved = Math.round((e.clientX - d.x) / 2);
+                        if (Math.abs(moved) >= 3) calSpinPair(pair.viewpoint, d.from + moved);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "ArrowLeft") { e.preventDefault(); calSpinBy(pair.viewpoint, -SS_SPIN_STEP_DEG); }
+                        else if (e.key === "ArrowRight") { e.preventDefault(); calSpinBy(pair.viewpoint, SS_SPIN_STEP_DEG); }
+                        else if (e.key === "Home") { e.preventDefault(); calSpinPair(pair.viewpoint, 0); }
+                      }}
+                      style={{ cursor: "ew-resize", touchAction: "pan-y", borderRadius: 6 }}>
+                      <img src={pair.shotUrl} alt="" draggable={false}
+                        style={{ width: "100%", aspectRatio: "4 / 3", objectFit: "contain", background: "#E7EEF5", borderRadius: 6, display: "block", pointerEvents: "none" }} />
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 6, fontSize: 11, color: "#64748B", fontWeight: 600 }}>
+                <span>Not facing the same way? Drag it, or use ← →.</span>
+                <button type="button" onClick={() => calSpinBy(pair.viewpoint, -SS_SPIN_STEP_DEG)} className="ssd-tb-btn">↺ Left</button>
+                <button type="button" onClick={() => calSpinBy(pair.viewpoint, SS_SPIN_STEP_DEG)} className="ssd-tb-btn">Right ↻</button>
+                {spun !== 0 && <button type="button" onClick={() => calSpinPair(pair.viewpoint, 0)} className="ssd-tb-btn">Reset</button>}
+                <span aria-live="polite" style={{ color: "#94A3B8" }}>{spun ? `Turned ${spun} degrees` : ""}</span>
+              </div>
+            </div>
+          );
+        })}
+        {/* ── FULL SIZE, OUT OF THE PANEL'S COLUMN ─────────────────────────────
+            Fixed to the viewport, so it is the window's width and not the 205 px the
+            designer column has on a phone. The two halves stack, both at full width,
+            with the same turn controls the pair carries -- a builder who opens this
+            to judge a pairing must not have to close it again to straighten it. ── */}
+        {adminCalZoom && (() => {
+          const zp = calPairs.find((p) => p.viewpoint === adminCalZoom);
+          if (!zp) return null;
+          const zWord = SS_VIEW_WORDS[zp.viewpoint] || zp.viewpoint;
+          const zSpun = adminCalSpin[zp.viewpoint] || 0;
+          return (
+            <div role="dialog" aria-modal="true" aria-label={`${zWord}: your picture beside the 3D`}
+              data-ssc-zoom={zp.viewpoint}
+              onClick={(e) => { if (e.target === e.currentTarget) setAdminCalZoom(null); }}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") { e.preventDefault(); setAdminCalZoom(null); }
+                else if (e.key === "ArrowLeft") { e.preventDefault(); calSpinBy(zp.viewpoint, -SS_SPIN_STEP_DEG); }
+                else if (e.key === "ArrowRight") { e.preventDefault(); calSpinBy(zp.viewpoint, SS_SPIN_STEP_DEG); }
+              }}
+              style={{ position: "fixed", inset: 0, zIndex: 4000, background: "rgba(15,23,42,0.94)", overflowY: "auto", padding: 10 }}>
+              <div style={{ maxWidth: 900, margin: "0 auto" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                  <span style={{ color: "#FFF", fontWeight: 800, fontSize: 13 }}>{zWord}</span>
+                  <span style={{ color: "#CBD5E1", fontSize: 11.5, fontWeight: 600 }}>
+                    {calLapNumber(zp.frameUrl) ? `your view ${calLapNumber(zp.frameUrl)}` : "one of your pictures"}
+                  </span>
+                  <span style={{ flex: 1 }} />
+                  <button type="button" autoFocus onClick={() => setAdminCalZoom(null)}
+                    style={{ ...S.btn("#FFF", "#0F172A"), fontSize: 12, padding: "4px 10px" }}>Close</button>
+                </div>
+                <div style={{ fontSize: 10, fontWeight: 800, color: "#CBD5E1", letterSpacing: 0.4, marginBottom: 3 }}>YOUR VIDEO</div>
+                <img src={zp.frameUrl} alt={`Your video, ${zWord.toLowerCase()}, full size`}
+                  style={{ width: "100%", background: "#0F172A", borderRadius: 6, display: "block", marginBottom: 10 }} />
+                <div style={{ fontSize: 10, fontWeight: 800, color: "#DDD6FE", letterSpacing: 0.4, marginBottom: 3 }}>YOUR 3D</div>
+                <img src={zp.shotUrl} alt="" draggable={false}
+                  style={{ width: "100%", background: "#E7EEF5", borderRadius: 6, display: "block" }} />
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8, color: "#CBD5E1", fontSize: 11.5, fontWeight: 600 }}>
+                  <span>Not facing the same way? Turn it, or use ← →.</span>
+                  <button type="button" onClick={() => calSpinBy(zp.viewpoint, -SS_SPIN_STEP_DEG)} style={{ ...S.btn("#FFF", "#5B21B6"), fontSize: 11, padding: "2px 8px" }}>↺ Left</button>
+                  <button type="button" onClick={() => calSpinBy(zp.viewpoint, SS_SPIN_STEP_DEG)} style={{ ...S.btn("#FFF", "#5B21B6"), fontSize: 11, padding: "2px 8px" }}>Right ↻</button>
+                  {zSpun !== 0 && <button type="button" onClick={() => calSpinPair(zp.viewpoint, 0)} style={{ ...S.btn("#FFF", "#64748B"), fontSize: 11, padding: "2px 8px" }}>Reset</button>}
+                  <span aria-live="polite">{zSpun ? `Turned ${zSpun} degrees` : ""}</span>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+        {calPairs.length === 0 && (
+          <div style={{ marginTop: 8, fontSize: 11.5, color: "#B45309", fontWeight: 600, lineHeight: 1.5 }}>
+            {/* ⚠️ DO NOT SEND THEM TO THE 3D PREVIEW FROM HERE. One of the three
+                ways to land on this line is a device that cannot render at all (no
+                WebGL, a lost context), and on that device the docked preview beside
+                this card has already failed and the full-screen one will too -- so
+                the one remedy the card offered was the one thing that could not
+                work. It is not forked on `reason` because the third way here is
+                merely being over the five-second budget, where the preview is fine;
+                instead it names what is true on every device. "What we drew" is
+                rendered below this, and the dimension drawing under it is 2D. */}
+            We couldn't put your own frames side by side with the 3D this time, so there is nothing to compare here. Read <b>What we drew</b> just below, and the dimension drawing under it, against your own pictures before you save.
+          </div>
+        )}
+        {/* THE ROOF, IN FEET. The prompt keeps asking for ratios because the ratios
+            measurably work; a builder cannot check a ratio against a building. Both
+            are true at once, so the number stays a ratio on the wire and becomes
+            feet here. */}
+        <div style={{ marginTop: 10, fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
+          <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec, calDrewPorch, calDrewStep, calReadoutMass)}
+        </div>
+        {/* ── THE FOUR QUESTIONS ───────────────────────────────────────────────
+            ONLY WHERE THERE IS SOMETHING TO ANSWER THEM AGAINST, which is the same
+            condition the Save gate uses. A device that could not render the pairs
+            (no WebGL, a lost context, over the five seconds) has nothing to put in
+            front of the builder, and four questions that gate nothing are worse
+            than none — a gate that is sometimes not a gate stops being read.
+            Consequence, said plainly: on that device the builder saves with no
+            confirmation step, and the line above is what tells them to open the
+            preview and compare it themselves. */}
+        {calPairs.length > 0 && (
+        <div role="group" aria-label="Four checks before saving" style={{ marginTop: 10, borderTop: "1px solid #E2E8F0", paddingTop: 8 }}>
+          <div style={{ fontWeight: 800, fontSize: 12, color: "#0F172A", marginBottom: 6 }}>Four things to check — answer all four before you save</div>
+          {SS_CHECKS.map(([key, question, hint]) => {
+            const answer = adminCalAnswers[key] || "";
+            return (
+              <div key={"ssc-q-" + key} data-ssc-question={key} style={{ borderTop: "1px dashed #E2E8F0", padding: "8px 0" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#0F172A" }}>{question}</div>
+                <div style={{ fontSize: 11, color: "#64748B", marginTop: 2, lineHeight: 1.5 }}>{hint}</div>
+                {/* Full-width and wrapping, so the three land under the question on a
+                    phone instead of squeezing beside it. */}
+                <div role="radiogroup" aria-label={question} style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                  {[["yes", "Yes"], ["no", "No"], ["unsure", "Not sure"]].map(([v, lbl]) => (
+                    <button key={"ssc-a-" + key + v} type="button" role="radio" aria-checked={answer === v}
+                      onClick={() => {
+                        setAdminCalAnswers((p) => ({ ...p, [key]: v }));
+                        // AND WHAT IT WAS AN ANSWER ABOUT, so the Save line can tell
+                        // a "No" that was acted on from one that was not.
+                        setAdminCalAnswerSig((p) => ({ ...p, [key]: calQuestionSig(key) }));
+                        // "No" opens the fix panel in the SAME row. Never a link
+                        // away, never a dead end.
+                        setAdminCalFix((cur) => (v === "no" ? key : cur === key ? null : cur));
+                      }}
+                      className="ssd-chip" style={{ ...calPill, minHeight: 30, ...(answer === v ? { background: v === "yes" ? "#047857" : v === "no" ? "#B91C1C" : "#64748B", borderColor: "transparent", color: "#FFF", fontWeight: 700 } : null) }}>
+                      {answer === v ? "✓ " : ""}{lbl}
+                    </button>
+                  ))}
+                  {answer && answer !== "no" && (
+                    <button type="button" onClick={() => setAdminCalFix((cur) => (cur === key ? null : key))}
+                      className="ssd-tb-btn is-soft" style={{ height: 30 }}>
+                      {adminCalFix === key ? "Hide the controls" : "Change it anyway"}
+                    </button>
+                  )}
+                </div>
+                {/* "Not sure" counts as answered and leaves a mark. Forcing a builder
+                    to commit to Yes when they genuinely cannot tell is how you get
+                    people clicking Yes to get past the gate. */}
+                {answer === "unsure" && (
+                  <div style={{ marginTop: 4, fontSize: 11, color: "#B45309", fontWeight: 600 }}>Marked "not sure" — you can change it any time below.</div>
+                )}
+                {/* THE SAME COURTESY "NOT SURE" ALREADY HAD. adminCalFix holds one
+                    key, so answering the next question closes the panel this one
+                    opened: by the time a builder reaches Save, three of four "No"s
+                    have left nothing on the row but a red button. */}
+                {answer === "no" && calUnfixedNoKeys.indexOf(key) >= 0 && (
+                  <div style={{ marginTop: 4, fontSize: 11, color: "#B91C1C", fontWeight: 600 }}>Marked wrong, and nothing here has changed yet — use the controls in this row, or save it as it is.</div>
+                )}
+                {adminCalFix === key && (
+                  /* The id the banner's button points at with aria-controls. Only one
+                     of the two panels can exist at a time -- this one needs pairs, the
+                     banner's needs none -- so the id is unique either way. */
+                  <div id={"ssc-fix-" + key} style={{ marginTop: 8, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "8px 10px" }}>
+                    {calFixPanel(key)}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <div aria-live="polite" style={{ marginTop: 8, fontSize: 11.5, fontWeight: 700, color: calChecksAnswered === SS_CHECKS.length ? "#047857" : "#B45309" }}>
+            {calChecksAnswered} of {SS_CHECKS.length} answered
+          </div>
+        </div>
+        )}
+        {/* "SOMETHING IS WRONG" NEVER ENDS THE FLOW, and it says the price rather
+            than hiding it — plus what to change about the input, so the second
+            generation is not the same generation twice. The price is the meter's
+            (calChargeOf); with none charged, or none known, it names no amount. */}
+        <div style={{ marginTop: 8, borderTop: "1px dashed #E2E8F0", paddingTop: 8, fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
+          Still not right after changing it by hand? Take a straight-on photo of the end that is wrong, add it in step 3 and generate again — {scan.charge && scan.charge.cents ? `a new generation is another ${scan.charge.said}.` : "that counts as a new generation."}
+        </div>
+      </div>
+    );
+  const calCardScan = !advancedOnly && setup3d && setup3d.onUploadModel && Boolean(adminCal) && (
+      <div className="ssd-card ss-cal-card" data-ssc-card="scan">
+        <div className="ss-cal-head">
+          <span className="ssd-card-t">Scan of a real building</span>
+          {scan.status !== "none" && (
+            <span className={"ss-cal-badge " + (scan.status === "locked" ? "is-ok" : "is-opt")}>
+              {scan.status === "locked" ? "locked" : scan.status}
+            </span>
+          )}
+          <span style={{ flex: 1 }} />
+          {scan.status === "locked"
+            ? <button type="button" onClick={() => scanSetStatus("uploaded")} disabled={scan.busy} className="ssd-tb-btn">Unlock</button>
+            : <button type="button" onClick={() => scanSetStatus("locked")} disabled={scan.busy || scan.status === "none"} className="ssd-tb-btn">Lock this 3D setup</button>}
+        </div>
+        <p className="ss-cal-p">
+          Walk around one of your real buildings with a phone scanning app and export a <b>.glb</b>. We read its
+          size and roof shape and set the 3D up to match — the scan itself is never shown to customers.
+        </p>
+        <div className="ss-cal-row" style={{ gap: 5, marginBottom: 8 }}>
+          <span className="ss-cal-sub" style={{ margin: 0 }}>Your phone:</span>
+          {[["iphone-pro", "iPhone Pro (LiDAR)"], ["iphone", "other iPhone"], ["android", "Android"]].map(([k, lbl]) => (
+            <button key={k} type="button" aria-pressed={scan.device === k} onClick={() => setScan((p) => ({ ...p, device: p.device === k ? null : k }))}
+              className={scan.device === k ? "ssd-chip is-on" : "ssd-chip"} style={calPill}>
+              {lbl}
+            </button>
+          ))}
+        </div>
+        {scan.device && (
+          <p className="ss-cal-p">
+            {scan.device === "iphone-pro" && <>Scaniverse (free, no account): <b>New Scan → Mesh</b>, walk slowly all the way around, process on-device, then <b>Share → Export Model → GLB</b>. LiDAR gives the cleanest mesh.</>}
+            {scan.device === "iphone" && <>No LiDAR on this model — Scaniverse still works in photo mode: circle the building slowly in good light, expect a rougher mesh, then <b>Share → Export Model → GLB</b>.</>}
+            {scan.device === "android" && <>Android phones scan by photos: use <b>Scaniverse</b> (free) or <b>Kiri Engine</b> (free account) — circle the building slowly in good light, then export as <b>GLB</b>.</>}
+          </p>
+        )}
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <label className="ssd-tb-btn is-primary ss-cal-file" style={{ cursor: scan.busy || scan.status === "locked" ? "default" : "pointer", opacity: scan.status === "locked" ? 0.5 : 1 }}>
+            {scan.busy ? (scan.step || "Working…") : "Choose a .glb scan"}
+            <input type="file" accept=".glb,model/gltf-binary" disabled={scan.busy || scan.status === "locked"}
+              onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; scanPick(f); }}
+              style={{ display: "none" }} />
+          </label>
+          {scan.status !== "none" && !scan.measured && !scan.busy && setup3d && setup3d.onLoadModelUrl && (
+            <button type="button" onClick={scanFetchStored} className="ssd-tb-btn">Re-measure the stored scan</button>
+          )}
+          {scan.measured && !scan.busy && (
+            <>
+              <button onClick={scanGenerate} disabled={adminCalPreview}
+                title={scan.aiReady === false
+                  ? "AI is off for this site — this applies the measurements only."
+                  : "Measure, render the scan from four sides, and let AI read the siding + colours."}
+                className="ssd-tb-btn is-primary" style={{ opacity: adminCalPreview ? 0.5 : 1 }}>✨ Generate 3D from this scan</button>
+              <button type="button" onClick={scanApply} className="ssd-tb-btn is-soft">Use these measurements</button>
+              <button type="button" onClick={scanUpload} className="ssd-tb-btn">Save the scan to this style</button>
+            </>
+          )}
+        </div>
+        {scan.err && <div className="ss-cal-err">{scan.err}</div>}
+        {scan.measured && (
+          <div style={{ marginTop: 10, fontSize: 12, color: "var(--ss-ink)" }}>
+            <b>{scan.measured.widthFt} × {scan.measured.depthFt} ft</b>{" · "}
+            walls <b>{scan.measured.eaveFt} ft</b>{" · "}
+            peak <b>{scan.measured.peakFt} ft</b>{" · "}
+            <b>{scan.measured.roofType}</b> roof, pitch <b>{scan.measured.pitch}</b>
+            {scan.measured.overhangFt ? <>{", overhang "}<b>{scan.measured.overhangFt} ft</b></> : null}
+            {scan.measured.gambrel && (
+              <span style={{ color: "#64748B" }}>{" "}(knee {scan.measured.gambrel.kneeU} / rise {scan.measured.gambrel.kneeRise} / ridge {scan.measured.gambrel.ridgeRise})</span>
+            )}
+            <span style={{ color: "#64748B" }}>{" "}(from {scan.measured.sampled.toLocaleString()} surface points)</span>
+            {scan.measured.warn && <div style={{ marginTop: 4, color: "#B45309", fontWeight: 600 }}>⚠ {scan.measured.warn}</div>}
+            {(() => {
+              const matches = scanSizeMatchesFor(scan.measured);
+              if (matches.length) {
+                return (
+                  <div style={{ marginTop: 6, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                    <span className="ss-cal-sub" style={{ margin: 0 }}>Closest sizes you sell:</span>
+                    {matches.map((s) => (
+                      <button key={s.label} type="button" onClick={() => scanApplySize(s.label)} className="ssd-chip" style={calPill}>
+                        {s.label}{s.score === 0 ? " ✓" : ` (±${s.score} ft)`}
+                      </button>
+                    ))}
+                  </div>
+                );
+              }
+              return (
+                <div style={{ marginTop: 6, fontSize: 11.5, color: "#B45309", fontWeight: 600 }}>
+                  You don't sell a {scan.measured.widthFt}×{scan.measured.depthFt} — add it under Settings → Catalog, or pick your closest size.
+                </div>
+              );
+            })()}
+          </div>
+        )}
+      </div>
+    );
   // Not built for the Advanced page (2026-09-29): that page is its own form now and never shows this
-  // panel, so building it there only paid for a second, invisible form on every slider tick.
-  const cal3dPanel = showCal3D && !advancedOnly && (
+  // panel, so building it there only paid for a second, invisible form on every slider tick. Nor for
+  // Settings → Designer → 3D since 2026-10-05, for the same reason: that page is the Advanced form too.
+  const cal3dPanel = showCal3D && !advancedOnly && !calibrationOnly && (
         <div style={{ background: "#FFFBEB", borderBottom: "1px solid #FCD34D", padding: "12px 20px" }}>
+          <style>{SS_CAL_CSS}</style>
           {/* THE ADVANCED PAGE (`advancedOnly`) rendered this same panel for its field grid until
               2026-09-29, and the `!advancedOnly` guards in it are left from then: they hid the parts
               that belong to calibrating a SAVED style. The page no longer builds this panel at all. */}
@@ -28699,974 +29726,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           </>)}
           {adminCal && (
             <div>
-              {/* ── Building scan. Only in the portal: it needs the builder's own session to
-                  upload into a private bucket, and a scan is theirs, not ours. The scan is a
-                  REFERENCE — we measure it and build the parametric model from the numbers,
-                  because the mesh itself cannot be edited, priced or quoted. ── */}
-              {/* ── STEP 1: the walk-around video. The low-friction path: any phone, no app,
-                  no export step. It reads the SHAPE only — size, colour and material are
-                  settings the customer changes afterwards, so nothing here needs to be
-                  measured.
-
-                  ⚠️ THIS CARD NO LONGER GENERATES ANYTHING (2026-09-10, Ahsan: "I want them
-                  to be able to upload a video in here and also add another section in which
-                  they can upload images. And once they have uploaded both a video and four
-                  images, then they can generate the 3D model"). Until today, PICKING A VIDEO
-                  FILE WAS ITSELF A PAID GENERATION — `onChange` called straight through to
-                  `onDraftFromVideo`, with no button, no confirmation and a $20 wallet hold.
-                  Adding a Generate button on top of that would have charged a builder TWICE
-                  for one building, which is the exact "oh, this is fun. Click." spend the
-                  meter was armed to prevent (Carolyn, 2026-09-04 @20:47). So the video card
-                  now only cuts frames and uploads them; one press of Generate below is one
-                  hold is one charge.
-
-                  Gated on onUploadPhoto alone now, not onUploadPhoto && onDraftFromVideo:
-                  this card no longer calls the drafter. That also fixes a live defect — the
-                  card was never gated on `scan.aiReady`, so with ANTHROPIC_API_KEY unset a
-                  builder could watch eight frames upload and then receive a 500. Uploading
-                  frames does not touch the AI, so there is nothing left to fail.
-
-                  REQUIRED since 2026-09-16 (Ahsan: "make video compulsory and images optional
-                  to generate the 3d model"), which is why its badge reads "required" and the
-                  photos step's reads "optional". It stopped being the ONLY required step on
-                  2026-09-19, when the size joined it — see step 2. ── */}
-              {!advancedOnly && setup3d && setup3d.onUploadPhoto && (
-                <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>🎥 Step 1 — Walk-around video</span>
-                    {calVideoReady
-                      ? <span style={{ fontSize: 11, fontWeight: 700, color: "#047857", background: "#ECFDF5", borderRadius: 5, padding: "2px 6px" }}>✓ {calVideoFrames.length} views ready</span>
-                      : <span style={{ fontSize: 11, fontWeight: 700, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 5, padding: "2px 6px" }}>required</span>}
-                  </div>
-                  <p style={{ margin: "6px 0 8px", fontSize: 11.5, color: "#92400E", lineHeight: 1.5 }}>
-                    Film one slow lap of a real building — phone sideways, whole building in frame, about 30 to 60 seconds.
-                    We cut a few still frames out of it and read the roof shape, pitch, overhang and wall height off them.
-                    <b> The video stays on your phone</b> — only the still frames are sent.
-                    {" "}Nothing is read yet: the shape is drafted once, when you press <b>Generate</b> in step 3.
-                  </p>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                    <label style={{ ...S.btn("#92400E", "#FFF"), fontSize: 12, cursor: adminCalVideo.busy || scan.status === "locked" ? "default" : "pointer", opacity: scan.status === "locked" ? 0.5 : 1, marginBottom: 0 }}>
-                      {adminCalVideo.busy ? (adminCalVideo.step || "Working…") : (calVideoReady ? "Choose a different video" : "Choose a walk-around video")}
-                      {/* adminCalPhotos.busy is deliberately absent: uploading images must not
-                          grey out the video picker, which is the same coupling in reverse. */}
-                      <input type="file" accept="video/*" disabled={adminCalVideo.busy || adminCalBusy || scan.status === "locked"}
-                        onChange={(e) => {
-                          const f = e.target.files && e.target.files[0];
-                          e.target.value = "";
-                          if (!f) return;
-                          calStageVideo(f);
-                        }}
-                        style={{ display: "none" }} />
-                    </label>
-                    {calVideoReady && !adminCalVideo.busy && (
-                      <button onClick={calClearVideo} disabled={adminCalBusy || scan.status === "locked"}
-                        title="Forget these frames — you would need to choose a video again before you can generate."
-                        style={{ ...S.btn("#FFF", "#B45309"), border: "1px solid #FDE68A", fontSize: 12 }}>Remove the video</button>
-                    )}
-                  </div>
-                  {adminCalVideo.err && <div style={{ marginTop: 8, fontSize: 11.5, color: "#DC2626", fontWeight: 600 }}>{adminCalVideo.err}</div>}
-                  {/* The frames themselves, unlabelled and in walk order. They are NOT the four
-                      named slots below and must never be spread into them again: until today a
-                      video import stride-filled Front/Left/Right/Back, so a builder who staged
-                      four photographs and then filmed a lap silently lost all four. They are
-                      also views 1-N of one lap, not four staged elevations — labelling them
-                      Front/Back/Left/Right would be a guess about where the walk started. */}
-                  {calVideoReady && !adminCalVideo.busy && (
-                    <div style={{ marginTop: 8 }}>
-                      <div style={{ fontSize: 11, fontWeight: 700, color: "#92400E", marginBottom: 4 }}>What we cut out of your lap, in walk order:</div>
-                      <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-                        {calVideoFrames.map((u, i) => (
-                          <img key={"cal-frame-" + i} src={u} alt={"View " + (i + 1)} title={"View " + (i + 1)}
-                            style={{ width: 78, height: 50, objectFit: "cover", borderRadius: 4, border: "1px solid #FCD34D" }} />
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-              {/* ── STEP 2: THE SIZE OF THE BUILDING THAT WAS FILMED (2026-09-19). Required,
-                  all three, and it is Ahsan's call: "the three dimension fields are required".
-
-                  WHY THIS CARD EXISTS AT ALL. Wall height came back 7 in 74 % of every recorded
-                  generation and was never once above 8, on buildings whose walls measure 9 —
-                  and 1.0 ft came back for the overhang in 53 % of them, on a building whose
-                  eave measures 0.15 ft. Zero variance at a wrong value is the signature of a
-                  default, not of a measurement. A phone at chest height has no datum in frame:
-                  no roof plane, no level line, and the only scale is a door whose height it has
-                  to guess first. The builder knows all three numbers. Asking is cheaper, more
-                  accurate and faster than any amount of prompt.
-
-                  WHAT IT IS NOT. It does not store a width or a length anywhere. One style
-                  sells at up to 21 sizes and the renderer takes its width from the customer's
-                  pick, so a width saved on the style would be a second, lying answer to a
-                  question the catalog already answers. These are the ruler for ONE reading. The
-                  wall height is the exception and it is not an exception really: `wallHeightFt`
-                  is an existing d3 key that already means exactly this, so the field below and
-                  this one edit the same slice.
-
-                  NEVER PRE-FILLED FROM `C.defaultSizes`. A tenant-wide default set says nothing
-                  about the building in front of this builder, and the blocking case is real: a
-                  style with no sizes of its own also has no "Preview on" picker, so a pre-filled
-                  guess would be compared against a preview whose size is nowhere on screen. With
-                  no sizes the fields start BLANK and the card says why in words.
-
-                  ⚠️ NO SSD_CSS ON THIS SURFACE. See SSC_CAL_CSS at module scope. ── */}
-              {/* GATED EXACTLY LIKE STEP 1, and for the same reason. The public ?admin=1
-                  operator page has no `setup3d`, so it renders no step 1 card and no Generate
-                  button -- and this card was left ungated, so that surface showed a "Step 2"
-                  with no step 1, an amber "required" badge that gated nothing, and copy about
-                  "the building you filmed" for an operator who filmed nothing. Two of its
-                  three fields were pure local state there and were silently discarded on the
-                  next style click. Step 3 is ungated on purpose (pasting photo URLs still
-                  works there); there is nothing on the operator surface that consumes these
-                  numbers, and it already has its own "Wall height (ft)" field below.
-
-                  `data-ssc-card` is a TEST HOOK and nothing else. tests/harness/calDims.mjs
-                  photographs this card in each of its states, and locating it by its heading
-                  text would make a reworded heading look like a broken harness. */}
-              {!advancedOnly && setup3d && setup3d.onUploadPhoto && (
-              <div data-ssc-card="dims" style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
-                <style>{SSC_CAL_CSS}</style>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>📏 Step 2 — The size of the building you filmed</span>
-                  {calDimsReady
-                    ? <span style={{ fontSize: 11, fontWeight: 700, color: "#047857", background: "#ECFDF5", borderRadius: 5, padding: "2px 6px" }}>✓ {calDimW} × {calDimL} ft, {calDimH} ft walls</span>
-                    : <span style={{ fontSize: 11, fontWeight: 700, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 5, padding: "2px 6px" }}>required</span>}
-                </div>
-                <p style={{ margin: "6px 0 8px", fontSize: 11.5, color: "#92400E", lineHeight: 1.5 }}>
-                  A video shows us the <b>shape</b>. It cannot show us the <b>size</b> — there is nothing in the frame to
-                  measure against, so we would be guessing, and a guess here bends every other number. Type the three
-                  measurements off the building you filmed and they become the ruler everything else is read against.
-                  {" "}<b>Width is the FRONT wall</b> — the side with the porch, or the main door if there is no porch — and
-                  <b> length runs front to back</b>. On a building with lower wings, measure the whole thing, wings included.
-                  {adminCal && !calOwnSizes(adminCal.styleValue).length
-                    ? <><br /><b>This style has no sizes set up yet</b>, so there is nothing to start you off — type the size of the building you filmed.</>
-                    : null}
-                </p>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8, marginBottom: 8 }}>
-                  {/* ⚠️ AMBER UNTIL IT HAS BEEN LOOKED AT, exactly like the wall height below and
-                      for exactly the same reason. These two are pre-filled from the MEDIAN ROW
-                      OF THE PRICE LIST, which is a number about what this style sells and not
-                      about the building in the video -- and the server states all three to the
-                      model as measurements the builder took. Grey on white read as a finished
-                      answer, and one tap on the wall height turned the badge green over all
-                      three. The seed stays; the tick waits. */}
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Width (ft) — the FRONT wall (the side with the porch or main door)
-                    {/* fontSize dropped from S.sel on purpose: an inline size beats the class, and
-                        the class is what carries the 16px that stops iOS zooming on every tap. */}
-                    <input className="ssc-dim-in" type="number" step="0.5" min="4" inputMode="decimal" placeholder="e.g. 12"
-                      {...calDimProps("widthFt", adminCalDims.widthFt)}
-                      style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: (calWidthNeedsLook || !calDimInBand("widthFt", calDimW)) ? "#F59E0B" : "#CBD5E1", background: calWidthNeedsLook ? "#FFFBEB" : "#FFF" }} />
-                    {calWidthNeedsLook && (
-                      <span style={{ display: "block", marginTop: 2, fontSize: 10.5, fontWeight: 600, color: "#B45309" }}>
-                        From your price list — tap to confirm it matches what you filmed.
-                      </span>
-                    )}
-                  </label>
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Length (ft) — front to back
-                    <input className="ssc-dim-in" type="number" step="0.5" min="4" inputMode="decimal" placeholder="e.g. 24"
-                      {...calDimProps("lengthFt", adminCalDims.lengthFt)}
-                      style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: (calLengthNeedsLook || !calDimInBand("lengthFt", calDimL)) ? "#F59E0B" : "#CBD5E1", background: calLengthNeedsLook ? "#FFFBEB" : "#FFF" }} />
-                    {calLengthNeedsLook && (
-                      <span style={{ display: "block", marginTop: 2, fontSize: 10.5, fontWeight: 600, color: "#B45309" }}>
-                        From your price list — tap to confirm it matches what you filmed.
-                      </span>
-                    )}
-                  </label>
-                  {/* THE SAME SLICE AS THE "Wall height (ft)" FIELD FURTHER DOWN, said out loud
-                      right under the box so nobody edits one and wonders why the other moved.
-                      The label is deliberately NOT "Wall height (ft) — at the eave": that reads
-                      the same to a person and is ambiguous to a locator, and it broke
-                      tests/harness/porchPanel.mjs, which reaches the field below by
-                      /^Wall height \(ft\)/. Putting the qualifier before the unit is clearer
-                      anyway -- the eave is where a builder has to hold the tape. */}
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height at the eave (ft) — the outside walls (single-slope roof: the LOW side)
-                    <input className="ssc-dim-in" type="number" step="0.5" min="3" inputMode="decimal" placeholder="e.g. 9"
-                      {...calDimProps("wallHeightFt", calDimH)}
-                      style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: (calWallNeedsLook || !calDimInBand("wallHeightFt", calDimH)) ? "#F59E0B" : "#CBD5E1", background: (calWallNeedsLook || calWallBad != null) ? "#FFFBEB" : "#FFF" }} />
-                    <span style={{ display: "block", marginTop: 2, fontSize: 10.5, fontWeight: 600, color: (calWallNeedsLook || calWallBad != null) ? "#B45309" : "#94A3B8" }}>
-                      {calWallBad != null
-                        ? `We can only store a wall between ${CAL_DIM_BANDS.wallHeightFt[0]} and ${CAL_DIM_BANDS.wallHeightFt[1]} ft, so this one is not saved yet.`
-                        : calWallNeedsLook
-                          ? "From this style's settings — tap to confirm it matches what you filmed."
-                          : "The same wall height as the field further down."}
-                    </span>
-                  </label>
-                </div>
-                {/* THE EAVE, OPTIONAL. Chips and not a box: the answers that matter are far apart
-                    (flush against 16 in) and a builder who has to type a number into an empty
-                    field will either skip it or guess. "Read it from the video" is where this
-                    starts and it is a real answer — the prompt asks in inches now and names the
-                    flush case, so the model has a fair chance at it. 0 is NOT that: 0 is a flush
-                    eave the builder looked at and measured. */}
-                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: "#92400E" }}>How far does the roof stick out past the wall?</span>
-                  {CAL_OVERHANG_CHIPS.map(([v, lbl]) => (
-                    <button key={"cal-oh-" + String(v)} type="button" onClick={() => setAdminCalDims((p) => ({ ...p, overhangIn: v }))}
-                      style={{ ...S.btn(adminCalDims.overhangIn === v ? "#92400E" : "#FFF", adminCalDims.overhangIn === v ? "#FFF" : "#92400E"), border: "1px solid #FCD34D", fontSize: 11, padding: "3px 8px" }}>
-                      {lbl}
-                    </button>
-                  ))}
-                  <span style={{ fontSize: 10.5, color: "#94A3B8", fontWeight: 600 }}>optional</span>
-                </div>
-                {/* WARNINGS, NOT REFUSALS. Amber and readable, and the button stays live under
-                    them: a builder calibrating against a real building on their own lot may well
-                    have filmed a size their catalog does not sell yet. */}
-                {calDimWarnings.map((w, i) => (
-                  <div key={"cal-dim-warn-" + i} style={{ marginBottom: 6, fontSize: 11.5, color: "#B45309", fontWeight: 600, lineHeight: 1.5 }}>⚠ {w}</div>
-                ))}
-                {/* ALWAYS NAME THE PREVIEWED SIZE, even where there is no picker to change it
-                    with (brief S2-D). A style with no sizes has no "Preview on" control at all,
-                    so without this line the builder compares their building against a 3D of
-                    completely unknown size — which is how a good draft reads as a wrong one.
-                    calibrationOnly, exactly like calSetSize: over the full designer this panel
-                    sits above a customer's plan and moving the size would clear it. */}
-                {calibrationOnly && (
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 11.5, color: "#92400E", fontWeight: 600 }}>
-                    <span>{sel.size ? <>The 3D preview is showing a <b>{sel.size}</b>.</> : <>The 3D preview has no size set yet.</>}</span>
-                    {calDimPreviewLabel && calDimPreviewLabel !== sel.size && (
-                      <button type="button" onClick={() => calSetSize(calDimPreviewLabel)}
-                        title="Render the preview at the size you typed, whether or not this style sells it"
-                        style={{ ...S.btn("#FFF", "#0E7490"), border: "1px solid #A5F3FC", fontSize: 11.5, padding: "3px 8px" }}>
-                        Show it on {Math.round(calDimW)} × {Math.round(calDimL)} (the one you filmed)
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-              )}
-              {/* ── STEP 3: the builder's own photos (OPTIONAL since 2026-09-16), and the one
-                  button that spends money. ──
-                  Carolyn 2026-09-04 @16:05: "we put a thing in here that says, you know, front
-                  side, left side, right side. And it tells them to get a photo of that." A
-                  builder shooting their own building needs to be told WHAT to shoot; four
-                  numbered boxes told them only how many.
-
-                  This card is NOT gated on setup3d: the public ?admin=1 operator page has no
-                  session to upload with, so each slot falls back to pasting a URL there — the
-                  same split calUploadPhotos / calAddPhotoUrl already make. Only the Generate button inside it
-                  needs the portal's authenticated callbacks. ── */}
-              {!advancedOnly && (
-              <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  {/* NO STEP NUMBER WHERE THERE ARE NO OTHER STEPS. Steps 1 and 2 are gated on
-                      `setup3d.onUploadPhoto`, which the public ?admin=1 operator page does not
-                      have, so this card was left announcing "Step 3" as the only card on the
-                      page. (It read "Step 2" there before the dimensions card took that
-                      number: an off-by-one that had been there a while and got wider.) The
-                      card is ungated on purpose -- pasting photo URLs still works there -- so
-                      it is the NUMBER that goes, and the copy with it: an operator filmed
-                      nothing and has no Generate button to make sharper. */}
-                  <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>📸 {setup3d && setup3d.onUploadPhoto ? "Step 3 — " : ""}Photos of the same building</span>
-                  {/* "optional" in GREY, not the amber "N of 4 added" it replaced (2026-09-16):
-                      amber on this surface means something is still missing, and nothing is. */}
-                  {calPhotoCount > 0
-                    ? <span style={{ fontSize: 11, fontWeight: 700, color: "#047857", background: "#ECFDF5", borderRadius: 5, padding: "2px 6px" }}>✓ {calPhotoCount} image{calPhotoCount === 1 ? "" : "s"}</span>
-                    : <span style={{ fontSize: 11, fontWeight: 700, color: "#475569", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 5, padding: "2px 6px" }}>optional</span>}
-                </div>
-                <p style={{ margin: "6px 0 8px", fontSize: 11.5, color: "#92400E", lineHeight: 1.5 }}>
-                  <b>Optional.</b> {setup3d && setup3d.onUploadPhoto
-                    ? <>The video alone is enough to generate; photos make the read sharper. Stand back and
-                      photograph the <b>same building you filmed</b>: straight on, whole building in frame, in daylight.</>
-                    : <>Reference photos of one real building of this style, for tuning the spec against. Straight on,
-                      whole building in frame, in daylight.</>}
-                  <b> One of each side</b> is the most useful set (front, left, right, back). Pick them all at once. Stills
-                  are sharper than video frames, so the roof pitch and the eave read best from these.
-                </p>
-                {/* ONE UPLOAD, MANY FILES, NO NAMED SLOTS (2026-09-10). Ahsan: "I want to be
-                    able to upload multiple pictures at a single time, remove the option of left
-                    right front and back, just use upload images where user can upload different
-                    images."
-
-                    This is the THIRD shape this surface has had and the second reversal, so the
-                    reasoning it overturns is kept rather than deleted. Carolyn asked for the four
-                    labelled boxes on 09-04 (@16:05) for a reason that was right: "we put a thing
-                    in here that says, you know, front side, left side, right side. And it tells
-                    them to get a photo of that" — four numbered boxes told a builder how many
-                    photos to take and not which ones. That instruction now lives in the copy
-                    above, which can say more than a box label ever could.
-
-                    What actually goes is the CLAIM that the second photo is the left side. A
-                    multi-select picker returns files in whatever order the OS gives them, so a
-                    positional label would be a guess — and a wrong label is worse than none,
-                    because it tells the model a photo shows a side it never shows. */}
-                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
-                  {setup3d && setup3d.onUploadPhoto ? (
-                    /* Disabled on adminCalPhotos.busy (its OWN work) and adminCalBusy (a generation
-                       or a save, which would be writing the same spec) — but NOT on
-                       adminCalVideo.busy, so images can be picked while a lap uploads.
-
-                       A PLAIN BLOCK COMMENT, not a braced JSX one: this sits inside a ternary
-                       branch, which must be ONE expression, so a JSX comment node beside the
-                       element parses as a second child and fails with "Unexpected token, expected
-                       comma". In children position the braced form is the correct one. */
-                    <label style={{ ...S.btn("#92400E", "#FFF"), fontSize: 12, cursor: adminCalPhotos.busy || adminCalBusy ? "wait" : "pointer", opacity: adminCalPhotos.busy || adminCalBusy ? 0.6 : 1, marginBottom: 0 }}>
-                      {adminCalPhotos.busy ? (adminCalPhotos.step || "Uploading…") : (calPhotoCount ? "Add more images" : "Choose images")}
-                      {/* `multiple` is the whole ask. accept="image/*" keeps the picker on images;
-                          the shrink and the server's type gate do the real enforcing. */}
-                      <input type="file" accept="image/*" multiple disabled={adminCalPhotos.busy || adminCalBusy} style={{ display: "none" }}
-                        onChange={(e) => {
-                          // COPIED BEFORE THE RESET, and that order is the whole bug this line
-                          // once had. `e.target.files` is a LIVE FileList, not a snapshot, so
-                          // `e.target.value = ""` empties the very object the handler is holding:
-                          // `fs.length` read 0 immediately afterwards and nothing uploaded, with no
-                          // error anywhere. The single-file version got away with it because it
-                          // pulled `files[0]` out first. The reset itself has to stay, or picking
-                          // the same file twice fires no change event at all.
-                          const fs = Array.prototype.slice.call(e.target.files || []);
-                          e.target.value = "";
-                          if (fs.length) calUploadPhotos(fs);
-                        }} />
-                    </label>
-                  ) : (
-                    /* No session on the public ?admin=1 page, so a URL is pasted. One box that
-                       appends, rather than one box per slot — there are no slots left to sit in.
-                       Enter submits, because a form field that only works via a button beside it
-                       is the kind of thing people report as broken. */
-                    <>
-                      {/* S.sel, not S.input. There IS no S.input — the block this replaces spread
-                          it anyway, and `{...undefined}` is a silent no-op, so that field had been
-                          rendering unstyled since the day it shipped. */}
-                      <input id="cal-photo-url" placeholder="https://…/photo.jpg" style={{ ...S.sel, minWidth: 260, fontSize: 12, fontWeight: 400 }}
-                        onKeyDown={(e) => {
-                          if (e.key !== "Enter") return;
-                          e.preventDefault();
-                          if (calAddPhotoUrl(e.currentTarget.value)) e.currentTarget.value = "";
-                        }} />
-                      <button type="button" style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}
-                        onClick={() => {
-                          const el = document.getElementById("cal-photo-url");
-                          if (el && calAddPhotoUrl(el.value)) el.value = "";
-                        }}>Add image</button>
-                    </>
-                  )}
-                  <span style={{ fontSize: 11.5, color: "#B45309", fontWeight: 600 }}>
-                    {calPhotoCount
-                      ? `${calPhotoCount} of ${CAL_PHOTO_MAX} used`
-                      : `Pick several at once, up to ${CAL_PHOTO_MAX}.`}
-                  </span>
-                </div>
-                {/* Step 3's own error line. It used to share adminCalMsg with the video path and
-                    the generation, so two concurrent uploads overwrote each other's news. */}
-                {adminCalPhotos.err && <div style={{ marginBottom: 8, fontSize: 11.5, color: "#DC2626", fontWeight: 600 }}>{adminCalPhotos.err}</div>}
-                {calPhotoCount > 0 && (
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
-                    {adminCal.photos.filter(Boolean).map((url, i) => (
-                      <div key={"cal-photo-" + url} style={{ position: "relative" }}>
-                        {/* "Image N of M", never a side name — see the block comment above. */}
-                        <img src={url} alt={`Image ${i + 1} of ${calPhotoCount}`} title={`Image ${i + 1} of ${calPhotoCount}`}
-                          style={{ width: 108, height: 72, objectFit: "cover", borderRadius: 4, border: "1px solid #FCD34D", display: "block" }} />
-                        {/* Removed by URL, not by index. The two agree today because calTrimPhotos
-                            leaves no blanks, so `.filter(Boolean)` returns the array itself — but
-                            that is an invariant held somewhere else, and an off-by-one here deletes
-                            the wrong photo silently. */}
-                        <button type="button" onClick={() => calRemovePhoto(url)} disabled={adminCalPhotos.busy || adminCalBusy}
-                          title="Remove this image"
-                          style={{ position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: 9, border: "1px solid #FCD34D", background: "#FFF", color: "#B45309", fontWeight: 800, fontSize: 12, lineHeight: 1, padding: 0, cursor: adminCalBusy ? "wait" : "pointer" }}>×</button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {/* THE ONE PAID BUTTON. It moved here from the action row beside Save on
-                    2026-09-10, because the steps it belongs to — film, photograph, generate —
-                    read top to bottom in one place. Its gate is Ahsan's of 2026-09-16: "make
-                    video compulsory and images optional to generate the 3d model", which
-                    replaced the 09-10 "both a video and four images". It still sits in step 3's
-                    card, so a builder with a walk-around and no photos reads past an optional
-                    step to reach it; the badge and the line underneath both say it is optional.
-
-                    RENDERED DISABLED, NEVER HIDDEN. A button that simply is not there tells a
-                    builder nothing about what is missing, and this repo has been bitten by
-                    disabled controls that fail silently; the line underneath always names the
-                    thing still to do.
-
-                    ⚠️ The CHARGE is not decided here and must not be. `calibrate_style_ai`
-                    takes the wallet hold server-side, ordered after the daily cap and before
-                    the model call, and the wallet deliberately FAILS CLOSED — failing open
-                    means performing a paid service free with no record of it. A browser button
-                    that thought it knew the price would be a second opinion about money. The
-                    money line below only REPEATS the server's own answer (scan.charge, from
-                    calChargeOf) and gates nothing. */}
-                {setup3d && setup3d.onDraftFromCombined && scan.aiReady !== false && (
-                  <div style={{ marginTop: 10, borderTop: "1px solid #FEF3C7", paddingTop: 10 }}>
-                    <button onClick={calGenerate} disabled={adminCalBusy || adminCalVideo.busy || adminCalPhotos.busy || !calCanGenerate}
-                      title={calCanGenerate
-                        ? (calPhotoCount
-                          ? "Read this building's shape from every view above — the walk-around frames and your own photos together"
-                          : "Read this building's shape from the walk-around frames above")
-                        /* The gate's OWN words, so a disabled button and the tooltip on it
-                           cannot say different things about what is missing. The hard-coded
-                           string named only the video, which stopped being the whole answer
-                           when the size joined the gate on 2026-09-19. */
-                        : calGenerateWhy}
-                      style={{ ...S.btn(adminCalBusy || !calCanGenerate ? "#9CA3AF" : "#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : (calCanGenerate ? "pointer" : "not-allowed") }}>
-                      {adminCalBusy ? "Working…" : "✨ Generate the 3D model"}
-                    </button>
-                    <div style={{ marginTop: 6, fontSize: 11.5, color: calCanGenerate ? "#166534" : "#B45309", fontWeight: 600, lineHeight: 1.5 }}>
-                      {calGenerateWhy}
-                    </div>
-                    {/* ── WHAT ONE PRESS IS DOING, in four honest lines ────────────────────
-                        A builder who watches a four-step bar with no explanation assumes four
-                        charges. The money line under the rule is what makes "the check
-                        always runs" safe to ship, and it is shown every single time rather
-                        than only on the slow path.
-
-                        Steps 1 and 2 are two halves of ONE paid call: the model looks at the
-                        views and drafts in the same request, so 1 stands for the whole of it
-                        and 2 completes when the draft lands. Two ticks appearing together is
-                        honest; a second progress bar for something that was never a second
-                        request would not be. ── */}
-                    {adminCalBusy && adminCalCheck && (
-                      <div data-ssc-card="progress" style={{ marginTop: 10, border: "1px solid #DDD6FE", borderRadius: 8, background: "#FAF5FF", padding: "10px 12px" }}>
-                        <div style={{ fontWeight: 800, fontSize: 12.5, color: "#5B21B6", marginBottom: 6 }}>Reading your building…</div>
-                        <ol style={{ margin: 0, padding: 0, listStyle: "none", display: "grid", gap: 4 }} aria-live="polite">
-                          {[
-                            ["draft", `Looking at your ${adminCalCheck.views || 0} views`, `Looked at your ${adminCalCheck.views || 0} views`],
-                            ["draft", "Drawing a first 3D from what they show", "Drew a first 3D from what they show"],
-                            /* THE ROUND IS SAID OUT LOUD once a check is running (2026-09-24). Up to
-                               SS_CHECK_ROUNDS of them, each a render and a check, so without it the
-                               card sits on one line for two minutes and reads as stuck. */
-                            ["check", adminCalCheck.round
-                              ? `Checking its work — round ${adminCalCheck.round} of ${SS_CHECK_ROUNDS}`
-                              : "Checking our 3D against your video, side by side", "Checked our 3D against your video"],
-                            ["done", "Correcting anything that doesn't line up", "Correcting anything that doesn't line up"],
-                          ].map(([owns, doing, done], i) => {
-                            const order = ["draft", "render", "check", "done"];
-                            const at = order.indexOf(adminCalCheck.step);
-                            const mine = order.indexOf(owns);
-                            const state = at > mine ? "done" : at === mine ? "now" : "next";
-                            return (
-                              <li key={"ssc-step-" + i} aria-current={state === "now" ? "step" : undefined}
-                                style={{ fontSize: 11.5, lineHeight: 1.5, fontWeight: state === "next" ? 500 : 700, color: state === "done" ? "#047857" : state === "now" ? "#5B21B6" : "#94A3B8" }}>
-                                {state === "done" ? "✓ " : state === "now" ? "› " : "  "}{state === "done" ? done : doing}
-                              </li>
-                            );
-                          })}
-                        </ol>
-                        {/* THE AUTOMATIC SECOND READ, said while it happens. Without this line the
-                            first step simply takes twice as long and nothing says why; with it, the
-                            builder knows the first read was thrown away and that it cost nothing. */}
-                        {adminCalCheck.retry && adminCalCheck.step === "draft" && (
-                          <div style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", fontWeight: 700, lineHeight: 1.5 }}>
-                            {adminCalCheck.retry === "upstream"
-                              ? "The AI service couldn't finish the first read, so we are reading your views again. It is still one generation."
-                              : "The first read ran out of room before it finished, so we are reading your views again with a shorter answer. It is still one generation."}
-                          </div>
-                        )}
-                        {/* THE PICKUP, said while it happens (2026-09-25). The answer this press was
-                            waiting on dropped, and the draft is being read back off the server; no
-                            "try again", because pressing again is the one thing that would not help. */}
-                        {adminCalCheck.recovering && adminCalCheck.step === "draft" && (
-                          <div data-ssc-recovering="1" style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", fontWeight: 700, lineHeight: 1.5 }}>
-                            Your connection dropped — picking the draft up from the server… Keep this page open. It is still one generation.
-                          </div>
-                        )}
-                        <div style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", lineHeight: 1.5 }}>
-                          {adminCalSlow
-                            ? "Still going. Big videos take longer — don't close the page."
-                            : "Usually four to six minutes — it studies your video carefully. You can leave this page open and come back."}
-                        </div>
-                        {/* THE MONEY LINE. Under a rule, on every render of this card. What it
-                            says about money follows the meter (calChargeOf, 2026-10-05): the
-                            price when one is charged, "free" when nothing is, and no money claim
-                            when the server has not said. data-ssc-charge names which. */}
-                        <div data-ssc-charge={scan.charge ? (scan.charge.cents ? "priced" : "free") : "unknown"} style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #DDD6FE", fontSize: 11, color: "#4C1D95", fontWeight: 700, lineHeight: 1.5 }}>
-                          {scan.charge && scan.charge.cents
-                            ? `This is one generation. The check and the correction are part of it — you are charged ${scan.charge.said} once, however much we have to fix.`
-                            : scan.charge && scan.charge.free
-                              ? "This is one generation. The check and the correction are part of it. Generating is free right now, so nothing comes out of your wallet."
-                              : "This is one generation. The check and the correction are part of it."}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-                {/* The model's own reading of the building, in plain words. It used to sit in
-                    the video card, bound to `adminCalVideo.observed` AND gated on
-                    `adminCalVideo.read > 0` — both of which only `calibrateFromVideo` ever
-                    set. With the video path no longer drafting, those notes would have
-                    rendered for nobody while the server still spent the extra 200 max_tokens
-                    producing them. `calGenerate` sets both fields now, which also closes the
-                    09-04 log's open item ("Show the observed notes on the combined draft"). */}
-                {adminCalVideo.read > 0 && !adminCalBusy && adminCalVideo.observed && (
-                  <div style={{ marginTop: 8, fontSize: 12, color: "#0F172A" }}>
-                    <b>What the model saw</b>
-                    <div style={{ marginTop: 6, display: "grid", gap: 3, fontSize: 11.5, color: "#334155" }}>
-                      {/* `roofNote` is the field the server composes its machine warnings into,
-                          so it carries the porch and wall-height ones as well. Labelling all
-                          three "Roof:" files two of them under the wrong heading. */}
-                      {adminCalVideo.observed.roofNote && <div><b>{calWarnQuestion === "porch" ? "Porch:" : calWarnQuestion === "walls" ? "Wall height:" : "Roof:"}</b> {adminCalVideo.observed.roofNote}</div>}
-                      {adminCalVideo.observed.eave && <div><b>Eave:</b> {adminCalVideo.observed.eave}</div>}
-                      {adminCalVideo.observed.doors && <div><b>Doors:</b> {adminCalVideo.observed.doors}</div>}
-                      {adminCalVideo.observed.windows && <div><b>Windows:</b> {adminCalVideo.observed.windows}</div>}
-                      {adminCalVideo.observed.vents && <div><b>Vents:</b> {adminCalVideo.observed.vents}</div>}
-                      {adminCalVideo.observed.confidence && (
-                        <div style={{ color: adminCalVideo.observed.confidence === "low" ? "#B45309" : "#64748B" }}>
-                          Confidence: <b>{adminCalVideo.observed.confidence}</b>
-                          {adminCalVideo.observed.confidence !== "high" ? " — check the roof numbers below against the building." : ""}
-                        </div>
-                      )}
-                    </div>
-                    {/* Said every time, not only on low confidence: a ground-level camera
-                        NEVER sees the roof planes, and the two roof shapes the spec cannot
-                        express are the two a builder is most likely to film. */}
-                    <div style={{ marginTop: 6, fontSize: 11.5, color: "#B45309", lineHeight: 1.5 }}>
-                      Roofs are read from the ground, so check the pitch below. Doors, windows and vents are placed in the designer — this only sets the building's shape.
-                    </div>
-                  </div>
-                )}
-              </div>
-              )}
-              {/* ── STEP 4: DOES THIS MATCH YOUR BUILDING? ────────────────────────────────
-                  The builder's own frames beside our 3D of the same view, turned to face the
-                  same way, and four questions that are not generic reassurance: they are the
-                  measured failure list. Roof shape (a drafted gambrel that rendered as a
-                  gable), the porch (`porchOutFt` came back 0 times in 19 recorded
-                  generations), the wall height (7 in 74 % of them, on buildings measuring 9)
-                  and the colours.
-
-                  ⚠️ NOTHING HERE IS SAVED. This card sits above the existing field grid and
-                  the Save button, and every control in it writes the same draft spec those
-                  do. Save is one deliberate press, after four answers.
-
-                  NO SSD_CSS ON THIS SURFACE — see SSC_CAL_CSS. Inline styles, and the one
-                  responsive rule that cannot be written inline (side-by-side on a panel,
-                  stacked on a phone) is an auto-fit grid rather than a media query, so it
-                  reflows on the CONTAINER and needs nothing measured in JavaScript. ── */}
-              {!advancedOnly && adminCalCheck && !adminCalBusy && adminCalCheck.step === "done" && (
-                <div data-ssc-card="compare" style={{ border: "1px solid #DDD6FE", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
-                    <span style={{ fontWeight: 800, fontSize: 12.5, color: "#5B21B6" }}>🔍 Step 4 — Does this match your building?</span>
-                    <span style={{ fontSize: 11, color: "#64748B", fontWeight: 700 }}>
-                      {calPairs.length ? `${calPairs.length} view${calPairs.length === 1 ? "" : "s"} · ` : ""}nothing is saved yet
-                    </span>
-                  </div>
-                  {/* ⚠️ PROMOTED OUT OF THE GREY NOTES LIST INTO A BANNER. This message used to
-                      land under four other lines in "What the model saw", which is the
-                      quietest place on the panel for the loudest thing on it. Its button arms
-                      the question it is about, so a builder is never left working out which of
-                      the four the warning meant. */}
-                  {calWarnBanner && (
-                    <div role="alert" style={{ marginTop: 8, border: "1px solid #FCD34D", background: "#FFFBEB", borderRadius: 6, padding: "8px 10px", fontSize: 11.5, color: "#92400E", fontWeight: 600, lineHeight: 1.5 }}>
-                      {calWarnBanner}
-                      <div style={{ marginTop: 6 }}>
-                        {/* ⚠️ WITH PAIRS ON SCREEN THIS BUTTON HAD NO VISIBLE EFFECT AT ALL.
-                            The panel it opens renders inside its own question's row, roughly a
-                            thousand pixels below the banner and off the bottom of the window;
-                            nothing scrolled, nothing near the button changed, and the label was
-                            gated on `!calPairs.length` so it could never read "Hide". The
-                            natural response -- press it again -- shut what the first press had
-                            opened. So: scroll the row into view, and let the label say which
-                            way the toggle is pointing. aria-expanded/aria-controls close the
-                            same gap for anyone who cannot see the scroll. */}
-                        <button type="button"
-                          aria-expanded={adminCalFix === calWarnQuestion}
-                          aria-controls={"ssc-fix-" + calWarnQuestion}
-                          onClick={() => {
-                            const opening = adminCalFix !== calWarnQuestion;
-                            setAdminCalFix(opening ? calWarnQuestion : null);
-                            // After the commit, not during it: the row is taller once the panel
-                            // is in it. setTimeout rather than requestAnimationFrame because a
-                            // hidden tab starves rAF and the scroll would never happen.
-                            if (opening && calPairs.length) {
-                              setTimeout(() => {
-                                const row = document.querySelector('[data-ssc-question="' + calWarnQuestion + '"]');
-                                if (row && row.scrollIntoView) row.scrollIntoView({ block: "center", behavior: "smooth" });
-                              }, 0);
-                            }
-                          }}
-                          style={{ ...S.btn("#92400E", "#FFF"), fontSize: 11 }}>
-                          {adminCalFix === calWarnQuestion ? "Hide" : "Open"} the {SS_FIX_WORDS[calWarnQuestion] || "roof"} controls
-                        </button>
-                      </div>
-                      {/* ⚠️ WITH NO PAIRS THERE ARE NO QUESTIONS, so the panel this button
-                          arms has nowhere to render and the button did nothing at all: no
-                          scroll, no message, not one node changed. That is the state the
-                          banner was promoted out of the grey notes list FOR -- the model could
-                          not line the frames up, or the device could not render, and the
-                          warning is all the builder has. So the panel opens here instead.
-                          With pairs on screen it opens in its own question's row, which keeps
-                          the fix next to the pictures the answer is about. */}
-                      {!calPairs.length && adminCalFix === calWarnQuestion && (
-                        <div id={"ssc-fix-" + calWarnQuestion} style={{ marginTop: 8, background: "#FFF", border: "1px solid #FDE68A", borderRadius: 6, padding: "8px 10px" }}>
-                          {calFixPanel(calWarnQuestion)}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {/* WHAT THE CHECK DID, in one quiet line or one honest list. A failed check
-                      says the CHECK could not run and never that the generation did: the
-                      builder has their draft and has been charged once either way. */}
-                  <div style={{ marginTop: 8, fontSize: 11.5, lineHeight: 1.5, fontWeight: 600, color: adminCalCheck.verdict === "matches" ? "#047857" : adminCalCheck.verdict === "corrections" ? "#5B21B6" : "#B45309" }}>
-                    {adminCalCheck.verdict === "matches" && <>✓ Checked against your video — the draft already matches. Look at it yourself anyway; you are the one who has seen the building.</>}
-                    {/* HOW MANY ROUNDS, when there was more than one: "corrected 3 things" after
-                        two looks is a different claim from after one, and the list below is the
-                        net of all of them (ssMergeChanges). */}
-                    {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length > 0 && <>We checked our own 3D against your video{(adminCalCheck.rounds || 1) > 1 ? ` ${adminCalCheck.rounds} times` : ""} and corrected {adminCalCheck.changed.length} thing{adminCalCheck.changed.length === 1 ? "" : "s"}:</>}
-                    {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length === 0 && <>We checked our own 3D against your video{(adminCalCheck.rounds || 1) > 1 ? ` ${adminCalCheck.rounds} times` : ""}, and its corrections cancelled each other out, so what you see is the first read. Look at it carefully against your pictures.</>}
-                    {adminCalCheck.verdict === "rejected_too_many" && <>Our check thought too much of the draft was wrong to patch safely, so it changed nothing. Go through the four questions below carefully.</>}
-                    {/* "Charged once" only on a priced meter (calChargeOf): with the meter off it
-                        was a claim about money nobody paid. */}
-                    {(adminCalCheck.verdict === "skipped" || adminCalCheck.verdict === "failed") && <>We couldn't run our own check this time, so what you see is the first read. Look at it carefully against your pictures before you save.{scan.charge && scan.charge.cents ? " You were charged once, as usual." : ""}</>}
-                  </div>
-                  {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length > 0 && (
-                    <ul style={{ margin: "6px 0 0", paddingLeft: 18, display: "grid", gap: 3 }}>
-                      {adminCalCheck.changed.map((ch, i) => {
-                        const line = ssChangeLine(ch);
-                        return (
-                          <li key={"ssc-chg-" + i} style={{ fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
-                            <b>{line.label}</b> — {line.text}
-                            {ch.why ? <span style={{ color: "#64748B" }}> · {ch.why}</span> : null}
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
-                  {adminCalCheck.note ? <div style={{ marginTop: 4, fontSize: 11.5, color: "#64748B", lineHeight: 1.5 }}>{adminCalCheck.note}</div> : null}
-                  {/* ── THE PAIRS ──────────────────────────────────────────────────────────
-                      One per viewpoint the FIRST pass labelled, and no more: a pair we could
-                      only make by guessing an angle would show the builder a mismatch we
-                      invented and ask them to judge it. */}
-                  {calPairs.length > 0 && (
-                    <p style={{ margin: "10px 0 6px", fontSize: 11.5, color: "#475569", lineHeight: 1.5 }}>
-                      Your pictures beside the 3D, turned to face the same way. <b>If the 3D is facing the wrong way, drag it round</b> — that is a camera we matched by machine, not a mistake in the building.
-                    </p>
-                  )}
-                  {calPairs.map((pair, i) => {
-                    const word = SS_VIEW_WORDS[pair.viewpoint] || pair.viewpoint;
-                    const spun = adminCalSpin[pair.viewpoint] || 0;
-                    const show = adminCalPairView[pair.viewpoint] || "both";
-                    const half = (kind) => (show === "both" || show === kind);
-                    return (
-                      <div key={"ssc-pair-" + pair.viewpoint} role="group" aria-label={`Comparison ${i + 1} of ${calPairs.length}: ${word}`}
-                        data-ssc-pair={pair.viewpoint}
-                        style={{ marginTop: 8, border: "1px solid #E2E8F0", borderRadius: 6, padding: 8 }}>
-                        <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
-                          <span style={{ fontSize: 11.5, fontWeight: 800, color: "#0F172A" }}>{word}</span>
-                          <span style={{ fontSize: 10.5, color: "#94A3B8", fontWeight: 600 }}>
-                            {calLapNumber(pair.frameUrl)
-                              ? `matched from your view ${calLapNumber(pair.frameUrl)}`
-                              : "matched from one of your pictures"}
-                          </span>
-                          <span style={{ flex: 1 }} />
-                          {/* One full-width image at a time, for a phone or for a closer look.
-                              "Both" still stacks rather than shrinking at narrow widths — see
-                              the grid below — so nothing here is ever 170 px wide. */}
-                          {[["both", "Side by side"], ["photo", "Your photo"], ["3d", "Your 3D"]].map(([k, lbl]) => (
-                            <button key={"ssc-pv-" + pair.viewpoint + k} type="button"
-                              aria-pressed={show === k}
-                              onClick={() => setAdminCalPairView((p) => ({ ...p, [pair.viewpoint]: k }))}
-                              style={{ ...S.btn(show === k ? "#5B21B6" : "#FFF", show === k ? "#FFF" : "#5B21B6"), border: "1px solid #DDD6FE", fontSize: 10.5, padding: "2px 7px" }}>
-                              {lbl}
-                            </button>
-                          ))}
-                          {/* THE ONE THAT ESCAPES THE COLUMN. On a phone the two halves above
-                              are 161 px wide whichever of the three is pressed; this opens them
-                              at the width of the window. A button rather than a tap on the
-                              image: the 3D half already owns pointerdown for the drag. */}
-                          <button type="button" data-ssc-zoom-open={pair.viewpoint}
-                            onClick={() => setAdminCalZoom(pair.viewpoint)}
-                            style={{ ...S.btn("#FFF", "#0F172A"), border: "1px solid #CBD5E1", fontSize: 10.5, padding: "2px 7px" }}>
-                            ⤢ Bigger
-                          </button>
-                        </div>
-                        <div style={{ display: "grid", gridTemplateColumns: show === "both" ? "repeat(auto-fit, minmax(min(240px, 100%), 1fr))" : "1fr", gap: 8 }}>
-                          {half("photo") && (
-                            <div>
-                              <div style={{ fontSize: 10, fontWeight: 800, color: "#64748B", letterSpacing: 0.4, marginBottom: 3 }}>YOUR VIDEO</div>
-                              <img src={pair.frameUrl} alt={`Your video, ${word.toLowerCase()}`}
-                                style={{ width: "100%", aspectRatio: "4 / 3", objectFit: "contain", background: "#0F172A", borderRadius: 6, display: "block" }} />
-                            </div>
-                          )}
-                          {half("3d") && (
-                            <div>
-                              <div style={{ fontSize: 10, fontWeight: 800, color: "#5B21B6", letterSpacing: 0.4, marginBottom: 3 }}>YOUR 3D</div>
-                              {/* DRAG TO ROTATE, AND ARROW KEYS TOO. A drag-only affordance
-                                  would shut keyboard users out of the one control that
-                                  rescues a pairing the labels got wrong. The drag COMMITS on
-                                  release rather than following the pointer: each new angle is
-                                  a fresh render, and re-rendering per pointermove would make
-                                  the panel unusable to save nobody any time. */}
-                              <div tabIndex={0} role="img" data-ssc-spin={pair.viewpoint}
-                                aria-label={`The 3D we built, ${word.toLowerCase()}. Left and right arrow keys turn it; Home puts it back.`}
-                                onPointerDown={(e) => { calDragRef.current = { viewpoint: pair.viewpoint, x: e.clientX, from: calSpinReqRef.current[pair.viewpoint] || 0 }; }}
-                                onPointerUp={(e) => {
-                                  const d = calDragRef.current;
-                                  calDragRef.current = null;
-                                  if (!d || d.viewpoint !== pair.viewpoint) return;
-                                  // 2 px of travel to the degree, so a lap is a comfortable
-                                  // drag rather than a flick, and a click that moved a pixel
-                                  // does not re-render anything.
-                                  const moved = Math.round((e.clientX - d.x) / 2);
-                                  if (Math.abs(moved) >= 3) calSpinPair(pair.viewpoint, d.from + moved);
-                                }}
-                                onKeyDown={(e) => {
-                                  if (e.key === "ArrowLeft") { e.preventDefault(); calSpinBy(pair.viewpoint, -SS_SPIN_STEP_DEG); }
-                                  else if (e.key === "ArrowRight") { e.preventDefault(); calSpinBy(pair.viewpoint, SS_SPIN_STEP_DEG); }
-                                  else if (e.key === "Home") { e.preventDefault(); calSpinPair(pair.viewpoint, 0); }
-                                }}
-                                style={{ cursor: "ew-resize", touchAction: "pan-y", borderRadius: 6 }}>
-                                <img src={pair.shotUrl} alt="" draggable={false}
-                                  style={{ width: "100%", aspectRatio: "4 / 3", objectFit: "contain", background: "#E7EEF5", borderRadius: 6, display: "block", pointerEvents: "none" }} />
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 6, fontSize: 11, color: "#64748B", fontWeight: 600 }}>
-                          <span>Not facing the same way? Drag it, or use ← →.</span>
-                          <button type="button" onClick={() => calSpinBy(pair.viewpoint, -SS_SPIN_STEP_DEG)} style={{ ...S.btn("#FFF", "#5B21B6"), border: "1px solid #DDD6FE", fontSize: 11, padding: "2px 8px" }}>↺ Left</button>
-                          <button type="button" onClick={() => calSpinBy(pair.viewpoint, SS_SPIN_STEP_DEG)} style={{ ...S.btn("#FFF", "#5B21B6"), border: "1px solid #DDD6FE", fontSize: 11, padding: "2px 8px" }}>Right ↻</button>
-                          {spun !== 0 && <button type="button" onClick={() => calSpinPair(pair.viewpoint, 0)} style={{ ...S.btn("#FFF", "#64748B"), border: "1px solid #E2E8F0", fontSize: 11, padding: "2px 8px" }}>Reset</button>}
-                          <span aria-live="polite" style={{ color: "#94A3B8" }}>{spun ? `Turned ${spun} degrees` : ""}</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {/* ── FULL SIZE, OUT OF THE PANEL'S COLUMN ─────────────────────────────
-                      Fixed to the viewport, so it is the window's width and not the 205 px the
-                      designer column has on a phone. The two halves stack, both at full width,
-                      with the same turn controls the pair carries -- a builder who opens this
-                      to judge a pairing must not have to close it again to straighten it. ── */}
-                  {adminCalZoom && (() => {
-                    const zp = calPairs.find((p) => p.viewpoint === adminCalZoom);
-                    if (!zp) return null;
-                    const zWord = SS_VIEW_WORDS[zp.viewpoint] || zp.viewpoint;
-                    const zSpun = adminCalSpin[zp.viewpoint] || 0;
-                    return (
-                      <div role="dialog" aria-modal="true" aria-label={`${zWord}: your picture beside the 3D`}
-                        data-ssc-zoom={zp.viewpoint}
-                        onClick={(e) => { if (e.target === e.currentTarget) setAdminCalZoom(null); }}
-                        onKeyDown={(e) => {
-                          if (e.key === "Escape") { e.preventDefault(); setAdminCalZoom(null); }
-                          else if (e.key === "ArrowLeft") { e.preventDefault(); calSpinBy(zp.viewpoint, -SS_SPIN_STEP_DEG); }
-                          else if (e.key === "ArrowRight") { e.preventDefault(); calSpinBy(zp.viewpoint, SS_SPIN_STEP_DEG); }
-                        }}
-                        style={{ position: "fixed", inset: 0, zIndex: 4000, background: "rgba(15,23,42,0.94)", overflowY: "auto", padding: 10 }}>
-                        <div style={{ maxWidth: 900, margin: "0 auto" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-                            <span style={{ color: "#FFF", fontWeight: 800, fontSize: 13 }}>{zWord}</span>
-                            <span style={{ color: "#CBD5E1", fontSize: 11.5, fontWeight: 600 }}>
-                              {calLapNumber(zp.frameUrl) ? `your view ${calLapNumber(zp.frameUrl)}` : "one of your pictures"}
-                            </span>
-                            <span style={{ flex: 1 }} />
-                            <button type="button" autoFocus onClick={() => setAdminCalZoom(null)}
-                              style={{ ...S.btn("#FFF", "#0F172A"), fontSize: 12, padding: "4px 10px" }}>Close</button>
-                          </div>
-                          <div style={{ fontSize: 10, fontWeight: 800, color: "#CBD5E1", letterSpacing: 0.4, marginBottom: 3 }}>YOUR VIDEO</div>
-                          <img src={zp.frameUrl} alt={`Your video, ${zWord.toLowerCase()}, full size`}
-                            style={{ width: "100%", background: "#0F172A", borderRadius: 6, display: "block", marginBottom: 10 }} />
-                          <div style={{ fontSize: 10, fontWeight: 800, color: "#DDD6FE", letterSpacing: 0.4, marginBottom: 3 }}>YOUR 3D</div>
-                          <img src={zp.shotUrl} alt="" draggable={false}
-                            style={{ width: "100%", background: "#E7EEF5", borderRadius: 6, display: "block" }} />
-                          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8, color: "#CBD5E1", fontSize: 11.5, fontWeight: 600 }}>
-                            <span>Not facing the same way? Turn it, or use ← →.</span>
-                            <button type="button" onClick={() => calSpinBy(zp.viewpoint, -SS_SPIN_STEP_DEG)} style={{ ...S.btn("#FFF", "#5B21B6"), fontSize: 11, padding: "2px 8px" }}>↺ Left</button>
-                            <button type="button" onClick={() => calSpinBy(zp.viewpoint, SS_SPIN_STEP_DEG)} style={{ ...S.btn("#FFF", "#5B21B6"), fontSize: 11, padding: "2px 8px" }}>Right ↻</button>
-                            {zSpun !== 0 && <button type="button" onClick={() => calSpinPair(zp.viewpoint, 0)} style={{ ...S.btn("#FFF", "#64748B"), fontSize: 11, padding: "2px 8px" }}>Reset</button>}
-                            <span aria-live="polite">{zSpun ? `Turned ${zSpun} degrees` : ""}</span>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })()}
-                  {calPairs.length === 0 && (
-                    <div style={{ marginTop: 8, fontSize: 11.5, color: "#B45309", fontWeight: 600, lineHeight: 1.5 }}>
-                      {/* ⚠️ DO NOT SEND THEM TO THE 3D PREVIEW FROM HERE. One of the three
-                          ways to land on this line is a device that cannot render at all (no
-                          WebGL, a lost context), and on that device the docked preview beside
-                          this card has already failed and the full-screen one will too -- so
-                          the one remedy the card offered was the one thing that could not
-                          work. It is not forked on `reason` because the third way here is
-                          merely being over the five-second budget, where the preview is fine;
-                          instead it names what is true on every device. "What we drew" is
-                          rendered below this, and the dimension drawing under it is 2D. */}
-                      We couldn't put your own frames side by side with the 3D this time, so there is nothing to compare here. Read <b>What we drew</b> just below, and the dimension drawing under it, against your own pictures before you save.
-                    </div>
-                  )}
-                  {/* THE ROOF, IN FEET. The prompt keeps asking for ratios because the ratios
-                      measurably work; a builder cannot check a ratio against a building. Both
-                      are true at once, so the number stays a ratio on the wire and becomes
-                      feet here. */}
-                  <div style={{ marginTop: 10, fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
-                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutSpan, calReadoutCentre)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the outside walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)} tall at the eave{adminCal.spec.roof.type === "shed" ? " on the low side" : ""}. {ssDrewWords(adminCal.spec, calDrewPorch, calDrewStep, calReadoutMass)}
-                  </div>
-                  {/* ── THE FOUR QUESTIONS ───────────────────────────────────────────────
-                      ONLY WHERE THERE IS SOMETHING TO ANSWER THEM AGAINST, which is the same
-                      condition the Save gate uses. A device that could not render the pairs
-                      (no WebGL, a lost context, over the five seconds) has nothing to put in
-                      front of the builder, and four questions that gate nothing are worse
-                      than none — a gate that is sometimes not a gate stops being read.
-                      Consequence, said plainly: on that device the builder saves with no
-                      confirmation step, and the line above is what tells them to open the
-                      preview and compare it themselves. */}
-                  {calPairs.length > 0 && (
-                  <div role="group" aria-label="Four checks before saving" style={{ marginTop: 10, borderTop: "1px solid #E2E8F0", paddingTop: 8 }}>
-                    <div style={{ fontWeight: 800, fontSize: 12, color: "#0F172A", marginBottom: 6 }}>Four things to check — answer all four before you save</div>
-                    {SS_CHECKS.map(([key, question, hint]) => {
-                      const answer = adminCalAnswers[key] || "";
-                      return (
-                        <div key={"ssc-q-" + key} data-ssc-question={key} style={{ borderTop: "1px dashed #E2E8F0", padding: "8px 0" }}>
-                          <div style={{ fontSize: 12, fontWeight: 700, color: "#0F172A" }}>{question}</div>
-                          <div style={{ fontSize: 11, color: "#64748B", marginTop: 2, lineHeight: 1.5 }}>{hint}</div>
-                          {/* Full-width and wrapping, so the three land under the question on a
-                              phone instead of squeezing beside it. */}
-                          <div role="radiogroup" aria-label={question} style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
-                            {[["yes", "Yes"], ["no", "No"], ["unsure", "Not sure"]].map(([v, lbl]) => (
-                              <button key={"ssc-a-" + key + v} type="button" role="radio" aria-checked={answer === v}
-                                onClick={() => {
-                                  setAdminCalAnswers((p) => ({ ...p, [key]: v }));
-                                  // AND WHAT IT WAS AN ANSWER ABOUT, so the Save line can tell
-                                  // a "No" that was acted on from one that was not.
-                                  setAdminCalAnswerSig((p) => ({ ...p, [key]: calQuestionSig(key) }));
-                                  // "No" opens the fix panel in the SAME row. Never a link
-                                  // away, never a dead end.
-                                  setAdminCalFix((cur) => (v === "no" ? key : cur === key ? null : cur));
-                                }}
-                                style={{ ...S.btn(answer === v ? (v === "yes" ? "#047857" : v === "no" ? "#B91C1C" : "#64748B") : "#FFF", answer === v ? "#FFF" : "#334155"), border: "1px solid #CBD5E1", fontSize: 11.5, minHeight: 30 }}>
-                                {answer === v ? "✓ " : ""}{lbl}
-                              </button>
-                            ))}
-                            {answer && answer !== "no" && (
-                              <button type="button" onClick={() => setAdminCalFix((cur) => (cur === key ? null : key))}
-                                style={{ ...S.btn("#FFF", "#5B21B6"), border: "1px solid #DDD6FE", fontSize: 11.5, minHeight: 30 }}>
-                                {adminCalFix === key ? "Hide the controls" : "Change it anyway"}
-                              </button>
-                            )}
-                          </div>
-                          {/* "Not sure" counts as answered and leaves a mark. Forcing a builder
-                              to commit to Yes when they genuinely cannot tell is how you get
-                              people clicking Yes to get past the gate. */}
-                          {answer === "unsure" && (
-                            <div style={{ marginTop: 4, fontSize: 11, color: "#B45309", fontWeight: 600 }}>Marked "not sure" — you can change it any time below.</div>
-                          )}
-                          {/* THE SAME COURTESY "NOT SURE" ALREADY HAD. adminCalFix holds one
-                              key, so answering the next question closes the panel this one
-                              opened: by the time a builder reaches Save, three of four "No"s
-                              have left nothing on the row but a red button. */}
-                          {answer === "no" && calUnfixedNoKeys.indexOf(key) >= 0 && (
-                            <div style={{ marginTop: 4, fontSize: 11, color: "#B91C1C", fontWeight: 600 }}>Marked wrong, and nothing here has changed yet — use the controls in this row, or save it as it is.</div>
-                          )}
-                          {adminCalFix === key && (
-                            /* The id the banner's button points at with aria-controls. Only one
-                               of the two panels can exist at a time -- this one needs pairs, the
-                               banner's needs none -- so the id is unique either way. */
-                            <div id={"ssc-fix-" + key} style={{ marginTop: 8, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "8px 10px" }}>
-                              {calFixPanel(key)}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                    <div aria-live="polite" style={{ marginTop: 8, fontSize: 11.5, fontWeight: 700, color: calChecksAnswered === SS_CHECKS.length ? "#047857" : "#B45309" }}>
-                      {calChecksAnswered} of {SS_CHECKS.length} answered
-                    </div>
-                  </div>
-                  )}
-                  {/* "SOMETHING IS WRONG" NEVER ENDS THE FLOW, and it says the price rather
-                      than hiding it — plus what to change about the input, so the second
-                      generation is not the same generation twice. The price is the meter's
-                      (calChargeOf); with none charged, or none known, it names no amount. */}
-                  <div style={{ marginTop: 8, borderTop: "1px dashed #E2E8F0", paddingTop: 8, fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
-                    Still not right after changing it by hand? Take a straight-on photo of the end that is wrong, add it in step 3 and generate again — {scan.charge && scan.charge.cents ? `a new generation is another ${scan.charge.said}.` : "that counts as a new generation."}
-                  </div>
-                </div>
-              )}
-              {!advancedOnly && setup3d && setup3d.onUploadModel && (
-                <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>📐 Scan of a real building</span>
-                    {scan.status !== "none" && (
-                      <span style={{ fontSize: 11, fontWeight: 800, borderRadius: 5, padding: "2px 6px",
-                        background: scan.status === "locked" ? "#ECFDF5" : "#F1F5F9",
-                        color: scan.status === "locked" ? "#047857" : "#475569" }}>
-                        {scan.status === "locked" ? "locked" : scan.status}
-                      </span>
-                    )}
-                    <span style={{ flex: 1 }} />
-                    {scan.status === "locked"
-                      ? <button onClick={() => scanSetStatus("uploaded")} disabled={scan.busy} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 11.5 }}>Unlock</button>
-                      : <button onClick={() => scanSetStatus("locked")} disabled={scan.busy || scan.status === "none"} style={{ ...S.btn("#FFF", "#047857"), border: "1px solid #A7F3D0", fontSize: 11.5 }}>Lock this 3D setup</button>}
-                  </div>
-                  <p style={{ margin: "6px 0 8px", fontSize: 11.5, color: "#92400E", lineHeight: 1.5 }}>
-                    Walk around one of your real buildings with a phone scanning app and export a <b>.glb</b>. We read its
-                    size and roof shape and set the 3D up to match — the scan itself is never shown to customers.
-                  </p>
-                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
-                    <span style={{ fontSize: 11, fontWeight: 700, color: "#92400E" }}>Your phone:</span>
-                    {[["iphone-pro", "iPhone Pro (LiDAR)"], ["iphone", "other iPhone"], ["android", "Android"]].map(([k, lbl]) => (
-                      <button key={k} onClick={() => setScan((p) => ({ ...p, device: p.device === k ? null : k }))}
-                        style={{ ...S.btn(scan.device === k ? "#92400E" : "#FFF", scan.device === k ? "#FFF" : "#92400E"), border: "1px solid #FCD34D", fontSize: 11, padding: "3px 8px" }}>
-                        {lbl}
-                      </button>
-                    ))}
-                  </div>
-                  {scan.device && (
-                    <p style={{ margin: "0 0 8px", fontSize: 11, color: "#78350F", lineHeight: 1.5 }}>
-                      {scan.device === "iphone-pro" && <>Scaniverse (free, no account): <b>New Scan → Mesh</b>, walk slowly all the way around, process on-device, then <b>Share → Export Model → GLB</b>. LiDAR gives the cleanest mesh.</>}
-                      {scan.device === "iphone" && <>No LiDAR on this model — Scaniverse still works in photo mode: circle the building slowly in good light, expect a rougher mesh, then <b>Share → Export Model → GLB</b>.</>}
-                      {scan.device === "android" && <>Android phones scan by photos: use <b>Scaniverse</b> (free) or <b>Kiri Engine</b> (free account) — circle the building slowly in good light, then export as <b>GLB</b>.</>}
-                    </p>
-                  )}
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                    <label style={{ ...S.btn("#92400E", "#FFF"), fontSize: 12, cursor: scan.busy || scan.status === "locked" ? "default" : "pointer", opacity: scan.status === "locked" ? 0.5 : 1, marginBottom: 0 }}>
-                      {scan.busy ? (scan.step || "Working…") : "Choose a .glb scan"}
-                      <input type="file" accept=".glb,model/gltf-binary" disabled={scan.busy || scan.status === "locked"}
-                        onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; scanPick(f); }}
-                        style={{ display: "none" }} />
-                    </label>
-                    {scan.status !== "none" && !scan.measured && !scan.busy && setup3d && setup3d.onLoadModelUrl && (
-                      <button onClick={scanFetchStored} style={{ ...S.btn("#FFF", "#0E7490"), border: "1px solid #A5F3FC", fontSize: 12 }}>Re-measure the stored scan</button>
-                    )}
-                    {scan.measured && !scan.busy && (
-                      <>
-                        <button onClick={scanGenerate} disabled={adminCalPreview}
-                          title={scan.aiReady === false
-                            ? "AI is off for this site — this applies the measurements only."
-                            : "Measure, render the scan from four sides, and let AI read the siding + colours."}
-                          style={{ ...S.btn("#7C3AED", "#FFF"), fontSize: 12, opacity: adminCalPreview ? 0.5 : 1 }}>✨ Generate 3D from this scan</button>
-                        <button onClick={scanApply} style={{ ...S.btn("#0E7490", "#FFF"), fontSize: 12 }}>Use these measurements</button>
-                        <button onClick={scanUpload} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}>Save the scan to this style</button>
-                      </>
-                    )}
-                  </div>
-                  {scan.err && <div style={{ marginTop: 8, fontSize: 11.5, color: "#DC2626", fontWeight: 600 }}>{scan.err}</div>}
-                  {scan.measured && (
-                    <div style={{ marginTop: 8, fontSize: 12, color: "#0F172A" }}>
-                      <b>{scan.measured.widthFt} × {scan.measured.depthFt} ft</b>{" · "}
-                      walls <b>{scan.measured.eaveFt} ft</b>{" · "}
-                      peak <b>{scan.measured.peakFt} ft</b>{" · "}
-                      <b>{scan.measured.roofType}</b> roof, pitch <b>{scan.measured.pitch}</b>
-                      {scan.measured.overhangFt ? <>{", overhang "}<b>{scan.measured.overhangFt} ft</b></> : null}
-                      {scan.measured.gambrel && (
-                        <span style={{ color: "#64748B" }}>{" "}(knee {scan.measured.gambrel.kneeU} / rise {scan.measured.gambrel.kneeRise} / ridge {scan.measured.gambrel.ridgeRise})</span>
-                      )}
-                      <span style={{ color: "#64748B" }}>{" "}(from {scan.measured.sampled.toLocaleString()} surface points)</span>
-                      {scan.measured.warn && <div style={{ marginTop: 4, color: "#B45309", fontWeight: 600 }}>⚠ {scan.measured.warn}</div>}
-                      {(() => {
-                        const matches = scanSizeMatchesFor(scan.measured);
-                        if (matches.length) {
-                          return (
-                            <div style={{ marginTop: 6, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                              <span style={{ fontSize: 11, fontWeight: 700, color: "#92400E" }}>Closest sizes you sell:</span>
-                              {matches.map((s) => (
-                                <button key={s.label} onClick={() => scanApplySize(s.label)}
-                                  style={{ ...S.btn("#FFF", "#0E7490"), border: "1px solid #A5F3FC", fontSize: 11.5, padding: "3px 8px" }}>
-                                  {s.label}{s.score === 0 ? " ✓" : ` (±${s.score} ft)`}
-                                </button>
-                              ))}
-                            </div>
-                          );
-                        }
-                        return (
-                          <div style={{ marginTop: 6, fontSize: 11.5, color: "#B45309", fontWeight: 600 }}>
-                            You don't sell a {scan.measured.widthFt}×{scan.measured.depthFt} — add it under Settings → Catalog, or pick your closest size.
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  )}
-                </div>
-              )}
+              {/* The video, size, check and scan cards are the new Settings → Designer → 3D page's (calCard*
+                  above). The operator's page has no setup3d, so the photos card is the only one it ever drew. */}
+              {calCardPhotos}
               {/* The drawing sits directly ABOVE the numbers it explains, and directly
                   beside the reference-photo thumbnails, so "film it, then nudge the
                   drawing" becomes the obvious workflow. The fitting engine already exists
@@ -30555,37 +30617,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               )}
               {!advancedOnly && (<>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                {/* The sample building the preview renders on. calibrationOnly ONLY, for the
-                    same reason calSetSize is: over the full designer this row sits above a
-                    customer's plan, and a size change there would clear it. A pitch or a
-                    gambrel knee reads completely differently on a 10x12 than on a 12x32, so
-                    calibrating against one fixed small shell was the actual problem. */}
-                {calibrationOnly && calSizeOpts().length > 0 && (
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: "#92400E" }}>
-                    Preview on
-                    <select value={sel.size || ""} onChange={(e) => calSetSize(e.target.value)}
-                      style={{ ...S.sel, minWidth: 110, border: "1px solid #FCD34D" }}>
-                      {calSizeOpts().map((sz) => <option key={sz} value={sz}>{sz}</option>)}
-                    </select>
-                  </label>
-                )}
-                {/* Full screen stays even with the dock up: it is the ONLY 3D on a narrow or
-                    touch screen (where dockOn is false), and the bigger view on a wide one. */}
-                <button onClick={() => setAdminCalPreview(true)}
-                  title={calibrationOnly && dockOn ? "Open the 3D at full screen" : "Preview this style in 3D"}
+                {/* The operator's page has no "Preview on" size picker and no docked 3D: both were
+                    Settings → Designer → 3D's (calibrationOnly), which since 2026-10-05 has its own
+                    page with the size in Size & roof and the 3D in a sticky column beside the form. */}
+                <button onClick={() => setAdminCalPreview(true)} title="Preview this style in 3D"
                   style={{ ...S.btn("#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13 }}>
-                  {calibrationOnly && dockOn ? "⛶ Full screen 3D" : "🧊 Preview in 3D"}
+                  🧊 Preview in 3D
                 </button>
-                {/* Without this the ✕ on the docked panel's header would be a one-way door.
-                    Same wording as the designer toolbar's dock toggle, deliberately. dockOn
-                    requires `embedded`, so this never appears on the ?admin=1 page, which
-                    renders this same const from the full return. */}
-                {calibrationOnly && dockOn && (
-                  <button onClick={() => setCalDock3D((v) => !v)}
-                    style={{ ...S.btn("#FFF", "#7C3AED"), border: "1px solid #DDD6FE", fontSize: 12 }}>
-                    {calDock3D ? "🧊 Hide 3D" : "🧊 Show 3D"}
-                  </button>
-                )}
                 {/* Copy-JSON is the operator's escape hatch when a save path is down; a
                     builder has no use for it and no place to paste it. */}
                 {!setup3d && <button onClick={copyCalJson} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}>Copy d3 JSON</button>}
@@ -30665,14 +30703,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   });
   const [advFrom, setAdvFrom] = useState("");                    // "" = blank building, else a style's value
   const [advDims, setAdvDims] = useState({ w: "12", l: "16" });  // as typed; sel.size only takes whole feet 6..60
-  // Which add-on the Advanced page's tab strip shows (Lean-to, Wings, Dormer, Porch & steps).
+  // Which add-on the Advanced page's tab strip shows (Lean-to, Wings, Dormer, Porch & steps). Settings →
+  // Designer → 3D has the same strip since 2026-10-05 (the page is built from this form), and this
+  // instance is that page's own.
   const [advAddOn, setAdvAddOn] = useState("leanto");
   // The portal topbar's real height (0 = not measured, and SS_ADV_CSS's 62/58 px stand). It is 62 px
   // until something in it wraps or grows -- the operator's "Editing as operator" badge makes it 66 at
   // 1100 px -- and the sticky progress bar, the 3D column and section jumps all sit under it.
+  // Measured on Settings → Designer → 3D too (`calibrationOnly`): it is the same frame under the same bar.
   const [advTopbarH, setAdvTopbarH] = useState(0);
   useEffect(() => {
-    if (!advancedOnly || typeof ResizeObserver === "undefined") return undefined;
+    if (!(advancedOnly || calibrationOnly) || typeof ResizeObserver === "undefined") return undefined;
     const bar = document.querySelector(".ss-topbar");
     if (!bar) return undefined;
     const read = () => { const h = Math.round(bar.getBoundingClientRect().height); setAdvTopbarH(h > 0 ? h : 0); };
@@ -30803,79 +30844,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   useEffect(() => { if (advancedOnly && onAdvancedDirty) onAdvancedDirty(advDirty); }, [advDirty]);
   useEffect(() => () => { if (advancedOnly && onAdvancedDirty) onAdvancedDirty(false); }, []);
 
-  // Settings → Designer → 3D. The calibration editor needs everything this component
-  // already computes (the style list, the resolved config, the live 3D preview), so the
-  // portal mounts the whole component and takes just this surface — no toolbar, no
-  // canvas, no estimate. Every hook above still runs, which is what keeps hook order
-  // identical between this return and the full designer below.
-  if (calibrationOnly) {
-    // Side-by-side since 2026-08-22 (Carolyn): "in the same way that the designer Tab now has
-    // the 3D view on the side of the layout, I want that same thing happening in the designer
-    // settings so as we change the view settings we can immediately see what it is doing in
-    // the 3D and adjust accordingly." Same Structure3DPanel, same dock-capability rule, one
-    // different width threshold, and the DRAFT spec instead of the saved one.
-    //
-    // `adminCal` is in the term because the form body only renders once a style is picked —
-    // a 3D panel beside nothing but the style chips is a WebGL context spent on decoration.
-    const calDock = Boolean(adminCal) && view3dOn && dockOn && calDock3D;
-    return (
-      <div style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif" }}>
-        {showCal3D
-          ? (
-            /* Measured on the ROW, like the designer's canvas row, for the same reason: the
-               portal sidebar collapses from 240px to 68px at max-width:900px, so a viewport
-               threshold would switch the dock ON for the narrower layout and OFF for the
-               wider one. alignItems:"flex-start" is also what leaves the sticky column room
-               to move — the flex default (stretch) makes it full-height and inert. */
-            <div ref={canvasRowRef} style={{ display: "flex", alignItems: "flex-start", gap: !adminCalPreview && calDock ? 12 : 0 }}>
-              {/* minWidth:0 is load-bearing, same as the canvas row: the form's auto-fit grids
-                  have an intrinsic min-content width, so without it the row overflows
-                  sideways instead of reflowing six columns down to three. */}
-              <div style={{ flex: "1 1 auto", minWidth: 0 }}>{cal3dPanel}</div>
-              {/* The `!adminCalPreview` term sits ON the render site and is never read from a
-                  variable — that is what makes the docked panel and the full-screen viewer
-                  below structurally unable to hold two WebGL contexts at once, the same
-                  guarantee {!(show3D || adminCalPreview)} gives the full designer. React runs
-                  this subtree's cleanup (dispose + forceContextLoss) before mounting the
-                  modal in the same commit. */}
-              {!adminCalPreview && calDock && (
-                /* top:74, not the designer's 12: this mounts inside the portal's NORMALLY
-                   SCROLLING .ss-inner, under a position:sticky .ss-topbar ~62px tall. top:12
-                   would park the panel behind it. */
-                <div style={{ flex: "0 0 clamp(320px, 34%, 480px)", height: "min(560px, 72vh)", position: "sticky", top: 74, marginTop: 12, marginRight: 12 }}>
-                  <Structure3DPanel
-                    /* Remount on the sample building's size and nothing else — same rule as
-                       the designer. Wall height deliberately does NOT remount: fitHeightFt
-                       re-frames in place, because here the height is what is being typed. */
-                    key={`${bldgW}x${bldgH}`}
-                    bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
-                    /* The DRAFT spec, NOT d3ResolveStyleSpec(...) — an unsaved slider showing
-                       up here is the whole feature. painted/roofType/roofColorHex are pinned
-                       to what cal3dPreview passes, so the docked view and the full-screen one
-                       cannot disagree about what a style looks like. */
-                    style3d={adminCal.spec}
-                    fitHeightFt={adminCal.spec.wallHeightFt || 0}
-                    painted={false} paintBody="" paintTrim=""
-                    roofType="" roofColorHex=""
-                    frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
-                    fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
-                    /* Nothing drags on this surface, and no canEdit: there is no plan to edit
-                       here, so the panel's "⛶ Edit in 3D" footer never renders. */
-                    suspended={false}
-                    pal={pal}
-                    onClose={() => setCalDock3D(false)}
-                  />
-                </div>
-              )}
-            </div>
-          )
-          : <div style={{ fontSize: 13, color: "#64748B" }}>3D isn't turned on for this account yet.</div>}
-        {cal3dPreview}
-      </div>
-    );
-  }
+  // Settings → Designer → 3D (`calibrationOnly`) has no return of its own since 2026-10-05: it is the
+  // Advanced page's return just below, in its calibration mode (`calMode`). Every hook above still runs
+  // for it, which is what keeps hook order identical between that return and the full designer below.
   // THE ADVANCED PAGE (portal Workspace → Advanced, 2026-09-28). Its hooks are ABOVE the
-  // calibrationOnly return, with the note that explains them. Everything here is plain JSX.
+  // calibrationOnly comment, with the note that explains them. Everything here is plain JSX.
   //
   // REBUILT IN THE DESIGNER'S LOOK (2026-09-29). Ahsan: "can you see the designer tab how organised and
   // good looking it is i want same in the advance tab it is looking ugly right now fix it and make it
@@ -30886,21 +30859,49 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // setters and reads the same d3* readouts, so both pages build the same building from the same keys.
   // Step keys are adv-*, never the Designer's: the portal keeps the Designer mounted (hidden) beside this
   // page, and its rows would answer an ss-step-style lookup first.
-  if (advancedOnly) {
+  //
+  // AND SETTINGS → DESIGNER → 3D, SINCE 2026-10-05 (`calMode`). Ahsan: "re design the designer settings
+  // tab similar to what we have done with advance tab". The calibration page was the amber panel above
+  // (cal3dPanel): a row of plain style buttons, then every field at once as labelled selects and boxes.
+  // It is now this page with a style in place of a blank building:
+  //   01 Pick a style   the styles as photo tiles (SSStyleStrip, as Start from), picking one opens it
+  //   02 Video & photos the walk-around, the size of the building filmed, the photos and the one paid
+  //                     button, the check against the video, the scan: the calCard* consts, unchanged
+  //                     in what they do, in the Designer's cards
+  //   03-06             this form's own Size & roof, Walls & foundation, Add-ons and Colors. One thing
+  //                     differs: Building size is the style's own sizes to preview on (calSetSize),
+  //                     never a width and length, because a style stores no size (the catalog does)
+  //   07 Save           Save 3D look onto the style that is open, with its reasons, as before
+  // Its steps are cal-*, so neither page's rows answer the other's lookups while both are mounted.
+  // The operator's ?admin=1 panel keeps cal3dPanel; nothing here is drawn there.
+  if (advancedOnly || calibrationOnly) {
+    const calMode = !advancedOnly;
     // Docked beside the form on a wide screen with a mouse -- the same dockOn rule, measured on the
     // row below, as the calibration surface. Elsewhere the Preview button is the 3D, and the column
     // is not sticky (a sticky 3D on a phone would sit on top of the form).
     const advDock = Boolean(adminCal) && view3dOn && dockOn && calDock3D;
     const advWBad = advFt(advDims.w) === null, advLBad = advFt(advDims.l) === null;
     // ── the steps ──
-    const advStepDefs = [
-      ["adv-start", "Start from", "Start"],
-      ["adv-shape", "Size & roof", "Size & roof"],
-      ["adv-walls", "Walls & foundation", "Walls"],
-      ["adv-addons", "Add-ons", "Add-ons"],
-      ["adv-colors", "Colors", "Colors"],
-      ["adv-save", "Name & save", "Save"],
-    ];
+    const advStepDefs = calMode
+      ? [
+        ["cal-style", "Pick a style", "Style"],
+        ["cal-film", "Video & photos", "Video"],
+        ["cal-shape", "Size & roof", "Size & roof"],
+        ["cal-walls", "Walls & foundation", "Walls"],
+        ["cal-addons", "Add-ons", "Add-ons"],
+        ["cal-colors", "Colors", "Colors"],
+        ["cal-save", "Check & save", "Save"],
+      ]
+      : [
+        ["adv-start", "Start from", "Start"],
+        ["adv-shape", "Size & roof", "Size & roof"],
+        ["adv-walls", "Walls & foundation", "Walls"],
+        ["adv-addons", "Add-ons", "Add-ons"],
+        ["adv-colors", "Colors", "Colors"],
+        ["adv-save", "Name & save", "Save"],
+      ];
+    // The step keys below are the Advanced page's; on Settings → Designer → 3D the same sections are cal-*.
+    const sk = (k) => (calMode ? k.replace(/^adv-/, "cal-") : k);
     const advKeys = advStepDefs.map((d) => d[0]);
     const advCur = advKeys.indexOf(ssStepCur) !== -1 ? ssStepCur : advKeys[0];
     // Never ticked (review 2026-09-29). In the Designer a tick means the step is finished; nothing on
@@ -31160,19 +31161,43 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     })();
     // Building size over Roof shape, beside Roof finish: two columns of about the same height at xl,
     // one column in the order read when the row is narrow. Wall height is with the walls, in 03.
+    // SETTINGS → DESIGNER → 3D previews on one of the style's own sizes (calSizeOpts: its sizes, else the
+    // account's default set), as its "Preview on" picker did. A pitch or a gambrel knee reads completely
+    // differently on a 10x12 than on a 12x32, so the builder judges the look on the sizes they sell. Nothing
+    // here is saved: a style stores no size. A style with no sizes at all says what the 3D is drawn on.
+    const calSizes = calMode ? calSizeOpts() : [];
+    const sizeCard = calMode ? (
+      <div className="ssd-card" data-ss-adv="bar" data-ss-cal="preview-size">
+        <span className="ssd-card-t">Preview size</span>
+        {calSizes.length > 0 ? (
+          <div className="ss-adv-chips" role="group" aria-label="Preview size" style={{ marginTop: 0 }}>
+            {calSizes.map((sz) => (
+              <button key={sz} type="button" aria-pressed={sel.size === sz} onClick={() => { if (sel.size !== sz) calSetSize(sz); }}
+                className={sel.size === sz ? "ssd-chip is-on" : "ssd-chip"} style={advPill}>{sz}</button>
+            ))}
+          </div>
+        ) : (
+          <span className="ss-adv-note" style={{ marginTop: 0 }}>This style has no sizes yet, so the 3D is drawn on a {bldgW} × {bldgH}. Add its sizes in Settings → Structures.</span>
+        )}
+        <span className="ssd-plan-meta" style={{ display: "block", marginTop: 8 }}>{bldgW} × {bldgH} ft · {bldgW * bldgH} sq ft</span>
+        <span className="ss-adv-note">Only what the 3D is drawn on. The size is not saved with the look.</span>
+      </div>
+    ) : (
+      <div className="ssd-card" data-ss-adv="bar">
+        <span className="ssd-card-t">Building size</span>
+        <div className="ss-adv-flds">
+          {advStepper("w", "Width (ft)")}
+          {advStepper("l", "Length (ft)")}
+        </div>
+        {(advWBad || advLBad)
+          ? <span className="ssd-tb-warn ss-adv-say">Width and length are whole feet, from 6 to 60.</span>
+          : <span className="ssd-plan-meta" style={{ display: "block", marginTop: 8 }}>{bldgW} × {bldgH} ft · {bldgW * bldgH} sq ft</span>}
+      </div>
+    );
     const secShape = spec && (
       <div className="ss-adv-cards ss-adv-top">
         <div className="ss-adv-stack">
-        <div className="ssd-card" data-ss-adv="bar">
-          <span className="ssd-card-t">Building size</span>
-          <div className="ss-adv-flds">
-            {advStepper("w", "Width (ft)")}
-            {advStepper("l", "Length (ft)")}
-          </div>
-          {(advWBad || advLBad)
-            ? <span className="ssd-tb-warn ss-adv-say">Width and length are whole feet, from 6 to 60.</span>
-            : <span className="ssd-plan-meta" style={{ display: "block", marginTop: 8 }}>{bldgW} × {bldgH} ft · {bldgW * bldgH} sq ft</span>}
-        </div>
+        {sizeCard}
         <div className="ssd-card">
           <span className="ssd-card-t">Roof shape</span>
           <div className="ss-adv-flds">
@@ -31769,7 +31794,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const e = roof.wingList[i];
             setCalFocus("wl" + i + "-widthFt");
             setCalDraft(e && e.widthFt != null ? String(e.widthFt) : "");
-            const el = document.querySelector('[data-ss-adv-wl="' + i + '"]');
+            // Looked up in THIS page's row, never the document: since 2026-10-05 Settings → Designer → 3D
+            // draws this form too, and the portal keeps the Advanced page mounted (hidden) before it, so a
+            // document-wide lookup found the hidden page's card and scrolled nothing.
+            const el = (canvasRowRef.current || document).querySelector('[data-ss-adv-wl="' + i + '"]');
             if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
           } })}
           <span className="ss-adv-note" style={{ textAlign: "center" }}>The front is at the bottom; each arrow points down that roof. Click a wing to find its card.</span>
@@ -32417,69 +32445,155 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       </>
     );
 
-    // No page title (review 2026-09-29): the portal's topbar already says "Advanced", and the Designer has
-    // none either. What the title row said is the note under Start from. The topbar's measured height,
-    // when there is one, replaces SS_ADV_CSS's 62/58 px (the progress bar is 44 px under it).
+    // No page title on the Advanced page (review 2026-09-29): the portal's topbar already says "Advanced",
+    // and the Designer has none either. What the title row said is the note under Start from. Settings →
+    // Designer → 3D does carry one, in a note row above 01: its topbar says only "Designer", and the
+    // Advanced mode card sits above it on the same page. The topbar's measured height, when there is one,
+    // replaces SS_ADV_CSS's 62/58 px (the progress bar is 44 px under it).
     const advTopCss = advTopbarH > 0
       ? `.ss-adv .ssd-frame[data-ssd-bp]{--ssd-sticky-top:${advTopbarH + 44}px}.ss-adv .ssd-frame[data-ssd-bp="xl"]{--ssd-sticky-top:${advTopbarH}px}.ss-adv .ssd-progress{top:${advTopbarH}px}`
       : "";
-    const advNote = "Every shape control on one building. Nothing here changes your styles until you save it as a new one.";
+    const advNote = calMode
+      ? "Film a walk-around of a real building (photos are optional), tune the style against the live 3D, then save. This is what your customers see in 3D."
+      : "Every shape control on one building. Nothing here changes your styles until you save it as a new one.";
+    // ── Settings → Designer → 3D's own pieces ──
+    // Picking a style while a generation runs is ANSWERED, never obeyed and never dead: openCalEditor
+    // replaces the draft wholesale, so a pick mid-flight used to land the running draft on the style
+    // picked (tests/harness/calStyleRace.mjs). The answer is said under the tiles, where the click was,
+    // as well as by Save.
+    const calPick = (v) => {
+      const st = (C.buildingStyles || []).find((x) => x.value === v);
+      if (!st) return;
+      if (adminCalBusy) { setAdminCalMsg({ ok: true, msg: "That generation is still running — give it a moment. Your other styles are here when it finishes." }); return; }
+      openCalEditor(st);
+    };
+    const calHeader = calMode && (
+      <SSRow>
+        <div className="ss-cal-intro" data-ss-cal="intro">
+          <div className="ss-cal-title">3D Style Calibration</div>
+          <p className="ss-cal-p" style={{ margin: 0 }}>
+            Give each building style its own 3D look so what customers spin on screen matches the buildings you actually
+            sell. Set once per style — the designer picks it up everywhere.
+          </p>
+        </div>
+      </SSRow>
+    );
+    const calStyles = calMode && (
+      <SSRow {...advRow("cal-style")}>
+        <SSSecHead text={advHead("cal-style")} />
+        <div role="group" aria-label="Pick a style" data-ss-cal="styles">
+          <SSStyleStrip styles={C.buildingStyles || []} value={adminCal ? adminCal.styleValue : ""} perRow={C.branding.stylesPerRow} S={S}
+            onPick={calPick} />
+        </div>
+        {adminCalBusy && adminCalMsg && adminCalMsg.ok && <div className="ss-cal-warn" role="status" style={{ margin: "8px 0 0" }}>{adminCalMsg.msg}</div>}
+        <span className="ss-adv-note" style={{ marginTop: 8 }}>{adminCal ? advNote : "Pick a style to open its 3D look. Then film a walk-around of a real building (photos are optional), tune it against the live 3D, and save."}</span>
+      </SSRow>
+    );
+    const calFilm = calMode && adminCal && (
+      <SSRow {...advRow("cal-film")}>
+        <SSSecHead text={advHead("cal-film")} />
+        {calCardVideo}
+        {calCardDims}
+        {calCardPhotos}
+        {calCardCheck}
+        {calCardScan}
+      </SSRow>
+    );
+    // SAVE 3D LOOK, onto the style that is open: saveCalSpec, exactly as before. RENDERED DISABLED, NEVER
+    // HIDDEN, with the reason beside it (the four questions after a generation). The reason line keeps
+    // its hook and its two colours, amber while something is open and green when not
+    // (tests/harness/calSelfCheck.mjs reads both).
+    const calFoot = calMode && adminCal && (
+      <SSRow {...advRow("cal-save")} mainClass="ssd-foot ss-adv-foot">
+        <div data-ss-cal="save">
+          {adminCalMsg && (
+            <div className={adminCalMsg.ok ? "ss-adv-ok" : "ssd-ft-err"} role={adminCalMsg.ok ? "status" : "alert"} style={{ wordBreak: "break-word" }}>{adminCalMsg.msg}</div>
+          )}
+          <div className="ssd-ft">
+            <div className="ssd-ft-hint" data-ssc-save-why style={{ fontWeight: 600, color: (calSaveBlocked || calUnfixedNos.length) ? "#B45309" : "#166534" }}>
+              {calPairs.length ? <>{calSaveWhy}{" "}</> : null}
+              <span style={{ color: "var(--ss-muted)", fontWeight: 400 }}>Nothing is saved until you press Save — your customers still see the old 3D.</span>
+            </div>
+            <div className="ssd-ft-btns">
+              <button type="button" className="ssd-ft-cta" onClick={saveCalSpec} disabled={adminCalBusy || calSaveBlocked}
+                title={calSaveBlocked ? calSaveWhy : undefined} style={{ cursor: adminCalBusy ? "wait" : (calSaveBlocked ? "not-allowed" : "pointer") }}>
+                {adminCalBusy ? "Saving…" : "Save 3D look"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </SSRow>
+    );
+    // A HARNESS HOOK, dev only: the draft this page is showing, for the numbers its form draws as
+    // sliders and tiles rather than boxes (the barn roof's knee and ridge rise, which the old grid
+    // showed as boxes; tests/harness/calSelfCheck.mjs reads them). Set only under __SS3D_DEBUG, the flag
+    // the 3D's own debug hooks use, and never read by the app.
+    if (calMode && typeof window !== "undefined" && window.__SS3D_DEBUG) window.__ssCalDraft = adminCal ? adminCal.spec : null;
+    // ── the Advanced page's own ──
+    const advStart = !calMode && (
+      <SSRow {...advRow("adv-start")}>
+        <SSSecHead text={advHead("adv-start")} />
+        {/* A style an earlier Save made and never finished is told at the TOP as well, where a
+            builder coming back sees it at once, not only by the Save button 2,000 px down. */}
+        {advMsg && !advMsg.ok && /customers can see it|is made and hidden/.test(advMsg.msg) && (
+          <div data-ss-adv="msg-top" className="ssd-ft-err" style={{ marginBottom: 12 }}>{advMsg.msg}</div>
+        )}
+        <div role="group" aria-label="Start from" data-ss-adv="start">
+          <SSStyleStrip styles={[{ value: "", label: "Blank building", img: ssAdvBlankImg(pal) }, ...(C.buildingStyles || [])]}
+            value={advFrom} perRow={C.branding.stylesPerRow} S={S} disabled={advBusy}
+            onPick={(v) => { if (advBusy || (v === advFrom && !advDirty)) return; advStartFrom(v); }} />
+        </div>
+        <span className="ss-adv-note" style={{ marginTop: 8 }}>{advNote}</span>
+      </SSRow>
+    );
+    const advFoot = !calMode && (
+      <SSRow {...advRow("adv-save")} mainClass="ssd-foot ss-adv-foot">
+        <div data-ss-adv="save">
+          {advMsg && (
+            <div data-ss-adv="msg" className={advMsg.ok ? "ss-adv-ok" : "ssd-ft-err"} role={advMsg.ok ? "status" : "alert"}>{advMsg.msg}</div>
+          )}
+          <div className="ssd-ft">
+            <p className="ssd-ft-hint">Saves as a <strong>new style</strong>, hidden from customers until you add its sizes and prices.</p>
+            <div className="ssd-ft-btns">
+              <label className="ss-adv-name">
+                <span className="ssd-fld-l">New style name</span>
+                <input type="text" className="ssd-input ssd-field" value={advName} maxLength={60} placeholder="e.g. Tri Home with lean-to"
+                  onChange={(e) => setAdvName(e.target.value)} disabled={advBusy}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !advBusy) advSave(); }} />
+              </label>
+              <button type="button" className="ssd-ft-cta" onClick={advSave} disabled={advBusy}>{advBusy ? "Saving…" : "Save as a new style"}</button>
+            </div>
+          </div>
+        </div>
+      </SSRow>
+    );
     return (
-      <div className="ss-adv" style={{ background: pal.surface }}>
-        <style>{SS_ADV_CSS + advTopCss}</style>
+      <div className={calMode ? "ss-adv ss-cal" : "ss-adv"} style={{ background: pal.surface }}>
+        <style>{SS_ADV_CSS + (calMode ? "\n" + SS_CAL_CSS : "") + advTopCss}</style>
         <SSDesignerFrame pal={pal} embedded>
           {!advIdle && <SSProgressBar steps={advSteps} current={advCur} onGo={advGo} />}
           {!advIdle && <SSStepWatcher ids={advKeys} onChange={setSsStepCur} />}
+          {calHeader}
           {!(showCal3D && view3dOn)
             ? <SSRow><div className="ssd-dt-lock" style={{ fontSize: 13, color: pal.muted, marginBottom: 20 }}>3D isn't turned on for this account yet.</div><span className="ss-adv-note">{advNote}</span></SSRow>
             : !adminCal
-              ? <SSRow><div style={{ fontSize: 13, color: pal.muted, marginBottom: 20 }}>Setting up the building…</div><span className="ss-adv-note">{advNote}</span></SSRow>
+              ? (calMode ? calStyles : <SSRow><div style={{ fontSize: 13, color: pal.muted, marginBottom: 20 }}>Setting up the building…</div><span className="ss-adv-note">{advNote}</span></SSRow>)
               : (
                 <>
-                  <SSRow {...advRow("adv-start")}>
-                    <SSSecHead text={advHead("adv-start")} />
-                    {/* A style an earlier Save made and never finished is told at the TOP as well, where a
-                        builder coming back sees it at once, not only by the Save button 2,000 px down. */}
-                    {advMsg && !advMsg.ok && /customers can see it|is made and hidden/.test(advMsg.msg) && (
-                      <div data-ss-adv="msg-top" className="ssd-ft-err" style={{ marginBottom: 12 }}>{advMsg.msg}</div>
-                    )}
-                    <div role="group" aria-label="Start from" data-ss-adv="start">
-                      <SSStyleStrip styles={[{ value: "", label: "Blank building", img: ssAdvBlankImg(pal) }, ...(C.buildingStyles || [])]}
-                        value={advFrom} perRow={C.branding.stylesPerRow} S={S} disabled={advBusy}
-                        onPick={(v) => { if (advBusy || (v === advFrom && !advDirty)) return; advStartFrom(v); }} />
-                    </div>
-                    <span className="ss-adv-note" style={{ marginTop: 8 }}>{advNote}</span>
-                  </SSRow>
+                  {calMode ? calStyles : advStart}
                   {/* THE ROW WHOSE WIDTH DECIDES THE DOCK (canvasRowRef, the 760 px calibration threshold with 40 px
                       of hysteresis): the numbered sections on the left, the 3D on the right. */}
                   <div ref={canvasRowRef} className={"ss-adv-cols " + (dockOn ? "is-docked" : "is-stacked")}>
                     <div data-ss-adv="view" className="ss-adv-view">{advView}</div>
                     <div data-ss-adv="fields" className="ss-adv-fields">
-                      <SSRow {...advRow("adv-shape")}><SSSecHead text={advHead("adv-shape")} />{secShape}</SSRow>
-                      <SSRow {...advRow("adv-walls")}><SSSecHead text={advHead("adv-walls")} />{secWalls}</SSRow>
-                      <SSRow {...advRow("adv-addons")}><SSSecHead text={advHead("adv-addons")} />{secAddOns}</SSRow>
-                      <SSRow {...advRow("adv-colors")}><SSSecHead text={advHead("adv-colors")} />{secColors}</SSRow>
+                      {calFilm}
+                      <SSRow {...advRow(sk("adv-shape"))}><SSSecHead text={advHead(sk("adv-shape"))} />{secShape}</SSRow>
+                      <SSRow {...advRow(sk("adv-walls"))}><SSSecHead text={advHead(sk("adv-walls"))} />{secWalls}</SSRow>
+                      <SSRow {...advRow(sk("adv-addons"))}><SSSecHead text={advHead(sk("adv-addons"))} />{secAddOns}</SSRow>
+                      <SSRow {...advRow(sk("adv-colors"))}><SSSecHead text={advHead(sk("adv-colors"))} />{secColors}</SSRow>
                       {/* Save is in the form column, so the sticky 3D runs down beside it to the end of the
                           page: the building stays whole on screen while it is named and saved. */}
-                  <SSRow {...advRow("adv-save")} mainClass="ssd-foot ss-adv-foot">
-                    <div data-ss-adv="save">
-                      {advMsg && (
-                        <div data-ss-adv="msg" className={advMsg.ok ? "ss-adv-ok" : "ssd-ft-err"} role={advMsg.ok ? "status" : "alert"}>{advMsg.msg}</div>
-                      )}
-                      <div className="ssd-ft">
-                        <p className="ssd-ft-hint">Saves as a <strong>new style</strong>, hidden from customers until you add its sizes and prices.</p>
-                        <div className="ssd-ft-btns">
-                          <label className="ss-adv-name">
-                            <span className="ssd-fld-l">New style name</span>
-                            <input type="text" className="ssd-input ssd-field" value={advName} maxLength={60} placeholder="e.g. Tri Home with lean-to"
-                              onChange={(e) => setAdvName(e.target.value)} disabled={advBusy}
-                              onKeyDown={(e) => { if (e.key === "Enter" && !advBusy) advSave(); }} />
-                          </label>
-                          <button type="button" className="ssd-ft-cta" onClick={advSave} disabled={advBusy}>{advBusy ? "Saving…" : "Save as a new style"}</button>
-                        </div>
-                      </div>
-                    </div>
-                  </SSRow>
+                      {calMode ? calFoot : advFoot}
                       {!dockOn && (
                         <div className="ss-adv-float" data-ss-adv="float">
                           <button type="button" className="ssd-tb-btn" onClick={() => setAdminCalPreview(true)} title="Open the 3D at full screen">🧊 See in 3D</button>

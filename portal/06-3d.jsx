@@ -539,6 +539,15 @@ function AdvancedModeCard({ advanced, has3d = false }) {
 function DesignerSettings({ clientId, setup3d = null, view3d = false, canBill = false, advanced = null }) {
   const { SS, failed } = useDesigner();
   const card = { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "16px 18px", marginBottom: 14 };
+  // THE CALIBRATION PAGE IS THE ADVANCED PAGE'S FORM since 2026-10-05 (Ahsan: "re design the designer
+  // settings tab similar to what we have done with advance tab"): the Designer's frame, numbered
+  // sections, the styles as photo tiles, sliders and picture tiles, the 3D in a sticky column beside the
+  // form. It brings its own title and copy, so it is not put inside the "3D" card below, which now only
+  // says why there is nothing to calibrate (no 3D, not an owner or admin, still loading, failed). The
+  // frame sits on a card of its own so it reads as one surface on the grey settings page.
+  // ⚠️ NO overflow:hidden on that card: the 3D column is position:sticky, and an overflow:hidden
+  // ancestor becomes its scrollport, which never scrolls, so sticky would silently do nothing.
+  const calibrating = Boolean(SS && setup3d);
   return (
     // 1240 matches .ss-inner's own cap (portal.html), so this reads "as wide as every other
     // settings page" rather than a number of its own. It was 1080, which cost the calibration
@@ -546,7 +555,12 @@ function DesignerSettings({ clientId, setup3d = null, view3d = false, canBill = 
     <div style={{ maxWidth: 1240 }}>
       {/* Above the 3D card (2026-10-05): it decides whether a whole page exists, so it is read first. */}
       {advanced && <AdvancedModeCard advanced={advanced} has3d={!!setup3d} />}
-      <div style={card}>
+      {calibrating && (
+        <div data-ss-cal-page style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12 }}>
+          <SS clientId={clientId} embedded calibrationOnly setup3d={setup3d} view3d />
+        </div>
+      )}
+      {!calibrating && <div style={card}>
         <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A", marginBottom: 4 }}>3D</div>
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: "#64748B", lineHeight: 1.55 }}>
           Give each building style its own 3D look so what customers spin on screen matches the
@@ -579,13 +593,7 @@ function DesignerSettings({ clientId, setup3d = null, view3d = false, canBill = 
             3D is on for this account. An owner or admin tunes how each building style looks in 3D here.
           </div>
         )}
-        {/* No wrapper here on purpose. The calibration row's 3D column is position:sticky, and
-            an overflow:hidden ancestor becomes that child's SCROLLPORT — which never scrolls,
-            so sticky silently does nothing at all and the panel just scrolls away with the
-            form. The card above already frames this section, and the panel supplies its own
-            #FFFBEB fill and #FCD34D bottom rule. */}
-        {SS && setup3d && <SS clientId={clientId} embedded calibrationOnly setup3d={setup3d} view3d />}
-      </div>
+      </div>}
     </div>
   );
 }

@@ -30,7 +30,10 @@
 //   3d (2026-10-04, the 10-01 call): the overhang presets reach 24″, which builds a 2 ft overhang; the
 //      dormer's width box runs to the building's length, a full-length dormer is drawn 3" in from each
 //      gable end and says so, and on a shorter building the same dormer stays inside its gable ends;
-//   5  the calibration panel in Settings > Designer still shows every field at once and no tab strip;
+//   5  (2026-10-05) Settings > Designer > 3D is this page's form too: the Designer's frame, its seven
+//      cal-* sections in order (Pick a style ... Check & save), the styles as photo tiles, the same tiles,
+//      segments, sliders and add-on tabs, and none of the old amber grid; a slider moves the 3D's draft,
+//      and Save 3D look sends it as save_style_d3 under the style that is open;
 //   6  the second review (2026-09-29): the End view's words are readable (11 px or more at 1440) and its
 //      pitch is the Pitch box's own number; a click in the middle of a number box never changes the
 //      building (Chrome's spinner is gone), and "click the steps box, type 4" builds 4 steps (in 3);
@@ -74,6 +77,7 @@ const CONFIG = {
 const ENT = { reason: "internal", status: "active", granted: ["view_3d"], features: { view_3d: true }, exempt: true, state: "exempt" };
 
 const { ok, failed } = reporter();
+const saves = [];   // save_style_d3 bodies, from section 5 (answered by the stub; nothing is written)
 const { browser, ctx: unused } = await launch({ width: 1440, height: 1000 });
 await unused.close();
 const H = { "access-control-allow-origin": "*", "access-control-expose-headers": "*" };
@@ -110,6 +114,7 @@ async function open(path) {
     if (url.includes("/auth/v1/")) return json(route, SESSION);
     if (url.includes("/portal-billing")) return json(route, { ok: true, configured: true, hasCard: false, plans: [], subscriptions: [], wallet: null, entitlement: ENT });
     if (url.includes("/portal-settings")) {
+      if (body.action === "save_style_d3") saves.push(body);
       if (body.action === "status") return json(route, { ok: true, clientId: OURS, role: "owner", settings: { business_name: OURS }, config: { company_name: OURS, accent_color: "#3D3672" }, access: null, prefs: null });
       if (body.action === "catalog") return json(route, { ok: true, aiReady: true, styles: [], sizes: [], layoutItems: [], fixtures: [], colors: [] });
       return json(route, { ok: true });
@@ -671,18 +676,55 @@ try {
   ok("no page errors on the Advanced page", errors.length === 0, errors.join(" | "));
   await ctx.close();
 
-  // 5 ── the calibration panel keeps every field at once ──────────────────────────────────────
+  // 5 ── Settings → Designer → 3D is this page's form too (2026-10-05) ────────────────────────────
+  // Ahsan: "re design the designer settings tab similar to what we have done with advance tab". It
+  // used to keep every field at once in the amber grid (and this check asserted exactly that).
   {
     const { ctx: c2, page: p2, errors: e2 } = await open("/portal/settings/designer");
     await p2.waitForFunction(() => document.body.innerText.includes("3D Style Calibration"), null, { timeout: 60000 });
-    await p2.getByRole("button", { name: "Harness Cabin", exact: true }).first().click().catch(() => {});
-    await p2.waitForFunction(() => [...document.querySelectorAll("label")].some((l) => /^Roof type/.test(l.innerText.trim())), null, { timeout: 30000 });
-    const labels = await p2.evaluate(() => [...document.querySelectorAll("body label")].filter((l) => l.offsetParent !== null).map((l) => l.innerText.trim().split("\n")[0].trim()));
-    const has = (re) => labels.some((t) => re.test(t));
-    ok("5: the calibration panel still shows roof, walls, lean-to, dormer, porch and colours together",
-      [/^Roof type/, /^Wall height/, /^Lean-to width/, /^Dormer width/, /^Porch$/, /^Body Color/].every(has), JSON.stringify(labels));
-    ok("5: …and no section tabs", await p2.locator('[data-ss-adv="sections"]').count() === 0);
-    ok("5: …and none of the Advanced page's frame", await p2.locator(".ss-adv").count() === 0);
+    const before = await p2.evaluate(() => ({
+      tiles: [...document.querySelectorAll('.ss-cal [data-ss-cal="styles"] [data-ss-style]')].map((t) => t.getAttribute("aria-label")),
+      form: !!document.querySelector('.ss-cal [data-ss-adv="fields"]'),
+    }));
+    ok("5: before a pick, the styles are photo tiles and nothing else is drawn", JSON.stringify(before.tiles) === JSON.stringify(["Harness Cabin"]) && !before.form, JSON.stringify(before));
+    await p2.getByRole("button", { name: "Harness Cabin", exact: true }).first().click();
+    await p2.waitForSelector('.ss-cal [data-ss-adv="sections"]', { timeout: 30000 });
+    const st = await p2.evaluate(() => {
+      const fields = document.querySelector('.ss-cal [data-ss-adv="fields"]');
+      return {
+        frame: !!(fields && fields.closest(".ssd-frame")),
+        steps: [...document.querySelectorAll('.ss-cal [id^="ss-step-"]')].map((e) => e.id.replace("ss-step-", "")),
+        rail: [...document.querySelectorAll(".ss-cal .ssd-rail .ssd-step")].map((b) => (b.getAttribute("aria-label") || "").replace(/ \(current\)$/, "")),
+        picked: (document.querySelector('.ss-cal [data-ss-cal="styles"] [aria-pressed="true"]') || {}).ariaLabel || null,
+        amber: [...document.querySelectorAll("body label")].some((l) => /^Roof type/.test(l.innerText.trim())),
+        cards: ["video", "dims", "photos"].filter((k) => document.querySelector(`#ss-step-cal-film [data-ssc-card="${k}"]`)),
+        canvas: !!document.querySelector('.ss-cal [data-ss-adv="view"] canvas'),
+      };
+    });
+    ok("5: the page is in the Designer's frame, built from this form", st.frame, JSON.stringify(st));
+    ok("5: …its seven sections, in order, under their own cal-* keys",
+      JSON.stringify(st.steps) === JSON.stringify(["cal-style", "cal-film", "cal-shape", "cal-walls", "cal-addons", "cal-colors", "cal-save"]), JSON.stringify(st.steps));
+    ok("5: …named on the rail (Pick a style … Check & save)", /^Step 1 of 7: Pick a style$/.test(st.rail[0] || "") && /^Step 7 of 7: Check & save$/.test(st.rail[6] || ""), JSON.stringify(st.rail));
+    ok("5: …the tile picked is lit", st.picked === "Harness Cabin", String(st.picked));
+    ok("5: …Video & photos holds the walk-around, the size and the photos cards", st.cards.length === 3, JSON.stringify(st.cards));
+    ok("5: …the 3D is docked beside the form", st.canvas, JSON.stringify(st));
+    ok("5: …and the old amber grid is gone", !st.amber);
+    ok("5: the same controls: Roof type tiles, Material segments, the four add-on tabs",
+      await p2.getByRole("radiogroup", { name: "Roof type", exact: true }).count() === 1
+      && await p2.getByRole("group", { name: "Material", exact: true }).count() === 1
+      && await p2.locator('.ss-cal [data-ss-adv="sections"] [data-ss-adv-sec]').count() === 4);
+    // A box writes the draft the 3D draws, and Save sends that draft under the style that is open.
+    const wall = p2.getByRole("spinbutton", { name: "Wall height (ft)", exact: true });
+    await wall.click();
+    await wall.fill("10");
+    await p2.keyboard.press("Tab");
+    await p2.waitForTimeout(300);
+    const n0 = saves.length;
+    await p2.getByRole("button", { name: /^Save 3D look$/ }).click();
+    for (let i = 0; i < 60 && saves.length === n0; i++) await p2.waitForTimeout(100);
+    const sv = saves[n0];
+    ok("5: Save 3D look sends save_style_d3 for the style that is open, with the wall typed",
+      !!sv && sv.styleValue === "hcabin" && sv.d3 && sv.d3.wallHeightFt === 10 && sv.d3.roof && sv.d3.roof.type === "gable", JSON.stringify(sv && { styleValue: sv.styleValue, wall: sv.d3 && sv.d3.wallHeightFt }));
     ok("5: no page errors", e2.length === 0, e2.join(" | "));
     await c2.close();
   }
