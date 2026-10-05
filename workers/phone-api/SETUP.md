@@ -41,7 +41,7 @@ All four must pass. The dry run prints the bindings and "exiting now"; it upload
    - Call status changes: `<BASE>/voice/status?leg=pstn&key=<PHONE_WEBHOOK_SECRET>`
    - Primary handler fails: a TwiML Bin that plays the standard greeting and records, with the `<Record action>` pointing at a second Bin that only hangs up. The every-15-minutes sweep files those messages.
    Leave the messaging configuration exactly as it is; texts stay on `sms-inbound` and `sms-status`.
-7. Phase 4 only: the push credentials (APNs sandbox, APNs production, FCM).
+7. Phase 4 only: the push credentials (FCM; and for iPhone, one `apn` credential per bundle id, each from that id's VoIP Services certificate, both with Sandbox UNTICKED: EAS signs every iPhone build, the development client included, for production push. README's secret table says which is which).
 
 ## 3. Secrets
 
@@ -62,7 +62,7 @@ npx wrangler secret put LOG_PSEUDONYM_KEY
 
 Paste the value at the prompt. Set it once and leave it: a new key gives everyone new refs, so a person's reports from before the change can only be found with the old key.
 
-APNs topics: set `APNS_BUNDLE_ID` to the App Store bundle id. It is the topic for `prod` devices (TestFlight and App Store builds), and development builds (`dev` devices) get it with `.dev` added, which is the id the app gives them. `APNS_BUNDLE_ID_DEV` overrides that and is normally left unset. Secrets set with a pasted newline are trimmed.
+APNs: set `APNS_BUNDLE_ID` to the App Store bundle id, the topic for `prod` devices (preview, TestFlight and App Store builds), and `APNS_BUNDLE_ID_DEV` to the development client's id, the topic for `dev` devices. Unset, the Worker derives the dev topic as `APNS_BUNDLE_ID` + `.dev`, but an older Worker doesn't, so set both. The key (`APNS_KEY_P8`, `APNS_KEY_ID`): in the Apple Developer account, Certificates, IDs & Profiles, Keys, a new key with Apple Push Notifications service, team scoped (all topics) and enabled for Production. Every iPhone alert goes to Apple's production host, so a key made for Sandbox alone is refused. Secrets set with a pasted newline are trimmed.
 
 ## 4. First deploy, on workers.dev
 

@@ -339,8 +339,19 @@ export async function sendFcm(env: Env, token: string, a: Alert): Promise<SendRe
 
 // ── APNs ────────────────────────────────────────────────────────────────────────────
 
-export const APNS_PRODUCTION = "https://api.push.apple.com";
-export const APNS_SANDBOX = "https://api.sandbox.push.apple.com";
+/**
+ * Every iPhone alert goes to Apple's PRODUCTION host, whatever the device's build_type. A token's
+ * APNs environment comes from the provisioning profile the build was signed with, not from the
+ * build's entitlements file or its build_type: Xcode sets aps-environment from the profile, and
+ * only a development profile gives "development" (sandbox). Every iPhone build of this app comes
+ * from EAS, which signs with distribution profiles only: ad hoc for the development and preview
+ * profiles (distribution "internal"), App Store for production. So every token, the dev client's
+ * included, is a production token, and api.sandbox.push.apple.com would answer BadDeviceToken
+ * to all of them. build_type still picks the topic (apnsTopic), since a development build has
+ * its own bundle id. A build signed with a development profile (run from Xcode on a Mac) is the
+ * one thing this can't reach (DEVIATIONS 75).
+ */
+export const APNS_HOST = "https://api.push.apple.com";
 
 /** A development build's bundle id is the store build's plus this (the app's own rule, app.config.ts). */
 const DEV_BUNDLE_SUFFIX = ".dev";
@@ -391,11 +402,12 @@ export function resetPushTokens(): void {
 
 /**
  * The apns-topic (the app's bundle id) for a device's build type:
- *   prod (TestFlight, App Store) → APNS_BUNDLE_ID.
- *   dev  (development builds)    → APNS_BUNDLE_ID_DEV when set, otherwise APNS_BUNDLE_ID with
- *                                  ".dev" added, the app's own rule for its development id. An
- *                                  APNS_BUNDLE_ID that already ends in ".dev" is used as it is
- *                                  (the old plan, where every build shared the .dev id).
+ *   prod (preview, TestFlight, App Store) → APNS_BUNDLE_ID.
+ *   dev  (the development client)         → APNS_BUNDLE_ID_DEV when set, otherwise APNS_BUNDLE_ID
+ *                                           with ".dev" added, the app's own rule for its
+ *                                           development id. An APNS_BUNDLE_ID that already ends
+ *                                           in ".dev" is used as it is (the old plan, where every
+ *                                           build shared the .dev id).
  * A prod device never falls back to a dev topic. Bundle ids are secrets, not vars, so they stay
  * out of this public repo (plan D7). null: no topic for this build type.
  */
@@ -415,10 +427,9 @@ export function apnsMissing(env: Env, buildType: "dev" | "prod"): string[] {
 }
 
 /**
- * One alert to one iPhone. `buildType` is the device row's build_type: it picks the host (a
- * development build's token is a sandbox token) and the topic. Never throws for anything Apple
- * or the configuration does: every outcome is a SendResult, so one iPhone never costs another
- * its alert.
+ * One alert to one iPhone. `buildType` is the device row's build_type: it picks the topic, never
+ * the host (APNS_HOST says why). Never throws for anything Apple or the configuration does: every
+ * outcome is a SendResult, so one iPhone never costs another its alert.
  */
 export async function sendApns(env: Env, token: string, buildType: "dev" | "prod", a: Alert): Promise<SendResult> {
   const missing = apnsMissing(env, buildType);
@@ -442,7 +453,7 @@ export async function sendApns(env: Env, token: string, buildType: "dev" | "prod
     return "skipped";
   }
 
-  const host = buildType === "dev" ? APNS_SANDBOX : APNS_PRODUCTION;
+  const host = APNS_HOST;
   let res: Response;
   try {
     res = await fetch(`${host}/3/device/${encodeURIComponent(token)}`, {
@@ -483,21 +494,22 @@ export async function sendApns(env: Env, token: string, buildType: "dev" | "prod
   // 410 (Unregistered, ExpiredToken): the app is gone from that phone, or its token expired.
   if (res.status === 410 || reason === "Unregistered" || reason === "ExpiredToken") return "unregistered";
   if (reason === "BadDeviceToken") {
-    // Not a token this host knows, which in practice means a token from the other environment.
-    // It can never be reached here, so it is forgotten like a dead one (the app saves its token
-    // again on its next launch); and logged, because a build that keeps landing here is a build
-    // whose aps-environment and build_type disagree.
+    // Not a token the production host knows: a sandbox token (a build signed with a development
+    // profile, which only Xcode makes; every EAS build is production, APNS_HOST) or a damaged
+    // one. Neither can ever be reached here, so it is forgotten like a dead one (the app saves its
+    // token again on its next launch), and logged.
     await logFault({
       code: "push_apns_bad_device_token", severity: "warn", throttleMs: 3_600_000,
-      message: `APNs (${host}) refused a ${buildType} build's token (BadDeviceToken); it was forgotten. If this repeats, that build's aps-environment doesn't match its build_type.`,
+      message: `APNs (${host}) refused a ${buildType} build's token (BadDeviceToken); it was forgotten. Every EAS build has a production token, so this is a build signed with a development profile (run from Xcode), which this Worker doesn't send to, or a damaged token.`,
     });
     return "unregistered";
   }
   if (reason === "DeviceTokenNotForTopic" || reason === "TopicDisallowed" || reason === "BadTopic") {
-    // Our configuration, not the device: the token is fine, the bundle id we sent is not its app's.
+    // Our configuration, not the device: the token is fine, the bundle id we sent is not its app's
+    // (or the key may not send to it).
     await logFault({
       code: "push_apns_wrong_topic", throttleMs: 3_600_000,
-      message: `APNs refused topic "${topic}" for a ${buildType} build (${reason}). Check ${buildType === "dev" ? "APNS_BUNDLE_ID_DEV (unset: APNS_BUNDLE_ID + \".dev\")" : "APNS_BUNDLE_ID"}.`,
+      message: `APNs refused topic "${topic}" for a ${buildType} build (${reason}). Check ${buildType === "dev" ? "APNS_BUNDLE_ID_DEV (unset: APNS_BUNDLE_ID + \".dev\")" : "APNS_BUNDLE_ID"}, and that the APNs key is Team Scoped (a Topic Specific key only sends to the bundle ids it lists).`,
     });
     return "failed";
   }
@@ -508,9 +520,12 @@ export async function sendApns(env: Env, token: string, buildType: "dev" | "prod
   await logFault({
     code: res.status === 403 ? "push_apns_auth_failed" : "push_apns_failed",
     throttleMs: res.status === 403 ? 3_600_000 : 60_000,
-    message: res.status === 403
-      ? `APNs refused the provider token (HTTP 403 ${reason}). Check that APNS_KEY_ID, APNS_TEAM_ID and APNS_KEY_P8 are one key of one team.`
-      : `APNs send failed (HTTP ${res.status} ${reason}).`,
+    message: res.status !== 403 ? `APNs send failed (HTTP ${res.status} ${reason}).`
+      // Apple's keys are made for one environment now (Sandbox or Production). One made for
+      // Sandbox signs perfectly and is still refused by the production host, under this reason.
+      : reason === "BadEnvironmentKeyIdInToken"
+        ? `APNs refused the provider token (HTTP 403 BadEnvironmentKeyIdInToken): the key APNS_KEY_ID names isn't enabled for Production, the only environment this Worker sends to. Create a Team Scoped key for Production in the Apple Developer account and set APNS_KEY_P8 and APNS_KEY_ID to it.`
+        : `APNs refused the provider token (HTTP 403 ${reason}). Check that APNS_KEY_ID, APNS_TEAM_ID and APNS_KEY_P8 are one key of one team, and that the key is enabled for Production.`,
   });
   return "failed";
 }

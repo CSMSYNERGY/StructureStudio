@@ -88,8 +88,8 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
     if (verdict.refuse && verdict.autoTopupEnabled) ec.waitUntil(requestAutoTopup(env, ctx.client_id));
   }
 
-  // Only iPhone development-profile builds get _dev: they use sandbox push and must never share
-  // a push binding with the TestFlight build (plan D8).
+  // Only the iPhone development client gets _dev: it is a separate app (its own bundle id and
+  // push credential) and must never share a push binding with the store build (plan D8).
   const identity = toIdentity(claims.sub, ctx.device_generation, platform === "ios" && buildType === "dev");
   const ttl = preflight ? PREFLIGHT_TTL : TOKEN_TTL;
   // A phone's token without a push credential still signs the person in and still places calls,

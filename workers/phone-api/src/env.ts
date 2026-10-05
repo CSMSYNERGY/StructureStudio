@@ -57,7 +57,11 @@ export interface Env {
   TWILIO_TWIML_APP_SID?: string;
   /** The setup-test TwiML App that answers with <Echo/>. */
   TWILIO_ECHO_APP_SID?: string;
-  TWILIO_PUSH_CREDENTIAL_APNS_SANDBOX?: string;
+  /**
+   * The iPhone push credentials (accessToken.ts pushCredentialFor), both with Sandbox unticked:
+   * _DEV from the development bundle id's VoIP certificate, _PROD from the store bundle id's.
+   */
+  TWILIO_PUSH_CREDENTIAL_APNS_DEV?: string;
   TWILIO_PUSH_CREDENTIAL_APNS_PROD?: string;
   TWILIO_PUSH_CREDENTIAL_FCM?: string;
 
@@ -76,15 +80,17 @@ export interface Env {
   // ── Text alerts ───────────────────────────────────────────────────────────────────
   /** The Firebase service account JSON, whole. */
   FCM_SERVICE_ACCOUNT_JSON?: string;
-  /** The APNs .p8 auth key (PEM text). */
+  /** The APNs .p8 auth key (PEM text): Team Scoped, enabled for Production (routes/push.ts APNS_HOST). */
   APNS_KEY_P8?: string;
   APNS_KEY_ID?: string;
   APNS_TEAM_ID?: string;
   /** The apns-topic for devices registered with build_type "prod": the App Store bundle id. */
   APNS_BUNDLE_ID?: string;
   /**
-   * The apns-topic for build_type "dev". Unset: APNS_BUNDLE_ID + ".dev", the app's own rule for
-   * its development builds (an APNS_BUNDLE_ID already ending in ".dev" is used as it is).
+   * The apns-topic for build_type "dev": the development bundle id. Unset: APNS_BUNDLE_ID + ".dev",
+   * the app's own rule for its development builds (an APNS_BUNDLE_ID already ending in ".dev" is
+   * used as it is). Set it anyway: an older Worker sends dev devices APNS_BUNDLE_ID itself, so with
+   * both set, the order of setting secrets and deploying doesn't matter.
    */
   APNS_BUNDLE_ID_DEV?: string;
 

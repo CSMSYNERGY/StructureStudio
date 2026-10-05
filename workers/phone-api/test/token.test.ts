@@ -45,11 +45,18 @@ describe("Twilio Access Token", () => {
 
   it("picks the push credential by platform and build", () => {
     const env = makeEnv();
-    expect(pushCredentialFor(env, "ios", "dev")).toBe(env.TWILIO_PUSH_CREDENTIAL_APNS_SANDBOX);
+    expect(pushCredentialFor(env, "ios", "dev")).toBe(env.TWILIO_PUSH_CREDENTIAL_APNS_DEV);
     expect(pushCredentialFor(env, "ios", "prod")).toBe(env.TWILIO_PUSH_CREDENTIAL_APNS_PROD);
     expect(pushCredentialFor(env, "android", "dev")).toBe(env.TWILIO_PUSH_CREDENTIAL_FCM);
     expect(pushCredentialFor(env, "android", "prod")).toBe(env.TWILIO_PUSH_CREDENTIAL_FCM);
     expect(pushCredentialFor(env, "chrome", "prod")).toBeUndefined();
+  });
+
+  it("never hands an iPhone a sandbox credential: EAS signs every build for production APNs, the dev client's too", () => {
+    // The old secret, left set on a Worker, is not read for any build.
+    const old = { TWILIO_PUSH_CREDENTIAL_APNS_SANDBOX: `CR${"0".repeat(31)}9` } as unknown as Parameters<typeof pushCredentialFor>[0];
+    expect(pushCredentialFor(old, "ios", "dev")).toBeUndefined();
+    expect(pushCredentialFor(old, "ios", "prod")).toBeUndefined();
   });
 });
 
@@ -97,11 +104,11 @@ describe("POST /token", () => {
     expect(json.user.can_text_contacts).toBe(can);
   });
 
-  it("adds _dev only for iPhone development-profile builds, with the sandbox credential", async () => {
+  it("adds _dev only for the iPhone development client, with the development bundle's credential", async () => {
     const { auth, env } = await setup();
     const ios = await call(env, appRequest("POST", "/token", await auth.token(USER_A), { platform: "ios", build_type: "dev", app_version: "1" }));
     expect(ios.json.identity).toBe(`u_${HEX_A}_g4_dev`);
-    expect(decode(ios.json.token).payload.grants.voice.push_credential_sid).toBe(env.TWILIO_PUSH_CREDENTIAL_APNS_SANDBOX);
+    expect(decode(ios.json.token).payload.grants.voice.push_credential_sid).toBe(env.TWILIO_PUSH_CREDENTIAL_APNS_DEV);
     const android = await call(env, appRequest("POST", "/token", await auth.token(USER_A), { platform: "android", build_type: "dev", app_version: "1" }));
     expect(android.json.identity).toBe(`u_${HEX_A}_g4`);
     const chrome = await call(env, appRequest("POST", "/token", await auth.token(USER_A), { platform: "chrome", build_type: "prod", app_version: "1" }));
@@ -121,7 +128,7 @@ describe("POST /token", () => {
 
   it.each([
     ["ios", "prod", "TWILIO_PUSH_CREDENTIAL_APNS_PROD"],
-    ["ios", "dev", "TWILIO_PUSH_CREDENTIAL_APNS_SANDBOX"],
+    ["ios", "dev", "TWILIO_PUSH_CREDENTIAL_APNS_DEV"],
     ["android", "prod", "TWILIO_PUSH_CREDENTIAL_FCM"],
   ] as const)("%s %s with %s unset still signs in: a token without a push credential, incoming_push false, one warning", async (platform, build_type, secret) => {
     const { net, auth } = await setup();

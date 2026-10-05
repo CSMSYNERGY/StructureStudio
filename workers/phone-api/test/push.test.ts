@@ -118,9 +118,10 @@ describe("/push/text", () => {
     await call(env, hook(env, inbound()));
     expect(fcmTokens(net).sort()).toEqual(["fcm-a", "fcm-c"]);
     expect(apnsTokens(net)).toEqual(["aa11"]);
-    // The dev build's token goes to Apple's sandbox, with our bundle id as the topic.
+    // The development client's token goes to Apple's PRODUCTION host (EAS signs it ad hoc, so its
+    // token is a production one), with its .dev bundle id as the topic.
     const apple = net.to(/push\.apple\.com/)[0];
-    expect(apple.url.origin).toBe("https://api.sandbox.push.apple.com");
+    expect(apple.url.origin).toBe("https://api.push.apple.com");
     expect(apple.headers.get("apns-topic")).toBe("com.example.mysynergyphone.dev");
     expect(apple.headers.get("apns-push-type")).toBe("alert");
     expect(apple.headers.get("authorization")).toMatch(/^bearer [\w-]+\.[\w-]+\.[\w-]+$/);
@@ -420,7 +421,7 @@ describe("APNs topic per build type", () => {
     expect(apnsMissing({ ...keyed, APNS_TEAM_ID: "  " }, "dev")).toEqual(["APNS_TEAM_ID"]);
   });
 
-  it("each iPhone gets its own build's host and topic, chosen by the device row's build_type", async () => {
+  it("each iPhone gets its own build's topic, chosen by the device row's build_type, and every one goes to the production host", async () => {
     const { net, env } = await setup({
       contact: { name: "Jordan Demo", owner_user_id: USER_A },
       env: { APNS_BUNDLE_ID: "com.example.mysynergyphone", APNS_BUNDLE_ID_DEV: "com.example.mysynergyphone.dev" },
@@ -429,19 +430,19 @@ describe("APNs topic per build type", () => {
     await call(env, hook(env, inbound()));
     const sent = net.to(/push\.apple\.com/).map((s) => ({ host: s.url.origin, token: s.url.pathname.split("/").pop(), topic: s.headers.get("apns-topic") }));
     expect(sent.sort((a, b) => a.token!.localeCompare(b.token!))).toEqual([
-      { host: "https://api.sandbox.push.apple.com", token: "dd01", topic: "com.example.mysynergyphone.dev" },
+      { host: "https://api.push.apple.com", token: "dd01", topic: "com.example.mysynergyphone.dev" },
       { host: "https://api.push.apple.com", token: "pp01", topic: "com.example.mysynergyphone" },
     ]);
   });
 
-  it("with only APNS_BUNDLE_ID set, a development build gets the .dev topic on the sandbox, the store build its own id", async () => {
+  it("with only APNS_BUNDLE_ID set, a development build gets the .dev topic, the store build its own id", async () => {
     const { net, env } = await setup({ contact: { name: "Jordan Demo", owner_user_id: USER_A }, env: { APNS_BUNDLE_ID: "com.example.mysynergyphone" } });
     net.rest("GET", "phone_devices", () => IPHONES);
     await call(env, hook(env, inbound()));
     const sent = net.to(/push\.apple\.com/).map((s) => [s.url.origin, s.headers.get("apns-topic")]).sort();
     expect(sent).toEqual([
       ["https://api.push.apple.com", "com.example.mysynergyphone"],
-      ["https://api.sandbox.push.apple.com", "com.example.mysynergyphone.dev"],
+      ["https://api.push.apple.com", "com.example.mysynergyphone.dev"],
     ]);
     expect(net.writes("app_errors")).toEqual([]);
   });
@@ -468,6 +469,8 @@ describe("APNs topic per build type", () => {
     expect(net.writes("phone_devices", "DELETE")).toEqual([]);
     const log = net.writes("app_errors").map((s) => s.json).find((l) => l.code === "push_apns_wrong_topic");
     expect(log?.message).toContain("APNS_BUNDLE_ID");
+    // A Topic Specific key that doesn't list the id is refused the same way.
+    expect(log?.message).toContain("Team Scoped");
   });
 });
 
@@ -522,7 +525,12 @@ describe("APNs sends", () => {
     expect(net.writes("phone_devices", "DELETE").map((s) => s.url.searchParams.get("id"))).toEqual(["in.(iGone,iExpired,iBad)"]);
     const logs = net.writes("app_errors").map((s) => s.json);
     expect(logs.map((l) => [l.code, l.severity]).sort()).toEqual([["push_apns_bad_device_token", "warn"], ["push_apns_failed", "error"]]);
-    expect(logs.find((l) => l.code === "push_apns_bad_device_token").message).toContain("https://api.sandbox.push.apple.com");
+    const bad = logs.find((l) => l.code === "push_apns_bad_device_token").message;
+    expect(bad).toContain("https://api.push.apple.com");
+    expect(bad).toContain("development profile");
+    // Even a dev device's token was sent to production: there is no second try on the sandbox.
+    expect(net.to(/push\.apple\.com/).every((s) => s.url.origin === "https://api.push.apple.com")).toBe(true);
+    expect(net.to(/push\.apple\.com/)).toHaveLength(5);
   });
 
   it("signs ONE provider token per isolate: ES256 with the key's id and team (trimmed), shared by a fan-out and the next webhook, renewed after 50 minutes", async () => {
@@ -575,6 +583,19 @@ describe("APNs sends", () => {
     expect(log?.message).toContain(reason);
   });
 
+  it("a key made for Apple's Sandbox only (BadEnvironmentKeyIdInToken) is named as that, not as a key/team mix-up; the device is kept", async () => {
+    const { net, env } = await setup({ ...owned, env: { APNS_BUNDLE_ID: STORE } });
+    net.rest("GET", "phone_devices", () => [iphone("i1", "pp01")]);
+    net.on("POST", /push\.apple\.com\/3\/device\//, () => jsonRes({ reason: "BadEnvironmentKeyIdInToken" }, 403));
+    const { res } = await call(env, hook(env, inbound()));
+    expect(res.status).toBe(204);
+    expect(net.writes("phone_devices", "DELETE")).toEqual([]);
+    const logs = net.writes("app_errors").map((s) => s.json);
+    expect(logs.map((l) => l.code)).toEqual(["push_apns_auth_failed"]);
+    expect(logs[0].message).toContain("isn't enabled for Production");
+    expect(logs[0].message).not.toContain("one key of one team");
+  });
+
   it("a key that can't sign skips iPhones with one log, Android still gets its alert, and a corrected key works at once", async () => {
     const broken = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
     const { net, env } = await setup({ contact: { name: "Jordan Demo", owner_user_id: null }, env: { APNS_KEY_P8: broken, APNS_BUNDLE_ID: STORE } });
@@ -598,7 +619,7 @@ describe("APNs sends", () => {
     expect(res.status).toBe(204);
     expect(fcmTokens(net)).toEqual(["fcm-a"]);
     const log = net.writes("app_errors").map((s) => s.json).find((l) => l.code === "push_apns_unreachable");
-    expect(log?.message).toContain("https://api.sandbox.push.apple.com");
+    expect(log?.message).toContain("https://api.push.apple.com");
     expect(log?.message).toContain("Network connection lost.");
     expect(net.writes("phone_devices", "DELETE")).toEqual([]);
   });
