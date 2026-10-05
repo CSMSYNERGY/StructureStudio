@@ -263,8 +263,13 @@ Deno.serve(withErrorLog("customer-pay", async (req: Request) => {
       minCents: MIN_PAYMENT_CENTS,
       maxCents: MAX_PAYMENT_CENTS,
       tokenizer: {
+        // The origin is also where the page tokenizes a bank account itself: since the
+        // Routing and Checking boxes (2026-10) the numbers go from the browser straight to
+        // CardSecure on this origin, never through here.
         origin: cpTokenizerOrigin(),
         cardUrl: cpTokenizerUrl("card"),
+        // No current page loads achUrl/achHeight. They stay so a page cached from before
+        // the two boxes still renders the old single-field iframe and can still pay.
         achUrl: cpTokenizerUrl("ach"),
         // Served, not hardcoded in the page: at 132px the CVV sat below the fold of a
         // non-scrolling frame and the form was quietly uncompletable.

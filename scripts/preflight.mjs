@@ -82,6 +82,11 @@
 //      are charged, and it carries the figure their consent sentence quotes. The check LIFTS
 //      the shipped block out of the file rather than re-implementing it, so a copy cannot
 //      drift into passing while the page is broken.
+//   9. The bank rail's Routing and Checking boxes (my-quotes.html and portal/04-orders.jsx):
+//      both copies of the routing check digit and the account-length rule are lifted out and
+//      run against the same vectors, no line naming a bank number may also touch storage, a
+//      URL, the console, the error log or an error sentence, and the boxes keep autocomplete
+//      off (checkAchBankInputs).
 //
 // Steps are numbered in the order they RUN.
 //
@@ -907,6 +912,117 @@ function checkMyQuotesPayFigures(html) {
     }
     if (!ok(out)) {
       errors.push(`my-quotes.html payFigures — ${name}: got ${JSON.stringify(out)}`);
+    }
+  }
+  return errors;
+}
+
+
+// ── The bank rail's Routing and Checking boxes: twins that must agree, numbers that go nowhere ─
+//
+// Since 2026-10 a bank account is typed into TWO boxes of our own (Carolyn 2026-09-02: "one says
+// routing and one says checking"), on two surfaces: the customer's pay panel in my-quotes.html
+// and the builder's Record-a-payment modal in portal/04-orders.jsx. Each composes
+// "routing/account" and tokenizes it straight from the browser with CardSecure. So for the first
+// time OUR code holds a bank account number, in two hand-kept copies, in two dialects. Three
+// things are checked on the SHIPPED text of both files:
+//
+//   1. The validators AGREE. achRoutingOk (9 digits + the ABA check digit) and achAccountOk
+//      (4-17 digits) are lifted out of each file and run against the same vectors, so one copy
+//      cannot drift into accepting what the other refuses.
+//   2. The numbers go NOWHERE but the tokenize POST. No line that names an ach* number may also
+//      touch storage, a URL, the console, the error log, or an error sentence. Line-based on
+//      purpose: it is a tripwire, and tests/harness/achBankBoxes.mjs is the runtime proof (it
+//      reads storage, the URL, the console and every request after a real run).
+//   3. The boxes carry autocomplete off, and the tokenize URL carries no query string and is
+//      built from the SERVED origin: no CardPointe host is written into either file (the repo is
+//      public, and the test/production switch is a secret on the server, not an edit here).
+//
+// Takes the texts as arguments so --self-test can hand it broken variants.
+const ACH_FILES = ["my-quotes.html", "portal/04-orders.jsx"];
+function checkAchBankInputs(files) {
+  const errors = [];
+  const takeBlock = (text, needle) => {
+    const lines = text.split("\n");
+    const start = lines.findIndex((l) => l.includes(needle));
+    if (start < 0) return null;
+    let depth = 0;
+    for (let i = start; i < lines.length; i++) {
+      for (const ch of lines[i]) { if (ch === "{") depth++; else if (ch === "}") depth--; }
+      if (depth === 0 && i > start) return lines.slice(start, i + 1).join("\n");
+    }
+    return null;
+  };
+  const ROUTING = [["031201360", true], ["031201361", false], ["123456780", true], ["123456789", false],
+    ["03120136", false], ["0312013600", false], ["03120136a", false], ["", false], [null, false]];
+  const ACCOUNT = [["000987654321", true], ["1234", true], ["123", false], ["12345678901234567", true],
+    ["123456789012345678", false], ["12a4", false], ["", false], [null, false]];
+  // Anything that writes somewhere a number must never go. `error:` and the setters cover the
+  // sentences shown to a person; the rest are storage, the address bar, and the logs.
+  const SINK = /localStorage|sessionStorage|\blsSet\(|console\.|\blocation\b|\bhistory\.|URLSearchParams|indexedDB|document\.cookie|log_error|logEdgeError|sendBeacon|\bsetError\(|\bsetTokenErr\(|\bsetMsg\(|textContent|innerHTML|innerText|\balert\(|\berror\s*:/;
+  const NUMBER = /\b(?:setAch|ach)(?:Routing|Account)(?!Ok\b)\w*/;
+
+  for (const f of ACH_FILES) {
+    const text = (files[f] ?? "").replace(/\r\n/g, "\n");
+    const rSrc = takeBlock(text, "function achRoutingOk(");
+    const aSrc = takeBlock(text, "function achAccountOk(");
+    const tSrc = takeBlock(text, "function achTokenize(");
+    if (!rSrc || !aSrc || !tSrc) {
+      errors.push(`${f}: achRoutingOk / achAccountOk / achTokenize is gone — the bank rail's Routing and `
+        + "Checking boxes validate and tokenize through them, and this check lifts them out of the file. "
+        + "If the boxes were removed on purpose, remove this check too.");
+      continue;
+    }
+    let fns;
+    try {
+      // eslint-disable-next-line no-new-func
+      fns = new Function([rSrc, aSrc, "return { achRoutingOk, achAccountOk };"].join("\n"))();
+    } catch (e) {
+      errors.push(`${f}: achRoutingOk / achAccountOk do not run in isolation — ${e.message}`);
+      continue;
+    }
+    for (const [v, want] of ROUTING) {
+      if (fns.achRoutingOk(v) !== want) errors.push(`${f}: achRoutingOk(${JSON.stringify(v)}) should be ${want}`);
+    }
+    for (const [v, want] of ACCOUNT) {
+      if (fns.achAccountOk(v) !== want) errors.push(`${f}: achAccountOk(${JSON.stringify(v)}) should be ${want}`);
+    }
+
+    text.split("\n").forEach((line, i) => {
+      if (NUMBER.test(line) && SINK.test(line)) {
+        errors.push(`${f}:${i + 1}  a bank number meets "${line.match(SINK)[0]}" — routing and account `
+          + "numbers may only go into the tokenize request, never into storage, a URL, the console, "
+          + "the error log or a sentence on screen");
+      }
+    });
+
+    const host = /[a-z0-9-]+\.cardconnect\.com/i.exec(text);
+    if (host) {
+      const at = text.slice(0, host.index).split("\n").length;
+      errors.push(`${f}:${at}  CardPointe host "${host[0]}" written into a `
+        + "browser-served file — the tokenize URL is built from the origin the server serves (pay_options)");
+    }
+    if (!/\/cardsecure\/api\/v1\/ccn\/tokenize["'`]/.test(tSrc) || /ccn\/tokenize\?/.test(tSrc)) {
+      errors.push(`${f}: achTokenize must POST to /cardsecure/api/v1/ccn/tokenize with no query string — `
+        + "a query string puts the numbers in server and proxy logs");
+    }
+
+    if (f.endsWith(".html")) {
+      const boxes = takeBlock(text, "function mountBankBoxes(");
+      if (!boxes || !/setAttribute\("autocomplete", "off"\)/.test(boxes)) {
+        errors.push(`${f}: the Routing and Checking boxes must set autocomplete="off" (mountBankBoxes) — `
+          + "a browser that offers to remember a bank account number has stored it");
+      }
+    } else {
+      for (const v of ["achRouting", "achAccount"]) {
+        const at = text.indexOf(`value={${v}}`);
+        const open = at < 0 ? -1 : text.lastIndexOf("<input", at);
+        const close = at < 0 ? -1 : text.indexOf("/>", at);
+        if (open < 0 || close < 0 || !/autoComplete="off"/.test(text.slice(open, close))) {
+          errors.push(`${f}: the input bound to ${v} must carry autoComplete="off" — a browser that `
+            + "offers to remember a bank account number has stored it");
+        }
+      }
     }
   }
   return errors;
@@ -2524,6 +2640,45 @@ if (process.argv.includes("--self-test")) {
   }
   console.log("self-test passed: the my-quotes tax breakdown check fails on wrong figures and on a missing block");
 
+  // ── The bank rail's Routing and Checking boxes ──
+  // The real files pass; a checksum that drifted in ONE copy, a number written to storage or to an
+  // error sentence, an input the browser may remember, a missing validator and a hardcoded
+  // CardSecure host all fail.
+  const achReal = Object.fromEntries(ACH_FILES.map((f) => [f, read(f)]));
+  if (checkAchBankInputs(achReal).length) {
+    console.error("self-test FAILED: the real my-quotes.html / portal/04-orders.jsx do not pass checkAchBankInputs:");
+    for (const e of checkAchBankInputs(achReal)) console.error("  " + e);
+    process.exit(1);
+  }
+  const achMutants = [
+    ["a check digit that drifted in the portal's copy", "portal/04-orders.jsx",
+      "(n[2] + n[5] + n[8])) % 10 === 0;", "(n[2] + n[5] + n[8])) % 10 === 1;", /achRoutingOk/],
+    ["a routing number written to localStorage", "my-quotes.html",
+      "        var mine = achSeq;", "        var mine = achSeq; lsSet(\"ach_last\", achRoutingEl.value);", /meets "lsSet\("/],
+    ["an account number put in an error sentence", "portal/04-orders.jsx",
+      "else { setPayToken(null); setTokenErr(r.error); }", "else { setPayToken(null); setTokenErr(r.error + achAccount); }", /meets "setTokenErr\("/],
+    ["a bank box the browser may remember", "portal/04-orders.jsx",
+      "autoComplete=\"off\" autoCorrect", "autoComplete=\"on\" autoCorrect", /autoComplete="off"/],
+    ["a validator that is gone", "my-quotes.html", "function achAccountOk(", "function achAccountOkOLD(", /is gone/],
+    ["a hardcoded CardSecure host", "portal/04-orders.jsx",
+      "await fetch(`${origin}/cardsecure", "await fetch(`https://fts.cardconnect.com/cardsecure", /CardPointe host/],
+  ];
+  for (const [what, f, from, to, want] of achMutants) {
+    const src = achReal[f].replace(/\r\n/g, "\n");
+    const mutated = src.replace(from, to);
+    if (mutated === src) {
+      console.error(`self-test FAILED: could not plant "${what}" — the subject of checkAchBankInputs moved`);
+      process.exit(1);
+    }
+    if (!checkAchBankInputs({ ...achReal, [f]: mutated }).some((e) => want.test(e))) {
+      console.error(`self-test FAILED: checkAchBankInputs passed ${what}`);
+      process.exit(1);
+    }
+  }
+  console.log("self-test passed: the Routing/Checking validators agree in both files, and a drifted check "
+    + "digit, a number in storage or an error sentence, a box the browser may remember, a missing "
+    + "validator and a hardcoded CardSecure host are each refused");
+
   // ── The GATES ⇄ action cross-check ─────────────────────────────────────────
   // This rule had NO self-test at all until now, in either direction — while quietly running
   // zero checks on one of the four functions it named. So prove the whole mechanism: that
@@ -2854,6 +3009,7 @@ errors.push(...checkStandalonePagesParse({
 }));
 errors.push(...checkMyQuotesTaxBreakdown(readFileSync(join(root, "my-quotes.html"), "utf8")));
 errors.push(...checkMyQuotesPayFigures(readFileSync(join(root, "my-quotes.html"), "utf8")));
+errors.push(...checkAchBankInputs(Object.fromEntries(ACH_FILES.map((f) => [f, readFileSync(join(root, f), "utf8")]))));
 
 if (errors.length) {
   console.error(`preflight: ${errors.length} error(s) — push refused\n`);
