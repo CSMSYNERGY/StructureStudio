@@ -26,7 +26,7 @@
  *     sending (`Authorization: Bearer`), unlike Postmark's account/server token split — so
  *     configured-ness is a single check and there is no per-API token to mix up.
  *   - Domain-level `status` values: "not_started" | "pending" | "verified" | "failed" |
- *     "temporary_failure". Only `rsDomainVerified` (status === "verified") means usable;
+ *     "temporary_failure". Only `rsDomainVerified` (status "verified", or "partially_verified" with every DKIM/SPF record verified) means usable;
  *     "temporary_failure" is a previously-passing domain that failed a periodic re-check.
  *   - Resend returns DNS record hosts as RELATIVE names ("send", "resend._domainkey").
  *     A UI rendering those verbatim hands the tenant a record that lands at the wrong node.
@@ -203,11 +203,26 @@ export type RsDomain = {
   tracking?: { open: boolean; click: boolean; subdomain: string | null };
 };
 
-/** The ONE meaning of "usable": Resend has checked the records and says verified. Every
+/** The ONE meaning of "usable": Resend has checked the records and says verified (or only an
+ *  optional tracking record is still pending; see below). Every
  *  other status — including "pending" and "temporary_failure" — is not-yet/no-longer. */
 export function rsDomainVerified(d: RsDomain): boolean {
-  return d.status === "verified";
+  if (d.status === "verified") return true;
+  // ⚠️ OPEN TRACKING MOVES THE DOMAIN-LEVEL STATUS. Switching open tracking on adds a "Tracking"
+  // CNAME (links.<domain>), and until that one record is in DNS Resend reports the WHOLE domain
+  // as `partially_verified` — seen live 2026-10-05 on a domain whose DKIM and both SPF records
+  // were all verified. email_verify_domain switches tracking on the moment a domain verifies,
+  // and the tracking record is optional, so without this the next Check would store "pending"
+  // for a domain that sends perfectly well and silently switch the builder's email off.
+  // So partially_verified counts only while every SENDING record (DKIM, SPF) is verified and
+  // sending is not switched off — a receiving-only subdomain (sending disabled) never passes.
+  if (d.status !== "partially_verified" || d.capabilities?.sending === "disabled") return false;
+  const sending = d.records.filter((r) => SENDING_PURPOSES.has(r.purpose.toUpperCase()));
+  return sending.length > 0 && sending.every((r) => r.verified);
 }
+
+/** Resend's `record` values for the records that decide whether a domain can SEND. */
+const SENDING_PURPOSES = new Set(["DKIM", "SPF"]);
 
 /**
  * Build the absolute record name from Resend's relative one.
