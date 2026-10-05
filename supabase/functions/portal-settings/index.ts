@@ -66,8 +66,14 @@ import { feeFor, normalizeRules } from "../_shared/deliveryFee.ts";
 import { isConfigured as deliveryDistanceConfigured } from "../_shared/deliveryDistance.ts";
 import { quoteDelivery } from "../_shared/deliveryQuote.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
+// The customer block, the logo and the per-builder validity on every quote / invoice PDF this
+// function prints (2026-10-05), and the Settings field behind the validity (migration 269).
+import { pdfCustomerFrom } from "../_shared/estimatePdf.ts";
+import { pdfLogoSources } from "../_shared/pdfLogo.ts";
+import { parseQuoteValidDays, QUOTE_VALID_DAYS_MAX, QUOTE_VALID_DAYS_MIN, readQuoteValidDays } from "../_shared/quoteValidity.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
+import { FLOOR_PLANS, OBJECT_PATH, LEGACY_ROOT_ERA_END, crmInvoiceExists, floorPlanKey, isOwnFloorPlanKey, invoiceExists, removeDesignObjects } from "../_shared/designStorageKeys.ts";
 import {
   CLADDING_OPTIONS,
   claddingLabel,
@@ -894,9 +900,18 @@ async function regenerateQuotePdf(
   input: { quoteNumber: string; snap: any; planUrl: unknown },
 ): Promise<string | null> {
   try {
-    const { data: cs } = await admin.from("client_settings")
-      .select("business_name, business_phone, business_website, business_address, quote_terms")
-      .eq("client_id", clientId).maybeSingle();
+    // The customer ("Prepared for") and the validity are read HERE, beside the settings, rather
+    // than threaded through the six callers: each would need `contact` in its own design select,
+    // and one that forgot would quietly re-print the quote without the customer on it. In
+    // parallel, so the re-print waits no longer than it did. Each read degrades on its own: no
+    // contact prints no block, and quoteValidity's read gives 30 on any failure.
+    const [{ data: cs }, { data: who }, valid] = await Promise.all([
+      admin.from("client_settings")
+        .select("business_name, business_phone, business_website, business_address, business_logo_url, quote_terms")
+        .eq("client_id", clientId).maybeSingle(),
+      admin.from("designs").select("contact").eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+      readQuoteValidDays(admin, clientId),
+    ]);
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const expectedPdfPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${clientId}/`;
     const planUrl = input.planUrl && String(input.planUrl).startsWith(expectedPdfPrefix) ? String(input.planUrl) : null;
@@ -910,6 +925,9 @@ async function regenerateQuotePdf(
       },
       estimateNumber: input.quoteNumber,
       dateIso: new Date().toISOString(),
+      validityDays: valid.days,
+      customer: pdfCustomerFrom(who?.contact, shortCode),
+      logoSources: pdfLogoSources(cs?.business_logo_url, supabaseUrl, clientId),
       // deno-lint-ignore no-explicit-any
       lines: lines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
       discount: Number(input.snap?.discount) || 0,
@@ -997,54 +1015,8 @@ function firstNameOf(contact: any): string | null {
 // and the only record of which file belongs to which design is designs/design_versions
 // .image_url — a column the anon-callable save_design RPC writes verbatim. So a stored URL
 // is untrusted input: it may say WHICH of this design's objects to remove, never WHOSE.
-const FLOOR_PLANS = "floor-plans";
-const OBJECT_PATH = `/storage/v1/object/public/${FLOOR_PLANS}/`;
-
-// The only tails our uploader has ever produced: none (the pre-2026-06-15 `<code>.pdf`
-// shape) or submitQuote's `-${Date.now()}` suffix.
-const KEY_TAIL = /^(-[0-9]+)?\.(pdf|png)$/;
-
-// The bucket-root era — slash-less object names, before per-tenant prefixes. It is CLOSED:
-// the newest row referencing one was created 2026-06-12, the first prefixed row 2026-06-15,
-// and migration 031's storage INSERT policy now requires a "<slug>/" prefix, so no new root
-// object can be created. The date therefore records finished history, not policy. Only a
-// design row from that era may name a root object; a row with no parseable created_at is
-// treated as newer, which is the safe direction.
-const LEGACY_ROOT_ERA_END = Date.parse("2026-06-14T00:00:00Z");
-
-/** Object key from a stored public URL, or null if it is not one of our floor-plan URLs. */
-function floorPlanKey(u: unknown): string | null {
-  if (typeof u !== "string" || !u) return null;
-  let path: string;
-  try { path = new URL(u.trim()).pathname; } catch { return null; } // not a URL at all
-  if (!path.startsWith(OBJECT_PATH)) return null;
-  const key = path.slice(OBJECT_PATH.length);
-  // Percent-escapes are REJECTED, never decoded: decodeURIComponent throws on a lone "%",
-  // withErrorLog would turn that into a 500, and the design would become undeletable.
-  // Nothing legitimate needs them — the code alphabet is [A-HJ-NP-Z2-9] and the tail is
-  // digits. new URL() has already resolved any "../" and dropped query/fragment.
-  // Only the PATH is pinned, deliberately not the host: the key is checked against
-  // server-derived values below, so an off-host URL can still only name this design's own
-  // object, whereas anchoring on SUPABASE_URL would reject every row under
-  // `functions serve` or behind a future storage CDN and silently orphan every file.
-  return key && key.length <= 300 && !key.includes("%") ? key : null;
-}
-
-/** Could THIS design's own uploads have produced `key`? Both inputs are server-resolved and
- *  neither is ever read from the request body. shortCode comes from the matched row, and
- *  designs.short_code is globally UNIQUE (designs_short_code_key), so it names at most one
- *  design anywhere — that uniqueness IS the authorization test here, not the date gate above.
- *  clientId is the resolved tenant slug: straight from client_users on the ordinary
- *  owner/admin path, assertClient-validated only on the operator-override path. So it is NOT
- *  shape-guaranteed here and must not need to be — plain string ops only, and no RegExp is
- *  ever built from either value, which is what keeps this correct whatever a slug contains. */
-function isOwnFloorPlanKey(key: string, clientId: string, shortCode: string, legacyOk: boolean): boolean {
-  let name = key;
-  if (key.startsWith(`${clientId}/`)) name = key.slice(clientId.length + 1);
-  // Another tenant's prefix, or a root object this row is too new to have created.
-  else if (key.includes("/") || !legacyOk) return false;
-  return name.startsWith(shortCode) && KEY_TAIL.test(name.slice(shortCode.length));
-}
+// The key rules (floorPlanKey, designObjectKind and the removal plan) live in
+// _shared/designStorageKeys.ts since 2026-10-05, where they are unit-tested.
 
 // Shared CSV pricing + inclusion importer (mirror of admin-catalog's). rows:
 // [{ style, width, length, price, active, inclusions: { item_key: qty } }].
@@ -1571,7 +1543,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // first paint. Each read keeps its own tolerance exactly as before (see the notes on each
     // below); only the waiting is shared. The pre-232 branding retry stays sequential: it runs
     // only when the first branding read fails, which is rare by design.
-    const [prRes, settingsRes, cfgFirst, loginPrefRes, phoneRes] = await Promise.all([
+    const [prRes, settingsRes, cfgFirst, loginPrefRes, phoneRes, validRes] = await Promise.all([
       // The caller's own preferences row. Best-effort: a failure here must never stop the
       // bootstrap call that every role depends on to learn its access map.
       userId
@@ -1597,6 +1569,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       canRead("phone")
         ? admin.from("client_settings").select("phone_status").eq("client_id", clientId).maybeSingle()
         : Promise.resolve({ data: null, error: null }),
+      // How long quotes stay good for (migration 269) — see the note below.
+      readQuoteValidDays(admin, clientId),
     ]);
     const pr = prRes.data;
     const myPrefs: Record<string, unknown> | null =
@@ -1638,6 +1612,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const phoneStatus: "on" | "off" | null = canRead("phone") && !phoneRowErr
       ? ((phoneRow as { phone_status?: string } | null)?.phone_status === "on" ? "on" : "off")
       : null;
+    // How many days a quote stays good for (client_settings.quote_valid_days, migration 269). ITS
+    // OWN READ, AND TOLERANT, for the same reason as the two above. A failed read answers null,
+    // and the Settings card then hides the box rather than offer a number it could not save.
+    const quoteValidDays: number | null = validRes.ok ? validRes.days : null;
     // STATUS FIELD FILTER. This action is "open" in GATES because it is the shell's
     // bootstrap: every role needs clientId/role/branding/business identity to render the
     // portal at all, so denying it would black out the app rather than close one card. The
@@ -1731,6 +1709,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       businessAddress: data?.business_address ?? null,
       businessLogoUrl: data?.business_logo_url ?? null,
       quoteTerms: data?.quote_terms ?? null,
+      quoteValidDays,
       showPricing: Boolean(data?.show_pricing),
       updatedAt: data?.updated_at ?? null,
       // designer branding (client_configs)
@@ -1836,6 +1815,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if ("businessWebsite" in payload) updates.business_website = trimOrNull(payload.businessWebsite, 300);
     if ("businessLogoUrl" in payload) updates.business_logo_url = trimOrNull(payload.businessLogoUrl, 1000);
     if ("quoteTerms" in payload) updates.quote_terms = trimOrNull(payload.quoteTerms, 8000);
+    // How long quotes stay good for (migration 269), printed as "Valid until" on every quote PDF
+    // and used as the CRM estimate's expiry. Blank puts the default (30) back; anything but a
+    // whole number of days in range is refused here with a sentence rather than at the column's
+    // CHECK. The Settings card sends it only when `status` could read the column, so an ordinary
+    // save never names it on a database without 269.
+    if ("quoteValidDays" in payload) {
+      const days = parseQuoteValidDays(payload.quoteValidDays);
+      if (days == null) {
+        return json({ error: `Quotes have to stay good for a whole number of days, from ${QUOTE_VALID_DAYS_MIN} to ${QUOTE_VALID_DAYS_MAX}.` }, 400);
+      }
+      updates.quote_valid_days = days;
+    }
     if ("betaEmail" in payload) updates.beta_email = trimOrNull(payload.betaEmail, 320);
     if ("betaMode" in payload) updates.beta_mode = Boolean(payload.betaMode);
     if ("showPricing" in payload) updates.show_pricing = Boolean(payload.showPricing);
@@ -3143,12 +3134,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // the tenant's GHL. Ahsan's call 2026-07-30 was "allow, but make them type it".
   //
   // THREE things have to go, and only the first is obvious:
-  //   1. the storage PDFs — the stored image_url columns say WHICH objects, but never get to
-  //      say whose: every derived key must match a name this design's own uploads could have
-  //      produced (see isOwnFloorPlanKey). The filename cannot simply be rebuilt from the
-  //      short_code — three historical shapes exist and the current one carries a Date.now()
-  //      suffix — but all three are DERIVABLE from (client_id, short_code), which is what
-  //      makes validating them possible where reconstructing them is not.
+  //   1. the storage files — the plan PDFs, and since 2026-10-05 the quote documents and the
+  //      picture cards too (_shared/designStorageKeys.ts has the rules and why). The stored URL
+  //      columns and a listing of the tenant folder say WHICH objects, but never get to say
+  //      whose: every key must match a name this design's own uploads could have produced.
+  //      The plan PDF's name cannot simply be rebuilt from the short_code — three historical
+  //      shapes exist and the current one carries a Date.now() suffix — but all of them are
+  //      DERIVABLE from (client_id, short_code), which is what makes validating them possible
+  //      where reconstructing them is not.
   //   2. design_versions — there is NO foreign key to designs (verified: zero FKs on either
   //      table), so nothing cascades. Left behind, the rows stay readable by the tenant's own
   //      RLS policy and by list_design_versions/load_design_version, which key on short_code —
@@ -3220,7 +3213,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Scoped by BOTH client_id and short_code. A code from another tenant matches nothing and
     // returns the same 404 as a code that never existed — no existence oracle.
     const { data: design, error: findErr } = await admin.from("designs")
-      .select("id, short_code, status, image_url, ghl_estimate_id, ghl_estimate_number, created_at")
+      .select("id, short_code, status, image_url, ghl_estimate_id, ghl_estimate_number, created_at, ss_quote_number, ss_quote_pdf_url, plan_image_url, view3d_image_url, ss_invoice_sent_at")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
     if (findErr) return dbFail(req, clientId, "find that design", findErr);
     if (!design) return json({ error: "Design not found (or not yours)." }, 404);
@@ -3242,6 +3235,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
     }
 
+    // 0. HAS AN INVOICE BEEN MADE FROM IT? The ledger is read ONCE, before anything is removed,
+    //    and gives two answers. `invoiced` (invoiceExists) is for the quote documents in storage
+    //    (step 2): any invoice, CRM or StructureStudio, was made from them, so they stay. It reads
+    //    the ledger AND the StructureStudio send stamp, not status alone; its comment has the live
+    //    rows that made that necessary. `crmInvoiced` (crmInvoiceExists) is for the CRM estimate
+    //    (step 3), and is the 09-02 rule unchanged: a StructureStudio invoice was never made from
+    //    an estimate in the CRM. A failed read stops here as a 500, not a guess: guessing "no
+    //    invoice" would delete the documents an invoice was made from, and the action is
+    //    idempotent, so a retry is free.
+    const { data: inv, error: invErr } = await admin.from("invoice_sends")
+      .select("invoice_id, invoice_number, invoice_pdf_url, status")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (invErr) return dbFail(req, clientId, "check that design for an invoice", invErr);
+    const invoiced = invoiceExists(st, inv, design.ss_invoice_sent_at);
+    const crmInvoiced = crmInvoiceExists(st, inv);
+
     // 1. Version rows first — we need their image_urls, and they are the invisible leftovers.
     //    A failed read is a 500, not a shrug: carrying on would delete the rows at step 3 with
     //    every version PDF unaccounted for. The action is idempotent, so a retry is free and
@@ -3252,39 +3261,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     // 2. Storage. Every candidate key must be one THIS design could have produced — under
     //    this tenant's prefix and carrying this design's globally-unique short_code. That
-    //    reduces image_url from a path to a yes/no, so no value a caller can store selects
-    //    another tenant's file, or another design's file within this tenant. Keys that fail
-    //    the test are kept and counted, never guessed at.
+    //    reduces a stored URL (or a listed name) from a path to a yes/no, so no value a caller
+    //    can store selects another tenant's file, or another design's file within this tenant.
+    //    Stored values that fail the test are kept and counted, never guessed at. The quote
+    //    documents' keys are derived from the row, and the invoice gate above decides whether
+    //    they go; <code>-invoice.pdf never does. removeDesignObjects never throws: a storage
+    //    failure must not block the row delete, or the design becomes undeletable and the
+    //    tenant is stuck. filesRemoved is what storage actually removed.
     const createdAt = Date.parse(String(design.created_at ?? ""));
     const legacyOk = Number.isFinite(createdAt) && createdAt < LEGACY_ROOT_ERA_END;
-    const keys = new Set<string>();    // ours — safe to remove
-    const kept = new Set<string>();    // distinct stored values we declined to act on
-    const foreign = new Set<string>(); // …and the namespaces they named, for triage
-    for (const u of [design.image_url, ...(versions ?? []).map((v: any) => v.image_url)]) {
-      if (!u) continue; // drafts carry no PDF
-      const key = floorPlanKey(u);
-      if (key && isOwnFloorPlanKey(key, clientId, design.short_code, legacyOk)) { keys.add(key); continue; }
-      kept.add(String(u).slice(0, 300));
-      // Only the namespace, and only if it is slug-SHAPED: a real cross-tenant plant names a
-      // real slug. Anything else is caller-authored free text, and app_errors is shapes and
-      // counts — not a place to let a caller choose what an operator reads.
-      const slash = key ? key.indexOf("/") : -1;
-      if (key && slash > 0 && !key.startsWith(`${clientId}/`)) {
-        const ns = key.slice(0, slash);
-        foreign.add(/^[a-z0-9][a-z0-9-]{0,63}$/.test(ns) ? ns : "(non-slug)");
-      }
-    }
-    let filesRemoved = 0;
-    if (keys.size) {
-      // Best-effort: a storage failure must not block the row delete, or the design becomes
-      // undeletable and the tenant is stuck. Orphaned objects are unlisted (migration 042
-      // dropped the anon SELECT policy) and cost only space. Refusing a key is best-effort
-      // for the same reason — it must never turn into an error the tenant cannot clear.
-      const rm = await admin.storage.from(FLOOR_PLANS).remove([...keys]);
-      // What storage actually removed. remove() does not error on a key that isn't there, and
-      // the old count was the pre-dedupe request length, so it over-reported both ways.
-      filesRemoved = rm.error ? 0 : (rm.data?.length ?? 0);
-    }
+    const files = await removeDesignObjects(admin.storage, {
+      clientId, shortCode: design.short_code, legacyOk, invoiced,
+      storedUrls: [design.image_url, design.plan_image_url, design.view3d_image_url,
+        ...(versions ?? []).map((v: any) => v.image_url)],
+      hasQuoteDoc: Boolean(design.ss_quote_pdf_url),
+    });
+    const filesRemoved = files.filesRemoved;
 
     // 3. The estimate in the tenant's CRM. GHL exposes DELETE /invoices/estimate/:id; altId +
     //    altType scope it to the sub-account. They are NOT sent the way the rest of this file
@@ -3299,7 +3291,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     //        and the dialog tells the operator to void the invoice in the CRM first. The check
     //        reads invoice_sends rather than trusting `status` alone, because status is a
     //        cached projection that sync-design-status can downgrade on a GHL blip — the
-    //        claim ledger is the durable fact that an invoice was created.
+    //        claim ledger is the durable fact that an invoice was created. It is crmInvoiced,
+    //        not `invoiced`: a StructureStudio invoice leaves no CRM invoice to void.
     //    (b) BEST-EFFORT, exactly like storage. A tenant's key may predate this feature and
     //        lack the estimates scope; a 401/403/5xx must never make the design undeletable
     //        and strand the local rows. The outcome is returned, audited, and (on failure)
@@ -3313,10 +3306,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     //        survive. Old page ⇒ no flag ⇒ old behaviour, exactly.
     let estimate: "none" | "deleted" | "skipped_invoiced" | "not_connected" | "failed" = "none";
     let estimateError: string | null = null;
+    // A 404 from the CRM is reported as "deleted" (the old dialog's wording depends on that
+    // value), and flagged separately so the audit can tell a real delete from "already gone".
+    let estimateAlreadyGone = false;
     if (design.ghl_estimate_id && payload.deleteEstimate === true) {
-      const { data: inv } = await admin.from("invoice_sends")
-        .select("invoice_id").eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
-      if (inv?.invoice_id || st === "invoiced" || st === "delivered") {
+      if (crmInvoiced) {
         estimate = "skipped_invoiced";
       } else {
         const { data: creds } = await admin.from("client_settings")
@@ -3348,6 +3342,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             // CRM, or a half-finished earlier attempt), so it counts as done rather than as an
             // error the operator has to interpret. That is also what makes a retry safe.
             estimate = (r.ok || r.status === 404) ? "deleted" : "failed";
+            estimateAlreadyGone = !r.ok && r.status === 404;
             // Keep GHL's own words. A bare status turned a one-line DTO complaint into a
             // month of guessing; the body is their validation output, so it carries no
             // customer data. Capped because it lands in an error row, not a log stream.
@@ -3380,8 +3375,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Durable: deleting a customer's design is not something we accept losing the record of.
     // Signature is (action, rowCount, note) — the tenant is already implicit in the resolved
     // context, so passing clientId here would silently land in rowCount.
+    // quote= says what happened to the quote documents (removed | kept | failed | none), and
+    // estimate=already_gone separates a CRM 404 from a real delete, so the next audit of this
+    // feature can prove one rather than infer it. list=failed marks a run that could not list
+    // the folder (older picture cards may be left); remove=failed one whose storage remove
+    // failed outright (every file it named may be left).
     await auditStrict("portal_delete_design", 1 + (versionsDeleted ?? 0),
-      `code=${shortCode} status=${st} versions=${versionsDeleted ?? 0} files=${filesRemoved} kept=${kept.size} estimate=${estimate}`);
+      `code=${shortCode} status=${st} versions=${versionsDeleted ?? 0} files=${filesRemoved} kept=${files.refused.length} ` +
+        `quote=${files.quote} estimate=${estimateAlreadyGone ? "already_gone" : estimate}` +
+        `${files.listFailed ? " list=failed" : ""}${files.removeFailed ? " remove=failed" : ""}`);
     // A CRM estimate we could not remove is a real leftover in someone else's system, and the
     // row that pointed at it is now gone — so it goes in error_events, where support can find
     // it, rather than living only in a banner the operator dismisses. The estimate id is the
@@ -3393,20 +3395,34 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         context: { shortCode, estimateId: String(design.ghl_estimate_id ?? ""), status: st },
       });
     }
+    // A failed storage remove leaves this design's public files behind (the quote PDF prints the
+    // customer's name and address), and the row that pointed at them is now gone. So it gets a
+    // durable row support can find and sweep from. Counts only, never a key or a URL: the code
+    // and the tenant folder are enough to list what is left.
+    if (files.removeFailed) {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "delete_design_files_failed",
+        message: `delete_design could not remove ${files.planned} stored file(s)`,
+        context: { shortCode, keys: files.planned, quote: files.quote, status: st },
+      });
+    }
     // A stored URL naming something this design could not have produced is not something a
     // tenant does by accident, so it gets a durable row rather than a substring in a note
     // nobody greps. Counts and namespace slugs only — never the URL itself, and never any
     // customer data (the app_errors doctrine).
-    if (kept.size) {
+    if (files.refused.length) {
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: "delete_design_key_refused",
-        message: `delete_design kept ${kept.size} unrecognised object key(s)`,
-        context: { shortCode, refused: kept.size, namespaces: [...foreign].slice(0, 5) },
+        message: `delete_design kept ${files.refused.length} unrecognised object key(s)`,
+        context: { shortCode, refused: files.refused.length, namespaces: files.namespaces.slice(0, 5) },
       });
     }
+    // quote / quotePdfKept / quoteNumber / estimateAlreadyGone are additions; every field the
+    // previous dialog reads keeps its old values.
     return json({
-      ok: true, shortCode, versionsDeleted: versionsDeleted ?? 0, filesRemoved, filesKept: kept.size,
-      estimate, estimateNumber: design.ghl_estimate_number ?? null, estimateError,
+      ok: true, shortCode, versionsDeleted: versionsDeleted ?? 0, filesRemoved, filesKept: files.refused.length,
+      estimate, estimateNumber: design.ghl_estimate_number ?? null, estimateError, estimateAlreadyGone,
+      quote: files.quote, quotePdfKept: files.quote === "kept", quoteNumber: design.ss_quote_number ?? null,
     });
   }
 
@@ -12046,7 +12062,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin.from("orders").select("total_cents, pretax_subtotal_cents")
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
       admin.from("client_settings")
-        .select("business_name, business_phone, business_website, business_address, quote_terms, co_fee_label, email_template_copy")
+        .select("business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, co_fee_label, email_template_copy")
         .eq("client_id", clientId).maybeSingle(),
     ]);
     const feeLabel = String(csRes.data?.co_fee_label ?? "").trim() || "Change order fee";
@@ -12070,6 +12086,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         },
         estimateNumber: String(inv.invoice_number),
         dateIso: new Date().toISOString(),
+        // "Bill to" and the letterhead logo, the same as send_invoice prints (2026-10-05).
+        customer: pdfCustomerFrom(d.contact, shortCode),
+        logoSources: pdfLogoSources(csRes.data?.business_logo_url, supabaseUrl, clientId),
         // deno-lint-ignore no-explicit-any
         lines: amended.lines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
         discount: amended.discount,
@@ -13615,6 +13634,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               },
               estimateNumber: invNumber,
               dateIso: nowIso(),
+              // "Bill to": the customer on the design, and the letterhead logo (2026-10-05).
+              customer: pdfCustomerFrom(d.contact, shortCode),
+              logoSources: pdfLogoSources(cur0?.business_logo_url, supabaseUrl, clientId),
               // deno-lint-ignore no-explicit-any
               lines: snapLines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
               discount: amended.discount,

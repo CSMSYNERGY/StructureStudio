@@ -19,6 +19,11 @@ export const stubDb: { from: ((table: string) => any) | null } = { from: null };
  *  capture). Left null, rpc() throws, like from(). Reset it to null when the test is done. */
 export const stubRpc: { rpc: ((fn: string, args?: any) => any) | null } = { rpc: null };
 
+/** The same opt-in for createClient(...).storage.from(bucket), for a test that drives a handler
+ *  which lists or removes objects (deleteDesignWiring_test.ts: delete_design's floor-plans step).
+ *  Left null, storage.from() throws, like from(). Reset it to null when the test is done. */
+export const stubStorage: { from: ((bucket: string) => any) | null } = { from: null };
+
 export function createClient(_url: string, _key: string, _opts?: any) {
   return {
     auth: {
@@ -38,6 +43,12 @@ export function createClient(_url: string, _key: string, _opts?: any) {
     rpc: (_fn: string, _args?: any): any => {
       if (stubRpc.rpc) return stubRpc.rpc(_fn, _args);
       throw new Error("supabase_stub createClient().rpc() has no fake installed — set stubRpc.rpc for the test that needs it");
+    },
+    storage: {
+      from: (_bucket: string): any => {
+        if (stubStorage.from) return stubStorage.from(_bucket);
+        throw new Error("supabase_stub createClient().storage has no fake installed — set stubStorage.from for the test that needs it");
+      },
     },
   };
 }

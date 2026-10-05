@@ -10,8 +10,11 @@ import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { repReplyTo } from "../_shared/repReplyTo.ts";
 import { changeOrderEmail, estimateEmail, tenantStylePhotoUrl } from "../_shared/emailTemplates.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
-import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
+import { buildFormalEstimatePdf, pdfCustomerFrom } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
+// The customer block, the logo and the per-builder validity on the quote documents (2026-10-05).
+import { fetchPdfLogo, pdfLogoSources } from "../_shared/pdfLogo.ts";
+import { readQuoteValidDays } from "../_shared/quoteValidity.ts";
 import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 import { sendTenantSms } from "../_shared/smsSend.ts";
@@ -2384,7 +2387,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   const fmt = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
   const issueAnchor = new Date(Date.now() - 12 * 60 * 60 * 1000);
   const today = fmt(issueAnchor);
-  const exp = new Date(issueAnchor.getTime() + 30 * 24 * 60 * 60 * 1000);
+  // How long the quote stays good for: Settings → Company, client_settings.quote_valid_days
+  // (migration 269). The ONE number behind the CRM estimate's expiry date here and the "Valid
+  // until" line on both PDFs below (the SS quote and the CRM-mode formal estimate), so the three
+  // cannot disagree. Its own tolerant read (_shared/quoteValidity.ts): a failed read, or this
+  // function reaching the database ahead of 269, gives 30, which is what every quote said before.
+  const { days: quoteValidDays } = await readQuoteValidDays(supabase, clientId);
+  const exp = new Date(issueAnchor.getTime() + quoteValidDays * 24 * 60 * 60 * 1000);
   const expiryFormatted = fmt(exp);
 
   let formattedPhone = "";
@@ -2807,6 +2816,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const planImg = tenantStorageUrl(planImageUrl);
     const view3dImg = tenantStorageUrl(view3dImageUrl);
     const skippedSheets: string[] = [];
+    // Sheet 1's letterhead logo: only ever this tenant's folder in our own storage (pdfLogo.ts);
+    // a pasted logo from another site stays in emails only. Fetched inside buildQuotePdf, beside
+    // the plan PDF, so a slow logo costs at most its own 3 s and never the quote.
+    const logoSources = pdfLogoSources(businessLogoUrl, supabaseUrl, clientId);
+    // "Prepared for": the customer as the designer's contact form has them right now (none for a
+    // legacy six-character code: the PDF's public key is derived from the code alone).
+    const pdfCustomer = pdfCustomerFrom(contact, designId);
 
     // THE QUOTE PDF, built from a snapshot and uploaded to its fixed path. Declared here, CALLED
     // BELOW THE PERSIST (review, 2026-09-17): the document is uploaded only after the write it
@@ -2825,6 +2841,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           },
           estimateNumber: ssQuoteNumber,
           dateIso: today,
+          validityDays: quoteValidDays,
+          customer: pdfCustomer,
           // deno-lint-ignore no-explicit-any
           lines: (Array.isArray(snap?.lines) ? snap.lines : []).map((l: any) => ({ ...l, desc: deHtml(l.desc) })),
           discount: snap?.discount,
@@ -2834,6 +2852,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           discountRows: snap?.discounts?.rows ?? null,
           quoteTerms: quoteTerms || null,
           planPdfUrl: planUrl,
+          logoSources,
           onSheetSkipped: (r) => skippedSheets.push(r),
         });
         // Service-role upload, so the bucket's anon path-shape policy ({clientId}/SS-….pdf) does
@@ -3652,15 +3671,24 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           try {
             // deHtml is at module scope (see its comment there) — shared with the SS-mode
             // quote so the two documents cannot de-render the same snapshot differently.
+            // The same letterhead logo, customer block and validity as the SS quote, so the two
+            // modes print the same form. The logo has its own 3 s budget and degrades to the text
+            // letterhead; nothing about it can stop the email below.
+            const logoNote = (r: string) => console.warn("formal estimate PDF:", r);
+            const logo = await fetchPdfLogo(pdfLogoSources(businessLogoUrl, supabaseUrl, clientId), logoNote);
             const pdfBytes = await buildFormalEstimatePdf({
               business: {
                 name: businessName,
                 phone: businessPhone || null,
                 website: businessWebsite || null,
                 address: businessAddress,
+                logo,
               },
               estimateNumber: estimateNumber || existingDesign.ghl_estimate_number || null,
               dateIso: today,          // same issue date as the GHL estimate (step 8)
+              validityDays: quoteValidDays, // and the same expiry as the GHL estimate (step 8)
+              customer: pdfCustomerFrom(contact, designId),
+              onLogoSkipped: logoNote,
               lines: estimateLines.lines.map((l) => ({ ...l, desc: deHtml(l.desc) })),
               discount: estimateLines.discount,
               quoteTerms: quoteTerms || null,
