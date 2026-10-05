@@ -514,8 +514,8 @@ async function main() {
   r.ok("⚠️ THE CORRECTION REACHED THE SPEC — the overhang field shows what the check said",
     merged !== null && Math.abs(parseFloat(merged) - 0.15) < 0.001, String(merged));
   const porch = await page.evaluate(() => {
-    // The porch-KIND select, found by the option only it has (porchPanel.mjs's locator). Since
-    // 2026-09-24 "Front wall (porch or door side)" is also a select whose label says porch.
+    // The porch-KIND select, found by the option only it has (porchPanel.mjs's locator). Other
+    // selects' labels say porch too (Porch end).
     const sel = Array.from(document.querySelectorAll("select")).find((s) => s.querySelector('option[value="projecting"]'));
     return sel ? sel.value : null;
   });

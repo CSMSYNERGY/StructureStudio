@@ -319,17 +319,27 @@ Deno.test("every corner in every frame: named for where it stands, and the porch
   ];
   for (const [what, base, size, h] of frames) {
     const [W, L] = sizeOf(size);
-    for (const porchEnd of ["front", "back"]) {
+    // A side wall too (2026-10-05): in the frame the left or right wall, a gable front's eave wall or a long-side
+    // front's gable end, with the lean-tos on the walls beside it; outside it, the front again.
+    for (const porchEnd of ["front", "back", "left", "right"]) {
       const b = { ...base, porchEnd };
       const ax = F.d3RoofAxes(b, W, L);
       // The two walls beside the porch's.
       const pw = F.d3PorchJoins({ ...b, leanTos: [{ wall: "left", widthFt: 6 }] }, W, L, h);
       const pWall = F.d3PorchReadout(spec(b, h), size).wall;
       const beside = pWall === "south" || pWall === "north" ? ["left", "right"] : ["front", "back"];
-      const roof = matched({ ...b, leanTos: beside.map((wall) => ({ wall, widthFt: 6, meetPorch: true })) }, size, h);
+      const asked = { ...b, leanTos: beside.map((wall) => ({ wall, widthFt: 6, meetPorch: true })) };
+      const roof = matched(asked, size, h);
       const r = joinsOf(roof, size, h);
       assert(pw === null || pw.porch.wall === pWall, what);
-      assertEquals(r.joins.length, 2, `${what}, porch ${porchEnd}: both sides join (${JSON.stringify(r.near)})`);
+      // Each side joins where its card can say how: a side porch on a single slant's sloped end has the high wall
+      // beside it, too tall for a lean-to to come down to the porch within its boxes (no fix), and that one stays
+      // a near-miss that says why.
+      const fixable = rdOf(asked, size, h).map((x: Any) => !!(x.porchCorner && x.porchCorner.fix));
+      const want = fixable.filter(Boolean).length;
+      assert(want >= (porchEnd === "left" || porchEnd === "right" ? 1 : 2), `${what}, porch ${porchEnd}: ${JSON.stringify(fixable)}`);
+      assertEquals(r.joins.length, want, `${what}, porch ${porchEnd}: every side with a fix joins (${JSON.stringify(r.near)})`);
+      for (const N of r.near) assert(!fixable[N.i] && N.asked && N.why.length > 0, `${what}, porch ${porchEnd}: a near-miss says why (${JSON.stringify(N)})`);
       const toRoot = F.d3PorchToRoot(roof, W, L);
       for (const J of r.joins) {
         const lw = roof.leanTos[J.i].wall;
@@ -347,9 +357,32 @@ Deno.test("every corner in every frame: named for where it stands, and the porch
         assertAlmostEquals(hz, kz, 1e-9, `${what} ${J.at}: the hip's end in z`);
         assertEquals(J.lt, ax.uAxisIsX === (pWall === "south" || pWall === "north") ? "eave" : "gable", `${what}: a porch on an end wall meets a side-wall lean-to`);
       }
-      assertEquals(r.joins.map((J: Any) => J.js).sort(), [-1, 1], `${what}: one on each side of the porch`);
+      if (want === 2) assertEquals(r.joins.map((J: Any) => J.js).sort(), [-1, 1], `${what}: one on each side of the porch`);
     }
   }
+});
+
+Deno.test("a porch on a SIDE wall meets a lean-to on the front or back wall round its corner, named for where it stands", () => {
+  // A 12x16 front gable, its porch on the left wall (a 16 ft eave wall): the lean-tos on the front and back walls
+  // (end walls) run to its corners, each one's card says how to match, and matched and asked both join.
+  const side = { ...PORCH, porchEnd: "left", porchAttachFt: 7.5 };
+  const roof = matched({ ...side, leanTos: [{ wall: "front", widthFt: 6, meetPorch: true }, { wall: "back", widthFt: 5, meetPorch: true }] });
+  const r = joinsOf(roof);
+  assertEquals(r.porch.wall, "west");
+  assertEquals(r.joins.map((J: Any) => [J.i, J.at, J.lt]).sort(), [[0, "front-left", "gable"], [1, "back-left", "gable"]], JSON.stringify(r.near));
+  // The porch the readout describes is that porch, and says who meets it.
+  assertEquals(porchOf(roof).meets.map((m: Any) => m.at).sort(), ["back-left", "front-left"]);
+  // The same porch on the right wall pairs with the right corners.
+  const right = matched({ ...side, porchEnd: "right", leanTos: [{ wall: "front", widthFt: 6, meetPorch: true }] });
+  assertEquals(joinsOf(right).joins.map((J: Any) => J.at), ["front-right"]);
+  // A lean-to on the porch's own side wall is over it: no join, said by its index, and the porch reads as it would.
+  const under = { ...roof, leanTos: [...roof.leanTos, { wall: "left", widthFt: 8 }] };
+  const u = joinsOf(under);
+  assert(u.joins.length === 0 && u.near.every((N: Any) => N.why.includes("underLeanTo") && N.over === 2), JSON.stringify(u.near));
+  assert(!("meets" in porchOf(under)), "no join, nothing said");
+  // Without the frame the porch named left is the front one: its joins are the front porch's, key for key.
+  const old = { ...PORCH, front: undefined, porchEnd: "left", leanTos: [{ ...RIGHT, meetPorch: true }] };
+  assertEquals(JSON.stringify(joinsOf(old)), JSON.stringify(joinsOf({ ...old, porchEnd: "front" })));
 });
 
 // ── SIX: with the other joins ───────────────────────────────────────────────────────────────
@@ -427,7 +460,7 @@ Deno.test("fuzz: every join was asked, reaches the corner and matches; one join 
   let joined = 0, missed = 0;
   for (let n = 0; n < 500; n++) {
     const size = pick(sizes), [W, L] = sizeOf(size);
-    const base = { ...pick(roofs), porchEnd: pick(["front", "back"]) };
+    const base = { ...pick(roofs), porchEnd: pick(["front", "back", "left", "right"]) };
     let leanTos = Array.from({ length: 1 + Math.floor(rand() * 5) }, () => {
       const e: Any = { wall: pick(["left", "right", "front", "back"]), widthFt: pick([3, 6, 8, 10]), dropFt: pick([0.5, 1, 1.5]) };
       if (rand() < 0.4) { e.attach = pick(["wall", "wall", "roof"]); e.attachFt = pick([0.25, 0.5, 1]); }

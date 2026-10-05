@@ -22,6 +22,9 @@
 //      deck under 2' 6"; one picked on a deeper deck stays picked there but is not drawn, the note saying
 //      so, and is drawn again once the deck is deepened (2026-10-04); a recessed porch offers the three
 //      front ones only and builds its steps;
+//      3e (2026-10-05): with no front set the porch end is a gable end, front or back, the note saying to set the
+//      front first; with the front a gable end it offers the left and right walls, which build the porch there,
+//      and a recessed porch on the left wall (an eave wall there) offers no timber truss, where the front gable does;
 //   4  a shed roof greys out Wings and Dormer (they need a ridge); 4b: at a phone's width the Save
 //      footer spans the width and the add-on tabs stay one row with no sideways page scroll;
 //   3d (2026-10-04, the 10-01 call): the overhang presets reach 24″, which builds a 2 ft overhang; the
@@ -414,6 +417,42 @@ try {
   await radio(page, "Porch", "Projecting").click();
   await panelModel(page, (M) => !!(M.porch && M.porch.steps && M.porch.steps.where === "center"));
   ok("3c: back to projecting, the centre steps stay", true);
+
+  // 3e ── a porch on a SIDE wall (2026-10-05) ──────────────────────────────────────────────────────
+  // The 09-28 call: "we may actually also need to be able to have it on the sides". Left and right need the front
+  // set (they are as seen standing at it); without it the end is a gable end and the note says so.
+  const endOpts = () => page.locator('[data-ss-adv-f="porchEnd"] button').evaluateAll((bs) => bs.map((b) => b.textContent.trim()).join("|"));
+  ok("3e: with no front set, the porch end is a gable end, front or back", (await endOpts()) === "Front gable end|Back gable end", await endOpts());
+  ok("3e: …and the note says to set the front first", /Set the front first for a side wall\./.test(await page.locator('[data-ss-adv-f="porchEnd"]').innerText()));
+  await segBtn(page, "Front wall (main door side)", "Gable end").click();
+  await page.waitForTimeout(300);
+  ok("3e: with the front a gable end, the side walls are offered", (await endOpts()) === "Front wall|Back wall|Left wall|Right wall", await endOpts());
+  await segBtn(page, "Porch end", "Left wall").click();
+  await panelModel(page, (M) => !!(M.porch && M.porch.wall === "west" && M.porch.onCap === false));
+  ok("3e: Left wall builds the porch on the west wall, down the ridge, and the front stays the front", true);
+  await page.locator("#ss-step-adv-addons").scrollIntoViewIfNeeded();
+  await shot(page, "ask-porch-left-wall.png");
+  // The truss stands in a gable END: on the left wall of a gable front a recessed porch runs along an eave wall, where
+  // the switch would tick and draw nothing, so it is not offered; at the front gable end it is.
+  const trussSw = () => page.locator('[data-ss-adv-f="porchTruss"]').count();
+  await radio(page, "Porch", "Recessed").click();
+  await page.waitForTimeout(200);
+  ok("3e: a recessed porch on the left wall of a gable front offers no timber truss", (await trussSw()) === 0);
+  await segBtn(page, "Porch end", "Front wall").click();
+  await page.waitForTimeout(200);
+  ok("3e: …at the front gable end it does", (await trussSw()) === 1);
+  await segBtn(page, "Porch end", "Left wall").click();
+  await radio(page, "Porch", "Projecting").click();
+  await panelModel(page, (M) => !!(M.porch && M.porch.wall === "west"));
+  await segBtn(page, "Porch end", "Right wall").click();
+  await panelModel(page, (M) => !!(M.porch && M.porch.wall === "east"));
+  ok("3e: Right wall, the east wall", true);
+  // Back to the building as it was: the porch at the front, the front not set.
+  await segBtn(page, "Porch end", "Front wall").click();
+  await panelModel(page, (M) => !!(M.porch && M.porch.wall === "south"));
+  await segBtn(page, "Front wall (main door side)", "Not set").click();
+  await page.waitForTimeout(300);
+  ok("3e: …and with the front cleared again, front or back only", (await endOpts()) === "Front gable end|Back gable end", await endOpts());
 
   // 3d ── the 10-01 call's polish (2026-10-04) ──────────────────────────────────────────────────────
   // A 24″ overhang preset. The main roof's slopes are 0.2 ft boxes as long as the ridge plus an overhang

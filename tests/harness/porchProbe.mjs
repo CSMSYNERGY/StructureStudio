@@ -63,6 +63,15 @@
 //      inside the porch's sheet, ceiling, board or drip, and its ceiling never over what the scan still measures
 //      without the lean-tos it meets (model.porch.joinClear). A lower lean-to beside it on the other wall stops
 //      the join, said, and nothing changes (PJ8).
+//  20. A PORCH ON A SIDE WALL (roof.porchEnd "left" / "right", 2026-10-05; cases P*, PR*, PS*, PJ9, PJ10): in the
+//      new frame the porch stands on the west or east wall and the front stays the front. Projecting on a front
+//      gable's side (an eave wall: down the ridge, posts every 8.5 ft or less), on a long-side front's side (a gable
+//      end, with a plate band) and on a single slant's high wall and sloped end, every check of 1-15 above on that
+//      wall (P1-P6); under a lean-to on the same wall, tucked under it (PL); recessed into a front gable's side (a
+//      post every 10 ft or less along the eave), a long-side front's side (a gable end, the truss) and a single
+//      slant's high wall, the check of 18 (PR1-PR3); a flight off an end of a side porch's deck, the check of 17
+//      (PS1, PS2); and a lean-to on the front or back wall meeting a side porch round its corner, the check of 19
+//      (PJ9, PJ10: s and d swap axes, the porch's wall running along z).
 //
 // The porch groups and bands are found by userData.ssPorch, and every member inside them by
 // userData.ssPorchPart, never by size or draw order: a 16x24's porch sheet is as big as a main roof
@@ -127,6 +136,28 @@ const CASES = [
     d3: { roof: { ...GAMBREL, porchOutFt: 6.5, porchEnd: "front", plateBand: true, porchSteps: "left" }, siding: null, colors: { ...COLORS, wood: "#C4965A" }, wallHeightFt: 9, roofMaterial: "metal", foundation: "skids" } },
 ];
 
+// 20. A PORCH ON A SIDE WALL (2026-10-05): `wall` is where it must stand. A single slant's H is its high wall's top,
+// the tallest wall in the scene.
+const SIDE_FRONT = { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6, eave: "fascia", porchOutFt: 6 };
+const SIDE_LONG = { type: "gable", front: "eave", pitch: 0.4, overhang: 0.6, eave: "fascia", porchOutFt: 6 };
+CASES.push(
+  { id: "P1", label: "Harness Side Porch Left", size: "16x24", H: 9, wall: "west", metal: true, wood: WOOD_FALLBACK,
+    d3: { roof: { ...SIDE_FRONT, porchEnd: "left" }, siding: "batten", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
+  { id: "P2", label: "Harness Side Porch Right", size: "16x24", H: 9, wall: "east", metal: true, wood: "#8a5a36",
+    d3: { roof: { ...SIDE_FRONT, porchEnd: "right", porchWidthFt: 14, porchAttachFt: 8.25 }, siding: "lap", colors: { ...COLORS, wood: "#8A5A36" }, wallHeightFt: 9, roofMaterial: "metal" } },
+  { id: "P3", label: "Harness Side Porch Gable Left", size: "24x16", H: 9, wall: "west", metal: true, wood: WOOD_FALLBACK, bands: 2,
+    d3: { roof: { ...SIDE_LONG, porchEnd: "left", plateBand: true }, siding: "batten", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
+  { id: "P4", label: "Harness Side Porch Gable Right", size: "24x16", H: 9, wall: "east", metal: false, wood: WOOD_FALLBACK,
+    d3: { roof: { ...SIDE_LONG, porchEnd: "right" }, siding: "panel", colors: COLORS, wallHeightFt: 9, roofMaterial: "shingle" } },
+  { id: "P5", label: "Harness Side Porch High Wall", size: "12x16", H: 11, wall: "west", metal: true, wood: WOOD_FALLBACK,
+    d3: { roof: { type: "shed", highSide: "left", pitch: 0.25, overhang: 0.6, eave: "fascia", porchOutFt: 5, porchAttachFt: 8.5, porchEnd: "left" }, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  { id: "P6", label: "Harness Side Porch Sloped End", size: "16x12", H: 11, wall: "east", metal: true, wood: WOOD_FALLBACK,
+    d3: { roof: { type: "shed", highSide: "front", pitch: 0.25, overhang: 0.6, eave: "fascia", porchOutFt: 5, porchEnd: "right" }, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  // A lean-to on the porch's own side wall: the porch is tucked under its roof (the clearance scan).
+  { id: "PL", label: "Harness Side Porch Under Lean-To", size: "16x24", H: 9, wall: "west", metal: true, wood: WOOD_FALLBACK, leanToOver: true,
+    d3: { roof: { ...SIDE_FRONT, porchEnd: "left", leanTos: [{ wall: "left", widthFt: 10, dropFt: 1.5 }] }, siding: "batten", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
+);
+
 // ── 17 / 18. STEPS OFF A DECK'S END, AND A RECESSED PORCH'S STEPS (2026-10-03) ──────────────────────
 // Each its own building, measured by stepsRun below. `wall` is where the porch is; `posts` how many
 // posts the porch stands (the recessed eave's centre-step bay included); `place` puts a door and ramp
@@ -170,6 +201,20 @@ const STEP_CASES = [
   // tool is found by that word.)
   { id: "RRP", label: "Harness Recessed Steps Hidden", size: "16x24", wall: "south", steps: "center", recessed: true, posts: 2, place: true, at: 8, stepsHidden: true,
     d3: { roof: { type: "gable", pitch: 0.42, overhang: 0.8, eave: "fascia", porchDepthFt: 3, porchSteps: "center" }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
+  // 20. On a SIDE wall (2026-10-05). A front gable's left wall is a 24 ft eave wall: three bays, four posts.
+  { id: "PR1", label: "Harness Side Recessed Eave", size: "12x24", wall: "west", steps: "left", recessed: true, eave: true, posts: 4,
+    d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6, eave: "fascia", porchDepthFt: 4, porchEnd: "left", porchSteps: "left" }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  // A long-side front's right wall is a gable end: two corner posts, and the timber truss in the gable over them.
+  { id: "PR2", label: "Harness Side Recessed Truss", size: "24x12", wall: "east", steps: "center", recessed: true, posts: 2,
+    d3: { roof: { type: "gable", front: "eave", pitch: 0.42, overhang: 0.8, eave: "fascia", porchDepthFt: 5, porchTruss: true, porchEnd: "right", porchSteps: "center" }, siding: "lap", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
+  // A single slant high on the right: its east wall is the high one, 16 ft long, two bays.
+  { id: "PR3", label: "Harness Side Recessed High Wall", size: "12x16", wall: "east", steps: "right", recessed: true, eave: true, posts: 3,
+    d3: { roof: { type: "shed", highSide: "right", pitch: 0.25, overhang: 0.6, eave: "fascia", porchDepthFt: 4, porchEnd: "right", porchSteps: "right" }, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  // A side porch's flight off an end of its deck (the A2 side flights): down the ridge on an eave wall, across a gable end.
+  { id: "PS1", label: "Harness Side Porch Side Steps", size: "16x24", wall: "west", steps: "leftSide",
+    d3: { roof: { ...SIDE_GABLE, porchEnd: "left", porchSteps: "leftSide" }, siding: "batten", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
+  { id: "PS2", label: "Harness Side Porch Gable Steps", size: "24x16", wall: "east", steps: "rightSide",
+    d3: { roof: { type: "gable", front: "eave", pitch: 0.4, overhang: 0.6, eave: "fascia", porchOutFt: 6, porchEnd: "right", porchSteps: "rightSide" }, siding: "batten", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
 ];
 
 // 19. THE PORCH A LEAN-TO MEETS (d3PorchJoins, 2026-10-05). Each lean-to's boxes are set to what its card says
@@ -191,6 +236,15 @@ const JOIN_CASES = [
   { id: "PJ4", label: "Harness Back Porch Meets Wide", size: "12x16", H: 9, sd: { cx: -6, cz: -8, sx: -1, dz: -1 },
     d3: { roof: { ...JOIN_BASE, porchEnd: "back", porchOutFt: 4, porchAttachFt: 8.5, leanTos: [{ wall: "left", widthFt: 8, enclosed: true, meetPorch: true }] }, siding: "panel", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
 ];
+// 20. A porch on a SIDE wall (2026-10-05) and a lean-to on the front or back wall round its corner: s runs out from the
+// lean-to's wall along z and d out from the porch's wall along x (swap). PJ9: a front gable's left wall (an eave
+// wall), the lean-to on the front; PJ10: a long-side front's right wall (a gable end), the lean-to on the back.
+JOIN_CASES.push(
+  { id: "PJ9", label: "Harness Side Porch Meets Front", size: "12x16", H: 8, sd: { cx: -6, cz: 8, sx: 1, dz: -1, swap: true },
+    d3: { roof: { ...JOIN_BASE, porchEnd: "left", porchOutFt: 6, leanTos: [{ wall: "front", widthFt: 6, meetPorch: true }] }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  { id: "PJ10", label: "Harness Side Porch Gable Meets Back", size: "16x12", H: 9, sd: { cx: 8, cz: -6, sx: -1, dz: 1, swap: true },
+    d3: { roof: { ...JOIN_BASE, front: "eave", porchEnd: "right", porchOutFt: 5, porchAttachFt: 8, porchPitch: 0.125, leanTos: [{ wall: "back", widthFt: 7, meetPorch: true }] }, siding: "lap", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
+);
 // No attach: the porch under its own rule, just under the plate, where the main roof's eave and rake boards hang out
 // over its corners. Joined, its numbers take them (d3PorchEaveCornerCapFt): the height the scan builds it at unjoined.
 const { porchAttachFt: _hung, ...JOIN_FREE } = JOIN_BASE;
@@ -441,12 +495,17 @@ async function measure(page, W, L) {
       out.leanTo = { n: 0, boxOver: false, lowestOver: null };
       M.roofGroup.traverse((q) => {
         if (!q.isMesh || under(q, pg)) return;
-        const lean = !!(q.userData && q.userData.ssLeanTo);
+        // The single lean-to is tagged true, a listed one by its index (0 is one too).
+        const lean = !!q.userData && q.userData.ssLeanTo != null && q.userData.ssLeanTo !== false;
         if (lean) out.leanTo.n++;
         const b = bbOf(q), o = outDist(b), a = across(b);
         if (o <= 0.16 || a[1] < out.slab.across[0] || a[0] > out.slab.across[1]) return;
         if (b.mn[1] < 1) return;                   // corner boards stand on the ground beside the wall
         let lowY = b.mn[1];
+        // On an EAVE wall (model.porch.onCap false: the new frame's, a side wall's too) every member is measured by
+        // what is really over the porch, the renderer's own rule there: a sloped rake's box over a porch that runs
+        // the whole wall is its far, low corner, nowhere near the porch.
+        if (!lean && P.onCap === false) lowY = lowestOver(q);
         if (lean) {
           lowY = lowestOver(q);
           if (b.mn[1] < out.slab.top - 0.005) out.leanTo.boxOver = true;
@@ -690,7 +749,7 @@ async function measureJoin(page, sd) {
       const p = o.geometry.attributes.position, v = new V();
       for (let k = 0; k < p.count; k++) {
         v.fromBufferAttribute(p, k).applyMatrix4(o.matrixWorld);
-        const s = sd.sx * (v.x - sd.cx), d = sd.dz * (v.z - sd.cz);
+        const s = sd.swap ? sd.sx * (v.z - sd.cz) : sd.sx * (v.x - sd.cx), d = sd.swap ? sd.dz * (v.x - sd.cx) : sd.dz * (v.z - sd.cz);
         [["s", s], ["d", d], ["y", v.y], ["f", d - s]].forEach(([key, x]) => { r[key][0] = Math.min(r[key][0], x); r[key][1] = Math.max(r[key][1], x); });
       }
       return r;
@@ -840,9 +899,11 @@ async function joinRun(ctx, c, ok, shots) {
       !!ls && ls.f[1] <= 0.005 && (J.eL > J.eP ? ls.d[1] <= J.eP + 0.005 : true), ls && JSON.stringify({ f: ls.f.map(f3), d: ls.d.map(f3) }));
     ok(`${tag}: no page errors`, errors.length === 0, JSON.stringify(errors).slice(0, 300));
     const [W, L] = c.size.split("x").map(Number);
-    const ex = c.sd.cx + c.sd.sx * (J.w / 2), ez = c.sd.cz + c.sd.dz * (P.dPost / 2);
-    await shot(page, `${shots}/${c.id}-join.png`, [ex + c.sd.sx * 20, c.H + 9, ez + c.sd.dz * 24], [c.sd.cx, c.H * 0.55, c.sd.cz]);
-    await shot(page, `${shots}/${c.id}-corner.png`, [c.sd.cx + c.sd.sx * (J.w + 9), c.H + 3, c.sd.cz + c.sd.dz * (P.dPost + 10)], [c.sd.cx + c.sd.sx * J.w * 0.6, c.H - 1.5, c.sd.cz + c.sd.dz * P.dPost * 0.6]);
+    // A point s out from the lean-to's wall and d out from the porch's, in the world (x, z): measureJoin's frame.
+    const at = (s, d) => (c.sd.swap ? [c.sd.cx + c.sd.dz * d, c.sd.cz + c.sd.sx * s] : [c.sd.cx + c.sd.sx * s, c.sd.cz + c.sd.dz * d]);
+    const e1 = at(J.w / 2 + 20, P.dPost / 2 + 24), e2 = at(J.w + 9, P.dPost + 10), t2 = at(J.w * 0.6, P.dPost * 0.6);
+    await shot(page, `${shots}/${c.id}-join.png`, [e1[0], c.H + 9, e1[1]], [c.sd.cx, c.H * 0.55, c.sd.cz]);
+    await shot(page, `${shots}/${c.id}-corner.png`, [e2[0], c.H + 3, e2[1]], [t2[0], c.H - 1.5, t2[1]]);
     void W; void L;
   } catch (e) {
     ok(`${tag}: ran to the end`, false, e && e.message ? e.message.split("\n")[0] : String(e));
@@ -904,6 +965,11 @@ async function runCase(ctx, c, ok, shots, seen) {
       ok(`${tag}: one deck group, reachable from root and NOT inside roofGroup`, m.nDeck === 1 && m.deckInRoot && !m.deckInRoofGroup);
       if (!P || !m.slab) { ok(`${tag}: model.porch and the porch roof sheet exist`, false, JSON.stringify({ porch: !!P, slab: !!m.slab })); return; }
       console.log(`   ${tag}: D ${P.D} wall ${P.wall} pitch ${f3(P.pitch)} yHigh ${f3(P.yHigh)} postH ${f3(P.postH)} ceilWall ${f3(P.ceilWall)} posts ${P.posts} short ${P.short}`);
+      if (c.wall) ok(`${tag}: the porch stands on the ${c.wall} wall (${c.d3.roof.porchEnd})`, P.wall === c.wall, P.wall);
+      if (c.leanToOver) {
+        ok(`${tag}: the lean-to on the porch's wall is tagged, and its roof runs over the porch`, m.leanTo.n >= 3 && m.leanTo.lowestOver != null && Number.isFinite(m.leanTo.lowestOver), JSON.stringify(m.leanTo));
+        ok(`${tag}: ...and the porch roof is tucked under it`, m.leanTo.lowestOver != null && m.slab.top <= m.leanTo.lowestOver + 0.005, `slab top ${f3(m.slab.top)} lean-to over it ${f3(m.leanTo.lowestOver)}`);
+      }
       ok(`${tag}: the deck's top is the floor (y 0)`, Math.abs(m.deck.top) <= 0.005, f3(m.deck.top));
       ok(`${tag}: the deck projects D`, Math.abs(m.deck.out - P.D) <= 0.02, `out ${f3(m.deck.out)} D ${P.D}`);
       ok(`${tag}: the porch roof reaches D + 0.25..0.45`, m.slab.out > P.D + 0.25 && m.slab.out < P.D + 0.45, f3(m.slab.out));

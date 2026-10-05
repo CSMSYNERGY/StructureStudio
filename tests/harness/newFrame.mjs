@@ -111,6 +111,18 @@ const CASES = [
   { id: "P4", label: "Frame Porch Gable Steps", size: "28x20", H: 10, ux: true, porch: { wall: "south", onCap: true, span: 12, attach: 9 }, colors: PLAIN,
     framing: { posts: 3, pitch: 0.2, clamped: false, steps: "right" },
     d3: { roof: { type: "gable", front: "gable", pitch: 0.47, overhang: 1, porchOutFt: 6, porchWidthFt: 12, porchAttachFt: 9, porchPosts: 3, porchPitch: 0.2, porchSteps: "right" }, siding: "batten", colors: PLAIN, wallHeightFt: 10 } },
+  // A PORCH ON A SIDE WALL (2026-10-05): porchEnd "left" / "right" in the frame, the front staying the front. A
+  // front gable's left wall is an EAVE wall (the porch down the ridge, 28 ft), a long side front's right wall a
+  // GABLE end (across the 20 ft profile); recessed into a gable front's side, posts every 10 ft or less along the
+  // eave line; and into a single slant's high side wall, which stops at H under the roof.
+  { id: "Q1", label: "Frame Side Porch Eave", size: "20x28", H: 10, ux: true, porch: { wall: "west", onCap: false, span: 28 }, colors: PLAIN,
+    d3: { roof: { type: "gable", front: "gable", pitch: 0.47, overhang: 1, porchOutFt: 6, porchEnd: "left" }, siding: "batten", colors: PLAIN, wallHeightFt: 10 } },
+  { id: "Q2", label: "Frame Side Porch Gable", size: "28x20", H: 10, ux: false, porch: { wall: "east", onCap: true, span: 12, attach: 9 }, colors: PLAIN,
+    d3: { roof: { type: "gable", front: "eave", pitch: 0.47, overhang: 1, porchOutFt: 6, porchWidthFt: 12, porchAttachFt: 9, porchEnd: "right" }, siding: "batten", colors: PLAIN, wallHeightFt: 10 } },
+  { id: "Q3", label: "Frame Side Recessed Eave", size: "20x28", H: 8, ux: true, recessedEave: 4, recessedWall: "west", colors: PLAIN,
+    d3: { roof: { type: "gable", front: "gable", pitch: 0.4, overhang: 0.8, porchDepthFt: 4, porchTruss: true, porchEnd: "left" }, siding: "batten", colors: PLAIN, wallHeightFt: 8 } },
+  { id: "Q4", label: "Frame Side Recessed High", size: "10x16", H: 7, ux: true, tallNeg: false, recessedEave: 4, recessedWall: "east", recessedHigh: true, colors: FARM_COLORS,
+    d3: { roof: { type: "shed", highSide: "right", pitch: 0.3, overhang: 1, eave: "fascia", porchDepthFt: 4, porchEnd: "right" }, siding: "batten", colors: FARM_COLORS, wallHeightFt: 7 } },
   // The control: no key, so today's rule -- a portrait shed's slope runs the long way and its porch
   // takes the WEST short wall (the old Farmstand, 10x16), with no frame.
   { id: "O", label: "Frame Old Shed", size: "10x16", H: 7, old: true, colors: PLAIN,
@@ -492,13 +504,18 @@ async function runCase(ctx, c, ok, dir) {
 
     // ── a porch recessed into an eave wall ──
     if (c.recessedEave) {
-      const s = m.walls.south;
+      // The wall it is cut into: south, or (a side wall, 2026-10-05) west or east, whose line runs along z.
+      const rw = c.recessedWall || "south", s = m.walls[rw];
+      const sg = rw === "south" || rw === "east" ? 1 : -1, ns = rw === "south" || rw === "north", half = ns ? L / 2 : W / 2;
+      const face = s && (ns ? (sg > 0 ? s.mx[2] : -s.mn[2]) : (sg > 0 ? s.mx[0] : -s.mn[0]));
+      const across = (q) => (ns ? (q.mn[2] + q.mx[2]) / 2 : (q.mn[0] + q.mx[0]) / 2);
       // Its face (0.15) or its battens (0.23) stand that far out from the set-back line.
-      ok(`${id}: the south (eave) wall is set back ${c.recessedEave} ft under the roof`, s && s.mx[2] > L / 2 - c.recessedEave + 0.14 && s.mx[2] < L / 2 - c.recessedEave + 0.27, s && f3(s.mx[2]));
+      ok(`${id}: the ${rw} (eave) wall is set back ${c.recessedEave} ft under the roof`, s && face > half - c.recessedEave + 0.14 && face < half - c.recessedEave + 0.27, s && f3(face));
       const posts = m.recessedEave.filter((e) => e.kind === "post"), hdr = m.recessedEave.filter((e) => e.kind === "header");
-      ok(`${id}: posts stand along the eave line with a header over them`, posts.length === Math.ceil((c.ux ? L : W) / 10) + 1 && hdr.length === 1 && posts.every((q) => near((q.mn[2] + q.mx[2]) / 2, L / 2 - 0.21, 0.01)), `${posts.length} posts, ${hdr.length} header`);
+      ok(`${id}: posts stand along the eave line with a header over them`, posts.length === Math.ceil((c.ux ? L : W) / 10) + 1 && hdr.length === 1 && posts.every((q) => near(across(q), sg * (half - 0.21), 0.01)), `${posts.length} posts, ${hdr.length} header`);
+      if (!ns) ok(`${id}: on a side wall, the front (south) wall stands full height to the front corners, not set back`, m.walls.south && near(m.walls.south.mx[2], L / 2, 0.3), m.walls.south && f3(m.walls.south.mx[2]));
       if (c.recessedHigh) {
-        ok(`${id}: the set-back high wall stops at H, under the roof`, near(s.top, H, 0.011) && m.frame && m.frame.tops.south === H, `${f3(s.top)} frame ${m.frame && m.frame.tops.south}`);
+        ok(`${id}: the set-back high wall stops at H, under the roof`, near(s.top, H, 0.011) && m.frame && m.frame.tops[rw] === H, `${f3(s.top)} frame ${m.frame && m.frame.tops[rw]}`);
         ok(`${id}: the high eave keeps its finish over the opening`, m.highEave.some((e) => e.kind === "fascia"), m.highEave.map((e) => e.kind).join(","));
       }
     }

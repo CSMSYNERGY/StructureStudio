@@ -121,7 +121,7 @@ export async function main() {
     // ── 2. the high side ──
     const highSide = field(page, "High side (single slant)").locator("select");
     ok("a single slant offers the high side", (await highSide.count()) === 1);
-    ok("...and not the front-wall choice, which is a gable's", (await field(page, "Front wall (porch or door side)").count()) === 0);
+    ok("...and not the front-wall choice, which is a gable's", (await field(page, "Front wall (main door side)").count()) === 0);
     ok("...starting at Not set", (await highSide.inputValue()) === "");
     await highSide.selectOption("front");
     await settle(page);
@@ -223,10 +223,28 @@ export async function main() {
     await settle(page);
     d3 = await save(page, calls);
     ok("No steps on a recessed porch deletes the key", !has(d3.roof, "porchSteps") && !has(d3.roof, "porchStepCount") && d3.roof.porchDepthFt === 6, keys(d3.roof));
+    // A single slant's front is its HIGH SIDE (2026-10-05): with none set, the side-wall hint names that control,
+    // not a Front wall this roof does not have.
+    await highSide.selectOption("");
+    await settle(page);
+    const sideHint = page.locator("[data-ss-porch-side-hint]");
+    const sideHintText = (await sideHint.count()) ? (await sideHint.innerText()).trim() : "";
+    ok("on a single slant with no high side, the porch end's hint says to set the High side first",
+      sideHintText === "To put it on a side wall, set the High side first.", sideHintText);
+    await highSide.selectOption("front");
+    await settle(page);
     const porchEnd = field(page, /^Porch end/).locator("select");
-    ok("in the new frame the porch end names a WALL, not a gable end",
-      (await porchEnd.locator("option").allTextContents()).join("|") === "Front wall|Back wall",
+    // A SIDE WALL (2026-10-05): in the frame the left and right walls are offered too, and saved as given.
+    ok("in the new frame the porch end names a WALL, not a gable end, and the side walls too",
+      (await porchEnd.locator("option").allTextContents()).join("|") === "Front wall|Back wall|Left wall|Right wall",
       (await porchEnd.locator("option").allTextContents()).join("|"));
+    ok("...and does not ask for the front to be set first", (await page.locator("[data-ss-porch-side-hint]").count()) === 0);
+    await porchEnd.selectOption("left");
+    await settle(page);
+    d3 = await save(page, calls);
+    ok("Left wall saves porchEnd \"left\", the porch and the frame kept", d3.roof.porchEnd === "left" && d3.roof.porchDepthFt === 6 && has(d3.roof, "highSide"), JSON.stringify(d3.roof));
+    await porchEnd.selectOption("front");
+    await settle(page);
     await porchSelect(page).selectOption("none");
     await settle(page);
 
@@ -256,7 +274,7 @@ export async function main() {
     await settle(page);
     d3 = await save(page, calls);
     ok("⚠️ SWITCHING TO A GABLE DROPS THE SHED'S HIGH SIDE", !has(d3.roof, "highSide"), keys(d3.roof));
-    const front = field(page, "Front wall (porch or door side)").locator("select");
+    const front = field(page, "Front wall (main door side)").locator("select");
     ok("a gable offers the front-wall choice, at Not set", (await front.count()) === 1 && (await front.inputValue()) === "");
     ok("...and no high side", (await field(page, "High side (single slant)").count()) === 0);
     await front.selectOption("eave");
@@ -295,7 +313,7 @@ export async function main() {
     await porchSelect(page).selectOption("none");
     await settle(page);
     await wingW.locator("xpath=../..").screenshot({ path: join(shots, "01-wings-row.png") });
-    await field(page, "Front wall (porch or door side)").locator("xpath=..").screenshot({ path: join(shots, "02-roof-row.png") });
+    await field(page, "Front wall (main door side)").locator("xpath=..").screenshot({ path: join(shots, "02-roof-row.png") });
     await wingSide.locator("select").selectOption("front");
     await settle(page);
     const lostText = await field(page, /^Wing side/).innerText();
