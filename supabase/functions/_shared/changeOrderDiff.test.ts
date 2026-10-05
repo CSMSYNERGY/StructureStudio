@@ -110,4 +110,26 @@ Deno.test("the rate chain's bookkeeping keys never raise a change order on their
   has("a real rate move is still reported", changeOrderDescription(restamped, moved), "County tax rate: 7.25% → 8.25%");
 });
 
+Deno.test("a rep's own price reads as an ordinary price change, and its list amount never shows (migration 277)", () => {
+  // submit-estimate keeps the catalog amount a rep replaced as listAmount on the line (for audit).
+  // The change order a customer is asked to approve must read the PRICE they are charged, never
+  // the list it replaced, and a line that only gained the bookkeeping key is not a change at all.
+  const before = { version: 1, discount: 0, lines: [{ kind: "building", itemKey: "", name: "12x24 Lofted Barn", desc: "", qty: 1, amount: 11200 }] };
+  const after = { version: 1, discount: 0, lines: [{ kind: "building", itemKey: "", name: "12x24 Lofted Barn", desc: "", qty: 1, amount: 10500, listAmount: 11200 }] };
+  const text = changeOrderDescription(before, after);
+  has("the price move is named", text, "12x24 Lofted Barn: price $11,200.00 → $10,500.00");
+  has("and the total follows it", text, "Total: $11,200.00 → $10,500.00");
+  // Re-priced again on a later resubmit: list unchanged, the agreed price is the baseline.
+  const again = { ...after, lines: [{ ...after.lines[0], amount: 10800 }] };
+  has("a second re-price is measured from the first", changeOrderDescription(after, again), "price $10,500.00 → $10,800.00");
+  // Same money, list amount added or moved: nothing for the customer to approve.
+  const stamped = { ...before, lines: [{ ...before.lines[0], listAmount: 11200 }] };
+  check("a listAmount alone is not a change", changeOrderDescription(before, stamped) === null,
+    `got ${JSON.stringify(changeOrderDescription(before, stamped))}`);
+  const relisted = { ...after, lines: [{ ...after.lines[0], listAmount: 12000 }] };
+  check("a moved list behind the same price is not a change", changeOrderDescription(after, relisted) === null,
+    `got ${JSON.stringify(changeOrderDescription(after, relisted))}`);
+  lacks("no sentence ever names a list figure the customer was not charged", changeOrderDescription(before, relisted), "12,000");
+});
+
 if (failures) throw new Error(`${failures} failed`);

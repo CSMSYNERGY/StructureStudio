@@ -123,6 +123,24 @@ const RVE: Level[] = ["none", "view", "edit"];
 export const AREAS: Area[] = [
   // ── Workspace ────────────────────────────────────────────────────────────
   { key: "designer",          label: "Designer",           group: "workspace", hint: "Build designs and quotes",            levels: RVE },
+  // CHANGING A LINE'S PRICE IN THE DESIGNER (a builder's request, migration 277,
+  // 2026-10-05). The builder's ask: "a sales person with the right permission can change the charge
+  // on any line item right in the Designer" — raise it for an extra-large rough opening, lower it to
+  // close — and the customer's quote shows the new number as that line's price, never as a visible
+  // "Custom" fee or "Discount". submit-estimate honours a price only from someone holding this, and
+  // strips (and logs) it from anyone else; see _shared/priceOverride.ts.
+  //
+  // Two levels, like Approve Changes: there is nothing to "view" — you either may type a price or
+  // you may not. Owners are absolute (effectiveAccess short-circuits them) and admins hold it by
+  // preset. Omitted from every other preset, so on the day it ships no sales rep, sales manager,
+  // office staffer, dealer, scheduler, crew or driver gains it: an owner or admin ticks it on for
+  // the specific people they trust, on the Team screen. No floor: a holder may go as low as they
+  // like. Both are the safe default while Carolyn decides (who gets it, and whether there is a
+  // floor); a floor would be one clamp in priceOverride.ts.
+  //
+  // ⚠️ access.ts is bundled per function: every function that bundles it must be redeployed with
+  // this change, or its copy drops `price_override` from a saved Team grant as an unknown key.
+  { key: "price_override",    label: "Override prices",    group: "workspace", hint: "Change a line's price in the Designer", levels: ["none", "edit"] },
   { key: "designs",           label: "Designs",            group: "workspace", hint: "Customer designs and quotes",         levels: RVE },
   // 'own' = see only the customers you are ASSIGNED TO or FOLLOWING — and, because a quote
   // belongs to a customer and not to a rep, only those customers' designs and browsing leads.
@@ -306,6 +324,9 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
   owner: Object.fromEntries(AREA_KEYS.map((k) => [k, k === "commissions" ? "edit" : "edit"])),
   admin: {
     designer: "edit", designs: "edit", contacts: "edit", inventory: "edit", orders: "edit",
+    // Override prices (migration 277): admins by preset, like Approve Changes. Every title below
+    // OMITS it — omission is how a preset denies, and it is what keeps it off every rep on day one.
+    price_override: "edit",
     change_orders: "edit", change_order_approve: "edit",
     build_schedule: "edit", delivery_schedule: "edit", repairs: "edit", commissions: "edit", reports: "edit",
     phone: "edit",

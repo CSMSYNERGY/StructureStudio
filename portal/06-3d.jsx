@@ -590,7 +590,7 @@ function DesignerSettings({ clientId, setup3d = null, view3d = false, canBill = 
   );
 }
 
-function DesignerTab({ clientId, onSaved, openDesign = null, setup3d = null, view3d = false, onOpenOrder = null, canPushInvoice = false }) {
+function DesignerTab({ clientId, onSaved, openDesign = null, setup3d = null, view3d = false, onOpenOrder = null, canPushInvoice = false, canOverridePrice = false }) {
   // Hook FIRST — see useDesigner's note. The two returns below are exactly the early guards
   // that make putting anything stateful under them a white screen.
   const { SS, failed } = useDesigner();
@@ -612,9 +612,10 @@ function DesignerTab({ clientId, onSaved, openDesign = null, setup3d = null, vie
     <div style={{ maxWidth: 1728, margin: "0 auto", width: "100%" }}>
       {/* onOpenOrder/canPushInvoice power Push to Invoice on the success screen. The host
           owns both on purpose: only the shell knows this user's Orders access, and only it
-          can navigate without unmounting the designer (which would discard the design). */}
+          can navigate without unmounting the designer (which would discard the design).
+          canOverridePrice (migration 277) turns each priced Details row's amount into a field. */}
       <SS clientId={clientId} embedded onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d}
-        onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} />
+        onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} canOverridePrice={canOverridePrice} />
     </div>
   );
 }

@@ -803,6 +803,75 @@ Deno.test("phone is offered on every tenant's Team screen", () => {
   assertEquals(AREAS.find((a) => a.key === "phone")?.levels, ["none", "own", "view", "edit"]);
 });
 
+// ── OVERRIDE PRICES (migration 277, 2026-10-05) ─────────────────────────────────────────
+// A builder's request: a rep with the right permission changes a line's price in the Designer, and the
+// quote shows it as that line's price. submit-estimate honours it only for someone canEdit() says
+// holds this area. The safe default until Carolyn decides: owners always, admins by preset, every
+// other title only when an owner or admin ticks it on for that person.
+
+Deno.test("Override prices: owners and admins hold it; every other title is denied by default", () => {
+  assertEquals(effectiveAccess("owner", "owner", null).price_override, "edit");
+  assertEquals(effectiveAccess("owner", null, null).price_override, "edit", "an owner with no title (most live owners)");
+  assertEquals(effectiveAccess("admin", "admin", null).price_override, "edit");
+  assertEquals(effectiveAccess("user", "admin", null).price_override, "edit", "the title decides, not the coarse role");
+  // Every non-admin title listed, so a title added tomorrow fails here until somebody decides.
+  const denied = TITLES.map((t) => t.key).filter((t) => t !== "owner" && t !== "admin");
+  assertEquals(denied.length, 8);
+  for (const t of denied) {
+    assertEquals(effectiveAccess("user", t, null).price_override, "none", t);
+    assertFalse("price_override" in PRESETS[t], `${t} should omit price_override, not spell out none`);
+  }
+  // A NULL or unknown title is a sales rep (normTitle), and a sales rep does not hold it.
+  assertEquals(effectiveAccess("user", null, null).price_override, "none");
+  assertEquals(effectiveAccess("user", "wizard", null).price_override, "none");
+});
+
+Deno.test("Override prices: the Team switch grants it to one person, and takes it from an admin", () => {
+  const rep = effectiveAccess("user", "sales_rep", { price_override: "edit" });
+  assertEquals(rep.price_override, "edit");
+  assert(canEdit(rep, "price_override"), "submit-estimate asks canEdit — the grant must satisfy it");
+  assertFalse(canEdit(effectiveAccess("user", "sales_rep", null), "price_override"));
+  // An owner can take it away from an admin: the preset is a starting point, not a ceiling.
+  assertEquals(effectiveAccess("admin", "admin", { price_override: "none" }).price_override, "none");
+  // ...but never from an owner.
+  assertEquals(effectiveAccess("owner", "owner", { price_override: "none" }).price_override, "edit");
+  // Two levels only. 'view' would mean nothing, so it is discarded rather than stored through.
+  assertEquals(effectiveAccess("user", "dealer", { price_override: "view" }).price_override, "none");
+  assertEquals(sanitizeAccess({ price_override: "edit" }, "sales_rep"), { price_override: "edit" });
+  assertEquals(sanitizeAccess({ price_override: "view" }, "sales_rep"), {});
+});
+
+Deno.test("Override prices: granting it moves nothing else, and nothing else grants it", () => {
+  const before = effectiveAccess("user", "sales_rep", null);
+  const after = effectiveAccess("user", "sales_rep", { price_override: "edit" });
+  for (const k of AREA_KEYS) {
+    if (k !== "price_override") assertEquals(after[k], before[k], `granting price_override moved ${k}`);
+  }
+  // Designer edit, designs edit and a rep's whole kit do not imply it.
+  const loaded = effectiveAccess("user", "sales_manager", { designer: "edit", designs: "edit", orders: "edit", change_orders: "edit" });
+  assertEquals(loaded.price_override, "none");
+});
+
+Deno.test("Override prices: a holder may pass it on; nobody else can mint it", () => {
+  assert(mayGrant("owner", {}, "price_override", "edit"));
+  assert(mayGrant("admin", effectiveAccess("admin", "admin", null), "price_override", "edit"));
+  assert(mayGrant("user", effectiveAccess("user", "sales_rep", { price_override: "edit" }), "price_override", "edit"));
+  assertFalse(mayGrant("user", effectiveAccess("user", "sales_manager", null), "price_override", "edit"));
+  assertFalse(mayGrant("admin", effectiveAccess("admin", "admin", { price_override: "none" }), "price_override", "edit"),
+    "an admin an owner took it from cannot hand it back to themselves or anyone");
+});
+
+Deno.test("Override prices is on every builder's Team screen, labelled for a builder", () => {
+  const a = accessMetadata().areas.find((x) => x.key === "price_override");
+  assert(a, "not internal-only: every builder's owner hands this out");
+  assertEquals(a.levels, ["none", "edit"]);
+  assertEquals(a.label, "Override prices");
+  assertEquals(a.group, "workspace");
+  assertFalse(!!a.ownerGranted || !!a.byTitleOnly || !!a.ownWrites, "an ordinary grantable switch");
+  // Right after Designer on the grid: it is a power inside the Designer.
+  assertEquals(AREA_KEYS.indexOf("price_override"), AREA_KEYS.indexOf("designer") + 1);
+});
+
 // ── The SQL twin, read back and compared cell by cell ───────────────────────────────────
 // scripts/preflight.mjs compares area KEYS, level VOCABULARIES and TITLE keys between this
 // module and area_level_for(), and says in its own header that it cannot compare preset
