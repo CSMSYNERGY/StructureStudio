@@ -2935,6 +2935,16 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   const ready = !busy && (!needsConfirm || typed.trim() === expected);
+  // Has an invoice been made from this design? The server decides for real (invoiceExists in
+  // _shared/designStorageKeys.ts also reads the invoice ledger, which this page cannot). This is
+  // the same answer from what the row carries: a StructureStudio invoice leaves the design
+  // 'accepted' with ss_invoice_sent_at set (migration 136), so status alone would promise to
+  // delete a quote the server keeps.
+  const invoiced = st === "invoiced" || st === "delivered" || !!design.ss_invoice_sent_at;
+  // The CRM estimate's own, narrower rule (crmInvoiceExists): a StructureStudio invoice was made
+  // from the StructureStudio quote, so it leaves no CRM invoice to void and the estimate still goes.
+  const crmInvoiced = st === "invoiced" || st === "delivered";
+  const quoteNo = design.ss_quote_number || null;
 
   const go = async () => {
     if (!ready) return;
@@ -2957,16 +2967,18 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
       </div>
       <div style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, marginBottom: 14 }}>
         <strong>{(design.contact || {}).name || "This customer"}</strong>
-        {design.ghl_estimate_number ? <> · EST-{design.ghl_estimate_number}</> : null} · {STATUS_LABELS[st]}
+        {design.ghl_estimate_number ? <> · EST-{design.ghl_estimate_number}</> : quoteNo ? <> · {quoteNo}</> : null} · {STATUS_LABELS[st]}
         <div style={{ marginTop: 8 }}>
-          Removes the design, its full version history and the saved PDFs. This cannot be undone.
+          {invoiced
+            ? "Removes the design, its full version history, and its floor plans and pictures. This cannot be undone."
+            : "Removes the design, its full version history, and the saved PDFs and pictures. This cannot be undone."}
         </div>
         {/* The CRM half, stated plainly, because it is the part that reaches outside this
             app. Three genuinely different outcomes, so this says which one applies to THIS
             design rather than one sentence that is wrong two-thirds of the time. The server
             decides for real (it checks the invoice ledger, not just the cached status). */}
         {design.ghl_estimate_number ? (
-          (st === "invoiced" || st === "delivered") ? (
+          crmInvoiced ? (
             <div style={{ marginTop: 8, color: "#92400E" }}>
               EST-{design.ghl_estimate_number} is <strong>kept</strong> in your CRM — an invoice was created from it.
               Void that invoice there if you want the estimate gone too.
@@ -2977,11 +2989,28 @@ function DeleteDesignDialog({ design, onClose, onDeleted }) {
               opportunity stay — only the estimate goes.
             </div>
           )
-        ) : (
+        ) : null}
+        {/* The StructureStudio quote (2026-10-05). Its PDF is a public file the customer was
+            emailed a link to, so the builder is told it goes, and when it stays: an invoice
+            made from it keeps both, the same rule as the CRM estimate above. */}
+        {quoteNo ? (
+          invoiced ? (
+            <div style={{ marginTop: 8, color: "#92400E" }}>
+              Quote {quoteNo} and its PDF are <strong>kept</strong>, because an invoice was made from it.
+              The invoice stays too.
+            </div>
+          ) : (
+            <div style={{ marginTop: 8, color: "#64748B" }}>
+              Quote {quoteNo} and its PDF are <strong>also deleted</strong>. The link in the customer's
+              quote email will stop working.
+            </div>
+          )
+        ) : null}
+        {!design.ghl_estimate_number && !quoteNo ? (
           <div style={{ marginTop: 8, color: "#64748B" }}>
-            No estimate has been created in your CRM for this design.
+            No quote or estimate has been made for this design yet.
           </div>
-        )}
+        ) : null}
       </div>
       {err && <div style={S.err}>{err}</div>}
       {needsConfirm && (

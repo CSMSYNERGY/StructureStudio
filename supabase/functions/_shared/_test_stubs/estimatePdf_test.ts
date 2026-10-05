@@ -16,8 +16,9 @@
 
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { PDFDocument } from "npm:pdf-lib@1.17.1";
-import { buildFormalEstimatePdf } from "../estimatePdf.ts";
+import { buildFormalEstimatePdf, pdfCustomerFrom } from "../estimatePdf.ts";
 import { pdfText } from "./pdfText.ts";
+import { makeJpegShape, makePng } from "./pngFixture.ts";
 
 // Generic identities only — this repo is PUBLIC; no client names or domains in fixtures.
 const BUSINESS = {
@@ -233,4 +234,206 @@ Deno.test("a taxed totals block keeps its rows together across a page break", as
   assert(doc.getPageCount() >= 2, `expected pagination, got ${doc.getPageCount()}`);
   const t = await pdfText(bytes);
   assert(t.includes("Taxable subtotal") && t.includes("Sales tax (7%"), "the whole block still renders");
+});
+
+// ── The formal estimate form (2026-10-05) ────────────────────────────────────────────────
+// Carolyn, 2026-08-06: the printed estimate should carry the letterhead, the customer's name and
+// "estimate good for X amount of days". These pin the customer block ("Prepared for", or "Bill to"
+// on an invoice), the per-builder validity and the logo, and above all that leaving all three out
+// draws exactly the page it drew before.
+
+/**
+ * Everything the page DRAWS, in order, comparable across renders: the inflated content and image
+ * streams with pdf-lib's per-document random resource names (/Helvetica-Bold-7098480789, /Image-…)
+ * normalised.
+ *
+ * Read from a re-save WITHOUT object streams, never from the bytes as built. pdf-lib saves with
+ * object streams, which puts the info dictionary (CreationDate/ModDate, stamped to the second) in
+ * one compressed stream and the cross-reference table in another, and that table holds byte
+ * offsets. Whenever the dates compress to a different length every later offset moves by a byte,
+ * so stripping the dates is not enough: two builds a second apart still differed in about one run
+ * in six (2026-10-05). Re-saved this way, both are plain text outside any stream, and the content
+ * streams are copied byte for byte.
+ */
+async function drawn(bytes: Uint8Array): Promise<string> {
+  const flat = await (await PDFDocument.load(bytes, { updateMetadata: false })).save({ useObjectStreams: false });
+  return (await pdfText(flat)).replace(/\/(Helvetica-Bold|Helvetica|Image)-\d+/g, "/$1");
+}
+/** The text lines drawn, as "x,y text", for "where did it land" assertions. */
+async function placed(bytes: Uint8Array): Promise<string[]> {
+  return [...(await pdfText(bytes)).matchAll(/1 0 0 1 (-?[\d.]+) (-?[\d.]+) Tm\n(.*) Tj/g)].map((m) => `${m[1]},${m[2]} ${m[3]}`);
+}
+const at = (lines: string[], text: string) => lines.find((l) => l.endsWith(` ${text}`))?.split(" ")[0] ?? null;
+const imageCount = (bytes: Uint8Array) => (new TextDecoder("latin1").decode(bytes).match(/\/Subtype \/Image/g) ?? []).length;
+
+// Made-up customer (the repo is public), shaped like designs.contact as the designer writes it.
+const CONTACT = {
+  name: "Pat Example", email: "pat@example.test", phone: "(555) 010-0199",
+  street: "42 Sample Lane", city: "Springfield", state: "OH", zip: "45501",
+};
+// A share code as genShortCode makes them today (10 characters), and one of the 48 legacy
+// six-character codes migration 156 redacts.
+const CODE = "SS-ABCD2345EF";
+const LEGACY = "SS-ABC234";
+
+Deno.test("pdfCustomerFrom reads designs.contact, and nothing printable is null", () => {
+  assertEquals(pdfCustomerFrom(CONTACT, CODE), {
+    name: "Pat Example", phone: "(555) 010-0199", email: "pat@example.test",
+    address: { street: "42 Sample Lane", city: "Springfield", state: "OH", zip: "45501" },
+  });
+  // The legacy key names contactAddress.ts knows (address / postalCode).
+  assertEquals(pdfCustomerFrom({ name: "Lee", address: "9 Mill St", postalCode: "65401" }, CODE)?.address,
+    { street: "9 Mill St", city: null, state: null, zip: "65401" });
+  for (const blank of [null, undefined, {}, [], "Pat", { name: "  ", email: "" }, { country: "US" }]) {
+    assertEquals(pdfCustomerFrom(blank, CODE), null, `for ${JSON.stringify(blank)}`);
+  }
+});
+
+Deno.test("pdfCustomerFrom prints no customer for a code short enough to guess (migration 156's rule)", async () => {
+  // The quote documents live in the public bucket under <client>/<code>-quote.pdf (and -estimate,
+  // -invoice): a key derived from the code alone. For a legacy six-character code that key can be
+  // enumerated, so a customer block there would hand out what load_design withholds.
+  assertEquals(pdfCustomerFrom(CONTACT, LEGACY), null);
+  assertEquals(pdfCustomerFrom(CONTACT, "SS-ABC2345"), null, "7 characters");
+  assert(pdfCustomerFrom(CONTACT, "SS-ABC23456"), "8 characters is one target, not enumerable");
+  assert(pdfCustomerFrom(CONTACT, CODE));
+  // A lost code prints no customer rather than the wrong one.
+  for (const code of ["", "SS-", undefined, null]) assertEquals(pdfCustomerFrom(CONTACT, code as unknown as string), null, String(code));
+  // And so the legacy code's page is exactly the page with no customer.
+  const none = await drawn(await buildFormalEstimatePdf(FIXTURE));
+  assertEquals(await drawn(await buildFormalEstimatePdf({ ...FIXTURE, customer: pdfCustomerFrom(CONTACT, LEGACY) })), none);
+});
+
+Deno.test("the customer block prints Prepared for, the name, the delivery address, phone and email", async () => {
+  const bytes = await buildFormalEstimatePdf({ ...FIXTURE, customer: pdfCustomerFrom(CONTACT, CODE) });
+  assertIsPdf(bytes);
+  const lines = await placed(bytes);
+  for (const s of ["Prepared for", "Pat Example", "42 Sample Lane", "Springfield, OH 45501", "(555) 010-0199", "pat@example.test"]) {
+    assert(at(lines, s), `"${s}" must render; drew ${JSON.stringify(lines.slice(0, 14))}`);
+  }
+  // Beside the title block, not under it: same top band, right-hand column.
+  const [tx, ty] = at(lines, "Estimate #1042")!.split(",").map(Number);
+  const [px, py] = at(lines, "Prepared for")!.split(",").map(Number);
+  assert(px > tx + 200 && Math.abs(py - ty) < 12, `Prepared for at ${px},${py}; the title at ${tx},${ty}`);
+  // And the representative estimate still fits one page with it.
+  assertEquals((await PDFDocument.load(bytes)).getPageCount(), 1);
+});
+
+Deno.test("no customer draws exactly the page it drew before: no heading, nothing moved", async () => {
+  const base = await drawn(await buildFormalEstimatePdf(FIXTURE));
+  assert(!base.includes("Prepared for") && !base.includes("Bill to"), "no block without a customer");
+  // Every way of having nothing to print is the same page as not passing a customer at all.
+  for (const customer of [null, undefined, {}, { name: "   ", phone: "", email: null, address: { street: " ", city: null } }]) {
+    assertEquals(await drawn(await buildFormalEstimatePdf({ ...FIXTURE, customer })), base, `customer ${JSON.stringify(customer)}`);
+  }
+  // And a logo-less business is the old text letterhead at the old place.
+  const lines = await placed(await buildFormalEstimatePdf(FIXTURE));
+  assertEquals(at(lines, "Example Barn Co."), "54,718");
+});
+
+Deno.test("a customer with only part of the record prints that part, and never 'null' or 'undefined'", async () => {
+  const t = await drawn(await buildFormalEstimatePdf({ ...FIXTURE, customer: pdfCustomerFrom({ name: "Sam Only", zip: "45501" }, CODE) }));
+  assert(t.includes("Prepared for") && t.includes("Sam Only") && t.includes("45501 Tj"), "name and zip print");
+  assert(!/\bnull\b|\bundefined\b/.test(t), "no placeholder words on a customer's document");
+  const emailOnly = await drawn(await buildFormalEstimatePdf({ ...FIXTURE, customer: { email: "only@example.test" } }));
+  assert(emailOnly.includes("Prepared for") && emailOnly.includes("only@example.test"), "an email alone still gets the block");
+});
+
+Deno.test("a non-Latin or emoji customer name is sanitised to WinAnsi instead of failing the quote", async () => {
+  // The standard fonts encode WinAnsi only and pdf-lib THROWS on anything else: a shopper's name
+  // must not be the reason a quote has no document.
+  const bytes = await buildFormalEstimatePdf({
+    ...FIXTURE,
+    customer: { name: "Zoë Łukasz 李 \u{1F3E0}", address: { street: "Straße “7”", city: "Zürich" } },
+  });
+  assertIsPdf(bytes);
+  const t = await drawn(bytes);
+  assert(t.includes("Zoë ?ukasz ?"), "Latin-1 kept, the rest replaced");
+  assert(t.includes('Straße "7"'), "curly quotes normalised, ß kept");
+  assert(t.includes("Zürich"), "ü kept");
+});
+
+Deno.test("a hostile 1,000-character name keeps two lines and cannot push the table off the page", async () => {
+  const bytes = await buildFormalEstimatePdf({ ...FIXTURE, customer: { name: "Very Long Name ".repeat(70), email: "x@example.test" } });
+  assertIsPdf(bytes);
+  assertEquals((await PDFDocument.load(bytes)).getPageCount(), 1, "the representative estimate still fits one page");
+  const nameLines = (await placed(bytes)).filter((l) => / Very Long Name/.test(l));
+  assertEquals(nameLines.length, 2, `at most two name lines, got ${nameLines.length}`);
+});
+
+Deno.test("validityDays sets the Valid until date; absent, zero or junk keeps 30", async () => {
+  // Issued 2026-08-10: + 14 days is August 24, + 60 is October 9, + 365 is August 10, 2027.
+  const valid = async (validityDays: number | undefined) =>
+    (await placed(await buildFormalEstimatePdf({ ...FIXTURE, validityDays })))
+      .find((l) => l.includes("Valid until:"))?.split(" ").slice(1).join(" ");
+  assertEquals(await valid(14), "Valid until: August 24, 2026");
+  assertEquals(await valid(60), "Valid until: October 9, 2026");
+  assertEquals(await valid(365), "Valid until: August 10, 2027");
+  assertEquals(await valid(undefined), "Valid until: September 9, 2026");
+  assertEquals(await valid(0), "Valid until: September 9, 2026");
+  assertEquals(await valid(Number.NaN), "Valid until: September 9, 2026");
+});
+
+Deno.test("an invoice prints Bill to and no Valid until, with the same customer", async () => {
+  const t = await drawn(await buildFormalEstimatePdf({ ...FIXTURE, docKind: "invoice", validityDays: 14, customer: pdfCustomerFrom(CONTACT, CODE) }));
+  assert(t.includes("Invoice #1042"), "titled Invoice");
+  assert(t.includes("Bill to"), "the customer block is titled Bill to");
+  assert(!t.includes("Prepared for"), "not Prepared for");
+  assert(!t.includes("Valid until"), "an invoice is a bill, not an offer: no validity, whatever the setting");
+  assert(t.includes("Pat Example") && t.includes("42 Sample Lane"), "the customer prints");
+});
+
+Deno.test("a PNG logo is embedded left of the business name, at most 48 pt high", async () => {
+  const skipped: string[] = [];
+  const bytes = await buildFormalEstimatePdf({
+    ...FIXTURE,
+    business: { ...BUSINESS, logo: makePng(300, 100) },
+    onLogoSkipped: (r) => skipped.push(r),
+  });
+  assertIsPdf(bytes);
+  assertEquals(skipped, []);
+  assertEquals(imageCount(bytes), 1, "one image XObject");
+  // 300x100 at 48 pt high is 144 x 48, drawn at the margin; the name moves right of it (54 + 144 + 14).
+  assert((await drawn(bytes)).includes("144 0 0 48 0 0 cm"), "drawn 144 x 48");
+  assertEquals(at(await placed(bytes), "Example Barn Co."), "212,718");
+  assertEquals((await PDFDocument.load(bytes)).getPageCount(), 1);
+});
+
+Deno.test("a very wide logo is capped at 2 inches wide instead of pushing the name off the line", async () => {
+  const bytes = await buildFormalEstimatePdf({ ...FIXTURE, business: { ...BUSINESS, logo: makePng(800, 100) } });
+  assert((await drawn(bytes)).includes("144 0 0 18 0 0 cm"), "800x100 scales to 144 x 18");
+});
+
+Deno.test("a JPEG logo takes the JPEG path (copied as DCT data, not decoded)", async () => {
+  const skipped: string[] = [];
+  const bytes = await buildFormalEstimatePdf({ ...FIXTURE, business: { ...BUSINESS, logo: makeJpegShape(473, 200) }, onLogoSkipped: (r) => skipped.push(r) });
+  assertIsPdf(bytes);
+  assertEquals(skipped, []);
+  assert(/\/Subtype \/Image[\s\S]{0,200}\/Filter \/DCTDecode/.test(new TextDecoder("latin1").decode(bytes)), "a DCTDecode image");
+});
+
+Deno.test("an unusable logo leaves the text letterhead exactly as it was, and says why", async () => {
+  const base = await drawn(await buildFormalEstimatePdf(FIXTURE));
+  const header = makePng(1254, 1254).slice(0, 33); // only the header: sniffed, never decoded
+  const broken = makePng(40, 20);
+  broken.fill(7, 41, broken.length - 12); // a real header over a corrupted body: pdf-lib throws
+  const cases: [string, Uint8Array, RegExp][] = [
+    ["too many pixels", header, /^logo 1254x1254 PNG is too big to embed$/],
+    ["corrupt PNG", broken, /^logo embed failed/],
+    ["a GIF", new TextEncoder().encode("GIF89a".padEnd(64, ".")), /^logo not a PNG or JPEG$/],
+    ["empty", new Uint8Array(0), /^logo empty$/],
+  ];
+  for (const [label, logo, want] of cases) {
+    const skipped: string[] = [];
+    const bytes = await buildFormalEstimatePdf({ ...FIXTURE, business: { ...BUSINESS, logo }, onLogoSkipped: (r) => skipped.push(r) });
+    assertIsPdf(bytes);
+    assertEquals(imageCount(bytes), 0, `${label}: no image`);
+    assertEquals(await drawn(bytes), base, `${label}: the page is the logo-less one`);
+    assertEquals(skipped.length, 1, `${label}: one reason, got ${JSON.stringify(skipped)}`);
+    assert(want.test(skipped[0]), `${label}: ${skipped[0]}`);
+  }
+  // A throwing telemetry sink cannot cost the document either.
+  assertIsPdf(await buildFormalEstimatePdf({
+    ...FIXTURE, business: { ...BUSINESS, logo: header }, onLogoSkipped: () => { throw new Error("boom"); },
+  }));
 });

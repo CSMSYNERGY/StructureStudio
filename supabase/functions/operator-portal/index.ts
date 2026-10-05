@@ -374,10 +374,13 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
         //                  degrades to inert text, so an operator cannot open a contact at all.
         //   ss_quote_*  -> DesignsTable renders them (02-sales.jsx:463/:512); without them the
         //                  Quote # column reads "-" for every SS-mode quote.
+        //   ss_invoice_sent_at -> the Delete design dialog (2026-10-05): a StructureStudio invoice
+        //                  leaves the design 'accepted', and without the stamp the dialog promises
+        //                  to delete a quote PDF the server keeps.
         // Adding a column to either owner read means adding it here too.
         const [designs, versions, cfg, leads] = await Promise.all([
           admin.from("designs")
-            .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, contact_id, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url")
+            .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, contact_id, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at")
             .eq("client_id", clientId).order("created_at", { ascending: false }),
           admin.from("design_versions")
             .select("short_code, version, created_at, selections, image_url, inventory_unit_id")

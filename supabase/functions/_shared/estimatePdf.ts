@@ -11,17 +11,29 @@
 // portal saves them piecemeal), so every field here is optional and a missing one is
 // skipped, never rendered as "null" and never a crash.
 //
+// The customer block and the logo (2026-10-05). Carolyn, 2026-08-06 (Fathom 775681234,
+// 1:00:07) asked for "a nice estimate form" with the letterhead, the customer's name on it and
+// "estimate good for X amount of days". The letterhead, terms and validity line were here; what
+// was missing was the customer (now `customer`, printed as "Prepared for", or "Bill to" on an
+// invoice), the logo (`business.logo`, bytes the CALLER fetched, see _shared/pdfLogo.ts) and a
+// per-builder number of days (`validityDays`, from _shared/quoteValidity.ts). All three are
+// optional, and with none of them the page draws exactly what it drew before.
+//
 // This module lives in _shared but is deliberately dependency-light: pdf-lib is pure JS
 // (no fs/net/env at runtime), and the version is PINNED — a floating npm tag changing
 // under every tenant on a cold start is the same hazard the vendored browser libs exist
-// to prevent.
+// to prevent. The logo is handed in as bytes for the same reason: the network stays with
+// the caller (quotePdf.ts), never in the builder.
 //
 // Unit tests: _shared/_test_stubs/estimatePdf_test.ts (that suite may use npm:/jsr:
 // imports; the self-contained _shared/*.test.ts group bans them, which is why the test
 // is not a sibling of this file).
 
 import { PDFDocument, StandardFonts, rgb } from "npm:pdf-lib@1.17.1";
-import type { PDFFont, PDFPage } from "npm:pdf-lib@1.17.1";
+import type { PDFFont, PDFImage, PDFPage } from "npm:pdf-lib@1.17.1";
+import { addressFrom, type StopAddress } from "./contactAddress.ts";
+import { logoUnfit, sniffLogo } from "./pdfLogo.ts";
+import { shareCodeIsGuessable } from "./shareCode.ts";
 
 export interface EstimatePdfBusiness {
   name?: string | null;
@@ -34,10 +46,22 @@ export interface EstimatePdfBusiness {
     state?: string | null;
     postalCode?: string | null;
   } | null;
-  // TODO (deliberate v1 omission): no logo image embedding. business_logo_url is a remote
-  // fetch at estimate-submit time — a slow, failed, oversized, or non-image response would
-  // add failure modes to the submit path for a cosmetic gain. Revisit with a cached,
-  // size-capped fetch if the logo is wanted on the formal PDF.
+  /**
+   * The logo's bytes (PNG or JPEG), already fetched — quotePdf.ts and the callers use
+   * pdfLogo.ts's fetchPdfLogo, which does the host/tenant guard, the timeout and the size caps.
+   * Drawn at most 48 pt high to the left of the business name. Absent, unreadable or unfit, the
+   * letterhead is the text one, unchanged, and `onLogoSkipped` hears why.
+   */
+  logo?: Uint8Array | null;
+}
+
+/** Who the document is for: designs.contact, read through pdfCustomerFrom below. */
+export interface EstimatePdfCustomer {
+  name?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  /** The delivery address, as contactAddress.ts reads it from designs.contact. */
+  address?: Partial<StopAddress> | null;
 }
 
 /** One entry of estimate_lines.lines — see submit-estimate step 11 for provenance. */
@@ -57,8 +81,17 @@ export interface EstimatePdfInput {
   estimateNumber?: string | number | null;
   /** Issue date (ISO). Unparseable/missing falls back to "now". */
   dateIso?: string | null;
-  /** Days the quote stays valid. Default 30; NaN/<=0 also falls back to 30. */
+  /** Days the quote stays valid: client_settings.quote_valid_days (migration 269). Default 30;
+   *  NaN/<=0 also falls back to 30. Not printed on an invoice. */
   validityDays?: number;
+  /**
+   * The customer, printed beside the title block as "Prepared for" (an estimate) or "Bill to"
+   * (an invoice): name, delivery address, phone, email. Absent, or with nothing printable in it,
+   * no block is drawn and the page is the one it always was.
+   */
+  customer?: EstimatePdfCustomer | null;
+  /** Why the logo was not drawn. Telemetry only, never control flow; a throw here is ignored. */
+  onLogoSkipped?: (reason: string) => void;
   lines?: EstimatePdfLine[] | null;
   /** Invoice-level discount (estimate_lines.discount). Rendered only when > 0. */
   discount?: number | null;
@@ -116,6 +149,20 @@ const COL = {
   qtyRight: MARGIN + 150 + 224 + 40, // right edge of the Qty column (right-aligned)
   amountRight: PAGE_W - MARGIN,      // right edge of the Amount column (right-aligned)
 };
+
+// The logo sits left of the business name: at most 48 pt high (Carolyn's letterhead, not a
+// banner) and 2" wide, so a very wide wordmark shrinks rather than pushing the name off the line.
+const LOGO_MAX_H = 48;
+const LOGO_MAX_W = 144;
+const LOGO_GAP = 14;
+
+// The customer block is the right-hand column beside the title block, the way a paper estimate
+// form puts "Prepared for" opposite the number and dates. 234 pt is wide enough for a long email
+// address at 9 pt; the title block's own lines are far shorter than the 270 pt left of it.
+const CUST_X = MARGIN + 270;
+const CUST_W = PAGE_W - MARGIN - CUST_X; // 234
+/** Wrapped lines kept per field: a 1,000-character name must not push the line items down a page. */
+const CUST_MAX_LINES = 2;
 
 const INK = rgb(0.13, 0.15, 0.18);
 const GRAY = rgb(0.45, 0.47, 0.5);
@@ -206,6 +253,29 @@ function fmtDate(d: Date): string {
   return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
 }
 
+/**
+ * The customer block's input, from a design's `contact` jsonb (the designer's form: name, email,
+ * phone, and the delivery address under the key names contactAddress.ts knows). Null when there
+ * is nothing printable, so a caller can pass the result straight through.
+ *
+ * Also null for a share code short enough to guess (shareCode.ts). Every document this feeds is
+ * stored in the public bucket under a key derived from the code alone, so printing the customer
+ * there would undo migration 156's redaction for the legacy six-character codes. The code is a
+ * required argument so a new caller cannot forget it.
+ */
+// deno-lint-ignore no-explicit-any
+export function pdfCustomerFrom(contact: any, shortCode: string): EstimatePdfCustomer | null {
+  if (shareCodeIsGuessable(shortCode)) return null;
+  if (!contact || typeof contact !== "object" || Array.isArray(contact)) return null;
+  // deno-lint-ignore no-explicit-any
+  const s = (v: any): string | null =>
+    typeof v === "string" && v.trim() ? v.trim() : typeof v === "number" && Number.isFinite(v) ? String(v) : null;
+  const address = addressFrom(contact);
+  const out = { name: s(contact.name), phone: s(contact.phone), email: s(contact.email), address };
+  const any = out.name || out.phone || out.email || address.street || address.city || address.state || address.zip;
+  return any ? out : null;
+}
+
 // ── The builder ──────────────────────────────────────────────────────────────────────────
 
 export async function buildFormalEstimatePdf(input: EstimatePdfInput): Promise<Uint8Array> {
@@ -253,10 +323,35 @@ export async function buildFormalEstimatePdf(input: EstimatePdfInput): Promise<U
   };
 
   // ── Letterhead ────────────────────────────────────────────────────────────────────────
+  // The logo first, because it decides where the text starts. Embedding is where a bad image
+  // fails (pdf-lib throws on a PNG or JPEG it cannot parse), and nothing has been drawn yet, so a
+  // failure here simply leaves the text letterhead exactly as it was without one.
+  const skipLogo = (r: string) => { try { input?.onLogoSkipped?.(r); } catch { /* telemetry only */ } };
+  let logo: { img: PDFImage; w: number; h: number } | null = null;
+  if (business.logo) {
+    const unfit = logoUnfit(business.logo);
+    if (unfit) skipLogo(`logo ${unfit}`);
+    else {
+      try {
+        const img = sniffLogo(business.logo)!.kind === "png"
+          ? await doc.embedPng(business.logo)
+          : await doc.embedJpg(business.logo);
+        const scale = Math.min(LOGO_MAX_H / img.height, LOGO_MAX_W / img.width);
+        if (Number.isFinite(scale) && scale > 0) logo = { img, w: img.width * scale, h: img.height * scale };
+        else skipLogo("logo has no size");
+      } catch (e) {
+        skipLogo(`logo embed failed: ${(e as Error)?.message?.slice(0, 80) || "error"}`);
+      }
+    }
+  }
+  const headTop = y;
+  const textX = logo ? MARGIN + logo.w + LOGO_GAP : MARGIN;
+  const textW = CONTENT_W - (textX - MARGIN);
+
   const bizName = sanitizeText(business.name).trim();
   if (bizName) {
-    for (const ln of wrapText(bizName, bold, 20, CONTENT_W)) {
-      page.drawText(ln, { x: MARGIN, y: y - 20, size: 20, font: bold, color: INK });
+    for (const ln of wrapText(bizName, bold, 20, textW)) {
+      page.drawText(ln, { x: textX, y: y - 20, size: 20, font: bold, color: INK });
       y -= 24;
     }
     y -= 2;
@@ -272,10 +367,14 @@ export async function buildFormalEstimatePdf(input: EstimatePdfInput): Promise<U
     .filter(Boolean)
     .join(" · "); // middle dot — Latin-1, WinAnsi-safe
   if (contactLine) {
-    for (const ln of wrapText(contactLine, helv, 9, CONTENT_W)) {
-      page.drawText(ln, { x: MARGIN, y: y - 9, size: 9, font: helv, color: GRAY });
+    for (const ln of wrapText(contactLine, helv, 9, textW)) {
+      page.drawText(ln, { x: textX, y: y - 9, size: 9, font: helv, color: GRAY });
       y -= 12;
     }
+  }
+  if (logo) {
+    page.drawImage(logo.img, { x: MARGIN, y: headTop - logo.h, width: logo.w, height: logo.h });
+    y = Math.min(y, headTop - logo.h);
   }
   y -= 8;
   page.drawLine({ start: { x: MARGIN, y }, end: { x: PAGE_W - MARGIN, y }, thickness: 1, color: RULE });
@@ -286,6 +385,7 @@ export async function buildFormalEstimatePdf(input: EstimatePdfInput): Promise<U
   const docWord = isInvoice ? "Invoice" : "Estimate";
   const numText = sanitizeText(input?.estimateNumber).trim();
   const title = numText ? `${docWord} #${numText}` : docWord;
+  const titleTop = y;
   page.drawText(title, { x: MARGIN, y: y - 14, size: 14, font: bold, color: INK });
   y -= 20;
   page.drawText(`Issued: ${fmtDate(issued)}`, { x: MARGIN, y: y - 10, size: 10, font: helv, color: INK });
@@ -294,6 +394,41 @@ export async function buildFormalEstimatePdf(input: EstimatePdfInput): Promise<U
     // An invoice is a bill, not an offer — no validity window.
     page.drawText(`Valid until: ${fmtDate(validUntil)}`, { x: MARGIN, y: y - 10, size: 10, font: helv, color: GRAY });
     y -= 14;
+  }
+
+  // ── Customer block (right column, beside the title block) ─────────────────────────────
+  // Every field is shopper-typed free text, so each goes through sanitizeText (WinAnsi) and
+  // wrapText, keeps at most CUST_MAX_LINES lines, and is skipped when blank — never "null" or
+  // "undefined" on a customer's document. Nothing printable means no heading either.
+  const cust = input?.customer ?? null;
+  const clean = (v: unknown) => sanitizeText(v).replace(/\s+/g, " ").trim().slice(0, 300);
+  const fit = (v: unknown, font: PDFFont, size: number) => {
+    const t = clean(v);
+    return t ? wrapText(t, font, size, CUST_W).slice(0, CUST_MAX_LINES) : [];
+  };
+  const ca = cust?.address ?? {};
+  const custCityState = [clean(ca.city), clean(ca.state)].filter(Boolean).join(", ");
+  const custLocality = [custCityState, clean(ca.zip)].filter(Boolean).join(" ");
+  const custName = fit(cust?.name, bold, 10);
+  const custRows = [
+    ...fit(ca.street, helv, 9),
+    ...fit(custLocality, helv, 9),
+    ...fit(cust?.phone, helv, 9),
+    ...fit(cust?.email, helv, 9),
+  ];
+  if (custName.length || custRows.length) {
+    let cy = titleTop;
+    page.drawText(isInvoice ? "Bill to" : "Prepared for", { x: CUST_X, y: cy - 9, size: 9, font: bold, color: GRAY });
+    cy -= 14;
+    for (const ln of custName) {
+      page.drawText(ln, { x: CUST_X, y: cy - 10, size: 10, font: bold, color: INK });
+      cy -= 13;
+    }
+    for (const ln of custRows) {
+      page.drawText(ln, { x: CUST_X, y: cy - 9, size: 9, font: helv, color: INK });
+      cy -= 12;
+    }
+    y = Math.min(y, cy);
   }
   y -= 8;
 

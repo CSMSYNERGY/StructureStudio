@@ -247,7 +247,10 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
         // alone was wrong in a way nothing would have reported — keeping only the narrow
         // projection loses the Pipeline's ability to open a customer at all, and keeping only
         // this line silently re-inflates every list payload back to the blob.
-        .select(`short_code, created_at, updated_at, status, contact, contact_id, ${SEL_LIST_COLS}, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url, total_cents, expected_close_date`)
+        //
+        // ss_invoice_sent_at (2026-10-05) is for the delete dialog only: a StructureStudio
+        // invoice leaves the design 'accepted', and the dialog has to know its quote is kept.
+        .select(`short_code, created_at, updated_at, status, contact, contact_id, ${SEL_LIST_COLS}, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at, total_cents, expected_close_date`)
         .eq("client_id", clientId)
         .order("created_at", { ascending: false }),
       sb.from("design_versions")
@@ -838,15 +841,29 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
             // while the design itself is gone — a bare "Deleted." would hide a leftover
             // estimate in someone else's system.
             const est = res.estimateNumber ? `EST-${res.estimateNumber}` : "its estimate";
+            // The StructureStudio quote's half (2026-10-05), named only when the design has a
+            // quote number, and added to whichever CRM sentence applies: a design can have both (a
+            // CRM estimate from before the switch to StructureStudio paperwork, then a quote). A
+            // server older than this page sends no `quote`, and every message then reads exactly
+            // as before.
+            const quote = res.quoteNumber ? `Quote ${res.quoteNumber}` : null;
+            const quoteLine = !quote ? ""
+              : res.quote === "removed" ? ` ${quote} and its PDF were deleted too.`
+              : res.quote === "kept" ? ` ${quote} and its PDF were kept, because an invoice was made from it.`
+              : res.quote === "failed" ? ` The PDF for ${quote} could not be removed. Support has a record of it.`
+              : "";
+            let msg;
             if (res.estimate === "failed") {
-              setDelMsg({ err: `${base}, but ${est} could NOT be removed from your CRM (${res.estimateError || "unknown error"}). Delete it there by hand — support has a record.` });
+              msg = `${base}, but ${est} could NOT be removed from your CRM (${res.estimateError || "unknown error"}). Delete it there by hand — support has a record.`;
             } else if (res.estimate === "skipped_invoiced") {
-              setDelMsg({ ok: `${base}. ${est} was left in your CRM because an invoice was created from it — void that invoice there if you also want the estimate gone.` });
+              msg = `${base}. ${est} was left in your CRM because an invoice was created from it — void that invoice there if you also want the estimate gone.`;
             } else if (res.estimate === "deleted") {
-              setDelMsg({ ok: `${base}, along with ${est} in your CRM.` });
+              msg = `${base}, along with ${est} in your CRM.`;
             } else {
-              setDelMsg({ ok: `${base}.` });
+              msg = `${base}.`;
             }
+            const leftover = res.estimate === "failed" || (quote && res.quote === "failed");
+            setDelMsg(leftover ? { err: msg + quoteLine } : { ok: msg + quoteLine });
             load();
           }} />
       )}
