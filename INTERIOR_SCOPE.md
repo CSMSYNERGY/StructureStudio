@@ -178,6 +178,11 @@ to one flat row), and set the shelf items' prices back to NULL (they stop being 
 **Interior walls that can hold a door.** The hardest item: genuinely new geometry (a drawn
 segment between two points), plus a door hosted *on* that segment rather than on a building
 wall. Needs its own scoping pass. Everything else should ship first.
+*Built 2026-10-05 as the Partition Wall (migration 278):* an Interior item, straight and
+axis-aligned, placed across the short span and stored in feet; its height is full or a number of
+inches; its doors and windows are catalog fixtures held inside the wall, never wall items. Hidden
+until the builder prices it (each, per foot or per square foot of wall). See the PARTITION WALLS
+block in the designer twins and `_shared/partitionPricing.ts`.
 
 **Electrical — package or per-addon.** Both, per Carolyn. Per-addon is a point item with a
 device type; the package is a single priced line that doesn't require placing anything. The

@@ -67,6 +67,41 @@ Deno.test("the Vent picker's list on each style", () => {
   assertEquals(vents.filter((f) => fixtureOfferedOnStyle(f, "deluxe")).map((f) => f.id), ["v-std"]);
 });
 
+// Doors and windows IN a partition wall (migration 278) live in its openings, never as items, so
+// ssPlacedNotOfferedOn cannot see them; ssPartitionOpeningsNotOfferedOn does, with ssIsPartition from
+// the PARTITION WALLS block lifted beside the helpers.
+const PSTART = "// ── PARTITION WALLS ──", PEND = "// ── END PARTITION WALLS ──";
+const PART = SRC.slice(SRC.indexOf(PSTART), SRC.indexOf(PEND));
+assert(PART.includes("function ssIsPartition("), "fixtureStyles_test: the PARTITION WALLS block moved");
+// deno-lint-ignore no-explicit-any
+type Plan = any[];
+const { ssPartitionOpeningsNotOfferedOn, ssStripPartitionOpenings } = new Function(
+  `${PART}\n${BLOCK}; return { ssPartitionOpeningsNotOfferedOn, ssStripPartitionOpenings };`,
+)() as {
+  ssPartitionOpeningsNotOfferedOn: (items: unknown, fixtures: unknown, styleKey: string) => { pid: number; o: { id: number } }[];
+  ssStripPartitionOpenings: (items: Plan, list: { pid: number; o: { id: number } }[]) => Plan;
+};
+const WALL = { id: 9, type: "partitionWall", wall: null, axis: "x", atFt: 6, fromFt: 0, toFt: 12, heightIn: null, openings: [
+  { id: 1, kind: "door", fixtureItemId: "d-gar", name: "Garage Door", centerFt: 3 },
+  { id: 2, kind: "window", fixtureItemId: "w-x", name: "Stale window", centerFt: 8 },
+  { id: 3, kind: "door", fixtureItemId: "d-gone", name: "Retired door", centerFt: 10.5 },
+] };
+
+Deno.test("a style change finds the partition doors and windows it does not offer, and takes only those out", () => {
+  const plan: Plan = [{ id: 3, type: "fixtureDoor", fixtureItemId: "d-gar", doorName: "Garage Door" }, WALL];
+  // On the Deluxe the garage door is offered and the stale window is not; the retired door (no catalog
+  // row) is left alone, the way an archived placed item is.
+  const off = ssPartitionOpeningsNotOfferedOn(plan, FIXTURES, "deluxe");
+  assertEquals(off.map((x) => [x.pid, x.o.id]), [[9, 2]]);
+  const out = ssStripPartitionOpenings(plan, off);
+  assertEquals(out[1].openings.map((o: { id: number }) => o.id), [1, 3]);
+  assertStrictEquals(out[0], plan[0], "items outside the walls are untouched");
+  assertEquals(ssPartitionOpeningsNotOfferedOn(plan, FIXTURES, "barn").map((x) => x.o.id), [1, 2]);
+  // Nothing to take out: the SAME plan back, so the effect does nothing.
+  assertStrictEquals(ssStripPartitionOpenings(plan, []), plan);
+  assertEquals(ssPartitionOpeningsNotOfferedOn([{ ...WALL, axis: undefined }], FIXTURES, "barn"), [], "a rectangle of the type is not a wall");
+});
+
 // A plan as the designer keeps it: catalog items carry fixtureItemId; built-ins do not.
 const ITEMS = [
   { id: 1, type: "window", isVent: true, fixtureItemId: "v-std", windowName: "Standard vent" },
@@ -134,9 +169,12 @@ for (const [name, src] of [["structure-studio.component.js", SRC], ["StructureSt
     assert(src.includes("...(offeredDoors.length || roDoorTile ? { doorPicker: DOOR_PICKER_CFG } : {}),"), "the Door button");
     assert(src.includes("...(rampCustom && offeredRamps.length ? { rampPicker: RAMP_PICKER_CFG } : {}),"), "the Ramp button");
     assert(src.includes("...(offeredWindows.length || roWindowTile ? { windowPicker: WINDOW_PICKER_CFG } : {}),"), "the Window button");
-    for (const p of ["<DoorPicker doors={offeredDoors} ", "<RampPicker ramps={offeredRamps} ", "<WindowPicker windows={offeredWindows} ", "<VentPicker vents={offeredVents}\n"]) {
+    // The door picker opened from a partition wall (migration 278) lists partitionDoors: the offered
+    // doors that stand on the floor, so still the style's own list, never the placeable one.
+    for (const p of ["<DoorPicker doors={doorPick.partitionId != null ? partitionDoors : offeredDoors} ", "<RampPicker ramps={offeredRamps} ", "<WindowPicker windows={offeredWindows} ", "<VentPicker vents={offeredVents}\n"]) {
       assert(src.includes(p), p);
     }
+    assert(src.includes("const partitionDoors = offeredDoors.filter((f) => !(Number(f.sillIn) > 0));"), "partitionDoors comes from the offered list");
     assert(src.includes("const pool = isDoor ? offeredDoors : isWin ? offeredWindows : offeredRamps;"), "the Swap pool");
     assertStrictEquals(src.split("placeableDoors={offeredDoors} placeableWindows={offeredWindows} placeableRamps={offeredRamps}").length - 1, 2, "both 3D viewers");
     // Nothing that offers a choice still reads the unfiltered lists.
@@ -172,7 +210,7 @@ for (const [name, src] of [["structure-studio.component.js", SRC], ["StructureSt
     assert(eff.includes('const rampsOff = off.length ? items.filter((it) => it.type === "ramp" && !offIds.has(it.id) && offIds.has(it.snapDoorId)) : [];'),
       "the ramps snapped to a removed door, not counted twice when the ramp is restricted itself");
     assert(eff.includes("rampsOff.forEach((it) => offIds.add(it.id));"), "join the removal");
-    assert(eff.includes("const kept = offIds.size ? items.filter((it) => !offIds.has(it.id)) : items;"), "and come off the plan the vents re-fit on");
+    assert(eff.includes("const kept = ssStripPartitionOpenings(offIds.size ? items.filter((it) => !offIds.has(it.id)) : items, partOff);"), "and come off the plan the vents re-fit on");
     assert(eff.includes("was taken off with it."), "the toast says the ramp went with its door");
   });
 
@@ -180,9 +218,17 @@ for (const [name, src] of [["structure-studio.component.js", SRC], ["StructureSt
     // A style sold in one size of other dimensions sets the size with the style; the size effect
     // above reflows the plan first, and the old `cur === from ? next : cur` dropped the removal.
     const eff = styleEffect(src);
-    assert(eff.includes("if (next !== items) setItems((cur) => (cur === from ? next : offIds.size ? cur.filter((it) => !offIds.has(it.id)) : cur));"),
-      "the computed plan when nothing replaced it, else the replacement less the same ids");
+    assert(eff.includes("if (next !== items) setItems((cur) => (cur === from ? next : ssStripPartitionOpenings(offIds.size ? cur.filter((it) => !offIds.has(it.id)) : cur, partOff)));"),
+      "the computed plan when nothing replaced it, else the replacement less the same ids and partition openings");
     assert(!eff.includes("(cur === from ? next : cur)"), "never the identity-only updater");
+  });
+
+  Deno.test(`${name}: a door or window in a partition wall the new style does not offer comes out of its wall`, () => {
+    const eff = styleEffect(src);
+    assert(eff.includes("const partOff = sel.style ? ssPartitionOpeningsNotOfferedOn(items, fixtures, sel.style) : [];"), "found in the walls");
+    assert(eff.includes("if (!r && !off.length && !partOff.length && !dormerOff) return;"), "a partition opening alone is enough to act");
+    assert(eff.includes("if (partOff.length) setSelOpening(null);"), "a removed opening is no longer selected");
+    assert(eff.includes("partOff.forEach((x) => names.push(`${x.o.name || x.o.kind} in the partition wall`));"), "and the toast names it");
   });
 
   Deno.test(`${name}: a tool armed for something the new style does not offer is disarmed`, () => {

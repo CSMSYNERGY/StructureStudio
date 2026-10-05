@@ -1088,7 +1088,9 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     }
     const inc = (row.inclusions && typeof row.inclusions === "object") ? row.inclusions : {};
     for (const [itemKey, val] of Object.entries(inc)) {
-      if (!itemKey) continue;
+      // A partition wall is never part of a size's price (278): no inclusion row is written for one,
+      // whatever a sheet exported before that change carries in its column.
+      if (!itemKey || itemKey === "partitionWall") continue;
       let qty = parseInclusionQty(val);
       if (qty === 1 && isLegacyYes(val)) qty = existingQty.get(`${sizeId}|${itemKey}`) ?? 1;
       const incRes = qty > 0
@@ -2358,7 +2360,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // wall_snap + the two dimension defaults (171): the Options grid only offers Depth and
       // Height off floor for wall-mounted items, and shows the master default where the tenant
       // has not overridden it.
-      admin.from("layout_item_types").select("item_key, label, wall_snap, depth_in, height_off_floor_in"),
+      admin.from("layout_item_types").select("item_key, label, wall_snap, depth_in, height_off_floor_in, hidden_until_priced"),
       admin.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
@@ -2397,7 +2399,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const labelByKey: Record<string, string> = {};
     const typeByKey: Record<string, any> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; typeByKey[t.item_key] = t; });
+    // A partition wall (278) is left out until it has a price, unless the read asks for it
+    // (withUnpriced: every catalog read from the portal that ships its Interior items card sends it,
+    // 01-core.jsx). Production's portal from before 278 then never lists one, so it never asks a
+    // builder to price an item its designer cannot draw yet. Only this item: a general rule would also
+    // take unpriced shelves (171) away from the tenants who have not priced them. Remove once
+    // production carries the new Interior items card.
+    const pricedKeys = new Set((lpRows.data ?? []).filter((r: any) => r.rate != null).map((r: any) => r.item_key));
     const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)
+      .filter((i: any) => payload.withUnpriced === true || i.item_key !== "partitionWall" || pricedKeys.has(i.item_key))
       .map((i: any) => {
         const t = typeByKey[i.item_key] || {};
         // Tenant override wins, master default fills in. null (not 0) means "not set", which is
@@ -2407,7 +2417,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         return { key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key,
           archived: !!i.archived, internalOnly: !!i.internal_only, taxable: i.taxable !== false,
           wallSnap: !!t.wall_snap, depthIn: depth != null ? Number(depth) : null,
-          heightOffFloorIn: off != null ? Number(off) : null };
+          heightOffFloorIn: off != null ? Number(off) : null,
+          // Out of the customer's palette until priced (171, 278): the Options card starts its rate
+          // blank instead of 0 and does not save a blank one, so a Save for something else cannot offer it free.
+          hiddenUntilPriced: !!t.hidden_until_priced };
       });
     const rs = csRamp.data;
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
@@ -2897,18 +2910,45 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const itemsRes = await admin.from("client_layout_items").select("item_key, active").eq("client_id", clientId);
     if (itemsRes.error) return dbFail(req, clientId, "load your option list", itemsRes.error);
     const validKeys = new Set((itemsRes.data ?? []).filter((i: any) => i.active).map((i: any) => i.item_key));
-    const exRes = await admin.from("layout_item_pricing").select("id, item_key").eq("client_id", clientId).is("style_id", null);
+    const exRes = await admin.from("layout_item_pricing").select("id, item_key, pricing_method, rate").eq("client_id", clientId).is("style_id", null);
     if (exRes.error) return dbFail(req, clientId, "load your current option prices", exRes.error);
     const idByKey = new Map<string, string>();
-    for (const r of exRes.data ?? []) idByKey.set(r.item_key, r.id);
+    const exByKey = new Map<string, { pricing_method: string; rate: number | null }>();
+    for (const r of exRes.data ?? []) { idByKey.set(r.item_key, r.id); exByKey.set(r.item_key, r); }
     let saved = 0; const skipped: string[] = [];
     for (const row of payload.rows) {
       const itemKey = String(row?.item_key ?? "").trim();
       const method = String(row?.pricing_method ?? "").trim();
       const rate = Number(row?.rate);
       if (!itemKey) continue;
+      // A partition wall (278) is priced only from the card that knows it (partitionAware, sent by the
+      // portal that ships the Interior items card). Production's card from before it sends every row it
+      // lists on Save, and a price set there would put a Partition Wall button on production's designer,
+      // which cannot draw one (it places a sliver no quote charges). The catalog hides an unpriced one
+      // from that card already; this is the backstop, and it never asks for a price. A priced one that
+      // card only sends back unchanged is passed over quietly. Remove once production carries the new
+      // Interior items card.
+      if (itemKey === "partitionWall" && payload.partitionAware !== true) {
+        const ex = exByKey.get(itemKey);
+        const unchanged = !!ex && ex.pricing_method === method && Number(ex.rate) === rate;
+        if (!unchanged) skipped.push(ex ? "Partition Wall: its price can be changed after the next app update" : "Partition Wall: opens with the next app update, nothing to set yet");
+        continue;
+      }
       if (!validKeys.has(itemKey)) { skipped.push(`${itemKey}: not an enabled item`); continue; }
       if (!ALLOWED_METHODS.has(method)) { skipped.push(`${itemKey}: invalid method "${method}"`); continue; }
+      // A partition wall (migration 278) is charged per foot of wall, per square foot of wall or each;
+      // the other four mean nothing for one wall, and submit-estimate would quietly charge them each.
+      if (itemKey === "partitionWall" && !["each", "lineal_ft", "sqft_option"].includes(method)) {
+        skipped.push(`${itemKey}: a partition wall is priced each, per foot (lineal ft) or per square foot of wall (sqft option)`);
+        continue;
+      }
+      // ...and it is only OFFERED once it has a price above $0: a first price of 0 would put it on every
+      // customer's designer, free. The card leaves an untouched (blank) one out of the Save, so this
+      // only says no to a 0 typed for a wall that has no price yet.
+      if (itemKey === "partitionWall" && !idByKey.has(itemKey) && !(rate > 0)) {
+        skipped.push(`${itemKey}: not offered until it has a price above $0`);
+        continue;
+      }
       if (!Number.isFinite(rate) || rate < 0) { skipped.push(`${itemKey}: invalid rate "${row?.rate}"`); continue; }
       // Optional per-item image (shown on the estimate line for this product). Only written
       // when the row carries an imageUrl field, so a save from an older client never blanks

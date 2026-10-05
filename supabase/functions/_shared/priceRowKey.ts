@@ -20,10 +20,10 @@
 // It is plain JavaScript on purpose — default parameters instead of type annotations — so the same
 // characters are valid in the browser bundle and still type-check under Deno's strict mode.
 //
-// RESERVED SPELLINGS. Partition walls are priced next and will put a wall line
-// and its hosted doors and windows on the estimate. Their keys are spelled here now, before anything
-// uses them, so that build cannot invent a second spelling: "partition:<id>" for the wall and
-// "partition:<id>:open:<openingId>" for a door or window hosted in it.
+// PARTITION WALLS (migration 278) put a line per wall and a line per door or window in one on the
+// estimate. Their keys were spelled here before anything used them, so that build could not invent a
+// second spelling: "partition:<id>" for the wall and "partition:<id>:open:<openingId>" for a door or
+// window in it.
 
 // ── PRICE ROW KEYS ──
 // The Details row a priced line sits on, as one string: the designer keys its rows with it and
@@ -43,7 +43,7 @@ function ssPriceGroupId(fixtureItemId = "", name = "", price = 0) {
 //       win         id = the group id, a = colour id                          (catalog windows)
 //       dress       id = shutters | flowerBox, a = colour id
 //       ramp        id = the group id, or "simple" for the tenant's one ramp price
-//       partition   id = the partition's id; a = a hosted opening's id      (reserved, not yet used)
+//       partition   id = the partition's id; a = a door or window in it      (partition walls, 278)
 function ssPriceRowKey(kind = "", id = "", a = "", b = "") {
   switch (kind) {
     case "layout": return id;

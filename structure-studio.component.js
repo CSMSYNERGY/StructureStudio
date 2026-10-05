@@ -100,6 +100,9 @@ const LEGACY_LAYOUT_FALLBACK = {
   // (migration 224). Same role as the three above: RENDER ONLY, so every design already
   // carrying one keeps drawing at exactly today's geometry — floor to D3.RO_H, no sill.
   roughOpening: { label: "Rough Opening", icon: "⬜", color: "#000000", width: 3, height: 0.5, shortLabel: "RO", wallOnly: true, noPalette: true },
+  // A partition wall (migration 278) keeps drawing on every design that has one if a builder later
+  // switches the item off. modelKey "partition" is what makes it one; ITEMS turns that into partitionType.
+  partitionWall: { label: "Partition Wall", icon: "🧱", color: "#57534E", width: 4, height: 0.375, shortLabel: "PART", modelKey: "partition", group: "interior", noPalette: true },
   // NOTE: ramp is NOT here — it's fully self-contained now (SIMPLE_RAMP_CFG below), decoupled from
   // the built-in `ramp` layout item, so a tenant's ramp works whether or not that legacy row exists.
 };
@@ -561,6 +564,252 @@ const PALETTE_GROUP_LABEL = { doors: "Doors", windows: "Windows", interior: "Int
 const PALETTE_GROUP_ORDER = ["doors", "windows", "interior", "electrical"];
 const SS_WALL_ORDER = { north: ["south", "east", "west"], south: ["north", "east", "west"], east: ["west", "north", "south"], west: ["east", "north", "south"] };
 
+// ── PARTITION WALLS ──
+// A wall INSIDE the building (a builder's request, 2026-09-07): "Need to be able to add a partition
+// wall on the interior of the shed, with the ability to add door/window to that wall. Right now I am
+// trying to do it by using lines and notes but hardly works." Eight of that builder's designs drew one
+// with a Line and a Note ("Partition wall w/ door between", "TACK ROOM Partition 90" high"), which
+// is the whole requirement: straight, usually wall to wall, full height or a stated height, often
+// with a door in it.
+//
+// THE ITEM IS STORED IN FEET, inside the building and measured from its north-west corner, not in
+// page pixels like every older item: { id, type: "partitionWall", wall: null, axis, atFt, fromFt,
+// toFt, heightIn, openings }. Axis "x" runs west to east at `atFt` from the north wall; axis "y" runs
+// north to south at `atFt` from the west wall; fromFt..toFt are its two ends along that run. A null
+// heightIn is FULL height, so the wall follows the building's plate wherever that ends up.
+//
+// ITS DOORS AND WINDOWS LIVE INSIDE IT ({ id, kind, fixtureItemId, centerFt, … }) and never as
+// placed door items. A door item carries `wall`, and about 126 places read `wall`: the building's
+// front, the door collisions, the doors[] estimate schedule, the gable vents, the electrical layout.
+// None of them may ever meet a door standing in the middle of the floor, so none of them can.
+//
+// Plain JS with no JSX and no outside names: partition_test.ts lifts this block from both twins
+// (byte for byte the same) and runs it, and designerPricing.ts lifts it beside the price rows.
+const SS_PARTITION_KEY = "partitionWall";
+const SS_PARTITION_T_FT = 0.375;      // drawn thickness: 2x4 studs sheathed both sides, about 4.5 in
+const SS_PARTITION_EDGE_FT = 1;       // the closest it may stand to an outside wall
+const SS_PARTITION_MIN_FT = 2;        // the shortest partition
+const SS_PARTITION_SNAP_FT = 0.5;     // an end dragged this close to a wall or a crossing partition lands on it
+const SS_PARTITION_END_FT = 0.25;     // framing kept between an opening and the partition's end (3 in)
+const SS_PARTITION_GAP_FT = 0.375;    // and between two openings, so their casings (D3_CASE_F each) never overlap (4.5 in)
+const SS_PARTITION_HEADER_IN = 3;     // a cut-down wall still clears its tallest opening by a header
+const SS_PARTITION_MIN_HEIGHT_IN = 24;
+// When a catalog row gives no size: D3.DOOR_H, D3.WINDOW_H and D3.WINDOW_SILL, in inches.
+const SS_PARTITION_DOOR_H_IN = 78, SS_PARTITION_WINDOW_H_IN = 36, SS_PARTITION_SILL_IN = 42;
+// One inch is the snap everywhere: placing, moving, stretching and sliding a door along it.
+function ssPartInch(ft) { return Math.round(Number(ft) * 12) / 12; }
+function ssPartR2(n) { return Math.round(Number(n) * 100) / 100; }
+// A partition is an item of this type WITH A RUN. One without (a plain rectangle a designer from before
+// this block could place, had a builder priced the item before it was live) is left to the generic
+// floor-item paths, exactly as that designer drew it, rather than read as a wall with no ends.
+function ssIsPartition(it) { return !!it && it.type === SS_PARTITION_KEY && (it.axis === "x" || it.axis === "y"); }
+// The building dimension a partition runs along, and the one it moves across.
+function ssPartitionRunFt(axis, bldgW, bldgH) { return axis === "y" ? Number(bldgH) : Number(bldgW); }
+function ssPartitionCrossFt(axis, bldgW, bldgH) { return axis === "y" ? Number(bldgW) : Number(bldgH); }
+function ssPartitionLenFt(p) { return p ? Math.max(0, (Number(p.toFt) || 0) - (Number(p.fromFt) || 0)) : 0; }
+// Its height in feet against the wall it stands under: full height is the wall, and a stated height
+// never goes above it (a taller-wall upgrade taken off again must not leave the partition through the
+// ceiling).
+function ssPartitionHeightFt(p, wallFt) {
+  const w = Number(wallFt) > 0 ? Number(wallFt) : 8;
+  const h = p && p.heightIn != null ? Number(p.heightIn) / 12 : NaN;
+  return isFinite(h) && h > 0 ? Math.min(h, w) : w;
+}
+function ssPartitionOpeningWidthFt(o) { return (Number(o && o.widthIn) || (o && o.kind === "window" ? 24 : 36)) / 12; }
+// [bottom, top] of an opening, in inches off the floor. A door stands on the floor; a window sits on
+// its catalog sill.
+function ssPartitionOpeningSpanIn(o) {
+  if (o && o.kind === "window") {
+    const s = o.sillIn != null && isFinite(Number(o.sillIn)) && Number(o.sillIn) >= 0 ? Number(o.sillIn) : SS_PARTITION_SILL_IN;
+    return [s, s + (Number(o.heightIn) || SS_PARTITION_WINDOW_H_IN)];
+  }
+  return [0, Number(o && o.heightIn) || SS_PARTITION_DOOR_H_IN];
+}
+// The lowest a wall may be cut down to and still hold what is in it.
+function ssPartitionMinHeightIn(p) {
+  return (p && p.openings || []).reduce((m, o) => Math.max(m, ssPartitionOpeningSpanIn(o)[1] + SS_PARTITION_HEADER_IN), SS_PARTITION_MIN_HEIGHT_IN);
+}
+// A click at (fx, fy) feet: a new partition ACROSS THE BUILDING'S SHORT SPAN, wall to wall, at the
+// click to the inch, and never closer than a foot to an outside wall. null when the building has no
+// room for one.
+function ssPartitionAt(fx, fy, bldgW, bldgH) {
+  const axis = Number(bldgW) <= Number(bldgH) ? "x" : "y";
+  const cross = ssPartitionCrossFt(axis, bldgW, bldgH);
+  if (!(cross >= 2 * SS_PARTITION_EDGE_FT)) return null;
+  const want = axis === "x" ? Number(fy) : Number(fx);
+  return { axis, atFt: Math.max(SS_PARTITION_EDGE_FT, Math.min(cross - SS_PARTITION_EDGE_FT, ssPartInch(want))), fromFt: 0, toFt: ssPartitionRunFt(axis, bldgW, bldgH) };
+}
+// Moving the whole wall ACROSS the building: where it lands.
+function ssPartitionMoveAcross(p, wantFt, bldgW, bldgH) {
+  const cross = ssPartitionCrossFt(p.axis, bldgW, bldgH);
+  return Math.max(SS_PARTITION_EDGE_FT, Math.min(cross - SS_PARTITION_EDGE_FT, ssPartInch(wantFt)));
+}
+// Two parallel partitions closer than this cannot both be framed, and on a plan they read as one.
+function ssPartitionClash(p, others) {
+  return (others || []).some((o) => ssIsPartition(o) && o.id !== p.id && o.axis === p.axis
+    && Math.abs((Number(o.atFt) || 0) - (Number(p.atFt) || 0)) < SS_PARTITION_SNAP_FT
+    && Math.min(Number(o.toFt), Number(p.toFt)) - Math.max(Number(o.fromFt), Number(p.fromFt)) > 0.01);
+}
+// Moving one END ("from" | "to") toward wantFt: the patch it lands on. Outside walls and partitions
+// crossing this one are magnets; it never gets shorter than SS_PARTITION_MIN_FT and never cuts into
+// the framing round a door or window in it. A partition IN LINE with this one (or close enough to
+// clash, ssPartitionClash) is a hard stop: the end can meet it, never run along it, or the feet they
+// share would be drawn as one wall and charged twice.
+function ssPartitionMoveEnd(p, end, wantFt, bldgW, bldgH, others) {
+  const run = ssPartitionRunFt(p.axis, bldgW, bldgH);
+  let v = ssPartInch(wantFt);
+  const stops = [0, run];
+  (others || []).forEach((o) => {
+    if (ssIsPartition(o) && o.id !== p.id && o.axis !== p.axis
+      && Number(o.fromFt) - 0.01 <= Number(p.atFt) && Number(o.toFt) + 0.01 >= Number(p.atFt)) stops.push(Number(o.atFt));
+  });
+  let best = null;
+  stops.forEach((s) => { if (Math.abs(v - s) < SS_PARTITION_SNAP_FT && (best == null || Math.abs(v - s) < Math.abs(v - best))) best = s; });
+  if (best != null) v = best;
+  const ops = p.openings || [];
+  const near = (others || []).filter((o) => ssIsPartition(o) && o.id !== p.id && o.axis === p.axis
+    && Math.abs((Number(o.atFt) || 0) - (Number(p.atFt) || 0)) < SS_PARTITION_SNAP_FT);
+  if (end === "from") {
+    let hi = Number(p.toFt) - SS_PARTITION_MIN_FT;
+    ops.forEach((o) => { hi = Math.min(hi, Number(o.centerFt) - ssPartitionOpeningWidthFt(o) / 2 - SS_PARTITION_END_FT); });
+    let lo0 = 0;
+    near.forEach((o) => { if (Number(o.toFt) <= Number(p.fromFt) + 0.01) lo0 = Math.max(lo0, Number(o.toFt)); });
+    return { fromFt: Math.max(lo0, Math.min(hi, v)) };
+  }
+  let lo = Number(p.fromFt) + SS_PARTITION_MIN_FT;
+  ops.forEach((o) => { lo = Math.max(lo, Number(o.centerFt) + ssPartitionOpeningWidthFt(o) / 2 + SS_PARTITION_END_FT); });
+  let hi0 = run;
+  near.forEach((o) => { if (Number(o.fromFt) >= Number(p.toFt) - 0.01) hi0 = Math.min(hi0, Number(o.fromFt)); });
+  return { toFt: Math.min(hi0, Math.max(lo, v)) };
+}
+// The range an opening's CENTRE may take along the partition, or null when it cannot fit at all.
+function ssPartitionCenterRange(p, widthFt) {
+  const lo = Number(p.fromFt) + widthFt / 2 + SS_PARTITION_END_FT;
+  const hi = Number(p.toFt) - widthFt / 2 - SS_PARTITION_END_FT;
+  return hi >= lo - 1e-9 ? [lo, Math.max(lo, hi)] : null;
+}
+// Is opening `o` (centred at o.centerFt) legal in `p`: inside its ends with framing to spare, and
+// clear of every other door and window in it?
+function ssPartitionOpeningOk(p, o) {
+  const w = ssPartitionOpeningWidthFt(o);
+  const r = ssPartitionCenterRange(p, w);
+  const c = Number(o.centerFt);
+  if (!r || !isFinite(c) || c < r[0] - 1e-6 || c > r[1] + 1e-6) return false;
+  return !(p.openings || []).some((q) => q && q.id !== o.id
+    && Math.abs(Number(q.centerFt) - c) < (ssPartitionOpeningWidthFt(q) + w) / 2 + SS_PARTITION_GAP_FT - 1e-6);
+}
+// The legal centre nearest wantFt for opening `o`, searching outward an inch at a time (reflowItems'
+// seat() search, at the plan's own snap), or null when there is nowhere it fits.
+function ssPartitionSeatOpening(p, o, wantFt) {
+  const r = ssPartitionCenterRange(p, ssPartitionOpeningWidthFt(o));
+  if (!r) return null;
+  const start = Math.max(r[0], Math.min(r[1], ssPartInch(wantFt)));
+  for (let k = 0; k <= Math.ceil((r[1] - r[0]) * 12) + 1; k++) {
+    for (const c of k === 0 ? [start] : [start - k / 12, start + k / 12]) {
+      if (c < r[0] - 1e-6 || c > r[1] + 1e-6) continue;
+      if (ssPartitionOpeningOk(p, { ...o, centerFt: c })) return c;
+    }
+  }
+  return null;
+}
+// A NEW BUILDING SIZE (reflowItems). The wall keeps its distance from the north (axis x) or west
+// (axis y) wall, clamped inside; an end standing on an outside wall stays on it, so a wall-to-wall
+// partition stays wall to wall; any other end is clamped into the new building, and every door and
+// window keeps its place if it still fits. Returns { item, kind } in reflowItems' own words: kind is
+// null (nothing to tell anyone), "resized" (the clamp shortened it) or "blocked" (it cannot be kept,
+// and the size change is put back). Nothing moved returns the SAME object.
+function ssPartitionReflow(p, prev, next) {
+  const tol = 0.01;
+  const runA = ssPartitionRunFt(p.axis, prev.w, prev.h), runB = ssPartitionRunFt(p.axis, next.w, next.h);
+  const crossB = ssPartitionCrossFt(p.axis, next.w, next.h);
+  if (!(crossB >= 2 * SS_PARTITION_EDGE_FT)) return { item: p, kind: "blocked" };
+  const from0 = Number(p.fromFt) || 0, to0 = Number(p.toFt) || 0, at0 = Number(p.atFt) || 0;
+  const fromFt = Math.abs(from0) < tol ? 0 : Math.max(0, Math.min(from0, runB));
+  const toFt = Math.abs(to0 - runA) < tol ? runB : Math.max(0, Math.min(to0, runB));
+  const atFt = Math.max(SS_PARTITION_EDGE_FT, Math.min(crossB - SS_PARTITION_EDGE_FT, at0));
+  if (toFt - fromFt < SS_PARTITION_MIN_FT - 1e-6) return { item: p, kind: "blocked" };
+  const span = { ...p, atFt, fromFt, toFt, openings: [] };
+  let opMoved = false;
+  const ops = (p.openings || []).map((o) => {
+    const r = ssPartitionCenterRange(span, ssPartitionOpeningWidthFt(o));
+    if (!r) return null;
+    const c = Math.max(r[0], Math.min(r[1], Number(o.centerFt)));
+    if (c !== Number(o.centerFt)) { opMoved = true; return { ...o, centerFt: c }; }
+    return o;
+  });
+  if (ops.some((o) => !o)) return { item: p, kind: "blocked" };
+  const out = { ...span, openings: opMoved ? ops : (p.openings || []) };
+  if (ops.some((o) => !ssPartitionOpeningOk(out, o))) return { item: p, kind: "blocked" };
+  const wallToWall = Math.abs(from0) < tol && Math.abs(to0 - runA) < tol;
+  const kind = !wallToWall && toFt - fromFt < to0 - from0 - tol ? "resized" : null;
+  if (atFt === at0 && fromFt === from0 && toFt === to0 && !opMoved) return { item: p, kind: null };
+  return { item: out, kind };
+}
+// Is page point (px, py) on the partition? Its position ALONG the run in feet, or null.
+function ssPartitionHit(p, px, py, mgX, mgY, scale, tolPx) {
+  const along = p.axis === "y" ? (py - mgY) / scale : (px - mgX) / scale;
+  const across = p.axis === "y" ? (px - mgX) / scale : (py - mgY) / scale;
+  const tol = tolPx / scale;
+  if (along < Number(p.fromFt) - tol || along > Number(p.toFt) + tol) return null;
+  return Math.abs(across - Number(p.atFt)) <= tol ? along : null;
+}
+// The door or window at alongFt, or null.
+function ssPartitionOpeningAt(p, alongFt) {
+  return (p.openings || []).find((o) => Math.abs(Number(o.centerFt) - alongFt) <= ssPartitionOpeningWidthFt(o) / 2) || null;
+}
+// The solid stretches and the openings cut into the wall, along its run, in feet. One answer for the
+// plan, the PDF and the 3D, so the three draw the same wall.
+function ssPartitionPieces(p) {
+  const from = Number(p.fromFt) || 0, to = Number(p.toFt) || 0;
+  const holes = (p.openings || []).map((o) => {
+    const w = ssPartitionOpeningWidthFt(o), c = Number(o.centerFt);
+    return { o, a0: Math.max(from, c - w / 2), a1: Math.min(to, c + w / 2) };
+  }).filter((h) => h.a1 > h.a0).sort((a, b) => a.a0 - b.a0);
+  const solid = [];
+  let cur = from;
+  holes.forEach((h) => { if (h.a0 > cur + 1e-6) solid.push([cur, h.a0]); cur = Math.max(cur, h.a1); });
+  if (to > cur + 1e-6) solid.push([cur, to]);
+  return { solid, holes };
+}
+// Feet in feet-and-inches, to the inch, the way the plan and the quote both print a partition.
+function ssPartitionFtIn(ft) {
+  const n = Math.round(Number(ft) * 12);
+  if (!(n > 0)) return "0\"";
+  const f = Math.floor(n / 12), i = n % 12;
+  return f ? (i ? f + "'" + i + "\"" : f + "'") : i + "\"";
+}
+// "12' long, full height (8')" or "12' long, 7'6" tall": the plan's PDF bullet and the quote row.
+function ssPartitionSize(p, wallFt) {
+  const h = ssPartitionFtIn(ssPartitionHeightFt(p, wallFt));
+  return ssPartitionFtIn(ssPartitionLenFt(p)) + " long, " + (p.heightIn == null ? "full height (" + h + ")" : h + " tall");
+}
+// How a partition is charged under the builder's method: per foot of wall, per square foot of wall
+// (its length times its height) or each. Any other method a pricing row could carry is charged each.
+// THE ONE RULE, mirrored line for line by _shared/partitionPricing.ts on the server.
+function ssPartitionCharge(p, method, wallFt) {
+  const len = ssPartR2(ssPartitionLenFt(p));
+  if (method === "lineal_ft") return { qty: len, per: "per ft", method };
+  if (method === "sqft_option") return { qty: ssPartR2(len * ssPartitionHeightFt(p, wallFt)), per: "per sq ft", method };
+  return { qty: 1, per: "each", method: "each" };
+}
+// What the estimate is told about the partitions (itemSummary.partitions): sizes, and each door or
+// window by its catalog id. submit-estimate re-reads every price, clamps every length to the building
+// and every height to its wall, so nothing here is trusted for money.
+function ssPartitionSummary(items, wallFt) {
+  return (items || []).filter(ssIsPartition).map((p) => ({
+    id: String(p.id), axis: p.axis === "y" ? "y" : "x",
+    lengthFt: ssPartR2(ssPartitionLenFt(p)),
+    heightIn: p.heightIn != null ? Number(p.heightIn) : null,
+    heightFt: ssPartR2(ssPartitionHeightFt(p, wallFt)),
+    openings: (p.openings || []).map((o) => ({
+      id: String(o.id), kind: o.kind === "window" ? "window" : "door", fixtureItemId: o.fixtureItemId || null,
+      name: o.name || null, widthIn: o.widthIn != null ? Number(o.widthIn) : null, heightIn: o.heightIn != null ? Number(o.heightIn) : null,
+      swing: o.swing || null, operation: o.operation || null, price: o.price != null ? Number(o.price) : null,
+    })),
+  }));
+}
+// ── END PARTITION WALLS ──
+
 /**
  * Move every placed item into the equivalent legal position for a new building size.
  *
@@ -626,6 +875,18 @@ function reflowItems(items, prev, next, ITEMS, gablePlace) {
     // moving them with the plan would be a regression, not a completion.
     if (!cfg || cfg.lineType || it.type === "textNote" || it.type === "line") { byId.set(it.id, it); continue; }
     if (cfg.doorSnap) continue;            // pass 2
+    // A partition wall is stored in FEET (the PARTITION WALLS block), so there is no page position to
+    // convert: its own rule keeps it, clamps it or blocks the size change. Never in `placed` — no
+    // wall item can collide with it. Two it would stack on one line (each clamped on its own) block
+    // the size change too: the plan would draw one wall and the quote charge two (ssPartitionClash,
+    // against the ones already reflowed this pass).
+    if (ssIsPartition(it)) {
+      const r = ssPartitionReflow(it, prev, next);
+      if (r.kind === "blocked" || ssPartitionClash(r.item, [...byId.values()])) { events.push({ id: it.id, type: it.type, label: labelOf(it), kind: "blocked" }); byId.set(it.id, it); continue; }
+      if (r.kind === "resized") events.push({ id: it.id, type: it.type, label: labelOf(it), kind: "resized", to: ssPartR2(ssPartitionLenFt(r.item)) });
+      byId.set(it.id, r.item);
+      continue;
+    }
 
     const isWall = (cfg.wallOnly || cfg.wallSnap) && it.wall;
     if (isWall) {
@@ -1609,6 +1870,142 @@ function fixtureDoorCanvas(ctx, item, iw, color) {
   else { ctx.beginPath(); ctx.arc(-iw / 2, 0, r, 0, out ? -Math.PI / 2 : Math.PI / 2, out); ctx.stroke(); }
   ctx.setLineDash([]);
 }
+// A PARTITION WALL ON THE PLAN (see the PARTITION WALLS block). The solid stretches are a bar the
+// wall's thickness; a door is the door bar with the swing arc every catalog door draws
+// (fixtureDoorSVG), and a window the window bar with its mullions. The door glyph is drawn by
+// standing the opening in for a north wall (axis x) or an east wall (axis y), so "out" swings north
+// or east, "in" south or west, and Flip swing is all a builder needs to point it into the right room.
+// Canvas twin: ssPartitionCanvas, the PDF. `h` carries the plan's handlers and selection.
+function ssPartitionSVG(p, cfg, mgX, mgY, scale, wallFt, h) {
+  const horiz = p.axis !== "y";
+  const tPx = Math.max(4, SS_PARTITION_T_FT * scale);
+  const at = Number(p.atFt) || 0;
+  const px = (a) => (horiz ? mgX + a * scale : mgX + at * scale);
+  const py = (a) => (horiz ? mgY + at * scale : mgY + a * scale);
+  const color = (cfg && cfg.color) || "#57534E";
+  const from = Number(p.fromFt) || 0, to = Number(p.toFt) || 0, mid = (from + to) / 2;
+  const band = (a0, a1, w) => (horiz
+    ? { x: px(a0), y: py(0) - w / 2, width: (a1 - a0) * scale, height: w }
+    : { x: px(0) - w / 2, y: py(a0), width: w, height: (a1 - a0) * scale });
+  const { solid, holes } = ssPartitionPieces(p);
+  const grab = h.locked ? undefined : { cursor: h.armed ? "crosshair" : "grab" };
+  const label = "PARTITION " + ssPartitionFtIn(ssPartitionLenFt(p)) + (p.heightIn != null ? " · " + ssPartitionFtIn(ssPartitionHeightFt(p, wallFt)) + " tall" : "");
+  const off = tPx / 2 + 5;
+  return (
+    <g key={p.id} data-ss-partition={p.id}>
+      {/* A wide invisible grip along the whole run, so a thin wall is easy to pick up and move. */}
+      <rect {...band(from, to, Math.max(tPx, 14))} fill="transparent" style={grab}
+        onMouseDown={(e) => h.onBody(e)} onTouchStart={(e) => h.onBody(e)} />
+      {h.isSel && <rect {...band(from - 4 / scale, to + 4 / scale, tPx + 8)} fill="none" stroke={h.selColor} strokeWidth={1.5} strokeDasharray="4 2" rx={3} pointerEvents="none" />}
+      {solid.map(([a0, a1], k) => <rect key={"s" + k} {...band(a0, a1, tPx)} fill={color} pointerEvents="none" />)}
+      {holes.map(({ o, a0, a1 }) => {
+        const iw = (a1 - a0) * scale, c = (a0 + a1) / 2, win = o.kind === "window";
+        const oSel = h.isSel && h.selOpeningId === o.id;
+        const dc = o.operation === "double" ? FIXTURE_DOOR_COLOR_DOUBLE : FIXTURE_DOOR_COLOR;
+        const lbl = (fmtFtIn(Number(o.widthIn) || ssPartitionOpeningWidthFt(o) * 12) + " " + (o.planLabel || (win ? "WIN" : "DOOR"))).trim();
+        return (
+          <g key={"o" + o.id} data-ss-partition-opening={o.id} transform={`translate(${px(c)},${py(c)}) rotate(${horiz ? 0 : 90})`}
+            style={grab} onMouseDown={(e) => h.onOpening(e, o.id)} onTouchStart={(e) => h.onOpening(e, o.id)}>
+            <rect x={-iw / 2} y={-Math.max(tPx, 12) / 2} width={iw} height={Math.max(tPx, 12)} fill="transparent" />
+            <rect x={-iw / 2} y={-tPx / 2} width={iw} height={tPx} fill={win ? FIXTURE_WINDOW_COLOR : dc} rx={1} />
+            {win
+              ? <g>{[0, -iw / 4, iw / 4].map((lx) => <line key={lx} x1={lx} y1={-tPx / 2 + 1} x2={lx} y2={tPx / 2 - 1} stroke="#FFF" strokeWidth={lx ? 1 : 1.5} />)}</g>
+              : fixtureDoorSVG({ wall: horiz ? "north" : "east", swing: o.swing, operation: o.operation }, iw, dc)}
+            {oSel && <rect x={-iw / 2 - 3} y={-tPx / 2 - 3} width={iw + 6} height={tPx + 6} fill="none" stroke={h.selColor} strokeWidth={1.5} strokeDasharray="3 2" rx={2} pointerEvents="none" />}
+            <text x={0} y={tPx / 2 + 10} textAnchor="middle" fill="#1E293B" fontSize={8} fontWeight="700" pointerEvents="none">{lbl}</text>
+          </g>
+        );
+      })}
+      <text x={horiz ? px(mid) : px(0) - off} y={horiz ? py(0) - off : py(mid)} textAnchor="middle" fill={color} fontSize={9} fontWeight="700" pointerEvents="none"
+        transform={horiz ? undefined : `rotate(-90,${px(0) - off},${py(mid)})`}>{label}</text>
+      {h.isSel && !h.locked && [["from", from], ["to", to]].map(([end, a]) => (
+        <circle key={end} data-ss-partition-end={end} cx={px(a)} cy={py(a)} r={7} fill={h.surface} stroke={h.selColor} strokeWidth={1.5}
+          style={{ cursor: horiz ? "ew-resize" : "ns-resize" }}
+          onMouseDown={(e) => { e.stopPropagation(); h.onEnd(e, end); }} onTouchStart={(e) => { e.stopPropagation(); h.onEnd(e, end); }} />
+      ))}
+    </g>
+  );
+}
+function ssPartitionCanvas(ctx, p, cfg, mgX, mgY, scale, wallFt) {
+  const horiz = p.axis !== "y";
+  const tPx = Math.max(4, SS_PARTITION_T_FT * scale);
+  const at = Number(p.atFt) || 0;
+  const px = (a) => (horiz ? mgX + a * scale : mgX + at * scale);
+  const py = (a) => (horiz ? mgY + at * scale : mgY + a * scale);
+  const color = (cfg && cfg.color) || "#57534E";
+  const from = Number(p.fromFt) || 0, to = Number(p.toFt) || 0, mid = (from + to) / 2;
+  const { solid, holes } = ssPartitionPieces(p);
+  ctx.save();
+  ctx.fillStyle = color;
+  solid.forEach(([a0, a1]) => {
+    if (horiz) ctx.fillRect(px(a0), py(0) - tPx / 2, (a1 - a0) * scale, tPx);
+    else ctx.fillRect(px(0) - tPx / 2, py(a0), tPx, (a1 - a0) * scale);
+  });
+  holes.forEach(({ o, a0, a1 }) => {
+    const iw = (a1 - a0) * scale, c = (a0 + a1) / 2, win = o.kind === "window";
+    const dc = o.operation === "double" ? FIXTURE_DOOR_COLOR_DOUBLE : FIXTURE_DOOR_COLOR;
+    ctx.save();
+    ctx.translate(px(c), py(c));
+    if (!horiz) ctx.rotate(Math.PI / 2);
+    ctx.fillStyle = win ? FIXTURE_WINDOW_COLOR : dc;
+    ctx.fillRect(-iw / 2, -tPx / 2, iw, tPx);
+    if (win) {
+      ctx.strokeStyle = "#FFF";
+      [0, -iw / 4, iw / 4].forEach((lx) => { ctx.lineWidth = lx ? 1 : 1.5; ctx.beginPath(); ctx.moveTo(lx, -tPx / 2 + 1); ctx.lineTo(lx, tPx / 2 - 1); ctx.stroke(); });
+    } else {
+      fixtureDoorCanvas(ctx, { wall: horiz ? "north" : "east", swing: o.swing, operation: o.operation }, iw, dc);
+    }
+    ctx.fillStyle = "#1E293B"; ctx.font = "bold 8px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText((fmtFtIn(Number(o.widthIn) || ssPartitionOpeningWidthFt(o) * 12) + " " + (o.planLabel || (win ? "WIN" : "DOOR"))).trim(), 0, tPx / 2 + 10);
+    ctx.restore();
+  });
+  const off = tPx / 2 + 5;
+  const label = "PARTITION " + ssPartitionFtIn(ssPartitionLenFt(p)) + (p.heightIn != null ? " · " + ssPartitionFtIn(ssPartitionHeightFt(p, wallFt)) + " tall" : "");
+  ctx.fillStyle = color; ctx.font = "bold 9px sans-serif"; ctx.textAlign = "center";
+  if (horiz) ctx.fillText(label, px(mid), py(0) - off);
+  else { ctx.translate(px(0) - off, py(mid)); ctx.rotate(-Math.PI / 2); ctx.fillText(label, 0, 0); }
+  ctx.restore();
+}
+// The selection toolbar's controls for a PARTITION WALL: its height (Full, or a number of inches),
+// "+ Door" and "+ Window" (the same pickers the outside walls use; what is chosen goes IN this wall),
+// and, with one of its doors or windows selected on the plan, Flip swing and Remove for just that
+// opening. A component of its own so the inch field can keep what is being typed without a new hook
+// in the designer body. The designer's handlers do every check and say why when they refuse.
+function SSPartitionBar({ p, wallFt, canDoor, canWindow, opening, onHeight, onAddDoor, onAddWindow, onFlip, onRemoveOpening }) {
+  const full = p.heightIn == null;
+  const wallIn = Math.round((Number(wallFt) || 8) * 12);
+  const [draft, setDraft] = useState(full ? "" : String(p.heightIn));
+  useEffect(() => { setDraft(p.heightIn == null ? "" : String(p.heightIn)); }, [p.id, p.heightIn]);
+  const commit = () => {
+    const t = String(draft).trim();
+    if (t === "" || !isFinite(Number(t))) { setDraft(full ? "" : String(p.heightIn)); return; }
+    // The field shows what was APPLIED, not what was typed: a height clamped back to the one the wall
+    // already has changes nothing, so the effect above never runs and the refused number would stay.
+    const h = onHeight(Math.round(Number(t)));
+    setDraft(h != null ? String(h) : full ? "" : String(p.heightIn));
+  };
+  const chip = (on) => (on ? "ssd-seg-b is-on" : "ssd-seg-b");
+  return (<>
+    <div className="ssd-seg is-tb" role="group" aria-label="Partition wall height">
+      <button onClick={() => onHeight(null)} aria-pressed={full} title={"As tall as the walls (" + ssPartitionFtIn(wallIn / 12) + ")"} className={chip(full)}>Full height</button>
+      <button onClick={() => { if (full) onHeight(Math.max(ssPartitionMinHeightIn(p), wallIn - 12)); }} aria-pressed={!full} title="Set the wall's own height" className={chip(!full)}>Custom</button>
+    </div>
+    {!full && (
+      <span className="ssd-tb-read">
+        <input type="number" min={1} step={1} value={draft} data-ss-partition-height="1" aria-label="Partition wall height in inches"
+          onChange={(e) => setDraft(e.target.value)} onBlur={commit}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } }}
+          style={{ width: 56, font: "inherit", padding: "2px 4px", border: "1px solid #CBD5E1", borderRadius: 4 }} /> in tall
+      </span>
+    )}
+    {canDoor && <button onClick={onAddDoor} className="ssd-tb-btn is-soft">+ Door</button>}
+    {canWindow && <button onClick={onAddWindow} className="ssd-tb-btn is-soft">+ Window</button>}
+    {opening && opening.kind !== "window" && opening.operation !== "slideup" && (
+      <button onClick={onFlip} className="ssd-tb-btn is-soft" title="Swing the door into the other room">⇅ Flip swing</button>
+    )}
+    {opening && <button onClick={onRemoveOpening} className="ssd-tb-btn is-danger">{opening.kind === "window" ? "Remove window" : "Remove door"}</button>}
+  </>);
+}
 // Door sizes are stored in inches; show them as feet/inches on the plan + in the picker.
 function fmtFtIn(inches) {
   const n = Number(inches);
@@ -2557,7 +2954,7 @@ function ssPriceGroupId(fixtureItemId = "", name = "", price = 0) {
 //       win         id = the group id, a = colour id                          (catalog windows)
 //       dress       id = shutters | flowerBox, a = colour id
 //       ramp        id = the group id, or "simple" for the tenant's one ramp price
-//       partition   id = the partition's id; a = a hosted opening's id      (reserved, not yet used)
+//       partition   id = the partition's id; a = a door or window in it      (partition walls, 278)
 function ssPriceRowKey(kind = "", id = "", a = "", b = "") {
   switch (kind) {
     case "layout": return id;
@@ -2698,7 +3095,10 @@ function computeSelectionRows(sel, paintColors, C, items) {
   const qmap = (rawQ && typeof rawQ === "object" && !Array.isArray(rawQ)) ? rawQ : null;
   const legacyArr = !qmap && stEntry ? pickSize(stEntry.sizeInclusions) : null;
   let includedNow = {};
-  if (qmap) includedNow = qmap; else if (Array.isArray(legacyArr)) { for (const k of legacyArr) includedNow[k] = 1; }
+  if (qmap) includedNow = { ...qmap }; else if (Array.isArray(legacyArr)) { for (const k of legacyArr) includedNow[k] = 1; }
+  // A partition wall is never part of a size's price (278): submit-estimate drops such a row, so a
+  // decline credits nothing here either.
+  delete includedNow[SS_PARTITION_KEY];
   const declinedKeys = (sel && Array.isArray(sel.declinedItems)) ? sel.declinedItems : [];
   // What is currently ON the plan, keyed the way declinedItems is — built-in layout keys plus
   // catalog fixture ids. Declining an included item does not hide the generic tool for it (the
@@ -3182,8 +3582,9 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     if (!st || !sel || !sel.size) return {};
     const pick = (map) => { if (!map || typeof map !== "object") return null; if (map[sel.size] != null) return map[sel.size]; const want = normSizeLabel(sel.size); for (const k in map) { if (normSizeLabel(k) === want) return map[k]; } return null; };
     const q = pick(st.sizeInclusionQty);
-    if (q && typeof q === "object" && !Array.isArray(q)) { const o = {}; for (const k in q) o[k] = Math.max(1, Number(q[k]) || 1); return o; }
-    const arr = pick(st.sizeInclusions); const o = {}; if (Array.isArray(arr)) for (const k of arr) o[k] = 1; return o;
+    // Never a partition wall (278), which no size includes; submit-estimate drops such a row too.
+    if (q && typeof q === "object" && !Array.isArray(q)) { const o = {}; for (const k in q) if (k !== SS_PARTITION_KEY) o[k] = Math.max(1, Number(q[k]) || 1); return o; }
+    const arr = pick(st.sizeInclusions); const o = {}; if (Array.isArray(arr)) for (const k of arr) if (k !== SS_PARTITION_KEY) o[k] = 1; return o;
   })();
   // NOTE: electrical no longer joins this netting. The three devices used to be layout items
   // priced through LAYOUT_PRICE_ORDER, so the package's counts were merged into incForRows;
@@ -3236,6 +3637,36 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     rows.push(row);
     if (ln.total == null) deferred.push({ row, pct: ln.pct });
     else nonPctSubtotal += ln.total;
+  }
+
+  // Partition walls (migration 278): ONE row per wall and one per priced door or window in it, each
+  // under its own key (ssPriceRowKey "partition"), so a rep's price lands on exactly that wall or
+  // that door. That is why a partition is not in LAYOUT_PRICE_ORDER, whose rows sum every item of a
+  // type into one. The wall is charged by the builder's method (ssPartitionCharge — the rule
+  // _shared/partitionPricing.ts mirrors for submit-estimate) at the PRICED wall height, the server's
+  // resolvedWallHeightFt. A door or window is its catalog price and is never netted against the
+  // size's inclusions, which are the building's own doors. An unpriced partition still gets a $0
+  // row: it is on the plan, and the quote must say so.
+  const partitions = items.filter(ssIsPartition);
+  if (partitions.length) {
+    const prp = resolve(SS_PARTITION_KEY) || { rate: 0, method: "each" };
+    const wallFt = pricedWallHeightFt(C, (C.buildingStyles || []).find((s) => s.value === styleKey), styleKey, sel, bW);
+    const pLabel = (C.layoutItems && C.layoutItems[SS_PARTITION_KEY] && C.layoutItems[SS_PARTITION_KEY].label) || "Partition Wall";
+    for (const p of partitions) {
+      const ch = ssPartitionCharge(p, prp.method, wallFt);
+      const total = Math.round(prp.rate * ch.qty * 100) / 100;
+      const per = ch.method === "lineal_ft" ? " / ft" : ch.method === "sqft_option" ? " / sq ft" : " each";
+      rows.push({ key: ssPriceRowKey("partition", p.id), label: pLabel, qty: ch.qty, unit: ssPartitionSize(p, wallFt) + " · " + fmtMoney2(prp.rate) + per,
+        total, method: ch.method, ...ssPriceable(prp.rate, ch.qty, ch.per) });
+      nonPctSubtotal += total;
+      for (const o of (p.openings || [])) {
+        const price = o.price != null ? Number(o.price) : 0;
+        if (!(price > 0)) continue;   // $0 / unpriced = free, no line (the doors' rule above)
+        rows.push({ key: ssPriceRowKey("partition", p.id, o.id), label: (o.name || (o.kind === "window" ? "Window" : "Door")) + " (in partition)",
+          qty: 1, unit: fmtMoney2(price) + " each", total: price, method: "each", ...ssPriceable(price, 1, "each") });
+        nonPctSubtotal += price;
+      }
+    }
   }
 
   // Catalog fixture doors (Options → Doors): each carries its OWN snapshotted price, not a
@@ -3553,6 +3984,13 @@ function priceRowMatcher(key) {
   const isCatalog = (i) => !!i.fixtureItemId && i.price != null;   // same test the grouping uses
   if (key === "window") return (i) => i.type === "window" && !isCatalog(i);
   if (key === "ramp" || key === "ramp:simple") return (i) => i.type === "ramp" && !isCatalog(i);
+  // A partition wall's row is that one wall. A door or window row inside one matches no ITEM — it is
+  // part of the wall, and Details takes it out of the wall itself (removePlaced).
+  if (key.indexOf("partition:") === 0) {
+    const pid = key.slice(10);
+    if (pid.indexOf(":open:") >= 0) return () => false;
+    return (i) => ssIsPartition(i) && String(i.id) === pid;
+  }
   const sep = key.indexOf(":");
   if (sep < 0) return (i) => i.type === key;
   const kind = key.slice(0, sep), fid = key.slice(sep + 1);
@@ -4041,6 +4479,32 @@ function ssPlacedNotOfferedOn(items, fixtures, styleKey) {
     if (!it || it.fixtureItemId == null) return false;
     const fx = fixtures.find((f) => f && String(f.id) === String(it.fixtureItemId));
     return !!fx && !fixtureOfferedOnStyle(fx, styleKey);
+  });
+}
+// The doors and windows IN partition walls (278) a style does not offer, as [{ pid, o }]. They live
+// inside their wall and never as items, so ssPlacedNotOfferedOn cannot see them: the same rule, one
+// wall at a time.
+function ssPartitionOpeningsNotOfferedOn(items, fixtures, styleKey) {
+  if (!Array.isArray(items) || !Array.isArray(fixtures)) return [];
+  const out = [];
+  items.forEach((it) => {
+    if (!ssIsPartition(it)) return;
+    (it.openings || []).forEach((o) => {
+      if (!o || o.fixtureItemId == null) return;
+      const fx = fixtures.find((f) => f && String(f.id) === String(o.fixtureItemId));
+      if (fx && !fixtureOfferedOnStyle(fx, styleKey)) out.push({ pid: it.id, o });
+    });
+  });
+  return out;
+}
+// `items` with those openings taken out of their walls, by wall id and opening id. The SAME array when
+// there are none.
+function ssStripPartitionOpenings(items, list) {
+  if (!list || !list.length) return items;
+  return items.map((it) => {
+    if (!ssIsPartition(it)) return it;
+    const drop = list.filter((x) => x.pid === it.id).map((x) => x.o.id);
+    return drop.length ? { ...it, openings: (it.openings || []).filter((o) => drop.indexOf(o.id) === -1) } : it;
   });
 }
 // What the customer is told when a style change takes them off. An object, not a string: a plain
@@ -8454,6 +8918,8 @@ const D3_COLORS = {
   // Natural lumber, for a projecting porch whose style sets no colors.wood (posts, header, rafters,
   // ceiling, the board over the rafter tails, deck). The sanitizer never writes it into a style.
   wood: "#C4965A",
+  // A partition wall's bare sheathing (278), a shade lighter than the loft so the two read apart.
+  partition: "#D8C6A2",
 };
 
 // Curated paint swatches for the 3D color picker. The LABEL is what lands in
@@ -13812,6 +14278,54 @@ function buildShed3DModel(THREE, p) {
     porchStepsGroup.visible = !hit;
     porchStepsGroup.userData.ssHiddenBy = hit ? "ramp" : null;
   };
+  // ── A PARTITION WALL (migration 278; the PARTITION WALLS block) ──
+  // Reached only from buildInterior's partition branch, which no item of a design without one can
+  // enter, so every other model is built by exactly the code it always was. Sheathing-coloured,
+  // SS_PARTITION_T_FT thick, from the floor to its own height (full height is the plate), split round
+  // its doors and windows the way buildOneWall splits a wall: a full-height piece between openings,
+  // the wall under a window and a header over each one. The door is plankDoorLeaf (the roll-up for a
+  // slide-up or roll-up catalog door) and the window d3WindowFill, on a frame laid along the
+  // partition, so they are the same door and window the outside walls draw. NO itemId on the group:
+  // the 3D editor cannot pick it up, which is the v1 rule — it is placed and moved on the plan.
+  const buildPartition3D = (it) => {
+    const horiz = it.axis !== "y";
+    const at = Number(it.atFt) || 0, from = Number(it.fromFt) || 0;
+    const Hp = ssPartitionHeightFt(it, H), PT = SS_PARTITION_T_FT;
+    const wf = horiz
+      ? { O: [from - bldgW / 2, at - bldgH / 2], U: [1, 0], N: [0, 1] }
+      : { O: [at - bldgW / 2, from - bldgH / 2], U: [0, 1], N: [1, 0] };
+    const g = new THREE.Group();
+    g.userData = { partition: true };
+    // Every material here is the partition's OWN. rebuildInterior disposes the interior group's
+    // materials with no shared set, so a mesh left on the model-lifetime trimMat (d3WindowFill's sill
+    // uses it) would dispose the building's trim on every live drag; the swap at the end prevents it.
+    const wm = mat(D3_COLORS.partition), pTrim = mat(trimColor);
+    const { solid, holes } = ssPartitionPieces(it);
+    solid.forEach(([a0, a1]) => g.add(wallBox(wm, wf, a0 - from, a1 - from, 0, Hp, 0, PT)));
+    holes.forEach(({ o, a0: h0, a1: h1 }) => {
+      const a0 = h0 - from, a1 = h1 - from, f = D3_CASE_F, cd = PT + 0.08;
+      const sp = ssPartitionOpeningSpanIn(o);
+      const top = Math.max(0.5, Math.min(sp[1] / 12, Hp - 0.2));
+      const y0 = Math.max(0, Math.min(sp[0] / 12, top - 0.5));
+      if (y0 > 0.01) g.add(wallBox(wm, wf, a0, a1, 0, y0, 0, PT));
+      if (Hp - top > 0.01) g.add(wallBox(wm, wf, a0, a1, top, Hp, 0, PT));
+      g.add(wallBox(pTrim, wf, a0 - f, a0, y0, top + f, 0, cd));
+      g.add(wallBox(pTrim, wf, a1, a1 + f, y0, top + f, 0, cd));
+      g.add(wallBox(pTrim, wf, a0 - f, a1 + f, top, top + f, 0, cd));
+      if (o.kind === "window") { d3WindowFill(g, wf, { it: { type: "window" }, a: (a0 + a1) / 2, a0, a1, y0, y1: top }, a0 - f, a1 + f); return; }
+      const look = fixtureDoorStyle({ fixtureItemId: o.fixtureItemId });
+      const doorMat = mat(D3_COLORS.door), ironMat = mat("#23272E", { metalness: 0.55, roughness: 0.42 });
+      const y1d = top - 0.05, field = look === "auto" ? "plank" : look;
+      if (look === "rollup" || o.operation === "slideup") rollUpCurtain(g, wf, doorMat, doorMat, a0 + 0.05, a1 - 0.05, 0.05, y1d);
+      else if (o.operation === "double") {
+        const m = (a0 + a1) / 2;
+        plankDoorLeaf(g, wf, doorMat, doorMat, ironMat, a0 + 0.05, m - 0.03, 0.05, y1d, "a0", false, field);
+        plankDoorLeaf(g, wf, doorMat, doorMat, ironMat, m + 0.03, a1 - 0.05, 0.05, y1d, "a1", true, field);
+      } else plankDoorLeaf(g, wf, doorMat, doorMat, ironMat, a0 + 0.05, a1 - 0.05, 0.05, y1d, o.operation === "right" ? "a1" : "a0", true, field);
+    });
+    g.traverse((o) => { if (o.isMesh && o.material === trimMat) o.material = pTrim; });
+    interiorGroup.add(g);
+  };
   const buildInterior = (itemsNow) => itemsNow.forEach((it) => {
     const c = itemTypes[it.type];
     // Before the tool check on purpose: a device whose tool left ITEMS still draws (see above).
@@ -14024,6 +14538,8 @@ function buildShed3DModel(THREE, p) {
       g.position.set(ftX(it.x), 0, ftZ(it.y));
       g.userData = { itemId: it.id, floorItem: true };
       interiorGroup.add(g);
+    } else if (ssIsPartition(it)) {
+      buildPartition3D(it);
     }
     // textNote / line: 2D annotations with no 3D representation (plan §4.7).
   });
@@ -21346,6 +21862,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // the style-agnostic list on purpose, so a style that offers no custom ramp hides the Ramp button
   // rather than flipping a custom-ramp builder to the simple ramp tool.
   const offeredDoors = placeableDoors.filter((f) => fixtureOfferedOnStyle(f, sel.style));
+  // A partition wall takes a door that stands on the floor: a loft door hangs up a gable end.
+  const partitionDoors = offeredDoors.filter((f) => !(Number(f.sillIn) > 0));
   const offeredRamps = placeableRamps.filter((f) => fixtureOfferedOnStyle(f, sel.style));
   const offeredWindows = placeableWindows.filter((f) => fixtureOfferedOnStyle(f, sel.style));
   const offeredVents = placeableVents.filter((f) => fixtureOfferedOnStyle(f, sel.style));
@@ -21421,15 +21939,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       for (const k in map) { if (normSizeLabel(k) === want) return map[k]; }
       return null;
     };
+    // A partition wall is never part of a size's price (278; submit-estimate drops such a row), so it
+    // gets no Included chip to place or decline.
     const qmap = pick(st.sizeInclusionQty);
     if (qmap && typeof qmap === "object" && !Array.isArray(qmap)) {
       const out = {};
-      for (const k in qmap) out[k] = Math.max(1, Number(qmap[k]) || 1);
+      for (const k in qmap) if (k !== SS_PARTITION_KEY) out[k] = Math.max(1, Number(qmap[k]) || 1);
       return out;
     }
     const arr = pick(st.sizeInclusions);
     const out = {};
-    if (Array.isArray(arr)) for (const k of arr) out[k] = 1;
+    if (Array.isArray(arr)) for (const k of arr) if (k !== SS_PARTITION_KEY) out[k] = 1;
     return out;
   }, [sel.style, sel.size, C.buildingStyles]);
   const includedItemKeys = useMemo(() => Object.keys(includedItemQty), [includedItemQty]);
@@ -21545,6 +22065,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // Rough openings leave the palette (and the 3D Add row) for the pickers' "Rough opening" tile. They
     // stay in ITEMS, so placed ones draw and price as before and an included one keeps its chip.
     ...Object.fromEntries(["roughOpeningDoor", "roughOpeningWindow"].filter((k) => baseItems[k]).map((k) => [k, { ...baseItems[k], noPalette: true }])),
+    // A partition wall's TOOL (modelKey "partition", migration 278) is told apart by partitionType: the
+    // click that places one, the armed hint and the 3D palette read it. A PLACED wall is told apart by
+    // its own shape (ssIsPartition), so the plan, the drag, the PDF and the 3D never depend on the config.
+    ...Object.fromEntries(Object.keys(baseItems).filter((k) => baseItems[k] && baseItems[k].modelKey === "partition").map((k) => [k, { ...baseItems[k], partitionType: true }])),
     // Included catalog fixtures (place-or-decline chips), keyed by fixture id.
     ...includedFixtureTools };
   const [swapId, setSwapId] = useState(null);       // id of a placed catalog fixture being SWAPPED to another
@@ -21757,6 +22281,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [activeTool, setActiveTool] = useState(null);
   const [items, setItems] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  // The door or window selected INSIDE a partition wall, { pid, oid }. It counts only while that
+  // partition is the selection.
+  const [selOpening, setSelOpening] = useState(null);
   const [editingNoteId, setEditingNoteId] = useState(null); // note being typed in-place on the canvas
   // Pick-one-to-remove mode ({ type }): entered from a Details row's × when several
   // "each"-priced items of that type are placed — the plan highlights them and the
@@ -22937,25 +23464,29 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (ventItemsSeenRef.current !== items) return;                   // arrived with new items: a load
     const fixtures = Array.isArray(C.fixtures) ? C.fixtures : [];
     const off = sel.style ? ssPlacedNotOfferedOn(items, fixtures, sel.style) : [];
+    // ...and the doors and windows standing in partition walls (278), which come out of their wall.
+    const partOff = sel.style ? ssPartitionOpeningsNotOfferedOn(items, fixtures, sel.style) : [];
     const offIds = new Set(off.map((it) => it.id));
     const rampsOff = off.length ? items.filter((it) => it.type === "ramp" && !offIds.has(it.id) && offIds.has(it.snapDoorId)) : [];
     rampsOff.forEach((it) => offIds.add(it.id));
     const dormerFx = sel.style && sel.dormerWindowId ? fixtures.find((f) => f && String(f.id) === String(sel.dormerWindowId)) : null;
     const dormerOff = !!dormerFx && !fixtureOfferedOnStyle(dormerFx, sel.style);
-    const kept = offIds.size ? items.filter((it) => !offIds.has(it.id)) : items;
+    const kept = ssStripPartitionOpenings(offIds.size ? items.filter((it) => !offIds.has(it.id)) : items, partOff);
     const vr = ventRoof2D();
     const r = ssRefitGableVents(kept, vr.roof, bldgW, bldgH, vr.H, ITEMS);
-    if (!r && !off.length && !dormerOff) return;
+    if (!r && !off.length && !partOff.length && !dormerOff) return;
     const next = r ? r.items : kept;
     const from = items;
     // A style sold in one size of other dimensions sets that size in the same commit, and the size
     // effect above has then already replaced the plan. Its reflow re-fitted the vents for the new
     // size, but what this style does not offer must still come off, so that part goes by id.
-    if (next !== items) setItems((cur) => (cur === from ? next : offIds.size ? cur.filter((it) => !offIds.has(it.id)) : cur));
+    if (next !== items) setItems((cur) => (cur === from ? next : ssStripPartitionOpenings(offIds.size ? cur.filter((it) => !offIds.has(it.id)) : cur, partOff)));
     if (off.length) setSelectedId(null);
+    if (partOff.length) setSelOpening(null);
     if (dormerOff) setSel((p) => ({ ...p, dormerWindowId: null, dormerWindowOffset: 0 }));
     const dropped = r && r.dropped ? ssVentStyleDropped(r.dropped) : null;
     const names = off.map((it) => it.doorName || it.windowName || it.rampName || "item");
+    partOff.forEach((x) => names.push(`${x.o.name || x.o.kind} in the partition wall`));
     if (dormerOff) names.push(`${dormerFx.name || "window"} in the dormer`);
     // A ramp that went with its door is said after the list, not listed as not offered.
     const rampDoor = rampsOff.length === 1 ? off.find((o) => o.id === rampsOff[0].snapDoorId) : null;
@@ -23366,6 +23897,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
   // Get sizes for selected style
   const selectedStyle = C.buildingStyles.find((s) => s.value === sel.style);
+  // How tall a full-height partition wall is: the wall the quote prices (pricedWallHeightFt), so the
+  // plan, the PDF and the estimate all speak of the same wall.
+  const partWallFt = pricedWallHeightFt(C, selectedStyle, sel.style, sel, bldgW);
   // The roof and plate height the 3D builds this design with — the SAME resolver call the 3D props
   // make — for putting a vent into a gable from the plan, which has no roof of its own to ask
   // (2026-09-15). A function, not a value: it is read when a vent is placed, dragged, reflowed or
@@ -23416,6 +23950,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return { x: f.x + (cx - r.left) * sx, y: f.y + (cy - r.top) * sx };
   }, []);
 
+  // A new partition wall, or a new door or window in one, can be given an id a removed one had: a wall
+  // after a reload (ids restart above the highest left on the plan), an opening at once (the next one
+  // up in its wall). A rep's price stored under the old row key (sel.priceOverrides, migration 277)
+  // must never land on the new one, since a price set for one thing is never carried onto another. So
+  // whatever is stored under the new keys is dropped as the wall or the opening is made.
+  const dropPartitionPrices = (pid, oid) => setSel((s) => {
+    const ov = s && s.priceOverrides;
+    if (!ov || typeof ov !== "object") return s;
+    const wallKey = ssPriceRowKey("partition", pid);
+    const gone = Object.keys(ov).filter((k) => (oid != null ? k === ssPriceRowKey("partition", pid, oid) : k === wallKey || k.indexOf(wallKey + ":open:") === 0));
+    if (!gone.length) return s;
+    const next = { ...ov };
+    gone.forEach((k) => { delete next[k]; });
+    const out = { ...s, priceOverrides: next };
+    if (!Object.keys(next).length) delete out.priceOverrides;
+    return out;
+  });
   // A door/window/rough-opening style item on a wall at a click point: snapped, checked against what
   // is already there, and stamped. ONE path for the palette's wall click (handleClick) and the pickers'
   // "Rough opening" tile (placePickedRo), so a rough opening placed either way is the same item.
@@ -23449,6 +24000,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (!activeTool) {
       const hit = [...items].reverse().find((it) => {
         const c = ITEMS[it.type]; if (!c) return false;
+        if (ssIsPartition(it)) return ssPartitionHit(it, pt.x, pt.y, mgX, mgY, scale, Math.max(7, (SS_PARTITION_T_FT * scale) / 2 + 3)) != null;
         if (c.lineType) {
           // Distance from click to the line segment
           const A = pt.x - it.x1, B = pt.y - it.y1;
@@ -23477,6 +24029,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // drag's trailing click from triggering it).
       if (hit && hit.id === selectedId && ITEMS[hit.type] && ITEMS[hit.type].noteType) { setEditingNoteId(hit.id); return; }
       if (!hit || hit.id !== editingNoteId) setEditingNoteId(null);
+      // A click on a partition's door or window selects that opening inside it.
+      const hitOp = hit && ssIsPartition(hit) ? ssPartitionOpeningAt(hit, ssPartitionHit(hit, pt.x, pt.y, mgX, mgY, scale, 1e6)) : null;
+      setSelOpening(hitOp ? { pid: hit.id, oid: hitOp.id } : null);
       setSelectedId(hit ? hit.id : null); return;
     }
     const cfg = ITEMS[activeTool]; if (!cfg) return;
@@ -23605,6 +24160,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setSelectedId(ni.id);
       setActiveTool(null);
       setToast(null);
+      return;
+    }
+
+    // A PARTITION WALL (the PARTITION WALLS block): across the building's short span, wall to wall,
+    // where the click is. It needs no wall and no snapping, so it goes before every wall branch.
+    if (cfg.partitionType) {
+      const fx = (pt.x - mgX) / scale, fy = (pt.y - mgY) / scale, bw = pW / scale, bh = pH / scale;
+      const refuse = (m) => { setToast(m); setTimeout(() => setToast(null), 4000); };
+      if (fx < 0 || fy < 0 || fx > bw || fy > bh) { refuse("Click inside the building, where the partition wall should go."); return; }
+      const g = ssPartitionAt(fx, fy, bw, bh);
+      if (!g) { refuse("This building is too small for a partition wall."); return; }
+      const ni = { id: idCounter++, type: activeTool, wall: null, ...g, heightIn: null, openings: [] };
+      if (ssPartitionClash(ni, items)) { refuse("There is already a partition wall there. Click somewhere else."); return; }
+      setItems((p) => [...p, ni]); dropPartitionPrices(ni.id); setSelectedId(ni.id); setSelOpening(null); setActiveTool(null); setToast(null);
       return;
     }
 
@@ -23748,6 +24317,32 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Place the door chosen in the picker at the remembered wall/click point. Snapshots the
   // door's spec (so a later catalog edit never changes this saved design) + the shopper's
   // swing/operation choice onto a stable `fixtureDoor` item.
+  // "+ Door" / "+ Window" on a partition wall: the picked catalog door or window goes IN the wall, at the
+  // free spot nearest its middle (ssPartitionSeatOpening), with its name, size and price snapshot the way
+  // a placed fixture keeps them. A wall cut down too low for it is refused, never raised behind the
+  // customer's back.
+  const addPartitionOpening = (pid, kind, fx, swing, operation) => {
+    const p = items.find((i) => i.id === pid);
+    if (!p || !fx) return;
+    const win = kind === "window", what = win ? "window" : "door";
+    const o = {
+      id: (p.openings || []).reduce((m, q) => Math.max(m, Number(q.id) || 0), 0) + 1, kind: what, fixtureItemId: fx.id,
+      name: fx.name || (win ? "Window" : "Door"),
+      planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || (win ? "WIN" : "DOOR")).toUpperCase().slice(0, 6),
+      widthIn: Number(fx.widthIn) || (win ? 24 : 36), heightIn: Number(fx.heightIn) || null,
+      ...(win ? { sillIn: fx.sillIn != null && Number(fx.sillIn) >= 0 ? Number(fx.sillIn) : null } : { swing: swing || "out", operation: operation || null }),
+      price: fx.price != null ? Number(fx.price) : null, centerFt: 0,
+    };
+    const c = ssPartitionSeatOpening(p, o, (Number(p.fromFt) + Number(p.toFt)) / 2);
+    if (c == null) { refuseDrag(`That ${what} doesn't fit in this partition wall. Make the wall longer, or take something out of it.`); return; }
+    const placed = { ...o, centerFt: c };
+    if (p.heightIn != null && ssPartitionOpeningSpanIn(placed)[1] + SS_PARTITION_HEADER_IN > Number(p.heightIn)) {
+      refuseDrag(`This partition wall is too low for that ${what}. Set it to Full height or taller first.`); return;
+    }
+    setItems((prev) => prev.map((i) => (i.id === pid ? { ...i, openings: [...(i.openings || []), placed] } : i)));
+    dropPartitionPrices(pid, placed.id);
+    setSelectedId(pid); setSelOpening({ pid, oid: placed.id }); setToast(null);
+  };
   // The pickers' "Rough opening" tile: the rough opening at the wall and point the picker was opened
   // from, placed exactly as the palette button used to place it (ssWallItemAt).
   const placePickedRo = (key, pick) => {
@@ -23757,6 +24352,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setItems((p) => [...p, r.item]); setSelectedId(r.item.id); setActiveTool(null); setToast(null);
   };
   const placePickedDoor = useCallback((fx, swing, operation, doorColor, trimColor) => {
+    // "+ Door" on a selected partition wall: the door goes IN that wall (addPartitionOpening).
+    if (doorPick && doorPick.partitionId != null) { if (fx) addPartitionOpening(doorPick.partitionId, "door", fx, swing, operation); setDoorPick(null); return; }
     // Swap mode: replace the selected door in place with the chosen door — keeping its wall,
     // but RE-LEGALIZED for the new width. The swap used to keep x/y verbatim with no bounds,
     // collision, or workbench check — the one mutation path with none — so swapping to a
@@ -23876,6 +24473,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // a normal type:"window" item (reuses the built-in window render/collision/payload) carrying the
   // style's width + a priced snapshot; fixtureItemId is what marks it as a catalog (vs built-in) window.
   const placePickedWindow = useCallback((fx, windowColor, dress) => {
+    // "+ Window" on a selected partition wall: the window goes IN that wall (addPartitionOpening).
+    if (windowPick && windowPick.partitionId != null) { if (fx) addPartitionOpening(windowPick.partitionId, "window", fx, null, null); setWindowPick(null); return; }
     // Swap mode: same re-legalization as the door swap above — the new width is re-clamped
     // to the wall and collision/workbench-checked before committing; the old swap kept x/y
     // verbatim with no checks at all (audit 2026-08-20).
@@ -24009,7 +24608,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setToast(null);
   }, [swapId, rampPick, mgX, mgY, pW, pH, scale, RAMP_SPACE_FT]);
 
-  const onPtrDown = useCallback((e, item) => {
+  const onPtrDown = useCallback((e, item, openingId) => {
     e.stopPropagation();
     if (planLockedRef.current) return;   // no selecting or dragging a building that exists
     if (gateRequired) { setGateOpen(true); return; }
@@ -24018,9 +24617,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     movedRef.current = false;
     gestureStartRef.current = { x: e.touches ? e.touches[0].clientX : e.clientX, y: e.touches ? e.touches[0].clientY : e.clientY };
     setSelectedId(item.id);
+    // A partition's door or window is selected inside it; anything else clears that.
+    setSelOpening(openingId != null ? { pid: item.id, oid: openingId } : null);
     const cfg = ITEMS[item.type];
     if (resizing || (cfg && cfg.doorSnap)) return; // don't drag ramps or while resizing
     const pt = getSvgPt(e);
+    if (ssIsPartition(item)) {
+      // The wall moves ACROSS the building; one of its doors or windows slides ALONG it. Both are
+      // measured from where the pointer took hold, so nothing jumps on the first move.
+      const horiz = item.axis !== "y";
+      const along = (horiz ? pt.x - mgX : pt.y - mgY) / scale, across = (horiz ? pt.y - mgY : pt.x - mgX) / scale;
+      const op = openingId != null ? (item.openings || []).find((q) => q.id === openingId) : null;
+      setDragging(op
+        ? { id: item.id, kind: "partitionOpening", openingId, off: along - Number(op.centerFt) }
+        : { id: item.id, kind: "partition", off: across - Number(item.atFt) });
+      return;
+    }
     if (cfg && cfg.lineType) {
       // Line is stored as two endpoints; track midpoint offset + half-deltas
       // so a body drag translates both endpoints rigidly.
@@ -24087,6 +24699,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const pt = getSvgPt(e);
       const it = items.find((i) => i.id === resizing.id);
       if (!it) return;
+
+      // A partition's END, stretched along its run: outside walls and crossing partitions are magnets,
+      // and it keeps its minimum length and the framing round its doors (ssPartitionMoveEnd).
+      if (ssIsPartition(it)) {
+        const along = (it.axis !== "y" ? pt.x - mgX : pt.y - mgY) / scale;
+        const patch = ssPartitionMoveEnd(it, resizing.handle === "from" ? "from" : "to", along, pW / scale, pH / scale, items);
+        if (Object.keys(patch).every((k) => patch[k] === it[k])) return;
+        setItems((p) => p.map((i) => (i.id === it.id ? { ...i, ...patch } : i)));
+        return;
+      }
 
       // Note leader (pointer) drag: the target dot follows the cursor anywhere
       // on the visible sheet. Dropping it back onto the note removes the
@@ -24234,6 +24856,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const it = items.find((i) => i.id === dragging.id);
     if (!it) return;
     const cfg = ITEMS[it.type]; if (!cfg) return;
+
+    // A partition wall moves across the building; a door or window in one slides along it. Every
+    // refusal says why, through refuseDrag like every other drag.
+    if (dragging.kind === "partition") {
+      const atFt = ssPartitionMoveAcross(it, ((it.axis !== "y" ? pt.y - mgY : pt.x - mgX) / scale) - dragging.off, pW / scale, pH / scale);
+      if (atFt === Number(it.atFt)) return;
+      if (ssPartitionClash({ ...it, atFt }, items)) { refuseDrag("Another partition wall is in the way."); return; }
+      setItems((p) => p.map((i) => (i.id === it.id ? { ...i, atFt } : i)));
+      return;
+    }
+    if (dragging.kind === "partitionOpening") {
+      const o = (it.openings || []).find((q) => q.id === dragging.openingId);
+      const r = o ? ssPartitionCenterRange(it, ssPartitionOpeningWidthFt(o)) : null;
+      if (!r) return;
+      const c = Math.max(r[0], Math.min(r[1], ssPartInch(((it.axis !== "y" ? pt.x - mgX : pt.y - mgY) / scale) - dragging.off)));
+      if (c === Number(o.centerFt)) return;
+      if (!ssPartitionOpeningOk(it, { ...o, centerFt: c })) { refuseDrag("Doors and windows in one partition wall can't overlap."); return; }
+      setItems((p) => p.map((i) => (i.id === it.id ? { ...i, openings: i.openings.map((q) => (q.id === o.id ? { ...q, centerFt: c } : q)) } : i)));
+      return;
+    }
 
     // Line body drag: translate both endpoints by the same delta, clamped so
     // neither endpoint leaves the visible page area.
@@ -24453,7 +25095,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const sel = items.find((i) => i.id === selectedId);
     if (!sel) return;
     const c = ITEMS[sel.type];
-    if (c && (c.wallOnly || c.wallSnap || c.lineType || c.doorSnap)) return;
+    if (ssIsPartition(sel) || (c && (c.wallOnly || c.wallSnap || c.lineType || c.doorSnap))) return;
 
     if (sel.type === "loft") {
       const curW = sel.widthFt || c.width, curH = sel.heightFt || c.height;
@@ -24566,6 +25208,31 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (r.refuse) { refuseDrag(r.refuse); return; }
     setItems((p) => p.map((i) => (i.id === it.id ? { ...i, ...r.patch } : i)));
   };
+  // A selected PARTITION WALL's toolbar (SSPartitionBar). Height: null is full height; a number of
+  // inches is kept between the tallest door or window in it (plus a header) and the wall itself, and
+  // anything at or over the wall is full height. Each correction says what it did. Returns the height
+  // the wall ends up with (null = full), or undefined when nothing was done, for the bar's field.
+  const partitionHeightSel = (pid, heightIn) => {
+    const p = items.find((i) => i.id === pid);
+    if (!p || planLocked) return;
+    const wallIn = Math.round(partWallFt * 12);
+    let h = heightIn == null ? null : Math.round(Number(heightIn));
+    if (h != null && !isFinite(h)) return;
+    if (h != null && h >= wallIn) { refuseDrag(`The walls are ${ssPartitionFtIn(wallIn / 12)} tall, so this partition is full height.`); h = null; }
+    const min = ssPartitionMinHeightIn(p);
+    if (h != null && h < min) { refuseDrag((p.openings || []).length ? `The tallest door or window in this wall needs it at least ${ssPartitionFtIn(min / 12)} tall.` : `A partition wall is at least ${ssPartitionFtIn(min / 12)} tall.`); h = min; }
+    if (h === p.heightIn) return h;
+    setItems((prev) => prev.map((i) => (i.id === pid ? { ...i, heightIn: h } : i)));
+    return h;
+  };
+  const partitionOpeningSel = (patchOrNull) => {
+    if (!selOpening || selOpening.pid !== selectedId || planLocked) return;
+    const { pid, oid } = selOpening;
+    setItems((prev) => prev.map((i) => (i.id !== pid ? i : { ...i, openings: (i.openings || [])
+      .map((o) => (o.id === oid && patchOrNull ? { ...o, ...patchOrNull(o) } : o))
+      .filter((o) => patchOrNull || o.id !== oid) })));
+    if (!patchOrNull) setSelOpening(null);
+  };
   const clearAll = () => { setItems([]); setSelectedId(null); setEditingNoteId(null); };
 
   // ─── EXPORT RENDERING (shared by Export modal, PDF, and submit) ───
@@ -24661,6 +25328,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         ctx.restore();
         return;
       }
+
+      // Partition wall: ssPartitionCanvas, the twin of the plan's ssPartitionSVG.
+      if (ssIsPartition(item)) { ssPartitionCanvas(ctx, item, cfg, mgX, mgY, scale, partWallFt); return; }
 
       // Plan-bound items: position is already in page coords; widths are in feet
       const itemW = item.widthFt || cfg.width;
@@ -24839,6 +25509,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const d = (roDimensions[ro.id] || "").trim();
       const label = ssRoLabel(ro, items);
       bullets.push(d ? `${label} — ${d}` : label);
+    });
+    // One bullet per partition wall, with what is in it: the plan shows where, this says what.
+    items.filter(ssIsPartition).forEach((p) => {
+      const inIt = (p.openings || []).map((o) => `${fmtFtIn(Number(o.widthIn) || ssPartitionOpeningWidthFt(o) * 12)} ${o.name || o.kind}`);
+      bullets.push(`${(ITEMS[p.type] && ITEMS[p.type].label) || "Partition wall"} — ${ssPartitionSize(p, partWallFt)}${inIt.length ? ", with " + inIt.join(" and ") : ""}`);
     });
     // Lines and notes are not bulleted — they already render at their position on the page.
     customOptions.forEach((co) => {
@@ -27842,6 +28517,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           if (item.type === "textNote") {
             return { type: "textNote", wall: null, text: (item.text || "").trim() };
           }
+          // A partition wall in its own words (ssPartitionSummary): sizes and what is in it, never a wall.
+          if (ssIsPartition(item)) return { type: item.type, wall: null, ...ssPartitionSummary([item], partWallFt)[0] };
           return {
             type: item.type,
             wall: displayLabel ? displayLabel.toLowerCase() : (item.wall || null),
@@ -27999,6 +28676,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           ramp: items.filter((i) => i.type === "ramp").length,   // count — ramp is priced "each" (one per door)
           lines: items.filter((i) => i.type === "line").length,
           notes: items.filter((i) => i.type === "textNote").map((n) => (n.text || "").trim()).filter(Boolean),
+          // Partition walls (278), only when there are some: submit-estimate prices each wall from these
+          // sizes, clamped to the building, and each door or window in one from the catalog by its id.
+          ...(items.some(ssIsPartition) ? { partitions: ssPartitionSummary(items, partWallFt) } : {}),
         },
         customOptions: customOptions.filter((co) => co.name && co.name.trim()).map((co) => ({
           name: co.name.trim(),
@@ -30631,8 +31311,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              palette keeps its collapsed Shelving popup, which is what Carolyn asked for there.
              Electrical Items is left out too, and nothing is re-admitted for it: its devices are
              placed on the plan only (the 3D draws them but has no chooser), so the button could
-             only ever flash place3's "pick from the palette" refusal. */
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && !ITEMS[k].isElecItemPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
+             only ever flash place3's "pick from the palette" refusal. A Partition Wall is left out
+             for the same reason: it is placed and moved on the plan only. */
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].partitionType && !ITEMS[k].isVentPicker && !ITEMS[k].isElecItemPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
           roOffer={{ door: roDoorOffered, window: roWindowOffered }}
           placeableDoors={offeredDoors} placeableWindows={offeredWindows} placeableRamps={offeredRamps}
           paintEnabled={false}
@@ -32612,9 +33293,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: pal.surface, minHeight: embedded ? "100%" : "100vh" }}>
       <SSDesignerFrame pal={pal} embedded={embedded}>
       {gateEl && createPortal(gateEl, document.body)}
-      {doorPick && createPortal(<DoorPicker doors={offeredDoors} showPricing={!!C.showPricing} doorColors={doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} ro={!doorPick.swap && roDoorTile} onPlaceRo={() => { const p = doorPick; setDoorPick(null); placePickedRo("roughOpeningDoor", p); }} onPlace={placePickedDoor} />, document.body)}
+      {doorPick && createPortal(<DoorPicker doors={doorPick.partitionId != null ? partitionDoors : offeredDoors} showPricing={!!C.showPricing} doorColors={doorPick.partitionId != null ? [] : doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} ro={!doorPick.swap && doorPick.partitionId == null && roDoorTile} onPlaceRo={() => { const p = doorPick; setDoorPick(null); placePickedRo("roughOpeningDoor", p); }} onPlace={placePickedDoor} />, document.body)}
       {rampPick && createPortal(<RampPicker ramps={offeredRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
-      {windowPick && createPortal(<WindowPicker windows={offeredWindows} showPricing={!!C.showPricing} windowColors={windowColorList} dressColors={dressColorList} swapFrom={swapId != null ? items.find((i) => i.id === swapId) : null} onCancel={() => { setWindowPick(null); setSwapId(null); }} ro={!windowPick.swap && roWindowTile} onPlaceRo={() => { const p = windowPick; setWindowPick(null); placePickedRo("roughOpeningWindow", p); }} onPlace={placePickedWindow} />, document.body)}
+      {windowPick && createPortal(<WindowPicker windows={offeredWindows} showPricing={!!C.showPricing} windowColors={windowPick.partitionId != null ? [] : windowColorList} dressColors={windowPick.partitionId != null ? [] : dressColorList} swapFrom={swapId != null ? items.find((i) => i.id === swapId) : null} onCancel={() => { setWindowPick(null); setSwapId(null); }} ro={!windowPick.swap && windowPick.partitionId == null && roWindowTile} onPlaceRo={() => { const p = windowPick; setWindowPick(null); placePickedRo("roughOpeningWindow", p); }} onPlace={placePickedWindow} />, document.body)}
       {elecItemPick && createPortal(
         <ElectricalItemPicker
           items={elecItemsOffered(C, !!(sel && sel.electrical), embedded)}
@@ -33405,7 +34086,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {/* Slot 1: the armed tool's hint, else the selected item's name, the one the 3D footer's
               "Remove …" uses. One text node, so a getByText(name, exact) never lands on this label. */}
           {activeTool
-            ? <span className="ssd-tb-hint">← {ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>
+            ? <span className="ssd-tb-hint">← {ITEMS[activeTool] && ITEMS[activeTool].partitionType ? "Click inside the building where the wall goes" : ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>
             : selectedId && !planLocked && (() => {
               const si = items.find((i) => i.id === selectedId);
               if (!si) return null;
@@ -33465,6 +34146,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </span>
             </>;
           })()}
+          {/* A selected PARTITION WALL (278): its height and + Door / + Window, and Flip swing / Remove
+              for a door or window selected in it. Remove beside Rotate still takes the whole wall. */}
+          {selectedId && !planLocked && (() => {
+            const si = items.find((i) => i.id === selectedId);
+            if (!si || !ssIsPartition(si)) return null;
+            const op = selOpening && selOpening.pid === si.id ? (si.openings || []).find((o) => o.id === selOpening.oid) : null;
+            return <SSPartitionBar p={si} wallFt={partWallFt} canDoor={partitionDoors.length > 0} canWindow={offeredWindows.length > 0} opening={op || null}
+              onHeight={(h) => partitionHeightSel(si.id, h)}
+              onAddDoor={() => { setDoorPick({ partitionId: si.id }); setActiveTool(null); setToast(null); }}
+              onAddWindow={() => { setWindowPick({ partitionId: si.id }); setActiveTool(null); setToast(null); }}
+              onFlip={() => partitionOpeningSel((o) => ({ swing: o.swing === "in" ? "out" : "in" }))}
+              onRemoveOpening={() => partitionOpeningSel(null)} />;
+          })()}
           {/* Center, and the centred READOUT, only for an item that actually has a wall to be
               centred on. Rotate beside it is shown for everything and silently no-ops on wall
               items (rotSel returns early for them) — do not copy that here: a button that
@@ -33481,7 +34175,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           })()}
           {selectedId && !planLocked && (
             <>
-              <button onClick={rotSel} className="ssd-tb-btn is-soft">↻ Rotate</button>
+              {!items.some((i) => i.id === selectedId && ssIsPartition(i)) && <button onClick={rotSel} className="ssd-tb-btn is-soft">↻ Rotate</button>}
               {/* "Remove", the word the 3D footer and every quote row already use (Carolyn,
                   2026-09-14): one action should not have two names on one page. */}
               <button onClick={delSel} className="ssd-tb-btn is-danger">🗑 Remove</button>
@@ -33801,6 +34495,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               );
             }
 
+            // ─── Partition wall: its own drawing, grips and handlers (ssPartitionSVG) ───
+            if (ssIsPartition(item)) {
+              return ssPartitionSVG(item, cfg, mgX, mgY, scale, partWallFt, {
+                isSel, selOpeningId: selOpening && selOpening.pid === item.id ? selOpening.oid : null,
+                selColor: planSel, surface: pal.surface, armed: !!activeTool, locked: planLocked,
+                onBody: (e) => onPtrDown(e, item), onOpening: (e, oid) => onPtrDown(e, item, oid), onEnd: (e, end) => startResize(e, item, end),
+              });
+            }
+
             const itemW = item.widthFt || cfg.width;
             const itemH = item.heightFt || cfg.height;
             const iw = itemW * scale; const ih = itemH * scale;
@@ -34001,7 +34704,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               priceRowMatcher: the pending type is a Details ROW key, and catalog rows' keys
               match no item's type (audit 2026-08-20). */}
           {pendingRemoval && items.filter(priceRowMatcher(pendingRemoval.type)).map((it) => {
-            const c = ITEMS[it.type]; if (!c) return null;
+            const c = ITEMS[it.type]; if (!c || ssIsPartition(it)) return null;
             const iwFt = it.widthFt || c.width, ihFt = it.heightFt || c.height;
             const iw = iwFt * scale, ih = ihFt * scale;
             const rot = it.rotation === 90 || it.rotation === 270;
@@ -34371,6 +35074,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               if (k.indexOf("foundation:") === 0) { const o = resolveFoundation(C, k.slice(11)); return !!o && o.taxable === false; }
               // Delivery is taxed only when Settings → Options → Delivery says so (ss_tax_delivery).
               if (k === "delivery") return !!(C.delivery) && C.delivery.taxable !== true;
+              // A partition wall's row reads the Partition Wall item's flag, and a door or window in one
+              // its catalog row's: the two submit-estimate reads for those lines (278).
+              const pk = /^partition:([^:]+)(?::open:(.+))?$/.exec(k);
+              if (pk) {
+                if (!pk[2]) { const pli = ((C && C.layoutItems) || {})[SS_PARTITION_KEY]; return !!pli && pli.taxable === false; }
+                const pw = items.find((i) => ssIsPartition(i) && String(i.id) === pk[1]);
+                const po = pw && (pw.openings || []).find((o) => String(o.id) === pk[2]);
+                const f = po && (Array.isArray(C.fixtures) ? C.fixtures : []).find((x) => x && String(x.id) === String(po.fixtureItemId));
+                return !!f && f.taxable === false;
+              }
               const li = ((C && C.layoutItems) || {})[k];
               return !!li && li.taxable === false;
             };
@@ -34407,6 +35120,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 // fx:/win:/ramp: keys that match no item's type, so this × removed nothing for
                 // exactly the rows that carry a price (audit 2026-08-20). The label rides along
                 // so pick mode can name the item (its key is not ITEMS-keyed).
+                // A door or window row inside a partition wall takes just that opening out of the wall.
+                const po = /^partition:(.+):open:(.+)$/.exec(String(r.key || ""));
+                if (po) {
+                  setItems((p) => p.map((i) => (ssIsPartition(i) && String(i.id) === po[1] ? { ...i, openings: (i.openings || []).filter((o) => String(o.id) !== po[2]) } : i)));
+                  setSelOpening(null);
+                  return;
+                }
                 const match = priceRowMatcher(r.key);
                 const placed = items.filter(match);
                 if (r.method === "each" && placed.length > 1) {
@@ -35212,8 +35932,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              palette keeps its collapsed Shelving popup, which is what Carolyn asked for there.
              Electrical Items is left out too, and nothing is re-admitted for it: its devices are
              placed on the plan only (the 3D draws them but has no chooser), so the button could
-             only ever flash place3's "pick from the palette" refusal. */
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && !ITEMS[k].isElecItemPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
+             only ever flash place3's "pick from the palette" refusal. A Partition Wall is left out
+             for the same reason: it is placed and moved on the plan only. */
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].partitionType && !ITEMS[k].isVentPicker && !ITEMS[k].isElecItemPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
           roOffer={{ door: roDoorOffered, window: roWindowOffered }}
           placeableDoors={offeredDoors} placeableWindows={offeredWindows} placeableRamps={offeredRamps}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
