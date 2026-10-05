@@ -545,7 +545,14 @@ function AdminApp() {
       const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
       selRef.current = ""; setDelOpen(false); setDelConfirm(""); setSel(""); setCat(null);
       const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
-      flash({ ok: `Builder "${id}" deleted${parts ? ` (${parts})` : ""}.` });
+      // What happened at the payment gateway (counts only; the server never sends an id).
+      const g = (r && r.gateway) || {};
+      const gw = [
+        g.subscriptionsCancelled ? `${g.subscriptionsCancelled} paid plan${g.subscriptionsCancelled === 1 ? "" : "s"} cancelled` : "",
+        g.vaultDeleted ? "saved card removed" : "",
+        g.vaultKept ? "saved card kept, because another builder uses it" : "",
+      ].filter(Boolean).join(", ");
+      flash({ ok: `Builder "${id}" deleted${parts ? ` (${parts})` : ""}.${gw ? ` Payment gateway: ${gw}.` : ""}` });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -1024,8 +1031,9 @@ function AdminApp() {
                 <div style={{ fontSize: 13, color: "#7F1D1D", marginBottom: 10, lineHeight: 1.5 }}>
                   This permanently deletes <b>{sel}</b> and <b>all of its data</b> — designs/leads, building styles &amp; sizes,
                   pricing &amp; inclusions, layout items, settings (incl. GHL credentials), error logs, owner/team logins, and
-                  uploaded floor-plan &amp; branding files. <b>This cannot be undone.</b> (GoHighLevel contacts/estimates live in
-                  GHL and are not affected.)
+                  uploaded floor-plan &amp; branding files. Any paid plans are cancelled at the payment gateway and their saved
+                  card is removed, so they are never charged again. <b>This cannot be undone.</b> (GoHighLevel contacts/estimates
+                  live in GHL and are not affected.)
                 </div>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                   <input value={delConfirm} onChange={(e) => setDelConfirm(e.target.value)} placeholder={`Type "${sel}" to confirm`}

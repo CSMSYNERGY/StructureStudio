@@ -12,6 +12,10 @@ import { syncTaxCodes } from "../_shared/taxCodeSync.ts";
 // "Offered on" (272): a template's per-style fixture lists, carried into a clone. portal-settings
 // imports the same module, so a change to it deploys both functions.
 import { cloneStyleIds } from "../_shared/fixtureStyleIds.ts";
+// delete_client cancels the builder's subscriptions and removes their saved card at the gateway
+// before it wipes anything (2026-10-05). nmi.ts is the one gateway client; see its importer ledger.
+import { nmiConfigured, nmiPost } from "../_shared/nmi.ts";
+import { cleanupTenantGateway, GatewayCleanupError, needsGateway, openSubscriptions } from "../_shared/tenantGatewayCleanup.ts";
 import {
   chargingMode, describeSettingsChange, monthRange, normalizePilotIds, normalizeSettings,
   parseSettingsPatch, PHONE_METER_LABELS, PHONE_METERS, PHONE_SETTINGS_COLUMNS, phoneBillingDbError,
@@ -720,7 +724,11 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       case "create_client": {
         const clientId = reqStr(p.clientId, "clientId").toLowerCase();
         if (!/^[a-z0-9][a-z0-9-]*$/.test(clientId)) throw new Error("Builder id must be lowercase letters, numbers and hyphens (DNS-safe).");
-        const reserved = ["www", "beta", "dev", "staging", "app", "api", "admin", "portal"];
+        // "first" (2026-10-05): portal-billing's first-charge order ids are ss_first_<clientId>_<plan>,
+        // so a tenant slugged "first" mints ss_first_<plan>_… and billing-webhook's ssClientIdOf
+        // reads the plan's first word as the tenant. Its events would be homed on, or acked as the
+        // deleted tenant, "simple" / "crm" / "full". No tenant had it on 2026-10-05.
+        const reserved = ["www", "beta", "dev", "staging", "app", "api", "admin", "portal", "first"];
         if (reserved.includes(clientId)) throw new Error(`"${clientId}" is a reserved id.`);
         const companyName = reqStr(p.companyName, "companyName");
         const exists = await sb.from("client_configs").select("client_id").eq("client_id", clientId).maybeSingle();
@@ -1778,10 +1786,16 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       // then the client_configs row itself. Requires the typed client id to match
       // (confirmClientId) so a stray/mistaken call can't nuke a tenant.
       // Irreversible. GHL-side contacts/estimates are external and untouched.
+      // BEFORE any of that, at the payment gateway: the tenant's open subscriptions are
+      // cancelled and its saved card is removed from the vault (2026-10-05), or the delete
+      // is refused with nothing wiped. The response and audit row carry COUNTS, never ids.
       // ⚠️ NOT removed: the financial ledgers (orders/payments/invoice_sends/
-      // billing_charge_attempts). Those are records of money that moved, so the
-      // response reports their counts as `retained` instead of silently keeping
-      // them — deciding to destroy them is a retention call, not a code change.
+      // billing_charge_attempts/wallet_transactions/usage_charges). Those are records of
+      // money that moved, so the response reports their counts as `retained` instead of
+      // silently keeping them — deciding to destroy them is a retention call, not a code change.
+      // ⚠️ NOT removed EITHER, and not decided yet: the tenant's CRM, phone, text, email and
+      // customer-login rows (end customers' names, numbers, message bodies, voicemails). They
+      // are counted as `leftBehind` so the operator sees them; see the note at that list.
       // Keep this list in step with the wipes below; drift here is what left a
       // deleted tenant's PII in the database twice already.
       case "delete_client": {
@@ -1790,11 +1804,116 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           throw new Error("Confirmation text does not match the client id.");
         }
         const deleted: Record<string, number> = {};
+        // Adds to the count rather than setting it: billing_customers is wiped twice, once by the
+        // gateway step the moment the card is gone, and again in the list below as the backstop.
         const wipe = async (table: string) => {
           const { error, count } = await sb.from(table).delete({ count: "exact" }).eq("client_id", clientId);
           if (error) throw new Error(`${table}: ${error.message}`);
-          deleted[table] = count ?? 0;
+          deleted[table] = (deleted[table] ?? 0) + (count ?? 0);
         };
+
+        // ── The payment gateway FIRST, before a single row is wiped (2026-10-05). ──────────────
+        // billing_subscriptions and billing_customers (wiped below) are only MIRRORS. Until this,
+        // deleting a paying builder left their subscriptions charging their card at Deposyt/NMI and
+        // the card in the gateway's vault, with no row left on our side to show either. Carolyn,
+        // 07-31: card information is not kept for a builder who is gone.
+        //
+        // ⚠️ The gateway account is SHARED with other CSM Synergy products, and both calls are
+        // irreversible. Only ids read from THIS tenant's own rows are touched, and it fails CLOSED:
+        // no gateway configured, or any answer short of "done" / "that id is already gone", refuses
+        // the delete with nothing wiped. A wiped tenant with a live subscription is a builder still
+        // being charged with nothing here to show why. The rules live in _shared/tenantGatewayCleanup.ts.
+        //
+        // ⛔ The vault id is a bearer capability for charging that card (see get_billing_overview).
+        // It is read here, handed to the gateway, and never reaches a response, an audit note or a
+        // log: counts only.
+        const [subsRes, custRes] = await Promise.all([
+          sb.from("billing_subscriptions").select("id, status").eq("client_id", clientId),
+          sb.from("billing_customers").select("vault_id").eq("client_id", clientId).maybeSingle(),
+        ]);
+        if (subsRes.error) throw new Error(`billing_subscriptions: ${subsRes.error.message}`);
+        if (custRes.error) throw new Error(`billing_customers: ${custRes.error.message}`);
+        const tenantSubs = (subsRes.data ?? []) as { id: string; status: string | null }[];
+        let tenantVault: string | null = custRes.data?.vault_id ? String(custRes.data.vault_id) : null;
+        // A vault another builder's row ALSO points at is still in use, and deleting it would break
+        // THEIR billing. It is kept and reported. Never true on 2026-10-05 (4 rows, 4 distinct
+        // vaults); one count to rule it out on an irreversible call is cheap.
+        let vaultShared = false;
+        if (tenantVault) {
+          const { count: others, error: sharedErr } = await sb.from("billing_customers")
+            .select("client_id", { count: "exact", head: true })
+            .eq("vault_id", tenantVault).neq("client_id", clientId);
+          if (sharedErr) throw new Error(`billing_customers: ${sharedErr.message}`);
+          if (others) { vaultShared = true; tenantVault = null; }
+        }
+        const openSubs = openSubscriptions(tenantSubs).length;
+        let gateway = { subscriptionsCancelled: 0, vaultDeleted: false, alreadyGone: 0 };
+        // One dedicated audit row, written as soon as the gateway step has run, whichever way it went:
+        // the generic operator row at the top only records that the action was asked for, and the
+        // ADMIN_PASSWORD path writes no success row at all, yet what happened at the gateway cannot be
+        // undone and must be findable. Counts only.
+        const auditGateway = async (outcome: string) => {
+          try {
+            await sb.from("admin_audit").insert({
+              action: "delete_client",
+              target_client_id: clientId,
+              actor_email: identity.via === "operator" ? identity.email : null,
+              actor_user_id: identity.via === "operator" ? identity.userId : null,
+              note: (`via=${identity.via} gateway ${outcome}`
+                + ` subscriptions_cancelled=${gateway.subscriptionsCancelled} of ${openSubs}`
+                + ` vault_deleted=${gateway.vaultDeleted} already_gone=${gateway.alreadyGone}`
+                + (vaultShared ? " vault_kept=shared" : "")).slice(0, 2000),
+            });
+          } catch (_e) { /* best-effort: the gateway outcome is also in the response */ }
+        };
+        const atGateway = needsGateway(tenantSubs, tenantVault);
+        if (atGateway) {
+          if (!nmiConfigured) {
+            return json({ error: "Can't reach the payment gateway; nothing was deleted." }, 503);
+          }
+          try {
+            gateway = await cleanupTenantGateway({
+              subs: tenantSubs,
+              vaultId: tenantVault,
+              nmiPost,
+              // Mark each mirror row cancelled the moment the gateway confirms, the way
+              // portal-billing's cancel does, so a delete that stops part-way and is retried
+              // skips what already went.
+              onCancelled: async (subscriptionId: string) => {
+                const now = new Date().toISOString();
+                await sb.from("billing_subscriptions")
+                  .update({ status: "cancelled", canceled_at: now, updated_at: now })
+                  .eq("id", subscriptionId).eq("client_id", clientId);
+              },
+              // And the row that points at the saved card goes the moment the gateway confirms the
+              // card is gone, not fifteen wipes later. If a later wipe throws, the tenant survives
+              // the failed delete, and a vault id left behind would show a card on file that the
+              // gateway no longer holds: Billing says "card on file", subscribe and top-up reuse it
+              // and are declined, and a retry asks the gateway to delete it again. With the row gone
+              // the retry has nothing to send. The wipe in the list below stays as the backstop.
+              onVaultDeleted: () => wipe("billing_customers"),
+            });
+          } catch (e) {
+            // Anything that is not the module's own refusal is treated as "no answer": we cannot
+            // say what happened at the gateway, so the operator is sent to look.
+            const stopped = e instanceof GatewayCleanupError ? e : null;
+            const noAnswer = stopped ? stopped.unknown : true;
+            if (stopped) gateway = stopped.progress;
+            await auditGateway(`refused(${noAnswer ? "no_answer" : "declined"})`);
+            const cancelledSoFar = gateway.subscriptionsCancelled;
+            const partial = cancelledSoFar
+              ? ` ${cancelledSoFar} of their ${openSubs} paid plan${openSubs === 1 ? "" : "s"} ${cancelledSoFar === 1 ? "was" : "were"} cancelled at the gateway before it stopped.`
+              : "";
+            return json({
+              error: noAnswer
+                ? `The payment gateway didn't answer, so nothing was deleted. A cancellation may still have gone through: check this builder's plans in the Deposyt portal before you try again.${partial}`
+                : `The payment gateway wouldn't cancel this builder's plan or remove their saved card, so nothing was deleted. It said: "${stopped!.said}".${partial}`,
+              gateway,
+            }, 502);
+          }
+        }
+        await auditGateway(atGateway ? "done" : "none");
+
         // tax_code_assignments (migration 246) goes FIRST, ahead of the order below. Its rows have
         // no foreign key to anything wiped here (target_key is text, shared by style ids and
         // heading keys), so none cascade; and the HEADING rows — delivery, doors, services — pass
@@ -1803,8 +1922,23 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // codes as its own saved choices, and a save that kept them would stamp them as theirs.
         // First, because it is the one table here that can be missing: admin-catalog deployed
         // before 246 is applied refuses the delete on this line, before anything is gone, instead
-        // of half-deleting the tenant and throwing further down.
+        // of half-deleting the tenant and throwing further down. (Only the gateway step above runs
+        // ahead of it: its refusals wipe nothing, and once the gateway has removed the saved card it
+        // wipes the billing_customers row that pointed at it, which is the one row that must not
+        // outlive the card.)
         await wipe("tax_code_assignments");
+        // wallet_accounts (migration 164) is the BALANCE, keyed by client_id with no FK to anything,
+        // so a recreated slug inherited it: a deleted test tenant left $100.00 behind (seen 10-05),
+        // which the next tenant on that slug would have spent as its own. The movements stay:
+        // wallet_transactions is a ledger, reported under `retained` below.
+        await wipe("wallet_accounts");
+        // client_feature_grants is the same kind of entitlement as wallet_accounts and
+        // billing_subscriptions: keyed by client_id, no FK, so a recreated slug inherited the dead
+        // tenant's comped features (seen 10-05: an unexpired view_3d grant outliving its tenant).
+        // get_config's view3d is an EXISTS over this table, so the new tenant would have had paid
+        // 3D on day one. A grant is a comp, not a record of money that moved, so it is wiped, not
+        // retained.
+        await wipe("client_feature_grants");
         // Catalog/design rows first, config last. Order respects FKs
         // (layout_item_pricing & building_sizes → building_styles; inclusions → sizes).
         await wipe("designs");
@@ -1833,7 +1967,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         //   one's 'active' subscription — full product, no payment — and made a subscribe call
         //   charge the FORMER customer's stored card, on an invoice nobody could attribute.
         //   Neither table is an accounting record; both are mirrors of gateway state, and the
-        //   gateway remains the source of truth.
+        //   gateway remains the source of truth. By this line the gateway step at the top has
+        //   already cancelled the subscriptions and removed the card these rows describe (and
+        //   wiped billing_customers once the card was gone; this second wipe is the backstop).
         await wipe("billing_subscriptions");
         await wipe("billing_customers");
         //   feedback_submissions holds submitter_name + submitter_email — the named people who
@@ -1858,11 +1994,31 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // accounting consequences, not a bug fix, so it is NOT made here — but leaving them
         // unmentioned is how this class of miss happened in the first place. The counts go back in
         // the response so the operator can see exactly what outlived the tenant and escalate if a
-        // deletion request requires them gone too.
+        // deletion request requires them gone too. wallet_transactions (every top-up, debit and
+        // refund) and usage_charges (each metered call, text and 3D generation) joined the list on
+        // 2026-10-05: they are the same kind of record, and were neither wiped nor reported.
         const retained: Record<string, number> = {};
-        for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts"]) {
+        for (const t of ["orders", "payments", "invoice_sends", "billing_charge_attempts", "wallet_transactions", "usage_charges"]) {
           const { count } = await sb.from(t).select("client_id", { count: "exact", head: true }).eq("client_id", clientId);
           if (count) retained[t] = count;
+        }
+        // LEFT BEHIND, and NOT a decision: the tenant's CRM, phone, text, email and customer-login
+        // rows, which name THEIR customers (names, phone numbers, message bodies, voicemails). All
+        // keyed by client_id with no FK to anything wiped here, so none cascade, and on 2026-10-05
+        // a deleted tenant's crm_contacts and customer_sessions were still in the database. Whether
+        // they are wiped, kept or exported first is a retention call for Ahsan and Carolyn, not
+        // part of the 10-05 change, so they are counted here exactly like `retained`: the dialog
+        // says "all of its data", and what outlives it has to be visible rather than assumed.
+        const leftBehind: Record<string, number> = {};
+        for (
+          const t of [
+            "crm_contacts", "crm_notes", "crm_files", "crm_activities", "sms_messages", "phone_calls",
+            "phone_voicemails", "phone_call_recordings", "email_sends", "email_inbound", "customer_sessions",
+            "customer_email_otps", "design_acceptances",
+          ]
+        ) {
+          const { count } = await sb.from(t).select("client_id", { count: "exact", head: true }).eq("client_id", clientId);
+          if (count) leftBehind[t] = count;
         }
 
         // Capture the logins mapped to this client, unmap them, then delete any
@@ -1917,7 +2073,15 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // `retained` is empty for a normal tenant and only appears when financial rows outlived
         // the delete — see the note above. Surfacing it is the point: the dialog says "and ALL of
         // its data", so anything that survives has to be visible rather than assumed.
-        return json({ ok: true, clientId, deleted, ...(Object.keys(retained).length ? { retained } : {}) });
+        // `gateway` is counts only (see the gateway step): what was cancelled and removed at the
+        // payment gateway, so the operator's confirmation can say so. `leftBehind` works like
+        // `retained`: present only when the tenant had rows there.
+        return json({
+          ok: true, clientId, deleted,
+          gateway: { ...gateway, ...(vaultShared ? { vaultKept: "in use by another builder" } : {}) },
+          ...(Object.keys(retained).length ? { retained } : {}),
+          ...(Object.keys(leftBehind).length ? { leftBehind } : {}),
+        });
       }
 
       default:

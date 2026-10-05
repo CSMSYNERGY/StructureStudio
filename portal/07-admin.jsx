@@ -708,6 +708,17 @@ function AdmClientPicker({ clients, current, onPick, onClose }) {
   );
 }
 
+// What delete_client did at the payment gateway, as one sentence for the confirmation (2026-10-05).
+// The server sends counts only, never an id, so there is nothing here to leak.
+function admGatewayNote(g) {
+  if (!g) return "";
+  const bits = [];
+  if (g.subscriptionsCancelled) bits.push(`${g.subscriptionsCancelled} paid plan${g.subscriptionsCancelled === 1 ? "" : "s"} cancelled`);
+  if (g.vaultDeleted) bits.push("saved card removed");
+  if (g.vaultKept) bits.push("saved card kept, because another builder uses it");
+  return bits.length ? ` Payment gateway: ${bits.join(", ")}.` : "";
+}
+
 // One destructive action = one dialog = one password prompt. There is deliberately no
 // second "now enter your password" modal and no cached password: delete_client is terminal
 // (the tenant is gone, so "the same action again" cannot happen), so a cache would avoid
@@ -745,8 +756,9 @@ function AdmDeleteDialog({ client, onClose, onDeleted }) {
       </div>
       <div style={{ fontSize: 13.5, color: "#475569", lineHeight: 1.55, marginBottom: 16 }}>
         This erases <strong>{id}</strong> from nine tables, deletes every login attached to it, and empties
-        its stored images and branding. Their designer link stops working immediately. <strong>This cannot
-        be undone.</strong> To stop offering the account without destroying its data, set a paused billing
+        its stored images and branding. Their designer link stops working immediately. Any paid plans are
+        cancelled at the payment gateway and their saved card is removed, so they are never charged again.
+        <strong> This cannot be undone.</strong> To stop offering the account without destroying its data, set a paused billing
         posture instead.
       </div>
       {err && <div style={S.err}>{err}</div>}
@@ -2653,7 +2665,7 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
             setDelOpen(false);
             const parts = (r && r.deleted) ? Object.entries(r.deleted).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") : "";
             await onReloadClients();
-            onFlash({ ok: `Deleted “${id}”${parts ? ` (${parts})` : ""}.` });
+            onFlash({ ok: `Deleted “${id}”${parts ? ` (${parts})` : ""}.${admGatewayNote(r && r.gateway)}` });
             onDeleted();
           }} />
       )}
