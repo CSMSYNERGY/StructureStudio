@@ -1,10 +1,14 @@
 // POST /push/text: a database webhook on new inbound sms_messages rows (header x-push-secret).
+// POST /push/email: the same for a customer's email (email_inbound, migration 267), ids only.
 //
 // Answers 204 at once and sends in the background. Sends a NORMAL (not VoIP) alert to the
 // devices of the people who own the text (plan section 7):
 //   • the contact's assigned owner, when there is one;
 //   • otherwise everyone with phone access who can see that contact;
 //   • for an unknown number, everyone with phone access and contacts view or edit.
+// An email goes to the same people as a text from its contact would. It only ever has a contact
+// (its own, or its design's): mail from someone who isn't one alerts nobody, as the apps' lists
+// never show it either.
 // Android gets FCM HTTP v1 NOTIFICATION messages (Twilio's SDK owns the app's one Firebase
 // listener and drops anything that is not a call, so a data-only message would vanish; a
 // notification message is shown by Android itself). iPhone gets APNs alerts.
@@ -15,10 +19,11 @@
 import type { Ctx, Env } from "../env";
 import { adminClient, must, type Admin } from "../db";
 import { b64urlEncode, b64urlEncodeString, pemToDer } from "../b64";
-import { ApiError, noContent, safeEqual } from "../http";
+import { ApiError, UUID_RE, noContent, safeEqual } from "../http";
 import { phoneDigits } from "../identity";
 import { logFault } from "../log";
 import { contactsLevelOf, phoneLevelOf } from "../scope";
+import { senderVerifiedFrom } from "../../../../supabase/functions/_shared/crmFeed.ts";
 
 interface SmsRecord {
   id: string;
@@ -39,24 +44,44 @@ interface Device {
   push_kind: "fcm" | "apns";
 }
 
+/** A received email, as deliverEmail reads it back. Never the body: an alert shows the subject. */
+interface EmailRow {
+  id: string;
+  client_id: string;
+  contact_id: string | null;
+  short_code: string | null;
+  subject: string | null;
+  spam_verdict: string | null;
+}
+
 export interface Alert {
   title: string;
   body: string;
   threadKey: string;
   messageId: string;
+  /** What arrived, sent to the apps as `type`. Unset is a text, as every alert was before email. */
+  kind?: "sms" | "email";
 }
 
-export async function pushText(env: Env, ec: Ctx, req: Request): Promise<Response> {
+/** The database's own secret (Vault 'sss_phone_push_secret'), the same for texts and email. */
+function checkPushSecret(env: Env, req: Request): void {
   const secret = env.PUSH_WEBHOOK_SECRET ?? "";
   if (!secret || !safeEqual(req.headers.get("x-push-secret") ?? "", secret)) {
     throw new ApiError("unauthorized", "Not allowed.");
   }
-  let payload: { type?: string; table?: string; record?: SmsRecord } | null = null;
+}
+
+async function webhookPayload<T>(req: Request): Promise<{ type?: string; table?: string; record?: T } | null> {
   try {
-    payload = await req.json();
+    return await req.json();
   } catch {
     throw new ApiError("bad_request", "Expected a database webhook payload.");
   }
+}
+
+export async function pushText(env: Env, ec: Ctx, req: Request): Promise<Response> {
+  checkPushSecret(env, req);
+  const payload = await webhookPayload<SmsRecord>(req);
   const rec = payload?.record;
   if (payload?.type === "INSERT" && payload.table === "sms_messages" && rec?.direction === "in" && rec.client_id) {
     ec.waitUntil(deliver(env, rec).catch((e) => logFault({
@@ -66,8 +91,34 @@ export async function pushText(env: Env, ec: Ctx, req: Request): Promise<Respons
   return noContent();
 }
 
-/** Who owns this inbound text (plan section 7). */
-export async function textOwners(admin: Admin, rec: SmsRecord): Promise<{ owners: string[]; contactName: string | null }> {
+/** email-inbound's client_id for mail it could not place with any business (emailInbound.ts). */
+const UNATTRIBUTED = "__unattributed__";
+
+/**
+ * The trigger (migration 267) sends {id, client_id} and nothing else, so no email's words sit in
+ * pg_net's queue. Only those two are read here, and only to find the row again: deliverEmail
+ * reads everything it shows from the table.
+ */
+export async function pushEmail(env: Env, ec: Ctx, req: Request): Promise<Response> {
+  checkPushSecret(env, req);
+  const payload = await webhookPayload<{ id?: unknown; client_id?: unknown }>(req);
+  const id = typeof payload?.record?.id === "string" ? payload.record.id : "";
+  const clientId = typeof payload?.record?.client_id === "string" ? payload.record.client_id : "";
+  if (payload?.type === "INSERT" && payload.table === "email_inbound" && UUID_RE.test(id)
+      && clientId && clientId !== UNATTRIBUTED) {
+    ec.waitUntil(deliverEmail(env, id, clientId).catch((e) => logFault({
+      code: "push_email_failed", clientId, message: `email alert failed: ${(e as Error).message}`,
+    })));
+  }
+  return noContent();
+}
+
+/** Who owns this inbound text (plan section 7). `contactFound` is false when the contact id
+ *  names no contact of this business. */
+export async function textOwners(
+  admin: Admin,
+  rec: Pick<SmsRecord, "client_id" | "contact_id">,
+): Promise<{ owners: string[]; contactName: string | null; contactFound: boolean }> {
   type ContactOwner = { name: string | null; owner_user_id: string | null };
   const contact: ContactOwner | null = rec.contact_id
     ? must(
@@ -83,7 +134,7 @@ export async function textOwners(admin: Admin, rec: SmsRecord): Promise<{ owners
 
   if (contact?.owner_user_id) {
     const owner = withPhone.find((u) => u.user_id === contact!.owner_user_id);
-    return { owners: owner ? [owner.user_id] : [], contactName: contact.name ?? null };
+    return { owners: owner ? [owner.user_id] : [], contactName: contact.name ?? null, contactFound: true };
   }
   const owners: string[] = [];
   const narrowed: string[] = [];
@@ -100,7 +151,7 @@ export async function textOwners(admin: Admin, rec: SmsRecord): Promise<{ owners
       if (!r.error && Array.isArray(r.data) && r.data.map(String).includes(String(rec.contact_id))) owners.push(narrowed[i]);
     });
   }
-  return { owners, contactName: contact?.name ?? null };
+  return { owners, contactName: contact?.name ?? null, contactFound: contact !== null };
 }
 
 function formatNumber(e164: string | null): string {
@@ -108,15 +159,86 @@ function formatNumber(e164: string | null): string {
   return d ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : (e164 ?? "Unknown number");
 }
 
-async function deliver(env: Env, rec: SmsRecord): Promise<void> {
-  const admin = adminClient(env);
+/** At most `max` characters, the last three of them "..." when it was cut. Never cuts an emoji
+ *  in half (a lone surrogate is not valid text to Google or Apple). */
+function clip(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max - 3);
+  return `${/[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut}...`;
+}
+
+async function phoneIsOn(admin: Admin, clientId: string): Promise<boolean> {
   const cs = must(
-    await admin.from("client_settings").select("phone_status").eq("client_id", rec.client_id).maybeSingle(),
+    await admin.from("client_settings").select("phone_status").eq("client_id", clientId).maybeSingle(),
     "read phone switch",
   ) as { phone_status?: string } | null;
-  if (cs?.phone_status !== "on") return;
+  return cs?.phone_status === "on";
+}
+
+async function deliver(env: Env, rec: SmsRecord): Promise<void> {
+  const admin = adminClient(env);
+  if (!(await phoneIsOn(admin, rec.client_id))) return;
 
   const { owners, contactName } = await textOwners(admin, rec);
+  const body = String(rec.body ?? "").trim();
+  await alertDevices(env, admin, owners, {
+    title: contactName || formatNumber(rec.from_number),
+    body: body ? clip(body, 140) : (Number(rec.num_media) > 0 ? "Photo received" : "New text"),
+    threadKey: rec.contact_id ?? `n:${rec.from_number ?? ""}`,
+    messageId: rec.id,
+  });
+}
+
+/**
+ * A customer's email, the alert reading "<contact>" over "Email: <subject>" (the app's own
+ * foreground alert, threads.ts lastMessageText), never any of the body. A contact with no name
+ * is "New email": the sender's own name or address would go through Google and Apple too, and
+ * the privacy page promises only the contact's name and the subject. Nothing is sent when:
+ *   • the row isn't this business's (the payload names a row; it never vouches for one);
+ *   • neither the row nor its design names a contact of this business (the same rule as 261's
+ *     live updates: no contact, no conversation to open);
+ *   • the provider said the sender failed SPF, DKIM or DMARC or was spam. A forged "From:" must
+ *     never ring the team's phones. No verdict at all is unknown, not failed, and still alerts,
+ *     as the thread shows such a reply without its "Couldn't confirm this came from" line;
+ *   • the business's phone is off.
+ */
+async function deliverEmail(env: Env, id: string, clientId: string): Promise<void> {
+  const admin = adminClient(env);
+  const row = must(
+    await admin.from("email_inbound")
+      .select("id, client_id, contact_id, short_code, subject, spam_verdict")
+      .eq("id", id).eq("client_id", clientId).maybeSingle(),
+    "read received email",
+  ) as EmailRow | null;
+  if (!row) return;
+  if (senderVerifiedFrom(row.spam_verdict) === false) return;
+
+  let contactId = row.contact_id;
+  if (!contactId && row.short_code) {
+    const design = must(
+      await admin.from("designs").select("contact_id").eq("client_id", row.client_id).eq("short_code", row.short_code).maybeSingle(),
+      "read design",
+    ) as { contact_id: string | null } | null;
+    contactId = design?.contact_id ?? null;
+  }
+  if (!contactId) return;
+  if (!(await phoneIsOn(admin, row.client_id))) return;
+
+  const { owners, contactName, contactFound } = await textOwners(admin, { client_id: row.client_id, contact_id: contactId });
+  if (!contactFound) return;
+  const subject = String(row.subject ?? "").replace(/\s+/g, " ").trim();
+  await alertDevices(env, admin, owners, {
+    title: contactName?.trim() || "New email",
+    body: clip(`Email: ${subject || "(no subject)"}`, 140),
+    threadKey: contactId,
+    messageId: row.id,
+    kind: "email",
+  });
+}
+
+/** Sends one alert to every device these people have a push token on, forgetting the tokens
+ *  Google or Apple say are gone. */
+async function alertDevices(env: Env, admin: Admin, owners: string[], alert: Alert): Promise<void> {
   if (!owners.length) return;
   const devices = (must(
     await admin.from("phone_devices").select("id, user_id, platform, build_type, push_token, push_kind")
@@ -124,14 +246,6 @@ async function deliver(env: Env, rec: SmsRecord): Promise<void> {
     "read devices",
   ) as Device[] | null) ?? [];
   if (!devices.length) return;
-
-  const body = String(rec.body ?? "").trim();
-  const alert: Alert = {
-    title: contactName || formatNumber(rec.from_number),
-    body: body ? (body.length > 140 ? `${body.slice(0, 137)}...` : body) : (Number(rec.num_media) > 0 ? "Photo received" : "New text"),
-    threadKey: rec.contact_id ?? `n:${rec.from_number ?? ""}`,
-    messageId: rec.id,
-  };
 
   const results = await Promise.allSettled(devices.map((d) =>
     d.push_kind === "fcm" ? sendFcm(env, d.push_token, alert) : sendApns(env, d.push_token, d.build_type === "dev" ? "dev" : "prod", alert)));
@@ -176,7 +290,7 @@ async function fcmAccessToken(sa: { client_email: string; private_key: string; t
 
 export async function sendFcm(env: Env, token: string, a: Alert): Promise<SendResult> {
   if (!env.FCM_SERVICE_ACCOUNT_JSON) {
-    await logFault({ code: "push_fcm_not_configured", severity: "info", throttleMs: 3_600_000, message: "FCM_SERVICE_ACCOUNT_JSON is not set; Android text alerts are skipped." });
+    await logFault({ code: "push_fcm_not_configured", severity: "info", throttleMs: 3_600_000, message: "FCM_SERVICE_ACCOUNT_JSON is not set; Android text and email alerts are skipped." });
     return "skipped";
   }
   let sa: { client_email: string; private_key: string; project_id: string; token_uri?: string };
@@ -194,7 +308,7 @@ export async function sendFcm(env: Env, token: string, a: Alert): Promise<SendRe
       message: {
         token,
         notification: { title: a.title, body: a.body },
-        data: { type: "sms", thread_key: a.threadKey, message_id: a.messageId },
+        data: { type: a.kind ?? "sms", thread_key: a.threadKey, message_id: a.messageId },
         android: { priority: "high", collapse_key: a.threadKey.slice(0, 64), notification: { tag: a.threadKey, channel_id: "texts" } },
       },
     }),
@@ -247,7 +361,7 @@ export async function sendApns(env: Env, token: string, buildType: "dev" | "prod
   if (!env.APNS_KEY_P8 || !env.APNS_KEY_ID || !env.APNS_TEAM_ID || !topic) {
     await logFault({
       code: `push_apns_not_configured_${buildType}`, severity: "info", throttleMs: 3_600_000,
-      message: `The APNs key, key id, team id or the ${buildType === "dev" ? "APNS_BUNDLE_ID_DEV / APNS_BUNDLE_ID" : "APNS_BUNDLE_ID"} topic is not set; iPhone text alerts for ${buildType} builds are skipped.`,
+      message: `The APNs key, key id, team id or the ${buildType === "dev" ? "APNS_BUNDLE_ID_DEV / APNS_BUNDLE_ID" : "APNS_BUNDLE_ID"} topic is not set; iPhone text and email alerts for ${buildType} builds are skipped.`,
     });
     return "skipped";
   }
@@ -264,7 +378,7 @@ export async function sendApns(env: Env, token: string, buildType: "dev" | "prod
     },
     body: JSON.stringify({
       aps: { alert: { title: a.title, body: a.body }, sound: "default", "thread-id": a.threadKey },
-      type: "sms", thread_key: a.threadKey, message_id: a.messageId,
+      type: a.kind ?? "sms", thread_key: a.threadKey, message_id: a.messageId,
     }),
   });
   if (res.ok) return "sent";

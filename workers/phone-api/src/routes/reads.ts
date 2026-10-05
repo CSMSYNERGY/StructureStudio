@@ -10,6 +10,7 @@
 // Texts follow the contacts area, as they always have; "mine" narrows the thread LIST only.
 // Email follows it the same way (emailThread.ts shapes it), and is never narrowed by phone level.
 
+import { senderVerifiedFrom } from "../../../../supabase/functions/_shared/crmFeed.ts";
 import { hasPaidFeature } from "../../../../supabase/functions/_shared/featureCheck.ts";
 import type { Env } from "../env";
 import { warmStates, type WarmInfo } from "../callEvents";
@@ -286,6 +287,8 @@ interface ThreadEvent {
   sent_by: string | null;
   /** The text itself, for texts: the thread's number comes from it. */
   sms: MsgRow | null;
+  /** A customer's email only: crmFeed's verdict on its sender (false: failed SPF, DKIM or DMARC). */
+  sender_verified?: boolean | null;
 }
 
 /** One table's newest rows below the cursor. `full` means it hit its limit: older rows exist that it didn't read. */
@@ -330,14 +333,14 @@ export async function listThreads(env: Env, req: Request): Promise<Response> {
   // conversation or test), on a contact. Mail from someone who isn't a contact isn't listed,
   // as in the portal, and quotes and invoices show inside the conversation, not here.
   const received = async (): Promise<Scan> => {
-    let q = c.admin.from("email_inbound").select("id, contact_id, subject, received_at")
+    let q = c.admin.from("email_inbound").select("id, contact_id, subject, received_at, spam_verdict")
       .eq("client_id", client).not("contact_id", "is", null).order("received_at", { ascending: false }).limit(EMAIL_SCAN);
     if (cursor) q = q.lt("received_at", cursor);
-    const rows = (must(await q, "list received email") as { id: string; contact_id: string; subject: string | null; received_at: string }[] | null) ?? [];
+    const rows = (must(await q, "list received email") as { id: string; contact_id: string; subject: string | null; received_at: string; spam_verdict: string | null }[] | null) ?? [];
     return {
       events: rows.map((r) => ({
         key: r.contact_id, contact_id: r.contact_id, at: r.received_at, direction: "in",
-        body: r.subject ?? "", channel: "email", sent_by: null, sms: null,
+        body: r.subject ?? "", channel: "email", sent_by: null, sms: null, sender_verified: senderVerifiedFrom(r.spam_verdict),
       })),
       full: rows.length === EMAIL_SCAN,
     };
@@ -448,7 +451,13 @@ export async function listThreads(env: Env, req: Request): Promise<Response> {
       // says nothing about where texts from it went.
       e164: g.sms ? customerNumber(g.sms) : toE164(contact?.phone),
       ...(channels ? { e164_source: g.sms ? "sms" : "contact" } : {}),
-      last: { body: g.last.body, direction: g.last.direction, at: g.last.at, ...(channels ? { channel: g.last.channel } : {}) },
+      last: {
+        body: g.last.body, direction: g.last.direction, at: g.last.at,
+        ...(channels ? { channel: g.last.channel } : {}),
+        // A customer's email: false when its sender failed SPF, DKIM or DMARC, so the apps don't
+        // alert on a forged "From:" (the rule /push/email keeps). null is unknown, and alerts.
+        ...(g.last.channel === "email" && g.last.direction === "in" ? { sender_verified: g.last.sender_verified ?? null } : {}),
+      },
     });
     if (threads.length >= PAGE) break;
   }
@@ -595,10 +604,32 @@ export function searchTerm(q: string): string {
   return q.replace(/[^\p{L}\p{N} .'@_-]/gu, " ").replace(/\s+/g, " ").trim().slice(0, 60);
 }
 
+/**
+ * The email-address half of `?email=1`: lower case, with the characters an address holds (a `+`
+ * too, which searchTerm drops) and nothing a PostgREST filter would trip on. Null when it is
+ * too short to search addresses by: under 3 characters with no @, a term like "co" or "ma"
+ * would match every .com and gmail address.
+ */
+export function emailSearchTerm(q: string): string | null {
+  const t = q.toLowerCase().replace(/[^\p{L}\p{N}.'@_+-]/gu, "").slice(0, 60);
+  return t.length >= 3 || (t.length >= 2 && t.includes("@")) ? t : null;
+}
+
+/**
+ * GET /search?q=: contacts by name or 3+ digits of their number, each with a number to call or
+ * text. `&email=1` (2026-10-05, the phone app's New message) also matches the email address and
+ * keeps a contact that has only an email: every row then carries `email` (null when there is
+ * none), and `e164` is null for an email-only one. Address matches are read separately and come
+ * after the name and number matches, so a common address fragment never pushes a name out of
+ * the 20. Without it the answer is exactly as before, which old app builds, the extension's
+ * Keypad and New message, and the Contacts tab (a call list) all read.
+ */
 export async function search(env: Env, req: Request): Promise<Response> {
   const c = await requireCaller(env, req);
   if (c.ctx.contacts_level === "none") return ok({ contacts: [] });
-  const raw = new URL(req.url).searchParams.get("q") ?? "";
+  const url = new URL(req.url);
+  const raw = url.searchParams.get("q") ?? "";
+  const withEmail = url.searchParams.get("email") === "1";
   const term = searchTerm(raw);
   const digits = raw.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
   if (term.length < 2 && digits.length < 3) return ok({ contacts: [] });
@@ -606,20 +637,35 @@ export async function search(env: Env, req: Request): Promise<Response> {
   const ors: string[] = [];
   if (term.length >= 2) ors.push(`name.ilike.*${term}*`);
   if (digits.length >= 3) ors.push(`phone_digits.like.*${digits}*`);
-  const rows = (must(
-    await c.admin.from("crm_contacts").select("id, name, phone, phone_digits")
-      .eq("client_id", c.ctx.client_id).is("merged_into", null).or(ors.join(","))
-      .order("updated_at", { ascending: false }).limit(60),
-    "search contacts",
-  ) as { id: string; name: string | null; phone: string | null; phone_digits: string | null }[] | null) ?? [];
+  type Row = { id: string; name: string | null; phone: string | null; phone_digits: string | null; email?: string | null };
+  const contactsQuery = () =>
+    c.admin.from("crm_contacts").select(withEmail ? "id, name, phone, phone_digits, email" : "id, name, phone, phone_digits")
+      .eq("client_id", c.ctx.client_id).is("merged_into", null)
+      .order("updated_at", { ascending: false }).limit(60);
+  const emailTerm = withEmail ? emailSearchTerm(raw) : null;
+  const [byName, byEmail] = await Promise.all([
+    contactsQuery().or(ors.join(",")),
+    // email_lower is generated (lower(btrim(email)), migration 130).
+    emailTerm ? contactsQuery().ilike("email_lower", `*${emailTerm}*`) : null,
+  ]);
+  const named = (must(byName, "search contacts") as Row[] | null) ?? [];
+  const found = new Set(named.map((r) => r.id));
+  const addressed = byEmail ? ((must(byEmail, "search contacts by email") as Row[] | null) ?? []).filter((r) => !found.has(r.id)) : [];
+  const rows = [...named, ...addressed];
 
   const visible = await visibleContactIds(c, rows.map((r) => r.id));
   const contacts = [];
   for (const r of rows) {
     if (!visible.has(r.id)) continue;
     const e164 = toE164(r.phone) ?? toE164(r.phone_digits);
-    if (!e164) continue; // nothing to call or text
-    contacts.push({ id: r.id, name: r.name ?? "", e164 });
+    if (withEmail) {
+      const email = emailAddress(r.email);
+      if (!e164 && !email) continue; // nothing to call, text or email
+      contacts.push({ id: r.id, name: r.name ?? "", e164, email });
+    } else {
+      if (!e164) continue; // nothing to call or text
+      contacts.push({ id: r.id, name: r.name ?? "", e164 });
+    }
     if (contacts.length >= 20) break;
   }
   return ok({ contacts });
