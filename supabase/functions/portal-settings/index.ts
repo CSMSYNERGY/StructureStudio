@@ -1527,13 +1527,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 }
 
   if (action === "status") {
-    // ALL FIVE READS AT ONCE (2026-10-01). Nothing below depends on another read's answer —
+    // ALL THE READS AT ONCE (2026-10-01). Nothing below depends on another read's answer —
     // each keys on clientId or userId alone — and `status` is the portal shell's bootstrap,
     // awaited on every boot, so five sequential round trips were five times the wait for the
     // first paint. Each read keeps its own tolerance exactly as before (see the notes on each
     // below); only the waiting is shared. The pre-232 branding retry stays sequential: it runs
     // only when the first branding read fails, which is rare by design.
-    const [prRes, settingsRes, cfgFirst, loginPrefRes, phoneRes, validRes] = await Promise.all([
+    const [prRes, settingsRes, cfgFirst, loginPrefRes, phoneRes, validRes, cornerRes] = await Promise.all([
       // The caller's own preferences row. Best-effort: a failure here must never stop the
       // bootstrap call that every role depends on to learn its access map.
       userId
@@ -1561,6 +1561,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         : Promise.resolve({ data: null, error: null }),
       // How long quotes stay good for (migration 269) — see the note below.
       readQuoteValidDays(admin, clientId),
+      // The four-corner page on the quote (migration 276) — see the note below.
+      admin.from("client_settings").select("quote_corner_views").eq("client_id", clientId).maybeSingle(),
     ]);
     const pr = prRes.data;
     const myPrefs: Record<string, unknown> | null =
@@ -1606,6 +1608,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // OWN READ, AND TOLERANT, for the same reason as the two above. A failed read answers null,
     // and the Settings card then hides the box rather than offer a number it could not save.
     const quoteValidDays: number | null = validRes.ok ? validRes.days : null;
+    // Does page 2 of the quote show the building from all four corners (client_settings.
+    // quote_corner_views, migration 276)? ITS OWN READ, AND TOLERANT, for the same reason as the
+    // three above. A failed read answers null and the Settings card hides the switch; a tenant with
+    // no settings row reads off, which is the column's default.
+    const { data: cornerRow, error: cornerErr } = cornerRes;
+    const quoteCornerViews: boolean | null = cornerErr
+      ? null
+      : (cornerRow as { quote_corner_views?: boolean } | null)?.quote_corner_views === true;
     // STATUS FIELD FILTER. This action is "open" in GATES because it is the shell's
     // bootstrap: every role needs clientId/role/branding/business identity to render the
     // portal at all, so denying it would black out the app rather than close one card. The
@@ -1700,6 +1710,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       businessLogoUrl: data?.business_logo_url ?? null,
       quoteTerms: data?.quote_terms ?? null,
       quoteValidDays,
+      quoteCornerViews,
       showPricing: Boolean(data?.show_pricing),
       updatedAt: data?.updated_at ?? null,
       // designer branding (client_configs)
@@ -1816,6 +1827,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         return json({ error: `Quotes have to stay good for a whole number of days, from ${QUOTE_VALID_DAYS_MIN} to ${QUOTE_VALID_DAYS_MAX}.` }, 400);
       }
       updates.quote_valid_days = days;
+    }
+    // The four-corner page on the quote (migration 276). A real boolean or a refusal: this switch
+    // changes what every customer's quote looks like, so a stray "false" string (truthy) must not
+    // turn it on. The Settings card sends it only when `status` could read the column, so an
+    // ordinary save never names it on a database without 276.
+    if ("quoteCornerViews" in payload) {
+      if (typeof payload.quoteCornerViews !== "boolean") {
+        return json({ error: "The four-corner page setting has to be on or off." }, 400);
+      }
+      updates.quote_corner_views = payload.quoteCornerViews;
     }
     if ("betaEmail" in payload) updates.beta_email = trimOrNull(payload.betaEmail, 320);
     if ("betaMode" in payload) updates.beta_mode = Boolean(payload.betaMode);
@@ -2312,6 +2333,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         };
       } catch (_) { return null; }
     })();
+    // Cladding offered per style (207), with each lap row's course size (style_cladding.exposure_in,
+    // migration 275) in the same read. On a database before 275 PostgREST answers 42703 for the whole
+    // select, so it is read again without the column and `courses` answers false: the card then
+    // hides its "Course (in)" box rather than offer one it cannot save, and every other column of
+    // the card still loads. Any other error is returned as it is, into the error loop below.
+    const CLADDING_COLUMNS = "id, style_id, cladding_id, label_override, rate, basis, taxable, internal_only, active, sort_order";
+    const claddingRead = (async () => {
+      const read = (cols: string) => admin.from("style_cladding").select(cols).eq("client_id", clientId).order("sort_order");
+      const res = await read(`${CLADDING_COLUMNS}, exposure_in`);
+      if (res.error && String((res.error as { code?: string }).code ?? "") === "42703") {
+        return { ...(await read(CLADDING_COLUMNS)), courses: false };
+      }
+      return { ...res, courses: !res.error };
+    })();
     const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes, wallet] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
@@ -2341,7 +2376,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin.from("style_wall_heights").select("id, style_id, delta_in, rate_per_lf, taxable, active, sort_order, widths_ft, internal_only, build_on_site, bos_fee_basis, bos_fee_rate").eq("client_id", clientId).order("delta_in"),
       // Cladding offered per style (207). The card renders a FIXED four rows per style, so a
       // style with no rows is not "broken" — it is a style offering builder's standard only.
-      admin.from("style_cladding").select("id, style_id, cladding_id, label_override, rate, basis, taxable, internal_only, active, sort_order").eq("client_id", clientId).order("sort_order"),
+      // Read above (claddingRead), for the lap course size and its fallback.
+      claddingRead,
       // Insulation rates (177) for the Options tab matrix.
       admin.from("insulation_offerings").select("id, ins_type, area, rate_per_sqft, taxable, active, internal_only").eq("client_id", clientId),
       admin.from("electrical_settings").select("*").eq("client_id", clientId).maybeSingle(),
@@ -2385,6 +2421,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       electrical: electricalRes.data ?? null,
       electricalItems: elecItemsRes.data ?? [],
       foundation: foundationRes.data ?? [],
+      // Can the Cladding card offer a lap course size (275)? False only on a database before it.
+      claddingCourses: claddingRes.courses === true,
       insulationEnabled: (csRamp.data as { insulation_enabled?: boolean } | null)?.insulation_enabled === true, rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
   }
 
@@ -5717,6 +5755,26 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const basisRaw = String(row?.basis ?? "").trim();
       if (basisRaw !== "" && !BASES.has(basisRaw)) { skipped.push(`${cid}: "${basisRaw}" is not a pricing basis`); i++; continue; }
 
+      // How much of each LAP board shows, in inches (exposure_in, 275): what the 3D draws the
+      // courses at, and nothing else — it never prices. Written only when the row NAMES it, so a
+      // portal that predates 275 (production's, until it is promoted) never touches a size a
+      // builder set. Blank is a real state, "the 3D's standard 6 in", and reaches the column as
+      // NULL. Refused, never coerced, on any other cladding or outside 3..12: the column's CHECK
+      // says the same, and a sentence here beats a constraint name in the skipped list. A blank on
+      // another cladding is simply nothing to write.
+      const courses: { exposure_in?: number | null } = {};
+      if (row && "exposureIn" in row) {
+        const exRaw = row.exposureIn == null ? "" : String(row.exposureIn).trim();
+        if (exRaw !== "" && cid !== "lap") { skipped.push(`${cid}: only lap siding takes a course size`); i++; continue; }
+        if (exRaw !== "") {
+          const n = Number(exRaw);
+          if (!Number.isFinite(n) || n < 3 || n > 12) { skipped.push(`${cid}: "${exRaw}" is not a course size from 3 to 12 inches`); i++; continue; }
+          courses.exposure_in = n;
+        } else if (cid === "lap") {
+          courses.exposure_in = null;
+        }
+      }
+
       const patch = {
         label_override: String(row?.labelOverride ?? "").trim().slice(0, 60) || null,
         rate,
@@ -5725,6 +5783,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         active: row?.active !== false,
         internal_only: row?.internalOnly === true,
         sort_order: i,
+        ...courses,
         updated_at: new Date().toISOString(),
       };
       const up = await admin.from("style_cladding")

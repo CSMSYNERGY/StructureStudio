@@ -4629,7 +4629,8 @@ const D3_DEFAULT_ROOF = { type: "gable", pitch: 0.4 };
 // The customer-facing exterior material. Carolyn's direction (2026-08-18): call it
 // CLADDING, not siding, and offer three genuinely different products rather than one
 // texture rotated:
-//   lap     horizontal boards, each course overlapping the one below (~6in exposure)
+//   lap     horizontal boards, each course overlapping the one below (~6in exposure; a
+//           builder's own size per style since 275, see d3CladdingFor)
 //   panel   vertical 4ft x 8ft sheets with grooves cut INTO the face (T1-11 / EWGWG)
 //   agpanel metal sheets whose ribs stand OUT, overlapping at the rib (Panel-Loc Plus)
 // `batten` is kept as a FOURTH, non-customer-facing id so the tenants whose styles
@@ -4691,6 +4692,23 @@ function d3NormalizeCladding(v) {
   if (s === "batten" || s === "board-and-batten" || s === "bnb") return "batten";
   if (s === "agpanel" || s === "ag" || s === "metal" || s === "panel-loc" || s === "panelloc") return "agpanel";
   return "panel"; // null / "" / "groove" / "panel" / "t111" / anything unrecognised
+}
+
+// THE CLADDING THE RENDERER DRAWS (275, 2026-10-05). A builder asked for "an option for 4.5" vinyl
+// siding": their lap row already sells it, renamed, but every lap wall was drawn in D3_CLADDING's 6 in
+// courses. exposureIn is that builder's own size for the lap row (style_cladding.exposure_in, inches,
+// 3..12), carried here as spec.sidingExposureIn. Every other case returns the D3_CLADDING entry
+// ITSELF, the very object the renderer has always used, so a building with no size draws exactly as
+// it did. With a size, lap's two vertical measures scale together: stepFt (the relief courses, and
+// the gable caps' and wing triangles' courses, which all read clad.stepFt) and tileFtV, which keeps
+// the raster's 8 boards per tile on the same courses. Both count from y = 0, so the texture and the
+// proud course lines stay in phase. The width of a tile (tileFtU) is grain, not courses, and stays.
+function d3CladdingFor(siding, exposureIn) {
+  const base = D3_CLADDING[d3NormalizeCladding(siding)] || D3_CLADDING.panel;
+  const n = exposureIn == null || exposureIn === "" ? NaN : Number(exposureIn);
+  if (base.relief !== "lap" || !(n >= 3 && n <= 12)) return base;
+  const stepFt = n / 12;
+  return { ...base, stepFt, tileFtV: base.tileFtV * stepFt / base.stepFt };
 }
 
 // ── METAL ROOF PROFILE ────────────────────────────────────────────────────────────
@@ -8281,7 +8299,9 @@ function d3WingsElevation(spec, sizeLabel, focusKey, frame) {
 // default height, like IdeaRoom's wall-raise feature. customerFoundation (from
 // d3CustomerFoundation, 2026-09-28) is the customer's foundation pick: "piers" stands
 // the building on piers whatever the style's own foundation is (see the end).
-function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOverride, customerWallHeightFt, customerFoundation) {
+// sidingExposureIn (from d3CladdingExposureIn, 275) is the lap course size, in inches, the
+// builder set on the lap siding the customer picked (see the end too).
+function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOverride, customerWallHeightFt, customerFoundation, sidingExposureIn) {
   const key = String(styleValue || "").trim().toLowerCase();
   const base = D3_STYLE_DEFAULTS[key] || {};
   const o = (styleCfg && styleCfg.d3) || {};
@@ -8360,6 +8380,13 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     else { delete spec.floorHeightFt; delete spec.gradeFallFt; delete spec.gradeFallToward; if (spec.foundation !== "slab") delete spec.gradeCornersFt; }
     spec.foundation = customerFoundation;
   }
+  // THE BUILDER'S LAP COURSE (275, 2026-10-05), for the lap siding the customer picked: a 4.5 in
+  // vinyl drawn in 4.5 in courses, not the 6 in every lap wall had (d3CladdingFor). The same rule as
+  // the foundation above: only the five customer-facing call sites pass it, and openCalEditor never
+  // does, because this object is what the calibration panel posts back as the style, and a size
+  // that belongs to the customer's pick must never be frozen into building_styles.d3. Named only
+  // when given and only on lap, so every other call returns the object it always returned.
+  if (sidingExposureIn != null && d3NormalizeCladding(spec.siding) === "lap") spec.sidingExposureIn = sidingExposureIn;
   return spec;
 }
 
@@ -8388,6 +8415,20 @@ function d3SidingOverride(config, sel) {
     if (/lap/i.test(v) && (/sid/i.test(v) || /sid/i.test(k))) return "lap";
   }
   return null;
+}
+
+// THE LAP COURSE THE BUILDER SELLS (275, 2026-10-05). The size, in inches, a builder set on this
+// style's Lap Siding row (Settings → Options → Cladding, "Course (in)"; get_config emits it as the
+// entry's exposureIn only where set), when the customer picked that lap siding. null otherwise,
+// which draws the 6 in courses lap has always had: no pick, another cladding, a style or a tenant
+// without the row or the size, or a size outside 3..12 (the column's own CHECK, held here too so a
+// stray value can never reach the renderer). resolveCladding is the pricing lookup, internal-only
+// rows included, so a rep's pick draws the same size it prices at. d3ResolveStyleSpec's 7th argument.
+function d3CladdingExposureIn(config, sel) {
+  if (!config || !sel || sel.cladding !== "lap") return null;
+  const o = resolveCladding(config, sel.style, "lap");
+  const n = o && o.exposureIn != null && o.exposureIn !== "" ? Number(o.exposureIn) : NaN;
+  return n >= 3 && n <= 12 ? n : null;
 }
 
 // THE CUSTOMER'S PIERS, DRAWN (2026-09-28). Carolyn, opening Designer > Foundation: "if they choose
@@ -9329,8 +9370,9 @@ function buildShed3DModel(THREE, p) {
   };
   // Cladding texture — multiplies the body color, so the customer's paint still drives
   // the hue while the pattern supplies the relief. One entry in D3_CLADDING decides the
-  // raster, the relief style below, and the tile scale.
-  const clad = D3_CLADDING[d3NormalizeCladding(p.styleSpec && p.styleSpec.siding)] || D3_CLADDING.panel;
+  // raster, the relief style below, and the tile scale; d3CladdingFor sizes a lap entry's
+  // courses to the builder's own (275), and hands back the entry itself everywhere else.
+  const clad = d3CladdingFor(p.styleSpec && p.styleSpec.siding, p.styleSpec && p.styleSpec.sidingExposureIn);
   // How far the cladding's proudest surface stands from the wall CENTRE-line, and the one
   // number every trim face must clear. Relief strips sit CLAD_RELIEF_OUT from the centre
   // with depth 0.1 (lap, batten) or 0.05 (rib), so their outer face lands at 0.23 / 0.205;
@@ -14290,6 +14332,134 @@ async function renderDefault3DShot(p) {
   return { url: shots[0].url, w: shots[0].w, h: shots[0].h };
 }
 
+// ─── THE QUOTE'S FOUR CORNERS (migration 276, 2026-10-05) ─────────────────────────────────
+// Carolyn, 2026-08-20: a page of the estimate that is "optional for them" and "gets 4 sides. So 4
+// quadrants", on its own sheet so it prints on the back of the floor plan. 2026-09-08, in writing:
+// "we want to see 4 images... one from each corner". A corner view shows two walls, so four of them
+// show every wall, and the 09-08 wording meets the 08-20 one. A builder switches it on in Settings →
+// Company (client_settings.quote_corner_views); get_config then carries `quoteCornerViews: true`,
+// and submitQuote puts this sheet on page 2 IN PLACE OF the single view. Off, nothing here runs.
+//
+// A SIBLING of renderDefault3DShot, for the reason renderSelfCheckShots is one: the quote's own
+// function keeps its one camera and its 1200 x 900 at 0.9 (a test pins them), so every quote from a
+// builder who never switches this on is exactly what it was. This shares d3OffscreenShots (one model
+// build, four camera moves) and the quote camera's FRAMING, and nothing else.
+//
+// THE CAMERAS are d3DefaultShotCamera's — the 34° lens, dist = R * 3.66, the eye half the distance
+// up, the aim at 0.45 of d3FrameHeightFt, both lowered by a raised floor's lift — walked round to the
+// four corners. Azimuth runs from the FRONT wall (frontWall, the door's wall; south before there is a
+// door) toward its RIGHT, D3_WALL_AZIMUTH and ssAzimuthDir's convention, so "left" and "right" are the
+// plan sheet's LEFT and RIGHT (getDisplayLabel): as you stand facing the front. d3FrameHeightFt holds
+// the building top to bottom from any side, because it frames off the longer dimension whatever the
+// angle; across the frame a corner shows at most (W + L) / 2 * cos 45° each side of centre, from at
+// least 3.66 times the half-length away, well inside 4:3. quoteCornerShots_test checks both.
+//
+// THE ORDER IS THE SHEET'S reading order: the front pair on top, the back pair under it, so the left
+// column is the views with the LEFT wall in them and the right column the views with the RIGHT.
+const D3_QUOTE_CORNERS = [
+  { key: "frontLeft", label: "Front left", az: 315 },
+  { key: "frontRight", label: "Front right", az: 45 },
+  { key: "backLeft", label: "Back left", az: 225 },
+  { key: "backRight", label: "Back right", az: 135 },
+];
+function d3QuoteCornerCameras(p) {
+  const off = D3_WALL_AZIMUTH[p.frontWall || "south"] || 0;
+  const frameH = d3FrameHeightFt(p.style3d, p.bldgW, p.bldgH);
+  const R = Math.max(p.bldgW, p.bldgH) * 0.5 + frameH;
+  const dist = R * 3.66;
+  const lift = d3GradeLiftFt(p.style3d);
+  return D3_QUOTE_CORNERS.map((c) => {
+    const dir = ssAzimuthDir(c.az + off);
+    const camX = dir[0] * dist, camZ = dir[1] * dist;
+    return {
+      corner: c.key, label: c.label, azimuthDeg: c.az,
+      fov: 34, far: dist * 10,
+      eye: [camX, dist * 0.5 - lift, camZ],
+      at: [0, frameH * 0.45 - lift, 0],
+      sun: [camX * 0.8, dist * 0.9, camZ * 0.8],
+    };
+  });
+}
+
+// The sheet is US Letter at 192 px an inch, 1632 x 2112: letter-shaped, so buildPdfFromJpegPages lays
+// it edge to edge as it does page 1, and the margins are drawn here, half an inch all round, which
+// every office printer reaches. Each corner shot is 800 x 600 (4:3, the quote shot's shape) at 0.92,
+// drawn into a 700 x 525 cell; the sheet is ONE JPEG, so the PDF wrapper needs nothing new. The
+// block (title, note, the 2 x 2) sits in the middle of the page: four 4:3 pictures fill the width of a
+// portrait page and leave height over, and centred is how a photo page reads.
+const D3_QUOTE_SHEET = { W: 1632, H: 2112, MARGIN: 96, GAP: 40, Q: 0.9 };
+// How long the four pictures get to decode before the sheet gives up. They are data: URLs made a
+// moment ago, so this is never the wait; it is what keeps a browser that never fires onload from
+// holding the customer's submit open forever.
+const D3_QUOTE_SHEET_DECODE_MS = 5000;
+
+// Returns { url, w, h } like renderDefault3DShot, or null — never throws. submitQuote treats a null
+// as "use the single view", which is what the quote carried before this existed.
+async function renderQuoteCornerSheet(p) {
+  const shots = await d3OffscreenShots(p, { w: 800, h: 600, quality: 0.92, cameras: d3QuoteCornerCameras });
+  if (!shots || shots.length !== D3_QUOTE_CORNERS.length) return null;
+  try {
+    const decode = (src) => new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve(im);
+      im.onerror = () => reject(new Error("a corner shot did not decode"));
+      im.src = src;
+    });
+    let timer = null;
+    const imgs = await Promise.race([
+      Promise.all(shots.map((s) => decode(s.url))),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), D3_QUOTE_SHEET_DECODE_MS); }),
+    ]);
+    clearTimeout(timer);
+    if (!imgs) return null;
+
+    const S = D3_QUOTE_SHEET;
+    const cv = document.createElement("canvas");
+    cv.width = S.W; cv.height = S.H;
+    const ctx = cv.getContext("2d");
+    if (!ctx) return null;
+    ctx.fillStyle = "#FFFFFF";
+    ctx.fillRect(0, 0, S.W, S.H);
+    const FONT = "system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+    const cellW = (S.W - S.MARGIN * 2 - S.GAP) / 2;
+    const cellH = Math.round(cellW * 3 / 4);
+    const TITLE = 46, NOTE = 26, LABEL = 30, LABEL_GAP = 14;
+    const rowH = LABEL + LABEL_GAP + cellH;
+    const blockH = TITLE + 18 + NOTE + 56 + rowH * 2 + S.GAP;
+    const top = Math.max(S.MARGIN, Math.round((S.H - blockH) / 2));
+
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#1E293B";
+    ctx.font = `700 ${TITLE}px ${FONT}`;
+    ctx.fillText("Your building from all four corners", S.MARGIN, top + TITLE);
+    ctx.fillStyle = "#64748B";
+    ctx.font = `400 ${NOTE}px ${FONT}`;
+    ctx.fillText("Left and right are as you stand in front of the building, facing it.", S.MARGIN, top + TITLE + 18 + NOTE);
+
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    const gridTop = top + TITLE + 18 + NOTE + 56;
+    for (let i = 0; i < D3_QUOTE_CORNERS.length; i++) {
+      const x = S.MARGIN + (i % 2) * (cellW + S.GAP);
+      const y = gridTop + Math.floor(i / 2) * (rowH + S.GAP);
+      ctx.fillStyle = "#334155";
+      ctx.font = `700 ${LABEL}px ${FONT}`;
+      ctx.fillText(D3_QUOTE_CORNERS[i].label, x, y + LABEL);
+      ctx.drawImage(imgs[i], x, y + LABEL + LABEL_GAP, cellW, cellH);
+      ctx.strokeStyle = "#CBD5E1";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x + 1, y + LABEL + LABEL_GAP + 1, cellW - 2, cellH - 2);
+    }
+    const url = cv.toDataURL("image/jpeg", S.Q);
+    // A lost context or a refused canvas yields "data:," — no sheet, rather than a broken page.
+    if (!url || url.length < 512) return null;
+    return { url, w: S.W, h: S.H };
+  } catch (_e) {
+    return null;
+  }
+}
+
 // ─── THE SELF-CHECK'S OWN CAMERAS (2026-09-19) ────────────────────────────────────────────
 // 896 × 672 at JPEG 0.80, because the design measured the same one-field error at 1280, 1024,
 // 896, 768, 640 and 512 px and the signal is FLAT (9.07 / 9.05 / 9.07 / 9.09 / 9.09 / 9.16 %
@@ -14568,7 +14738,11 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, roOffer, placeableDoors, placeableWindows, placeableRamps, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, dormerWindowId, dormerWindowOffset, perimeterFt, showPricing, onPaintChange, onWallHeight, onDormerWindow, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose, draftOnly = false }) {
+// `quoteCorners` is the builder's four-corner switch (migration 276) as submitQuote reads it
+// (3D on and `quoteCornerViews: true`). Then page 2 is the four-corner sheet, drawn off-screen at
+// submit, and the shot taken here is only the quote's picture (the order screen's card and the
+// customer's quote thumbnail), so the button says that and never "in my quote".
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, roOffer, placeableDoors, placeableWindows, placeableRamps, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, dormerWindowId, dormerWindowOffset, perimeterFt, showPricing, onPaintChange, onWallHeight, onDormerWindow, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose, draftOnly = false, quoteCorners = false }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -16150,7 +16324,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   };
   // This image becomes page 2 of the quote the customer signs against, so it must
   // never be read while a fixture photo is still loading — that would ship a quote
-  // showing blank placeholder doors. Capped so a dead image host can't hang the
+  // showing blank placeholder doors. With the builder's four corners on (`quoteCorners`),
+  // page 2 is the four-corner sheet instead and this image is the quote's picture, which a
+  // customer sees just the same. Capped so a dead image host can't hang the
   // shutter; a warm cache waits for nothing.
   // The photo lands directly in the materials, and capture() renders before it reads
   // the buffer, so waiting for the loads is the whole guard. No animation frame is
@@ -16545,10 +16721,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           <button onClick={() => setInterior((v) => !v)} disabled={phase !== "ready"} style={{ background: "#1E293B", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
           {interior ? "🏠 Show exterior" : "👁 Look inside"}
         </button>
-        {/* No quote to put a view in on a style draft (`draftOnly`). */}
+        {/* No quote to put a view in on a style draft (`draftOnly`). With the four corners on
+            (`quoteCorners`) page 2 is the corner sheet whatever is framed here, so the shot is
+            the quote's picture and the button says so rather than promise a page it is not on. */}
         {!draftOnly && (
         <button onClick={takeSnapshot} disabled={phase !== "ready"} style={{ background: accent, color: ssOnFill(accent), border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
-          {shotTaken ? "✓ Added to quote — retake?" : "📸 Use this view in my quote"}
+          {quoteCorners
+            ? (shotTaken ? "✓ Picture saved — retake?" : "📸 Use this view as my quote's picture")
+            : (shotTaken ? "✓ Added to quote — retake?" : "📸 Use this view in my quote")}
         </button>
         )}
         </div>
@@ -23192,7 +23372,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // nudged, and on a render only while a vent is SELECTED (the toolbar's zone readout), so an
   // ordinary render never pays for it.
   const ventRoof2D = () => {
-    const s = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel));
+    const s = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel));
     return { roof: (s && s.roof) || D3_DEFAULT_ROOF, H: (s && s.wallHeightFt) || D3.WALL_H };
   };
   const sizeOpts = selectedStyle && Array.isArray(selectedStyle.sizes) ? selectedStyle.sizes : (C.defaultSizes || []);
@@ -27424,20 +27604,36 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // _shared/quotePdf.ts, which appends `designs.image_url` — this very PDF — so anything that
       // does not get in here cannot reach either document. It also leaves view3dImageUrl null, so
       // the portal's order screen stops showing a 3D card for them too.
+      // The building as the off-screen renders draw it. A function, so it is only worked out when
+      // a render is actually taken: a rep's armed shot with the four corners off takes none.
+      const offscreenShotArgs = () => ({
+        bldgW, bldgH, items, itemTypes: ITEMS, frontWall,
+        painted: sel.paint === "Painted", paintBody: paintColors.body, paintTrim: paintColors.trim,
+        scale, mgX, mgY,
+        style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel)),
+        roofType: sel.roofType,
+        roofColorHex: (() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })(),
+        fixtures: C.fixtures, bodyColors: bodyPaintPool, trimColors: trimPaintPool,
+        dormerWindowId: sel.dormerWindowId || null, dormerWindowOffset: sel.dormerWindowOffset || 0,
+      });
       let shot3d = view3dOn ? render3DSnapshotRef.current : null;
       if (!shot3d && view3dOn) {
-        shot3d = await renderDefault3DShot({
-          bldgW, bldgH, items, itemTypes: ITEMS, frontWall,
-          painted: sel.paint === "Painted", paintBody: paintColors.body, paintTrim: paintColors.trim,
-          scale, mgX, mgY,
-          style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel)),
-          roofType: sel.roofType,
-          roofColorHex: (() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })(),
-          fixtures: C.fixtures, bodyColors: bodyPaintPool, trimColors: trimPaintPool,
-          dormerWindowId: sel.dormerWindowId || null, dormerWindowOffset: sel.dormerWindowOffset || 0,
-        });
+        shot3d = await renderDefault3DShot(offscreenShotArgs());
       }
-      if (shot3d) pdfPages.push({ bytes: dataUrlToBytes(shot3d.url), w: shot3d.w, h: shot3d.h });
+      // THE FOUR CORNERS (migration 276): a builder who switched on "Show the building from all four
+      // corners on page 2 of my quotes" gets that sheet INSTEAD of the single view, and only page 2:
+      // shot3d stays the single view, because it is also the 3D image uploaded below, which the order
+      // screen's card and the quote thumbnail show at 4:3. Gated on view3dOn like everything above, so
+      // a builder with 3D off still sends the plan alone whatever the switch says. A sheet that cannot
+      // render (null) leaves the single view on page 2, which is what the quote always carried.
+      // The 3D viewer reads the same test (its quoteCorners prop), so with the switch on its button
+      // offers the quote's picture and never promises a framed view a page of the PDF.
+      let page3d = shot3d;
+      if (view3dOn && C.quoteCornerViews === true) {
+        const sheet = await renderQuoteCornerSheet(offscreenShotArgs());
+        if (sheet) page3d = sheet;
+      }
+      if (page3d) pdfPages.push({ bytes: dataUrlToBytes(page3d.url), w: page3d.w, h: page3d.h });
       const blob = buildPdfFromJpegPages(pdfPages);
       const { error: upErr } = await supabase.storage
         .from("floor-plans")
@@ -27750,7 +27946,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // them back into the modal, and billing for a window that is nowhere on the drawing is
           // the one outcome worth a few lines to prevent. The choice STAYS on the design; it comes
           // back the moment the dormer can hold it again.
-          const dSpec = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel));
+          const dSpec = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel));
           const dRoof = (dSpec && dSpec.roof) || {};
           if (!d3DormerWindowFit(fx, d3DormerWidthFt(dRoof, d3RoofAxes(dRoof, bldgW, bldgH).L), d3DormerFaceFt(dSpec, bldgW, bldgH), sel.dormerWindowOffset)) return [];
           return [{
@@ -33837,7 +34033,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
               painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
               frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
-              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel))}
+              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel))}
               roofType={sel.roofType}
               roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
               fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
@@ -35005,7 +35201,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           styleValue={sel.style} frontWall={frontWall}
           painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
-          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel))}
+          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel))}
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
           fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
@@ -35049,6 +35245,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           onItemDelete={(id) => { setItems((p) => p.filter((i) => i.id !== id && !(i.type === "ramp" && i.snapDoorId === id))); setSelectedId(null); }}
           onSnapshot={(shot) => { render3DSnapshotRef.current = shot || null; setHas3DSnapshot(Boolean(shot)); }}
           onClose={() => setShow3D(false)}
+          quoteCorners={view3dOn && C.quoteCornerViews === true}
         />
       )}
 
