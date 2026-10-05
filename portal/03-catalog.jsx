@@ -28,12 +28,14 @@ function ssQuoteDaysOk(v) {
   return n >= 1 && n <= 365;
 }
 
-function SettingsView({ section }) {
+function SettingsView({ section, view3d = false }) {
   // Which settings cards to render: "connection" (GHL creds + pipeline mapping)
   // or "branding" (customer-link look & feel + business details + pricing
   // display + testing). No section = all (legacy). Form state always covers
   // every field (prefilled from status), so the global save stays safe no
   // matter which section is on screen.
+  // `view3d` is the shell's view3dUnlocked: the four-corner switch (migration 276) shows only where
+  // the tenant has 3D, because without it the quote carries no 3D page at all.
   const show = (k) => !section || section === k;
   const [status, setStatus] = useState(null);   // response of action:"status"
   const [error, setError] = useState(null);
@@ -62,6 +64,8 @@ function SettingsView({ section }) {
     // How many days a quote stays good for (migration 269). A STRING like every other field; "30"
     // is the column's default and what every quote printed before the setting existed.
     quoteValidDays: "30",
+    // Page 2 of the quote from all four corners (migration 276). Off is the column's default.
+    quoteCornerViews: false,
     // Who issues the paperwork (migration 121). Defaults to the CRM — the same default the
     // column has — so a status response that predates the column can't read as "SS issues it".
     // Invoices number separately from quotes (migration 125, Carolyn's decision).
@@ -176,6 +180,7 @@ function SettingsView({ section }) {
         addr1: a.addressLine1 || "", addrCity: a.city || "", addrState: a.state || "", addrZip: a.postalCode || "",
         quoteTerms: data.quoteTerms || "",
         quoteValidDays: typeof data.quoteValidDays === "number" ? String(data.quoteValidDays) : "30",
+        quoteCornerViews: data.quoteCornerViews === true,
         betaMode: Boolean(data.betaMode), betaEmail: data.betaEmail || "", showPricing: Boolean(data.showPricing),
         invoiceInGhl: data.invoiceInGhl !== false,
         ssQuoteNext: data.ssQuoteNext == null ? "" : String(data.ssQuoteNext),
@@ -237,11 +242,20 @@ function SettingsView({ section }) {
       // Only when `status` could read the column: a portal-settings or database without migration
       // 269 never sees the key, so this page can ship ahead of either without breaking the save.
       ...(quoteDaysReady ? { quoteValidDays: quoteDaysBlank ? 30 : Number(form.quoteValidDays) } : {}),
+      // Only when `status` could read the column (migration 276), and only when the owner changed
+      // it: a save from Branding or CRM Connection, or one from a tab opened before someone else
+      // flipped the switch, then never writes back a value nobody on this screen chose.
+      ...(cornerReady && form.quoteCornerViews !== status.quoteCornerViews ? { quoteCornerViews: form.quoteCornerViews === true } : {}),
     };
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
     setBusy(false);
     if (err || (data && data.error)) { setError((data && data.error) || err.message); return; }
     setSaved(true);
+    // The four-corner switch is sent only when it differs from `status`, so `status` has to learn
+    // what was just stored even when the re-read below fails. Otherwise ticking it, saving through
+    // a failed re-read and unticking it again compares false with a stale false, sends nothing,
+    // says "Settings saved." and leaves the page on every quote.
+    if ("quoteCornerViews" in body) setStatus((s) => (s ? { ...s, quoteCornerViews: body.quoteCornerViews } : s));
     // refresh masked status
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
     if (st && !st.error) setStatus(st);
@@ -264,6 +278,9 @@ function SettingsView({ section }) {
   // 269 is applied and portal-settings knows the field; before that (or on a read that failed) it
   // answers null or nothing, and the box stays hidden rather than offer a value it cannot save.
   const quoteDaysReady = Boolean(status && typeof status.quoteValidDays === "number");
+  // The same for the four-corner switch (migration 276): status answers true or false once the
+  // column exists and portal-settings knows it, and null or nothing before, which hides the switch.
+  const cornerReady = Boolean(status && typeof status.quoteCornerViews === "boolean");
   // The SS-paperwork fields used to key on `!form.invoiceInGhl` alone. For a tenant that
   // cannot choose, SS mode is the only mode — including while their row still says otherwise,
   // which is exactly when they need the numbering fields in front of them.
@@ -581,7 +598,7 @@ function SettingsView({ section }) {
           {!ssMode
             ? <>On — your estimates and invoices are created in your CRM and emailed from there, exactly as they are today.</>
             : <><b>{mayGhlInvoice ? "Off — StructureStudio issues your quotes and invoices." : "StructureStudio issues your quotes and invoices."}</b> Each quote is one document: the priced
-                estimate, the floor plan, and a sheet showing all four sides in 3D. Your customer accepts it from
+                estimate, the floor plan, and, if you have 3D, a 3D picture of the building. Your customer accepts it from
                 their quote page, and you invoice from the Orders tab. If a CRM is connected, contacts and
                 opportunities still go there so your pipeline keeps working; if not, everything stays in Structure Studio.</>}
         </p>
@@ -1008,6 +1025,20 @@ function SettingsView({ section }) {
             </div>
             <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
               Your quotes show a “Valid until” date this many days after the quote date. Anywhere from 1 to 365 days.
+            </div>
+          </div>
+        )}
+        {/* Carolyn 2026-08-20: a 3D page on the estimate, "optional for them", that "gets 4 sides. So
+            4 quadrants"; 2026-09-08: "we want to see 4 images... one from each corner". Only where
+            3D is unlocked (no 3D, no 3D page), and only once status can read the setting. */}
+        {view3d && cornerReady && (
+          <div style={{ marginTop: 12 }}>
+            <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
+              <input type="checkbox" checked={form.quoteCornerViews} onChange={set("quoteCornerViews")} style={{ marginTop: 2 }} data-ss-quote-corners />
+              Show the building from all four corners on page 2 of my quotes
+            </label>
+            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
+              Page 2 of your quotes shows four 3D pictures of the building, one from each corner, in place of the single 3D view.
             </div>
           </div>
         )}
@@ -4746,6 +4777,9 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
   const [byStyle, setByStyle] = useState({});
   const [busyId, setBusyId] = useState(null);
   const [msg, setMsg] = useState(null);
+  // Can this database hold a lap course size (style_cladding.exposure_in, 275)? portal-settings
+  // answers false only before 275, and then the box is hidden rather than offered and lost.
+  const [courses, setCourses] = useState(false);
 
   const load = async () => {
     const body = scoped({ action: "catalog" });
@@ -4754,6 +4788,7 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
       String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     setCat(data);
+    setCourses(data.claddingCourses === true);
     const saved = {};
     (data.cladding || []).forEach((r) => { (saved[r.style_id] = saved[r.style_id] || {})[r.cladding_id] = r; });
     const m = {};
@@ -4773,6 +4808,8 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
           taxable: !r || r.taxable !== false,
           active: !r || r.active !== false,
           internalOnly: !!(r && r.internal_only),
+          // Lap only: how much of each board shows, in inches. Blank = the 3D's standard 6 in.
+          exposureIn: c.id === "lap" && r && r.exposure_in != null ? String(r.exposure_in) : "",
         };
       });
     });
@@ -4796,6 +4833,12 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
       if (badRate.length) {
         throw new Error("Nothing was saved — fix these rate(s) first: " + badRate.map((r) => r.builtIn).join(", "));
       }
+      // The course size the same way: a typo must not become a silent 6 in.
+      const lapRow = rows.find((r) => r.claddingId === "lap");
+      const course = lapRow ? String(lapRow.exposureIn == null ? "" : lapRow.exposureIn).trim() : "";
+      if (courses && course !== "" && !(Number.isFinite(Number(course)) && Number(course) >= 3 && Number(course) <= 12)) {
+        throw new Error("Nothing was saved — the lap course has to be between 3 and 12 inches (leave it blank for 6).");
+      }
       const { data, error } = await sb.functions.invoke("portal-settings", {
         body: scoped({
           action: "save_cladding",
@@ -4808,6 +4851,9 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
             taxable: r.taxable,
             active: r.active,
             internalOnly: r.internalOnly,
+            // Sent on the lap row only, and only where the database can hold it: a row that does
+            // not name it leaves the stored size alone.
+            ...(courses && r.claddingId === "lap" ? { exposureIn: String(r.exposureIn == null ? "" : r.exposureIn).trim() } : {}),
           })),
         }),
       });
@@ -4833,6 +4879,7 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
               <th style={S.th} title="Blank = you do not offer it on this style. 0 = included at no charge. Anything else is an upcharge.">Rate (USD)</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page.">Internal only</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this.">Taxable</th>
+              {courses && <th style={S.th} title="Lap siding only: how much of each board shows, in inches. When a customer picks Lap Siding, the 3D draws the boards at this size. Blank = 6 in.">Course (in)</th>}
             </tr></thead>
             <tbody>
               {rows.map((r, i) => (
@@ -4867,6 +4914,16 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
                       onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)}
                       style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
                   </td>
+                  {courses && (
+                    <td style={S.td}>
+                      {r.claddingId === "lap" && (
+                        <input type="number" min="3" max="12" step="0.25" value={r.exposureIn} placeholder="6"
+                          aria-label={`${st.label} lap siding course, inches`}
+                          onChange={(e) => setRow(st.id, i, "exposureIn", e.target.value)}
+                          style={{ ...S.input, width: 80 }} />
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -4891,6 +4948,13 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
         else is an upcharge. Rename any of them under <b>Shown
         as</b> to whatever your customers know it as &mdash; the drawing and the 3D view are
         unaffected, because the siding itself is still the same one of our four.
+        {courses && (
+          <>
+            {" "}On <b>Lap Siding</b> you can also set the <b>course</b>: how much of each board
+            shows, in inches (4.5 for a 4&frac12;&Prime; vinyl, say). When a customer picks Lap
+            Siding, the 3D draws the boards at that size; it does not change the price. Blank is 6 in.
+          </>
+        )}
       </p>
       {/* The SAME wording as the Options header, because it is the same vocabulary. Two
           sentences are appended for cladding specifically: a whole-building option has no area

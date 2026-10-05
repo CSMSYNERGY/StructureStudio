@@ -175,7 +175,8 @@ Deno.test("⚠️ every customer-facing resolver call passes the pick, and the c
     const calls = src.split("d3ResolveStyleSpec(").slice(1).map((t) => t.slice(0, 260));
     const customer = calls.filter((t) => t.startsWith("selectedStyle, sel.style,"));
     assertEquals(customer.length, 5, `${file}: ventRoof2D, the quote's shot, the dormer price gate, the dock and the viewer`);
-    for (const t of customer) assert(t.includes("d3CustomerFoundation(C, sel))"), `${file}: ${t.slice(0, 200)}`);
+    // The foundation pick is the 6th argument; the lap course (275, claddingExposure_test) may follow it.
+    for (const t of customer) assert(/d3CustomerFoundation\(C, sel\)(\)|, d3CladdingExposureIn\(C, sel\)\))/.test(t), `${file}: ${t.slice(0, 200)}`);
     // Two seeds, and neither passes a customer choice: openCalEditor's, and the Advanced page's
     // "Start from" copy of a style (2026-09-28). Both become a draft a builder can save as a style.
     const seed = calls.filter((t) => t.startsWith("s, s.value,"));
