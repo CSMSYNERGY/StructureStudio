@@ -10,12 +10,20 @@
 //   * a gate that errors lets the text go and leaves an app_errors row behind;
 //   * an earlier refusal (STOP) wins over the wallet — paying would not have sent it.
 //
+// And the FROM number (migration 266): a reply may name another of the business's numbers, which
+// must be the business's own, live, registered and in its Messaging Service, or the text is refused
+// with a sentence (never sent from a different number); absent, it is the main number as before.
+// pickReplyNumber / replyFromNumber choose that number: the customer's thread, then the sender's
+// own number, then the main one.
+//
 // Both dependencies are stubbed: globalThis.fetch (Twilio, wallet-autotopup and app_errors) and
 // a recording fake of the supabase client. smsSend.ts reaches supabase-js through logError.ts,
 // the same way emailSend.test.ts's subject does; no network is used.
 // Run: deno test --allow-env --node-modules-dir=none supabase/functions/_shared/smsSend.test.ts
 
-import { sendTenantSms, type TenantSms } from "./smsSend.ts";
+import {
+  FROM_NOT_OURS, FROM_NOT_READY, pickReplyNumber, replyFromNumber, sendTenantSms, type ReplyNumberRow, type TenantSms,
+} from "./smsSend.ts";
 
 const assert = (cond: unknown, msg = "assertion failed") => {
   if (!cond) throw new Error(msg);
@@ -41,6 +49,10 @@ type World = {
   /** wallet_usage_gate's reply, or "error" for a PostgREST error. */
   gate?: Record<string, unknown> | "error";
   optedOut?: boolean;
+  /** What an sms_numbers read answers (default: the main number, registered). null = no row. */
+  numberRow?: Record<string, unknown> | null;
+  /** The sms_numbers read fails. */
+  numberReadFails?: boolean;
 };
 
 async function inWorld(world: World, msg: Partial<TenantSms> = {}) {
@@ -61,6 +73,9 @@ async function inWorld(world: World, msg: Partial<TenantSms> = {}) {
   }) as typeof fetch;
 
   const db: string[] = [];
+  /** Every filter each table was read with, e.g. "sms_numbers" → ["eq:client_id=tenant-a", ...]. */
+  const filters: Record<string, string[][]> = {};
+  const inserted: { table: string; row: Record<string, unknown> }[] = [];
   const rpcs: { name: string; args: unknown }[] = [];
   const admin = {
     rpc(name: string, args: unknown) {
@@ -70,22 +85,29 @@ async function inWorld(world: World, msg: Partial<TenantSms> = {}) {
     },
     from(table: string) {
       const ops: string[] = [];
+      const seen: string[] = [];
+      (filters[table] ??= []).push(seen);
       const q: Record<string, unknown> = {};
-      for (const m of ["select", "eq", "is", "limit", "upsert"]) q[m] = () => { ops.push(m); return q; };
-      q.insert = () => { ops.push("insert"); return q; };
+      for (const m of ["select", "limit", "upsert"]) q[m] = () => { ops.push(m); return q; };
+      for (const m of ["eq", "is"]) q[m] = (col: string, val: unknown) => { ops.push(m); seen.push(`${m}:${col}=${val}`); return q; };
+      q.insert = (r: Record<string, unknown>) => { ops.push("insert"); inserted.push({ table, row: r }); return q; };
       q.update = () => { ops.push("update"); return q; };
       const row = (): unknown => {
         switch (table) {
           case "client_settings": return { sms_number: BUSINESS, sms_status: "active" };
           case "sms_registrations": return { status: "active", messaging_service_sid: "MG" + "0".repeat(32) };
-          case "sms_numbers": return { registration_status: "registered" };
+          case "sms_numbers": return world.numberRow === undefined ? { registration_status: "registered" } : world.numberRow;
           case "sms_opt_outs": return world.optedOut ? { reason: "sms_stop" } : null;
           case "sms_consent_log": return { action: "granted" };
           case "crm_contacts": return { sms_opt_out_at: null };
           default: return null;
         }
       };
-      q.maybeSingle = () => { db.push(`${table}:read`); return Promise.resolve({ data: row(), error: null }); };
+      q.maybeSingle = () => {
+        db.push(`${table}:read`);
+        if (table === "sms_numbers" && world.numberReadFails) return Promise.resolve({ data: null, error: { code: "57014", message: "canceling statement" } });
+        return Promise.resolve({ data: row(), error: null });
+      };
       q.single = () => {
         db.push(`${table}:${ops.includes("insert") ? "insert" : "read"}`);
         return Promise.resolve({ data: { id: "msg-1" }, error: null });
@@ -106,7 +128,7 @@ async function inWorld(world: World, msg: Partial<TenantSms> = {}) {
       ...msg,
     });
     await Promise.all(kept); // let the background top-up request finish inside the stubs
-    return { out, fetched, db, rpcs, kept };
+    return { out, fetched, db, rpcs, kept, filters, inserted };
   } finally {
     globalThis.fetch = realFetch;
     for (const [k, v] of Object.entries(saved)) v === undefined ? Deno.env.delete(k) : Deno.env.set(k, v);
@@ -169,4 +191,145 @@ Deno.test("an earlier refusal wins: a STOP is answered as a STOP, never as an em
   assertEquals(w.out.reason, "opted_out");
   assertEquals(w.rpcs.length, 0, "the gate is not even asked");
   assertEquals(topupCalls(w.fetched).length, 0, "and no card is charged for a text that could never go");
+});
+
+// ── The FROM number (migration 266) ─────────────────────────────────────────────────────────
+const SERVICE = "MG" + "0".repeat(32);
+const OTHER_LINE = "+15550100003";
+const twilioFrom = (f: Fetched[]) => twilioCalls(f).map((c) => new URLSearchParams(String(c.body)).get("From"));
+
+Deno.test("fromNumber ABSENT: the main number, read as before (registered), and nothing else asked", async () => {
+  const w = await inWorld({ meters: "off" });
+  assertEquals(w.out, { sent: true, id: "msg-1" });
+  assertEquals(twilioFrom(w.fetched), [BUSINESS]);
+  assertEquals(w.inserted.find((i) => i.table === "sms_messages")?.row.from_number, BUSINESS);
+  assertEquals(w.filters.sms_numbers, [["eq:client_id=tenant-a", `eq:phone_number=${BUSINESS}`, "is:released_at=null"]]);
+  // The main number named explicitly is the same path, byte for byte.
+  const same = await inWorld({ meters: "off" }, { fromNumber: BUSINESS });
+  assertEquals(same.out, { sent: true, id: "msg-1" });
+  assertEquals(same.filters.sms_numbers, w.filters.sms_numbers);
+});
+
+Deno.test("fromNumber that passes all four checks: the text goes out FROM it, through the business's own service", async () => {
+  const w = await inWorld({ meters: "off", numberRow: { registration_status: "registered", messaging_service_sid: SERVICE } }, { fromNumber: OTHER_LINE });
+  assertEquals(w.out, { sent: true, id: "msg-1" });
+  assertEquals(twilioFrom(w.fetched), [OTHER_LINE]);
+  assertEquals(new URLSearchParams(String(twilioCalls(w.fetched)[0].body)).get("MessagingServiceSid"), SERVICE);
+  assertEquals(w.inserted.find((i) => i.table === "sms_messages")?.row.from_number, OTHER_LINE, "the ledger row says which number it left from");
+  // Read on THIS business, live rows only: another builder's number can never match.
+  assertEquals(w.filters.sms_numbers, [["eq:client_id=tenant-a", `eq:phone_number=${OTHER_LINE}`, "is:released_at=null"]]);
+});
+
+Deno.test("fromNumber ANOTHER business's (or released, or made up): refused in words, no claim row, no send", async () => {
+  const w = await inWorld({ meters: "off", numberRow: null }, { fromNumber: OTHER_LINE });
+  assertEquals(w.out, { sent: false, reason: "not_active", error: FROM_NOT_OURS });
+  assert(!w.db.includes("sms_messages:insert"), "no ledger row");
+  assertEquals(twilioCalls(w.fetched).length, 0, "and never sent from the main number instead");
+});
+
+Deno.test("fromNumber not registered, or outside the business's Messaging Service: refused (30034 is silent)", async () => {
+  for (const row of [
+    { registration_status: "pending_registration", messaging_service_sid: SERVICE },
+    { registration_status: "failed", messaging_service_sid: SERVICE },
+    { registration_status: "registered", messaging_service_sid: null },
+    { registration_status: "registered", messaging_service_sid: "MG" + "1".repeat(32) },
+  ]) {
+    const w = await inWorld({ meters: "off", numberRow: row }, { fromNumber: OTHER_LINE });
+    assertEquals(w.out, { sent: false, reason: "not_active", error: FROM_NOT_READY }, JSON.stringify(row));
+    assertEquals(twilioCalls(w.fetched).length, 0, JSON.stringify(row));
+    assert(!w.db.includes("sms_messages:insert"), JSON.stringify(row));
+  }
+});
+
+Deno.test("fromNumber whose check cannot be read: refused, never guessed", async () => {
+  const w = await inWorld({ meters: "off", numberReadFails: true }, { fromNumber: OTHER_LINE });
+  assertEquals(w.out.sent, false);
+  assertEquals(w.out.reason, "failed");
+  assertEquals(twilioCalls(w.fetched).length, 0);
+});
+
+// ── pickReplyNumber: the customer's thread, then the sender's own number, then the main one ──
+const MAIN = "+15550100001", SALES = "+15550100003", MIKE = "+15550100004", CALLS_ONLY = "+15550100005";
+const ME = "00000000-0000-4000-8000-0000000000a1";
+const NUMS: ReplyNumberRow[] = [
+  { phone_number: MAIN, registration_status: "registered", messaging_service_sid: SERVICE, assigned_user_id: null },
+  { phone_number: SALES, registration_status: "registered", messaging_service_sid: SERVICE, assigned_user_id: null },
+  { phone_number: MIKE, registration_status: "registered", messaging_service_sid: SERVICE, assigned_user_id: ME },
+  { phone_number: CALLS_ONLY, registration_status: "pending_registration", messaging_service_sid: null, assigned_user_id: null },
+];
+type Thread = { direction: string | null; from_number: string | null; to_number: string | null };
+const pick = (thread: Thread | null, over: Partial<Parameters<typeof pickReplyNumber>[0]> = {}) =>
+  pickReplyNumber({ thread, numbers: NUMS, mainNumber: MAIN, serviceSid: SERVICE, userId: ME, ...over });
+
+Deno.test("pickReplyNumber: the number the customer last texted, or we last texted them from", () => {
+  assertEquals(pick({ direction: "in", from_number: "+15550100099", to_number: SALES }), SALES, "they texted the sales line");
+  assertEquals(pick({ direction: "out", from_number: SALES, to_number: "+15550100099" }), SALES, "we last texted them from it");
+  assertEquals(pick({ direction: "in", from_number: "+15550100099", to_number: MAIN }), null, "the main number is null: sendTenantSms's own path");
+  assertEquals(pick({ direction: "out", from_number: MAIN, to_number: "+15550100099" }), null, "and the sender's own number does not override the customer's thread");
+});
+
+Deno.test("pickReplyNumber: no thread → the sender's own number; nobody's → the main number", () => {
+  assertEquals(pick(null), MIKE);
+  assertEquals(pick(null, { userId: "00000000-0000-4000-8000-0000000000b2" }), null);
+  assertEquals(pick(null, { userId: null }), null);
+  assertEquals(pick(null, { userId: ME.toUpperCase() }), MIKE, "ids compare without case");
+});
+
+Deno.test("pickReplyNumber: a number that can't text right now is skipped, so the reply still goes (from the next one)", () => {
+  assertEquals(pick({ direction: "in", from_number: "+15550100099", to_number: CALLS_ONLY }), MIKE, "calling-only: the sender's own number next");
+  assertEquals(pick({ direction: "in", from_number: "+15550100099", to_number: CALLS_ONLY }, { userId: null }), null, "then the main number");
+  assertEquals(pick({ direction: "in", from_number: "+15550100099", to_number: "+15550100077" }, { userId: null }), null, "released (not live): the main number");
+  assertEquals(pick({ direction: "in", from_number: "+15550100099", to_number: SALES }, { serviceSid: "MG" + "1".repeat(32) }), null, "outside the business's service");
+  assertEquals(pick({ direction: "in", from_number: "+15550100099", to_number: SALES }, { serviceSid: null }), null, "no texting setup at all");
+  assertEquals(pick({ direction: null, from_number: SALES, to_number: SALES }, { userId: null }), null, "a row with no direction says nothing");
+});
+
+// replyFromNumber's reads, against a fake that answers each table and records the filters.
+function replyAdmin(o: { thread?: unknown[]; numbers?: unknown[] | "error"; main?: string | null; service?: string | null } = {}) {
+  const asked: Record<string, string[]> = {};
+  const admin = {
+    from(table: string) {
+      const seen: string[] = (asked[table] = []);
+      const q: Record<string, unknown> = {};
+      for (const m of ["select", "eq", "is", "or", "order", "limit"]) {
+        q[m] = (...a: unknown[]) => { seen.push(`${m}:${a.map((x) => typeof x === "object" && x !== null ? JSON.stringify(x) : String(x)).join(",")}`); return q; };
+      }
+      const rows = (): { data: unknown; error: unknown } => {
+        if (table === "sms_messages") return { data: o.thread ?? [], error: null };
+        if (table === "sms_numbers") return o.numbers === "error" ? { data: null, error: { code: "42703" } } : { data: o.numbers ?? NUMS, error: null };
+        return { data: null, error: null };
+      };
+      q.maybeSingle = () => Promise.resolve(table === "client_settings"
+        ? { data: { sms_number: o.main === undefined ? MAIN : o.main }, error: null }
+        : table === "sms_registrations" ? { data: { messaging_service_sid: o.service === undefined ? SERVICE : o.service }, error: null } : rows());
+      q.then = (ok: (v: unknown) => unknown, bad: (e: unknown) => unknown) => Promise.resolve(rows()).then(ok, bad);
+      return q;
+    },
+  };
+  return { admin, asked };
+}
+
+Deno.test("replyFromNumber: a saved customer's thread is read by contact, on this business, newest first", async () => {
+  const { admin, asked } = replyAdmin({ thread: [{ direction: "in", from_number: "+15550100099", to_number: SALES }] });
+  assertEquals(await replyFromNumber(admin, "tenant-a", { contactId: "contact-1", userId: ME }), SALES);
+  assertEquals(asked.sms_messages, ["select:direction, from_number, to_number", "eq:client_id,tenant-a", "eq:contact_id,contact-1", 'order:created_at,{"ascending":false}', "limit:1"]);
+  assert(asked.sms_numbers.includes("eq:client_id,tenant-a") && asked.sms_numbers.includes("is:released_at,null"), "only this business's live numbers");
+});
+
+Deno.test("replyFromNumber: an unknown number's thread is read by that number, among texts with no contact", async () => {
+  const { admin, asked } = replyAdmin({ thread: [{ direction: "out", from_number: SALES, to_number: "+15550100099" }] });
+  assertEquals(await replyFromNumber(admin, "tenant-a", { customerE164: "+15550100099" }), SALES);
+  assert(asked.sms_messages.includes("is:contact_id,null"));
+  assert(asked.sms_messages.includes("or:from_number.eq.+15550100099,to_number.eq.+15550100099"));
+  // Anything that isn't a US number never reaches the filter (the filter is built from it).
+  const bad = replyAdmin();
+  assertEquals(await replyFromNumber(bad.admin, "tenant-a", { customerE164: "+15550100099,to_number.neq.x", userId: ME }), MIKE);
+  assertEquals(bad.asked.sms_messages, undefined, "no thread read at all");
+});
+
+Deno.test("replyFromNumber: before migration 266, or with no texting setup, it is always the main number", async () => {
+  assertEquals(await replyFromNumber(replyAdmin({ numbers: "error" }).admin, "tenant-a", { contactId: "c", userId: ME }), null);
+  assertEquals(await replyFromNumber(replyAdmin({ service: null }).admin, "tenant-a", { contactId: "c", userId: ME }), null);
+  const throws = { from() { throw new Error("boom"); } };
+  assertEquals(await replyFromNumber(throws, "tenant-a", { contactId: "c" }), null, "never throws");
 });

@@ -274,19 +274,27 @@ Deno.test("the three phase-6 actions are phone:edit, behind the rollout, and buy
   assert(/const mayBuyPhoneNumber = \(\) => canEdit\("phone"\) && canEdit\("settings_billing"\) && \(!operator \|\| operator\.canBill\);/.test(SRC));
   const buy = slice(SRC, 'if (action === "phone_buy_number") {', "// ── Plan phase 6: caller-ID trust", "phone_buy_number branch");
   assert(/if \(!mayBuyPhoneNumber\(\)\)/.test(buy));
-  assert(/buyCallingNumber\(\{ clientId, wanted \}, \{/.test(buy), "the purchase is buyCallingNumber (tested above), not an inline copy");
+  assert(/buyCallingNumber\(\{ clientId, wanted, recorded: liveRows\.map\(\(r\) => String\(r\.phone_number\)\) \}, \{/.test(buy),
+    "the purchase is buyCallingNumber (tested above), told which numbers are already the tenant's");
   assert(/p_kind: "sms_number_monthly"/.test(SRC) && /hold: takeNumberHold/.test(buy), "the first month is held on portal-sms's meter");
   assert(/findPurchasedNumbers, purchaseNumber, releaseNumber,/.test(buy), "a number bought but not recorded can be given back");
   assert(/\.insert\(callingOnlyNumberRow\(clientId, b\)\)/.test(buy));
-  assert(!/messagingServiceSid/.test(buy), "the calling-only purchase must never pass a messaging service");
+  assert(!/messagingServiceSid/.test(buy), "the purchase itself never passes a messaging service (joining texting is attachToTexting, after the row is recorded)");
   assert(!/client_settings"\)\s*\.update/.test(buy), "a calling-only number must not become client_settings.sms_number");
-  // One live number per tenant, checked before anything is bought; the env a number needs, before money moves.
-  assert(buy.indexOf(".is(\"released_at\", null)") < buy.indexOf("buyCallingNumber("));
+  // Up to MAX_NUMBERS live numbers (migration 266), checked before anything is bought; the env a number needs, before money moves.
+  assert(/const live = await phoneNumberRows\(\);[\s\S]*?if \(liveRows\.length >= MAX_NUMBERS\) \{/.test(buy));
+  assert(buy.indexOf("phoneNumberRows()") < buy.indexOf("buyCallingNumber("));
+  assert(!/\(count \?\? 0\) >= 1/.test(buy), "the one-number refusal is gone");
   assert(buy.indexOf("smsInboundUrl(") < buy.indexOf("buyCallingNumber("), "no SMS webhook configured, no purchase");
   // Review SSB-3: every path gives the new number somewhere for its TEXTS to go.
   assert(buy.indexOf("if (phoneOn) {") < buy.indexOf("connectNumberForCalls("));
-  assert(/config: \{ \.\.\.numberVoicemailConfig\(ve\.env\), \.\.\.numberSmsConfig\(smsUrl\) \}/.test(buy), "calling off: voicemail + the SMS webhook, in one update");
-  assert(/connectNumberForCalls\(\{ \.\.\.row, messaging_service_sid: null \}\)/.test(buy), "calling on: connect it as the calling-only number it is");
+  assert(/config: \{ \.\.\.numberVoicemailConfig\(ve\.env\), \.\.\.\(joined \? \{\} : numberSmsConfig\(smsUrl\)\) \}/.test(buy),
+    "calling off: voicemail + the SMS webhook (unless it joined texting), in one update");
+  assert(/connectNumberForCalls\(\{ \.\.\.row, messaging_service_sid: joined \? serviceSid : null \}\)/.test(buy),
+    "calling on: connect it as the calling-only number it is, or as the texting number it just became");
+  // Migration 266: texting joins AFTER the row is recorded, and only while the builder's texting is on.
+  assert(buy.indexOf("const serviceSid = await textingServiceSid();") > buy.indexOf("buyCallingNumber("));
+  assert(/attachToTexting\(\{ serviceSid, numberSid: bought\.sid \}, textingDeps\(String\(row\.id\)\)\)/.test(buy));
 });
 
 Deno.test("Connect this number for calls: only while calling is on; a calling-only number gets its SMS webhook in the same update", () => {
@@ -349,7 +357,10 @@ Deno.test("numberActionForSwitch: off moves a connected number; on puts back one
   assertEquals(numberActionForSwitch(false, null), null);
 });
 
-function switchWorld(o: { number?: Record<string, unknown> | null; readFails?: boolean; moveOk?: boolean; connectOk?: boolean; write?: "ok" | "noRow" | "error" } = {}) {
+function switchWorld(o: {
+  number?: Record<string, unknown> | null; numbers?: Record<string, unknown>[]; readFails?: boolean;
+  moveOk?: boolean | ((id: string) => boolean); connectOk?: boolean | ((id: string) => boolean); write?: "ok" | "noRow" | "error";
+} = {}) {
   const log: string[] = [];
   return {
     log,
@@ -359,12 +370,20 @@ function switchWorld(o: { number?: Record<string, unknown> | null; readFails?: b
         return Promise.resolve(o.write === "noRow" ? { ok: false as const, noRow: true as const }
           : o.write === "error" ? { ok: false as const, error: { code: "XX000" } } : { ok: true as const });
       },
-      readNumber: () => {
+      // Migration 266: every live number (oldest first); `number` is the one-number world.
+      readNumbers: () => {
         log.push("read");
-        return Promise.resolve(o.readFails ? { error: { code: "XX000" } } : { row: (o.number ?? null) as never });
+        const rows = o.numbers ?? (o.number ? [o.number] : []);
+        return Promise.resolve(o.readFails ? { error: { code: "XX000" } } : { rows: rows as never });
       },
-      toVoicemail: () => { log.push("to_voicemail"); return Promise.resolve(o.moveOk ?? true); },
-      connect: () => { log.push("connect"); return Promise.resolve(o.connectOk ?? true); },
+      toVoicemail: (n: { id: string }) => {
+        log.push(o.numbers ? `to_voicemail:${n.id}` : "to_voicemail");
+        return Promise.resolve(typeof o.moveOk === "function" ? o.moveOk(n.id) : (o.moveOk ?? true));
+      },
+      connect: (n: { id: string }) => {
+        log.push(o.numbers ? `connect:${n.id}` : "connect");
+        return Promise.resolve(typeof o.connectOk === "function" ? o.connectOk(n.id) : (o.connectOk ?? true));
+      },
     },
   };
 }
@@ -372,27 +391,73 @@ const CONNECTED = { id: "n1", phone_number: "+15555550100", twilio_sid: PN, voic
 
 Deno.test("switchCalling OFF: the switch lands first, then a connected number moves to voicemail", async () => {
   const w = switchWorld({ number: CONNECTED });
-  assertEquals(await switchCalling(false, w.deps), { ok: true, phoneStatus: "off", number: { voiceReady: false }, warning: null });
+  assertEquals(await switchCalling(false, w.deps), { ok: true, phoneStatus: "off", number: { voiceReady: false }, numbers: [{ id: "n1", voiceReady: false }], warning: null });
   assertEquals(w.log, ["status:off", "read", "to_voicemail"]);
 });
 
 Deno.test("switchCalling OFF when the move fails: still off (it is the safety switch), and the answer says callers still hear 'can't take calls'", async () => {
   const w = switchWorld({ number: CONNECTED, moveOk: false });
-  assertEquals(await switchCalling(false, w.deps), { ok: true, phoneStatus: "off", number: { voiceReady: true }, warning: SWITCH_WARNINGS.offStuck });
+  assertEquals(await switchCalling(false, w.deps), { ok: true, phoneStatus: "off", number: { voiceReady: true }, numbers: [{ id: "n1", voiceReady: true }], warning: SWITCH_WARNINGS.offStuck });
   const unread = switchWorld({ readFails: true });
-  assertEquals(await switchCalling(false, unread.deps), { ok: true, phoneStatus: "off", number: null, warning: SWITCH_WARNINGS.offUnchecked });
+  assertEquals(await switchCalling(false, unread.deps), { ok: true, phoneStatus: "off", number: null, numbers: [], warning: SWITCH_WARNINGS.offUnchecked });
 });
 
 Deno.test("switchCalling ON reconnects a number the switch moved; a failed reconnect says so; a number never connected is left for Connect", async () => {
   const moved = { ...CONNECTED, voice_enabled: false };
   const w = switchWorld({ number: moved });
-  assertEquals(await switchCalling(true, w.deps), { ok: true, phoneStatus: "on", number: { voiceReady: true }, warning: null });
+  assertEquals(await switchCalling(true, w.deps), { ok: true, phoneStatus: "on", number: { voiceReady: true }, numbers: [{ id: "n1", voiceReady: true }], warning: null });
   assertEquals(w.log, ["status:on", "read", "connect"]);
   const bad = switchWorld({ number: moved, connectOk: false });
   assertEquals((await switchCalling(true, bad.deps) as { warning: string }).warning, SWITCH_WARNINGS.onNotReconnected);
   const fresh = switchWorld({ number: { ...moved, voice_configured_at: null } });
-  assertEquals(await switchCalling(true, fresh.deps), { ok: true, phoneStatus: "on", number: { voiceReady: false }, warning: null });
+  assertEquals(await switchCalling(true, fresh.deps), { ok: true, phoneStatus: "on", number: { voiceReady: false }, numbers: [{ id: "n1", voiceReady: false }], warning: null });
   assert(!fresh.log.includes("connect"));
+});
+
+// ── Migration 266: the switch moves EVERY number, not only the first ──────────────────────────
+const SECOND = { id: "n2", phone_number: "+15555550101", twilio_sid: PN, voice_enabled: true, voice_configured_at: "2026-10-01T00:00:00Z" };
+const NEVER = { id: "n3", phone_number: "+15555550102", twilio_sid: PN, voice_enabled: false, voice_configured_at: null };
+
+Deno.test("switchCalling OFF with three numbers: each connected one moves to voicemail, in order; one never connected is left alone", async () => {
+  const w = switchWorld({ numbers: [CONNECTED, SECOND, NEVER] });
+  assertEquals(await switchCalling(false, w.deps), {
+    ok: true, phoneStatus: "off", number: { voiceReady: false },
+    numbers: [{ id: "n1", voiceReady: false }, { id: "n2", voiceReady: false }, { id: "n3", voiceReady: false }], warning: null,
+  });
+  assertEquals(w.log, ["status:off", "read", "to_voicemail:n1", "to_voicemail:n2"]);
+});
+
+Deno.test("switchCalling OFF: one number that won't move doesn't stop the others, and the warning says SOME", async () => {
+  const w = switchWorld({ numbers: [CONNECTED, SECOND], moveOk: (id) => id !== "n1" });
+  const out = await switchCalling(false, w.deps);
+  assertEquals(out, {
+    ok: true, phoneStatus: "off", number: { voiceReady: true },
+    numbers: [{ id: "n1", voiceReady: true }, { id: "n2", voiceReady: false }], warning: SWITCH_WARNINGS.offStuckSome,
+  });
+  assertEquals(w.log, ["status:off", "read", "to_voicemail:n1", "to_voicemail:n2"], "the second is still moved");
+});
+
+Deno.test("switchCalling ON with two numbers the switch moved: both reconnect; a failed one says SOME", async () => {
+  const moved = [{ ...CONNECTED, voice_enabled: false }, { ...SECOND, voice_enabled: false }];
+  const w = switchWorld({ numbers: moved });
+  assertEquals((await switchCalling(true, w.deps) as { numbers: unknown }).numbers, [{ id: "n1", voiceReady: true }, { id: "n2", voiceReady: true }]);
+  assertEquals(w.log, ["status:on", "read", "connect:n1", "connect:n2"]);
+  const bad = switchWorld({ numbers: moved, connectOk: (id) => id === "n1" });
+  const out = await switchCalling(true, bad.deps) as { warning: string; number: unknown };
+  assertEquals(out.warning, SWITCH_WARNINGS.onNotReconnectedSome);
+  assertEquals(out.number, { voiceReady: true }, "`number` is still the first number's state, for an older portal");
+});
+
+Deno.test("buy (migration 266): the tenant's OWN recorded numbers are never 'adopted' as orphans", async () => {
+  // Twilio lists every FriendlyName=client_id number, the recorded ones included.
+  assertEquals(pickOrphan([ORPHAN], "+15555550102", [ORPHAN.phoneNumber]), null, "a recorded number is not an orphan");
+  assertEquals(pickOrphan([ORPHAN, { sid: "PNx", phoneNumber: "+15555550109" }], "+15555550102", [ORPHAN.phoneNumber])?.phoneNumber, "+15555550109",
+    "an unrecorded one beside it still is");
+  const w = buyWorld({ twilioHas: [ORPHAN] });
+  const out = await buyCallingNumber({ clientId: "demo-tenant", wanted: "+15555550102", recorded: [ORPHAN.phoneNumber] }, w.deps);
+  assert(out.ok);
+  assertEquals(out.ok && [out.bought.phoneNumber, out.reconciled, out.adoptedInstead], ["+15555550102", false, false], "the second number is BOUGHT");
+  assert(w.log.includes("hold:sms_num:demo-tenant:+15555550102"), "and held on its own key");
 });
 
 Deno.test("switchCalling: no settings row, or a failed write, touches no number", async () => {

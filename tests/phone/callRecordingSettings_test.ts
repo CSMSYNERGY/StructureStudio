@@ -123,7 +123,7 @@ Deno.test("phone_recording_save refuses anyone but the owner BEFORE it parses or
 
 Deno.test("phone_settings_get hands an own-level caller only whether calls are recorded", () => {
   const get = SRC.slice(SRC.indexOf('if (action === "phone_settings_get")'));
-  const own = get.slice(get.indexOf("if (ownPhoneOnly(access))"), get.indexOf("if (ownPhoneOnly(access))") + 400);
+  const own = get.slice(get.indexOf("if (ownPhoneOnly(access))"), get.indexOf("const [teamOut, routeRes"));
   assert(own.includes("recording: recording ? { on: recording.on, serverOn: recording.serverOn } : null"));
   // The card can only tell the truth if both reads and the save carry the server's switch.
   assert(get.includes("recordingView(recRes.data as Record<string, unknown> | null, recordingServerOn((k) => Deno.env.get(k)))"));

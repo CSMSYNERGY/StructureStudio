@@ -69,6 +69,14 @@ Deno.test("buyPlan: no number → buy; a calling-only number → adopt the oldes
   assertEquals(buyPlan([CALLING_ONLY, later]), { kind: "adopt", number: CALLING_ONLY }, "the oldest, the one the Phone tab shows");
 });
 
+Deno.test("buyPlan (migration 266): a team line is adopted before someone's own number, whatever their order", () => {
+  const mine = { ...CALLING_ONLY, assigned_user_id: "00000000-0000-4000-8000-0000000000a1" };
+  const team = { ...CALLING_ONLY, id: "row-3", phone_number: "+15555550143", assigned_user_id: null };
+  assertEquals(buyPlan([mine, team]), { kind: "adopt", number: team }, "the oldest TEAM line, though a personal number is older");
+  assertEquals(buyPlan([mine]), { kind: "adopt", number: mine }, "only personal numbers: the oldest, as before");
+  assertEquals(buyPlan([mine, { ...team, messaging_service_sid: MS }]), { kind: "has_number" }, "a texting number still wins");
+});
+
 Deno.test("adopt: into the Messaging Service, its own SmsUrl cleared, then sms_number, number_pending, and the row LAST", async () => {
   const w = world();
   const out = await w.run();
@@ -200,7 +208,11 @@ const BUY = slice(SMS_FN, 'case "buy_number": {', 'case "opt_outs": {', "buy_num
 const ADOPT = slice(BUY, 'if (plan.kind === "adopt") {', 'const wanted = String(p.phoneNumber ?? "").trim();', "the adopt branch");
 
 Deno.test("buy_number reads the live numbers (failing CLOSED) and decides with buyPlan before anything is searched or held", () => {
-  assert(/\.select\("id, phone_number, twilio_sid, messaging_service_sid"\)\s*\.eq\("client_id", clientId\)\.is\("released_at", null\)\s*\.order\("purchased_at", \{ ascending: true \}\)/.test(BUY));
+  // Migration 266: with whose number each is, read again without it on a database before 266.
+  assert(/const readLive = \(cols: string\) => admin\.from\("sms_numbers"\)\s*\.select\(cols\)\s*\.eq\("client_id", clientId\)\.is\("released_at", null\)\s*\.order\("purchased_at", \{ ascending: true \}\);/.test(BUY));
+  assert(BUY.includes('let liveRead = await readLive("id, phone_number, twilio_sid, messaging_service_sid, assigned_user_id");'));
+  assert(/if \(liveRead\.error && String\(\(liveRead\.error as \{ code\?: string \}\)\.code \?\? ""\) === "42703"\) \{\s*liveRead = await readLive\("id, phone_number, twilio_sid, messaging_service_sid"\);/.test(BUY),
+    "only a missing column falls back; any other failure still refuses below");
   assert(/const plan = buyPlanFromRead\(\{ data: \(liveRead\.data \?\? null\) as LiveNumber\[\] \| null, error: liveRead\.error \}\);/.test(BUY));
   assert(/if \(plan\.kind === "read_failed"\) \{[\s\S]*?return json\(\{ error: "Couldn't check your numbers just now\. Try again in a minute\." \}, 503\);/.test(BUY), "a failed read refuses instead of buying");
   const planAt = BUY.indexOf("const plan = buyPlanFromRead(");
@@ -250,9 +262,30 @@ Deno.test("review BE-5: the SMS tab offers the adopt press in EXACTLY the server
 
 Deno.test("the status view says which number is calling-only, and the SMS tab offers to use it instead of a search", () => {
   assert(/callingOnly: !n\.messaging_service_sid,/.test(SMS_FN));
-  assert(/\.select\("phone_number, registration_status, purchased_at, messaging_service_sid"\)/.test(SMS_FN));
-  const adopt = slice(SMS_TAB, "{SMS_ADOPT_STATES.includes(status) && !readOnly && (data.numbers || []).some((n) => n.callingOnly) && (", "\n      )}\n", "the adopt card");
+  assert(/assigned: !!n\.assigned_user_id,/.test(SMS_FN), "migration 266: whose number it is, so the card names the number buyPlan adopts");
+  assert(SMS_FN.includes('let res = await read("phone_number, registration_status, purchased_at, messaging_service_sid, assigned_user_id");'));
+  assert(SMS_FN.includes('res = await read("phone_number, registration_status, purchased_at, messaging_service_sid");'), "a database before 266 still lists the numbers");
+  const adopt = slice(SMS_TAB, "{SMS_ADOPT_STATES.includes(status) && !readOnly && smsAdoptNumber(data.numbers) && (", "\n      )}\n", "the adopt card");
   assert(/onClick=\{\(\) => act\(\(\) => call\("buy_number", \{\}\)\)\}/.test(adopt), "adopting sends no phoneNumber");
   assert(/Finish connecting/.test(adopt), "a stopped adoption is offered as a finish, not a fresh offer");
-  assert(SMS_TAB.includes("{status === \"campaign_approved\" && !readOnly && !(data.numbers || []).some((n) => n.callingOnly) && ("), "the search only shows when there is nothing to adopt");
+  assert(SMS_TAB.includes("{status === \"campaign_approved\" && !readOnly && !smsAdoptNumber(data.numbers) && ("), "the search only shows when there is nothing to adopt");
+});
+
+// ── Migration 266: the SMS tab names the number buyPlan adopts, and never offers one it won't ──
+Deno.test("smsAdoptNumber is buyPlan's rule on the status view's numbers: nothing once a number texts; a team line first", () => {
+  const src = slice(SMS_TAB, "function smsAdoptNumber(numbers) {", "\n}\n", "smsAdoptNumber");
+  const smsAdoptNumber = new Function(`${src}\n}\nreturn smsAdoptNumber;`)() as (n: unknown) => { phoneNumber: string } | null;
+  const co = (phoneNumber: string, assigned = false) => ({ phoneNumber, callingOnly: true, assigned });
+  assertEquals(smsAdoptNumber([]), null);
+  assertEquals(smsAdoptNumber(undefined), null);
+  assertEquals(smsAdoptNumber([co("+15555550142")])?.phoneNumber, "+15555550142");
+  assertEquals(smsAdoptNumber([co("+15555550142", true), co("+15555550143")])?.phoneNumber, "+15555550143", "a team line before someone's own");
+  assertEquals(smsAdoptNumber([co("+15555550142", true)])?.phoneNumber, "+15555550142");
+  assertEquals(smsAdoptNumber([co("+15555550142"), { phoneNumber: "+15555550143", callingOnly: false }]), null,
+    "with a texting number already there the server answers 409, so nothing is offered (an extra calling-only number joins from the Phone tab)");
+  // A server before 266 sends no `assigned`: the oldest, as before.
+  assertEquals(smsAdoptNumber([{ phoneNumber: "+15555550142", callingOnly: true }, { phoneNumber: "+15555550143", callingOnly: true }])?.phoneNumber, "+15555550142");
+  // Every place the tab decides about adopting asks it, never its own copy of the rule.
+  assert(!/\(data\.numbers \|\| \[\]\)\.some\(\(n\) => n\.callingOnly\)/.test(SMS_TAB), "no second copy of the rule left");
+  assert(!/data\.numbers\.find\(\(n\) => n\.callingOnly\)/.test(SMS_TAB));
 });

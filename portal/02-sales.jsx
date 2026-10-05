@@ -4012,10 +4012,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                             {CONSENT_ATTESTATION}
                           </span>
                         </label>
-                        <input value={consentNote} onChange={(e) => setConsentNote(e.target.value)}
-                          maxLength={200}
+                        {/* Two lines, not one (2026-10-05): "how they gave it" is a short story —
+                            where, when, who asked — and a one-line box hid most of it as it was typed. */}
+                        <textarea value={consentNote} onChange={(e) => setConsentNote(e.target.value)}
+                          rows={2} maxLength={200} data-ss-consent-note=""
                           placeholder="How they gave it — e.g. asked us at the lot on 12 Aug (optional)"
-                          style={{ ...S.input, width: "100%", boxSizing: "border-box", marginTop: 8, fontSize: 12.5 }} />
+                          style={{ ...S.input, width: "100%", boxSizing: "border-box", marginTop: 8, fontSize: 12.5, resize: "vertical", display: "block", lineHeight: 1.45 }} />
                         <div style={{ display: "flex", gap: 8, marginTop: 9, alignItems: "center", flexWrap: "wrap" }}>
                           <button type="button" style={S.btn(ACCENT, "#FFF")} disabled={busy || !consentTicked}
                             onClick={recordConsent}>

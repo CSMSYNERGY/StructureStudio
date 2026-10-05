@@ -5,10 +5,11 @@ import worker from "../src/index";
 import { recordingSweep } from "../src/cron/sweep";
 import { retention } from "../src/cron/retention";
 import { chargeMonthlyLineFees, lineFeeIdem, utcMonth } from "../src/cron/lineFee";
+import { chargeMonthlyNumberFees, numberFeeIdem, numberFeeMemo, numberPeriod } from "../src/cron/numberFee";
 import { previousUtcDay } from "../src/cron/usageCharge";
 import { adminClient } from "../src/db";
 import { installDenoShim } from "../src/env";
-import { BUSINESS_NUMBER, CLIENT, CUSTOMER, FakeCtx, FakeNet, NUMBER_ID, filter, jsonRes, makeEnv, routeInfo } from "./helpers";
+import { BUSINESS_NUMBER, CLIENT, CUSTOMER, FakeCtx, FakeNet, NUMBER_ID, SUPABASE_URL, filter, jsonRes, makeEnv, routeInfo, type Seen } from "./helpers";
 
 const RE = (n: number) => "RE" + String(n).padStart(32, "0");
 const CA = (n: number) => "CA" + String(n).padStart(32, "0");
@@ -246,6 +247,7 @@ describe("scheduled()", () => {
     const net = new FakeNet().install();
     net.on("GET", /\/Recordings\.json\?/, () => jsonRes({ recordings: [], next_page_uri: null }));
     net.rest("GET", "phone_voicemails", () => []);
+    net.rest("GET", "usage_prices", () => []);
     const env = makeEnv();
     const ctx = new FakeCtx();
     await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now(), noRetry() {} } as ScheduledController, env, ctx as unknown as ExecutionContext);
@@ -257,7 +259,10 @@ describe("scheduled()", () => {
     await worker.scheduled({ cron: "0 9 * * *", scheduledTime: Date.now(), noRetry() {} } as ScheduledController, env, daily as unknown as ExecutionContext);
     await daily.settle();
     expect(net.reads("phone_voicemails")).toHaveLength(1);
-    expect(net.reads("usage_prices")).toHaveLength(0); // PHONE_USAGE_METERS is off
+    // PHONE_USAGE_METERS is off, so the line fee reads nothing. The number fee's one switch is
+    // its own meter (cron/numberFee.ts), so it reads that row, and only that row, every day.
+    expect(net.reads("usage_prices").map((s) => filter(s, "kind"))).toEqual(["sms_number_monthly"]);
+    expect(net.reads("sms_numbers")).toHaveLength(0);
     expect(net.to(/Usage\/Records/)).toHaveLength(0); // and so is cost capture (helpers)
   });
 
@@ -412,5 +417,236 @@ describe("monthly line fee (phone_line_monthly, daily cron)", () => {
     await ctx.settle();
     expect(net.writes("app_errors").map((s) => s.json.context?.job)).toContain("retention");
     expect(net.rpcCalls("wallet_credit").length).toBeGreaterThan(0);
+  });
+});
+
+describe("monthly number fee (sms_number_monthly, daily cron, months 2 and on)", () => {
+  const T2 = "tenant-two";
+  const EXEMPT = "exempt-tenant";
+  const BILLING_EXEMPT = "billing-exempt-tenant";
+  const GONE = "deleted-tenant";
+  const num = (n: number) => `00000000-0000-4000-8000-00000000a${String(n).padStart(3, "0")}`;
+  const N2 = num(2);
+
+  interface Num { id: string; client_id: string; purchased_at: string; released_at?: string | null }
+  interface Wallet { balance_cents?: number; held_cents?: number; auto_topup_enabled?: boolean; auto_topup_threshold_cents?: number | null }
+
+  /** The values of an `in.(...)` filter, as postgrest-js writes them. */
+  function inList(s: Seen, col: string): string[] {
+    const m = /^in\.\((.*)\)$/.exec(s.url.searchParams.get(col) ?? "");
+    return m ? m[1].split(",").map((x) => x.replace(/^"|"$/g, "")) : [];
+  }
+
+  /**
+   * A fake database that remembers what it charged: wallet_credit writes its key to the ledger
+   * (and a replayed key is a no-op, as in 244), and the ledger read honours the keys asked for.
+   */
+  function setup(opts: { price?: unknown[]; numbers: Num[]; charged?: string[]; wallets?: Record<string, Wallet>; failFor?: string } ) {
+    const net = new FakeNet().install();
+    const ledger = new Set(opts.charged ?? []);
+    const debits: string[] = [];
+    net.rest("GET", "usage_prices", (s) => (filter(s, "kind") === "sms_number_monthly" ? (opts.price ?? [{ price_cents: 2900, active: true }]) : []));
+    // Honours released_at=is.null, so a query that forgot it would charge the released row.
+    net.rest("GET", "sms_numbers", (s) => opts.numbers
+      .filter((n) => (s.url.searchParams.get("released_at") === "is.null" ? !n.released_at : true))
+      .map(({ released_at: _r, ...row }) => row));
+    net.rest("GET", "wallet_transactions", (s) => inList(s, "idempotency_key").filter((k) => ledger.has(k)).map((k) => ({ idempotency_key: k })));
+    net.rest("GET", "client_configs", (s) => inList(s, "client_id").filter((c) => c !== GONE).map((c) => ({ client_id: c })));
+    net.rest("GET", "client_settings", (s) => inList(s, "client_id").map((c) => ({ client_id: c, billing_exempt: c === BILLING_EXEMPT })));
+    net.rest("GET", "wallet_accounts", (s) => inList(s, "client_id").map((c) => ({
+      client_id: c, metered_exempt: c === EXEMPT, balance_cents: 10_000, held_cents: 0, auto_topup_enabled: false, auto_topup_threshold_cents: null,
+      ...(opts.wallets?.[c] ?? {}),
+    })));
+    net.rpc("wallet_credit", (s) => {
+      if (opts.failFor && s.json.p_client_id === opts.failFor) {
+        return new Response(JSON.stringify({ code: "P0001", message: "boom" }), { status: 400, headers: { "content-type": "application/json" } });
+      }
+      if (!ledger.has(s.json.p_idem)) { ledger.add(s.json.p_idem); debits.push(s.json.p_idem); }
+      return 7100;
+    });
+    net.on("POST", (u) => u.href === `${SUPABASE_URL}/functions/v1/wallet-autotopup`, () => jsonRes({ fired: true, ok: true }));
+    net.rest("POST", "app_errors", () => []);
+    return { net, ledger, debits };
+  }
+  const run = (iso: string) => { const env = makeEnv(); return chargeMonthlyNumberFees(env, adminClient(env), new Date(iso)); };
+
+  it("keys, memos and periods: the purchase day each month (UTC), clamped to the month's last day", () => {
+    expect(numberFeeIdem(NUMBER_ID, 1)).toBe(`sms_number_monthly:${NUMBER_ID}:m1`);
+    expect(numberFeeIdem(NUMBER_ID, 12)).toBe(`sms_number_monthly:${NUMBER_ID}:m12`);
+    expect(numberFeeMemo(1)).toBe("Phone number fee, month 2");
+    const at = (purchased: string, day: string) => numberPeriod(purchased, new Date(`${day}T09:00:00Z`));
+    expect(at("2026-09-15T17:30:00Z", "2026-09-15")).toBe(0); // the purchase day, even before the purchase's hour
+    expect(at("2026-09-15T17:30:00Z", "2026-10-14")).toBe(0);
+    expect(at("2026-09-15T17:30:00Z", "2026-10-15")).toBe(1);
+    expect(at("2026-09-15T17:30:00Z", "2027-09-15")).toBe(12);
+    expect(at("2026-12-10T00:00:00Z", "2027-01-10")).toBe(1); // across the year
+    // Bought on the 31st: Feb 28 (29 in a leap year), then Mar 31, Apr 30. The clamp never drifts.
+    expect(at("2027-01-31T12:00:00Z", "2027-02-27")).toBe(0);
+    expect(at("2027-01-31T12:00:00Z", "2027-02-28")).toBe(1);
+    expect(at("2027-01-31T12:00:00Z", "2027-03-01")).toBe(1);
+    expect(at("2027-01-31T12:00:00Z", "2027-03-30")).toBe(1);
+    expect(at("2027-01-31T12:00:00Z", "2027-03-31")).toBe(2);
+    expect(at("2027-01-31T12:00:00Z", "2027-04-30")).toBe(3);
+    expect(at("2028-01-31T12:00:00Z", "2028-02-28")).toBe(0);
+    expect(at("2028-01-31T12:00:00Z", "2028-02-29")).toBe(1);
+    expect(at("2026-11-30T12:00:00Z", "2027-02-27")).toBe(2);
+    expect(at("2026-11-30T12:00:00Z", "2027-02-28")).toBe(3);
+    // Before the purchase, or a date that does not parse: never a chargeable period.
+    expect(at("2026-10-05T00:00:00Z", "2026-10-04")).toBe(-1);
+    expect(numberPeriod("not a date", new Date())).toBeNaN();
+  });
+
+  it("the key is never the purchase's: month 1 stays with the purchase hold (sms_num:<client>:<number>)", () => {
+    const key = numberFeeIdem(NUMBER_ID, 1);
+    expect(key.startsWith("sms_num:")).toBe(false);
+    expect(key).not.toContain(BUSINESS_NUMBER);
+    // Both purchases still hold the first month on this meter under that other key.
+    const src = (f: string) => readFileSync(resolve(process.cwd(), f), "utf8");
+    expect(src("../../supabase/functions/portal-sms/index.ts")).toMatch(/takeHold\(admin, clientId, "sms_number_monthly", `sms_num:\$\{clientId\}:\$\{wanted\}`/);
+    expect(src("../../supabase/functions/portal-settings/phoneNumber.ts")).toContain("return `sms_num:${clientId}:${e164}`");
+  });
+
+  it.each([
+    ["no meter row", [], "unknown_meter"],
+    ["the meter inactive (as it ships)", [{ price_cents: 2900, active: false }], "inactive"],
+    ["the meter priced at zero", [{ price_cents: 0, active: true }], "unpriced"],
+  ] as const)("does nothing while disarmed (%s): one price read, no numbers read, no charge", async (_l, price, reason) => {
+    const { net } = setup({ price: [...price], numbers: [{ id: NUMBER_ID, client_id: CLIENT, purchased_at: "2026-01-10T00:00:00Z" }] });
+    expect(await run("2026-10-10T09:00:00Z")).toEqual({ ran: false, reason });
+    expect(net.reads("usage_prices")).toHaveLength(1);
+    expect(net.reads("sms_numbers")).toEqual([]);
+    expect(net.rpcCalls("wallet_credit")).toEqual([]);
+  });
+
+  it("when armed it needs no env switch: each live number is charged on its own day, current month only; first-month, already-charged, exempt, deleted and released numbers are not", async () => {
+    const { net } = setup({
+      numbers: [
+        { id: num(1), client_id: CLIENT, purchased_at: "2026-08-20T15:00:00Z" },         // period 2 today: charged
+        { id: N2, client_id: T2, purchased_at: "2026-10-01T10:00:00Z" },                  // its purchase month
+        { id: num(3), client_id: T2, purchased_at: "2026-09-20T10:00:00Z" },              // period 1, already on the ledger
+        { id: num(4), client_id: EXEMPT, purchased_at: "2026-01-05T10:00:00Z" },
+        { id: num(5), client_id: BILLING_EXEMPT, purchased_at: "2026-02-05T10:00:00Z" },
+        { id: num(6), client_id: GONE, purchased_at: "2026-03-05T10:00:00Z" },
+        { id: num(7), client_id: CLIENT, purchased_at: "2026-01-01T10:00:00Z", released_at: "2026-05-01T00:00:00Z" },
+      ],
+      charged: [numberFeeIdem(num(3), 1)],
+    });
+    // makeEnv() has PHONE_USAGE_METERS "off": the meter row is the only switch, as for month 1.
+    const out = await run("2026-10-20T09:00:00Z");
+    expect(out).toEqual({ ran: true, tenants: 5, numbers: 6, firstMonth: 1, charged: 1, already: 1, exempt: 2, gone: 1, failed: 0, topups: 0 });
+    expect(net.rpcCalls("wallet_credit").map((s) => s.json)).toEqual([{
+      p_client_id: CLIENT, p_amount_cents: -2900, p_kind: "debit", p_ref_type: "sms_number", p_ref_id: num(1),
+      p_memo: "Phone number fee, month 3", p_idem: `sms_number_monthly:${num(1)}:m2`, p_actor: null, p_meter_kind: "sms_number_monthly",
+    }]);
+    expect(net.reads("sms_numbers")[0].url.searchParams.get("released_at")).toBe("is.null");
+    // One ledger read for every number due, narrowed by tenant as well (wallet_tx_idem).
+    const ledgerRead = net.reads("wallet_transactions");
+    expect(ledgerRead).toHaveLength(1);
+    expect(inList(ledgerRead[0], "client_id").sort()).toEqual([BILLING_EXEMPT, CLIENT, GONE, EXEMPT, T2].sort());
+    expect(inList(ledgerRead[0], "idempotency_key")).toHaveLength(5);
+    // The deleted tenant's number is a warning to release it, not a charge and not an error.
+    expect(net.writes("app_errors").map((s) => [s.json.code, s.json.severity, s.json.client_id])).toEqual([["sms_number_fee_no_tenant", "warn", GONE]]);
+  });
+
+  it("the purchase month is never charged here; the first run on the anniversary charges month 2", async () => {
+    const { net, debits } = setup({ numbers: [{ id: NUMBER_ID, client_id: CLIENT, purchased_at: "2026-09-15T17:30:00Z" }] });
+    expect(await run("2026-09-16T09:00:00Z")).toMatchObject({ ran: true, firstMonth: 1, charged: 0 });
+    expect(await run("2026-10-14T09:00:00Z")).toMatchObject({ ran: true, firstMonth: 1, charged: 0 });
+    expect(net.rpcCalls("wallet_credit")).toEqual([]);
+    expect(await run("2026-10-15T09:00:00Z")).toMatchObject({ ran: true, firstMonth: 0, charged: 1 });
+    expect(debits).toEqual([`sms_number_monthly:${NUMBER_ID}:m1`]);
+  });
+
+  it("the day clamp: bought Jan 31, charged Feb 28, not again on Mar 1, then Mar 31", async () => {
+    const { debits } = setup({ numbers: [{ id: NUMBER_ID, client_id: CLIENT, purchased_at: "2027-01-31T20:00:00Z" }] });
+    for (const day of ["2027-02-27", "2027-02-28", "2027-03-01", "2027-03-30", "2027-03-31"]) await run(`${day}T09:00:00Z`);
+    expect(debits).toEqual([`sms_number_monthly:${NUMBER_ID}:m1`, `sms_number_monthly:${NUMBER_ID}:m2`]);
+  });
+
+  it("every daily run of a month charges once: the ledger read skips it, and a replay reuses the same key", async () => {
+    const { net, debits } = setup({ numbers: [{ id: NUMBER_ID, client_id: CLIENT, purchased_at: "2026-09-15T10:00:00Z" }] });
+    for (let d = 0; d < 31; d++) await run(new Date(Date.parse("2026-10-15T09:00:00Z") + d * 86_400_000).toISOString());
+    expect(debits).toEqual([`sms_number_monthly:${NUMBER_ID}:m1`]);
+    expect(net.rpcCalls("wallet_credit")).toHaveLength(1);
+    await run("2026-11-15T09:00:00Z");
+    expect(debits).toEqual([`sms_number_monthly:${NUMBER_ID}:m1`, `sms_number_monthly:${NUMBER_ID}:m2`]);
+
+    // Two runs racing past the ledger read send the SAME key, so 244's replay check (and the
+    // unique (client_id, idempotency_key) index) makes the second a no-op, never a second debit.
+    const race = setup({ numbers: [{ id: NUMBER_ID, client_id: CLIENT, purchased_at: "2026-09-15T10:00:00Z" }] });
+    await Promise.all([run("2026-10-20T09:00:00Z"), run("2026-10-20T09:00:00Z")]);
+    const keys = race.net.rpcCalls("wallet_credit").map((s) => s.json.p_idem);
+    expect(new Set(keys)).toEqual(new Set([`sms_number_monthly:${NUMBER_ID}:m1`]));
+    expect(race.debits).toHaveLength(1);
+  });
+
+  it("arming late charges only the current month, never the months before", async () => {
+    const { net } = setup({ numbers: [{ id: NUMBER_ID, client_id: CLIENT, purchased_at: "2026-01-10T10:00:00Z" }] });
+    expect(await run("2026-06-20T09:00:00Z")).toMatchObject({ ran: true, charged: 1 });
+    expect(net.rpcCalls("wallet_credit").map((s) => [s.json.p_idem, s.json.p_memo])).toEqual([
+      [`sms_number_monthly:${NUMBER_ID}:m5`, "Phone number fee, month 6"],
+    ]);
+  });
+
+  it("a failed charge is logged and retried by the next run (same key); the other numbers are still charged", async () => {
+    const { net } = setup({
+      numbers: [
+        { id: NUMBER_ID, client_id: CLIENT, purchased_at: "2026-09-15T10:00:00Z" },
+        { id: N2, client_id: T2, purchased_at: "2026-09-16T10:00:00Z" },
+      ],
+      failFor: CLIENT,
+    });
+    expect(await run("2026-10-20T09:00:00Z")).toMatchObject({ ran: true, charged: 1, failed: 1 });
+    const errs = net.writes("app_errors").map((s) => s.json);
+    expect(errs.map((e) => [e.code, e.severity, e.client_id])).toEqual([["sms_number_fee_failed", "error", CLIENT]]);
+    expect(errs[0].context).toMatchObject({ number_id: NUMBER_ID, period: 1 });
+    await run("2026-10-21T09:00:00Z");
+    expect(net.rpcCalls("wallet_credit").filter((s) => s.json.p_client_id === CLIENT).map((s) => s.json.p_idem))
+      .toEqual([`sms_number_monthly:${NUMBER_ID}:m1`, `sms_number_monthly:${NUMBER_ID}:m1`]);
+  });
+
+  it("a failed read charges nobody that run, and is logged", async () => {
+    const { net } = setup({ numbers: [{ id: NUMBER_ID, client_id: CLIENT, purchased_at: "2026-09-15T10:00:00Z" }] });
+    net.rest("GET", "client_settings", () => new Response(JSON.stringify({ message: "down" }), { status: 500 }));
+    expect(await run("2026-10-20T09:00:00Z")).toEqual({ ran: false, reason: "error" });
+    expect(net.rpcCalls("wallet_credit")).toEqual([]);
+    expect(net.writes("app_errors").map((s) => s.json.code)).toEqual(["sms_number_fee_failed"]);
+  });
+
+  it("a balance the fee leaves under the auto top-up threshold asks for a top-up, once per tenant", async () => {
+    const { net } = setup({
+      numbers: [
+        { id: NUMBER_ID, client_id: CLIENT, purchased_at: "2026-09-15T10:00:00Z" },
+        { id: num(8), client_id: CLIENT, purchased_at: "2026-08-15T10:00:00Z" },
+        { id: N2, client_id: T2, purchased_at: "2026-09-15T10:00:00Z" },
+      ],
+      wallets: {
+        [CLIENT]: { balance_cents: 400, held_cents: 0, auto_topup_enabled: true, auto_topup_threshold_cents: 1000 },
+        [T2]: { balance_cents: 5000, held_cents: 0, auto_topup_enabled: true, auto_topup_threshold_cents: 1000 },
+      },
+    });
+    expect(await run("2026-10-20T09:00:00Z")).toMatchObject({ ran: true, charged: 3, topups: 1 });
+    expect(net.to(/\/functions\/v1\/wallet-autotopup$/).map((s) => s.json)).toEqual([{ client_id: CLIENT }]);
+  });
+
+  it("the daily cron runs it after the line fee, on the tick's clock; no other minute reads its meter", async () => {
+    const index = readFileSync(resolve(process.cwd(), "src/index.ts"), "utf8");
+    const daily = index.slice(index.indexOf("if (dailyDue) {"), index.indexOf("if (tick && callTranscribeOn(env))"));
+    expect(daily).toContain('await job("number_fee", () => chargeMonthlyNumberFees(env, adminClient(env), at));');
+    expect(daily.indexOf('job("number_fee"')).toBeGreaterThan(daily.indexOf('job("line_fee"'));
+
+    const { net, debits } = setup({ numbers: [{ id: NUMBER_ID, client_id: CLIENT, purchased_at: "2026-09-20T10:00:00Z" }] });
+    net.rest("GET", "phone_voicemails", () => []);
+    net.on("GET", /\/Recordings\.json\?/, () => jsonRes({ recordings: [], next_page_uri: null }));
+    net.on("GET", /\/health\?warm=1/, () => jsonRes({ ok: true, warm: true }));
+    const tick = async (iso: string) => {
+      const c = new FakeCtx();
+      await worker.scheduled({ cron: "* * * * *", scheduledTime: Date.parse(iso), noRetry() {} } as ScheduledController, makeEnv(), c as unknown as ExecutionContext);
+      await c.settle();
+    };
+    await tick("2026-10-20T10:00:00Z");
+    expect(net.reads("usage_prices")).toEqual([]);
+    await tick("2026-10-20T09:00:00Z");
+    expect(debits).toEqual([`sms_number_monthly:${NUMBER_ID}:m1`]);
   });
 });

@@ -128,7 +128,12 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
       // that texted first follow a different rule (sms.ts) and do not read this.
       can_text_contacts: maySendToContacts(ctx),
     },
+    // The number this person's calls show: their own number when the business gave them one
+    // (migration 266), else a team line. The apps say "Your number".
     number: ctx.number ? { e164: ctx.number.e164 } : null,
+    // Every number of the business (migration 266), so the apps can tell a teammate's transfer,
+    // which rings From one of them, from a customer. An older app reads `number` alone.
+    numbers: ctx.numbers,
     settings: {
       dnd: s ? onDnd({ dnd: s.dnd === true, dnd_until: s.dnd_until ?? null }) : false,
       forward_to_cell: s?.forward_to_cell ?? null,

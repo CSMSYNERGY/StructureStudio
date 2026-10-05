@@ -4,6 +4,7 @@ import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { ownContactsOnly } from "../_shared/access.ts";
 import { optInDisclosureUrl, designerUrl } from "../_shared/smsConsentText.ts";
+import { suggestedCopyForRow } from "../_shared/smsCopyTemplate.ts";
 import { fetchPage } from "../_shared/safeFetchText.ts";
 import { policyPageChecks, optInPageChecks, consistencyChecks } from "../_shared/smsComplianceCheck.ts";
 import type { Check } from "../_shared/smsComplianceCheck.ts";
@@ -293,13 +294,20 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
    *
    *  Two indexed single-row reads on every call. Deliberately unconditional: the cross-checks
    *  are pure and free, so they are recomputed on every read rather than snapshotted, and a
-   *  field the builder has just corrected stops being reported as broken immediately. */
+   *  field the builder has just corrected stops being reported as broken immediately.
+   *
+   *  `lead_sms_consent_box` (migration 242) rides the same read for the suggested wording: it is
+   *  whether the designer shows the tick box at all, and the suggestion says customers tick it.
+   *  ⚠️ A FAILED READ MEANS NO SUGGESTION, the opposite of the designer and the disclosure page,
+   *  which treat it as "on". They decide whether to SHOW a box; this decides whether to tell the
+   *  carriers there is one, and a sentence we cannot stand behind is worse than an empty field. */
   const [{ data: csRow }, { data: ccRow }] = await Promise.all([
-    admin.from("client_settings").select("business_website").eq("client_id", clientId).maybeSingle(),
+    admin.from("client_settings").select("business_website, lead_sms_consent_box").eq("client_id", clientId).maybeSingle(),
     admin.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
   ]);
   const settingsWebsite = String(csRow?.business_website ?? "");
   const consentCompanyName = String(ccRow?.company_name ?? "");
+  const consentBoxOn = csRow?.lead_sms_consent_box === true;
 
   /** Load the row, creating the empty one on first sight so every later write can assume it. */
   const load = async () => {
@@ -345,6 +353,18 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         ? reg.campaign_message_samples.map((s: unknown) => String(s ?? ""))
         : ["", ""],
     },
+    // Wording the carriers have approved before, filled in with this builder's own facts
+    // (Carolyn 2026-09-17: "I want it to basically prefill for them"). ⚠️ ONLY WHILE THE ROW HOLDS
+    // NO WORDING AT ALL: anything the builder saved is theirs and is never sat beside, or under,
+    // ours. Null when it would not be true (no business name, the tick box switched off). The
+    // form takes it only while untouched and never submits it by itself; an older portal ignores
+    // the key. Built fresh on every read, so a name or policy address fixed since shows at once.
+    suggestedCopy: suggestedCopyForRow(reg, {
+      companyName: consentCompanyName,
+      consentBoxOn,
+      designerUrl: designerUrl(clientId),
+      disclosureUrl: optInDisclosureUrl(clientId),
+    }),
     aupAcceptedAt: reg?.aup_accepted_at ?? null,
     aupText: AUP_TEXT,
     numbers: (numbers ?? []).map((n) => ({
@@ -354,6 +374,9 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       // Bought for calls on the Phone tab and not in a Messaging Service yet: buy_number adopts
       // it (My Synergy Phone plan phase 6), so the number step offers "use it" instead of a search.
       callingOnly: !n.messaging_service_sid,
+      // One person's own number (migration 266): adopted only when no team line is calling-only
+      // (adoptNumber.ts buyPlan), and the number step names the one it will use.
+      assigned: !!n.assigned_user_id,
     })),
     businessTypes: BUSINESS_TYPES,
     jobPositions: JOB_POSITIONS,
@@ -386,11 +409,17 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
     },
   });
 
+  // The tenant's live numbers, oldest first, with whose number each is (migration 266; read again
+  // without that column on a database before it, where every number is a team line).
   const numbersOf = async () => {
-    const { data } = await admin.from("sms_numbers")
-      .select("phone_number, registration_status, purchased_at, messaging_service_sid")
+    const read = (cols: string) => admin.from("sms_numbers")
+      .select(cols)
       .eq("client_id", clientId).is("released_at", null).order("purchased_at");
-    return data ?? [];
+    let res = await read("phone_number, registration_status, purchased_at, messaging_service_sid, assigned_user_id");
+    if (res.error && String((res.error as { code?: string }).code ?? "") === "42703") {
+      res = await read("phone_number, registration_status, purchased_at, messaging_service_sid");
+    }
+    return res.data ?? [];
   };
 
   const note = async (type: string, detail: unknown) => {
@@ -861,10 +890,16 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         // number the Phone tab bought (messaging_service_sid NULL) is the builder's number, and
         // texting ADOPTS it (adoptNumber.ts) instead of buying a second one. A failed read now
         // refuses; it used to read as "no numbers" and go on to buy.
-        const liveRead = await admin.from("sms_numbers")
-          .select("id, phone_number, twilio_sid, messaging_service_sid")
+        // With whose number each is (migration 266: buyPlan adopts a team line before someone's
+        // own); read again without that column on a database before 266.
+        const readLive = (cols: string) => admin.from("sms_numbers")
+          .select(cols)
           .eq("client_id", clientId).is("released_at", null)
           .order("purchased_at", { ascending: true });
+        let liveRead = await readLive("id, phone_number, twilio_sid, messaging_service_sid, assigned_user_id");
+        if (liveRead.error && String((liveRead.error as { code?: string }).code ?? "") === "42703") {
+          liveRead = await readLive("id, phone_number, twilio_sid, messaging_service_sid");
+        }
         const plan = buyPlanFromRead({ data: (liveRead.data ?? null) as LiveNumber[] | null, error: liveRead.error });
         if (plan.kind === "read_failed") {
           await logEdgeError({
@@ -946,10 +981,11 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         // month is charged here. Idempotent on the tenant + the number, so a retry after a
         // lost response reconciles to the same hold rather than charging for a second month.
         //
-        // ⏭ RECURRING IS NOT WIRED. This takes the FIRST month only. There is no pg_cron on
-        // this project, so the monthly charge needs the same lazy-sweep treatment the
-        // registration poller uses — see the work log. Until then a number bills us monthly
-        // and the builder once, which is a known, bounded shortfall rather than a silent one.
+        // This takes the FIRST month only. Months 2 and on are the phone-api Worker's daily cron
+        // (workers/phone-api/src/cron/numberFee.ts): one wallet_credit per number per month
+        // from the purchase day, keyed sms_number_monthly:<number id>:m<n>, so it never
+        // charges this month again. Both are armed by the same switch, this meter's
+        // usage_prices row (active and priced).
         const heldNum = await takeHold(admin, clientId, "sms_number_monthly", `sms_num:${clientId}:${wanted}`, userId ?? null);
         if (!heldNum.ok) return json(heldNum.body, heldNum.status);
 

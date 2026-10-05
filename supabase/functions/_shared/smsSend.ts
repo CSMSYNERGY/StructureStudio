@@ -50,7 +50,20 @@ export type TenantSms = {
    *  omit it (EdgeRuntime.waitUntil is used). Without either, the request is sent and may be
    *  cut off when the response ends. */
   waitUntil?: ((p: Promise<unknown>) => void) | null;
+  /** The business number to send FROM, E.164, when it is not the main texting number
+   *  (client_settings.sms_number): a reply goes out from the number the customer last used
+   *  (replyFromNumber below, migration 266). It must be one of THIS business's live numbers,
+   *  registered for texting, in the business's own Messaging Service; anything else is refused
+   *  with a sentence, never quietly sent from another number (an unregistered US send dies at
+   *  the carrier with 30034 and nobody sees it). Absent, or the main number itself = the main
+   *  number, exactly as before. Automatic texts never set it. */
+  fromNumber?: string | null;
 };
+
+/** fromNumber is not a live number of this business (another builder's, released, or made up). */
+export const FROM_NOT_OURS = "That number isn't one of your business's numbers any more, so the text wasn't sent. Reload and try again.";
+/** fromNumber is ours but can't text yet (not registered, or outside the texting setup). */
+export const FROM_NOT_READY = "That number isn't set up for texting yet, so the text wasn't sent. It can text once the carriers approve it.";
 
 export async function sendTenantSms(
   admin: any,
@@ -85,16 +98,35 @@ export async function sendTenantSms(
     if (!reg || reg.status !== "active" || !reg.messaging_service_sid) {
       return { sent: false, reason: "not_active" };
     }
-    const { data: num } = await admin.from("sms_numbers")
-      .select("registration_status")
-      .eq("client_id", clientId).eq("phone_number", s.sms_number)
-      .is("released_at", null).maybeSingle();
-    if (!num || num.registration_status !== "registered") {
-      return {
-        sent: false,
-        reason: "not_active",
-        error: "This number is still being registered with the carriers. Texting switches on by itself once that clears.",
-      };
+    // ── WHICH of the business's numbers (migration 266) ─────────────────────────────────
+    // The main texting number unless the caller names another. Another must pass FOUR checks,
+    // each of which alone would otherwise send into a black hole or out of someone else's line:
+    // it is THIS business's (client_id), live (not released), registered for texting, and in the
+    // business's own Messaging Service (the service Twilio sends through, below). A failed read
+    // refuses too: guessing is how a text leaves from a number nobody chose.
+    const from = msg.fromNumber ? String(msg.fromNumber).trim() : String(s.sms_number);
+    if (from !== String(s.sms_number)) {
+      const { data: alt, error: altErr } = await admin.from("sms_numbers")
+        .select("registration_status, messaging_service_sid")
+        .eq("client_id", clientId).eq("phone_number", from)
+        .is("released_at", null).maybeSingle();
+      if (altErr) return { sent: false, reason: "failed", error: "The text could not be sent. Try again." };
+      if (!alt) return { sent: false, reason: "not_active", error: FROM_NOT_OURS };
+      if (alt.registration_status !== "registered" || alt.messaging_service_sid !== reg.messaging_service_sid) {
+        return { sent: false, reason: "not_active", error: FROM_NOT_READY };
+      }
+    } else {
+      const { data: num } = await admin.from("sms_numbers")
+        .select("registration_status")
+        .eq("client_id", clientId).eq("phone_number", s.sms_number)
+        .is("released_at", null).maybeSingle();
+      if (!num || num.registration_status !== "registered") {
+        return {
+          sent: false,
+          reason: "not_active",
+          error: "This number is still being registered with the carriers. Texting switches on by itself once that clears.",
+        };
+      }
     }
 
     // ── The number, derived server-side ──────────────────────────────────────────────
@@ -249,7 +281,7 @@ export async function sendTenantSms(
       contact_id: msg.contactId ?? null,
       short_code: msg.shortCode ?? null,
       direction: "out",
-      from_number: s.sms_number,
+      from_number: from,
       to_number: to,
       body,
       status: "claimed",
@@ -275,7 +307,7 @@ export async function sendTenantSms(
     try {
       const out = await sendSms({
         to,
-        from: String(s.sms_number),
+        from,
         messagingServiceSid: String(reg.messaging_service_sid),
         body,
         statusCallback: msg.statusCallback ?? null,
@@ -348,5 +380,107 @@ export async function sendTenantSms(
       message: `unhandled: ${(e as Error).message}`,
     }).catch(() => {});
     return { sent: false, reason: "failed", error: "The text could not be sent." };
+  }
+}
+
+// ── Which number a person's reply goes out from (migration 266) ─────────────────────────────
+//
+// Carolyn 2026-09-30: a business can have more than one number, and a number can be one
+// person's. A customer who texted the sales line, or Mike's own number, expects the answer from
+// that same number; a reply from another one reads as a stranger. So a text a PERSON sends to a
+// customer (the record page's Send, the apps' Send) goes out from, in order:
+//   1. the business number of the newest text in that customer's thread (the number they texted,
+//      or the one we last texted them from);
+//   2. failing that, the sender's own number (sms_numbers.assigned_user_id);
+//   3. failing that, the main number (null: sendTenantSms's own default).
+// A candidate is used only if it can text right now: live, registered, and in the business's
+// Messaging Service. One that can't (a calling-only number, one still with the carriers, one
+// released since) is skipped for the next, so a reply that worked before this change still goes
+// out, from the main number, rather than being refused. The main number itself answers null, so
+// that path stays byte for byte what it was. Every read failure answers null too: replying from
+// the main number is what every text did before.
+//
+// Automatic texts (submit-estimate's quote text, text_sign_link) never ask: they stay on the main
+// number, the one the business registered and advertises.
+
+export type ReplyThreadRow = { direction: string | null; from_number: string | null; to_number: string | null };
+export type ReplyNumberRow = {
+  phone_number: string;
+  registration_status: string | null;
+  messaging_service_sid: string | null;
+  assigned_user_id?: string | null;
+};
+
+/** The pure half of replyFromNumber: the rows in, the number out (null = the main number). */
+export function pickReplyNumber(o: {
+  thread: ReplyThreadRow | null;
+  numbers: ReplyNumberRow[];
+  mainNumber: string | null;
+  serviceSid: string | null;
+  userId?: string | null;
+}): string | null {
+  if (!o.serviceSid) return null;
+  const live = new Map((o.numbers ?? []).map((n) => [String(n.phone_number), n] as [string, ReplyNumberRow]));
+  const canText = (e164: string) => {
+    const n = live.get(e164);
+    return !!n && n.registration_status === "registered" && !!n.messaging_service_sid && n.messaging_service_sid === o.serviceSid;
+  };
+  const ours = o.thread
+    ? (o.thread.direction === "in" ? o.thread.to_number : o.thread.direction === "out" ? o.thread.from_number : null)
+    : null;
+  const me = String(o.userId ?? "").toLowerCase();
+  const mine = me ? (o.numbers ?? []).find((n) => String(n.assigned_user_id ?? "").toLowerCase() === me)?.phone_number ?? null : null;
+  for (const c of [ours, mine]) {
+    if (!c) continue;
+    if (o.mainNumber && c === o.mainNumber) return null;
+    if (canText(c)) return c;
+  }
+  return null;
+}
+
+const E164_US = /^\+1[2-9]\d{9}$/;
+
+/**
+ * The reads behind pickReplyNumber, in parallel (one round trip): the thread's newest text, the
+ * business's live numbers, the main number and the Messaging Service. `contactId` names a saved
+ * customer's thread; without one, `customerE164` names an unknown number's (its texts carry no
+ * contact). Never throws; null = the main number.
+ */
+// deno-lint-ignore no-explicit-any
+export async function replyFromNumber(admin: any, clientId: string, o: {
+  contactId?: string | null;
+  customerE164?: string | null;
+  userId?: string | null;
+}): Promise<string | null> {
+  try {
+    const e164 = o.customerE164 && E164_US.test(o.customerE164) ? o.customerE164 : null;
+    const threadQ = o.contactId
+      ? admin.from("sms_messages").select("direction, from_number, to_number")
+        .eq("client_id", clientId).eq("contact_id", o.contactId)
+        .order("created_at", { ascending: false }).limit(1)
+      : e164
+      ? admin.from("sms_messages").select("direction, from_number, to_number")
+        .eq("client_id", clientId).is("contact_id", null)
+        .or(`from_number.eq.${e164},to_number.eq.${e164}`)
+        .order("created_at", { ascending: false }).limit(1)
+      : Promise.resolve({ data: [], error: null });
+    const [thread, nums, cs, reg] = await Promise.all([
+      threadQ,
+      admin.from("sms_numbers").select("phone_number, registration_status, messaging_service_sid, assigned_user_id")
+        .eq("client_id", clientId).is("released_at", null).limit(50),
+      admin.from("client_settings").select("sms_number").eq("client_id", clientId).maybeSingle(),
+      admin.from("sms_registrations").select("messaging_service_sid").eq("client_id", clientId).maybeSingle(),
+    ]);
+    // Before migration 266 (no assigned_user_id) or any failed read of the numbers: the main number.
+    if (nums.error || reg.error || cs.error) return null;
+    return pickReplyNumber({
+      thread: thread.error ? null : ((thread.data ?? [])[0] ?? null),
+      numbers: (nums.data ?? []) as ReplyNumberRow[],
+      mainNumber: (cs.data as { sms_number?: string | null } | null)?.sms_number ?? null,
+      serviceSid: (reg.data as { messaging_service_sid?: string | null } | null)?.messaging_service_sid ?? null,
+      userId: o.userId ?? null,
+    });
+  } catch {
+    return null;
   }
 }

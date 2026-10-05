@@ -40,6 +40,7 @@ import { callTranscribeOn, noticeTwiml, recordingBackstop, recordingCallback } f
 import { recordingSweep } from "./cron/sweep";
 import { recordingRetention, retention } from "./cron/retention";
 import { chargeMonthlyLineFees } from "./cron/lineFee";
+import { chargeMonthlyNumberFees } from "./cron/numberFee";
 import { runTranscriptions } from "./cron/transcribe";
 import { runUsageCharges, snapshotTwilioUsage } from "./cron/usageCharge";
 
@@ -290,6 +291,9 @@ export default {
         await job("recording_retention", () => recordingRetention(env, at));
         await job("twilio_usage", () => snapshotTwilioUsage(env, adminClient(env), at));
         await job("line_fee", () => chargeMonthlyLineFees(env, adminClient(env)));
+        // Each number's own fee from its second month on (the purchase took the first). Its only
+        // rail is the sms_number_monthly meter, the switch month 1 is charged on.
+        await job("number_fee", () => chargeMonthlyNumberFees(env, adminClient(env), at));
       }
       if (tick && callTranscribeOn(env)) {
         await job("transcribe", () => runTranscriptions(env, adminClient(env), at));

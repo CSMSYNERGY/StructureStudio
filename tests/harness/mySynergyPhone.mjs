@@ -21,7 +21,8 @@
 //      from a blob: URL; review SSB-7), fetched only when Play is pressed, and not in view-as or
 //      with calling off.
 //   L. Settings -> Phone, plan phase 6: "Connect this number for calls", and the calling-only
-//      number search + purchase (the purchase is a STUB here; nothing is bought).
+//      number search + purchase (the purchase is a STUB here; nothing is bought). Who answers and
+//      how, chosen before the first number exists, carries over to it (L8, L9).
 //   M. The rollout on the Phone tab (review SSB-1): an owner the server will not let switch
 //      calling on sees no switch, no Connect and no Buy, and is told why; and turning calling off
 //      with a connected number moves it to voicemail, with "Send calls to voicemail" when that
@@ -55,6 +56,13 @@
 //      own; Play fetches the audio with the header into a blob: URL; "Use the standard greeting"
 //      clears it after a confirm; the Worker's refusal reaches the screen; the owner's link field
 //      says it is for the shared number; a Worker that doesn't keep greetings shows no section.
+//   X. Settings -> Phone with MORE THAN ONE NUMBER (migration 266, Carolyn 09-30): the list of
+//      numbers with each one's name and whose it is; picking one opens its OWN settings (name,
+//      person, who answers, hours, caller ID); Save, Connect and "Use this number for texting too"
+//      send that number's id; someone who already has a number isn't offered a second; "Add another
+//      number" buys one (a STUB) and opens it; a sales rep with their own number sees "Your number".
+//      The stub checks every save with the REAL parseRoute / parseNumberLabel / parseAssignee /
+//      pickNumber. Nothing is bought, connected or texted anywhere.
 //   W. Who reaches Your calls: a sales rep (phone 'own', no settings area: the real title preset)
 //      gets Settings with exactly Phone and My Profile, and the card, at /portal/settings/phone
 //      (the apps' "Change in Structure Studio" link); and an older Worker, which answers GET
@@ -77,6 +85,7 @@ import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import { launch, reporter, BASE, REF, shotsDir } from "./lib.mjs";
 import { buildCallsReport, parseRecording, parseRoute, recordingView } from "../../supabase/functions/portal-settings/phone.ts";
+import { MAX_NUMBERS, parseAssignee, parseNumberLabel, pickNumber, suggestedMembersFor } from "../../supabase/functions/portal-settings/phone.ts";
 import { parseBusinessHours, RING_HOURS_WORDS, validTimeZone } from "../../supabase/functions/_shared/phoneHours.ts";
 import { PRESETS } from "../../supabase/functions/_shared/access.ts";
 
@@ -175,6 +184,9 @@ async function scenario(browser, opts) {
     // Who reaches it (W): the signed-in person's tenant role and access map (the owner's by
     // default), and a Worker from before 264 (GET /settings/me answers 405, as the real one does).
     role = "owner", access = OWNER_ACCESS, oldWorker = false,
+    // X (migration 266): the business's numbers in phone_settings_get's `numbers` shape; null =
+    // a server from before 266 (`number` and `route` only), which every other scenario is.
+    numbers = null, textingActive = false,
   } = opts;
   const ctx = await browser.newContext({ viewport, ...(timezoneId ? { timezoneId } : {}), ...(userAgent ? { userAgent, isMobile: true, hasTouch: true } : {}) });
   await ctx.addInitScript(([ref, s]) => {
@@ -218,6 +230,7 @@ async function scenario(browser, opts) {
     recording: recordingRow ? recordingView(recordingRow, recordingServerOn) : null,
     number: opts.noNumber ? null : (numberOverride ?? { id: "num-1", e164: "+15555550199", textingStatus: "registered", voiceReady: false, callingOnly: false }),
     my,
+    numbers: numbers ? numbers.map((n) => ({ ...n })) : null,
   };
   await page.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href), (route) => route.abort());
   // THE phone-api WORKER's voicemail audio, stubbed (registered after the abort-everything route,
@@ -304,6 +317,75 @@ async function scenario(browser, opts) {
     if (!url.includes("/portal-settings")) return json(route, { ok: true });
     calls.push(body);
     const clientId = body.targetClientId || CLIENT;
+    // X. A server with migration 266: every number, each saved, connected and joined by its id.
+    if (state.numbers) {
+      const eligible = new Set(team.filter((t) => t.phoneLevel !== "none").map((t) => t.userId));
+      const names = new Map(team.map((t) => [t.userId, t.name]));
+      const pickedOf = () => pickNumber(state.numbers, body.numberId);
+      switch (body.action) {
+        case "phone_settings_get":
+          if (access.phone !== "view" && access.phone !== "edit") {
+            const mine = state.numbers.find((n) => n.assignedUserId === USER.id) || state.numbers[0];
+            return json(route, { ok: true, available: true, scope: "own", phoneStatus: state.phoneStatus, level: "own", canEdit: false,
+              number: mine ? { e164: mine.e164, label: mine.label, mine: mine.assignedUserId === USER.id } : null, recording: null });
+          }
+          return json(route, { ok: true, available: true, scope: "team", phoneStatus: state.phoneStatus, level: "edit", canEdit: true,
+            number: state.numbers[0] || null, route: state.numbers[0] ? state.numbers[0].route : null,
+            numbers: state.numbers, perNumber: true, maxNumbers: MAX_NUMBERS, textingActive,
+            canBuyNumber: rolloutOpen, canJoinTexting: rolloutOpen, numbersForSale: true, voiceSetup: true, canSwitchOn: rolloutOpen, canConnect: rolloutOpen, selfServe: false,
+            callerId: state.numbers[0] ? state.numbers[0].callerId : null, canManageCallerId: trustOperator,
+            recording: state.recording, canChangeRecording: !!state.recording && canChangeRecording,
+            team, suggestedMembers: null });
+        case "phone_settings_save": {
+          const pk = pickedOf();
+          if (!pk.ok) return json(route, { error: pk.error }, 409);
+          const n = pk.n;
+          const l = Object.prototype.hasOwnProperty.call(body, "label") ? parseNumberLabel(body.label) : { ok: true, value: n.label };
+          if (!l.ok) return json(route, { error: l.error }, 400);
+          const a = Object.prototype.hasOwnProperty.call(body, "assignedUserId") ? parseAssignee(body.assignedUserId, eligible, names) : { ok: true, value: n.assignedUserId };
+          if (!a.ok) return json(route, { error: a.error }, 400);
+          // sms_numbers_one_per_person, as the database answers it.
+          if (a.value && state.numbers.some((x) => x.id !== n.id && x.assignedUserId === a.value)) {
+            return json(route, { error: "That person already has their own number. Make that one a team line first, or choose someone else." }, 409);
+          }
+          const r = parseRoute(body, eligible, names);
+          if (!r.ok) return json(route, { error: r.error }, 400);
+          const rt = {
+            mode: r.row.mode, members: r.row.members, ringSeconds: r.row.ring_seconds, noAnswer: r.row.no_answer,
+            forwardTo: r.row.forward_to, businessHours: r.row.business_hours, timeZone: r.row.time_zone,
+            afterHours: r.row.after_hours, greetingUrl: r.row.greeting_url, updatedAt: new Date().toISOString(),
+          };
+          Object.assign(n, { label: l.value, assignedUserId: a.value, route: rt, suggestedMembers: null });
+          return json(route, { ok: true, numberId: n.id, label: n.label, assignedUserId: n.assignedUserId, route: rt });
+        }
+        case "phone_enable_number": {
+          const pk = pickedOf();
+          if (!pk.ok) return json(route, { error: pk.error }, 409);
+          if (state.phoneStatus !== "on") return json(route, { error: "Turn calling on first, then connect the number." }, 409);
+          pk.n.voiceReady = true;
+          return json(route, { ok: true, number: { id: pk.n.id, e164: pk.n.e164, voiceReady: true } });
+        }
+        case "phone_number_texting": {
+          const pk = pickedOf();
+          if (!pk.ok) return json(route, { error: pk.error }, 409);
+          if (!textingActive) return json(route, { error: "Texting isn't on for this account yet." }, 409);
+          pk.n.callingOnly = false;
+          return json(route, { ok: true, number: { id: pk.n.id, callingOnly: false } });
+        }
+        case "phone_buy_number": {
+          if (state.numbers.length >= MAX_NUMBERS) return json(route, { error: "This account has 10 numbers." }, 409);
+          const id = `00000000-0000-4000-8000-00000000a00${state.numbers.length + 1}`;
+          state.numbers.push({ id, e164: body.phoneNumber, label: null, assignedUserId: null, textingStatus: "pending_registration",
+            voiceReady: state.phoneStatus === "on", callingOnly: !textingActive, main: false,
+            callerId: { available: true, shakenStir: { registered: false, status: null }, voiceIntegrity: { registered: false, status: null }, checkedAt: null },
+            route: null, suggestedMembers: suggestedMembersFor(null, team) });
+          return json(route, { ok: true, number: { id, e164: body.phoneNumber, voiceReady: state.phoneStatus === "on", callingOnly: !textingActive } });
+        }
+        case "phone_trust_status":
+          return json(route, { error: "Caller ID registration is set up by Structure Studio. Ask us and we'll register your number." }, 403);
+        default: break;
+      }
+    }
     switch (body.action) {
       case "status":
         return json(route, { ok: true, clientId, role, operatorMode: !!body.targetClientId, access, prefs: null,
@@ -841,6 +923,11 @@ try {
     await s.page.waitForSelector("[data-ss-phone-buy]", { timeout: 15000 }).catch(() => {});
     const offered = ok("L3 an owner with no number is offered 'Get a number for calls'", (await s.page.locator("[data-ss-phone-buy]").count()) === 1);
     if (offered) {
+      // Choices made BEFORE there is a number (the form is open; only its Save waits for one):
+      // the rep ticked and one after another. They must still be there once the number arrives.
+      const box = (id) => s.page.locator(`[data-ss-phone-member="${id}"] input[type=checkbox]`);
+      const inOrder = s.page.locator("label", { hasText: "Ring one after another, in this order" }).locator("input");
+      ok("L8a the answer list can be chosen before there is a number", (await tick(box(REP))) && (await tick(inOrder)));
       await s.page.locator("[data-ss-phone-areacode]").fill("555");
       await tap(s.page.locator("[data-ss-phone-search]"));
       await s.page.waitForSelector('[data-ss-phone-result="+15555550101"]', { timeout: 8000 }).catch(() => {});
@@ -857,7 +944,14 @@ try {
           && /Calls only for now/.test(await s.page.locator("body").innerText())
           && (await s.page.locator("[data-ss-phone-connected]").count()) === 1);
       ok("L7 and the purchase is no longer offered", (await s.page.locator("[data-ss-phone-buy]").count()) === 0);
+      ok("L8 what was chosen before the number was bought is still chosen (the rep ticked, one after another)",
+        (await box(USER.id).isChecked().catch(() => false)) && (await box(REP).isChecked().catch(() => false)) && (await inOrder.isChecked().catch(() => false)));
       await s.page.screenshot({ path: join(shots, "L-number-bought.png"), fullPage: true });
+      await tap(s.page.locator("[data-ss-phone-save]"));
+      await s.page.waitForFunction(() => document.body.innerText.includes("Saved. Calls to your number"), null, { timeout: 8000 }).catch(() => {});
+      const saved = s.calls.filter((c) => c.action === "phone_settings_save").pop() || {};
+      ok("L9 and Save sends them for the new number (checked by the real rules)",
+        JSON.stringify(saved.members) === JSON.stringify([USER.id, REP]) && saved.mode === "in_order" && saved.numberId === "num-2", JSON.stringify(saved));
     }
     await s.ctx.close();
   }
@@ -1204,6 +1298,95 @@ try {
       ok("V5 a refusal reaches the screen in the Worker's own words, and nothing waits on it",
         /Your phone is already ringing for your greeting\. Try again in half a minute\./.test(await said()) && /Record my greeting/.test(await said()), (await said()).slice(-160));
     }
+    await s.ctx.close();
+  }
+
+  // ── X. More than one number (migration 266) ───────────────────────────────────────────────
+  {
+    const CID = { available: true, shakenStir: { registered: false, status: null }, voiceIntegrity: { registered: false, status: null }, checkedAt: null };
+    const MAIN = { id: "00000000-0000-4000-8000-00000000a001", e164: "+15555550199", label: null, assignedUserId: null, textingStatus: "registered",
+      voiceReady: true, callingOnly: false, main: true, callerId: CID,
+      route: { mode: "all_at_once", members: [USER.id], ringSeconds: 20, noAnswer: "voicemail", forwardTo: null, businessHours: null, timeZone: "America/Chicago", afterHours: "voicemail", greetingUrl: null, updatedAt: null },
+      suggestedMembers: null };
+    const RILEY = { id: "00000000-0000-4000-8000-00000000a002", e164: "+15555550198", label: "Riley cell", assignedUserId: REP, textingStatus: "pending_registration",
+      voiceReady: false, callingOnly: true, main: false, callerId: CID, route: null, suggestedMembers: [REP] };
+    const s = await scenario(browser, { name: "X", numbers: [MAIN, RILEY], textingActive: true });
+    await s.go("/portal/settings/phone");
+    await s.page.waitForSelector("[data-ss-phone-number-list]", { timeout: 15000 }).catch(() => {});
+    const rows = await s.page.locator("[data-ss-phone-number-row]").allInnerTexts();
+    ok("X1 two numbers are listed, each with its name and whose it is",
+      rows.length === 2 && /Main number/.test(rows[0]) && /\(555\) 555-0199/.test(rows[0]) && /Team line/.test(rows[0])
+        && /Riley cell/.test(rows[1]) && /\(555\) 555-0198/.test(rows[1]) && /Riley Rep/.test(rows[1]), JSON.stringify(rows));
+    ok("X2 the first number is open: its own answer list (the owner ticked) and its Save",
+      (await s.page.locator('[data-ss-phone-number-row="+15555550199"][aria-pressed="true"]').count()) === 1
+        && (await s.page.locator(`[data-ss-phone-member="${USER.id}"] input[type=checkbox]`).isChecked().catch(() => false)));
+    await s.page.screenshot({ path: join(shots, "X-two-numbers.png"), fullPage: true });
+
+    // Open Riley's number: its own name, person, answer list (just Riley, nothing saved yet), Connect.
+    await tap(s.page.locator('[data-ss-phone-number-row="+15555550198"]'));
+    await s.page.waitForTimeout(300);
+    ok("X3 picking Riley's number opens ITS settings: name, Riley as the person, Riley ticked, Connect and Use for texting",
+      (await s.page.locator("[data-ss-phone-number-label]").inputValue().catch(() => "")) === "Riley cell"
+        && (await s.page.locator("[data-ss-phone-number-owner-select]").inputValue().catch(() => "")) === REP
+        && (await s.page.locator(`[data-ss-phone-member="${REP}"] input[type=checkbox]`).isChecked().catch(() => false))
+        && !(await s.page.locator(`[data-ss-phone-member="${USER.id}"] input[type=checkbox]`).isChecked().catch(() => true))
+        && (await s.page.locator("[data-ss-phone-connect]").count()) === 1 && (await s.page.locator("[data-ss-phone-texting-join-button]").count()) === 1);
+    await s.page.screenshot({ path: join(shots, "X-riley-number-open.png"), fullPage: true });
+
+    await s.page.locator("[data-ss-phone-number-label]").fill("Riley's line", { timeout: 5000 }).catch(() => {});
+    await tap(s.page.locator("[data-ss-phone-save]"));
+    await s.page.waitForTimeout(600);
+    const saved = s.calls.filter((c) => c.action === "phone_settings_save").pop() || {};
+    ok("X4 Save sends THIS number's id, name, person and answer list (checked by the real rules)",
+      saved.numberId === RILEY.id && saved.label === "Riley's line" && saved.assignedUserId === REP && JSON.stringify(saved.members) === JSON.stringify([REP]),
+      JSON.stringify(saved));
+    ok("X5 the list shows the new name", /Riley's line/.test(await s.page.locator('[data-ss-phone-number-row="+15555550198"]').innerText().catch(() => "")));
+
+    await tap(s.page.locator("[data-ss-phone-connect]"));
+    await s.page.waitForTimeout(400);
+    await tap(s.page.locator("[data-ss-phone-texting-join-button]"));
+    await s.page.waitForTimeout(400);
+    const enable = s.calls.filter((c) => c.action === "phone_enable_number").pop() || {};
+    const join_ = s.calls.filter((c) => c.action === "phone_number_texting").pop() || {};
+    ok("X6 Connect and \"Use this number for texting too\" each name Riley's number",
+      enable.numberId === RILEY.id && join_.numberId === RILEY.id && (await s.page.locator("[data-ss-phone-texting-join-button]").count()) === 0
+        && (await s.page.locator("[data-ss-phone-connected]").count()) === 1, JSON.stringify({ enable, join_ }));
+
+    // Back to the main number: its settings are its own, untouched; Riley can't be given a second number.
+    await tap(s.page.locator('[data-ss-phone-number-row="+15555550199"]'));
+    await s.page.waitForTimeout(300);
+    const x7 = await s.page.evaluate(([rep, me]) => {
+      const sel = document.querySelector("[data-ss-phone-number-owner-select]");
+      const opt = sel && [...sel.options].find((o) => o.value === rep);
+      const box = document.querySelector(`[data-ss-phone-member="${me}"] input[type=checkbox]`);
+      return { owner: sel ? sel.value : "x", rileyDisabled: !!(opt && opt.disabled), rileyText: opt ? opt.textContent : null, ownerTicked: !!(box && box.checked) };
+    }, [REP, USER.id]);
+    ok("X7 the main number's form is its own (owner ticked, team line), and Riley is shown as having their own number",
+      x7.ownerTicked && x7.owner === "" && x7.rileyDisabled && /has their own number/.test(x7.rileyText || ""), JSON.stringify(x7));
+
+    // Add a third number (a STUB purchase): it is listed and opened, as a team line ringing the owner.
+    await tap(s.page.locator("[data-ss-phone-add]"));
+    await tap(s.page.locator("[data-ss-phone-search]"));
+    await s.page.waitForSelector('[data-ss-phone-result="+15555550101"]', { timeout: 5000 }).catch(() => {});
+    await tap(s.page.locator('[data-ss-phone-result="+15555550101"] button'));
+    await s.page.waitForTimeout(1200);
+    const bought = s.calls.filter((c) => c.action === "phone_buy_number").pop() || {};
+    ok("X8 Add another number buys the picked one (stub) and opens it, listed third",
+      bought.phoneNumber === "+15555550101" && (await s.page.locator("[data-ss-phone-number-row]").count()) === 3
+        && (await s.page.locator('[data-ss-phone-number-row="+15555550101"][aria-pressed="true"]').count()) === 1
+        && /Number 3/.test(await s.page.locator('[data-ss-phone-number-row="+15555550101"]').innerText().catch(() => "")), JSON.stringify(bought));
+    await s.page.screenshot({ path: join(shots, "X-third-number-added.png"), fullPage: true });
+    await s.ctx.close();
+  }
+  {
+    // A sales rep whose own number it is: "Your number", the one their calls show.
+    const RILEY_OWN = { id: "00000000-0000-4000-8000-00000000a002", e164: "+15555550198", label: "Riley cell", assignedUserId: USER.id };
+    const s = await scenario(browser, { name: "X9", role: "user", access: PRESETS.sales_rep, numbers: [{ id: "00000000-0000-4000-8000-00000000a001", e164: "+15555550199", label: null, assignedUserId: null }, RILEY_OWN] });
+    await s.go("/portal/settings/phone");
+    await s.page.waitForSelector('[data-ss-phone-settings="own"]', { timeout: 15000 }).catch(() => {});
+    const card = await s.page.locator('[data-ss-phone-numbers]').first().innerText().catch(() => "");
+    ok("X9 a sales rep with their own number is shown it as \"Your number\"", /Your number/.test(card) && /\(555\) 555-0198/.test(card) && /Riley cell/.test(card), card);
+    await s.page.screenshot({ path: join(shots, "X-sales-rep-own-number.png"), fullPage: true });
     await s.ctx.close();
   }
 

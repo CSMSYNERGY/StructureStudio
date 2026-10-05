@@ -83,8 +83,10 @@ describe("POST /settings/me", () => {
     [{ dnd: true, dnd_until: "2000-01-01T00:00:00Z" }, "Pick an end time for Do Not Disturb within the next 30 days."],
     [{ forward_to_cell: "12" }, "That cell number isn't a US or Canadian number."],
     [{ forward_to_cell: BUSINESS_NUMBER }, "That's your business number. Enter your own cell phone."],
+    // Migration 266: any of the business's numbers, not only the one this person's calls show.
+    [{ forward_to_cell: "+15555550102" }, "That's your business number. Enter your own cell phone."],
   ])("refuses %j", async (body, message) => {
-    const { token, env } = await setup();
+    const { token, env } = await setup(callerCtx({ numbers: [BUSINESS_NUMBER, "+15555550102"] }));
     const { json } = await call(env, appRequest("POST", "/settings/me", token, body));
     expect(json.error).toEqual({ code: "bad_request", message });
   });

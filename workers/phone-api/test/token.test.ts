@@ -2,7 +2,8 @@ import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { mintAccessToken, pushCredentialFor } from "../src/accessToken";
 import { b64urlDecodeJson } from "../src/b64";
-import { Auth, FakeNet, SUPABASE_URL, USER_A, USER_C, appRequest, call, callerCtx, filter, jsonRes, makeEnv } from "./helpers";
+import { Auth, FakeNet, NUMBER_ID, SUPABASE_URL, USER_A, USER_C, appRequest, call, callerCtx, filter, jsonRes, makeEnv } from "./helpers";
+import { businessNumbersOf } from "../src/db";
 
 const HEX_A = USER_A.replace(/-/g, "");
 
@@ -247,5 +248,42 @@ describe("POST /token", () => {
     expect(none.res.status).toBe(401);
     const junk = await call(env, appRequest("POST", "/token", "not.a.jwt", { platform: "chrome", build_type: "prod" }));
     expect(junk.json.error.code).toBe("unauthorized");
+  });
+});
+
+// ── More than one number (migration 266) ────────────────────────────────────────────────────
+describe("POST /token with more than one business number", () => {
+  async function tokenFor(ctx: Record<string, unknown>) {
+    const net = new FakeNet().install();
+    const auth = await new Auth().init();
+    auth.serve(net);
+    net.rpc("phone_caller_context", () => ctx);
+    net.rest("GET", "phone_user_settings", () => []);
+    return call(makeEnv(), appRequest("POST", "/token", await auth.token(USER_A), { platform: "chrome", build_type: "prod" }));
+  }
+
+  it("`number` is the caller's own (the RPC's pick); `numbers` is every number of the business", async () => {
+    const own = { id: "00000000-0000-4000-8000-00000000a002", e164: "+15555550102", voice_enabled: true, registration_status: "pending_registration" };
+    const { res, json } = await tokenFor(callerCtx({ number: own, numbers: ["+15555550100", "+15555550101", "+15555550102"] }));
+    expect(res.status).toBe(200);
+    expect(json.number).toEqual({ e164: "+15555550102" });
+    expect(json.numbers).toEqual(["+15555550100", "+15555550101", "+15555550102"]);
+  });
+
+  it("a database before 266 (no `numbers`): the one number; no number at all: none", async () => {
+    const before = await tokenFor(callerCtx());
+    expect(before.json.numbers).toEqual(["+15555550100"]);
+    const none = await tokenFor(callerCtx({ number: null }));
+    expect(none.json.number).toBeNull();
+    expect(none.json.numbers).toEqual([]);
+  });
+
+  it("businessNumbersOf keeps E.164 strings only, once each, at most 50, with `number` always in it", () => {
+    expect(businessNumbersOf(["+15555550100", "+15555550100", "nope", 7, null, " +15555550101 "], "+15555550100")).toEqual(["+15555550100", "+15555550101"]);
+    expect(businessNumbersOf(["+15555550101"], "+15555550100")).toEqual(["+15555550100", "+15555550101"]);
+    expect(businessNumbersOf("+15555550100", null)).toEqual([]);
+    expect(businessNumbersOf(undefined, "+15555550100")).toEqual(["+15555550100"]);
+    expect(businessNumbersOf(Array.from({ length: 80 }, (_, i) => `+1555555${String(1000 + i)}`), null)).toHaveLength(50);
+    expect(NUMBER_ID).toMatch(/^[0-9a-f-]{36}$/);
   });
 });

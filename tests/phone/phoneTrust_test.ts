@@ -391,12 +391,16 @@ Deno.test("setup: the profile comes from the texting registration (or, internal 
 
 Deno.test("phone_settings_get reports the caller ID from its OWN select, and who may change it", () => {
   const get = slice(SRC, 'if (action === "phone_settings_get") {', 'if (action === "phone_settings_save") {', "phone_settings_get");
-  assert(/const tr = await trustRowOf\(n\.id\);/.test(get));
-  assert(/callerId = tr\.error \? callerIdView\(null, false\)/.test(get), "a server without 255 shows 'not available', never a failed screen");
+  // Migration 266: ONE read of every number's caller-ID columns, in their own select, on this tenant.
+  assert(/const tr = await admin\.from\("sms_numbers"\)\.select\(TRUST_COLUMNS\)\.eq\("client_id", clientId\)\.in\("id", rows\.map\(\(r\) => r\.id\)\)/.test(get));
+  assert(/trustAvailable = !tr\.error;/.test(get) && /trustAvailable \? callerIdView\(/.test(get) && /: callerIdView\(null, false\);/.test(get),
+    "a server without 255 shows 'not available', never a failed screen");
+  assert(/callerId: callerIdOf\(String\(r\.id\)\)/.test(get), "each number carries its own caller ID");
   assert(/canManageCallerId: canEdit\("phone"\) && await callerMayManageCallerId\(\)/.test(get));
   // The number read everything else uses is untouched by 255's columns.
-  const numberRead = slice(SRC, "const phoneNumberRow = async () =>", ".limit(1);", "phoneNumberRow");
+  const numberRead = slice(SRC, "const phoneNumberRows = async ()", "\n  };\n", "phoneNumberRows");
   assert(!/shaken|voice_integrity|caller_id/.test(numberRead));
+  assert(!/shaken|voice_integrity|caller_id/.test(slice(SRC, "const NUMBER_COLUMNS = ", ";", "NUMBER_COLUMNS")));
   assert(/\.select\(TRUST_COLUMNS\)/.test(SRC));
 });
 
@@ -425,6 +429,9 @@ Deno.test("the Caller ID card: status words for Twilio's enum, Twilio's use case
   const row = slice(SMS, "const trustRow = (key, label, blurb, product) => {", "\n  };\n", "trustRow");
   assert(/data\.canManageCallerId && canSend &&/.test(row), "Register only for an operator, and only while there is something to send");
   assert(/data\.canManageCallerId && \(cid\.shakenStir\.registered \|\| cid\.voiceIntegrity\.registered\) &&/.test(card), "Check status only for an operator");
-  assert(/phoneAction\("phone_trust_setup", \{ product,/.test(SMS) && /phoneAction\("phone_trust_status"\)/.test(SMS));
-  assert(/\{numberCard\}\n\s*\{callerIdCard\}/.test(SMS), "the card sits under the number on the team screen");
+  // Migration 266: each press names the number that is open (caller ID is per number).
+  assert(/phoneAction\("phone_trust_setup", \{ product, numberId: sel\.id,/.test(SMS) && /phoneAction\("phone_trust_status", \{ numberId: sel\.id \}\)/.test(SMS));
+  assert(/const cid = \(sel && sel\.callerId\) \|\| null;/.test(SMS), "the card reads the open number's registrations");
+  // Under the number on the team screen; since migration 266 the number's name and person come first.
+  assert(/\{numberCard\}\n\s*\{thisNumberCard\}\n\s*\{callerIdCard\}/.test(SMS), "the card sits under the number on the team screen");
 });

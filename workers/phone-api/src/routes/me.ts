@@ -142,8 +142,11 @@ export async function settingsMe(env: Env, req: Request): Promise<Response> {
     } else {
       const cell = toE164(String(body.forward_to_cell));
       if (!cell || isPremiumRate(cell)) throw new ApiError("bad_request", "That cell number isn't a US or Canadian number.");
-      // Forwarding the business line to itself would ring the same Dial forever.
-      if (c.ctx.number && cell === c.ctx.number.e164) throw new ApiError("bad_request", "That's your business number. Enter your own cell phone.");
+      // Forwarding a business line to itself (or to another of the business's numbers, migration
+      // 266) would ring the same Dial forever.
+      if ((c.ctx.number && cell === c.ctx.number.e164) || (c.ctx.numbers ?? []).includes(cell)) {
+        throw new ApiError("bad_request", "That's your business number. Enter your own cell phone.");
+      }
       patch.forward_to_cell = cell;
     }
   }

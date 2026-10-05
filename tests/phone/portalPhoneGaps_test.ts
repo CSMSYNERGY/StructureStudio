@@ -201,7 +201,7 @@ Deno.test("the timeline plays a voicemail from the Worker, never preloading it, 
 // ── Settings → Phone offers the phase-6 pieces ─────────────────────────────────────────────
 Deno.test("the Phone tab offers Connect and a calling-only number, each only where the server will accept it", () => {
   const view = slice(SMS, "function PhoneSettingsView(", "// ── The Calls page", "PhoneSettingsView");
-  assert(/phoneAction\("phone_enable_number"\)/.test(view));
+  assert(/phoneAction\("phone_enable_number", \{ numberId: sel\.id \}\)/.test(view), "Connect names the open number (migration 266)");
   assert(/phoneAction\("phone_search_numbers", \{ areaCode: numQ \}\)/.test(view));
   assert(/phoneAction\("phone_buy_number", \{ phoneNumber: e164 \}\)/.test(view));
   assert(/data\.scope === "team" && !data\.number && data\.canBuyNumber && data\.numbersForSale/.test(view), "buying is offered only to someone canBuyNumber allows");
