@@ -385,7 +385,13 @@ export function buildCallsReport(opts: {
     const rang = new Set((c.rang_user_ids ?? []).filter(Boolean));
     if (c.answered_by) rang.add(c.answered_by);        // a transferred-to teammate was rung too
     for (const uid of rang) { const l = line(uid); if (l) l.callsIn++; }
-    if (c.answered_by) {
+    // ANSWERED IS answered_at, NOT ONLY answered_by — the timeline's rule (crmFeed callFeedEvents).
+    // The Worker stamps answered_at with NO answered_by on two real paths: the route's forward
+    // number picking up (/voice/screen has no user for it), and a cold transfer nobody took
+    // (the transfer clears answered_by; fileVoicemail: "an answered call that ended in voicemail
+    // stays answered"). Keyed on answered_by alone, both read as MISSED — for the business, and
+    // on the line of every person rung, including the one who talked to the customer.
+    if (c.answered_by || (c.answered_at && !live)) {
       totals.answered++;
       const who = line(c.answered_by);
       if (who) who.answered++;

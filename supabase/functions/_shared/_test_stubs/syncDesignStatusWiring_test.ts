@@ -313,6 +313,20 @@ Deno.test("order totals: read beside the CRM reads, a changed total written with
   assert(ordersRead > 0 && ordersRead < trace.events.indexOf("db:designs:update"), `orders are read before the writes: ${trace.events.join(" ")}`);
 });
 
+// ─── 5b. A builder with hundreds of designs ────────────────────────────────────────────────────
+// `in.(…)` rides in the URL, so the Designs tab's full 500 codes in one read is an ~8 KB request line
+// that the gateway refuses (a 500 that leaves every status unrefreshed). Both reads go in chunks.
+Deno.test("500 codes: the designs and orders reads are chunked, and no design or order total is dropped", async () => {
+  const designs = Array.from({ length: 500 }, (_, i) => D(`SS-K${String(i).padStart(5, "0")}`, { ghl_estimate_id: `e${i % 450}` }));
+  const orders = designs.map((d, i) => ({ id: `ord${i}`, short_code: d.short_code, total_source: null, total_cents: null }));
+  const { res, body, trace } = await drive({ shortCodes: designs.map((d) => d.short_code) }, { designs, orders }, location());
+  assertEquals(res.status, 200);
+  assertEquals(Object.keys(body.statuses).length, 500, "every design's status comes back");
+  assertEquals(trace.events.filter((e) => e === "db:designs:select").length, 3, "500 codes are read as 200 + 200 + 100");
+  assertEquals(trace.events.filter((e) => e === "db:orders:select").length, 3, "the orders read is chunked the same way");
+  assertEquals(trace.orderWrites.length, 500, "every order got its total");
+});
+
 // ─── 6. Writes ──────────────────────────────────────────────────────────────────────────────────
 Deno.test("a burst of status changes is written four at a time, not one after another", async () => {
   const designs = Array.from({ length: 12 }, (_, i) => D(`SS-EEE${String(i).padStart(3, "0")}`, { status: "invoiced", ghl_estimate_id: `e${i + 20}` }));

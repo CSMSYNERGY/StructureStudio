@@ -24,6 +24,8 @@ import { bosBasisOf, bosQtyFor, bosCharges, bosAmountFor, bosIsPct } from "../_s
 // shares, and the parse/apply rules. See step 2c (who may) and step 7-PO (where it lands).
 import { ssPriceGroupId, ssPriceRowKey } from "../_shared/priceRowKey.ts";
 import { applyPriceOverrides, parsePriceOverrides } from "../_shared/priceOverride.ts";
+// Partition walls (migration 278): the clamped reading of itemSummary.partitions and how a wall is charged.
+import { partitionCharge, partitionDescription, partitionOpeningDescription, partitionsFromPayload } from "../_shared/partitionPricing.ts";
 import { FOUNDATION_LABEL, isFoundationId, foundationQtyFor, foundationDesc } from "../_shared/foundation.ts";
 import { quoteDelivery, type DeliveryQuote } from "../_shared/deliveryQuote.ts";
 import { hasSubject } from "../_shared/jwtSubject.ts";
@@ -997,6 +999,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         if (archivedKeys.has(String(r.item_key))) continue;
         includedMap.set(String(r.item_key), Math.max(1, Number(r.qty) || 1));
       }
+      // A partition wall is never part of a size's price (migration 278): the portal offers no
+      // inclusion column for it, and a row written by hand must not net or credit one either.
+      includedMap.delete("partitionWall");
     } catch { /* no inclusions → everything placed is charged as-is */ }
   }
 
@@ -1774,6 +1779,65 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const shelfDesc = rows.map((r: any) => `${r.wall ? r.wall + " wall " : ""}${r.lengthFt || 1}ft`).join(", ") + " (priced per foot)";
     pushItem(names, key, shelfDesc, { count: rows.length, lengthFt: totalShelfFt });
   }
+  // ── Partition walls (migration 278) ───────────────────────────────────────────
+  // One line per wall and one per priced door or window in it, each tagged with the designer's own
+  // row key (ssPriceRowKey "partition"), so a rep's price for one wall or one door lands on exactly
+  // that line — which is why these do not go through pushItem, whose line sums every item of a key.
+  // partitionsFromPayload clamps every length to the building and every height to the wall this
+  // estimate prices (the anon key reaches this function). The wall is charged by the builder's method
+  // on the partitionWall row (partitionCharge: per foot, per square foot of wall, or each); an
+  // unpriced wall still gets its $0 line, because it is on the plan. A door or window is priced from
+  // fixture_items by its id, like the doors[] and windows[] lines above, except that nothing in the
+  // body is ever a price: an id that is not in this tenant's catalog, or not a door or window, prices
+  // nothing. Never netted against a size's inclusions (those are the building's own doors), and no new
+  // QBO kind: a wall is a layout_item, a door a door, a window a window.
+  {
+    const partitions = partitionsFromPayload((summary as Record<string, unknown>).partitions,
+      { widthFt: buildingWidthFt, lengthFt: buildingDepthFt }, resolvedWallHeightFt);
+    if (partitions.length) {
+      const lp = layoutRates.get("partitionWall");
+      const rate = lp?.rate || 0;
+      const fxIds = [...new Set(partitions.flatMap((p) => p.openings.map((o) => o.fixtureItemId)).filter((x): x is string => !!x))];
+      const fxRows = new Map<string, { name: string; category: string; price: number | null; widthIn: number | null; heightIn: number | null; url: string | null; show: boolean }>();
+      if (fxIds.length) {
+        const fr = await supabase.from("fixture_items").select("id, name, category, price, width_in, height_in, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", fxIds);
+        // A failed read prices no door or window in any wall; say so rather than quote them silently at nothing.
+        if (fr.error) console.warn(`submit-estimate: partition doors/windows unpriced, fixture_items read failed: ${fr.error.message}`);
+        for (const r of (fr.data ?? []) as any[]) {
+          fxRows.set(String(r.id), {
+            name: String(r.name || "").trim(), category: String(r.category || "door"), price: r.price != null ? Number(r.price) : null,
+            widthIn: r.width_in != null ? Number(r.width_in) : null, heightIn: r.height_in != null ? Number(r.height_in) : null,
+            url: r.image_url || null, show: r.show_image_on_estimate !== false,
+          });
+        }
+      }
+      for (const p of partitions) {
+        const ch = partitionCharge(p, lp?.method);
+        targetItems.push(tagLine({
+          name: "Partition Wall", qty: ch.qty, amount: rate,
+          priceId: "", productId: "", attachments: lp ? imgAttachments(lp.imageUrl) : [],
+          currency: "USD", type: "one_time", description: partitionDescription(p),
+        }, { kind: "layout_item", itemKey: "partitionWall", nonTaxable: layoutTaxable.get("partitionWall") === false,
+             ...(p.id ? { rowKey: ssPriceRowKey("partition", p.id) } : {}) }));
+        for (const o of p.openings) {
+          const fx = o.fixtureItemId ? fxRows.get(o.fixtureItemId) : undefined;
+          if (!fx || (fx.category !== "door" && fx.category !== "window")) continue;
+          const price = fx.price != null ? fx.price : 0;
+          if (!(price > 0)) continue;   // unpriced = not charged, the catalog's own contract
+          const line = {
+            name: fx.name || o.name, qty: 1, amount: price,
+            priceId: "", productId: "", attachments: fx.show && fx.url ? imgAttachments(fx.url) : [],
+            currency: "USD", type: "one_time", description: partitionOpeningDescription(o, fx.widthIn, fx.heightIn),
+          };
+          const prov = { nonTaxable: fixtureTaxable.get(String(o.fixtureItemId)) === false,
+            ...(p.id && o.id ? { rowKey: ssPriceRowKey("partition", p.id, o.id) } : {}) };
+          // Two literal kinds, not a computed one: qboLineKinds.test reads every tagLine site's kind.
+          if (fx.category === "window") targetItems.push(tagLine(line, { kind: "window", ...prov }));
+          else targetItems.push(tagLine(line, { kind: "door", ...prov }));
+        }
+      }
+    }
+  }
   // ── Electrical ─────────────────────────────────────────────────────────────
   // The package line first; every device and item is then priced by the ONE rule in the items
   // block below, netting against elecCovered. A plan holding exactly the standard layout
@@ -2230,10 +2294,18 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const fr = await supabase.from("fixture_items").select("id, price").eq("client_id", clientId).in("id", declFxIds);
       for (const r of fr.data ?? []) if (r.price != null) declFxPrice.set(String(r.id), Number(r.price));
     }
+    // ONE CREDIT PER INCLUSION. Each credit below is the size's WHOLE included quantity, so a key
+    // declined twice is not two declines — and this list is body-supplied on an endpoint the anon
+    // key reaches. The designer toggles keys as a set and never repeats one; a hand-built POST
+    // repeating ["window", "window", …] used to collect the credit once per copy, walking the
+    // building line to $0 and spilling the rest into a discount on the other lines.
+    const creditedKeys = new Set<string>();
     for (const d of declinedItems) {
       const key = String(d?.key ?? "").trim();
       if (!key) continue;
       if (placedKeys.has(key)) continue;   // placed = kept, not a decline → no credit
+      if (creditedKeys.has(key)) continue;
+      creditedKeys.add(key);
       if (declFxPrice.has(key)) {
         const q = includedMap.get(key) || 0;
         if (q <= 0) continue;

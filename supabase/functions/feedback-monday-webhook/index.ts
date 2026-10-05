@@ -226,11 +226,16 @@ Deno.serve(withErrorLog("feedback-monday-webhook", async (req: Request) => {
         // different meanings, so the lookup must be (board, id). `value` carries the
         // stable label index; `text` is only the fallback.
         //
+        // `limit: 100` is load-bearing: Monday's `items` query defaults to 25 even when `ids`
+        // is given (ascending id order), so without it only the 25 OLDEST of the up-to-100
+        // rows above were ever reconciled — never the newest. 100 is Monday's maximum, which
+        // is why the row read above stops at 100. See portal-feedback's `refresh`.
+        //
         // `replies` is fetched because a /client REPLY is mirrored too, under its own id.
         // Without it the reconcile would never see a reply again, so a reply would be the
         // one client-visible comment that could not be edited or retracted. It is cheap:
         // Monday charges the nested field flat, not per parent.
-        query: `query ($ids: [ID!]) { items (ids: $ids) {
+        query: `query ($ids: [ID!]) { items (ids: $ids, limit: 100) {
           id board { id } column_values { id text value } updates (limit: 50) {
             id text_body created_at creator { name }
             replies { id text_body created_at creator { name } } } } }`,

@@ -1,7 +1,8 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { withErrorLog } from "../_shared/logError.ts";
-import { foreignOrderPrefixOf } from "../_shared/billingOrderId.ts";
+import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
+import { foreignOrderPrefixOf, ssClientIdOf } from "../_shared/billingOrderId.ts";
+import { redactWebhookPayload } from "../_shared/billingWebhookRedact.ts";
 
 // Deposyt subscription-lifecycle webhook → mirrors billing state into
 // public.billing_subscriptions (portal Billing tab reads that, never the gateway).
@@ -27,7 +28,10 @@ import { foreignOrderPrefixOf } from "../_shared/billingOrderId.ts";
 //   recurring.subscription.pause   → status paused
 //
 // Every event is recorded in billing_webhook_events keyed by the Deposyt event id
-// (idempotency: a replayed event id short-circuits as already-processed).
+// (idempotency: a replayed event id short-circuits as already-processed). The STORED payload is a
+// whitelist rebuild (_shared/billingWebhookRedact.ts), never the gateway's body: NMI's body carries
+// the payer's masked card number, expiry, name, email and phone, for other products' customers as
+// much as ours, and nothing reads them back. Processing below works on the parsed body in memory.
 
 const SIGNING_KEY = Deno.env.get("DEPOSYT_WEBHOOK_SIGNING_KEY") || "";
 
@@ -95,8 +99,10 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
     .from("billing_webhook_events").select("id, status").eq("id", eventId).maybeSingle();
   if (existing?.status === "processed") return json({ ok: true, duplicate: true });
   if (!existing) {
+    // The redacted copy, never `payload` itself (see the header). Migration 281 scrubbed the rows
+    // stored before this, and a raw insert here would put back exactly what it removed.
     const { error: logErr } = await admin.from("billing_webhook_events")
-      .insert({ id: eventId, event_type: eventType, payload });
+      .insert({ id: eventId, event_type: eventType, payload: redactWebhookPayload(payload) });
     if (logErr) console.warn("[billing-webhook] event log insert failed:", logErr.message);
   }
 
@@ -128,6 +134,49 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
     const ackForeign = async () => {
       await done(true, `ignored: foreign-product subscription (order_id=${orderIdRaw})`);
       return json({ ok: true, ignored: "foreign-product subscription" });
+    };
+    // What an update/delete/pause that matched NO billing_subscriptions row means. ONE definition,
+    // shared by all four 0-row sites below, because each of them used to carry its own copy.
+    //   - Positively foreign (see above): ack.
+    //   - OURS, and the tenant no longer exists: ack. admin-catalog's delete_client cancels a
+    //     builder's subscriptions at the gateway and then wipes their rows, and the gateway answers
+    //     each cancellation with its own recurring.subscription.delete. That event can never find a
+    //     row, so retrying it was the 2026-08-24/25 redelivery storm again, once per deleted
+    //     builder. "Ours" is ssClientIdOf (ss_<clientId>_…, every live delete event carries
+    //     order_id); "no longer exists" is no client_configs row for that slug.
+    //   - Anything short of that proof keeps the throw-and-retry the reordering note on the delete
+    //     case depends on: an absent order_id, a client_configs read that FAILED, or a tenant that
+    //     still exists (the add really has not landed yet). delete_client removes client_configs
+    //     LAST, so a delete event arriving mid-delete sees the tenant still there, 422s once, and
+    //     the redelivery acks.
+    // The ack is quiet only for a DELETE, which is the cancellation delete_client itself asked for.
+    // An update or a pause (short of an update that says cancelled) means the gateway still holds a
+    // LIVE subscription for a builder who no longer exists, one the delete never cancelled because
+    // it had no row for it. Before the ack this event 422'd, and that fault row was the only trace;
+    // so it is still acked (no redelivery storm) but files an error row, subscription id and slug
+    // only, for someone to cancel it in the Deposyt portal.
+    const noRow = async (): Promise<Response> => {
+      if (foreignOrderPrefix) return await ackForeign();
+      const tenantId = ssClientIdOf(orderIdRaw);
+      if (tenantId) {
+        const { data: cfg, error: cfgErr } = await admin.from("client_configs")
+          .select("client_id").eq("client_id", tenantId).maybeSingle();
+        if (!cfgErr && !cfg) {
+          if (eventType !== "recurring.subscription.delete" && norm(status) !== "cancelled") {
+            await logEdgeError({
+              fn: "billing-webhook",
+              req,
+              clientId: tenantId,
+              code: "deleted_tenant_live_subscription",
+              message: `Subscription ${subId} is still live at the payment gateway, but builder "${tenantId}" was deleted. Cancel it in the Deposyt portal.`,
+              context: { subscription_id: subId, event_type: eventType },
+            });
+          }
+          await done(true, `ignored: tenant deleted (client_id=${tenantId})`);
+          return json({ ok: true, ignored: "tenant deleted" });
+        }
+      }
+      throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
     };
     // NMI sends next_charge_date: "1970-01-01" as its placeholder for "no scheduled date"
     // — observed on EVERY live event 2026-07-28, adds and deletes alike. Stored at face
@@ -183,11 +232,9 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
         //      gateway, which we would have no row for.
         const { data: existingSub } = await admin.from("billing_subscriptions")
           .select("client_id, current_period_start, status").eq("id", subId).maybeSingle();
-        // ss_first_<clientId>_<planId> is portal-billing's first-charge variant; without
-        // the optional "first_" hop the capture group returned the literal "first" as the
-        // tenant slug, and a gateway-created subscription would have been homed on a
-        // nonexistent client called "first".
-        const fromOrderId = /^ss_(?:first_)?([a-z0-9-]+)_/.exec(orderIdRaw)?.[1] ?? null;
+        // ss_first_<clientId>_<planId> is portal-billing's first-charge variant — see
+        // ssClientIdOf for why the optional "first_" hop matters.
+        const fromOrderId = ssClientIdOf(orderIdRaw);
         const tenant = existingSub?.client_id ?? clientId ?? fromOrderId;
         if (!tenant) {
           if (foreignOrderPrefix) return await ackForeign();
@@ -240,10 +287,7 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
                     { count: "exact" })
             .eq("id", subId);
           if (peErr) throw new Error(peErr.message);
-          if (!count) {
-            if (foreignOrderPrefix) return await ackForeign();
-            throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
-          }
+          if (!count) return await noRow();
           break;
         }
         if (!next) {
@@ -276,10 +320,7 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
           ...pastDuePatch,
         }, { count: "exact" }).eq("id", subId);
         if (error) throw new Error(error.message);
-        if (!count) {
-          if (foreignOrderPrefix) return await ackForeign();
-          throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
-        }
+        if (!count) return await noRow();
         break;
       }
       case "recurring.subscription.delete": {
@@ -298,10 +339,7 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
           status: "cancelled", canceled_at: new Date().toISOString(), updated_at: new Date().toISOString(),
         }, { count: "exact" }).eq("id", subId);
         if (error) throw new Error(error.message);
-        if (!count) {
-          if (foreignOrderPrefix) return await ackForeign();
-          throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
-        }
+        if (!count) return await noRow();
         break;
       }
       case "recurring.subscription.pause": {
@@ -311,10 +349,7 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
           status: "paused", updated_at: new Date().toISOString(),
         }, { count: "exact" }).eq("id", subId);
         if (error) throw new Error(error.message);
-        if (!count) {
-          if (foreignOrderPrefix) return await ackForeign();
-          throw new Error(`No billing_subscriptions row for ${subId} — retry once the add lands`);
-        }
+        if (!count) return await noRow();
         break;
       }
       default:

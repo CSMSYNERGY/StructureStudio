@@ -48,6 +48,8 @@ const REGIONS: Array<[string, string]> = [
   // price-override helpers beside it.
   ["function d3BaseWallHeightFt(C, styleCfg) {", "// Which placed items does a Details"],
   ["function priceRowMatcher(key) {", "let idCounter = 1;"],
+  // Partition walls (migration 278): the price rows and priceRowMatcher call into this block.
+  ["// ── PARTITION WALLS ──\n", "// ── END PARTITION WALLS ──\n"],
 ];
 
 export const REGIONS_CMP = REGIONS.map(([a, b]) => ({ a, text: lift(CMP, "structure-studio.component.js", a, b) }));
@@ -65,6 +67,8 @@ export type Designer = {
   ssPriceRowKey: (kind?: string, id?: any, a?: any, b?: any) => string;
   ssPriceGroupId: (fixtureItemId?: any, name?: string, price?: number) => string;
   priceRowMatcher: (key: string) => (item: any) => boolean;
+  ssPartitionSummary: (items: any[], wallFt: number) => any[];
+  pricedWallHeightFt: (C: any, styleCfg: any, styleKey: string, sel: any, widthFt: number) => number;
   ssIsRO: (t: string) => boolean;
   fmtMoney2: (n: number) => string;
 };
@@ -75,7 +79,7 @@ export function designer(): Designer {
   const names = [
     "computeSelectionRows", "computeLayoutPricingRows", "ssResolvePctSelectionRows", "ssApplyPriceOverrides",
     "ssPriceOverrideList", "ssPriceOverrideOf", "ssRoPrice", "ssRoRateOf", "ssPriceRowKey", "ssPriceGroupId",
-    "priceRowMatcher", "ssIsRO", "fmtMoney2",
+    "priceRowMatcher", "ssIsRO", "fmtMoney2", "ssPartitionSummary", "pricedWallHeightFt",
   ];
   return new Function("SUPABASE_URL", `${body}\n; return { ${names.join(", ")} };`)("https://stub.supabase.co") as Designer;
 }

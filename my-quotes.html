@@ -271,6 +271,12 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
   var tokenKey = clientId ? "ssq_token_" + clientId : null;
   var nameKey = clientId ? "ssq_name_" + clientId : null;
   var bizKey = clientId ? "ssq_biz_" + clientId : null;
+  // WHO the token was proven for. The designer writes these beside the shared token (ssCustKeys)
+  // and locks its contact to them; this page never needed them, but it must not leave the last
+  // person's behind. Forgotten whenever this page replaces or ends the session, so the designer
+  // asks customer-quotes who the token belongs to instead of trusting a stale number.
+  var identityKeys = clientId ? ["ssq_phone_" + clientId, "ssq_email_" + clientId] : [];
+  function forgetIdentity() { for (var i = 0; i < identityKeys.length; i++) lsDel(identityKeys[i]); }
   var token = clientId ? lsGet(tokenKey) : null;
   var custName = (clientId && lsGet(nameKey)) || "";
   var phoneDigits = "";      // the 10 digits, no formatting
@@ -485,6 +491,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
         if (r.ok && r.data && r.data.token) {
           token = r.data.token;
           lsSet(tokenKey, token);
+          forgetIdentity();
           if (r.data.name) { custName = String(r.data.name); lsSet(nameKey, custName); }
           loadQuotes();
         } else if (r.ok && r.data && r.data.noQuotes) {
@@ -987,6 +994,14 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
         newTot.textContent = "New order total: " + nt;
         box.appendChild(newTot);
       }
+    } else if (co.newTotal != null && co.totalAfter != null && fmtMoney(co.newTotal) !== fmtMoney(co.totalAfter)) {
+      // newTotal is the WHOLE revised order (customer-quotes), which an earlier approved change
+      // moves past this change's own after-figure. Say so, or the pair above contradicts the
+      // amount in the sentence beside the checkbox.
+      var newTot2 = document.createElement("div");
+      newTot2.style.cssText = "font-size:13px;font-weight:800;margin-top:4px;color:#92400E";
+      newTot2.textContent = "New order total: " + fmtMoney(co.newTotal);
+      box.appendChild(newTot2);
     }
     var btn = document.createElement("button");
     btn.type = "button";
@@ -1107,7 +1122,10 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     var frameWrap = document.createElement("div");
     frameWrap.style.cssText = "margin-top:10px";
     var errEl = document.createElement("div");
-    errEl.className = "err";
+    // "error", the class the stylesheet styles (as the sign and accept panels use); "err" matched
+    // nothing, so a refused payment printed as bare text under the button.
+    errEl.className = "error";
+    errEl.hidden = true;
     errEl.style.cssText = "margin-top:8px";
     var payToken = null, payExpiry = null;
 
@@ -1190,13 +1208,15 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     ["card", "ach"].forEach(function (id) {
       var t = document.createElement("button");
       t.type = "button";
-      t.className = "sign-tab" + (id === rail ? " is-on" : "");
+      // "active" is the class .sign-tab styles for the picked tab (the signature tabs use it too);
+      // "is-on" matched nothing, so Card / Bank account never showed which one was chosen.
+      t.className = "sign-tab" + (id === rail ? " active" : "");
       t.textContent = id === "card" ? "Card" : "Bank account";
       t.addEventListener("click", function () {
         rail = id;
         var all = tabs.querySelectorAll(".sign-tab");
         for (var j = 0; j < all.length; j++) all[j].className = "sign-tab";
-        t.className = "sign-tab is-on";
+        t.className = "sign-tab active";
         feeEl.textContent = "";
         payBtn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
         // A reload rather than a field toggle: the two rails need different tokenizer
@@ -1553,7 +1573,14 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     var consentBox = document.createElement("input");
     consentBox.type = "checkbox";
     var consentSpan = document.createElement("span");
-    if (co) {
+    if (co && typeof co.consentText === "string" && co.consentText) {
+      // The exact sentence customer-accept will store for this signature, composed by the
+      // server from the whole revised order (customer-quotes, _shared/consentSentences.ts).
+      // The copy below had drifted from it — it named this change's own after-figure, so a
+      // customer could tick one amount while the record held another.
+      consentSpan.textContent = co.consentText;
+    } else if (co) {
+      // A customer-quotes from before consentText shipped: the old local composition.
       var afterText = fmtMoney(co.totalAfter);
       consentSpan.textContent = "I agree that my electronic signature is as binding as a handwritten one, and I approve change order CO-" +
         (co.coNo != null ? co.coNo : "?") + " to quote " + numText + (afterText ? " for a new total of " + afterText : "") + ".";
@@ -1643,6 +1670,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     token = null;
     lsDel(tokenKey);
     lsDel(nameKey);
+    forgetIdentity();
     if (t) callFn("customer-auth", { action: "logout", token: t }).catch(function () {});
     custName = "";
     $("code-input").value = "";

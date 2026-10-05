@@ -204,6 +204,6 @@ Deno.test("the nav item and the page mount both ask advancedOn, never the held c
 });
 
 Deno.test("both route clamps are handed the gate", () => {
-  assert(/const resolvedTab = ssClampTab\([^;]*advancedClampOn\);/.test(SHELL), "the URL clamp must pass advancedClampOn");
-  assert(/const activeTab = ssClampTab\([^;]*advancedClampOn\);/.test(SHELL), "the render clamp must pass advancedClampOn");
+  assert(/const resolvedTab = ssClampTab\([^;]*advancedClampOn, sub\);/.test(SHELL), "the URL clamp must pass advancedClampOn");
+  assert(/const activeTab = ssClampTab\([^;]*advancedClampOn, sub\);/.test(SHELL), "the render clamp must pass advancedClampOn");
 });

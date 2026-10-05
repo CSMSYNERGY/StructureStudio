@@ -214,14 +214,27 @@ function PMCellInput({ col, value, onCommit, onClose }) {
   const base = { ...S.input, padding: "4px 6px", fontSize: 12.5 };
   const commit = () => {
     if (col.type === "number") onCommit(text.trim() === "" ? null : Number(text));
-    else if (isLink) onCommit(text.trim() ? { url: text.trim(), text: (value && value.text) || "" } : null);
+    else if (isLink) {
+      // A bare "acme.com/spec.pdf" — what people actually type — gets https:// in front. The
+      // server keeps http(s) links only and DROPS anything else without an error, so a
+      // scheme-less address showed as saved here (the optimistic patch) and was gone on reload.
+      const t = text.trim();
+      const url = t && !/^[a-z][a-z0-9+.-]*:/i.test(t) ? "https://" + t : t;
+      onCommit(url ? { url, text: (value && value.text) || "" } : null);
+    }
     else onCommit(text);
     onClose();
   };
   if (col.type === "date") {
-    return <input autoFocus type="date" style={{ ...base, minWidth: 130 }} value={value || ""}
-      onChange={(e) => { onCommit(e.target.value || null); onClose(); }}
-      onBlur={onClose} onKeyDown={(e) => { if (e.key === "Escape") onClose(); }} />;
+    // Committed on Enter or blur like the typed fields, NOT on change. A date input fires its
+    // change event once per keystroke with whatever the segments hold so far — typing the month
+    // "12" reports January first, and the first digit of a year reports year 0002 — so
+    // committing on change saved a date nobody chose and closed the editor before the second
+    // digit could land. Unchanged, nothing is written.
+    const commitDate = () => { const v = text || null; if (v !== (value || null)) onCommit(v); onClose(); };
+    return <input autoFocus type="date" style={{ ...base, minWidth: 130 }} value={text}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commitDate} onKeyDown={(e) => { if (e.key === "Enter") commitDate(); if (e.key === "Escape") onClose(); }} />;
   }
   if (col.type === "long_text") {
     return <textarea autoFocus rows={3} style={{ ...base, width: "100%", minWidth: 220, resize: "vertical", fontWeight: 500 }}

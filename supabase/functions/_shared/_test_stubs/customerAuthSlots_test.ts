@@ -36,10 +36,14 @@
 // deno-lint-ignore-file no-explicit-any
 import { stubDb } from "./supabase_stub.ts";
 import { _resetBrandRefusedForTests } from "../twilioVerify.ts";
+import { EMAIL_OTP_MAX_ATTEMPTS, hashEmailOtp } from "../emailOtp.ts";
 
 function assertEquals<T>(actual: T, expected: T, msg = ""): void {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
   if (a !== e) throw new Error(`Expected ${e}, got ${a}${msg ? ` — ${msg}` : ""}`);
+}
+function assert(v: unknown, msg = ""): void {
+  if (!v) throw new Error(`Assertion failed${msg ? ` — ${msg}` : ""}`);
 }
 
 const realServe = Deno.serve;
@@ -407,5 +411,59 @@ Deno.test("brand fallback (60204, then the unbranded resend succeeds): one text,
     assertEquals(next.status, 200);
     assertEquals(twilio.map((c) => c.branded), [true, false, false]);
     assertEquals(slots(db, 7), [1, 2, 2]);
+  });
+});
+
+// email code guesses ────────────────────────────────────────────────────────────────────────
+// The email channel holds its OWN code (Twilio Verify counts attempts for the SMS path; nothing
+// counts them here but customer_email_otps.attempts), so that counter is the whole brute-force
+// bound on a 6-digit secret: EMAIL_OTP_MAX_ATTEMPTS guesses per issued code. It used to be read
+// once and written back as read+1 after the compare, so guesses sent TOGETHER all read the same
+// count, all reached the compare, and together cost one attempt: ten parallel wrong guesses left
+// the code alive at attempts 1, and a thousand would have too.
+
+const CODE = "482916";
+
+/** A live code for EMAIL, as request_code stores it. */
+async function seedEmailCode(db: FakeDb, attempts = 0): Promise<void> {
+  db.tables.customer_sessions = [];
+  db.tables.customer_email_otps.push({
+    client_id: TENANT, email_lower: EMAIL, code_hash: await hashEmailOtp(TENANT, EMAIL, CODE),
+    expires_at: new Date(Date.now() + 5 * 60_000).toISOString(), attempts, consumed_at: null,
+    created_at: new Date().toISOString(),
+  });
+}
+const guess = (code: string) => post({ action: "verify_code", channel: "email", clientId: TENANT, email: EMAIL, code });
+const wrong = (i: number) => String(100000 + i);
+
+Deno.test("email codes: guesses sent together each cost an attempt, so the sixth guess never reaches the code", async () => {
+  await withStubs(() => twilioSent(), async ({ db }) => {
+    await seedEmailCode(db);
+    // Ten wrong guesses at once, then the right code.
+    const burst = await Promise.all(Array.from({ length: 10 }, (_, i) => guess(wrong(i))));
+    assertEquals(burst.map((r) => r.status), Array(10).fill(401));
+    assertEquals(db.tables.customer_email_otps[0].attempts, EMAIL_OTP_MAX_ATTEMPTS, "five guesses were judged, and counted");
+    const right = await guess(CODE);
+    assertEquals(right.status, 401, "the code died at five guesses, however they were sent");
+    assertEquals(db.tables.customer_sessions, [], "no session");
+  });
+});
+
+Deno.test("email codes: the right code still signs in, once, and a dead code costs no attempt", async () => {
+  await withStubs(() => twilioSent(), async ({ db }) => {
+    await seedEmailCode(db, 3);
+    assertEquals((await guess(wrong(1))).status, 401);
+    assertEquals(db.tables.customer_email_otps[0].attempts, 4);
+    const ok = await guess(CODE);
+    assertEquals(ok.status, 200);
+    assertEquals(typeof ok.body.token, "string");
+    assertEquals(db.tables.customer_sessions.length, 1);
+    assert(db.tables.customer_email_otps[0].consumed_at, "the code is burnt");
+    // Consumed: refused without touching the counter.
+    const before = db.tables.customer_email_otps[0].attempts;
+    const again = await guess(CODE);
+    assertEquals(again.status, 401);
+    assertEquals(db.tables.customer_email_otps[0].attempts, before);
+    assertEquals(db.tables.customer_sessions.length, 1);
   });
 });

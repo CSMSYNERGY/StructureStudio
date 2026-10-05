@@ -482,16 +482,36 @@ Deno.test("a 10 ft wall: a lowered vent is measured on the real plate, so ▲ in
   assert(F.checkWallSlabOverlap(at8, 1 * g.scale, [shelf], shelfTypes, g.scale, at8, H10), "a shelf at 8 ft is in the way of a vent at 8 ft");
 });
 
+Deno.test("a 10 ft wall: a same-size reflow (reload, style re-fit) leaves a 4 ft window under a top-spot vent where it is", () => {
+  // The vent's top spot on a 10 ft plate is 8'8"..9'8"; a 48 in window at the 3'6" sill tops out at
+  // 7'6". Legal - the 3D and the plan's drag both allow it. Measured under the 8 ft default the vent
+  // drops to 6'8"..7'8" and "collides", and reflowItems slid the window away on every open.
+  const g = geo(12, 16);
+  const v = vent(g, "south", 6, { id: 70, heightIn: 12, sillFt: null, sillMode: "fixed" });
+  const win = { id: 71, type: "window", wall: "south", x: g.mgX + 6 * g.scale, y: g.mgY + g.pH, widthFt: 3, heightFt: 0.5, rotation: 0, heightIn: 48, fixtureItemId: "w48" };
+  const d = { w: 12, h: 16 };
+  const kept = F.reflowItems([v, win], d, d, ITEMS, undefined, 10).items.find((i: Any) => i.id === 71);
+  assertAlmostEquals(kept.x, win.x, 1e-6, "with the plate the window stays put");
+  const moved = F.reflowItems([v, win], d, d, ITEMS).items.find((i: Any) => i.id === 71);
+  assert(Math.abs(moved.x - win.x) > 1, "control: on the 8 ft default it is slid away");
+  // A style re-fit (ssRefitGableVents) reflows at unchanged dimensions with the same plate.
+  const gv = vent(g, "north", 6, { id: 72, ventZone: "gable", ventRiseFt: MIN_RISE });
+  const r = F.ssRefitGableVents([gv, v, win], GABLE, 12, 16, 10, ITEMS);
+  assertAlmostEquals(r.items.find((i: Any) => i.id === 71).x, win.x, 1e-6, "a style pick leaves the window where it is");
+});
+
 Deno.test("both twins re-fit gable vents on a style pick, but not on a load, and pass the plate to every vent refusal", () => {
   for (const [name, text] of [["component.js", SRC], ["jsx", JSX]] as const) {
     // Since 272 the re-fit runs on `kept`: the plan less any catalog item the new style is not
-    // offered on (fixtureStyles_test pins that half), which is `items` itself when nothing goes.
+    // offered on, and since 278 less any such door or window in a partition wall (fixtureStyles_test
+    // pins that half), which is `items` itself when nothing goes.
     assert(text.includes("const r = ssRefitGableVents(kept, vr.roof, bldgW, bldgH, vr.H, ITEMS);"), `${name}: the style effect re-fits`);
-    assert(text.includes("const kept = offIds.size ? items.filter((it) => !offIds.has(it.id)) : items;"), `${name}: ...the plan as it stands, less only what the style does not offer`);
+    assert(text.includes("const kept = ssStripPartitionOpenings(offIds.size ? items.filter((it) => !offIds.has(it.id)) : items, partOff);"), `${name}: ...the plan as it stands, less only what the style does not offer`);
     assert(text.includes("if (ventItemsSeenRef.current !== items) return;"), `${name}: a load (style and items in one commit) is skipped`);
     // The re-fit lands only on the plan it was computed from. A plan the size effect replaced in the
-    // same commit keeps its own re-fit and loses only the not-offered ids (fixtureStyles_test).
-    assert(text.includes("const next = r ? r.items : kept;") && text.includes("if (next !== items) setItems((cur) => (cur === from ? next : offIds.size ? cur.filter((it) => !offIds.has(it.id)) : cur));"),
+    // same commit keeps its own re-fit and loses only the not-offered ids and partition openings
+    // (fixtureStyles_test).
+    assert(text.includes("const next = r ? r.items : kept;") && text.includes("if (next !== items) setItems((cur) => (cur === from ? next : ssStripPartitionOpenings(offIds.size ? cur.filter((it) => !offIds.has(it.id)) : cur, partOff)));"),
       `${name}: the re-fit only lands on the plan it was computed from`);
     const styleFx = text.indexOf("}, [sel.style]);"), tracker = text.indexOf("useEffect(() => { ventItemsSeenRef.current = items; }, [items]);");
     assert(styleFx > 0 && tracker > styleFx, `${name}: the items tracker runs AFTER the style effect, or a load reads as a pick`);

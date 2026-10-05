@@ -116,6 +116,32 @@ function withListSelections(r) {
   return { ...rest, selections: { style: sel_style || "", size: sel_size || "" } };
 }
 
+// ── EVERY ROW, NOT THE FIRST THOUSAND ───────────────────────────────────────────────────
+// PostgREST answers at most db-max-rows (1000 on this project) per request and says nothing
+// when it stops there. The Designs and Contacts lists read the whole tenant in ONE request,
+// newest first, so past 1000 rows the OLDEST designs, versions and browsing leads simply
+// vanished — from the list, from the chip counts, from search — with no error anywhere.
+// design_versions crosses the line first (every save writes one, drafts included), and then
+// older designs lose their "▾ versions" expander and drop out of the "2+ versions" filter.
+//
+// So these reads page with .range() until a short page, at a size under the cap so a page can
+// never come back silently short and end the scan early (customerIdentity.ts ADDRESS_SCAN_PAGE,
+// same reasoning). `page(from, to)` must order on a UNIQUE tiebreaker after its real order, or
+// rows sharing a timestamp can swap across a page boundary; `keyOf` drops the duplicate a row
+// inserted mid-read produces. A failed page is an error, never a shorter list.
+const SS_LIST_PAGE = 500;
+async function ssReadAllRows(page, keyOf) {
+  const seen = new Set();
+  const out = [];
+  for (let from = 0; from < SS_LIST_PAGE * 400; from += SS_LIST_PAGE) {
+    const { data, error } = await page(from, from + SS_LIST_PAGE - 1);
+    if (error) return { data: null, error };
+    (data || []).forEach((r) => { const k = keyOf(r); if (!seen.has(k)) { seen.add(k); out.push(r); } });
+    if (!data || data.length < SS_LIST_PAGE) break;
+  }
+  return { data: out, error: null };
+}
+
 // NO SCHEDULING FROM THIS PAGE (Carolyn 2026-08-08). Designs briefly carried an
 // "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
 // and it is from Orders that a sold building goes to the Build or Delivery schedule.
@@ -233,7 +259,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     // Only `selections.style` and `selections.size` are read here — see SEL_LIST_COLS above
     // for why the blob itself never crosses the wire for a list.
     const [dRes, vRes] = await Promise.all([
-      sb.from("designs")
+      // Paged (ssReadAllRows): one request stopped at PostgREST's 1000-row cap.
+      ssReadAllRows((from, to) => sb.from("designs")
         // contact_id (130) is selected for ONE reason: the Pipeline's job is now to open the
         // CUSTOMER, and the customer record is addressed by contact id, not short_code.
         // Carolyn 2026-09-04 @1:07:19, watching it work: "this pipeline click is going to
@@ -252,11 +279,13 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
         // invoice leaves the design 'accepted', and the dialog has to know its quote is kept.
         .select(`short_code, created_at, updated_at, status, contact, contact_id, ${SEL_LIST_COLS}, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at, total_cents, expected_close_date`)
         .eq("client_id", clientId)
-        .order("created_at", { ascending: false }),
-      sb.from("design_versions")
+        .order("created_at", { ascending: false }).order("short_code", { ascending: false })
+        .range(from, to), (r) => r.short_code),
+      ssReadAllRows((from, to) => sb.from("design_versions")
         .select(`short_code, version, created_at, ${SEL_LIST_COLS}, image_url, inventory_unit_id`)
         .eq("client_id", clientId)
-        .order("version", { ascending: false })
+        .order("version", { ascending: false }).order("short_code", { ascending: true })
+        .range(from, to), (v) => v.short_code + ":" + v.version)
         .then((r) => r, () => ({ data: [] })),
     ]);
     if (dRes.error) { setError(dRes.error.message); setRows([]); return; }
@@ -1021,13 +1050,32 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       // grouping itself uses. A browsing lead who later submits simply becomes their design
       // row; the browsing entry disappears rather than duplicating them.
       const groupEmails = new Set([...groups.values()].map((g) => String(g.email || "").trim().toLowerCase()).filter(Boolean));
+      // ONE BROWSING ROW PER PERSON. captured_leads is unique on the RAW digits, so the same
+      // visitor captured once as "+1 512…" (browser autofill keeps the +1, and the gate accepts
+      // it) and once as "512…" is two rows there — and was two identical "Browsing" rows here,
+      // both opening the same contact. Newest first (the read orders on updated_at), so the row
+      // kept is the latest; the older one only fills in what the kept one lacks.
+      const browsingByPhone = new Map();
       browsingIn.forEach((l) => {
         const em = String(l.email || "").trim().toLowerCase();
         // captured_leads.phone_digits is the raw digit filter (capture-lead), so it has to
         // go through the same key or a lead captured as "+1 …" survives as a third row for
         // a person who has already submitted designs.
         if (groups.has(normPhone(l.phone_digits)) || (em && groupEmails.has(em))) return;
-        groups.set("lead-" + l.id, {
+        const pk = normPhone(l.phone_digits);
+        const kept = pk ? browsingByPhone.get(pk) : null;
+        if (kept) {
+          if (!kept.contactId && l.contact_id) kept.contactId = l.contact_id;
+          if (!kept.name && l.name) kept.name = l.name;
+          if (!kept.email && l.email) kept.email = l.email;
+          if (l.created_at && l.created_at < kept.firstSeen) kept.firstSeen = l.created_at;
+          if (l.source === "details" && kept.source !== "details") {
+            kept.source = "details";
+            kept.search = " browsing lead viewed pricing quote details";
+          }
+          return;
+        }
+        const lead = {
           key: "lead-" + l.id, browsing: true, source: l.source,
           // A browsing lead is a PERSON too, so its name links to the record like every
           // other row. captured_leads.contact_id is stamped by capture-lead (and by 130's
@@ -1039,7 +1087,9 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
           latestCode: null, topStatus: "browsing",
           search: " browsing lead" + (l.source === "details" ? " viewed pricing quote details" : ""),
           codes: [],
-        });
+        };
+        groups.set(lead.key, lead);
+        if (pk) browsingByPhone.set(pk, lead);
       });
       const out = [...groups.values()].sort((a, b) => (b.lastActivity > a.lastActivity ? 1 : b.lastActivity < a.lastActivity ? -1 : 0));
       setRows(out);
@@ -1066,13 +1116,16 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     const [dRes, clRes] = await Promise.all([
       // Style and size only (SEL_LIST_COLS) — this list groups people, and the two values it
       // folds into a lead's searchable text are the only part of the plan it ever reads.
-      sb.from("designs")
+      // Both paged (ssReadAllRows) — a single request stopped at PostgREST's 1000-row cap.
+      ssReadAllRows((from, to) => sb.from("designs")
         .select(`short_code, created_at, updated_at, status, contact, ${SEL_LIST_COLS}, ghl_estimate_number, contact_id`)
         .eq("client_id", clientId)
-        .order("created_at", { ascending: false }),
-      sb.from("captured_leads")
+        .order("created_at", { ascending: false }).order("short_code", { ascending: false })
+        .range(from, to), (r) => r.short_code),
+      ssReadAllRows((from, to) => sb.from("captured_leads")
         .select("id, name, phone, phone_digits, email, source, created_at, updated_at, contact_id")
-        .eq("client_id", clientId).order("updated_at", { ascending: false })
+        .eq("client_id", clientId).order("updated_at", { ascending: false }).order("id", { ascending: true })
+        .range(from, to), (l) => l.id)
         .then((r) => r, () => ({ data: [] })),
     ]);
     if (dRes.error) { setError(dRes.error.message); setRows([]); return; }
@@ -3343,6 +3396,16 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     ? ([sel.style, sel.size].filter(Boolean).join(" ") || (record && record.short_code) || "Design")
     : cname;
 
+  // A composer renders only while ITS TAB IS ENABLED, not merely while it is the remembered
+  // `tab`. The two drift apart in ordinary use: `tab` starts on "note", so a contact opened
+  // with no deal picked showed a live note box under a greyed Notes tab whose hint says to pick
+  // a deal first — and saved the note with shortCode null, the exact thing the picker exists to
+  // stop. Clearing a pick, or picking a deal that is not accepted while Invoice is open, left
+  // the old tab's panel live the same way. The tab's own predicate is the one answer.
+  const tabOn = (key) => {
+    const t = CRM_TABS.find((x) => x.key === key);
+    return !!t && (!t.when || t.when(ctx)) && t.enabled(ctx);
+  };
   const chips = CRM_CHIPS.filter((c) => !c.when || c.when(ctx));
   const active = chips.find((c) => c.key === chip) || chips[0];
   const feed = (data.feed || []).filter((e) => !active.types || active.types.indexOf(e.type) !== -1);
@@ -3844,11 +3907,24 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 {open && (
                   <div style={{ border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderTop: "none",
                     borderRadius: "0 0 6px 6px", background: "#FFF", padding: "7px 10px 9px" }}>
-                    {fieldRow("Expected close", canEdit ? (
-                      <input type="date" value={String(d.expected_close_date || "").slice(0, 10)} disabled={dealBusy}
-                        onChange={(e) => saveDealClose(d.short_code, e.target.value)}
-                        style={{ ...S.input, padding: "4px 7px", fontSize: 12.5, width: 158 }} />
-                    ) : (d.expected_close_date ? fmtDate(d.expected_close_date) : "—"))}
+                    {/* Saved on blur or Enter, the way the Pipeline card's close date is — NOT on
+                        change. A date input fires change once per keystroke with whatever its
+                        segments hold so far: typing the month "12" reports January first and the
+                        first digit of a year reports year 0002, so a change-save stored January
+                        (and the save disabled the box before the "2" could land). Keyed on the
+                        stored value so a save or a reload repaints it; Escape puts it back. */}
+                    {fieldRow("Expected close", canEdit ? (() => {
+                      const stored = String(d.expected_close_date || "").slice(0, 10);
+                      return (
+                        <input type="date" key={`${d.short_code}:${stored}`} defaultValue={stored} disabled={dealBusy}
+                          onBlur={(e) => { if (e.target.value !== stored) saveDealClose(d.short_code, e.target.value); }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") e.currentTarget.blur();
+                            if (e.key === "Escape") { e.currentTarget.value = stored; e.currentTarget.blur(); }
+                          }}
+                          style={{ ...S.input, padding: "4px 7px", fontSize: 12.5, width: 158 }} />
+                      );
+                    })() : (d.expected_close_date ? fmtDate(d.expected_close_date) : "—"))}
                     {fieldRow("Style", s.style || "—")}
                     {fieldRow("Size", s.size || "—")}
                     {fieldRow("Total", d.total_cents != null ? fmtMoneyWhole(d.total_cents) : "—")}
@@ -4339,7 +4415,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
 
             {/* The thread opened in My Synergy Phone instead of here. One link back to the composer,
                 because a person who wants to type it here should never be stuck. */}
-            {tab === "sms" && canEdit && data.contact && data.contact.phone && smsViaPhone && (
+            {tab === "sms" && tabOn("sms") && canEdit && data.contact && data.contact.phone && smsViaPhone && (
               <div style={{ marginBottom: 12 }} data-ss-phone-panel="text">
                 {phoneUi.kind === "checking" ? (
                   <div style={{ fontSize: 12.5, color: "#64748B" }}>Opening the conversation in My Synergy Phone…</div>
@@ -4354,7 +4430,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 )}
               </div>
             )}
-            {tab === "sms" && canEdit && data.contact && data.contact.phone && !smsViaPhone && (
+            {tab === "sms" && tabOn("sms") && canEdit && data.contact && data.contact.phone && !smsViaPhone && (
               <div style={{ marginBottom: 12 }}>
                 {/* Why the composer is here rather than My Synergy Phone, when that is news. */}
                 {phoneUi && phoneUi.what === "text" && phoneUi.kind === "install" && <SsPhoneInstallCard what="text" compact />}
@@ -4468,7 +4544,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 )}
               </div>
             )}
-            {tab === "email" && canEdit && data.contact && data.contact.email && (
+            {tab === "email" && tabOn("email") && canEdit && data.contact && data.contact.email && (
               <div style={{ marginBottom: 12 }}>
                 {/* WHERE A REPLY GOES follows the server's rule (_shared/repReplyTo.ts): the writer's
                     own address, except in view-as, where CSM Synergy staff are never put on a
@@ -4541,7 +4617,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 untouched. Tenants have meeting and lunch rows already logged, and a chip
                 the composer no longer offers is not the same thing as a kind the history
                 can no longer render. Removing them server-side would blank those rows. */}
-            {tab === "activity" && canEdit && (
+            {tab === "activity" && tabOn("activity") && canEdit && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
                   {["call", "task", "deadline"].map((k) => (
@@ -4576,7 +4652,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 (Carolyn 2026-08-26 24:01: "the top part is about things to do. The bottom
                 part is about history"). Uploading IS something you do, so the button stays
                 here; the files it produces belong down there. */}
-            {tab === "files" && canEdit && data.contact && data.contact.id && (
+            {tab === "files" && tabOn("files") && canEdit && data.contact && data.contact.id && (
               <div style={{ marginBottom: 12 }}>
                 <label style={{
                   display: "inline-block", ...S.btn(ACCENT, "#FFF"),
@@ -4598,7 +4674,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 and the schedule already are — a second invoice button on a second screen is
                 how two sources of truth for money get built. So this routes rather than
                 duplicates, and says plainly what the customer still has to do. */}
-            {tab === "invoice" && (kind === "design" ? record : activeDeal) && (
+            {tab === "invoice" && tabOn("invoice") && (kind === "design" ? record : activeDeal) && (
               <div style={{ marginBottom: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 13px" }}>
                 <div style={{ fontSize: 12.5, color: "#475569" }}>
                   This quote is accepted, so it can be invoiced. Invoicing happens on the order — with the
@@ -4626,7 +4702,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 2026-09-02: "this black outline ... is sooo annoying." The SMS composer a
                 few lines up was written later against the real token, which is why that
                 one alone looked right. */}
-            {tab === "note" && canEdit && (
+            {tab === "note" && tabOn("note") && canEdit && (
               <div style={{ marginBottom: 12 }}>
                 <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={2}
                   placeholder="Click here to add a note…"
@@ -4810,7 +4886,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                           words someone typed (migration 261). Every other email body here is
                           one line (a document's subject, or "Emailed to …"), so nothing else
                           changes. */}
-                      {e.body && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2, whiteSpace: e.type === "email" || e.type === "sms" ? "pre-wrap" : undefined }}>{e.body}</div>}
+                      {/* An open activity's body is the server's `Due ${due_at}` — the raw
+                          timestamptz ("Due 2026-09-03T12:00:00+00:00"). The date is formatted
+                          here from meta.dueAt, the same way Focus prints it a few lines up. */}
+                      {e.body && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2, whiteSpace: e.type === "email" || e.type === "sms" ? "pre-wrap" : undefined }}>
+                        {e.type === "activity" && e.meta && !e.meta.done && e.meta.dueAt ? `Due ${fmtDate(e.meta.dueAt)}` : e.body}
+                      </div>}
                       {/* MY SYNERGY PHONE: the voicemail itself, played from the phone-api Worker
                           (GET /voicemails/:id/audio). Only for someone the Worker will serve —
                           phone access, calling on, not an operator in view-as (their token is

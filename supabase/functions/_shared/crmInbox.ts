@@ -149,9 +149,13 @@ const callIsLive = (c: Row) => {
   const st = String(c?.status ?? "");
   return st === "ringing" || st === "in_progress";
 };
+// An inbound call that left a message is a VOICEMAIL even when it was answered first: a cold
+// transfer nobody took goes to the builder's voicemail on the SAME call, which the Worker keeps
+// answered (fileVoicemail). crmFeed's callFeedEvents reads it that way; read as answered here it
+// was a handled "Call" in the inbox while the record showed the voicemail waiting.
 const callAnswered = (c: Row) => c?.direction === "out"
   ? !!c.answered_at && (Number(c.duration_s) || 0) > 0
-  : !!c?.answered_by || (!!c?.answered_at && !callIsLive(c));
+  : (!!c?.answered_by || (!!c?.answered_at && !callIsLive(c))) && !one(c?.phone_voicemails);
 
 /** What happened on a call, in a few words. NEVER a transcript: a voicemail's words and a call
  *  summary stay on the record, behind the phone permission the record applies to them. The

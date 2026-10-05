@@ -99,7 +99,7 @@ Deno.test("portal: My Profile saves emailSignature through save_prefs, capped at
 });
 
 Deno.test("portal: the record's Email tab shows the signature under the box, with a way to change it", () => {
-  const tab = slice(SALES, `{tab === "email" && canEdit && data.contact && data.contact.email && (`, `onClick={sendEmail}>`, "the Email tab");
+  const tab = slice(SALES, `{tab === "email" && tabOn("email") && canEdit && data.contact && data.contact.email && (`, `onClick={sendEmail}>`, "the Email tab");
   assert(tab.includes(`"Your signature is added: "`), "the preview line");
   assert(tab.includes(`"Edit in My Profile"`) && tab.includes(`"Add one in My Profile"`), "the link to My Profile");
   assert(tab.includes("window.confirm("), "leaving with words in the box asks first");

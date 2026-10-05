@@ -17,6 +17,9 @@ import {
   resendConfigured, ResendApiError, ResendNotConfigured, type RsDomain,
 } from "../_shared/resend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
+// Email Settings asks public DNS whether the sending domain already has a DMARC record before
+// it advises one (2026-10-05).
+import { dmarcDomainOf, lookupExistingDmarc } from "../_shared/dmarcLookup.ts";
 // The routing Reply-To sendTenantEmail adds, asked here only to refuse a view-as email no reply can reach.
 import { buildReplyAddress } from "../_shared/emailInbound.ts";
 import { cleanSignature, signatureHtml, signText } from "../_shared/emailSignature.ts";
@@ -92,6 +95,7 @@ import { WALK_FRAME_MAX, wingsAgreementWarning, wantsV2Prompt } from "../_shared
 // A raised foundation's save carry-forward (2026-09-25), on its own line for the same reason.
 import { carryForwardFoundation } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
+import { rtpImportNumber, rtpImportOverhead } from "../_shared/rtpImportValues.ts";
 // The Conversations page's calls go through the record timeline's own visibility rule.
 import { scopeCallRows } from "../_shared/crmFeed.ts";
 // The Conversations page (crm_inbox). Its own module, so crmFeed (which the phone-api Worker
@@ -537,6 +541,10 @@ const GATES: GateTable = {
   // the approve area: attesting is part of raising a change, not part of allowing one, and
   // Carolyn asked for those to be separate switches.
   attest_change_order: { area: "change_orders", level: "edit" },
+  // The order's money after the Change orders card acknowledges a change in the browser —
+  // attest_change_order's money block on its own. Takes no money from the caller; it
+  // recomputes from what is already acknowledged, so it sits with the card's own writes.
+  apply_change_order_money: { area: "change_orders", level: "edit" },
 
   // ── My Synergy Phone (calling settings + the Calls report) ───────────────────────────
   // The `phone` area (none/own/view/edit), which _shared/access.ts and area_level_for carry.
@@ -728,6 +736,7 @@ function draftAnswer(
  *
  * `where` completes "Couldn't …" and is the correlation key — keep it short, specific and
  * stable, because it is both user-facing text and the thing you grep app_errors for.
+ * `extra` rides alongside for a caller whose answer already carried a machine field (`reason`).
  */
 function dbFail(
   req: Request,
@@ -736,6 +745,7 @@ function dbFail(
   // deno-lint-ignore no-explicit-any
   err: any,
   status = 500,
+  extra: Record<string, unknown> = {},
 ) {
   logEdgeError({
     fn: "portal-settings",
@@ -748,6 +758,7 @@ function dbFail(
   return json({
     error: `Couldn't ${where}. Please try again — if it keeps happening, tell CSM Synergy and mention "${where}".`,
     ref: where,
+    ...extra,
   }, status);
 }
 
@@ -1023,8 +1034,25 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
   if (st.error) throw st.error;
   const sz = await sb.from("building_sizes").select("id, style_id, width_ft, length_ft, sort_order").eq("client_id", clientId);
   if (sz.error) throw sz.error;
+  // A cell resolves against every style's label OR key, hidden styles included — and nothing
+  // makes a label unique (create_style only uniquifies the key). So with a hidden "Barn" and a
+  // fresh "Barn", last-writer-wins sent a whole sheet of prices to whichever came back last,
+  // possibly the hidden one, while the live style kept quoting the old numbers and the banner
+  // reported them imported. A name more than one style answers to now resolves to nobody and
+  // its rows are skipped by name. (The portal's Structures upload refuses the same case before
+  // sending; both operator consoles reach admin-catalog's copy with no such guard.)
   const styleByName = new Map<string, any>();
-  for (const s of st.data ?? []) { styleByName.set(String(s.label).toLowerCase(), s); styleByName.set(String(s.key).toLowerCase(), s); }
+  const claimedBy = new Map<string, Set<string>>();   // lowercased label/key -> style ids
+  for (const s of st.data ?? []) {
+    for (const tok of [s.label, s.key]) {
+      const t = String(tok ?? "").trim().toLowerCase();
+      if (!t) continue;
+      styleByName.set(t, s);
+      const ids = claimedBy.get(t) ?? new Set<string>();
+      ids.add(String(s.id));
+      claimedBy.set(t, ids);
+    }
+  }
   const sizeByDims = new Map<string, any>();   // `${style_id}|${w}|${l}` -> row
   const maxSort = new Map<string, number>();   // style_id -> highest sort_order
   for (const z of sz.data ?? []) {
@@ -1059,6 +1087,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const styleName = String(row?.style ?? "").trim();
     const wv = num(row?.width), lv = num(row?.length);
     if (!styleName && wv.blank && lv.blank) continue;   // wholly blank line
+    if ((claimedBy.get(styleName.toLowerCase())?.size ?? 0) > 1) {
+      skipped.push(`${styleName}: more than one building style answers to this name (a hidden style counts) — rename one of them, then import again`);
+      continue;
+    }
     const style = styleByName.get(styleName.toLowerCase());
     if (!style) { skipped.push(`${styleName || "(blank)"}: unknown style`); continue; }
     if (wv.blank && lv.blank) { skipped.push(`${styleName}: missing width & length`); continue; }
@@ -1067,7 +1099,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     }
     const w = wv.n, l = lv.n;
     const pr = num(row?.price);
-    if (!pr.blank && !Number.isFinite(pr.n)) { skipped.push(`${styleName} ${w}x${l}: invalid price "${row?.price}"`); continue; }
+    // Negative is refused with the unparseable: nothing in the product means a building priced
+    // below zero: submit-estimate would email it as a negative building line, while the
+    // designer's preview clamps the line to $0, so the customer saw one number and got another.
+    if (!pr.blank && (!Number.isFinite(pr.n) || pr.n < 0)) { skipped.push(`${styleName} ${w}x${l}: invalid price "${row?.price}"`); continue; }
     const price = pr.blank ? null : pr.n;
     const active = !inactiveWord(row?.active) && price != null;   // active intent AND priced
     const label = `${fmt(w)}x${fmt(l)}`;
@@ -1088,7 +1123,9 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     }
     const inc = (row.inclusions && typeof row.inclusions === "object") ? row.inclusions : {};
     for (const [itemKey, val] of Object.entries(inc)) {
-      if (!itemKey) continue;
+      // A partition wall is never part of a size's price (278): no inclusion row is written for one,
+      // whatever a sheet exported before that change carries in its column.
+      if (!itemKey || itemKey === "partitionWall") continue;
       let qty = parseInclusionQty(val);
       if (qty === 1 && isLegacyYes(val)) qty = existingQty.get(`${sizeId}|${itemKey}`) ?? 1;
       const incRes = qty > 0
@@ -1635,9 +1672,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         ghlStageDeliveredId: data?.ghl_stage_delivered_id ?? null,
         betaMode: Boolean(data?.beta_mode),
         betaEmail: data?.beta_email ?? null,
-        // Who issues the paperwork (migration 121). Defaults TRUE for every tenant, so a
-        // row that predates the column — or a tenant with no client_settings row at all —
-        // reads as "invoice through the CRM", i.e. today's behaviour.
+        // Who issues the paperwork (migration 121). Anything but an explicit false reads as
+        // "invoice through the CRM", the same test submit-estimate makes, so a row that
+        // predates the column keeps the path it had and a tenant with no client_settings row
+        // at all reads as CRM mode until its first save. That save creates the row, and since
+        // migration 280 a new row starts false (StructureStudio paperwork); 280 moved no
+        // existing row.
         invoiceInGhl: data?.invoice_in_ghl !== false,
         // MAY they invoice through the CRM at all (migration 217)? Carolyn 2026-09-07:
         // "The feature for payments to go through GHL should only show in Junior Barns as he
@@ -1976,7 +2016,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const nextRequired = "coUnlockRequired" in payload
         ? Boolean(updates.co_unlock_required)
         : curCo?.co_unlock_required === true;
-      const nextInGhl = "invoiceInGhl" in payload ? Boolean(payload.invoiceInGhl) : curCo?.invoice_in_ghl !== false;
+      // No row yet: the upsert below creates one, and since migration 280 it starts in paperwork
+      // mode (invoice_in_ghl false). So judge the mode it WILL have, not "anything but false is
+      // the CRM" — that rule is for rows that exist (submit-estimate, email, the status read).
+      const nextInGhl = "invoiceInGhl" in payload
+        ? Boolean(payload.invoiceInGhl)
+        : (curCo ? curCo.invoice_in_ghl !== false : false);
 
       // 1. In CRM mode GoHighLevel owns the documents. There is nothing of ours to print a
       //    fee line on, so the money would simply never be charged.
@@ -2023,9 +2068,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // from the Quotes & Invoices card, which always posts this key.
       const mayInvoiceInGhl = curInv?.ghl_invoicing_allowed === true;
       if ("invoiceInGhl" in payload && !mayInvoiceInGhl) updates.invoice_in_ghl = false;
+      // A tenant with NO row is not on the CRM path: this save creates its row, and since
+      // migration 280 a new row starts false. Reading it as CRM mode let a lone starting quote
+      // number through without the invoice number and tax rate, into a paperwork-mode row with
+      // two of the three missing: a shopper's quote then takes a number and is refused for want
+      // of a rate (submit-estimate's no_tax_rate), and the next one takes another.
       const nextInGhl = "invoiceInGhl" in payload
         ? (mayInvoiceInGhl && Boolean(payload.invoiceInGhl))
-        : curInv?.invoice_in_ghl !== false;
+        : (curInv ? curInv.invoice_in_ghl !== false : false);
       const nextQuoteStart = "ssQuoteNext" in payload ? updates.ss_quote_next : (curInv?.ss_quote_next ?? null);
       const nextInvoiceStart = "ssInvoiceNext" in payload ? updates.ss_invoice_next : (curInv?.ss_invoice_next ?? null);
       const nextTaxRate = "ssTaxRate" in payload ? updates.ss_tax_rate : (curInv?.ss_tax_rate ?? null);
@@ -2358,7 +2408,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // wall_snap + the two dimension defaults (171): the Options grid only offers Depth and
       // Height off floor for wall-mounted items, and shows the master default where the tenant
       // has not overridden it.
-      admin.from("layout_item_types").select("item_key, label, wall_snap, depth_in, height_off_floor_in"),
+      admin.from("layout_item_types").select("item_key, label, wall_snap, depth_in, height_off_floor_in, hidden_until_priced"),
       admin.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
@@ -2397,7 +2447,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const labelByKey: Record<string, string> = {};
     const typeByKey: Record<string, any> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; typeByKey[t.item_key] = t; });
+    // A partition wall (278) is left out until it has a price, unless the read asks for it
+    // (withUnpriced: every catalog read from the portal that ships its Interior items card sends it,
+    // 01-core.jsx). Production's portal from before 278 then never lists one, so it never asks a
+    // builder to price an item its designer cannot draw yet. Only this item: a general rule would also
+    // take unpriced shelves (171) away from the tenants who have not priced them. Remove once
+    // production carries the new Interior items card.
+    const pricedKeys = new Set((lpRows.data ?? []).filter((r: any) => r.rate != null).map((r: any) => r.item_key));
     const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)
+      .filter((i: any) => payload.withUnpriced === true || i.item_key !== "partitionWall" || pricedKeys.has(i.item_key))
       .map((i: any) => {
         const t = typeByKey[i.item_key] || {};
         // Tenant override wins, master default fills in. null (not 0) means "not set", which is
@@ -2407,7 +2465,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         return { key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key,
           archived: !!i.archived, internalOnly: !!i.internal_only, taxable: i.taxable !== false,
           wallSnap: !!t.wall_snap, depthIn: depth != null ? Number(depth) : null,
-          heightOffFloorIn: off != null ? Number(off) : null };
+          heightOffFloorIn: off != null ? Number(off) : null,
+          // Out of the customer's palette until priced (171, 278): the Options card starts its rate
+          // blank instead of 0 and does not save a blank one, so a Save for something else cannot offer it free.
+          hiddenUntilPriced: !!t.hidden_until_priced };
       });
     const rs = csRamp.data;
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
@@ -2743,9 +2804,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const m = raw as { category?: unknown; name?: unknown; unitCost?: unknown };
       const name = String(m.name ?? "").trim();
       const category = String(m.category ?? "").trim();
-      const unitCost = Number(m.unitCost);
+      // rtpImportNumber, not Number(): a cell the browser could not parse arrives as null
+      // (JSON's NaN), which Number() reads as a valid $0 — see _shared/rtpImportValues.ts.
+      const unitCost = rtpImportNumber(m.unitCost);
       if (!name) continue;
-      if (!Number.isFinite(unitCost) || unitCost < 0) { skipped.push(`material "${name}": invalid cost "${m.unitCost}"`); continue; }
+      if (!Number.isFinite(unitCost) || unitCost < 0) {
+        skipped.push(`material "${name}": the cost isn't a usable number — ${idByName.has(name.toLowerCase()) ? "kept its current cost" : "not added"}`);
+        continue;
+      }
       const existingId = idByName.get(name.toLowerCase());
       const res = existingId
         ? await admin.from("rtp_materials").update({ category, unit_cost: unitCost, active: true, updated_at: new Date().toISOString() }).eq("id", existingId).select("id").maybeSingle()
@@ -2779,18 +2845,29 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       { const e = tooMany(lines, "lines"); if (e) { skipped.push(`${styleName} ${width}x${length}: ${e}`); continue; } }
       const rows: Record<string, unknown>[] = [];
       const seen = new Set<string>();
+      // A quantity that is not a number ("12 ea", "two" — null on the wire, see
+      // _shared/rtpImportValues.ts) or is negative used to read as 0 = "not used", and since this
+      // block FULL-REPLACES the size's bill of materials the line was deleted and the building
+      // re-priced without it. saveBom in the portal refuses the same input; here the size is left
+      // as it was and named instead. A blank cell still arrives as 0 and still means "not used".
+      const badQty: string[] = [];
       for (const [i, ln] of (lines as unknown[]).entries()) {
         const l = ln as { material?: unknown; section?: unknown; qty?: unknown };
         const matName = String(l.material ?? "").trim();
         const section = SECTIONS.has(String(l.section ?? "")) ? String(l.section) : "other";
-        const qty = Number(l.qty);
+        const qty = typeof l.qty === "string" && l.qty.trim() === "" ? 0 : rtpImportNumber(l.qty);
         const materialId = idByName.get(matName.toLowerCase());
         if (!materialId) { if (matName) skipped.push(`${styleName} ${width}x${length}: material "${matName}" is not on the Materials sheet`); continue; }
-        if (!Number.isFinite(qty) || qty <= 0) continue; // blank/zero qty = not used on this building
+        if (!Number.isFinite(qty) || qty < 0) { badQty.push(matName); continue; }
+        if (qty === 0) continue; // blank/zero qty = not used on this building
         const key = `${materialId}|${section}`;
         if (seen.has(key)) { skipped.push(`${styleName} ${width}x${length}: "${matName}" listed twice under ${section}`); continue; }
         seen.add(key);
         rows.push({ client_id: clientId, size_id: sizeId, material_id: materialId, section, qty, sort_order: i });
+      }
+      if (badQty.length) {
+        skipped.push(`${styleName} ${width}x${length}: not updated — these quantities aren't usable numbers: ${badQty.join(", ")}`);
+        continue;
       }
       const del = await admin.from("rtp_bom_lines").delete().eq("size_id", sizeId).eq("client_id", clientId);
       if (del.error) { skipped.push(`${styleName} ${width}x${length}: ${del.error.message}`); continue; }
@@ -2802,22 +2879,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     // ── Overhead: replace only when the sheet is present in the upload ──
+    // All or nothing (rtpImportOverhead): the lines are one ordered formula, so a bad line
+    // leaves the CURRENT overhead in place rather than replacing it with the rest of the sheet.
     if (overhead) {
-      const KINDS = new Set(["multiplier", "percent_of_price", "flat"]);
-      const rows: Record<string, unknown>[] = [];
-      for (const [i, ln] of (overhead as unknown[]).entries()) {
-        const l = ln as { label?: unknown; kind?: unknown; value?: unknown };
-        const label = String(l.label ?? "").trim();
-        const kind = String(l.kind ?? "");
-        const value = Number(l.value);
-        if (!label || !KINDS.has(kind) || !Number.isFinite(value) || value < 0) { skipped.push(`overhead line ${i + 1}: invalid`); continue; }
-        rows.push({ client_id: clientId, label, kind, value, sort_order: i, active: true });
-      }
-      const del = await admin.from("rtp_overhead_lines").delete().eq("client_id", clientId);
-      if (del.error) return dbFail(req, clientId, "replace your overhead lines", del.error);
-      if (rows.length) {
-        const ins = await admin.from("rtp_overhead_lines").insert(rows);
-        if (ins.error) return dbFail(req, clientId, "save your overhead lines", ins.error);
+      const ovh = rtpImportOverhead(overhead as unknown[]);
+      if (ovh.invalid.length) {
+        // First, not last: the portal shows only the first few skipped lines.
+        skipped.unshift("Overhead sheet NOT applied — your current overhead lines are unchanged. Fix these and upload again:", ...ovh.invalid);
+      } else {
+        const rows = ovh.rows.map((r) => ({ client_id: clientId, ...r, active: true }));
+        const del = await admin.from("rtp_overhead_lines").delete().eq("client_id", clientId);
+        if (del.error) return dbFail(req, clientId, "replace your overhead lines", del.error);
+        if (rows.length) {
+          const ins = await admin.from("rtp_overhead_lines").insert(rows);
+          if (ins.error) return dbFail(req, clientId, "save your overhead lines", ins.error);
+        }
       }
     }
 
@@ -2897,18 +2973,45 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const itemsRes = await admin.from("client_layout_items").select("item_key, active").eq("client_id", clientId);
     if (itemsRes.error) return dbFail(req, clientId, "load your option list", itemsRes.error);
     const validKeys = new Set((itemsRes.data ?? []).filter((i: any) => i.active).map((i: any) => i.item_key));
-    const exRes = await admin.from("layout_item_pricing").select("id, item_key").eq("client_id", clientId).is("style_id", null);
+    const exRes = await admin.from("layout_item_pricing").select("id, item_key, pricing_method, rate").eq("client_id", clientId).is("style_id", null);
     if (exRes.error) return dbFail(req, clientId, "load your current option prices", exRes.error);
     const idByKey = new Map<string, string>();
-    for (const r of exRes.data ?? []) idByKey.set(r.item_key, r.id);
+    const exByKey = new Map<string, { pricing_method: string; rate: number | null }>();
+    for (const r of exRes.data ?? []) { idByKey.set(r.item_key, r.id); exByKey.set(r.item_key, r); }
     let saved = 0; const skipped: string[] = [];
     for (const row of payload.rows) {
       const itemKey = String(row?.item_key ?? "").trim();
       const method = String(row?.pricing_method ?? "").trim();
       const rate = Number(row?.rate);
       if (!itemKey) continue;
+      // A partition wall (278) is priced only from the card that knows it (partitionAware, sent by the
+      // portal that ships the Interior items card). Production's card from before it sends every row it
+      // lists on Save, and a price set there would put a Partition Wall button on production's designer,
+      // which cannot draw one (it places a sliver no quote charges). The catalog hides an unpriced one
+      // from that card already; this is the backstop, and it never asks for a price. A priced one that
+      // card only sends back unchanged is passed over quietly. Remove once production carries the new
+      // Interior items card.
+      if (itemKey === "partitionWall" && payload.partitionAware !== true) {
+        const ex = exByKey.get(itemKey);
+        const unchanged = !!ex && ex.pricing_method === method && Number(ex.rate) === rate;
+        if (!unchanged) skipped.push(ex ? "Partition Wall: its price can be changed after the next app update" : "Partition Wall: opens with the next app update, nothing to set yet");
+        continue;
+      }
       if (!validKeys.has(itemKey)) { skipped.push(`${itemKey}: not an enabled item`); continue; }
       if (!ALLOWED_METHODS.has(method)) { skipped.push(`${itemKey}: invalid method "${method}"`); continue; }
+      // A partition wall (migration 278) is charged per foot of wall, per square foot of wall or each;
+      // the other four mean nothing for one wall, and submit-estimate would quietly charge them each.
+      if (itemKey === "partitionWall" && !["each", "lineal_ft", "sqft_option"].includes(method)) {
+        skipped.push(`${itemKey}: a partition wall is priced each, per foot (lineal ft) or per square foot of wall (sqft option)`);
+        continue;
+      }
+      // ...and it is only OFFERED once it has a price above $0: a first price of 0 would put it on every
+      // customer's designer, free. The card leaves an untouched (blank) one out of the Save, so this
+      // only says no to a 0 typed for a wall that has no price yet.
+      if (itemKey === "partitionWall" && !idByKey.has(itemKey) && !(rate > 0)) {
+        skipped.push(`${itemKey}: not offered until it has a price above $0`);
+        continue;
+      }
       if (!Number.isFinite(rate) || rate < 0) { skipped.push(`${itemKey}: invalid rate "${row?.rate}"`); continue; }
       // Optional per-item image (shown on the estimate line for this product). Only written
       // when the row carries an imageUrl field, so a save from an older client never blanks
@@ -2984,7 +3087,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const r = await fetch(`https://services.leadconnectorhq.com/products/?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
       prodStatus = r.status; prodOk = r.ok; prodBody = (await r.text()).slice(0, 600);
     } catch (e) {
-      return json({ error: `Couldn't reach GoHighLevel to verify: ${(e as Error).message}` }, 502);
+      // The runtime's network text (it names the URL it failed on) goes to app_errors, the same
+      // as the body below; the builder gets our sentence. Filed here, so the wrapper adds no copy.
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ghl_unreachable",
+        message: `verify_save_ghl: GoHighLevel could not be reached: ${String((e as Error)?.message ?? e).slice(0, 300)}`,
+        context: { action: "verify_save_ghl" },
+      }).catch(() => {});
+      const unreachable = json({ error: "Couldn't reach GoHighLevel to verify — try again in a few minutes." }, 502);
+      filedAtReturnSite.add(unreachable);
+      return unreachable;
     }
     if (!prodOk) {
       // An authored hint, never GoHighLevel's raw body. This used to paste 600 characters
@@ -3078,7 +3190,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     try {
       r = await fetch(`https://services.leadconnectorhq.com/opportunities/pipelines?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
     } catch (e) {
-      return json({ error: `Couldn't reach GoHighLevel: ${(e as Error).message}` }, 502);
+      // Network text to app_errors, our sentence to the builder — as verify_save_ghl above.
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ghl_unreachable",
+        message: `list_ghl_pipelines: GoHighLevel could not be reached: ${String((e as Error)?.message ?? e).slice(0, 300)}`,
+        context: { action: "list_ghl_pipelines" },
+      }).catch(() => {});
+      const unreachable = json({ error: "Couldn't reach GoHighLevel — try Refresh again shortly." }, 502);
+      filedAtReturnSite.add(unreachable);
+      return unreachable;
     }
     if (!r.ok) {
       // Authored hint, not GoHighLevel's raw body — same reasoning as verify_save_ghl above.
@@ -3263,6 +3383,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "set_expected_close") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!/^SS-[A-HJ-NP-Z2-9]{6,12}$/.test(shortCode)) return json({ error: "Unknown design." }, 400);
+    // ROW SCOPE (207), the same check every other designs:edit write here makes. A Dealer holds
+    // designs:edit with contacts:'own', so the gate alone let them move the close date on a
+    // colleague's deal they cannot see in any list, by posting its short code.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     // null clears the date; anything else must be a real calendar date. The check is not
     // cosmetic: `new Date("2026-02-31")` rolls into March rather than failing, so a typo
@@ -3612,12 +3736,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     d3: unknown; d3_photos: unknown; d3_video_frames: unknown; updated_at: string | null;
   };
   const findStyleFor3D = async (styleValue: string, styleId: string) => {
+    // building_styles.id is a uuid, so a malformed one would answer 22P02 and turn a bad id
+    // into a 500; it is simply not one of this tenant's styles.
+    if (styleId && !isUuid(styleId)) return { err: json({ error: "Style not found (or not yours)." }, 404) };
     // d3, the two media columns and updated_at ride along for the late-save guard in
     // save_style_d3 / save_style_media (styleSaveGuard.ts); every other caller ignores them.
     let q = admin.from("building_styles").select("id, key, model_status, model_url, d3, d3_photos, d3_video_frames, updated_at").eq("client_id", clientId);
     q = styleId ? q.eq("id", styleId) : q.eq("key", styleValue);
     const { data, error } = await q.maybeSingle();
-    if (error) return { err: json({ error: error.message }, 500) };
+    if (error) return { err: dbFail(req, clientId, "find that style", error) };
     if (!data) return { err: json({ error: "Style not found (or not yours)." }, 404) };
     return { style: data as Style3D };
   };
@@ -3723,7 +3850,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // has written it since, which closes the gap between that read and this update.
     if (decision === "write") write = found.style!.updated_at ? write.eq("updated_at", found.style!.updated_at) : write.is("updated_at", null);
     const { data: wrote, error, count } = await write.select("updated_at");
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "save that style's 3D setup", error);
     if (!count) {
       if (decision === "write") {
         const again = await findStyleFor3D(styleValue, styleId);
@@ -3846,7 +3973,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       magic = new Uint8Array(await headRes.arrayBuffer());
     } catch (e) {
-      return json({ error: `Could not read that scan: ${e instanceof Error ? e.message : String(e)}` }, 502);
+      return dbFail(req, clientId, "read that scan", { message: e instanceof Error ? e.message : String(e) }, 502);
     }
     // "glTF" — the GLB container magic. Anything else is a renamed .obj/.usdz/.zip.
     const isGlb = magic.length >= 4 && magic[0] === 0x67 && magic[1] === 0x6C && magic[2] === 0x54 && magic[3] === 0x46;
@@ -3858,7 +3985,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       model_url: rawPath, model_status: "uploaded", model_uploaded_at: new Date().toISOString(),
       model_meta: meta, model_locked_at: null, updated_at: new Date().toISOString(),
     }, { count: "exact" }).eq("client_id", clientId).eq("id", found.style!.id);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "record that scan", error);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true, modelPath: rawPath });
   }
@@ -3884,7 +4011,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (status === "none") { patch.model_url = null; patch.model_meta = null; patch.model_uploaded_at = null; }
     const { error, count } = await admin.from("building_styles")
       .update(patch, { count: "exact" }).eq("client_id", clientId).eq("id", found.style!.id);
-    if (error) return json({ error: error.message }, 500);
+    if (error) return dbFail(req, clientId, "change that style's 3D status", error);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
     return json({ ok: true, status });
   }
@@ -3900,7 +4027,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const path = found.style!.model_url;
     if (!path) return json({ ok: true, url: null, status: found.style!.model_status });
     const signed = await admin.storage.from("models").createSignedUrl(path, 600);
-    if (signed.error || !signed.data) return json({ error: `Could not open that scan: ${signed.error?.message ?? "unknown"}` }, 500);
+    if (signed.error || !signed.data) return dbFail(req, clientId, "open that scan", signed.error ?? { message: "no signed URL returned" });
     return json({ ok: true, url: signed.data.signedUrl, status: found.style!.model_status });
   }
 
@@ -3924,7 +4051,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // anon get_config).
     const path = `${clientId}/style-photo-${crypto.randomUUID()}.${ext}`;
     const up = await admin.storage.from("branding").upload(path, bytes, { contentType: ct, upsert: true });
-    if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
+    if (up.error) return dbFail(req, clientId, "upload that photo", up.error);
     const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
     return json({ ok: true, url: pub.publicUrl });
   }
@@ -4167,11 +4294,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const rawCap = capRow?.ai_style_daily_cap;
     const dailyCap = (typeof rawCap === "number" && rawCap >= 0) ? rawCap : DEFAULT_DAILY_CAP;
     // Unlimited skips the COUNT entirely rather than running a query whose answer cannot matter.
+    const capSince = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     if (dailyCap > 0) {
-      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       const { count: used, error: capErr } = await admin.from("ai_style_calls")
         .select("id", { count: "exact", head: true })
-        .eq("client_id", clientId).gt("called_at", since);
+        .eq("client_id", clientId).gt("called_at", capSince);
       // Fail OPEN on a broken count (capture-lead's posture): a cap that cannot be read must
       // not brick calibration, and the per-call cost is cents.
       if (capErr) {
@@ -4213,6 +4340,28 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ({ data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert(ledgerInsert).select("id").single());
     }
     if (ledgerErr) return json({ error: "The AI drafting meter is unavailable right now - try again shortly." }, 503);
+    // ── THE CAP, COUNTED AGAIN WITH THIS PRESS'S OWN ROW IN IT ─────────────────────────────────
+    // The count above runs before this press's row exists, so presses sent together all read the
+    // same number, all pass, and all insert: it bounded only presses sent one after another, and
+    // with the meter disarmed (every tenant today) nothing else stops a burst from drafting on our
+    // Anthropic key as many times as it has requests. So it is counted again now, every row in the
+    // window ours included: more than the cap means this press is past it, and its row goes. Two
+    // presses that straddle the cap at the same instant can both refuse — the safe direction for
+    // a spend cap, and the next press lands. Fails open like the count above.
+    if (dailyCap > 0 && ledgerRow?.id) {
+      const { count: withOurs, error: recountErr } = await admin.from("ai_style_calls")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", clientId).gt("called_at", capSince);
+      if (recountErr) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_style_cap_count_failed",
+          message: `AI calibration cap recount failed, allowing the call: ${recountErr.message}`,
+        });
+      } else if ((withOurs ?? 0) > dailyCap) {
+        await admin.from("ai_style_calls").delete().eq("id", ledgerRow.id);
+        return json({ error: `Daily limit reached (${dailyCap} AI drafts). Tune the sliders by hand, or try again tomorrow.` }, 429);
+      }
+    }
 
     // ── WALLET HOLD ────────────────────────────────────────────────────────────────
     // Ordered deliberately: the API-key check, then the daily cap, then the ai_style_calls
@@ -5544,6 +5693,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     // The style must be this tenant's. clientId comes from the JWT, never the body, so this
     // is what stops a crafted styleId writing heights onto another builder's catalog.
+    // building_styles.id is a uuid: a malformed one would answer 22P02 and file a 500 fault,
+    // when it is simply not one of this tenant's styles (findStyleFor3D's guard).
+    if (!isUuid(styleId)) return json({ error: "That building style is not in your catalog." }, 400);
     const stRes = await admin.from("building_styles").select("id").eq("client_id", clientId).eq("id", styleId).maybeSingle();
     if (stRes.error) return dbFail(req, clientId, "read that style", stRes.error);
     if (!stRes.data) return json({ error: "That building style is not in your catalog." }, 400);
@@ -5717,6 +5869,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     // The style must be this tenant's. clientId comes from the JWT, never the body — this is
     // what stops a crafted styleId writing cladding onto another builder's catalog.
+    // A malformed uuid is not one of their styles either (save_wall_heights' guard).
+    if (!isUuid(styleId)) return json({ error: "That building style is not in your catalog." }, 400);
     const stRes = await admin.from("building_styles").select("id").eq("client_id", clientId).eq("id", styleId).maybeSingle();
     if (stRes.error) return dbFail(req, clientId, "read that style", stRes.error);
     if (!stRes.data) return json({ error: "That building style is not in your catalog." }, 400);
@@ -8836,9 +8990,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
     if (!contactId && !shortCode) return json({ error: "An activity must attach to a contact or a design." }, 400);
     { const bad = await mismatchedPair(contactId, shortCode); if (bad) return bad; }
+    // Checked before toISOString(), which THROWS on an invalid date and turned a bad dueAt
+    // into an unhandled 500.
+    const dueMs = payload.dueAt ? Date.parse(String(payload.dueAt)) : null;
+    if (dueMs !== null && !Number.isFinite(dueMs)) return json({ error: "That due date isn't a date we can read." }, 400);
     const row: Record<string, unknown> = {
       client_id: clientId, kind, subject,
-      due_at: payload.dueAt ? new Date(String(payload.dueAt)).toISOString() : null,
+      due_at: dueMs !== null ? new Date(dueMs).toISOString() : null,
       assignee_user_id: userId ?? null, created_by: userId ?? null,
     };
     if (contactId) row.contact_id = contactId;
@@ -9024,9 +9182,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     // Invoice-send ledger state for these designs (migration 052). Lets the drawer show
     // "invoice created but not emailed — retry" instead of silently looking invoiced.
+    // Not `error`: send_invoice parks the CRM's own reply text and Postgres messages there for
+    // support, and nothing in the browser reads it — that column is not ours to put on the wire.
     const { data: sends } = await admin
       .from("invoice_sends")
-      .select("short_code, status, invoice_number, error, updated_at")
+      .select("short_code, status, invoice_number, updated_at")
       .eq("client_id", clientId).in("short_code", codes);
 
     return json({ ok: true, designs: dRes.data ?? [], versions: vRes.data ?? [], estimates, invoiceSends: sends ?? [] });
@@ -10756,6 +10916,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your email sending settings", error);
+    // Does the sending domain already have a DMARC record? The screen's advisory row says
+    // "publish p=none at _dmarc.<domain>", and following it where a record exists either adds a
+    // second one (then receivers ignore both) or replaces the builder's own policy with none
+    // (_shared/dmarcLookup.ts). Asked of public DNS, from the domain in the DKIM host Resend
+    // returned, never our stored string. It runs alongside the recent-sends read below, is
+    // capped at DMARC_LOOKUP_TIMEOUT_MS, never throws, and answers null when it can't be sure,
+    // which the screen reads as "say nothing about DMARC". No records yet, no lookup.
+    const dmarcDomain = dmarcDomainOf(s?.email_dns_records);
+    const existingDmarcP = dmarcDomain ? lookupExistingDmarc(dmarcDomain) : Promise.resolve(null);
     // opened_at and complained_at are migration 262's (B4). Read with them, and once more without
     // them on "no such column", so a deploy ahead of 262 still shows this screen instead of failing
     // it whole — crmFeed's rule for body_text.
@@ -10770,6 +10939,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ({ data: sends, error: sendsErr } = await readSends("id, kind, to_email, status, error, bounce_reason, created_at"));
     }
     if (sendsErr) return dbFail(req, clientId, "load your recent emails", sendsErr);
+    const existingDmarc = await existingDmarcP;
     const domain = s?.email_domain ?? null;
     const fromLocal = (typeof s?.email_from_local === "string" && s.email_from_local.trim()) || "info";
     return json({
@@ -10786,6 +10956,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       lastError: s?.email_last_error ?? null,
       active: s?.email_provider === "resend",
       dnsRecords: Array.isArray(s?.email_dns_records) ? s.email_dns_records : [],
+      // { present, policy, count, host } or null (no records yet, or DNS couldn't say). The
+      // screen shows its DMARC advisory row only for present: false at _dmarc.<the DKIM host's
+      // domain>, says "leave it as it is" for one record, and warns about two or more.
+      existingDmarc,
       // ── Receiving replies ────────────────────────────────────────────────────────────
       // One nested block rather than five loose keys, so the screen can render the whole
       // receiving card from a single object and a future provider swap changes one shape.
@@ -11942,7 +12116,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       try {
         await auditStrict("operator_verify_tax_attempt", null, `short_code=${shortCode}`);
       } catch (e) {
-        return json({ error: (e as Error).message, reason: "audit_unavailable" }, 503);
+        // auditStrict's message carries the insert's Postgres text after its own prefix.
+        return dbFail(req, clientId, "record this action for audit", e, 503, { reason: "audit_unavailable" });
       }
     }
     {
@@ -12139,6 +12314,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "amendment_status") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const gate = await amendmentGate(shortCode);
     const [liveRes, unlockRes, csRes] = await Promise.all([
@@ -12177,6 +12354,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const shortCode = String(payload?.shortCode ?? "").trim();
     const reason = String(payload?.reason ?? "").trim().slice(0, 500);
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
     // The reason is not paperwork: it is what the approver reads before deciding, and it
     // lands permanently on the order's amendment trail.
     if (!reason) return json({ error: "Say what needs changing -- whoever unlocks it will read this." }, 400);
@@ -12244,6 +12423,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const decision = payload?.decision === "declined" ? "declined" : "granted";
     const note = String(payload?.note ?? "").trim().slice(0, 500) || null;
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: cs } = await admin.from("client_settings")
       .select("co_unlock_hours").eq("client_id", clientId).maybeSingle();
@@ -12302,6 +12483,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "open_amendment") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: d } = await admin.from("designs")
       .select("short_code, ss_quote_number, accepted_at, estimate_lines, selections, paint_colors")
@@ -12388,6 +12571,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, clientId, "load that change", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
+    // ROW SCOPE (207), as send_invoice, on the design this change order belongs to.
+    { const refused = await refuseUnlessDesignVisible(String(co.short_code ?? "")); if (refused) return refused; }
     if (co.status === "pending_ack") {
       return json({ ok: true, already: true, changeOrder: co });
     }
@@ -12496,6 +12681,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, clientId, "load that change", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
+    // ROW SCOPE (207), as send_invoice, on the design this change order belongs to.
+    { const refused = await refuseUnlessDesignVisible(String(co.short_code ?? "")); if (refused) return refused; }
     if (co.status === "acknowledged") return json({ ok: true, already: true });
     if (co.status !== "pending_ack") {
       return json({
@@ -12663,6 +12850,54 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     });
   }
 
+  // ── apply_change_order_money: the order's money once a change is acknowledged ──────────
+  //
+  // The Orders tab's Change orders card acknowledges a change in the browser (a manual change
+  // recorded as already confirmed, or "Record verbal" on a pending one) and then has to move
+  // the order's money. It did that by writing `orders.total_cents = co.total_after_cents`
+  // ALONE — the exact write customer-accept and attest_change_order stopped making on
+  // 2026-09-07 (see orderCentsAfterAck): pretax_subtotal_cents and tax_cents stayed at the
+  // accepted figures and every earlier change-order FEE (and this change's own) was dropped.
+  // send_invoice reconciles the printed lines against pretax_subtotal_cents, so the invoice
+  // and its email billed the PRE-change amount — "Change order CO-1 $250 / Order adjustment
+  // −$250" — while the balance, the pay screen and the sentence the customer signs all named
+  // the new one.
+  //
+  // This is that block of attest_change_order, on its own: no input money at all, only the
+  // agreed lines and the acknowledged change orders already in the database, so the browser
+  // can ask for it but cannot steer it. Same gate as the card's own change_orders writes.
+  if (action === "apply_change_order_money") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
+    const [{ data: freshD, error: dErr }, { data: allAcked, error: cErr }] = await Promise.all([
+      admin.from("designs").select("estimate_lines, accepted_snapshot")
+        .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+      admin.from("change_orders")
+        .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
+        .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "acknowledged"),
+    ]);
+    if (dErr) return dbFail(req, clientId, "load that design", dErr);
+    if (cErr) return dbFail(req, clientId, "load its change orders", cErr);
+    if (!freshD) return json({ error: "Design not found." }, 404);
+    const money = orderCentsAfterAck(agreedBaseline(freshD).lines, allAcked ?? []);
+    // No usable snapshot: nothing to compute from, and writing a fabricated figure over a real
+    // order total is the worst outcome available (orderCentsAfterAck's own rule).
+    if (money == null) return json({ ok: true, applied: false });
+    const { error: totErr } = await admin.from("orders")
+      .update({
+        total_cents: money.totalCents,
+        pretax_subtotal_cents: money.pretaxCents,
+        tax_cents: money.taxCents,
+        // 'manual' also shields it from sync-design-status' GHL repricer.
+        total_source: "manual",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("client_id", clientId).eq("short_code", shortCode);
+    if (totErr) return dbFail(req, clientId, "update the order total", totErr);
+    return json({ ok: true, applied: true, totalCents: money.totalCents });
+  }
+
   // ── reissue_invoice: rebuild the invoice document after an approved change ────────────
   //
   // ⚠️ THIS IS THE REMEDY THE STALE-INVOICE REFUSAL NAMES, and until 2026-09-08 it did not
@@ -12686,6 +12921,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "reissue_invoice") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: d, error: dErr } = await admin.from("designs")
       .select("short_code, status, ss_quote_number, image_url, estimate_lines, accepted_snapshot, contact")
@@ -12905,6 +13142,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, clientId, "load that change order", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
+    // ROW SCOPE (207), as send_invoice, on the design this change order belongs to.
+    { const refused = await refuseUnlessDesignVisible(String(co.short_code ?? "")); if (refused) return refused; }
     if (co.status !== "pending_ack") {
       return json({
         error: co.status === "draft"
@@ -12966,10 +13205,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // "Invoice to approve". ⚠️ Selecting it before the column exists 500s this whole read,
       // which empties the Orders tab — migration 229 must be applied BEFORE this deploys.
       : "short_code, contact_id, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at, ss_invoice_requested_at";
-    const { data, error } = await admin.from("designs")
-      .select(cols).eq("client_id", clientId).in("short_code", codes).limit(2000);
-    if (error) return dbFail(req, clientId, "read the designs for these orders", error);
-    const visible = await visibleDesignRows((data || []) as { contact_id?: string | null }[]);
+    // CHUNKED, because `in.(…)` rides in the URL even from here. The browser moved this read
+    // to POST precisely so 2000 codes would fit, but one PostgREST GET carrying them all is
+    // ~16 bytes a code (commas encode as %2C): 500 codes is already an 8 KB request line and
+    // 2000 is 33 KB, past what the gateway accepts — so a tenant with a few hundred orders
+    // lost the WHOLE Orders tab ("Couldn't load orders"). 200 codes is ~3 KB. Parallel, and
+    // each chunk is client-scoped exactly as the single read was.
+    const DESIGN_CHUNK = 200;
+    const chunks: string[][] = [];
+    for (let i = 0; i < codes.length; i += DESIGN_CHUNK) chunks.push(codes.slice(i, i + DESIGN_CHUNK));
+    const reads = await Promise.all(chunks.map((c) =>
+      admin.from("designs").select(cols).eq("client_id", clientId).in("short_code", c).limit(DESIGN_CHUNK)
+    ));
+    const failed = reads.find((r) => r.error);
+    if (failed) return dbFail(req, clientId, "read the designs for these orders", failed.error);
+    const data = reads.flatMap((r) => r.data || []);
+    const visible = await visibleDesignRows(data as { contact_id?: string | null }[]);
     if (!visible) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
     return json({ ok: true, designs: visible });
   }
@@ -12978,6 +13229,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "order_paperwork") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
     const { data: cs, error: csErr } = await admin.from("client_settings")
       .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, quote_terms")
       .eq("client_id", clientId).maybeSingle();
@@ -13062,6 +13315,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "stage_order_attribute_change") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
     const attrs = (payload?.attrs && typeof payload.attrs === "object") ? payload.attrs : {};
     const dryRun = payload?.dryRun === true;
     const has = (k: string) => Object.prototype.hasOwnProperty.call(attrs, k);
@@ -13536,6 +13791,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, clientId, "load that change order", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
+    // ROW SCOPE (207), as send_invoice, on the design this change order belongs to.
+    { const refused = await refuseUnlessDesignVisible(String(co.short_code ?? "")); if (refused) return refused; }
     // A DRAFT IS DISCARDABLE -- that is what the rep's "Discard the change" does, and it is
     // also what releases the unlock they spent (the guard trigger's void branch).
     if (co.status !== "pending_ack" && co.status !== "draft") {
@@ -13700,7 +13957,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // operator declared a stranger's customer had agreed" must not read the same later.
         await auditStrict(`operator_${action}_attempt`, null, `short_code=${shortCode}`);
       } catch (e) {
-        return json({ error: (e as Error).message }, 503);
+        // auditStrict's message carries the insert's Postgres text after its own prefix.
+        return dbFail(req, clientId, "record this action for audit", e, 503);
       }
     }
 
@@ -14252,7 +14510,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             .rpc("allocate_ss_invoice_number", { p_client_id: clientId });
           if (allocErr) {
             await setClaim({ status: "failed", error: `allocate: ${allocErr.message}`.slice(0, 500) });
-            return json({ error: `Could not allocate an invoice number: ${allocErr.message}` }, 502);
+            return dbFail(req, clientId, "allocate an invoice number", allocErr, 502);
           }
           invNumber = allocated ? String(allocated) : null;
           if (!invNumber) {
@@ -14622,6 +14880,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         return { ok: false, status: 0, body: null, netErr: (e as Error)?.message || "network error" };
       }
     };
+    // A GoHighLevel call failed. Its body and the runtime's network text are not ours to show
+    // (dbFail's contract, applied to the CRM the way verify_save_ghl does): both go to app_errors
+    // under `step`, and the builder is shown the status alone. The caller marks its 502 filedHere,
+    // so the wrapper does not add a second row without the detail.
+    // deno-lint-ignore no-explicit-any
+    const ghlFailed = (step: string, r: { status: number; body: any; netErr?: string }): string => {
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: r.status || "ghl_unreachable",
+        message: `send_invoice: GoHighLevel ${step} failed (${r.status ? `HTTP ${r.status}` : "no answer"})`,
+        context: {
+          step, shortCode,
+          body: r.body?.message != null ? String(r.body.message).slice(0, 300) : null,
+          netErr: r.netErr ? String(r.netErr).slice(0, 300) : null,
+        },
+      }).catch(() => {});
+      return r.status ? `HTTP ${r.status}` : "your CRM didn't answer";
+    };
     const STALE_CLAIM_MS = 3 * 60 * 1000;
 
     // ── Own-domain email branch (Resend-active tenants) ────────────────────────
@@ -14757,7 +15032,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         const r = await ghl(`https://services.leadconnectorhq.com/invoices/estimate/list?altId=${encodeURIComponent(locationId)}&altType=location&limit=${limit}&offset=${offset}`, { headers: ghlHeaders });
         if (!r.ok) {
           await setClaim({ status: "failed", error: `estimate list ${r.status}` });
-          return json({ error: `Could not read estimates from your CRM (${r.status || r.netErr}).` }, 502);
+          return filedHere(json({ error: `Could not read estimates from your CRM (${ghlFailed("estimate list", r)}).` }, 502));
         }
         const arr: any[] = Array.isArray(r.body?.estimates) ? r.body.estimates : [];
         est = arr.find((e) => String(e?._id ?? "") === String(design.ghl_estimate_id)) ?? null;
@@ -14812,7 +15087,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       });
       if (!convRes.ok) {
         await setClaim({ status: "failed", error: `convert ${convRes.status}` });
-        return json({ error: `Creating the invoice failed: ${convRes.body?.message ?? convRes.status ?? convRes.netErr}` }, 502);
+        return filedHere(json({ error: `Creating the invoice failed (${ghlFailed("convert", convRes)}).` }, 502));
       }
       const invoice = convRes.body?.invoice ?? convRes.body ?? {};
       invoiceId = String(invoice?._id ?? invoice?.id ?? "");
@@ -14848,10 +15123,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         });
         if (!sendRes.ok) {
           await setClaim({ status: "created", error: `send ${sendRes.status || sendRes.netErr}: ${sendRes.body?.message ?? ""}`.slice(0, 500) });
-          return json({
-            error: `Invoice ${invoiceNumber ?? ""} was created in your CRM but the email didn't go out (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). Click Send invoice on this design again to retry the email — it will NOT create a second invoice.`,
+          return filedHere(json({
+            error: `Invoice ${invoiceNumber ?? ""} was created in your CRM but the email didn't go out (${ghlFailed("send", sendRes)}). Click Send invoice on this design again to retry the email — it will NOT create a second invoice.`,
             invoiceId, invoiceNumber, created: true, sent: false,
-          }, 502);
+          }, 502));
         }
       }
     } else {
@@ -14878,7 +15153,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         });
         if (!sendRes.ok) {
           await setClaim({ status: "created", error: `resend ${sendRes.status || sendRes.netErr}`.slice(0, 500) });
-          return json({ error: `Retrying the email for invoice ${invoiceNumber ?? ""} failed (${sendRes.body?.message ?? sendRes.status ?? sendRes.netErr}). You can send it from your CRM.`, invoiceId, invoiceNumber, created: true, sent: false }, 502);
+          return filedHere(json({ error: `Retrying the email for invoice ${invoiceNumber ?? ""} failed (${ghlFailed("resend", sendRes)}). You can send it from your CRM.`, invoiceId, invoiceNumber, created: true, sent: false }, 502));
         }
       }
     }
@@ -14923,6 +15198,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Owner/admin by omission from READ_ACTIONS.
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207), as send_invoice: a caller on contacts:'own' may only touch their own customers' orders.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: row } = await admin.from("invoice_sends")
       .select("status, invoice_number, qbo_invoice_id, qbo_realm_id")

@@ -143,6 +143,10 @@ export async function verifySupabaseJwt(env: Env, token: string): Promise<AuthCl
   } catch {
     return refuse("decode");
   }
+  // Valid JSON is not yet a JWT: `null` (or an array) decodes fine, and reading .alg off it
+  // would throw a TypeError past every refusal below, answering a stranger 500 instead of 401.
+  const isObject = (v: unknown) => !!v && typeof v === "object" && !Array.isArray(v);
+  if (!isObject(header) || !isObject(claims)) refuse("decode");
   const signed = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
 
   let valid = false;

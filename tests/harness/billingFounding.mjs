@@ -137,6 +137,14 @@ const TENANTS = {
   }),
 };
 const DECLINE = "Harness stub: the card was declined, and nothing was charged.";
+// f: the new builder's account once Simple Layout is paid for.
+const ACTIVE_AFTER = {
+  ...statusAnswer({ hasCard: true, entitlement: { exempt: false, state: "active", locked: false, reason: "active", features: { ...allFeatures(false), simple_layout: true } } }),
+  subscriptions: [{ id: "sub-harness-1", plan_id: "simple_layout_annual", status: "active", price_cents: 195000, current_period_start: "2026-10-04T00:00:00Z", current_period_end: "2027-10-04T00:00:00Z", canceled_at: null, created_at: "2026-10-04T00:00:00Z", past_due_since: null }],
+};
+// g: a platform operator (own tenant OPS_CLIENT, internal) viewing CLIENT while it is locked.
+const OPS_CLIENT = "harness-ops";
+const LAPSED_WITH_CARD = { ...TENANTS.c, hasCard: true, entitlement: { ...TENANTS.c.entitlement, reason: "cancelled" } };
 
 // The server's founding refusal, lifted from the module portal-billing answers with.
 const FOUNDING_SRC = readFileSync(join(ROOT, "supabase", "functions", "_shared", "foundingPricing.ts"), "utf8");
@@ -162,10 +170,15 @@ const H = { "access-control-allow-origin": "*", "access-control-expose-headers":
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", headers: H, body: JSON.stringify(body) });
 
 // One fresh context per scenario: nothing the portal caches in storage can leak between them.
-async function open(label, status, path = "/portal/settings/billing", { subscribeAnswer = null } = {}) {
+// `operator`: the signed-in person is a platform operator (own tenant OPS_CLIENT, answered with
+// `ownStatus`), and `status` is the answer for the tenant they view with ?view= (body.targetClientId).
+// `statusAfterSubscribe`: what `status` answers once a subscribe has been answered 200.
+async function open(label, status, path = "/portal/settings/billing", { subscribeAnswer = null, operator = false, ownStatus = null, statusAfterSubscribe = null } = {}) {
   const billing = [];   // every portal-billing request body, in order
   const logged = [];    // every log_error RPC body (what the portal files in app_errors)
   const pageErrors = [];
+  const dialogs = [];   // every window.confirm / alert message; each one is DISMISSED
+  let subscribed = false;
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 1000 }, serviceWorkers: "block" });
   await ctx.addInitScript(([ref, s]) => {
     try { localStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(s)); } catch (_e) { /* storage blocked */ }
@@ -179,6 +192,7 @@ async function open(label, status, path = "/portal/settings/billing", { subscrib
   }, [REF, SESSION]);
   const page = await ctx.newPage();
   page.on("pageerror", (e) => pageErrors.push(e.message));
+  page.on("dialog", (d) => { dialogs.push(d.message()); d.dismiss().catch(() => {}); });
 
   // Catch-all abort FIRST: Playwright runs matching routes in reverse registration order.
   await page.route((u) => !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u.href), (route) => route.abort());
@@ -189,8 +203,9 @@ async function open(label, status, path = "/portal/settings/billing", { subscrib
     let body = {};
     try { body = JSON.parse(req.postData() || "{}"); } catch (_e) { /* not JSON */ }
     if (url.includes("/rest/v1/rpc/log_error")) { logged.push(body); return json(route, null); }
-    if (url.includes("/rest/v1/rpc/")) return json(route, false);   // is_operator, is_support_operator, can_open_projects, …
-    if (url.includes("/rest/v1/client_users")) return json(route, [{ client_id: CLIENT, role: "owner" }]);
+    if (url.includes("/rest/v1/rpc/is_operator")) return json(route, !!operator);
+    if (url.includes("/rest/v1/rpc/")) return json(route, false);   // is_support_operator, can_open_projects, …
+    if (url.includes("/rest/v1/client_users")) return json(route, [{ client_id: operator ? OPS_CLIENT : CLIENT, role: "owner" }]);
     if (url.includes("/rest/v1/")) return json(route, []);
     if (url.includes("/auth/v1/user")) return json(route, USER);
     if (url.includes("/auth/v1/")) return json(route, SESSION);
@@ -200,9 +215,16 @@ async function open(label, status, path = "/portal/settings/billing", { subscrib
       const warm = new URL(url).searchParams.has("warm");
       billing.push(warm ? { ...body, warm: true } : body);
       if (warm) return json(route, { ok: true });
-      if (body.action === "status") return json(route, status);
-      // Anything that would move money is answered with a refusal: nothing here is ever "bought".
-      if (body.action === "subscribe") return subscribeAnswer ? json(route, subscribeAnswer.body, subscribeAnswer.status) : json(route, { error: DECLINE }, 402);
+      if (body.action === "status") {
+        if (operator && !body.targetClientId) return json(route, ownStatus);
+        return json(route, subscribed && statusAfterSubscribe ? statusAfterSubscribe : status);
+      }
+      // Anything that would move money is answered with a refusal: nothing here is ever "bought"
+      // (f's stubbed success aside, which moves nothing either: the gateway is never reached).
+      if (body.action === "subscribe") {
+        if (subscribeAnswer && (subscribeAnswer.status || 200) === 200) subscribed = true;
+        return subscribeAnswer ? json(route, subscribeAnswer.body, subscribeAnswer.status || 200) : json(route, { error: DECLINE }, 402);
+      }
       return json(route, { error: `Harness stub: unexpected portal-billing action ${body.action}` }, 400);
     }
     if (url.includes("/portal-settings")) {
@@ -214,7 +236,10 @@ async function open(label, status, path = "/portal/settings/billing", { subscrib
       if (body.action === "get_master") return json(route, { ok: true, layoutItemTypes: [] });
       return json(route, { ok: true });
     }
-    if (url.includes("/operator-portal")) return json(route, { ok: true, clients: [] });
+    if (url.includes("/operator-portal")) {
+      if (body.action === "get_portal") return json(route, { ok: true, clientId: body.clientId, companyName: body.clientId, designs: [], versions: [], capturedLeads: [] });
+      return json(route, { ok: true, clients: [] });
+    }
     return json(route, { ok: true });
   };
   await page.route(`**/${REF}.supabase.co/**`, handler);
@@ -225,7 +250,7 @@ async function open(label, status, path = "/portal/settings/billing", { subscrib
 
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
-  return { label, page, ctx, billing, logged, pageErrors };
+  return { label, page, ctx, billing, logged, pageErrors, dialogs };
 }
 
 const text = (page) => page.evaluate(() => document.body.innerText);
@@ -478,6 +503,61 @@ try {
     await S.page.evaluate(() => window.scrollTo(0, 0));
     await S.page.screenshot({ path: join(SHOTS, `billing-e-server-refusal${SHOT_TAG}.png`), fullPage: true });
     ok("e: no uncaught page errors", S.pageErrors.length === 0, S.pageErrors.join(" | "));
+    await S.ctx.close();
+  }
+
+  // ── f: paying from the billing gate lifts the gate, with no reload ──
+  // The shell fetched its entitlement once per token, so the builder was told "You're subscribed"
+  // and left behind the gate ("…unlock as soon as payment goes through", it says) until they
+  // reloaded. A purchase now raises ssEntitlementChanged and the shell re-reads it.
+  {
+    const S = await open("f", TENANTS.c, "/portal/designs", {
+      subscribeAnswer: { status: 200, body: { ok: true, subscriptions: [], failed: [] } },
+      statusAfterSubscribe: ACTIVE_AFTER,
+    });
+    const loaded = await waitText(S.page, "Choose your features");
+    ok("f: a new builder lands on the billing gate", loaded && (await text(S.page)).includes("Activate your account"));
+    await S.page.evaluate(() => { window.__sameDocument = true; });
+    const btn = checkoutButton(S.page);
+    if (await btn.count()) { await btn.first().scrollIntoViewIfNeeded(); await btn.first().click(); }
+    const thanked = await waitText(S.page, "You're subscribed", 10000);
+    ok("f: the stubbed checkout succeeds and says so", thanked && actions(S, "subscribe").length === 1, JSON.stringify(actions(S, "subscribe")));
+    const lifted = await S.page.waitForFunction(() => !document.body.innerText.includes("Activate your account"), null, { timeout: 8000 }).then(() => true, () => false);
+    ok("f: the gate lifts by itself, no reload needed", lifted);
+    ok("f: …in the same document (nothing reloaded the page)", (await S.page.evaluate(() => window.__sameDocument === true)));
+    ok("f: no uncaught page errors", S.pageErrors.length === 0, S.pageErrors.join(" | "));
+    await S.ctx.close();
+  }
+
+  // ── g: an operator viewing a LOCKED builder gets the picker in its view-as mode ──
+  // BillingGate used to render BillingView with no viewingLabel, i.e. in the builder's own mode.
+  {
+    const S = await open("g1", LAPSED_WITH_CARD, `/portal/designs?view=${CLIENT}`, { operator: true, ownStatus: TENANTS.a });
+    const loaded = await waitText(S.page, "Choose your features", 20000);
+    ok("g1: the operator sees the viewed builder's gate", loaded && (await text(S.page)).includes("Your subscription has ended"));
+    const btn = checkoutButton(S.page);
+    const label = (await btn.count()) ? (await btn.first().innerText()).trim() : null;
+    ok(`g1: the checkout names the builder ("Subscribe ${CLIENT} with card on file")`, label === `Subscribe ${CLIENT} with card on file`, String(label));
+    if (label) { await btn.first().scrollIntoViewIfNeeded(); await btn.first().click(); }
+    await S.page.waitForTimeout(800);
+    ok("g1: pressing it asks first, naming whose card is billed", S.dialogs.some((m) => m.includes(`This bills the card ${CLIENT} has on file`)), JSON.stringify(S.dialogs));
+    ok("g1: …and a No sends no subscribe", actions(S, "subscribe").length === 0, JSON.stringify(actions(S, "subscribe")));
+    const add = S.page.getByRole("button", { name: "$100", exact: true });
+    if (await add.count()) { await add.first().click(); await S.page.getByRole("button", { name: "Add $100", exact: true }).first().click(); }
+    await S.page.waitForTimeout(800);
+    ok("g1: a wallet top-up asks first, naming the builder", S.dialogs.some((m) => m.includes(`Add $100 to ${CLIENT}'s wallet?`)), JSON.stringify(S.dialogs));
+    ok("g1: …and a No sends no top-up", actions(S, "topup").length === 0, JSON.stringify(actions(S, "topup")));
+    ok("g1: no uncaught page errors", S.pageErrors.length === 0, S.pageErrors.join(" | "));
+    await S.ctx.close();
+  }
+  {
+    const S = await open("g2", TENANTS.c, `/portal/designs?view=${CLIENT}`, { operator: true, ownStatus: TENANTS.a });
+    const loaded = await waitText(S.page, "Choose your features", 20000);
+    ok("g2: the operator sees the viewed builder's gate", loaded && (await text(S.page)).includes("Activate your account"));
+    ok("g2: with no card on file it says the owner must add one", (await text(S.page)).includes(`${CLIENT} has no card on file`));
+    ok("g2: …and offers no card entry", (await S.page.getByRole("button", { name: "Continue to secure card entry" }).count()) === 0);
+    ok("g2: the Collect.js lightbox never opened", (await S.page.evaluate(() => window.__collect.started)) === 0);
+    ok("g2: no uncaught page errors", S.pageErrors.length === 0, S.pageErrors.join(" | "));
     await S.ctx.close();
   }
 } finally {

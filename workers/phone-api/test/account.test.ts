@@ -78,6 +78,36 @@ describe("POST /settings/me", () => {
     expect(w.headers.get("prefer")).toContain("resolution=merge-duplicates");
   });
 
+  it("turning DND on after a timed DND ran out clears the old end time, so it is really on", async () => {
+    const { net, token, env } = await setup();
+    // The stored row: a one-hour DND that ended an hour ago (the flag is still true).
+    const stored: Record<string, unknown> = { dnd: true, dnd_until: new Date(Date.now() - 3_600_000).toISOString(), forward_to_cell: null };
+    net.rest("POST", "phone_user_settings", (s) => {
+      Object.assign(stored, s.json);
+      return [{ dnd: stored.dnd, dnd_until: stored.dnd_until, forward_to_cell: stored.forward_to_cell }];
+    });
+    net.rest("PATCH", "phone_user_settings", (s) => {
+      Object.assign(stored, s.json);
+      return [{ dnd: stored.dnd, dnd_until: stored.dnd_until, forward_to_cell: stored.forward_to_cell }];
+    });
+    const { json } = await call(env, appRequest("POST", "/settings/me", token, { dnd: true }));
+    expect(json).toEqual({ ok: true, settings: { dnd: true, dnd_until: null, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } } });
+    expect(stored.dnd_until).toBeNull();
+    const clear = net.writes("phone_user_settings", "PATCH")[0];
+    expect(filter(clear, "user_id")).toBe(USER_A);
+    // Guarded: only a timer that has passed is cleared.
+    expect(clear.url.searchParams.get("dnd_until")).toMatch(/^lte\./);
+  });
+
+  it("turning DND on leaves a timer that is still running alone", async () => {
+    const { net, token, env } = await setup();
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+    net.rest("POST", "phone_user_settings", () => [{ dnd: true, dnd_until: until, forward_to_cell: null }]);
+    const { json } = await call(env, appRequest("POST", "/settings/me", token, { dnd: true }));
+    expect(json.settings).toEqual({ dnd: true, dnd_until: until, forward_to_cell: null, dnd_cover_user_id: null, ring_hours: null, ring_hours_tz: null, greeting: { set: false, updated_at: null } });
+    expect(net.writes("phone_user_settings", "PATCH")).toHaveLength(0);
+  });
+
   it.each([
     [{ dnd: "yes" }, "Do Not Disturb must be on or off."],
     [{ dnd: true, dnd_until: "2000-01-01T00:00:00Z" }, "Pick an end time for Do Not Disturb within the next 30 days."],
