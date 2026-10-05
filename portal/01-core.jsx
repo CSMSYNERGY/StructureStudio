@@ -535,6 +535,10 @@ const TAB_META = {
   // do more than one quote for one deal, so let's leave it on the deals side right now."
   designs: ["Pipeline", "Customer designs and quotes — as a list or a pipeline board"],
   contacts: ["Contacts", "Everyone who has enquired, and their activity"],
+  // Carolyn, 2026-08-21 @45:22: "I like the idea of a conversations tab ... So conversations
+  // would be email, all of it ... I want that bar at the top that shows that I can sort and see
+  // just that." One row per customer, from crm_inbox; replying happens on their record.
+  conversations: ["Conversations", "Every email, text and call with your customers, newest first"],
   orders: ["Orders", "Track accepted quotes from sale to payment and delivery"],
   support: ["Support", "Get set up, report a problem, request a feature, and see what's new"],
   settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
@@ -676,7 +680,7 @@ if (SS_POPOUT) { try { document.title = "Projects — Structure Studio"; } catch
 // data). Everything else is
 // admin-only. SUPERSEDED for anyone whose tenant row carries per-area access (migration
 // 100) — see TAB_AREA below; this list is the fallback for the older binary shape.
-const NONADMIN_TABS = ["designer", "designs", "contacts", "orders", "support", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+const NONADMIN_TABS = ["designer", "designs", "contacts", "conversations", "orders", "support", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
 
 // Which permission area each page needs to be VISIBLE (migration 100). The server ships the
 // caller's resolved map on the status call and enforces it on every action regardless —
@@ -697,6 +701,9 @@ const TAB_AREA = {
   // customer-designs list back through a tab that no longer contains it.
   designs: "designs",
   contacts: "contacts",
+  // The same customers, seen by their latest message: whoever may open Contacts may open this,
+  // and crm_inbox narrows contacts:'own' and the calls row by row on the server.
+  conversations: "contacts",
   inventory: "inventory",
   orders: "orders",
   "build-schedule": "build_schedule",
@@ -1636,6 +1643,7 @@ const ROW_SCOPE_AREA = {
   contacts: "contacts",    // the customer list itself
   orders: "contacts",      // orders_designs is filtered server-side by the same rule
   inventory: "contacts",   // the ESTIMATES on a lot building; the buildings themselves are not
+  conversations: "contacts", // crm_inbox narrows every thread through crm_visible_contact_ids
 };
 
 // Is this person limited to their own rows in this area? The mirror of ownContactsOnly() in
@@ -2758,6 +2766,7 @@ function ssWarmThrottled(name) {
 const SS_NAV_WARM = {
   designs: ["sync-design-status"],                      // REST list paints, then the status sync
   contacts: ["sync-design-status"],
+  conversations: ["portal-settings"],                   // crm_inbox
   inventory: ["portal-settings", "sync-design-status"], // list_inventory, then the sync
   orders: ["portal-settings", "portal-schedule"],       // orders_designs; schedule_links
   "build-schedule": ["portal-schedule"],

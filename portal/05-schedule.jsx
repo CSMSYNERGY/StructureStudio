@@ -52,6 +52,65 @@ const schedEditorKey = (j) => j.id + ":" + (j.updated_at || "");
 const schedStyle = (j) => String(j.building_label || "")
   .replace(/\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?/i, "").trim();
 
+// ── The customer behind a schedule row (Carolyn 2026-08-28) ──────────────────────────────
+// "If I click on this card ... it takes it now to a ... view of that contact ... I think we'll
+// do the same kind of structure from both the build schedule and the delivery schedule."
+// portal-schedule puts `customer_link: { code, contactId }` on an order job, an order stop and
+// a sold unit's sale stop, and only while that design still exists. This decides where the
+// link goes for one reader, the same fallback as the Pipeline's onOpenRecord:
+//   • the CONTACT record, when there is a customer AND the account has the CRM AND this person
+//     may open Contacts;
+//   • otherwise the DESIGN's own record, when they may open Pipeline (a crew leader holds
+//     designs:'view' and no contacts);
+//   • otherwise null, and the name stays plain text. A crew member holds neither, and a
+//     button that opens a "not allowed" page is worse than no button.
+// `reach` is { crm, contacts, designs }, the shell's ssClampTab answers. Pure, so it can be
+// tested without a browser (schedOpenCustomer_test.ts).
+function schedCustomerDest(link, reach) {
+  if (!link || typeof link.code !== "string" || !link.code || !reach) return null;
+  if (link.contactId && reach.crm && reach.contacts) {
+    return { page: "contacts", sub: "c-" + link.contactId, contactId: link.contactId, code: link.code };
+  }
+  if (reach.designs) return { page: "designs", sub: "d-" + link.code, contactId: null, code: link.code };
+  return null;
+}
+
+// The customer's name as the way into their record. `open` is the shell's answer for THIS row
+// (see the tabs' customerOpener prop); the caller renders plain text when it is null, exactly
+// as before. A button rather than a link because where it goes depends on who is looking, and
+// because it has to pass through `beforeLeave` (an unsaved edit on this page) first.
+function SchedCustomerButton({ name, code, open, beforeLeave = null, style = null }) {
+  return (
+    <button type="button" data-ss-sched-customer={code} title="Open the customer's record"
+      onClick={(e) => { e.stopPropagation(); if (beforeLeave && !beforeLeave()) return; open(); }}
+      style={{ background: "none", border: "none", padding: 0, margin: 0, font: "inherit", fontWeight: 800, color: ACCENT, cursor: "pointer",
+        textAlign: "left", textDecoration: "underline", textDecorationColor: "rgba(61,54,114,.35)", textUnderlineOffset: 3, ...style }}>
+      {name || "Open customer"}<span aria-hidden="true"> ›</span>
+    </button>
+  );
+}
+
+// ── Where you were on a schedule ──────────────────────────────────────────────────────────
+// Opening a customer leaves the page, and both ways back (the record's own Back and the
+// browser's) REMOUNT the schedule. Without this it came back on the default view at this
+// week, not on the week she left: Carolyn, same call, "What happens when I hit the back button
+// ... I want to make sure that they function the same way." So each schedule keeps its view
+// and its week for this browser tab (sessionStorage), FOR TODAY ONLY: a tab left open
+// overnight still starts the next morning on this week, as it always has. Only which view and
+// which week; never customer data (ssTabCache's reason for staying in memory does not apply).
+const SCHED_VIEW_KEYS = { build: "ss.sched.build.view", delivery: "ss.sched.delivery.view" };
+function schedViewLoad(key, today = ssLocalIso(new Date())) {
+  try {
+    const v = JSON.parse(window.sessionStorage.getItem(key) || "null");
+    return v && typeof v === "object" && v.day === today ? v : {};
+  } catch (_e) { return {}; }
+}
+function schedViewSave(key, state, today = ssLocalIso(new Date())) {
+  try { window.sessionStorage.setItem(key, JSON.stringify({ ...state, day: today })); } catch (_e) { /* storage blocked: it just won't be remembered */ }
+}
+// One saved field, or the fallback when it is missing or is not a value this build knows.
+const schedViewPick = (saved, k, ok, fallback) => (saved && ok(saved[k]) ? saved[k] : fallback);
+
 // ── The WHEN filter — Carolyn's full condition list (screenshot, 2026-08-23) ──────────────
 // Filtering NARROWS the list; segmenting ARRANGES it; they compose. One condition dropdown
 // plus a contextual parameter input (`param` says which). All date math on ISO strings via
@@ -193,7 +252,7 @@ function SchedJobHistory({ jobId, refreshKey = 0 }) {
 // linked role may move a card" — which was true under the old STAFF tier and is not true
 // now: move_job and add_note both require build_schedule:'edit', so a view-only member was
 // being offered two controls the server refuses.
-function SchedJobEditor({ job, stages, crews = [], canEdit, busy, error, onSave, onComplete, onDelete, onOpenDesign }) {
+function SchedJobEditor({ job, stages, crews = [], canEdit, busy, error, onSave, onComplete, onDelete, onOpenDesign, dirtyRef = null }) {
   // ONE build date (Carolyn 2026-08-04: most builds finish within a day). It writes both
   // date columns so every existing check (past due, delivery conflicts, pool) keys off it.
   //
@@ -201,13 +260,22 @@ function SchedJobEditor({ job, stages, crews = [], canEdit, busy, error, onSave,
   // when we click saved the popup should close"). The stage dropdown and the crew note used
   // to be separate immediate writes — three ways to change a job, two of which gave no hint
   // they had already committed. They are form state now; Save commits all of it.
-  const [f, setF] = useState({
+  const [base] = useState(() => ({
     title: job.title || "", customerName: job.customer_name || "", buildingLabel: job.building_label || "",
     buildDate: job.due_date || job.scheduled_start || "",
     crewId: job.crew_id || "", notes: job.notes || "",
     stageId: job.stage_id || "", note: "",
-  });
+  }));
+  const [f, setF] = useState(base);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  // Whether anything typed here is unsaved, for the popup's customer link: following it leaves
+  // the page, and the form with it (BuildScheduleTab asks before it does).
+  const dirty = canEdit && Object.keys(base).some((k) => f[k] !== base[k]);
+  useEffect(() => {
+    if (!dirtyRef) return undefined;
+    dirtyRef.current = dirty;
+    return () => { dirtyRef.current = false; };
+  }, [dirty, dirtyRef]);
   const lbl = { ...S.lbl, marginBottom: 3 };
   const inp = { ...S.input, padding: "6px 8px", fontSize: 12.5 };
   // A grid item's automatic minimum size is its MIN-CONTENT size, and an <input>'s
@@ -328,7 +396,9 @@ function SchedStageEditor({ stages, busy, onClose, onSave }) {
   );
 }
 
-function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
+// `customerOpener(link)` answers, for one job's customer_link, the click that opens that
+// customer (or null: plain text). Null itself when this reader may open no record at all.
+function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign, customerOpener = null }) {
   // Who may WRITE here is build_schedule:'edit' (migration 100) — a Crew Leader has it, a
   // Sales Rep does not, and neither is an admin. `canAdmin` alone was the old owner/admin
   // gate: it locked every write control for exactly the people the Crew Leader title was
@@ -340,9 +410,18 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   // behind it — this component unmounts on every tab switch (see ssTabCache in 01-core).
   const [data, setData] = useState(() => ssCacheGet("portal-schedule", "build_board", clientId));  // { stages, jobs, stopByJob, tray, team } | null = loading
   const [error, setError] = useState(null);
-  const [view, setView] = useState("calendar"); // calendar (main) | board | table
-  const [calView, setCalView] = useState("week"); // week | month
-  const [cursorMs, setCursorMs] = useState(() => Date.now());
+  // View and week come back from where this tab left them today (see schedViewLoad), which is
+  // what makes Back from a customer's record land on the week it left.
+  const [view, setView] = useState(() => schedViewPick(schedViewLoad(SCHED_VIEW_KEYS.build), "view",
+    (v) => ["calendar", "board", "table"].includes(v), "calendar")); // calendar (main) | board | table
+  const [calView, setCalView] = useState(() => schedViewPick(schedViewLoad(SCHED_VIEW_KEYS.build), "calView",
+    (v) => v === "week" || v === "month", "week")); // week | month
+  const [cursorMs, setCursorMs] = useState(() => schedViewPick(schedViewLoad(SCHED_VIEW_KEYS.build), "cursorMs",
+    (v) => Number.isFinite(v), Date.now()));
+  useEffect(() => { schedViewSave(SCHED_VIEW_KEYS.build, { view, calView, cursorMs }); }, [view, calView, cursorMs]);
+  // Is the open popup's form holding unsaved edits? SchedJobEditor keeps it current; the
+  // popup's customer link reads it before leaving the page.
+  const editorDirty = useRef(false);
   const [crewFilter, setCrewFilter] = useState("all"); // "all" | crewId — ONE control, obeyed by every view
   // The WHEN filter (round 8). Transient like crewFilter — filters are a working view, not a
   // remembered preference (unlike `segment`, which persists deliberately).
@@ -764,6 +843,10 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
     const job = jobs.find((j) => j.id === expandedId);
     if (!job) return null;
     const close = () => setExpandedId(null);
+    // The customer's record, from the popup every view opens (the card click itself stays the
+    // popup: decisions 24/25, and the crew drag relies on it). Outside the canEdit block, so a
+    // view-only reader gets it too.
+    const openCustomer = customerOpener && job.customer_link ? customerOpener(job.customer_link) : null;
     return (
       <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,.38)", zIndex: 95, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
         onClick={close} role="dialog" aria-modal="true" aria-label="Job details">
@@ -778,7 +861,11 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                 2026-08-22) — 14/800 against the building's 15/800. Still a step down, so the
                 building keeps the headline that decision 14 gives it, but the name is no
                 longer the smallest thing on the row. */}
-            {job.customer_name && <span style={{ fontSize: 14, fontWeight: 800, color: "#334155" }}>{job.customer_name}</span>}
+            {openCustomer ? (
+              <SchedCustomerButton name={job.customer_name} code={job.customer_link.code} open={openCustomer}
+                beforeLeave={() => !editorDirty.current || window.confirm("You've changed this job and not saved it. Leave without saving?")}
+                style={{ fontSize: 14 }} />
+            ) : job.customer_name && <span style={{ fontSize: 14, fontWeight: 800, color: "#334155" }}>{job.customer_name}</span>}
             {schedBuildDate(job) && (
               <span style={{ ...schedChip("#F1F5F9", "#475569"), fontVariantNumeric: "tabular-nums" }}>{schedFmtBuild(schedBuildDate(job))}</span>
             )}
@@ -818,7 +905,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           )}
           <SchedJobEditor key={schedEditorKey(job)} job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy} error={saveErr}
             onSave={(patch) => saveJob(job, patch)} onComplete={() => completeJob(job)} onDelete={() => deleteJob(job)}
-            onOpenDesign={onOpenDesign} />
+            onOpenDesign={onOpenDesign} dirtyRef={editorDirty} />
         </div>
       </div>
     );
@@ -2524,7 +2611,8 @@ function SchedStopEditor({ stop, territories, busy, onSave, onCancel }) {
   );
 }
 
-function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
+// `customerOpener` as on BuildScheduleTab: one stop's customer_link in, its click (or null) out.
+function DeliveryScheduleTab({ clientId, canAdmin, access = null, customerOpener = null }) {
   // delivery_schedule:'edit' (migration 100) — the Driver preset carries it, which is the
   // point: a driver plans and closes out their own loads.
   //
@@ -2537,10 +2625,17 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
   const [data, setData] = useState(() => ssCacheGet("portal-schedule", "loads", clientId));  // loads payload
   const [pool, setPool] = useState(() => ssCacheGet("portal-schedule", "pool", clientId));   // pool payload
   const [error, setError] = useState(null);
-  const [view, setView] = useState("loads");   // loads | table | calendar
-  const [weekOffset, setWeekOffset] = useState(0);
-  const [monthCursor, setMonthCursor] = useState(() => { const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d.getTime(); });
-  const [calView, setCalView] = useState("week");            // calendar zoom: week | month
+  // View and week come back from where this tab left them today (schedViewLoad): Back from a
+  // customer's record lands where it left, as on the Build Schedule.
+  const [view, setView] = useState(() => schedViewPick(schedViewLoad(SCHED_VIEW_KEYS.delivery), "view",
+    (v) => ["loads", "table", "calendar"].includes(v), "loads"));   // loads | table | calendar
+  const [weekOffset, setWeekOffset] = useState(() => schedViewPick(schedViewLoad(SCHED_VIEW_KEYS.delivery), "weekOffset",
+    (v) => Number.isInteger(v), 0));
+  const [monthCursor, setMonthCursor] = useState(() => schedViewPick(schedViewLoad(SCHED_VIEW_KEYS.delivery), "monthCursor",
+    (v) => Number.isFinite(v), (() => { const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d.getTime(); })()));
+  const [calView, setCalView] = useState(() => schedViewPick(schedViewLoad(SCHED_VIEW_KEYS.delivery), "calView",
+    (v) => v === "week" || v === "month", "week"));            // calendar zoom: week | month
+  useEffect(() => { schedViewSave(SCHED_VIEW_KEYS.delivery, { view, weekOffset, monthCursor, calView }); }, [view, weekOffset, monthCursor, calView]);
   const [showWeekends, setShowWeekends] = useState(false);   // calendar: Sat/Sun columns off by default (matches Build Schedule)
   const [driverFilter, setDriverFilter] = useState("all");
   const [dragItem, setDragItem] = useState(null);            // a to-be-loaded item being dragged onto the calendar
@@ -2551,6 +2646,13 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
   const [editLoadId, setEditLoadId] = useState(null);    // header edit
   const [editStopId, setEditStopId] = useState(null);
   const [override, setOverride] = useState(null);        // { loadId, action, unbuilt, reason, complete }
+  // A stop's customer, as a way into their record (Carolyn 2026-08-28: "the same kind of
+  // structure from both the build schedule and the delivery schedule"). Null leaves the name
+  // as plain text. Leaving the page drops any half-filled form here (a stop or load being
+  // edited, a new load, an override reason), so with one open it asks first.
+  const stopCustomer = (s) => (customerOpener && s.customer_link ? customerOpener(s.customer_link) : null);
+  const leaveOk = () => !(editStopId || editLoadId || newLoad || override)
+    || window.confirm("You have something open here that isn't saved. Leave the Delivery Schedule without saving it?");
 
   // Full-body call: on a non-2xx we still need the JSON (the 409 carries blocked+unbuilt).
   const callFull = async (body) => {
@@ -3201,7 +3303,12 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
                                   <span style={{ width: 20, height: 20, borderRadius: "50%", background: "#F1F5F9", color: "#475569", fontSize: 10.5, fontWeight: 800, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{s.stop_order}</span>
                                 </td>
                                 <td style={{ ...S.td, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{s.serial ? "#" + s.serial : (s.repair_id ? "Repair" : "—")}</td>
-                                <td style={S.td}><strong>{s.customer_name || "—"}</strong>{s.customer_phone && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>{s.customer_phone}</div>}</td>
+                                <td style={S.td}>
+                                  {stopCustomer(s)
+                                    ? <SchedCustomerButton name={s.customer_name} code={s.customer_link.code} open={stopCustomer(s)} beforeLeave={leaveOk} />
+                                    : <strong>{s.customer_name || "—"}</strong>}
+                                  {s.customer_phone && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>{s.customer_phone}</div>}
+                                </td>
                                 <td style={S.td}>{s.building_label || "—"}</td>
                                 <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700, whiteSpace: "nowrap" }}>
                                   {(s.width_ft && s.length_ft) ? `${Number(s.width_ft)}×${Number(s.length_ft)}` : "—"}
@@ -3274,7 +3381,12 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
                 return (
                   <tr key={s.id}>
                     <td style={{ ...S.td, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{s.serial ? "#" + s.serial : (s.repair_id ? "R" : "—")}</td>
-                    <td style={S.td}><strong>{s.customer_name || "—"}</strong>{s.building_label && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>{s.building_label}</div>}</td>
+                    <td style={S.td}>
+                      {stopCustomer(s)
+                        ? <SchedCustomerButton name={s.customer_name} code={s.customer_link.code} open={stopCustomer(s)} beforeLeave={leaveOk} />
+                        : <strong>{s.customer_name || "—"}</strong>}
+                      {s.building_label && <div style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>{s.building_label}</div>}
+                    </td>
                     <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700, whiteSpace: "nowrap" }}>{(s.width_ft && s.length_ft) ? `${Number(s.width_ft)}×${Number(s.length_ft)}` : "—"}{Number(s.width_ft) > 8.5 && <span style={{ ...schedChip("#FEF3C7", "#92400E"), marginLeft: 5 }}>W</span>}</td>
                     <td style={S.td}>{[s.dest_street, s.dest_city].filter(Boolean).join(", ") || "—"}</td>
                     <td style={S.td}>{terrName[s.territory_id] || "—"}</td>

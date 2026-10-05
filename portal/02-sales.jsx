@@ -1412,6 +1412,313 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
   );
 }
 
+// ─── Conversations (every customer's latest email, text or call) ───
+// Carolyn, 2026-08-21 @45:22: "I like the idea of a conversations tab ... So conversations would
+// be email, all of it. In the way that GoHighLevel has that, like I like that except I want that
+// bar at the top that shows that I can sort and see just that." And @42:45, comparing Pipedrive:
+// "I want a conversations tab, sure, but I want to be able to see my calls."
+//
+// ONE ROW PER CUSTOMER, from their newest message, newest first (portal-settings crm_inbox; the
+// rules are in supabase/functions/_shared/crmInbox.ts). The bar on top is All · Email · Texts ·
+// Calls, plus Everyone / Mine. A row opens the customer's record ON the matching History chip,
+// and the replying happens there, in the record's Email and SMS boxes: this page has no reply
+// box of its own (a GoHighLevel-style split pane was not built; say so when it ships).
+//
+// "Waiting on you" is derived, not stored: the customer spoke last (an email or a text from them,
+// or a call from them nobody picked up). Replying is what clears it, so there is no read/unread
+// state to keep.
+//
+// The filter lives in the URL (/portal/conversations/email|texts|calls), so the browser's Back
+// from a record lands on the same filter. Mine/Everyone is remembered for the tab's session.
+//
+// Texts and Calls are offered the way the record's History chips are (CRM_CHIPS `when`): Texts
+// once the account can text or has texts, Calls (for someone allowed to see calls) once calling
+// is offered or there are calls. A filter that can only ever be empty reads as broken.
+const SS_INBOX_FILTERS = [
+  { slug: null, channel: "all", label: "All" },
+  { slug: "email", channel: "email", label: "Email" },
+  { slug: "texts", channel: "sms", label: "Texts" },
+  { slug: "calls", channel: "calls", label: "Calls" },
+];
+// The History chip (CRM_CHIPS key) a row opens the record on, by the row's channel.
+const CRM_INBOX_CHIP = { email: "emails", sms: "messages", calls: "calls" };
+const SS_INBOX_CHANNEL = {
+  email: { label: "Email", bg: "#EFF6FF", fg: "#1D4ED8" },
+  sms: { label: "Text", bg: "#F0FDF4", fg: "#15803D" },
+  calls: { label: "Call", bg: "#F5F3FF", fg: ACCENT },
+};
+const SS_INBOX_DIRECTION = {
+  in: { email: "Received", sms: "Received", calls: "Incoming" },
+  out: { email: "Sent", sms: "Sent", calls: "Outgoing" },
+};
+// When, the way a message list says it: a time today, "Yesterday", a weekday this week, else the
+// date (with the year only when it isn't this year). The full date and time is on hover.
+function ssInboxWhen(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const now = new Date();
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((day(now) - day(d)) / 86400000);
+  if (days === 0) return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  if (days === 1) return "Yesterday";
+  if (days > 1 && days < 7) return d.toLocaleDateString("en-US", { weekday: "short" });
+  return d.toLocaleDateString("en-US", d.getFullYear() === now.getFullYear()
+    ? { month: "short", day: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+}
+// Pages joined by customer: the server never lists someone twice, and this makes sure of it.
+function ssInboxJoin(list, more) {
+  const seen = new Set(list.map((r) => r.contactId));
+  return list.concat((more || []).filter((r) => r && r.contactId && !seen.has(r.contactId) && seen.add(r.contactId)));
+}
+const SS_INBOX_MINE_KEY = "ss.inbox.mine";
+
+// `urlFilter` is the URL's sub segment; `onFilter(slug)` changes it. `onOpen(contactId, channel)`
+// opens the record. `phoneLevel` (the viewer's phone access) only keys the cache: what calls a
+// person may see changes with it, the same reason the cache keys on the contacts row scope.
+function ConversationsInbox({ clientId, viewing = false, phoneOffered = false, phoneLevel = null, urlFilter = null, onFilter = null, onOpen = null }) {
+  const filter = SS_INBOX_FILTERS.find((f) => f.slug === urlFilter) || SS_INBOX_FILTERS[0];
+  const channel = filter.channel;
+  const [mine, setMine] = useState(() => { try { return sessionStorage.getItem(SS_INBOX_MINE_KEY) === "1"; } catch (_e) { return false; } });
+  const [rows, setRows] = useState(null);       // null = loading
+  const [cursor, setCursor] = useState(null);   // where the next page starts; null = no more
+  const [meta, setMeta] = useState(null);       // which filters to offer (the first page says)
+  const [error, setError] = useState(null);
+  const [more, setMore] = useState(false);
+  // True while load() is reading: the rows on screen may be the cached copy it is replacing.
+  // Load more waits for it (review 2026-10-05): appended to the cached rows, its page either
+  // overwrote the fresh first page (a customer who just texted vanished) or was wiped by it.
+  const [refreshing, setRefreshing] = useState(false);
+  // Drops an answer that arrives after the filter moved on, like openDetails' actReqRef above.
+  const reqRef = useRef(0);
+  // NARROW (a phone, or a squeezed window): one column per row, the way a messages app lists them
+  // (the name, then the channel, then the words; the time on the right), instead of three
+  // columns where the words wrap one per line and the time is pushed off the side. Measured on
+  // the card itself, so the rail's width counts and no stylesheet is needed.
+  const cardRef = useRef(null);
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => {
+    const el = cardRef.current;
+    const measure = () => { const w = el ? el.getBoundingClientRect().width : window.innerWidth; setNarrow(w < 560); };
+    measure();
+    if (el && typeof ResizeObserver === "function") {
+      const ro = new ResizeObserver(measure);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+  // Cache-seeded like Contacts, so coming Back from a record paints at once and refreshes behind
+  // it (every portal-settings call carries ~2 s of fixed cost). Not in view-as, like Contacts.
+  const cacheAction = `crm_inbox|${channel}|${mine ? 1 : 0}|${phoneLevel || ""}`;
+
+  const fetchPage = async (cur) => {
+    const { data, error: err } = await sb.functions.invoke("portal-settings", {
+      body: { action: "crm_inbox", channel, mine, ...(cur ? { cursor: cur } : {}) },
+    });
+    if (err) return { error: await fnError(err) };
+    if (!data || data.error || !Array.isArray(data.threads)) return { error: (data && data.error) || "Couldn't load your conversations. Please try again." };
+    return { data };
+  };
+
+  const load = useCallback(async () => {
+    const req = ++reqRef.current;
+    setError(null);
+    setMore(false);
+    setRefreshing(true);
+    const hit = viewing ? null : ssCacheGet("portal-settings", cacheAction, clientId);
+    if (hit) { setRows(hit.threads); setCursor(hit.cursor); setMeta(hit.meta); }
+    else { setRows(null); setCursor(null); }
+    let list = [];
+    let cur = null;
+    let firstMeta = null;
+    try {
+      // A page can come back with nobody on it and more to read: Mine, or someone who sees only
+      // their own customers, can filter a whole page away. Read on a few pages before saying
+      // "nothing here", rather than showing an empty list with a Load more under it.
+      for (let i = 0; i < 5; i++) {
+        const out = await fetchPage(cur);
+        if (req !== reqRef.current) return;
+        if (out.error) {
+          setError(out.error);
+          // Keep what did arrive (Load more retries from where it stopped); with nothing, the
+          // cached rows, if any, stay on screen under the error.
+          if (list.length) { setRows(list); setCursor(cur); }
+          return;
+        }
+        const d = out.data;
+        if (i === 0) firstMeta = { smsReady: !!d.smsReady, hasTexts: !!d.hasTexts, hasCalls: !!d.hasCalls, seesCalls: !!d.seesCalls };
+        list = ssInboxJoin(list, d.threads);
+        cur = d.cursor || null;
+        if (list.length || !cur) break;
+      }
+      setRows(list); setCursor(cur); setMeta(firstMeta);
+      if (!viewing) ssCachePut("portal-settings", cacheAction, clientId, { threads: list, cursor: cur, meta: firstMeta });
+    } finally {
+      // A newer load owns the flag from here.
+      if (req === reqRef.current) setRefreshing(false);
+    }
+  }, [clientId, viewing, channel, mine, cacheAction]);
+  useEffect(() => { load(); }, [load]);
+
+  const loadMore = async () => {
+    if (!cursor || more || refreshing) return;
+    const req = reqRef.current;
+    setMore(true); setError(null);
+    let list = rows || [];
+    let cur = cursor;
+    try {
+      for (let i = 0; i < 5 && cur; i++) {
+        const out = await fetchPage(cur);
+        if (req !== reqRef.current) return;
+        if (out.error) { setError(out.error); break; }
+        const before = list.length;
+        list = ssInboxJoin(list, out.data.threads);
+        cur = out.data.cursor || null;
+        if (list.length > before) break;
+      }
+      if (req !== reqRef.current) return;
+      setRows(list); setCursor(cur);
+    } finally {
+      if (req === reqRef.current) setMore(false);
+    }
+  };
+
+  const setWhose = (v) => {
+    setMine(v);
+    try { sessionStorage.setItem(SS_INBOX_MINE_KEY, v ? "1" : "0"); } catch (_e) { /* storage blocked: it just won't be remembered */ }
+  };
+
+  const offered = SS_INBOX_FILTERS.filter((f) =>
+    f.channel === channel || f.channel === "all" || f.channel === "email"
+    || (f.channel === "sms" && !!(meta && (meta.smsReady || meta.hasTexts)))
+    || (f.channel === "calls" && !!(meta && meta.seesCalls && (phoneOffered || meta.hasCalls))));
+  const open = (r) => { if (onOpen) onOpen(r.contactId, r.channel); };
+  const pill = (on) => ({
+    display: "inline-flex", alignItems: "center", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700,
+    padding: "5px 12px", borderRadius: 999, border: on ? "1px solid " + ACCENT : "1px solid #E2E8F0",
+    background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#475569",
+  });
+  // Empty WITH more to read is not "nothing yet": load() gave up reading ahead (Mine, or someone
+  // who sees only their own customers, can filter page after page away), and the button under
+  // this reads further back. Mine's sentence names no "team": for someone who sees only their own
+  // customers, Everyone adds the ones nobody is assigned to, not their colleagues' (review 2026-10-05).
+  const emptyText = cursor
+    ? "Nothing in the most recent conversations. Use Look further back to see older ones."
+    : mine
+    ? "Nothing here for you yet. Switch to Everyone to see every conversation you have access to."
+    : channel === "email" ? "No email conversations yet."
+    : channel === "sms" ? "No text conversations yet."
+    : channel === "calls" ? "No calls with customers yet."
+    : "No conversations yet. Emails, texts and calls with your customers show up here as they happen.";
+
+  return (
+    <div ref={cardRef} style={S.card} data-ss-inbox="" data-ss-inbox-narrow={narrow ? "1" : "0"}>
+      <CardHead
+        title="Conversations"
+        count={rows ? `${rows.length}${cursor ? "+" : ""}` : null}
+        desc="Click a conversation to open the customer's record and reply from there."
+        right={<button type="button" onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>}
+      />
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <div role="group" aria-label="Show" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {offered.map((f) => (
+            <button key={f.channel} type="button" aria-pressed={f.channel === channel} data-ss-inbox-filter={f.channel}
+              onClick={() => { if (f.channel !== channel && onFilter) onFilter(f.slug); }} style={pill(f.channel === channel)}>
+              {f.label}
+            </button>
+          ))}
+        </div>
+        <div role="group" aria-label="Whose conversations" style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button type="button" aria-pressed={!mine} data-ss-inbox-mine="0" onClick={() => { if (mine) setWhose(false); }} style={pill(!mine)}>Everyone</button>
+          <button type="button" aria-pressed={mine} data-ss-inbox-mine="1" onClick={() => { if (!mine) setWhose(true); }} style={pill(mine)}
+            title="Your customers, customers nobody is assigned to, and anyone you've written to or talked with">Mine</button>
+        </div>
+      </div>
+      {error && <div style={S.err}>{error}</div>}
+      {rows === null && !error && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>{(narrow ? ["Customer", "When"] : ["Customer", "Latest", "When"]).map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+            <tbody>{narrow ? <SkelRows cols={2} rows={6} widths={["80%", "60%"]} /> : <SkelRows cols={3} rows={6} widths={["55%", "80%", "50%"]} />}</tbody>
+          </table>
+        </div>
+      )}
+      {rows && rows.length === 0 && !error && (
+        <p style={{ fontSize: 13, color: "#64748B", padding: 12, margin: 0 }} data-ss-inbox-empty="">{emptyText}</p>
+      )}
+      {rows && rows.length > 0 && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <th style={S.th}>Customer</th>
+              {!narrow && <th style={S.th}>Latest</th>}
+              <th style={{ ...S.th, textAlign: "right" }}>When</th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r) => {
+                const ch = SS_INBOX_CHANNEL[r.channel] || SS_INBOX_CHANNEL.email;
+                const dir = (SS_INBOX_DIRECTION[r.direction] || SS_INBOX_DIRECTION.in)[r.channel] || "";
+                // A real link, like the nav: right-click or middle-click opens the record in a new
+                // tab. A left click stays on the page (ssNavClick) and opens it on the History chip
+                // for this channel.
+                const who = (
+                  <a href={ssPagePath("contacts", "c-" + r.contactId)}
+                    onClick={(e) => { e.stopPropagation(); ssNavClick(() => open(r))(e); }}
+                    style={{ color: ACCENT, fontWeight: 800, textDecoration: "none", overflowWrap: "anywhere" }}>
+                    {r.name || "Unnamed contact"}
+                  </a>
+                );
+                const waiting = r.awaitingReply ? (
+                  <span data-ss-inbox-waiting="" style={{ background: "#FEF3C7", color: "#92400E", borderRadius: 999, padding: "2px 9px", fontSize: 11.5, fontWeight: 800, whiteSpace: "nowrap" }}>Waiting on you</span>
+                ) : null;
+                const latest = (
+                  <>
+                    <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 3 }}>
+                      <span style={{ background: ch.bg, color: ch.fg, borderRadius: 6, padding: "1px 8px", fontSize: 11.5, fontWeight: 800 }}>{ch.label}</span>
+                      <span style={{ fontSize: 11.5, color: "#64748B", fontWeight: 700 }}>{dir}</span>
+                      {narrow && waiting}
+                    </div>
+                    <div style={{ color: "#334155", overflowWrap: "anywhere" }}>{r.preview}</div>
+                  </>
+                );
+                return (
+                  <tr key={r.contactId} data-ss-inbox-row={r.contactId} data-ss-inbox-channel={r.channel}
+                    onClick={() => open(r)} style={{ cursor: "pointer" }}>
+                    {narrow ? (
+                      <td style={S.td}>
+                        <div style={{ marginBottom: 4 }}>{who}</div>
+                        {latest}
+                      </td>
+                    ) : (
+                      <>
+                        <td style={{ ...S.td, width: "32%" }}>
+                          {who}
+                          {waiting && <div style={{ marginTop: 5 }}>{waiting}</div>}
+                        </td>
+                        <td style={S.td}>{latest}</td>
+                      </>
+                    )}
+                    <td style={{ ...S.td, whiteSpace: "nowrap", textAlign: "right", color: "#64748B", width: 1 }} title={fmtWhen(r.at)}>{ssInboxWhen(r.at)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {rows && cursor && (
+        <div style={{ textAlign: "center", marginTop: 12 }}>
+          <button type="button" onClick={loadMore} disabled={more || refreshing} data-ss-inbox-more=""
+            style={{ ...S.btn("#FFF", ACCENT), border: "1px solid #E2E8F0", padding: "8px 16px", cursor: more || refreshing ? "default" : "pointer" }}>
+            {more || refreshing ? "Loading…" : rows.length ? "Load more" : "Look further back"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
 // THE MERGED CRM RECORD PAGE — Contacts + Designs, one shell, two contexts.
@@ -1471,23 +1778,31 @@ function crmSsQuoteDesign(c) {
   return d && d.ss_quote_number && !d.ghl_estimate_number ? d : null;
 }
 
+// `kinds` is which record a card can EVER appear on, and it is what Settings → My Profile lists
+// when someone puts the cards in their own order. `when` is whether it shows on THIS record. The
+// two have to agree (a card whose `when` can pass on a contact must list "contact"), and
+// crmCardOrder_test holds them to it: a card missing from `kinds` still renders, but it can't be
+// moved, so it would sit at the bottom of everyone's arranged column with no way up.
 const CRM_SECTIONS = [
-  { key: "summary", title: "Summary", when: () => true },
-  { key: "details", title: "Details", when: () => true },
+  { key: "summary", title: "Summary", kinds: ["contact", "design"], when: () => true },
+  { key: "details", title: "Details", kinds: ["contact", "design"], when: () => true },
   // ── THE RECIPROCAL EMBED. This pair IS Carolyn's "here is the contact, and the deal is
   // all on the side here ... it's in one place." A Person shows its Deals; a Deal shows
   // its Person. Same shell, mirrored.
-  { key: "deals", title: "Deals", when: (c) => c.kind === "contact" },
+  { key: "deals", title: "Deals", kinds: ["contact"], when: (c) => c.kind === "contact" },
   // ORDERS. Carolyn, 2026-08-26 33:20: "when you're in contacts, in a contact, I feel like
   // you should see the deal. You should see the orders." Deals were already here; orders
   // are what say whether any of them turned into a sale. Contact-side only — a design's
   // order is the same one row and would just repeat the stage bar above it.
-  { key: "orders", title: "Orders", when: (c) => c.kind === "contact" },
-  { key: "person", title: "Person", when: (c) => c.kind === "design" },
+  { key: "orders", title: "Orders", kinds: ["contact"], when: (c) => c.kind === "contact" },
+  { key: "person", title: "Person", kinds: ["design"], when: (c) => c.kind === "design" },
   // SALES TAX (Avalara stage, 2026-09-17). The deal on screen — the record itself, or the one
   // picked on a contact — and only a StructureStudio-issued quote: a CRM-mode tenant's CRM
   // figures tax on its own estimate, so there is nothing here for them to see or change.
-  { key: "tax", title: "Sales tax", when: (c) => !!crmSsQuoteDesign(c) },
+  // `note` is the line My Profile shows under it, so nobody arranging their cards wonders why
+  // this one is missing from most records.
+  { key: "tax", title: "Sales tax", kinds: ["contact", "design"], when: (c) => !!crmSsQuoteDesign(c),
+    note: "Shows for a deal with a StructureStudio quote" },
   // BUILD, DELIVERY, REPAIRS. Carolyn, 2026-08-28 @37:48: "whether you're in a contact or
   // whether you're in a deal, it doesn't matter, you want to be able to see the contact
   // details, the deals, the orders, the build schedule, the delivery schedule ... Repairs
@@ -1496,11 +1811,51 @@ const CRM_SECTIONS = [
   // "If there's nothing, like, because they haven't placed an order, the card just is going
   // to be blank. It'll say build schedule. And it just is nothing." -- so an empty card
   // RENDERS EMPTY rather than disappearing. A card that vanishes reads as "not built".
-  { key: "build", title: "Build schedule", when: () => true },
-  { key: "delivery", title: "Delivery schedule", when: () => true },
-  { key: "repairs", title: "Repairs", when: () => true },
-  { key: "overview", title: "Overview", when: () => true },
+  { key: "build", title: "Build schedule", kinds: ["contact", "design"], when: () => true },
+  { key: "delivery", title: "Delivery schedule", kinds: ["contact", "design"], when: () => true },
+  { key: "repairs", title: "Repairs", kinds: ["contact", "design"], when: () => true },
+  { key: "overview", title: "Overview", kinds: ["contact", "design"], when: () => true },
 ];
+
+// ── EACH PERSON'S CARD ORDER ──────────────────────────────────────────────────────────────
+// Carolyn, 2026-08-28 @39:00: "they can put their cards in the order that they want them, and
+// they can have a different order under a contact, and a different order under a deal." Stored
+// per person in client_users.prefs.cardOrder ({ contact: [...keys], design: [...keys] }, migration
+// 165) and arranged in Settings → My Profile; nothing on the server reads it.
+//
+// The saved list is a WISH, not a schema. It can name a card this build doesn't have (save_prefs
+// keeps unknown keys on purpose, so a newer tab's layout survives a save from an older one) or
+// leave out one added since it was saved. So: the saved keys that are showing, in saved order,
+// then everything else that is showing in registry order. A new card turns up at the bottom of an
+// arranged column rather than vanishing, and an empty or missing list is the registry order.
+function crmOrderSections(visible, saved) {
+  if (!Array.isArray(saved) || !saved.length) return visible;
+  const out = [];
+  for (const k of saved) {
+    const s = visible.find((v) => v.key === k);
+    if (s && out.indexOf(s) === -1) out.push(s);
+  }
+  for (const s of visible) if (out.indexOf(s) === -1) out.push(s);
+  return out;
+}
+
+// The list to SAVE once someone has arranged the cards this build knows (`known`, the full key
+// list for one kind). A key the saved list holds and this build doesn't know keeps its slot, and
+// the known keys fill the other slots in their new order, so an older tab can't quietly drop a
+// newer card's place. Known keys that weren't saved before go on the end.
+function crmMergeCardOrder(saved, known) {
+  const queue = known.slice();
+  const seen = [];
+  const out = [];
+  for (const k of (Array.isArray(saved) ? saved : [])) {
+    if (typeof k !== "string" || seen.indexOf(k) !== -1) continue;
+    seen.push(k);
+    // Each distinct known key in `saved` takes one slot, and there are never more of them than
+    // `known` holds, so the queue can't run dry here.
+    out.push(known.indexOf(k) === -1 ? k : queue.shift());
+  }
+  return out.concat(queue);
+}
 
 // The ACTION BAR — "up at the top here is things you can do. So this bar is basically
 // actions that you can take." Disabled tabs render GREYED WITH A TOOLTIP, never hidden: a
@@ -2761,7 +3116,14 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // Quick sends (the signed-in person's saved messages, the list My Synergy Phone keeps) beside
   // the Email and SMS boxes. Off in view-as: the list would be the OPERATOR's own, and the server
   // refuses it there too.
-  quickSendsOn = false }) {
+  quickSendsOn = false,
+  // The signed-in person's card order (My Profile), { contact: [...], design: [...] } or null.
+  // Null in view-as, where prefs aren't read, so the operator sees the default order.
+  cardOrder = null,
+  // The History chip to open on (a CRM_CHIPS key), when the reader came from a Conversations row:
+  // an email opens on Emails, a text on Messages, a call on Calls. Read once, as initial state
+  // (the shell remounts the record per route). A chip this record doesn't show falls back to All.
+  initialChip = null }) {
   // THE SUBSCRIPTION IS AN EDIT GATE, NOT A TAB GATE, and it has to be applied here rather
   // than tab by tab. Every WRITE this page makes is a `crm_*` action — crm_save_note,
   // crm_save_activity, crm_complete_activity, crm_send_email, crm_send_sms, crm_save_contact,
@@ -2783,7 +3145,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [tab, setTab] = useState("note");
-  const [chip, setChip] = useState("all");
+  const [chip, setChip] = useState(initialChip || "all");
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [mail, setMail] = useState({ subject: "", body: "" });
@@ -3862,8 +4224,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
 
       <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div style={{ flex: "1 1 260px", minWidth: 240, maxWidth: 360 }}>
-          {CRM_SECTIONS.filter((s) => s.when(ctx)).map((s) => (
-            <div key={s.key} style={{ ...S.card, marginBottom: 10 }}>
+          {/* In the reader's own order (My Profile). CrmRecordSkeleton doesn't follow it: its
+              blocks are untitled placeholders, so there is nothing there to arrange. */}
+          {crmOrderSections(CRM_SECTIONS.filter((s) => s.when(ctx)), cardOrder && cardOrder[kind]).map((s) => (
+            <div key={s.key} data-ss-crm-section={s.key} style={{ ...S.card, marginBottom: 10 }}>
               <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 7 }}>{s.title}</div>
               {renderSection(s.key)}
             </div>
@@ -4289,9 +4653,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               {chips.map((c) => {
                 const n = c.types ? (data.feed || []).filter((e) => c.types.indexOf(e.type) !== -1).length : (data.feed || []).length;
                 return (
-                  <button key={c.key} onClick={() => setChip(c.key)}
+                  /* Lit from `active`, the chip the list is really filtered by: a chip asked for
+                     that this record doesn't show (initialChip "messages" where texting is off)
+                     filters by All, and All is what has to look selected. */
+                  <button key={c.key} onClick={() => setChip(c.key)} aria-pressed={active.key === c.key} data-ss-crm-chip={c.key}
                     style={{
-                      background: chip === c.key ? ACCENT : "#F1F5F9", color: chip === c.key ? "#FFF" : "#475569",
+                      background: active.key === c.key ? ACCENT : "#F1F5F9", color: active.key === c.key ? "#FFF" : "#475569",
                       border: "none", borderRadius: 999, padding: "3px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer",
                     }}>{c.label} ({n})</button>
                 );
