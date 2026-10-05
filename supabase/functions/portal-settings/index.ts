@@ -182,6 +182,11 @@ import {
   TRUST_OPERATOR_SENTENCE, trustOperatorAllowed, type TrustRow,
 } from "./phoneTrust.ts";
 import { isInternalTenant } from "../_shared/internalTenant.ts";
+// CSM Synergy's own GoHighLevel contacts into its CRM (migration 282): the GoHighLevel read and the
+// walk. This function is the module's only importer.
+import {
+  importDeadlines, importSummary, parseImportRequest, runGhlContactImport, type ImportRow, type ImportStop, type PageCounts,
+} from "../_shared/ghlContactImport.ts";
 import { isQboLineKind } from "../_shared/qboLineKinds.ts";
 import { companyTagOf, mapRowsForRealm, pushedToOtherCompany } from "../_shared/qboRealm.ts";
 // Quick sends in the CRM composer: My Synergy Phone's list (migration 258), read and counted here.
@@ -429,6 +434,12 @@ const GATES: GateTable = {
   // is the same altitude as editing one; CONTACT_ROW_SCOPE marks it `creates`, and the branch
   // makes a caller limited to their own customers the new contact's owner.
   crm_create_contact:    { area: "contacts", level: "edit" },
+  // CSM Synergy's own GoHighLevel contacts into its CRM (migration 282). ⚠️ THIS LINE IS THE FLOOR
+  // ONLY: the branch is OPERATOR-ONLY (trustOperatorAllowed: an operator who can write, never
+  // support-only) and runs on our own account alone (internal_account), before GoHighLevel is
+  // called. CONTACT_ROW_SCOPE marks it tenantWide, so a caller limited to their own customers is
+  // refused; the crm_ prefix brings the CRM subscription check. A dry run unless dryRun: false.
+  crm_import_ghl_contacts: { area: "contacts", level: "edit" },
   crm_send_sms:          { area: "contacts", level: "edit" },
   // Recording that a customer gave permission is a claim about them, so it sits at the
   // same level as texting them — the people who talk to customers, not everyone.
@@ -1377,6 +1388,8 @@ Deno.serve(withErrorLog("portal-settings", withServerTiming(async (req: Request,
   }> = {
     crm_save_contact:      { contactKeys: ["id"] },
     crm_create_contact:    { creates: true },
+    // Reads a whole GoHighLevel location and writes the whole tenant's customer list.
+    crm_import_ghl_contacts: { tenantWide: true },
     crm_save_note:         { rowTable: "crm_notes",      contactKeys: ["contactId"], codeKeys: ["shortCode"] },
     crm_delete_note:       { rowTable: "crm_notes" },
     crm_save_activity:     { rowTable: "crm_activities", contactKeys: ["contactId"], codeKeys: ["shortCode"] },
@@ -9909,6 +9922,141 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!out.id) return dbFail(req, clientId, "save that contact", { message: "crm_create_contact returned no id" });
     audit("crm_create_contact", 1, `contact=${out.id} calls=${out.relinked?.calls ?? 0} sms=${out.relinked?.sms ?? 0} owner=${ownContacts ? "caller" : "none"}`).catch(() => {});
     return json({ ok: true, id: out.id, contactId: out.id, relinked: { calls: out.relinked?.calls ?? 0, sms: out.relinked?.sms ?? 0 } });
+  }
+
+  // ── GoHighLevel contacts into the CRM (migration 282) ───────────────────────────────────
+  // Carolyn, 2026-09-28: "continue building out the CRM part of it as well, because I also want to
+  // use it for all of our leads in here." CSM Synergy's own GoHighLevel location's contacts come into
+  // its own CRM through public.crm_import_ghl_contacts, one page of 100 per call, every contact
+  // through crm_ensure_contact (the dedupe every design and lead already goes through). Contacts
+  // only: no texts, emails, calls or pipeline stages until Carolyn says which of those move.
+  // _shared/ghlContactImport.ts reads GoHighLevel (POST /contacts/search, nothing else) and decides
+  // when to stop; this branch is the gate, the key and the database.
+  //
+  // ⚠️ THREE GATES, ALL BEFORE GOHIGHLEVEL IS CALLED.
+  //   1. contacts:'edit' and the CRM subscription (GATES, the crm_ prefix) are the floor, and
+  //      CONTACT_ROW_SCOPE marks it tenantWide: a caller limited to their own customers is refused.
+  //   2. OPERATOR-ONLY, the caller-ID setup's rule (trustOperatorAllowed): an operator in view-as
+  //      with can_write, or an app_operators member with can_write on their own tenant; never a
+  //      support-only one. It reads a whole CRM location and writes hundreds of customer rows, and no
+  //      screen calls it.
+  //   3. OUR OWN ACCOUNT ONLY (client_settings.internal_account, _shared/internalTenant.ts; today
+  //      that is structure-studio alone). A builder's GoHighLevel contacts are theirs to move, and
+  //      nobody has asked to move them.
+  //
+  // A DRY RUN unless the body says `dryRun: false` (parseImportRequest): the database runs each page
+  // and rolls it back, and the answer is what the real run would do. A real run is audited BEFORE
+  // its first write (auditStrict: no record of who started it, no import). Either way it answers
+  // `cursor` when it stops early (time, GoHighLevel slowing us down); the next call sends it back
+  // and carries on from there, in the same mode: a real run refuses a dry run's cursor (400), or
+  // it would skip every page before it. Re-running is safe: every contact it brought in now matches.
+  //
+  // ⛔ THE REAL RUN WAITS on Carolyn saying which leads move AND on the portal's Contacts list
+  // showing contacts with no design or captured lead (LeadsTable in 02-sales.jsx reads only
+  // designs and captured_leads today). Before that ships, it runs only once Carolyn has been told
+  // plainly that imported leads are found through My Synergy Phone's search and caller ID, not the
+  // Contacts list; that they come in unassigned, so someone limited to their own customers sees
+  // none of them until they are assigned; and that GoHighLevel's tags are kept but not shown yet,
+  // and she still says go ahead.
+  //
+  // COUNTS ONLY. Nothing answered or logged carries a contact. GoHighLevel's error bodies are thrown
+  // away unread, and a database failure is logged by its code, never its message or detail (a
+  // Postgres detail can quote the row it refused).
+  if (action === "crm_import_ghl_contacts") {
+    if (!(await trustOperatorAllowed({ operator: operator ?? null, ownOperatorRow }))) {
+      return json({ error: "Importing contacts from GoHighLevel is done by Structure Studio staff." }, 403);
+    }
+    let internal: boolean;
+    try { internal = await isInternalTenant(admin, clientId); }
+    catch (e) { return dbFail(req, clientId, "check whose account this is", e); }
+    if (!internal) return json({ error: "The GoHighLevel contact import is only for Structure Studio's own account." }, 403);
+
+    const parsed = parseImportRequest((payload ?? {}) as Record<string, unknown>);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+
+    const { data: creds, error: credErr } = await admin.from("client_settings")
+      .select("ghl_location_id, ghl_api_key").eq("client_id", clientId).maybeSingle();
+    if (credErr) return dbFail(req, clientId, "read the GoHighLevel connection", credErr);
+    if (!creds?.ghl_location_id || !creds?.ghl_api_key) {
+      return json({ error: "This account isn't connected to GoHighLevel, so there are no contacts to import. Connect it under Settings → CRM Connection first." }, 409);
+    }
+    if (!parsed.dryRun) {
+      try { await auditStrict("crm_import_ghl_contacts_start", null, `dry_run=false resume=${parsed.cursor ? "yes" : "no"}`); }
+      catch (e) { return dbFail(req, clientId, "record who started the import", e); }
+    }
+
+    // 282 not applied yet: PostgREST's "no such function" (or Postgres's own). The first page stops
+    // the walk, nothing was written, and the answer says so rather than reporting a fault.
+    let notInstalled = false;
+    const { softMs, hardMs } = importDeadlines({ requestStartMs, workerBornMs: WORKER_BORN_MS });
+    const result = await runGhlContactImport({
+      locationId: String(creds.ghl_location_id),
+      apiKey: String(creds.ghl_api_key),
+      dryRun: parsed.dryRun,
+      cursor: parsed.cursor,
+      softMs,
+      hardMs,
+      importPage: async (rows: ImportRow[], dryRun: boolean): Promise<PageCounts> => {
+        const { data, error } = await admin.rpc("crm_import_ghl_contacts", { p_client_id: clientId, p_rows: rows, p_dry_run: dryRun });
+        if (error) {
+          const code = String((error as { code?: string }).code ?? "");
+          if (code === "PGRST202" || code === "42883") notInstalled = true;
+          throw error;
+        }
+        const d = (data ?? {}) as Record<string, unknown>;
+        const n = (k: string) => Number.isFinite(Number(d[k])) ? Number(d[k]) : 0;
+        return {
+          created: n("created"), matched: n("matched"), noIdentity: n("no_identity"), conflicts: n("conflicts"), labelled: n("labelled"),
+          optedOut: n("opted_out"), split: n("split"),
+        };
+      },
+    });
+
+    if (notInstalled) {
+      const r = json({ error: "The contact import isn't installed on this server yet." }, 503);
+      r.headers.set(SS_REFUSAL_HEADER, "1");
+      r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
+      return r;
+    }
+
+    const c = result.counts;
+    audit("crm_import_ghl_contacts", c.created,
+      `dry_run=${parsed.dryRun} stopped=${result.stopped} pages=${result.pages} fetched=${c.fetched} created=${c.created} `
+      + `matched=${c.matched} no_identity=${c.noIdentity} conflicts=${c.conflicts} labelled=${c.labelled} opted_out=${c.optedOut} `
+      + `split=${c.split} repeats=${c.repeats} sms_dnd=${c.smsDnd}`,
+    ).catch(() => {});
+
+    // A stop that is not "the end" or "out of time for this call" is GoHighLevel refusing or the
+    // database failing: one row here, by code and counts, and the wrapper does not file a second.
+    const STATUS: Record<ImportStop, number> = {
+      end: 200, time: 200, page_ceiling: 200, ghl_busy: 503, ghl_auth: 502, ghl_refused: 502, paging_stuck: 502, database: 500,
+    };
+    const status = STATUS[result.stopped];
+    const answer = json({
+      ok: status === 200,
+      dryRun: parsed.dryRun,
+      done: result.done,
+      stopped: result.stopped,
+      ghlStatus: result.ghlStatus,
+      cursor: result.cursor,
+      pages: result.pages,
+      total: result.total,
+      paging: result.paging,
+      counts: c,
+      message: importSummary(result, parsed.dryRun),
+      ...(status === 200 ? {} : { error: importSummary(result, parsed.dryRun) }),
+    }, status);
+    if (status === 200) return answer;
+    logEdgeError({
+      fn: "portal-settings", req, clientId, code: `ghl_import_${result.stopped}`,
+      severity: result.stopped === "database" ? "error" : "warn",
+      message: `The GoHighLevel contact import stopped early (${result.stopped}).`,
+      context: {
+        dryRun: parsed.dryRun, ghlStatus: result.ghlStatus, pages: result.pages, counts: c,
+        pgCode: (result.dbError as { code?: string } | undefined)?.code ?? null,
+      },
+    }).catch(() => {});
+    return filedHere(answer);
   }
 
   // ── Plan phase 6: a number for calls, self-serve ────────────────────────────────────────
