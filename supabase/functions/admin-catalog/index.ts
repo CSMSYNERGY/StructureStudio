@@ -8,6 +8,9 @@ import { paidThroughOf } from "../_shared/billingPeriods.ts";
 import { pingAvalara } from "../_shared/salesTax.ts";
 import { finishLookup, insertLookup, PING_CLIENT_ID, pingResponse } from "../_shared/taxLookups.ts";
 import { syncTaxCodes } from "../_shared/taxCodeSync.ts";
+// "Offered on" (272): a template's per-style fixture lists, carried into a clone. portal-settings
+// imports the same module, so a change to it deploys both functions.
+import { cloneStyleIds } from "../_shared/fixtureStyleIds.ts";
 import {
   chargingMode, describeSettingsChange, monthRange, normalizePilotIds, normalizeSettings,
   parseSettingsPatch, PHONE_METER_LABELS, PHONE_METERS, PHONE_SETTINGS_COLUMNS, phoneBillingDbError,
@@ -803,17 +806,29 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           const fxSrc = await sb.from("fixture_items").select("*").eq("client_id", T).eq("archived", false);
           if (fxSrc.error) throw new Error(`clone fixtures read: ${fxSrc.error.message}`);
           const fixtureIdMap = new Map<string, string>();  // old fixture id → new fixture id
+          let fxStylesDropped = 0;
           if ((fxSrc.data ?? []).length) {
             const fxRows = (fxSrc.data ?? []).map((f0: any) => {
               const { id, client_id, created_at, updated_at, ...rest } = f0;
               const newId = crypto.randomUUID();
               fixtureIdMap.set(String(id), newId);
+              // "Offered on" (272): style_ids names the TEMPLATE's styles, so it is remapped through
+              // styleIdMap like the sizes (cloneStyleIds says why). Only a list is touched: NULL
+              // (every style) stays NULL, and a read from before 272 has no such key, so nothing is
+              // sent for a column that is not there yet.
+              if (Array.isArray(rest.style_ids)) {
+                const s = cloneStyleIds(rest.style_ids, styleIdMap);
+                rest.style_ids = s.value;
+                if (s.dropped) fxStylesDropped++;
+              }
               return { id: newId, client_id: Cc, ...rest };
             });
             const r = await sb.from("fixture_items").insert(fxRows);
             if (r.error) throw new Error(`clone fixtures: ${r.error.message}`);
           }
           counts.fixture_items = fixtureIdMap.size;
+          // Lists none of whose styles came across, sent as every style instead (cloneStyleIds).
+          if (fxStylesDropped) counts.fixture_style_ids_dropped = fxStylesDropped;
 
           // 4. building_size_inclusions → remap size_id (qty travels with the row —
           // previously dropped here, resetting every clone's quantities to the default 1)
