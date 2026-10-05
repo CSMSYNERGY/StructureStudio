@@ -261,6 +261,12 @@ async function withCallRow(admin: Admin, id: string, tries = 4): Promise<CallRow
 
 // ── /voice/outbound ──────────────────────────────────────────────────────────────────
 
+/**
+ * The most a call can still be going for: Twilio's default <Dial> timeLimit (4 hours), the same
+ * bound phone_route_for_number puts on 'busy' (migration 254 DEVIATION 2) for the same reason.
+ */
+const MAX_LIVE_CALL_MINUTES = 240;
+
 /** Outbound minutes today (UTC), rounded up per call the way Twilio bills. */
 async function minutesUsedToday(admin: Admin, clientId: string, now = new Date()): Promise<number> {
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
@@ -273,9 +279,11 @@ async function minutesUsedToday(admin: Admin, clientId: string, now = new Date()
   for (const r of rows ?? []) {
     if (typeof r.duration_s === "number" && r.duration_s > 0) minutes += Math.ceil(r.duration_s / 60);
     else if (r.answered_at && !r.ended_at) {
-      // A call still going counts for what it has used so far.
+      // A call still going counts for what it has used so far. A row whose final status
+      // callback was lost never gets ended_at; uncapped, it would keep "using" a minute a minute
+      // until midnight UTC and lock the builder out of calling (600 minutes is 10 hours).
       const ms = now.getTime() - Date.parse(r.answered_at);
-      if (Number.isFinite(ms) && ms > 0) minutes += Math.ceil(ms / 60_000);
+      if (Number.isFinite(ms) && ms > 0) minutes += Math.min(MAX_LIVE_CALL_MINUTES, Math.ceil(ms / 60_000));
     }
   }
   return minutes;
@@ -820,9 +828,17 @@ export async function applyStatus(env: Env, p: TwilioParams, url: URL, signed = 
     row = await withCallRow(admin, callId);
   } else if (sid) {
     const col = leg === "client" ? "client_call_sid" : "twilio_call_sid";
-    const { data } = await admin.from("phone_calls").select("id").eq(col, sid).maybeSingle();
-    const id = (data as { id?: string } | null)?.id;
-    row = id ? await callById(admin, id) : null;
+    // The row is inserted in waitUntil after the TwiML, so a leg's FINAL callback can beat it:
+    // an inbound caller who hangs up at once, or while a cold isolate is still answering.
+    // Dropped, that call would stay 'ringing' for good. Ending is the one event worth the
+    // short wait withCallRow gives callbacks that carry a call id; the others are not.
+    const tries = TERMINAL.has(status) ? 4 : 1;
+    for (let i = 0; i < tries && !row; i++) {
+      if (i) await new Promise((r) => setTimeout(r, 150 * 2 ** (i - 1)));
+      const { data } = await admin.from("phone_calls").select("id").eq(col, sid).maybeSingle();
+      const id = (data as { id?: string } | null)?.id;
+      row = id ? await callById(admin, id) : null;
+    }
   }
   if (!row) return; // a leg we never recorded (a refused call, or another product's call)
   const id = row.id;
@@ -853,10 +869,18 @@ export async function applyStatus(env: Env, p: TwilioParams, url: URL, signed = 
     // Outbound customer leg.
     if (!row.twilio_call_sid && sid) await patchCall(admin, id, { twilio_call_sid: sid }, (q) => q.is("twilio_call_sid", null));
     if (status === "in-progress" || status === "answered") {
-      await patchCall(admin, id, { status: "in_progress", answered_at: at }, (q) => q.is("answered_at", null));
+      // The callbacks are separate requests handled in separate background tasks, so on a
+      // short call 'completed' can be written first (its filter takes a 'ringing' row). A late
+      // answer must not reopen an ended call: that left it 'in_progress' for good, never queued
+      // for billing, shown as live, and its placer busy to inbound calls for four hours.
+      const opened = await patchCall(admin, id, { status: "in_progress", answered_at: at }, (q) => q.is("answered_at", null).is("ended_at", null));
+      if (!opened) await patchCall(admin, id, { answered_at: at }, (q) => q.is("answered_at", null));
       // The customer picked up: an armed call starts recording on their leg now, as its
-      // whisper (/voice/notice) plays them the announcement (../recording.ts).
-      await startCallRecording(env, admin, { ...row, twilio_call_sid: row.twilio_call_sid ?? (sid || null) });
+      // whisper (/voice/notice) plays them the announcement (../recording.ts). Not on a call
+      // already known to have ended (a late answer): there is nothing left to record.
+      if (opened || !row.ended_at) {
+        await startCallRecording(env, admin, { ...row, twilio_call_sid: row.twilio_call_sid ?? (sid || null) });
+      }
     } else if (status === "completed") {
       await patchCall(admin, id, { status: "completed", ended_at: at, duration_s: finalDuration() }, (q) => q.in("status", ["ringing", "in_progress", "no_answer"]));
     } else if (TERMINAL.has(status)) {

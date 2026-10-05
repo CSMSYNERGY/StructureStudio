@@ -1176,7 +1176,14 @@ function xlsxCellText(v) {
   if (v == null) return "";
   if (typeof v === "object") {
     if (v.text != null) return String(v.text);
-    if (v.result != null) return String(v.result);
+    // An Excel ERROR (#REF!, #N/A, #DIV/0!) — ExcelJS gives { error } for the value itself and
+    // { formula, result: { error } } for a formula that failed. It must come through as its code,
+    // never as "": every importer reads a blank as meaningful — the pricing sheet as "not priced"
+    // (the NULL-base-price contract hides the size from the designer), a fixture's price the same
+    // way, a Real-Time Pricing cost as $0 — while "#REF!" is refused by name and the row is left
+    // as it was. ("[object Object]" from the old String(result) was refused too, but unreadably.)
+    if (v.error != null) return String(v.error);
+    if (v.result != null) return (typeof v.result === "object" && !(v.result instanceof Date)) ? xlsxCellText(v.result) : String(v.result);
     if (Array.isArray(v.richText)) return v.richText.map((t) => t.text).join("");
     if (v.hyperlink != null) return String(v.hyperlink);
     return "";
@@ -1593,6 +1600,8 @@ function BillingView({ viewingLabel = null, section = "all", paywall = false }) 
   const [autoThreshold, setAutoThreshold] = useState("");
   const [autoAmount, setAutoAmount] = useState("");
 
+  // The shell's own entitlement is refreshed through ssEntitlementChanged (subscribe and cancel
+  // below), which respects the paywall's hold; this only re-reads what this view shows.
   const load = useCallback(async () => {
     setError(null);
     const { data: d, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "status" } });
@@ -2241,7 +2250,10 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       {data && liveSubs.length > 0 && (() => {
         const moSum = liveSubs.filter((s) => (planById[s.plan_id] || {}).billing_interval !== "annual").reduce((a, s) => a + (s.price_cents || 0), 0);
         const yrSum = liveSubs.filter((s) => (planById[s.plan_id] || {}).billing_interval === "annual").reduce((a, s) => a + (s.price_cents || 0), 0);
-        const nextRenew = liveSubs.map((s) => s.current_period_end).filter(Boolean).sort()[0] || null;
+        // paid_through (portal-billing, rolled forward past each renewal) before the stored
+        // current_period_end, which stays on the FIRST renewal date for good; the fallback is
+        // only for an older portal-billing that does not send it.
+        const nextRenew = liveSubs.map((s) => s.paid_through || s.current_period_end).filter(Boolean).sort()[0] || null;
         const headStatus = liveSubs.some((s) => s.status === "past_due") ? "past_due" : liveSubs.some((s) => s.status === "paused") ? "paused" : "active";
         const hb = SUB_BADGE[headStatus] || SUB_BADGE.active;
         const spend = [moSum ? `${fmt$(moSum)}/mo` : null, yrSum ? `${fmt$(yrSum)}/yr` : null].filter(Boolean).join(" + ") || "—";
@@ -2284,7 +2296,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                   <span style={{ background: b.bg, color: b.fg, borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>{b.label}</span>
                   <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
                     {s.price_cents != null && <>{fmt$(s.price_cents)}{p.billing_interval === "annual" ? "/yr" : "/mo"} · </>}
-                    started {fmtDate(s.current_period_start)}{s.current_period_end ? ` · renews ${fmtDate(s.current_period_end)}` : ""}
+                    started {fmtDate(s.current_period_start)}{(s.paid_through || s.current_period_end) ? ` · renews ${fmtDate(s.paid_through || s.current_period_end)}` : ""}
                   </div>
                 </div>
                 <button type="button" onClick={() => cancel(s)} disabled={busy}

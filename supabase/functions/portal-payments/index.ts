@@ -164,6 +164,13 @@ async function recentDeclines(
     .eq("actor_kind", "staff")
     .eq("actor_ref", actorRef)
     .eq("state", "closed_declined")
+    // closed_declined also holds the gateway's rate limiter and OUR configuration errors
+    // (invoicePayment.ts closes both that way — "rate limited: …" / "gateway configuration: …")
+    // because neither charged anything. Neither is the gateway answering about a CARD, so
+    // neither may count, or five tries through a broken credential or a busy minute read as
+    // "several declined attempts" and lock the login out for an hour.
+    .not("detail", "like", "rate limited:%")
+    .not("detail", "like", "gateway configuration:%")
     .gt("created_at", since);
   return Number(count ?? 0);
 }

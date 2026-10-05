@@ -17,7 +17,7 @@
 // public.
 
 import {
-  afterAt, awaitingReply, buildInbox, callLabel, canonAt, chunked, fmtClock, INBOX_AT_COLUMN, INBOX_EMAIL_KINDS,
+  afterAt, awaitingReply, buildInbox, callEvent, callLabel, canonAt, chunked, fmtClock, INBOX_AT_COLUMN, INBOX_EMAIL_KINDS,
   INBOX_PAGE, INBOX_SCAN, InboxReadError, inboxTables, parseInboxRequest, smsPreview,
   type InboxContact, type InboxEvent, type InboxFilter, type InboxRequest, type InboxSource, type InboxTable,
   type InboxThread, type InboxViewer,
@@ -92,6 +92,11 @@ Deno.test("a call's line says what happened and never what was said", () => {
   const said = "Hi, it's Pat, call me back about the gambrel please";
   same(callLabel(c({ status: "missed", phone_voicemails: { id: "vm1", transcript: said } })), "Voicemail", "voicemail embed");
   same(callLabel(c({ status: "voicemail", phone_voicemails: [{ id: "vm2", transcript: said }] })), "Voicemail", "voicemail array");
+  // A cold transfer nobody took: answered first (answered_at, no answered_by), then voicemail on
+  // the same call. The message is the line, and it is not handled (crmFeed reads it the same way).
+  const xfer = c({ answered_at: "x", duration_s: 40, phone_voicemails: { id: "vm3" } });
+  same(callLabel(xfer), "Voicemail", "voicemail after an unanswered transfer");
+  same(callEvent({ ...xfer, contact_id: "k", started_at: at(1) }, ME)?.handled, false, "it waits on you");
 });
 
 Deno.test("waiting on you: the customer spoke last and nobody has answered", () => {

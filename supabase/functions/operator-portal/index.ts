@@ -378,9 +378,12 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
         //                  leaves the design 'accepted', and without the stamp the dialog promises
         //                  to delete a quote PDF the server keeps.
         // Adding a column to either owner read means adding it here too.
+        //   total_cents, expected_close_date -> the Pipeline card's value and close date
+        //                  (migration 206). The owner read gained them and this one did not, so
+        //                  in view-as every card read "No quote yet" with no close date.
         const [designs, versions, cfg, leads] = await Promise.all([
           admin.from("designs")
-            .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, contact_id, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at")
+            .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, contact_id, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at, total_cents, expected_close_date")
             .eq("client_id", clientId).order("created_at", { ascending: false }),
           admin.from("design_versions")
             .select("short_code, version, created_at, selections, image_url, inventory_unit_id")

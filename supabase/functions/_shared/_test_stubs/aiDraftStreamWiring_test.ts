@@ -89,6 +89,7 @@ type ModelPlan = { status?: number; body?: string; delayMs?: number; hang?: bool
 type World = {
   cap?: number | null;          // client_settings.ai_style_daily_cap (null = the default 10)
   used?: number;                // generations in the last 24 h
+  usedAfter?: number;           // the count once this press's own row is written (default used + 1; more = a burst landed beside it)
   ledgerFails?: boolean;        // the ai_style_calls insert errors
   hold?: Record<string, unknown>;
   holdErr?: { message: string };
@@ -140,7 +141,12 @@ function answer(world: World, trace: Trace, target: string, ops: any[][]) {
   if (target === "client_users") return { data: [{ client_id: "harness-tenant", role: "owner", title: null, access: null, ...(world.member ?? {}) }], error: null };
   if (target === "client_settings") return { data: world.cap === undefined ? null : { ai_style_daily_cap: world.cap }, error: null };
   if (target === "ai_style_calls") {
-    if (has("select") && (arg("select") === "id") && ops.some((o) => o[0] === "select" && o[2] && o[2].head)) return { count: world.used ?? 0, error: null };
+    if (has("select") && (arg("select") === "id") && ops.some((o) => o[0] === "select" && o[2] && o[2].head)) {
+      // Before this press's row is written, the rows already there; after it, those plus ours (and
+      // whatever a burst wrote beside it).
+      const inserted = trace.db.some((op: any) => Array.isArray(op) && op[0] === "ai_style_calls" && Array.isArray(op[1]) && op[1][0] === "insert");
+      return { count: inserted ? (world.usedAfter ?? (world.used ?? 0) + 1) : (world.used ?? 0), error: null };
+    }
     // The recover action's read: a real filter over world.ledger, so what it returns is decided by
     // the filters the handler actually put on the query, and nothing else.
     if (has("select") && has("in")) {
@@ -424,6 +430,9 @@ const SCENARIOS: [string, World, number][] = [
   ["a draft whose capture failed", { model: FIVE(GOOD()), captureErr: true }, 200],
   ["no API key", { noKey: true }, 500],
   ["the daily cap", { cap: 10, used: 10 }, 429],
+  // Presses sent together all read 3 before any of them wrote its row; counted again with its own
+  // row in, this one is the eleventh.
+  ["a burst past the daily cap", { cap: 10, used: 3, usedAfter: 11 }, 429],
   ["the ledger insert failing", { ledgerFails: true }, 503],
   ["the wallet hold failing", { holdErr: { message: "rpc down" } }, 503],
   ["insufficient funds", { hold: { err: "insufficient_funds", price_cents: 2000, balance_after: 500 } }, 402],
@@ -585,6 +594,28 @@ Deno.test("every failure after the hold releases it once, streamed, with its ret
   const ok = await drive(STREAMED, { model: FIVE(GOOD()) });
   assertEquals(ok.trace.released, []);
   assertEquals(ok.trace.captured.length, 1);
+});
+
+// ─── The daily cap against presses sent together ───────────────────────────────────────────────
+// The count before the insert cannot see a burst: every press in it reads the same number. Counted
+// again with its own row in, a press past the cap takes back its row and never reaches the model or
+// the wallet; one inside it carries on.
+Deno.test("the daily cap holds against a burst: past it after its own row, a press deletes the row and spends nothing", async () => {
+  for (const payload of [V2, STREAMED]) {
+    const what = payload === STREAMED ? "streamed" : "plain";
+    const past = await drive(payload, { cap: 10, used: 3, usedAfter: 11, model: FIVE(GOOD()) });
+    const body = JSON.parse(past.out.text.trimStart());
+    assertEquals(payload === STREAMED ? body.status : past.out.status, 429, what);
+    assert(/Daily limit reached \(10 AI drafts\)/.test(body.error), `${what}: the cap's own sentence`);
+    const ledger = past.trace.db.filter((op: any) => op[0] === "ai_style_calls") as any[];
+    assertEquals(ledger.map((op) => op[1][0]), ["select", "insert", "select", "delete"], `${what}: count, insert, count again, take the row back`);
+    assertEquals(ledger[3].find((o: any) => o[0] === "eq"), ["eq", "id", LEDGER_ID], `${what}: its OWN row`);
+    assertEquals(past.trace.sent.length, 0, `${what}: no model call`);
+    assertEquals(past.trace.db.filter((op: any) => String(op[0]).startsWith("rpc:")).length, 0, `${what}: no hold`);
+    // At the cap exactly, with its own row counted, a press is inside it.
+    const inside = await drive(payload, { cap: 10, used: 9, usedAfter: 10, model: FIVE(GOOD()) });
+    assert(/^ *[{]"ok":true,/.test(inside.out.text), `${what}: the tenth press drafts`);
+  }
 });
 
 // ─── The live failure of 2026-09-26, through the real handler ──────────────────────────────────

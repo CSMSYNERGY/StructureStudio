@@ -1724,7 +1724,10 @@ function ssFallbackTab(access) {
 // `advancedOn` (2026-09-28) says whether the Advanced page may resolve at all — the shell passes
 // ssAdvancedOn(...) for the tenant on screen. It defaults to FALSE for the same reason as
 // canProjects' default: a call site that forgets it refuses the page rather than offering it.
-function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator, advancedOn = false) {
+// `sub` (2026-10-04) is the route's sub-page, read for ONE purpose: /portal/settings/myprofile.
+// The shell's two route clamps pass it; every other caller asks about a non-settings tab and
+// leaves it null, which changes nothing for them.
+function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator, advancedOn = false, sub = null) {
   // FIRST, above `if (canAdmin) return tab`: owners and operators are not an exception. A tenant
   // without Advanced lands on the Designer (the page it grew out of), clamped like any other ask.
   if (tab === "advanced" && !advancedOn) return ssClampTab("designer", isOperator, canAdmin, access, supportView, canProjects);
@@ -1748,6 +1751,15 @@ function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canP
   // Team without any access to builders' accounts. `!supportView` still applies to both —
   // someone standing in a builder's shoes has no business in either console.
   if (tab === "projects") return (canProjects && !supportView) ? tab : ssFallbackTab(access);
+  // MY PROFILE IS EVERY ROLE'S. It is the one Settings sub-page with no permission area
+  // (ssSettingsTabs), the account menu offers it to everyone, the needsDetails nudge sends
+  // people there, and its two actions (save_prefs / save_profile) are "self" on the server.
+  // The tab-level rule below asks for a Settings area (SETTINGS_AREAS). Phone holders (sales
+  // rep, dealer, sales manager) reach Settings through `phone`; a scheduler, crew member or
+  // driver holds none, so without this line My Profile and "Add details" bounced them straight
+  // back to their fallback page. Only the route: the Settings nav item still follows
+  // ssCanSeeTab, so nobody gains a rail entry.
+  if (tab === "settings" && sub === "myprofile") return tab;
   // Owners, admins and operators are never clamped — an owner locked out of their own
   // portal by a permission bug is the one failure this feature must not have.
   if (canAdmin) return tab;
@@ -1805,10 +1817,17 @@ const SS_WHEN = [
 ];
 const SS_WHEN_PARAM = Object.fromEntries(SS_WHEN.map(([k, _l, p]) => [k, p]));
 // ISO date + or - N days/weeks/months, in local time.
+// Months CLAMP to the target month's last day: a bare setMonth() overflows from the 29th–31st,
+// so "In the last 1 month" on Mar 31 started at Mar 3 (Feb 31 rolled over) and "In the next
+// 1 month" on Jan 31 ran to Mar 3.
 const ssShiftIso = (iso, n, unit) => {
   const d = ssLocalDate(iso);
-  if (unit === "months") d.setMonth(d.getMonth() + n);
-  else d.setDate(d.getDate() + n * (unit === "weeks" ? 7 : 1));
+  if (unit === "months") {
+    const day = d.getDate();
+    d.setDate(1);
+    d.setMonth(d.getMonth() + n);
+    d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
+  } else d.setDate(d.getDate() + n * (unit === "weeks" ? 7 : 1));
   return ssLocalIso(d);
 };
 // Does a date pass the condition? p = { a, b, month, n, unit }. A condition whose parameter

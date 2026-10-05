@@ -243,12 +243,16 @@ function statusAfterPush(kind: "bug" | "feature"): string {
 // (mondayChangeIsNewer), so re-reading a stale Monday label is not a write and can
 // never undo the Projects side. The team works in Projects; cutover
 // (MONDAY_PUSH_DISABLED=1, then stripping the Monday code) ends the divergence.
+//
+// Returns whether the submission is on the board (created now, or already there). Callers that
+// still push to Monday ignore it; with MONDAY_PUSH_DISABLED=1 it IS the answer to "did this
+// reach our tracker", which is what the widget's `pushed` flag tells the builder.
 // deno-lint-ignore no-explicit-any
-async function mirrorToProjects(admin: any, row: any): Promise<void> {
+async function mirrorToProjects(admin: any, row: any): Promise<boolean> {
   try {
     const { data: board } = await admin.from("pm_boards").select("id")
       .eq("slug", row.kind === "feature" ? "features" : "bugs").maybeSingle();
-    if (!board) return;
+    if (!board) return false;
     const { data: exists } = await admin.from("pm_items").select("id, monday_item_id")
       .eq("feedback_submission_id", row.id).maybeSingle();
     if (exists) {
@@ -257,7 +261,7 @@ async function mirrorToProjects(admin: any, row: any): Promise<void> {
       if (row.monday_item_id && !exists.monday_item_id) {
         await admin.from("pm_items").update({ monday_item_id: row.monday_item_id }).eq("id", exists.id);
       }
-      return;
+      return true;
     }
     // The board's INTAKE group (migration 150), not "whichever sits first" — the Monday
     // import left two similarly-named intake groups per board, so first-by-position sent
@@ -265,7 +269,7 @@ async function mirrorToProjects(admin: any, row: any): Promise<void> {
     const { data: groups } = await admin.from("pm_groups").select("id, intake")
       .eq("board_id", board.id).order("position");
     const group = (groups || []).find((g: { intake: boolean }) => g.intake) || (groups || [])[0];
-    if (!group) return;
+    if (!group) return false;
     const { data: cols } = await admin.from("pm_columns").select("*").eq("board_id", board.id);
     const values: Record<string, unknown> = {};
     for (const c of cols || []) {
@@ -303,7 +307,7 @@ async function mirrorToProjects(admin: any, row: any): Promise<void> {
     }
     const { data: maxRow } = await admin.from("pm_items").select("position")
       .eq("group_id", group.id).order("position", { ascending: false }).limit(1).maybeSingle();
-    await admin.from("pm_items").insert({
+    const { error: insErr } = await admin.from("pm_items").insert({
       board_id: board.id, group_id: group.id,
       name: String(row.title || "").slice(0, 200), values,
       position: (maxRow?.position || 0) + 1024,
@@ -311,8 +315,13 @@ async function mirrorToProjects(admin: any, row: any): Promise<void> {
       monday_item_id: row.monday_item_id || null,
       created_by: row.submitted_by || null, created_by_email: row.submitter_email || null,
     });
+    // supabase-js RESOLVES a failed insert ({ error }), it does not throw — so the catch below
+    // never saw one and a refused insert passed for a mirrored submission.
+    if (insErr) throw new Error(insErr.message);
+    return true;
   } catch (e) {
     console.error("Projects mirror failed for submission", row.id, e instanceof Error ? e.message : String(e));
+    return false;
   }
 }
 
@@ -459,13 +468,18 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
 
     // Mirror into the internal Projects board FIRST (best-effort, never throws) —
     // before the Monday push, so an unexpected push crash cannot lose the pm_item.
-    await mirrorToProjects(admin, row);
+    const mirrored = await mirrorToProjects(admin, row);
 
     // Cutover switch: MONDAY_PUSH_DISABLED=1 stops the Monday leg without a redeploy.
     // Deliberately NOT an error state — no monday_error is recorded — because the
     // submission's real home (mirror row + Projects item) is already written.
+    //
+    // ⚠️ `pushed` is what the builder's widget reads to decide whether to say "syncing it to
+    // our tracker didn't go through". With Monday switched off the tracker IS Projects, so
+    // the honest answer is whether the Projects item exists. This returned a flat `false`,
+    // which put that error box on EVERY submission from the moment the switch was thrown.
     if (Deno.env.get("MONDAY_PUSH_DISABLED") === "1") {
-      return json({ ok: true, submission: row, pushed: false });
+      return json({ ok: true, submission: row, pushed: mirrored });
     }
 
     if (!token) {
@@ -515,9 +529,9 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
     const { data: row } = await admin.from("feedback_submissions")
       .select("*").eq("id", String(body.id ?? "")).eq("client_id", clientId).maybeSingle();
     if (!row) return json({ error: "Submission not found." }, 404);
-    await mirrorToProjects(admin, row);  // a failed first push may also have raced the mirror
+    const mirrored = await mirrorToProjects(admin, row);  // a failed first push may also have raced the mirror
     if (Deno.env.get("MONDAY_PUSH_DISABLED") === "1") {
-      return json({ ok: true, submission: row, pushed: false });
+      return json({ ok: true, submission: row, pushed: mirrored });   // see `submit`
     }
     if (!token) return json({ error: "Monday is not configured." }, 500);
     if (row.monday_item_id) return json({ ok: true, submission: row, pushed: true });
@@ -628,12 +642,22 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
     const byItem = new Map((rows ?? []).map((r: any) => [String(r.monday_item_id), r]));
     // board { id } + value.index: label ids collide across boards, and `text` is only
     // a display name the team can rename out from under us.
+    //
+    // ⚠️ `limit` IS NOT OPTIONAL. Monday's `items` query defaults to limit 25 EVEN WHEN
+    // `ids` is given, and returns the matches in ascending id order — so a tenant with more
+    // than 25 pushed submissions had their NEWEST ones (the highest ids, the ones still
+    // moving) silently dropped from every "Check for updates". Verified against the live API
+    // 2026-10-04: 30 ids in, 25 back, the five newest missing; `limit: 100` returned all 30.
+    // 100 is Monday's maximum and covers the 40 rows read above.
     const q = `query ($ids: [ID!]) {
-      items (ids: $ids) {
+      items (ids: $ids, limit: 100) {
         id
         board { id }
         column_values { id text value }
-        updates (limit: 50) { id text_body created_at creator { name } }
+        updates (limit: 50) {
+          id text_body created_at creator { name }
+          replies { id text_body created_at creator { name } }
+        }
       }
     }`;
     // deno-lint-ignore no-explicit-any
@@ -679,19 +703,27 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
       // was immutable and un-retractable in the tenant's My Submissions. Marked → overwrite;
       // unmarked → remove. Deleting on unmark preserves the safety property: internal chatter is
       // still never STORED, this only removes rows.
+      //
+      // A thread node is an update OR one of its REPLIES, exactly as in sync_all. The webhook
+      // mirrors a /client reply under its own replyId, and nothing else ever reads it back:
+      // this button is the only reconcile that runs (sync_all has no scheduler) and the webhook
+      // is not subscribed to edits. Walking top-level updates alone left every mirrored reply
+      // un-editable and un-retractable — and a reply whose webhook was missed never arrived.
       for (const u of it.updates ?? []) {
-        const text: string = u.text_body ?? "";
-        if (!CLIENT_MARKER.test(text)) {
-          await admin.from("feedback_comments").delete().eq("monday_update_id", String(u.id));
-          continue;
+        for (const node of [u, ...(u.replies ?? [])]) {
+          const text: string = node.text_body ?? "";
+          if (!CLIENT_MARKER.test(text)) {
+            await admin.from("feedback_comments").delete().eq("monday_update_id", String(node.id));
+            continue;
+          }
+          await admin.from("feedback_comments").upsert({
+            submission_id: row.id,
+            monday_update_id: String(node.id),
+            author_name: node.creator?.name ?? "Structure Studio",
+            body: text.replace(CLIENT_MARKER, "").trim(),
+            created_at: node.created_at ?? new Date().toISOString(),
+          }, { onConflict: "monday_update_id" });
         }
-        await admin.from("feedback_comments").upsert({
-          submission_id: row.id,
-          monday_update_id: String(u.id),
-          author_name: u.creator?.name ?? "Structure Studio",
-          body: text.replace(CLIENT_MARKER, "").trim(),
-          created_at: u.created_at ?? new Date().toISOString(),
-        }, { onConflict: "monday_update_id" });
       }
     }
     return json({ ok: true, refreshed });

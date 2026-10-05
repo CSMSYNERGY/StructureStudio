@@ -121,6 +121,21 @@ describe("/voice/outbound", () => {
     expect(net.writes("phone_calls", "POST")[0].json.error_code).toBe("minute_cap");
   });
 
+  it("a call row whose end was never recorded counts at most Twilio's 4-hour call limit, not the whole day", async () => {
+    // Answered 6 hours ago, no ended_at: its final status callback was lost (migration 254
+    // DEVIATION 2 bounds 'busy' at 4 hours for exactly this). No call lasts past 240 minutes.
+    const answered = new Date(Date.now() - 6 * 3_600_000).toISOString();
+    setup(undefined, { used: [{ duration_s: null, answered_at: answered, ended_at: null }] });
+    const { text } = await dialOut(makeEnv({ DAILY_MINUTE_CAP: "300" }));
+    expect(text).toContain("<Dial");
+  });
+
+  it("a call really still going counts what it has used so far", async () => {
+    const answered = new Date(Date.now() - 20 * 60_000 - 5_000).toISOString();
+    setup(undefined, { used: [{ duration_s: null, answered_at: answered, ended_at: null }] });
+    expect((await dialOut(makeEnv({ DAILY_MINUTE_CAP: "21" }))).text).toContain("Today's calling limit is reached");
+  });
+
   it("allows the call just under the cap", async () => {
     setup(undefined, { used: [{ duration_s: 540, answered_at: null, ended_at: null }] });
     const { text } = await dialOut(makeEnv({ DAILY_MINUTE_CAP: "10" }));

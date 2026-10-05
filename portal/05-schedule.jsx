@@ -28,6 +28,11 @@ const schedBuildDate = (job) => job.due_date || job.scheduled_start || null;
 // Projects table engine and this tab share one WHEN filter / local-date kernel).
 const schedLocalDate = ssLocalDate;
 const schedLocalIso = ssLocalIso;
+// The viewer's IANA zone, sent with every call that can mark a build done (move_job,
+// complete_job, create_job, the delivery override) so portal-schedule stamps the building
+// serial's MMDD with the SHOP's day. Without it the server used the UTC day, which is already
+// tomorrow for a US shop after 5–8 pm local — and that date is printed on the physical tag.
+const schedTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch (_e) { return null; } };
 // Past due = has a build date, that date is before today, and the stage isn't finished.
 const schedPastDue = (job, kind) => {
   const d = schedBuildDate(job);
@@ -609,7 +614,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign, cus
   const moveJob = async (job, stageId) => {
     if (!stageId || stageId === job.stage_id) return;
     setData((d) => ({ ...d, jobs: d.jobs.map((j) => j.id === job.id ? { ...j, stage_id: stageId } : j) }));
-    const r = await call({ action: "move_job", jobId: job.id, stageId, position: Date.now() });
+    const r = await call({ action: "move_job", jobId: job.id, stageId, position: Date.now(), tz: schedTz() });
     if (!r) load();
   };
   // Calendar drop = the reschedule (one build date per job; both date columns kept equal).
@@ -627,7 +632,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign, cus
   };
   const addFromTray = async (body, label) => {
     setBusy(true); setMsg(null);
-    const r = await call({ action: "create_job", ...body }, `${label} added to the board.`);
+    const r = await call({ action: "create_job", ...body, tz: schedTz() }, `${label} added to the board.`);
     setBusy(false); if (r) load();
   };
   // Dragging a tray item (not on the board yet) straight onto a calendar date creates the
@@ -636,7 +641,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign, cus
     setBusy(true); setMsg(null);
     const extra = { dueDate: iso, scheduledStart: iso };
     if (crewFilter !== "all") extra.crewId = crewFilter;
-    const r = await call({ action: "create_job", ...body, ...extra },
+    const r = await call({ action: "create_job", ...body, ...extra, tz: schedTz() },
       `${label} scheduled for ${schedFmtBuild(iso)}${crewFilter !== "all" ? " with " + ((crewById[crewFilter] || {}).name || "crew") : ""}.`);
     setBusy(false); if (r) load();
   };
@@ -661,7 +666,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign, cus
     setBusy(true); setMsg(null); setSaveErr(null);
     let r = await call({ action: "update_job", jobId: job.id, ...fields });
     if (r && stageId && stageId !== job.stage_id) {
-      r = await call({ action: "move_job", jobId: job.id, stageId, position: Date.now() });
+      r = await call({ action: "move_job", jobId: job.id, stageId, position: Date.now(), tz: schedTz() });
     }
     if (r && note && note.trim()) {
       r = await call({ action: "add_note", jobId: job.id, note: note.trim() });
@@ -673,7 +678,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign, cus
   };
   const completeJob = async (job) => {
     setBusy(true); setMsg(null);
-    const r = await call({ action: "complete_job", jobId: job.id }, `${job.customer_name || job.title || "Job"} marked built.`);
+    const r = await call({ action: "complete_job", jobId: job.id, tz: schedTz() }, `${job.customer_name || job.title || "Job"} marked built.`);
     setBusy(false);
     if (!r) return;
     setExpandedId(null);
@@ -1715,7 +1720,16 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign, cus
           : cur.toLocaleDateString("en-US", { month: "long", year: "numeric" });
         const step = (dir) => {
           const c = new Date(cursorMs);
-          if (calView === "week") c.setDate(c.getDate() + dir * 7); else c.setMonth(c.getMonth() + dir);
+          if (calView === "week") c.setDate(c.getDate() + dir * 7);
+          else {
+            // Clamp the day: setMonth() on the 29th–31st overflows a shorter month, so from
+            // Oct 31 "›" landed on Dec 1 (November skipped) and "‹" on Oct 1 (stuck). The
+            // cursor is any day — it starts at today and "Open that week" / "+N more" set it.
+            const day = c.getDate();
+            c.setDate(1);
+            c.setMonth(c.getMonth() + dir);
+            c.setDate(Math.min(day, new Date(c.getFullYear(), c.getMonth() + 1, 0).getDate()));
+          }
           setCursorMs(c.getTime());
         };
         const dropProps = (iso) => canEdit ? {
@@ -2744,6 +2758,10 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null, customerOpener
   const profName = (p) => p ? (p.display_name || nameOf[p.user_id] || "Driver") : "No driver";
   const terrName = {}; territories.forEach((t) => { terrName[t.id] = t.name; });
   const stopsByLoad = {}; stops.forEach((s) => { (stopsByLoad[s.load_id] = stopsByLoad[s.load_id] || []).push(s); });
+  // One lookup, not loads.find() inside the table's sort comparator — `loads` is the tenant's
+  // whole load history now that the read is paged rather than capped at 500, and a find per
+  // comparison made that sort quadratic in it.
+  const loadById = {}; loads.forEach((l) => { loadById[l.id] = l; });
   Object.keys(stopsByLoad).forEach((k) => stopsByLoad[k].sort((a, b) => a.stop_order - b.stop_order));
 
   // `jobs` = every non-repair building on the build board without a stop (orders,
@@ -2862,6 +2880,7 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null, customerOpener
       body.override = true;
       body.overrideReason = withOverride.reason;
       body.alsoCompleteBuilds = !!withOverride.complete;
+      body.tz = schedTz();   // "Also mark as Built" mints serials too
     }
     const r = await callFull(body);
     setBusy(false);
@@ -3374,10 +3393,10 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null, customerOpener
                   30 rows of it at a time. Sorting is a permutation, so stops.length below is
                   the same total either way. */}
               {stops.slice().sort((a, b) => {
-                const la = loads.find((x) => x.id === a.load_id) || {}; const lb = loads.find((x) => x.id === b.load_id) || {};
+                const la = loadById[a.load_id] || {}; const lb = loadById[b.load_id] || {};
                 return String(la.load_date || "9999").localeCompare(String(lb.load_date || "9999")) || a.stop_order - b.stop_order;
               }).slice((curPage - 1) * pageSize, curPage * pageSize).map((s) => {
-                const l = loads.find((x) => x.id === s.load_id) || {};
+                const l = loadById[s.load_id] || {};
                 return (
                   <tr key={s.id}>
                     <td style={{ ...S.td, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{s.serial ? "#" + s.serial : (s.repair_id ? "R" : "—")}</td>

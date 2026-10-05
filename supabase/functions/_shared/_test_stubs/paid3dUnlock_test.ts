@@ -332,7 +332,9 @@ Deno.test("the event: 01-core raises it on window, and Billing raises it after s
 Deno.test("on the PAYWALL, a checkout short of a clean success keeps its message until Continue", () => {
   // The re-read that lifts the gate unmounts BillingGate and the BillingView in it, message and all,
   // and a partial failure's message can be "do NOT try again" or a charge reference.
-  assert(/\? <BillingView paywall \/>/.test(ADMIN), "BillingGate must mount its BillingView with `paywall`");
+  // …and with `viewingLabel`, so an operator on a locked builder's gate gets the view-as picker
+  // (the "This bills the card <builder> has on file" confirm), never the builder's own mode.
+  assert(/\? <BillingView viewingLabel=\{viewingLabel\} paywall \/>/.test(ADMIN), "BillingGate must mount its BillingView with `viewingLabel` and `paywall`");
   assert(CATALOG.includes(`function BillingView({ viewingLabel = null, section = "all", paywall = false }) {`), "BillingView lost its paywall prop");
   const subscribe = codeBetween(CATALOG, "const subscribe = async () => {", "const cancel = async (s) => {", "BillingView subscribe");
   assert(subscribe.includes("const clean = !e && r && !r.error && !(r.failed && r.failed.length);"), "the clean-success test changed");

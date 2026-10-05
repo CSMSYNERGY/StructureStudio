@@ -991,7 +991,9 @@ test("a refused Get Quote (400) shows the reason, logs as info, and the design s
   await flushDraft(page);
   await expect.poll(() => ls(page, "ss_draft_" + CLIENT)).toMatch(/^SS-[A-Z0-9]{10}$/);
   const code = await ls(page, "ss_draft_" + CLIENT);
-  expect(saves.filter((s) => s.p_code === code && s.p_status === "draft").length).toBeGreaterThan(0);
+  // Polled, not read once: the unload save writes the pointer BEFORE it sends the keepalive POST
+  // (saveDraftSilently), so the pointer can be visible here while the route has not yet recorded it.
+  await expect.poll(() => saves.filter((s) => s.p_code === code && s.p_status === "draft").length).toBeGreaterThan(0);
 
   await page.getByRole("button", { name: "Get Quote", exact: true }).click();
   await expect(page.getByText(NO_USER)).toBeVisible({ timeout: 45_000 });

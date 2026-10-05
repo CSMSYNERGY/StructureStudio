@@ -21,7 +21,7 @@ import {
 import { rsSendEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
 import {
   isPlausibleEmail, normalizeEmail, issueEmailOtp, verifyEmailOtp, emailOtpBody,
-  EmailOtpNotConfigured,
+  EmailOtpNotConfigured, EMAIL_OTP_MAX_ATTEMPTS,
 } from "../_shared/emailOtp.ts";
 import { clientIp } from "../_shared/adminGate.ts";
 
@@ -921,9 +921,46 @@ async function handleEmailChannel(
     return json({ error: "Too many attempts. Try again in about 15 minutes." }, 429);
   }
 
-  const { data: row } = await sb.from("customer_email_otps")
-    .select("code_hash, expires_at, attempts, consumed_at")
+  const OTP_COLS = "code_hash, expires_at, attempts, consumed_at";
+  let { data: row } = await sb.from("customer_email_otps")
+    .select(OTP_COLS)
     .eq("client_id", clientId).eq("email_lower", email).maybeSingle();
+
+  // ── CLAIM THE GUESS BEFORE IT IS JUDGED ──────────────────────────────────────────────────
+  // attempts is the ONLY bound on guessing this code (Twilio Verify counts the SMS path's; this
+  // code is ours). Read, compared, and written back as read+1 afterwards, it bound nothing:
+  // guesses sent together all read the same count, all reached the compare, and together cost
+  // one attempt, so a burst of a thousand was a thousand guesses at a 6-digit secret. Now a guess
+  // reaches the compare only after a compare-and-swap moved attempts from the value it read to
+  // one more (same code, same count), so at most EMAIL_OTP_MAX_ATTEMPTS guesses are ever judged
+  // per code, however they arrive. A dead code (none, consumed, expired, spent) is refused below
+  // by verifyEmailOtp WITHOUT a claim, which keeps "a stale tab never burns the budget for the
+  // code the customer is about to request". The right code costs its attempt too, and is burnt.
+  for (let i = 0; i < CLAIM_ATTEMPTS; i++) {
+    if (!row || row.consumed_at || !(Date.parse(String(row.expires_at)) > Date.now())) break;
+    const seen = Number(row.attempts) || 0;
+    if (seen >= EMAIL_OTP_MAX_ATTEMPTS) break;
+    const { data: won, error: claimErr } = await sb.from("customer_email_otps")
+      .update({ attempts: seen + 1 })
+      .eq("client_id", clientId).eq("email_lower", email)
+      .eq("code_hash", row.code_hash).eq("attempts", row.attempts).is("consumed_at", null)
+      .select(OTP_COLS);
+    if (claimErr) {
+      // Unknown whether the guess was counted, so it is not judged: an uncounted guess is the
+      // hole this claim closes.
+      await logEdgeError({
+        fn: "customer-auth", req, clientId, code: "email_otp_claim",
+        message: `could not count an email sign-in attempt: ${claimErr.message}`,
+      });
+      return json({ error: "Something went wrong checking the code — try again." }, 502);
+    }
+    if (Array.isArray(won) && won.length > 0) break; // counted: judge it against `row`, as read
+    // Lost the swap: another guess (or a new code) landed in between. Read again.
+    ({ data: row } = await sb.from("customer_email_otps")
+      .select(OTP_COLS)
+      .eq("client_id", clientId).eq("email_lower", email).maybeSingle());
+    if (i === CLAIM_ATTEMPTS - 1) row = null;
+  }
 
   let verdict;
   try {
@@ -934,14 +971,11 @@ async function handleEmailChannel(
   }
 
   if (!verdict.ok) {
-    // ⚠️ Only a genuine MISMATCH costs an attempt. Charging an expired or already-consumed
-    // code would let a stale tab burn the budget for the code the customer is about to
-    // request, locking them out of a login they are doing correctly.
+    // The window's fail budget counts only a genuine MISMATCH (the attempt itself was counted by
+    // the claim above). Charging an expired or already-consumed code would let a stale tab burn
+    // the budget for the code the customer is about to request.
     if (verdict.reason === "mismatch") {
       if (emailBucket) await saveBucket(sb, emailBucket, { fail: emailBucket.failCount + 1 });
-      await sb.from("customer_email_otps")
-        .update({ attempts: (row?.attempts ?? 0) + 1 })
-        .eq("client_id", clientId).eq("email_lower", email);
     }
     return json({ error: MSG_EMAIL_CODE_BAD }, 401);
   }

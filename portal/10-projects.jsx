@@ -208,15 +208,21 @@ const pmExt = (name) => String(name || "").split(".").pop().toLowerCase();
 const pmIsImage = (a) => String(a.mime || "").startsWith("image/") || ["png", "jpg", "jpeg", "gif", "webp"].includes(pmExt(a.name || a.path));
 const pmFileIcon = (a) => (pmIsImage(a) ? "🖼️" : (pmExt(a.name || a.path) === "pdf" ? "📄" : "📎"));
 
+// Why the bucket would refuse this file, or null. Split out so the composer can ask BEFORE it
+// posts the note the file belongs to — see PMItemPanel's post().
+function pmFileRefusal(file) {
+  if (!PM_FILE_MIME[pmExt(file.name)]) return `"${file.name}" is not a kind of file we can attach (images, video or PDF).`;
+  if (file.size > PM_MAX_FILE) return `"${file.name}" is larger than 25 MB.`;
+  return null;
+}
 // Upload one file to an item and record it on an update. The signed upload URL comes from
 // portal-projects (the bucket has no browser policies at all), the bytes go straight to
 // storage, and attach_meta writes the row — so a large screenshot never travels through
 // the edge function.
 async function pmUploadTo(itemId, updateId, file) {
-  const ext = pmExt(file.name);
-  const mime = PM_FILE_MIME[ext];
-  if (!mime) throw new Error(`"${file.name}" is not a kind of file we can attach (images, video or PDF).`);
-  if (file.size > PM_MAX_FILE) throw new Error(`"${file.name}" is larger than 25 MB.`);
+  const refusal = pmFileRefusal(file);
+  if (refusal) throw new Error(refusal);
+  const mime = PM_FILE_MIME[pmExt(file.name)];
   const signed = await pmCall({ action: "upload_attachment", itemId, name: file.name });
   const up = await sb.storage.from("pm-attachments").uploadToSignedUrl(signed.path, signed.token, file, { contentType: mime });
   if (up.error) throw new Error(up.error.message);
@@ -299,6 +305,14 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
   useEffect(() => { loadDetail(); }, [loadDetail]);
 
   const sub = detail && detail.submission;
+  // A report from another PRODUCT (Framed UP, BuildBridge, CSM Studio — migration 161) is linked
+  // exactly like a builder's, but carries no client_id: no portal will ever show it a note, and
+  // portal-projects refuses to publish there. Defaulting those cards to "Visible to client" put
+  // a false "They will see it in My Requests" confirm on every reply. Until get_item answers,
+  // a linked card is assumed to be a builder's, as before.
+  const crossApp = !!(sub && !sub.client_id);
+  const canPublish = !!item.feedback_submission_id && !crossApp;
+  useEffect(() => { if (crossApp) setToClient(false); }, [crossApp]);
   const post = async () => {
     const body = compose.trim();
     if (!body || busy) return;
@@ -306,18 +320,32 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
       const who = sub ? (sub.client_id || "this client") : "this client";
       if (!window.confirm(`Publish this update to ${who}? They will see it in My Requests.`)) return;
     }
+    // A file the bucket will not take is refused BEFORE the note is posted. Checked only
+    // after the post, it threw with the note already created and the composer still full,
+    // so the obvious recovery — drop the file, press Post again — posted the note twice,
+    // and on a client card published it to the builder twice. An iPhone .heic is enough.
+    const refusal = files.map(pmFileRefusal).find(Boolean);
+    if (refusal) { setErr(refusal); return; }
     setBusy(true); setErr("");
+    const staged = files;
+    let d;
     try {
-      const d = await pmCall({ action: "add_update", itemId: item.id, body, clientVisible: toClient });
-      // Files attach to the update that was just created, so a failed upload leaves the
-      // note itself intact and says which file did not make it.
-      for (const f of files) await pmUploadTo(item.id, d.update.id, f);
-      // Back to the card's own default, NOT to false — resetting to false after each post
-      // re-creates the original bug one reply later, which is exactly how it would come back.
-      setCompose(""); setToClient(Boolean(item && item.feedback_submission_id)); setFiles([]);
-      if (fileRef.current) fileRef.current.value = "";
-      loadDetail();
-    } catch (e) { setErr(e.message); loadDetail(); }
+      d = await pmCall({ action: "add_update", itemId: item.id, body, clientVisible: toClient });
+    } catch (e) { setErr(e.message); loadDetail(); setBusy(false); return; }
+    // The note EXISTS from here on, so the composer is cleared whatever happens to its files.
+    // Back to the card's own default, NOT to false — resetting to false after each post
+    // re-creates the original bug one reply later, which is exactly how it would come back.
+    setCompose(""); setToClient(canPublish); setFiles([]);
+    if (fileRef.current) fileRef.current.value = "";
+    // Files attach to the update that was just created, so a failed upload leaves the
+    // note itself intact and says which file did not make it.
+    const failed = [];
+    for (const f of staged) {
+      try { await pmUploadTo(item.id, d.update.id, f); }
+      catch (e) { failed.push(e.message || `"${f.name}" did not upload.`); }
+    }
+    if (failed.length) setErr(`Your note was posted, but not every file made it: ${failed.join(" ")}`);
+    loadDetail();
     setBusy(false);
   };
   const publishExisting = async (u) => {
@@ -394,9 +422,11 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
             <textarea rows={3} placeholder="Add a note or update…" style={{ ...S.input, resize: "vertical", fontWeight: 500 }}
               value={compose} onChange={(e) => setCompose(e.target.value)} />
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-              <label style={{ fontSize: 12, fontWeight: 600, color: item.feedback_submission_id ? "#334155" : "#94A3B8", display: "flex", alignItems: "center", gap: 5 }}
-                title={item.feedback_submission_id ? "Publishes this one note to the client's My Requests feed" : "This item isn't linked to a client submission"}>
-                <input type="checkbox" checked={toClient} disabled={!item.feedback_submission_id}
+              <label style={{ fontSize: 12, fontWeight: 600, color: canPublish ? "#334155" : "#94A3B8", display: "flex", alignItems: "center", gap: 5 }}
+                title={canPublish ? "Publishes this one note to the client's My Requests feed"
+                  : crossApp ? "Reported in another app — there is no client portal to publish to"
+                  : "This item isn't linked to a client submission"}>
+                <input type="checkbox" checked={toClient} disabled={!canPublish}
                   onChange={(e) => setToClient(e.target.checked)} />
                 Visible to client
               </label>
@@ -440,7 +470,7 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
               <span style={{ fontSize: 11.5, color: "#94A3B8" }}>{pmStamp(u.created_at)}{u.edited_at ? " · edited" : ""}</span>
               {fromClient ? tag("#E0E7FF", "#4338CA", "FROM CLIENT")
                 : u.client_visible ? tag("#CCF1EC", "#0F766E", "VISIBLE TO CLIENT ✓") : tag("#F1F5F9", "#64748B", "INTERNAL")}
-              {canWrite && !u.client_visible && item.feedback_submission_id && (
+              {canWrite && !u.client_visible && canPublish && (
                 <button type="button" style={{ background: "none", border: "none", color: "#1B7895", fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0 }}
                   onClick={() => publishExisting(u)}>Publish to client…</button>
               )}
@@ -893,16 +923,25 @@ function PMSetupAdmin({ canWrite }) {
     .then((d) => setClients(d.clients || [])).catch((e) => setErr(e.message)), []);
   useEffect(() => { loadTpl(); loadClients(); }, [loadTpl, loadClients]);
 
+  // WHOSE list may land. A list read answers whenever it answers: tick a step on one builder
+  // (toggle, then reload) and open the next builder straight away, and the first builder's
+  // reload arrived after the second's list — painting builder A's steps under builder B's
+  // name, where "Remove" and the ticks act on A's rows while the confirm names B. Every
+  // response is checked against the list that is open NOW, not the one open when it was asked.
+  const openRef = useRef(null);
   const openList = (cid) => {
-    if (openClient === cid) { setOpenClient(null); setClientItems(null); return; }
+    if (openClient === cid) { openRef.current = null; setOpenClient(null); setClientItems(null); return; }
+    openRef.current = cid;
     setOpenClient(cid); setClientItems(null); setAdding(null);
     pmCall({ action: "setup_client_items", clientId: cid })
-      .then((d) => setClientItems(d.items || [])).catch((e) => setErr(e.message));
+      .then((d) => { if (openRef.current === cid) setClientItems(d.items || []); }).catch((e) => setErr(e.message));
   };
-  const reloadList = () => (openClient
-    ? pmCall({ action: "setup_client_items", clientId: openClient })
-      .then((d) => setClientItems(d.items || [])).catch((e) => setErr(e.message))
-    : Promise.resolve());
+  const reloadList = () => {
+    const cid = openClient;
+    if (!cid) return Promise.resolve();
+    return pmCall({ action: "setup_client_items", clientId: cid })
+      .then((d) => { if (openRef.current === cid) setClientItems(d.items || []); }).catch((e) => setErr(e.message));
+  };
 
   const run = async (body, after) => {
     setBusy(true); setErr(""); setNote("");
@@ -1271,20 +1310,32 @@ function ProjectsTab({ sub, onSub }) {
     return boards.find((b) => b.slug === sub) || boards[0];
   }, [boards, sub, setupMode]);
 
+  // ONLY THE LATEST get_board MAY LAND. Responses do not come back in the order they were
+  // asked for — opening Roadmap runs the roadmap sync first, so it is routinely the slow one —
+  // and every one of them used to be applied. Click Roadmap, then Bugs: Bugs answered, then
+  // Roadmap's late answer replaced it, leaving the Bugs tab lit over Roadmap's table, and
+  // "＋ Add item" (which files into data.board) put the new card on Roadmap. Two reloads of
+  // one board after quick edits race the same way and can repaint the older state.
+  const boardReq = useRef({ seq: 0, boardId: null });
   const loadBoard = useCallback((b) => {
     if (!b) return;
+    const seq = ++boardReq.current.seq;
+    boardReq.current.boardId = b.id;
+    const latest = () => boardReq.current.seq === seq;
     setLoading(true); setErr("");
     pmCall({ action: "get_board", boardId: b.id }).then((d) => {
+      if (!latest()) return;
       setData(d); setCanWrite(!!d.canWrite);
       setView(pmLoadView(b.slug, d.columns));
       setSavedViews(d.views || []);
       // If this browser still holds pre-sharing local views, push them up and re-read.
       pmLiftLocalViews(b).then((lifted) => {
-        if (lifted) pmCall({ action: "get_board", boardId: b.id }).then((d2) => setSavedViews(d2.views || [])).catch(() => {});
+        if (lifted) pmCall({ action: "get_board", boardId: b.id })
+          .then((d2) => { if (boardReq.current.boardId === b.id) setSavedViews(d2.views || []); }).catch(() => {});
       });
       const dateCols = d.columns.filter((c) => c.type === "date");
       setWhenColId((cur) => (dateCols.some((c) => c.id === cur) ? cur : (dateCols[0] ? dateCols[0].id : null)));
-    }).catch((e) => setErr(e.message)).finally(() => setLoading(false));
+    }).catch((e) => { if (latest()) setErr(e.message); }).finally(() => { if (latest()) setLoading(false); });
   }, []);
   useEffect(() => { if (activeBoard) loadBoard(activeBoard); }, [activeBoard && activeBoard.id]);
 
@@ -1379,9 +1430,22 @@ function ProjectsTab({ sub, onSub }) {
     });
     return addItem(name, null, values);
   };
+  // A row pulled in from another board (item.overlay) keeps its REAL group on its own board;
+  // the groups shown here are this board's. Moving or reordering one by group would either do
+  // nothing server-side while the optimistic patch showed it moved (move_items filters on
+  // board_id), or — before reorder_item refused it — rewrite the card into a group on a board
+  // it does not live on. Column-bucket drops are fine: they are value edits, remapped by
+  // update_item through fromBoardId.
+  const overlayGroupRefusal = (item, target) => {
+    const foreign = item && item.overlay ? item : (target && target.overlay ? target : null);
+    if (!foreign) return false;
+    setErr(`"${foreign.name}" lives on ${foreign.home_board_name || "another board"} — move or reorder it there. Here you can change its cells.`);
+    return true;
+  };
   const onDropToGroup = (item, g) => {
     if (view.groupBy === "groups") {
       if (!g.isRealGroup || g.key === item.group_id) return;
+      if (overlayGroupRefusal(item, null)) return;
       callOrReload({ action: "move_items", ids: [item.id], groupId: g.key },
         () => mutateItem(item.id, { group_id: g.key }));
     } else {
@@ -1396,6 +1460,7 @@ function ProjectsTab({ sub, onSub }) {
   };
   const onDropOnRow = (item, target) => {
     if (view.groupBy === "groups") {
+      if (overlayGroupRefusal(item, target)) return;
       pmCall({ action: "reorder_item", id: item.id, beforeId: target.id, groupId: target.group_id })
         .then(reload)
         .catch((e) => { setErr(e.message); reload(); });
@@ -1498,6 +1563,10 @@ function ProjectsTab({ sub, onSub }) {
         if (!col) continue;
         const v = r.values ? r.values[colId] : null;
         if (col.type === "people") { if (!(Array.isArray(v) && v.includes(want))) return false; }
+        // A multi-select dropdown holds several option ids, and groupKeyOf answers with the
+        // FIRST only (it is the grouping key, one bucket per row) — so filtering on it dropped
+        // every row carrying the chosen option second or later. Membership, like people.
+        else if (col.type === "dropdown") { if (!(Array.isArray(v) ? v : (v ? [v] : [])).includes(want)) return false; }
         else if (pmType(col).groupKeyOf(v) !== want) return false;
       }
       if (whenCond !== "any" && whenColId) {

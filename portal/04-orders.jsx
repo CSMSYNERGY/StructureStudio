@@ -764,13 +764,16 @@ function MySubmissions({ refreshKey }) {
 // and this list, so they cannot disagree). A `locked` row is a paid add-on this builder has
 // not bought: shown, padlocked, and left out of the count — Carolyn 2026-09-04, it doubles
 // as the upsell. A step we have not finished building never arrives here at all.
-function SetupChecklist({ items, counts, onPatch, onReload, onNavigate, canAdmin }) {
+function SetupChecklist({ items, counts, canEdit, onPatch, onReload, onNavigate, canAdmin }) {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);      // id being toggled
   const [viewing, setViewing] = useState(null); // { url, title } — screenshot popup
 
+  // Ticking is portal-setup's owner/admin action (or an operator who can write). Everyone
+  // else reads the list; their checkbox is disabled rather than ticking and bouncing back.
+  const mayTick = canEdit !== false;
   const toggle = async (it) => {
-    if (it.locked) return;
+    if (it.locked || !mayTick) return;
     const done = !it.completed_at;
     setBusy(it.id); setError(null);
     // Optimistic: ticking a box that then sits there doing nothing feels broken.
@@ -843,9 +846,10 @@ function SetupChecklist({ items, counts, onPatch, onReload, onNavigate, canAdmin
                   <SsLock title={`Needs ${ssFeatureLabel(feat)}`} />
                 </span>
               ) : (
-                <input type="checkbox" checked={isDone} disabled={busy === it.id}
+                <input type="checkbox" checked={isDone} disabled={busy === it.id || !mayTick}
                   onChange={() => toggle(it)} aria-label={it.title}
-                  style={{ marginTop: 3, width: 16, height: 16, flexShrink: 0, cursor: "pointer" }} />
+                  title={mayTick ? undefined : "An owner or admin ticks these off"}
+                  style={{ marginTop: 3, width: 16, height: 16, flexShrink: 0, cursor: mayTick ? "pointer" : "default" }} />
               )}
               <div style={{ minWidth: 0, flex: 1 }}>
                 {/* No line-through on a locked row — that reads as "done". */}
@@ -952,7 +956,9 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
         const c = items.filter((i) => !i.locked);
         return { total: c.length, done: c.filter((i) => i.completed_at).length, open: c.filter((i) => !i.completed_at).length };
       })();
-      const next = { items, counts };
+      // `canEdit` is whether this caller's tick will be accepted (owner/admin, or an operator
+      // who can write). Absent from an older edge function → assume yes, as before.
+      const next = { items, counts, canEdit: data.canEdit !== false };
       setSetupData(next);
       return next;
     } catch (_e) {
@@ -980,7 +986,7 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
         ? { ...x, completed_at: done ? new Date().toISOString() : null, completed_by_kind: done ? "client" : null, completed_by_name: done ? "You" : null }
         : x);
       const c = items.filter((i) => !i.locked);
-      return { items, counts: { total: c.length, done: c.filter((i) => i.completed_at).length, open: c.filter((i) => !i.completed_at).length } };
+      return { ...cur, items, counts: { total: c.length, done: c.filter((i) => i.completed_at).length, open: c.filter((i) => !i.completed_at).length } };
     });
   }, []);
 
@@ -1113,6 +1119,7 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
       </div>
 
       {effTab === "setup" ? <SetupChecklist items={setupData && setupData.items} counts={setupData && setupData.counts}
+        canEdit={!setupData || setupData.canEdit !== false}
         onPatch={patchSetup} onReload={loadSetup} onNavigate={onNavigate} canAdmin={canAdmin} />
         : effTab === "mine" ? <MySubmissions refreshKey={submissionsKey} />
         : error ? <div style={S.err}>Couldn't load updates: {error}</div>
@@ -1397,6 +1404,9 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
   // is not a faster page, it is a page that lies about money and then corrects itself,
   // which is exactly the silent understatement the payment pagination exists to prevent.
   const [moneyReady, setMoneyReady] = useState(false);
+  // The tenant whose pending bank payments this mount has already asked the gateway about —
+  // see "BANK MONEY ONLY MOVES WHEN SOMEBODY ASKS" at the end of load().
+  const reconcileFiredRef = useRef(null);
   const load = useCallback(async () => {
     setError(null);
     setMoneyReady(false);
@@ -1540,6 +1550,29 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
     // never be what a revisit paints from, even behind the pending flag.
     ssCachePut("rest", "orders", clientId, settled);
     setMoneyReady(true);
+
+    // ── BANK MONEY ONLY MOVES WHEN SOMEBODY ASKS ──────────────────────────────────────
+    // portal-payments' `reconcile` is the ONLY code that turns a pending bank payment into
+    // settled (or returned) money — there is no pg_cron — and its header names this tab as
+    // the caller: fire-and-forget on load, never awaited in the paint path, then re-read the
+    // money. Nothing called it, so every ACH payment, from either the customer's pay screen
+    // or the Record-a-payment modal, read "Bank payment clearing" forever, the balance never
+    // closed, and paymentAmountDecision refused every further payment on that order
+    // ("A bank payment on this order is still clearing").
+    // Only when a gateway payment IS pending (the sweep has nothing to do otherwise, and a
+    // tenant without card payments must not file a refusal on every load), and at most once
+    // per mount, so a sweep that reports movement can never become a reload loop.
+    const hasPendingBank = (paysRes.data || []).some((p) =>
+      p.gateway === "cardpointe" && !p.voided_at && p.funding_state === "pending");
+    if (hasPendingBank && reconcileFiredRef.current !== clientId) {
+      reconcileFiredRef.current = clientId;
+      sb.functions.invoke("portal-payments", { body: { action: "reconcile" } }).then(({ data }) => {
+        const moved = data && !data.error && (
+          (Array.isArray(data.updated) && data.updated.length > 0) ||
+          (Array.isArray(data.resolved) && data.resolved.some((x) => x && x.resolved)));
+        if (moved) load();
+      }, () => {});
+    }
   }, [clientId]);
 
   // Refresh = re-read the tables. This used to also pull totals/statuses from GHL
@@ -1623,6 +1656,11 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
     if (sale) {
       // Already built and sitting on a lot — it never touches the build board, it just
       // needs a truck. Serial shown because that is how the yard refers to it.
+      // DELIVERED first: `onLoad` only counts an OPEN stop, so once the sale stop was marked
+      // delivered this row fell through to "Schedule delivery →" again — for a building
+      // standing in the buyer's yard. Marking that stop delivered writes 'delivered' onto
+      // this very design (portal-schedule writeBackDelivered), so the row already knows.
+      if (normStatus(r.d.status) === "delivered") return <span style={schedChipStyle("#F0FDF4", "#15803D")}>Delivered ✓</span>;
       if (sale.onLoad) return <span style={schedChipStyle("#EEF2FF", "#3D3672")}>On a load</span>;
       if (!deliverOn) return <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>#{sale.serial} · needs a load</span>;
       return schedLinkBtn("Schedule delivery →", `Building #${sale.serial} is on the lot — take it to the Delivery Schedule`,
@@ -1983,14 +2021,31 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, rel
   // verbally" banner painted straight over this error and the operator walked away from
   // an acknowledged, frozen CO with the order still at its old total and nothing saying so.
   const applyAckedTotal = async (co) => {
-    // The acknowledged total becomes the order's total; 'manual' also shields it from the
-    // GHL repricer (sync-design-status skips manual rows).
-    if (co.total_after_cents == null) return true;
-    const { error } = await sb.from("orders")
-      .update({ total_cents: co.total_after_cents, total_source: "manual", updated_at: new Date().toISOString() })
-      .eq("client_id", clientId).eq("short_code", shortCode);
-    if (error) { setMsg({ err: `Change recorded, but the order total didn't update: ${error.message}` }); return false; }
-    return true;
+    // THE SERVER WORKS OUT THE MONEY (portal-settings apply_change_order_money), with the one
+    // arithmetic customer-accept and attest_change_order use. This used to write
+    // `total_cents = co.total_after_cents` alone, which left pretax_subtotal_cents and
+    // tax_cents at the accepted figures and dropped every change-order fee — so the invoice
+    // (reconciled against the pre-tax column) billed the OLD amount with a "Change order /
+    // Order adjustment" pair that cancelled out, while the balance and the pay screen asked
+    // for the new one. Called even for a change with no new total: a fee is still owed.
+    const { data, error } = await sb.functions.invoke("portal-settings", {
+      body: { action: "apply_change_order_money", shortCode },
+    });
+    let m = (data && data.error) || null;
+    if (error && !m) m = await fnError(error);
+    if (!m) return true;
+    // A portal-settings that predates the action answers "Unrecognised action" — keep the old
+    // single-column write for that window rather than leave the order on its pre-change total.
+    if (/Unrecognised action/i.test(String(m))) {
+      if (co.total_after_cents == null) return true;
+      const { error: legacyErr } = await sb.from("orders")
+        .update({ total_cents: co.total_after_cents, total_source: "manual", updated_at: new Date().toISOString() })
+        .eq("client_id", clientId).eq("short_code", shortCode);
+      if (!legacyErr) return true;
+      m = legacyErr.message;
+    }
+    setMsg({ err: `Change recorded, but the order total didn't update: ${m}` });
+    return false;
   };
 
   const createCo = async () => {

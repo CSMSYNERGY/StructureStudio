@@ -4,6 +4,7 @@ import { checkAdminPassword } from "../_shared/adminGate.ts";
 import { checkAdminAuth } from "../_shared/adminAuth.ts";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
+import { linkOwnerRow, type LinkRole } from "../_shared/linkOwnerRow.ts";
 import { paidThroughOf } from "../_shared/billingPeriods.ts";
 import { pingAvalara } from "../_shared/salesTax.ts";
 import { finishLookup, insertLookup, PING_CLIENT_ID, pingResponse } from "../_shared/taxLookups.ts";
@@ -120,8 +121,25 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
   if (st.error) throw st.error;
   const sz = await sb.from("building_sizes").select("id, style_id, width_ft, length_ft, sort_order").eq("client_id", clientId);
   if (sz.error) throw sz.error;
+  // A cell resolves against every style's label OR key, hidden styles included — and nothing
+  // makes a label unique (create_style only uniquifies the key). So with a hidden "Barn" and a
+  // fresh "Barn", last-writer-wins sent a whole sheet of prices to whichever came back last,
+  // possibly the hidden one, while the live style kept quoting the old numbers and the banner
+  // reported them imported. A name more than one style answers to now resolves to nobody and
+  // its rows are skipped by name. (The portal's Structures upload refuses the same case before
+  // sending; both operator consoles reach this function with no such guard.)
   const styleByName = new Map<string, any>();
-  for (const s of st.data ?? []) { styleByName.set(String(s.label).toLowerCase(), s); styleByName.set(String(s.key).toLowerCase(), s); }
+  const claimedBy = new Map<string, Set<string>>();   // lowercased label/key -> style ids
+  for (const s of st.data ?? []) {
+    for (const tok of [s.label, s.key]) {
+      const t = String(tok ?? "").trim().toLowerCase();
+      if (!t) continue;
+      styleByName.set(t, s);
+      const ids = claimedBy.get(t) ?? new Set<string>();
+      ids.add(String(s.id));
+      claimedBy.set(t, ids);
+    }
+  }
   const sizeByDims = new Map<string, any>();   // `${style_id}|${w}|${l}` -> row
   const maxSort = new Map<string, number>();   // style_id -> highest sort_order
   for (const z of sz.data ?? []) {
@@ -156,6 +174,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     const styleName = String(row?.style ?? "").trim();
     const wv = num(row?.width), lv = num(row?.length);
     if (!styleName && wv.blank && lv.blank) continue;   // wholly blank line
+    if ((claimedBy.get(styleName.toLowerCase())?.size ?? 0) > 1) {
+      skipped.push(`${styleName}: more than one building style answers to this name (a hidden style counts) — rename one of them, then import again`);
+      continue;
+    }
     const style = styleByName.get(styleName.toLowerCase());
     if (!style) { skipped.push(`${styleName || "(blank)"}: unknown style`); continue; }
     if (wv.blank && lv.blank) { skipped.push(`${styleName}: missing width & length`); continue; }
@@ -164,7 +186,10 @@ async function importPricingRows(sb: any, clientId: string, rows: any[]) {
     }
     const w = wv.n, l = lv.n;
     const pr = num(row?.price);
-    if (!pr.blank && !Number.isFinite(pr.n)) { skipped.push(`${styleName} ${w}x${l}: invalid price "${row?.price}"`); continue; }
+    // Negative is refused with the unparseable: nothing in the product means a building priced
+    // below zero: submit-estimate would email it as a negative building line, while the
+    // designer's preview clamps the line to $0, so the customer saw one number and got another.
+    if (!pr.blank && (!Number.isFinite(pr.n) || pr.n < 0)) { skipped.push(`${styleName} ${w}x${l}: invalid price "${row?.price}"`); continue; }
     const price = pr.blank ? null : pr.n;
     const active = !inactiveWord(row?.active) && price != null;   // active intent AND priced
     const label = `${fmt(w)}x${fmt(l)}`;
@@ -397,14 +422,23 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Billing posture per tenant, so the console can show at a glance who is comped
         // and who is discounted. client_settings is service-role only — this function is
         // the only place it can be read from.
-        const { data: cs } = await sb.from("client_settings")
+        // ⚠️ All three reads below THROW on error rather than defaulting to empty. The console
+        // seeds editable state from this answer and writes it back whole: an unread
+        // client_settings showed every tenant as billable at 0%, so one Save on the Billing
+        // card (set_billing sends billingExempt every time) cleared a real exemption and locked
+        // that tenant out; an unread grant list showed nobody holding a comp, so the 3D toggle
+        // (set_feature_grants REPLACES the set) revoked every other grant the tenant had. A
+        // console that fails to load is recoverable; a confidently wrong one that saves is not.
+        const { data: cs, error: csErr } = await sb.from("client_settings")
           .select("client_id, billing_exempt, billing_exempt_until, discount_percent, discount_features");
+        if (csErr) throw csErr;
         const byId = new Map((cs ?? []).map((r: any) => [r.client_id, r]));
         // The billable feature list, so the console can offer a per-feature discount
         // picker without hardcoding a copy of the catalogue that would drift from
         // billing_plans. One entry per feature (monthly/annual share a feature).
-        const { data: planRows } = await sb.from("billing_plans")
+        const { data: planRows, error: planErr } = await sb.from("billing_plans")
           .select("feature, name, availability, required, operator_grantable").eq("active", true).order("sort_order", { ascending: false });
+        if (planErr) throw planErr;
         const seenFeature = new Set<string>();
         const features = (planRows ?? []).filter((p: any) => {
           if (!p.feature || seenFeature.has(p.feature)) return false;
@@ -413,8 +447,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         }).map((p: any) => ({ feature: p.feature, name: p.name, availability: p.availability, required: p.required, operatorGrantable: Boolean(p.operator_grantable) }));
         // Operator grants per tenant (migration 109) — the console's "Early access" card.
         // client_feature_grants is service-role only, so this function is the only reader.
-        const { data: grantRows } = await sb.from("client_feature_grants")
+        const { data: grantRows, error: grantErr } = await sb.from("client_feature_grants")
           .select("client_id, feature, expires_at");
+        if (grantErr) throw grantErr;
         const grantsById = new Map<string, any[]>();
         for (const g of (grantRows ?? []) as any[]) {
           const arr = grantsById.get(g.client_id) ?? [];
@@ -758,11 +793,15 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           const counts: Record<string, number> = {};
 
           // 1. building_styles → old id → new id (matched by stable per-client key)
-          const stSrc = await sb.from("building_styles").select("key, label, image_url, sort_order, active").eq("client_id", T);
+          // taxable (158) and show_image_on_estimate (037) ride along: both default TRUE, so leaving
+          // them out silently reversed a template's "not taxable" / "no photo on the estimate"
+          // on every cloned style — tax charged on a building line the template exempted.
+          const stSrc = await sb.from("building_styles").select("key, label, image_url, sort_order, active, taxable, show_image_on_estimate").eq("client_id", T);
           if (stSrc.error) throw new Error(`clone styles read: ${stSrc.error.message}`);
           if ((stSrc.data ?? []).length) {
             const r = await sb.from("building_styles").insert((stSrc.data ?? []).map((s: any) => ({
               client_id: Cc, key: s.key, label: s.label, image_url: s.image_url, sort_order: s.sort_order, active: s.active,
+              taxable: s.taxable !== false, show_image_on_estimate: s.show_image_on_estimate !== false,
             })));
             if (r.error) throw new Error(`clone styles: ${r.error.message}`);
           }
@@ -855,8 +894,13 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           counts.building_size_inclusions = incRows.length;
           if (incDropped) counts.building_size_inclusions_dropped = incDropped;
 
-          // 5. client_layout_items (no style FK)
-          const liSrc = await sb.from("client_layout_items").select("item_key, active, sort_order, label_override, width_override, height_override, short_label_override").eq("client_id", T);
+          // 5. client_layout_items (no style FK). The per-row flags are copied too — each column
+          // defaults to the permissive value, so dropping it changed what the clone SELLS:
+          // archived (075) brought a retired option back onto the palette, internal_only (082)
+          // put a rep-only option in front of the new builder's public shoppers, taxable (158)
+          // taxed an option the template exempted, and the shelf dimensions (171) fell back to
+          // the master defaults.
+          const liSrc = await sb.from("client_layout_items").select("item_key, active, sort_order, label_override, width_override, height_override, short_label_override, archived, internal_only, taxable, depth_in, height_off_floor_in").eq("client_id", T);
           if (liSrc.error) throw new Error(`clone items read: ${liSrc.error.message}`);
           if ((liSrc.data ?? []).length) {
             const r = await sb.from("client_layout_items").insert((liSrc.data ?? []).map((i: any) => ({ client_id: Cc, ...i })));
@@ -1293,7 +1337,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // is confusing, while a comp this writer refuses is self-explanatory.
         // on_demand_pricing joined 2026-08-28 with the Real-Time Pricing build — pay-only
         // from the start, so no comp can hand out a feature whose whole point is the upcharge.
-        const PAID_ONLY_FEATURES = new Set(["schedule_builds", "quickbooks_sync", "on_demand_pricing"]);
+        // crm joined portal-billing's and featureCheck's sets 2026-08-29 but never this one, so a
+        // CRM comp saved here read as granted while the reader refused to honour it.
+        const PAID_ONLY_FEATURES = new Set(["schedule_builds", "quickbooks_sync", "on_demand_pricing", "crm"]);
 
         const wanted = Array.isArray(p.grants) ? p.grants : [];
         if (wanted.length > 50) throw new Error("Too many grants in one request.");
@@ -1631,13 +1677,15 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // 3. map the user to this client with the chosen role. Refuse to SILENTLY re-home a
         //    login already linked to a different client (operator typo / isolation footgun);
         //    require an explicit reassign:true to move them.
-        const existingLink = await sb.from("client_users").select("client_id").eq("user_id", user.id).maybeSingle();
+        const existingLink = await sb.from("client_users").select("client_id, role").eq("user_id", user.id).maybeSingle();
         if (existingLink.error) throw existingLink.error;
         if (existingLink.data && existingLink.data.client_id && existingLink.data.client_id !== clientId && p.reassign !== true) {
           throw new Error(`"${email}" is already linked to builder "${existingLink.data.client_id}". Pass reassign:true to move them to "${clientId}".`);
         }
+        // Not just `role`: access resolves from title + overrides, which a role-only upsert left
+        // behind from the old builder or the old role — see _shared/linkOwnerRow.ts.
         const up = await sb.from("client_users").upsert(
-          { user_id: user.id, client_id: clientId, role }, { onConflict: "user_id" });
+          linkOwnerRow(existingLink.data, user.id, clientId, role as LinkRole), { onConflict: "user_id" });
         if (up.error) throw up.error;
 
         // 4. always hand back a one-time set-password link (works without SMTP)

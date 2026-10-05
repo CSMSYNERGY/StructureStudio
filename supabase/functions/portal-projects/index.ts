@@ -484,6 +484,23 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
     if (!clientId || internal) return null;
     return `${who} signs in as a member of the "${clientId}" account, so they cannot be given operator access — that would let one builder's staff open every other builder's account. Give them a separate CSM Synergy login first.`;
   };
+  // Who would read a note published on this submission? Returns a refusal sentence, or null.
+  //
+  // A report from another PRODUCT (app-feedback, migration 161) carries client_id NULL, and
+  // feedback_comments is readable only through `client_id = current_client_id()`, which NULL
+  // never satisfies — nor do those apps have any read path back. A "client-visible" note there
+  // reaches nobody, while the drawer tagged it VISIBLE TO CLIENT ✓ after a confirm promising
+  // "They will see it in My Requests". Refused, so an operator never believes a FramedUp or
+  // BuildBridge reporter was answered when they were not.
+  const noAudienceRefusal = async (submissionId: string): Promise<string | null> => {
+    const { data: sub, error } = await admin.from("feedback_submissions")
+      .select("client_id, source_app").eq("id", submissionId).maybeSingle();
+    if (error) throw error;
+    if (sub && sub.client_id) return null;
+    const app = sub ? (APP_LABELS_ORIGIN[String(sub.source_app)] || String(sub.source_app || "")) : "";
+    return `${app ? `This was reported in ${app}, which` : "This submission"} has no client portal to publish to — keep the note internal.`;
+  };
+
   // deno-lint-ignore no-explicit-any
   const getItem = async (id: string): Promise<any> => {
     const { data, error } = await admin.from("pm_items").select("*").eq("id", str(id, 40)).maybeSingle();
@@ -1108,6 +1125,19 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const item = await getItem(payload.id);
         const beforeId = str(payload.beforeId, 40);  // the row the item lands ABOVE
         const groupId = str(payload.groupId, 40) || item.group_id;
+        // ⚠️ NEVER ACROSS BOARDS — the rule move_items enforces with its board_id filter, which
+        // this action never had. On an overlay board every row is draggable, so dropping a card
+        // pulled in from Bugs onto one of the working board's own rows sent THAT row's group,
+        // and the Bugs card was rewritten into another board's group: still board_id = Bugs, so
+        // on the board its reporter's team works it fell out of its group into the unnamed "—"
+        // bucket. The reverse drop sent the synthetic "overlay:<slug>" group id and died as a
+        // raw uuid-cast 500. Either way the answer is a refusal, before anything is written.
+        if (groupId !== item.group_id) {
+          const { data: dest } = await admin.from("pm_groups").select("id, board_id").eq("id", groupId).maybeSingle();
+          if (!dest || dest.board_id !== item.board_id) {
+            return json({ error: "That row lives on another board — reorder it on its own board." }, 400);
+          }
+        }
         const { data: rows, error: rErr } = await admin.from("pm_items")
           .select("id, position").eq("group_id", groupId).is("archived_at", null).order("position");
         if (rErr) throw rErr;
@@ -1588,9 +1618,25 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
 
       // Who is set up, and who is stuck — every tenant with a list, plus the ones with none.
       case "setup_overview": {
-        const { data: rows, error } = await admin.from("tenant_setup_items")
-          .select("client_id, completed_at, template_item_id");
-        if (error) throw error;
+        // EVERY builder's every step, so PAGED. PostgREST answers at most 1000 rows a request on
+        // this project and truncates silently, and this read is the whole denominator: at ~20
+        // steps a builder, about the 50th builder with a list takes it past 1000, and from then
+        // an arbitrary slice of rows (the read was unordered) simply vanished — builders shown
+        // with too few steps, the wrong done count, or "No setup list" with an Assign button
+        // that then 409s.
+        // Ordered by id so range paging neither repeats nor skips; the offset advances by what
+        // came back and stops on an EMPTY page, so a max-rows below 1000 cannot end it early.
+        const rows: Array<{ client_id: string; completed_at: string | null; template_item_id: string | null }> = [];
+        for (let offset = 0; offset < 200_000;) {
+          const { data: page, error } = await admin.from("tenant_setup_items")
+            .select("id, client_id, completed_at, template_item_id")
+            .order("id", { ascending: true })
+            .range(offset, offset + 999);
+          if (error) throw error;
+          if (!page || !page.length) break;
+          rows.push(...page);
+          offset += page.length;
+        }
         const { data: clients, error: cErr } = await admin.from("client_configs").select("client_id");
         if (cErr) throw cErr;
         // Steps we have not finished building are not counted, so this card reads the same
@@ -1757,6 +1803,10 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (clientVisible && !item.feedback_submission_id) {
           return json({ error: "This item isn't linked to a client submission — there is nobody to publish to." }, 400);
         }
+        if (clientVisible) {
+          const refusal = await noAudienceRefusal(item.feedback_submission_id);
+          if (refusal) return json({ error: refusal }, 400);
+        }
         let feedbackCommentId: string | null = null;
         if (clientVisible) {
           const { data: comment, error } = await admin.from("feedback_comments").insert({
@@ -1788,6 +1838,8 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (!item.feedback_submission_id) {
           return json({ error: "This item isn't linked to a client submission — there is nobody to publish to." }, 400);
         }
+        const pubRefusal = await noAudienceRefusal(item.feedback_submission_id);
+        if (pubRefusal) return json({ error: pubRefusal }, 400);
         const { data: comment, error: cErr } = await admin.from("feedback_comments").insert({
           submission_id: item.feedback_submission_id, monday_update_id: null,
           author_name: "CSM Synergy", body: u.body,
