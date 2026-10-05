@@ -144,11 +144,36 @@ Deno.test("the Advanced argument changes no other tab", () => {
   }
 });
 
-Deno.test("ssAdvancedOn reads the internal-account signal and nothing else", () => {
-  // null is "not answered yet" and must read OFF, or the nav item flashes for everyone.
-  for (const e of [null, undefined, {}, { reason: "exempt" }, { reason: "never_paid" }, { reason: "active", granted: ["view_3d"] }]) {
+Deno.test("ssAdvancedOn reads the internal-account signal and the builder's own switch, nothing else", () => {
+  // null is "not answered yet" and must read OFF, or the nav item flashes for everyone. Neither 3D
+  // (granted or paid) nor exempt nor the features blanket opens it: only the two signals do.
+  for (const e of [
+    null, undefined, {}, { reason: "exempt" }, { reason: "never_paid" }, { reason: "active", granted: ["view_3d"] },
+    { reason: "active", paid: ["view_3d"], features: { view_3d: true } },
+    { reason: "exempt", exempt: true, granted: ["view_3d"], features: { view_3d: true } },
+  ]) {
     assertEquals(ssAdvancedOn(e), false, JSON.stringify(e));
   }
   assertEquals(ssAdvancedOn({ reason: "internal" }), true);
   assertEquals(ssAdvancedOn({ reason: "internal", exempt: true, state: "exempt" }), true);
+  // The builder's switch (2026-10-05, client_settings.advanced_mode via portal-billing).
+  assertEquals(ssAdvancedOn({ reason: "active", advancedMode: true }), true, "a builder who turned it on");
+  assertEquals(ssAdvancedOn({ reason: "exempt", exempt: true, advancedMode: true }), true);
+  assertEquals(ssAdvancedOn({ reason: "active", advancedMode: false }), false, "turned off (or never on)");
+  // Our own account stays on whatever its column says.
+  assertEquals(ssAdvancedOn({ reason: "internal", advancedMode: false }), true, "internal stays on with the column off");
+  // Strictly true: nothing that merely looks like yes.
+  for (const v of ["true", 1, "on", [true], { on: true }]) {
+    assertEquals(ssAdvancedOn({ reason: "active", advancedMode: v }), false, `advancedMode ${JSON.stringify(v)}`);
+  }
+});
+
+Deno.test("a builder with Advanced mode on: /portal/advanced resolves for them like any page they may see", () => {
+  // The shell passes ssAdvancedOn(...) && advancedMayRun as the 7th argument; with it true the route
+  // is theirs, with it false it lands on the Designer — owners and operators included.
+  const on = ssAdvancedOn({ reason: "active", advancedMode: true });
+  assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, on), "advanced");
+  const off = ssAdvancedOn({ reason: "active", advancedMode: false });
+  assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, off), "designer");
+  assertEquals(ssClampTab("advanced", true, true, OWNER_MAP, false, true, off), "designer");
 });

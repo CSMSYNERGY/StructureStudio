@@ -465,7 +465,9 @@ function BillingGate({ reason, isAdmin }) {
         </div>
       </div>
       {isAdmin
-        ? <BillingView />
+        /* `paywall`: a checkout that only partly went through keeps its message on screen until
+           Continue, because the entitlement re-read that lifts this gate unmounts the view. */
+        ? <BillingView paywall />
         : (
           <div style={S.card}>
             <div style={S.h2}>Ask your account owner to activate</div>
@@ -2002,8 +2004,11 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
         clientId: c.client_id,
         grants: next.map((g) => ({ feature: g.feature, expiresAt: g.expiresAt || null })),
       });
+      // Since 2026-10-05 (migration 270) paying for 3D switches it on by itself, so this button is
+      // only the HAND switch. Taking it off leaves a paying builder's 3D on, and the message must
+      // not claim otherwise: this is the button Carolyn would use to take the old hand switches off.
       const okMsg = on
-        ? `3D turned OFF for ${c.company_name || c.client_id}. They see the “coming soon” teaser again.`
+        ? `3D hand switch turned OFF for ${c.company_name || c.client_id}. If they pay for 3D it stays on through their subscription; if not, they lose it.`
         : `3D turned ON for ${c.company_name || c.client_id}. This is a comp — no subscription, no charge.`;
       // The write LANDED; a refresh hiccup after it must not read as "the save failed" --
       // that misreport is how an operator clicks again and undoes their own change.
@@ -2120,8 +2125,8 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
               return (
                 <button type="button" onClick={() => toggle3D(c)} disabled={saving}
                   title={on
-                    ? "3D is ON for this builder — click to remove access"
-                    : "Switch 3D on for this builder. A comp: no subscription, no charge."}
+                    ? "3D is switched ON by hand for this builder. Click to take the hand switch off (3D they pay for stays on)."
+                    : "Switch 3D on for this builder by hand. A comp: no subscription, no charge. A builder who pays for 3D has it already."}
                   style={{
                     ...S.btn(on ? "#75E6DA" : "#FFFFFF", on ? "#0F4C46" : "#64748B"),
                     border: "1px solid " + (on ? "#4FD1C5" : "#CBD5E1"),
@@ -2598,7 +2603,7 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
       {grantable.length > 0 && (
         <div style={S.card}>
           <CardHead title="Early access"
-            desc="Switch a feature on for this builder before it goes on sale. This is a comp, not a purchase: it does not create a subscription and does not charge anything. Unchecking a box revokes it." />
+            desc="Switch a feature on for this builder by hand. This is a comp, not a purchase: it does not create a subscription and does not charge anything. Unchecking a box takes the comp away; a feature they pay for stays on through their subscription." />
           <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", paddingLeft: 2 }}>
             {grantable.map((f) => (
               <label key={f.feature} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#334155", cursor: "pointer" }}>

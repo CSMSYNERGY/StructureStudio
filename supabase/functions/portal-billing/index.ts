@@ -299,6 +299,9 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // keeps working (with a warning) instead of being locked out mid-week. A
   // CANCELLATION is deliberate and locks immediately.
   const GRACE_DAYS = 7;
+  // advanced_mode (migration 270) is NOT in this select: it is read on its own below, fail-soft,
+  // because it gates and prices nothing, and this read is fatal. Named here, a database without
+  // the column would answer 42703 and every tenant's billing call would be a 500.
   const { data: csRow, error: csErr } = await admin
     .from("client_settings").select("billing_exempt, billing_exempt_until, discount_percent, discount_features, internal_account")
     .eq("client_id", clientId).maybeSingle();
@@ -329,6 +332,13 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // DELIBERATELY SEPARATE FROM `exempt`. Widening billing_exempt to cover pay-only would
   // have unlocked every paid feature for every grandfathered builder on the platform.
   const internal = Boolean(csRow?.internal_account);
+  // The builder's Advanced mode switch (migration 270, PART 5), read apart from the row above and
+  // FAIL-SOFT: it opens a page, it prices and gates nothing, so a failed read (a deploy ahead of
+  // 270, or 270 rolled back) is "Advanced off" with a warning, never a refused entitlement. Our
+  // own account has the page regardless, so it skips the read.
+  const { data: advRow, error: advErr } = internal ? { data: null, error: null }
+    : await admin.from("client_settings").select("advanced_mode").eq("client_id", clientId).maybeSingle();
+  if (advErr) console.warn("advanced_mode read failed; treating Advanced as off:", advErr.message);
   // A DATED free period (migration 059) — an existing customer moving from free to paid gets
   // a warned window instead of a wall. Unlike billing_exempt this is visible (countdown
   // banner) and self-expiring, and it is deliberately checked AFTER the normal entitlement
@@ -636,9 +646,9 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // non-grantable never shows up as an entitlement the tenant supposedly holds.
     // A non-billable or internal account is ALSO shown its grantable features as comps.
     // `features` above already reads true for them, but the browser resolves 3D off THIS
-    // array (12-shell.jsx view3dUnlocked), so a comped account absent here would get full
-    // access to everything except the one tab it is most often comped for. Still filtered
-    // through `grantable`, so this can never claim a purchase, and skipped where a real
+    // array and `paid` below (01-core.jsx ssView3dOn), so a comped account absent here would
+    // get full access to everything except the one tab it is most often comped for. Still
+    // filtered through `grantable`, so this can never claim a purchase, and skipped where a real
     // subscription already confers the feature — a paying tenant must never be told their
     // purchase was a comp.
     granted: [...new Set([
@@ -647,6 +657,27 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
         ? [...grantable].filter((f) => !featureState.get(f)?.usable)
         : []),
     ])],
+    // Which features are ON BY PURCHASE right now: every feature whose featureState is usable
+    // (active; past_due inside the grace; cancelled but inside the period already paid for),
+    // with a Suite subscription already expanded into what it includes. 2026-10-05, migration
+    // 270: a builder who bought 3D saw Billing say "Active" while the designer stayed locked,
+    // because the browser opened 3D off `granted` alone and a purchase never lands there. The
+    // shell now opens 3D on granted OR paid (ssView3dOn), and get_config's view3d asks the same
+    // question of the same tables for the public designer (ss_view3d_paid, which mirrors
+    // featureState rule for rule — change the two together).
+    //
+    // ADDITIVE. `granted` and `features` are untouched, so a portal that predates this field (the
+    // production portal until it is promoted) reads exactly what it read before. No blanket: an
+    // internal or non-billable account lists only what it actually pays for here, which is why
+    // the browser can read this without the reasoning that keeps it off `features`.
+    paid: [...featureState].filter(([, st]) => st.usable).map(([f]) => f).sort(),
+    // The Advanced page (Carolyn 2026-09-28): a builder's own switch in Settings → Designer
+    // (client_settings.advanced_mode, migration 270; portal-settings save_advanced_mode), and always
+    // on for our own account. 01-core.jsx ssAdvancedOn is the one reader. Not a feature, not a
+    // grant, nothing paid: it says whether the page is offered, and the page still needs 3D. Sent to
+    // everyone on the account, like the rest of the entitlement; it names nothing commercial.
+    // Strictly `=== true`: the column is NOT NULL, a missing row is off, and so is a failed read.
+    advancedMode: internal || (!advErr && advRow?.advanced_mode === true),
   };
 
   if (action === "status") {
