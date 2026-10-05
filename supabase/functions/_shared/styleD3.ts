@@ -173,11 +173,18 @@ const D3_LEANTO_SIDES = ["left", "right"] as const;
 // every tenant's column the first time anyone opened and saved the calibration panel --
 // the same reasoning `eave` below is built on.
 const D3_DORMER_TYPES = ["gable", "transom"] as const;
-// Which gable end a recessed porch opens at. ABSENT means "front", like dormerType's absent
-// "gable": the renderer tests `!== "back"`, so a row that predates this field keeps its exact
-// render and styleD3.test.ts's deep-equal on `roof` keeps passing. Emitting a default here
-// would write it into every tenant's column the first time anyone saved the panel.
-const D3_PORCH_ENDS = ["front", "back"] as const;
+// Which wall the porch is on. ABSENT means "front", like dormerType's absent "gable": the renderer
+// tests `!== "back"`, so a row that predates this field keeps its exact render and styleD3.test.ts's
+// deep-equal on `roof` keeps passing. Emitting a default here would write it into every tenant's
+// column the first time anyone saved the panel.
+// "left" and "right" (2026-10-05, the 09-28 call: "we may actually also need to be able to have it on
+// the sides") are the west and east walls in the new frame (roof.front or roof.highSide set), as seen
+// standing at the front, which stays the front. Outside the frame the renderers read them as "front",
+// production's `!== "back"` included, so a side porch on a style with no front draws where it always
+// would have. Neither prompt offers them: the generator and the check still say front or back, so
+// parseModelSpec drops a model reply's side wall (it reads as the front, as it always did) and
+// applySelfCheck never moves a porch onto or off a side wall. Only a builder's save stores one.
+const D3_PORCH_ENDS = ["front", "back", "left", "right"] as const;
 // ── THE FRONT, and the frame every left/right/front/back is read in (2026-09-24) ─────────────
 // FRONT is the wall you walk up to: the one carrying the porch, or the main door when there is
 // no porch. The builder's size "WxL" is W = that wall's length, L = the depth front to back.
@@ -499,9 +506,10 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   if ((D3_DORMER_TYPES as readonly string[]).includes(String(rawRoof.dormerType))) {
     roof.dormerType = String(rawRoof.dormerType);
   }
-  // Which gable end the porch opens at. Stored whether or not porchDepthFt is currently above
+  // Which wall the porch is on. Stored whether or not porchDepthFt is currently above
   // zero, exactly like leanToSide and dormerType, so turning the depth back up remembers the
-  // end. Out of the numeric loop for the same reason: clamped() destructures CLAMPS[key] and
+  // end. A side wall is stored with or without the new frame, like the others: a front set later
+  // puts the porch back on the side wall it was given. Out of the numeric loop for the same reason: clamped() destructures CLAMPS[key] and
   // would throw on a key with no entry.
   if ((D3_PORCH_ENDS as readonly string[]).includes(String(rawRoof.porchEnd))) {
     roof.porchEnd = String(rawRoof.porchEnd);
@@ -639,9 +647,12 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // level ridge to keep) whose ridge runs front to back, so the back wall is a gable wall. On an
   // "eave" front both keys go; with no front they stay, because the old frame runs a portrait
   // footprint's ridge front to back and only the size can say which (the renderer asks it). Never
-  // beside wings or a lean-to, which run the length of an eave wall at ONE eave height, and never
-  // with a porch at the back, which the rear section would stand over. Dropped rather than stored
-  // for later, the porch attach height's rule: an inert key is a trap for the next edit.
+  // beside wings or a lean-to, which run the length of an eave wall at ONE eave height, never with a
+  // porch at the back, which the rear section would stand over, and never with a porch on a SIDE wall
+  // (2026-10-05), one of the eave walls the step's wedge runs along. A side wall is one only in the new
+  // frame (a front set): with no front, left or right is the front, and the step stays (d3RoofStep).
+  // Dropped rather than stored for later, the porch attach height's rule: an inert key is a trap for
+  // the next edit.
   // THE LEAN-TO LIST (roof.leanTos, 2026-09-29): a non-empty one replaces the single lean-to, whose keys
   // go, and it is written LAST, after every other roof key, so no stored spec's key order moves.
   const leanTos = sanitizeLeanTos(rawRoof.leanTos);
@@ -654,7 +665,8 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   const roofOn = (k: string) => (num(roof[k]) ?? 0) > 0.5;
   if (stepAt !== null && stepAt > 0.5 && stepRise !== null && Math.abs(stepRise) >= 0.01
       && type === "gable" && roof.front !== "eave" && !roofOn("wingWidthFt") && !roofOn("leanToWidthFt") && !leanTos && !wingList
-      && !(roof.porchEnd === "back" && (roofOn("porchDepthFt") || roofOn("porchOutFt")))) {
+      && !((roof.porchEnd === "back" || (roof.front != null && (roof.porchEnd === "left" || roof.porchEnd === "right")))
+        && (roofOn("porchDepthFt") || roofOn("porchOutFt")))) {
     roof.rearStepFt = Math.max(4, stepAt);
   } else {
     delete roof.rearStepFt;
@@ -1949,6 +1961,13 @@ export function parseModelSpec(text: string, dims?: KnownDims | null, measure = 
   // invented list cannot refuse a roof step the model drew beside it.
   const rawRoof = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).roof : null;
   if (rawRoof && typeof rawRoof === "object") delete (rawRoof as Record<string, unknown>).wingList;
+  // A porch on a SIDE wall (roof.porchEnd "left" or "right", 2026-10-05) is the Advanced page's and the
+  // calibration panel's alone: no prompt offers one, and the v2 one says the porch is on the front. A model
+  // reply that names a side wall gets the front, exactly as it did before the sanitiser kept the words, so
+  // a draft never puts a porch on a wall nobody asked about, and the check can still correct the frame.
+  if (rawRoof && typeof rawRoof === "object" && ["left", "right"].includes(String((rawRoof as Record<string, unknown>).porchEnd))) {
+    delete (rawRoof as Record<string, unknown>).porchEnd;
+  }
   const clean = sanitizeD3Spec(applyKnownDims(foldOverhangInches(parsed), dims));
   if (!measure || !clean.ok) return clean;
   return { ok: true, d3: applyMeasuredPitches(clean.d3, text, dims?.lengthFt).d3 };
@@ -3105,7 +3124,9 @@ export function roofStepAtSize(roof: Record<string, unknown> | null | undefined,
   const front = cfg.front === "gable" || cfg.front === "eave" ? cfg.front : null;
   if (front === "eave" || (num(cfg.wingWidthFt) ?? 0) > 0.5 || (num(cfg.leanToWidthFt) ?? 0) > 0.5 || sanitizeLeanTos(cfg.leanTos) || sanitizeWingList(cfg.wingList)) return null;
   const porchOut = Math.min(12, num(cfg.porchOutFt) ?? 0) > 0.5;
-  if (cfg.porchEnd === "back" && (porchOut || (num(cfg.porchDepthFt) ?? 0) > 0.5)) return null;
+  // A porch at the back, or on a side wall (left or right: the new frame only, a gable front here).
+  const sidePorch = front === "gable" && (cfg.porchEnd === "left" || cfg.porchEnd === "right");
+  if ((cfg.porchEnd === "back" || sidePorch) && (porchOut || (num(cfg.porchDepthFt) ?? 0) > 0.5)) return null;
   // d3RoofAxes: a gable front runs the ridge front to back; without a front, a portrait footprint does.
   if (!(front === "gable" || lengthFt >= widthFt)) {
     return { drawn: null, why: "on this footprint its ridge runs from side to side, so the back wall is not a gable end" };
@@ -3879,6 +3900,23 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   for (const field of [...wanted.keys()]) {
     if (field !== "roof.type") continue;
     if ((D3_ROOF_TYPES as readonly string[]).includes(String(wanted.get(field)))) continue;
+    dropped.push(field);
+    wanted.delete(field);
+  }
+  // NO CHECK MOVES A PORCH ONTO OR OFF A SIDE WALL (2026-10-05). Neither check prompt knows the side
+  // walls: the v2 one says the porch defines the front and that roof.porchEnd's only correction is to
+  // "front". A correction that would MOVE a porch onto a side wall is dropped: no prompt offers one, and
+  // before the sanitiser kept the words, that is where it went. Both modes; prompts untouched.
+  // The other half is a fence, not a feature: the server's check judges the row's draft, which is the
+  // model's (parseModelSpec drops a model's side wall), so it never meets a side porch today. Should a
+  // draft ever carry one, with the porch ON, a render with it on the left wall would read to the v2 check
+  // as a building facing the wrong way, and roof.porchEnd, roof.front and roof.highSide are dropped
+  // rather than let it swing the porch back to the front. A stray side word with no porch blocks nothing.
+  const sideEnd = (v: unknown) => v === "left" || v === "right";
+  const draftRoof = (base.d3 as { roof?: { porchEnd?: unknown; porchOutFt?: unknown; porchDepthFt?: unknown } }).roof;
+  const draftSide = sideEnd(draftRoof?.porchEnd) && ((num(draftRoof?.porchOutFt) ?? 0) > 0.5 || (num(draftRoof?.porchDepthFt) ?? 0) > 0.5);
+  for (const field of draftSide ? ["roof.porchEnd", "roof.front", "roof.highSide"] : ["roof.porchEnd"]) {
+    if (!wanted.has(field) || (!draftSide && !sideEnd(wanted.get(field)))) continue;
     dropped.push(field);
     wanted.delete(field);
   }

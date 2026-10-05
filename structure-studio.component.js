@@ -1212,7 +1212,7 @@ function ssGableEndWalls(roofCfg, bldgW, bldgH) {
   return d3RoofAxes(roofCfg, bldgW, bldgH).uAxisIsX ? ["north", "south"] : ["west", "east"];
 }
 // The gable end that carries the porch's king-post truss, or null. Mirrors buildShed3DModel's
-// porchWall + porchTrussOn exactly (depth clamp, "front" = south/west, gable only): the truss's
+// porchWall + porchTrussOn exactly (d3PorchWall, the depth clamp, gable only): the truss's
 // brace feet stand on the header, and a gable vent on that end has to sill above them. A
 // projecting porch on the style switches the recessed porch off, and its truss with it.
 function ssPorchTrussWall(roofCfg, bldgW, bldgH) {
@@ -1222,19 +1222,21 @@ function ssPorchTrussWall(roofCfg, bldgW, bldgH) {
   // Wings (d3Massing) switch the recessed porch off in the renderer, and its truss with it.
   if (d3WingsOn(d3Massing(cfg, bldgW, bldgH, D3.WALL_H))) return null;
   const ax = d3RoofAxes(cfg, bldgW, bldgH);
-  const depth = Math.max(0, Math.min(Number(cfg.porchDepthFt) || 0, (ax.uAxisIsX ? bldgH : bldgW) - 4));
+  // THE NEW FRAME puts the porch on whichever wall porchEnd names, gable end or not (d3PorchWall). The
+  // truss stands in a gable, so a porch on an EAVE wall has none.
+  const wall = d3PorchWall(cfg, bldgW, bldgH);
+  const ns = wall === "north" || wall === "south";
+  if (ax.uAxisIsX !== ns) return null;
+  const depth = Math.max(0, Math.min(Number(cfg.porchDepthFt) || 0, (ns ? bldgH : bldgW) - 4));
   if (!(depth > 0.5)) return null;
-  const front = (cfg.porchEnd || "front") !== "back";
-  // THE NEW FRAME: the porch is on the FRONT (south) or back (north) wall whatever that wall is.
-  // The truss stands in a gable, so on a building whose front is an EAVE wall there is none.
-  if (d3NewFrame(cfg)) return ax.uAxisIsX ? (front ? "south" : "north") : null;
-  return ax.uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
+  return wall;
 }
 // The PROJECTING porch (roof.porchOutFt, 2026-09-17), or null: a deck, posts and a low roof of its
 // own standing IN FRONT of one gable end, where the recessed porch is cut into it. D is how far the
 // posts' outer faces stand out past the wall's footprint line, clamped to 12 like the sanitizer and
-// on above 0.5 ft. The end follows the recessed porch's rule exactly — portrait gable or gambrel:
-// front = south; landscape or shed roof: front = west — so porchEnd names the same end either way.
+// on above 0.5 ft. The wall is the recessed porch's exactly (d3PorchWall) — portrait gable or gambrel:
+// front = south; landscape or shed roof: front = west; the new frame: the wall porchEnd names, a side
+// wall too — so porchEnd names the same wall either way.
 //
 // ⛔ ONE PORCH AT A TIME. When this returns a porch the recessed one is off everywhere:
 // buildShed3DModel's porchDepth and ssPorchTrussWall both ask it. The sanitizer deletes
@@ -1243,11 +1245,10 @@ function d3ProjectingPorch(roofCfg, bldgW, bldgH) {
   const cfg = roofCfg || {};
   const D = Math.max(0, Math.min(12, Number(cfg.porchOutFt) || 0));
   if (!(D > 0.5)) return null;
-  const front = (cfg.porchEnd || "front") !== "back";
-  // THE NEW FRAME (d3NewFrame): "front" is the SOUTH wall and "back" the north, whether that wall
-  // is a gable end or an eave wall; d3PorchSpan says which it is. Outside it, today's rule.
-  const wall = d3NewFrame(cfg) ? (front ? "south" : "north")
-    : d3RoofAxes(cfg, bldgW, bldgH).uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
+  // THE NEW FRAME (d3NewFrame): "front" is the SOUTH wall, "back" the north, "left" and "right" the west
+  // and east, whether that wall is a gable end or an eave wall; d3PorchSpan says which it is. Outside
+  // it, today's rule (d3PorchWall).
+  const wall = d3PorchWall(cfg, bldgW, bldgH);
   // END WINGS (roof.wingList): no projecting porch on an end wing's end, nor on an eave wall beside one.
   if (cfg.wingList && d3WingListBlocksPorch(cfg, bldgW, bldgH, wall)) return null;
   return { D, wall };
@@ -4599,6 +4600,36 @@ function d3ShedHighWall(roofCfg, wFt, lFt) {
   const ax = d3RoofAxes(roofCfg, wFt, lFt);
   return ax.uAxisIsX ? (ax.tallNeg ? "west" : "east") : (ax.tallNeg ? "north" : "south");
 }
+// ── WHICH WALL THE PORCH IS ON (roof.porchEnd; the side walls, 2026-10-05) ─────────────────────────
+// The 09-28 call @5:13, on a single slant's porch end: "your front and back is right, but we may actually
+// also need to be able to have it on the sides", and the door wall stays the front ("this is considered
+// the front of this building"). So in the new frame porchEnd also takes "left" and "right", the west and
+// east walls as seen standing in front, and the front does not move. Outside the frame there is no front
+// to stand at, so they read as "front", which is what the production renderer's `!== "back"` draws too:
+// a side porch saved on a style with no front stays on the front end until a front is set.
+// ONE answer, read by everything that places a porch (the projecting and the recessed porch, the truss,
+// the roof step, the lean-to readout, the panels), so a porch can never be on one wall in the 3D and on
+// another in a readout. Front, back and absent come out exactly as they always did.
+//   d3PorchEnd     the end as drawn: "front" | "back" | "left" | "right"
+//   d3PorchWall    its compass wall
+//   d3PorchOnEave  that wall is an EAVE wall (the new frame only): the porch runs along the ridge there,
+//                  where on a gable end it runs across the profile
+function d3PorchEnd(roofCfg) {
+  const v = roofCfg && roofCfg.porchEnd;
+  if (v === "back") return "back";
+  return (v === "left" || v === "right") && d3NewFrame(roofCfg) ? v : "front";
+}
+function d3PorchWall(roofCfg, wFt, lFt) {
+  const end = d3PorchEnd(roofCfg);
+  if (d3NewFrame(roofCfg)) return end === "back" ? "north" : end === "left" ? "west" : end === "right" ? "east" : "south";
+  const front = end !== "back";
+  return d3RoofAxes(roofCfg, wFt, lFt).uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
+}
+function d3PorchOnEave(roofCfg, wFt, lFt) {
+  if (!d3NewFrame(roofCfg)) return false;
+  const w = d3PorchWall(roofCfg, wFt, lFt);
+  return d3RoofAxes(roofCfg, wFt, lFt).uAxisIsX ? (w === "west" || w === "east") : (w === "south" || w === "north");
+}
 
 // The roof's cross-section: a polyline of [u, y] points running eave -> ridge -> eave,
 // plus the slope segments that get roof slabs.
@@ -5477,9 +5508,9 @@ function d3RecessedLostWords(roofCfg, W, L) {
   const m = d3WingListOn(roofCfg) ? d3Massing(roofCfg, W, L, D3.WALL_H) : null;
   if (!(m && m.list && m.ends.length)) return `${lead} Use a projecting porch in front of the middle section.`;
   const wallWord = roofCfg.front != null || roofCfg.highSide != null ? "wall" : "gable end";
-  const ux = d3RoofAxes(roofCfg, W, L).uAxisIsX;
-  const wallOf = (pe) => (d3NewFrame(roofCfg) || ux ? (pe === "back" ? "north" : "south") : (pe === "back" ? "east" : "west"));
-  const ok = ["front", "back"].filter((pe) => !d3WingListBlocksPorch(roofCfg, W, L, wallOf(pe)));
+  // A side wall too in the new frame (d3PorchWall, 2026-10-05): with the front a long side, a gable end.
+  const ends = d3NewFrame(roofCfg) ? ["front", "back", "left", "right"] : ["front", "back"];
+  const ok = ends.filter((pe) => !d3WingListBlocksPorch(roofCfg, W, L, d3PorchWall({ ...roofCfg, porchEnd: pe }, W, L)));
   return ok.length === 1 ? `${lead} Use a projecting porch on the ${ok[0]} ${wallWord}, the end with no end wing.`
     : ok.length ? `${lead} Use a projecting porch.`
       : `${lead} A projecting porch is not drawn either while the end wings are on.`;
@@ -5967,7 +5998,8 @@ function d3PorchJoins(roofCfg, W, L, H, gs, cj) {
 //   * both keys, a step over half a foot, and a rise of at least 0.01 ft either way
 //   * no wings and no lean-to: both run the length of an eave wall at one eave height, and the
 //     sanitiser refuses the step beside them for that reason
-//   * no porch at the BACK, where the rear section would stand over its opening
+//   * no porch at the BACK, where the rear section would stand over its opening, and none on a SIDE
+//     wall (d3PorchWall, 2026-10-05), an eave wall the step's wedge and the rear eave run along
 // The joint is held to leave at least 4 ft of building each side of it (4 ft of enclosed room in
 // front of it where a recessed porch takes the front), and the rise to -1.5..1.5 ft and to what
 // leaves the rear roof a pitch of at least 0.02.
@@ -5983,7 +6015,7 @@ function d3RoofStep(roofCfg, W, L, H) {
   const ax = d3RoofAxes(cfg, W, L);
   if (!ax.uAxisIsX) return null;
   const porchOut = d3ProjectingPorch(cfg, W, L);
-  if ((cfg.porchEnd || "front") === "back" && (porchOut || Number(cfg.porchDepthFt) > 0.5)) return null;
+  if (d3PorchWall(cfg, W, L) !== "south" && (porchOut || Number(cfg.porchDepthFt) > 0.5)) return null;
   // A recessed porch at the front, clamped the way buildShed3DModel clamps it.
   const porchIn = porchOut ? 0 : Math.max(0, Math.min(Number(cfg.porchDepthFt) || 0, ax.L - 4));
   const room = ax.L - (porchIn > 0.5 ? porchIn : 0) - 4;
@@ -6987,20 +7019,20 @@ function d3PorchStepsGeom(g, D, where, gradeFt, stepCount) {
 // own rule, restated pure (2026-10-03) so the panel's readout and the ground under its steps read the
 // porch that is built. Off beside a projecting porch (which wins), with wings (d3WingsOn: its header
 // would stand under a cap no longer at the wall's top), and at or under 0.5 ft once its depth is held
-// to leave 4 ft of building behind it. Its wall is the front (south) or back (north) one in the new
-// frame and on a portrait gable or gambrel, the west or east end on an old-frame landscape footprint;
-// onEave says the new frame put it in an EAVE wall, where its posts stand along the eave line.
+// to leave 4 ft of building behind it. Its wall is d3PorchWall's: the one porchEnd names in the new
+// frame (a side wall too), the south or north end on a portrait gable or gambrel, the west or east end
+// on an old-frame landscape footprint; onEave says the new frame put it in an EAVE wall, where its
+// posts stand along the eave line.
 //   { wall, depth, onEave }
 function d3RecessedPorch(roofCfg, W, L, H) {
   const cfg = roofCfg || {};
   if (d3ProjectingPorch(cfg, W, L)) return null;
-  const ax = d3RoofAxes(cfg, W, L);
-  const frontBack = d3NewFrame(cfg) || ax.uAxisIsX;
-  const depth = Math.max(0, Math.min(Number(cfg.porchDepthFt) || 0, (frontBack ? L : W) - 4));
+  const wall = d3PorchWall(cfg, W, L);
+  // The run it eats into: the depth behind a south or north wall, the width behind a west or east one.
+  const depth = Math.max(0, Math.min(Number(cfg.porchDepthFt) || 0, (wall === "south" || wall === "north" ? L : W) - 4));
   if (!(depth > 0.5)) return null;
   if (d3WingsOn(d3Massing(cfg, W, L, H || D3.WALL_H))) return null;
-  const front = (cfg.porchEnd || "front") !== "back";
-  return { wall: frontBack ? (front ? "south" : "north") : (front ? "west" : "east"), depth, onEave: d3NewFrame(cfg) && !ax.uAxisIsX };
+  return { wall, depth, onEave: d3PorchOnEave(cfg, W, L) };
 }
 // A RECESSED PORCH'S POSTS AS d3PorchStepsGeom's FRAME (2026-10-03), or null without the porch: the
 // renderer's two 0.32 ft corner posts across a gable end, a single bay, or on an eave wall its posts
@@ -7291,9 +7323,7 @@ function d3LeanTosReadout(spec, sizeLabel) {
     porch = P.onCap ? { wall: compass[pj.wall], kind: "projecting", a0: P.centerU - P.span / 2, a1: P.centerU + P.span / 2 }
       : { wall: compass[pj.wall], kind: "projecting", a0: ax.L / 2 - P.span / 2, a1: ax.L / 2 + P.span / 2 };
   } else if ((Number(roof.porchDepthFt) || 0) > 0.5 && !d3WingsOn(d3Massing(roof, w, d, D3.WALL_H))) {
-    const front = (roof.porchEnd || "front") !== "back";
-    const pw = d3NewFrame(roof) ? (front ? "south" : "north") : ax.uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
-    porch = { wall: compass[pw], kind: "recessed", a0: -Infinity, a1: Infinity };
+    porch = { wall: compass[d3PorchWall(roof, w, d)], kind: "recessed", a0: -Infinity, a1: Infinity };
   }
   const hit = (a, b) => Math.min(a.a1, b.a1) - Math.max(a.a0, b.a0) > 0.01;
   return gs.map((g) => {
@@ -9505,10 +9535,11 @@ function buildShed3DModel(THREE, p) {
   //
   // Depth is clamped to leave four feet of building behind it. Deeper than that is a carport,
   // and a wall clamped to zero length is a crash rather than a shape.
-  const porchAxes = d3RoofAxes(roofCfg, bldgW, bldgH);
-  // THE NEW FRAME puts a porch on the front (south) or back (north) wall whatever that wall is, so
-  // the run it eats into is the depth; outside it, the gable end's rule below.
-  const porchRun = (NEW_FRAME || porchAxes.uAxisIsX) ? bldgH : bldgW;        // the run a porch eats into
+  // THE NEW FRAME puts a porch on whichever wall porchEnd names (a side wall too, 2026-10-05) whatever
+  // kind of wall it is; outside it, the gable end's rule below. d3PorchWall is that one answer, so the
+  // run it eats into is the depth behind a south or north wall and the width behind a west or east one.
+  const porchWallAt = d3PorchWall(roofCfg, bldgW, bldgH);
+  const porchRun = (porchWallAt === "south" || porchWallAt === "north") ? bldgH : bldgW;        // the run a porch eats into
   // A projecting porch wins over a recessed one. The sanitizer never stores both; raw data holding
   // both draws the projecting porch and no set-back, and ssPorchTrussWall drops the truss to match.
   const porchDepth = porchOut ? 0 : Math.max(0, Math.min(Number(roofCfg.porchDepthFt) || 0, porchRun - 4));
@@ -9550,17 +9581,18 @@ function buildShed3DModel(THREE, p) {
   // A landscape footprint's gable ends are west/east and its default front (south) is an eave
   // side, so no gable end is "the front" there; it keeps the end it always had. No saved style
   // carried a porch when this changed (checked across every tenant), so nothing stored moved.
-  const porchFront = (roofCfg.porchEnd || "front") !== "back";
-  const porchWall = !porchOn ? null
-    : (NEW_FRAME || porchAxes.uAxisIsX) ? (porchFront ? "south" : "north") : (porchFront ? "west" : "east");
+  // A SIDE WALL (2026-10-05) is the same rule in the new frame: "left" and "right" name the west and
+  // east walls as seen from the front, which stays where it is (d3PorchWall).
+  const porchWall = !porchOn ? null : porchWallAt;
   // The name the recessed-porch block below resolves its local end from. Derived from the WALL
   // now rather than from porchEnd, so the set-back and the posts can never pick different ends.
   const porchAtNeg = porchWall === "north" || porchWall === "west";
-  // IN THE NEW FRAME the front can be an EAVE wall (roof.front "eave", a shed's front/back high
-  // side). A porch recessed into an eave wall sets that wall back under the roof exactly like one
-  // at a gable end -- the WALLS table below is the same arithmetic -- but the cap ends do not move
-  // and the posts stand along the eave line instead of across a cap (the recessed-porch block).
-  const porchOnEave = porchOn && NEW_FRAME && !porchAxes.uAxisIsX;
+  // IN THE NEW FRAME the porch wall can be an EAVE wall (roof.front "eave", a shed's front/back high
+  // side, or a side wall of a front gable). A porch recessed into an eave wall sets that wall back under
+  // the roof exactly like one at a gable end -- the WALLS table below is the same arithmetic -- but the
+  // cap ends do not move and the posts stand along the eave line instead of across a cap (the
+  // recessed-porch block).
+  const porchOnEave = porchOn && d3PorchOnEave(roofCfg, bldgW, bldgH);
   // How far each wall's ORIGIN travels, and how much length it loses. Every one of these is
   // zero without a porch, so a style that has never had one builds byte-for-byte what it did.
   const pN = porchWall === "north" ? porchDepth : 0;
@@ -11356,7 +11388,7 @@ function buildShed3DModel(THREE, p) {
   // flight, the one its readout says, built after the projecting porch below. Null without them.
   const recessedStepsGeom = porchOn ? d3RecessedStepsOnGround(p.styleSpec, bldgW, bldgH) : null;
   if (porchOnEave) {
-    const uIn = (porchWall === "south" ? 1 : -1) * (S / 2 - 0.21);   // south is +u here (u = world z)
+    const uIn = (porchWall === "south" || porchWall === "east" ? 1 : -1) * (S / 2 - 0.21);   // south or east is +u here (u = world z, or x)
     const POST = 0.32, INSET = 0.4;
     // Centre steps take one bay more where the count is even, so no post stands at the top of them
     // (d3RecessedPorchFrame, d3PorchGeom's rule). Without steps the count is what it always was.
@@ -14841,11 +14873,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         const a = Math.max(w / 2, Math.min((ns ? it.x - mgX : it.y - mgY) / scale, len - w / 2));
         const rc = spec.roof || D3_DEFAULT_ROOF;
         // A new-frame shed's high wall that a RECESSED porch has set back stops at H (d3WallTops'
-        // setBack), exactly as buildShed3DModel's porchWall builds it: the front or back wall, in
-        // the new frame, with a porch deeper than 0.5 ft left after its clamp and none projecting.
-        const recessed = !!d3ShedHighWall(rc, bldgW, bldgH) && !d3ProjectingPorch(rc, bldgW, bldgH)
-          && Math.min(Number(rc.porchDepthFt) || 0, bldgH - 4) > 0.5
-          && it.wall === ((rc.porchEnd || "front") !== "back" ? "south" : "north");
+        // setBack), exactly as buildShed3DModel's porchWall builds it: d3RecessedPorch, the renderer's
+        // own rule restated (its wall, a side wall too, and a porch deeper than 0.5 ft after its clamp).
+        const rp = d3ShedHighWall(rc, bldgW, bldgH) ? d3RecessedPorch(rc, bldgW, bldgH, Hn) : null;
+        const recessed = !!rp && it.wall === rp.wall;
         return d3WallTopFt(rc, bldgW, bldgH, Hn, it.wall, a - w / 2, a + w / 2, recessed);
       };
       const openSpanOf = (it) => {
@@ -20217,7 +20248,9 @@ function ssDrewWords(spec, porchBuilt, stepBuilt, massBuilt) {
   // "wall" in the new frame, where the front can be a long side; "end" on every older style,
   // where the porch was only ever on a gable end and the panel has always called it that.
   const face = (roof.front != null || roof.highSide != null) ? "wall" : "end";
-  const end = roof.porchEnd === "back" ? "back" : "front";
+  // A SIDE WALL (2026-10-05) only in the new frame, d3PorchEnd's rule: outside it left and right are the front.
+  const sideEnd = face === "wall" && (roof.porchEnd === "left" || roof.porchEnd === "right") ? roof.porchEnd : null;
+  const end = roof.porchEnd === "back" ? "back" : sideEnd ? `${sideEnd} side` : "front";
   const outFt = Number(roof.porchOutFt) || 0;
   const inFt = Number(roof.porchDepthFt) || 0;
   if (outFt > 0.5) {
@@ -20334,7 +20367,7 @@ const SS_CHANGE_WORDS = {
   "roof.tailSpacingIn": ["How far apart the rafter tails are", (v) => `${Math.round(Number(v))} in`],
   "roof.porchOutFt": ["How far the porch sticks out", (v) => ssFtInWords(Number(v))],
   "roof.porchDepthFt": ["How far the porch goes into the building", (v) => ssFtInWords(Number(v))],
-  "roof.porchEnd": ["Which end the porch is on", (v) => (String(v) === "back" ? "the other end" : "the end you filmed first")],
+  "roof.porchEnd": ["Which end the porch is on", (v) => (String(v) === "back" ? "the other end" : String(v) === "left" || String(v) === "right" ? `the ${String(v)} side` : "the end you filmed first")],
   "roof.porchTruss": ["The beam across the porch", (v) => (v ? "there" : "not there")],
   "roof.leanToWidthFt": ["How far the lean-to sticks out", (v) => ssFtInWords(Number(v))],
   "roof.leanToDropFt": ["How far the lean-to roof drops", (v) => ssFtInWords(Number(v))],
@@ -29088,8 +29121,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <option value="gambrel">Gambrel (barn)</option>
                   </select>
                 </label>
-                {/* WHICH WAY THE BUILDING FACES (2026-09-24). The FRONT is the wall with the porch,
-                    or the main door when there is no porch, and it is the wall the size's first
+                {/* WHICH WAY THE BUILDING FACES (2026-09-24). The FRONT is the main door's wall (a
+                    porch can go on any wall since 2026-10-05), and it is the wall the size's first
                     number measures. "Not set" is a real answer and it is where every older style
                     sits: the roof then runs the way it always has (the ridge along the longer
                     side), and picking it deletes the key rather than storing a default. One
@@ -29106,7 +29139,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     </select>
                   </label>
                 ) : (
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Front wall (porch or door side)
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Front wall (main door side)
                     <select value={adminCal.spec.roof.front || ""} onChange={(e) => calSetRoofOpt("front", e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
                       <option value="">Not set (ridge the long way, as before)</option>
                       <option value="gable">Gable end (the roof triangle faces you)</option>
@@ -29261,7 +29294,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     : !(Math.abs(Number(roof.rearEaveRiseFt)) >= 0.01) ? "A rise of 0 draws no step."
                     : (Number(roof.wingWidthFt) || 0) > 0.5 || d3WingListOn(roof) ? "Not drawn with lower wings: they run the length of the building at one height."
                     : d3AnyLeanTo(roof) ? "Not drawn with a lean-to: it runs the length of the building at one height."
-                    : roof.porchEnd === "back" && ((Number(roof.porchDepthFt) || 0) > 0.5 || (Number(roof.porchOutFt) || 0) > 0.5) ? "Not drawn with the porch at the back."
+                    : d3PorchEnd(roof) !== "front" && ((Number(roof.porchDepthFt) || 0) > 0.5 || (Number(roof.porchOutFt) || 0) > 0.5) ? `Not drawn with the porch ${d3PorchEnd(roof) === "back" ? "at the back" : "on a side wall"}.`
                     : !d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? `Not drawn on ${sel.size || "this size"}: its ridge runs side to side. Set the front wall to a gable end.`
                     : `Not drawn: ${sel.size || "this size"} is too short to leave 4 ft each side of the step.`;
                   return (
@@ -29713,11 +29746,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch end
                           {/* THE SAME KEY, TWO MEANINGS, and the label follows the one in force. In the
                               2026-09-24 frame (roof.front or roof.highSide set) "front" is the FRONT
-                              WALL, gable end or not; on every older style it is the front gable end. */}
-                          <select value={roof.porchEnd === "back" ? "back" : "front"} onChange={(e) => calSetRoof({ porchEnd: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                              WALL, gable end or not, and a side wall can be picked too (2026-10-05); on
+                              every older style it is the front gable end, and there is no side to pick
+                              until the front is set (d3PorchEnd reads left and right as the front there).
+                              A single slant sets its front with the High side, so its hint names that. */}
+                          <select value={d3PorchEnd(roof)} onChange={(e) => calSetRoof({ porchEnd: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
                             <option value="front">{(roof.front != null || roof.highSide != null) ? "Front wall" : "Front gable end"}</option>
                             <option value="back">{(roof.front != null || roof.highSide != null) ? "Back wall" : "Back gable end"}</option>
+                            {d3NewFrame(roof) && <option value="left">Left wall</option>}
+                            {d3NewFrame(roof) && <option value="right">Right wall</option>}
                           </select>
+                          {!d3NewFrame(roof) && <div style={{ ...hint, fontWeight: 400 }} data-ss-porch-side-hint="">{(roof.type || "gable") === "shed" ? "To put it on a side wall, set the High side first." : "To put it on a side wall, set which wall is the front first."}</div>}
                         </label>
                       )}
                       {/* WHERE THE PORCH ROOF MEETS THE WALL, AND HOW WIDE THE PORCH IS (2026-09-24).
@@ -29824,8 +29863,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         );
                       })()}
                       {/* Gable only: the renderer draws the truss on a gable roof and nowhere else,
-                          so on a gambrel this box used to tick and change nothing. */}
-                      {kind === "recessed" && (roof.type || "gable") === "gable" && (
+                          so on a gambrel this box used to tick and change nothing. And only at a
+                          gable END: a porch on an eave wall (a long-side front, or a side wall of a
+                          gable front, 2026-10-05) has no gable to stand it in (d3PorchOnEave). */}
+                      {kind === "recessed" && (roof.type || "gable") === "gable" && !d3PorchOnEave(roof, bldgW, bldgH) && (
                         <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700, display: "flex", alignItems: "center", gap: 6, alignSelf: "end", paddingBottom: 6 }}>
                           <input type="checkbox" checked={!!roof.porchTruss}
                             onChange={(e) => calSetRoof({ porchTruss: e.target.checked })} />
@@ -30539,7 +30580,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               : !(Math.abs(Number(roof.rearEaveRiseFt)) >= 0.01) ? "A rise of 0 draws no step."
                 : (Number(roof.wingWidthFt) || 0) > 0.5 || d3WingListOn(roof) ? "Not drawn with lower wings: they run the length of the building at one height."
                   : d3AnyLeanTo(roof) ? "Not drawn with a lean-to: it runs the length of the building at one height."
-                    : roof.porchEnd === "back" && ((Number(roof.porchDepthFt) || 0) > 0.5 || (Number(roof.porchOutFt) || 0) > 0.5) ? "Not drawn with the porch at the back."
+                    : d3PorchEnd(roof) !== "front" && ((Number(roof.porchDepthFt) || 0) > 0.5 || (Number(roof.porchOutFt) || 0) > 0.5) ? `Not drawn with the porch ${d3PorchEnd(roof) === "back" ? "at the back" : "on a side wall"}.`
                       : !d3RoofAxes(roof, bldgW, bldgH).uAxisIsX ? `Not drawn on ${sizeWords}: its ridge runs side to side. Set the front wall to a gable end.`
                         : `Not drawn: ${sizeWords} is too short to leave 4' 0" each side of the step.`;
     })();
@@ -30586,13 +30627,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             ) : advNum({ k: "pitch", label: "Pitch", unit: "in 12", value: Math.round((roof.pitch != null ? roof.pitch : 0.4) * 1200) / 100,
               min: 0, max: 12, step: 0.5, commit: (n) => calSetRoof({ pitch: n / 12 }), ends: ["flat", "steep"], full: true,
               children: advSay(advFtIn(ssRoofInFeet(roof, advSpan, advCentre))) })}
-            {/* WHICH WAY THE BUILDING FACES (2026-09-24): the front is the porch or door wall. One control or
+            {/* WHICH WAY THE BUILDING FACES (2026-09-24): the front is the main door's wall (a porch can go on any wall, 2026-10-05). One control or
                 the other, never both -- the sanitiser keeps front on a gable or gambrel, highSide on a shed. */}
             {isShed
               ? advSeg({ f: "highSide", label: "High side", value: roof.highSide || "", pick: (v) => calSetRoofOpt("highSide", v), full: true,
                 opts: [["", "Not set"], ["front", "Front"], ["back", "Back"], ["left", "Left"], ["right", "Right"]],
                 note: roof.highSide ? null : "Not set, it falls the long way, as before.", unset: true })
-              : advSeg({ f: "front", label: "Front wall (porch or door side)", value: roof.front || "", pick: (v) => calSetRoofOpt("front", v), full: true,
+              : advSeg({ f: "front", label: "Front wall (main door side)", value: roof.front || "", pick: (v) => calSetRoofOpt("front", v), full: true,
                 opts: [["", "Not set"], ["gable", "Gable end"], ["eave", "Long side"]],
                 note: roof.front === "gable" ? "The roof triangle faces you." : roof.front === "eave" ? "The roof edge faces you." : "Not set, the ridge runs the long way, as before.", unset: true })}
           </div>
@@ -31559,9 +31600,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // any end wing is there (d3WingListBlocksPorch, d3ProjectingPorch's wall), and it is said here.
       const pjEnd = (() => {
         if (kind !== "projecting" || !roof.wingList) return null;
-        const front = (roof.porchEnd || "front") !== "back";
         const ux = d3RoofAxes(roof, bldgW, bldgH).uAxisIsX;
-        const pw = d3NewFrame(roof) || ux ? (front ? "south" : "north") : (front ? "west" : "east");
+        const pw = d3PorchWall(roof, bldgW, bldgH);
         if (!d3WingListBlocksPorch(roof, bldgW, bldgH, pw)) return null;
         return (ux ? pw === "north" || pw === "south" : pw === "west" || pw === "east") ? "end" : "side";
       })();
@@ -31616,9 +31656,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {pr && pr.meets && advSay(`${pr.meets.map((m, j) => `${j ? "lean-to" : "Lean-to"} ${m.i + 1} meets it around the ${m.at} corner`).join(", and ")}: one roof with a hip.${pr.edgeOver
                 ? " It sits just under the main roof's edge at the corner." : ""}`, false, { "data-ss-porch-meets": "" })}
             </> })}
-          {advSeg({ f: "porchEnd", label: "Porch end", value: roof.porchEnd === "back" ? "back" : "front", pick: (v) => calSetRoof({ porchEnd: v }),
-            opts: [["front", newFrame ? "Front wall" : "Front gable end"], ["back", newFrame ? "Back wall" : "Back gable end"]] })}
-          {kind === "recessed" && (roof.type || "gable") === "gable" && (
+          {/* A SIDE WALL (2026-10-05) once the front is set; the front stays where it is (d3PorchEnd). */}
+          {advSeg({ f: "porchEnd", label: "Porch end", value: d3PorchEnd(roof), pick: (v) => calSetRoof({ porchEnd: v }),
+            opts: [["front", newFrame ? "Front wall" : "Front gable end"], ["back", newFrame ? "Back wall" : "Back gable end"]]
+              .concat(d3NewFrame(roof) ? [["left", "Left wall"], ["right", "Right wall"]] : []),
+            note: d3NewFrame(roof) ? null : ["Set the front first for a side wall.",
+              "Left and right are as seen standing at the front, so a side wall is offered once Front wall (High side on a single slant) is set under Roof shape."] })}
+          {/* The truss stands in a gable END: none on a porch along an eave wall (d3PorchOnEave), the box's rule. */}
+          {kind === "recessed" && (roof.type || "gable") === "gable" && !d3PorchOnEave(roof, bldgW, bldgH) && (
             <div key="truss" className="ss-adv-f is-full">{advSwitch("porchTruss", !!roof.porchTruss, "Timber truss in the porch gable", "Timber truss in the porch gable", () => calSetRoof({ porchTruss: !roof.porchTruss }))}</div>
           )}
           {kind === "projecting" && advNum({ k: "porchWidthFt", label: "Porch width (ft)", value: roof.porchWidthFt, min: 4, max: Math.max(4, Math.min(60, porchW)), step: 0.5, band: [4, 60],

@@ -187,6 +187,14 @@ Deno.test("new frame: the porch takes the front (south) or back (north) wall, ga
   }
   // Without a key, today's rule: a landscape gable's porch is on its WEST gable end.
   assertEquals(F.d3ProjectingPorch({ type: "gable", porchOutFt: 6 }, 32, 12).wall, "west");
+  // A SIDE WALL (2026-10-05): left and right are the west and east walls, gable end or eave, the front
+  // staying where it is; without a key they are the front, the rule above.
+  for (const [end, wall] of [["left", "west"], ["right", "east"]]) {
+    assertEquals(F.d3ProjectingPorch({ ...FARM, porchEnd: end }, 16, 10).wall, wall, `FARM ${end}`);
+    for (const front of ["gable", "eave"]) assertEquals(F.d3ProjectingPorch({ type: "gable", front, porchOutFt: 6, porchEnd: end }, 28, 20).wall, wall, `${front} ${end}`);
+    assertEquals(F.d3ProjectingPorch({ type: "gable", porchOutFt: 6, porchEnd: end }, 32, 12).wall, "west", `no key, ${end}: the front end`);
+    assertEquals(F.d3ProjectingPorch({ type: "gable", porchOutFt: 6, porchEnd: end }, 12, 32).wall, "south", `no key, ${end}: the front end`);
+  }
 });
 
 Deno.test("d3PorchSpan: a cap end spans S, an eave wall L, porchWidthFt narrows it; absent is today", () => {
@@ -200,6 +208,9 @@ Deno.test("d3PorchSpan: a cap end spans S, an eave wall L, porchWidthFt narrows 
   // A gable-front 28x20: the porch on the gable end spans the profile, 28.
   assertEquals(F.d3PorchSpan({ type: "gable", front: "gable", porchOutFt: 6, porchWidthFt: 12 }, 28, 20), { span: 12, centerU: 0, onCap: true, full: 28 });
   assertEquals(F.d3PorchSpan({ type: "gable", front: "eave", porchOutFt: 6 }, 28, 20), { span: 28, centerU: 0, onCap: false, full: 28 });
+  // A side wall (2026-10-05): a gable front's side is an eave wall the depth long, a long-side front's a gable end.
+  assertEquals(F.d3PorchSpan({ type: "gable", front: "gable", porchOutFt: 6, porchEnd: "left" }, 28, 20), { span: 20, centerU: 0, onCap: false, full: 20 });
+  assertEquals(F.d3PorchSpan({ type: "gable", front: "eave", porchOutFt: 6, porchEnd: "right", porchWidthFt: 12 }, 28, 20), { span: 12, centerU: 0, onCap: true, full: 20 });
   // No key: the gable end, S, exactly the span the renderer always passed d3PorchGeom.
   for (const [w, l] of [[12, 32], [32, 12], [16, 24]]) {
     const cfg = { type: "gambrel", porchOutFt: 6 };
@@ -239,6 +250,10 @@ Deno.test("the truss stands in a gable: none on an eave-wall front, the south ga
   assertEquals(F.ssPorchTrussWall({ type: "gable", front: "eave", porchTruss: true, porchDepthFt: 4 }, 24, 12), null);
   assertEquals(F.ssPorchTrussWall({ type: "gable", front: "gable", porchTruss: true, porchDepthFt: 4 }, 24, 12), "south");
   assertEquals(F.ssPorchTrussWall({ type: "gable", front: "gable", porchTruss: true, porchDepthFt: 4, porchEnd: "back" }, 24, 12), "north");
+  // A side wall (2026-10-05): a long-side front's left and right are its gable ends, a gable front's are eave walls.
+  assertEquals(F.ssPorchTrussWall({ type: "gable", front: "eave", porchTruss: true, porchDepthFt: 4, porchEnd: "left" }, 24, 12), "west");
+  assertEquals(F.ssPorchTrussWall({ type: "gable", front: "eave", porchTruss: true, porchDepthFt: 4, porchEnd: "right" }, 24, 12), "east");
+  assertEquals(F.ssPorchTrussWall({ type: "gable", front: "gable", porchTruss: true, porchDepthFt: 4, porchEnd: "left" }, 24, 12), null);
 });
 
 Deno.test("d3PorchReadout reads the high wall and the attach height the renderer builds with", () => {
@@ -518,13 +533,18 @@ Deno.test("d3PorchStepsGeom off an end: centred along it, between the wall and t
 // built posts. Here it is held to the renderer's rule written out once more, the truss's
 // (ssPorchTrussWall) and the lean-to readout's, which read the same end.
 Deno.test("d3RecessedPorch: the renderer's rule -- which wall, how deep, and when there is none", () => {
+  // The rule, written out: in the new frame the wall porchEnd names (a side too, 2026-10-05), else the gable end
+  // on the porch's end; the run it eats into is the depth behind a south or north wall, the width behind the
+  // others; and it is on an EAVE wall when the frame puts it on a wall the ridge runs along.
   const rule = (roof: Any, W: number, Lg: number) => {
     const ax = F.d3RoofAxes(roof, W, Lg);
-    const run = (F.d3NewFrame(roof) || ax.uAxisIsX) ? Lg : W;
-    const depth = F.d3ProjectingPorch(roof, W, Lg) ? 0 : Math.max(0, Math.min(Number(roof.porchDepthFt) || 0, run - 4));
+    const end = roof.porchEnd === "back" ? "back" : F.d3NewFrame(roof) && (roof.porchEnd === "left" || roof.porchEnd === "right") ? roof.porchEnd : "front";
+    const wall = F.d3NewFrame(roof) ? ({ front: "south", back: "north", left: "west", right: "east" } as Any)[end]
+      : ax.uAxisIsX ? (end === "back" ? "north" : "south") : (end === "back" ? "east" : "west");
+    const ns = wall === "south" || wall === "north";
+    const depth = F.d3ProjectingPorch(roof, W, Lg) ? 0 : Math.max(0, Math.min(Number(roof.porchDepthFt) || 0, (ns ? Lg : W) - 4));
     if (!(depth > 0.5) || F.d3Massing(roof, W, Lg, 8).wings.length) return null;
-    const front = (roof.porchEnd || "front") !== "back";
-    return { wall: (F.d3NewFrame(roof) || ax.uAxisIsX) ? (front ? "south" : "north") : (front ? "west" : "east"), depth, onEave: F.d3NewFrame(roof) && !ax.uAxisIsX };
+    return { wall, depth, onEave: F.d3NewFrame(roof) && ax.uAxisIsX !== ns };
   };
   const cases: Array<[Any, number, number, Any]> = [
     // A portrait gable: the gable ends are north and south, front is south.
@@ -536,6 +556,15 @@ Deno.test("d3RecessedPorch: the renderer's rule -- which wall, how deep, and whe
     // The new frame with an eave front: the south wall, an eave wall.
     [{ type: "gable", front: "eave", pitch: 0.4, porchDepthFt: 4 }, 16, 12, { wall: "south", depth: 4, onEave: true }],
     [{ type: "shed", highSide: "front", pitch: 0.25, porchDepthFt: 4 }, 16, 10, { wall: "south", depth: 4, onEave: true }],
+    // A side wall (2026-10-05): a gable front's left wall is an eave wall, the width the run it eats into; a
+    // long-side front's right wall a gable end; a single slant's high left wall an eave wall.
+    [{ type: "gable", front: "gable", pitch: 0.4, porchDepthFt: 4, porchEnd: "left" }, 12, 16, { wall: "west", depth: 4, onEave: true }],
+    [{ type: "gable", front: "gable", pitch: 0.4, porchDepthFt: 12, porchEnd: "left" }, 12, 16, { wall: "west", depth: 8, onEave: true }],
+    [{ type: "gable", front: "eave", pitch: 0.4, porchDepthFt: 5, porchEnd: "right" }, 24, 12, { wall: "east", depth: 5, onEave: false }],
+    [{ type: "shed", highSide: "left", pitch: 0.25, porchDepthFt: 4, porchEnd: "left" }, 12, 16, { wall: "west", depth: 4, onEave: true }],
+    // Without a frame a side is the front.
+    [{ type: "gable", pitch: 0.4, porchDepthFt: 4, porchEnd: "left" }, 12, 16, { wall: "south", depth: 4, onEave: false }],
+    [{ type: "gable", pitch: 0.4, porchDepthFt: 5, porchEnd: "right" }, 24, 12, { wall: "west", depth: 5, onEave: false }],
     // Held to leave 4 ft of building, and off at or under 0.5 ft.
     [{ type: "gable", pitch: 0.4, porchDepthFt: 12 }, 12, 14, { wall: "south", depth: 10, onEave: false }],
     [{ type: "gable", pitch: 0.4, porchDepthFt: 0.5 }, 12, 16, null],
