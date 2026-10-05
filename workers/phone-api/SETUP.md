@@ -90,16 +90,17 @@ The zone's tenant wildcard route (`*.structurestudiosuite.com/*`) outranks a cus
 4. Make sure `phone` can never be taken as a tenant subdomain.
 5. Update the Twilio URLs from step 2 to `https://phone.structurestudiosuite.com/...` if you set them to workers.dev.
 
-## 6. The database webhook for text alerts
+## 6. The database webhooks for text and email alerts
 
-The webhook is a trigger in the repo, not a Dashboard webhook:
+The webhooks are triggers in the repo, not Dashboard webhooks:
 
 1. Put the push secret in Supabase Vault, the SAME value as the Worker's `PUSH_WEBHOOK_SECRET`:
    `select vault.create_secret('<PUSH_WEBHOOK_SECRET>', 'sss_phone_push_secret', 'x-push-secret for phone-api /push/text');`
 2. Apply `supabase/migrations/256_sss_phone_push_webhook.sql` (by hand, `--file`, then record 256 in the ledger).
 3. Set the Worker's `FCM_SERVICE_ACCOUNT_JSON` (Android) and the APNS_* secrets (iPhone).
+4. Email alerts (2026-10-05), once texts work: deploy a Worker that has `POST /push/email`, check the live copy has it (the marker `push_email_failed` in the downloaded bundle) and `/health`, make sure the app's privacy page says what an email alert shows, then apply `supabase/migrations/267_phone_push_email.sql` the same way. It uses the same Vault secret: nothing new to create. Its own probe prints what it checked; its AFTER APPLYING block has the read-backs.
 
-Do NOT also create a Dashboard "Database Webhook" on sms_messages: 256 already is that webhook, and a second one sends every alert twice (and stores the secret in plain text). Never add the `net` schema to the API's exposed schemas.
+Do NOT also create a Dashboard "Database Webhook" on sms_messages or email_inbound: 256 and 267 already are those webhooks, and a second one sends every alert twice (and stores the secret in plain text). Never add the `net` schema to the API's exposed schemas.
 
 ## 7. The pilot line
 
@@ -235,4 +236,5 @@ Pseudonymous is not anonymous. Anyone who can query the database can line a repo
 
 - Stop everything for a tenant at once: `update public.client_settings set phone_status = 'off' where client_id = '<id>';`
 - Previous Worker version: `npx wrangler rollback` from this directory.
+- Stop email alerts only (texts keep theirs): `drop trigger if exists phone_push_email on public.email_inbound;` (267's ROLLBACK has the rest).
 - If the Worker is down, callers still reach voicemail through the number's fallback Bin.

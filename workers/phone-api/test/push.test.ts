@@ -1,4 +1,5 @@
-// /push/text: who gets a text alert, and how it is sent (FCM HTTP v1, APNs).
+// /push/text: who gets a text alert, and how it is sent (FCM HTTP v1, APNs). /push/email: the
+// same people, for a customer's email (migration 267's trigger), from the row and never the payload.
 import { describe, expect, it, vi } from "vitest";
 
 // The `phone` access area arrives in access.ts with the portal change. Until then this file
@@ -15,7 +16,7 @@ vi.mock("../../../supabase/functions/_shared/access.ts", async (importOriginal) 
   };
 });
 
-import { BASE, CLIENT, CONTACT_1, CUSTOMER, FakeNet, USER_A, USER_B, USER_C, call, filter, jsonRes, makeEnv } from "./helpers";
+import { BASE, CLIENT, CONTACT_1, CONTACT_2, CUSTOMER, FakeNet, USER_A, USER_B, USER_C, call, filter, jsonRes, makeEnv } from "./helpers";
 import type { Env } from "../src/env";
 import { apnsTopic } from "../src/routes/push";
 
@@ -120,6 +121,9 @@ describe("/push/text", () => {
     expect(apple.headers.get("apns-push-type")).toBe("alert");
     expect(apple.headers.get("authorization")).toMatch(/^bearer [\w-]+\.[\w-]+\.[\w-]+$/);
     expect(apple.json.aps.alert).toEqual({ title: "Jordan Demo", body: "Is the shed ready?" });
+    // A text is still a text to the app (/push/email sends "email").
+    expect(apple.json).toMatchObject({ type: "sms", thread_key: CONTACT_1 });
+    expect(net.to(/messages:send$/).every((s) => s.json.message.data.type === "sms")).toBe(true);
     // Nobody without phone access.
     expect(fcmTokens(net)).not.toContain("fcm-d");
   });
@@ -157,6 +161,217 @@ describe("/push/text", () => {
     expect(logs.map((l) => l.code).sort()).toEqual(["push_apns_not_configured_dev", "push_fcm_not_configured"]);
     expect(logs.every((l) => l.severity === "info" && l.source === "edge:phone-api")).toBe(true);
     expect(filter(net.reads("client_users")[0], "client_id")).toBe(CLIENT);
+  });
+});
+
+// ── /push/email ─────────────────────────────────────────────────────────────────────
+
+const EMAIL_ID = "00000000-0000-4000-8000-00000000e001";
+const VERIFIED = "spam=PASS virus=PASS spf=pass dkim=pass dmarc=pass";
+
+interface EmailFixture {
+  id: string;
+  client_id: string;
+  contact_id: string | null;
+  short_code: string | null;
+  from_name: string | null;
+  from_email: string;
+  subject: string | null;
+  spam_verdict: string | null;
+  body_text: string | null;
+}
+interface ContactFixture { id: string; client_id: string; name: string | null; owner_user_id: string | null }
+interface DesignFixture { short_code: string; client_id: string; contact_id: string | null }
+
+const received = (over: Partial<EmailFixture> = {}): EmailFixture => ({
+  id: EMAIL_ID, client_id: CLIENT, contact_id: CONTACT_1, short_code: null,
+  from_name: "Jordan Demo", from_email: "jordan@example.test", subject: "Re: Your 12x24 quote",
+  spam_verdict: VERIFIED, body_text: "Can we move delivery to Friday?", ...over,
+});
+const JORDAN: ContactFixture = { id: CONTACT_1, client_id: CLIENT, name: "Jordan Demo", owner_user_id: USER_A };
+
+async function emailSetup(opts: {
+  rows?: EmailFixture[]; contacts?: ContactFixture[]; designs?: DesignFixture[];
+  followers?: string[]; phoneStatus?: string; fcmStatus?: number;
+} = {}) {
+  const s = await setup({ followers: opts.followers, phoneStatus: opts.phoneStatus, fcmStatus: opts.fcmStatus });
+  const rows = opts.rows ?? [received()];
+  const contacts = opts.contacts ?? [JORDAN];
+  const designs = opts.designs ?? [];
+  // Every read honours the filters the Worker sends, so a row, contact or design of another
+  // business is really never found (and a missing filter really finds it).
+  s.net.rest("GET", "email_inbound", (q) => rows.filter((r) => filter(q, "id") === r.id && filter(q, "client_id") === r.client_id));
+  s.net.rest("GET", "crm_contacts", (q) => contacts.filter((c) => filter(q, "id") === c.id && filter(q, "client_id") === c.client_id));
+  s.net.rest("GET", "designs", (q) => designs.filter((d) => filter(q, "short_code") === d.short_code && filter(q, "client_id") === d.client_id));
+  return s;
+}
+
+/** What 267's trigger posts: ids only. */
+function emailHook(record: Record<string, unknown>, opts: { secret?: string; table?: string; type?: string } = {}) {
+  return new Request(`${BASE}/push/email`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-push-secret": opts.secret ?? "test-push-secret" },
+    body: JSON.stringify({ type: opts.type ?? "INSERT", table: opts.table ?? "email_inbound", schema: "public", record }),
+  });
+}
+const idsOf = (r: EmailFixture) => ({ id: r.id, client_id: r.client_id });
+const pushes = (net: FakeNet) => net.to(/messages:send$|push\.apple\.com/);
+
+describe("/push/email", () => {
+  it("refuses a wrong secret, reading nothing", async () => {
+    const { net, env } = await emailSetup();
+    const { res } = await call(env, emailHook(idsOf(received()), { secret: "nope" }));
+    expect(res.status).toBe(401);
+    expect(net.reads("email_inbound")).toEqual([]);
+    expect(pushes(net)).toEqual([]);
+  });
+
+  it("a reply from an owned customer alerts only the owner: type 'email', the contact's thread, 'Email: <subject>'", async () => {
+    const { net, env } = await emailSetup();
+    const { res } = await call(env, emailHook(idsOf(received())));
+    expect(res.status).toBe(204);
+    expect(fcmTokens(net)).toEqual(["fcm-a"]);
+    expect(apnsTokens(net)).toEqual([]);
+    expect(net.to(/messages:send$/)[0].json.message).toMatchObject({
+      token: "fcm-a",
+      notification: { title: "Jordan Demo", body: "Email: Re: Your 12x24 quote" },
+      data: { type: "email", thread_key: CONTACT_1, message_id: EMAIL_ID },
+      // The texts channel, and one alert per conversation: an email replaces that contact's text alert.
+      android: { priority: "high", collapse_key: CONTACT_1, notification: { tag: CONTACT_1, channel_id: "texts" } },
+    });
+    // The row is found again by id AND business, and its body is never read, let alone sent.
+    const read = net.reads("email_inbound")[0];
+    expect([filter(read, "id"), filter(read, "client_id")]).toEqual([EMAIL_ID, CLIENT]);
+    expect(read.url.searchParams.get("select")).not.toMatch(/body/);
+    expect(JSON.stringify(pushes(net).map((s) => s.json))).not.toContain("Friday");
+  });
+
+  it("an unowned customer's email reaches everyone with phone access who can see them, on both platforms", async () => {
+    const { net, env } = await emailSetup({ contacts: [{ ...JORDAN, owner_user_id: null }], followers: [USER_C] });
+    await call(env, emailHook(idsOf(received())));
+    expect(fcmTokens(net).sort()).toEqual(["fcm-a", "fcm-c"]);
+    expect(apnsTokens(net)).toEqual(["aa11"]);
+    expect(fcmTokens(net)).not.toContain("fcm-d");
+    const apple = net.to(/push\.apple\.com/)[0];
+    expect(apple.json).toMatchObject({
+      aps: { alert: { title: "Jordan Demo", body: "Email: Re: Your 12x24 quote" }, "thread-id": CONTACT_1 },
+      type: "email", thread_key: CONTACT_1, message_id: EMAIL_ID,
+    });
+    expect(apple.headers.get("apns-collapse-id")).toBe(CONTACT_1);
+  });
+
+  it("a reply filed only by its quote's code alerts that design's contact's people", async () => {
+    const { net, env } = await emailSetup({
+      rows: [received({ contact_id: null, short_code: "SS-DEMOQUOTE" })],
+      contacts: [{ id: CONTACT_2, client_id: CLIENT, name: "Casey Demo", owner_user_id: USER_A }],
+      designs: [{ short_code: "SS-DEMOQUOTE", client_id: CLIENT, contact_id: CONTACT_2 }],
+    });
+    await call(env, emailHook(idsOf(received())));
+    expect(fcmTokens(net)).toEqual(["fcm-a"]);
+    expect(net.to(/messages:send$/)[0].json.message).toMatchObject({
+      notification: { title: "Casey Demo" }, data: { type: "email", thread_key: CONTACT_2 },
+    });
+    const design = net.reads("designs")[0];
+    expect([filter(design, "client_id"), filter(design, "short_code")]).toEqual([CLIENT, "SS-DEMOQUOTE"]);
+  });
+
+  it("no contact of this business, no alert", async () => {
+    const cases: Array<{ label: string; rows: EmailFixture[]; designs?: DesignFixture[]; contacts?: ContactFixture[] }> = [
+      { label: "neither a contact nor a code", rows: [received({ contact_id: null })] },
+      { label: "a design with no contact", rows: [received({ contact_id: null, short_code: "SS-DEMOQUOTE" })],
+        designs: [{ short_code: "SS-DEMOQUOTE", client_id: CLIENT, contact_id: null }] },
+      { label: "another business's design", rows: [received({ contact_id: null, short_code: "SS-DEMOQUOTE" })],
+        designs: [{ short_code: "SS-DEMOQUOTE", client_id: "other-tenant", contact_id: CONTACT_2 }] },
+      { label: "a contact id that is another business's contact", rows: [received()],
+        contacts: [{ ...JORDAN, client_id: "other-tenant", owner_user_id: null }] },
+    ];
+    for (const c of cases) {
+      const { net, env } = await emailSetup({ rows: c.rows, designs: c.designs, contacts: c.contacts ?? [JORDAN] });
+      const { res } = await call(env, emailHook(idsOf(received())));
+      expect(res.status, c.label).toBe(204);
+      expect(pushes(net), c.label).toEqual([]);
+      expect(net.reads("phone_devices"), c.label).toEqual([]);
+    }
+  });
+
+  it("sends nothing while the business's phone is off", async () => {
+    const { net, env } = await emailSetup({ phoneStatus: "off" });
+    await call(env, emailHook(idsOf(received())));
+    expect(pushes(net)).toEqual([]);
+    expect(net.reads("client_users")).toEqual([]);
+  });
+
+  it("a payload naming another business for the row finds nothing and sends nothing", async () => {
+    const { net, env } = await emailSetup();
+    const { res } = await call(env, emailHook({ id: EMAIL_ID, client_id: "other-tenant" }));
+    expect(res.status).toBe(204);
+    expect(filter(net.reads("email_inbound")[0], "client_id")).toBe("other-tenant");
+    expect(pushes(net)).toEqual([]);
+  });
+
+  it("trusts nothing in the payload but the id: a forged subject, sender and contact never reach the alert", async () => {
+    const { net, env } = await emailSetup();
+    await call(env, emailHook({ ...idsOf(received()), subject: "FORGED", from_name: "Mallory", contact_id: CONTACT_2, spam_verdict: VERIFIED }));
+    expect(net.to(/messages:send$/)[0].json.message).toMatchObject({
+      notification: { title: "Jordan Demo", body: "Email: Re: Your 12x24 quote" },
+      data: { thread_key: CONTACT_1 },
+    });
+    expect(JSON.stringify(pushes(net).map((s) => s.json))).not.toMatch(/FORGED|Mallory/);
+  });
+
+  it("a sender the provider couldn't verify rings nobody; no verdict at all still alerts", async () => {
+    for (const verdict of ["spam=PASS virus=PASS spf=fail dkim=pass dmarc=fail", "spam=FAIL virus=PASS spf=pass dkim=pass dmarc=pass"]) {
+      const { net, env } = await emailSetup({ rows: [received({ spam_verdict: verdict })] });
+      await call(env, emailHook(idsOf(received())));
+      expect(pushes(net), verdict).toEqual([]);
+      expect(net.reads("client_settings"), verdict).toEqual([]);
+    }
+    const unknown = await emailSetup({ rows: [received({ spam_verdict: null })] });
+    await call(unknown.env, emailHook(idsOf(received())));
+    expect(fcmTokens(unknown.net)).toEqual(["fcm-a"]);
+  });
+
+  it("reads nothing for anything but a new email_inbound row with a real id and business", async () => {
+    const bad: Array<[string, Request]> = [
+      ["a text's table", emailHook(idsOf(received()), { table: "sms_messages" })],
+      ["an update", emailHook(idsOf(received()), { type: "UPDATE" })],
+      ["an id that isn't a uuid", emailHook({ id: "1 or 1=1", client_id: CLIENT })],
+      ["no business", emailHook({ id: EMAIL_ID })],
+      ["mail no business could be found for", emailHook({ id: EMAIL_ID, client_id: "__unattributed__" })],
+    ];
+    for (const [label, req] of bad) {
+      const { net, env } = await emailSetup();
+      const { res } = await call(env, req);
+      expect(res.status, label).toBe(204);
+      expect(net.seen.filter((s) => s.url.pathname.startsWith("/rest/v1/")), label).toEqual([]);
+    }
+  });
+
+  it("the words: no subject, a long one cut to 140, and a contact with no name titled \"New email\", never by the sender", async () => {
+    const send = async (row: Partial<EmailFixture>, contact: Partial<ContactFixture> = {}) => {
+      const { net, env } = await emailSetup({ rows: [received(row)], contacts: [{ ...JORDAN, ...contact }] });
+      await call(env, emailHook(idsOf(received())));
+      return net.to(/messages:send$/)[0].json.message.notification as { title: string; body: string };
+    };
+    expect((await send({ subject: null })).body).toBe("Email: (no subject)");
+    expect((await send({ subject: "  \n " })).body).toBe("Email: (no subject)");
+    expect((await send({ subject: "Re: delivery\r\n\tFriday" })).body).toBe("Email: Re: delivery Friday");
+    const long = await send({ subject: "x".repeat(300) });
+    expect(long.body).toHaveLength(140);
+    expect(long.body).toMatch(/^Email: x+\.\.\.$/);
+    // The cut lands inside an emoji: the half is dropped, never sent on its own.
+    const emoji = await send({ subject: `${"x".repeat(129)}\u{1F600}${"y".repeat(20)}` });
+    expect(emoji.body).toBe(`Email: ${"x".repeat(129)}...`);
+    // The sender's name and address never go through Google or Apple (the privacy page's promise).
+    expect((await send({}, { name: null })).title).toBe("New email");
+    expect((await send({ from_name: "Sam Sender" }, { name: "  " })).title).toBe("New email");
+    expect((await send({ from_name: null }, { name: null })).title).toBe("New email");
+  });
+
+  it("forgets a token FCM says is gone", async () => {
+    const { net, env } = await emailSetup({ fcmStatus: 404 });
+    await call(env, emailHook(idsOf(received())));
+    expect(net.writes("phone_devices", "DELETE")[0].url.searchParams.get("id")).toBe("in.(dA)");
   });
 });
 

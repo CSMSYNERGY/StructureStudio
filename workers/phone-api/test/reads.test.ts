@@ -54,6 +54,11 @@ function holds(val: unknown, expr: string): boolean {
   if (op === "lt") return val != null && String(val) < arg;
   if (op === "gte") return val != null && String(val) >= arg;
   if (op === "in") return val != null && splitTop(arg.slice(1, -1)).map(unquote).includes(String(val));
+  if (op === "like" || op === "ilike") {
+    // PostgREST's * is SQL's %; _ is any one character.
+    const re = [...arg].map((ch) => (ch === "*" || ch === "%" ? ".*" : ch === "_" ? "." : ch.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))).join("");
+    return val != null && new RegExp(`^${re}$`, op === "ilike" ? "is" : "s").test(String(val));
+  }
   throw new Error(`table(): the fake has no "${op}" filter`);
 }
 
@@ -368,7 +373,7 @@ describe("GET /threads?channels=sms,email (email joins the list)", () => {
     });
     const { json } = await call(env, list(token));
     expect(json.threads).toEqual([
-      { key: CONTACT_2, contact_id: CONTACT_2, contact_name: "Casey", e164: "+15555550143", e164_source: "contact", last: { body: "Shed sizes", direction: "in", at: T(1), channel: "email" } },
+      { key: CONTACT_2, contact_id: CONTACT_2, contact_name: "Casey", e164: "+15555550143", e164_source: "contact", last: { body: "Shed sizes", direction: "in", at: T(1), channel: "email", sender_verified: null } },
       { key: CONTACT_3, contact_id: CONTACT_3, contact_name: "Riley", e164: null, e164_source: "contact", last: { body: "Your delivery date", direction: "out", at: T(2), channel: "email" } },
       { key: CONTACT_1, contact_id: CONTACT_1, contact_name: "Jordan", e164: CUSTOMER, e164_source: "sms", last: { body: "text s1", direction: "in", at: T(3), channel: "sms" } },
     ]);
@@ -395,8 +400,27 @@ describe("GET /threads?channels=sms,email (email joins the list)", () => {
     const { json } = await call(env, list(token));
     expect(json.threads).toEqual([
       { key: CONTACT_2, contact_id: CONTACT_2, contact_name: "Casey", e164: "+15555550143", e164_source: "sms", last: { body: "On my way", direction: "out", at: T(1), channel: "sms" } },
-      { key: CONTACT_1, contact_id: CONTACT_1, contact_name: "Jordan", e164: CUSTOMER, e164_source: "sms", last: { body: "Re: Your quote", direction: "in", at: T(2), channel: "email" } },
+      { key: CONTACT_1, contact_id: CONTACT_1, contact_name: "Jordan", e164: CUSTOMER, e164_source: "sms", last: { body: "Re: Your quote", direction: "in", at: T(2), channel: "email", sender_verified: null } },
     ]);
+  });
+
+  it("a customer's email says whether its sender was confirmed, so the apps can skip alerting on a forged From", async () => {
+    const { net, token, env } = await setup(callerCtx({ phone_level: "view" }));
+    world(net, {
+      contacts: [person(CONTACT_1, "Jordan"), person(CONTACT_2, "Casey"), person(CONTACT_3, "Riley")],
+      inbound: [
+        mailIn("i1", { contact_id: CONTACT_1, spam_verdict: "spf=fail dmarc=fail", received_at: T(1) }),
+        mailIn("i2", { contact_id: CONTACT_2, spam_verdict: "spam=pass virus=pass spf=pass dkim=pass dmarc=pass", received_at: T(2) }),
+      ],
+      sent: [mailOut("o1", { contact_id: CONTACT_3, created_at: T(3) })],
+    });
+    const { json } = await call(env, list(token));
+    const last = (key: string) => json.threads.find((t: { key: string }) => t.key === key).last;
+    expect(last(CONTACT_1).sender_verified).toBe(false);
+    expect(last(CONTACT_2).sender_verified).toBe(true);
+    // Only a customer's email carries it: not our own email, and not a text.
+    expect(last(CONTACT_3)).not.toHaveProperty("sender_verified");
+    expect(net.reads("email_inbound")[0].url.searchParams.get("select")).toBe("id,contact_id,subject,received_at,spam_verdict");
   });
 
   it("a thread I emailed is mine even when the customer belongs to someone else", async () => {
@@ -871,6 +895,138 @@ describe("GET /search and /team", () => {
     net.rest("GET", "crm_contacts", () => []);
     await call(env, appRequest("GET", `/search?q=${encodeURIComponent("a,b(c)*d 555")}`, token));
     expect(net.reads("crm_contacts")[0].url.searchParams.get("or")).toBe("(name.ilike.*a b c d 555*,phone_digits.like.*555*)");
+  });
+
+  describe("?email=1, the phone app's New message (2026-10-05)", () => {
+    const CONTACT_4 = "00000000-0000-4000-8000-00000000c004";
+    const CONTACT_5 = "00000000-0000-4000-8000-00000000c005";
+    // A crm_contacts row; email_lower is generated from email (lower(btrim(email)), migration 130).
+    const contact = (id: string, over: Record<string, unknown>) => {
+      const r: Record<string, unknown> = { id, client_id: CLIENT, merged_into: null, name: null, phone: null, phone_digits: null, email: null, updated_at: T(0), ...over };
+      return { ...r, email_lower: r.email == null ? null : String(r.email).trim().toLowerCase() };
+    };
+    // The two reads ?email=1 makes: names and numbers (the `or` one), and addresses.
+    const nameReads = (net: FakeNet) => net.reads("crm_contacts").filter((r) => r.url.searchParams.has("or"));
+    const addressReads = (net: FakeNet) => net.reads("crm_contacts").filter((r) => r.url.searchParams.has("email_lower"));
+    const ROWS = [
+      contact(CONTACT_1, { name: "Jordan Phone", phone: "(555) 555-0142", phone_digits: "5555550142", email: "jordan@example.com", updated_at: T(1) }),
+      contact(CONTACT_2, { name: "Jordan Mail", email: " Jo@Example.com ", updated_at: T(2) }),
+      // Neither a number to call or text nor an address to email.
+      contact(CONTACT_3, { name: "Jordan Nothing", phone: "555-01", phone_digits: "55501", email: "not an address", updated_at: T(3) }),
+      // Merged into another contact, and another business's: never found.
+      contact(CONTACT_4, { name: "Jordan Merged", email: "jo@example.net", merged_into: CONTACT_2, updated_at: T(4) }),
+      contact(CONTACT_5, { name: "Jordan Elsewhere", email: "jo@example.org", client_id: OTHER_TENANT, updated_at: T(5) }),
+    ];
+
+    it("without it, the answer is exactly as before: contacts with a number, no email filter and no email column", async () => {
+      const { net, token, env } = await setup(callerCtx());
+      net.rest("GET", "crm_contacts", table(ROWS));
+      const { json } = await call(env, appRequest("GET", "/search?q=jord", token));
+      expect(json.contacts).toEqual([{ id: CONTACT_1, name: "Jordan Phone", e164: "+15555550142" }]);
+      const q = net.reads("crm_contacts")[0];
+      expect(q.url.searchParams.get("or")).toBe("(name.ilike.*jord*)");
+      expect(q.url.searchParams.get("select")).toBe("id,name,phone,phone_digits");
+      expect(addressReads(net)).toEqual([]);
+      // An address typed without the param matches nobody.
+      const { json: byEmail } = await call(env, appRequest("GET", "/search?q=jo@ex", token));
+      expect(byEmail.contacts).toEqual([]);
+    });
+
+    it("with it, an email-only contact comes back with e164 null and its address; every row carries email", async () => {
+      const { net, token, env } = await setup(callerCtx());
+      net.rest("GET", "crm_contacts", table(ROWS));
+      const { json } = await call(env, appRequest("GET", "/search?q=jord&email=1", token));
+      expect(json.contacts).toEqual([
+        { id: CONTACT_1, name: "Jordan Phone", e164: "+15555550142", email: "jordan@example.com" },
+        { id: CONTACT_2, name: "Jordan Mail", e164: null, email: "Jo@Example.com" },
+      ]);
+      const [q] = nameReads(net);
+      expect(q.url.searchParams.get("or")).toBe("(name.ilike.*jord*)");
+      expect(q.url.searchParams.get("select")).toBe("id,name,phone,phone_digits,email");
+      const [e] = addressReads(net);
+      expect(e.url.searchParams.get("email_lower")).toBe("ilike.*jord*");
+      for (const r of [q, e]) {
+        expect(filter(r, "client_id")).toBe(CLIENT);
+        expect(r.url.searchParams.get("merged_into")).toBe("is.null");
+        expect(r.url.searchParams.get("select")).toBe("id,name,phone,phone_digits,email");
+        expect(r.url.searchParams.get("order")).toBe("updated_at.desc");
+        expect(r.url.searchParams.get("limit")).toBe("60");
+      }
+    });
+
+    it("matches on the email address, whatever its case", async () => {
+      const { net, token, env } = await setup(callerCtx());
+      net.rest("GET", "crm_contacts", table(ROWS));
+      const { json } = await call(env, appRequest("GET", `/search?q=${encodeURIComponent("JO@Ex")}&email=1`, token));
+      expect(json.contacts).toEqual([{ id: CONTACT_2, name: "Jordan Mail", e164: null, email: "Jo@Example.com" }]);
+      expect(nameReads(net)[0].url.searchParams.get("or")).toBe("(name.ilike.*JO@Ex*)");
+      expect(addressReads(net)[0].url.searchParams.get("email_lower")).toBe("ilike.*jo@ex*");
+    });
+
+    it("finds an address with a + in it, typed whole or in part", async () => {
+      const { net, token, env } = await setup(callerCtx());
+      const SAM = "00000000-0000-4000-8000-00000000c006";
+      net.rest("GET", "crm_contacts", table([...ROWS, contact(SAM, { name: null, email: "sam+sheds@example.com", updated_at: T(6) })]));
+      for (const q of ["sam+sheds", "Sam+Sheds@Example.com"]) {
+        const { json } = await call(env, appRequest("GET", `/search?q=${encodeURIComponent(q)}&email=1`, token));
+        expect(json.contacts).toEqual([{ id: SAM, name: "", e164: null, email: "sam+sheds@example.com" }]);
+      }
+      expect(addressReads(net)[0].url.searchParams.get("email_lower")).toBe("ilike.*sam+sheds*");
+      // The name half is unchanged: searchTerm still drops the +.
+      expect(nameReads(net)[0].url.searchParams.get("or")).toBe("(name.ilike.*sam sheds*)");
+    });
+
+    it("lists name matches before address matches, so a common address fragment never pushes a name out", async () => {
+      const { net, token, env } = await setup(callerCtx());
+      // 70 newer contacts whose only match is ".com" (more than one read's 60), and an older Casey Combs.
+      const dotCom = Array.from({ length: 70 }, (_, i) =>
+        contact(`00000000-0000-4000-8000-0000000e${String(i).padStart(4, "0")}`, { name: `Pat ${i}`, email: `pat${i}@gmail.com`, updated_at: T(i) }));
+      const combs = contact(CONTACT_1, { name: "Casey Combs", phone: "(555) 555-0142", phone_digits: "5555550142", email: "casey@example.com", updated_at: T(500) });
+      net.rest("GET", "crm_contacts", table([...dotCom, combs]));
+      const { json } = await call(env, appRequest("GET", "/search?q=Com&email=1", token));
+      expect(json.contacts[0]).toEqual({ id: CONTACT_1, name: "Casey Combs", e164: "+15555550142", email: "casey@example.com" });
+      expect(json.contacts).toHaveLength(20);
+      expect(ids(json.contacts.slice(1))).not.toContain(CONTACT_1);
+      // Two letters with no @ don't search addresses at all: "co" is in every .com address.
+      const before = addressReads(net).length;
+      const { json: short } = await call(env, appRequest("GET", "/search?q=Co&email=1", token));
+      expect(ids(short.contacts)).toEqual([CONTACT_1]);
+      expect(addressReads(net)).toHaveLength(before);
+    });
+
+    it("keeps the own-customers scope: a rep never finds another rep's email-only contact", async () => {
+      const { net, token, env } = await setup(callerCtx({ contacts_level: "own", own_contacts_only: true }), [CONTACT_1]);
+      net.rest("GET", "crm_contacts", table(ROWS));
+      const { json } = await call(env, appRequest("GET", "/search?q=jord&email=1", token));
+      expect(ids(json.contacts)).toEqual([CONTACT_1]);
+      const { json: byEmail } = await call(env, appRequest("GET", "/search?q=jo@ex&email=1", token));
+      expect(byEmail.contacts).toEqual([]);
+      // Contacts `none` sees no customer at all, and nothing is read.
+      const none = await setup(callerCtx({ contacts_level: "none" }));
+      none.net.rest("GET", "crm_contacts", table(ROWS));
+      const { json: nothing } = await call(none.env, appRequest("GET", "/search?q=jo@ex&email=1", none.token));
+      expect(nothing.contacts).toEqual([]);
+      expect(none.net.reads("crm_contacts")).toHaveLength(0);
+    });
+
+    it("still drops a contact with neither a valid number nor a valid address", async () => {
+      const { net, token, env } = await setup(callerCtx());
+      net.rest("GET", "crm_contacts", table(ROWS));
+      const { json } = await call(env, appRequest("GET", "/search?q=nothing&email=1", token));
+      expect(json.contacts).toEqual([]);
+      // The row was read (its name matched); the Worker left it out.
+      expect(nameReads(net)).toHaveLength(1);
+    });
+
+    it("still stops at 20", async () => {
+      const { net, token, env } = await setup(callerCtx());
+      const many = Array.from({ length: 30 }, (_, i) =>
+        contact(`00000000-0000-4000-8000-0000000d${String(i).padStart(4, "0")}`, { name: `Jo ${i}`, email: `jo${i}@example.com`, updated_at: T(i) }));
+      net.rest("GET", "crm_contacts", table(many));
+      const { json } = await call(env, appRequest("GET", "/search?q=jo&email=1", token));
+      expect(json.contacts).toHaveLength(20);
+      expect(json.contacts[0]).toEqual({ id: "00000000-0000-4000-8000-0000000d0000", name: "Jo 0", e164: null, email: "jo0@example.com" });
+    });
   });
 
   it("lists teammates with phone access and their identity base", async () => {

@@ -6,7 +6,8 @@
 //               (or 204). A fault answers 500 with no body, so Twilio falls over to the
 //               number's Voice Fallback URL and the caller still reaches voicemail. One GET:
 //               /voice/greeting-audio, the audio a <Play> fetches (greeting.ts), on ?key= alone.
-//   /push/text  the database webhook (x-push-secret). 204.
+//   /push/*     the database webhooks (x-push-secret): /push/text for a customer's text,
+//               /push/email for their email (migration 267, ids only). 204.
 //   the rest    the extension and the app: bearer login, JSON {ok, ...}, CORS for the extension
 //               and portal origins.
 // Every unexpected fault is logged through the shared logEdgeError as edge:phone-api.
@@ -32,7 +33,7 @@ import { sendSms } from "./routes/sms";
 import { getThread, listCalls, listThreads, search, team } from "./routes/reads";
 import { devices, forgetDevice, health, log, mySettings, settingsMe, signOutAll, turn } from "./routes/me";
 import { createQuickSend, deleteQuickSend, listQuickSends, quickSendUsed, updateQuickSend } from "./routes/quickSends";
-import { pushText } from "./routes/push";
+import { pushEmail, pushText } from "./routes/push";
 import { clearGreeting, myGreetingAudio, recordGreeting } from "./routes/greeting";
 import { callTranscript, recordingAudio } from "./routes/recordings";
 import { callTranscribeOn, noticeTwiml, recordingBackstop, recordingCallback } from "./recording";
@@ -182,6 +183,7 @@ const ROUTES: { method: string; re: RegExp; h: Handler }[] = [
   { method: "POST", re: /^\/quick-sends\/([^/]+)\/used$/, h: (r, env, _ec, m) => quickSendUsed(env, r, pathParam(m[1])) },
   { method: "POST", re: /^\/quick-sends\/([^/]+)$/, h: (r, env, _ec, m) => updateQuickSend(env, r, pathParam(m[1])) },
   { method: "POST", re: /^\/push\/text$/, h: (r, env, ec) => pushText(env, ec, r) },
+  { method: "POST", re: /^\/push\/email$/, h: (r, env, ec) => pushEmail(env, ec, r) },
 ];
 
 async function handleApp(req: Request, env: Env, ec: Ctx, path: string): Promise<Response> {
