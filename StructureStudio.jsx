@@ -2170,7 +2170,9 @@ function d3CustomerWallHeightFt(C, styleCfg, styleKey, sel, widthFt) {
 // beside them and the cost appears on the estimate.
 const INSULATION_AREAS = ["floor", "walls", "roof"];
 const INSULATION_AREA_LABEL = { floor: "Floor", walls: "Walls", roof: "Roof" };
-const INSULATION_TYPE_LABEL = { batt: "Batt", spray_foam: "Spray Foam" };
+// rigid_foam (migration 272): a builder who insulates only under the floor sheeting. Its row
+// is a Floor rate with Walls and Roof left blank, so nothing here is floor-specific.
+const INSULATION_TYPE_LABEL = { batt: "Batt", spray_foam: "Spray Foam", rigid_foam: "Rigid Foam" };
 function insulationOffered(C) {
   const l = C && C.insulation;
   return Array.isArray(l) ? l : [];
@@ -2523,10 +2525,18 @@ function resolveWallHeight(C, styleKey, deltaIn, widthFt) {
   // includeInternal TRUE on purpose: this resolves a PRICE, and an increase a rep selected must
   // still cost what it costs. Filtering here would let a rep pick an internal-only upgrade, see
   // a total, and have the estimate silently drop the charge. Visibility is the picker's job.
-  const hit = wallHeightOptionsFor(C, styleKey, undefined, true).find((o) => Number(o.deltaIn) === d) || null;
-  if (!hit) return null;
-  // A pick that no longer fits the building prices NOTHING, matching the server's refusal.
-  return widthFt === undefined || wallHeightFitsWidth(hit, widthFt) ? hit : null;
+  if (widthFt === undefined) {
+    return wallHeightOptionsFor(C, styleKey, undefined, true).find((o) => Number(o.deltaIn) === d) || null;
+  }
+  // The WIDTH picks the row (migration 272). An increase can be listed twice on a style, once
+  // hauled and once built on site, with no width in common: +12" hauled on the 8-12 wide and the
+  // same +12" built on site on the 14 wide (bug report 2026-10-02). So the rows offered at this
+  // width are searched, not the first row with this increase, which would be the hauled one and
+  // would then fail the width check on the 14. A pick that fits no row prices NOTHING, matching
+  // the server's refusal; two rows at one width (a catalog the Settings save refuses) price
+  // nothing too, because submit-estimate refuses that case rather than guess between them.
+  const hits = wallHeightOptionsFor(C, styleKey, widthFt, true).filter((o) => Number(o.deltaIn) === d);
+  return hits.length === 1 ? hits[0] : null;
 }
 
 // ── Quote sections (Carolyn, 2026-09-02) ────────────────────────────────────
@@ -3873,6 +3883,42 @@ function loadGoogleMapsPlaces(apiKey) {
 function isOptionApplicable(opt, styleValue) {
   if (!opt || !Array.isArray(opt.buildingStyles) || opt.buildingStyles.length === 0) return true;
   return !!styleValue && opt.buildingStyles.includes(styleValue);
+}
+
+// ─── Per-fixture building-style scoping (migration 272) ───
+// A catalog door, window, ramp or vent may be offered on some styles only: the builder's "Offered
+// on" ticks (fixture_items.style_ids), which get_fixtures sends as `styleKeys`. No key means every
+// style, which is every fixture there was before 272. With the key, only the styles it names, so
+// a restricted fixture is offered nowhere until a style is picked, the way a scoped option above
+// hides. An empty list (every style it named was deleted since) offers it nowhere.
+// Visibility only, like internalOnly: it narrows what the PICKERS offer. A placed item still
+// renders and prices from the full catalog.
+function fixtureOfferedOnStyle(f, styleKey) {
+  if (!f || !Array.isArray(f.styleKeys)) return true;
+  return f.styleKeys.indexOf(styleKey) !== -1;
+}
+// The placed catalog fixtures a style does NOT offer, which a style change takes off the plan. An
+// item whose fixture is no longer in the catalog is left alone: it is archived, not restricted,
+// and isArchivedItem already badges it.
+function ssPlacedNotOfferedOn(items, fixtures, styleKey) {
+  if (!Array.isArray(items) || !Array.isArray(fixtures)) return [];
+  return items.filter((it) => {
+    if (!it || it.fixtureItemId == null) return false;
+    const fx = fixtures.find((f) => f && String(f.id) === String(it.fixtureItemId));
+    return !!fx && !fixtureOfferedOnStyle(fx, styleKey);
+  });
+}
+// What the customer is told when a style change takes them off. An object, not a string: a plain
+// string reads "Can't place here", and nothing was refused. `extra` is the gable-vent sentence
+// when the same switch also brought a vent down (ssVentStyleDropped), so one toast says both.
+function ssNotOfferedToast(names, styleLabel, extra) {
+  const counts = [];
+  names.forEach((n) => { const c = counts.find((x) => x.n === n); if (c) c.k++; else counts.push({ n, k: 1 }); });
+  const on = styleLabel ? `the ${styleLabel}` : "this style";
+  const text = names.length === 1
+    ? `The ${names[0]} isn't offered on ${on}, so it was taken off your building.`
+    : `These aren't offered on ${on}, so they were taken off your building: ${counts.map((c) => (c.k > 1 ? `${c.n} (${c.k})` : c.n)).join(", ")}.`;
+  return { tone: "warn", title: "Not offered on this style", text: extra ? `${text} ${extra}` : text };
 }
 
 // ─── 3D VIEW ENGINE ───
@@ -20921,9 +20967,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // category has always meant a door and must keep meaning one.
   const ventFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "vent"), [C.fixtures]);
   // Internal-only fixtures: the rep (embedded) designer can place them, but the customer-facing page
-  // must NOT offer them as placement options. These "placeable" lists drive the PICKERS + picker
-  // buttons only; the full memos above still feed isArchivedItem / swap / render so an already-placed
-  // internal-only fixture keeps rendering for the customer and never reads as archived.
+  // must NOT offer them as placement options. These "placeable" lists, narrowed by style into the
+  // offered* lists below the sel state, drive the PICKERS + picker buttons only; the full memos
+  // above still feed isArchivedItem / swap / render so an already-placed internal-only fixture
+  // keeps rendering for the customer and never reads as archived.
   const placeableDoors = customerFacing ? doorFixtures.filter((f) => !f.internalOnly) : doorFixtures;
   const placeableRamps = customerFacing ? rampFixtures.filter((f) => !f.internalOnly) : rampFixtures;
   const placeableWindows = customerFacing ? windowFixtures.filter((f) => !f.internalOnly) : windowFixtures;
@@ -20956,6 +21003,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
     return init;
   });
+  // What the PICKERS offer on the style being designed (272, fixtureOfferedOnStyle): the placeable
+  // lists narrowed by the builder's "Offered on" ticks, so a louvered vent sold on the Greenhouse
+  // alone is not in the Vent picker on another style. Declared HERE, below sel: the placeable lists
+  // above sit before this useState, and reading sel.style up there throws (TDZ). rampCustom stays on
+  // the style-agnostic list on purpose, so a style that offers no custom ramp hides the Ramp button
+  // rather than flipping a custom-ramp builder to the simple ramp tool.
+  const offeredDoors = placeableDoors.filter((f) => fixtureOfferedOnStyle(f, sel.style));
+  const offeredRamps = placeableRamps.filter((f) => fixtureOfferedOnStyle(f, sel.style));
+  const offeredWindows = placeableWindows.filter((f) => fixtureOfferedOnStyle(f, sel.style));
+  const offeredVents = placeableVents.filter((f) => fixtureOfferedOnStyle(f, sel.style));
   // Catalog fixtures the current size INCLUDES → a placement tool keyed by the fixture id. Each
   // renders in the "included — place or decline" row and, when armed, drops that EXACT fixture on
   // the next wall click (doors/windows) or door (ramps). Empty until a style+size is chosen; the
@@ -21108,7 +21165,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // layout_item_types.palette_group value shipped for one button.
   const ventTools = (() => {
     const out = {};
-    placeableVents.forEach((fx) => {
+    offeredVents.forEach((fx) => {
       out[`vnt:${fx.id}`] = {
         label: fx.name || "Vent", color: FIXTURE_VENT_COLOR, icon: "🌬️",
         wallOnly: true, width: (Number(fx.widthIn) || 12) / 12, height: 0.5,
@@ -21124,14 +21181,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     ...elecItemTools,
     ...(Object.keys(elecItemTools).length ? { elecItemPicker: ELEC_ITEM_PICKER_CFG } : {}),
     // The Door tool also exists for a builder who offers only the rough opening: its picker holds the tile.
-    ...(placeableDoors.length || roDoorTile ? { doorPicker: DOOR_PICKER_CFG } : {}),
-    ...(rampCustom ? { rampPicker: RAMP_PICKER_CFG } : {}),
+    ...(offeredDoors.length || roDoorTile ? { doorPicker: DOOR_PICKER_CFG } : {}),
+    ...(rampCustom && offeredRamps.length ? { rampPicker: RAMP_PICKER_CFG } : {}),
     // Ramp is ALWAYS the self-contained SIMPLE_RAMP_CFG (overrides any built-in `ramp` layout item),
     // so every placed ramp renders. Placeable only when the tenant offers a SIMPLE ramp; custom mode
     // and not-offered are render-only (the picker handles custom placement).
     ramp: { ...SIMPLE_RAMP_CFG, noPalette: !(rampMode === "simple" && rampEnabled) },
     // Catalog windows add a "Window" picker tool; the built-in window stays as-is (like doors).
-    ...(placeableWindows.length || roWindowTile ? { windowPicker: WINDOW_PICKER_CFG } : {}),
+    ...(offeredWindows.length || roWindowTile ? { windowPicker: WINDOW_PICKER_CFG } : {}),
     ...ventTools,
     ...(Object.keys(ventTools).length ? { ventPicker: VENT_PICKER_CFG } : {}),
     // Shelving: collapse the slab family behind one picker, but ONLY when there is a choice to
@@ -22511,6 +22568,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setSel((s) => ({ ...s, wallHeightDeltaIn: 0 }));
       setToast(`A ${curDelta}" wall-height increase isn't available on a ${p.w} ft wide building — set back to standard height.`);
       setTimeout(() => setToast(null), 6000);
+    } else if (curDelta > 0 && prev && prev.w !== p.w) {
+      // The same increase can be hauled at one width and built on site at another (272), so a
+      // width change can keep the pick and still change what is being bought. Say so: the
+      // Built On Site line appearing or vanishing from the total needs a reason in plain words.
+      const was = resolveWallHeight(C, sel.style, curDelta, prev.w);
+      const now = resolveWallHeight(C, sel.style, curDelta, p.w);
+      // An object, not a string: a plain string reads "Can't place here", and nothing was refused.
+      if (was && now && !!was.buildOnSite !== !!now.buildOnSite) {
+        setToast(now.buildOnSite
+          ? { tone: "warn", title: "Built on site", text: `Walls ${curDelta}" taller are too tall to haul on a ${p.w} ft wide building, so this building will be built on your site.` }
+          : { tone: "info", title: "Hauled", text: `Walls ${curDelta}" taller can be hauled on a ${p.w} ft wide building, so this building is no longer built on site.` });
+        setTimeout(() => setToast(null), 6000);
+      }
     }
   }, [sel.size]);
 
@@ -22525,18 +22595,52 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // declared AFTER this effect updates, so on a shared commit this still sees the previous items.
   // The functional setItems lands only on the plan it was computed from, never on one that replaced
   // it in the meantime.
+  //
+  // The same change takes off any catalog fixture the new style is not offered on (272): a louvered
+  // vent sold on the Greenhouse alone must not ride along onto another style's quote, because a
+  // style pick keeps every placed item (the size effect reflows them, it never clears them). A ramp
+  // goes with its door, the way every other door removal takes it (delSel, onItemDelete): left
+  // behind, it sits on a bare wall and is still priced and quoted. The dormer window is the same
+  // choice made in 3D, so it goes the same way. One toast names them.
   useEffect(() => {
     const prevStyle = ventStyleRef.current;
     ventStyleRef.current = sel.style;
     if (prevStyle === null || prevStyle === sel.style) return;      // first render, or no change
+    // A tool armed for an item this style does not offer is gone from ITEMS, and with it armed a
+    // plan click does nothing at all, not even select. Disarm it.
+    if (activeTool && !ITEMS[activeTool]) setActiveTool(null);
     if (sel.style && !selectedStyle) return;                          // a style the config does not list
     if (ventItemsSeenRef.current !== items) return;                   // arrived with new items: a load
+    const fixtures = Array.isArray(C.fixtures) ? C.fixtures : [];
+    const off = sel.style ? ssPlacedNotOfferedOn(items, fixtures, sel.style) : [];
+    const offIds = new Set(off.map((it) => it.id));
+    const rampsOff = off.length ? items.filter((it) => it.type === "ramp" && !offIds.has(it.id) && offIds.has(it.snapDoorId)) : [];
+    rampsOff.forEach((it) => offIds.add(it.id));
+    const dormerFx = sel.style && sel.dormerWindowId ? fixtures.find((f) => f && String(f.id) === String(sel.dormerWindowId)) : null;
+    const dormerOff = !!dormerFx && !fixtureOfferedOnStyle(dormerFx, sel.style);
+    const kept = offIds.size ? items.filter((it) => !offIds.has(it.id)) : items;
     const vr = ventRoof2D();
-    const r = ssRefitGableVents(items, vr.roof, bldgW, bldgH, vr.H, ITEMS);
-    if (!r) return;
+    const r = ssRefitGableVents(kept, vr.roof, bldgW, bldgH, vr.H, ITEMS);
+    if (!r && !off.length && !dormerOff) return;
+    const next = r ? r.items : kept;
     const from = items;
-    setItems((cur) => (cur === from ? r.items : cur));
-    if (r.dropped) { setToast(ssVentStyleDropped(r.dropped)); setTimeout(() => setToast(null), 6000); }
+    // A style sold in one size of other dimensions sets that size in the same commit, and the size
+    // effect above has then already replaced the plan. Its reflow re-fitted the vents for the new
+    // size, but what this style does not offer must still come off, so that part goes by id.
+    if (next !== items) setItems((cur) => (cur === from ? next : offIds.size ? cur.filter((it) => !offIds.has(it.id)) : cur));
+    if (off.length) setSelectedId(null);
+    if (dormerOff) setSel((p) => ({ ...p, dormerWindowId: null, dormerWindowOffset: 0 }));
+    const dropped = r && r.dropped ? ssVentStyleDropped(r.dropped) : null;
+    const names = off.map((it) => it.doorName || it.windowName || it.rampName || "item");
+    if (dormerOff) names.push(`${dormerFx.name || "window"} in the dormer`);
+    // A ramp that went with its door is said after the list, not listed as not offered.
+    const rampDoor = rampsOff.length === 1 ? off.find((o) => o.id === rampsOff[0].snapDoorId) : null;
+    const rampsNote = !rampsOff.length ? null : rampsOff.length === 1
+      ? `The ramp on the ${(rampDoor && (rampDoor.doorName || rampDoor.windowName)) || "door"} was taken off with it.`
+      : "The ramps on those doors were taken off with them.";
+    const extra = [rampsNote, dropped].filter(Boolean).join(" ") || null;
+    if (names.length) { setToast(ssNotOfferedToast(names, selectedStyle ? selectedStyle.label : "", extra)); setTimeout(() => setToast(null), 6000); }
+    else if (dropped) { setToast(dropped); setTimeout(() => setToast(null), 6000); }
   }, [sel.style]);
   useEffect(() => { ventItemsSeenRef.current = items; }, [items]);
 
@@ -30244,7 +30348,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              palette keeps its collapsed Shelving popup, which is what Carolyn asked for there. */
           paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
           roOffer={{ door: roDoorOffered, window: roWindowOffered }}
-          placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
+          placeableDoors={offeredDoors} placeableWindows={offeredWindows} placeableRamps={offeredRamps}
           paintEnabled={false}
           onSnapshot={() => {}}
           draftOnly={advancedOnly}
@@ -32236,9 +32340,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: pal.surface, minHeight: embedded ? "100%" : "100vh" }}>
       <SSDesignerFrame pal={pal} embedded={embedded}>
       {gateEl && createPortal(gateEl, document.body)}
-      {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} doorColors={doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} ro={!doorPick.swap && roDoorTile} onPlaceRo={() => { const p = doorPick; setDoorPick(null); placePickedRo("roughOpeningDoor", p); }} onPlace={placePickedDoor} />, document.body)}
-      {rampPick && createPortal(<RampPicker ramps={placeableRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
-      {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} windowColors={windowColorList} dressColors={dressColorList} swapFrom={swapId != null ? items.find((i) => i.id === swapId) : null} onCancel={() => { setWindowPick(null); setSwapId(null); }} ro={!windowPick.swap && roWindowTile} onPlaceRo={() => { const p = windowPick; setWindowPick(null); placePickedRo("roughOpeningWindow", p); }} onPlace={placePickedWindow} />, document.body)}
+      {doorPick && createPortal(<DoorPicker doors={offeredDoors} showPricing={!!C.showPricing} doorColors={doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} ro={!doorPick.swap && roDoorTile} onPlaceRo={() => { const p = doorPick; setDoorPick(null); placePickedRo("roughOpeningDoor", p); }} onPlace={placePickedDoor} />, document.body)}
+      {rampPick && createPortal(<RampPicker ramps={offeredRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
+      {windowPick && createPortal(<WindowPicker windows={offeredWindows} showPricing={!!C.showPricing} windowColors={windowColorList} dressColors={dressColorList} swapFrom={swapId != null ? items.find((i) => i.id === swapId) : null} onCancel={() => { setWindowPick(null); setSwapId(null); }} ro={!windowPick.swap && roWindowTile} onPlaceRo={() => { const p = windowPick; setWindowPick(null); placePickedRo("roughOpeningWindow", p); }} onPlace={placePickedWindow} />, document.body)}
       {elecItemPick && createPortal(
         <ElectricalItemPicker
           items={elecItemsOffered(C, !!(sel && sel.electrical), embedded)}
@@ -32249,7 +32353,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       {shelfPick && createPortal(<ShelfPicker items={shelvingKeys} itemTypes={ITEMS} rates={shelvingRates} showPricing={!!C.showPricing}
         onCancel={() => setShelfPick(false)}
         onPick={(k) => { setShelfPick(false); setActiveTool(k); setSelectedId(null); }} />, document.body)}
-      {ventPick && createPortal(<VentPicker vents={placeableVents}
+      {ventPick && createPortal(<VentPicker vents={offeredVents}
         onCancel={() => setVentPick(false)}
         onPick={(id) => { setVentPick(false); setActiveTool(`vnt:${id}`); setSelectedId(null); }} />, document.body)}
       {/* Size change refused: something on the plan has nowhere to go in the smaller
@@ -32785,6 +32889,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             return { ...p, insulationType: t, insulation: cur.filter((s) => keep.indexOf(s.area) !== -1).map((s) => ({ ...s, type: t })) };
           });
           const insAll = insAreas.length > 1 && insAreas.every(insHas);
+          // With ONE type on offer there is no type picker, so the type rides on the area button
+          // ("Rigid Foam — Floor"). A bare "Floor" never said what goes in it, and for a builder
+          // who sells only rigid foam under the floor that one button is the whole option. Two or
+          // more types keep the short area names under the picker that already names the type.
+          const insAreaLabel = (a) => (insTypes.length === 1
+            ? `${INSULATION_TYPE_LABEL[insType] || insType} — ${INSULATION_AREA_LABEL[a]}`
+            : INSULATION_AREA_LABEL[a]);
           const insBody = !planLocked && insAreas.length ? (
             <>
               {insTypes.length > 1 && (
@@ -32799,7 +32910,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               )}
               {insAreas.map((a) => (
                 <button key={a} onClick={() => insToggle(a)} aria-pressed={insHas(a)}
-                  className={insHas(a) ? "ssd-cov is-on" : "ssd-cov"}>{INSULATION_AREA_LABEL[a]}</button>
+                  className={insHas(a) ? "ssd-cov is-on" : "ssd-cov"}>{insAreaLabel(a)}</button>
               ))}
               {insAreas.length > 1 && (
                 <button onClick={() => setSel((p) => ({ ...p, insulation: insAll ? [] : insAreas.map((a) => ({ type: insType, area: a })) }))}
@@ -33046,7 +33157,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const isWin = si.type === "window" && !isVentItem(si);
             const isRamp = si.type === "ramp";
             if (!(isDoor || isWin || isRamp)) return null;
-            const pool = isDoor ? placeableDoors : isWin ? placeableWindows : placeableRamps;
+            const pool = isDoor ? offeredDoors : isWin ? offeredWindows : offeredRamps;
             if (!pool || pool.length === 0) return null;
             const archived = isArchivedItem(si);
             const openSwap = () => {
@@ -34753,7 +34864,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              palette keeps its collapsed Shelving popup, which is what Carolyn asked for there. */
           paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
           roOffer={{ door: roDoorOffered, window: roWindowOffered }}
-          placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
+          placeableDoors={offeredDoors} placeableWindows={offeredWindows} placeableRamps={offeredRamps}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
           onPaintChange={(pc) => {
             setPaintColors({ body: pc.body, trim: pc.trim });

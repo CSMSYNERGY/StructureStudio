@@ -502,9 +502,15 @@ Deno.test("a 10 ft wall: a same-size reflow (reload, style re-fit) leaves a 4 ft
 
 Deno.test("both twins re-fit gable vents on a style pick, but not on a load, and pass the plate to every vent refusal", () => {
   for (const [name, text] of [["component.js", SRC], ["jsx", JSX]] as const) {
-    assert(text.includes("const r = ssRefitGableVents(items, vr.roof, bldgW, bldgH, vr.H, ITEMS);"), `${name}: the style effect re-fits`);
+    // Since 272 the re-fit runs on `kept`: the plan less any catalog item the new style is not
+    // offered on (fixtureStyles_test pins that half), which is `items` itself when nothing goes.
+    assert(text.includes("const r = ssRefitGableVents(kept, vr.roof, bldgW, bldgH, vr.H, ITEMS);"), `${name}: the style effect re-fits`);
+    assert(text.includes("const kept = offIds.size ? items.filter((it) => !offIds.has(it.id)) : items;"), `${name}: ...the plan as it stands, less only what the style does not offer`);
     assert(text.includes("if (ventItemsSeenRef.current !== items) return;"), `${name}: a load (style and items in one commit) is skipped`);
-    assert(text.includes("setItems((cur) => (cur === from ? r.items : cur));"), `${name}: the re-fit only lands on the plan it was computed from`);
+    // The re-fit lands only on the plan it was computed from. A plan the size effect replaced in the
+    // same commit keeps its own re-fit and loses only the not-offered ids (fixtureStyles_test).
+    assert(text.includes("const next = r ? r.items : kept;") && text.includes("if (next !== items) setItems((cur) => (cur === from ? next : offIds.size ? cur.filter((it) => !offIds.has(it.id)) : cur));"),
+      `${name}: the re-fit only lands on the plan it was computed from`);
     const styleFx = text.indexOf("}, [sel.style]);"), tracker = text.indexOf("useEffect(() => { ventItemsSeenRef.current = items; }, [items]);");
     assert(styleFx > 0 && tracker > styleFx, `${name}: the items tracker runs AFTER the style effect, or a load reads as a pick`);
     assert(text.includes("const r = ssVentRefusal({ ...it, ...patch }, existing, itemTypes, scale, w.H);"), `${name}: arrows and chips pass the plate`);

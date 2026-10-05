@@ -1057,22 +1057,37 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     if (!styleRowId) {
       return json({ error: `Cannot price a wall-height upgrade: the style "${style}" is not in your catalog.` }, 400);
     }
+    // EVERY row for the increase, not maybeSingle: since migration 272 an increase can be listed
+    // twice on a style, once hauled and once built on site, with no width in common (a builder
+    // sells +12" hauled on the 8-12 wide and the same +12" built on site on the 14 wide). The
+    // building's width picks the row, exactly as the designer's resolveWallHeight picks it, so the
+    // preview and this line price the same row with the same rate and the same on-site fee.
+    type WallHeightRow = {
+      rate_per_lf: number | null; taxable: boolean | null; active: boolean; widths_ft: number[] | null;
+      build_on_site: boolean | null; bos_fee_basis: string | null; bos_fee_rate: number | null };
     const whRes = await supabase.from("style_wall_heights")
       .select("delta_in, rate_per_lf, taxable, active, widths_ft, build_on_site, bos_fee_basis, bos_fee_rate")
-      .eq("client_id", clientId).eq("style_id", styleRowId).eq("delta_in", wallHeightDeltaIn).maybeSingle();
-    const wh = whRes.data as {
-      rate_per_lf: number | null; taxable: boolean | null; active: boolean; widths_ft: number[] | null;
-      build_on_site: boolean | null; bos_fee_basis: string | null; bos_fee_rate: number | null } | null;
-    if (whRes.error || !wh || !wh.active || wh.rate_per_lf == null) {
+      .eq("client_id", clientId).eq("style_id", styleRowId).eq("delta_in", wallHeightDeltaIn);
+    const whOffered = ((whRes.data ?? []) as WallHeightRow[]).filter((r) => r.active && r.rate_per_lf != null);
+    if (whRes.error || !whOffered.length) {
       return json({ error: `A ${wallHeightDeltaIn}" wall-height increase isn't offered on "${styleLabel}". Set it in the portal under Settings → Options → Wall Height Upgrades, then resubmit.` }, 400);
     }
     // Offered on this WIDTH? Total haul height is wall + roof and the roof grows with width, so
     // an increase legal on an 8 wide can be illegal on a 14. The browser already filters the
     // picker, but this is the check that counts: the payload is attacker-controlled, and a
     // building that cannot be hauled is not a quote we can honour. NULL widths_ft = every width.
-    if (Array.isArray(wh.widths_ft) && !wh.widths_ft.some((w) => Number(w) === buildingWidthFt)) {
+    const whFits = whOffered.filter((r) => !Array.isArray(r.widths_ft) || r.widths_ft.some((w) => Number(w) === buildingWidthFt));
+    if (!whFits.length) {
       return json({ error: `A ${wallHeightDeltaIn}" wall-height increase isn't available on a ${buildingWidthFt} ft wide "${styleLabel}" — taller walls are limited by width for hauling. Choose standard height or a narrower building.` }, 400);
     }
+    // Two rows offered at one width is a catalog the Settings save refuses (the hauled and the
+    // on-site row may not share a width). Should one exist anyway, refuse rather than guess: the
+    // two rows carry different rates and only one of them is built on site, so picking either could
+    // quote a building the builder did not mean. The designer prices nothing in the same case.
+    if (whFits.length > 1) {
+      return json({ error: `A ${wallHeightDeltaIn}" wall-height increase is set up twice for a ${buildingWidthFt} ft wide "${styleLabel}" (hauled and built on site). Untick ${buildingWidthFt} ft on one of the two rows in the portal under Settings → Options → Wall Height Upgrades, then resubmit.` }, 400);
+    }
+    const wh = whFits[0];
     const whRate = Number(wh.rate_per_lf) || 0;
     // 5..20 ft (5..14 until 2026-09-24): styleD3's WALL_HEIGHT_MAX_FT, written as a literal so this
     // function does not start bundling styleD3.ts. ⚠️ LOCK-STEP with d3WallHeightFromDelta in both
@@ -1275,7 +1290,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     if (ioRes.error) return json({ error: "Could not read your insulation rates just now. Try resubmitting in a moment." }, 400);
     const offers = (ioRes.data ?? []) as { ins_type: string; area: string; rate_per_sqft: number | null; taxable: boolean | null; active: boolean }[];
     const AREA_LABEL: Record<string, string> = { floor: "Floor", walls: "Walls", roof: "Roof" };
-    const TYPE_LABEL: Record<string, string> = { batt: "Batt", spray_foam: "Spray Foam" };
+    // Same names as the designer's INSULATION_TYPE_LABEL (both twins), so the preview line and
+    // the quote line read alike. rigid_foam is migration 272 (floor-only in practice).
+    const TYPE_LABEL: Record<string, string> = { batt: "Batt", spray_foam: "Spray Foam", rigid_foam: "Rigid Foam" };
     // roof == floor is the v1 simplification the builder's rate absorbs; walls are GROSS
     // (perimeter x height, no opening deduction). The browser's insulationSqft is the same
     // three lines — they must agree or the preview and the quote disagree.

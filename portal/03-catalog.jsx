@@ -3730,6 +3730,39 @@ const WH_BOS_BASES = [
   ["pct_building_price", "pct building price"],
   ["pct_estimate_total", "pct estimate total"],
 ];
+// One hauled and one built-on-site row per increase, and the two share no width (migration 272;
+// bug report 2026-10-02: +12 hauled on the 8-12 wide, the same +12 built on site on the 14 wide).
+// The portal's copy of wallHeightClash in supabase/functions/_shared/wallHeightRows.ts, so a
+// builder reads the sentence BEFORE the save instead of as a refused one; wallHeightRows.test.ts
+// pins the wording, so keep the two alike. A null widths list is every width the style sells, and
+// on a style with no sizes yet, every width at all.
+function whClash(rows, styleWidths) {
+  const key = (r) => Number(String(r.deltaIn).trim()) + ":" + (r.buildOnSite ? "site" : "haul");
+  const seen = {};
+  for (const r of rows) {
+    const d = Number(String(r.deltaIn).trim());
+    if (seen[key(r)]) return "+" + d + " in is listed twice" + (r.buildOnSite ? " as built on site" : "") + ". An increase can be listed once for hauled buildings and once ticked Built on site.";
+    seen[key(r)] = r;
+  }
+  const all = styleWidths || [];
+  for (const r of rows) {
+    if (r.buildOnSite) continue;
+    const d = Number(String(r.deltaIn).trim());
+    const site = seen[d + ":site"];
+    if (!site) continue;
+    let shared;
+    if (!Array.isArray(r.widthsFt) && !Array.isArray(site.widthsFt) && !all.length) shared = [];
+    else {
+      const wa = Array.isArray(r.widthsFt) ? r.widthsFt.map(Number) : (all.length ? all : null);
+      const wb = Array.isArray(site.widthsFt) ? site.widthsFt.map(Number) : (all.length ? all : null);
+      const both = wa === null ? (wb || []) : wb === null ? wa : wa.filter((w) => wb.indexOf(w) !== -1);
+      shared = [...new Set(both)].sort((x, y) => x - y);
+      if (!shared.length) continue;
+    }
+    return "+" + d + " in is offered both hauled and built on site at " + (shared.length ? shared.join(", ") + " ft wide" : "every width") + ". Untick " + (shared.length === 1 ? "that width" : "those widths") + " on one of the two rows.";
+  }
+  return null;
+}
 // -- Wall Height Upgrades (172) ----------------------------------------------------------
 // One card, one section per building style -- the ColorsView pattern, and for the reason
 // Carolyn liked it there: a builder reads down their own styles rather than across a matrix.
@@ -3739,9 +3772,9 @@ const WH_BOS_BASES = [
 // renderSection is a plain function and NOT a component, deliberately: as a component React
 // remounts it on every keystroke and the input loses focus. Same note as ColorsView.
 // -- Insulation (177) -------------------------------------------------------------------
-// A fixed 2x3 matrix: batt / spray foam across floor / walls / roof. Blank a cell and that
-// combination stops being offered -- the row is deleted, get_config stops emitting it, and the
-// customer's toggle disappears. "Entire building" is a shortcut in the DESIGNER, never a
+// A fixed 3x3 matrix: batt / spray foam / rigid foam (272) across floor / walls / roof. Blank a
+// cell and that combination stops being offered -- the row is deleted, get_config stops emitting
+// it, and the customer's toggle disappears. "Entire building" is a shortcut in the DESIGNER, never a
 // fourth row here: a stored fourth rate would be a second place for the price to live.
 function Electrical({ viewingLabel = null, clientId = null }) {
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
@@ -3984,7 +4017,7 @@ function Electrical({ viewingLabel = null, clientId = null }) {
 
 function Insulation({ viewingLabel = null, clientId = null }) {
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
-  const TYPES = [["batt", "Batt"], ["spray_foam", "Spray Foam"]];
+  const TYPES = [["batt", "Batt"], ["spray_foam", "Spray Foam"], ["rigid_foam", "Rigid Foam"]];
   const AREAS = [["floor", "Floor"], ["walls", "Walls"], ["roof", "Roof"]];
   const [cat, setCat] = useState(null);
   const [cells, setCells] = useState({});
@@ -4050,7 +4083,8 @@ function Insulation({ viewingLabel = null, clientId = null }) {
         roof use the footprint; walls use the perimeter &times; the wall height, so a taller-wall
         upgrade is included automatically. <b>Leave a rate blank and that combination isn&rsquo;t
         offered</b> &mdash; the customer simply won&rsquo;t see it. They pick the areas they want and
-        each one lands as its own line on the quote.
+        each one lands as its own line on the quote. Only insulate under the floor? Fill in just the
+        Floor rate for that type and leave Walls and Roof blank.
       </p>
       <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
         <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)}
@@ -4535,6 +4569,9 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
         return t !== "" && (!Number.isFinite(Number(t)) || Number(t) < 0);
       });
       if (badBos.length) throw new Error("Nothing was saved \u2014 fix these build-on-site fee(s) first: " + badBos.map((r) => "+" + r.deltaIn + " in (\"" + r.bosFeeRate + "\")").join(", ") + ".");
+      // The same increase twice is fine once hauled and once Built on site, on different widths.
+      const clash = whClash(rows, widthsOf(styleId));
+      if (clash) throw new Error("Nothing was saved \u2014 " + clash);
       const { data, error } = await sb.functions.invoke("portal-settings", {
         body: scoped({
           action: "save_wall_heights",
@@ -4704,6 +4741,8 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
         say so. Tick <b>Built on site</b> on an increase too tall to haul under a bridge: the
         customer sees “on site” beside that choice, the building is marked as a site build
         rather than a delivery, and you can add the upcharge for sending a crew out.
+        To sell the same increase hauled on narrower buildings and built on site on wider ones, add it
+        <b> twice</b>: once with the hauled widths ticked, and once ticked <b>Built on site</b> with the wider widths.
       </p>
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" · ")}</div>}</div>}
@@ -5308,6 +5347,13 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // checkboxes. Windows only.
   const [winColors, setWinColors] = useState([]);
   const isWindowCat = category === "window";
+  // The builder's building styles, for the "Offered on" ticks (272). Every category. Hidden
+  // styles are left out of the ticks, as every other per-style card here leaves them out.
+  const [offerStyles, setOfferStyles] = useState([]);
+  // EVERY style id, hidden ones included. "Every style" is judged against these, never against the
+  // ticks shown: a line restricted to the Greenhouse while the only other style is hidden must not
+  // save as "every style" on a price edit, or the restriction is gone when that style comes back.
+  const [allStyleIds, setAllStyleIds] = useState([]);
 
   const mapRow = (d) => ({
     id: d.id, name: d.name || "", plan_label: d.plan_label || "", show_image_on_estimate: d.show_image_on_estimate !== false,
@@ -5318,6 +5364,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     color_mode: d.color_mode || "fixed", has_trim_color: d.has_trim_color === true, fixed_color_id: d.fixed_color_id || null,
     // null = comes in ALL window colors (the living default); an array = exactly those.
     window_color_ids: Array.isArray(d.window_color_ids) ? d.window_color_ids.map(String) : null,
+    // null = offered on EVERY building style (the living default); an array = only those (272).
+    style_ids: Array.isArray(d.style_ids) ? d.style_ids.map(String) : null,
     // Blank = "use the standard 3'6"", which is NOT the same as 0 (a window starting at
     // the floor), so an empty string has to survive the round trip rather than becoming 0.
     // fmtFtIn renders 0 as "" (right for a width, wrong here — it would turn a deliberate
@@ -5345,6 +5393,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     setRows([...list.filter((r) => !r.archived), ...list.filter((r) => r.archived)]);
     if (isDoorCat) setDoorColors((data.colors || []).filter((c) => c.door === true && c.active !== false));
     if (isWindowCat) setWinColors((data.windowColors || []).filter((c) => c.active !== false));
+    setOfferStyles((data.styles || []).filter((s) => s.active !== false));
+    setAllStyleIds((data.styles || []).map((s) => String(s.id)));
     setLoaded(true);
   };
   // refreshKey lets a sibling editor force a reload in place — WindowsView bumps it after
@@ -5352,6 +5402,13 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // checkboxes without a page refresh.
   useEffect(() => { load(); }, [refreshKey]);
 
+  // What a line's "Offered on" ticks send (272): null when every style the builder has, hidden
+  // ones included, is ticked, else the ticked ids. It rides on every save of the line (a price
+  // edit, Archive), so judging "every" by the visible ticks alone would widen a restriction.
+  const styleIdsOut = (ids) => (ids == null || (allStyleIds.length > 0 && allStyleIds.every((id) => ids.includes(id)))) ? null : ids;
+  // Every "Offered on" box unticked. portal-settings refuses that save, so the Save button waits.
+  // Judged on the boxes shown: a line left on hidden styles only reaches no customer today either.
+  const offeredNowhere = (d) => !!d && Array.isArray(d.style_ids) && offerStyles.length > 1 && !offerStyles.some((s) => d.style_ids.includes(String(s.id)));
   // One line's payload for save_fixture / import_fixtures. Sizes go over as inches.
   // Color keys ride ONLY for doors so the server's presence contract leaves other
   // categories' (forced) values alone.
@@ -5366,6 +5423,10 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // Every box ticked goes over as null ("all colors") so a window-color added later
     // automatically appears on unrestricted windows.
     ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
+    // Offered on (272), every category, the same collapse: every style ticked, hidden ones
+    // included, goes over as null ("every style"), so a style added later offers this item
+    // without a visit here.
+    styleIds: styleIdsOut(r.style_ids),
     ...(isWindowCat ? { sillIn: ftInToInches(r.sill_in), sillMode: r.sill_mode === "variable" ? "variable" : "fixed" } : {}),
     // Height off the floor rides for DOORS as well since 2026-09-04 — a loft door is an
     // ordinary door row whose sill is not zero (Carolyn @27:16: "that loft door goes with the
@@ -5658,7 +5719,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, style_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -5730,6 +5791,14 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // one they got wrong should not have to open each row to find it. Only when set, so an
     // ordinary door's summary line is unchanged.
     if (isDoorCat && String(r.sill_in || "").trim()) parts.push(`${String(r.sill_in).trim()} off the floor`);
+    // Offered on some styles only (272): said on the row, so a builder looking for why an item
+    // is missing from a style's designer finds the answer without opening each line.
+    if (styleIdsOut(r.style_ids) !== null) {
+      const names = offerStyles.filter((s) => r.style_ids.includes(String(s.id))).map((s) => s.label);
+      // None shown: hidden styles, or (no foreign key on the list) styles deleted since.
+      parts.push(names.length ? `only on ${names.join(", ")}`
+        : r.style_ids.some((id) => allStyleIds.includes(id)) ? "only on hidden styles" : "on no style: its styles were deleted");
+    }
     if (r.image_url && r.show_image_on_estimate) parts.push("photo on estimate");
     return parts.join("  ·  ");
   };
@@ -5845,6 +5914,43 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           )}
         </div>
       )}
+      {/* Offered on (272), for every category: the styles a customer can add this item to. A
+          builder asked for louvered vents on greenhouses only (2026-10-02); the same ticks keep a
+          garage door off a style sold without one. Only with two or more styles, since one style
+          leaves nothing to choose. Same collapse as the window colours: every style ticked, hidden
+          ones included, is "every style", including ones added later. A hidden style has no box, so
+          a tick change carries its place in the list through untouched. None ticked cannot be saved
+          (an item offered nowhere is Active unticked), and the Save button says so. */}
+      {offerStyles.length > 1 && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={fldLbl}>Offered on <span style={{ fontWeight: 400 }}>these building styles</span></div>
+          <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+            {offerStyles.map((s) => {
+              const ids = edit.draft.style_ids;
+              const checked = ids == null || ids.includes(String(s.id));
+              const toggle = (on) => {
+                const all = allStyleIds;
+                const cur = ids == null ? all : ids.filter((x) => all.includes(x));
+                const next = on ? [...new Set([...cur, String(s.id)])] : cur.filter((x) => x !== String(s.id));
+                setDraft({ style_ids: all.every((x) => next.includes(x)) ? null : next });
+              };
+              return (
+                <label key={s.id} data-ss-offered-on={s.key} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: "#334155", cursor: "pointer", whiteSpace: "nowrap" }}>
+                  <input type="checkbox" checked={checked} onChange={(e) => toggle(e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                  {s.label}
+                </label>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 12, color: offeredNowhere(edit.draft) ? "#DC2626" : "#94A3B8", marginTop: 6 }}>
+            {offeredNowhere(edit.draft)
+              ? `Tick at least one style. To stop offering this ${noun} everywhere, untick Active instead.`
+              : styleIdsOut(edit.draft.style_ids) == null
+                ? `Offered on every style, and on any style you add later.`
+                : `Customers designing any other style won't see this ${noun}.`}
+          </div>
+        </div>
+      )}
       {/* Height off the floor (139). Carolyn, 2026-08-25: "how far off the floor, not off
           the ground, off the floor, which is off the inside of the building, not the
           exterior." Every window used to render at the same 3'6" in 3D no matter what the
@@ -5929,7 +6035,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         {dCbx("taxable", "Taxable", "Untick if you don't charge sales tax on this item. It then shows on the quote and invoice under a separate non-taxable subtotal.")}
         <span style={{ flex: 1 }} />
         <button onClick={() => setEdit(null)} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
-        <button onClick={saveLine} disabled={busy || !edit.draft.name.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (busy || !edit.draft.name.trim()) ? 0.55 : 1 }}>{busy ? "Saving…" : `Save ${noun}`}</button>
+        <button onClick={saveLine} disabled={busy || !edit.draft.name.trim() || offeredNowhere(edit.draft)} title={offeredNowhere(edit.draft) ? "Tick at least one building style under Offered on" : undefined} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (busy || !edit.draft.name.trim() || offeredNowhere(edit.draft)) ? 0.55 : 1 }}>{busy ? "Saving…" : `Save ${noun}`}</button>
       </div>
     </div>
   );
@@ -6129,7 +6235,8 @@ function VentsView({ viewingLabel = null, clientId = null }) {
         one, set it to <b>0</b> if every building includes it at no charge, or enter an amount to charge for it —
         the same three states the doors and windows lists use. Each vent is <b>one line</b>; click <b>Edit</b> to
         change it and every line saves on its own. Drag <b>⠿</b> to set the order customers see. Sizes are
-        feet/inches — 12", 1'6" (no spaces).
+        feet/inches — 12", 1'6" (no spaces). To sell a vent on some building styles only, click <b>Edit</b> and
+        untick the others under <b>Offered on</b>.
       </p>
       <FixtureCatalog category="vent" noun="vent" addLabel="Add vent" namePh="e.g. Gable vent" labelPh="VNT" wPh={'12"'} hPh={'12"'} sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} />
     </div>
