@@ -2574,6 +2574,95 @@ function ssRowSection(key) {
   return ssOpeningRank(key) >= 0 ? "openings" : "options";
 }
 
+// ── PRICE ROW KEYS ──
+// The Details row a priced line sits on, as one string: the designer keys its rows with it and
+// submit-estimate tags its lines with it (migration 277). _shared/priceRowKey.ts holds the same
+// text; change both together.
+//
+// A catalog door, window or ramp is grouped by its fixture id, or by name|price when the placed
+// item carries none (a fixture since deleted from the catalog, or a design from before ids).
+function ssPriceGroupId(fixtureItemId = "", name = "", price = 0) {
+  return fixtureItemId ? String(fixtureItemId) : name + "|" + price;
+}
+// kind  building | wallHeight | buildOnSite | cladding | paint | roof | electrical — one row each
+//       layout      id = the built-in item key (singleDoor, window, loft, workbench, ramp, ...)
+//       insul       id = the area (floor, walls, roof)
+//       foundation | elecItem | ro   id = the catalog item id, or the placed item's id for "ro"
+//       fx          id = the group id, a = colour id, b = trim colour id      (catalog doors)
+//       win         id = the group id, a = colour id                          (catalog windows)
+//       dress       id = shutters | flowerBox, a = colour id
+//       ramp        id = the group id, or "simple" for the tenant's one ramp price
+//       partition   id = the partition's id; a = a hosted opening's id      (reserved, not yet used)
+function ssPriceRowKey(kind = "", id = "", a = "", b = "") {
+  switch (kind) {
+    case "layout": return id;
+    case "fx": return "fx:" + id + "|" + a + "|" + b;
+    case "win": return "win:" + id + "|" + a;
+    case "dress": return "dress:" + id + "|" + a;
+    case "partition": return a ? "partition:" + id + ":open:" + a : "partition:" + id;
+    case "insul": case "foundation": case "elecItem": case "ro": case "ramp": return kind + ":" + id;
+    default: return kind;
+  }
+}
+// ── END PRICE ROW KEYS ──
+
+// ─── A rep's own price for a line (a builder's request; migration 277) ──────────
+// Someone holding "Override prices" (Settings → Team; owners and admins by default) types a line's
+// price on its Details row. sel.priceOverrides = { [rowKey]: { amount, was } }: `amount` is the unit
+// price as typed (a string while it is being edited, like a discount's), `was` the list unit price
+// it replaced. It is saved with the design the way sel.discounts is, and the customer's own view
+// shows the resulting numbers with no hint that anything was changed.
+//
+// The rows that may take one carry their list UNIT price and the quantity it multiplies
+// (ssPriceable) — exactly the line submit-estimate builds. The price replaces the unit amount and
+// never the quantity, so a measured line (per ft, per sq ft) is re-priced per unit. Never priceable:
+// tax, discounts, delivery, custom options, an "included" $0 row, a percentage row.
+//
+// The server decides, not this: submit-estimate honours the field only from someone holding the
+// area and strips it from anyone else, so these helpers only have to agree with it on WHICH line and
+// WHAT number (ssPriceRowKey above is that agreement).
+
+// The list unit price and charged quantity a priceable row carries, or {} for anything else.
+function ssPriceable(unit, qty, per) {
+  const u = Number(unit), q = Number(qty);
+  if (unit == null || !isFinite(u) || !isFinite(q) || q <= 0) return {};
+  return { listUnit: Math.round(u * 100) / 100, chargeQty: q, per: per || "each" };
+}
+// What a pricing basis charges per, in the words the staff hint uses.
+function ssPricePer(basis) {
+  if (basis === "lineal_ft" || basis === "perimeter_building") return "per ft";
+  if (basis === "sqft_option" || basis === "sqft_building" || basis === "sqft") return "per sq ft";
+  return "each";
+}
+// The rep's price for one row, or null when there is none to apply: missing, not a number, or
+// STALE — the list price it was set against has moved since (another size, a declined item, a
+// catalog change). A price set for one thing is never carried silently onto another; the row shows
+// its list price again and the staff hint says why. Capped like submit-estimate's.
+function ssPriceOverrideOf(ov, key, listUnit) {
+  if (!ov || typeof ov !== "object") return null;
+  const o = ov[key];
+  if (!o || typeof o !== "object") return null;
+  const t = String(o.amount == null ? "" : o.amount).trim();
+  if (t === "") return null;
+  const v = Number(t);
+  if (!isFinite(v) || v < 0) return null;
+  if (o.was != null && listUnit != null && Math.abs(Number(o.was) - Number(listUnit)) >= 0.005) return null;
+  return Math.round(Math.min(v, 1000000) * 100) / 100;
+}
+// A rough opening's unit price: the rep's for that one opening, else the rate. Each rough opening
+// is its own row and its own server line, keyed by the placed item's id.
+function ssRoPrice(ov, ro, rate) {
+  const v = ssPriceOverrideOf(ov, ssPriceRowKey("ro", ro && ro.id), Math.round((Number(rate) || 0) * 100) / 100);
+  return v != null ? v : rate;
+}
+// A rough-opening rate, per-style override first — the resolution the Details rows use.
+function ssRoRateOf(C, sel, key) {
+  const lp = C && C.layoutPricing && C.layoutPricing[key];
+  if (!lp) return 0;
+  const ov = (lp.byStyle && sel && sel.style) ? lp.byStyle[sel.style] : null;
+  return Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0;
+}
+
 // Fill in any selection row whose amount is "rate% of every OTHER line" — today only cladding
 // on pct_estimate_total. computeSelectionRows cannot do this itself: it runs before the other
 // lines exist and its own output is part of the base, so the row leaves it with total null and
@@ -2725,7 +2814,8 @@ function computeSelectionRows(sel, paintColors, C, items) {
   declinedTotal = Math.round(declinedTotal * 100) / 100;
   const styleSize = [styleLabel, sel && sel.size].filter(Boolean).join(" ") || "—";
   const buildingDetail = declinedLines.length ? [`Original building price: ${fmtMoney2(buildingPrice)}`, ...declinedLines].join("\n") : "";
-  rows.push({ key: "building", label: styleSize, detail: buildingDetail, total: showP ? Math.max(0, buildingPrice - declinedTotal) : null });
+  rows.push({ key: ssPriceRowKey("building"), label: styleSize, detail: buildingDetail, total: showP ? Math.max(0, buildingPrice - declinedTotal) : null,
+    ...(showP ? ssPriceable(Math.max(0, buildingPrice - declinedTotal), 1) : {}) });
   // Taller walls sit directly under the building because that is what they change. A selection
   // charge, so it is NOT in LAYOUT_PRICE_ORDER and never touches the inclusion machinery.
   // Insulation — one line per ticked area, the same shape the estimate emits. Priced from the
@@ -2735,12 +2825,13 @@ function computeSelectionRows(sel, paintColors, C, items) {
   if (whOpt) {
     const whRate = Number(whOpt.ratePerLf) || 0;
     rows.push({
-      key: "wallHeight",
+      key: ssPriceRowKey("wallHeight"),
       label: `Taller Walls (+${whOpt.deltaIn} in)`,
       qty: buildingPerimeter,
       unit: fmtMoney2(whRate) + " / ft",
       total: showP ? Math.round(whRate * buildingPerimeter * 100) / 100 : null,
       method: "lineal_ft",
+      ...(showP ? ssPriceable(whRate, buildingPerimeter, "per ft") : {}),
     });
     // BUILT ON SITE (183) — MIRRORS submit-estimate line for line, because this preview and the
     // estimate must agree to the penny. Walls this tall cannot go under a bridge, so the
@@ -2770,7 +2861,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
         : bosBasis === "pct_building_price" ? Math.round((bosRate / 100) * buildingPrice * 100) / 100
         : Math.round(bosRate * bosShape.qty * 100) / 100;
       rows.push({
-        key: "buildOnSite",
+        key: ssPriceRowKey("buildOnSite"),
         label: "Built On Site",
         detail: "Walls this tall cannot be hauled, so this building is assembled on your site.",
         qty: bosShape.qty,
@@ -2780,6 +2871,8 @@ function computeSelectionRows(sel, paintColors, C, items) {
         total: bosTotal,
         method: bosBasis,
         ...(bosShape.deferred && showP && bosRate > 0 ? { pct: bosRate } : {}),
+        // Priceable only when submit-estimate has a line for it: a real fee, not a percentage.
+        ...(bosTotal != null && bosRate > 0 && !bosShape.pctOf ? ssPriceable(bosRate, bosShape.qty, ssPricePer(bosBasis)) : {}),
       });
     }
   }
@@ -2804,12 +2897,13 @@ function computeSelectionRows(sel, paintColors, C, items) {
       const insOff = offered.find((o) => o.type === pick.type && o.area === area);
       const insRate = insOff && insOff.ratePerSqft != null ? Number(insOff.ratePerSqft) : null;
       rows.push({
-        key: "insul:" + area,
+        key: ssPriceRowKey("insul", area),
         label: `${INSULATION_TYPE_LABEL[pick.type] || pick.type} Insulation — ${INSULATION_AREA_LABEL[area]}`,
         qty: sqft,
         unit: insRate != null ? fmtMoney2(insRate) + " / sq ft" : "sq ft",
         total: showP && insRate != null ? Math.round(insRate * sqft * 100) / 100 : null,
         method: "sqft",
+        ...(showP && insRate != null ? ssPriceable(insRate, sqft, "per sq ft") : {}),
       });
     });
   }
@@ -2839,7 +2933,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
       : basis === "pct_building_price" ? Math.round((rate / 100) * buildingPrice * 100) / 100
       : Math.round(rate * qty * 100) / 100;
     rows.push({
-      key: "foundation:" + opt.id,
+      key: ssPriceRowKey("foundation", opt.id),
       label: foundationLabelOf(opt),
       ...(missing ? { detail: basis === "lineal_ft" ? "Enter the feet to remove" : "Enter a quantity" } : {}),
       qty: qty,
@@ -2847,6 +2941,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
       total: total,
       method: basis,
       ...(shape.deferred && showP && rate != null && !missing ? { pct: rate } : {}),
+      ...(total != null && !shape.pctOf ? ssPriceable(rate, qty, ssPricePer(basis)) : {}),
     });
   });
   // The electrical package: one fixed line. A SELECTION charge like taller walls, so it is not
@@ -2861,12 +2956,13 @@ function computeSelectionRows(sel, paintColors, C, items) {
          elecCfg.includePanel ? "panel included" : "no panel"].join(" · ")
       : "";
     rows.push({
-      key: "electrical",
+      key: ssPriceRowKey("electrical"),
       label: elecCfg.label || "Electrical Package",
       detail: detail,
       // Null when the tenant hides pricing — get_config already nulled it, so this reads
       // whatever arrived rather than deciding the policy a second time.
       total: showP && elecCfg.price != null ? Number(elecCfg.price) : null,
+      ...(showP && elecCfg.price != null ? ssPriceable(elecCfg.price, 1) : {}),
     });
   }
   // EVERY electrical item, one rule (Carolyn 2026-09-03 — the two lists became one):
@@ -2888,16 +2984,17 @@ function computeSelectionRows(sel, paintColors, C, items) {
       if (covered > 0 && chargeable <= 0) {
         // Wholly covered by the package: shown at zero so the customer can see it IS included
         // rather than wondering why the thing on their plan has no line.
-        rows.push({ key: "elecItem:" + ei.id, label: ei.name + " (in the package)", qty: n, unit: "included", total: 0, method: "each" });
+        rows.push({ key: ssPriceRowKey("elecItem", ei.id), label: ei.name + " (in the package)", qty: n, unit: "included", total: 0, method: "each" });
         return;
       }
       rows.push({
-        key: "elecItem:" + ei.id,
+        key: ssPriceRowKey("elecItem", ei.id),
         label: ei.name,
         qty: chargeable,
         unit: (price != null ? fmtMoney2(price) + " each" : "") + (covered > 0 ? ` · ${covered} in the package` : ""),
         total: showP && price != null ? Math.round(price * chargeable * 100) / 100 : null,
         method: "each",
+        ...(showP && price != null ? ssPriceable(price, chargeable, "each") : {}),
       });
     });
   }
@@ -2952,7 +3049,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
         : cladBasis === "pct_building_price" ? Math.round((cladRate / 100) * buildingPrice * 100) / 100
         : Math.round(cladRate * cladShape.qty * 100) / 100;
       rows.push({
-        key: "cladding",
+        key: ssPriceRowKey("cladding"),
         label: claddingLabelOf(cladOpt, cladOpt.id),
         qty: cladShape.qty,
         unit: cladRate == null ? cladShape.bare
@@ -2961,6 +3058,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
         total: total,
         method: cladBasis,
         ...(cladShape.deferred && showP && cladRate != null ? { pct: cladRate } : {}),
+        ...(total != null && !cladShape.pctOf ? ssPriceable(cladRate, cladShape.qty, ssPricePer(cladBasis)) : {}),
       });
     }
   }
@@ -2985,7 +3083,8 @@ function computeSelectionRows(sel, paintColors, C, items) {
   // dropdown, back when sel.cladding was expected to hold free text from a config option.
   const claddingTxt = claddingLabelOf(cladOpt, sel && sel.cladding);
   const pDetail = claddingTxt ? `${claddingTxt} — ${colourTxt}` : colourTxt;
-  rows.push({ key: "paint", label: claddingTxt ? "Cladding" : "Cladding & Colors", detail: pDetail, total: showP ? pTotal : null });
+  rows.push({ key: ssPriceRowKey("paint"), label: claddingTxt ? "Cladding" : "Cladding & Colors", detail: pDetail, total: showP ? pTotal : null,
+    ...(showP ? ssPriceable(pTotal, 1) : {}) });
   const offersRoof = colors.some((c) => c.shingle || c.metal);
   if (offersRoof) {
     const rt = (sel && sel.roofType) || "";
@@ -2995,8 +3094,12 @@ function computeSelectionRows(sel, paintColors, C, items) {
       rTotal = charge(rc);
       rDetail = (sel && sel.roofColor) ? `${rt} — ${sel.roofColor}` : `${rt} — (color TBD)`;
     }
-    rows.push({ key: "roof", label: "Roof", detail: rDetail, total: showP ? rTotal : null });
+    rows.push({ key: ssPriceRowKey("roof"), label: "Roof", detail: rDetail, total: showP ? rTotal : null,
+      ...(showP ? ssPriceable(rTotal, 1) : {}) });
   }
+  // A rep's own prices (migration 277). Applied HERE, inside the builder, so every caller — Details,
+  // the inventory asking price, computeLayoutPricingRows' percentage base — reads the same numbers.
+  ssApplyPriceOverrides(rows, sel && sel.priceOverrides);
   // One place decides the section, so the two builders cannot disagree about where a row goes.
   rows.forEach((r) => { r.section = ssRowSection(r.key); });
   return rows;
@@ -3138,7 +3241,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const placedMeasure = rp.method === "lineal_ft" ? (m.lengthFt || 0) : rp.method === "sqft_option" ? (m.optionSqft || 0) : (m.count || 0);
     const chargeable = Math.max(0, placedMeasure - inc);
     if (inc > 0 && chargeable <= 0) {
-      rows.push({ key, label: label + " (included)", qty: placedMeasure, unit: "included", total: 0, method: rp.method });
+      rows.push({ key: ssPriceRowKey("layout", key), label: label + " (included)", qty: placedMeasure, unit: "included", total: 0, method: rp.method });
       continue;
     }
     let mNet = m;
@@ -3158,7 +3261,13 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     } else {
       unit = ln.unit;
     }
-    const row = { key, label, qty: dispQty, unit, total: ln.total, method: rp.method };
+    const row = { key: ssPriceRowKey("layout", key), label, qty: dispQty, unit, total: ln.total, method: rp.method,
+      // Priceable as submit-estimate's pushItem line: the unit is the rate, or the rate times the
+      // building's area/perimeter for the two methods that multiply the COUNT; never a percentage.
+      ...(ln.total != null && rp.method !== "pct_building_price"
+        ? ssPriceable(rp.method === "sqft_building" ? rp.rate * buildingArea : rp.method === "perimeter_building" ? rp.rate * buildingPerimeter : rp.rate,
+          ln.qty, rp.method === "lineal_ft" ? "per ft" : rp.method === "sqft_option" ? "per sq ft" : "each")
+        : {}) };
     rows.push(row);
     if (ln.total == null) deferred.push({ row, pct: ln.pct });
     else nonPctSubtotal += ln.total;
@@ -3200,7 +3309,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   for (const it of items) {
     if (it.type !== "fixtureDoor") continue;
     const price = it.price != null ? Number(it.price) : 0;
-    const fid = it.fixtureItemId || `${it.doorName || "Door"}|${price}`;
+    const fid = ssPriceGroupId(it.fixtureItemId, it.doorName || "Door", price);
     const gk = `${fid}|${it.colorId || ""}|${it.trimColorId || ""}`;
     if (!fxGroups[gk]) {
       const colorBits = [it.colorLabel, it.trimColorLabel ? `${it.trimColorLabel} trim` : null].filter(Boolean);
@@ -3209,6 +3318,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
         label: (it.doorName || "Door") + (colorBits.length ? ` — ${colorBits.join(" / ")}` : ""),
         price: price + (priced ? doorRateOf(it.colorId) + doorRateOf(it.trimColorId) : 0),
         qty: 0, fid: it.fixtureItemId || null,
+        rowKey: ssPriceRowKey("fx", fid, it.colorId || "", it.trimColorId || ""),
       };
       fxOrder.push(gk);
     }
@@ -3219,12 +3329,13 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const inc = takeIncluded(g.fid, g.qty);
     const chargeable = Math.max(0, g.qty - inc);
     if (g.price > 0 && inc > 0 && chargeable <= 0) {
-      rows.push({ key: `fx:${gk}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
+      rows.push({ key: g.rowKey, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
       continue;
     }
     if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
     const total = Math.round(g.price * chargeable * 100) / 100;
-    rows.push({ key: `fx:${gk}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
+    rows.push({ key: g.rowKey, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each",
+      ...ssPriceable(g.price, chargeable, "each") });
     nonPctSubtotal += total;
   }
 
@@ -3241,13 +3352,14 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   const winOrder = [];
   for (const it of customWindows) {
     const price = it.price != null ? Number(it.price) : 0;
-    const fid = it.fixtureItemId || `${it.windowName || "Window"}|${price}`;
+    const fid = ssPriceGroupId(it.fixtureItemId, it.windowName || "Window", price);
     const gk = `${fid}|${it.colorId || ""}`;
     if (!winGroups[gk]) {
       winGroups[gk] = {
         label: (it.windowName || "Window") + (it.colorLabel ? ` — ${it.colorLabel}` : ""),
         price: price + windowRateOf(it.colorId),
         qty: 0, fid: it.fixtureItemId || null,
+        rowKey: ssPriceRowKey("win", fid, it.colorId || ""),
       };
       winOrder.push(gk);
     }
@@ -3258,12 +3370,13 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const inc = takeIncluded(g.fid, g.qty);
     const chargeable = Math.max(0, g.qty - inc);
     if (g.price > 0 && inc > 0 && chargeable <= 0) {
-      rows.push({ key: `win:${gk}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
+      rows.push({ key: g.rowKey, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
       continue;
     }
     if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
     const total = Math.round(g.price * chargeable * 100) / 100;
-    rows.push({ key: `win:${gk}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
+    rows.push({ key: g.rowKey, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each",
+      ...ssPriceable(g.price, chargeable, "each") });
     nonPctSubtotal += total;
   }
 
@@ -3314,7 +3427,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
       const g = groups[gk];
       const total = Math.round(rate * g.qty * 100) / 100;
       rows.push({
-        key: `dress:${d.key}|${gk}`,
+        key: ssPriceRowKey("dress", d.key, gk),
         label: d.label + (g.label ? ` — ${g.label}` : ""),
         unit: `${g.qty} window${g.qty === 1 ? "" : "s"} · ` + (rate > 0 ? fmtMoney2(rate) + " each" : "included"),
         total, method: "each",
@@ -3329,7 +3442,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   const rampGroups = {};
   for (const it of customRamps) {
     const price = it.price != null ? Number(it.price) : 0;
-    const fid = it.fixtureItemId || `${it.rampName || "Ramp"}|${price}`;
+    const fid = ssPriceGroupId(it.fixtureItemId, it.rampName || "Ramp", price);
     if (!rampGroups[fid]) rampGroups[fid] = { label: it.rampName || "Ramp", price, qty: 0, fid: it.fixtureItemId || null };
     rampGroups[fid].qty++;
   }
@@ -3338,12 +3451,13 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const inc = (g.fid && incForRows[g.fid]) ? Number(incForRows[g.fid]) : 0;
     const chargeable = Math.max(0, g.qty - inc);
     if (g.price > 0 && inc > 0 && chargeable <= 0) {
-      rows.push({ key: `ramp:${fid}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
+      rows.push({ key: ssPriceRowKey("ramp", fid), label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
       continue;
     }
     if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
     const total = Math.round(g.price * chargeable * 100) / 100;
-    rows.push({ key: `ramp:${fid}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
+    rows.push({ key: ssPriceRowKey("ramp", fid), label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each",
+      ...ssPriceable(g.price, chargeable, "each") });
     nonPctSubtotal += total;
   }
   if (rampSimplePriced && simpleRamps.length) {
@@ -3361,14 +3475,20 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
           totalFt += dw;
         }
         totalFt = Math.round(totalFt * 100) / 100;
-        if (totalFt > 0) { const total = Math.round(rampPrice * totalFt * 100) / 100; rows.push({ key: "ramp:simple", label: "Ramp", qty: totalFt, unit: fmtMoney2(rampPrice) + " / ft", total, method: "lineal_ft" }); nonPctSubtotal += total; }
+        if (totalFt > 0) { const total = Math.round(rampPrice * totalFt * 100) / 100; rows.push({ key: ssPriceRowKey("ramp", "simple"), label: "Ramp", qty: totalFt, unit: fmtMoney2(rampPrice) + " / ft", total, method: "lineal_ft", ...ssPriceable(rampPrice, totalFt, "per ft") }); nonPctSubtotal += total; }
       } else {
         const total = Math.round(rampPrice * simpleRamps.length * 100) / 100;
-        rows.push({ key: "ramp:simple", label: "Ramp", qty: simpleRamps.length, unit: fmtMoney2(rampPrice) + " each", total, method: "each" });
+        rows.push({ key: ssPriceRowKey("ramp", "simple"), label: "Ramp", qty: simpleRamps.length, unit: fmtMoney2(rampPrice) + " each", total, method: "each", ...ssPriceable(rampPrice, simpleRamps.length, "each") });
         nonPctSubtotal += total;
       }
     }
   }
+
+  // A rep's own prices (migration 277), BEFORE the percentage pass below — submit-estimate applies
+  // them in step 7-PO, ahead of step 7a, so a "% of subtotal" line is a share of what the customer is
+  // charged. Each re-priced row moves the base by exactly its own change; with none, nothing moves.
+  ssApplyPriceOverrides(rows, sel && sel.priceOverrides);
+  rows.forEach((r) => { if (r.overridden) nonPctSubtotal += r.total - r.listTotal; });
 
   // Resolve pct_estimate_total rows LAST against the same base the edge function uses:
   // building (NET of declined-item credits — submit-estimate bakes them into the
@@ -3378,7 +3498,13 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     // One term per RO key: the door and window ROs price independently, and the legacy generic
     // key still prices for the designs that carry one.
     const roTotal = SS_RO_KEYS.reduce((s, k) =>
-      s + (resolve(k) || { rate: 0 }).rate * items.filter((i) => i.type === k).length, 0);
+      s + (resolve(k) || { rate: 0 }).rate * items.filter((i) => i.type === k).length, 0)
+      // ...moved by a rep's own price for any one opening (migration 277): its difference from the
+      // rate, so with no price set this adds exactly nothing.
+      + items.filter((i) => ssIsRO(i.type)).reduce((s, ro) => {
+        const r0 = (resolve(ro.type) || { rate: 0 }).rate;
+        return s + (ssRoPrice(sel && sel.priceOverrides, ro, r0) - r0);
+      }, 0);
     const customTotal = (customOptions || []).reduce((s, co) => {
       if (!co || !co.name || !String(co.name).trim()) return s;
       const amt = parseFloat(co.amount) || 0;
@@ -3404,6 +3530,50 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   // by computeSelectionRows, matching the GHL estimate.)
   rows.forEach((r) => { r.section = ssRowSection(r.key); });
   return { rows };
+}
+
+// Apply sel.priceOverrides to the rows that can take one (ssPriceable), in place. Called INSIDE
+// computeSelectionRows and computeLayoutPricingRows, before any percentage row is resolved, so every
+// total site — Details, the inventory asking price, the payload — reads the numbers submit-estimate
+// step 7-PO will charge. With no overrides it touches nothing.
+function ssApplyPriceOverrides(rows, ov) {
+  if (!ov || typeof ov !== "object") return rows;
+  (rows || []).forEach((r) => {
+    if (!r || r.listUnit == null || r.total == null) return;
+    const v = ssPriceOverrideOf(ov, r.key, r.listUnit);
+    if (v == null) return;
+    const from = fmtMoney2(r.listUnit), to = fmtMoney2(v);
+    r.listTotal = r.total;
+    r.unitPrice = v;
+    r.total = Math.round(v * r.chargeQty * 100) / 100;
+    r.overridden = true;
+    // The customer reads the row's unit text too, and it quotes the list price ("$1,250.00 each",
+    // "… billable @ $5.00/ft"). Re-spelled at the new price, or the list sits right beside it.
+    if (r.unit) r.unit = r.unit.indexOf(from) >= 0 ? r.unit.split(from).join(to) : to + (r.per === "each" ? " each" : " " + r.per);
+    // The building's detail is the declined-item breakdown, which opens with the original price;
+    // the rep's figure replaces the whole computed amount (submit-estimate drops it the same way).
+    if (r.key === "building") r.detail = "";
+  });
+  return rows;
+}
+// The overrides actually APPLIED right now, the way the payload sends them: [{ rowKey, amount }].
+// Built from the same rows Details shows, so a stale or half-typed entry never reaches the server and
+// what the rep saw is what is sent. Rough openings ride along, one entry per opening.
+function ssPriceOverrideList(sel, items, customOptions, C, paintColors) {
+  const ov = sel && sel.priceOverrides;
+  if (!ov || typeof ov !== "object" || !Object.keys(ov).length) return [];
+  const out = [];
+  computeSelectionRows(sel, paintColors, C, items)
+    .concat(C && C.showPricing ? computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows : [])
+    .forEach((r) => { if (r.overridden) out.push({ rowKey: r.key, amount: r.unitPrice }); });
+  if (C && C.showPricing) {
+    (items || []).filter((i) => ssIsRO(i.type)).forEach((ro) => {
+      const key = ssPriceRowKey("ro", ro.id);
+      const v = ssPriceOverrideOf(ov, key, Math.round(ssRoRateOf(C, sel, ro.type) * 100) / 100);
+      if (v != null) out.push({ rowKey: key, amount: v });
+    });
+  }
+  return out;
 }
 
 // Which placed items does a Details "Options on your plan" row cover? Built-in rows key by
@@ -4494,7 +4664,8 @@ const D3_DEFAULT_ROOF = { type: "gable", pitch: 0.4 };
 // The customer-facing exterior material. Carolyn's direction (2026-08-18): call it
 // CLADDING, not siding, and offer three genuinely different products rather than one
 // texture rotated:
-//   lap     horizontal boards, each course overlapping the one below (~6in exposure)
+//   lap     horizontal boards, each course overlapping the one below (~6in exposure; a
+//           builder's own size per style since 275, see d3CladdingFor)
 //   panel   vertical 4ft x 8ft sheets with grooves cut INTO the face (T1-11 / EWGWG)
 //   agpanel metal sheets whose ribs stand OUT, overlapping at the rib (Panel-Loc Plus)
 // `batten` is kept as a FOURTH, non-customer-facing id so the tenants whose styles
@@ -4556,6 +4727,23 @@ function d3NormalizeCladding(v) {
   if (s === "batten" || s === "board-and-batten" || s === "bnb") return "batten";
   if (s === "agpanel" || s === "ag" || s === "metal" || s === "panel-loc" || s === "panelloc") return "agpanel";
   return "panel"; // null / "" / "groove" / "panel" / "t111" / anything unrecognised
+}
+
+// THE CLADDING THE RENDERER DRAWS (275, 2026-10-05). A builder asked for "an option for 4.5" vinyl
+// siding": their lap row already sells it, renamed, but every lap wall was drawn in D3_CLADDING's 6 in
+// courses. exposureIn is that builder's own size for the lap row (style_cladding.exposure_in, inches,
+// 3..12), carried here as spec.sidingExposureIn. Every other case returns the D3_CLADDING entry
+// ITSELF, the very object the renderer has always used, so a building with no size draws exactly as
+// it did. With a size, lap's two vertical measures scale together: stepFt (the relief courses, and
+// the gable caps' and wing triangles' courses, which all read clad.stepFt) and tileFtV, which keeps
+// the raster's 8 boards per tile on the same courses. Both count from y = 0, so the texture and the
+// proud course lines stay in phase. The width of a tile (tileFtU) is grain, not courses, and stays.
+function d3CladdingFor(siding, exposureIn) {
+  const base = D3_CLADDING[d3NormalizeCladding(siding)] || D3_CLADDING.panel;
+  const n = exposureIn == null || exposureIn === "" ? NaN : Number(exposureIn);
+  if (base.relief !== "lap" || !(n >= 3 && n <= 12)) return base;
+  const stepFt = n / 12;
+  return { ...base, stepFt, tileFtV: base.tileFtV * stepFt / base.stepFt };
 }
 
 // ── METAL ROOF PROFILE ────────────────────────────────────────────────────────────
@@ -8154,7 +8342,9 @@ function d3WingsElevation(spec, sizeLabel, focusKey, frame) {
 // default height, like IdeaRoom's wall-raise feature. customerFoundation (from
 // d3CustomerFoundation, 2026-09-28) is the customer's foundation pick: "piers" stands
 // the building on piers whatever the style's own foundation is (see the end).
-function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOverride, customerWallHeightFt, customerFoundation) {
+// sidingExposureIn (from d3CladdingExposureIn, 275) is the lap course size, in inches, the
+// builder set on the lap siding the customer picked (see the end too).
+function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOverride, customerWallHeightFt, customerFoundation, sidingExposureIn) {
   const key = String(styleValue || "").trim().toLowerCase();
   const base = D3_STYLE_DEFAULTS[key] || {};
   const o = (styleCfg && styleCfg.d3) || {};
@@ -8233,6 +8423,13 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     else { delete spec.floorHeightFt; delete spec.gradeFallFt; delete spec.gradeFallToward; if (spec.foundation !== "slab") delete spec.gradeCornersFt; }
     spec.foundation = customerFoundation;
   }
+  // THE BUILDER'S LAP COURSE (275, 2026-10-05), for the lap siding the customer picked: a 4.5 in
+  // vinyl drawn in 4.5 in courses, not the 6 in every lap wall had (d3CladdingFor). The same rule as
+  // the foundation above: only the five customer-facing call sites pass it, and openCalEditor never
+  // does, because this object is what the calibration panel posts back as the style, and a size
+  // that belongs to the customer's pick must never be frozen into building_styles.d3. Named only
+  // when given and only on lap, so every other call returns the object it always returned.
+  if (sidingExposureIn != null && d3NormalizeCladding(spec.siding) === "lap") spec.sidingExposureIn = sidingExposureIn;
   return spec;
 }
 
@@ -8261,6 +8458,20 @@ function d3SidingOverride(config, sel) {
     if (/lap/i.test(v) && (/sid/i.test(v) || /sid/i.test(k))) return "lap";
   }
   return null;
+}
+
+// THE LAP COURSE THE BUILDER SELLS (275, 2026-10-05). The size, in inches, a builder set on this
+// style's Lap Siding row (Settings → Options → Cladding, "Course (in)"; get_config emits it as the
+// entry's exposureIn only where set), when the customer picked that lap siding. null otherwise,
+// which draws the 6 in courses lap has always had: no pick, another cladding, a style or a tenant
+// without the row or the size, or a size outside 3..12 (the column's own CHECK, held here too so a
+// stray value can never reach the renderer). resolveCladding is the pricing lookup, internal-only
+// rows included, so a rep's pick draws the same size it prices at. d3ResolveStyleSpec's 7th argument.
+function d3CladdingExposureIn(config, sel) {
+  if (!config || !sel || sel.cladding !== "lap") return null;
+  const o = resolveCladding(config, sel.style, "lap");
+  const n = o && o.exposureIn != null && o.exposureIn !== "" ? Number(o.exposureIn) : NaN;
+  return n >= 3 && n <= 12 ? n : null;
 }
 
 // THE CUSTOMER'S PIERS, DRAWN (2026-09-28). Carolyn, opening Designer > Foundation: "if they choose
@@ -9202,8 +9413,9 @@ function buildShed3DModel(THREE, p) {
   };
   // Cladding texture — multiplies the body color, so the customer's paint still drives
   // the hue while the pattern supplies the relief. One entry in D3_CLADDING decides the
-  // raster, the relief style below, and the tile scale.
-  const clad = D3_CLADDING[d3NormalizeCladding(p.styleSpec && p.styleSpec.siding)] || D3_CLADDING.panel;
+  // raster, the relief style below, and the tile scale; d3CladdingFor sizes a lap entry's
+  // courses to the builder's own (275), and hands back the entry itself everywhere else.
+  const clad = d3CladdingFor(p.styleSpec && p.styleSpec.siding, p.styleSpec && p.styleSpec.sidingExposureIn);
   // How far the cladding's proudest surface stands from the wall CENTRE-line, and the one
   // number every trim face must clear. Relief strips sit CLAD_RELIEF_OUT from the centre
   // with depth 0.1 (lap, batten) or 0.05 (rib), so their outer face lands at 0.23 / 0.205;
@@ -14180,6 +14392,134 @@ async function renderDefault3DShot(p) {
   return { url: shots[0].url, w: shots[0].w, h: shots[0].h };
 }
 
+// ─── THE QUOTE'S FOUR CORNERS (migration 276, 2026-10-05) ─────────────────────────────────
+// Carolyn, 2026-08-20: a page of the estimate that is "optional for them" and "gets 4 sides. So 4
+// quadrants", on its own sheet so it prints on the back of the floor plan. 2026-09-08, in writing:
+// "we want to see 4 images... one from each corner". A corner view shows two walls, so four of them
+// show every wall, and the 09-08 wording meets the 08-20 one. A builder switches it on in Settings →
+// Company (client_settings.quote_corner_views); get_config then carries `quoteCornerViews: true`,
+// and submitQuote puts this sheet on page 2 IN PLACE OF the single view. Off, nothing here runs.
+//
+// A SIBLING of renderDefault3DShot, for the reason renderSelfCheckShots is one: the quote's own
+// function keeps its one camera and its 1200 x 900 at 0.9 (a test pins them), so every quote from a
+// builder who never switches this on is exactly what it was. This shares d3OffscreenShots (one model
+// build, four camera moves) and the quote camera's FRAMING, and nothing else.
+//
+// THE CAMERAS are d3DefaultShotCamera's — the 34° lens, dist = R * 3.66, the eye half the distance
+// up, the aim at 0.45 of d3FrameHeightFt, both lowered by a raised floor's lift — walked round to the
+// four corners. Azimuth runs from the FRONT wall (frontWall, the door's wall; south before there is a
+// door) toward its RIGHT, D3_WALL_AZIMUTH and ssAzimuthDir's convention, so "left" and "right" are the
+// plan sheet's LEFT and RIGHT (getDisplayLabel): as you stand facing the front. d3FrameHeightFt holds
+// the building top to bottom from any side, because it frames off the longer dimension whatever the
+// angle; across the frame a corner shows at most (W + L) / 2 * cos 45° each side of centre, from at
+// least 3.66 times the half-length away, well inside 4:3. quoteCornerShots_test checks both.
+//
+// THE ORDER IS THE SHEET'S reading order: the front pair on top, the back pair under it, so the left
+// column is the views with the LEFT wall in them and the right column the views with the RIGHT.
+const D3_QUOTE_CORNERS = [
+  { key: "frontLeft", label: "Front left", az: 315 },
+  { key: "frontRight", label: "Front right", az: 45 },
+  { key: "backLeft", label: "Back left", az: 225 },
+  { key: "backRight", label: "Back right", az: 135 },
+];
+function d3QuoteCornerCameras(p) {
+  const off = D3_WALL_AZIMUTH[p.frontWall || "south"] || 0;
+  const frameH = d3FrameHeightFt(p.style3d, p.bldgW, p.bldgH);
+  const R = Math.max(p.bldgW, p.bldgH) * 0.5 + frameH;
+  const dist = R * 3.66;
+  const lift = d3GradeLiftFt(p.style3d);
+  return D3_QUOTE_CORNERS.map((c) => {
+    const dir = ssAzimuthDir(c.az + off);
+    const camX = dir[0] * dist, camZ = dir[1] * dist;
+    return {
+      corner: c.key, label: c.label, azimuthDeg: c.az,
+      fov: 34, far: dist * 10,
+      eye: [camX, dist * 0.5 - lift, camZ],
+      at: [0, frameH * 0.45 - lift, 0],
+      sun: [camX * 0.8, dist * 0.9, camZ * 0.8],
+    };
+  });
+}
+
+// The sheet is US Letter at 192 px an inch, 1632 x 2112: letter-shaped, so buildPdfFromJpegPages lays
+// it edge to edge as it does page 1, and the margins are drawn here, half an inch all round, which
+// every office printer reaches. Each corner shot is 800 x 600 (4:3, the quote shot's shape) at 0.92,
+// drawn into a 700 x 525 cell; the sheet is ONE JPEG, so the PDF wrapper needs nothing new. The
+// block (title, note, the 2 x 2) sits in the middle of the page: four 4:3 pictures fill the width of a
+// portrait page and leave height over, and centred is how a photo page reads.
+const D3_QUOTE_SHEET = { W: 1632, H: 2112, MARGIN: 96, GAP: 40, Q: 0.9 };
+// How long the four pictures get to decode before the sheet gives up. They are data: URLs made a
+// moment ago, so this is never the wait; it is what keeps a browser that never fires onload from
+// holding the customer's submit open forever.
+const D3_QUOTE_SHEET_DECODE_MS = 5000;
+
+// Returns { url, w, h } like renderDefault3DShot, or null — never throws. submitQuote treats a null
+// as "use the single view", which is what the quote carried before this existed.
+async function renderQuoteCornerSheet(p) {
+  const shots = await d3OffscreenShots(p, { w: 800, h: 600, quality: 0.92, cameras: d3QuoteCornerCameras });
+  if (!shots || shots.length !== D3_QUOTE_CORNERS.length) return null;
+  try {
+    const decode = (src) => new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve(im);
+      im.onerror = () => reject(new Error("a corner shot did not decode"));
+      im.src = src;
+    });
+    let timer = null;
+    const imgs = await Promise.race([
+      Promise.all(shots.map((s) => decode(s.url))),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), D3_QUOTE_SHEET_DECODE_MS); }),
+    ]);
+    clearTimeout(timer);
+    if (!imgs) return null;
+
+    const S = D3_QUOTE_SHEET;
+    const cv = document.createElement("canvas");
+    cv.width = S.W; cv.height = S.H;
+    const ctx = cv.getContext("2d");
+    if (!ctx) return null;
+    ctx.fillStyle = "#FFFFFF";
+    ctx.fillRect(0, 0, S.W, S.H);
+    const FONT = "system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+    const cellW = (S.W - S.MARGIN * 2 - S.GAP) / 2;
+    const cellH = Math.round(cellW * 3 / 4);
+    const TITLE = 46, NOTE = 26, LABEL = 30, LABEL_GAP = 14;
+    const rowH = LABEL + LABEL_GAP + cellH;
+    const blockH = TITLE + 18 + NOTE + 56 + rowH * 2 + S.GAP;
+    const top = Math.max(S.MARGIN, Math.round((S.H - blockH) / 2));
+
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#1E293B";
+    ctx.font = `700 ${TITLE}px ${FONT}`;
+    ctx.fillText("Your building from all four corners", S.MARGIN, top + TITLE);
+    ctx.fillStyle = "#64748B";
+    ctx.font = `400 ${NOTE}px ${FONT}`;
+    ctx.fillText("Left and right are as you stand in front of the building, facing it.", S.MARGIN, top + TITLE + 18 + NOTE);
+
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    const gridTop = top + TITLE + 18 + NOTE + 56;
+    for (let i = 0; i < D3_QUOTE_CORNERS.length; i++) {
+      const x = S.MARGIN + (i % 2) * (cellW + S.GAP);
+      const y = gridTop + Math.floor(i / 2) * (rowH + S.GAP);
+      ctx.fillStyle = "#334155";
+      ctx.font = `700 ${LABEL}px ${FONT}`;
+      ctx.fillText(D3_QUOTE_CORNERS[i].label, x, y + LABEL);
+      ctx.drawImage(imgs[i], x, y + LABEL + LABEL_GAP, cellW, cellH);
+      ctx.strokeStyle = "#CBD5E1";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x + 1, y + LABEL + LABEL_GAP + 1, cellW - 2, cellH - 2);
+    }
+    const url = cv.toDataURL("image/jpeg", S.Q);
+    // A lost context or a refused canvas yields "data:," — no sheet, rather than a broken page.
+    if (!url || url.length < 512) return null;
+    return { url, w: S.W, h: S.H };
+  } catch (_e) {
+    return null;
+  }
+}
+
 // ─── THE SELF-CHECK'S OWN CAMERAS (2026-09-19) ────────────────────────────────────────────
 // 896 × 672 at JPEG 0.80, because the design measured the same one-field error at 1280, 1024,
 // 896, 768, 640 and 512 px and the signal is FLAT (9.07 / 9.05 / 9.07 / 9.09 / 9.09 / 9.16 %
@@ -14458,7 +14798,11 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, roOffer, placeableDoors, placeableWindows, placeableRamps, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, dormerWindowId, dormerWindowOffset, perimeterFt, showPricing, onPaintChange, onWallHeight, onDormerWindow, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose, draftOnly = false }) {
+// `quoteCorners` is the builder's four-corner switch (migration 276) as submitQuote reads it
+// (3D on and `quoteCornerViews: true`). Then page 2 is the four-corner sheet, drawn off-screen at
+// submit, and the shot taken here is only the quote's picture (the order screen's card and the
+// customer's quote thumbnail), so the button says that and never "in my quote".
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, roOffer, placeableDoors, placeableWindows, placeableRamps, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, dormerWindowId, dormerWindowOffset, perimeterFt, showPricing, onPaintChange, onWallHeight, onDormerWindow, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose, draftOnly = false, quoteCorners = false }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -15349,6 +15693,12 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         //
         // Refusing here closes the class. The tools themselves are re-admitted to the 3D palette
         // (see paletteKeys), so shelving is placed from 3D by its real buttons.
+        //
+        // Electrical has no real buttons to re-admit: a device is placed on the plan only. So
+        // paletteKeys leaves its picker out of the Add row (2026-10-05) and this refusal stays
+        // as the guard rail. 3D placement would need a chooser sheet like the door/window one,
+        // and a placement that skips the electricalItemId/heightOffFloorIn stamps the 2D click
+        // writes is drawn as nothing and priced at $0.
         if (cfg.isShelfPicker || cfg.isElecItemPicker || cfg.isVentPicker) {
           flash3("Pick which one from the palette beside the plan, then place it here.");
           setTool3(null);
@@ -16036,7 +16386,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   };
   // This image becomes page 2 of the quote the customer signs against, so it must
   // never be read while a fixture photo is still loading — that would ship a quote
-  // showing blank placeholder doors. Capped so a dead image host can't hang the
+  // showing blank placeholder doors. With the builder's four corners on (`quoteCorners`),
+  // page 2 is the four-corner sheet instead and this image is the quote's picture, which a
+  // customer sees just the same. Capped so a dead image host can't hang the
   // shutter; a warm cache waits for nothing.
   // The photo lands directly in the materials, and capture() renders before it reads
   // the buffer, so waiting for the loads is the whole guard. No animation frame is
@@ -16431,10 +16783,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           <button onClick={() => setInterior((v) => !v)} disabled={phase !== "ready"} style={{ background: "#1E293B", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
           {interior ? "🏠 Show exterior" : "👁 Look inside"}
         </button>
-        {/* No quote to put a view in on a style draft (`draftOnly`). */}
+        {/* No quote to put a view in on a style draft (`draftOnly`). With the four corners on
+            (`quoteCorners`) page 2 is the corner sheet whatever is framed here, so the shot is
+            the quote's picture and the button says so rather than promise a page it is not on. */}
         {!draftOnly && (
         <button onClick={takeSnapshot} disabled={phase !== "ready"} style={{ background: accent, color: ssOnFill(accent), border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
-          {shotTaken ? "✓ Added to quote — retake?" : "📸 Use this view in my quote"}
+          {quoteCorners
+            ? (shotTaken ? "✓ Picture saved — retake?" : "📸 Use this view as my quote's picture")
+            : (shotTaken ? "✓ Added to quote — retake?" : "📸 Use this view in my quote")}
         </button>
         )}
         </div>
@@ -20532,6 +20888,48 @@ function ssChangeLine(change) {
   const word = (v, side) => (absent(v) ? (side === "to" ? "gone" : "not set") : show(v));
   return { label, text: `${word(change.from, "from")} → ${word(change.to, "to")}` };
 }
+// THE MONEY LINE'S ONE RULE (2026-10-05). What one press of Generate takes from the wallet, as the
+// server last said it: portal-settings `catalog` → wallet, which the host hands over with the
+// style's photos when the editor opens (onLoadStyle3D), and again at every press (calGenerate).
+// The panel used to state a fixed $20 price while the meter was off; the copy follows the meter
+// now.
+//
+//   { cents, said }  the meter is on, this tenant is not exempt, and the price is above 0:
+//                    wallet_hold takes exactly that, once per press.
+//   { free: true }   the meter is off (wallet_hold answers meter_inactive and the press runs
+//                    free), the tenant is exempt (held at 0), or the price is 0.
+//   null             not known: no wallet (an older function, a failed read, a host with no
+//                    catalog), a price the server redacted, or a field it did not send. The line
+//                    then makes no money claim at all, never a guessed one.
+//
+// ⚠️ NO `exempt`, NO ANSWER, NOT EVEN "OFF". The walletRead before this one turned a usage_prices
+// read that FAILED into meterActive false, so from a function without `exempt` (a branch deploy,
+// a rollback) "off" can be a failed read on an armed meter, and "free" would be a promise the hold
+// then breaks. The new walletRead always sends a boolean `exempt` and answers a failed or missing
+// read with wallet null, so its "off" is the meter's own.
+//
+// ⚠️ IT DECIDES NOTHING. The charge is wallet_hold's, server-side, at the press; this only picks
+// the sentence the builder reads. calGenerate reads the wallet again at the press, so a meter
+// armed or disarmed while the editor sat open is said as it now is. What is left is a flip in the
+// seconds between that read and the hold.
+function calChargeOf(wallet) {
+  if (!wallet || typeof wallet !== "object") return null;
+  if (typeof wallet.exempt !== "boolean") return null;
+  if (wallet.meterActive === false) return { free: true };
+  if (wallet.meterActive !== true) return null;
+  if (wallet.exempt) return { free: true };
+  const p = wallet.priceCents;
+  if (typeof p !== "number" || !isFinite(p) || p < 0) return null;
+  const cents = Math.round(p);
+  if (cents === 0) return { free: true };
+  const dollars = cents / 100;
+  return {
+    cents,
+    said: "$" + (cents % 100 === 0
+      ? dollars.toLocaleString("en-US")
+      : dollars.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })),
+  };
+}
 // Upload a list with BOUNDED CONCURRENCY, preserving order, and never throwing.
 //
 // ⚠️ THREE LANES, AND THIS HAS NOW BEEN WRONG IN BOTH DIRECTIONS. The history is short and worth
@@ -20940,7 +21338,7 @@ function SSAdvArt({ kind }) {
   return <svg viewBox="0 0 56 38" width="56" height="38" aria-hidden="true" focusable="false" style={{ display: "block" }}>{art[kind] || null}</svg>;
 }
 
-function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false }) {
+function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false, canOverridePrice = false }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
   //   embedded = true  → the Designer tab inside portal.html: business users building
@@ -21013,6 +21411,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const offeredRamps = placeableRamps.filter((f) => fixtureOfferedOnStyle(f, sel.style));
   const offeredWindows = placeableWindows.filter((f) => fixtureOfferedOnStyle(f, sel.style));
   const offeredVents = placeableVents.filter((f) => fixtureOfferedOnStyle(f, sel.style));
+  // ── What someone WITHOUT "Override prices" is shown (migration 277) ──
+  // A design can carry prices that someone holding the permission typed (sel.priceOverrides). In the
+  // portal, for anyone else, submit-estimate drops them and charges list, so the totals here must
+  // be list too, or Details promises one figure and the quote charges another. Only what is SHOWN
+  // moves: sel keeps the stored prices, save_design keeps them for the next person who holds the
+  // permission (migration 277), and the submit still sends them so the server logs that they were
+  // dropped. The public page and the share link are not embedded and show them, as before.
+  const priceSel = embedded && !canOverridePrice && sel.priceOverrides ? { ...sel, priceOverrides: undefined } : sel;
   // Catalog fixtures the current size INCLUDES → a placement tool keyed by the fixture id. Each
   // renders in the "included — place or decline" row and, when armed, drops that EXACT fixture on
   // the next wall click (doors/windows) or door (ramps). Empty until a style+size is chosen; the
@@ -21895,8 +22301,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // specific lines (delivery, discounts) — an asking price describes the building alone.
   const inventoryQuotePrefill = () => {
     try {
-      const selRows = computeSelectionRows(sel, paintColors, C, items);
-      const priceRows = C.showPricing ? computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows : [];
+      const selRows = computeSelectionRows(priceSel, paintColors, C, items);
+      const priceRows = C.showPricing ? computeLayoutPricingRows(items, priceSel, customOptions, C, paintColors).rows : [];
       const roList = items.filter((i) => ssIsRO(i.type));
       const roRateOf = (key) => {
         const lp = C.layoutPricing && C.layoutPricing[key];
@@ -21904,7 +22310,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         const ov = (lp.byStyle && sel.style) ? lp.byStyle[sel.style] : null;
         return Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0;
       };
-      const roTotal = roList.reduce((s, ro) => s + roRateOf(ro.type), 0);
+      const roTotal = roList.reduce((s, ro) => s + ssRoPrice(priceSel.priceOverrides, ro, roRateOf(ro.type)), 0);
       const customTotal = (customOptions || []).reduce((s, r) => {
         const amt = Math.max(0, parseFloat(r && r.amount) || 0);
         const q = r && r.qty ? Math.abs(parseInt(r.qty, 10)) || 1 : 1;
@@ -22407,7 +22813,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // React #310, and this file has shipped that.
   const calLoadRef = useRef(null);
   // Building scan (094): { busy, step, err, measured, file, status } for the selected style.
-  const [scan, setScan] = useState({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null });
+  // `charge` (2026-10-05) rides beside the aiReady probe from the same read: calChargeOf of the
+  // catalog's wallet, i.e. what one Generate press costs this tenant. null until that read lands.
+  const [scan, setScan] = useState({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null, charge: null });
   // Prevents the size-change effect from clearing items when we're rehydrating
   // a saved design (sel.size and items get set together).
   const prevSizeRef = useRef("");
@@ -23061,7 +23469,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // nudged, and on a render only while a vent is SELECTED (the toolbar's zone readout), so an
   // ordinary render never pays for it.
   const ventRoof2D = () => {
-    const s = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel));
+    const s = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel));
     return { roof: (s && s.roof) || D3_DEFAULT_ROOF, H: (s && s.wallHeightFt) || D3.WALL_H };
   };
   const sizeOpts = selectedStyle && Array.isArray(selectedStyle.sizes) ? selectedStyle.sizes : (C.defaultSizes || []);
@@ -24776,7 +25184,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const mid = calMidSize(s.value);
       if (mid) setSel((p) => ({ ...p, style: s.value, size: mid }));
     }
-    setScan({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null });
+    setScan({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null, charge: null });
     // Reset with the scan: cached frame URLs belong to the style they were filmed for, and
     // carrying them across would draft the next style from the previous building.
     setAdminCalVideo({ busy: false, step: null, err: null, count: 0, urls: null, observed: null, read: 0 });
@@ -24817,7 +25225,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // identically to a style whose walk-around simply had not arrived.
         const vf = Array.isArray(meta.videoFrames) ? meta.videoFrames.filter(Boolean) : [];
         setAdminCalVideo((p) => ({ ...p, urls: vf, count: vf.length }));
-        setScan((p) => ({ ...p, status: meta.modelStatus || "none", aiReady: meta.aiReady !== false }));
+        // The money line's answer rides with the probe it sits beside (calChargeOf). A host that
+        // sends no wallet leaves it null, which the line says as no price at all.
+        setScan((p) => ({ ...p, status: meta.modelStatus || "none", aiReady: meta.aiReady !== false, charge: calChargeOf(meta.wallet) }));
       }).catch(() => { /* a convenience read; never block the editor */ });
     }
   };
@@ -26205,6 +26615,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // running (see cal3dPanel), so this is the second lock on the same door.
     const run = calRunRef.current;
     const mine = () => calRunRef.current === run;
+    // THE MONEY LINE IS READ AT THE PRESS (2026-10-05). scan.charge came from the read the editor
+    // made when the style opened, and a meter armed or disarmed while the editor sat open would
+    // have been said from that: "free" on a press that took $20, or "$20" on one that took
+    // nothing. So the same read goes out again now, beside the generation, and the line makes no
+    // money claim until it lands. Only `.wallet` is used: the photo and frame writes live in
+    // openCalEditor's own then() and do not run from here. The one side effect is the shell's save
+    // base (ssStyleSaveBase), moved forward only when no save was confirmed since this was issued,
+    // which a 409 would rebase onto the current version anyway. Never throws: a failed read is
+    // null, i.e. no money claim.
+    setScan((p) => ({ ...p, charge: null }));
+    const chargeNow = (setup3d.onLoadStyle3D ? Promise.resolve().then(() => setup3d.onLoadStyle3D(adminCal.styleValue)) : Promise.resolve(null))
+      .then((meta) => calChargeOf(meta && meta.wallet), () => null);
+    chargeNow.then((c) => { if (mine()) setScan((p) => ({ ...p, charge: c })); });
     calShotRef.current = null;
     calSpinReqRef.current = {};
     // Four answers about the LAST building are not four answers about this one.
@@ -26273,7 +26696,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // and without offering it back: the spec it was merged onto is gone, and a button
       // claiming to restore it would be a promise this panel cannot keep.
       if (!mine()) {
-        setAdminCalMsg({ ok: false, msg: "That generation finished after you opened another style, so it has not been applied to anything. Opening a style replaces what is on screen. You were charged for it once, as usual." });
+        // The money as THIS press read it (chargeNow, above): the style opened since resets
+        // scan.charge, so the closure is not the answer. Said only on a priced meter.
+        const charged = await chargeNow;
+        const paid = charged && charged.cents ? " You were charged for it once, as usual." : "";
+        setAdminCalMsg({ ok: false, msg: "That generation finished after you opened another style, so it has not been applied to anything. Opening a style replaces what is on screen." + paid });
         return;
       }
       // ⚠️ A SERVER THAT NEVER HEARD OF `dims` MUST NOT THROW AWAY THE MEASUREMENT IT IGNORED.
@@ -26470,15 +26897,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const scanPick = async (file) => {
     if (!file) return;
     // Full replacement on purpose (drops renderUrls — a new file needs new
-    // renders) but the style's status, the aiReady probe and the builder's
-    // device pick survive.
-    setScan({ busy: true, step: "Reading the scan…", err: null, measured: null, file: null, status: scan.status, aiReady: scan.aiReady, device: scan.device });
+    // renders) but the style's status, the aiReady probe, the money line's charge
+    // and the builder's device pick survive.
+    setScan({ busy: true, step: "Reading the scan…", err: null, measured: null, file: null, status: scan.status, aiReady: scan.aiReady, charge: scan.charge, device: scan.device });
     try {
       const { scene, measured } = await scanReadGlb(file);
       scanDisposeScene(scene);
-      setScan({ busy: false, step: null, err: null, measured, file, status: scan.status, aiReady: scan.aiReady, device: scan.device });
+      setScan({ busy: false, step: null, err: null, measured, file, status: scan.status, aiReady: scan.aiReady, charge: scan.charge, device: scan.device });
     } catch (e) {
-      setScan({ busy: false, step: null, err: e.message || "Could not read that scan.", measured: null, file: null, status: scan.status, aiReady: scan.aiReady, device: scan.device });
+      setScan({ busy: false, step: null, err: e.message || "Could not read that scan.", measured: null, file: null, status: scan.status, aiReady: scan.aiReady, charge: scan.charge, device: scan.device });
     }
   };
   // Four three-quarter turntable JPEGs of the raw scan, framed off the
@@ -27354,20 +27781,36 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // _shared/quotePdf.ts, which appends `designs.image_url` — this very PDF — so anything that
       // does not get in here cannot reach either document. It also leaves view3dImageUrl null, so
       // the portal's order screen stops showing a 3D card for them too.
+      // The building as the off-screen renders draw it. A function, so it is only worked out when
+      // a render is actually taken: a rep's armed shot with the four corners off takes none.
+      const offscreenShotArgs = () => ({
+        bldgW, bldgH, items, itemTypes: ITEMS, frontWall,
+        painted: sel.paint === "Painted", paintBody: paintColors.body, paintTrim: paintColors.trim,
+        scale, mgX, mgY,
+        style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel)),
+        roofType: sel.roofType,
+        roofColorHex: (() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })(),
+        fixtures: C.fixtures, bodyColors: bodyPaintPool, trimColors: trimPaintPool,
+        dormerWindowId: sel.dormerWindowId || null, dormerWindowOffset: sel.dormerWindowOffset || 0,
+      });
       let shot3d = view3dOn ? render3DSnapshotRef.current : null;
       if (!shot3d && view3dOn) {
-        shot3d = await renderDefault3DShot({
-          bldgW, bldgH, items, itemTypes: ITEMS, frontWall,
-          painted: sel.paint === "Painted", paintBody: paintColors.body, paintTrim: paintColors.trim,
-          scale, mgX, mgY,
-          style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel)),
-          roofType: sel.roofType,
-          roofColorHex: (() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })(),
-          fixtures: C.fixtures, bodyColors: bodyPaintPool, trimColors: trimPaintPool,
-          dormerWindowId: sel.dormerWindowId || null, dormerWindowOffset: sel.dormerWindowOffset || 0,
-        });
+        shot3d = await renderDefault3DShot(offscreenShotArgs());
       }
-      if (shot3d) pdfPages.push({ bytes: dataUrlToBytes(shot3d.url), w: shot3d.w, h: shot3d.h });
+      // THE FOUR CORNERS (migration 276): a builder who switched on "Show the building from all four
+      // corners on page 2 of my quotes" gets that sheet INSTEAD of the single view, and only page 2:
+      // shot3d stays the single view, because it is also the 3D image uploaded below, which the order
+      // screen's card and the quote thumbnail show at 4:3. Gated on view3dOn like everything above, so
+      // a builder with 3D off still sends the plan alone whatever the switch says. A sheet that cannot
+      // render (null) leaves the single view on page 2, which is what the quote always carried.
+      // The 3D viewer reads the same test (its quoteCorners prop), so with the switch on its button
+      // offers the quote's picture and never promises a framed view a page of the PDF.
+      let page3d = shot3d;
+      if (view3dOn && C.quoteCornerViews === true) {
+        const sheet = await renderQuoteCornerSheet(offscreenShotArgs());
+        if (sheet) page3d = sheet;
+      }
+      if (page3d) pdfPages.push({ bytes: dataUrlToBytes(page3d.url), w: page3d.w, h: page3d.h });
       const blob = buildPdfFromJpegPages(pdfPages);
       const { error: upErr } = await supabase.storage
         .from("floor-plans")
@@ -27680,7 +28123,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // them back into the modal, and billing for a window that is nowhere on the drawing is
           // the one outcome worth a few lines to prevent. The choice STAYS on the design; it comes
           // back the moment the dormer can hold it again.
-          const dSpec = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel));
+          const dSpec = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel));
           const dRoof = (dSpec && dSpec.roof) || {};
           if (!d3DormerWindowFit(fx, d3DormerWidthFt(dRoof, d3RoofAxes(dRoof, bldgW, bldgH).L), d3DormerFaceFt(dSpec, bldgW, bldgH), sel.dormerWindowOffset)) return [];
           return [{
@@ -27751,7 +28194,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           itemKey: ro.type,
           dimensions: (roDimensions[ro.id] || "").trim(),
           qty: 1,
+          // The placed opening's id: its Details row key, so a rep's price for this one opening
+          // finds its own line on the server (migration 277). Ignored by everything else.
+          id: ro.id,
         })),
+        // A rep's own line prices (migration 277): only from the portal, and only when one is
+        // applied — otherwise the key is absent and the payload is exactly what it was. Sent for
+        // someone WITHOUT "Override prices" too, built from the stored prices their Details does not
+        // show: submit-estimate strips them and logs that it did, so a quote that went back to list
+        // leaves a trace. The server decides who may, whatever this screen believes.
+        ...(embedded ? (() => {
+          const list = ssPriceOverrideList(sel, items, customOptions, C, paintColors);
+          return list.length ? { priceOverrides: list } : {};
+        })() : {}),
         submittedAt: new Date().toISOString(),
       };
 
@@ -28813,7 +29268,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     takes the wallet hold server-side, ordered after the daily cap and before
                     the model call, and the wallet deliberately FAILS CLOSED — failing open
                     means performing a paid service free with no record of it. A browser button
-                    that thought it knew the price would be a second opinion about money. */}
+                    that thought it knew the price would be a second opinion about money. The
+                    money line below only REPEATS the server's own answer (scan.charge, from
+                    calChargeOf) and gates nothing. */}
                 {setup3d && setup3d.onDraftFromCombined && scan.aiReady !== false && (
                   <div style={{ marginTop: 10, borderTop: "1px solid #FEF3C7", paddingTop: 10 }}>
                     <button onClick={calGenerate} disabled={adminCalBusy || adminCalVideo.busy || adminCalPhotos.busy || !calCanGenerate}
@@ -28893,9 +29350,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                             ? "Still going. Big videos take longer — don't close the page."
                             : "Usually four to six minutes — it studies your video carefully. You can leave this page open and come back."}
                         </div>
-                        {/* THE MONEY LINE. Under a rule, on every render of this card. */}
-                        <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #DDD6FE", fontSize: 11, color: "#4C1D95", fontWeight: 700, lineHeight: 1.5 }}>
-                          This is one generation. The check and the correction are part of it — you are charged $20 once, however much we have to fix.
+                        {/* THE MONEY LINE. Under a rule, on every render of this card. What it
+                            says about money follows the meter (calChargeOf, 2026-10-05): the
+                            price when one is charged, "free" when nothing is, and no money claim
+                            when the server has not said. data-ssc-charge names which. */}
+                        <div data-ssc-charge={scan.charge ? (scan.charge.cents ? "priced" : "free") : "unknown"} style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #DDD6FE", fontSize: 11, color: "#4C1D95", fontWeight: 700, lineHeight: 1.5 }}>
+                          {scan.charge && scan.charge.cents
+                            ? `This is one generation. The check and the correction are part of it — you are charged ${scan.charge.said} once, however much we have to fix.`
+                            : scan.charge && scan.charge.free
+                              ? "This is one generation. The check and the correction are part of it. Generating is free right now, so nothing comes out of your wallet."
+                              : "This is one generation. The check and the correction are part of it."}
                         </div>
                       </div>
                     )}
@@ -29025,7 +29489,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length > 0 && <>We checked our own 3D against your video{(adminCalCheck.rounds || 1) > 1 ? ` ${adminCalCheck.rounds} times` : ""} and corrected {adminCalCheck.changed.length} thing{adminCalCheck.changed.length === 1 ? "" : "s"}:</>}
                     {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length === 0 && <>We checked our own 3D against your video{(adminCalCheck.rounds || 1) > 1 ? ` ${adminCalCheck.rounds} times` : ""}, and its corrections cancelled each other out, so what you see is the first read. Look at it carefully against your pictures.</>}
                     {adminCalCheck.verdict === "rejected_too_many" && <>Our check thought too much of the draft was wrong to patch safely, so it changed nothing. Go through the four questions below carefully.</>}
-                    {(adminCalCheck.verdict === "skipped" || adminCalCheck.verdict === "failed") && <>We couldn't run our own check this time, so what you see is the first read. Look at it carefully against your pictures before you save. You were charged once, as usual.</>}
+                    {/* "Charged once" only on a priced meter (calChargeOf): with the meter off it
+                        was a claim about money nobody paid. */}
+                    {(adminCalCheck.verdict === "skipped" || adminCalCheck.verdict === "failed") && <>We couldn't run our own check this time, so what you see is the first read. Look at it carefully against your pictures before you save.{scan.charge && scan.charge.cents ? " You were charged once, as usual." : ""}</>}
                   </div>
                   {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length > 0 && (
                     <ul style={{ margin: "6px 0 0", paddingLeft: 18, display: "grid", gap: 3 }}>
@@ -29281,10 +29747,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   </div>
                   )}
                   {/* "SOMETHING IS WRONG" NEVER ENDS THE FLOW, and it says the price rather
-                      than hiding it — plus what to change about the input, so the second $20
-                      is not the same $20 twice. */}
+                      than hiding it — plus what to change about the input, so the second
+                      generation is not the same generation twice. The price is the meter's
+                      (calChargeOf); with none charged, or none known, it names no amount. */}
                   <div style={{ marginTop: 8, borderTop: "1px dashed #E2E8F0", paddingTop: 8, fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
-                    Still not right after changing it by hand? Take a straight-on photo of the end that is wrong, add it in step 3 and generate again — a new generation is another $20.
+                    Still not right after changing it by hand? Take a straight-on photo of the end that is wrong, add it in step 3 and generate again — {scan.charge && scan.charge.cents ? `a new generation is another ${scan.charge.said}.` : "that counts as a new generation."}
                   </div>
                 </div>
               )}
@@ -30345,8 +30812,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              one slab the three REAL slabs are re-stamped noPalette and replaced by a single
              shelfPicker stand-in, so this row showed a button that could not place anything and
              hid the three that could. Re-admit the slab keys and drop the stand-in; the 2D
-             palette keeps its collapsed Shelving popup, which is what Carolyn asked for there. */
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
+             palette keeps its collapsed Shelving popup, which is what Carolyn asked for there.
+             Electrical Items is left out too, and nothing is re-admitted for it: its devices are
+             placed on the plan only (the 3D draws them but has no chooser), so the button could
+             only ever flash place3's "pick from the palette" refusal. */
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && !ITEMS[k].isElecItemPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
           roOffer={{ door: roDoorOffered, window: roWindowOffered }}
           placeableDoors={offeredDoors} placeableWindows={offeredWindows} placeableRamps={offeredRamps}
           paintEnabled={false}
@@ -33761,7 +34231,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
               painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
               frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
-              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel))}
+              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel))}
               roofType={sel.roofType}
               roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
               fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
@@ -33939,8 +34409,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // Every row shares the same right-anchored grid: [qty 50px] [amount 85px]
             // [action 28px], gap 6 — so every amount lines up in one column. Rows with
             // no action get a 28px spacer; rows with no qty just omit that cell.
-            const selRows = computeSelectionRows(sel, paintColors, C, items);
-            const priceRows = C.showPricing ? computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows : [];
+            const selRows = computeSelectionRows(priceSel, paintColors, C, items);
+            const priceRows = C.showPricing ? computeLayoutPricingRows(items, priceSel, customOptions, C, paintColors).rows : [];
             const roList = items.filter((i) => ssIsRO(i.type));
             // Rough-opening rate: same per-style resolution as the estimate (layoutPricing,
             // byStyle override wins) — the old C.layoutPrices read was a stale key that
@@ -33952,7 +34422,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               const ov = (lp.byStyle && sel.style) ? lp.byStyle[sel.style] : null;
               return Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0;
             };
-            const roTotal = roList.reduce((s, ro) => s + roRateOf(ro.type), 0);
+            const roTotal = roList.reduce((s, ro) => s + ssRoPrice(priceSel.priceOverrides, ro, roRateOf(ro.type)), 0);
             const customTotal = customOptions.reduce((s, r) => {
               if (!r || !r.name || !String(r.name).trim()) return s;
               const amt = Math.max(0, parseFloat(r.amount) || 0);
@@ -33990,6 +34460,75 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // control would not fit, so the state is carried by colour + the title text. ON is
             // the default and reads as a quiet accent chip; OFF is amber, because "no tax on this line"
             // is the exceptional state a rep should be able to spot at a glance.
+            // ── A rep's own price for a row (migration 277) ─────────────────
+            // Only for someone holding "Override prices" — the portal passes canOverridePrice; the
+            // public page and the customer's share link never do, so they see plain numbers — and
+            // only on rows that can take one (ssPriceable). The field shows the rep's price, or the
+            // list price until they type one. The hint under the row's name is staff-only and is the
+            // one place the list price shows. submit-estimate re-checks the permission whatever
+            // this screen believes, and strips the field from anyone who does not hold it.
+            const priceOv = sel.priceOverrides || {};
+            const setPrice = (key, v, listUnit) => setSel((p) => ({ ...p,
+              priceOverrides: { ...(p.priceOverrides || {}), [key]: { amount: v, was: Math.round(Number(listUnit) * 100) / 100 } } }));
+            const clearPrice = (key) => setSel((p) => {
+              const next = { ...(p.priceOverrides || {}) };
+              delete next[key];
+              const out = { ...p, priceOverrides: next };
+              // The last one gone: the design stores no trace of the feature, as before it existed.
+              if (!Object.keys(next).length) delete out.priceOverrides;
+              return out;
+            });
+            // Leaving the field: an empty or unreadable entry, or one equal to the list price, is no
+            // price at all — the row goes back to the catalog's and nothing is stored for it.
+            const settlePrice = (key, listUnit) => {
+              if (!priceOv[key]) return;
+              const v = ssPriceOverrideOf(priceOv, key, listUnit);
+              if (v == null || Math.abs(v - Number(listUnit)) < 0.005) clearPrice(key);
+            };
+            const priceInput = (key, listUnit, label) => {
+              const o = priceOv[key];
+              const fresh = !!o && (o.was == null || Math.abs(Number(o.was) - Number(listUnit)) < 0.005);
+              return (
+                <div className="ssd-dt-money" title={`List price ${fmtMoney2(listUnit)}. Type a different price to change this line; the customer sees only the new price.`}>
+                  <span className="ssd-dt-cur">$</span>
+                  <input type="number" min="0" step="0.01" inputMode="decimal" data-ss-price-key={key}
+                    aria-label={`Price for ${label}`}
+                    value={fresh ? String(o.amount == null ? "" : o.amount) : Number(listUnit).toFixed(2)}
+                    onChange={(e) => setPrice(key, e.target.value.replace(/[^0-9.]/g, ""), listUnit)}
+                    onBlur={() => settlePrice(key, listUnit)}
+                    className="ssd-dt-money-in ssd-field" />
+                </div>
+              );
+            };
+            // "List $1,250.00 each · this line $2,400.00 · Use list price". A price set against a
+            // list that has since moved (another size, a declined item) is not applied, and says so.
+            const priceHint = (r) => {
+              const o = priceOv[r.key];
+              const stale = !!o && !r.overridden && o.was != null && Math.abs(Number(o.was) - Number(r.listUnit)) >= 0.005;
+              const per = r.per && r.per !== "each" ? " " + r.per : (Number(r.chargeQty) !== 1 ? " each" : "");
+              return (
+                <div className="ssd-dt-d" data-ss-price-hint={r.key}>
+                  {`List ${fmtMoney2(r.listUnit)}${per}`}
+                  {/* The field holds the UNIT price, so the line's total lives here whenever it differs. */}
+                  {Number(r.chargeQty) !== 1 ? ` · this line ${fmtMoney2(r.total)}` : ""}
+                  {stale ? ` · your ${fmtMoney2(Number(o.amount) || 0)} was set when the list was ${fmtMoney2(o.was)}, so it is not used` : ""}
+                  {(r.overridden || stale) && <button type="button" className="ssd-dt-suggest" onClick={() => clearPrice(r.key)}>Use list price</button>}
+                </div>
+              );
+            };
+            // In the portal, for someone WITHOUT the permission: a price someone who holds it set on
+            // this row, which their submit will not use (priceSel above). Staff-only, so they know why
+            // the row reads list and what sending the quote does. Null when there is nothing to say.
+            const droppedPrice = (key, listUnit) => {
+              if (!embedded || canOverridePrice || listUnit == null) return null;
+              const v = ssPriceOverrideOf(sel.priceOverrides, key, listUnit);
+              return v != null && Math.abs(v - Number(listUnit)) >= 0.005 ? v : null;
+            };
+            const droppedNote = (key, v, style) => (
+              <div className="ssd-dt-d" data-ss-price-dropped={key} style={style}>
+                {`Someone who can change prices set this to ${fmtMoney2(v)}. You can't change prices, so sending the quote from here uses the list price.`}
+              </div>
+            );
             const taxBtn = (taxable, onToggle) => (
               <button type="button" onClick={onToggle}
                 title={taxable
@@ -34092,17 +34631,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 // The mockup's "Included": in the unheaded building group only, a line priced at exactly $0 is part
                 // of the building's price (cladding, roof). Everywhere else a $0.00 stays a number.
                 const included = inBuilding && r.total != null && Number(r.total) === 0;
+                // Someone holding "Override prices" types this row's price (migration 277) — not on an
+                // "Included" one: a line that is part of the building's price has no price to change.
+                const pricing = embedded && canOverridePrice && r.listUnit != null && r.total != null
+                  && !(inBuilding && Number(r.listUnit) === 0);
+                const dropped = r.total != null ? droppedPrice(r.key, r.listUnit) : null;
                 return (
                   <div key={r.key} className={"ssd-dt-row" + (inBuilding ? " is-bldg" : "") + (r.key === "building" ? " is-main" : "")}>
                     <div className="ssd-dt-name">
                       <div className="ssd-dt-n">{r.label}{noTaxPill(r)}</div>
                       <div className="ssd-dt-d">{r.detail || r.unit}</div>
+                      {pricing && priceHint(r)}
+                      {dropped != null && droppedNote(r.key, dropped)}
                     </div>
                     <div className="ssd-dt-r">
                       {/* Qty is read-only (it changes by placing or removing on the plan), so it is a boxed number
                           in the stepper's shape with no − / + (redesign plan §0.2). */}
                       {onPlan && <div className="ssd-dt-qty">{Number.isInteger(r.qty) ? r.qty : Number(r.qty).toFixed(1)}</div>}
-                      {r.total != null
+                      {pricing
+                        ? priceInput(r.key, r.listUnit, r.label)
+                        : r.total != null
                         ? <div className={"ssd-dt-amt" + (included ? " is-incl" : "")}>{included ? "Included" : fmtMoney2(r.total)}</div>
                         : <div className="ssd-dt-amt" />}
                       {onPlan && !planLocked
@@ -34141,6 +34689,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {roList.map((ro) => {
                   const dim = roDimensions[ro.id] || "";
                   const invalid = !dim.trim();
+                  // A price someone with "Override prices" set on this opening, which this person's
+                  // submit will not use (migration 277; null for a holder and on the public page).
+                  const roDropped = C.showPricing ? droppedPrice(ssPriceRowKey("ro", ro.id), Math.round(roRateOf(ro.type) * 100) / 100) : null;
                   // The opening height, and for a window RO its sill, are the CUSTOMER's to set
                   // per opening (Carolyn 2026-09-08). They are written straight onto the item,
                   // where openingSpan / openSpanOf / ssItemVBand already read them — so the 3D
@@ -34185,13 +34736,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       <div className="ssd-dt-r">
                         {C.showPricing && (<>
                           <div className="ssd-dt-qty">1</div>
-                          <div className="ssd-dt-amt">{fmtMoney2(roRateOf(ro.type))}</div>
+                          {embedded && canOverridePrice
+                            ? priceInput(ssPriceRowKey("ro", ro.id), Math.round(roRateOf(ro.type) * 100) / 100, ssRoLabel(ro, items))
+                            : <div className="ssd-dt-amt">{fmtMoney2(ssRoPrice(priceSel.priceOverrides, ro, roRateOf(ro.type)))}</div>}
+                          {embedded && canOverridePrice && (sel.priceOverrides || {})[ssPriceRowKey("ro", ro.id)] && (
+                            <button type="button" className="ssd-dt-suggest" title={`Use the list price, ${fmtMoney2(roRateOf(ro.type))}`}
+                              onClick={() => clearPrice(ssPriceRowKey("ro", ro.id))}>Use list price</button>
+                          )}
                         </>)}
                         {!planLocked
                           ? <button type="button" className="ssd-dt-x" title="Remove this rough opening from the plan" aria-label={`Remove ${ssRoLabel(ro, items)}`}
                               onClick={() => { setItems((p) => p.filter((i) => i.id !== ro.id)); setSelectedId(null); }}>×</button>
                           : <div className="ssd-dt-sp" />}
                       </div>
+                      {/* The row wraps, so a full-width note sits on a line of its own under the fields. */}
+                      {roDropped != null && droppedNote(ssPriceRowKey("ro", ro.id), roDropped, { flex: "0 0 100%", marginTop: 0 })}
                     </div>
                   );
                 })}
@@ -34853,7 +35412,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           styleValue={sel.style} frontWall={frontWall}
           painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
-          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel))}
+          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW), d3CustomerFoundation(C, sel), d3CladdingExposureIn(C, sel))}
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
           fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
@@ -34861,8 +35420,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              one slab the three REAL slabs are re-stamped noPalette and replaced by a single
              shelfPicker stand-in, so this row showed a button that could not place anything and
              hid the three that could. Re-admit the slab keys and drop the stand-in; the 2D
-             palette keeps its collapsed Shelving popup, which is what Carolyn asked for there. */
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
+             palette keeps its collapsed Shelving popup, which is what Carolyn asked for there.
+             Electrical Items is left out too, and nothing is re-admitted for it: its devices are
+             placed on the plan only (the 3D draws them but has no chooser), so the button could
+             only ever flash place3's "pick from the palette" refusal. */
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && !ITEMS[k].isElecItemPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
           roOffer={{ door: roDoorOffered, window: roWindowOffered }}
           placeableDoors={offeredDoors} placeableWindows={offeredWindows} placeableRamps={offeredRamps}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
@@ -34894,6 +35456,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           onItemDelete={(id) => { setItems((p) => p.filter((i) => i.id !== id && !(i.type === "ramp" && i.snapDoorId === id))); setSelectedId(null); }}
           onSnapshot={(shot) => { render3DSnapshotRef.current = shot || null; setHas3DSnapshot(Boolean(shot)); }}
           onClose={() => setShow3D(false)}
+          quoteCorners={view3dOn && C.quoteCornerViews === true}
         />
       )}
 
@@ -34974,7 +35537,7 @@ class DesignerErrorBoundary extends Component {
 // bundle uses (multi-tenant RPC vs. legacy direct table access).
 console.log("[StructureStudio] multi-tenant build: config-loader + RPC data path");
 
-export default function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false }) {
+export default function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false, canOverridePrice = false }) {
   // state shape: { status: "ready", config } | { status: "loading" } | { status: "error", clientId, message }
   const [state, setState] = useState(() => (
     configProp ? { status: "ready", config: configProp } : { status: "loading" }
@@ -35137,5 +35700,5 @@ export default function StructureStudio({ config: configProp = null, clientId: c
       </div>
     );
   }
-  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} calibrationOnly={calibrationOnly} advancedOnly={advancedOnly} onAdvancedDirty={onAdvancedDirty} onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} /></DesignerErrorBoundary>;
+  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} calibrationOnly={calibrationOnly} advancedOnly={advancedOnly} onAdvancedDirty={onAdvancedDirty} onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} canOverridePrice={canOverridePrice} /></DesignerErrorBoundary>;
 }

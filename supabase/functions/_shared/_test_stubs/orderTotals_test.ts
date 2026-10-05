@@ -216,3 +216,16 @@ Deno.test("an empty or malformed snapshot does not throw", () => {
   assertEquals(ssSnapTotals({}).total, 0);
   assertEquals(ssSnapTotals(null).total, 0);
 });
+
+Deno.test("a re-priced line (migration 277) totals at its price; the list amount it carries counts for nothing", () => {
+  // submit-estimate keeps the catalog amount a rep replaced as listAmount, for audit. The order
+  // document must add up the price the customer is charged, exactly as the server does.
+  const snap = {
+    lines: [{ ...line(1, 9500), listAmount: 11200 }, line(2, 150), { ...line(1, 450, true), listAmount: 600 }],
+    tax: { amount: 699.38, rate: 0.0725, label: "Sales tax" },
+  };
+  const t = ssSnapTotals(snap);
+  assertEquals(t.subtotal, 10250);
+  assertEquals(t.total, 10949.38);
+  assertAgrees(snap, "re-priced lines");
+});

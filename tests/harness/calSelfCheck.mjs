@@ -38,6 +38,13 @@
 //       key, hands the draft back off its ledger row WITH the frame map the row kept -- and the
 //       free check runs on it exactly as on a live answer: the same row, round 0, one render per
 //       labelled view, the pairs on screen, and no "did not run" note
+//   13. ⚠️ THE MONEY LINE FOLLOWS THE METER (2026-10-05). The catalog's `wallet` is steered: armed
+//       at 2000 (the run above) says $20; armed at 1550 says $15.50, so the number is the server's
+//       and not a string; the meter off (the live state) says free; an exempt tenant says free;
+//       and a catalog with no wallet says no amount at all. "You were charged once, as usual" and
+//       "another $X" appear only on a priced meter. And the press READS THE WALLET AGAIN: a meter
+//       armed while the editor sat open says the price, and one disarmed says free, without the
+//       style being opened again
 //
 // Stubbed at the NETWORK layer, like calDims.mjs: no account, no login, no writes, and the
 // artifacts under test are the compiled bundles the browser really loads. A change that was
@@ -132,6 +139,15 @@ let dropNext = false;
 let recoverAnswer = null;
 const recoverCalls = [];
 const MATCHES = { ok: true, verdict: "matches", d3: null, changed: [], checked: {}, note: "", renders: 3, ms: 700 };
+// THE VIDEO METER, as the catalog reports it (portal-settings walletRead, 2026-10-05). Armed at
+// 2000 for the whole run up to 13, which is the state every "$20" and "charged once" assertion
+// above 13 is about; 13 steers it through the others. `undefined` sends no wallet key at all
+// (an older function, or a failed read, which the server now answers as null).
+// The server's shape since that change: price, meter, exemption, and no balance.
+const WALLET_ARMED = { priceCents: 2000, meterActive: true, exempt: false };
+let catalogWallet = WALLET_ARMED;
+// Catalog reads answered: the editor's own when a style opens, and the press's (13).
+let catalogCalls = 0;
 
 // How many pixels differ between two JPEG data URLs, as a fraction. Decoded with the same
 // browser that drew them — there is no image decoder in node here, and shipping one to count
@@ -211,7 +227,13 @@ async function main() {
           access: null, prefs: null,
         });
       }
-      if (a === "catalog") return json(route, { ok: true, aiReady: true, styles: STYLES, sizes: [], layoutItems: [], fixtures: [], colors: [] });
+      if (a === "catalog") {
+        catalogCalls += 1;
+        return json(route, {
+          ok: true, aiReady: true, styles: STYLES, sizes: [], layoutItems: [], fixtures: [], colors: [],
+          ...(catalogWallet === undefined ? {} : { wallet: catalogWallet }),
+        });
+      }
       if (a === "calibrate_style_ai") {
         genCalls.push(body);
         // The server's own shape since commit 6: `frameMap` says which image shows which view
@@ -325,22 +347,30 @@ async function main() {
   // Both readings in ONE evaluate. Taken in two, the flow can finish in the round trip
   // between them and the second one measures a panel that is already done — which is a
   // harness racing the app, not a finding about the app.
-  let snap = { card: "", locked: false };
-  for (let i = 0; i < 400 && !snap.card; i++) {
-    snap = await page.evaluate(() => {
+  //
+  // The money line starts with NO claim at the press and settles when the press's own wallet read
+  // lands (13), so the reading is kept going while the card is up and the line is still "unknown".
+  let snap = { card: "", locked: false, charge: null };
+  for (let i = 0; i < 400 && !(snap.card && snap.charge !== "unknown"); i++) {
+    const s = await page.evaluate(() => {
       const el = document.querySelector('[data-ssc-card="progress"]');
       // ⚠️ "Working…", NOT "Generate the 3D model". The button relabels itself for the whole
       // flow, so a locator keyed on the idle label finds nothing while it is busy and reads
       // that as "not disabled" — which is the exact opposite of what it is.
       const b = Array.from(document.querySelectorAll("button")).find((x) => /Generate the 3D model|Working/.test(x.textContent || ""));
-      return { card: el ? el.textContent : "", locked: Boolean(b) && b.disabled, label: b ? b.textContent.trim() : "" };
+      const money = el ? el.querySelector("[data-ssc-charge]") : null;
+      return { card: el ? el.textContent : "", locked: Boolean(b) && b.disabled, label: b ? b.textContent.trim() : "", charge: money ? money.getAttribute("data-ssc-charge") : null };
     });
-    if (!snap.card) await page.waitForTimeout(20);
+    if (s.card) snap = s;
+    else if (snap.card) break;   // the card is gone: keep the last reading of it
+    if (!(snap.card && snap.charge !== "unknown")) await page.waitForTimeout(20);
   }
   const card = snap.card;
   r.ok("the progress card is on screen while the flow runs", Boolean(card), card.slice(0, 60));
-  r.ok("⚠️ AND IT SAYS THE PRICE, ONCE, UNDER A RULE",
-    card.includes("you are charged $20 once, however much we have to fix"), card.slice(-90));
+  // The meter is ARMED at 2000 here (catalogWallet), so the price is the server's $20. What the
+  // line says with the meter off, exempt or unknown is 13, at the end.
+  r.ok("⚠️ AND IT SAYS THE PRICE, ONCE, UNDER A RULE (meter armed at 2000)",
+    card.includes("you are charged $20 once, however much we have to fix") && snap.charge === "priced", `${snap.charge} · ${card.slice(-90)}`);
   r.ok("with all four steps named, including the two that are new",
     card.includes("Checking our 3D against your video") && card.includes("Correcting anything that doesn't line up"));
   // "four to six minutes" since the streamed draft's reads got 300 s (2026-09-25; three to five while
@@ -1039,8 +1069,12 @@ async function main() {
   r.ok("a check that does not run still leaves the builder their draft and their pairs",
     (await page.evaluate(() => document.querySelectorAll("[data-ssc-pair]").length)) === 3,
     String(await page.evaluate(() => document.querySelectorAll("[data-ssc-pair]").length)));
-  r.ok("⚠️ AND IT SAYS THE *CHECK* FAILED, NEVER THE GENERATION",
+  // "You were charged once" because the meter is ARMED in this run (catalogWallet). 13 holds that
+  // the sentence is gone with the meter off, exempt or unknown.
+  r.ok("⚠️ AND IT SAYS THE *CHECK* FAILED, NEVER THE GENERATION (meter armed: charged once)",
     (await text()).includes("We couldn't run our own check this time") && (await text()).includes("You were charged once, as usual"));
+  r.ok("and generating again is priced from the meter: another $20",
+    (await text()).includes("generate again — a new generation is another $20."));
   void a4;
 
   // ── A 409 IS THE CHECK REFUSING, NOT THE GENERATION FAILING ───────────────────────────
@@ -1056,7 +1090,7 @@ async function main() {
   const after409 = await text();
   r.ok("⚠️ A 409 ON THE CHECK STILL LEAVES THE BUILDER THEIR DRAFT AND THEIR PAIRS",
     (await page.evaluate(() => document.querySelectorAll("[data-ssc-pair]").length)) === 3);
-  r.ok("and it is reported as the CHECK not running, never as a failed generation",
+  r.ok("and it is reported as the CHECK not running, never as a failed generation (meter armed: charged once)",
     after409.includes("We couldn't run our own check this time") && after409.includes("You were charged once, as usual"));
   r.ok("the raw supabase-js wording never reaches the builder",
     !/non-2xx status code/i.test(after409));
@@ -1074,7 +1108,7 @@ async function main() {
   const afterAbort = await text();
   r.ok("⚠️ AN UNREACHABLE CHECK STILL LEAVES THE BUILDER THEIR DRAFT AND THEIR PAIRS",
     (await page.evaluate(() => document.querySelectorAll("[data-ssc-pair]").length)) === 3);
-  r.ok("and it says the CHECK could not run",
+  r.ok("and it says the CHECK could not run (meter armed: charged once)",
     afterAbort.includes("We couldn't run our own check this time") && afterAbort.includes("You were charged once, as usual"));
   r.ok("⚠️ AND THE VENDOR'S OWN SENTENCE NEVER REACHES THE SCREEN",
     !/Failed to send a request to the Edge Function/i.test(afterAbort),
@@ -1374,6 +1408,119 @@ async function main() {
     captions.some((c) => c.said !== ({ front: 1, side: 2, eaveCorner: 4 })[c.viewpoint]),
     captions.map((c) => `${c.viewpoint}: request ${({ front: 1, side: 2, eaveCorner: 4 })[c.viewpoint]} -> lap ${c.said}`).join(" | "));
   STYLES[0].d3_photos = [];
+
+  // ── 13: THE MONEY LINE FOLLOWS THE METER (2026-10-05) ─────────────────────────────────────
+  // The panel said "you are charged $20 once" from a fixed string while the meter was off. The
+  // catalog's wallet now decides which of three sentences it shows (calChargeOf). Each case
+  // reopens the style, which is the read that carries the wallet, and presses once with a check
+  // that does not run, so all three money sentences are on screen: the progress card's line in
+  // flight, then "charged once" and "generate again" after it.
+  //
+  // The check is slowed so the progress card is up long enough to read; it answers "skipped".
+  //
+  // `openWith` (F, G): the wallet the STYLE OPEN reads, switched to `wallet` after that read has
+  // landed and before the press, the way a meter armed or disarmed while the editor sits open is.
+  // The line is read once the press's own catalog read has been answered: before it, the line
+  // makes no claim, so a reading taken then would say nothing about which read it follows.
+  const moneyPress = async (wallet, shot, opts = {}) => {
+    const stale = "openWith" in opts;
+    catalogWallet = stale ? opts.openWith : wallet;
+    const c0 = catalogCalls;
+    await openStyle();
+    await setDims(16, 24, 9);
+    const opened = catalogCalls > c0;
+    catalogWallet = wallet;
+    const c1 = catalogCalls;
+    checkReply = { ok: true, verdict: "skipped", reason: "off", d3: null, changed: [], checked: {}, note: "", renders: 0, ms: 5 };
+    checkDelayMs = 900;
+    const n = checkCalls.length;
+    await page.evaluate(() => { const el = document.querySelector('[data-ssc-card="compare"]'); if (el) el.setAttribute("data-ssc-stale", "1"); });
+    await gen.first().click();
+    let line = null;
+    let settle = 0;
+    for (let i = 0; i < 600; i++) {
+      const got = await page.evaluate(() => {
+        const el = document.querySelector('[data-ssc-card="progress"] [data-ssc-charge]');
+        return el ? { kind: el.getAttribute("data-ssc-charge"), text: el.textContent.trim() } : null;
+      });
+      if (got) line = got;
+      // Settled: the press's read is answered and the line says something, or it has stayed
+      // "unknown" for a good while after that read (D, where the catalog sends no wallet).
+      if (line && catalogCalls > c1 && (line.kind !== "unknown" || ++settle > 20)) break;
+      await page.waitForTimeout(20);
+    }
+    if (line && shot) await page.locator('[data-ssc-card="progress"]').screenshot({ path: join(shots, shot) }).catch(() => {});
+    await page.waitForFunction(() => {
+      const el = document.querySelector('[data-ssc-card="compare"]');
+      const b = Array.from(document.querySelectorAll("button")).find((x) => /Generate the 3D model/.test(x.textContent || ""));
+      return Boolean(el) && !el.getAttribute("data-ssc-stale") && Boolean(b) && !b.disabled;
+    }, null, { timeout: 120000 });
+    await page.waitForTimeout(300);
+    checkDelayMs = 0;
+    const after = await text();
+    return { line: line || { kind: null, text: "" }, after, checked: checkCalls.length > n, opened, pressRead: catalogCalls > c1 };
+  };
+  const SAY = "This is one generation. The check and the correction are part of it";
+  const AGAIN = "Take a straight-on photo of the end that is wrong, add it in step 3 and generate again — ";
+
+  // A. Armed at another price: the number is the server's, not a string in the bundle.
+  const m1550 = await moneyPress({ ...WALLET_ARMED, priceCents: 1550 });
+  r.ok("13A ⚠️ ARMED AT 1550, THE LINE SAYS $15.50: the price is the server's",
+    m1550.line.kind === "priced" && m1550.line.text === `${SAY} — you are charged $15.50 once, however much we have to fix.`, JSON.stringify(m1550.line));
+  r.ok("13A and the after-lines name the same price, never $20",
+    m1550.after.includes("You were charged once, as usual") && m1550.after.includes(`${AGAIN}a new generation is another $15.50.`) && !m1550.after.includes("$20"),
+    (m1550.after.match(/[^\n]*generate again[^\n]*/) || [""])[0]);
+
+  // B. The meter off: the live state on 2026-10-05.
+  const off = await moneyPress({ ...WALLET_ARMED, meterActive: false }, "08-meter-off-progress.png");
+  await page.locator('[data-ssc-card="compare"]').screenshot({ path: join(shots, "08-meter-off-after.png") }).catch(() => {});
+  r.ok("13B ⚠️ METER OFF: the progress card says generating is free, with no price",
+    off.line.kind === "free" && off.line.text === `${SAY}. Generating is free right now, so nothing comes out of your wallet.`, JSON.stringify(off.line));
+  r.ok("13B and nothing after it says the builder was charged",
+    off.checked && off.after.includes("We couldn't run our own check this time") && !/charged/i.test(off.after.replace(/Sales tax is charged[^\n]*/g, "")),
+    (off.after.match(/[^\n]*(charged|run our own check)[^\n]*/gi) || []).join(" | ").slice(0, 200));
+  r.ok("13B and generating again names no price", off.after.includes(`${AGAIN}that counts as a new generation.`) && !/another \$/.test(off.after),
+    (off.after.match(/[^\n]*generate again[^\n]*/) || [""])[0]);
+
+  // C. Armed, but this tenant is exempt (wallet_hold holds it at 0).
+  const exempt = await moneyPress({ ...WALLET_ARMED, exempt: true });
+  r.ok("13C ⚠️ EXEMPT ON AN ARMED METER: free, never the $20 it will not pay",
+    exempt.line.kind === "free" && exempt.line.text.includes("Generating is free right now") && !exempt.line.text.includes("$"), JSON.stringify(exempt.line));
+  r.ok("13C and no 'charged once', no 'another $'",
+    !exempt.after.includes("You were charged once") && exempt.after.includes(`${AGAIN}that counts as a new generation.`));
+
+  // D. No wallet in the catalog (an older function, or a read the server could not make).
+  const unknown = await moneyPress(undefined);
+  r.ok("13D ⚠️ NO WALLET: one generation, and no money claim either way",
+    unknown.line.kind === "unknown" && unknown.line.text === `${SAY}.`, JSON.stringify(unknown.line));
+  r.ok("13D and no 'charged once', no 'free', no price after it",
+    !unknown.after.includes("You were charged once") && !unknown.after.includes("Generating is free") && unknown.after.includes(`${AGAIN}that counts as a new generation.`));
+
+  // E. And back: the armed meter's $20 returns on the next open, so 13 cannot pass on a stuck line.
+  const back = await moneyPress(WALLET_ARMED);
+  r.ok("13E armed at 2000 again: $20 and 'charged once' are back",
+    back.line.kind === "priced" && back.line.text.includes("you are charged $20 once") && back.after.includes("You were charged once, as usual"), JSON.stringify(back.line));
+
+  // F. ⚠️ A STALE TAB, ARMED UNDER IT: the style opened while the meter was off, the meter was
+  // armed, and Generate was pressed without opening the style again. The open-time read said free;
+  // the hold takes $20. Before the press re-read, the card promised "free" on a charged press.
+  const armedLate = await moneyPress(WALLET_ARMED, null, { openWith: { ...WALLET_ARMED, meterActive: false } });
+  r.ok("13F ⚠️ OPENED WITH THE METER OFF, ARMED BEFORE THE PRESS: the card says $20, never free",
+    armedLate.opened && armedLate.pressRead && armedLate.line.kind === "priced" && armedLate.line.text === `${SAY} — you are charged $20 once, however much we have to fix.`,
+    JSON.stringify({ opened: armedLate.opened, pressRead: armedLate.pressRead, line: armedLate.line }));
+  r.ok("13F and the after-lines say the charge: 'charged once' and another $20",
+    armedLate.after.includes("You were charged once, as usual") && armedLate.after.includes(`${AGAIN}a new generation is another $20.`),
+    (armedLate.after.match(/[^\n]*generate again[^\n]*/) || [""])[0]);
+
+  // G. And the mirror: opened armed, disarmed before the press. Nothing is taken, so nothing may
+  // say a price or a charge.
+  const offLate = await moneyPress({ ...WALLET_ARMED, meterActive: false }, null, { openWith: WALLET_ARMED });
+  r.ok("13G ⚠️ OPENED ARMED, DISARMED BEFORE THE PRESS: the card says free, no $20",
+    offLate.opened && offLate.pressRead && offLate.line.kind === "free" && !offLate.line.text.includes("$"),
+    JSON.stringify({ opened: offLate.opened, pressRead: offLate.pressRead, line: offLate.line }));
+  r.ok("13G and no 'charged once', no 'another $'",
+    !offLate.after.includes("You were charged once") && offLate.after.includes(`${AGAIN}that counts as a new generation.`) && !/another \$/.test(offLate.after));
+  catalogWallet = WALLET_ARMED;
 
   // ── 9: no page errors ─────────────────────────────────────────────────────────────────
   r.ok("zero page errors across the whole run", errors.length === 0, errors.slice(0, 3).join(" | "));

@@ -1887,6 +1887,10 @@ function Dashboard({ session }) {
         videoFrames: (st && Array.isArray(st.d3_video_frames)) ? st.d3_video_frames.filter(Boolean) : [],
         modelStatus: (st && st.model_status) || "none",
         aiReady: data.aiReady !== false,
+        // The video meter as the server reads it (price, on or off, exempt), for the money line.
+        // Passed through untouched: the designer's calChargeOf is the one place it is read, and a
+        // catalog with no wallet (an older function, a failed read) is null, which says no price.
+        wallet: data.wallet ?? null,
       };
     },
     onDraftFromPhotos: async (photoUrls, styleValue) => {
@@ -2031,7 +2035,9 @@ function Dashboard({ session }) {
       if (brokeOff || closedAtDeadline) {
         const rec = opts && opts.recover;
         if (!rec || typeof rec.alive !== "function" || !body.idempotencyKey) {
-          throw new Error("Your connection dropped before the draft arrived, so we could not show it. If it finished, you were charged for it once.");
+          // No money claim (2026-10-05): this line cannot see the wallet, and with the meter off
+          // nobody is charged. The server's own pickup sentences are the ones that say money.
+          throw new Error("Your connection dropped before the draft arrived, so we could not show it. If it finished, it counted as one generation.");
         }
         let asked = 0;
         let got = null;
@@ -2509,6 +2515,15 @@ function Dashboard({ session }) {
   // both or neither, and an approver who cannot raise a change is a normal, intended state.
   // `change_order_approve` has two levels only (none/edit), like `commissions`.
   const coApproveCanEdit = canAdmin || !!(myAccess && myAccess.change_order_approve === "edit");
+  // Changing a line's price in the Designer (migration 277): owners and admins by
+  // default, anyone else only when an owner or admin ticks "Override prices" for them in Team.
+  // Presentation only — submit-estimate re-checks {area:'price_override', level:'edit'} and strips
+  // a price from anyone who does not hold it, whatever the browser believes.
+  // The RESOLVED map, not the role: owners resolve 'edit' on every area and admins hold it by
+  // preset, so `canAdmin ||` added nothing for them except an admin whose switch an owner turned
+  // off — who then typed prices the server dropped. canAdmin stays only for a platform operator
+  // in view-as, who has no map on the viewed tenant (a support operator reads the owner's).
+  const priceCanOverride = (!!viewing && canAdmin) || !!(myAccess && myAccess.price_override === "edit");
   // Grace / transition banners read gateEnt too: in view-as they are the VIEWED tenant's
   // countdowns, so an operator sees exactly the warning the builder sees.
   const gateGrace = !!gateEnt && gateEnt.state === "grace";
@@ -3053,6 +3068,7 @@ function Dashboard({ session }) {
               <DesignerTab key={"d-" + effClientId} clientId={effClientId} view3d={view3dUnlocked} onSaved={() => setDesignsRefreshKey((k) => k + 1)}
                 openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null}
                 canPushInvoice={ordersCanEdit}
+                canOverridePrice={priceCanOverride}
                 /* navigate(), not location.assign: the designer host above is kept MOUNTED
                    across tab switches, and a real navigation would throw away whatever is
                    on the canvas. ssClampTab first, same as the record page's Orders link —

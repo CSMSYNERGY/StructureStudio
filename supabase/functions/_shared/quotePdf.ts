@@ -38,8 +38,11 @@ const FETCH_TIMEOUT_MS = 10_000;
 
 export interface QuotePdfInput extends EstimatePdfInput {
   /**
-   * Public URL of the designer's plan PDF (`designs.image_url`): page 1 the floor plan, page 2
-   * the four-sided 3D sheet when one was captured. Null/absent → estimate sheet only.
+   * Public URL of the designer's plan PDF (`designs.image_url`): page 1 the floor plan; page 2, when
+   * the tenant has 3D on, a 3D page: the view the rep set up in the 3D viewer or a default
+   * three-quarter view, or, for a builder who switched on "all four corners" (migration 276,
+   * client_settings.quote_corner_views), one sheet with the building from each corner. Built in the
+   * designer's submitQuote; nothing here depends on which. Null/absent → estimate sheet only.
    */
   planPdfUrl?: string | null;
   /**

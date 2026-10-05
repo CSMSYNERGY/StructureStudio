@@ -19,7 +19,11 @@ import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 import { sendTenantSms } from "../_shared/smsSend.ts";
 import { deHtml, designTotalCents, round2, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
-import { bosBasisOf, bosQtyFor, bosCharges, bosAmountFor } from "../_shared/buildOnSite.ts";
+import { bosBasisOf, bosQtyFor, bosCharges, bosAmountFor, bosIsPct } from "../_shared/buildOnSite.ts";
+// A rep's own price for a line (migration 277): the one key spelling the designer
+// shares, and the parse/apply rules. See step 2c (who may) and step 7-PO (where it lands).
+import { ssPriceGroupId, ssPriceRowKey } from "../_shared/priceRowKey.ts";
+import { applyPriceOverrides, parsePriceOverrides } from "../_shared/priceOverride.ts";
 import { FOUNDATION_LABEL, isFoundationId, foundationQtyFor, foundationDesc } from "../_shared/foundation.ts";
 import { quoteDelivery, type DeliveryQuote } from "../_shared/deliveryQuote.ts";
 import { hasSubject } from "../_shared/jwtSubject.ts";
@@ -176,7 +180,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   try { payload = await req.json(); }
   catch { return json({ error: "Invalid JSON" }, 400); }
 
-  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, doors, ramps, windows, imageUrl, planImageUrl, view3dImageUrl, betaMode, deliveryFee, declinedItems, discounts } = payload || {};
+  const { designId, clientId, contact, selections, itemSummary, roughOpenings, customOptions, doors, ramps, windows, imageUrl, planImageUrl, view3dImageUrl, betaMode, deliveryFee, declinedItems, discounts, priceOverrides } = payload || {};
 
   // Mirrors n8n strict validation
   const missing: string[] = [];
@@ -347,6 +351,18 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // change_orders:none could open an accepted design from Pipeline, resubmit, and mint a
   // change order the Team screen says they may not raise.
   let mayAmendCaller = false;
+  // A REP'S OWN PRICE FOR A LINE (a builder's request; migration 277). The portal's designer
+  // sends `priceOverrides: [{rowKey, amount}]` whenever a price is applied to the design — typed by
+  // this person, or stored by someone else who holds the area — and the public page never does.
+  // Whatever the browser believes about the permission is a courtesy, like every UI gate: this body
+  // is reachable with the anon key. So it is a THIRD question beside the two above, asked of the same
+  // auth round trip, and a caller who cannot answer it has the field stripped and logged below.
+  // Separate from staffCaller on purpose: every rep may build and price a quote, but only the
+  // people an owner chose may replace a catalog price with their own (and a rep without it still
+  // gets a discount through, exactly as before).
+  const wantedOverrides = parsePriceOverrides(priceOverrides);
+  let allowedOverrides: Map<string, number> = wantedOverrides;
+  let mayOverrideCaller = false;
   try {
     const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
     // The bare anon key is a valid JWT with no `sub`, so getUser() rejects it — the
@@ -362,7 +378,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // limit(1), not maybeSingle(): a duplicate client_users row must not lock a rep out
           // of their own tenant (the reasoning _shared/resolveTenant.ts records for its read).
           supabase.from("client_users").select("role, title, access").eq("user_id", userId).eq("client_id", clientId).limit(1),
-          supabase.from("app_operators").select("user_id").eq("user_id", userId).maybeSingle(),
+          // can_write rides along for Override prices only (below); staffCaller and mayAmendCaller
+          // still read the row's presence, exactly as before.
+          supabase.from("app_operators").select("user_id, can_write").eq("user_id", userId).maybeSingle(),
         ]);
         // MEMBERSHIP IS NOT PERMISSION (audit 2026-09-06). A client_users row only says "works
         // here": a Driver and a Crew Leader are in that table too, and both resolve to
@@ -385,6 +403,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         mayAmendCaller = Boolean(opRes.data) ||
           (memberRow
             ? canEdit(effectiveAccess(memberRow.role, memberRow.title, memberRow.access), "change_orders")
+            : false);
+        // Owners resolve 'edit' on every area and admins hold it by preset; anyone else only by a
+        // Team grant. A platform operator in view-as has no row here, so the same bypass applies —
+        // but only to one who may WRITE: a read-only (or support) operator account is refused every
+        // write by resolveTenant, and re-pricing a customer's quote is one.
+        mayOverrideCaller = Boolean(opRes.data && (opRes.data as { can_write?: boolean }).can_write) ||
+          (memberRow
+            ? canEdit(effectiveAccess(memberRow.role, memberRow.title, memberRow.access), "price_override")
             : false);
       }
     }
@@ -519,6 +545,27 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // expired mid-designer shows up here, and a run of these is how you would notice.
       //   select message, count(*) from app_errors where severity='info' group by 1
       //   having count(*) > 20 order by 2 desc;
+      severity: "info",
+    }).catch(() => {});
+  }
+  // The same posture for a rep's own line prices (migration 277): honoured only for a caller who
+  // holds `price_override` (or a platform operator), STRIPPED for everyone else, and the quote goes
+  // out at list price. Never refused — a shopper resubmitting their own share link carries no
+  // session, and must not be blocked by a field they did not knowingly send. The known, accepted
+  // cost is the discount one: an anonymous resubmit of a rep-priced design goes back to list until
+  // a rep resubmits. Logged as INFO, a refusal and never a fault, and never deleted: a run of these
+  // from one tenant is how a rep whose grant was taken away (or whose session expired) shows up, and
+  // one row is the trace of a teammate without the grant resubmitting a design someone with it priced
+  // (their Details showed list, so the quote matches what they saw; the stored prices stay put).
+  if (wantedOverrides.size && !mayOverrideCaller) {
+    allowedOverrides = new Map();
+    logEdgeError({
+      fn: "submit-estimate",
+      req,
+      clientId,
+      code: "unauthorized_price_override",
+      message: "Caller without the Override prices permission sent line prices — stripped; estimate submitted at list price.",
+      context: { designId: String(designId), overrideCount: wantedOverrides.size, staffCaller },
       severity: "info",
     }).catch(() => {});
   }
@@ -717,8 +764,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // Serialized into designs.estimate_lines at step 11, AFTER pct_estimate_total
   // resolution and credit baking have finalized the amounts (both mutate in place).
   // A line no site tagged serializes as kind "fallback" — the push's safety net.
-  const lineProv = new Map<any, { kind: string; itemKey?: string; nonTaxable?: boolean; skip?: boolean }>();
-  const tagLine = <T,>(line: T, p: { kind: string; itemKey?: string; nonTaxable?: boolean; skip?: boolean }): T => {
+  //
+  // rowKey (migration 277) names the designer's Details row the line sits on, spelled by the shared
+  // ssPriceRowKey, so a rep's price for that row can find this line in step 7-PO. Only lines that
+  // may take a rep's price get one: never tax, discounts, delivery, custom options, an "(included)"
+  // $0 line or a percentage line. listAmount is written by step 7-PO when a price replaced the
+  // catalog's, and persisted for audit only (step 11); nothing prints it.
+  const lineProv = new Map<any, { kind: string; itemKey?: string; nonTaxable?: boolean; skip?: boolean; rowKey?: string; listAmount?: number }>();
+  const tagLine = <T,>(line: T, p: { kind: string; itemKey?: string; nonTaxable?: boolean; skip?: boolean; rowKey?: string }): T => {
     lineProv.set(line, p);
     return line;
   };
@@ -891,7 +944,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     type: "one_time",
     description: "",   // size lives in the name; filled with the credit breakdown only when items are declined
   };
-  targetItems.push(tagLine(buildingLine, { kind: "building", nonTaxable: !styleTaxable }));
+  targetItems.push(tagLine(buildingLine, { kind: "building", nonTaxable: !styleTaxable, rowKey: ssPriceRowKey("building") }));
 
   // Add-on pricing — always from this tenant's layout_item_pricing table (keyed by item_key).
   // A style-specific override (style_id = the selected style) wins over the style_id IS NULL
@@ -1114,7 +1167,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       currency: "USD",
       type: "one_time",
       description: `${buildingPerimeter} ft of wall at $${whRate.toFixed(2)} per foot`,
-    }, { kind: "wall_height", nonTaxable: wh.taxable === false }));
+    }, { kind: "wall_height", nonTaxable: wh.taxable === false, rowKey: ssPriceRowKey("wallHeight") }));
 
     // ── Built on site (183) ───────────────────────────────────────────────────────────
     // Not a product the customer shopped for — a CONSEQUENCE of asking for a wall too tall to
@@ -1165,7 +1218,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // Taxability is INHERITED from the increase that caused it rather than given its own
           // column. They are one decision on one row, and a builder who marks taller walls
           // non-taxable has already said what they think about this charge.
-        }, { kind: "build_on_site", nonTaxable: wh.taxable === false });
+        }, { kind: "build_on_site", nonTaxable: wh.taxable === false, ...(bosIsPct(bosBasis) ? {} : { rowKey: ssPriceRowKey("buildOnSite") }) });
         targetItems.push(bosLine);
         if (bosBasis === "pct_estimate_total") deferredPctLines.push({ item: bosLine, rate: bosRate });
       }
@@ -1256,7 +1309,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             : cladShape.unit
               ? `${cladShape.qty} ${cladShape.unit} at $${cladRate.toFixed(2)} each`
               : `${cladName} for this building`,
-        }, { kind: "cladding", nonTaxable: sc.taxable === false });
+        }, { kind: "cladding", nonTaxable: sc.taxable === false, ...(basis.startsWith("pct_") ? {} : { rowKey: ssPriceRowKey("cladding") }) });
         targetItems.push(cladLine);
         if (basis === "pct_estimate_total") deferredPctLines.push({ item: cladLine, rate: cladRate });
       }
@@ -1324,7 +1377,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         currency: "USD",
         type: "one_time",
         description: `${sqft} sq ft at $${rate.toFixed(2)} per sq ft`,
-      }, { kind: "insulation", nonTaxable: off.taxable === false }));
+      }, { kind: "insulation", nonTaxable: off.taxable === false, rowKey: ssPriceRowKey("insul", area) }));
     }
   }
 
@@ -1372,7 +1425,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           currency: "USD",
           type: "one_time",
           description: foundationDesc(basis, qty, rate),
-        }, { kind: "foundation", nonTaxable: row.taxable === false });
+        }, { kind: "foundation", nonTaxable: row.taxable === false, ...(bosIsPct(basis) ? {} : { rowKey: ssPriceRowKey("foundation", id) }) });
         targetItems.push(line);
         if (basis === "pct_estimate_total") deferredPctLines.push({ item: line, rate });
       }
@@ -1477,7 +1530,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       type: "one_time",
       description: desc,
     };
-    targetItems.push(tagLine(item, { kind: "layout_item", itemKey: itemKey || "", nonTaxable: layoutTaxable.get(String(itemKey || "")) === false }));
+    targetItems.push(tagLine(item, {
+      kind: "layout_item", itemKey: itemKey || "", nonTaxable: layoutTaxable.get(String(itemKey || "")) === false,
+      // The designer's row for a built-in item is keyed by the item key itself (singleDoor, loft…).
+      // Not the "(included)" line above, and not either percentage: those never take a rep's price.
+      ...(itemKey && method !== "pct_building_price" && method !== "pct_estimate_total"
+        ? { rowKey: ssPriceRowKey("layout", itemKey) } : {}),
+    }));
     if (method === "pct_estimate_total") deferredPctLines.push({ item, rate });
   };
 
@@ -1545,7 +1604,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     targetItems.push(tagLine({
       name: "Paint Colors", qty: 1, amount: paintAmount, priceId: "", productId: "",
       attachments: [], currency: "USD", type: "one_time", description: paintDesc,
-    }, { kind: "paint", nonTaxable: !paintTaxable }));
+    }, { kind: "paint", nonTaxable: !paintTaxable, rowKey: ssPriceRowKey("paint") }));
   }
 
   // ── Line 3: Roof ── shown whenever the tenant offers roofs (the designer then always sends a
@@ -1575,7 +1634,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     targetItems.push(tagLine({
       name: "Roof", qty: 1, amount: roofAmount, priceId: "", productId: "",
       attachments: [], currency: "USD", type: "one_time", description: roofDesc,
-    }, { kind: "roof", nonTaxable: !roofTaxable }));
+    }, { kind: "roof", nonTaxable: !roofTaxable, rowKey: ssPriceRowKey("roof") }));
   }
 
   if (summary.doubleDoors > 0) pushItem("Double Door", "doubleDoor", "", { count: summary.doubleDoors });
@@ -1635,7 +1694,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const rate = charge && c ? c.rate : 0;
       return { text: label ? `${label}${suffix}${rate > 0 ? ` ($${rate})` : ""}` : null, rate };
     };
-    const dg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
+    const dg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null; rowKey: string | null }>();
     for (const d of doors) {
       // A FOUND catalog row always wins, its NULL/0 price included (the owner's "unpriced =
       // not charged" contract). The body's snapshot price survives ONLY where there is
@@ -1663,8 +1722,15 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const sw = d.swing === "in" ? "in-swing" : d.swing === "out" ? "out-swing" : null;
       const op = d.operation === "slideup" ? "slide up" : d.operation === "double" ? "double" : d.operation === "right" ? "right hinge" : d.operation === "left" ? "left hinge" : null;
       const desc = [d.widthIn && d.heightIn ? `${fmtFtIn(d.widthIn)}×${fmtFtIn(d.heightIn)}` : null, sw, op, mainC.text, trimC.text, d.wall ? `${d.wall} wall` : null].filter(Boolean).join(" · ");
-      const key = `${name}|${price}|${mainC.text || ""}|${trimC.text || ""}`;
-      const g = dg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (d.fixtureItemId || null) };
+      // The designer's Details row for this door (migration 277), spelled by the shared rule from the
+      // same fields its fx: row is grouped by — the fixture id (or name|snapshot price) and the two
+      // colour ids. A door whose row a rep re-priced gets a line of its own, so the new price lands
+      // on exactly the doors that row showed; with no override the grouping is what it always was.
+      // A line two rows share keeps no rowKey: no single price names it.
+      const rowKey = ssPriceRowKey("fx", ssPriceGroupId(d.fixtureItemId, d.name || "Door", d.price != null ? Number(d.price) : 0), d.colorId || "", d.trimColorId || "");
+      const key = `${name}|${price}|${mainC.text || ""}|${trimC.text || ""}` + (allowedOverrides.has(rowKey) ? `|${rowKey}` : "");
+      const g = dg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (d.fixtureItemId || null), rowKey };
+      if (g.rowKey !== rowKey) g.rowKey = null;
       g.qty++; dg.set(key, g);
     }
     for (const g of dg.values()) {
@@ -1682,7 +1748,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         name: included ? g.name + " (included)" : g.name, qty: included ? g.qty : chargeable, amount: included ? 0 : g.price,
         priceId: "", productId: "", attachments: atts,
         currency: "USD", type: "one_time", description: g.desc || "",
-      }, { kind: "door", nonTaxable: g.fixtureItemId ? fixtureTaxable.get(String(g.fixtureItemId)) === false : false }));
+      }, { kind: "door", nonTaxable: g.fixtureItemId ? fixtureTaxable.get(String(g.fixtureItemId)) === false : false,
+           ...(included || !g.rowKey ? {} : { rowKey: g.rowKey }) }));
     }
   }
 
@@ -1726,7 +1793,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         "1 switch",
         electricalPkg.includePanel ? `electrical panel included, ${electricalPkg.panelHeightIn}" off the floor` : "no electrical panel",
       ].join(", "),
-    }, { kind: "electrical", nonTaxable: electricalPkg.taxable === false }));
+    }, { kind: "electrical", nonTaxable: electricalPkg.taxable === false, rowKey: ssPriceRowKey("electrical") }));
   }
   // ── The builder's own electrical items ─────────────────────────────────────
   // Priced SERVER-SIDE from electrical_items by id — the body sends counts, never money (the
@@ -1790,7 +1857,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           description: covered > 0
             ? `${covered} in the electrical package, ${chargeable} extra`
             : (hasPkg ? "Added to the electrical package" : "Electrical item"),
-        }, { kind: "electrical_item", nonTaxable: ei.taxable === false }));
+        }, { kind: "electrical_item", nonTaxable: ei.taxable === false, rowKey: ssPriceRowKey("elecItem", id) }));
       }
     }
   }
@@ -1836,7 +1903,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         const rr = await supabase.from("fixture_items").select("id, price, image_url, show_image_on_estimate").eq("client_id", clientId).in("id", rampIds);
         for (const r of rr.data ?? []) rImg.set(String(r.id), { url: r.image_url || null, show: r.show_image_on_estimate !== false, price: r.price != null ? Number(r.price) : null });
       }
-      const rg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
+      const rg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null; rowKey: string | null }>();
       for (const r of customRamps) {
         // Same rule as fixture doors above: a FOUND catalog row always wins (NULL/0 price =
         // included, no line); the body's snapshot survives only for a hard-deleted fixture
@@ -1850,8 +1917,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         if (!(price > 0)) continue;   // $0 / unpriced = included, no line
         const name = (String(r.name || "Ramp").trim()) || "Ramp";
         const desc = [sizeStr(r), r.wall ? `${r.wall} wall` : null].filter(Boolean).join(" · ");
-        const key = `${name}|${price}`;
-        const g = rg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (r.fixtureItemId || null) };
+        // The designer's ramp:<group id> row (migration 277) — the same split as the doors above.
+        const rowKey = ssPriceRowKey("ramp", ssPriceGroupId(r.fixtureItemId, r.name || "Ramp", r.price != null ? Number(r.price) : 0));
+        const key = `${name}|${price}` + (allowedOverrides.has(rowKey) ? `|${rowKey}` : "");
+        const g = rg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (r.fixtureItemId || null), rowKey };
+        if (g.rowKey !== rowKey) g.rowKey = null;
         g.qty++; rg.set(key, g);
       }
       for (const g of rg.values()) {
@@ -1869,7 +1939,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           name: included ? g.name + " (included)" : g.name, qty: included ? g.qty : chargeable, amount: included ? 0 : g.price,
           priceId: "", productId: "", attachments: (im && im.show && im.url) ? imgAttachments(im.url) : [],
           currency: "USD", type: "one_time", description: g.desc || "",
-        }, { kind: "ramp", nonTaxable: g.fixtureItemId ? fixtureTaxable.get(String(g.fixtureItemId)) === false : false }));
+        }, { kind: "ramp", nonTaxable: g.fixtureItemId ? fixtureTaxable.get(String(g.fixtureItemId)) === false : false,
+             ...(included || !g.rowKey ? {} : { rowKey: g.rowKey }) }));
       }
     }
     // --- simple ramps: priced from the tenant's single ramp price ---
@@ -1887,13 +1958,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             name: "Ramp", qty: totalFt, amount: rampPrice,
             priceId: "", productId: "", attachments: atts,
             currency: "USD", type: "one_time", description: `${simpleRamps.length} ramp${simpleRamps.length > 1 ? "s" : ""} · priced per ft of door width`,
-          }, { kind: "ramp", nonTaxable: false }));   // simple ramp: no catalog row, no flag
+          }, { kind: "ramp", nonTaxable: false, rowKey: ssPriceRowKey("ramp", "simple") }));   // simple ramp: no catalog row, no flag
         } else {
           targetItems.push(tagLine({
             name: "Ramp", qty: simpleRamps.length, amount: rampPrice,
             priceId: "", productId: "", attachments: atts,
             currency: "USD", type: "one_time", description: "",
-          }, { kind: "ramp", nonTaxable: false }));   // simple ramp: no catalog row, no flag
+          }, { kind: "ramp", nonTaxable: false, rowKey: ssPriceRowKey("ramp", "simple") }));   // simple ramp: no catalog row, no flag
         }
       }
     }
@@ -1946,7 +2017,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       if (w && w.flowerBox) { const l = dressLabel(w.flowerBoxColorId, w.flowerBoxColorLabel); bits.push(l ? `flower box: ${l}` : "flower box"); }
       return bits.length ? bits.join(" · ") : null;
     };
-    const wg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
+    const wg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null; rowKey: string | null }>();
     for (const w of windows) {
       // Same rule as fixture doors above: a FOUND catalog row always wins (NULL/0 price =
       // included, no line); the body's snapshot survives only for a hard-deleted fixture or
@@ -1980,8 +2051,15 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // this key (two identical windows on different walls are one line, which is right), so a
       // dormer window would otherwise fold into an identical wall window's group and be
       // described by that window's wall — telling the shop to build both on the front.
-      const key = `${name}|${price}|${colorText || ""}|${dressText || ""}|${w && w.dormer ? "dormer" : ""}`;
-      const g = wg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (w.fixtureItemId || null) };
+      // The designer's win:<group id>|<colour> row (migration 277) — the same split as the doors.
+      // A DORMER window has no Details row of its own (the designer prices it straight into the
+      // payload), so it never takes a wall window's price even when it shares that row's key.
+      const rowKey = w && w.dormer ? null
+        : ssPriceRowKey("win", ssPriceGroupId(w.fixtureItemId, w.name || "Window", w.price != null ? Number(w.price) : 0), w.colorId || "");
+      const key = `${name}|${price}|${colorText || ""}|${dressText || ""}|${w && w.dormer ? "dormer" : ""}`
+        + (rowKey && allowedOverrides.has(rowKey) ? `|${rowKey}` : "");
+      const g = wg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (w.fixtureItemId || null), rowKey };
+      if (g.rowKey !== rowKey) g.rowKey = null;
       g.qty++; wg.set(key, g);
     }
     for (const g of wg.values()) {
@@ -1993,7 +2071,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         name: included ? g.name + " (included)" : g.name, qty: included ? g.qty : chargeable, amount: included ? 0 : g.price,
         priceId: "", productId: "", attachments: (im && im.show && im.url) ? imgAttachments(im.url) : [],
         currency: "USD", type: "one_time", description: g.desc || "",
-      }, { kind: "window", nonTaxable: g.fixtureItemId ? fixtureTaxable.get(String(g.fixtureItemId)) === false : false }));
+      }, { kind: "window", nonTaxable: g.fixtureItemId ? fixtureTaxable.get(String(g.fixtureItemId)) === false : false,
+           ...(included || !g.rowKey ? {} : { rowKey: g.rowKey }) }));
     }
 
     // ── Shutters and flower boxes as their own priced lines (Carolyn 2026-09-04) ──────────
@@ -2082,7 +2161,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         currency: "USD",
         type: "one_time",
         description: ro.dimensions ? String(ro.dimensions) : "",
-      }, { kind: "layout_item", itemKey, nonTaxable: layoutTaxable.get(itemKey) === false }));
+        // Each rough opening is its own Details row and its own line, so a rep can price one
+        // oversized opening without touching the rest (the case the builder named). Keyed by the
+        // placed item's id, which the designer sends since migration 277; an entry from an older
+        // bundle carries none and simply cannot take a price.
+      }, { kind: "layout_item", itemKey, nonTaxable: layoutTaxable.get(itemKey) === false,
+           ...(ro?.id != null && String(ro.id) !== "" ? { rowKey: ssPriceRowKey("ro", String(ro.id)) } : {}) }));
     });
   }
 
@@ -2244,6 +2328,15 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     });
   }
 
+
+  // 7-PO. A REP'S OWN PRICES (migration 277). Every line now exists with its final
+  // catalog amount — the declined-item credits are baked into the building line just above — so
+  // this is the first moment a rep's price can replace one, and it must happen BEFORE 7a: a
+  // percentage-of-the-quote line is a share of what the customer is actually charged, exactly as
+  // the designer's preview works it out. allowedOverrides is empty unless step 2c verified the
+  // caller holds `price_override`, so for everyone else this does nothing at all. The catalog
+  // amount is kept on the provenance as listAmount (audit only; see step 11's snapshot).
+  applyPriceOverrides(targetItems, lineProv, allowedOverrides, (li) => deferredPctLines.some((d) => d.item === li));
 
   // 7a. Resolve pct_estimate_total add-ons LAST: each is rate% of the subtotal of every OTHER
   // line (building + non-percentage add-ons + custom options + rough openings + any
@@ -2600,6 +2693,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           qty: Number(li.qty) || 0,
           amount: Number(li.amount) || 0,
           nonTaxable: !!p?.nonTaxable,
+          // The catalog unit price a rep's own price replaced (migration 277) — present ONLY on a
+          // line that took one, so every other snapshot is byte-for-byte what it was. For audit:
+          // an under-priced quote can always be read against its list. Never printed: the PDFs,
+          // the emails, the customer screens and the books all read the named fields above.
+          ...(p?.listAmount != null ? { listAmount: p.listAmount } : {}),
         };
       }),
   };

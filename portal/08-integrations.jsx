@@ -1856,6 +1856,9 @@ function ssLevelLabel(areaKey, lv) {
   // Approving unlocks is a yes/no, and "Edit" is the wrong word for it — nothing is being
   // edited. Two levels, so this row renders two buttons rather than three.
   if (areaKey === "change_order_approve") return ({ none: "No", edit: "Can approve" })[lv] || lv;
+  // Override prices (migration 277) is a yes/no as well: may this person type a line's price in
+  // the Designer. "Edit" would read as editing something else.
+  if (areaKey === "price_override") return ({ none: "No", edit: "Can change prices" })[lv] || lv;
   // My Synergy Phone (254): four levels, and the middle two are about WHOSE calls, not read-vs-write —
   // 'own' makes and takes calls and sees their own, 'view' also sees the team's (the Calls
   // report, the Team tab in the apps), 'edit' also changes the phone settings.
@@ -4119,7 +4122,7 @@ function BillingShell({ sub: rawSub, onSub, tabs, viewingLabel = null }) {
   );
 }
 
-function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null, canReadTax = false, canEditTax = false }) {
+function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null, canReadTax = false, canEditTax = false, view3d = false }) {
   // Same clamp SettingsShell runs, for the same reason and one more. A person granted only
   // settings_team has no Business Details tab, so the rail's Company link cannot be the
   // `company` slug for them — it points at their first visible tab instead (see 12-shell).
@@ -4134,7 +4137,8 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
           cannot save half a form between them — see the note at the top of SettingsView. */}
       {/* Building serial numbers ride with Business Details (Carolyn 2026-09-11). They are a
           shop-wide counter, not a property of any one lot, which is why they left Locations. */}
-      {sub === "company" && (<><SettingsView section="company" /><SerialNumbersCard /></>)}
+      {/* view3d: Business Details shows the four-corner quote switch only where 3D is unlocked. */}
+      {sub === "company" && (<><SettingsView section="company" view3d={view3d} /><SerialNumbersCard /></>)}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "team" && <CommissionTeam viewingLabel={viewingLabel} />}
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}
@@ -4211,7 +4215,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           Client Setup links that point at branding and team are untouched. */}
       {hubs.company.some((t) => t[0] === sub) && (
         <CompanyShell sub={sub} onSub={setSub} tabs={hubs.company} clientId={clientId}
-          viewingLabel={viewingLabel}
+          viewingLabel={viewingLabel} view3d={view3d}
           /* Location tax rates and the Tax tab's codes are settings_crm — the area that owns the
              company rate — not the team/branding areas Locations rides on. Same unclamped reading as ssCompanyTabs: an
              owner/admin, or a null map (a platform operator in view-as, whose rights come
