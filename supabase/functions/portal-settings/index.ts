@@ -2264,28 +2264,51 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
     // WALLET, read here rather than only in portal-billing, because the calibration panel has to
-    // show "$20 · balance $140" BEFORE the builder clicks. Learning the price from a 402 after
-    // waiting thirty seconds for a generation is the worst possible ordering.
+    // say what one press of Generate costs BEFORE the builder clicks. Learning the price from a 402
+    // after waiting thirty seconds for a generation is the worst possible ordering.
+    //
+    // THE MONEY LINE READS THIS (2026-10-05). The panel said "you are charged $20 once" from a
+    // hard-coded string while the meter was off, so the copy and the meter disagreed. The shell now
+    // hands this object to the designer and calChargeOf (both twins) turns it into one of three
+    // lines: the price, "free right now", or no money claim at all. `exempt` is
+    // wallet_accounts.metered_exempt, the one exemption wallet_hold honours (it holds an exempt
+    // tenant at 0), so an exempt tenant is no longer told a price it never pays. Safe for older
+    // bundles: before this, nothing in the portal read `wallet` at all.
     //
     // ALL READS AT ONCE (2026-10-02), the same move as `status`. The wallet pair keys on clientId and
     // a constant kind and never needed the catalog's answer, yet it waited for all sixteen table
     // reads to land first: one more serial round trip on every catalog call. It starts with them
-    // now. Its tolerance is UNCHANGED and deliberate: errors read as 0 balance / null price / meter
-    // off; only a throw gives wallet = null; this promise never rejects, and it is outside the
-    // error loop below, so a wallet failure still cannot fail the catalog.
-    const walletRead = (async (): Promise<{ balanceCents: number; heldCents: number; priceCents: number | null; meterActive: boolean } | null> => {
+    // now. This promise never rejects, and it is outside the error loop below, so a wallet failure
+    // still cannot fail the catalog.
+    //
+    // ⚠️ A FAILED READ IS `null`, NOT "METER OFF" (2026-10-05). Errors used to read as 0 balance /
+    // null price / meter off, which nothing displayed. Now the panel says "Generating is free right
+    // now" on meterActive false, so a usage_prices read that failed would have told a builder on an
+    // armed meter that it was free. Either read failing, or a throw, gives wallet = null, which the
+    // panel says as one generation with no money claim either way. So does a MISSING price row:
+    // wallet_hold answers that as meter_unknown and the press is refused (503), not run free, so
+    // "off" would be the same wrong promise.
+    //
+    // NO BALANCE HERE (2026-10-05). The catalog's gate is Structures or Options at view, which the
+    // default admin preset and a support operator without billing both pass, and portal-billing
+    // withholds the balance from exactly those callers. Nothing read it here anyway: the money line
+    // needs only the price, the meter and the exemption. If a balance is ever wanted beside the
+    // button, gate it the way portal-billing's `mine` does.
+    const walletRead = (async (): Promise<{ priceCents: number | null; meterActive: boolean; exempt: boolean } | null> => {
       try {
         const [acct, price] = await Promise.all([
-          admin.from("wallet_accounts").select("balance_cents, held_cents").eq("client_id", clientId).maybeSingle(),
+          admin.from("wallet_accounts").select("metered_exempt").eq("client_id", clientId).maybeSingle(),
           admin.from("usage_prices").select("price_cents, active, visible").eq("kind", "video_3d_generation").maybeSingle(),
         ]);
+        if (acct.error || price.error || !price.data) return null;
         return {
-          balanceCents: Number(acct.data?.balance_cents ?? 0),
-          heldCents: Number(acct.data?.held_cents ?? 0),
           // Redacted when visible is false, the same posture portal-billing takes on
           // billing_plans.price_cents — the projection and the revoke are both load-bearing.
           priceCents: price.data && price.data.visible !== false ? Number(price.data.price_cents) : null,
           meterActive: Boolean(price.data?.active),
+          // No wallet row is a tenant never charged for anything, and not exempt: wallet_hold
+          // creates the row at the default (false) on the first hold.
+          exempt: acct.data?.metered_exempt === true,
         };
       } catch (_) { return null; }
     })();
