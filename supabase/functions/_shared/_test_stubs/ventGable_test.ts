@@ -485,13 +485,15 @@ Deno.test("a 10 ft wall: a lowered vent is measured on the real plate, so ▲ in
 Deno.test("both twins re-fit gable vents on a style pick, but not on a load, and pass the plate to every vent refusal", () => {
   for (const [name, text] of [["component.js", SRC], ["jsx", JSX]] as const) {
     // Since 272 the re-fit runs on `kept`: the plan less any catalog item the new style is not
-    // offered on (fixtureStyles_test pins that half), which is `items` itself when nothing goes.
+    // offered on, and since 278 less any such door or window in a partition wall (fixtureStyles_test
+    // pins that half), which is `items` itself when nothing goes.
     assert(text.includes("const r = ssRefitGableVents(kept, vr.roof, bldgW, bldgH, vr.H, ITEMS);"), `${name}: the style effect re-fits`);
-    assert(text.includes("const kept = offIds.size ? items.filter((it) => !offIds.has(it.id)) : items;"), `${name}: ...the plan as it stands, less only what the style does not offer`);
+    assert(text.includes("const kept = ssStripPartitionOpenings(offIds.size ? items.filter((it) => !offIds.has(it.id)) : items, partOff);"), `${name}: ...the plan as it stands, less only what the style does not offer`);
     assert(text.includes("if (ventItemsSeenRef.current !== items) return;"), `${name}: a load (style and items in one commit) is skipped`);
     // The re-fit lands only on the plan it was computed from. A plan the size effect replaced in the
-    // same commit keeps its own re-fit and loses only the not-offered ids (fixtureStyles_test).
-    assert(text.includes("const next = r ? r.items : kept;") && text.includes("if (next !== items) setItems((cur) => (cur === from ? next : offIds.size ? cur.filter((it) => !offIds.has(it.id)) : cur));"),
+    // same commit keeps its own re-fit and loses only the not-offered ids and partition openings
+    // (fixtureStyles_test).
+    assert(text.includes("const next = r ? r.items : kept;") && text.includes("if (next !== items) setItems((cur) => (cur === from ? next : ssStripPartitionOpenings(offIds.size ? cur.filter((it) => !offIds.has(it.id)) : cur, partOff)));"),
       `${name}: the re-fit only lands on the plan it was computed from`);
     const styleFx = text.indexOf("}, [sel.style]);"), tracker = text.indexOf("useEffect(() => { ventItemsSeenRef.current = items; }, [items]);");
     assert(styleFx > 0 && tracker > styleFx, `${name}: the items tracker runs AFTER the style effect, or a load reads as a pick`);

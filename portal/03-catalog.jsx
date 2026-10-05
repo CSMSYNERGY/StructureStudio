@@ -2524,7 +2524,9 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     // Drop the built-in "ramp" — the ramp is now a self-contained option managed in the Ramp
     // settings section (simple price or custom catalog ramps), not a per-building inclusion column.
     // Mirrors LayoutPricing, which also hides the ramp row.
-    const layout = items().filter((it) => !it.archived && it.key !== "ramp").map((it) => ({ key: it.key, label: it.label }));
+    // Nor a partition wall (migration 278): it is the customer's own layout inside the building, never
+    // part of a size's price, so it has no column (submit-estimate ignores such a row too).
+    const layout = items().filter((it) => !it.archived && it.key !== "ramp" && it.key !== "partitionWall").map((it) => ({ key: it.key, label: it.label }));
     const fx = ((cat && cat.fixtures) || []).filter((f) => f && f.active !== false && f.archived !== true);
     // Plain ASCII "x" (not "×") — a CSV opened in Excel misreads non-ASCII as mojibake ("Ã—"), and
     // since the column is matched by its exact label on re-import, a garbled header would silently
@@ -3705,6 +3707,14 @@ const LP_METHODS = [
   { value: "perimeter_building", label: "perimeter building" },
   { value: "pct_building_price", label: "pct building price" },
   { value: "pct_estimate_total", label: "pct estimate total" },
+];
+// A partition wall (migration 278) is priced by the foot of wall, by the square foot of wall (its length
+// times its height) or each: the three methods its pricing understands. portal-settings refuses the
+// others for it, and submit-estimate would charge them each.
+const LP_METHODS_PARTITION = [
+  { value: "each", label: "each" },
+  { value: "lineal_ft", label: "lineal ft — per foot of wall" },
+  { value: "sqft_option", label: "sqft option — per sq ft of wall" },
 ];
 // The build-on-site fee's basis, shown inline on the row (Carolyn 2026-09-14). The same seven
 // methods as LP_METHODS, with "each" spelled the way she reads it: "All these but each is
@@ -4973,7 +4983,12 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
     // all any more — 206 made them ordinary electrical_items, so they cannot appear here.
     return (data.items || []).filter((it) => it.key !== "ramp").map((it) => {
       const p = byKey[it.key] || {};
-      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived, internalOnly: !!it.internalOnly, taxable: it.taxable !== false,
+      // An item that stays out of the customer's palette until it is PRICED (171's shelves, 278's partition
+      // wall) starts BLANK rather than 0, and Save leaves a blank one alone: a 0 would be a price, and the
+      // item would appear free on every customer's designer the first time this card was saved for
+      // something else. Any other item keeps showing 0, which is what it costs today.
+      const unpriced = !!it.hiddenUntilPriced && p.rate == null;
+      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : unpriced ? "" : "0", unpriced, image_url: p.image_url || null, archived: !!it.archived, internalOnly: !!it.internalOnly, taxable: it.taxable !== false,
         wallSnap: !!it.wallSnap, depthIn: it.depthIn != null ? String(it.depthIn) : "", heightOffFloorIn: it.heightOffFloorIn != null ? String(it.heightOffFloorIn) : "" };
     });
   };
@@ -5080,9 +5095,11 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
         const t = String(v ?? "").trim(); return t !== "" && (!Number.isFinite(Number(t)) || Number(t) < 0);
       }));
       if (dimBad.length) throw new Error(`Nothing was saved — fix these measurement(s) first, they aren't usable inch values: ${dimBad.map((r) => r.label).join(", ")}.`);
-      const payloadRows = src.map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: rateOf(r), imageUrl: r.image_url ?? null,
+      const payloadRows = src.filter((r) => !(r.unpriced && String(r.rate ?? "").trim() === "")).map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: rateOf(r), imageUrl: r.image_url ?? null,
         ...(r.wallSnap ? { depthIn: String(r.depthIn ?? "").trim(), heightOffFloorIn: String(r.heightOffFloorIn ?? "").trim() } : {}) }));
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows } });
+      // partitionAware: this card knows the partition wall (278), so portal-settings lets it price one.
+      // The card from before it, which cannot, never sends the flag.
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows, partitionAware: true } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       await load();
       const skipped = data.skipped || [];
@@ -5115,7 +5132,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
         const itemKey = keyByAny[String(cols[iItem] || "").trim().toLowerCase()];
         if (!itemKey || !byKey[itemKey]) return;   // unknown/disabled item — ignore
         const method = methodByAny[String(cols[iMethod] || "").trim().toLowerCase()];
-        if (method) byKey[itemKey].pricing_method = method;
+        if (method && (itemKey !== "partitionWall" || LP_METHODS_PARTITION.some((m) => m.value === method))) byKey[itemKey].pricing_method = method;
         const rate = String(cols[iRate] || "").replace(/[$,\s]/g, "");
         if (rate !== "") byKey[itemKey].rate = rate;
       });
@@ -5174,14 +5191,16 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
               <tbody>
                 {rows.map((r) => r).sort((a, b) => (a.archived ? 1 : 0) - (b.archived ? 1 : 0)).map((r) => (
                   <tr key={r.item_key} style={r.archived ? { opacity: 0.55 } : undefined}>
-                    <td style={{ ...S.td, fontWeight: 700 }}>{r.label}{r.archived && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, color: "#B45309", background: "#FEF3C7", borderRadius: 4, padding: "1px 6px" }}>Archived</span>}</td>
+                    <td style={{ ...S.td, fontWeight: 700 }} data-ss-lp-item={r.item_key}>{r.label}{r.archived && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, color: "#B45309", background: "#FEF3C7", borderRadius: 4, padding: "1px 6px" }}>Archived</span>}
+                      {r.unpriced && <div style={{ fontSize: 11.5, fontWeight: 500, color: "#64748B", marginTop: 2, maxWidth: 240 }}>Not offered yet. Customers see it once you set a rate and save.</div>}
+                    </td>
                     <td style={S.td}>
                       <select value={r.pricing_method} onChange={(e) => setRow(r.item_key, "pricing_method", e.target.value)} style={{ ...S.input, width: "auto", minWidth: 170 }}>
-                        {LP_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                        {(r.item_key === "partitionWall" ? LP_METHODS_PARTITION : LP_METHODS).map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
                       </select>
                     </td>
                     <td style={S.td}>
-                      <input type="number" min="0" step="0.01" value={r.rate} onChange={(e) => setRow(r.item_key, "rate", e.target.value)} style={{ ...S.input, width: 120 }} />
+                      <input type="number" min="0" step="0.01" value={r.rate} placeholder={r.unpriced ? "not offered" : undefined} onChange={(e) => setRow(r.item_key, "rate", e.target.value)} style={{ ...S.input, width: 120 }} />
                     </td>
                     {/* Dimensions apply to wall-mounted items only; a dash reads as "not applicable
                         here", which an empty box would not. Blank = fall back to our default. */}

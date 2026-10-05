@@ -300,6 +300,17 @@ __ssFunctions.invoke = async (name, opts) => {
     // Never mutate the caller's object — several call sites build a local `body` and reuse it.
     opts = { ...opts, body: { ...opts.body, targetClientId: injected } };
   }
+  // Every catalog read asks for the items kept out of the customer's palette until priced (278's
+  // partition wall): this portal's Interior items card lists one so it can be priced, and the
+  // portal-settings catalog leaves it out for anyone who does not ask (production's portal from
+  // before 278). Here, not on the card's own call: window.__ssCatalogFlight shares one in-flight read
+  // per tenant between cards, so whichever card fires first decides the body. Copied, never mutated.
+  if (
+    name === "portal-settings" && opts && opts.body && typeof opts.body === "object" &&
+    opts.body.action === "catalog" && opts.body.withUnpriced === undefined
+  ) {
+    opts = { ...opts, body: { ...opts.body, withUnpriced: true } };
+  }
   // A tab whose session vanished under it must NOT fall back to the anon key. supabase-js
   // puts that key on the wire as the Bearer whenever getSession() resolves null — our
   // legacy `eyJ` anon key defeats supabase-js's own omitApiKeyAsBearer opt-out, which only
