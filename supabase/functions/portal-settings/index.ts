@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import { clientIp } from "../_shared/adminGate.ts";
 import { withErrorLog, logEdgeError, SS_REFUSAL_HEADER } from "../_shared/logError.ts";
+import { timedFetch, withServerTiming, type ServerTiming } from "../_shared/serverTiming.ts";
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
@@ -54,8 +55,9 @@ import {
 // The paid lookup (2026-09-17): verify_tax and send_invoice's informational check. The only
 // `allowLookup: true` lives inside paidLookup, so neither caller can skip the cap or the ledger.
 import {
-  chargeLookup, invoiceTaxCheck, invoiceTaxCheckPlan, type InvoiceTaxCheck, lookupSwitchRefusal, paidLookup,
-  parseVerifyTax, quoteSentRefusal, verifiedTax, verifyLookupRefusal, verifyQuoteRefusal,
+  chargeLookup, invoiceTaxCheck, invoiceTaxCheckPlan, type InvoiceTaxCheck, lookupPriceCents, lookupSwitchRefusal, paidLookup,
+  parseVerifyTax, quoteSentRefusal, VERIFY_TAX_METER, verifiedTax, type VerifyWallet, verifyLookupRefusal, verifyPriceRefusal,
+  verifyQuoteRefusal, verifyWalletFrom, verifyWalletRefusal,
 } from "../_shared/taxSpend.ts";
 // Why a guarded acceptance promote matched no row. customer-accept's, shared so push_to_invoice's
 // rep attestation answers a re-price that lands mid-promote exactly the way a customer's does.
@@ -613,58 +615,8 @@ function json(body: unknown, status = 200) {
   });
 }
 
-// ── Server-Timing ───────────────────────────────────────────────────────────────────────
-// Where one call's time went, written on the response itself so it can be read from the
-// portal's own tab (DevTools → Network → Timing, or response.headers) without filing a row
-// anywhere: `auth` is resolveTenant (the sign-in check plus the company lookup), `db` is every
-// query made through `admin` summed — the company lookup included, and parallel queries
-// counted in full, so it can exceed wall time — and `total` is the whole handler. Durations
-// and the region only; nothing about the caller or the data.
-//
-// Added 2026-10-01 to find out what is left of "every call costs ~2.2 s" once the function
-// runs next to the database (the portal pins it to us-east-1 since the same day).
-type ServerTiming = { auth: number; authPath?: string; db: number; dbN: number };
-
-const timedFetch = (st: ServerTiming): typeof fetch => async (input, init) => {
-  const t0 = performance.now();
-  try {
-    return await fetch(input, init);
-  } finally {
-    st.db += performance.now() - t0;
-    st.dbN++;
-  }
-};
-
-function withServerTiming(
-  handler: (req: Request, st: ServerTiming) => Promise<Response>,
-): (req: Request) => Promise<Response> {
-  return async (req: Request): Promise<Response> => {
-    const t0 = performance.now();
-    const st: ServerTiming = { auth: 0, db: 0, dbN: 0 };
-    const res = await handler(req, st);
-    // Only real calls are timed; a preflight carries nothing to time. (Not written as an
-    // OPTIONS equality test on purpose: aiDraftRetryWiring_test finds the handler's first line
-    // by the first such test in this file.)
-    if (req.method !== "POST") return res;
-    try {
-      const ms = (n: number) => Math.round(n);
-      const region = Deno.env.get("SB_REGION") ?? "unknown";
-      res.headers.set(
-        "Server-Timing",
-        `auth;desc="${st.authPath ?? "none"}";dur=${ms(st.auth)}, db;desc="${st.dbN} queries";dur=${ms(st.db)}, ` +
-          `total;dur=${ms(performance.now() - t0)}, region;desc="${region}"`,
-      );
-      // Cross-origin JS sees only safelisted headers; the refusal marker may already be named.
-      const exposed = res.headers.get("Access-Control-Expose-Headers");
-      res.headers.set("Access-Control-Expose-Headers", exposed ? `${exposed}, Server-Timing` : "Server-Timing");
-      res.headers.set("Timing-Allow-Origin", "*");
-    } catch {
-      // Immutable headers (a Response.redirect): the response matters, the timing does not.
-    }
-    // The SAME object, never a copy: withErrorLog's alreadyFiled check is by identity.
-    return res;
-  };
-}
+// Server-Timing (auth / db / total / region on every POST) lives in _shared/serverTiming.ts since
+// 2026-10-05, unchanged, so sync-design-status can send the same header.
 
 // 5xx responses whose app_errors row was already written at the return site, with more detail
 // than the wrapper can see (withErrorLog's `alreadyFiled` option skips them). Only the AI draft
@@ -6649,23 +6601,38 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // One read for the tax card: who issues the paperwork, the company rate, each location's
   // local rate, and whether verified lookups are switched on for this tenant. `configured` says
   // only whether the platform holds Avalara credentials — a boolean, never the credentials or
-  // the account behind them. No prices: both tax meters are disarmed, and a price read, when one
-  // is needed, follows the catalog action's redaction rather than riding a settings payload.
+  // the account behind them.
+  //
+  // `lookupPriceCents` (2026-10-05) is what one Verify press costs the builder's wallet, for the
+  // Verify confirm: the tax_lookup meter's price, or null when a press costs nothing (disarmed —
+  // both tax meters are today — unpriced, or an exempt tenant: billing_exempt or the wallet's
+  // metered_exempt, the two chargeTaxCalculation skips) or the price is redacted (visible false,
+  // the catalog action's and portal-billing's rule). Read here and not on `status`, which every
+  // signed-in employee gets; this action is settings_crm:view, the area that owns the button. A
+  // failed price read is null, never a failed card, and a failed wallet read counts as not exempt
+  // (a stated price the press then doesn't cost is the safe way to be wrong): verify_tax checks
+  // the figure the confirm stated against the charge before any spend (verifyPriceRefusal).
   //
   // Every location is listed, inactive ones too, with `active` on each: an inactive lot never
   // prices a quote (taxChain), and the card should be able to say why a rate is not applying.
   // `usage24h` is null when the ledger cannot be counted — unknown, not zero.
   if (action === "tax_settings") {
-    const [csRes, locRes, usage24h] = await Promise.all([
-      admin.from("client_settings").select("invoice_in_ghl, ss_tax_rate, ss_tax_label, tax_lookup_enabled")
+    const [csRes, locRes, usage24h, priceRes, walletRes] = await Promise.all([
+      admin.from("client_settings").select("invoice_in_ghl, ss_tax_rate, ss_tax_label, tax_lookup_enabled, billing_exempt")
         .eq("client_id", clientId).maybeSingle(),
       admin.from("builder_locations").select(LOCATION_TAX_COLUMNS)
         .eq("client_id", clientId).order("sort_order").order("created_at"),
       countLookups24h(admin, clientId),
+      admin.from("usage_prices").select("price_cents, active, visible").eq("kind", VERIFY_TAX_METER).maybeSingle()
+        .then((r: { data: unknown; error: unknown }) => r, () => ({ data: null, error: true })),
+      admin.from("wallet_accounts").select("metered_exempt").eq("client_id", clientId).maybeSingle()
+        .then((r: { data: unknown; error: unknown }) => r, () => ({ data: null, error: true })),
     ]);
     if (csRes.error) return dbFail(req, clientId, "load your tax settings", csRes.error);
     if (locRes.error) return dbFail(req, clientId, "load your locations' tax rates", locRes.error);
     const cs = csRes.data;
+    const exempt = cs?.billing_exempt === true ||
+      (!walletRes.error && (walletRes.data as { metered_exempt?: unknown } | null)?.metered_exempt === true);
     return json({
       ok: true,
       // Same reading as status's invoiceInGhl: a row predating the column is CRM mode.
@@ -6676,6 +6643,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       companyLabel: cs?.ss_tax_label ?? "Sales tax",
       dailyCap: DAILY_TAX_LOOKUP_CAP,
       usage24h,
+      lookupPriceCents: priceRes.error ? null : lookupPriceCents(priceRes.data, exempt),
       locations: (locRes.data ?? []).map(locationTaxView),
     });
   }
@@ -11684,6 +11652,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   //   5. an operator in view-as: confirmVerify, and a STRICT audit row (no row, no spend);
   //   6. a quote the customer already holds (emailed, texted or printed: quoteInCustomerHands):
   //      confirmResend, asked now because after the lookup the call is paid;
+  //   6b. the wallet, when the meter is armed: a press it cannot cover is refused (402), and an
+  //      unreadable wallet refuses too (503). Never on the invoice path (taxSpend.ts header).
+  //      Then the price: a press that will be charged must carry the figure its confirm stated
+  //      (quotedPriceCents), or it is refused 409 price_changed naming the price;
   //   7-9. paidLookup: the claim (the daily cap, the per-minute cap and the ledger row in one
   //      locked database step, failing closed), the request, the row closed;
   //   on failure: the quote is untouched. A verified rate the builder paid for earlier is never
@@ -11697,11 +11669,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "verify_tax") {
     const parsed = parseVerifyTax(payload);
     if (!parsed.ok) return json(parsed.refusal.body, parsed.refusal.status);
-    const { shortCode, confirmResend, confirmVerify } = parsed.value;
+    const { shortCode, confirmResend, confirmVerify, quotedPriceCents } = parsed.value;
     { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
+    // billing_exempt: one of the two exemptions the wallet check (6b) honours, read here with the
+    // switch rather than as a third read beside the wallet's.
     const { data: cs, error: csErr } = await admin.from("client_settings")
-      .select("invoice_in_ghl, tax_lookup_enabled, ss_tax_label").eq("client_id", clientId).maybeSingle();
+      .select("invoice_in_ghl, tax_lookup_enabled, ss_tax_label, billing_exempt").eq("client_id", clientId).maybeSingle();
     if (csErr) return dbFail(req, clientId, "read your tax settings", csErr);
     {
       const off = lookupSwitchRefusal({
@@ -11736,6 +11710,38 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       });
       if (r) return json(r.body, r.status);
     }
+    // 6b. The wallet (2026-10-05): refuse the button, never the invoice. Read on the press that
+    // carries every confirmation, so it is the freshest balance, and before paidLookup, so a press
+    // the wallet cannot cover writes no ledger row and makes no call. Disarmed, unpriced or exempt
+    // asks nothing of the wallet; a read that fails on an armed meter refuses (503, fail closed).
+    {
+      let w: VerifyWallet;
+      try {
+        const [price, wallet] = await Promise.all([
+          admin.from("usage_prices").select("price_cents, active").eq("kind", VERIFY_TAX_METER).maybeSingle(),
+          admin.from("wallet_accounts").select("balance_cents, held_cents, metered_exempt").eq("client_id", clientId).maybeSingle(),
+        ]);
+        w = verifyWalletFrom({ price, wallet, billingExempt: cs?.billing_exempt === true });
+      } catch (_e) {
+        // billing_exempt was read with the switch above, so it still decides on its own.
+        w = { armed: null, priceCents: null, exempt: cs?.billing_exempt === true ? true : null, balanceCents: null, heldCents: null };
+      }
+      const r = verifyWalletRefusal(w);
+      if (r) {
+        if (r.status !== 503) return json(r.body, r.status);
+        // One row, under the code the tax triage reads, and not the wrapper's generic copy too.
+        logEdgeError({
+          fn: "portal-settings", req, clientId, code: "tax_meter",
+          message: `verify_tax: the price or wallet read failed for ${shortCode}, so the press was refused`,
+        }).catch(() => {});
+        return filedHere(json(r.body, r.status));
+      }
+      // The figure the builder agreed to. tax_settings is read when the card opens, so a portal
+      // left open while the meter was armed (or a card whose price read failed) showed no price;
+      // that press is asked again with the price instead of being charged it unseen.
+      const changed = verifyPriceRefusal(w, quotedPriceCents);
+      if (changed) return json(changed.body, changed.status);
+    }
 
     // deno-lint-ignore no-explicit-any
     const storedTax: any = (d.estimate_lines as any)?.tax ?? null;
@@ -11767,7 +11773,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       sender: signedIn,
       afterWrite: async () => {
         charge = await chargeLookup(admin, lookup, {
-          clientId, kind: "tax_lookup", refType: "design", refId: shortCode,
+          clientId, kind: VERIFY_TAX_METER, refType: "design", refId: shortCode,
           memo: `Verified sales tax rate${lookup.jurisdiction ? ` — ${lookup.jurisdiction}` : ""}`,
           actorUserId: userId ?? null,
         });

@@ -28,6 +28,17 @@
 // nothing, and a delivered figure with no charge is the acceptable direction, never the reverse.
 // Both meters are disarmed, so today every charge is a no-op that reports `inactive`.
 //
+// REFUSE THE BUTTON, NEVER THE INVOICE (plan v2, the empty-wallet rule; built 2026-10-05). The
+// charge posts after the fact and lets the balance go negative (taxMeter.ts says why), so the
+// wallet is checked BEFORE the spend, and only for the Verify button: verifyWalletRefusal runs
+// after verify_tax's confirmations and before paidLookup, so a press the wallet cannot cover
+// writes no ledger row and makes no call. A press is discretionary and refusing it costs the
+// customer nothing. An invoice is already promised, so send_invoice's check never asks the
+// wallet: an empty wallet still gets its invoice sent, checked, and charged into the negative.
+// The check is a read, not a hold: two presses at the same moment can both pass on the last
+// ten cents and take the wallet one charge below zero. Holds are what the invoice path cannot
+// use (taxMeter.ts, "WHY DIRECT-POST"), and one lookup's overshoot is not worth a second scheme.
+//
 // ⚠️ Bundled per function like every _shared module. Importer today: portal-settings. Derive
 // them before a deploy rather than trusting this line:
 //     find supabase/functions -name '*.ts' ! -name '*.test.ts' ! -path '*_test_stubs*' -print0 \
@@ -68,15 +79,22 @@ const text = (v: unknown): string | null => {
 
 // ── verify_tax: the refusals before any spend ──────────────────────────────────────────────
 
-/** verify_tax's payload: { shortCode, confirmResend?, confirmVerify? }. The two confirmations
- *  are true only when literally `true`: a "yes" string from a mis-built request is not consent. */
+/** verify_tax's payload: { shortCode, confirmResend?, confirmVerify?, quotedPriceCents? }. The two
+ *  confirmations are true only when literally `true`: a "yes" string from a mis-built request is
+ *  not consent. `quotedPriceCents` is the price the builder's confirm stated (2026-10-05): a
+ *  whole number of cents, or null when the confirm named none (absent, null, or anything that is
+ *  not a whole non-negative number: a price nobody can read was not shown). */
 export function parseVerifyTax(
   payload: unknown,
-): { ok: true; value: { shortCode: string; confirmResend: boolean; confirmVerify: boolean } } | { ok: false; refusal: SpendRefusal } {
+):
+  | { ok: true; value: { shortCode: string; confirmResend: boolean; confirmVerify: boolean; quotedPriceCents: number | null } }
+  | { ok: false; refusal: SpendRefusal } {
   const p = (payload && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
   const shortCode = text(p.shortCode)?.slice(0, 64) ?? null;
   if (!shortCode) return { ok: false, refusal: refuse(400, "bad_request", "shortCode is required.") };
-  return { ok: true, value: { shortCode, confirmResend: p.confirmResend === true, confirmVerify: p.confirmVerify === true } };
+  const q = p.quotedPriceCents;
+  const quotedPriceCents = typeof q === "number" && Number.isInteger(q) && q >= 0 ? q : null;
+  return { ok: true, value: { shortCode, confirmResend: p.confirmResend === true, confirmVerify: p.confirmVerify === true, quotedPriceCents } };
 }
 
 /**
@@ -157,6 +175,138 @@ export function quoteSentRefusal(input: {
 export function rateLimitedRefusal(): SpendRefusal {
   return refuse(429, "rate_limited", "Too many tax lookups in the last minute. Nothing was looked up — wait a minute and try again. The quote keeps its current tax rate.",
     { retryAfterSeconds: TAX_LOOKUP_MINUTE_WINDOW_SECONDS });
+}
+
+// ── verify_tax: the wallet, the last refusal before the spend (2026-10-05) ───────────────────
+
+/** The meter a Verify press is charged on: chargeLookup's kind in verify_tax, and the price row
+ *  the wallet check and tax_settings read. One name, so the check cannot read another meter's
+ *  price than the one the charge posts to. */
+export const VERIFY_TAX_METER: TaxMeterKind = "tax_lookup";
+
+/**
+ * What verifyWalletRefusal decides on. A `null` field is a read that failed; verifyWalletFrom
+ * builds this from the rows. The two exemptions are chargeTaxCalculation's: the wallet's
+ * metered_exempt and the account's billing_exempt.
+ */
+export interface VerifyWallet {
+  /** usage_prices(tax_lookup).active. A missing row is false: the charge reports unknown_meter. */
+  armed: boolean | null;
+  priceCents: number | null;
+  exempt: boolean | null;
+  balanceCents: number | null;
+  heldCents: number | null;
+}
+
+const finiteCents = (v: unknown): number | null => {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+};
+
+/**
+ * The rows verify_tax read, as a VerifyWallet. A read that failed is null in every field it
+ * would have filled, so a check that needs it refuses. A wallet with no row is a tenant never
+ * charged for anything: balance 0, nothing held, not exempt (wallet_credit creates the row on
+ * the first charge). A balance that is not a number counts as unread, not as zero and not as
+ * "enough": `NaN < price` is false, and that is a free lookup on an armed meter.
+ */
+export function verifyWalletFrom(input: {
+  price: { data: unknown; error: unknown };
+  wallet: { data: unknown; error: unknown };
+  billingExempt: boolean;
+}): VerifyWallet {
+  const priceRead = !input.price?.error;
+  const walletRead = !input.wallet?.error;
+  const p = (priceRead ? input.price?.data ?? null : null) as Record<string, unknown> | null;
+  const w = (walletRead ? input.wallet?.data ?? null : null) as Record<string, unknown> | null;
+  return {
+    armed: priceRead ? p?.active === true : null,
+    // A missing price row is a meter that charges nothing: 0, not unread.
+    priceCents: priceRead ? (p ? finiteCents(p.price_cents) : 0) : null,
+    exempt: input.billingExempt === true ? true : walletRead ? w?.metered_exempt === true : null,
+    balanceCents: walletRead ? (w ? finiteCents(w.balance_cents) : 0) : null,
+    heldCents: walletRead ? (w ? finiteCents(w.held_cents ?? 0) : 0) : null,
+  };
+}
+
+/** Cents as dollars for a sentence: 10 → "$0.10", -30 → "-$0.30". */
+const usd = (cents: number): string => `${cents < 0 ? "-" : ""}$${(Math.abs(cents) / 100).toFixed(2)}`;
+
+/**
+ * Does the wallet cover one more verified lookup? The same test wallet_hold makes (balance minus
+ * what is held, against the price), asked only when a press would really be charged, i.e. when
+ * chargeTaxCalculation would post a debit:
+ *   exempt (metered_exempt or billing_exempt) → no check, and asked FIRST: an exempt tenant is
+ *     never charged, so a price read that failed cannot make its press unsafe;
+ *   disarmed, unknown or priced at zero → no check (the charge is a no-op; the live state today);
+ *   a read the answer depends on that failed → 503 meter_unavailable. Fail closed, like
+ *     wallet_hold: an unreadable wallet on an armed meter is a charge nobody can say is covered;
+ *   less available than the price → 402 insufficient_funds, naming both;
+ *   otherwise null, and the lookup goes ahead.
+ * `balanceCents` on the 402 is what the sentence states: the balance less anything held.
+ */
+export function verifyWalletRefusal(w: VerifyWallet): SpendRefusal | null {
+  // Plain words for a builder: what they can act on is their wallet, not our meter.
+  const unavailable = refuse(503, "meter_unavailable",
+    "We couldn't check your wallet balance just now, so nothing was looked up. Try again in a minute. The quote keeps its current tax rate.");
+  if (w.exempt === true) return null;
+  if (w.armed === null) return unavailable;
+  if (w.armed !== true) return null;
+  const price = finiteCents(w.priceCents);
+  if (price === null) return unavailable;
+  if (price <= 0) return null;
+  const balance = finiteCents(w.balanceCents), held = finiteCents(w.heldCents);
+  if (w.exempt !== false || balance === null || held === null) return unavailable;
+  const available = balance - held;
+  if (available >= price) return null;
+  return refuse(402, "insufficient_funds",
+    `A verified tax lookup costs ${usd(price)} and your wallet has ${usd(available)}. Add funds in Settings → Billing. The quote keeps its current tax rate.`,
+    { code: "insufficient_funds", priceCents: price, balanceCents: available });
+}
+
+/**
+ * What one press will really cost the wallet: the price when chargeTaxCalculation would post a
+ * debit (not exempt, armed, priced above zero), otherwise 0. Read it only after
+ * verifyWalletRefusal has passed, when every read it depends on succeeded.
+ */
+export function verifyChargeCents(w: VerifyWallet): number {
+  if (w.exempt === true || w.armed !== true) return 0;
+  const price = finiteCents(w.priceCents);
+  return price !== null && price > 0 ? price : 0;
+}
+
+/**
+ * Did the confirm the builder said yes to state what this press costs? (2026-10-05.) tax_settings
+ * is read once, when the card opens, and its price is null when that read failed, so a portal left
+ * open while the meter was armed, or a card whose price read failed, would otherwise charge a
+ * figure the dialog never showed. A press that will be charged is refused 409 price_changed, before
+ * any spend, whenever the price it carries (quotedPriceCents) is not the charge. The body names the
+ * price, and the portal asks again with that figure and repeats the press carrying it. A press that
+ * costs nothing is never refused, whatever the dialog said: the builder agreed to pay at least that.
+ * Run after verifyWalletRefusal, so a wallet that cannot cover the price hears that first.
+ */
+export function verifyPriceRefusal(w: VerifyWallet, quotedPriceCents: number | null): SpendRefusal | null {
+  const cents = verifyChargeCents(w);
+  if (cents <= 0 || quotedPriceCents === cents) return null;
+  return refuse(409, "price_changed",
+    `A verified tax lookup costs ${usd(cents)} from your wallet. Nothing was looked up, and the quote keeps its current tax rate. Reload the page to verify at that price.`,
+    { priceCents: cents });
+}
+
+/**
+ * The price a Verify confirm states, for tax_settings: the charge per press, or null when a press
+ * costs nothing (disarmed, unpriced, or an exempt tenant: metered_exempt or billing_exempt, the
+ * two chargeTaxCalculation skips) or the price is not shown (visible false, the redaction the
+ * catalog's wallet payload and portal-billing apply). Null also covers a read that failed, so a
+ * dialog that cannot know the price says nothing about one rather than a wrong one; verify_tax
+ * then names it (verifyPriceRefusal) before a press is charged.
+ */
+export function lookupPriceCents(row: unknown, exempt = false): number | null {
+  const r = row && typeof row === "object" ? row as Record<string, unknown> : null;
+  if (exempt === true || !r || r.active !== true || r.visible === false) return null;
+  const cents = finiteCents(r.price_cents);
+  return cents != null && cents > 0 ? cents : null;
 }
 
 // ── The spend ──────────────────────────────────────────────────────────────────────────────

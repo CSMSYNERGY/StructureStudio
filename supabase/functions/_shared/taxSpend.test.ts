@@ -14,14 +14,15 @@ Deno.env.set("AVALARA_LICENSE_KEY", "test-key");
 Deno.env.set("AVALARA_API_BASE", "https://avatax.test");
 
 const {
-  chargeLookup, invoiceTaxCheck, invoiceTaxCheckPlan, lookupSwitchRefusal, paidLookup, parseVerifyTax,
-  quoteSentRefusal, rateLimitedRefusal, verifiedTax, verifyLookupRefusal, verifyQuoteRefusal,
+  chargeLookup, invoiceTaxCheck, invoiceTaxCheckPlan, lookupPriceCents, lookupSwitchRefusal, paidLookup, parseVerifyTax,
+  quoteSentRefusal, rateLimitedRefusal, VERIFY_TAX_METER, verifiedTax, verifyChargeCents, verifyLookupRefusal,
+  verifyPriceRefusal, verifyQuoteRefusal, verifyWalletFrom, verifyWalletRefusal,
 } = await import("./taxSpend.ts");
 const { DAILY_TAX_LOOKUP_CAP, TAX_LOOKUP_MINUTE_WINDOW_SECONDS, VERIFY_LOOKUPS_PER_MINUTE } = await import("./taxLookups.ts");
-const { taxLedgerIdem } = await import("./taxMeter.ts");
+const { chargeTaxCalculation, taxLedgerIdem } = await import("./taxMeter.ts");
 const { taxOn } = await import("./salesTax.ts");
 const { designTotalCents } = await import("./estimateLines.ts");
-import type { PaidLookup, PaidLookupFailure } from "./taxSpend.ts";
+import type { PaidLookup, PaidLookupFailure, VerifyWallet } from "./taxSpend.ts";
 
 const assertEquals = (a: unknown, b: unknown, msg?: string) => {
   const sa = JSON.stringify(a), sb = JSON.stringify(b);
@@ -165,13 +166,22 @@ Deno.test("parseVerifyTax: a short code is required; the confirmations are true 
     assert(!r.ok, `${JSON.stringify(p)} must be refused`);
     if (!r.ok) assertEquals([r.refusal.status, r.refusal.body.reason], [400, "bad_request"]);
   }
-  assertEquals(parseVerifyTax({ shortCode: " SS-1 " }), { ok: true, value: { shortCode: "SS-1", confirmResend: false, confirmVerify: false } });
+  assertEquals(parseVerifyTax({ shortCode: " SS-1 " }), { ok: true, value: { shortCode: "SS-1", confirmResend: false, confirmVerify: false, quotedPriceCents: null } });
   assertEquals(parseVerifyTax({ shortCode: "SS-1", confirmResend: "true", confirmVerify: 1 }),
-    { ok: true, value: { shortCode: "SS-1", confirmResend: false, confirmVerify: false } }, "a truthy non-boolean is not consent");
-  assertEquals(parseVerifyTax({ shortCode: "SS-1", confirmResend: true, confirmVerify: true }),
-    { ok: true, value: { shortCode: "SS-1", confirmResend: true, confirmVerify: true } });
+    { ok: true, value: { shortCode: "SS-1", confirmResend: false, confirmVerify: false, quotedPriceCents: null } }, "a truthy non-boolean is not consent");
+  assertEquals(parseVerifyTax({ shortCode: "SS-1", confirmResend: true, confirmVerify: true, quotedPriceCents: 10 }),
+    { ok: true, value: { shortCode: "SS-1", confirmResend: true, confirmVerify: true, quotedPriceCents: 10 } });
   const long = parseVerifyTax({ shortCode: "S".repeat(200) });
   assert(long.ok && long.value.shortCode.length === 64, "a long code is clipped, not refused");
+  // The price the confirm stated: a whole number of cents, or null (none shown).
+  for (const q of [0, 10, 125]) {
+    const r = parseVerifyTax({ shortCode: "SS-1", quotedPriceCents: q });
+    assert(r.ok && r.value.quotedPriceCents === q, String(q));
+  }
+  for (const q of [undefined, null, "10", 9.5, -10, Number.NaN, Number.POSITIVE_INFINITY, { cents: 10 }]) {
+    const r = parseVerifyTax({ shortCode: "SS-1", quotedPriceCents: q });
+    assert(r.ok && r.value.quotedPriceCents === null, `${String(q)} is no price shown`);
+  }
 });
 
 // ── lookupSwitchRefusal ──────────────────────────────────────────────────────────────────────
@@ -457,5 +467,218 @@ Deno.test("invoiceTaxCheck: matched, differs and failed — and never a total", 
     { status: "failed", failure: "timeout", agreedRatePct: 7.25 });
   for (const check of [invoiceTaxCheck(0.0725, ok(0.08)), invoiceTaxCheck(0.0725, ok(0.0725))]) {
     assert(Object.keys(check).every((k) => !/total|amount|cents/i.test(k)), "a tax check reports rates, never a figure to bill");
+  }
+});
+
+// ── verifyWalletRefusal: refuse the button, never the invoice (2026-10-05) ───────────────────
+//
+// What goes wrong without these: a press refused on a meter that would charge nothing (every
+// builder locked out of Verify the day this deploys, while both meters are still off), an armed
+// meter whose unreadable wallet reads as "enough", a held amount ignored, or the check asking
+// about a different meter than the one the charge posts to.
+
+const W = (over: Partial<VerifyWallet> = {}): VerifyWallet =>
+  ({ armed: true, priceCents: 10, exempt: false, balanceCents: 500, heldCents: 0, ...over });
+const EMPTY = W({ balanceCents: 0 });
+const UNREAD_WALLET = { exempt: null, balanceCents: null, heldCents: null };
+
+Deno.test("verifyWalletRefusal: the live state (disarmed, 0c) asks nothing of the wallet — not even one that couldn't be read", () => {
+  for (const w of [EMPTY, W({ ...UNREAD_WALLET }), W({ balanceCents: -5000 })]) {
+    assertEquals(verifyWalletRefusal({ ...w, armed: false, priceCents: 0 }), null);
+    assertEquals(verifyWalletRefusal({ ...w, armed: false, priceCents: 10 }), null, "priced but disarmed is still free");
+  }
+});
+
+Deno.test("verifyWalletRefusal: armed at zero, or an exempt tenant, is never refused — the charge would be a no-op", () => {
+  assertEquals(verifyWalletRefusal(W({ priceCents: 0, balanceCents: 0 })), null, "unpriced");
+  assertEquals(verifyWalletRefusal(W({ priceCents: -10, balanceCents: 0 })), null, "a negative price is no price");
+  assertEquals(verifyWalletRefusal(W({ exempt: true, balanceCents: 0 })), null, "exempt with an empty wallet");
+  assertEquals(verifyWalletRefusal(W({ exempt: true, balanceCents: null, heldCents: null })), null,
+    "billing_exempt decides on its own when the wallet row couldn't be read");
+  assertEquals(verifyWalletRefusal(W({ exempt: true, armed: null, priceCents: null })), null,
+    "an exempt tenant is never charged, so a price read that failed is no reason to refuse its press");
+});
+
+Deno.test("verifyWalletRefusal: less than the price available is 402 insufficient_funds, naming the price and the wallet", () => {
+  const r = verifyWalletRefusal(W({ balanceCents: 9 }))!;
+  assertEquals([r.status, r.body.reason, r.body.code, r.body.priceCents, r.body.balanceCents], [402, "insufficient_funds", "insufficient_funds", 10, 9]);
+  assertEquals(r.body.error,
+    "A verified tax lookup costs $0.10 and your wallet has $0.09. Add funds in Settings → Billing. The quote keeps its current tax rate.");
+  assertEquals(verifyWalletRefusal(EMPTY)!.body.error,
+    "A verified tax lookup costs $0.10 and your wallet has $0.00. Add funds in Settings → Billing. The quote keeps its current tax rate.");
+  assertEquals(verifyWalletRefusal(W({ balanceCents: -30 }))!.body.error,
+    "A verified tax lookup costs $0.10 and your wallet has -$0.30. Add funds in Settings → Billing. The quote keeps its current tax rate.",
+    "a wallet the invoice checks took below zero says so");
+  assert(verifyWalletRefusal(W({ priceCents: 125, balanceCents: 100 }))!.body.error.startsWith("A verified tax lookup costs $1.25 and your wallet has $1.00."),
+    "the price is the meter's, never a hardcoded 10c");
+  assert(!/avalara/i.test(r.body.error), "a builder-facing sentence does not name the vendor");
+});
+
+Deno.test("verifyWalletRefusal: exactly the price is enough, and a held amount is not available (wallet_hold's own test)", () => {
+  assertEquals(verifyWalletRefusal(W({ balanceCents: 10 })), null, "10c covers a 10c press");
+  assertEquals(verifyWalletRefusal(W({ balanceCents: 2010, heldCents: 2000 })), null, "a $20 hold leaves 10c");
+  const r = verifyWalletRefusal(W({ balanceCents: 2005, heldCents: 2000 }))!;
+  assertEquals([r.status, r.body.balanceCents], [402, 5], "the $20 video hold is not money a lookup can use");
+  assert(r.body.error.includes("your wallet has $0.05"), r.body.error);
+});
+
+Deno.test("verifyWalletRefusal: a read the answer needs that failed refuses 503 meter_unavailable (fail closed)", () => {
+  const cases: [string, VerifyWallet][] = [
+    ["the price row", W({ armed: null, priceCents: null })],
+    ["the price, armed", W({ priceCents: null })],
+    ["the wallet row", W({ ...UNREAD_WALLET })],
+    ["the balance alone", W({ balanceCents: null })],
+    ["the held amount alone", W({ heldCents: null })],
+    ["the exemption alone", W({ exempt: null })],
+    ["a balance that is not a number", W({ balanceCents: Number.NaN })],
+    ["a held amount that is not a number", W({ heldCents: Number.POSITIVE_INFINITY })],
+  ];
+  for (const [label, w] of cases) {
+    const r = verifyWalletRefusal(w);
+    assert(r, `${label}: refused`);
+    assertEquals([r!.status, r!.body.reason], [503, "meter_unavailable"], label);
+    assertEquals(r!.body.error,
+      "We couldn't check your wallet balance just now, so nothing was looked up. Try again in a minute. The quote keeps its current tax rate.");
+    assert(!/meter|avalara/i.test(r!.body.error), "plain words: no internal meter, no vendor");
+  }
+});
+
+Deno.test("verifyWalletFrom: rows to a VerifyWallet — absent rows are a free meter and an empty wallet, failed reads are null", () => {
+  const ok = (data: unknown) => ({ data, error: null });
+  const down = { data: null, error: { message: "down" } };
+  const wallet = { balance_cents: 500, held_cents: 20, metered_exempt: false };
+  assertEquals(verifyWalletFrom({ price: ok({ active: true, price_cents: 10 }), wallet: ok(wallet), billingExempt: false }),
+    { armed: true, priceCents: 10, exempt: false, balanceCents: 500, heldCents: 20 });
+  assertEquals(verifyWalletFrom({ price: ok(null), wallet: ok(wallet), billingExempt: false }),
+    { armed: false, priceCents: 0, exempt: false, balanceCents: 500, heldCents: 20 }, "no price row: the charge reports unknown_meter");
+  assertEquals(verifyWalletFrom({ price: ok({ active: true, price_cents: 10 }), wallet: ok(null), billingExempt: false }),
+    { armed: true, priceCents: 10, exempt: false, balanceCents: 0, heldCents: 0 }, "no wallet row: never charged, so nothing in it");
+  assertEquals(verifyWalletFrom({ price: down, wallet: ok(wallet), billingExempt: false }).armed, null);
+  assertEquals(verifyWalletFrom({ price: ok({ active: true, price_cents: 10 }), wallet: down, billingExempt: false }),
+    { armed: true, priceCents: 10, exempt: null, balanceCents: null, heldCents: null });
+  assertEquals(verifyWalletFrom({ price: ok({ active: true, price_cents: 10 }), wallet: down, billingExempt: true }).exempt, true);
+  assertEquals(verifyWalletFrom({ price: ok({ active: true, price_cents: 10 }), wallet: ok({ ...wallet, metered_exempt: true }), billingExempt: false }).exempt, true);
+  assertEquals(verifyWalletFrom({ price: ok({ active: true, price_cents: 10 }), wallet: ok({ ...wallet, balance_cents: "4900" }), billingExempt: false }).balanceCents,
+    4900, "a bigint PostgREST hands back as a string still reads");
+  assertEquals(verifyWalletFrom({ price: ok({ active: true, price_cents: 10 }), wallet: ok({ ...wallet, balance_cents: "lots" }), billingExempt: false }).balanceCents,
+    null, "garbage is unread, not zero and not enough");
+  assertEquals(verifyWalletFrom({ price: ok({ active: "true", price_cents: 10 }), wallet: ok(wallet), billingExempt: false }).armed, false,
+    "armed only when literally true, like chargeTaxCalculation");
+});
+
+/**
+ * chargeTaxCalculation's world for one tenant: the tax_lookup price row, the wallet row and the
+ * account's billing_exempt. Answers the same rows to verifyWalletFrom, so the two read one truth.
+ */
+function meterWorld(price: { active: boolean; price_cents: number } | null, wallet: Record<string, unknown> | null, billingExempt: boolean) {
+  const rpcs: string[] = [];
+  const row = (table: string): unknown =>
+    table === "usage_prices" ? price : table === "wallet_accounts" ? wallet : table === "client_settings" ? { billing_exempt: billingExempt } : null;
+  const admin = {
+    from(table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {};
+      for (const m of ["select", "eq", "maybeSingle"]) chain[m] = () => chain;
+      chain.then = (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) => Promise.resolve({ data: row(table), error: null }).then(res, rej);
+      return chain;
+    },
+    rpc(name: string) { rpcs.push(name); return Promise.resolve({ data: 0, error: null }); },
+  };
+  return { admin, rpcs, wallet: verifyWalletFrom({ price: { data: price, error: null }, wallet: { data: wallet, error: null }, billingExempt }) };
+}
+
+Deno.test("verifyWalletRefusal never refuses a press chargeTaxCalculation would not charge, and lets through only what the wallet covers", async () => {
+  const prices = [null, { active: false, price_cents: 0 }, { active: false, price_cents: 10 }, { active: true, price_cents: 0 }, { active: true, price_cents: 10 }, { active: true, price_cents: 25 }];
+  const wallets = [null, { balance_cents: 0, held_cents: 0, metered_exempt: false }, { balance_cents: 10, held_cents: 0, metered_exempt: false },
+    { balance_cents: 30, held_cents: 25, metered_exempt: false }, { balance_cents: -40, held_cents: 0, metered_exempt: false },
+    { balance_cents: 0, held_cents: 0, metered_exempt: true }, { balance_cents: 900, held_cents: 0, metered_exempt: false }];
+  let refused = 0, charged = 0;
+  for (const price of prices) {
+    for (const wallet of wallets) {
+      for (const billingExempt of [false, true]) {
+        const world = meterWorld(price, wallet, billingExempt);
+        const refusal = verifyWalletRefusal(world.wallet);
+        const charge = await chargeTaxCalculation(world.admin, { clientId: "acme", kind: VERIFY_TAX_METER, lookupId: crypto.randomUUID(), refType: "design", refId: "SS-ABCDEFGH" });
+        const label = JSON.stringify({ price, wallet, billingExempt });
+        assertEquals(verifyChargeCents(world.wallet), charge.charged ? charge.priceCents : 0, `${label}: verifyChargeCents is what the charge posts`);
+        if (refusal) {
+          refused++;
+          assertEquals(refusal.status, 402, label);
+          assert(charge.charged, `${label}: refused a press that would have cost nothing (${JSON.stringify(charge)})`);
+        }
+        if (charge.charged) {
+          charged++;
+          const available = Number(wallet?.balance_cents ?? 0) - Number(wallet?.held_cents ?? 0);
+          assertEquals(!!refusal, available < charge.priceCents, `${label}: refused iff the wallet can't cover the price`);
+        }
+      }
+    }
+  }
+  assert(refused > 0 && charged > refused, `the grid exercised both outcomes (refused ${refused}, charged ${charged})`);
+});
+
+Deno.test("the wallet check and the Verify charge name the same meter, and tax_settings prices that one", () => {
+  assertEquals(VERIFY_TAX_METER, "tax_lookup");
+});
+
+// ── verifyPriceRefusal: never charge a figure the confirm didn't state (2026-10-05) ─────────
+//
+// What goes wrong without these: a portal left open while the meter is armed, or a card whose
+// price read failed, shows a confirm with no figure and the press is charged anyway.
+
+Deno.test("verifyChargeCents: the price only when chargeTaxCalculation would post it", () => {
+  assertEquals(verifyChargeCents(W()), 10);
+  assertEquals(verifyChargeCents(W({ priceCents: 25 })), 25);
+  for (const w of [W({ armed: false }), W({ armed: null }), W({ priceCents: 0 }), W({ priceCents: null }), W({ exempt: true })]) {
+    assertEquals(verifyChargeCents(w), 0, JSON.stringify(w));
+  }
+});
+
+Deno.test("verifyPriceRefusal: a charged press whose confirm stated another figure, or none, is 409 price_changed naming the price", () => {
+  assertEquals(verifyPriceRefusal(W(), 10), null, "the confirm stated the charge");
+  for (const quoted of [null, 0, 5, 25]) {
+    const r = verifyPriceRefusal(W(), quoted)!;
+    assert(r, String(quoted));
+    assertEquals([r.status, r.body.reason, r.body.priceCents], [409, "price_changed", 10], String(quoted));
+    assertEquals(r.body.error,
+      "A verified tax lookup costs $0.10 from your wallet. Nothing was looked up, and the quote keeps its current tax rate. Reload the page to verify at that price.");
+  }
+  assertEquals(verifyPriceRefusal(W({ priceCents: 125 }), 10)!.body.priceCents, 125, "the meter's price, never a hardcoded 10c");
+});
+
+Deno.test("verifyPriceRefusal: a press that costs nothing is never refused, whatever the confirm said", () => {
+  for (const quoted of [null, 0, 10]) {
+    assertEquals(verifyPriceRefusal(W({ armed: false, priceCents: 0 }), quoted), null, `the live meter, quoted ${quoted}`);
+    assertEquals(verifyPriceRefusal(W({ priceCents: 0 }), quoted), null, `armed at zero, quoted ${quoted}`);
+    assertEquals(verifyPriceRefusal(W({ exempt: true }), quoted), null, `exempt, quoted ${quoted}`);
+  }
+});
+
+Deno.test("lookupPriceCents: a price only when a press really costs it and the price is shown", () => {
+  assertEquals(lookupPriceCents({ active: true, price_cents: 10, visible: true }), 10);
+  assertEquals(lookupPriceCents({ active: true, price_cents: 10 }), 10, "a row predating `visible` is shown");
+  assertEquals(lookupPriceCents({ active: true, price_cents: "10", visible: true }), 10);
+  for (const row of [
+    null, undefined, "10", { active: false, price_cents: 10, visible: true }, { active: true, price_cents: 0, visible: true },
+    { active: true, price_cents: 10, visible: false }, { active: "true", price_cents: 10 }, { active: true, price_cents: "free" },
+    { active: false, price_cents: 0, visible: true }, // the live row today
+  ]) {
+    assertEquals(lookupPriceCents(row), null, JSON.stringify(row));
+  }
+  assertEquals(lookupPriceCents({ active: true, price_cents: 10, visible: true }, true), null,
+    "an exempt tenant is never charged, so its confirm states no price");
+  assertEquals(lookupPriceCents({ active: true, price_cents: 10, visible: true }, false), 10);
+});
+
+Deno.test("the confirm's price and the charge agree: lookupPriceCents states a figure exactly when verifyPriceRefusal would ask for it", () => {
+  const rows = [null, { active: false, price_cents: 0, visible: true }, { active: true, price_cents: 0, visible: true },
+    { active: true, price_cents: 10, visible: true }, { active: true, price_cents: 25, visible: true }];
+  for (const row of rows) {
+    for (const exempt of [false, true]) {
+      const shown = lookupPriceCents(row, exempt);
+      const w = verifyWalletFrom({ price: { data: row, error: null }, wallet: { data: { balance_cents: 900, held_cents: 0, metered_exempt: false }, error: null }, billingExempt: exempt });
+      assertEquals(verifyPriceRefusal(w, shown), null, `${JSON.stringify(row)} exempt=${exempt}: the stated price is the charge`);
+      assertEquals(shown ?? 0, verifyChargeCents(w), `${JSON.stringify(row)} exempt=${exempt}`);
+    }
   }
 });

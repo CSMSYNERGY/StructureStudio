@@ -22,6 +22,11 @@
 //   9. push_to_invoice's rep attestation, the OTHER writer of accepted_at and accepted_snapshot,
 //      promoting without the compare-and-swap, or refusing a re-price after the order, the invoice
 //      number or the email; and a customer who won the race billed from the push's stale read.
+//  10. the wallet check (2026-10-05) moved below paidLookup — a press the wallet cannot cover still
+//      writes a ledger row and makes a billed call before it is refused — or copied onto the
+//      invoice path, which must never refuse; its reads split from each other, or reading a
+//      different meter than the one the Verify charge posts to; and the price riding `status`.
+//      verifyTaxWalletWiring_test drives the same order through the real handler.
 // Same technique as locationTaxWiring_test: read the source, so a drift fails the push. If an
 // anchor moves, re-point it — do not delete the test.
 
@@ -123,6 +128,7 @@ Deno.test("verify_tax: every refusal before the lookup, in the spec's order", ()
     ["verifyQuoteRefusal(", "no quote / no address / operator confirmation"],
     ['auditStrict("operator_verify_tax_attempt"', "operator strict audit"],
     ["quoteSentRefusal(", "the customer-holds-it confirmation"],
+    ["verifyWalletRefusal(", "the wallet (an armed meter the wallet cannot cover)"],
     ["paidLookup(", "the lookup (the claim: daily cap, per-minute cap, ledger row)"],
     ["verifyLookupRefusal(", "failure refusal"],
     ["restampQuoteTax(", "the write"],
@@ -158,7 +164,7 @@ Deno.test("verify_tax: the quote is written only through restampQuoteTax, and th
   assert(charges.length === 1, `verify_tax should charge in exactly one place, found ${charges.length}`);
   const afterWrite = at(VERIFY, "afterWrite: async () => {", "verify_tax");
   assert(charges[0] > afterWrite, "the charge is not inside restampQuoteTax's afterWrite");
-  assert(/chargeLookup\(admin, lookup, \{[\s\S]*?kind: "tax_lookup"/.test(VERIFY), "verify_tax charges the wrong meter");
+  assert(/chargeLookup\(admin, lookup, \{[\s\S]*?kind: VERIFY_TAX_METER\b/.test(VERIFY), "verify_tax charges another meter than the one its wallet check reads");
   assert(!/chargeTaxCalculation\(/.test(VERIFY), "verify_tax charges around chargeLookup — no ledger key");
 
   const write = at(RESTAMP, ".update(", "restampQuoteTax");
@@ -167,6 +173,68 @@ Deno.test("verify_tax: the quote is written only through restampQuoteTax, and th
   const pdf = at(RESTAMP, "regenerateQuotePdf(", "restampQuoteTax");
   assert(write < checked && checked < hook, "afterWrite runs before the write is checked");
   assert(hook < pdf, "afterWrite runs after the PDF — a slow render would stand between the write and the charge");
+});
+
+Deno.test("verify_tax: the wallet is read once, both rows at once, after every confirmation and before the claim", () => {
+  const quoteSent = at(VERIFY, "quoteSentRefusal(", "verify_tax");
+  const claim = at(VERIFY, "paidLookup(", "verify_tax");
+  const reads = at(VERIFY, "await Promise.all([", "verify_tax", quoteSent);
+  assert(quoteSent < reads && reads < claim, "the wallet reads are not between the last confirmation and the claim");
+  const pair = VERIFY.slice(reads, at(VERIFY, "]);", "verify_tax", reads));
+  assert(/from\("usage_prices"\)\.select\("price_cents, active"\)\.eq\("kind", VERIFY_TAX_METER\)/.test(pair),
+    "the price read is not the Verify meter's, or left the Promise.all");
+  assert(/from\("wallet_accounts"\)\.select\("balance_cents, held_cents, metered_exempt"\)\.eq\("client_id", clientId\)/.test(pair),
+    "the wallet read left the Promise.all, or no longer reads the held amount and the exemption");
+  assert((VERIFY.match(/from\("(usage_prices|wallet_accounts)"\)/g) ?? []).length === 2, "verify_tax reads the meter or the wallet a second time");
+  assert(/verifyWalletFrom\(\{ price, wallet, billingExempt: cs\?\.billing_exempt === true \}\)/.test(VERIFY),
+    "billing_exempt no longer reaches the check — an account chargeTaxCalculation never bills would be refused");
+  assert(/\.select\("[^"]*\bbilling_exempt\b[^"]*"\)/.test(VERIFY.slice(0, at(VERIFY, "lookupSwitchRefusal(", "verify_tax"))),
+    "verify_tax's settings read no longer selects billing_exempt");
+  const refusal = VERIFY.slice(at(VERIFY, "const r = verifyWalletRefusal(w);", "verify_tax"), claim);
+  assert(/if \(r\) \{[\s\S]*?return json\(r\.body, r\.status\);/.test(refusal), "a wallet refusal no longer returns before the claim");
+  assert(/code: "tax_meter"/.test(refusal), "an unreadable wallet refuses without an app_errors row support can find (tax_meter)");
+  assert(/return filedHere\(json\(r\.body, r\.status\)\);/.test(refusal), "the 503 is filed twice (tax_meter, then the wrapper's generic row)");
+  assert(/catch \(_e\) \{[\s\S]{0,200}?w = \{ armed: null,/.test(VERIFY), "a thrown read no longer reads as unread (fail closed)");
+});
+
+Deno.test("verify_tax: the price the confirm stated is checked after the wallet and before the claim", () => {
+  const wallet = at(VERIFY, "const r = verifyWalletRefusal(w);", "verify_tax");
+  const price = at(VERIFY, "verifyPriceRefusal(w, quotedPriceCents)", "verify_tax");
+  const claim = at(VERIFY, "paidLookup(", "verify_tax");
+  assert(wallet < price && price < claim, "the stated-price check is not between the wallet check and the claim");
+  assert(/const changed = verifyPriceRefusal\(w, quotedPriceCents\);\s*if \(changed\) return json\(changed\.body, changed\.status\);/.test(VERIFY),
+    "a price_changed refusal no longer returns before the claim");
+  assert(/const \{ shortCode, confirmResend, confirmVerify, quotedPriceCents \} = parsed\.value;/.test(VERIFY),
+    "quotedPriceCents no longer comes from parseVerifyTax");
+});
+
+Deno.test("the wallet refuses the Verify button only: one caller in the tree, and nothing on the invoice path", async () => {
+  const callers: string[] = [];
+  for (const [path, src] of await functionSources()) {
+    const n = [...src.matchAll(/\bverifyWalletRefusal\(/g)].length;
+    if (path !== "_shared/taxSpend.ts" && n) callers.push(`${path}×${n}`);
+  }
+  assert(callers.length === 1 && callers[0] === "portal-settings/index.ts×1", `verifyWalletRefusal callers: ${callers.join(", ")}`);
+  assert(VERIFY.includes("verifyWalletRefusal("), "the one caller is not verify_tax");
+  assert(!/verifyWalletRefusal\(|verifyWalletFrom\(|wallet_accounts|insufficient_funds/.test(SS_INVOICE),
+    "send_invoice reads the wallet or refuses on it — an empty wallet must never stop an invoice");
+});
+
+Deno.test("tax_settings prices the Verify confirm from the same meter, redacted, and status never carries it", () => {
+  const settings = block(SETTINGS, 'if (action === "tax_settings") {', "\n  if (action ===", "tax_settings");
+  assert(/from\("usage_prices"\)\.select\("price_cents, active, visible"\)\.eq\("kind", VERIFY_TAX_METER\)/.test(settings),
+    "tax_settings reads another meter's price, or no longer reads `visible` for the redaction");
+  assert(/lookupPriceCents: priceRes\.error \? null : lookupPriceCents\(priceRes\.data, exempt\)/.test(settings),
+    "lookupPriceCents no longer comes from the redacting helper, a failed read is not null, or the exemption is dropped");
+  // The two exemptions chargeTaxCalculation honours, so an exempt tenant's confirm states no price.
+  assert(/\.select\("[^"]*\bbilling_exempt\b[^"]*"\)/.test(settings), "tax_settings no longer reads billing_exempt");
+  assert(/from\("wallet_accounts"\)\.select\("metered_exempt"\)\.eq\("client_id", clientId\)/.test(settings),
+    "tax_settings no longer reads the wallet's metered_exempt");
+  assert(/const exempt = cs\?\.billing_exempt === true \|\|\s*\(!walletRes\.error && [^\n]*metered_exempt === true\);/.test(settings),
+    "the exemption is not billing_exempt OR a READ metered_exempt (a failed wallet read must not hide the price)");
+  assert(!/return dbFail\([^)]*priceRes/.test(settings), "a failed price read fails the whole tax card");
+  const status = block(SETTINGS, 'if (action === "status") {', "\n  if (action ===", "status");
+  assert(!/lookupPriceCents|usage_prices/.test(status), "the price rides `status`, which every signed-in employee gets");
 });
 
 Deno.test("send_invoice: the tax check reports and charges; it writes no total and blocks nothing", () => {
