@@ -421,6 +421,25 @@ Deno.test("fqdn building is defensive: apex/empty → domain, already-absolute n
   }
 });
 
+Deno.test("rsDomainVerified: partially_verified passes only while every DKIM and SPF record is verified (open tracking pending)", () => {
+  // Seen live 2026-10-05: switching open tracking on left a fully verified domain at
+  // partially_verified until its links CNAME was in DNS, with DKIM and both SPF records verified.
+  const rec = (purpose: string, verified: boolean) => ({ purpose, host: "h", fqdn: "h.example.com", type: "TXT", value: "v", verified });
+  const sendingOk = [rec("DKIM", true), rec("SPF", true), rec("SPF", true)];
+  const at = (status: string, records = sendingOk, sending = "enabled"): RsDomain =>
+    ({ id: DOMAIN_ID, status, records, capabilities: { sending, receiving: "disabled" } });
+  assertEquals(rsDomainVerified(at("partially_verified", [...sendingOk, rec("Tracking", false)])), true,
+    "a pending optional tracking record never takes sending away");
+  assertEquals(rsDomainVerified(at("partially_verified", [rec("DKIM", true), rec("SPF", false), rec("Tracking", false)])), false,
+    "an unverified SPF record still blocks");
+  assertEquals(rsDomainVerified(at("partially_verified", [rec("Tracking", true)])), false,
+    "no sending records at all is not verified for sending");
+  assertEquals(rsDomainVerified(at("partially_verified", sendingOk, "disabled")), false,
+    "a receiving-only subdomain (sending disabled) never passes");
+  assertEquals(rsDomainVerified(at("partially_failed", sendingOk)), false, "only partially_verified is relaxed");
+  assertEquals(rsDomainVerified(at("pending", sendingOk)), false, "records alone never decide");
+});
+
 Deno.test("rsDomainVerified is true ONLY on \"verified\"", () => {
   const at = (status: string): RsDomain => ({ id: DOMAIN_ID, status, records: [] });
   assertEquals(rsDomainVerified(at("verified")), true);
