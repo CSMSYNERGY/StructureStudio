@@ -14,6 +14,8 @@
 // ⚠️ Duplication ledger — this module is the original now. Importers:
 //   portal-billing/index.ts   (subscribe, cancel, topup)
 //   _shared/walletTopup.ts    (the shared top-up charge, used by both portal functions)
+//   admin-catalog/index.ts    (delete_client: cancel the tenant's subscriptions, delete its vault)
+//   _shared/tenantGatewayCleanup.ts (isGatewayUnknown only; admin-catalog hands it nmiPost)
 
 export const GATEWAY = (Deno.env.get("NMI_GATEWAY_URL") || "https://deposyt.transactiongateway.com").replace(/\/+$/, "");
 const SECURITY_KEY = Deno.env.get("NMI_SECURITY_KEY") || "";
