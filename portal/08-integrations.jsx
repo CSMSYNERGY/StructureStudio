@@ -591,8 +591,11 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
 // email_status contract (portal-settings): { platformReady, domainStatus:
 //   "not_configured"|"pending"|"verified"|"failed", domain, fromName, fromLocal,
 //   fromAddress, verifiedAt, lastError, active, dnsRecords: [{type,host,value,verified,tracking?}],
-//   recentSends: [{id?, kind, to, status, error?, bounceReason?, createdAt, openedAt, complainedAt}] }.
+//   recentSends: [{id?, kind, to, status, error?, bounceReason?, createdAt, openedAt, complainedAt}],
+//   existingDmarc: {present, policy, count, host} | null }.
 //   `tracking: true` marks the optional open-tracking record (B4); `openedAt` is migration 262's.
+//   `existingDmarc` is public DNS's answer for the sending domain (_shared/dmarcLookup.ts); null,
+//   or missing on an older server, means nobody knows, and then nothing is said about DMARC.
 // `failed` renders the same remediation panel as `pending` (plus lastError): the fix for
 // both is "add the records, check again", so a separate dead-end state helps nobody.
 
@@ -827,7 +830,8 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   // halfway through. All three share this frame: heading, a line of explanation, a status line,
   // then label/field pairs. Nothing is reordered above: email_status is genuinely one cheap
   // call (an indexed client_settings row plus ten capped email_sends rows, and deliberately no
-  // vendor round trip) and its result IS the screen, so there is no slow leg to defer.
+  // vendor round trip; the one DNS question it asks runs beside the sends read and gives up
+  // after 2.5 s) and its result IS the screen, so there is no slow leg to defer.
   if (status === null) return (
     <div style={S.card}>
       <SkelBar w={214} h={14} />
@@ -871,7 +875,38 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
     if (send) return String(send.host).replace(/^send\./, "");
     return String(status.domain || "").replace(/^www\./, "");
   })();
-  const dnsAdvisory = dns.length > 0 && dnsApex
+  // ── Is there a DMARC record already? (2026-10-05) ──
+  // This row used to show for every domain, and every builder domain waiting to connect already
+  // had a record, one of them p=reject. Following the row there either ADDS a second record
+  // (receivers then ignore both, so the domain has none) or swaps the builder's own policy for
+  // p=none. So email_status asks public DNS first (existingDmarc, _shared/dmarcLookup.ts):
+  //   • none there: the row, exactly as before;
+  //   • one: no row, and a line saying leave it as it is;
+  //   • two or more: no row, and a warning, because that is already broken;
+  //   • DNS couldn't say (null), or a server from before the check sent nothing: no row and no
+  //     line. Advising p=none blind is the mistake being fixed.
+  // The answer has to be about THIS domain: `host` is where the server looked (from the same
+  // DKIM host dnsApex reads) or where it found a record (this domain, or a parent whose record
+  // covers it). A host that is neither counts as unknown.
+  const dmarc = status.existingDmarc && typeof status.existingDmarc === "object" ? status.existingDmarc : null;
+  const dmarcHost = dmarc && typeof dmarc.host === "string" ? dmarc.host : "";
+  const dmarcNone = !!dmarc && dmarc.present === false && !!dnsApex && dmarcHost === "_dmarc." + dnsApex;
+  const dmarcFound = !!dmarc && dmarc.present === true && !!dnsApex && dmarcHost.startsWith("_dmarc.")
+    && ("." + dnsApex).endsWith("." + dmarcHost.slice("_dmarc.".length));
+  const dmarcCount = dmarcFound ? Number(dmarc.count) || 1 : 0;
+  const dmarcHave = dmarcFound && dmarcCount === 1;
+  // Two records at one name cancel each other out, and nothing else on the screen would say so:
+  // Resend never checks DMARC. Shown on the records card and on the verified one, because a
+  // domain that verified long ago can still be carrying the extra record.
+  const dmarcDupNote = dmarcFound && dmarcCount > 1 ? (
+    <p data-ss-dmarc="duplicate" style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 600, marginTop: 10, marginBottom: 10, lineHeight: 1.55 }}>
+      ⚠ Your domain has {dmarcCount} DMARC records (at <span style={{ fontFamily: "ui-monospace, monospace" }}>{dmarcHost}</span>).
+      {dmarcCount === 2
+        ? " Two records cancel each other out: inboxes ignore both, as if you had none. Ask whoever manages your DNS to delete the extra one."
+        : " More than one cancels them all out: inboxes ignore every one, as if you had none. Ask whoever manages your DNS to keep one and delete the rest."}
+    </p>
+  ) : null;
+  const dnsAdvisory = dns.length > 0 && dnsApex && dmarcNone
     ? [{
       type: "TXT",
       host: "_dmarc." + dnsApex,
@@ -917,6 +952,9 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
   // exactly what the portal shows without it is what put a live A/B test in Gmail's spam
   // folder (2026-08-21). A webmaster who adds three records and stops has done the work and
   // still gets spam-foldered, and nobody would know why.
+  // It goes in ONLY when the row is on screen, i.e. DNS said there is no record (dnsAdvisory
+  // is empty otherwise, which also drops its note below). Asking a webmaster to "add" one where
+  // a record exists is how a domain ends up with two, or with p=none in place of its own.
   const webmasterMailto = (() => {
     if (dnsRows.length === 0) return "";
     const dom = dnsApex || status.domain || "our domain";
@@ -1102,6 +1140,14 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
               your mail.
             </p>
           )}
+          {/* The record is already there (existingDmarc): no row to add, and the builder told not
+              to touch it, since "fixing" it to ours would weaken or cancel theirs. */}
+          {dmarcHave && (
+            <p data-ss-dmarc="present" style={{ fontSize: 12, color: ACCENT, marginTop: 10, marginBottom: 10, lineHeight: 1.55 }}>
+              ✓ You already have a DMARC record{dmarc.policy ? <> (<strong>p={dmarc.policy}</strong>)</> : null}. Leave it as it is — don't add another one.
+            </p>
+          )}
+          {dmarcDupNote}
           {dnsRows.length > 0 && (
             <div style={{ overflowX: "auto", background: "#FFF", border: "1px solid #C7D2FE", borderRadius: 8 }}>
               <table style={{ borderCollapse: "collapse", width: "100%" }}>
@@ -1223,6 +1269,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 Deactivating instantly reverts to sending through your CRM — nothing else changes.
               </p>
             </div>
+            {dmarcDupNote}
             {/* Verified is not forever: a DNS host migration, a zone rebuild or a webmaster
                 tidying up "unused" TXT records drops these silently, and the first symptom is
                 mail going to spam. The records have to stay reachable AFTER verification, not

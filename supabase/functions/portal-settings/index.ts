@@ -17,6 +17,9 @@ import {
   resendConfigured, ResendApiError, ResendNotConfigured, type RsDomain,
 } from "../_shared/resend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
+// Email Settings asks public DNS whether the sending domain already has a DMARC record before
+// it advises one (2026-10-05).
+import { dmarcDomainOf, lookupExistingDmarc } from "../_shared/dmarcLookup.ts";
 // The routing Reply-To sendTenantEmail adds, asked here only to refuse a view-as email no reply can reach.
 import { buildReplyAddress } from "../_shared/emailInbound.ts";
 import { cleanSignature, signatureHtml, signText } from "../_shared/emailSignature.ts";
@@ -1635,9 +1638,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         ghlStageDeliveredId: data?.ghl_stage_delivered_id ?? null,
         betaMode: Boolean(data?.beta_mode),
         betaEmail: data?.beta_email ?? null,
-        // Who issues the paperwork (migration 121). Defaults TRUE for every tenant, so a
-        // row that predates the column — or a tenant with no client_settings row at all —
-        // reads as "invoice through the CRM", i.e. today's behaviour.
+        // Who issues the paperwork (migration 121). Anything but an explicit false reads as
+        // "invoice through the CRM", the same test submit-estimate makes, so a row that
+        // predates the column keeps the path it had and a tenant with no client_settings row
+        // at all reads as CRM mode until its first save. That save creates the row, and since
+        // migration 280 a new row starts false (StructureStudio paperwork); 280 moved no
+        // existing row.
         invoiceInGhl: data?.invoice_in_ghl !== false,
         // MAY they invoice through the CRM at all (migration 217)? Carolyn 2026-09-07:
         // "The feature for payments to go through GHL should only show in Junior Barns as he
@@ -1976,7 +1982,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const nextRequired = "coUnlockRequired" in payload
         ? Boolean(updates.co_unlock_required)
         : curCo?.co_unlock_required === true;
-      const nextInGhl = "invoiceInGhl" in payload ? Boolean(payload.invoiceInGhl) : curCo?.invoice_in_ghl !== false;
+      // No row yet: the upsert below creates one, and since migration 280 it starts in paperwork
+      // mode (invoice_in_ghl false). So judge the mode it WILL have, not "anything but false is
+      // the CRM" — that rule is for rows that exist (submit-estimate, email, the status read).
+      const nextInGhl = "invoiceInGhl" in payload
+        ? Boolean(payload.invoiceInGhl)
+        : (curCo ? curCo.invoice_in_ghl !== false : false);
 
       // 1. In CRM mode GoHighLevel owns the documents. There is nothing of ours to print a
       //    fee line on, so the money would simply never be charged.
@@ -2023,9 +2034,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // from the Quotes & Invoices card, which always posts this key.
       const mayInvoiceInGhl = curInv?.ghl_invoicing_allowed === true;
       if ("invoiceInGhl" in payload && !mayInvoiceInGhl) updates.invoice_in_ghl = false;
+      // A tenant with NO row is not on the CRM path: this save creates its row, and since
+      // migration 280 a new row starts false. Reading it as CRM mode let a lone starting quote
+      // number through without the invoice number and tax rate, into a paperwork-mode row with
+      // two of the three missing: a shopper's quote then takes a number and is refused for want
+      // of a rate (submit-estimate's no_tax_rate), and the next one takes another.
       const nextInGhl = "invoiceInGhl" in payload
         ? (mayInvoiceInGhl && Boolean(payload.invoiceInGhl))
-        : curInv?.invoice_in_ghl !== false;
+        : (curInv ? curInv.invoice_in_ghl !== false : false);
       const nextQuoteStart = "ssQuoteNext" in payload ? updates.ss_quote_next : (curInv?.ss_quote_next ?? null);
       const nextInvoiceStart = "ssInvoiceNext" in payload ? updates.ss_invoice_next : (curInv?.ss_invoice_next ?? null);
       const nextTaxRate = "ssTaxRate" in payload ? updates.ss_tax_rate : (curInv?.ss_tax_rate ?? null);
@@ -10756,6 +10772,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your email sending settings", error);
+    // Does the sending domain already have a DMARC record? The screen's advisory row says
+    // "publish p=none at _dmarc.<domain>", and following it where a record exists either adds a
+    // second one (then receivers ignore both) or replaces the builder's own policy with none
+    // (_shared/dmarcLookup.ts). Asked of public DNS, from the domain in the DKIM host Resend
+    // returned, never our stored string. It runs alongside the recent-sends read below, is
+    // capped at DMARC_LOOKUP_TIMEOUT_MS, never throws, and answers null when it can't be sure,
+    // which the screen reads as "say nothing about DMARC". No records yet, no lookup.
+    const dmarcDomain = dmarcDomainOf(s?.email_dns_records);
+    const existingDmarcP = dmarcDomain ? lookupExistingDmarc(dmarcDomain) : Promise.resolve(null);
     // opened_at and complained_at are migration 262's (B4). Read with them, and once more without
     // them on "no such column", so a deploy ahead of 262 still shows this screen instead of failing
     // it whole — crmFeed's rule for body_text.
@@ -10770,6 +10795,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ({ data: sends, error: sendsErr } = await readSends("id, kind, to_email, status, error, bounce_reason, created_at"));
     }
     if (sendsErr) return dbFail(req, clientId, "load your recent emails", sendsErr);
+    const existingDmarc = await existingDmarcP;
     const domain = s?.email_domain ?? null;
     const fromLocal = (typeof s?.email_from_local === "string" && s.email_from_local.trim()) || "info";
     return json({
@@ -10786,6 +10812,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       lastError: s?.email_last_error ?? null,
       active: s?.email_provider === "resend",
       dnsRecords: Array.isArray(s?.email_dns_records) ? s.email_dns_records : [],
+      // { present, policy, count, host } or null (no records yet, or DNS couldn't say). The
+      // screen shows its DMARC advisory row only for present: false at _dmarc.<the DKIM host's
+      // domain>, says "leave it as it is" for one record, and warns about two or more.
+      existingDmarc,
       // ── Receiving replies ────────────────────────────────────────────────────────────
       // One nested block rather than five loose keys, so the screen can render the whole
       // receiving card from a single object and a future provider swap changes one shape.
