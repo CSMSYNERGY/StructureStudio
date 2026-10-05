@@ -35,6 +35,17 @@
 //   P   THE CALIBRATION PANEL (?admin=1): a list style says so and saves its roof untouched.
 //   X   THE OLDER DESIGNER (optional): SS_WINGLIST_OLD_BASE=<url of a server serving a build without the
 //       list> draws A's approximation, one wing per side as wide as the stack, with no page errors.
+//   DL  LIST DIGESTS (optional, like D): Case E, C, T, T landscape, T open eave, T lap, T on four sides, and T
+//       with roof.wingCornersMeet false build the same scene graph as the base build (one served from before
+//       the corners switch). SS_WINGLIST_LIST_DIGEST=<file> writes, SS_WINGLIST_LIST_BASE=<file> compares.
+//   J   WING ROOFS THAT MEET AT A CORNER (roof.wingCornersMeet, 2026-10-05): Case T with the switch, on four
+//       sides, landscape, with an open eave, and a near-miss beside a join. Each join's two wings stay on
+//       their own sides of the hip; their slabs', fascias' and soffits' cut faces are one face; two strips
+//       cap it; no rake, fly rafter or tail stands at a joined end; the side wings stay at H; the end wing's
+//       clerestory stops at the side wings'; a near-miss side builds exactly as without the switch.
+//   AJ  THE SWITCH ON THE ADVANCED PAGE: shown only with a side wing and an end wing on one corner; the
+//       corners' words (a match, a join, a near-miss with its numbers, a hint while Off); the card lines; the End view, Side
+//       view and Plan drawn round the hip; Save carrying the key; Off deleting it.
 //
 // E, C, T and the end parts of SZ and A run only when the cmp twin's `const D3_WINGLIST_ENDS = true;`, or with
 // SS_WINGLIST_FORCE_ENDS=1 (the R2 developer build, which sets the flag locally). PURE is the pure layer
@@ -42,7 +53,7 @@
 //
 //   python -m http.server 8406 --bind 127.0.0.1 --directory <repo root>
 //   SS_BASE=http://127.0.0.1:8406 node tests/harness/wingList.mjs      (SS_SHOTS=<dir> for the PNGs)
-//   SS_CASES=D,Z,M,S,E,C,T,SZ,A,P,X                                    (a subset; default all but D, D+, X)
+//   SS_CASES=D,Z,M,S,E,C,T,SZ,A,P,X,DL,J,AJ                            (a subset; default all but D, D+, X, DL)
 //
 // Exit 0 = every assertion held.
 import { readFileSync, writeFileSync } from "node:fs";
@@ -71,7 +82,7 @@ const f3 = (v) => (v == null || !Number.isFinite(Number(v)) ? String(v) : Number
 const sp = (t) => String(t).replace(/ /g, " ");
 const { ok, failed } = reporter();
 const only = process.env.SS_CASES ? process.env.SS_CASES.split(",") : null;
-const want = (k) => (only ? only.includes(k) : !["D", "D+", "X"].includes(k));
+const want = (k) => (only ? only.includes(k) : !["D", "D+", "X", "DL"].includes(k));
 const shots = shotsDir("wingList");
 
 // ── the pure layer, lifted from the cmp twin ─────────────────────────────────────────────────────
@@ -219,7 +230,8 @@ async function scene(page, engine = "__ss3dEngine") {
       if (!q.isMesh || !q.userData || q.userData.ssWingList == null) return;
       const i = q.userData.ssWingList;
       (by[i] = by[i] || []).push({ ...bb(q), type: q.geometry.type, post: q.parent === M.roofGroup, tier: q.userData.ssWingTier, side: q.userData.ssWing,
-        slabTan: q.geometry.type === "BoxGeometry" && q.rotation.z !== 0 && q.geometry.parameters && q.geometry.parameters.depth > 5 ? Math.abs(Math.tan(q.rotation.z)) : null,
+        // A slab cut on a hip (roof.wingCornersMeet) is a BufferGeometry on the same box's rotation: ssWingSlab.
+        slabTan: q.userData.ssWingSlab || (q.geometry.type === "BoxGeometry" && q.rotation.z !== 0 && q.geometry.parameters && q.geometry.parameters.depth > 5) ? Math.abs(Math.tan(q.rotation.z)) : null,
         trim: q.material === M.trimMat || q.material === M.fasciaMat });
     });
     const cl = [];
@@ -439,6 +451,37 @@ if (want("D+") && STORED) {
   if (outFile) writeFileSync(outFile, JSON.stringify(out));
 }
 
+// ── DL · end-wing lists without the corners switch ─────────────────────────────────────────────
+// Before roof.wingCornersMeet nothing here could meet round a corner, and without the switch (or with it false)
+// nothing may: every list with end wings builds the same scene graph as a build served from before the switch.
+const DL_OUT = process.env.SS_WINGLIST_LIST_DIGEST, DL_BASE = process.env.SS_WINGLIST_LIST_BASE;
+const DL_CASES = () => [
+  ["E", "24x32", D3of(CASE_E, 9)], ["C", "30x32", D3of(CASE_C, 9)], ["T", "24x28", D3of(CASE_T, 9)], ["T-land", "28x24", D3of(landscape(CASE_T), 9)],
+  ["T-open", "24x28", D3of({ ...CASE_T, eave: "open" }, 9)], ["T-lap", "24x28", D3of(CASE_T, 9, { siding: "lap" })],
+  ["T-four", "24x28", D3of({ ...CASE_T, wingList: [...CASE_T.wingList, { wall: "back", widthFt: 8 }] }, 9)],
+  ["T-false", "24x28", D3of({ ...CASE_T, wingCornersMeet: false }, 9)], ["T-near", "24x28", D3of({ ...CASE_T, wingList: [{ wall: "left", widthFt: 6 }, ...CASE_T.wingList.slice(1)] }, 9)],
+];
+if (want("DL") && (DL_OUT || DL_BASE) && ENDS) {
+  const base = DL_BASE ? JSON.parse(readFileSync(DL_BASE, "utf8")) : null;
+  const out = {};
+  for (const [id, size, d3] of DL_CASES()) {
+    try {
+      const { page, errors } = await openCase(`Harness DL ${id}`, size, d3);
+      const dg = await digest(page, true);
+      out[id] = dg;
+      if (base) {
+        const b = base[id] || [];
+        const diff = dg.filter((x) => !b.includes(x)).concat(b.filter((x) => !dg.includes(x)));
+        ok(`DL ${id}: the same scene graph as the base build (${dg.length} meshes)`, !!base[id] && !diff.length, diff.slice(0, 2).join(" | "));
+      }
+      ok(`DL ${id}: no page errors`, errors.length === 0, errors.slice(0, 3).join(" | "));
+      await page.close();
+    } catch (e) { ok(`DL ${id}: ran`, false, e && e.message); }
+  }
+  if (base) ok(`DL: every base case was rendered (${Object.keys(base).length})`, Object.keys(base).every((k) => out[k]), Object.keys(base).filter((k) => !out[k]).join(","));
+  if (DL_OUT) { writeFileSync(DL_OUT, JSON.stringify(out, null, 1)); console.log(`   DL: wrote ${Object.keys(out).length} digests to ${DL_OUT}`); }
+}
+
 // ── Z · junk ─────────────────────────────────────────────────────────────────────────────────
 if (want("Z")) {
   const JUNK = [null, [], "left", {}, 4, [null], [null, 3], [{ wall: "top", widthFt: 8 }], [{ wall: ["left"], widthFt: 8 }], [{ wall: "left" }],
@@ -579,7 +622,9 @@ function endChecks(tag, S) {
       !!c && c.side === 2 * t.sz && near(t.sz > 0 ? cz[0] : cz[1], t.zI - t.sz * T / 2, 0.03) && c.minY <= t.ya + 1e-6 && near(c.maxY, cTop, 0.01),
       c && JSON.stringify([c.side, f3(cz[0]), f3(cz[1]), f3(c.minY), f3(c.maxY)]));
     const posts = ms.filter((q) => q.post);
-    ok(`${name}: two corner boards at the long walls' corners on z ${f3(t.zI)}`, posts.length === 2
+    // Round a corner (hipSides, roof.wingCornersMeet) the hip stands there instead of a corner board.
+    const nPosts = 2 - (t.hipSides ? t.hipSides.length : 0);
+    ok(`${name}: ${nPosts} corner board${nPosts === 1 ? "" : "s"} at the long walls' corners on z ${f3(t.zI)}`, posts.length === nPosts
       && posts.every((p) => near((zr(p)[0] + zr(p)[1]) / 2, t.zI, 0.3) && near(Math.abs((p.uMin + p.uMax) / 2), m.S / 2, 0.3)), JSON.stringify(posts.map((p) => [f3(p.uMin), f3(p.uMax), ...zr(p).map(f3)])));
   });
   ok(`${tag}: every vertex finite`, S.finite);
@@ -670,6 +715,214 @@ if (want("T") && ENDS) {
     ok("T: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
     await page.close();
   } catch (e) { ok("T: ran", false, e && e.stack); }
+}
+
+// ── J · wing roofs that meet at a corner (roof.wingCornersMeet, 2026-10-05) ─────────────────────────
+// In the page, per join (model.wingCorners): f = (feet out past the end wall) - (feet out past the side wall),
+// the hip where f = 0. Every member of the side wing keeps f <= 0 and every member of the end wing f >= 0,
+// the corner boards and the hip's own cap strips aside (the strips cross it by design, 0.06 ft). Each slab,
+// fascia and soffit cut on the hip has its vertices there listed, to show the two cut faces are one face;
+// the strips that cap this hip are counted; the rakes (0.32 x 0.1 boards), fly rafters and tails of each
+// wing are listed by where they stand, in the building's u and rg z.
+const HIPS = (engine) => {
+  const E = window[engine], M = E.model, m = M.massing, V = E.camera.position.constructor;
+  E.scene.updateMatrixWorld(true);
+  const L = m.L, S = m.S;
+  const uz = (v) => (m.uAxisIsX ? [v.x, v.z + L / 2] : [v.z, L / 2 - v.x]);
+  const meshesOf = (i) => { const a = []; M.roofGroup.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssWingList === i) a.push(q); }); return a; };
+  const world = (q) => { const p = q.geometry.attributes.position, out = []; for (let k = 0; k < p.count; k++) out.push(new V().fromBufferAttribute(p, k).applyMatrix4(q.matrixWorld)); return out; };
+  const joins = ((M.wingCorners && M.wingCorners.joins) || []).map((J) => {
+    const f = (v) => { const [u, z] = uz(v); return (J.at ? z - L : -z) - (J.s * u - S / 2); };
+    const res = { name: J.name, i: J.i, j: J.j, worst: { side: -Infinity, end: -Infinity }, strips: 0, onHip: {}, hipTails: [] };
+    for (const [who, i, sgn] of [["side", J.i, 1], ["end", J.j, -1]]) {
+      for (const q of meshesOf(i)) {
+        const ud = q.userData;
+        if (Array.isArray(ud.ssWingHip)) { if (ud.ssWingHip[0] === J.i && ud.ssWingHip[1] === J.j) res.strips++; continue; }
+        // The hip rafter's tail runs on the hip itself (an open eave): how far out past each wall it reaches.
+        if (Array.isArray(ud.ssWingHipTail)) {
+          if (ud.ssWingHipTail[0] === J.i && ud.ssWingHipTail[1] === J.j) {
+            // Along each slope, from its wall line: e cos - (y - ye) sin, which is OV at that slab's eave end.
+            const c = 1 / Math.sqrt(1 + J.pitch * J.pitch), sn = J.pitch * c;
+            const e = world(q).map((v) => { const [u, z] = uz(v); return [J.s * u - S / 2, J.at ? z - L : -z, v.y - J.ye]; });
+            res.hipTails.push({ alongS: Math.max(...e.map((x) => x[0] * c - x[2] * sn)), alongZ: Math.max(...e.map((x) => x[1] * c - x[2] * sn)),
+              minS: Math.min(...e.map((x) => x[0])), minZ: Math.min(...e.map((x) => x[1])) });
+          }
+          continue;
+        }
+        if (q.parent === M.roofGroup) continue;
+        const kind = ud.ssWingSlab ? "slab" : ud.ssWingEave || null;
+        for (const v of world(q)) {
+          const fv = sgn * f(v);
+          res.worst[who] = Math.max(res.worst[who], fv);
+          if (kind && Math.abs(fv) < 1e-3) ((res.onHip[kind] = res.onHip[kind] || { side: [], end: [] })[who]).push([v.x, v.y, v.z]);
+        }
+      }
+    }
+    return res;
+  });
+  // Rakes, fly rafters and tails per wing: the centre of each, in (u, rg z).
+  const parts = {};
+  M.roofGroup.traverse((q) => {
+    if (!q.isMesh || !q.userData || q.userData.ssWingList == null || q.geometry.type !== "BoxGeometry" || q.userData.ssWingHipTail) return;
+    const pr = q.geometry.parameters, c = new V(0, 0, 0).applyMatrix4(q.matrixWorld), at = uz(c);
+    const kind = Math.abs(pr.height - 0.32) < 1e-9 && Math.abs(pr.depth - 0.1) < 1e-9 ? "rake" : Math.abs(pr.depth - 0.125) < 1e-9 && Math.abs(pr.height - 0.34) < 1e-9 ? "tail" : null;
+    if (kind) ((parts[q.userData.ssWingList] = parts[q.userData.ssWingList] || { rake: [], tail: [] })[kind]).push(at);
+  });
+  return { joins, parts, corners: M.wingCorners };
+};
+// Two lists of hip points are one face: each point of one within 0.005 ft of a point of the other.
+const sameFace = (a, b) => a.length > 0 && b.length > 0
+  && a.every((p) => b.some((q) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]) < 0.005))
+  && b.every((p) => a.some((q) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]) < 0.005));
+function hipChecks(tag, H, eaveKinds) {
+  ok(`${tag}: ${H.joins.length} join(s) in the model`, H.joins.length > 0, JSON.stringify(H.corners));
+  H.joins.forEach((J) => {
+    const n = `${tag} ${J.name}`;
+    ok(`${n}: the side wing's members stay on its side of the hip`, J.worst.side <= 0.005, f3(J.worst.side));
+    ok(`${n}: the end wing's members stay on its side`, J.worst.end <= 0.005, f3(J.worst.end));
+    ok(`${n}: two strips cap the hip`, J.strips === 2, String(J.strips));
+    for (const k of ["slab", ...eaveKinds]) {
+      const h = J.onHip[k] || { side: [], end: [] };
+      ok(`${n}: the two ${k}s' cut faces are one face (${h.side.length} / ${h.end.length} points on the hip)`, sameFace(h.side, h.end));
+    }
+  });
+}
+// Each wing's rakes and fly rafters stand only at an end that is not joined: a side wing's at z 0 or L, an end
+// wing's at u -S/2 or S/2; and no tail stands within 0.3 ft of a joined end's wall line.
+function endsChecks(tag, H, m) {
+  const L = m.L, S = m.S;
+  m.wings.forEach((g) => {
+    const p = H.parts[g.i] || { rake: [], tail: [] }, hz = (at) => !!(g.hipEnds && g.hipEnds.includes(at));
+    const free = [0, 1].filter((at) => !hz(at) && !m.ends.some((t) => t.at === at && t.outer)).length;
+    ok(`${tag} side i${g.i}: ${2 - (g.hipEnds || []).length} rake(s), none at a joined end`, p.rake.length === 2 - (g.hipEnds || []).length
+      && p.rake.every(([, z]) => !(hz(0) && z < 2) && !(hz(1) && z > L - 2)), JSON.stringify(p.rake.map((a) => a.map(f3))));
+    ok(`${tag} side i${g.i}: no tail on a joined corner`, p.tail.every(([, z]) => !(hz(0) && z < 0.3) && !(hz(1) && z > L - 0.3)), JSON.stringify(p.tail.filter(([, z]) => z < 1 || z > L - 1).map((a) => a.map(f3))));
+    if (free === 0 && g.hipEnds && g.hipEnds.length === 2) ok(`${tag} side i${g.i}: no fly rafter`, p.tail.every(([, z]) => z > -0.05 && z < L + 0.05));
+  });
+  m.ends.forEach((t) => {
+    const p = H.parts[t.i] || { rake: [], tail: [] }, hs = (s) => !!(t.hipSides && t.hipSides.includes(s));
+    ok(`${tag} end i${t.i}: ${2 - (t.hipSides || []).length} rake(s), none at a joined side`, p.rake.length === 2 - (t.hipSides || []).length
+      && p.rake.every(([u]) => !(hs(-1) && u < 0) && !(hs(1) && u > 0)), JSON.stringify(p.rake.map((a) => a.map(f3))));
+    ok(`${tag} end i${t.i}: no tail on a joined corner`, p.tail.every(([u]) => !(hs(-1) && u < -S / 2 + 0.3) && !(hs(1) && u > S / 2 - 0.3)), JSON.stringify(p.tail.filter(([u]) => Math.abs(u) > S / 2 - 1).map((a) => a.map(f3))));
+  });
+}
+const CASE_TJ = { ...CASE_T, wingCornersMeet: true };
+if (want("J") && ENDS) {
+  // J1: Case T with the switch: both side wings meet the front end wing.
+  try {
+    const { page, errors } = await openCase("Corner J1", "24x28", D3of(CASE_TJ, 9));
+    const S = await scene(page), H = await page.evaluate(HIPS, "__ss3dEngine");
+    const m = S.massing;
+    oracleCheck("J1", m, PURE_E, CASE_TJ, 24, 28, 9);
+    ok("J1: two joins, front-left and front-right; the side wings at 9, meeting the middle at 11; the middle at 17", JSON.stringify(H.corners.joins.map((J) => J.name)) === '["front-left","front-right"]'
+      && m.wings.every((g) => near(g.ye, 9) && near(g.ya, 11) && !g.raised && JSON.stringify(g.hipEnds) === "[1]") && near(m.Hc, 17)
+      && JSON.stringify(m.ends[0].hipSides) === "[-1,1]", JSON.stringify({ c: H.corners, w: m.wings.map((g) => [g.ye, g.ya, g.raised, g.hipEnds]), Hc: m.Hc }));
+    tierChecks("J1", S);
+    endChecks("J1", S);
+    hipChecks("J1", H, ["fascia", "soffit"]);
+    endsChecks("J1", H, m);
+    for (const wall of ["west", "east", "south"]) ok(`J1: the ${wall} wall is 9 end to end`, (S.walls[wall] || []).length > 0 && S.walls[wall].every((v) => near(v, 9, 0.01)), JSON.stringify(S.walls[wall]));
+    const c = S.cl.find((q) => q.side === 2), g0 = m.wings.find((g) => g.side < 0), g1 = m.wings.find((g) => g.side > 0);
+    ok(`J1: the end wing's clerestory runs between the side wings' clerestories' outer faces (${f3(g0.u0 - T / 2)} .. ${f3(g1.u0 + T / 2)})`,
+      !!c && near(c.uMin, g0.u0 - T / 2, 0.02) && near(c.uMax, g1.u0 + T / 2, 0.02), c && `${f3(c.uMin)} .. ${f3(c.uMax)}`);
+    await shot(page, "J1-front-right.png", [32, 17, 34], [0, 7, 3]);
+    await shot(page, "J1-corner.png", [17, 14.5, 21], [9.5, 9.6, 11.5]);
+    await shot(page, "J1-above.png", [16, 34, 30], [0, 8, 4]);
+    ok("J1: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
+    await page.close();
+  } catch (e) { ok("J1: ran", false, e && e.stack); }
+  // J2: a wing on every wall, all four corners met: one roof all round the middle.
+  try {
+    const roof = { ...CASE_TJ, wingList: [...CASE_T.wingList, { wall: "back", widthFt: 8 }] };
+    const { page, errors } = await openCase("Corner J2", "24x28", D3of(roof, 9));
+    const S = await scene(page), H = await page.evaluate(HIPS, "__ss3dEngine"), m = S.massing;
+    oracleCheck("J2", m, PURE_E, roof, 24, 28, 9);
+    ok("J2: four joins", H.corners.joins.length === 4 && H.corners.near.length === 0, JSON.stringify(H.corners));
+    tierChecks("J2", S);
+    endChecks("J2", S);
+    hipChecks("J2", H, ["fascia", "soffit"]);
+    endsChecks("J2", H, m);
+    for (const wall of ["west", "east", "south", "north"]) ok(`J2: the ${wall} wall is 9 end to end`, (S.walls[wall] || []).length > 0 && S.walls[wall].every((v) => near(v, 9, 0.01)), JSON.stringify(S.walls[wall]));
+    await shot(page, "J2-four-corners.png", [30, 26, 34], [0, 8, 0]);
+    ok("J2: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
+    await page.close();
+  } catch (e) { ok("J2: ran", false, e && e.stack); }
+  // J3: the same building the other way round (the ridge along x): the eave walls are back and front.
+  try {
+    const roof = { ...landscape(CASE_T), wingCornersMeet: true };
+    const { page, errors } = await openCase("Corner J3", "28x24", D3of(roof, 9));
+    const S = await scene(page), H = await page.evaluate(HIPS, "__ss3dEngine"), m = S.massing;
+    oracleCheck("J3", m, PURE_E, roof, 28, 24, 9);
+    ok("J3: two joins, at the left end's corners", JSON.stringify(H.corners.joins.map((J) => J.name).sort()) === '["back-left","front-left"]', JSON.stringify(H.corners.joins.map((J) => J.name)));
+    tierChecks("J3", S);
+    endChecks("J3", S);
+    hipChecks("J3", H, ["fascia", "soffit"]);
+    endsChecks("J3", H, m);
+    await shot(page, "J3-landscape.png", [-34, 20, 26], [0, 7, 0]);
+    ok("J3: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
+    await page.close();
+  } catch (e) { ok("J3: ran", false, e && e.stack); }
+  // J4: an open eave: rafter tails along both eaves stop short of the corner, inside each wing's half.
+  try {
+    const roof = { ...CASE_TJ, eave: "open" };
+    const { page, errors } = await openCase("Corner J4", "24x28", D3of(roof, 9));
+    const S = await scene(page), H = await page.evaluate(HIPS, "__ss3dEngine"), m = S.massing;
+    hipChecks("J4", H, []);
+    endsChecks("J4", H, m);
+    const tails = Object.values(H.parts).reduce((t, p) => t + p.tail.length, 0);
+    ok("J4: the open eave has its tails", tails > 20, String(tails));
+    // One hip rafter tail per corner, under the hip: flush with the slabs' eave ends (no corner of it past OV
+    // along either slope, the farthest within 0.05 ft of it), its inboard end inside the building's corner.
+    H.joins.forEach((J) => ok(`J4 ${J.name}: one hip rafter tail, out to the slabs' eave ends (OV ${OV} along each slope) and no further`,
+      J.hipTails.length === 1 && J.hipTails.every((h) => h.alongS <= OV + 0.005 && h.alongZ <= OV + 0.005 && Math.max(h.alongS, h.alongZ) > OV - 0.05 && h.minS < 0 && h.minZ < 0),
+      JSON.stringify(J.hipTails.map((h) => Object.fromEntries(Object.entries(h).map(([k, v]) => [k, f3(v)]))))));
+    await shot(page, "J4-hip-tail.png", [16.2, 7.2, 19.6], [11.6, 8.9, 13.6]);
+    await shot(page, "J4-open-eave.png", [21, 8.5, 25], [8, 9.6, 9]);
+    ok("J4: zero page errors", errors.length === 0, errors.join(" | ").slice(0, 300));
+    await page.close();
+  } catch (e) { ok("J4: ran", false, e && e.stack); }
+  // J5: a near-miss beside a join: a 6 ft left wing steps up over the end wing exactly as without the switch,
+  // while the right wing meets it; the end wing keeps its rake and corner board on the left.
+  try {
+    const list = [{ wall: "left", widthFt: 6 }, ...CASE_T.wingList.slice(1)];
+    const on = { ...CASE_TJ, wingList: list }, off = { ...CASE_T, wingList: list };
+    const a = await openCase("Corner J5", "24x28", D3of(on, 9));
+    const S = await scene(a.page), H = await a.page.evaluate(HIPS, "__ss3dEngine"), m = S.massing;
+    const total = (await digest(a.page, false)).length;
+    const leftOf = (page) => page.evaluate(() => {
+      const E = window.__ss3dEngine, M = E.model, V = E.camera.position.constructor, out = [];
+      E.scene.updateMatrixWorld(true);
+      M.roofGroup.traverse((q) => {
+        if (!q.isMesh || !q.userData || q.userData.ssWingList !== 0) return;
+        q.geometry.computeBoundingBox();
+        const b = q.geometry.boundingBox, mn = [1e9, 1e9, 1e9], mx = [-1e9, -1e9, -1e9];
+        for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
+          const v = new V(x, y, z).applyMatrix4(q.matrixWorld);
+          [v.x, v.y, v.z].forEach((c, k) => { mn[k] = Math.min(mn[k], c); mx[k] = Math.max(mx[k], c); });
+        }
+        out.push(`${q.geometry.type} ${mn.map((v) => v.toFixed(3))} ${mx.map((v) => v.toFixed(3))}`);
+      });
+      return out.sort();
+    });
+    const lOn = await leftOf(a.page);
+    ok("J5: front-right joins; front-left is a width near-miss, dw 2", JSON.stringify(H.corners.joins.map((J) => J.name)) === '["front-right"]'
+      && H.corners.near.length === 1 && H.corners.near[0].name === "front-left" && JSON.stringify(H.corners.near[0].why) === '["width"]' && near(H.corners.near[0].dw, 2), JSON.stringify(H.corners));
+    ok("J5: the left wing still steps up (raised), the right one stays at 9", m.wings.find((g) => g.side < 0).raised && near(m.wings.find((g) => g.side > 0).ye, 9),
+      JSON.stringify(m.wings.map((g) => [g.side, g.ye, g.raised])));
+    hipChecks("J5", H, ["fascia", "soffit"]);
+    endsChecks("J5", H, m);
+    endChecks("J5", S);
+    ok("J5: the west wall still steps; the east wall is 9 end to end", (S.walls.west || []).some((v) => v > 9.5) && (S.walls.east || []).every((v) => near(v, 9, 0.01)), JSON.stringify([S.walls.west, S.walls.east]));
+    await shot(a.page, "J5-near-and-join.png", [-6, 22, 40], [0, 8, 2]);
+    ok("J5: zero page errors", a.errors.length === 0, a.errors.join(" | ").slice(0, 300));
+    await a.page.close();
+    const b = await openCase("Corner J5 off", "24x28", D3of(off, 9));
+    const lOff = await leftOf(b.page);
+    ok(`J5: the left wing's ${lOn.length} meshes are exactly the ones it has without the switch`, lOn.length > 0 && JSON.stringify(lOn) === JSON.stringify(lOff),
+      lOn.filter((x) => !lOff.includes(x)).slice(0, 2).join(" | "));
+    ok(`J5: the scene has meshes (${total})`, total > 50);
+    await b.page.close();
+  } catch (e) { ok("J5: ran", false, e && e.stack); }
 }
 
 // ── SZ · every size ──────────────────────────────────────────────────────────────────────────
@@ -803,7 +1056,7 @@ const wlCards = (page) => page.$$eval("[data-ss-adv-wl]", (c) => c.map((x) => ({
   t: (x.querySelector(".ssd-card-t") || {}).textContent, lit: x.classList.contains("is-lit") })));
 // Every Plan label inside its own section's rectangle (the middle's included), on screen: the texts that are not.
 const planOverflow = (page) => page.evaluate(() => [...document.querySelectorAll('[data-ss-adv="wingplan"] svg > g')].flatMap((g) => {
-  const r = g.querySelector("rect").getBoundingClientRect();
+  const r = (g.querySelector("rect") || g.querySelector("polygon")).getBoundingClientRect();
   return [...g.querySelectorAll("text")].filter((t) => { const b = t.getBoundingClientRect(); return b.width > 0 && (b.left < r.left - 1 || b.right > r.right + 1 || b.top < r.top - 1 || b.bottom > r.bottom + 1); })
     .map((t) => t.textContent);
 }));
@@ -1096,6 +1349,113 @@ if (want("AE") && ENDS) {
     }
     ok("AE: zero page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
   } catch (e) { ok("AE: ran", false, e && e.stack); }
+  await actx.close();
+}
+
+// ── AJ · the corners switch on the Advanced page (roof.wingCornersMeet, 2026-10-05) ───────────────────
+if (want("AJ") && ENDS) {
+  const { actx, page, errors, calls } = await openAdvanced();
+  const nb = (t) => String(t).replace(/\u00a0/g, " ");
+  const sw = () => page.locator('[data-ss-adv-f="wingCornersMeet"]');
+  const lines = () => page.$$eval("[data-ss-adv-wl-corner]", (a) => a.map((x) => ({ kind: x.dataset.ssAdvWlCorner, at: x.dataset.ssAdvWlCornerAt, t: x.textContent.replace(/\u00a0/g, " ") })));
+  try {
+    await setSize(page, 24, 28);
+    await page.locator('[data-ss-adv-sec="wings"]').click();
+    await settle(page, 300);
+    await clickF(page, "wlAdd", "left");
+    await clickF(page, "wlAdd", "right");
+    await advModel(page, (M) => M.massing.list && M.massing.wings.length === 2);
+    ok("AJ1: side wings alone share no corner with an end wing: no switch", (await sw().count()) === 0);
+    await clickF(page, "wlAdd", "front");
+    await advModel(page, (M) => M.massing.ends.length === 1 && M.massing.wings.length === 2);
+    await typeBox(page, page.getByLabel("Middle section wall height (ft)", { exact: true }), 17);
+    await advModel(page, (M) => Math.abs(M.massing.Hc - 17) < 1e-9);
+    ok("AJ2: with a front end wing the switch shows, Off", (await sw().count()) === 1 && (await sw().locator('button[aria-pressed="true"]').innerText()).trim() === "Off");
+    const l2 = await lines();
+    ok("AJ2: …and says each corner matches, before it is on", l2.length === 2 && l2.every((x) => x.kind === "joined" && / match at the front-(left|right) corner\. On, they run one roof around it\./.test(x.t)), JSON.stringify(l2));
+    const m2 = await mass(page);
+    ok("AJ2: off, the side wings still step up over the end wing", m2.wings.every((g) => g.raised && g.ye > 9) && !("corners" in m2), JSON.stringify(m2.wings.map((g) => [g.ye, g.raised])));
+    await sw().locator("button", { hasText: "On" }).click();
+    await settle(page, 450);
+    await advModel(page, (M) => M.wingCorners && M.wingCorners.joins.length === 2);
+    const m3 = await mass(page);
+    ok("AJ3: on, both corners meet: the side wings stand at the walls' 8 ft", m3.wings.every((g) => near(g.ye, 8) && !g.raised), JSON.stringify(m3.wings.map((g) => [g.ye, g.raised])));
+    const l3 = await lines();
+    ok("AJ3: …and each corner says so", l3.length === 2 && l3.every((x) => x.kind === "joined" && /^Left wing 1 and Front end wing 1 meet around the front-left corner: one roof with a hip\.$|^Right wing 1 and Front end wing 1 meet around the front-right corner: one roof with a hip\.$/.test(x.t)), JSON.stringify(l3));
+    const hipLines = await page.$$eval("[data-ss-adv-wl-hip]", (a) => a.map((x) => x.textContent.replace(/\u00a0/g, " ")));
+    ok("AJ3: each card names the wing its roof runs into (2 on the end wing's)", hipLines.length === 4 && hipLines.filter((t) => /^Meets Front end wing 1 around the front-(left|right) corner/.test(t)).length === 2
+      && hipLines.filter((t) => /^Meets (Left|Right) wing 1 around the front-(left|right) corner/.test(t)).length === 2, JSON.stringify(hipLines));
+    const raisedSay = await page.locator("[data-ss-adv-readout^='wl-push-']").count();
+    ok("AJ3: no side wing says it was raised", raisedSay === 0, String(raisedSay));
+    // The drawings: the front end wing in the End view, a side wing in the Side view, and the Plan, round the hip.
+    ok("AJ3: the End view draws the front end wing's band round both hips", (await page.locator('[data-ss-adv="end"] [data-ss-elev-hip]').count()) >= 1);
+    ok("AJ3: the Side view draws the side wing's roof round the front corner", (await page.locator('[data-ss-adv="side"] [data-ss-elev-hip]').count()) === 1);
+    ok("AJ3: the Plan draws all three wings to the hip", (await page.locator('[data-ss-adv="wingplan"] [data-ss-plan-hip]').count()) === 3);
+    ok("AJ3: every Plan label still inside its section", (await planOverflow(page)).length === 0, JSON.stringify(await planOverflow(page)));
+    if (process.env.SS_SHOTS) {
+      await sw().screenshot({ path: join(shots, "AJ-switch-on-1440.png") }).catch(() => {});
+      await page.locator('[data-ss-adv="end"]').screenshot({ path: join(shots, "AJ-end-side-views-1440.png") }).catch(() => {});
+      await page.locator('[data-ss-adv="wingplan"]').screenshot({ path: join(shots, "AJ-plan-1440.png") }).catch(() => {});
+    }
+    // A near-miss: the left wing 6 ft wide, the numbers said, the left side steps up again, the right still meets.
+    const left = (await mass(page)).wings.find((g) => g.side < 0);
+    await typeBox(page, page.getByLabel("Left wing 1 width (ft)", { exact: true }), 6);
+    await advModel(page, (M) => M.wingCorners && M.wingCorners.joins.length === 1 && M.wingCorners.near.length === 1);
+    const l4 = await lines();
+    const nearL = l4.find((x) => x.kind === "near");
+    ok("AJ4: a 6 ft left wing: a near-miss with both widths, and what to change", !!nearL && nearL.at === "front-left"
+      && nb(nearL.t) === `Left wing 1 and Front end wing 1 share the front-left corner, but Left wing 1 is 6' 0" wide, and Front end wing 1 is 8' 0" wide, so Left wing 1's roof steps up over Front end wing 1's. Give both the same width to run one roof around it.`,
+      JSON.stringify(l4));
+    const m4 = await mass(page);
+    ok("AJ4: …the left wing steps up again, the right one still meets", m4.wings.find((g) => g.i === left.i).raised && near(m4.wings.find((g) => g.side > 0).ye, 8), JSON.stringify(m4.wings.map((g) => [g.i, g.ye, g.raised])));
+    if (process.env.SS_SHOTS) await sw().screenshot({ path: join(shots, "AJ-near-miss-1440.png") }).catch(() => {});
+    await typeBox(page, page.getByLabel("Left wing 1 width (ft)", { exact: true }), 8);
+    await advModel(page, (M) => M.wingCorners && M.wingCorners.joins.length === 2);
+    // A steeper left roof, then an outside wall asked above the walls: each said with its numbers.
+    await typeBox(page, page.getByLabel("Left wing 1 roof pitch", { exact: true }), 4);
+    await advModel(page, (M) => M.wingCorners && M.wingCorners.near.length === 1 && M.wingCorners.near[0].why[0] === "pitch");
+    const lp = (await lines()).find((x) => x.kind === "near");
+    ok("AJ4: a 4 in 12 left roof beside the end wing's 3 in 12: said with both pitches", !!lp
+      && nb(lp.t) === "Left wing 1 and Front end wing 1 share the front-left corner, but Left wing 1's roof is 4 in 12, and Front end wing 1's is 3 in 12, so Left wing 1's roof steps up over Front end wing 1's. Give both the same pitch to run one roof around it.",
+      JSON.stringify(lp));
+    await typeBox(page, page.getByLabel("Left wing 1 roof pitch", { exact: true }), 3);
+    await advModel(page, (M) => M.wingCorners && M.wingCorners.joins.length === 2);
+    await typeBox(page, page.getByLabel("Left wing 1 outside wall height (ft)", { exact: true }), 12);
+    await advModel(page, (M) => M.wingCorners && M.wingCorners.near.length === 1 && M.wingCorners.near[0].why[0] === "height");
+    const lh = (await lines()).find((x) => x.kind === "near");
+    ok("AJ4: an outside wall asked at 12 ft: said with both heights, and Auto to meet", !!lh
+      && nb(lh.t) === `Left wing 1 and Front end wing 1 share the front-left corner, but Left wing 1's outside wall is set to 12' 0", not the walls' 8' 0", so Left wing 1's roof steps up over Front end wing 1's. Set Left wing 1's outside wall to Auto.`,
+      JSON.stringify(lh));
+    await page.locator('[data-ss-adv-wl="0"] [data-ss-adv-f="wlEaveFt"] button', { hasText: "Auto" }).click();
+    await settle(page, 450);
+    await advModel(page, (M) => M.wingCorners && M.wingCorners.joins.length === 2);
+    // Save carries the key; Off deletes it.
+    const d3 = await saveNew(page, calls, "Harness Corners");
+    ok("AJ5: Save carries roof.wingCornersMeet true beside the list", !!d3 && d3.roof && d3.roof.wingCornersMeet === true && Array.isArray(d3.roof.wingList), JSON.stringify(d3 && d3.roof));
+    ok("AJ5: …and the older designer's one wing a side follows the side wings as drawn: 3 in 12, meeting the middle at 8 + 2", near(d3.roof.wingPitch, 0.25, 1e-9), String(d3 && d3.roof.wingPitch));
+    await sw().locator("button", { hasText: "Off" }).click();
+    await settle(page, 450);
+    await advModel(page, (M) => !M.wingCorners && M.massing.wings.every((g) => g.raised));
+    const off5 = await saveNew(page, calls, "Harness Corners Off");
+    const mOff = await mass(page);
+    ok("AJ5: Off: the key is gone, the side wings step up again, and the approximation follows them up", !!off5 && !("wingCornersMeet" in off5.roof)
+      && near(off5.roof.wingPitch, (mOff.ya - 8) / 8, 1e-9) && off5.roof.wingPitch > 0.25 + 1e-6, JSON.stringify(off5 && off5.roof));
+    // Off, a near-miss is a hint, not a warning: the side wing stepping up over the end wing is the build the builder
+    // has, and nothing on the page asked them to change it.
+    await typeBox(page, page.getByLabel("Left wing 1 width (ft)", { exact: true }), 6);
+    await page.waitForFunction(() => document.querySelectorAll('[data-ss-adv-wl-corner="near"]').length === 1, null, { timeout: 15000 }).catch(() => {});
+    const offNear = await page.$$eval('[data-ss-adv-wl-corner="near"]', (a) => a.map((x) => x.className));
+    ok("AJ5: …a near-miss while Off reads as a hint, not a warning", offNear.length === 1 && /ssd-tb-hint/.test(offNear[0]) && !/ssd-tb-warn/.test(offNear[0]), JSON.stringify(offNear));
+    await typeBox(page, page.getByLabel("Left wing 1 width (ft)", { exact: true }), 8);
+    await page.waitForFunction(() => document.querySelectorAll('[data-ss-adv-wl-corner="near"]').length === 0, null, { timeout: 15000 }).catch(() => {});
+    // 390 px: the switch and its lines fit.
+    await page.setViewportSize({ width: 390, height: 900 });
+    await settle(page, 600);
+    const wide = await sw().evaluate((el) => ({ w: el.scrollWidth, c: el.clientWidth, page: document.documentElement.scrollWidth, vw: window.innerWidth }));
+    ok("AJ6: at 390 px the switch and its words fit, no sideways scroll", wide.w <= wide.c + 1 && wide.page <= wide.vw + 1, JSON.stringify(wide));
+    if (process.env.SS_SHOTS) await sw().screenshot({ path: join(shots, "AJ-switch-390.png") }).catch(() => {});
+    ok("AJ: zero page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
+  } catch (e) { ok("AJ: ran", false, e && e.stack); }
   await actx.close();
 }
 

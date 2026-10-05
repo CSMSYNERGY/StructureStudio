@@ -125,7 +125,7 @@ export function porchKind(roof) {
 // foundation the photo path never applies, and would drop the siding the photo path is the
 // only one that DOES apply. Same reply, two different buildings on screen.
 // The wing keys calDraftRoof clears as one set (the browser's CAL_WING_KEYS).
-const WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt", "wingSides", "wingList"];
+const WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt", "wingSides", "wingList", "wingCornersMeet"];
 export function mergeDraft(prior, draft, source = "video") {
   const p = prior || {}, d = draft || {};
   const dr = d.roof || {};

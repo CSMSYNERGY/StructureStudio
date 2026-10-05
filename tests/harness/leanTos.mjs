@@ -32,21 +32,39 @@
 //   P  THE CALIBRATION PANEL (?admin=1): a style with a list says "This style has 2 lean-tos, set on the
 //      Advanced page." instead of the single lean-to's boxes, and saves the list untouched; a style with
 //      the single lean-to still shows its boxes.
+//   J  TWO LEAN-TOS THAT MEET AT A CORNER (d3CornerJoins, 2026-10-04): a side-wall one and an end-wall one
+//      that match exactly run as one roof round the corner. J1 open: each slab on its own side of the hip
+//      and the two cut faces one face, one corner post, the side wall's header through and the end wall's
+//      butted, one hip cap. J2 enclosed: 4 walls not 6, the outer walls meeting, one corner board. J3 a
+//      near-miss joins nothing and builds each exactly as alone. J4 a wrap round three sides. J5 the
+//      Advanced page's words on both cards, and a near-miss's numbers after a drop is changed. J6 beside a
+//      projecting porch.
+//   M  A LEAN-TO THAT MEETS THE PORCH (d3PorchJoins, 2026-10-05), its numbers set to what its card says matches:
+//      M1 the lean-to's side of the join: its slab on its side of the hip with its top on the porch roof's
+//      plane (the porch sheet's too, so the two meet on the hip), its posts from its free end to the porch's
+//      corner post and not at it, its header level to the porch's header, its half of the cap. M2 narrower
+//      than the porch is deep: the header level to where the hip crosses it, then down the porch roof's slope.
+//      M3 enclosed: all its walls kept, and a header from its corner board to the corner post. M4 a wrap round
+//      the back too: the lean-to it meets round the back corner (d3CornerJoins) is on the same plane, and so is
+//      their corner post. M5 the Advanced page: "Meet the porch" shows on the card that reaches the porch's
+//      corner; asked off by its numbers it says by how much and what to type; typed, the two join, the porch's
+//      card says who meets it, Save carries meetPorch, and "Runs past it" takes the key off; a second lean-to
+//      is offered it until it is set up the roof, where it never can meet the porch.
 //   and zero page errors.
 //
 //   python -m http.server 8321 --bind 127.0.0.1 --directory <repo root>
-//   SS_BASE=http://127.0.0.1:8321 SS_SHOTS=<dir> node tests/harness/leanTos.mjs     (SS_CASES=S,U,C,P for a subset)
+//   SS_BASE=http://127.0.0.1:8321 SS_SHOTS=<dir> node tests/harness/leanTos.mjs     (SS_CASES=S,U,C,P,J,M for a subset)
 //
 // Exit 0 = every assertion held.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, BASE, REF, PASS_THROUGH_GET } from "./lib.mjs";
+import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir, purePorch, BASE, REF, PASS_THROUGH_GET } from "./lib.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PORTAL_HTML = readFileSync(join(ROOT, "portal.html"), "utf8");
 const SHOTS = shotsDir("leanTos");
-const CASES = (process.env.SS_CASES || "S,U,C,P").split(",");
+const CASES = (process.env.SS_CASES || "S,U,C,P,J,M").split(",");
 const want = (k) => CASES.includes(k);
 const settle = (page, ms = 400) => page.waitForTimeout(ms);
 const near = (a, b, tol = 0.02) => Math.abs(a - b) <= tol;
@@ -143,17 +161,50 @@ const SCENE = (engine) => {
   M.root.traverse((q) => {
     if (!q.isMesh || !q.userData || q.userData.ssLeanTo === undefined) return;
     const t = String(q.userData.ssLeanTo);
-    const g = by[t] || (by[t] = { n: 0, slab: null, posts: [], walls: [], corners: [], header: null, fillers: 0 });
+    const g = by[t] || (by[t] = { n: 0, slab: null, posts: [], walls: [], corners: [], header: null, fillers: 0, hips: 0 });
     g.n++;
     const b = bb(q), P = q.geometry.parameters || {};
-    if (q.userData.ssLeanToPost) g.posts.push(b);
+    // Two lean-tos joined at a corner (d3CornerJoins): the slab cut along the hip and the hip cap's strips.
+    if (q.userData.ssLeanToHip) g.hips++;
+    else if (q.userData.ssLeanToSlab) g.slab = b;
+    else if (q.userData.ssLeanToPost) g.posts.push(b);
     else if (q.userData.ssLeanToWall) g.walls.push(b);
     else if (q.userData.ssLeanToStand) g.corners.push(b);
     else if (q.geometry.type === "BoxGeometry" && Math.abs(P.height - 0.2) < 1e-9) g.slab = b;
     else if (q.geometry.type === "BoxGeometry") g.header = b;
     else g.fillers++;
   });
-  return { by, grade: M.grade, leanTos: M.leanTos ? JSON.parse(JSON.stringify(M.leanTos)) : null, leanTo: M.leanTo ? JSON.parse(JSON.stringify(M.leanTo)) : null };
+  return { by, grade: M.grade, leanTos: M.leanTos ? JSON.parse(JSON.stringify(M.leanTos)) : null, leanTo: M.leanTo ? JSON.parse(JSON.stringify(M.leanTo)) : null,
+    corners: M.leanToCorners ? JSON.parse(JSON.stringify(M.leanToCorners)) : null };
+};
+// The joined lean-tos' members in the frame d3CornerJoins speaks (the building's u -- the roof group's x plus
+// the massing's uc -- the roof group's z along the ridge, and y): every vertex of each cut slab, and the box
+// of each strip, post, header, wall and corner board, by tag, so each is measured against its own hip.
+const JOINED = (engine) => {
+  const E = window[engine], M = E.model, V = E.camera.position.constructor;
+  const uc = M.massing ? M.massing.uc : 0;
+  const verts = (o) => {
+    o.updateMatrix();
+    const p = o.geometry.attributes.position, out = [], v = new V();
+    for (let k = 0; k < p.count; k++) { v.fromBufferAttribute(p, k).applyMatrix4(o.matrix); out.push([v.x + uc, v.y, v.z]); }
+    return out;
+  };
+  const r3 = (c) => Math.round(c * 1000) / 1000;
+  const boxOf = (o) => { const vs = verts(o); return { mn: [0, 1, 2].map((k) => r3(Math.min(...vs.map((v) => v[k])))), mx: [0, 1, 2].map((k) => r3(Math.max(...vs.map((v) => v[k])))) }; };
+  const by = {};
+  M.root.traverse((q) => {
+    if (!q.isMesh || !q.userData || q.userData.ssLeanTo === undefined) return;
+    const u = q.userData, t = String(u.ssLeanTo);
+    const g = by[t] || (by[t] = { slab: null, slabBox: null, hips: [], posts: [], cornerPosts: [], headers: [], walls: [], boards: [], cornerBoards: [] });
+    if (u.ssLeanToHip) g.hips.push({ of: u.ssLeanToHip, ...boxOf(q) });
+    else if (u.ssLeanToSlab) { g.slab = verts(q); g.slabBox = boxOf(q); }
+    else if (u.ssLeanToPost) (u.ssLeanToCorner ? g.cornerPosts : g.posts).push(boxOf(q));
+    else if (u.ssLeanToWall) g.walls.push(boxOf(q));
+    else if (u.ssLeanToStand) (u.ssLeanToCorner ? g.cornerBoards : g.boards).push(boxOf(q));
+    else if (q.geometry.type === "BoxGeometry" && Math.abs((q.geometry.parameters || {}).height - 0.2) < 1e-9) g.slabBox = boxOf(q);
+    else if (q.geometry.type === "BoxGeometry") g.headers.push(boxOf(q));
+  });
+  return { by, corners: M.leanToCorners ? JSON.parse(JSON.stringify(M.leanToCorners)) : null, porch: !!M.porch };
 };
 async function aimShot(page, engine, path, eye, at) {
   const clip = await page.evaluate(({ engine, eye, at }) => {
@@ -631,6 +682,406 @@ if (want("P")) {
     ok("P: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
   } catch (e) { ok("P: ran", false, e && e.stack); }
   await page.close();
+}
+
+// ── J · TWO LEAN-TOS THAT MEET AT A CORNER (d3CornerJoins, 2026-10-04) ──────────────────────────────
+// 12x16, the old frame: the right wall is a side wall (u = 6, along z 0..16) and the front an end wall (z =
+// 16, across u -6..6). Each lean-to 8 ft wide meeting at the 8 ft plate, 1 ft drop: they join at the
+// front-right corner, the hip from (6, 16) out to past (14, 24), the outer corner post at (14, 24).
+const J_ROOF = { type: "gable", pitch: 0.4, overhang: 0.6 };
+const jCase = (leanTos, extra) => ({ roof: { ...J_ROOF, ...(extra || {}), leanTos }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" });
+// Which side of join J's hip a point is on, across the plan (+ the end-wall lean-to's side, - the side-wall one's).
+const hipSide = (J, v) => J.sz * (v[2] - J.zC) - J.dir * (v[0] - J.uC);
+const ctr = (b) => [(b.mn[0] + b.mx[0]) / 2, (b.mn[1] + b.mx[1]) / 2, (b.mn[2] + b.mx[2]) / 2];
+// A world eye and target from the building's frame (world x = u, world z = z - L/2 on 12x16).
+const jEye = (u, y, z) => [u, y, z - 8];
+if (want("J")) {
+  // J1: an open pair. One roof: each slab stays on its own side of the hip, and the two cut faces are the
+  // same face (the top faces meet on the hip line, no gap, no overlap); one corner post; the side-wall
+  // header runs through to the end-wall header's outer face and that one butts into it; one hip cap.
+  try {
+    const { page, errors } = await openCase(ctx, "Harness Joined Open", "12x16", jCase([{ wall: "right", widthFt: 8 }, { wall: "front", widthFt: 8 }]));
+    const m = await page.evaluate(JOINED, "__ss3dEngine");
+    const J = m.corners && m.corners.joins[0];
+    ok("J1: the right and front lean-tos join at the front-right corner, and nothing is a near-miss",
+      !!J && m.corners.joins.length === 1 && J.at === "front-right" && J.i === 0 && J.j === 1 && m.corners.near.length === 0 && near(J.post[0], 14, 1e-9) && near(J.post[1], 24, 1e-9),
+      JSON.stringify(m.corners && m.corners.joins.map((x) => [x.at, x.i, x.j, x.post])));
+    const A = m.by["0"], B = m.by["1"];
+    const crossA = A.slab ? Math.max(...A.slab.map((v) => hipSide(J, v))) : NaN, crossB = B.slab ? Math.max(...B.slab.map((v) => -hipSide(J, v))) : NaN;
+    ok("J1: no slab vertex crosses the hip: the side wall's stays on its side, the end wall's on its own (within 0.005 ft)", crossA <= 0.005 && crossB <= 0.005, `${f3(crossA)} ${f3(crossB)}`);
+    const onHip = (vs) => [...new Set(vs.filter((v) => Math.abs(hipSide(J, v)) < 1e-4).map((v) => v.map((c) => Math.round(c * 1000) / 1000).join(",")))].sort();
+    const hA = onHip(A.slab || []), hB = onHip(B.slab || []);
+    ok("J1: …and the two cut faces are one face: the same corners on the hip from both slabs (no gap, no overlap)", hA.length >= 4 && JSON.stringify(hA) === JSON.stringify(hB), JSON.stringify({ hA, hB }));
+    ok("J1: …the free ends are today's: the side wall's past z 0 by the overhang, the end wall's past u -6", !!A.slabBox && near(A.slabBox.mn[2], -0.6, 0.002) && !!B.slabBox && near(B.slabBox.mn[0], -6.6, 0.002),
+      JSON.stringify([A.slabBox, B.slabBox]));
+    const cps = [...A.cornerPosts, ...B.cornerPosts];
+    ok("J1: one post at the outer corner (14, 24), on the ground up to the 7 ft edge", cps.length === 1 && near(ctr(cps[0])[0], 14, 0.2) && near(ctr(cps[0])[2], 24, 0.2) && near(cps[0].mn[1], 0) && near(cps[0].mx[1], 7),
+      JSON.stringify(cps));
+    ok("J1: …the side wall's own posts run from its free end to it (3, at u 14, z 0.8..16.3), the end wall's (3, at z 24, u -5.2..7.6), none at the corner",
+      A.posts.length === 3 && A.posts.every((p) => near(ctr(p)[0], 14) && ctr(p)[2] > 0.7 && ctr(p)[2] < 17) && B.posts.length === 3 && B.posts.every((p) => near(ctr(p)[2], 24) && ctr(p)[0] > -5.3 && ctr(p)[0] < 8),
+      JSON.stringify([A.posts.map((p) => ctr(p).map(f3)), B.posts.map((p) => ctr(p).map(f3))]));
+    const ha = A.headers[0], hb = B.headers[0];
+    ok("J1: the side wall's header runs through to z 24.175 (the end wall header's outer face); the end wall's stops at u 13.825 (its inner face)",
+      A.headers.length === 1 && B.headers.length === 1 && near(ha.mn[2], 0, 0.002) && near(ha.mx[2], 24.175, 0.002) && near(ha.mn[0], 13.825, 0.002)
+        && near(hb.mn[0], -6, 0.002) && near(hb.mx[0], 13.825, 0.002) && near(hb.mx[2], 24.175, 0.002), JSON.stringify([ha, hb]));
+    const hips = [...A.hips, ...B.hips];
+    ok("J1: one hip cap, a strip on each slab, from the corner out to the eave", hips.length === 2 && hips.every((h) => JSON.stringify(h.of) === "[0,1]") && hips.every((h) => h.mn[0] < 6.5 && h.mx[0] > 14.3),
+      JSON.stringify(hips));
+    ok("J1: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
+    await aimShot(page, "__ss3dEngine", join(SHOTS, "j1-joined-open-pair.png"), jEye(30, 15, 38), jEye(7, 4, 14));
+    await aimShot(page, "__ss3dEngine", join(SHOTS, "j1-joined-open-pair-corner.png"), jEye(20, 10.5, 29), jEye(10, 6.5, 19));
+    await page.close();
+  } catch (e) { ok("J1: ran", false, e && e.stack); }
+
+  // J2: an enclosed pair. 4 walls, not 6: the side wall's outer wall runs on round the corner to the end
+  // wall's outer face, the end wall's stops at the side wall's inner face, the two corner end walls are
+  // left out, and one corner board stands at the outer corner.
+  try {
+    const { page, errors } = await openCase(ctx, "Harness Joined Enclosed", "12x16", jCase([{ wall: "right", widthFt: 8, enclosed: true }, { wall: "front", widthFt: 8, enclosed: true }]));
+    const m = await page.evaluate(JOINED, "__ss3dEngine");
+    const A = m.by["0"], B = m.by["1"];
+    ok("J2: joined at the front-right corner", !!(m.corners && m.corners.joins.length === 1 && m.corners.joins[0].at === "front-right"), JSON.stringify(m.corners));
+    ok("J2: 4 walls instead of 6, no posts at all", A.walls.length + B.walls.length === 4 && A.posts.length + B.posts.length + A.cornerPosts.length + B.cornerPosts.length === 0,
+      JSON.stringify({ walls: [A.walls.length, B.walls.length], posts: [A.posts.length, B.posts.length] }));
+    const oA = A.walls.find((w) => w.mx[2] - w.mn[2] > 10), oB = B.walls.find((w) => w.mx[0] - w.mn[0] > 10);
+    ok("J2: the side wall's outer wall runs z 0..24.15 at u 14; the end wall's runs u -6..13.85 at z 24, both from the ground to the 7 ft edge",
+      !!oA && near(oA.mn[2], 0, 0.002) && near(oA.mx[2], 24.15, 0.002) && near(ctr(oA)[0], 14, 0.002) && !!oB && near(oB.mn[0], -6, 0.002) && near(oB.mx[0], 13.85, 0.002) && near(ctr(oB)[2], 24, 0.002)
+        && [oA, oB].every((w) => near(w.mn[1], 0) && near(w.mx[1], 7)), JSON.stringify([oA, oB]));
+    const cb = [...A.cornerBoards, ...B.cornerBoards];
+    ok("J2: one corner board at the outer corner (14, 24), and the free ends keep theirs (one each)",
+      cb.length === 1 && near(ctr(cb[0])[0], 14, 0.01) && near(ctr(cb[0])[2], 24, 0.01) && A.boards.length === 1 && B.boards.length === 1, JSON.stringify({ cb, a: A.boards, b: B.boards }));
+    ok("J2: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
+    await aimShot(page, "__ss3dEngine", join(SHOTS, "j2-joined-enclosed-pair.png"), jEye(30, 15, 38), jEye(7, 4, 14));
+    await page.close();
+  } catch (e) { ok("J2: ran", false, e && e.stack); }
+
+  // J3: a near-miss (the front one's drop 3 in more) joins nothing, and each is built exactly as it is alone.
+  try {
+    const pair = await openCase(ctx, "Harness Near Miss", "12x16", jCase([{ wall: "right", widthFt: 8 }, { wall: "front", widthFt: 8, dropFt: 1.25 }]));
+    const sp = await pair.page.evaluate(SCENE, "__ss3dEngine");
+    await pair.page.close();
+    const a = await openCase(ctx, "Harness Right Alone", "12x16", jCase([{ wall: "right", widthFt: 8 }]));
+    const sa = await a.page.evaluate(SCENE, "__ss3dEngine");
+    await a.page.close();
+    const b = await openCase(ctx, "Harness Front Alone", "12x16", jCase([{ wall: "front", widthFt: 8, dropFt: 1.25 }]));
+    const sb = await b.page.evaluate(SCENE, "__ss3dEngine");
+    await b.page.close();
+    ok("J3: a 3 in difference in drop joins nothing: one near-miss at the front-right corner, by its outer edge",
+      !!sp.corners && sp.corners.joins.length === 0 && sp.corners.near.length === 1 && sp.corners.near[0].at === "front-right" && JSON.stringify(sp.corners.near[0].why) === '["drop"]' && near(sp.corners.near[0].d1, -0.25, 1e-9),
+      JSON.stringify(sp.corners));
+    const same = (x, y) => !!x && !!y && JSON.stringify(x.slab) === JSON.stringify(y.slab) && JSON.stringify(x.posts) === JSON.stringify(y.posts) && JSON.stringify(x.header) === JSON.stringify(y.header) && x.n === y.n && x.hips === 0;
+    ok("J3: …and each lean-to is built exactly as it is alone: its slab, posts and header to 1/1000 ft", same(sp.by["0"], sa.by["0"]) && same(sp.by["1"], sb.by["0"]),
+      JSON.stringify([sp.by["0"] && sp.by["0"].slab, sa.by["0"] && sa.by["0"].slab, sp.by["1"] && sp.by["1"].slab, sb.by["0"] && sb.by["0"].slab]));
+    ok("J3: zero page errors", [pair, a, b].every((x) => x.errors.length === 0), JSON.stringify([...pair.errors, ...a.errors, ...b.errors].slice(0, 3)));
+  } catch (e) { ok("J3: ran", false, e && e.stack); }
+
+  // J4: a wrap round three sides: left, front and right, each 8 ft. The front one joins at both its ends;
+  // its posts stand only between the two corner posts.
+  try {
+    const { page, errors } = await openCase(ctx, "Harness Wrap Three Sides", "12x16", jCase([{ wall: "left", widthFt: 8 }, { wall: "front", widthFt: 8 }, { wall: "right", widthFt: 8 }]));
+    const m = await page.evaluate(JOINED, "__ss3dEngine");
+    const js = m.corners ? m.corners.joins : [];
+    ok("J4: two joins, front-left and front-right, the front lean-to joined at both its ends",
+      js.length === 2 && JSON.stringify(js.map((x) => [x.at, x.i, x.j])) === JSON.stringify([["front-left", 0, 1], ["front-right", 2, 1]]) && JSON.stringify(m.corners.ends["1"]) === JSON.stringify({ a0: 0, a1: 1 }),
+      JSON.stringify(m.corners && { joins: js.map((x) => [x.at, x.i, x.j]), ends: m.corners.ends }));
+    const F = m.by["1"], cps = [...m.by["0"].cornerPosts, ...m.by["2"].cornerPosts, ...F.cornerPosts];
+    ok("J4: two corner posts, at (-14, 24) and (14, 24)", cps.length === 2 && cps.some((p) => near(ctr(p)[0], -14, 0.2) && near(ctr(p)[2], 24, 0.2)) && cps.some((p) => near(ctr(p)[0], 14, 0.2) && near(ctr(p)[2], 24, 0.2)),
+      JSON.stringify(cps.map(ctr)));
+    ok("J4: the front one's own posts only between them (3 across the 28 ft, 7 ft apart), its header from one side header's inner face to the other's",
+      F.posts.length === 3 && F.posts.every((p) => ctr(p)[0] > -13.5 && ctr(p)[0] < 13.5 && near(ctr(p)[2], 24)) && F.headers.length === 1 && near(F.headers[0].mn[0], -13.825, 0.002) && near(F.headers[0].mx[0], 13.825, 0.002),
+      JSON.stringify({ posts: F.posts.map((p) => f3(ctr(p)[0])), hdr: F.headers }));
+    ok("J4: two hip caps, two strips each", [m.by["0"], F, m.by["2"]].reduce((t, g) => t + g.hips.length, 0) === 4);
+    const crosses = js.map((J) => {
+      const side = m.by[String(J.i)], end = m.by[String(J.j)];
+      // The end-wall slab is cut at both its ends, each by its own hip: measure it only near this corner.
+      const nearC = (v) => J.dir * (v[0] - J.uC) > -2;
+      return [Math.max(...side.slab.filter(nearC).map((v) => hipSide(J, v))), Math.max(...end.slab.filter(nearC).map((v) => -hipSide(J, v)))];
+    });
+    ok("J4: at each corner each slab stays on its own side of that corner's hip", crosses.every(([x, y]) => x <= 0.005 && y <= 0.005), JSON.stringify(crosses));
+    ok("J4: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
+    await aimShot(page, "__ss3dEngine", join(SHOTS, "j4-wrap-three-sides.png"), jEye(-4, 22, 46), jEye(0, 3, 12));
+    await aimShot(page, "__ss3dEngine", join(SHOTS, "j4-wrap-three-sides-left.png"), jEye(-34, 16, 36), jEye(-3, 4, 12));
+    await page.close();
+  } catch (e) { ok("J4: ran", false, e && e.stack); }
+
+  // J6: a projecting porch on the front, and a joined pair at the back-right corner: built with no errors.
+  try {
+    const { page, errors } = await openCase(ctx, "Harness Joined With Porch", "12x16", jCase([{ wall: "right", widthFt: 8 }, { wall: "back", widthFt: 8 }], { porchOutFt: 6, porchEnd: "front" }));
+    const m = await page.evaluate(JOINED, "__ss3dEngine");
+    ok("J6: a projecting porch and a pair joined at the back-right corner build together", m.porch && !!m.corners && m.corners.joins.length === 1 && m.corners.joins[0].at === "back-right",
+      JSON.stringify(m.corners && m.corners.joins.map((x) => x.at)));
+    ok("J6: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
+    await aimShot(page, "__ss3dEngine", join(SHOTS, "j6-porch-and-joined-pair.png"), jEye(30, 16, -22), jEye(4, 3, 4));
+    await page.close();
+  } catch (e) { ok("J6: ran", false, e && e.stack); }
+
+  // J5: the Advanced page says it on both cards; a drop changed by 3 in turns the words into a near-miss with
+  // the number, on both.
+  const { c, page, errors } = await openPortal("/portal/advanced");
+  try {
+    await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
+    await page.locator('[data-ss-adv-sec="leanto"]').click();
+    await settle(page, 300);
+    await page.locator('[data-ss-adv-f="leanToAdd"]').click();
+    await panelWait(page, "(M) => !!(M.leanTos && M.leanTos.length === 1)");
+    await page.locator('[data-ss-adv-f="leanToAdd"]').click();
+    await panelWait(page, "(M) => !!(M.leanTos && M.leanTos.length === 2)");
+    await segIn(page, 1, "Wall", "Front").click();
+    await panelWait(page, "(M) => !!(M.leanToCorners && M.leanToCorners.joins.length === 1)");
+    await settle(page, 300);
+    const words = async (i) => (await card(page, i).locator("[data-ss-leanto-corner]").allInnerTexts()).map((t) => t.replace(/ /g, " ").trim());
+    const kinds = async (i) => card(page, i).locator("[data-ss-leanto-corner]").evaluateAll((els) => els.map((e) => e.getAttribute("data-ss-leanto-corner")));
+    const w0 = await words(0), w1 = await words(1);
+    ok("J5: both cards say they meet, around the front-right corner",
+      JSON.stringify(w0) === JSON.stringify(["Meets lean-to 2 around the front-right corner: one roof, a hip and one corner post."])
+        && JSON.stringify(w1) === JSON.stringify(["Meets lean-to 1 around the front-right corner: one roof, a hip and one corner post."])
+        && JSON.stringify(await kinds(0)) === '["joined"]' && JSON.stringify(await kinds(1)) === '["joined"]', JSON.stringify({ w0, w1 }));
+    await card(page, 1).scrollIntoViewIfNeeded();
+    await settle(page, 400);
+    console.log("aim", JSON.stringify(await aimDock(page, [0.9, 0.6, 1], [3, 3, 4])));
+    await settle(page, 300);
+    await page.evaluate(() => window.__ss3dPanel.render());
+    await page.screenshot({ path: join(SHOTS, "j5-advanced-joined.png") });
+    await typeIn(page, 1, "Outer edge drop (ft)", 1.25);
+    await panelWait(page, "(M) => !!(M.leanToCorners && M.leanToCorners.joins.length === 0 && M.leanToCorners.near.length === 1)");
+    await settle(page, 300);
+    const n0 = await words(0), n1 = await words(1);
+    ok("J5: a drop 3 in more on lean-to 2: the joined words are gone, and each card says by how much the other differs",
+      JSON.stringify(n0) === JSON.stringify(["Lean-to 2 also reaches the front-right corner, but its outer edge is 3\" lower, so the two roofs run past each other. Give both the same width, the same height at the wall and the same outer-edge height to run one roof around it."])
+        && JSON.stringify(n1) === JSON.stringify(["Lean-to 1 also reaches the front-right corner, but its outer edge is 3\" higher, so the two roofs run past each other. Give both the same width, the same height at the wall and the same outer-edge height to run one roof around it."])
+        && JSON.stringify(await kinds(0)) === '["near"]', JSON.stringify({ n0, n1 }));
+    await typeIn(page, 1, "Outer edge drop (ft)", 1);
+    await panelWait(page, "(M) => !!(M.leanToCorners && M.leanToCorners.joins.length === 1)");
+    ok("J5: …and set back to 1 ft they meet again", (await page.locator('[data-ss-leanto-corner="joined"]').count()) === 2);
+    ok("J5: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
+  } catch (e) { ok("J5: ran", false, e && e.stack); await page.screenshot({ path: join(SHOTS, "j5-failure.png") }).catch(() => {}); }
+  await c.close();
+}
+
+// ── M · A LEAN-TO THAT MEETS THE PORCH (d3PorchJoins, 2026-10-05) ──────────────────────────────────────────
+// 12x16, front a gable end, a projecting porch across it 8 ft deep, hung at 7' 6" and asked 2 in 12 (which the 6 ft
+// under its beam lowers to about 1.15 in 12). Each lean-to's boxes are set to what its card says matches the porch
+// (d3LeanTosReadout's porchCorner.fix). In the building's frame the front-right corner is (6, 8): s out from the
+// right wall along x, d out from the front wall along z, f = d - s (+ the porch's side of the hip).
+const M_ROOF = { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6, eave: "fascia", porchOutFt: 8, porchAttachFt: 7.5, porchPitch: 2 / 12 };
+const mCase = (leanTos) => {
+  const d3 = { roof: { ...M_ROOF, leanTos }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" };
+  const rs = purePorch().d3LeanTosReadout(d3, "12x16") || [];
+  return { ...d3, roof: { ...d3.roof, leanTos: leanTos.map((e, i) => {
+    const f = rs[i] && rs[i].porchCorner && rs[i].porchCorner.fix;
+    return f ? { ...e, attach: f.attach || undefined, attachFt: f.attach ? f.attachFt : undefined, dropFt: f.dropFt } : e;
+  }) } };
+};
+// Every lean-to member and the porch's sheet and posts, in the corner's frame, against the roof plane the two share
+// (T(t) = Y0 - pitch * t, t the distance out from each one's own wall): its highest point over that plane.
+const MEETS = (engine) => {
+  const E = window[engine], M = E.model, V = E.camera.position.constructor;
+  E.scene.updateMatrixWorld(true);
+  const J = M.leanToPorch && M.leanToPorch.joins[0];
+  if (!J) return { J: null, ltp: M.leanToPorch ? JSON.parse(JSON.stringify(M.leanToPorch)) : null };
+  const Y0 = J.hip[0][2], p = J.pitch;
+  const fr = (v) => ({ s: v.x - 6, d: v.z - 8 });
+  const rng = (o, own) => {
+    const r = { s: [Infinity, -Infinity], d: [Infinity, -Infinity], y: [Infinity, -Infinity], f: [Infinity, -Infinity], over: -Infinity };
+    const pos = o.geometry.attributes.position, v = new V();
+    for (let k = 0; k < pos.count; k++) {
+      v.fromBufferAttribute(pos, k).applyMatrix4(o.matrixWorld);
+      const { s, d } = fr(v);
+      [["s", s], ["d", d], ["y", v.y], ["f", d - s]].forEach(([key, x]) => { r[key][0] = Math.min(r[key][0], x); r[key][1] = Math.max(r[key][1], x); });
+      if (own) r.over = Math.max(r.over, v.y - (Y0 - p * own(v)));
+    }
+    return r;
+  };
+  const by = {};
+  let sheet = null;
+  M.root.traverse((q) => {
+    if (!q.isMesh || !q.userData) return;
+    const u = q.userData;
+    if (u.ssPorchPart === "slab") sheet = rng(q, (v) => fr(v).d);
+    if (u.ssLeanTo === undefined) return;
+    const g = by[u.ssLeanTo] || (by[u.ssLeanTo] = { slab: null, hips: [], posts: [], corner: [], headers: [], walls: [], boards: [] });
+    // Each lean-to's own distance out from its wall: the right one along +x, the back one along -z.
+    const own = u.ssLeanTo === 0 ? (v) => fr(v).s : (v) => -8 - v.z;
+    if (u.ssLeanToHip) g.hips.push({ of: u.ssLeanToHip, ...rng(q) });
+    else if (u.ssLeanToSlab) g.slab = rng(q, own);
+    else if (u.ssLeanToPost) (u.ssLeanToCorner ? g.corner : g.posts).push(rng(q));
+    else if (u.ssLeanToWall) g.walls.push(rng(q));
+    else if (u.ssLeanToStand) (u.ssLeanToCorner ? g.corner : g.boards).push(rng(q));
+    else g.headers.push(rng(q));
+  });
+  const joinPosts = [];
+  M.root.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssPorchPart === "joinCorner") joinPosts.push(rng(q)); });
+  return { J: JSON.parse(JSON.stringify(J)), ltp: JSON.parse(JSON.stringify(M.leanToPorch)), lc: M.leanToCorners ? JSON.parse(JSON.stringify(M.leanToCorners)) : null,
+    by, sheet, joinPosts, porch: { dPost: M.porch.dPost, hdrTop: M.porch.hdrTop, yHigh: M.porch.yHigh, join: M.porch.join || null } };
+};
+const mid = (r, k) => (r[k][0] + r[k][1]) / 2;
+if (want("M")) {
+  // M1: open, as wide as the porch is deep.
+  try {
+    const { page, errors } = await openCase(ctx, "Harness Meets Porch", "12x16", mCase([{ wall: "right", widthFt: 8, meetPorch: true }]));
+    const m = await page.evaluate(MEETS, "__ss3dEngine");
+    const J = m.J, A = m.by["0"];
+    ok("M1: the right lean-to meets the porch at the front-right corner", !!J && m.ltp.joins.length === 1 && J.at === "front-right" && J.i === 0 && J.js === 1 && JSON.stringify(m.porch.join) === '[{"i":0,"at":"front-right","js":1}]',
+      JSON.stringify(m.ltp));
+    if (!J) throw new Error("no join");
+    ok("M1: its slab stays on its side of the hip, and stops on the porch's front edge (8.3 ft out, before its own 8.6)", !!A.slab && A.slab.f[1] <= 0.005 && near(A.slab.d[1], J.eP, 0.005),
+      A.slab && JSON.stringify({ f: A.slab.f.map(f3), d: A.slab.d.map(f3) }));
+    ok("M1: its top and the porch sheet's lie on the one roof plane they share (the lean-to rebuilt the porch's way): no point over it, both touching it",
+      !!A.slab && !!m.sheet && Math.abs(A.slab.over) < 0.002 && Math.abs(m.sheet.over) < 0.002, JSON.stringify({ lean: A.slab && f3(A.slab.over), porch: m.sheet && f3(m.sheet.over) }));
+    ok("M1: its posts run along its outer line (8 ft out) from its free end to short of the porch's corner post: 3, up to its edge",
+      A.posts.length === 3 && A.posts.every((q) => near(mid(q, "s"), 8, 0.01) && q.d[1] < J.dPost - 1 && near(q.y[1], J.y1, 0.002)) && A.corner.length === 0,
+      JSON.stringify(A.posts.map((q) => [f3(mid(q, "s")), f3(mid(q, "d")), f3(q.y[1])])));
+    ok("M1: one corner post, the porch's, where the two posts' lines cross (8, 7.77)", m.joinPosts.length === 1 && near(mid(m.joinPosts[0], "s"), 8, 0.005) && near(mid(m.joinPosts[0], "d"), J.dPost, 0.005),
+      JSON.stringify(m.joinPosts.map((q) => [f3(mid(q, "s")), f3(mid(q, "d"))])));
+    ok("M1: its header runs level along its outer line, from its free end to the porch header's inner face (7.625), its top at its edge",
+      A.headers.length === 1 && near(A.headers[0].d[0], -16, 0.005) && near(A.headers[0].d[1], J.hdrIn, 0.005) && near(A.headers[0].y[1], J.y1, 0.002),
+      JSON.stringify(A.headers.map((q) => ({ d: q.d.map(f3), y: q.y.map(f3) }))));
+    ok("M1: its half of the hip's cap, tagged [0, \"porch\"]", A.hips.length === 1 && JSON.stringify(A.hips[0].of) === '[0,"porch"]' && A.hips[0].f[1] <= 0.06 * Math.SQRT2 + 0.005, JSON.stringify(A.hips));
+    ok("M1: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
+    await aimShot(page, "__ss3dEngine", join(SHOTS, "m1-meets-porch.png"), [30, 15, 30], [7, 4.5, 9]);
+    await aimShot(page, "__ss3dEngine", join(SHOTS, "m1-meets-porch-corner.png"), [21, 10, 22], [11, 6, 12]);
+    await page.close();
+  } catch (e) { ok("M1: ran", false, e && e.stack); }
+
+  // M2: 5 ft wide, the porch the deeper: the header level to the hip, then down the porch roof's slope.
+  try {
+    const { page, errors } = await openCase(ctx, "Harness Meets Porch Narrow", "12x16", mCase([{ wall: "right", widthFt: 5, meetPorch: true }]));
+    const m = await page.evaluate(MEETS, "__ss3dEngine");
+    const J = m.J, A = m.by["0"];
+    ok("M2: joined, the lean-to's eave (5.6 ft out) before the porch's front edge (8.3)", !!J && J.eL < J.eP && near(A.slab.f[1], 0, 0.005) && near(A.slab.d[1], J.eL, 0.03), J && JSON.stringify({ eL: J.eL, eP: J.eP, d: A.slab.d }));
+    const lvl = A.headers.find((q) => q.y[1] - q.y[0] < 0.51), slope = A.headers.find((q) => q.y[1] - q.y[0] >= 0.51);
+    ok("M2: its header level to where the hip crosses its outer line (5 ft out), then a piece down the porch roof's slope to the porch's header (7.625)",
+      A.headers.length === 2 && !!lvl && near(lvl.d[1], 5, 0.005) && !!slope && near(slope.d[1], J.hdrIn, 0.005) && slope.y[1] < lvl.y[1] + 0.001 && near(slope.y[0], J.y1 - J.pitch * (J.hdrIn - 5) - 0.5 * Math.cos(Math.atan(J.pitch)), 0.002),
+      JSON.stringify(A.headers.map((q) => ({ d: q.d.map(f3), y: q.y.map(f3) }))));
+    ok("M2: ...and it stays under the porch's ceiling there (its top under the porch roof plane by at least the roof's thickness)",
+      !!slope && slope.y[1] <= J.hip[0][2] - J.pitch * 5 - 0.16, JSON.stringify(slope));
+    ok("M2: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
+    await aimShot(page, "__ss3dEngine", join(SHOTS, "m2-meets-porch-narrow.png"), [28, 13, 30], [6, 5, 10]);
+    await page.close();
+  } catch (e) { ok("M2: ran", false, e && e.stack); }
+
+  // M3: enclosed, it keeps all its walls; a header runs from its corner board to the corner post.
+  try {
+    const { page, errors } = await openCase(ctx, "Harness Meets Porch Enclosed", "12x16", mCase([{ wall: "right", widthFt: 8, enclosed: true, meetPorch: true }]));
+    const m = await page.evaluate(MEETS, "__ss3dEngine");
+    const J = m.J, A = m.by["0"];
+    ok("M3: joined, with all three of its walls and both corner boards, on the ground", !!J && A.walls.length === 3 && A.boards.length === 2 && A.posts.length === 0, JSON.stringify({ walls: A.walls.length, boards: A.boards.length, posts: A.posts.length }));
+    ok("M3: its outer wall stops at the porch's wall line, under its roof", A.walls.some((w) => near(w.d[1], 0, 0.005) && w.y[1] <= J.y1 + 0.002 + 1e-6),
+      JSON.stringify(A.walls.map((w) => ({ d: w.d.map(f3), y: w.y.map(f3) }))));
+    ok("M3: a header from its corner board's outer face (0.03 ft past the wall line) on to the porch header's inner face",
+      A.headers.length === 1 && near(A.headers[0].d[0], 0.03, 0.005) && near(A.headers[0].d[1], J.hdrIn, 0.005) && near(A.headers[0].y[1], J.y1, 0.002), JSON.stringify(A.headers));
+    ok("M3: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
+    await aimShot(page, "__ss3dEngine", join(SHOTS, "m3-meets-porch-enclosed.png"), [30, 15, 30], [7, 4.5, 9]);
+    await page.close();
+  } catch (e) { ok("M3: ran", false, e && e.stack); }
+
+  // M4: a wrap round the back too: the right lean-to meets the porch, and a back one (the same numbers) meets it
+  // round the back-right corner. Both on the porch roof's plane, and so is their corner post.
+  try {
+    // The back one with the right one's numbers, which the card set to match the porch.
+    const right = mCase([{ wall: "right", widthFt: 8, meetPorch: true }]);
+    const { meetPorch: _m, ...back } = right.roof.leanTos[0];
+    const { page, errors } = await openCase(ctx, "Harness Meets Porch And Back", "12x16", { ...right, roof: { ...right.roof, leanTos: [right.roof.leanTos[0], { ...back, wall: "back" }] } });
+    const m = await page.evaluate(MEETS, "__ss3dEngine");
+    const J = m.J, A = m.by["0"], B = m.by["1"];
+    ok("M4: the porch join at the front-right, and the two lean-tos joined at the back-right", !!J && !!m.lc && m.lc.joins.length === 1 && m.lc.joins[0].at === "back-right" && J.at === "front-right",
+      JSON.stringify({ porch: J && J.at, lc: m.lc && m.lc.joins.map((x) => x.at) }));
+    ok("M4: both lean-tos' tops on the porch roof's plane", !!A.slab && !!B.slab && Math.abs(A.slab.over) < 0.002 && Math.abs(B.slab.over) < 0.002, JSON.stringify({ a: A.slab && f3(A.slab.over), b: B.slab && f3(B.slab.over) }));
+    const cp = [...A.corner, ...B.corner];
+    ok("M4: their corner post at the back-right stands up to the edge both share (the porch's plane, 8 ft out)", cp.length === 1 && near(cp[0].y[1], J.y1, 0.002), JSON.stringify(cp.map((q) => q.y.map(f3))));
+    ok("M4: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
+    await aimShot(page, "__ss3dEngine", join(SHOTS, "m4-meets-porch-and-back.png"), [30, 16, -24], [6, 5, -2]);
+    await page.close();
+  } catch (e) { ok("M4: ran", false, e && e.stack); }
+
+  // M5: the Advanced page.
+  const { c, page, errors, calls } = await openPortal("/portal/advanced");
+  try {
+    await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
+    // A projecting porch across the front, 8 ft deep, its roof hung at 7' 6" at 1 in 12 (which leaves 6 ft under its beam).
+    await page.locator('[data-ss-adv-sec="porch"]').click();
+    await settle(page, 300);
+    await page.locator('[data-ss-adv-f="porchKind"] [data-ss-adv-tile="projecting"]').click();
+    await settle(page, 300);
+    for (const [label, v] of [["Depth (ft)", 8], ["Roof meets the wall at (ft up)", 7.5], ["Porch roof pitch", 1]]) {
+      const b = page.getByLabel(label, { exact: true });
+      await b.fill(String(v)); await b.press("Tab"); await settle(page, 250);
+    }
+    await panelWait(page, "(M) => !!(M.porch && Math.abs(M.porch.yHigh - 7.5) < 1e-9)");
+    await settle(page, 300);
+    const ro0 = (await page.locator('[data-ss-adv-readout="porch"]').innerText()).replace(/ /g, " ");
+    // A lean-to on the right, 8 ft out, meeting at the eave.
+    await page.locator('[data-ss-adv-sec="leanto"]').click();
+    await settle(page, 300);
+    await page.locator('[data-ss-adv-f="leanToAdd"]').click();
+    await panelWait(page, "(M) => !!(M.leanTos && M.leanTos.length === 1 && M.leanToPorch)");
+    const seg = card(page, 0).locator('[data-ss-adv-f="leanToMeetPorch"]');
+    ok("M5: the card of a lean-to that reaches the porch's corner offers \"Meet the porch\", off", (await seg.count()) === 1
+      && /It reaches the front-right corner of the porch's wall./.test(await seg.innerText()) && (await segIn(page, 0, "At the porch", "Runs past it").getAttribute("aria-pressed")) === "true",
+      await seg.innerText().catch(() => ""));
+    await segIn(page, 0, "At the porch", "Meet the porch").click();
+    await panelWait(page, "(M) => !!(M.leanToPorch && M.leanToPorch.near.length === 1 && M.leanToPorch.near[0].asked)");
+    await settle(page, 300);
+    const nearT = (await card(page, 0).locator('[data-ss-leanto-porch="near"]').innerText()).replace(/ /g, " ");
+    const fix = /pick "On the wall", set "How far down the wall" to ([\d.]+) and "Outer edge drop" to ([\d.]+)\./.exec(nearT);
+    // The porch's height is its roof's top (7' 6", as its own card says); a lean-to's is its slab's underside, so the
+    // height it meets its wall at to match is 7' 6" over the wall's line less the slab there: 7' 3.75".
+    ok("M5: asked, it says what differs and by how much, and what to type", /^The porch roof meets the wall at 7' 6" and builds 1 in 12\. A lean-to's height is its roof's underside, so to run one roof with it this one meets its wall at 7'3\.75"\. This lean-to meets its wall 8\.25" higher than that, and its outer edge is 4\.25" higher than the porch roof's slope puts it, so the two roofs run past each other\. To run one roof around it, pick "On the wall"/.test(nearT) && !!fix && fix[1] === "0.69" && fix[2] === "1.35",
+      nearT);
+    await page.screenshot({ path: join(SHOTS, "m5-advanced-near.png") });
+    await segIn(page, 0, "Meets the building", "On the wall").click();
+    await settle(page, 300);
+    await typeIn(page, 0, "How far down the wall (ft)", fix ? fix[1] : 0.69);
+    await typeIn(page, 0, "Outer edge drop (ft)", fix ? fix[2] : 1.35);
+    await panelWait(page, "(M) => !!(M.leanToPorch && M.leanToPorch.joins.length === 1)");
+    await settle(page, 300);
+    const joinedT = (await card(page, 0).locator('[data-ss-leanto-porch]').allInnerTexts()).map((t) => t.replace(/ /g, " "));
+    ok("M5: typed as it says, the two meet: one roof round the front-right corner", JSON.stringify(joinedT) === JSON.stringify(["Meets the porch around the front-right corner: one roof with a hip, and one corner post."])
+      && (await card(page, 0).locator('[data-ss-leanto-porch="joined"]').count()) === 1, JSON.stringify(joinedT));
+    await card(page, 0).scrollIntoViewIfNeeded();
+    await settle(page, 300);
+    await aimDock(page, [0.9, 0.55, 1], [4, 3, 6]);
+    await settle(page, 300);
+    await page.evaluate(() => window.__ss3dPanel.render());
+    await page.screenshot({ path: join(SHOTS, "m5-advanced-joined.png") });
+    await page.locator('[data-ss-adv-sec="porch"]').click();
+    await settle(page, 300);
+    const pm = (await page.locator("[data-ss-porch-meets]").allInnerTexts()).map((t) => t.replace(/ /g, " "));
+    ok("M5: the porch's card says who meets it", pm.length === 1 && /^Lean-to 1 meets it around the front-right corner: one roof with a hip./.test(pm[0]), JSON.stringify(pm));
+    const ro = (await page.locator('[data-ss-adv-readout="porch"]').innerText()).replace(/ /g, " ");
+    ok("M5: ...and its readout, \"or a little lower\" before (the main roof's edge could push it down), is now its exact height", /roof meets the wall at 7' 6" or a little lower/.test(ro0) && /roof meets the wall at 7' 6"/.test(ro) && !/a little lower/.test(ro), JSON.stringify([ro0, ro]));
+    await page.locator('[data-ss-adv-sec="leanto"]').click();
+    await settle(page, 300);
+    // Save carries the ask on the lean-to.
+    await page.getByLabel("New style name").fill("Harness Meets Porch");
+    await page.getByRole("button", { name: "Save as a new style" }).click();
+    const t0 = Date.now();
+    while (!calls.some((x) => x.action === "save_style_d3") && Date.now() - t0 < 20000) await settle(page, 200);
+    const sd = calls.find((x) => x.action === "save_style_d3");
+    const lts = sd && sd.body.d3 && sd.body.d3.roof && sd.body.d3.roof.leanTos;
+    ok("M5: Save sends the lean-to with meetPorch: true", !!lts && lts.length === 1 && lts[0].meetPorch === true && lts[0].attach === "wall", JSON.stringify(lts));
+    // "Runs past it" takes the key off: no join, and the card says it would match.
+    await segIn(page, 0, "At the porch", "Runs past it").click();
+    await panelWait(page, "(M) => !!(M.leanToPorch && M.leanToPorch.joins.length === 0)");
+    await settle(page, 300);
+    const offT = (await card(page, 0).locator("[data-ss-leanto-porch]").allInnerTexts()).map((t) => t.replace(/ /g, " "));
+    ok("M5: \"Runs past it\" takes the ask off: no join, and the card says it already matches",
+      JSON.stringify(offT) === JSON.stringify(["It already matches the porch at the front-right corner. Pick \"Meet the porch\" to run one roof around it."]), JSON.stringify(offT));
+    // A second lean-to, on the left: offered "Meet the porch" while it could meet it; set up the roof, where it never
+    // can, it is not offered at all.
+    await page.locator('[data-ss-adv-f="leanToAdd"]').click();
+    await panelWait(page, "(M) => !!(M.leanTos && M.leanTos.length === 2)");
+    await settle(page, 300);
+    const seg1 = () => card(page, 1).locator('[data-ss-adv-f="leanToMeetPorch"]');
+    const offered = await seg1().count();
+    await segIn(page, 1, "Meets the building", "On the roof").click();
+    await panelWait(page, "(M) => !!(M.leanTos && M.leanTos[1] && M.leanTos[1].mode === 'roof')");
+    await settle(page, 300);
+    const after = await seg1().count();
+    ok("M5: a second lean-to on the left is offered \"Meet the porch\"; up the roof, where it never can, it is not", offered === 1 && after === 0, JSON.stringify({ offered, after }));
+    ok("M5: zero page errors", errors.length === 0, JSON.stringify(errors.slice(0, 3)));
+  } catch (e) { ok("M5: ran", false, e && e.stack); await page.screenshot({ path: join(SHOTS, "m5-failure.png") }).catch(() => {}); }
+  await c.close();
 }
 
 await browser.close();

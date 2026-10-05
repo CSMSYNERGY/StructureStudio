@@ -584,6 +584,25 @@ Deno.test("⚠️ 'What we drew' says a wing list in one sentence from the massi
   assert(!/lower wing/i.test(porch), porch);
 });
 
+// WING ROOFS THAT MEET AT A CORNER (roof.wingCornersMeet, 2026-10-05): the corners the massing joined, said after
+// the list's sentence, as built; a near-miss is drawn as before and says nothing more.
+Deno.test("'What we drew' names the corners a wing list's roofs run around, as built", () => {
+  const roof = { type: "gable", pitch: 0.5, centerEaveFt: 17, wingCornersMeet: true,
+    wingList: [{ wall: "left", widthFt: 8 }, { wall: "right", widthFt: 8 }, { wall: "front", widthFt: 8 }] };
+  const built = (joins: string[], near: string[] = []) => ({ Hc: 17, list: true, wings: [{}, {}], ends: [{}],
+    corners: { joins: joins.map((name) => ({ name })), near: near.map((name) => ({ name, why: ["width"] })) } });
+  assertEquals(F.ssDrewWords({ roof }, null, undefined, built(["front-left", "front-right"])),
+    "3 wings, set on the Advanced page, with the middle section's walls at 17 ft. Their roofs run around the front-left and front-right corners as one, with a hip.");
+  assertEquals(F.ssDrewWords({ roof }, null, undefined, built(["front-right"], ["front-left"])),
+    "3 wings, set on the Advanced page, with the middle section's walls at 17 ft. Their roofs run around the front-right corner as one, with a hip.");
+  assertEquals(F.ssDrewWords({ roof }, null, undefined, built(["back-left", "back-right", "front-left"])),
+    "3 wings, set on the Advanced page, with the middle section's walls at 17 ft. Their roofs run around the back-left, back-right and front-left corners as one, with a hip.");
+  // A near-miss only, or no corners at all (the switch off): the list's sentence alone.
+  for (const b of [built([], ["front-left"]), { Hc: 17, list: true, wings: [{}, {}], ends: [{}] }]) {
+    assertEquals(F.ssDrewWords({ roof }, null, undefined, b), "3 wings, set on the Advanced page, with the middle section's walls at 17 ft.");
+  }
+});
+
 // ⚠️ An edit to the wing list is an edit to the roof: it clears an unfixed roof "No" (calQuestionSig).
 Deno.test("⚠️ the roof question's slice holds the wing list", () => {
   const [a, b] = ["  const calQuestionSig = (key) => {", "  // ⚠️ ANSWERED IS NOT AGREED."];
@@ -597,6 +616,7 @@ Deno.test("⚠️ the roof question's slice holds the wing list", () => {
     ["a wing added on a wing", one, { ...base, roof: { ...roof, wingList: [{ wall: "left", widthFt: 8 }, { wall: "left", widthFt: 6 }] } }],
     ["a wing's width changed", one, { ...base, roof: { ...roof, wingList: [{ wall: "left", widthFt: 7 }] } }],
     ["the list taken off", one, base],
+    ["the corners switch turned on", one, { ...base, roof: { ...roof, wingList: [{ wall: "left", widthFt: 8 }], wingCornersMeet: true } }],
   ] as const) {
     assert(sig(from, "roof") !== sig(to, "roof"), `${what}: the roof's slice moves`);
     for (const k of ["porch", "walls", "colours"]) assertEquals(sig(from, k), sig(to, k), `${what}: the ${k} question's slice does not`);

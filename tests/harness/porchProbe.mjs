@@ -51,6 +51,18 @@
 //      footprint's edge, inside the opening and clear of every post, on the grass, climbing a raised
 //      floor's whole height; centre steps on an even eave count add a bay (d3RecessedPorchFrame); a
 //      ramp run out over them hides them, and a live rebuild without it brings them back
+//  19. A LEAN-TO THAT MEETS THE PORCH (roof.leanTos[i].meetPorch, d3PorchJoins, 2026-10-05; cases PJ*): the
+//      porch is built from its readout's numbers (never lowered by the scan), and on the joined side its sheet,
+//      ceiling, board and drip run on to the lean-to's eave and stop on the hip; that side's cheek, corner fill
+//      and rake trim are gone; the header runs on to one corner post where the two posts' lines cross (down the
+//      lean-to's slope past the hip), on the ground; a hip rafter, jack rafters and the cap's half on the sheet;
+//      a rake trim along the lean-to's eave line where the porch is the deeper. Front gable end and an eave wall,
+//      the lean-to narrower and wider. Asked but a hair off, nothing at all changes (PJ5). Hung under its own rule
+//      (no attach) at a 0.6 and a 1 ft overhang, the main roof's eave corners hold it at the height the scan builds
+//      it at unjoined (PJ6, PJ7). Every joined porch is tucked under everything else on the roof: no vertex of it
+//      inside the porch's sheet, ceiling, board or drip, and its ceiling never over what the scan still measures
+//      without the lean-tos it meets (model.porch.joinClear). A lower lean-to beside it on the other wall stops
+//      the join, said, and nothing changes (PJ8).
 //
 // The porch groups and bands are found by userData.ssPorch, and every member inside them by
 // userData.ssPorchPart, never by size or draw order: a 16x24's porch sheet is as big as a main roof
@@ -159,6 +171,43 @@ const STEP_CASES = [
   { id: "RRP", label: "Harness Recessed Steps Hidden", size: "16x24", wall: "south", steps: "center", recessed: true, posts: 2, place: true, at: 8, stepsHidden: true,
     d3: { roof: { type: "gable", pitch: 0.42, overhang: 0.8, eave: "fascia", porchDepthFt: 3, porchSteps: "center" }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal", foundation: "piers", floorHeightFt: 1.5 } },
 ];
+
+// 19. THE PORCH A LEAN-TO MEETS (d3PorchJoins, 2026-10-05). Each lean-to's boxes are set to what its card says
+// matches the porch (d3LeanTosReadout's porchCorner.fix), so each joins. sd places the corner in the world: s out
+// from the lean-to's wall along x, d out from the porch's wall along z (s = sx (x - cx), d = dz (z - cz)).
+const JOIN_BASE = { type: "gable", front: "gable", pitch: 0.4, overhang: 0.6, eave: "fascia", porchOutFt: 8, porchAttachFt: 7.5, porchPitch: 2 / 12 };
+const JOIN_CASES = [
+  // The porch 8 ft deep (its front edge 8.3 ft out) and the lean-to 8 ft wide (its eave 8.6 ft out): the hip runs
+  // to the porch's front edge, and the header past the corner post's line slopes down the lean-to.
+  { id: "PJ1", label: "Harness Porch Meets Right", size: "12x16", H: 8, sd: { cx: 6, cz: 8, sx: 1, dz: 1 },
+    d3: { roof: { ...JOIN_BASE, leanTos: [{ wall: "right", widthFt: 8, meetPorch: true }] }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  // The lean-to 5 ft wide: the porch is the deeper, so its sheet runs on past the hip with a rake trim on it.
+  { id: "PJ2", label: "Harness Porch Meets Narrow", size: "12x16", H: 8, sd: { cx: 6, cz: 8, sx: 1, dz: 1 },
+    d3: { roof: { ...JOIN_BASE, leanTos: [{ wall: "right", widthFt: 5, meetPorch: true }] }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  // The porch on an EAVE wall (the front a long side): an end-wall lean-to meets it at the front-right corner.
+  { id: "PJ3", label: "Harness Eave Porch Meets End", size: "16x12", H: 9, sd: { cx: 8, cz: 6, sx: 1, dz: 1 },
+    d3: { roof: { ...JOIN_BASE, front: "eave", porchOutFt: 6, porchAttachFt: 8, porchPitch: 0.125, leanTos: [{ wall: "right", widthFt: 7, meetPorch: true }] }, siding: "lap", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
+  // A shallow porch (4 ft) on a back wall, a wide lean-to on the left: the lean-to is cut on the porch's front edge.
+  { id: "PJ4", label: "Harness Back Porch Meets Wide", size: "12x16", H: 9, sd: { cx: -6, cz: -8, sx: -1, dz: -1 },
+    d3: { roof: { ...JOIN_BASE, porchEnd: "back", porchOutFt: 4, porchAttachFt: 8.5, leanTos: [{ wall: "left", widthFt: 8, enclosed: true, meetPorch: true }] }, siding: "panel", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
+];
+// No attach: the porch under its own rule, just under the plate, where the main roof's eave and rake boards hang out
+// over its corners. Joined, its numbers take them (d3PorchEaveCornerCapFt): the height the scan builds it at unjoined.
+const { porchAttachFt: _hung, ...JOIN_FREE } = JOIN_BASE;
+JOIN_CASES.push(
+  { id: "PJ6", label: "Harness Porch Meets Under Eave", size: "12x16", H: 8, sd: { cx: 6, cz: 8, sx: 1, dz: 1 }, yHigh: 7.617,
+    d3: { roof: { ...JOIN_FREE, leanTos: [{ wall: "right", widthFt: 8, meetPorch: true }] }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  // A 1 ft overhang: the eave boards reach over both front corners, the one with no lean-to too.
+  { id: "PJ7", label: "Harness Porch Meets Wide Eave", size: "12x16", H: 8, sd: { cx: 6, cz: 8, sx: 1, dz: 1 }, yHigh: 7.469,
+    d3: { roof: { ...JOIN_FREE, overhang: 1, leanTos: [{ wall: "right", widthFt: 8, meetPorch: true }] }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+);
+// PJ5: asked, but its drop 3 in more than matches: the porch and the lean-to are built exactly as without the ask.
+const JOIN_MISS = { id: "PJ5", label: "Harness Porch Near Miss", size: "12x16", H: 8, sd: { cx: 6, cz: 8, sx: 1, dz: 1 }, off: 0.25, why: ["pitch"],
+  d3: { roof: { ...JOIN_BASE, leanTos: [{ wall: "right", widthFt: 8, meetPorch: true }] }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } };
+// PJ8: matched and asked, but a lean-to on the left wall, met a foot down with 2 ft of drop, runs its overhang out over
+// the porch's left end under the porch roof: the scan lowers the porch under it, so nothing meets the porch.
+const JOIN_EDGE = { id: "PJ8", label: "Harness Porch Edge Miss", size: "12x16", H: 8, sd: { cx: 6, cz: 8, sx: 1, dz: 1 }, why: ["edge"],
+  d3: { roof: { ...JOIN_FREE, leanTos: [{ wall: "right", widthFt: 8, meetPorch: true }, { wall: "left", widthFt: 8, attach: "wall", attachFt: 1, dropFt: 2 }] }, siding: "batten", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } };
 
 const configFor = (c) => {
   const [w, l] = c.size.split("x").map(Number);
@@ -630,6 +679,203 @@ async function shot(page, path, eye, at) {
   await page.screenshot({ path, clip });
 }
 
+// 19: every porch member and lean-to member in the corner's own frame (s, d, y and f = d - s, the side of the hip:
+// + the porch's, - the lean-to's), by its tag; and a digest of every porch and lean-to vertex, for PJ5.
+async function measureJoin(page, sd) {
+  return page.evaluate((sd) => {
+    const E = window.__ss3dEngine, M = E.model, V = E.camera.position.constructor;
+    E.scene.updateMatrixWorld(true);
+    const rng = (o) => {
+      const r = { s: [Infinity, -Infinity], d: [Infinity, -Infinity], y: [Infinity, -Infinity], f: [Infinity, -Infinity] };
+      const p = o.geometry.attributes.position, v = new V();
+      for (let k = 0; k < p.count; k++) {
+        v.fromBufferAttribute(p, k).applyMatrix4(o.matrixWorld);
+        const s = sd.sx * (v.x - sd.cx), d = sd.dz * (v.z - sd.cz);
+        [["s", s], ["d", d], ["y", v.y], ["f", d - s]].forEach(([key, x]) => { r[key][0] = Math.min(r[key][0], x); r[key][1] = Math.max(r[key][1], x); });
+      }
+      return r;
+    };
+    const parts = {}, lean = [];
+    let digest = "";
+    const dig = (o) => { const p = o.geometry.attributes.position, v = new V(); for (let k = 0; k < p.count; k++) { v.fromBufferAttribute(p, k).applyMatrix4(o.matrixWorld); digest += [v.x, v.y, v.z].map((c) => c.toFixed(4)).join(",") + ";"; } };
+    M.root.traverse((q) => {
+      if (!q.isMesh || !q.userData) return;
+      const u = q.userData;
+      if (u.ssPorchPart && !(q.parent && q.parent.userData && q.parent.userData.ssPorchPart === "steps")) {
+        (parts[u.ssPorchPart] = parts[u.ssPorchPart] || []).push({ ...rng(q), join: u.ssPorchJoin == null ? null : u.ssPorchJoin, buffer: q.geometry.type === "BufferGeometry" });
+        dig(q);
+      }
+      if (u.ssLeanTo !== undefined) {
+        lean.push({ tag: u.ssLeanTo, slab: !!u.ssLeanToSlab, hip: !!u.ssLeanToHip, post: !!u.ssLeanToPost, ...rng(q) });
+        dig(q);
+      }
+    });
+    // TUCKED: no vertex of anything else on the roof inside the porch's sheet, ceiling, front board or drip -- bar the
+    // lean-tos it meets, whose roofs it runs into on the hip. Each is a convex box, cut on the hip where it runs on, so
+    // a point is inside when it stands behind every face, by `depth`.
+    const meets = new Set(M.leanToPorch ? Object.keys(M.leanToPorch.ends).map(Number) : []);
+    const inPorch = (q) => { let n = q; while (n) { if (n.userData && n.userData.ssPorch) return true; n = n.parent; } return false; };
+    const holders = [];
+    M.root.traverse((q) => {
+      if (!q.isMesh || !q.userData || ["slab", "ceiling", "board", "drip"].indexOf(q.userData.ssPorchPart) < 0) return;
+      const p = q.geometry.attributes.position, idx = q.geometry.index, n = idx ? idx.count : p.count;
+      const at = (k) => new V().fromBufferAttribute(p, idx ? idx.getX(k) : k).applyMatrix4(q.matrixWorld);
+      const planes = [], lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity], mid = new V();
+      for (let t = 0; t + 2 < n; t += 3) {
+        const a = at(t), b = at(t + 1), c = at(t + 2);
+        [a, b, c].forEach((v) => { mid.add(v); [v.x, v.y, v.z].forEach((x, k) => { lo[k] = Math.min(lo[k], x); hi[k] = Math.max(hi[k], x); }); });
+        const nrm = new V().subVectors(b, a).cross(new V().subVectors(c, a));
+        if (nrm.lengthSq() < 1e-16) continue;
+        nrm.normalize();
+        planes.push([nrm, nrm.dot(a)]);
+      }
+      // Its own middle must test inside, or the faces were not wound outward and the test below could see nothing.
+      mid.multiplyScalar(1 / n);
+      holders.push({ name: q.userData.ssPorchPart, planes, lo, hi, self: Math.min(...planes.map(([nrm, d]) => d - nrm.dot(mid))) });
+    });
+    const tucked = [];
+    M.roofGroup.traverse((q) => {
+      if (!q.isMesh || inPorch(q) || (q.userData && q.userData.ssLeanTo != null && meets.has(q.userData.ssLeanTo))) return;
+      const p = q.geometry.attributes.position, v = new V();
+      for (let k = 0; k < p.count; k++) {
+        v.fromBufferAttribute(p, k).applyMatrix4(q.matrixWorld);
+        for (const h of holders) {
+          if (v.x < h.lo[0] || v.x > h.hi[0] || v.y < h.lo[1] || v.y > h.hi[1] || v.z < h.lo[2] || v.z > h.hi[2]) continue;
+          const depth = Math.min(...h.planes.map(([nrm, d]) => d - nrm.dot(v)));
+          if (depth > 1e-4 && tucked.length < 40) tucked.push({ in: h.name, lean: q.userData ? q.userData.ssLeanTo : undefined, at: [v.x, v.y, v.z].map((x) => +x.toFixed(3)), depth: +depth.toFixed(4) });
+        }
+      }
+    });
+    const P = M.porch;
+    return { parts, lean, digest, tucked, tuckSees: holders.length >= 4 && holders.every((h) => h.self > 0.005), grade: M.grade, ltp: M.leanToPorch ? JSON.parse(JSON.stringify(M.leanToPorch)) : null,
+      porch: P ? { yHigh: P.yHigh, pitch: P.pitch, postH: P.postH, hdrTop: P.hdrTop, posts: P.posts, dPost: P.dPost, dEnd: P.dEnd, side: P.side, join: P.join || null, joinClear: P.joinClear, sizes: P.sizes } : null };
+  }, sd);
+}
+
+// A style whose lean-tos are set to what their cards say matches the porch, `off` ft more drop on the first.
+const matchedJoin = (PURE, c) => {
+  const spec = c.d3, rs = PURE.d3LeanTosReadout(spec, c.size) || [];
+  const leanTos = spec.roof.leanTos.map((e, i) => {
+    const f = e.meetPorch && rs[i] && rs[i].porchCorner && rs[i].porchCorner.fix;
+    return f ? { ...e, attach: f.attach || undefined, attachFt: f.attach ? f.attachFt : undefined, dropFt: f.dropFt + (i === 0 && c.off ? c.off : 0) } : e;
+  });
+  return { ...spec, roof: { ...spec.roof, leanTos } };
+};
+
+async function joinOpen(ctx, c, d3) {
+  const config = configFor({ ...c, d3 });
+  const page = await ctx.newPage();
+  const errors = collectErrors(page);
+  await page.addInitScript(() => { window.__SS3D_DEBUG = true; });
+  await stubSupabase(page, { config, fixtures: FIXTURES });
+  await openDesigner(page, config.clientId);
+  await page.waitForFunction(() => [...document.querySelectorAll("svg rect")].some((r) => r.getAttribute("stroke") === "#1E293B"), null, { timeout: 30000 });
+  await pickStyle(page, c.label);
+  await chooseSize(page, c.size);
+  await openEditor(page);
+  return { page, errors };
+}
+
+async function joinRun(ctx, c, ok, shots) {
+  const PURE = purePorch();
+  const tag = `${c.id} ${c.label} ${c.size}`;
+  const d3 = matchedJoin(PURE, c);
+  const { page, errors } = await joinOpen(ctx, c, d3);
+  try {
+    const m = await measureJoin(page, c.sd);
+    const P = m.porch, J = m.ltp && m.ltp.joins[0], R = PURE.d3PorchReadout(d3, c.size);
+    ok(`${tag}: the lean-to meets the porch: one join, named on model.porch`, !!P && !!J && m.ltp.joins.length === 1 && JSON.stringify(P.join) === JSON.stringify([{ i: 0, at: J.at, js: J.js }]),
+      JSON.stringify({ join: P && P.join, joins: m.ltp && m.ltp.joins.map((x) => x.at), near: m.ltp && m.ltp.near }));
+    if (!P || !J) return;
+    const near = (a, b, t = 0.01) => Math.abs(a - b) <= t;
+    ok(`${tag}: the porch is the readout's to the float -- built from its numbers, never lowered by the scan -- and the readout says who meets it`,
+      near(P.yHigh, R.yHigh, 1e-9) && near(P.pitch, R.pitch, 1e-9) && near(P.postH, R.postH, 1e-9) && R.atMost === false && JSON.stringify(R.meets) === JSON.stringify([{ i: 0, at: J.at }]),
+      JSON.stringify({ built: [P.yHigh, P.pitch], readout: [R.yHigh, R.pitch, R.atMost, R.meets] }));
+    if (c.yHigh != null) ok(`${tag}: hung under the main roof's eave corners, at the height the scan builds it unjoined (${c.yHigh})`, near(P.yHigh, c.yHigh, 0.001), f3(P.yHigh));
+    ok(`${tag}: its ceiling (${f3(m.ltp.porch.cap)}) never stands over what the scan measures without the lean-to it meets (${f3(P.joinClear)})`,
+      typeof P.joinClear === "number" && m.ltp.porch.cap <= P.joinClear + 1e-6, JSON.stringify({ cap: m.ltp.porch.cap, joinClear: P.joinClear }));
+    ok(`${tag}: tucked under everything else on the roof: no vertex of it inside the porch's sheet, ceiling, board or drip`, m.tuckSees && m.tucked.length === 0, JSON.stringify({ sees: m.tuckSees, in: m.tucked.slice(0, 6) }));
+    const one = (name) => (m.parts[name] || []);
+    const sheet = one("slab")[0], ceil = one("ceiling")[0];
+    ok(`${tag}: its sheet stays on its side of the hip and runs out past the corner to the lean-to's eave or the hip's end, the nearer (${f3(Math.min(J.eL, J.eP))} ft)`,
+      !!sheet && sheet.buffer && sheet.f[0] >= -0.005 && near(sheet.s[1], Math.min(J.eL, J.eP), 0.01), sheet && JSON.stringify({ f: sheet.f.map(f3), s: sheet.s.map(f3) }));
+    ok(`${tag}: ...the ceiling under it too, inside the sheet's edge`, !!ceil && ceil.f[0] >= -0.005 && ceil.s[1] <= J.eL - P.sizes.SIDE_OV + 0.005, ceil && JSON.stringify({ f: ceil.f.map(f3), s: ceil.s.map(f3) }));
+    const front = Math.min(J.eL, J.eP);
+    ok(`${tag}: the front board and the drip run on to where the front edge meets the hip or the lean-to's eave (${f3(front)})`,
+      ["board", "drip"].every((k) => one(k).length === 1 && one(k)[0].f[0] >= -0.005 && one(k)[0].s[1] >= front - 0.01 && one(k)[0].s[1] <= front + 0.06),
+      JSON.stringify(["board", "drip"].map((k) => one(k).map((b) => b.s.map(f3)))));
+    ok(`${tag}: one cheek, one corner fill and one rake trim, all on the far side; none on the joined one`,
+      one("cheek").length === 1 && one("cornerFill").length === 1 && one("rake").length === 1 && [...one("cheek"), ...one("cornerFill"), ...one("rake")].every((b) => b.s[1] < -2),
+      JSON.stringify({ cheek: one("cheek").map((b) => f3(b.s[1])), fill: one("cornerFill").length, rake: one("rake").map((b) => f3(b.s[1])) }));
+    const rk = one("joinRake");
+    ok(`${tag}: ${J.eL < J.eP ? "a rake trim along the lean-to's eave line, from the hip to the front edge" : "no rake trim past the hip (the lean-to is the deeper)"}`,
+      J.eL < J.eP ? rk.length === 1 && near(rk[0].s[1], J.eL, 0.01) && rk[0].f[0] >= -0.005 && near(rk[0].d[1], J.eP, 0.06) : rk.length === 0, JSON.stringify(rk.map((b) => ({ s: b.s.map(f3), d: b.d.map(f3) }))));
+    const own = one("post"), cp = one("joinCorner"), ext = one("joinPost");
+    const hw = m.ltp.porch.hw, s0 = P.side - P.sizes.POST / 2 - hw;
+    ok(`${tag}: the porch's own ${P.posts} posts stand on its deck, inside its width`, own.length === P.posts && own.every((b) => near(b.y[0], 0, 0.001) && b.s[1] <= P.side - hw + 0.001), JSON.stringify(own.map((b) => [f3(b.s[0]), f3(b.y[0])])));
+    const cpb = cp[0], cs = cpb ? (cpb.s[0] + cpb.s[1]) / 2 : NaN, cd = cpb ? (cpb.d[0] + cpb.d[1]) / 2 : NaN;
+    const bot = d3.foundation === "blocks" || d3.foundation === "piers" ? -m.grade : 0;
+    ok(`${tag}: one corner post where the lean-to's posts' line (${J.w} ft out) crosses the porch's (${f3(P.dPost)}), on the ground`,
+      cp.length === 1 && near(cs, J.w, 0.005) && near(cd, P.dPost, 0.005) && near(cpb.y[0], bot, 0.005), JSON.stringify({ n: cp.length, s: f3(cs), d: f3(cd), y: cpb && cpb.y.map(f3) }));
+    ok(`${tag}: posts along the porch's line out to it at least every 8.5 ft (${ext.length})`, ext.every((b) => near((b.d[0] + b.d[1]) / 2, P.dPost, 0.005) && b.s[0] > 0 && b.s[1] < J.w) && ext.length === Math.max(1, Math.ceil((J.w - s0) / 8.5 - 1e-6)) - 1,
+      JSON.stringify(ext.map((b) => f3((b.s[0] + b.s[1]) / 2))));
+    const hd = one("header"), lvl = hd.find((b) => b.join == null), slope = hd.find((b) => b.join === 0);
+    const sLvl = Math.min(J.w + 0.175, P.dPost);
+    ok(`${tag}: the header runs on level to ${f3(sLvl)} past the corner${J.w + 0.175 > P.dPost ? ", then down the lean-to's slope to its posts' line" : ""}`,
+      !!lvl && near(lvl.s[1], sLvl, 0.005) && (J.w + 0.175 > P.dPost + 0.01 ? !!slope && near(slope.s[1], J.w + 0.175, 0.06) && slope.y[0] < lvl.y[0] : !slope),
+      JSON.stringify({ lvl: lvl && lvl.s.map(f3), slope: slope && { s: slope.s.map(f3), y: slope.y.map(f3) }, lvlY: lvl && lvl.y.map(f3) }));
+    const phi = Math.atan(P.pitch), HH = P.sizes.HDR_H;
+    const hb = J.w <= P.dPost ? P.hdrTop - HH : P.hdrTop - P.pitch * (J.w - P.dPost) - HH / Math.cos(phi);
+    ok(`${tag}: the corner post's top meets the header's underside there (${f3(hb)})`, !!cpb && near(cpb.y[1], hb, 0.005), JSON.stringify({ post: cpb && f3(cpb.y[1]), hdr: hd.map((b) => b.y.map(f3)) }));
+    const hr = one("hipRafter"), jr = one("jackRafter");
+    ok(`${tag}: a hip rafter under the hip, and jack rafters from it on the porch's side, inside the ceiling (${jr.length})`,
+      hr.length === 1 && hr[0].f[0] > -0.15 && hr[0].f[1] < 0.15 && (J.eL - P.sizes.SIDE_OV > 2.5 ? jr.length >= 1 : true) && jr.every((b) => b.f[0] >= 0.088 - 0.005 && b.s[1] <= J.eL - P.sizes.SIDE_OV + 0.005),
+      JSON.stringify({ hr: hr.map((b) => b.f.map(f3)), jr: jr.map((b) => [b.f[0], b.s[1]].map(f3)) }));
+    const cap = one("hip"), lcap = m.lean.filter((q) => q.hip);
+    ok(`${tag}: the hip's cap, a strip on the sheet and one on the lean-to's slab, each 0.06 ft past the hip`,
+      cap.length === 1 && lcap.length === 1 && cap[0].f[0] >= -0.06 * Math.SQRT2 - 0.005 && cap[0].f[1] <= 0.275 * Math.SQRT2 + 0.005 && lcap[0].f[1] <= 0.06 * Math.SQRT2 + 0.005,
+      JSON.stringify({ porch: cap.map((b) => b.f.map(f3)), lean: lcap.map((b) => b.f.map(f3)) }));
+    const ls = m.lean.find((q) => q.slab);
+    ok(`${tag}: the lean-to's slab stays on its side of the hip${J.eL > J.eP ? " and stops on the porch's front edge" : ""}`,
+      !!ls && ls.f[1] <= 0.005 && (J.eL > J.eP ? ls.d[1] <= J.eP + 0.005 : true), ls && JSON.stringify({ f: ls.f.map(f3), d: ls.d.map(f3) }));
+    ok(`${tag}: no page errors`, errors.length === 0, JSON.stringify(errors).slice(0, 300));
+    const [W, L] = c.size.split("x").map(Number);
+    const ex = c.sd.cx + c.sd.sx * (J.w / 2), ez = c.sd.cz + c.sd.dz * (P.dPost / 2);
+    await shot(page, `${shots}/${c.id}-join.png`, [ex + c.sd.sx * 20, c.H + 9, ez + c.sd.dz * 24], [c.sd.cx, c.H * 0.55, c.sd.cz]);
+    await shot(page, `${shots}/${c.id}-corner.png`, [c.sd.cx + c.sd.sx * (J.w + 9), c.H + 3, c.sd.cz + c.sd.dz * (P.dPost + 10)], [c.sd.cx + c.sd.sx * J.w * 0.6, c.H - 1.5, c.sd.cz + c.sd.dz * P.dPost * 0.6]);
+    void W; void L;
+  } catch (e) {
+    ok(`${tag}: ran to the end`, false, e && e.message ? e.message.split("\n")[0] : String(e));
+  } finally {
+    await page.close();
+  }
+}
+
+// PJ5: asked and a hair off is the same porch and lean-to as not asked at all, vertex for vertex.
+async function joinMissRun(ctx, c, ok) {
+  const PURE = purePorch();
+  const tag = `${c.id} ${c.label} ${c.size}`;
+  const d3 = matchedJoin(PURE, c);
+  const plain = { ...d3, roof: { ...d3.roof, leanTos: d3.roof.leanTos.map(({ meetPorch: _m, ...e }) => e) } };
+  try {
+    const a = await joinOpen(ctx, c, d3);
+    const ma = await measureJoin(a.page, c.sd);
+    await a.page.close();
+    const b = await joinOpen(ctx, { ...c, label: c.label + " Plain" }, plain);
+    const mb = await measureJoin(b.page, c.sd);
+    await b.page.close();
+    const N0 = ma.ltp && ma.ltp.near.find((x) => x.i === 0);
+    ok(`${tag}: asked, ${c.off ? `its drop ${c.off * 12} in past a match` : "matched, beside a lower lean-to over the porch"}: no join, a near-miss (${c.why})`,
+      !!ma.ltp && ma.ltp.joins.length === 0 && !!N0 && N0.asked && JSON.stringify(N0.why) === JSON.stringify(c.why) && !ma.porch.join,
+      JSON.stringify(ma.ltp));
+    ok(`${tag}: ...and the porch and the lean-to are built vertex for vertex as without the ask (${ma.digest.length} chars)`, ma.digest.length > 1000 && ma.digest === mb.digest,
+      `${ma.digest.length} vs ${mb.digest.length}`);
+    ok(`${tag}: no page errors`, a.errors.length === 0 && b.errors.length === 0, JSON.stringify([...a.errors, ...b.errors]).slice(0, 300));
+  } catch (e) {
+    ok(`${tag}: ran to the end`, false, e && e.message ? e.message.split("\n")[0] : String(e));
+  }
+}
+
 // seen: what each finished case built, for the cases that must build the same porch (sameAs).
 async function runCase(ctx, c, ok, shots, seen) {
   const [W, L] = c.size.split("x").map(Number);
@@ -818,6 +1064,11 @@ export async function main() {
       if (only.length && !only.includes(c.id)) continue;
       await stepsRun(ctx, c, ok, shots);
     }
+    for (const c of JOIN_CASES) {
+      if (only.length && !only.includes(c.id)) continue;
+      await joinRun(ctx, c, ok, shots);
+    }
+    for (const c of [JOIN_MISS, JOIN_EDGE]) if (!only.length || only.includes(c.id)) await joinMissRun(ctx, c, ok);
   } finally {
     await browser.close();
   }

@@ -223,7 +223,7 @@ try {
 
   // 2 ── each add-on tab shows only its own controls; the rest of the page is always there ─────────
   const OWN = {
-    leanto: ["leanToAdd", "leanToWall", "leanToWidthFt", "leanToDropFt", "leanToAttach", "leanToAttachFt", "leanToLength", "leanToLengthFt", "leanToOffsetFt", "leanToEnclosed"],
+    leanto: ["leanToAdd", "leanToWall", "leanToWidthFt", "leanToDropFt", "leanToAttach", "leanToAttachFt", "leanToLength", "leanToLengthFt", "leanToOffsetFt", "leanToEnclosed", "leanToMeetPorch"],
     // Each wing set on its own (roof.wingSides, 2026-09-29): the shared middle height, then a card per eave side.
     // The wing list (roof.wingList, 2026-10-01): the add row, "+ Add a wing on ...", and each list card's controls.
     wings: ["wingsOn", "centerEaveFt", ...["left", "right", "front", "back"].flatMap((s) => ["wingOn", "wingWidthFt", "wingAttach", "wingAttachFt", "wingPitch"].map((f) => `${f}-${s}`)),
