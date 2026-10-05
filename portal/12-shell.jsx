@@ -805,6 +805,22 @@ function Dashboard({ session }) {
   // owner-JWT-bound and must not run against the operator's own tenant).
   const [viewing, setViewing] = useState(null);
 
+  // ONE refetch counter for the entitlement (2026-10-05). Both reads of it below (your own, and
+  // the viewed tenant's in view-as) are keyed on the sign-in token, so a purchase or a
+  // cancellation on the Billing tab reached nothing until a reload: a builder who had just bought
+  // 3D was still looking at a locked 3D, and an owner who paid on the paywall was still looking at
+  // the paywall it promises lifts "as soon as payment goes through". Whatever changes the
+  // entitlement raises ssEntitlementChanged (01-core.jsx): Billing's subscribe and cancel, and the
+  // Advanced mode switch in Settings → Designer (whose answer is the entitlement's advancedMode).
+  // This bumps the counter, and the counter sits in both effects' deps. Declared ABOVE them for the reason `viewing`'s comment gives
+  // (Babel compiles const to var, so a dep read above its useState is silently undefined).
+  const [entitlementRev, setEntitlementRev] = useState(0);
+  useEffect(() => {
+    const bump = () => setEntitlementRev((n) => n + 1);
+    window.addEventListener(SS_ENTITLEMENT_CHANGED, bump);
+    return () => window.removeEventListener(SS_ENTITLEMENT_CHANGED, bump);
+  }, []);
+
   // Fetches the entitlement declared above — split from its useState and placed BELOW
   // `viewing` because Babel compiles const to var, so a `viewing` read above its useState
   // is silently `undefined`, never a throw (the canAdminForUrl comment tells that story).
@@ -815,7 +831,10 @@ function Dashboard({ session }) {
   // tenant's entitlement here and lock the operator's own portal after Exit (audit
   // 2026-08-20). Skipped while viewing; the `viewing` dep refetches on exit, so nothing
   // goes stale either. Keyed on the token, not the session object — onAuthStateChange
-  // mints a new session object on EVERY auth event, token change or not.
+  // mints a new session object on EVERY auth event, token change or not. And on
+  // entitlementRev, so a purchase on the Billing tab lands without a reload. A refetch keeps the
+  // last answer on screen until the new one arrives, and a failed one keeps it for good: the
+  // same never-lock-someone-out posture as the first read.
   useEffect(() => {
     if (viewing) return;
     let cancelled = false;
@@ -826,7 +845,7 @@ function Dashboard({ session }) {
       } catch (_e) { /* leave null — never lock someone out because a call failed */ }
     })();
     return () => { cancelled = true; };
-  }, [session.access_token, viewing]);
+  }, [session.access_token, viewing, entitlementRev]);
 
   // ── SUPPORT OPERATOR (migration 176) ─────────────────────────────────────────
   // A support operator stands in the builder's shoes: the server resolves the VIEWED
@@ -1007,7 +1026,10 @@ function Dashboard({ session }) {
     };
     load(0);
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [mirrorView, viewing && viewing.clientId, session.access_token]);
+    // entitlementRev: an operator who subscribes or cancels FOR the viewed builder (Billing in
+    // view-as) sees the builder's portal change at once, exactly as the builder would. The state is
+    // not cleared first, so the old answer stays on screen until the new one lands.
+  }, [mirrorView, viewing && viewing.clientId, session.access_token, entitlementRev]);
 
   // Keep the address bar honest about where you actually are.
   //
@@ -1611,39 +1633,29 @@ function Dashboard({ session }) {
   // HOISTED above setup3d (2026-08-21). It used to live ~200 lines further down, which is
   // why the 3D calibration editor was never gated on it: setup3d is the last hook and could
   // not read a value declared below itself. See the setup3d memo for what that cost.
-  // 3D reads entitlement.GRANTED, not entitlement.features, and that is deliberate.
   //
-  // `features.view_3d` is computed by portal-billing, where view_3d falls under the
-  // exempt/free-period BLANKET unless that function has the three-branch map (which needs
-  // billing_plans.operator_grantable, migration 109). Every tenant predating the billing gate
-  // is exempt, so gating on features here would show 3D to essentially all of them the moment
-  // a frontend shipped ahead of the backend — which is exactly what happened on 2026-08-19,
-  // when this landed on beta before the migration could be applied.
+  // 3D is on when the tenant on screen was GIVEN it or has PAID for it: ssView3dOn (01-core.jsx)
+  // reads entitlement.granted and entitlement.paid, two lists portal-billing names feature by
+  // feature. Until 2026-10-05 this read `granted` alone, and a purchase never lands there, so a
+  // builder who bought 3D (Carolyn's call with one on 2026-09-16, and another on 2026-08-27) saw
+  // Billing say Active while 3D stayed locked until she switched it on by hand. `paid` is every
+  // feature a subscription makes usable right now, with the same grace and paid-through rules
+  // as the rest of Billing; the public designer gets the same answer from get_config (migration
+  // 270). A purchase on the Billing tab reaches this without a reload: see entitlementRev.
   //
-  // `granted` is emitted ONLY by portal-billing, and only for features this tenant genuinely
-  // holds as a comp rather than a purchase, so reading it keeps the copy honest ("switched on
-  // for you by Structure Studio", never "included in your plan").
+  // Still NOT entitlement.features, and never fold 3D into featureOn: `features` hands every
+  // non-billable account every feature in one blanket, which is how 3D once showed on nearly
+  // every tenant at once (2026-08-19, a frontend that shipped ahead of migration 109). And the
+  // copy depends on knowing a comp from a purchase ("switched on for you by Structure Studio",
+  // never "included in your plan"), which only the two named lists can tell apart.
   //
-  // ⚠️ AMENDED 2026-09-21 (migration 228). `granted` is no longer grants alone: portal-billing
-  // now also puts a NON-BILLABLE or INTERNAL account's grantable features in that array, so
-  // ticking Non-billable switches 3D on without a second trip to the Early access card. That
-  // is a deliberate widening and it is still not a blanket — the server names each feature and
-  // filters it through `grantable`, so an ordinary tenant is unaffected and a paying one is
-  // never told their purchase was a comp. The reason for keeping the browser on `granted`
-  // rather than on `features` is unchanged, and is now about honesty of copy rather than
-  // reach: `features` cannot distinguish a comp from a purchase.
-  //
-  // When view_3d goes on sale, add the subscription check here — do NOT fold it back into
-  // featureOn, which would widen it by a blanket rather than feature by feature.
-  // View-as reads the VIEWED tenant's grant, for every operator (Carolyn 2026-09-15) — the
-  // old `isOperator ||` blanket showed a 3D tab on a builder who was never granted it. A null
-  // viewedCtx is still loading and reads as on, the same rule featureOn uses. On the
-  // operator's own portal the operator's own grant decides, exactly like any tenant.
+  // View-as reads the VIEWED tenant's lists, for every operator (Carolyn 2026-09-15): the old
+  // `isOperator ||` blanket showed a 3D tab on a builder who never had it. A null viewedCtx is
+  // still loading and reads as on, the same rule featureOn uses. On the operator's own portal
+  // the operator's own entitlement decides, exactly like any tenant.
   const view3dUnlocked = viewing
-    ? (!viewedCtx || (!!viewedCtx.entitlement && Array.isArray(viewedCtx.entitlement.granted)
-        && viewedCtx.entitlement.granted.indexOf("view_3d") !== -1))
-    : (!!entitlement && Array.isArray(entitlement.granted)
-        && entitlement.granted.indexOf("view_3d") !== -1);
+    ? (!viewedCtx || ssView3dOn(viewedCtx.entitlement))
+    : ssView3dOn(entitlement);
   // The tenant every surface should read and write. Feeds the clientId props and the
   // remount keys; the invoke wrapper handles the edge functions. Null until the tenant
   // resolves — every real read happens below the early returns.
@@ -2594,6 +2606,26 @@ function Dashboard({ session }) {
   // the numbers, so what they actually got was a hollow Billing page and buttons that could
   // only come back 403: the "disabled UI fails silently" shape, one level up.
   const settingsAccess = mirrorAccess;
+  // ── Settings → Designer's ADVANCED MODE switch (2026-10-05, migration 270) ──
+  // The builder's own way into the Advanced page (06-3d.jsx AdvancedModeCard). Built from the SAME
+  // three values the Advanced gate above uses, so the switch and the menu item cannot disagree:
+  //   advancedEnt     the entitlement of the tenant ON SCREEN, and in view-as only the viewed
+  //                   tenant's own answer (never the operator's, never the last builder's);
+  //   advancedMayRun  owner/admin, or a platform operator in view-as: the people the page is for;
+  //   ssAdvancedOn    whether it is on now.
+  // null hides the card: not answered yet, not someone who may run the account, or a server that
+  // predates `advancedMode` (a switch whose answer could never come back would look broken). Our own
+  // account shows it on and locked: internal_account keeps the page whatever the column says.
+  // Turning it off throws away an unsaved building on the Advanced page, so that asks first, in the
+  // words exitAccount uses.
+  const advancedSwitch = (advancedMayRun && advancedEnt
+    && (advancedEnt.reason === "internal" || typeof advancedEnt.advancedMode === "boolean")) ? {
+      on: ssAdvancedOn(advancedEnt),
+      locked: advancedEnt.reason === "internal",
+      confirmOff: () => !advancedDirtyRef.current
+        || window.confirm("Turning Advanced off will discard the building you haven't saved on the Advanced page. Continue?"),
+      onOpen: () => navigate("advanced"),
+    } : null;
   // Accounts and Admin moved INTO this rail, so it has to stay up on their pages too or
   // clicking one would throw you straight back to the nav you just left. The settings half is
   // the IDENTICAL predicate the body render uses — copy it if you change either.
@@ -2714,8 +2746,9 @@ function Dashboard({ session }) {
         <nav className="ss-nav">
           {navItem("designer", "Designer")}
           {/* Directly under Designer (Carolyn 2026-09-28), and only where ssAdvancedOn says so —
-              our own account, for now. `advancedOn` is false until the entitlement answers, so
-              the item arrives late on a cold load and never flashes for anyone else. */}
+              our own account, and a builder who turned Advanced mode on in Settings → Designer.
+              `advancedOn` is false until the entitlement answers, so the item arrives late on a
+              cold load and never flashes for anyone else. */}
           {advancedOn && navItem("advanced", "Advanced")}
           {/* TWO items again. Carolyn, 2026-08-26 12:15, having used the merged one: "we have
               contacts as one, and then we have another one that says pipeline ... I would
@@ -3476,6 +3509,14 @@ function Dashboard({ session }) {
                 qboUnlocked={qboUnlocked}
                 rtpUnlocked={rtpUnlocked}
                 setup3d={setup3d}
+                /* Settings → Designer says "add 3D on Billing" only when 3D is really off; on an
+                   account that has it, setup3d is null only because this person cannot run it. */
+                view3d={view3dUnlocked}
+                /* ...and points at Billing only for someone who can use it (the gate's own test);
+                   anyone else is told to ask the owner, never sent to a page they cannot open. */
+                canBill={billingActor}
+                /* The Advanced mode switch (advancedSwitch above), null where it must not show. */
+                advanced={advancedSwitch}
                 /* The same answer the rail's list was built from, or the two disagree. */
                 phoneOffered={phoneOffered}
                 sub={sub} onSub={(x) => navigate("settings", x)} />
@@ -3581,6 +3622,9 @@ function Dashboard({ session }) {
             {!gateLocked && advancedHeld && (
               <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Checking your account…</div>
             )}
+            {/* 3D is on sale, and buying it switches 3D on at once (2026-10-05), so a tenant
+                without it gets the available-now card with the way in, like Scheduling and the
+                CRM, rather than a "we're still building this" teaser. */}
             {!gateLocked && activeTab === "view-3d" && (
               view3dUnlocked
                 ? <Studio3DStatus clientId={effClientId} canAdmin={mirrorAdmin} navigate={navigate} />
@@ -3593,6 +3637,8 @@ function Dashboard({ session }) {
                       "Roof profile, cladding, doors and windows in their colors",
                       "The 3D view rides along on the emailed quote",
                     ]}
+                    cta={canAdmin ? { label: "Add 3D — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                    available
                   />
             )}
             {!gateLocked && activeTab === "rent-to-own-contracts" && (

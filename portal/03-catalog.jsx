@@ -1539,13 +1539,16 @@ function WalletTransactions({ reloadKey, recent = [] }) {
 //
 // The founding-price banner and the "checkout isn't switched on yet" notices ride with
 // SUBSCRIPTION: both are about the plan grid directly beneath them.
-function BillingView({ viewingLabel = null, section = "all" }) {
+function BillingView({ viewingLabel = null, section = "all", paywall = false }) {
   const showWallet = section === "all" || section === "wallet";
   const showSub = section === "all" || section === "subscription";
   const [data, setData] = useState(null);   // status response; null = loading
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);   // subscribe/cancel in flight
   const [msg, setMsg] = useState(null);      // { ok } | { err }
+  // On the paywall (BillingGate passes `paywall`), a checkout that went through only in part holds
+  // back the shell's entitlement re-read until the customer presses Continue: see subscribe().
+  const [holdSignal, setHoldSignal] = useState(false);
   const [sel, setSel] = useState({});        // feature -> "monthly" | "annual"
   const [crmIv, setCrmIv] = useState({});    // Synergy CRM tier -> "monthly" | "annual" (display only)
   const [demoNote, setDemoNote] = useState(false); // our own account pressed checkout — see demoView
@@ -1835,7 +1838,7 @@ This charges the card they have on file.`)) { setBusy(false); return; }
     if (demoView) { setDemoNote(true); return; }
     const planIds = cartPlans.map((p) => p.id);
     if (planIds.length === 0) { setMsg({ err: "Select at least one feature." }); return; }
-    setMsg(null); setBusy(true);
+    setMsg(null); setHoldSignal(false); setBusy(true);
     try {
       // EVERY caller echoes the exact amount shown, and the server refuses a mismatch —
       // so the card can only ever be charged the number that was on screen. dueTodayCents
@@ -1859,6 +1862,14 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
         body.paymentToken = await getPaymentToken(dueTodayCents || null);
       }
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
+      // Whatever the answer, the server may have started something (a partial success comes back
+      // as `failed` beside the ones that went through), so the shell re-reads the entitlement now
+      // rather than at the next reload: 3D bought here is on in the designer without one.
+      // EXCEPT on the paywall: there, a re-read that unlocks the portal unmounts this view and the
+      // message with it, and a partial failure's message can say "do NOT try again" or carry a
+      // charge reference. So anything short of a clean success waits for the Continue button.
+      const clean = !e && r && !r.error && !(r.failed && r.failed.length);
+      if (paywall && !clean) setHoldSignal(true); else ssEntitlementChanged();
       if (e) {
         // A non-2xx from the function carries the real story in its BODY — a declined-card
         // message, a "charge may not have been reversed (ref …)" with the transaction id,
@@ -1892,6 +1903,9 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
     try {
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body: { action: "cancel", subscriptionId: s.id } });
       if (e || (r && r.error)) throw new Error((e && e.message) || r.error);
+      // Usually nothing visible moves (a cancelled feature runs to the end of the paid period),
+      // but the shell's copy of the entitlement must not be the one place that is out of date.
+      ssEntitlementChanged();
       setMsg({ ok: `${p.name || "Feature"} cancelled.` });
       await load();
     } catch (e) { setMsg({ err: e.message }); }
@@ -1940,7 +1954,19 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
   return (
     <div>
       {error && <div style={S.err}>{error}</div>}
-      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {/* While held, the server's sentence keeps a box of its own with Continue under it, so the
+          button is never read as part of it; otherwise the box is the bare sentence, as always. */}
+      {msg && msg.err && (
+        <div style={S.err}>
+          {holdSignal ? (<>
+            <div>{msg.err}</div>
+            <button type="button" onClick={() => { setHoldSignal(false); ssEntitlementChanged(); }}
+              style={{ ...S.btn("#1D4ED8", "#FFF"), marginTop: 8, padding: "4px 10px", fontSize: 12 }}>
+              Continue
+            </button>
+          </>) : msg.err}
+        </div>
+      )}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
 
       {showSub && (<>

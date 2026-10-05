@@ -4152,7 +4152,7 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null, phoneOffered = false }) {
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, view3d = false, canBill = false, advanced = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null, phoneOffered = false }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
   // phoneOffered rides into BOTH lists (this body and the rail in 12-shell.jsx) from the same
@@ -4204,7 +4204,8 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       )}
       {/* 3D Style Calibration used to sit at the top of the Designer TAB. It is setup, not
           design work, so it lives here now; the tab itself no longer receives setup3d. */}
-      {sub === "designer" && <DesignerSettings clientId={clientId} setup3d={setup3d} />}
+      {/* `advanced` is the Advanced mode switch (06-3d.jsx AdvancedModeCard), null where it must not show. */}
+      {sub === "designer" && <DesignerSettings clientId={clientId} setup3d={setup3d} view3d={view3d} canBill={canBill} advanced={advanced} />}
       {/* COMPANY is a hub with its own top navigation — six sub-pages behind one rail item.
           Every one of them is still a real /portal/settings/<slug>, so the bookmarks and the
           Client Setup links that point at branding and team are untouched. */}

@@ -20,6 +20,10 @@
 //      link, entitlement held back. No Advanced item is ever drawn, the page is never drawn, the
 //      topbar never says Advanced, and it ends on /portal/designer with the Designer mounted.
 //   B2 A NEVER-PAID BUILDER behind the billing gate: same refusal, no item.
+//   M  A BUILDER WHO TURNED ADVANCED MODE ON (2026-10-05: entitlement.advancedMode, from
+//      client_settings.advanced_mode): the item under Designer, and the page opens with its 3D.
+//   M2 The same builder with it OFF, cold /portal/advanced: no item, no page, ends on the Designer.
+//      (tests/harness/advancedModeSwitch.mjs drives the Settings switch itself.)
 //   C  AN OPERATOR viewing our account (?view=), clicked: the item appears once the viewed
 //      entitlement answers, the page opens, and Save carries targetClientId for the viewed tenant.
 //   C2 The same operator's COLD /portal/advanced?view=<ours>: their own entitlement answers first
@@ -477,6 +481,39 @@ try {
     ok(`${tag}: nothing was written`, writes(calls).length === 0);
     ok(`${tag}: no page errors`, errors.length === 0, errors.join(" | "));
     if (tag.startsWith("B ")) await page.locator("aside.ss-side").screenshot({ path: join(SHOTS, "advpage-sidebar-other-builder.png") });
+    await ctx.close();
+  }
+
+  // ── M / M2: a builder's own Advanced mode switch (2026-10-05, migration 270) ──────────────
+  // Not internal and not exempt: an ordinary builder with 3D whose entitlement carries
+  // advancedMode (client_settings.advanced_mode, turned on in Settings → Designer).
+  {
+    const e = ent("active", { advancedMode: true });
+    const { ctx, page, calls, errors } = await open({ own: OTHER, entFor: () => e }, "/portal/designs");
+    await page.waitForFunction(() => !!document.querySelector('.ss-nav a[href^="/portal/advanced"]'), null, { timeout: 20000 }).catch(() => {});
+    const order = await navOrder(page);
+    ok("M: a builder with Advanced mode ON gets the item, directly under Designer",
+      order.indexOf("/portal/advanced") > 0 && order.indexOf("/portal/advanced") === order.indexOf("/portal/designer") + 1, order.join(" "));
+    await page.locator('.ss-nav a[href^="/portal/advanced"]').click();
+    await page.getByText("Every shape control on one building").first().waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
+    ok("M: …and the page opens at /portal/advanced", (await here(page)) === "/portal/advanced" && await page.getByText("Every shape control on one building").first().isVisible(), await here(page));
+    await advPanel(page).catch(() => {});
+    ok("M: …with its 3D mounted beside the form", await page.evaluate(() => !!(window.__ss3dPanel && window.__ss3dPanel.renderer.domElement.closest('[data-ss-adv="view"]'))));
+    await page.locator("aside.ss-side").screenshot({ path: join(SHOTS, "advpage-sidebar-builder-switched-on.png") });
+    ok("M: nothing was written", writes(calls).length === 0);
+    ok("M: no page errors", errors.length === 0, errors.join(" | "));
+    await ctx.close();
+  }
+  {
+    const e = ent("active", { advancedMode: false });
+    const { ctx, page, calls, errors } = await open({ own: OTHER, entFor: () => e, billingDelayMs: 1200 }, "/portal/advanced");
+    await settle(page, 3500);
+    const s = await seen(page);
+    ok("M2: a builder with Advanced mode OFF: the item is never drawn", !s.nav);
+    ok("M2: …the page is never drawn", !s.page);
+    ok("M2: …and a cold /portal/advanced ends on /portal/designer", (await here(page)) === "/portal/designer", s.paths.join(" → "));
+    ok("M2: nothing was written", writes(calls).length === 0);
+    ok("M2: no page errors", errors.length === 0, errors.join(" | "));
     await ctx.close();
   }
 

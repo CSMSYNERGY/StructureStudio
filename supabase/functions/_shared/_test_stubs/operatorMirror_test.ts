@@ -43,9 +43,11 @@ Deno.test("the mirror fetch runs for EVERY operator in view-as, not only support
   assert(!block.includes("if (!supportView)"), "viewedCtx effect has gone back to support-only");
 });
 
-Deno.test("view3dUnlocked reads the viewed tenant's grant, with no operator blanket", () => {
+Deno.test("view3dUnlocked reads the viewed tenant's entitlement, with no operator blanket", () => {
   const block = codeBetween(SHELL, "const view3dUnlocked =", "const effClientId =", "view3dUnlocked");
-  assert(block.includes("viewedCtx.entitlement.granted"), "must read the viewed tenant's granted list");
+  // Since 2026-10-05 the rule is ssView3dOn (granted OR paid, 01-core.jsx); paid3dUnlock_test
+  // holds the rule itself. What matters HERE is whose entitlement it is handed in view-as.
+  assert(block.includes("ssView3dOn(viewedCtx.entitlement)"), "must read the viewed tenant's entitlement");
   assert(!/isOperator\s*\|\|/.test(block), "view3dUnlocked has grown an `isOperator ||` blanket again");
 });
 
