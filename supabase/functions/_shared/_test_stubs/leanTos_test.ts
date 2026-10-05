@@ -255,6 +255,24 @@ Deno.test("the readout says overlaps, a porch behind one, how high openings go, 
   assertEquals(F.d3PorchReadout(specOf({ ...GABLE, front: "eave", porchOutFt: 6, leanTos: [{ wall: "back", widthFt: 4 }] }), "12x16").atMost, true);
 });
 
+Deno.test("a porch on a SIDE wall: the lean-to on that wall is read against the porch's own run there, and nothing moves", () => {
+  // A front gable 12x16: the left wall is a 16 ft eave wall. A projecting porch 8 ft wide in its middle (a0 4..12
+  // down the ridge) and two lean-tos 4 ft long on that wall, one at its back end, one in the middle.
+  const leanTos = [{ wall: "left", widthFt: 8, lengthFt: 4, offsetFt: -6 }, { wall: "left", widthFt: 6, lengthFt: 4, offsetFt: 0 }, { wall: "front", widthFt: 5 }];
+  const side = { ...GABLE, front: "gable", porchOutFt: 6, porchWidthFt: 8, porchEnd: "left", leanTos };
+  const rs = F.d3LeanTosReadout(specOf(side), "12x16");
+  assertEquals(rs.map((r: Any) => [r.wall, r.a0, r.a1, r.porch]), [["left", 0, 4, null], ["left", 6, 10, "projecting"], ["front", -6, 6, null]]);
+  // Recessed into that wall it takes the whole wall, so both lean-tos on it stand in front of it.
+  const rec = F.d3LeanTosReadout(specOf({ ...GABLE, front: "gable", porchDepthFt: 4, porchEnd: "left", leanTos }), "12x16");
+  assertEquals(rec.map((r: Any) => r.porch), ["recessed", "recessed", null]);
+  // Without the frame the side is the front, and the front lean-to is the one in front of the porch.
+  const old = F.d3LeanTosReadout(specOf({ ...GABLE, porchOutFt: 6, porchEnd: "left", leanTos }), "12x16");
+  assertEquals(old.map((r: Any) => r.porch), [null, null, "projecting"]);
+  // The lean-tos are where they were put, porch or none.
+  const bare = F.d3LeanTosReadout(specOf({ ...GABLE, front: "gable", leanTos }), "12x16");
+  assertEquals(rs.map((r: Any) => [r.a0, r.a1, r.ya, r.y1]), bare.map((r: Any) => [r.a0, r.a1, r.ya, r.y1]));
+});
+
 Deno.test("a lean-to up the roof covers a dormer only where its run reaches the dormer", () => {
   const base = { ...GABLE, dormerWidthFt: 4, dormerType: "gable", dormerOffsetU: -0.45 };
   const m = F.d3Massing(base, 12, 16, H);

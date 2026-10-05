@@ -436,7 +436,107 @@ function DesignerLoading() {
   return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading the designer…</div>;
 }
 
-function DesignerSettings({ clientId, setup3d = null }) {
+// ─── Settings → Designer → Advanced mode (2026-10-05, migration 270) ───
+// Carolyn 2026-09-28: the Advanced page is "only available in Structure Studio for us yet"; when it
+// launches, a builder turns "advanced mode" on in Settings to get the tab, "so everybody is not
+// going to see". This is that switch: one per builder, off until an owner or admin turns it on,
+// free. It writes client_settings.advanced_mode (portal-settings save_advanced_mode), and the
+// shell's Advanced item follows portal-billing's entitlement.advancedMode through ssAdvancedOn.
+//
+// `advanced` comes from the shell (12-shell.jsx advancedSwitch) and is null when the card must not
+// show: the entitlement has not answered yet, the server predates the field, or this person may
+// not run the account (owner/admin, or a platform operator in view-as; the same people the page
+// itself is for). Its fields:
+//   on          what the entitlement says now (ssAdvancedOn)
+//   locked      our own account: always on, through internal_account, whatever the column says
+//   confirmOff  asks before an unsaved building on the Advanced page is thrown away; false = stay
+//   onOpen      goes to the Advanced page
+// `has3d` is setup3d being there, the page's own test (AdvancedTab). Without 3D the switch cannot be
+// turned ON (the page could only say "Advanced needs 3D"), but an Advanced mode already on can
+// always be turned OFF.
+//
+// After a save the shell is told to read the entitlement again (ssEntitlementChanged), which is
+// what puts the item in the menu or takes it out, without a reload. Until that answer lands, the
+// switch shows what was saved.
+function AdvancedModeCard({ advanced, has3d = false }) {
+  const [pending, setPending] = useState(null);   // the value just saved, until the entitlement agrees
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);           // { ok } | { err }
+  const serverOn = !!advanced.on;
+  useEffect(() => { if (pending !== null && serverOn === pending) setPending(null); }, [serverOn, pending]);
+  const on = advanced.locked ? true : (pending !== null ? pending : serverOn);
+  const needs3d = !on && !has3d;
+  const disabled = busy || !!advanced.locked || needs3d;
+  const toggle = async () => {
+    if (disabled) return;
+    const want = !on;
+    if (!want && advanced.confirmOff && !advanced.confirmOff()) return;
+    // The tenant on screen NOW, in the click's tick (an explicit value skips the wrapper's
+    // injection; null is the caller's own account) — the shell's onCreateStyle does the same.
+    const target = ssTargetClientId || null;
+    setBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_advanced_mode", enabled: want, targetClientId: target } });
+      if (error || !data || data.error || !data.ok) throw new Error((error && error.message) || (data && data.error) || "Advanced mode wasn't saved. Try again.");
+      setPending(want);
+      setMsg({ ok: want ? "Advanced is on. You'll find it in the menu, right under Designer." : "Advanced is off. It's gone from the menu." });
+      ssEntitlementChanged();
+    } catch (e) { setMsg({ err: e.message || "Advanced mode wasn't saved. Try again." }); }
+    setBusy(false);
+  };
+  const track = { display: "inline-block", width: 38, height: 22, borderRadius: 22, background: on ? ACCENT : "#CBD5E1", position: "relative", verticalAlign: "middle", transition: "background .12s", opacity: disabled && !busy ? 0.55 : 1 };
+  const knob = { position: "absolute", top: 3, [on ? "right" : "left"]: 3, width: 16, height: 16, borderRadius: "50%", background: "#FFF" };
+  return (
+    <div data-ss-adv-mode={on ? "on" : "off"} style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "16px 18px", marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 14, flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A", marginBottom: 4 }}>Advanced mode</div>
+          <p style={{ margin: 0, fontSize: 12.5, color: "#64748B", lineHeight: 1.55 }}>
+            Adds an Advanced page under Designer for designing a building from scratch with every shape control.
+          </p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flex: "0 0 auto" }}>
+          {needs3d && (
+            <span style={{ fontSize: 11, fontWeight: 700, color: "#92400E", background: "#FEF3C7", borderRadius: 20, padding: "3px 10px", whiteSpace: "nowrap" }}>Needs 3D</span>
+          )}
+          <button type="button" role="switch" aria-checked={on} aria-label="Advanced mode" disabled={disabled}
+            onClick={toggle} title={advanced.locked ? "Always on for this account" : (needs3d ? "Needs 3D" : (on ? "Turn Advanced mode off" : "Turn Advanced mode on"))}
+            style={{ background: "none", border: "none", padding: 0, cursor: disabled ? "default" : "pointer", font: "inherit", lineHeight: 0 }}>
+            <span style={track}><span style={knob} /></span>
+          </button>
+          <span style={{ fontSize: 13, fontWeight: 700, color: on ? "#0F172A" : "#64748B", minWidth: 24 }}>{busy ? "Saving…" : (on ? "On" : "Off")}</span>
+        </div>
+      </div>
+      {advanced.locked && (
+        <div style={{ marginTop: 10, fontSize: 12.5, color: "#64748B" }}>Always on for this account.</div>
+      )}
+      {!advanced.locked && needs3d && (
+        <div style={{ marginTop: 10, fontSize: 12.5, color: "#64748B", lineHeight: 1.55 }}>
+          Advanced builds on 3D. Add 3D on the Billing page, then turn this on.
+        </div>
+      )}
+      {!advanced.locked && on && !has3d && (
+        <div style={{ marginTop: 10, fontSize: 12.5, color: "#64748B", lineHeight: 1.55 }}>
+          The Advanced page opens once 3D is on for this account.
+        </div>
+      )}
+      {msg && msg.err && <div role="alert" style={{ marginTop: 10, fontSize: 12.5, color: "#B91C1C" }}>{msg.err}</div>}
+      {msg && msg.ok && (
+        <div style={{ marginTop: 10, fontSize: 12.5, color: "#166534", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span>{msg.ok}</span>
+          {on && has3d && advanced.onOpen && serverOn && (
+            <button type="button" onClick={advanced.onOpen}
+              style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontWeight: 700, fontSize: 12.5, cursor: "pointer", textDecoration: "underline" }}>
+              Open Advanced
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DesignerSettings({ clientId, setup3d = null, view3d = false, canBill = false, advanced = null }) {
   const { SS, failed } = useDesigner();
   const card = { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "16px 18px", marginBottom: 14 };
   return (
@@ -444,6 +544,8 @@ function DesignerSettings({ clientId, setup3d = null }) {
     // settings page" rather than a number of its own. It was 1080, which cost the calibration
     // form ~160px it now needs: since 2026-08-22 the 3D preview docks BESIDE the form.
     <div style={{ maxWidth: 1240 }}>
+      {/* Above the 3D card (2026-10-05): it decides whether a whole page exists, so it is read first. */}
+      {advanced && <AdvancedModeCard advanced={advanced} has3d={!!setup3d} />}
       <div style={card}>
         <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A", marginBottom: 4 }}>3D</div>
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: "#64748B", lineHeight: 1.55 }}>
@@ -458,10 +560,23 @@ function DesignerSettings({ clientId, setup3d = null }) {
             The designer failed to load — refresh the page. (structure-studio.component.js must be served alongside portal.html.)
           </div>
         )}
-        {SS && !setup3d && (
+        {/* setup3d is null for two reasons, and they need different words. 3D off: since
+            2026-10-05 buying it switches it on by itself, so the way in is Billing, not a wait for
+            someone at Structure Studio. 3D on: this person may not run the account (setup3d is
+            built for owners and admins only). The Billing pointer goes only to someone who can
+            open Billing (`canBill`, the shell's billingActor); anyone else is told to ask, the
+            QuickBooksLocked rule, never sent to a page that is not in their menu. */}
+        {SS && !setup3d && !view3d && (
           <div style={{ fontSize: 13, color: "#64748B", lineHeight: 1.55 }}>
-            3D isn't turned on for this account yet. Once it is, each of your building styles can be
-            tuned here against a live 3D preview.
+            {canBill
+              ? "3D isn't on for this account yet. Add 3D on the Billing page and it switches on right away. "
+              : "3D isn't on for this account yet. Ask your account owner to add 3D on the Billing page. "}
+            Then each of your building styles can be tuned here against a live 3D preview.
+          </div>
+        )}
+        {SS && !setup3d && view3d && (
+          <div style={{ fontSize: 13, color: "#64748B", lineHeight: 1.55 }}>
+            3D is on for this account. An owner or admin tunes how each building style looks in 3D here.
           </div>
         )}
         {/* No wrapper here on purpose. The calibration row's 3D column is position:sticky, and
@@ -507,8 +622,10 @@ function DesignerTab({ clientId, onSaved, openDesign = null, setup3d = null, vie
 
 // ─── Advanced (2026-09-28) ───
 // Carolyn: "an advanced tab that is only available in Structure Studio for us yet" — where a
-// builder designs a custom building from scratch with every option. Our own account only for
-// now (ssAdvancedOn in 01-core decides, and the shell mounts this only when it says yes).
+// builder designs a custom building from scratch with every option. Our own account, and since
+// 2026-10-05 any builder whose owner or admin turned Advanced mode on in Settings → Designer
+// (AdvancedModeCard above; ssAdvancedOn in 01-core decides, and the shell mounts this only when it
+// says yes).
 //
 // A SEPARATE designer instance from the Designer page's, on purpose: the building drawn here
 // is a draft of a new STYLE, not a customer's quote, and the quote in progress next door must
@@ -526,7 +643,7 @@ function AdvancedTab({ clientId, setup3d = null, canAdmin = false, onDirty = nul
     return (
       <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14, lineHeight: 1.6 }}>
         {canAdmin
-          ? "Advanced needs 3D. Turn 3D on for this account and this page opens."
+          ? "Advanced needs 3D. Add 3D on the Billing page and this page opens."
           : "Only an owner or admin can use Advanced."}
       </div>
     );

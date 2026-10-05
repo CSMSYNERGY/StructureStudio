@@ -15,8 +15,10 @@
 //   6. a style with no porch, opened and saved untouched, sends no porchOutFt, porchDepthFt,
 //      plateBand or wood key
 //   7. the projecting readout ("Posts ... clear") shows, and turns amber at 7 ft walls
-//   8. the truss box shows only for a recessed porch on a gable roof; the wood box only for a
-//      projecting porch, or (2026-10-04) as "Wood colour (steps)" for a recessed porch's steps
+//   8. the truss box shows only for a recessed porch on a gable roof, at a gable END (2026-10-05: not on
+//      the left wall of a gable front, an eave wall; yes on the left wall of a long-side front, a gable
+//      end); the wood box only for a projecting porch, or (2026-10-04) as "Wood colour (steps)" for a
+//      recessed porch's steps
 //   9. the BUILDER-ONLY cards stay off this surface: no step 1, no step 2, no Generate
 //  10. zero page errors
 //  11. the steps by porch kind (2026-10-03): a projecting porch offers left / centre / right and a
@@ -176,6 +178,13 @@ export async function main() {
     ok("save 1: nothing else in roof moved", keys(d3.roof) === "overhang,pitch,plateBand,porchEnd,porchOutFt,type"
       && d3.roof.type === "gable" && d3.roof.pitch === 0.4 && d3.roof.overhang === 0.6, keys(d3.roof));
     ok("save 1: no wood key until one is typed", !has(d3.colors, "wood"), keys(d3.colors));
+    // A SIDE WALL (2026-10-05) needs the front: with no front set the end is a gable end, front or back only, and the
+    // panel says what to do first.
+    const endSel = field(page, /^Porch end/).locator("select");
+    ok("with no front set the porch end offers the two gable ends only",
+      (await endSel.locator("option").allTextContents()).join("|") === "Front gable end|Back gable end", (await endSel.locator("option").allTextContents()).join("|"));
+    ok("...and says to set which wall is the front first for a side wall",
+      (await page.locator("[data-ss-porch-side-hint]").count()) === 1 && /set which wall is the front first/.test(await page.locator("[data-ss-porch-side-hint]").innerText()));
 
     // ── 2. Recessed ──
     await porchSelect(page).selectOption("recessed");
@@ -190,8 +199,24 @@ export async function main() {
     ok("...a recessed porch on a gambrel shows no truss box", (await trussBox(page).count()) === 0);
     await roofType.selectOption("gable");
     await settle(page);
+    // ...and it stands in a gable END (2026-10-05): on the left wall of a gable front the porch runs along an eave
+    // wall, where the box would tick and draw nothing; on the left wall of a long-side front, a gable end, it shows.
+    const frontSel = field(page, "Front wall (main door side)").locator("select");
+    await frontSel.selectOption("gable");
+    await settle(page);
+    await endSel.selectOption("left");
+    await settle(page);
+    ok("...a recessed porch on the left wall of a gable front shows no truss box", (await trussBox(page).count()) === 0);
+    await frontSel.selectOption("eave");
+    await settle(page);
+    ok("...on the left wall of a long-side front, a gable end, it shows", (await trussBox(page).count()) === 1);
+    // Back to the building as it was: the porch at the back, no front.
+    await endSel.selectOption("back");
+    await frontSel.selectOption("");
+    await settle(page);
     d3 = (await save(page, calls)).d3;
     ok("save 2: porchDepthFt 6.5", d3.roof.porchDepthFt === 6.5, JSON.stringify(d3.roof));
+    ok("save 2: the porch is back at the back, and no front is stored", d3.roof.porchEnd === "back" && !has(d3.roof, "front"), JSON.stringify(d3.roof));
     ok("save 2: no porchOutFt", !has(d3.roof, "porchOutFt"), keys(d3.roof));
     ok("save 2: the band stays on", d3.roof.plateBand === true);
 

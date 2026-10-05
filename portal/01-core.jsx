@@ -508,7 +508,7 @@ Object.defineProperty(sb, "functions", { value: __ssFunctions, configurable: tru
 
 const TAB_META = {
   designer: ["Designer", "Design a building and build a quote"],
-  // Our own account only, for now (Carolyn 2026-09-28) — see ssAdvancedOn below.
+  // Our own account, and a builder who switched Advanced mode on in Settings — see ssAdvancedOn below.
   advanced: ["Advanced", "Design a building from scratch with every shape control"],
   accounts: ["Accounts", "Open any builder's portal — operators only"],
   admin: ["Admin", "Operator console — master catalog, builder setup, and onboarding"],
@@ -639,14 +639,20 @@ const SS_SOON_TABS = ["rent-to-own-contracts", "reports", "self-serve-display-un
 
 // The Advanced page (Carolyn 2026-09-28): "an advanced tab that is only available in Structure
 // Studio for us yet", later switched on per builder as "advanced mode" in Settings. THIS IS THE
-// ONE PLACE THAT RULE LIVES — the nav item, the route clamp and the page all ask it — so the
-// later per-tenant setting is a one-line change here (e.g. `|| entitlement.advancedMode === true`,
-// or a flag read off the status call).
+// ONE PLACE THAT RULE LIVES — the nav item, the route clamp and the page all ask it.
 //
-// Today it is "our own account", read off the signal the portal already receives: portal-billing
-// reports `reason: "internal"` for the one tenant flagged client_settings.internal_account
-// (migration 169), the same signal 03-catalog's demoView reads. NOT the slug: this repo is public
-// and _shared/internalTenant.ts explains why the literal must not appear in source.
+// On in two cases, both read off portal-billing's entitlement:
+//   * OUR OWN ACCOUNT, always: `reason: "internal"` for the one tenant flagged
+//     client_settings.internal_account (migration 169), the same signal 03-catalog's demoView reads.
+//     NOT the slug: this repo is public and _shared/internalTenant.ts explains why the literal must
+//     not appear in source.
+//   * A BUILDER WHO SWITCHED IT ON (2026-10-05, migration 270): `advancedMode: true`, from
+//     client_settings.advanced_mode, which an owner or admin sets in Settings → Designer (the
+//     "Advanced mode" card, portal-settings save_advanced_mode). Off for every builder until then,
+//     and free. Ahsan on the 09-28 call: they "turn on the advanced mode to access this tab, so
+//     everybody is not going to see"; Carolyn: "Yep, yep, no, that's good." Whether builders are
+//     offered the switch on production waits on her (it ships with the portal's promotion).
+// Strictly `=== true`: a server that predates the field sends nothing, and that is off.
 //
 // Pass the EFFECTIVE tenant's entitlement (the viewed one in view-as). null = not answered yet,
 // which reads as off, so the nav item can never flash for a builder who does not have it.
@@ -655,7 +661,7 @@ const SS_SOON_TABS = ["rent-to-own-contracts", "reports", "self-serve-display-un
 // (12-shell.jsx): whoever may run the account, the same bar setup3d — the page's only way to
 // save — already sets. It is not part of the per-tenant setting, so it stays out of here.
 function ssAdvancedOn(entitlement) {
-  return !!(entitlement && entitlement.reason === "internal");
+  return !!(entitlement && (entitlement.reason === "internal" || entitlement.advancedMode === true));
 }
 
 // Keeps the query string (?view=<clientId> is orthogonal to the path and must survive
@@ -2094,11 +2100,11 @@ function EmbedCodeBlock({ clientId }) {
 
 // ─── Paid add-ons, named for a human ───
 // How a feature key reads in tenant-facing copy, and whether pointing someone at Billing
-// would actually help. `buyable: false` means there is nothing to purchase — view_3d is
-// operator-GRANTED only (see view3dUnlocked in 12-shell.jsx, which reads
-// entitlement.granted rather than entitlement.features for exactly this reason), so
-// "Add 3D — see Billing" would send a builder to a page with no such button. Used by the
-// setup checklist's padlocked rows; keep the keys in step with _shared/featureCheck.ts's
+// would actually help. `buyable: false` means there is nothing to purchase (Self Serve
+// Displays is still coming soon), so "Add it — see Billing" would send a builder to a page
+// with no such button. view_3d IS buyable: the 3D View plans are on sale, and since
+// 2026-10-05 buying one switches 3D on by itself (ssView3dOn below). Used by the setup
+// checklist's padlocked rows; keep the keys in step with _shared/featureCheck.ts's
 // FEATURE_KEYS, which is what the operator editor validates against.
 const SS_FEATURE_LABELS = {
   schedule_builds:     { label: "Scheduling",           buyable: true },
@@ -2107,9 +2113,46 @@ const SS_FEATURE_LABELS = {
   crm:                 { label: "the Built-in CRM",     buyable: true },
   simple_layout:       { label: "Simple Layout",        buyable: true },
   self_serve_displays: { label: "Self Serve Displays",  buyable: false },
-  view_3d:             { label: "3D",                   buyable: false },
+  view_3d:             { label: "3D",                   buyable: true },
 };
 const ssFeatureLabel = (key) => (SS_FEATURE_LABELS[key] || {}).label || "an add-on";
+
+// ─── Is 3D on for this account? ───
+// THE ONE RULE, asked by the shell's view3dUnlocked for the tenant on screen (the viewed one in
+// view-as); everything 3D in the portal follows that value. Pass that tenant's entitlement from
+// portal-billing. 3D is on when either list it sends names view_3d:
+//   granted  switched on for them by Structure Studio (a comp). A non-billable or internal
+//            account's grantable features ride in here as well (migration 228).
+//   paid     bought, and usable right now: active, past due inside the 7-day grace, or cancelled
+//            but still inside the period already paid for. The Suite counts, because the server
+//            expands it into what it includes.
+// `paid` arrived 2026-10-05 (migration 270). Before it, a builder who bought 3D saw Billing say
+// Active while the designer stayed locked, until an operator switched 3D on by hand. The public
+// designer asks the same question of the same tables through get_config's view3d.
+//
+// NOT entitlement.features. That map gives every non-billable account every feature in one
+// blanket, and it cannot tell a comp from a purchase; these two lists name each feature on its
+// own. null (not answered yet) or a list that is missing reads as off.
+function ssView3dOn(entitlement) {
+  if (!entitlement) return false;
+  const names = (list) => Array.isArray(list) && list.indexOf("view_3d") !== -1;
+  return names(entitlement.granted) || names(entitlement.paid);
+}
+
+// ─── The entitlement changed: ask the shell to read it again ───
+// The shell reads portal-billing's entitlement once per sign-in token (12-shell.jsx), so a
+// purchase made on the Billing tab did not reach anything that reads it (3D, the paywall, the
+// paid tabs) until a reload. Whatever just changed what this account pays for calls this; the
+// shell listens, bumps one counter, and refetches its own entitlement (or, in view-as, the
+// viewed tenant's). A window event rather than a prop, because the Billing view is mounted in
+// two places (the Billing tab and the paywall) far from the shell, and anything else that
+// changes the entitlement later can raise the same signal. A browser that cannot dispatch it
+// simply catches up on the next reload, as before.
+const SS_ENTITLEMENT_CHANGED = "ss-entitlement-changed";
+function ssEntitlementChanged() {
+  try { window.dispatchEvent(new Event(SS_ENTITLEMENT_CHANGED)); } catch (_e) { /* the next reload catches up */ }
+}
+
 // What an operator may tag a setup step with. Mirrors FEATURE_KEYS in
 // _shared/featureCheck.ts, which validates the save and rejects anything else — a typo
 // stored here would padlock a step for every builder forever, with nothing on screen to

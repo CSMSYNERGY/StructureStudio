@@ -523,6 +523,37 @@ same way, modelled on scheduling:
   feature (`client_feature_grants`) or have the tenant subscribe — do not put the blanket back.
   `_test_stubs/operatorMirror_test.ts` pins all of this against the shipped source.
 
+- **3D is on when it was GIVEN or PAID (2026-10-05, migration 270).** `ssView3dOn` in
+  `portal/01-core.jsx` is the one rule: `entitlement.granted` OR `entitlement.paid` names
+  `view_3d`, never `entitlement.features` (the exempt blanket). `paid` is portal-billing's list of
+  features a subscription makes usable right now (active; past_due inside the 7-day grace;
+  cancelled inside the paid-through period; the Suite expanded). The PUBLIC designer gets the same
+  answer from `get_config`'s `view3d` = live grant OR `public.ss_view3d_paid(client_id)`, a SQL copy
+  of featureState's rule — change it with `featureCheck.ts` / portal-billing / `billingPeriods.ts`
+  (`_test_stubs/paid3dUnlock_test.ts` pins the shared constants; `tests/sql/migration270.test.cjs`
+  fuzzes it against the real `paidThroughOf`). Buying never writes a grant, and the hand grants
+  given to paying builders before this are left alone (whether to remove them is Carolyn's call).
+  Anything that changes the entitlement calls `ssEntitlementChanged()`; the shell bumps one
+  counter (`entitlementRev`) and re-reads its own entitlement and the viewed tenant's, so no reload.
+
+- **The Advanced page is a per-builder switch (2026-10-05, migration 270 PART 5).** `ssAdvancedOn`
+  in `portal/01-core.jsx` is the one rule: `entitlement.reason === "internal"` (our own account,
+  always) OR `entitlement.advancedMode === true`. portal-billing sends `advancedMode` from
+  `client_settings.advanced_mode` (boolean, NOT NULL, default false: off for every builder until an
+  owner or admin turns it on). The switch is the "Advanced mode" card in Settings → Designer
+  (`06-3d.jsx AdvancedModeCard`, built by the shell's `advancedSwitch` from the SAME
+  `advancedEnt` / `advancedMayRun` the menu item uses) and saves through portal-settings
+  `save_advanced_mode {enabled}` (settings_structures:edit AND owner/admin; a platform operator in
+  view-as writes the viewed builder; a support operator is refused). Free, no grant, no plan; the
+  page still needs 3D, so the switch cannot be turned ON without it (OFF always works). Our own
+  account shows it on and locked. portal-billing reads the column on its OWN, fail-soft (a failed
+  read is Advanced off, never a 500), so it must never join the fatal client_settings select; the
+  save UPDATES and creates a missing row only when turning ON, with `ramp_enabled: false` (that
+  column defaults to true, but get_fixtures reads a missing row's ramps as off). Tests: `_test_stubs/advancedModeSwitch_test.ts`
+  (both handlers), `advancedGate_test.ts`, `tabClamp_test.ts`, `tests/sql/migration270.test.cjs`
+  (PART 5), `tests/harness/advancedModeSwitch.mjs` and `advancedTab.mjs` M/M2. Whether builders
+  on production are offered it is Carolyn's call (it ships with the portal's promotion).
+
 - **The SUPPORT half of the mirror (`app_operators.support_only`, migration 176).** A support
   operator wears the VIEWED tenant's OWNER access map, minus Billing. Three things stopped that
   map reaching the screen and all were fixed 2026-09-15: `settingsAccess` passed **null** in

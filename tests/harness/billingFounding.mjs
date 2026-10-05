@@ -507,9 +507,9 @@ try {
   }
 
   // ── f: paying from the billing gate lifts the gate, with no reload ──
-  // The shell fetches its entitlement once per token. BillingView hands it the fresh one after a
-  // purchase (ss:entitlement); before that the builder was told "You're subscribed" and left behind
-  // the gate ("…unlock as soon as payment goes through", it says) until they reloaded.
+  // The shell fetched its entitlement once per token, so the builder was told "You're subscribed"
+  // and left behind the gate ("…unlock as soon as payment goes through", it says) until they
+  // reloaded. A purchase now raises ssEntitlementChanged and the shell re-reads it.
   {
     const S = await open("f", TENANTS.c, "/portal/designs", {
       subscribeAnswer: { status: 200, body: { ok: true, subscriptions: [], failed: [] } },

@@ -261,6 +261,11 @@ const GATES: GateTable = {
   save_style_model:          { area: "settings_structures", level: "edit" },
   set_style_model_status:    { area: "settings_structures", level: "edit" },
   style_model_url:           { area: "settings_structures", level: "edit" },
+  // The builder's Advanced mode switch (Settings → Designer, migration 270). The Designer settings
+  // page's own area, as a write. That is the floor: the branch ALSO requires an owner or admin (or a
+  // platform operator in view-as), because the page it opens saves new styles through setup3d, which
+  // is built for them alone. A team member an owner has given Structures (edit) is refused there.
+  save_advanced_mode:        { area: "settings_structures", level: "edit" },
 
   // ── Options & colours ────────────────────────────────────────────────────
   save_colors:                    { area: "settings_options", level: "edit" },
@@ -2856,6 +2861,54 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (error) return dbFail(req, clientId, on ? "turn real-time pricing on" : "turn real-time pricing off", error);
     await auditStrict("portal_rtp_toggle", 1, `rtp_enabled=${on}`);
     return json({ ok: true, enabled: on });
+  }
+
+  // ── The builder's Advanced mode switch (Settings → Designer, migration 270) ─────────────────
+  // Carolyn 2026-09-28: a builder turns the Advanced page on for themselves in Settings, so not
+  // everybody sees it. Free, no grant, no plan: this sets one boolean, and portal-billing's
+  // entitlement carries it back as `advancedMode` (01-core.jsx ssAdvancedOn). The page still needs 3D,
+  // and it says so; turning the switch on without 3D is allowed and harmless, and turning it OFF must
+  // always work, so neither direction asks about 3D here.
+  //
+  // OWNER OR ADMIN, restated here as delete_design does: the GATES line is only the floor. The page
+  // this opens saves new styles through setup3d, which the shell builds for whoever may run the
+  // account and nobody else, and the switch is offered to the same people (12-shell.jsx
+  // advancedMayRun). In view-as that is a PLATFORM operator: a support operator wears the owner's
+  // map, not the owner's chair, and is refused here as the shell never offers them the switch. A
+  // read-only operator never gets this far (resolveTenant refuses writes for them).
+  if (action === "save_advanced_mode") {
+    if (operator ? operator.supportOnly : (role !== "owner" && role !== "admin")) {
+      return json({ error: "Only an account owner or admin can turn Advanced mode on or off." }, 403);
+    }
+    // Refuse, never coerce: "false" as a string must not read as on.
+    if (typeof payload.enabled !== "boolean") return json({ error: "enabled must be true or false." }, 400);
+    const enabled = payload.enabled;
+    const where = enabled ? "turn Advanced mode on" : "turn Advanced mode off";
+    const now = new Date().toISOString();
+    // UPDATE first, and create a row only when there is none AND the switch goes on. NOT an upsert:
+    // a created row takes every column's default, and ramp_enabled defaults to TRUE while
+    // get_fixtures reads a missing row's ramps as OFF, so a bare create would put an unpriced ramp
+    // on that builder's public designer as a side effect of this switch (live 2026-10-05: one tenant
+    // has no row). The create therefore names ramp_enabled false, which keeps what their public
+    // designer shows today. Off with no row is already off: nothing to write.
+    // .select() so a zero-row update is visible: PostgREST calls it a success.
+    const upd = await admin.from("client_settings")
+      .update({ advanced_mode: enabled, updated_at: now }).eq("client_id", clientId).select("client_id");
+    if (upd.error) return dbFail(req, clientId, where, upd.error);
+    let wrote = upd.data?.length ?? 0;
+    if (wrote === 0 && enabled) {
+      let ins = await admin.from("client_settings")
+        .insert({ client_id: clientId, advanced_mode: true, ramp_enabled: false, updated_at: now });
+      // The row appeared between the two calls (another save created it): it is there now, so the
+      // update is the right write, and it leaves that row's ramps alone.
+      if (ins.error?.code === "23505") {
+        ins = await admin.from("client_settings").update({ advanced_mode: true, updated_at: now }).eq("client_id", clientId);
+      }
+      if (ins.error) return dbFail(req, clientId, where, ins.error);
+      wrote = 1;
+    }
+    await audit("portal_advanced_mode", wrote, `advanced_mode=${enabled}`);
+    return json({ ok: true, advancedMode: enabled });
   }
 
   // Layout-item pricing (per placeable: doors, windows, workbench, loft, ramp …). Saves
