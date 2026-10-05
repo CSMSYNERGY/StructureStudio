@@ -197,7 +197,7 @@ export const D3_SHED_HIGH_SIDES = ["front", "back", "left", "right"] as const;
 // renderer, not here, because the sanitiser cannot know which way a later edit will turn the roof.
 export const D3_WING_SIDES = ["both", "left", "right", "front", "back"] as const;
 // The keys that only mean something with a ridge. Dropped as a set on a shed.
-const D3_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt", "wingSides", "wingList"] as const;
+const D3_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt", "wingSides", "wingList", "wingCornersMeet"] as const;
 // ── EACH WING SET ON ITS OWN (roof.wingSides, 2026-09-29) ─────────────────────────────────────────
 // Carolyn, 09-29, on the Advanced page: "I want this wing to be like this and this wing to be like
 // this". { left?, right?, front?, back? }, one entry per wall a wing can stand on, each OVERRIDING the
@@ -266,6 +266,8 @@ export const D3_ATTACH = ["roof", "wall"] as const;
 //   offsetFt  where along the wall, from the wall's middle, -30..30      absent: centred; toward the
 //             RIGHT on the front and back walls, toward the FRONT on the left and right walls
 //   enclosed  true: walled in with the building's siding                 absent: open on posts
+//   meetPorch true: meets a projecting porch beside it as one roof round   absent: runs past it
+//             the corner, when the two match (2026-10-05, the renderer's d3PorchJoins; only true is kept)
 // An entry without a known wall or a width is dropped; so is a key outside that list. A non-empty
 // list REPLACES the single lean-to (leanToWidthFt, leanToDropFt, leanToSide, leanToAttach,
 // leanToAttachFt), whose keys are then dropped here; absent, those keys are today's lean-to exactly.
@@ -308,6 +310,7 @@ export function sanitizeLeanTos(raw: unknown): Record<string, unknown>[] | null 
     const offsetFt = band("offsetFt");
     if (offsetFt !== null) lt.offsetFt = offsetFt;
     if (src.enclosed === true) lt.enclosed = true;
+    if (src.meetPorch === true) lt.meetPorch = true;
     out.push(lt);
   }
   return out.length ? out : null;
@@ -659,6 +662,12 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   }
   if (leanTos) roof.leanTos = leanTos;
   if (wingList) roof.wingList = wingList;
+  // WING ROOFS THAT MEET AT A CORNER (roof.wingCornersMeet, 2026-10-05): the Advanced page's switch. A side wing
+  // and an end wing that match run one roof around the corner they share, with a hip, instead of the side
+  // wing's stepping up over the end wing's. It means something only beside a wing list, so it is kept only
+  // with one, written after it, and only as `true` (absent is off, today's building). Production's older
+  // designer reads nothing of it; no prompt names it, and a model reply's list is dropped, so it goes too.
+  if (wingList && rawRoof.wingCornersMeet === true) roof.wingCornersMeet = true;
 
   // Anything that is not a renderable cladding means "unset", which the renderer
   // draws as panel siding. Matches the AI validator's posture: drop what we cannot

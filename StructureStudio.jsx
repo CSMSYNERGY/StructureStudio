@@ -4927,6 +4927,11 @@ function d3MassingTopAt(m, u) {
 const D3_WINGLIST_WALLS = ["left", "right", "front", "back"];
 const D3_WINGLIST_MAX = 16;
 const D3_WINGLIST_ENDS = true;
+// Two wing roofs that meet at a corner (roof.wingCornersMeet) match to this, in feet: as wide, and as high
+// where each meets the middle. It only absorbs float noise. Nothing rounds a width to the boxes' steps (a box
+// holds what is typed to its band, and a side's shared pool splits unrounded), so one a hair off is a
+// near-miss, and the card says it to the hundredth of an inch where whole inches would read the same.
+const D3_WL_CORNER_TOL = 0.01;
 // A stored number: a finite number, or a numeric string that is not blank (Number("") is 0, a blank box
 // is not a 0). The sanitizer's wlNum, token for token.
 function d3WlNum(v) {
@@ -4984,6 +4989,12 @@ function d3WingListDeep(m) { return !!(m && m.list && ((m.ends && m.ends.length)
 // 1: z L), sz (its outward sign), tier, outer, w, want, shrunk, pitch, zO (its outside wall), zI (its inner
 // line), ye, ya, top, attach, attachFt, clamped, cuts, meets, meetFt, ask, askIgnored, raised, raisedBy,
 // raisedFrom, low, tight, roofIgnored.
+// WING ROOFS THAT MEET AT A CORNER (roof.wingCornersMeet === true, beside end wings only; d3WingCornerPairs):
+//   corners   { joins, near }, each { name ("front-left"), s, at, i, j }: a join's w, pitch, ye and ya (the
+//             side wing's, the end wing's to D3_WL_CORNER_TOL), a near-miss's why, dw, dp and dy
+//   hipEnds   on a side wing that meets: the ends (0, 1) where its roof runs on round the corner
+//   hipSides  on an end wing that meets: the sides (-1, 1) where it does
+// Without the key none of the three is written, and nothing below reads a corner.
 // The order: wings = every tier 1 (-u side, then +u), then every tier 2, ...; ends = tier 1 (end 0, end 1),
 // then tier 2, ... So m.wings[0] is a tier-1 wing. `allowEnds` false keeps end-wall entries stored, not
 // drawn (why "end"): D3_WINGLIST_ENDS, until the end-wing renderer ships.
@@ -5042,6 +5053,10 @@ function d3MassingList(cfg, ax, Hn, out, allowEnds) {
     out.prof = d3RoofProfile(cfg, out.Sc, out.Hc, ax.tallNeg).dedup;
     return out;
   }
+  // 3b. Where a side wing's roof and an end wing's run on round the corner as one (roof.wingCornersMeet, only
+  // with the key and only beside end wings): each joined wing learns which of its ends or sides it meets at.
+  const cm = cfg.wingCornersMeet === true && hasEnds ? d3WingCornerPairs(G, Z, Hn) : null;
+  if (cm) cm.joins.forEach((p) => { (p.g.hipEnds = p.g.hipEnds || []).push(p.at); (p.t.hipSides = p.t.hipSides || []).push(p.s); });
   // 4. Side lines: the outermost wing on today's literals, each one in from it on the next one's inner line.
   [-1, 1].forEach((s) => {
     const ch = G[s];
@@ -5123,12 +5138,14 @@ function d3MassingList(cfg, ax, Hn, out, allowEnds) {
       const t = ch[0]; t.pitch = t.p0; t.ya = t.ye + t.w * t.p0;
     });
     // 7. Side chains, outer to inner. The outermost stands on the building's wall at H; beside end wings its
-    // outside wall rises over the middle stretch to pass over the end roofs (raised, raisedBy those wings).
+    // outside wall rises over the middle stretch to pass over the end roofs (raised, raisedBy those wings) --
+    // unless its roof meets theirs round the corners (hipEnds, roof.wingCornersMeet): then it stays at H, the
+    // end wings' own outside walls, and the two roofs are one.
     [-1, 1].forEach((s) => {
       const ch = G[s], n = ch.length;
       if (!n) return;
       const gn = ch[n - 1];
-      if (hasEnds) {
+      if (hasEnds && !gn.hipEnds) {
         const k = kOf(gn), fE = floorEnd(k), mm = meetMin();
         const blankE = Math.max(fE, meetBlankEnd(k), Hn + 1);
         gn.ye = Math.max(gn.ask != null ? gn.ask : blankE, fE, mm, Hn + 1);
@@ -5172,8 +5189,10 @@ function d3MassingList(cfg, ax, Hn, out, allowEnds) {
       T1e.forEach((t) => { if (!t.attach && endFloorOf(t, kcMax) >= out.Hc - 1e-6) out.hcRaisedBy.push(t.i); });
     }
     [-1, 1].forEach((s) => { const ch = G[s]; if (!ch.length) out.E[s] = out.Hc; ch.forEach((g, k) => { g.top = k ? ch[k - 1].ye : out.Hc; }); });
-    // A tier-1 end wing "On the wall" meets the lowest face on its line, under the steepest eave there.
-    const Emin = Math.min(out.E["-1"], out.E["1"]);
+    // A tier-1 end wing "On the wall" meets the lowest face on its line, under the steepest eave there. A side
+    // whose wing's roof meets the end wings' around the corners (hipEnds) is no face on it: the hip is.
+    const upE = [-1, 1].filter((s) => !(G[s].length && G[s][G[s].length - 1].hipEnds)).map((s) => out.E[s]);
+    const Emin = upE.length ? Math.min(...upE) : out.Hc;
     T1e.forEach((t) => {
       t.top = Emin;
       if (!t.attach) return;
@@ -5232,7 +5251,7 @@ function d3MassingList(cfg, ax, Hn, out, allowEnds) {
     }
     if (parent.ye < child.ya + Math.max(1.0, a + Math.max(0, parent.pitch - child.pitch) * ov) - 1e-9) child.tight = true;
   }));
-  if (hasEnds) sides.forEach((g) => { if (g.ye < floorEnd(g.pitch) - 1e-9) g.tight = true; });
+  if (hasEnds) sides.forEach((g) => { if (!g.hipEnds && g.ye < floorEnd(g.pitch) - 1e-9) g.tight = true; });
   // 10. The records, legacy keys first.
   const sideRec = (g) => {
     const o = { side: g.side, wall: g.wall, w: g.w, pitch: g.pitch, u1: g.u1, u0: g.u0, ye: g.ye, ya: g.ya };
@@ -5240,16 +5259,72 @@ function d3MassingList(cfg, ax, Hn, out, allowEnds) {
     Object.assign(o, { i: g.i, bwall: g.bwall, tier: g.tier, outer: g.outer, want: g.want, shrunk: g.shrunk, top: g.top, ask: g.ask, askIgnored: g.askIgnored,
       raised: g.raised, raisedBy: g.raisedBy, raisedFrom: g.raisedFrom, low: g.low, tight: g.tight, roofIgnored: g.roofIgnored });
     if (g.tier > 1 && g.mt) Object.assign(o, g.mt);
+    if (g.hipEnds) o.hipEnds = g.hipEnds.slice();
     return o;
   };
   const endRec = (t) => ({ i: t.i, wall: t.wall, bwall: t.bwall, at: t.at, sz: t.sz, tier: t.tier, outer: t.outer, w: t.w, want: t.want, shrunk: t.shrunk,
     pitch: t.pitch, zO: t.zO, zI: t.zI, ye: t.ye, ya: t.ya, top: t.top,
     attach: t.mt ? "wall" : null, attachFt: t.mt ? t.mt.attachFt : null, clamped: t.mt ? t.mt.clamped : false, cuts: t.mt ? t.mt.cuts : false,
     meets: t.mt ? "wall" : null, meetFt: t.mt ? t.mt.meetFt : null,
-    ask: t.ask, askIgnored: t.askIgnored, raised: t.raised, raisedBy: t.raisedBy, raisedFrom: t.raisedFrom, low: t.low, tight: t.tight, roofIgnored: t.roofIgnored });
+    ask: t.ask, askIgnored: t.askIgnored, raised: t.raised, raisedBy: t.raisedBy, raisedFrom: t.raisedFrom, low: t.low, tight: t.tight, roofIgnored: t.roofIgnored,
+    ...(t.hipSides ? { hipSides: t.hipSides.slice() } : {}) });
   for (let k = 0; k < Math.max(G["-1"].length, G["1"].length); k++) [G["-1"][k], G["1"][k]].forEach((g) => { if (g) out.wings.push(sideRec(g)); });
   for (let k = 0; k < Math.max(Z[0].length, Z[1].length); k++) [Z[0][k], Z[1][k]].forEach((t) => { if (t) out.ends.push(endRec(t)); });
+  // The corners (roof.wingCornersMeet): the two wings' own numbers as built, never the records themselves.
+  if (cm) {
+    out.corners = {
+      joins: cm.joins.map((p) => ({ name: p.name, s: p.s, at: p.at, i: p.i, j: p.j, w: p.g.w, pitch: p.g.pitch, ye: p.g.ye, ya: p.g.ya })),
+      near: cm.near.map((p) => ({ name: p.name, s: p.s, at: p.at, i: p.i, j: p.j, why: p.why, dw: p.dw, dp: p.dp, dy: p.dy })),
+    };
+  }
   return out;
+}
+// WING ROOFS THAT MEET AT A CORNER (roof.wingCornersMeet, 2026-10-05). Carolyn, 10-01, on her photo of a side
+// wing whose roof steps up over the end wing's: she wants the two to run as ONE roof round the corner. Beside
+// end wings a side wing's outside wall rises so its roof passes over theirs (d3MassingList step 7). With the
+// key, a side wing and an end wing that match exactly both keep their outside walls at the building's, H, and
+// their two roofs, each falling to its own wall at one pitch, cross on the 45-degree line out of the corner:
+// a hip, from the building's corner at wall height up to the inner corner, where both meet the middle at ya.
+// The match is the builder's own numbers, never nudged: a pair a hair apart is a near-miss, said with its
+// numbers, and built as it is without the key. A pair is the outermost wing on a side wall and the
+// outermost on an end wall, at the corner they share; it joins when
+//   - each is the only wing on its wall ("stack": a wing on a wing steps over its own);
+//   - both are Automatic ("attach": a roof set to meet the middle on the wall, or up its roof, takes its
+//     pitch from where it meets);
+//   - the side wing's outside wall is not asked away from the building's ("height", dy the ask less H);
+//   - they are as wide ("width", dw the end wing's less the side wing's) and as steep, to D3_WL_CORNER_TOL
+//     where each meets the middle ("pitch", dp the end wing's pitch less the side wing's);
+//   - and the side wing joins every end wing it runs to, its outside wall being one height its whole
+//     length ("otherEnd", on a pair that matched beside one that does not).
+// G and Z are d3MassingList's chains (side -1 / 1, end 0 / 1), read before the solve: widths, asked pitches
+// (p0), attach words and asks. Null without a side wing and an end wing on one corner. Each pair is { name,
+// s, at, i, j, g, t, why, dw, dp, dy }, g and t the two records, which d3MassingList strips.
+function d3WingCornerPairs(G, Z, Hn) {
+  const tol = D3_WL_CORNER_TOL, pairs = [];
+  [-1, 1].forEach((s) => [0, 1].forEach((at) => {
+    const cs = G[s], ce = Z[at];
+    if (!cs.length || !ce.length) return;
+    const g = cs[cs.length - 1], t = ce[ce.length - 1], why = [];
+    if (cs.length > 1 || ce.length > 1) why.push("stack");
+    if (g.attach || t.attach) why.push("attach");
+    if (!why.length) {
+      if (g.ask != null && Math.abs(g.ask - Hn) > tol) why.push("height");
+      if (Math.abs(t.w - g.w) > tol) why.push("width");
+      if (Math.abs(t.p0 - g.p0) * Math.max(g.w, t.w) > tol) why.push("pitch");
+    }
+    const name = g.bwall === "front" || g.bwall === "back" ? g.bwall + "-" + t.bwall : t.bwall + "-" + g.bwall;
+    pairs.push({ name, s, at, i: g.i, j: t.i, g, t, why, dw: t.w - g.w, dp: t.p0 - g.p0, dy: g.ask != null ? g.ask - Hn : 0 });
+  }));
+  if (!pairs.length) return null;
+  pairs.forEach((p) => { if (!p.why.length && pairs.some((q) => q.s === p.s && q.why.length && q.why[0] !== "otherEnd")) p.why.push("otherEnd"); });
+  return { joins: pairs.filter((p) => !p.why.length), near: pairs.filter((p) => p.why.length > 0) };
+}
+// The corners a list WOULD meet at with the key on, whatever it is now: the Advanced page's switch is shown
+// only where there is a pair, and says what it does at each corner before it is pressed. Null without a list
+// or a pair.
+function d3WingCorners(roofCfg, W, L, H) {
+  if (!d3WingListOn(roofCfg)) return null;
+  return d3Massing({ ...roofCfg, wingCornersMeet: true }, W, L, H).corners || null;
 }
 // A tier-1 side wing that meets the MIDDLE on the wall or up its roof: d3WingsAttach's body token for token,
 // each wing from its own outside wall (g.ye, H on a wing standing on the building's wall) and its own asked
@@ -5339,6 +5414,9 @@ function d3ListWallTops(m, wall) {
   const z1 = E1.length ? b(E1[0]) : m.L;
   pieces.push([z, z1, m.E[s]]); z = z1;
   E1.forEach((t, k) => { const e = t.outer ? m.L : b(E1[k + 1]); pieces.push([z, e, t.ye]); z = e; });
+  // A side wing whose roof meets the end wings' round the corners (roof.wingCornersMeet) stands at H, as they
+  // do: the wall is one height end to end, null like every other such wall.
+  if (pieces.every((p) => p[2] === m.H)) return null;
   if (m.uAxisIsX) return pieces;
   return pieces.map((p) => [m.L - p[1], m.L - p[0], p[2]]).sort((p, q) => p[0] - q[0]);
 }
@@ -5630,6 +5708,243 @@ function d3LeanTosGeom(roofCfg, W, L, H) {
     return { ...base, dir: 0, E, k: 0, drop, d, y1, ya, at: E - ya, mode: attach === "wall" ? "wall" : null, pitch: (ya - y1) / w, clamped: false, flat, noRoof: false, cuts: false,
       roofIgnored: attach === "roof", atL: f.atL, sz: f.sz, zW, zO: zW + f.sz * w, a0: mid - run.len / 2, a1: mid + run.len / 2 };
   });
+}
+// ── TWO LEAN-TOS THAT MEET AT A CORNER (roof.leanTos, 2026-10-04) ──────────────────────────────────
+// Carolyn, 10-01: "if the two heights match each other and the pitch match each other, that it'll do it
+// like this" -- her wrap-around porch: a lean-to on a side wall and one on an end wall running as ONE roof
+// around the building's corner, with a hip where the two slopes meet. Each lean-to's roof falls from where
+// it meets its wall (ya) to its outer edge (y1) across its width, so two that meet their walls at the same
+// height, have their outer edges at the same height and are as wide (so as steep) cross on the 45-degree
+// line out from the corner: the hip, from the corner at ya to the outer corner past the overhang. That
+// exact match is the only join, and the builder's own numbers make it. Nothing is nudged to make one: a
+// pair a hair apart is a near-miss, said on both cards with the numbers, and built as two lean-tos
+// running past each other, each exactly as it is alone. A pair joins when
+//   - one stands on a side (eave) wall and one on an end wall, and both run to the same outside corner;
+//   - they meet their walls at the same height, their outer edges are at the same height and they are as
+//     wide, each to D3_LT_CORNER_TOL (every box steps in quarter feet: this only absorbs float noise);
+//   - the side-wall one does not meet the roof (it lands up the roof, not at the corner), and the building
+//     has no end wings (roof.wingList), which step its eave where they stand. Both are near-misses, said.
+//     "On the roof" on a shed's high side (noRoof) meets at the eave, "On the wall" at 0, and is judged so.
+// At each corner the first such pair in list order joins; a lean-to can join at both its ends, a wrap
+// around three sides. Everything is in d3LeanTosGeom's frame, the building's u and the roof group's z:
+//   joins  { i, j, at, dir, sz, uC, zC, w, ya, y1, pitch, ovh, hip, post, enc }: i the side-wall lean-to's
+//          index, j the end-wall one's, at the corner's name ("front-right"), dir and sz the side wall's
+//          and the end wall's outward signs, (uC, zC) the building's corner, ovh the overhang across the
+//          plan, hip [[u, z, y] at the corner, [u, z, y] at the outer corner past the overhang] on the
+//          roof line, post the outer corner [u, z], enc whether each is enclosed [i's, j's]
+//   near   { i, j, at, why, dy, d1, dw }: a pair at a corner none joins, why ("height" | "drop" | "width"
+//          | "roof" | "endWings"), and by how much, j's less i's: at the wall, at the outer edge, wide
+//   ends   { [index]: { a0 | a1: k } }: which end of a joined lean-to's run is at joins[k]
+// Null when no two lean-tos reach a corner together: every list without a side-wall lean-to and an
+// end-wall one running to the same corner, which is every style stored before this.
+const D3_LT_CORNER_TOL = 0.01;
+function d3CornerJoins(roofCfg, W, L, H, gs) {
+  const list = gs || d3LeanTosGeom(roofCfg, W, L, H);
+  if (!list) return null;
+  const cfg = roofCfg || {};
+  const ax = d3RoofAxes(cfg, W, L);
+  const tol = D3_LT_CORNER_TOL;
+  const pairs = [];
+  list.forEach((a, x) => list.slice(x + 1).forEach((b) => {
+    if (a.kind === b.kind) return;
+    const e = a.kind === "eave" ? a : b, g = a.kind === "eave" ? b : a;
+    // Both run to the corner: the side-wall one to the end wall's line, the end-wall one to the side wall's.
+    const eReach = g.sz > 0 ? e.a1 >= ax.L - tol : e.a0 <= tol;
+    const gReach = e.dir > 0 ? g.a1 >= ax.S / 2 - tol : g.a0 <= -ax.S / 2 + tol;
+    if (eReach && gReach) pairs.push({ e, g, key: e.dir + ":" + g.sz, at: e.wall === "front" || e.wall === "back" ? e.wall + "-" + g.wall : g.wall + "-" + e.wall });
+  }));
+  if (!pairs.length) return null;
+  const Hn = Number(H) > 0 ? Number(H) : D3.WALL_H;
+  const mz = d3WingListOn(cfg) ? d3Massing(cfg, W, L, Hn) : null;
+  const endWings = !!(mz && mz.list && mz.ends.length);
+  const ovRaw = cfg.overhang != null ? Number(cfg.overhang) : D3.OVERHANG;
+  const OV = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
+  const joins = [], near = [], ends = {}, taken = {};
+  pairs.forEach((p) => {
+    const { e, g } = p;
+    p.why = [];
+    if (e.mode === "roof" && !e.noRoof) p.why.push("roof");
+    if (endWings || e.endCross) p.why.push("endWings");
+    if (!p.why.length) {
+      if (Math.abs(g.ya - e.ya) > tol) p.why.push("height");
+      if (Math.abs(g.y1 - e.y1) > tol) p.why.push("drop");
+      if (Math.abs(g.w - e.w) > tol) p.why.push("width");
+    }
+    if (p.why.length || taken[p.key]) return;
+    taken[p.key] = true;
+    const k = joins.length, uC = e.u0, zC = g.zW;
+    const ovh = OV / Math.sqrt(1 + e.pitch * e.pitch);
+    joins.push({ i: e.i, j: g.i, at: p.at, dir: e.dir, sz: g.sz, uC, zC, w: e.w, ya: e.ya, y1: e.y1, pitch: e.pitch, ovh,
+      hip: [[uC, zC, e.ya], [uC + e.dir * (e.w + ovh), zC + g.sz * (e.w + ovh), e.y1 - e.pitch * ovh]],
+      post: [e.u1, g.zO], enc: [e.enclosed, g.enclosed] });
+    (ends[e.i] = ends[e.i] || {})[g.sz > 0 ? "a1" : "a0"] = k;
+    (ends[g.i] = ends[g.i] || {})[e.dir > 0 ? "a1" : "a0"] = k;
+  });
+  pairs.forEach((p) => {
+    if (!taken[p.key]) near.push({ i: p.e.i, j: p.g.i, at: p.at, why: p.why, dy: p.g.ya - p.e.ya, d1: p.g.y1 - p.e.y1, dw: p.g.w - p.e.w });
+  });
+  return { joins, near, ends };
+}
+// ── A LEAN-TO THAT MEETS THE PORCH (roof.leanTos[i].meetPorch, 2026-10-05) ─────────────────────────
+// The same wrap-around (Carolyn, 10-01) with a projecting porch on one wall and a lean-to on the wall beside
+// it: one roof round the building's corner, with a hip. A shed-roofed porch (d3PorchGeom) is an end-wall
+// lean-to in all but name -- its roof meets its wall at yHigh, falls at its pitch and runs out to its front
+// edge, dEnd -- so the pair is the corner join above with a porch for one of the two. The builder asks for
+// it (meetPorch on the lean-to, its card's "Meet the porch"), because joined the porch is built from its
+// own numbers alone, the ones its panel prints, and the clearance scan does not lower it: that would leave the
+// lean-to meeting a porch roof that is not where either card says. So those numbers already hold it under
+// what the scan would have found: d3PorchCapFt's ceiling and, on a gable end, the main roof's eave corners
+// (d3PorchEaveCornerCapFt). And only on a match, never nudged: the two roofs' TOPS meet the walls at one
+// height and fall at one pitch. A porch's height is its roof's top where it meets the wall; a lean-to's is
+// its slab's underside on its wall line, so the lean-to's own number for the match is ya, the porch roof's
+// top over the wall's line less the lean-to slab's thickness there, and its outer edge is that line as far
+// out as it is wide, each to D3_LT_CORNER_TOL. Their widths need not match: the hip runs out from the corner
+// to the nearer of the two eaves, and the deeper roof runs on past it to the outer corner.
+// A lean-to on a side wall meets a porch on an end wall, and one on an end wall meets a porch on a side wall
+// (the new frame's eave-wall porch); either way it runs to the porch's corner. A pair that cannot join says
+// why: "roof" (the side-wall lean-to meets the roof, up the slope), "wings" (wings or end wings on the
+// building), "porchWidth" (the porch is narrower than its wall, so it stops short of the corner),
+// "underLeanTo" (another lean-to's roof runs over the porch on the porch's own wall: `over`, its index),
+// "leanTo" (this lean-to already meets another lean-to round that corner), "edge" (another lean-to beside
+// the porch hangs its roof over the porch lower than the porch roof: `edge` { i, at, by }, its index, its
+// corner and how far the porch roof's top stands over what the scan would hold it under), "height" and
+// "pitch" (by dy at the wall and d1 at the lean-to's outer edge, ya's line less the lean-to's) and "taken" (a
+// lean-to earlier in the list meets the porch there first). underLeanTo and edge are the scan's own work: an
+// unjoined porch is lowered under such a roof, and a joined one would run into it, so while one stays no
+// lean-to meets the porch. In d3LeanTosGeom's frame, the building's u and the roof group's z:
+//   joins  d3CornerJoins' join with the porch for the other one ({ i, j: "porch", at, dir, sz, uC, zC, w,
+//          ya, pitch, ovh, hip, post, enc }), plus lt the lean-to's kind, js the corner's side in the porch's
+//          own frame (x across it, d3PorchToRoot's), eL and eP the lean-to's eave and the porch's front edge
+//          out from the corner, dPost and hdrIn the porch's posts and its header's inner face, and [y0, y1]
+//          the lean-to's roof line on the porch roof's plane, at its wall line and at its outer edge: its own
+//          ya and y1 to D3_LT_CORNER_TOL, so its top meets its wall where the porch roof's meets the porch's
+//          and the two top faces cross on the hip and nowhere else.
+//          post is the one corner post, where the lean-to's posts' line crosses the porch's; enc, as there,
+//          [the side-wall one's, the end-wall one's] walls, the porch's always false.
+//   near   { i, at, asked, why, dy, d1 }, and over or edge with those whys: every other lean-to that runs to a
+//          corner of the porch's wall, asked or not. Not asked and no why: it would join if asked, and its
+//          card says so.
+//   ends   { [index]: { a0 | a1: k } }: which end of a joined lean-to's run is at joins[k]
+//   porch  { wall, kind, yHigh, ya, pitch, dWall, dPost, dEnd, cap, hw }: the porch a join builds --
+//          d3PorchGeom under cap, the lower of d3PorchCapFt and d3PorchEaveCornerCapFt -- ya a lean-to's
+//          number to meet it (above), hw half its wall.
+// gs and cj are d3LeanTosGeom's records and d3CornerJoins' answer (null for none), where the caller has them.
+// Null without a list, without a projecting porch, or with no lean-to running to a corner of its wall:
+// every style stored before this.
+function d3PorchJoins(roofCfg, W, L, H, gs, cj) {
+  const list = gs || d3LeanTosGeom(roofCfg, W, L, H);
+  if (!list) return null;
+  const cfg = roofCfg || {};
+  const pj = d3ProjectingPorch(cfg, W, L);
+  if (!pj) return null;
+  const ax = d3RoofAxes(cfg, W, L);
+  const tol = D3_LT_CORNER_TOL;
+  const pw = { south: "front", north: "back", west: "left", east: "right" }[pj.wall];
+  const pf = d3LeanToWall(ax, pw);
+  const P = d3PorchSpan(cfg, W, L);
+  // The porch's run along its wall, the way a lean-to's is kept: the building's u on an end wall, z on a side wall.
+  const pa0 = P.onCap ? P.centerU - P.span / 2 : ax.L / 2 + P.centerU - P.span / 2, pa1 = pa0 + P.span;
+  const cands = [];
+  list.forEach((q) => {
+    if (q.kind === pf.kind) return;
+    const dir = pf.kind === "gable" ? q.dir : pf.dir, sz = pf.kind === "gable" ? pf.sz : q.sz;
+    // The side-wall one's run and the end-wall one's, each to the other's wall line.
+    const eRun = pf.kind === "gable" ? [q.a0, q.a1] : [pa0, pa1], gRun = pf.kind === "gable" ? [pa0, pa1] : [q.a0, q.a1];
+    const eReach = sz > 0 ? eRun[1] >= ax.L - tol : eRun[0] <= tol;
+    const gReach = dir > 0 ? gRun[1] >= ax.S / 2 - tol : gRun[0] <= -ax.S / 2 + tol;
+    if (!(pf.kind === "gable" ? eReach : gReach)) return;
+    const at = q.wall === "front" || q.wall === "back" ? q.wall + "-" + pw : pw + "-" + q.wall;
+    cands.push({ q, dir, sz, at, porchReach: pf.kind === "gable" ? gReach : eReach });
+  });
+  if (!cands.length) return null;
+  // The lean-tos' own corner joins (d3CornerJoins), when the caller has not already found them.
+  const lc = cj === undefined ? d3CornerJoins(cfg, W, L, H, list) : cj;
+  const Hn = Number(H) > 0 ? Number(H) : D3.WALL_H;
+  // The porch d3PorchReadout describes for a join: its trimFace, under d3PorchCapFt's ceiling and, on a gable
+  // end, the main roof's eave corners the scan would have held it under (d3PorchEaveCornerCapFt).
+  const TF = D3.WALL_T / 2 + 0.03;
+  const cap = Math.min(d3PorchCapFt(cfg, W, L, Hn, TF), d3PorchEaveCornerCapFt(cfg, W, L, Hn));
+  const g = d3PorchGeom(P.span, d3PorchWallTopFt(cfg, W, L, Hn), pj.D, TF, cap, Number(cfg.porchAttachFt) || 0, d3PorchFraming(cfg));
+  const wings = d3WingsOn(d3Massing(cfg, W, L, Hn));
+  const ovRaw = cfg.overhang != null ? Number(cfg.overhang) : D3.OVERHANG;
+  const OV = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
+  const p = g.pitch, Y0 = g.yHigh + p * g.dWall;               // the porch roof's top over the wall's line
+  const lift = (D3.ROOF_T / 2) * (1 + Math.sqrt(1 + p * p));   // a lean-to slab's top over its own line
+  const ya = Y0 - lift;                                        // so a lean-to's own number for the match
+  const ovh = OV / Math.sqrt(1 + p * p);
+  // WHAT ELSE HANGS OVER THE PORCH, which the scan would lower an unjoined porch under: a lean-to on the porch's
+  // own wall whose roof, overhangs and all, runs over the porch sheet's width; and one on a wall beside it whose
+  // free end's overhang runs out past the porch wall's face, its slab's underside where the sheet reaches past
+  // its wall line (less the scan's 0.03) under the porch roof's top. Out past the wall line: the sheet's half
+  // width is d3PorchGeom's side + SIDE_OV, and the scan's wall face its dWall + 0.005.
+  const sheet = TF + 0.08;
+  const sP = pf.kind === "gable" ? pf.sz : pf.dir, lineP = pf.kind === "gable" ? (pf.sz > 0 ? ax.L : 0) : pf.dir * (ax.S / 2);
+  const overs = [];
+  list.forEach((o) => {
+    if (o.kind === pf.kind) {
+      if (o.wall === pw && Math.min(o.a1 + OV, pa1 + sheet) - Math.max(o.a0 - OV, pa0 - sheet) > 0.01) overs.push({ i: o.i, why: "underLeanTo" });
+      return;
+    }
+    const past = sP > 0 ? o.a1 + OV - lineP : lineP - (o.a0 - OV);
+    const sO = o.kind === "eave" ? o.dir : o.sz, lineO = o.kind === "eave" ? o.dir * (ax.S / 2) : o.zW;
+    const x = sO > 0 ? pa1 + sheet - lineO : lineO - (pa0 - sheet);
+    if (!(past > g.dWall + 0.005) || !(x > 0)) return;
+    const up = o.kind === "eave" ? o.dir * (o.u0 - o.ua) : 0;    // "On the roof" meets up the slope, inside its wall line
+    const bound = o.ya - o.pitch * (x + up) - (D3.ROOF_T / 2) * (Math.sqrt(1 + o.pitch * o.pitch) - 1) - 0.03;
+    if (g.yHigh > bound + tol) {
+      overs.push({ i: o.i, why: "edge", at: o.wall === "front" || o.wall === "back" ? o.wall + "-" + pw : pw + "-" + o.wall, by: g.yHigh - bound });
+    }
+  });
+  const joins = [], near = [], ends = {};
+  // Each on its own first: whether it could meet the porch at all.
+  const rows = cands.map((c) => {
+    const q = c.q;
+    const asked = !!(cfg.leanTos && cfg.leanTos[q.i] && cfg.leanTos[q.i].meetPorch === true);
+    const end = q.kind === "eave" ? (c.sz > 0 ? "a1" : "a0") : (c.dir > 0 ? "a1" : "a0");
+    const y1P = ya - p * q.w;                                  // ya's line as far out as this is wide
+    const why = [];
+    if (q.mode === "roof" && !q.noRoof) why.push("roof");
+    if (wings || q.endCross) why.push("wings");
+    if (!c.porchReach) why.push("porchWidth");
+    if (lc && lc.ends[q.i] && lc.ends[q.i][end] != null) why.push("leanTo");
+    if (!why.length) {
+      if (Math.abs(q.ya - ya) > tol) why.push("height");
+      if (Math.abs(q.y1 - y1P) > tol) why.push("pitch");
+    }
+    return { c, q, asked, end, y1P, why };
+  });
+  // The first asked one at each corner that could meets the porch there, unless something is left over the porch:
+  // every roof over it but those (each cut on the hip at its own corner), which stops them all. Then a later asked
+  // one at a corner is "taken"; with them stopped, it is stopped too. One not asked is told as if it were.
+  const first = {};
+  rows.forEach((r) => { if (r.asked && !r.why.length && !first[r.c.at]) first[r.c.at] = r; });
+  const meet = rows.filter((r) => first[r.c.at] === r).map((r) => r.q.i);
+  const leftOver = (r, by) => overs.filter((o) => o.i !== r.q.i && by.indexOf(o.i) < 0);
+  const stopped = meet.length > 0 && leftOver(rows.find((r) => r.q.i === meet[0]), meet).length > 0;
+  rows.forEach((r) => {
+    if (r.why.length) return;
+    if (r.asked && first[r.c.at] !== r && !stopped) { r.why.push("taken"); return; }
+    const left = leftOver(r, r.asked && first[r.c.at] !== r ? [] : meet);
+    const under = left.find((o) => o.why === "underLeanTo"), edge = left.find((o) => o.why === "edge");
+    if (under) { r.why.push("underLeanTo"); r.over = under.i; }
+    if (edge) { r.why.push("edge"); r.edge = { i: edge.i, at: edge.at, by: edge.by }; }
+  });
+  rows.forEach((r) => {
+    const { c, q, asked, end, why } = r;
+    if (why.length || !asked) {
+      near.push({ i: q.i, at: c.at, asked, why, dy: ya - q.ya, d1: r.y1P - q.y1, ...(r.over != null ? { over: r.over } : {}), ...(r.edge ? { edge: r.edge } : {}) });
+      return;
+    }
+    const k = joins.length, uC = c.dir * (ax.S / 2), zC = c.sz > 0 ? ax.L : 0;
+    const eL = q.w + ovh, h = Math.min(eL, g.dEnd);
+    joins.push({ i: q.i, j: "porch", at: c.at, lt: q.kind, dir: c.dir, sz: c.sz, uC, zC, js: pf.kind === "gable" ? c.sz * c.dir : -c.sz * c.dir,
+      w: q.w, ya, pitch: p, ovh, y0: ya, y1: ya - p * q.w, eL, eP: g.dEnd, dPost: g.dPost, hdrIn: g.dPost - g.sizes.HDR_D / 2,
+      hip: [[uC, zC, Y0], [uC + c.dir * h, zC + c.sz * h, Y0 - p * h]],
+      post: q.kind === "eave" ? [q.u1, zC + c.sz * g.dPost] : [uC + c.dir * g.dPost, q.zO],
+      enc: q.kind === "eave" ? [q.enclosed, false] : [false, q.enclosed] });
+    (ends[q.i] = ends[q.i] || {})[end] = k;
+  });
+  return { joins, near, ends, porch: { wall: pj.wall, kind: pf.kind, yHigh: g.yHigh, ya, pitch: p, dWall: g.dWall, dPost: g.dPost, dEnd: g.dEnd, cap, hw: P.full / 2 } };
 }
 // ── THE ROOF STEP (roof.rearStepFt / roof.rearEaveRiseFt, 2026-09-28) ───────────────────────────────
 // A gable building whose roof is TWO SECTIONS along the ridge. The rear section covers the last
@@ -6781,6 +7096,48 @@ function d3PorchCapFt(roofCfg, W, L, H, trimFace) {
   if (reach > m.L / 2 + OV - 0.1) drop = Math.max(drop, (0.16 - (D3.ROOF_T / 2 - 0.08)) * ny);
   return Math.min(cap, eaveY - drop - 0.03);
 }
+// THE MAIN ROOF'S EAVE CORNERS OVER A GABLE-END PORCH (2026-10-05), in feet off the floor, or Infinity. On a
+// cap end d3PorchCapFt leaves the eaves to the clearance scan, which finds them where the roof's overhang runs
+// past the wall at each corner the porch runs to: the eave and rake boards hanging out over the porch's sheet.
+// A porch a lean-to meets (d3PorchJoins) is built without the scan, so its ceiling takes this too, on each such
+// side, d3PorchCapFt's eave-wall terms: the slope line OV out at the corner, less the eave's finish or the
+// rake board's bottom corner there, whichever hangs lower, less the scan's 0.03. A shed's high side is held
+// as if its roof fell outward, which is lower than it is: never above what the scan finds. Infinity off a
+// cap end, on a flush roof and on a porch that runs to neither corner; read nowhere else, so no other
+// porch moves.
+function d3PorchEaveCornerCapFt(roofCfg, W, L, H) {
+  const cfg = roofCfg || {};
+  if (!d3ProjectingPorch(cfg, W, L)) return Infinity;
+  const P = d3PorchSpan(cfg, W, L);
+  if (!P.onCap) return Infinity;
+  const ax = d3RoofAxes(cfg, W, L);
+  const m = d3Massing(cfg, W, L, H);
+  const ovRaw = cfg.overhang != null ? Number(cfg.overhang) : D3.OVERHANG;
+  const OV = isFinite(ovRaw) ? Math.max(0, ovRaw) : D3.OVERHANG;
+  const face = D3.WALL_T / 2 + 0.005 - 0.01;            // d3PorchCapFt's: the scan's wall face, less a hundredth
+  let y = Infinity;
+  [-1, 1].forEach((s) => {
+    // The porch runs to this side's corner (d3PorchJoins' reach): its sheet passes under that eave there.
+    if (!(s > 0 ? P.centerU + P.span / 2 >= ax.S / 2 - 0.01 : P.centerU - P.span / 2 <= -ax.S / 2 + 0.01)) return;
+    // The slope that ends at this side: a wing's, or the centre's own end leg, and the outline at its corner.
+    let k = 0, yC = Infinity;
+    const wing = m.wings.find((g) => g.side === s && g.outer !== false);
+    if (wing) { k = wing.pitch; yC = wing.ye; }
+    else {
+      const pr = s > 0 ? m.prof.slice().reverse() : m.prof;
+      yC = pr[0][1];
+      for (let i = 1; i < pr.length; i++) {
+        const du = Math.abs(pr[i][0] - pr[0][0]);
+        if (du > 1e-9) { k = Math.abs(pr[i][1] - pr[0][1]) / du; break; }
+      }
+    }
+    const ny = 1 / Math.sqrt(1 + k * k);
+    if (OV * ny + 0.12 * k * ny + D3_EAVE.FASCIA_T / 2 <= face) return;
+    const drop = Math.max(d3EaveFinishDrop(cfg, ny), (0.16 - (D3.ROOF_T / 2 - 0.08)) * ny);
+    y = Math.min(y, yC - OV * k * ny - drop - 0.03);
+  });
+  return y;
+}
 // The projecting porch for a SPEC and a size LABEL, for the calibration panel: the size parsed the
 // way d3DormerReadout parses it, then d3PorchGeom under d3PorchCapFt, the ceiling the renderer holds
 // it under too. `atMost` says the renderer may still build it lower: on a gable end whose roof reaches
@@ -6806,13 +7163,22 @@ function d3PorchReadout(spec, sizeLabel) {
   // The style's post count, porch-roof pitch and steps (2026-09-25), exactly as the renderer reads
   // them, so `posts` and `pitch` below are the ones built. The steps' count (2026-09-28) too.
   const framing = d3PorchFraming(roof);
-  const g = d3PorchGeom(S, top, porch.D, trimFace, d3PorchCapFt(roof, w, d, H, trimFace), attachFt, framing);
+  // A LEAN-TO THAT MEETS IT (d3PorchJoins, 2026-10-05): the porch is then built from these numbers alone, under
+  // the join's ceiling (pjn.porch.cap, which takes the main roof's eave corners the scan would have found), so
+  // they are its exact height; `meets` names each lean-to and its corner, and edgeOver says those eave corners
+  // are what hold it there. No key moves on any other porch.
+  const pjn = d3PorchJoins(roof, w, d, H);
+  const meets = pjn && pjn.joins.length ? pjn.joins.map((J) => ({ i: J.i, at: J.at })) : null;
+  const capFt = d3PorchCapFt(roof, w, d, H, trimFace);
+  const g = d3PorchGeom(S, top, porch.D, trimFace, meets ? pjn.porch.cap : capFt, attachFt, framing);
   const ovRaw = roof.overhang != null ? Number(roof.overhang) : D3.OVERHANG;
   const onCap = d3PorchSpan(roof, w, d).onCap;
-  const atMost = onCap ? (isFinite(ovRaw) ? ovRaw : D3.OVERHANG) > D3.WALL_T / 2 + 0.005 : d3AnyLeanTo(roof);
+  const over = onCap ? (isFinite(ovRaw) ? ovRaw : D3.OVERHANG) > D3.WALL_T / 2 + 0.005 : d3AnyLeanTo(roof);
+  const atMost = meets ? false : over;
+  const edgeOver = !!meets && pjn.porch.cap < capFt - 1e-9 && Math.abs(g.yHigh - pjn.porch.cap) < 1e-9;
   // With porchAttachFt set it is the ATTACH height, not the wall, that decides the headroom, so the
   // panel's suggestion is where to hang the porch roof: hNeeded is a wall top, 0.2 above that.
-  return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2, atMost,
+  return { ...g, D: porch.D, wall: porch.wall, S, H, wallTop: top, attachFt: attachFt > 0 ? attachFt : null, attachNeeded: g.hNeeded - 0.2, atMost, ...(meets ? { meets, edgeOver } : {}),
     // The steps climb from the ground under them (d3PorchStepsOnGround): d3GradeFt on level ground.
     framing, steps: d3PorchStepsOnGround(spec, w, d, g, porch.D, framing.steps) };
 }
@@ -6892,6 +7258,16 @@ function d3LeanToFascia(roof, g) {
 //   porch      "projecting" | "recessed" when a porch stands on this wall where the lean-to runs
 //   openTop    met on the wall below the eave or the plate: how high doors and windows on that wall can
 //              go, 0.2 ft under its roof line (the designer's rule under a wall's top), else null
+//   corner     ONLY on a lean-to that reaches a corner with another (d3CornerJoins, 2026-10-04): one
+//              { with, at, joined, why } per pair, `with` the other's index; a near-miss also says by how
+//              much the other differs from this one (dy at the wall, d1 at the outer edge, dw wide)
+//   porchCorner  ONLY on a lean-to that runs to a corner of a projecting porch's wall (d3PorchJoins,
+//              2026-10-05): { at, asked, joined, why }, and unjoined also dy and d1 (the match's less this
+//              one's, at the wall and at its outer edge), the porch's { yHigh, pitch, ya } (ya the height
+//              this one meets its wall at to match: its slab's underside, where the porch's yHigh is its
+//              roof's top), over or edge with those whys, and fix: what this card's own boxes would be set to
+//              for the two to match -- { attach, attachFt, dropFt }, the attach "wall" or null for the one it
+//              has -- or null where they cannot reach it
 // Null without a list.
 function d3LeanTosReadout(spec, sizeLabel) {
   const roof = (spec && spec.roof) || {};
@@ -6899,6 +7275,8 @@ function d3LeanTosReadout(spec, sizeLabel) {
   const w = mm ? parseFloat(mm[1]) : 12, d = mm ? parseFloat(mm[2]) : 16;
   const gs = d3LeanTosGeom(roof, w, d, (spec && spec.wallHeightFt) || D3.WALL_H);
   if (!gs) return null;
+  const cj = d3CornerJoins(roof, w, d, (spec && spec.wallHeightFt) || D3.WALL_H, gs);
+  const pjn = d3PorchJoins(roof, w, d, (spec && spec.wallHeightFt) || D3.WALL_H, gs, cj);
   // The porch on each wall, in the lean-to's own run coordinates: a projecting porch's span (d3PorchSpan:
   // building u on a gable end, down the ridge on an eave wall), a recessed one across its whole end.
   const compass = { south: "front", north: "back", west: "left", east: "right" };
@@ -6920,7 +7298,36 @@ function d3LeanTosReadout(spec, sizeLabel) {
     const overlaps = gs.filter((o) => o !== g && o.wall === g.wall && hit(o, g)).map((o) => o.i);
     const onPorch = porch && porch.wall === g.wall && hit(porch, g) ? porch.kind : null;
     const openTop = g.mode === "wall" && g.at >= 1 / 24 ? Math.floor((g.ya - 0.2) * 12 + 1e-6) / 12 : null;
-    return { ...r, overlaps, porch: onPorch, openTop };
+    const corner = !cj ? [] : cj.joins.filter((J) => J.i === g.i || J.j === g.i).map((J) => ({ with: J.i === g.i ? J.j : J.i, at: J.at, joined: true, why: [] }))
+      .concat(cj.near.filter((N) => N.i === g.i || N.j === g.i).map((N) => {
+        // From this lean-to's side: the other's less this one's (0 - x, never a -0 where they agree).
+        const mine = N.i === g.i;
+        return { with: mine ? N.j : N.i, at: N.at, joined: false, why: N.why, dy: mine ? N.dy : 0 - N.dy, d1: mine ? N.d1 : 0 - N.d1, dw: mine ? N.dw : 0 - N.dw };
+      }));
+    // Meeting the porch: how this lean-to's own boxes would read for its two numbers to be the match's (the porch's
+    // ya and its slope from there). On the wall that far under its eave (the top of the wall on an end wall),
+    // unless it already meets at that height, when its attach stays and only the drop moves -- measured from the
+    // eave on the wall, from the top of the wall without an attach (d3LeanTosGeom's two rules). Null outside the
+    // boxes' bands.
+    const porchCorner = (() => {
+      if (!pjn) return null;
+      const J = pjn.joins.find((x) => x.i === g.i);
+      if (J) return { at: J.at, asked: true, joined: true, why: [] };
+      const N = pjn.near.find((x) => x.i === g.i);
+      if (!N) return null;
+      const Hn = (spec && spec.wallHeightFt) || D3.WALL_H;
+      const yP = pjn.porch.ya, y1P = yP - pjn.porch.pitch * g.w;
+      const keep = Math.abs(N.dy) <= D3_LT_CORNER_TOL;
+      const onWall = keep ? g.mode === "wall" : true;
+      const from = onWall ? g.E : Hn;
+      const attachFt = onWall ? (keep ? g.d : g.E - yP) : null;
+      const dropFt = from - y1P;
+      const fits = (attachFt == null || (attachFt >= -1e-9 && attachFt <= 8 + 1e-9)) && dropFt >= -1e-9 && dropFt <= Math.min(6, from - 1.5) + 1e-9;
+      return { at: N.at, asked: N.asked, joined: false, why: N.why, dy: N.dy, d1: N.d1, porch: { yHigh: pjn.porch.yHigh, pitch: pjn.porch.pitch, ya: yP },
+        ...(N.over != null ? { over: N.over } : {}), ...(N.edge ? { edge: N.edge } : {}),
+        fix: fits ? { attach: onWall ? "wall" : null, attachFt, dropFt } : null };
+    })();
+    return { ...r, overlaps, porch: onPorch, openTop, ...(corner.length ? { corner } : {}), ...(porchCorner ? { porchCorner } : {}) };
   });
 }
 
@@ -7284,10 +7691,18 @@ function d3WingListElevation(spec, sizeLabel, focusKey, frame) {
       {d3LeanTosElev(LTS, X, Y, OV, focusKey, label)}
       {inView.map((t) => {
         const lo = t.ye - OV * t.pitch;
+        // ROUND A CORNER (hipSides, roof.wingCornersMeet) the band ends there on the hip, which seen end-on lies
+        // on the side wing's own roof line, from the eave corner up to where both meet the middle.
+        const hipOn = (s) => (t.hipSides && t.hipSides.indexOf(s) >= 0 ? m.wings.find((g) => g.side === s) : null);
+        const hL = hipOn(-1), hR = hipOn(1);
+        const band = (hL ? [[-s2 - OV, lo], [-s2, t.ye], [hL.u0, t.ya]] : [[-s2 - OV, lo], [-s2 - OV, t.ya]])
+          .concat(hR ? [[hR.u0, t.ya], [s2, t.ye], [s2 + OV, lo]] : [[s2 + OV, t.ya], [s2 + OV, lo]]);
         return (
           <g key={"wle" + t.i}>
-            <rect x={X(-s2 - OV)} y={Y(t.ya)} width={(S + OV * 2) * sc} height={Math.max(1, (t.ya - lo) * sc)} fill="#FDE68A" fillOpacity="0.9"
-              stroke={lit(t.i) ? HL : INK} strokeWidth={lit(t.i) ? 2 : 1.2} />
+            {t.hipSides
+              ? <polygon points={pts(band)} fill="#FDE68A" fillOpacity="0.9" stroke={lit(t.i) ? HL : INK} strokeWidth={lit(t.i) ? 2 : 1.2} strokeLinejoin="round" data-ss-elev-hip="" />
+              : <rect x={X(-s2 - OV)} y={Y(t.ya)} width={(S + OV * 2) * sc} height={Math.max(1, (t.ya - lo) * sc)} fill="#FDE68A" fillOpacity="0.9"
+                stroke={lit(t.i) ? HL : INK} strokeWidth={lit(t.i) ? 2 : 1.2} />}
             <text x={X(0)} y={(Y(t.ya) + Y(lo)) / 2 + 3} textAnchor="middle" style={{ fontSize: fs, fontWeight: 700, fill: lit(t.i) ? HL : INK }}>
               {`${t.bwall} end wing${t.tier > 1 ? " " + t.tier : ""}, ${in12(t.pitch)} in 12`}
             </text>
@@ -7346,11 +7761,20 @@ function d3WingListSideElevation(spec, sizeLabel, focusKey, frame) {
   const fs = PLAIN ? 9 : 8;
   const pts = (arr) => arr.map((p) => X(p[0]) + "," + Y(p[1])).join(" ");
   const xL = Math.min(X(m.zA), X(m.zB)), xR = Math.max(X(m.zA), X(m.zB));
+  // ROUND A CORNER (hipEnds, roof.wingCornersMeet): the side wing on this wall stays at the wall's height, and
+  // its roof is seen face on, from its eave up to where it meets the middle, running round each joined corner
+  // on the hip (the end wing's roof line here) and ending square at a gable end. The middle stands above it.
+  const gv = m.wings.find((g) => g.side === (P ? -1 : 1) && g.hipEnds);
+  const hz = (at) => !!(gv && gv.hipEnds.indexOf(at) >= 0);
   return (
     <svg viewBox={`0 0 ${VW} ${VH}`} style={d3ElevFrame(frame)} data-ss-elev-winglist-side="">
       <line x1={PL - 10} y1={Y(0)} x2={VW - PR + 10} y2={Y(0)} stroke="#D6D3D1" strokeWidth="1" />
-      <polygon points={pts([[m.zA - OV, E], [m.zB + OV, E], [m.zB + OV, peak], [m.zA - OV, peak]])} fill="#FFFBEB" stroke={INK} strokeWidth="1.2" />
+      <polygon points={pts([[m.zA - OV, gv ? gv.ya : E], [m.zB + OV, gv ? gv.ya : E], [m.zB + OV, peak], [m.zA - OV, peak]])} fill="#FFFBEB" stroke={INK} strokeWidth="1.2" />
       <rect x={xL} y={Y(E)} width={xR - xL} height={E * sc} fill="#FEF3C7" stroke={INK} strokeWidth="1.2" />
+      {gv && (
+        <polygon points={pts([[-OV, gv.ye - OV * gv.pitch], [L + OV, gv.ye - OV * gv.pitch], [hz(1) ? m.zB : L + OV, gv.ya], [hz(0) ? m.zA : -OV, gv.ya]])}
+          fill="#FDE68A" fillOpacity="0.9" stroke={lit(gv.i) ? HL : INK} strokeWidth={lit(gv.i) ? 2 : 1.2} strokeLinejoin="round" data-ss-elev-hip="" />
+      )}
       {m.ends.map((t) => (
         <g key={"wls" + t.i}>
           <rect x={Math.min(X(t.zI), X(t.zO))} y={Y(t.ye)} width={Math.abs(X(t.zO) - X(t.zI))} height={t.ye * sc} fill="#FEF3C7" stroke={lit(t.i) ? HL : INK} strokeWidth="1.2" />
@@ -7406,10 +7830,21 @@ function d3WingListPlanSVG({ spec, sizeLabel, focusKey, onPick }) {
     return <polyline points={p3.map((p) => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ")} fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />;
   };
   const named = (bw, end, k) => `${bw.charAt(0).toUpperCase() + bw.slice(1)} ${end ? "end wing" : "wing"} ${k}`;
+  // ROUND A CORNER (roof.wingCornersMeet) a side wing and an end wing share the corner square, split on its
+  // diagonal, the hip: each one's outline runs out to the building's corner and in along the hip (`poly`).
+  const sideHipPoly = (g) => {
+    const h0 = g.hipEnds.indexOf(0) >= 0, h1 = g.hipEnds.indexOf(1) >= 0;
+    return [[g.u1, h0 ? 0 : m.zA], [g.u1, h1 ? L : m.zB], [g.u0, m.zB], [g.u0, m.zA]];
+  };
+  const endHipPoly = (t) => {
+    const gOn = (s) => (t.hipSides.indexOf(s) >= 0 ? m.wings.find((g) => g.side === s) : null), gl = gOn(-1), gr = gOn(1);
+    return [[-S / 2, t.zO], [S / 2, t.zO], [gr ? gr.u0 : S / 2, t.zI], [gl ? gl.u0 : -S / 2, t.zI]];
+  };
   const secs = m.wings.map((g) => ({ i: g.i, short: g.bwall.charAt(0).toUpperCase() + g.tier, name: named(g.bwall, false, g.tier), ye: g.ye,
-    b: box(Math.min(g.u0, g.u1), Math.max(g.u0, g.u1), m.zA, m.zB), v: vec(g.side, 0) }))
+    b: box(Math.min(g.u0, g.u1), Math.max(g.u0, g.u1), m.zA, m.zB), v: vec(g.side, 0), poly: g.hipEnds ? sideHipPoly(g) : null }))
     .concat((m.ends || []).map((t) => ({ i: t.i, short: t.bwall.charAt(0).toUpperCase() + t.tier, name: named(t.bwall, true, t.tier), ye: t.ye,
-      b: box(-S / 2, S / 2, Math.min(t.zI, t.zO), Math.max(t.zI, t.zO)), v: vec(0, t.sz) })));
+      b: box(-S / 2, S / 2, Math.min(t.zI, t.zO), Math.max(t.zI, t.zO)), v: vec(0, t.sz), poly: t.hipSides ? endHipPoly(t) : null })));
+  const planPts = (poly) => poly.map(([u, z]) => { const p = at(u, z); return X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1); }).join(" ");
   const mid = box(m.uc - m.Sc / 2, m.uc + m.Sc / 2, m.zA, m.zB);
   const pk = m.prof.reduce((a, p) => (p[1] > a[1] ? p : a), m.prof[0]);
   const r0 = at(m.uc + pk[0], m.zA), r1 = at(m.uc + pk[0], m.zB);
@@ -7460,7 +7895,9 @@ function d3WingListPlanSVG({ spec, sizeLabel, focusKey, onPick }) {
         return (
           <g key={"wl" + q.i} data-ss-plan-wl={q.i} onClick={onPick ? () => onPick(q.i) : undefined}>
             <title>{`${q.name}: outside wall ${ye}`}</title>
-            <rect x={q.b.x} y={q.b.y} width={q.b.w} height={q.b.h} fill={bg} stroke={ink} strokeWidth={on ? 2.2 : 1.2} />
+            {q.poly
+              ? <polygon points={planPts(q.poly)} fill={bg} stroke={ink} strokeWidth={on ? 2.2 : 1.2} strokeLinejoin="round" data-ss-plan-hip="" />
+              : <rect x={q.b.x} y={q.b.y} width={q.b.w} height={q.b.h} fill={bg} stroke={ink} strokeWidth={on ? 2.2 : 1.2} />}
             {named && <text x={cx} y={cy + (across ? -2 : 4)} textAnchor="middle" {...halo(bg)} style={{ fontSize: fz(11), fontWeight: 800, fill: ink }}>{q.short}</text>}
             {across && <text x={cx} y={cy + 11} textAnchor="middle" {...halo(bg)} style={small}>{ye}</text>}
             {onEnd && upright(cx, cy - 12 - String(ye).length * 3, ye, small, bg)}
@@ -9223,6 +9660,16 @@ function buildShed3DModel(THREE, p) {
         mass.wings.forEach((g) => { if (!g.outer) wf.capCuts.push(g.u1 + S / 2); });
         wf.capCuts.sort((p, q) => p - q);
       }
+      // ROUND A CORNER (hipSides, roof.wingCornersMeet) the hip roof stands where a joined side wing's band of
+      // this wall would be, so the wall runs from that wing's clerestory's outer face instead: `start` and a
+      // shorter `len`, in the same along-frame, so its siding keeps the phase of the middle's cap above it.
+      if (t.hipSides) {
+        t.hipSides.forEach((s) => {
+          const g = mass.wings.find((q) => q.side === s);
+          if (s < 0) wf.start = g.u0 - T / 2 + S / 2;
+          else wf.len = g.u0 + T / 2 + S / 2;
+        });
+      }
       CLERESTORY["clerestoryEnd" + t.at + "_" + t.tier] = wf;
     });
   }
@@ -9736,7 +10183,8 @@ function buildShed3DModel(THREE, p) {
       if (mn - 0.01 > y0) wg.add(wallBox(wallMat, wf, a0, a1, y0, mn));
       ps.forEach((p) => { const b = Math.max(mn, y0); if (p[2] > b + 0.01) cutsIn(p[0], p[1]).forEach(([s0, s1]) => wg.add(wallBox(wallMat, wf, s0, s1, b, p[2]))); });
     };
-    let cursor = 0;
+    // A wall that starts past its origin (`start`: an end wing's clerestory round a corner) is built from there.
+    let cursor = wf.start || 0;
     ranges.forEach((rg) => {
       if (rg.a0 > cursor + 0.01) upTo(cursor, rg.a0, yB);
       if (rg.y0 > 0.01) wg.add(wallBox(wallMat, wf, rg.a0, rg.a1, 0, rg.y0));
@@ -9776,7 +10224,7 @@ function buildShed3DModel(THREE, p) {
           // Courses DIE INTO the corner boards instead of running to the wall's end — the
           // clamp bites only when b0/b1 ARE the wall's own ends (interior spans between
           // openings sit far from 0 / wf.len), so this is a corner rule, not a gap rule.
-          const s0 = Math.max(b0 + 0.03, trimFace);
+          const s0 = Math.max(b0 + 0.03, (wf.start || 0) + trimFace);
           const s1 = Math.min(b1 - 0.03, wf.len - trimFace);
           if (s1 - s0 < 0.1) return;
           // Same phase argument as the battens: y walks the whole wall from the ground and
@@ -9818,7 +10266,7 @@ function buildShed3DModel(THREE, p) {
       // now. This is the third instance of the same family Carolyn has flagged (2026-08-18,
       // 2026-08-24: "this going up, it has to go straight up"); the roof cap was the second,
       // fixed further down, and openings were the one still standing.
-      let bc = 0;
+      let bc = wf.start || 0;
       ranges.forEach((rg) => {
         if (rg.a0 > bc + 0.01) relief(bc, rg.a0);
         if (rg.y0 > 0.01) relief(rg.a0, rg.a1, 0, rg.y0);          // under the sill
@@ -10419,7 +10867,11 @@ function buildShed3DModel(THREE, p) {
   // end walls up to its roof line, in the building's own siding (wallMat, its cladding in feet like every
   // wall) T thick, with a corner board at each outer corner; no openings. They stand on the ground under
   // them -- the deepest of it where it falls away, bedded into the slope like a footing.
-  const ltWalls = (tag, kind, o) => {
+  // TWO ENCLOSED LEAN-TOS JOINED AT A CORNER (d3CornerJoins, 2026-10-04) pass `cut`: { lo, hi }, where the
+  // outer wall runs to at a joined end (z on an eave wall, u on an end wall), round the corner; that end's
+  // wall and corner board are then the join's to leave out or build. Without it, every wall as it was.
+  // Returns the walls' foot.
+  const ltWalls = (tag, kind, o, cut) => {
     const wallPiece = (pts, place) => {
       const sh = new THREE.Shape();
       pts.forEach((pt, k) => (k ? sh.lineTo(pt[0], pt[1]) : sh.moveTo(pt[0], pt[1])));
@@ -10438,8 +10890,10 @@ function buildShed3DModel(THREE, p) {
       cb.userData.ssLeanToStand = true;
       rg.add(cb);
     };
+    const j0 = !!(cut && cut.lo != null), j1 = !!(cut && cut.hi != null);
     if (kind === "eave") {
-      const { dir, uW, u0, u1, y0, y1, z0, z1 } = o;
+      const { dir, uW, u0, u1, y0, y1 } = o;
+      const z0 = j0 ? cut.lo : o.z0, z1 = j1 ? cut.hi : o.z1;
       const bot = FALL ? -depthUnder((uW + u1) / 2, (z0 + z1) / 2, Math.abs(u1 - uW) / 2, (z1 - z0) / 2, rgRoot) : postBot;
       const lineAt = (u) => y0 + (y1 - y0) * ((u - u0) / ((u1 - u0) || 1));
       const uS = uW + dir * T / 2, uE = u1 + dir * T / 2;
@@ -10447,13 +10901,14 @@ function buildShed3DModel(THREE, p) {
       wallPiece([[z0, bot], [z1, bot], [z1, y1], [z0, y1]], (m) => { m.rotation.y = -Math.PI / 2; m.position.set(u1 + T / 2, 0, 0); });
       // End walls, in the (u, y) plane at each end of the run.
       const endPts = [[uS, bot], [uE, bot], [uE, lineAt(uE)], [uS, lineAt(uS)]];
-      wallPiece(endPts, (m) => { m.position.z = z0; });
-      wallPiece(endPts, (m) => { m.position.z = z1 - T; });
-      corner(u1, z0 + T / 2, y1, bot);
-      corner(u1, z1 - T / 2, y1, bot);
-      return;
+      if (!j0) wallPiece(endPts, (m) => { m.position.z = z0; });
+      if (!j1) wallPiece(endPts, (m) => { m.position.z = z1 - T; });
+      if (!j0) corner(u1, z0 + T / 2, y1, bot);
+      if (!j1) corner(u1, z1 - T / 2, y1, bot);
+      return bot;
     }
-    const { uA, uB, zW, zO, sz, y0, y1 } = o;
+    const { zW, zO, sz, y0, y1 } = o;
+    const uA = j0 ? cut.lo : o.uA, uB = j1 ? cut.hi : o.uB;
     const bot = FALL ? -depthUnder((uA + uB) / 2, (zW + zO) / 2, (uB - uA) / 2, Math.abs(zO - zW) / 2, rgRoot) : postBot;
     const lineAt = (z) => y0 + (y1 - y0) * ((z - zW) / ((zO - zW) || 1));
     const zS = zW + sz * T / 2, zE = zO + sz * T / 2;
@@ -10461,10 +10916,11 @@ function buildShed3DModel(THREE, p) {
     wallPiece([[uA, bot], [uB, bot], [uB, y1], [uA, y1]], (m) => { m.position.z = zO - T / 2; });
     // End walls, drawn in the (z, y) plane and turned onto u = uA and u = uB.
     const endPts = [[zS, bot], [zE, bot], [zE, lineAt(zE)], [zS, lineAt(zS)]];
-    wallPiece(endPts, (m) => { m.rotation.y = -Math.PI / 2; m.position.set(uA + T, 0, 0); });
-    wallPiece(endPts, (m) => { m.rotation.y = -Math.PI / 2; m.position.set(uB, 0, 0); });
-    corner(uA + T / 2, zO, y1, bot);
-    corner(uB - T / 2, zO, y1, bot);
+    if (!j0) wallPiece(endPts, (m) => { m.rotation.y = -Math.PI / 2; m.position.set(uA + T, 0, 0); });
+    if (!j1) wallPiece(endPts, (m) => { m.rotation.y = -Math.PI / 2; m.position.set(uB, 0, 0); });
+    if (!j0) corner(uA + T / 2, zO, y1, bot);
+    if (!j1) corner(uB - T / 2, zO, y1, bot);
+    return bot;
   };
   // A lean-to off an EAVE wall, in rg's frame: its roof from (u0, y0) out to (u1, y1), uW the wall line,
   // local z0..z1 along the wall; nPost posts under the outer edge; `at` its d3LeanToGeom record when it
@@ -10569,14 +11025,300 @@ function buildShed3DModel(THREE, p) {
     hdr.userData.ssLeanTo = q.i;
     rg.add(hdr);
   };
+  // TWO LEAN-TOS THAT MEET AT A CORNER (d3CornerJoins, 2026-10-04): a side-wall lean-to and an end-wall one
+  // that match exactly run as one roof round the building's corner. Each slab is today's box on today's
+  // planes, run on past a joined end and cut there along the hip (ltCutBox): the two top faces meet on the
+  // hip line with no gap and no overlap, and a free end is today's to the float. Two strips cap the hip, one
+  // post stands at the outer corner (both enclosed, one corner board), and the side-wall one's header or
+  // outer wall runs through to the corner while the end-wall one's butts into it: butt joints only, so no
+  // two faces ever lie on each other. Null without a join -- every style stored before this -- and a lean-to
+  // in no join is built by today's hands above whatever its neighbours do.
+  const LTC = LEANTOS ? d3CornerJoins(roofCfg, bldgW, bldgH, H, LEANTOS) : null;
+  // A LEAN-TO THAT MEETS THE PORCH (d3PorchJoins, 2026-10-05): null without a join -- every style stored before
+  // this, and every lean-to not asked to -- and then nothing below moves. Joined, the porch is built from its
+  // readout's numbers (its clearance scan does not lower it), and the lean-to, and each it meets round another
+  // corner (d3CornerJoins, which matched it exactly), on the porch roof's plane: ltLine[index] = { y0, y1 }, its
+  // roof line at its wall and at its outer edge. That is the lean-to's own ya and y1 to D3_LT_CORNER_TOL, the
+  // match's own test, so this moves none of them by more than float noise or a hundredth of a foot typed.
+  const LTP = LEANTOS && porchOut ? d3PorchJoins(roofCfg, bldgW, bldgH, H, LEANTOS, LTC) : null;
+  const LTPJ = LTP && LTP.joins.length ? LTP : null;
+  const ltLine = {};
+  if (LTPJ) {
+    const todo = LTPJ.joins.map((J) => J.i);
+    LTPJ.joins.forEach((J) => { ltLine[J.i] = { y0: J.y0, y1: J.y1 }; });
+    while (todo.length) {
+      const i = todo.pop();
+      (LTC ? LTC.joins : []).forEach((J) => {
+        const o = J.i === i ? J.j : J.j === i ? J.i : null;
+        if (o == null || ltLine[o]) return;
+        ltLine[o] = { y0: ltLine[i].y0, y1: ltLine[i].y0 - LTPJ.porch.pitch * LEANTOS.find((r) => r.i === o).w };
+        todo.push(o);
+      });
+    }
+  }
+  // box(m, w, h, d) placed by `place` (its rotation and position), cut by each of `cuts` -- f(x, z) in rg's
+  // frame, kept where f <= 0 -- and closed on each cut by a face on its plane. A face no cut reaches is the
+  // box's own, so what is left lies on the whole box's faces to the float; the UVs are its world feet, the
+  // axes d3RoofSlabUVs gives a slab (or d3RoofSlabUVsT's, uvT).
+  const ltCutBox = (m, w, h, d, place, cuts, uvT) => {
+    const mesh = new THREE.Mesh(new THREE.BufferGeometry(), m);
+    place(mesh);
+    mesh.updateMatrix();
+    const V = (x, y, z) => new THREE.Vector3(x, y, z);
+    const a = w / 2, b = h / 2, c = d / 2;
+    // Each face wound counter-clockwise seen from outside; clipping keeps the winding.
+    let faces = [
+      [V(a, -b, c), V(a, -b, -c), V(a, b, -c), V(a, b, c)], [V(-a, -b, -c), V(-a, -b, c), V(-a, b, c), V(-a, b, -c)],
+      [V(-a, b, c), V(a, b, c), V(a, b, -c), V(-a, b, -c)], [V(-a, -b, -c), V(a, -b, -c), V(a, -b, c), V(-a, -b, c)],
+      [V(-a, -b, c), V(a, -b, c), V(a, b, c), V(-a, b, c)], [V(a, -b, -c), V(-a, -b, -c), V(-a, b, -c), V(a, b, -c)],
+    ];
+    const once = (pts) => pts.filter((p, k) => pts.findIndex((q) => q.distanceToSquared(p) < 1e-12) === k);
+    cuts.forEach((cut) => {
+      const fAt = (p) => { const v = p.clone().applyMatrix4(mesh.matrix); return cut(v.x, v.z); };
+      const on = [];
+      faces = faces.map((poly) => {
+        const out = [];
+        poly.forEach((p, k) => {
+          const q = poly[(k + 1) % poly.length], fp = fAt(p), fq = fAt(q);
+          if (fp <= 0) { out.push(p); if (fp > -1e-9) on.push(p); }
+          if ((fp <= 0) !== (fq <= 0)) { const x = p.clone().lerp(q, fp / (fp - fq)); out.push(x); on.push(x); }
+        });
+        return once(out);
+      }).filter((poly) => poly.length >= 3);
+      // The cut's own face: each point on the plane once, wound about the way f grows (outward).
+      const pts = once(on);
+      if (pts.length < 3) return;
+      const f0 = fAt(V(0, 0, 0));
+      const n = V(fAt(V(1, 0, 0)) - f0, fAt(V(0, 1, 0)) - f0, fAt(V(0, 0, 1)) - f0);
+      const mid = pts.reduce((s, p) => s.add(p), V(0, 0, 0)).multiplyScalar(1 / pts.length);
+      const e1 = pts[0].clone().sub(mid), e2 = n.clone().cross(e1);
+      const ang = (p) => { const r = p.clone().sub(mid); return Math.atan2(r.dot(e2), r.dot(e1)); };
+      faces.push(pts.sort((p, q) => ang(p) - ang(q)));
+    });
+    const pos = [], uv = [];
+    faces.forEach((poly) => {
+      for (let k = 1; k + 1 < poly.length; k++) {
+        [poly[0], poly[k], poly[k + 1]].forEach((p) => { pos.push(p.x, p.y, p.z); uv.push(uvT ? p.x : p.z, uvT ? p.z : p.x); });
+      }
+    });
+    mesh.geometry.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    mesh.geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+    mesh.geometry.computeVertexNormals();
+    return mesh;
+  };
+  // The hip cut of join J in rg's frame: how far a point is out past the hip toward the END-WALL lean-to's
+  // side, across the plan (positive there, negative on the side-wall one's), times sqrt 2. The side-wall
+  // slab keeps f <= 0, the end-wall one -f <= 0.
+  const ltHipF = (J) => (x, z) => J.sz * (z - J.zC) - J.dir * (x - (J.uC - mass.uc));
+  // Half the hip cap, on one joined slab (`side` 1 the side-wall one's, -1 the end-wall one's): a strip
+  // 0.06 ft thick lying on its top face, from 0.06 ft past the hip (under the other strip, as a ridge cap's
+  // two boards cross) to 0.275 ft in from it, the ridge cap's half width, from the wall to the eave -- and no
+  // further out along the hip than the slab's own tip there, or the part past the hip would poke out past
+  // the other slab's eave.
+  const ltHipStrip = (tag, J, side, place, w, d, uvT, slab) => {
+    const lift = (m) => {
+      place(m);
+      m.updateMatrix();
+      const ny = new THREE.Vector3().setFromMatrixColumn(m.matrix, 1);
+      if (ny.y < 0) ny.negate();
+      m.position.addScaledVector(ny, D3.ROOF_T / 2 + 0.03);
+    };
+    const into = (x, z) => -side * ltHipF(J)(x, z) / Math.SQRT2;
+    const along = (x, z) => (J.dir * (x - (J.uC - mass.uc)) + J.sz * (z - J.zC)) / Math.SQRT2;
+    const sp = slab.geometry.attributes.position, v = new THREE.Vector3();
+    let tip = -Infinity;
+    for (let k = 0; k < sp.count; k++) {
+      v.fromBufferAttribute(sp, k).applyMatrix4(slab.matrix);
+      if (Math.abs(ltHipF(J)(v.x, v.z)) < 1e-4) tip = Math.max(tip, along(v.x, v.z));
+    }
+    const strip = ltCutBox(roofMat, w, 0.06, d, lift, [(x, z) => -into(x, z) - 0.06, (x, z) => into(x, z) - 0.275, (x, z) => along(x, z) - tip], uvT);
+    strip.userData.ssLeanTo = tag;
+    strip.userData.ssLeanToHip = [J.i, J.j];
+    rg.add(strip);
+  };
+  // Posts under a joined lean-to's outer edge, along its run from pA to pB (a free end's today's inset, a
+  // joined end's corner post, which the join stands and is left out here), at least one every 8 ft.
+  const ltPostsAlong = (tag, pA, pB, skipA, skipB, at, y1) => {
+    const nGap = Math.max(1, Math.ceil(Math.abs(pB - pA) / 8 - 1e-9));
+    for (let k = skipA ? 1 : 0; k <= (skipB ? nGap - 1 : nGap); k++) {
+      const p = at(pA + (k / nGap) * (pB - pA));
+      const pb = FALL ? -depthUnder(p[0], p[1], 0.15, 0.15, rgRoot) : postBot;
+      const post = box(trimMat, 0.3, y1 - pb, 0.3);
+      post.position.set(p[0], (y1 + pb) / 2, p[1]);
+      post.userData.ssLeanTo = tag;
+      post.userData.ssLeanToPost = true;
+      post.userData.ssLeanToStand = true;
+      rg.add(post);
+    }
+  };
+  // Each enclosed lean-to's walls' foot, by its index: the join's corner board stands on the deeper.
+  const ltFoot = {};
+  // MEETING THE PORCH (d3PorchJoins). A joined end's slab stops on the porch's front edge too, where that comes
+  // before its own eave (`front(J)`, how far a point is past it); and its header, past the porch's wall line,
+  // runs level to where the hip crosses its outer line and then down the porch roof's slope to the porch's
+  // header, which it butts -- from d0 out past that wall, or (null) only the slope where today's header runs
+  // there already. at(d) is the outer line in rg, d out past the porch's wall. The slope's piece is a hair
+  // narrower, so its faces never lie on the level one's.
+  const ltPorchCuts = (Js, front) => Js.filter((J) => J && J.j === "porch" && J.eL > J.eP).map(front);
+  const ltPorchBeam = (tag, J, d0, y1, at) => {
+    const eaveLt = J.lt === "eave";
+    const put = (len, across, d, y, tilt) => {
+      const b = box(trimMat, eaveLt ? across : len, 0.5, eaveLt ? len : across);
+      if (tilt) { if (eaveLt) b.rotation.x = J.sz * tilt; else b.rotation.z = -J.dir * tilt; }
+      const p = at(d);
+      b.position.set(p[0], y, p[1]);
+      b.userData.ssLeanTo = tag;
+      rg.add(b);
+    };
+    const dL = Math.min(J.w, J.hdrIn);
+    if (d0 != null && dL - d0 > 0.01) put(dL - d0, 0.35, (d0 + dL) / 2, y1 - 0.25, 0);
+    if (J.w < J.hdrIn - 0.01) {
+      const phi = Math.atan(J.pitch), dm = (J.w + J.hdrIn) / 2;
+      put((J.hdrIn - J.w) / Math.cos(phi), 0.34, dm - 0.25 * Math.sin(phi), y1 - J.pitch * (dm - J.w) - 0.25 * Math.cos(phi), phi);
+    }
+  };
+  // A SIDE-WALL lean-to in a join (`at` = LTC.ends[q.i]): addEaveLeanTo's slab, cut at each joined end,
+  // its half of each hip cap, and its posts and header (or walls) run on to the corner.
+  // Joined to the porch (`atP` = LTPJ.ends[q.i]), the same at that end, on the porch roof's plane (ltLine).
+  const addEaveLeanToJoined = (q, uW, at, atP) => {
+    const tag = q.i;
+    const ln = ltLine[q.i];
+    const u0 = q.ua - mass.uc, u1 = q.u1 - mass.uc, y0 = ln ? ln.y0 : q.ya, y1 = ln ? ln.y1 : q.y1;
+    const du = u1 - u0, dy = y1 - y0;
+    const slen = Math.sqrt(du * du + dy * dy) || 1;
+    const ux = du / slen, uy = dy / slen;
+    const J0 = at.a0 != null ? LTC.joins[at.a0] : atP && atP.a0 != null ? LTPJ.joins[atP.a0] : null;
+    const J1 = at.a1 != null ? LTC.joins[at.a1] : atP && atP.a1 != null ? LTPJ.joins[atP.a1] : null;
+    // A joined end runs on past the outer corner (the cut takes it back to the hip); a free end keeps
+    // today's overhang past its run.
+    const past = (J) => J.zC + J.sz * (J.w + OV + 1);
+    const zA = J0 ? past(J0) : q.a0 - OV, zB = J1 ? past(J1) : q.a1 + OV;
+    const place = (m) => {
+      m.rotation.z = Math.atan2(dy, du);
+      m.position.set((u0 + u1) / 2 + ux * OV / 2, (y0 + y1) / 2 + uy * OV / 2 + D3.ROOF_T / 2, (zA + zB) / 2);
+    };
+    const lslab = ltCutBox(roofMat, slen + OV, D3.ROOF_T, zB - zA, place,
+      [J0, J1].filter(Boolean).map(ltHipF).concat(ltPorchCuts([J0, J1], (J) => (x, z) => J.sz * (z - J.zC) - J.eP)), false);
+    lslab.userData.ssLeanTo = tag;
+    lslab.userData.ssLeanToSlab = true;
+    rg.add(lslab);
+    [J0, J1].forEach((J) => { if (J) ltHipStrip(tag, J, 1, place, slen + OV, zB - zA, false, lslab); });
+    if (q.enclosed) {
+      // Joined to an enclosed one, its outer wall runs on to that one's outer face; to an open one it keeps
+      // all its walls, and the join closes the corner with a post and a short header.
+      const cut = {};
+      if (J0 && J0.enc[1]) cut.lo = J0.post[1] + J0.sz * T / 2;
+      if (J1 && J1.enc[1]) cut.hi = J1.post[1] + J1.sz * T / 2;
+      ltFoot[tag] = ltWalls(tag, "eave", { dir: q.dir, uW, u0, u1, y0, y1, z0: q.a0, z1: q.a1 }, cut);
+      // Walled in beside the porch, it keeps all its walls: from its corner board on to the porch's corner post.
+      [J0, J1].forEach((J) => { if (J && J.j === "porch") ltPorchBeam(tag, J, 0.03, y1, (d) => [u1, J.zC + J.sz * d]); });
+      return;
+    }
+    const inset = Math.min(0.8, q.len * 0.08);
+    ltPostsAlong(tag, J0 ? J0.post[1] : q.a0 + inset, J1 ? J1.post[1] : q.a1 - inset, !!J0, !!J1, (z) => [u1, z], y1);
+    // The header runs through the corner post to the end-wall one's header's outer face; beside a porch, on to
+    // where the hip crosses it or the porch's header, whichever comes first (ltPorchBeam takes it on from there).
+    const hEnd = (J) => (J.j === "porch" ? J.zC + J.sz * Math.min(J.w, J.hdrIn) : J.post[1] + J.sz * 0.175);
+    const hA = J0 ? hEnd(J0) : q.a0, hB = J1 ? hEnd(J1) : q.a1;
+    const hdr = box(trimMat, 0.35, 0.5, hB - hA);
+    hdr.position.set(u1, y1 - 0.25, (hA + hB) / 2);
+    hdr.userData.ssLeanTo = tag;
+    rg.add(hdr);
+    [J0, J1].forEach((J) => { if (J && J.j === "porch") ltPorchBeam(tag, J, null, y1, (d) => [u1, J.zC + J.sz * d]); });
+  };
+  // An END-WALL lean-to in a join: addGableLeanTo's slab cut at each joined end, its half of each hip cap,
+  // and its posts and header (or walls) stopping at the side-wall one's.
+  const addGableLeanToJoined = (q, at, atP) => {
+    const tag = q.i;
+    const ln = ltLine[q.i], ya = ln ? ln.y0 : q.ya, yb = ln ? ln.y1 : q.y1;
+    const uA = q.a0 - mass.uc, uB = q.a1 - mass.uc;
+    const dz = q.zO - q.zW, dy = yb - ya;
+    const slen = Math.sqrt(dz * dz + dy * dy) || 1;
+    const uz = dz / slen, uy = dy / slen;
+    const J0 = at.a0 != null ? LTC.joins[at.a0] : atP && atP.a0 != null ? LTPJ.joins[atP.a0] : null;
+    const J1 = at.a1 != null ? LTC.joins[at.a1] : atP && atP.a1 != null ? LTPJ.joins[atP.a1] : null;
+    const past = (J) => J.uC - mass.uc + J.dir * (J.w + OV + 1);
+    const xA = J0 ? past(J0) : uA - OV, xB = J1 ? past(J1) : uB + OV;
+    const place = (m) => {
+      m.rotation.x = Math.atan2(-dy, dz);
+      m.position.set((xA + xB) / 2, (ya + yb) / 2 + uy * OV / 2 + D3.ROOF_T / 2, (q.zW + q.zO) / 2 + uz * OV / 2);
+    };
+    const keep = (J) => { const f = ltHipF(J); return (x, z) => -f(x, z); };
+    const lslab = ltCutBox(roofMat, xB - xA, D3.ROOF_T, slen + OV, place,
+      [J0, J1].filter(Boolean).map(keep).concat(ltPorchCuts([J0, J1], (J) => (x, z) => J.dir * (x - (J.uC - mass.uc)) - J.eP)), true);
+    lslab.userData.ssLeanTo = tag;
+    lslab.userData.ssLeanToSlab = true;
+    rg.add(lslab);
+    [J0, J1].forEach((J) => { if (J) ltHipStrip(tag, J, -1, place, xB - xA, slen + OV, true, lslab); });
+    // Where the side-wall one's outer line is, in rg's u.
+    const outerU = (J) => J.post[0] - mass.uc;
+    if (q.enclosed) {
+      const cut = {};
+      if (J0 && J0.enc[0]) cut.lo = outerU(J0) - J0.dir * T / 2;
+      if (J1 && J1.enc[0]) cut.hi = outerU(J1) - J1.dir * T / 2;
+      ltFoot[tag] = ltWalls(tag, "gable", { uA, uB, zW: q.zW, zO: q.zO, sz: q.sz, y0: ya, y1: yb }, cut);
+      [J0, J1].forEach((J) => { if (J && J.j === "porch") ltPorchBeam(tag, J, 0.03, yb, (d) => [J.uC - mass.uc + J.dir * d, q.zO]); });
+      return;
+    }
+    const inset = Math.min(0.8, (uB - uA) * 0.08);
+    ltPostsAlong(tag, J0 ? outerU(J0) : uA + inset, J1 ? outerU(J1) : uB - inset, !!J0, !!J1, (u) => [u, q.zO], yb);
+    // The header stops at the side-wall one's header (its inner face), which runs through the corner; beside a
+    // porch on a side wall, as the side-wall builder's does.
+    const hEnd = (J) => (J.j === "porch" ? J.uC - mass.uc + J.dir * Math.min(J.w, J.hdrIn) : outerU(J) - J.dir * 0.175);
+    const hA = J0 ? hEnd(J0) : uA, hB = J1 ? hEnd(J1) : uB;
+    const hdr = box(trimMat, hB - hA, 0.5, 0.35);
+    hdr.position.set((hA + hB) / 2, yb - 0.25, q.zO);
+    hdr.userData.ssLeanTo = tag;
+    rg.add(hdr);
+    [J0, J1].forEach((J) => { if (J && J.j === "porch") ltPorchBeam(tag, J, null, yb, (d) => [J.uC - mass.uc + J.dir * d, q.zO]); });
+  };
+  // What stands at a join's outer corner: one corner board where both are enclosed (on the deeper of their
+  // two walls' feet), else one post under both roofs -- and, where one of the two is enclosed, a short header
+  // from that one's corner board along its outer line to the post, the side-wall line running through.
+  const ltCornerPiece = (J) => {
+    const pu = J.post[0] - mass.uc, pz = J.post[1];
+    const y1 = ltLine[J.i] ? ltLine[J.i].y1 : J.y1;
+    const tagIt = (m) => { m.userData.ssLeanTo = J.i; m.userData.ssLeanToStand = true; m.userData.ssLeanToCorner = [J.i, J.j]; rg.add(m); };
+    if (J.enc[0] && J.enc[1]) {
+      const bot = Math.min(ltFoot[J.i], ltFoot[J.j]);
+      const cb = box(cornerMat, 0.36, y1 - bot, 0.36);
+      cb.position.set(pu, (y1 + bot) / 2, pz);
+      tagIt(cb);
+      return;
+    }
+    const pb = FALL ? -depthUnder(pu, pz, 0.15, 0.15, rgRoot) : postBot;
+    const post = box(trimMat, 0.3, y1 - pb, 0.3);
+    post.position.set(pu, (y1 + pb) / 2, pz);
+    post.userData.ssLeanToPost = true;
+    tagIt(post);
+    if (J.enc[0]) {
+      // The side-wall one is walled: from its corner board's outer face (z, 0.03 past the end of its run)
+      // through the post to the end-wall one's header's outer face.
+      const zA = J.zC + J.sz * 0.03, zB = pz + J.sz * 0.175;
+      const hdr = box(trimMat, 0.35, 0.5, Math.abs(zB - zA));
+      hdr.position.set(pu, y1 - 0.25, (zA + zB) / 2);
+      hdr.userData.ssLeanTo = J.i;
+      rg.add(hdr);
+    } else if (J.enc[1]) {
+      // The end-wall one is walled: from its corner board's outer face to the side-wall one's header.
+      const uA = J.uC - mass.uc + J.dir * 0.03, uB = pu - J.dir * 0.175;
+      const hdr = box(trimMat, Math.abs(uB - uA), 0.5, 0.35);
+      hdr.position.set((uA + uB) / 2, y1 - 0.25, pz);
+      hdr.userData.ssLeanTo = J.j;
+      rg.add(hdr);
+    }
+  };
   if (LEANTOS) {
     LEANTOS.forEach((q) => {
-      if (q.kind === "gable") { addGableLeanTo(q); return; }
+      const at = LTC && LTC.ends[q.i], atP = LTPJ && LTPJ.ends[q.i];
+      if (q.kind === "gable") { if (at || atP) addGableLeanToJoined(q, at || {}, atP); else addGableLeanTo(q); return; }
       const uW = q.dir * (mass.S / 2) - mass.uc;
+      if (at || atP) { addEaveLeanToJoined(q, uW, at || {}, atP); return; }
       const inset = Math.min(0.8, q.len * 0.08);
       addEaveLeanTo(q.i, q.dir, uW, q.ua - mass.uc, q.u1 - mass.uc, q.ya, q.y1, q.a0, q.a1,
         Math.max(2, Math.ceil((q.len - 2 * inset) / 8 - 1e-9) + 1), q, q.enclosed);
     });
+    if (LTC) LTC.joins.forEach(ltCornerPiece);
   } else if (leanW > 0.5) {
     const drop = Math.min(roofCfg.leanToDropFt != null ? roofCfg.leanToDropFt : 1, H - 1.5);
     const dir = roofCfg.leanToSide === "left" ? -1 : 1;   // which eave it hangs off
@@ -11180,6 +11922,92 @@ function buildShed3DModel(THREE, p) {
   // A wing built from roof.wingList also carries its list index and tier, which the harness groups by.
   const tagWingList = (o, g) => { if (g.i != null) { o.userData.ssWingList = g.i; o.userData.ssWingTier = g.tier; } };
   const wingSlopes = [];
+  // ── WING ROOFS THAT MEET AT A CORNER (roof.wingCornersMeet, 2026-10-05; d3WingCornerPairs) ──────────────
+  // A side wing and an end wing that meet run as ONE roof round the corner. Each one's body, slab, fascia and
+  // soffit run on past the joined end (the side wing to the end wall, its slab past it) and are cut there by
+  // the vertical plane over the hip, the 45-degree line out of the building's corner where the two roof
+  // planes cross: the two cut faces are one face, so the slabs' top faces meet on the hip with no gap and no
+  // overlap, and the fascias and soffits are mitred. Two strips cap the hip. No rake, no fly rafter and no
+  // gable triangle stand at a joined end; the end wing's clerestory stops at the side wing's, whose corner
+  // board stands where the hip meets the middle. All of it is reached only through hipEnds / hipSides, which
+  // the massing writes only with the key, so every other building is built by exactly the code it was.
+  // How far a point of rg is out past side wall s (x) and past end `at`'s wall (z), in feet.
+  const hipOutS = (s, x) => s * (x + mass.uc) - mass.S / 2;
+  const hipOutZ = (at, z) => (at ? z - L : -z);
+  // The hip at side s and end `at`, in the frame of the wing whose slab it cuts: f (kept where f <= 0; its
+  // gradient is sqrt 2 long, so f / sqrt 2 is the distance off the hip), along (feet along the hip out of the
+  // corner) and tag [the side wing's index, the end wing's]. An end wing is built in its own group eg, turned
+  // a quarter: eg's x is rg's z, and eg's z is -(rg's x).
+  const hipTag = (s, at) => { const J = mass.corners.joins.find((q) => q.s === s && q.at === at); return J ? [J.i, J.j] : null; };
+  const sideHip = (s, at) => ({ f: (x, z) => hipOutZ(at, z) - hipOutS(s, x), along: (x, z) => (hipOutS(s, x) + hipOutZ(at, z)) / Math.SQRT2, tag: hipTag(s, at) });
+  const endHip = (s, at) => ({ f: (x, z) => hipOutS(s, -z) - hipOutZ(at, x), along: (x, z) => (hipOutS(s, -z) + hipOutZ(at, x)) / Math.SQRT2, tag: hipTag(s, at) });
+  // A wing body's ExtrudeGeometry (its caps and its sides, two groups) cut in place by each of `cuts` (f(x, z)
+  // in its own frame, kept where f <= 0), triangle by triangle, positions and UVs carried and each group kept;
+  // a sliver a cut leaves on its plane is dropped. The cut is left open: the other wing's body closes it on
+  // the same plane, and both stand under the roof.
+  const hipClipGeom = (geo, cuts) => {
+    const P = geo.attributes.position, UV = geo.attributes.uv;
+    const groups = geo.groups.length ? geo.groups.map((q) => ({ ...q })) : [{ start: 0, count: P.count, materialIndex: 0 }];
+    const pos = [], uv = [];
+    geo.clearGroups();
+    groups.forEach((gr) => {
+      const start = pos.length / 3;
+      for (let k = gr.start; k + 2 < gr.start + gr.count; k += 3) {
+        let poly = [k, k + 1, k + 2].map((q) => ({ p: [P.getX(q), P.getY(q), P.getZ(q)], t: UV ? [UV.getX(q), UV.getY(q)] : [0, 0] }));
+        cuts.forEach((f) => {
+          const next = [];
+          poly.forEach((a, q) => {
+            const b = poly[(q + 1) % poly.length], fa = f(a.p[0], a.p[2]), fb = f(b.p[0], b.p[2]);
+            if (fa <= 0) next.push(a);
+            if ((fa <= 0) !== (fb <= 0)) {
+              const r = fa / (fa - fb);
+              next.push({ p: a.p.map((v, j) => v + (b.p[j] - v) * r), t: a.t.map((v, j) => v + (b.t[j] - v) * r) });
+            }
+          });
+          poly = next;
+        });
+        for (let q = 1; q + 1 < poly.length; q++) {
+          const A = poly[0].p, B = poly[q].p, C = poly[q + 1].p;
+          const e1 = [B[0] - A[0], B[1] - A[1], B[2] - A[2]], e2 = [C[0] - A[0], C[1] - A[1], C[2] - A[2]];
+          const cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2], cz = e1[0] * e2[1] - e1[1] * e2[0];
+          if (cx * cx + cy * cy + cz * cz < 1e-12) continue;
+          [poly[0], poly[q], poly[q + 1]].forEach((v) => { pos.push(v.p[0], v.p[1], v.p[2]); uv.push(v.t[0], v.t[1]); });
+        }
+      }
+      geo.addGroup(start, pos.length / 3 - start, gr.materialIndex);
+    });
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    if (UV) geo.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+    geo.deleteAttribute("normal");
+    geo.computeVertexNormals();
+    geo.computeBoundingBox(); geo.computeBoundingSphere();
+    return geo;
+  };
+  // Box mesh m0 as built (its w, h, d, rotation and position) cut by `hips` in its group's frame, each cut face
+  // closed (ltCutBox): the same box to the float wherever no hip reaches. UVs in world feet, d3RoofSlabUVs' axes.
+  const hipCutBox = (m0, w, h, d, hips) => ltCutBox(m0.material, w, h, d, (m) => { m.rotation.copy(m0.rotation); m.position.copy(m0.position); }, hips.map((q) => q.f), false);
+  // Half the hip's cap on one cut slab, ltHipStrip's: 0.06 ft thick on its top face, from 0.06 ft past the hip
+  // (under the other half, as a ridge cap's two boards cross) to 0.275 ft in from it, and no further out along
+  // the hip than the slab's own tip there, so it never pokes past the other slab's eave. ssWingHip [i, j].
+  const hipStrip = (G, slab, w, d, h) => {
+    const lift = (m) => {
+      m.rotation.copy(slab.rotation); m.position.copy(slab.position);
+      m.updateMatrix();
+      const ny = new THREE.Vector3().setFromMatrixColumn(m.matrix, 1);
+      if (ny.y < 0) ny.negate();
+      m.position.addScaledVector(ny, D3.ROOF_T / 2 + 0.03);
+    };
+    const into = (x, z) => -h.f(x, z) / Math.SQRT2;
+    const sp = slab.geometry.attributes.position, v = new THREE.Vector3();
+    let tip = -Infinity;
+    for (let k = 0; k < sp.count; k++) {
+      v.fromBufferAttribute(sp, k).applyMatrix4(slab.matrix);
+      if (Math.abs(h.f(v.x, v.z)) < 1e-4) tip = Math.max(tip, h.along(v.x, v.z));
+    }
+    const strip = ltCutBox(roofMat, w, 0.06, d, lift, [(x, z) => -into(x, z) - 0.06, (x, z) => into(x, z) - 0.275, (x, z) => h.along(x, z) - tip], false);
+    strip.userData.ssWingHip = h.tag;
+    G.add(strip);
+  };
   mass.wings.forEach((g) => {
     // `face` is the clerestory's OUTER face, the wing's side of the centre wall line.
     const s = g.side, lu1 = g.u1 - mass.uc, face = g.u0 + s * (T / 2) - mass.uc;
@@ -11191,6 +12019,10 @@ function buildShed3DModel(THREE, p) {
     // centre's eave leg, and the body is closed up to it: the wedge between the centre's roof line,
     // carried out to the face, and the wing's. Its caps are the gable end's wall there.
     const onRoof = g.attach === "roof" && !g.cuts;
+    // ROUND A CORNER (hipEnds, roof.wingCornersMeet): at a joined end it runs on out to the end wall (za, zb),
+    // and the hip cuts it back.
+    const hz0 = !!(g.hipEnds && g.hipEnds.indexOf(0) >= 0), hz1 = !!(g.hipEnds && g.hipEnds.indexOf(1) >= 0);
+    const za = hz0 ? 0 : mass.zA, zb = hz1 ? L : mass.zB;
     if (yFace - ye > 0.02) {
       const sh = new THREE.Shape();
       sh.moveTo(lu1, ye); sh.lineTo(face, ye);
@@ -11198,8 +12030,8 @@ function buildShed3DModel(THREE, p) {
       else sh.lineTo(face, yFace);
       sh.lineTo(lu1, ye);
       // Beside END WINGS (hasEnds) a side wing runs over the middle's stretch only, mass.zA..mass.zB.
-      const wgeo = new THREE.ExtrudeGeometry(sh, { depth: hasEnds ? mass.zB - mass.zA : L, bevelEnabled: false });
-      if (hasEnds) wgeo.translate(0, 0, mass.zA);
+      const wgeo = new THREE.ExtrudeGeometry(sh, { depth: hasEnds ? zb - za : L, bevelEnabled: false });
+      if (hasEnds) wgeo.translate(0, 0, za);
       const wuv = wgeo.attributes.uv;
       if (wuv) { for (let i = 0; i < wuv.count; i++) wuv.setX(i, wuv.getX(i) + (mass.S / 2 + mass.uc)); wuv.needsUpdate = true; }
       // The caps flush with the wall face, as moveCapsFlush does for the centre's.
@@ -11216,6 +12048,8 @@ function buildShed3DModel(THREE, p) {
         wpos.needsUpdate = true;
         wgeo.computeBoundingBox(); wgeo.computeBoundingSphere();
       }
+      // A joined end's cap stands on the end wall's line, all of it past the hip: the cut takes it away.
+      if (g.hipEnds) hipClipGeom(wgeo, g.hipEnds.map((at) => sideHip(s, at).f));
       const body = new THREE.Mesh(wgeo, wcap ? [wallMat, gableMat] : gableMat);
       body.userData.ssWing = s;
       tagWingList(body, g);
@@ -11241,6 +12075,15 @@ function buildShed3DModel(THREE, p) {
     sl.wingIn = inner;
     sl.wingInExt = onRoof ? 0 : (D3.ROOF_T + 0.02) * g.pitch + 0.005;  // the slab's top edge reaches the face
     sl.wingList = g.i; sl.wingTier = g.tier;
+    // Round a corner its slope has its own section: on past each joined end (its slab, fascia and soffit an
+    // overhang and a foot past the end wall, cut on the hip), no rake there, and no tail at the corner.
+    if (g.hipEnds) {
+      sl.hipSec = (whole) => {
+        const lo = hz0 ? -(OV + 1) : mass.zA - OV, hi = hz1 ? L + OV + 1 : mass.zB + OV;
+        return { ...whole, zLen: hi - lo, zMid: (lo + hi) / 2, z0: za, z1: zb, end0: !hz0, endL: !hz1, tail0: !hz0, hips: g.hipEnds.map((at) => sideHip(s, at)),
+          hipTails: g.hipEnds.map((at) => ({ x: lu1, z: at ? L : 0, dx: s / Math.SQRT2, dz: (at ? 1 : -1) / Math.SQRT2, tag: hipTag(s, at) })) };
+      };
+    }
     wingSlopes.push(sl);
   });
   // ONE SLOPE OF ONE SECTION OF ROOF (the roof step, 2026-09-28). `sec` is the section: the eave its
@@ -11294,7 +12137,7 @@ function buildShed3DModel(THREE, p) {
     };
     const extA = jointExt(A, -ux, -uy);      // the slab extends beyond A along -u
     const extB = jointExt(B, ux, uy);
-    const slab = box(roofMat, slen + extA + extB, D3.ROOF_T, sec.zLen);
+    let slab = box(roofMat, slen + extA + extB, D3.ROOF_T, sec.zLen);
     d3RoofSlabUVs(slab);
     slab.rotation.z = Math.atan2(dy, du);
     const shift = (extB - extA) / 2;   // recentre: the ends no longer extend equally
@@ -11303,7 +12146,11 @@ function buildShed3DModel(THREE, p) {
       (A[1] + B[1]) / 2 + uy * shift + ny * t,
       sec.zMid
     );
+    // A wing's slab round a corner (sec.hips, roof.wingCornersMeet): the same box, cut on each hip and capped.
+    // Cut members are tagged by what they are (ssWingSlab, ssWingEave) for tests/harness/wingList.mjs case J.
+    if (sec.hips) { slab = hipCutBox(slab, slen + extA + extB, D3.ROOF_T, sec.zLen, sec.hips); slab.userData.ssWingSlab = true; }
     G.add(slab);
+    if (sec.hips) sec.hips.forEach((h) => hipStrip(G, slab, slen + extA + extB, sec.zLen, h));
     // Eave fascia: a trim board hung on the slab's LOW edge, the finish
     // carpentry that stops a roof reading as a floating slab. Positioned with
     // the SAME normal offset the slab itself carries, or it hangs visibly
@@ -11340,8 +12187,9 @@ function buildShed3DModel(THREE, p) {
         const finishY = eaveY - d3EaveFinishDrop(roofCfg, ny); // the lowest the eave finishes
         const fasTop = edgeY + 0.06;                           // just under the deck's top face
         const fasH = OV_NOTCHED ? Math.max(0.08, fasTop - finishY) : D3_EAVE.FASCIA_H;
-        const fascia = box(fasciaMat, D3_EAVE.FASCIA_T, fasH, sec.zLen);
+        let fascia = box(fasciaMat, D3_EAVE.FASCIA_T, fasH, sec.zLen);
         fascia.position.set(edgeU, OV_NOTCHED ? fasTop - fasH / 2 : edgeY - 0.14, sec.zMid);
+        if (sec.hips) { fascia = hipCutBox(fascia, D3_EAVE.FASCIA_T, fasH, sec.zLen, sec.hips); fascia.userData.ssWingEave = "fascia"; }   // mitred round a corner
         G.add(fascia);
         eaveHangY = Math.min(eaveHangY, OV_NOTCHED ? finishY : edgeY - 0.14 - 0.2);   // the board's bottom edge
         hang(lowEnd[0], OV_NOTCHED ? finishY : edgeY - 0.14 - 0.2);
@@ -11353,8 +12201,9 @@ function buildShed3DModel(THREE, p) {
           const wallU = lowEnd[0];
           const soffitW = Math.abs(edgeU - wallU);
           if (soffitW > 0.06) {
-            const soffit = box(fasciaMat, soffitW, D3_EAVE.SOFFIT_T, sec.zLen);
+            let soffit = box(fasciaMat, soffitW, D3_EAVE.SOFFIT_T, sec.zLen);
             soffit.position.set((wallU + edgeU) / 2, deckBotY - D3_EAVE.SOFFIT_T / 2, sec.zMid);
+            if (sec.hips) { soffit = hipCutBox(soffit, soffitW, D3_EAVE.SOFFIT_T, sec.zLen, sec.hips); soffit.userData.ssWingEave = "soffit"; }
             G.add(soffit);
             // A roof step's section keeps its boxed eave's outline (the wall, the corner where the
             // soffit meets the deck's underside, and that underside's slope), so the joint can close
@@ -11405,11 +12254,37 @@ function buildShed3DModel(THREE, p) {
         // leaves the tail AT the joint to the section in front of it, so no two tails share a place.
         const tRun = sec.z1 - sec.z0;
         const tailStep = tRun / Math.max(1, Math.round(tRun / Math.max(0.5, (roofCfg.tailSpacingIn || 24) / 12)));
-        for (let z = sec.z0; z <= sec.z1 + 1e-6; z += tailStep) if (sec.endL || z < sec.z1 - 1e-6) addTail(Math.min(z, sec.z1));
+        // Round a corner (sec.tail0 false, or endL false at a hip) no tail stands on the corner itself.
+        for (let z = sec.z0; z <= sec.z1 + 1e-6; z += tailStep) if ((sec.endL || z < sec.z1 - 1e-6) && (sec.tail0 !== false || z > sec.z0 + 1e-6)) addTail(Math.min(z, sec.z1));
         // Fly-rafter tails, one under each rake about 10 in outboard of the gable wall.
         // Skipped when the overhang is too shallow to hold one, and at a joint, which has no rake.
         const flyOut = Math.min(OV - 0.1, 10 / 12);
         if (flyOut > 0.15) { if (sec.end0) addTail(sec.z0 - flyOut); if (sec.endL) addTail(sec.z1 + flyOut); }
+        // ROUND A CORNER (sec.hipTails: a side wing's slope, once per join) the hip rafter's tail: one on the
+        // diagonal under the hip at the tails' own drop, its inboard end in the building's corner and its outboard
+        // end as far out as both slabs' eave ends let it (each tail's end is flush with its slab's: no corner of
+        // this one passes OV along either slope). In plan it runs r feet out along the diagonal, falling q a foot.
+        // ssWingHipTail [side wing, end wing].
+        if (sec.hipTails) {
+          sec.hipTails.forEach((ht) => {
+            const q = Math.abs(dy / du) / Math.SQRT2, cs = Math.abs(ux), sn = Math.abs(dy) / slen, k = Math.sqrt(1 + q * q);
+            // A corner of the outboard end, t across the diagonal and v up off the hip line, lies (r + v q / k + t)
+            // / sqrt 2 out past one wall and v / k - q r above the eave: along that wall's slope that is a r + its
+            // own share, so the end stops where the farthest corner reaches OV.
+            let far = -Infinity;
+            [-1, 1].forEach((tt) => [-1, 1].forEach((vv) => {
+              const t = tt * TAIL_W / 2, v = tailN + vv * TAIL_H / 2;
+              far = Math.max(far, ((v * q / k + t) / Math.SQRT2) * cs - (v / k) * sn);
+            }));
+            const rIn = -0.5 * cs * Math.SQRT2, rOut = (OV - far) / (cs / Math.SQRT2 + q * sn), rm = (rIn + rOut) / 2;
+            const X = new THREE.Vector3(ht.dx, -q, ht.dz).divideScalar(k), Y = new THREE.Vector3(ht.dx * q, 1, ht.dz * q).divideScalar(k);
+            const tl = box(tailMat(), (rOut - rIn) * k, TAIL_H, TAIL_W);
+            tl.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(X, Y, new THREE.Vector3().crossVectors(X, Y)));
+            tl.position.set(ht.x + rm * ht.dx, lowEnd[1] - q * rm, ht.z + rm * ht.dz).addScaledVector(Y, tailN);
+            tl.userData.ssWingHipTail = ht.tag;
+            G.add(tl);
+          });
+        }
       }
     }
     // ── THE SHED'S HIGH EAVE (new frame, 2026-09-24) ──
@@ -11530,7 +12405,7 @@ function buildShed3DModel(THREE, p) {
     const whole = hasEnds
       ? { Hr, peak: profPeak, joint: jointPartnerAt, zLen: (mass.zB - mass.zA) + OV * 2, zMid: (mass.zA + mass.zB) / 2, z0: mass.zA, z1: mass.zB, end0: true, endL: true }
       : { Hr, peak: profPeak, joint: jointPartnerAt, zLen: L + OV * 2, zMid: L / 2, z0: 0, z1: L, end0: true, endL: true };
-    slopes.concat(wingSlopes).forEach((sl) => buildSlope(sl, whole));
+    slopes.concat(wingSlopes).forEach((sl) => buildSlope(sl, sl.hipSec ? sl.hipSec(whole) : whole));
   } else {
     const zJ = STEP.stepFt;
     const front = { Hr, peak: profPeak, joint: jointPartnerAt, zLen: L - zJ + OV, zMid: (zJ + L + OV) / 2, z0: zJ, z1: L, end0: false, endL: true, boxes: [] };
@@ -11630,6 +12505,8 @@ function buildShed3DModel(THREE, p) {
       const eg = new THREE.Group();
       eg.rotation.y = -Math.PI / 2;
       const tag = (o) => { o.userData.ssWing = 2 * t.sz; o.userData.ssWingList = t.i; o.userData.ssWingTier = t.tier; return o; };
+      // ROUND A CORNER (hipSides, roof.wingCornersMeet): eg z zL0 is the +u long wall, zL1 the -u one.
+      const hs0 = !!(t.hipSides && t.hipSides.indexOf(1) >= 0), hs1 = !!(t.hipSides && t.hipSides.indexOf(-1) >= 0);
       const zF = t.zI + t.sz * (T / 2), yF = t.ye + (t.w - T / 2) * t.pitch;
       const parent = t.tier > 1 ? mass.ends.find((q) => q.at === t.at && q.tier === t.tier - 1) : null;
       // 1. The body: (zO, ye) -> (zF, ye) -> (zF, yF), extruded across the width; caps flush with the long
@@ -11652,6 +12529,8 @@ function buildShed3DModel(THREE, p) {
           if (euv) euv.needsUpdate = true;
           egeo.computeBoundingBox(); egeo.computeBoundingSphere();
         }
+        // A joined side's cap stands on that long wall's line, all of it past the hip: the cut takes it away.
+        if (t.hipSides) hipClipGeom(egeo, t.hipSides.map((s) => endHip(s, t.at).f));
         eg.add(tag(new THREE.Mesh(egeo, ecap ? [wallMat, gableMat] : gableMat)));
       }
       // 2. The slope, left to right in eg's x so its normal points up; its inner end stops at the wall.
@@ -11659,15 +12538,22 @@ function buildShed3DModel(THREE, p) {
       const sl = t.sz < 0 ? [outerP, innerP] : [innerP, outerP];
       sl.wing = 2 * t.sz; sl.wingIn = innerP; sl.wingInExt = (D3.ROOF_T + 0.02) * t.pitch + 0.005;
       sl.wingList = t.i; sl.wingTier = t.tier;
-      buildSlope(sl, { group: eg, hangWall: t.wall, Hr: t.ye, peak: Infinity, joint: () => null,
-        zLen: Sb + OV * 2, zMid: ucE, z0: zL0, z1: zL1, end0: true, endL: true });
+      const esec = { group: eg, hangWall: t.wall, Hr: t.ye, peak: Infinity, joint: () => null,
+        zLen: Sb + OV * 2, zMid: ucE, z0: zL0, z1: zL1, end0: true, endL: true };
+      // Round a corner: on past each joined long wall by an overhang and a foot, cut on the hip, no rake there.
+      const eLo = hs0 ? zL0 - OV - 1 : zL0 - OV, eHi = hs1 ? zL1 + OV + 1 : zL1 + OV;
+      buildSlope(sl, !t.hipSides ? esec
+        : { ...esec, zLen: eHi - eLo, zMid: (eLo + eHi) / 2, end0: !hs0, endL: !hs1, tail0: !hs0, hips: t.hipSides.map((s) => endHip(s, t.at)) });
       // 3. The flashing where its roof meets its clerestory.
       const slabTop = yF + (D3.ROOF_T + 0.02) * Math.sqrt(1 + t.pitch * t.pitch);
-      const fT = Math.max(0.03, cladReach - T / 2 + 0.02), fLen = Sb - 2 * trimFace;
+      // Round a corner the clerestory stops at the joined side wing's (CLERESTORY), and so does this.
+      const gOn = (s) => mass.wings.find((g) => g.side === s);
+      const fA = hs0 ? ucE - gOn(1).u0 + trimFace : zL0 + trimFace, fB = hs1 ? ucE - gOn(-1).u0 - trimFace : zL1 - trimFace;
+      const fT = Math.max(0.03, cladReach - T / 2 + 0.02), fLen = t.hipSides ? fB - fA : Sb - 2 * trimFace;
       if (fLen > 0.5) {
         const fl = tag(box(roofMat, fT, 0.38, fLen));
         d3RoofSlabUVs(fl);
-        fl.position.set(zF + t.sz * fT / 2, slabTop + 0.14, ucE);
+        fl.position.set(zF + t.sz * fT / 2, slabTop + 0.14, t.hipSides ? (fA + fB) / 2 : ucE);
         eg.add(fl);
       }
       // 4. Corner boards where its clerestory meets each long wall, from its roof up to what that
@@ -11693,7 +12579,7 @@ function buildShed3DModel(THREE, p) {
           if (z < lo || z > hi) continue;
           const yTop = t.ye + Math.abs(z + t.sz * halfW - t.zO) * t.pitch;
           if (yTop <= t.ye + 0.05) continue;
-          [zL0 - capStripOut(capFlush), zL1 + capStripOut(capFlush)].forEach((ez) => {
+          [zL0 - capStripOut(capFlush), zL1 + capStripOut(capFlush)].filter((ez, k) => !(k ? hs1 : hs0)).forEach((ez) => {
             const st = tag(box(reliefMat, halfW * 2, yTop - t.ye, capStripDepth));
             st.position.set(z, (t.ye + yTop) / 2, ez);
             eg.add(st);
@@ -11706,7 +12592,7 @@ function buildShed3DModel(THREE, p) {
           const zIn = t.zO - t.sz * Math.max(trimFace, (y + 0.06 - t.ye) / t.pitch);
           if ((zF - zIn) * -t.sz < 0.1) continue;
           const a = Math.min(zIn, zF), b = Math.max(zIn, zF);
-          [zL0 - CLAD_RELIEF_OUT, zL1 + CLAD_RELIEF_OUT].forEach((ez) => {
+          [zL0 - CLAD_RELIEF_OUT, zL1 + CLAD_RELIEF_OUT].filter((ez, k) => !(k ? hs1 : hs0)).forEach((ez) => {
             const st = tag(box(wallMat, b - a, 0.08, 0.1));
             st.position.set((a + b) / 2, y, ez);
             eg.add(st);
@@ -11861,8 +12747,14 @@ function buildShed3DModel(THREE, p) {
     };
     let capY = Infinity;
     const bb = new THREE.Box3();
+    // JOINED TO A LEAN-TO (d3PorchJoins, 2026-10-05) the porch is built from its readout's numbers alone
+    // (LTPJ.porch.cap below), the ones the lean-to was matched to, and none of this lowers it: those numbers
+    // already sit under the main roof's eave corners (d3PorchEaveCornerCapFt), and any other lean-to over the
+    // porch stops the join. The lean-tos that meet it are left out and everything else is still measured, as
+    // geom.joinClear, so porchProbe can prove that ceiling never stands above what this finds.
     rg.children.forEach((o) => {
       if (!o.isMesh || (o.userData && o.userData.ssPorch)) return;
+      if (LTPJ && o.userData && o.userData.ssLeanTo != null && LTPJ.ends[o.userData.ssLeanTo]) return;
       // A listed lean-to's posts and walls (roof.leanTos, ssLeanToStand) stand on the ground: its roof is
       // what the porch goes under. Nothing else carries the tag.
       if (o.userData && o.userData.ssLeanToStand) return;
@@ -11885,7 +12777,7 @@ function buildShed3DModel(THREE, p) {
     // And under the ceiling the building itself sets (d3PorchCapFt, which the panel's readout reads
     // too): the outline in the wall's own plane, which nothing above measures on a flush roof, and on
     // an eave wall the eave over it. On every stored style that is H - 0.2, where the porch already is.
-    const geom = d3PorchGeom(span, topH, D, trimFace, Math.min(capY, d3PorchCapFt(roofCfg, bldgW, bldgH, H, trimFace)), attachFt, framing);
+    const geom = d3PorchGeom(span, topH, D, trimFace, LTPJ ? LTPJ.porch.cap : Math.min(capY, d3PorchCapFt(roofCfg, bldgW, bldgH, H, trimFace)), attachFt, framing);
     const { POST, HDR_H, HDR_D, RAF_W, RAF_D, PR_T, SHEATH, SIDE_OV, CHEEK_T, FAS_T } = geom.sizes;
     const { pitch, yHigh, side, dWall, dPost, dEnd } = geom;
     const ang = Math.atan(pitch), cosA = Math.cos(ang), sinA = Math.sin(ang);
@@ -11906,10 +12798,41 @@ function buildShed3DModel(THREE, p) {
       b.rotation.set(0, -Math.PI / 2, -ang);
       return b;
     };
+    // ── JOINED TO A LEAN-TO (d3PorchJoins, 2026-10-05) ── PJ is null on every porch no lean-to meets, and then
+    // every member below is built exactly as it was. Joined on a side (J.js, +1 to the right in this frame), the
+    // porch roof runs on round the corner to the lean-to's eave: the sheet, the ceiling, the front board and the
+    // drip go out that far and are cut along the hip (ltCutBox, the lean-to slab's own cut) where the lean-to's
+    // roof takes over. That side's cheek, corner fill and rake trim go -- the lean-to's roof is beside it now,
+    // not open air -- and where the porch is deeper than the lean-to is wide, a rake trim edges the sheet past
+    // the hip. The header runs on to one corner post where the lean-to's posts' line crosses the porch's, down
+    // the lean-to's slope once the hip has crossed it, with a post at least every 8.5 ft out to it, standing on
+    // the ground; a hip rafter under the hip carries jack rafters on in the new stretch, and a strip on the
+    // sheet caps the hip (the lean-to's slab carries the other, d3CornerJoins' cap).
+    //   sOut(J, x)   how far out past the lean-to's wall line, the corner at 0 (the lean-to's own distance)
+    //   pHip         <= 0 on the porch's side of the hip, `gap` short of it
+    //   pEave        <= 0 inside the lean-to's eave line, `inset` in from it
+    const PJ = LTPJ ? LTPJ.joins : null;
+    const jSide = (s) => (PJ ? PJ.find((J) => J.js === s) || null : null);
+    const hw = LTPJ ? LTPJ.porch.hw : 0;
+    const sOut = (J, x) => J.js * x - hw;
+    const pHip = (J, gap) => (x, d) => sOut(J, x) - d + gap;
+    const pEave = (J, inset) => (x, d) => sOut(J, x) - J.eL + inset;
+    // onSlope's placing, for a member from xa to xb across, and the member itself cut by `cuts`.
+    const slopePlace = (xa, xb, d0, d1, t, off) => (b) => {
+      const dm = (d0 + d1) / 2, k = off + t / 2;
+      b.rotation.set(0, -Math.PI / 2, -ang);
+      b.position.set((xa + xb) / 2, yTop(dm) - cosA * k, dm - sinA * k);
+    };
+    const onSlopeCut = (m, d0, d1, xa, xb, t, off, cuts) => ltCutBox(m, (d1 - d0) / cosA, t, xb - xa, slopePlace(xa, xb, d0, d1, t, off), cuts, false);
+    // A member `w` wide about the porch's middle, run out on each joined side to reach(J) past the corner.
+    const widen = (w, reach) => [-1, 1].map((s) => { const J = jSide(s); return J ? s * (hw + reach(J)) : (s * w) / 2; });
+    const cutsOf = (fn) => [].concat(...PJ.map(fn));
     // The roof sheet takes the SHARED roofMat, so the customer's roof colour, the metal or shingle
     // texture and the metal's sky all follow, with the ribs running down the slope.
-    const slab = onSlope(roofMat, dWall, dEnd, 0, 2 * (side + SIDE_OV), PR_T, 0);
-    d3RoofSlabUVs(slab);
+    const slabX = PJ ? widen(2 * (side + SIDE_OV), (J) => J.eL + 0.5) : null;
+    const slab = PJ ? onSlopeCut(roofMat, dWall, dEnd, slabX[0], slabX[1], PR_T, 0, cutsOf((J) => [pHip(J, 0), pEave(J, 0)]))
+      : onSlope(roofMat, dWall, dEnd, 0, 2 * (side + SIDE_OV), PR_T, 0);
+    if (!PJ) d3RoofSlabUVs(slab);
     pg.add(part(slab, "slab"));
     // Wood ceiling boards under the sheet, and 2x6 rafters every 2 ft under those, held inboard of
     // the cheeks (in the first cut the outer rafter hid the cheek).
@@ -11920,15 +12843,18 @@ function buildShed3DModel(THREE, p) {
     // was never acne: hiding the rafters removed the dots and moving them inboard does too. A
     // quarter inch is what it took; an eighth left one pixel of it on the 16x24 at eye level.
     const RAF_GAP = 0.02;
-    pg.add(part(onSlope(woodMat, dWall, dEnd - FAS_T, 0, 2 * side, SHEATH, PR_T), "ceiling"));
+    pg.add(part(PJ ? onSlopeCut(woodMat, dWall, dEnd - FAS_T, ...widen(2 * side, (J) => J.eL), SHEATH, PR_T, cutsOf((J) => [pHip(J, 0), pEave(J, SIDE_OV)]))
+      : onSlope(woodMat, dWall, dEnd - FAS_T, 0, 2 * side, SHEATH, PR_T), "ceiling"));
     const rafU = side - CHEEK_T - RAF_GAP - RAF_W / 2;
     for (let i = 0; i < geom.nRaf; i++) {
       pg.add(part(onSlope(woodMat, dWall + 0.05, dEnd - FAS_T, -rafU + (i * 2 * rafU) / (geom.nRaf - 1), RAF_W, RAF_D, PR_T + SHEATH), "rafter"));
     }
     // The header on the posts, flush with the rafters. Its ends stop just inside the cheeks: level
     // with their outer faces the wood and the siding z-fought in a stipple at both front corners.
-    const hdr = box(woodMat, 2 * (side - CHEEK_T) + 0.02, HDR_H, HDR_D);
-    hdr.position.set(0, geom.hdrTop - HDR_H / 2, dPost);
+    // Joined, it runs on level to the lean-to's posts' line, or to where the hip crosses it first.
+    const hdrX = PJ ? widen(2 * (side - CHEEK_T) + 0.02, (J) => Math.min(J.w + 0.175, dPost)) : null;
+    const hdr = PJ ? box(woodMat, hdrX[1] - hdrX[0], HDR_H, HDR_D) : box(woodMat, 2 * (side - CHEEK_T) + 0.02, HDR_H, HDR_D);
+    hdr.position.set(PJ ? (hdrX[0] + hdrX[1]) / 2 : 0, geom.hdrTop - HDR_H / 2, dPost);
     pg.add(part(hdr, "header"));
     // Posts, evenly spaced, the outer two flush with the corner boards. A centre post may stand in
     // front of a door: posts are a rule, not item-aware, because items move in scoped rebuilds that
@@ -11955,6 +12881,7 @@ function buildShed3DModel(THREE, p) {
     // (the light block this corner once had).
     const dC = dEnd - FAS_T;
     for (const s of [-1, 1]) {
+      if (jSide(s)) continue;
       const sh = new THREE.Shape();
       sh.moveTo(dWall, geom.postH);
       sh.lineTo(D, geom.postH);
@@ -11988,14 +12915,81 @@ function buildShed3DModel(THREE, p) {
     // read as a bright double beam with the header under it. The drip now runs from the roof's edge
     // down to FASCIA_WOOD above the board's bottom. The board stays wood behind it, so only that
     // strip of it shows.
-    const board = box(woodMat, 2 * (side + SIDE_OV), boardH, FAS_T);
-    board.position.set(0, yTop(dEnd - FAS_T / 2) - PR_T / cosA - boardH / 2, dEnd - FAS_T / 2);
+    // Joined, both run out to the lean-to's eave or to the hip, whichever the front edge meets first.
+    const frontX = PJ ? widen(2 * (side + SIDE_OV), (J) => Math.min(J.eL, dEnd) + 0.3) : null;
+    const frontCuts = PJ ? cutsOf((J) => [pHip(J, 0), pEave(J, 0)]) : null;
+    const frontBox = (m, h, d, y, z) => ltCutBox(m, frontX[1] - frontX[0], h, d, (b) => b.position.set((frontX[0] + frontX[1]) / 2, y, z), frontCuts, false);
+    const board = PJ ? frontBox(woodMat, boardH, FAS_T, yTop(dEnd - FAS_T / 2) - PR_T / cosA - boardH / 2, dEnd - FAS_T / 2) : box(woodMat, 2 * (side + SIDE_OV), boardH, FAS_T);
+    if (!PJ) board.position.set(0, yTop(dEnd - FAS_T / 2) - PR_T / cosA - boardH / 2, dEnd - FAS_T / 2);
     pg.add(part(board, "board"));
     const FASCIA_WOOD = 0.15, dripTop = yTop(dEnd) + 0.02;
     const dripH = Math.max(0.16, dripTop - (boardBot + FASCIA_WOOD));
-    const drip = box(fasciaMat, 2 * (side + SIDE_OV), dripH, 0.05);
-    drip.position.set(0, dripTop - dripH / 2, dEnd + 0.025);
+    const drip = PJ ? frontBox(fasciaMat, dripH, 0.05, dripTop - dripH / 2, dEnd + 0.025) : box(fasciaMat, 2 * (side + SIDE_OV), dripH, 0.05);
+    if (!PJ) drip.position.set(0, dripTop - dripH / 2, dEnd + 0.025);
     pg.add(part(drip, "drip"));
+    // The rest of each joined side, in the order its comment above gives it (`ssPorchJoin` names the lean-to).
+    if (PJ) {
+      const phi = Math.atan(pitch);
+      const toRootP = FALL ? d3PorchToRoot(roofCfg, bldgW, bldgH) : null;
+      const hdrBot = (s) => (s <= dPost ? geom.hdrTop - HDR_H : geom.hdrTop - pitch * (s - dPost) - HDR_H / Math.cos(phi));
+      const sp = (2 * rafU) / (geom.nRaf - 1);
+      PJ.forEach((J) => {
+        const tagJ = (m, name) => { m.userData.ssPorchJoin = J.i; return part(m, name); };
+        // The header's slope past the hip, a hair shallower than the level piece so their faces never meet.
+        if (J.w + 0.175 > dPost + 0.01) {
+          const s1 = J.w + 0.175, sm = (dPost + s1) / 2;
+          const hs = box(woodMat, (s1 - dPost) / Math.cos(phi), HDR_H, HDR_D - 0.01);
+          hs.rotation.z = -J.js * phi;
+          hs.position.set(J.js * (hw + sm - (HDR_H / 2) * Math.sin(phi)), geom.hdrTop - pitch * (sm - dPost) - (HDR_H / 2) * Math.cos(phi), dPost);
+          pg.add(tagJ(hs, "header"));
+        }
+        // Posts from the porch's own corner post out to the corner post, at least every 8.5 ft, on the ground.
+        const s0 = side - POST / 2 - hw;
+        const n = Math.max(1, Math.ceil((J.w - s0) / 8.5 - 1e-6));
+        for (let k = 1; k <= n; k++) {
+          const s = s0 + (k / n) * (J.w - s0), x = J.js * (hw + s), top = hdrBot(s);
+          const pb = FALL ? -depthUnder(x, dPost, POST / 2, POST / 2, toRootP) : postBot;
+          const post = box(woodMat, POST, top - pb, POST);
+          post.position.set(x, (top + pb) / 2, dPost);
+          pg.add(tagJ(post, k === n ? "joinCorner" : "joinPost"));
+        }
+        // Jack rafters every 2 ft on from the porch's own, from the hip rafter's face to the front, inside the
+        // ceiling's edge; and the hip rafter, from the walls' corner to just short of the nearer eave.
+        for (let k = 1; k < 64; k++) {
+          const s = rafU + k * sp - hw;
+          if (s + RAF_W / 2 > J.eL - SIDE_OV - 0.02 || s + RAF_W / Math.SQRT2 + RAF_W > dEnd - FAS_T - 0.1) break;
+          const x = J.js * (hw + s), d0 = Math.max(dWall + 0.05, s - 0.3);
+          pg.add(tagJ(onSlopeCut(woodMat, d0, dEnd - FAS_T, x - RAF_W / 2, x + RAF_W / 2, RAF_D, PR_T + SHEATH, [pHip(J, RAF_W / Math.SQRT2)]), "jackRafter"));
+        }
+        const t0 = dWall, t1 = Math.min(J.eL - 0.15, dEnd - FAS_T), tm = (t0 + t1) / 2, phiH = Math.atan(pitch / Math.SQRT2);
+        if (t1 > t0 + 0.3) {
+          const hr = box(woodMat, ((t1 - t0) * Math.SQRT2) / Math.cos(phiH), RAF_D, RAF_W);
+          hr.rotation.set(0, Math.atan2(-1, J.js), -phiH);
+          hr.updateMatrix();
+          const up = new THREE.Vector3().setFromMatrixColumn(hr.matrix, 1);
+          hr.position.set(J.js * (hw + tm), yU(tm), tm).addScaledVector(up, -RAF_D / 2);
+          pg.add(tagJ(hr, "hipRafter"));
+        }
+        // The cap's half on the sheet: 0.06 ft thick on its top face, from 0.06 ft past the hip to 0.275 ft in
+        // from it, as far out along the hip as the sheet's own tip and inside the lean-to's eave.
+        const sv = slab.geometry.attributes.position, v = new THREE.Vector3();
+        slab.updateMatrix();
+        let tip = -Infinity;
+        for (let k = 0; k < sv.count; k++) {
+          v.fromBufferAttribute(sv, k).applyMatrix4(slab.matrix);
+          if (Math.abs(pHip(J, 0)(v.x, v.z)) < 1e-4) tip = Math.max(tip, (sOut(J, v.x) + v.z) / Math.SQRT2);
+        }
+        const into = (x, d) => (d - sOut(J, x)) / Math.SQRT2;
+        pg.add(tagJ(ltCutBox(roofMat, (dEnd - dWall) / cosA, 0.06, slabX[1] - slabX[0], slopePlace(slabX[0], slabX[1], dWall, dEnd, 0.06, -0.06),
+          [(x, d) => -into(x, d) - 0.06, (x, d) => into(x, d) - 0.275, (x, d) => (sOut(J, x) + d) / Math.SQRT2 - tip, pEave(J, 0)], false), "hip"));
+        // Past the hip on a porch deeper than the lean-to is wide, the sheet's edge along the lean-to's eave line.
+        // Its top stands 0.005 ft proud of the cap's, whose end it covers: level, the two coplanar faces stippled.
+        if (J.eL < dEnd - 0.01) {
+          const xr = J.js * (hw + J.eL - 0.04 + (NEW_FRAME ? 0.005 : 0));
+          pg.add(tagJ(onSlopeCut(fasciaMat, J.eL - 0.3, dEnd, xr - 0.04, xr + 0.04, 0.285, -0.065, [pHip(J, 0)]), "joinRake"));
+        }
+      });
+    }
     // The ledger on the wall under the rafters: 0.04 ft proud of any casing (casings face at
     // trimFace), its ends buried in the corner boards.
     const LED_H = 0.3, ledFace = trimFace + 0.04;
@@ -12085,6 +13079,9 @@ function buildShed3DModel(THREE, p) {
     porchDeckGroup.userData.ssPorch = "deck";
     porchDeckGroup.add(deck);
     porchCapZ = onCap ? (atZero ? 0 : L) : null;
+    // Joined to a lean-to (d3PorchJoins): which, at which corner, on which side of this frame, and what the scan
+    // measured over it without the lean-tos it meets (joinClear, never under its ceiling). Absent otherwise.
+    if (PJ) { geom.join = PJ.map((J) => ({ i: J.i, at: J.at, js: J.js })); geom.joinClear = capY; }
     return geom;
   })();
   // ── A RECESSED PORCH'S STEPS (roof.porchSteps, 2026-10-03) ──
@@ -12236,7 +13233,8 @@ function buildShed3DModel(THREE, p) {
         if (u < lo || u > hi) continue;
         const yTop = ye + Math.abs(u + s * halfW - g.u1) * g.pitch;
         if (yTop <= ye + 0.05) continue;
-        (hasEnds ? [mass.zA - capStripOut(capOut0), mass.zB + capStripOut(capOutL)] : [-capStripOut(capOut0), L + capStripOut(capOutL)]).forEach((z) => {
+        (hasEnds ? [mass.zA - capStripOut(capOut0), mass.zB + capStripOut(capOutL)] : [-capStripOut(capOut0), L + capStripOut(capOutL)])
+          .filter((z, k) => !(g.hipEnds && g.hipEnds.indexOf(k) >= 0)).forEach((z) => {
           const st = box(reliefMat, halfW * 2, yTop - ye, capStripDepth);
           st.position.set(u - mass.uc, (ye + yTop) / 2, z);
           st.userData.ssWing = s;
@@ -12261,7 +13259,8 @@ function buildShed3DModel(THREE, p) {
         const uIn = g.u1 - s * Math.max(trimFace, (y + 0.06 - ye) / g.pitch);
         if ((face - uIn) * -s < 0.1) continue;
         const a = Math.min(uIn, face), b = Math.max(uIn, face);
-        (hasEnds ? [mass.zA - CLAD_RELIEF_OUT, mass.zB + CLAD_RELIEF_OUT] : [-CLAD_RELIEF_OUT, L + CLAD_RELIEF_OUT]).forEach((z) => {
+        (hasEnds ? [mass.zA - CLAD_RELIEF_OUT, mass.zB + CLAD_RELIEF_OUT] : [-CLAD_RELIEF_OUT, L + CLAD_RELIEF_OUT])
+          .filter((z, k) => !(g.hipEnds && g.hipEnds.indexOf(k) >= 0)).forEach((z) => {
           const st = box(wallMat, b - a, 0.08, 0.1);
           st.position.set((a + b) / 2 - mass.uc, y, z);
           st.userData.ssWing = s;
@@ -12800,6 +13799,14 @@ function buildShed3DModel(THREE, p) {
   model.leanTo = leanAt;
   // The lean-to list as built (d3LeanTosGeom), or null without one.
   model.leanTos = LEANTOS;
+  // Where two of them meet at a corner (d3CornerJoins: joins, near-misses, joined ends), or null: for
+  // tests/harness/leanTos.mjs; nothing in the app reads it.
+  model.leanToCorners = LTC;
+  // Where a lean-to meets the porch (d3PorchJoins: joins, the rest, joined ends, the porch), or null: for
+  // tests/harness/leanTos.mjs and porchProbe.mjs; nothing in the app reads it.
+  model.leanToPorch = LTP;
+  // Where wing roofs meet round a corner (roof.wingCornersMeet; d3WingCornerPairs), null without the key.
+  model.wingCorners = mass.corners || null;
   // The roof step as built (d3RoofStep), for tests/harness/roofStep.mjs; absent without one.
   if (STEP) model.roofStep = { stepFt: STEP.stepFt, rise: STEP.rise, Hf: STEP.Hf, Hb: STEP.Hb, pitch: STEP.pitch, pitchB: STEP.pitchB, rearPeak: rearProf.peak };
   // The ground's depth below the floor's top (d3GradeFt) and, on blocks or piers, the skirt, runners
@@ -19153,6 +20160,9 @@ function ssDrewWords(spec, porchBuilt, stepBuilt, massBuilt) {
   if (listBuilt) {
     const n = (listBuilt.wings ? listBuilt.wings.length : 0) + (listBuilt.ends ? listBuilt.ends.length : 0);
     if (n > 0) out.push(`${n} wing${n === 1 ? "" : "s"}, set on the Advanced page, with the middle section's walls at ${ssFtInWords(listBuilt.Hc)}.`);
+    // Where a side wing's roof and an end wing's run around a corner as one (roof.wingCornersMeet), as built.
+    const hips = listBuilt.corners ? listBuilt.corners.joins.map((c) => c.name) : [];
+    if (hips.length) out.push(`Their roofs run around the ${hips.length > 1 ? hips.slice(0, -1).join(", ") + " and " + hips[hips.length - 1] : hips[0]} corner${hips.length > 1 ? "s" : ""} as one, with a hip.`);
   } else if (type !== "shed" && wing > 0) {
     const where = ({ both: "each side", left: "the left side", right: "the right side", front: "the front", back: "the back" })[roof.wingSide] || "the side";
     // Where that roof meets the middle section (roof.wingAttach, 2026-09-28), only when the style says,
@@ -23658,7 +24668,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // on would make the preview draw a building that Save cannot store -- and "the new frame is
   // active" is decided by whether either frame key is PRESENT, so a stale one would turn the
   // preview's porch and front round while the saved style turned it back.
-  const CAL_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt", "wingSides", "wingList"];
+  const CAL_WING_KEYS = ["wingSide", "wingWidthFt", "wingPitch", "centerEaveFt", "wingAttach", "wingAttachFt", "wingSides", "wingList", "wingCornersMeet"];
   const calSetRoofType = (type) => setAdminCal((p) => {
     const roof = { ...p.spec.roof, type };
     if (type === "shed") { delete roof.front; for (const k of CAL_WING_KEYS) delete roof[k]; }
@@ -23779,6 +24789,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     delete roof.wingSides; delete roof.wingAttach; delete roof.wingAttachFt;
     if (next.length) { roof.wingList = next; calWingListSync(roof, H); }
     else { for (const k of CAL_WING_KEYS) delete roof[k]; }
+    return { ...p, spec: { ...p.spec, roof } };
+  });
+  // WING ROOFS THAT MEET AT A CORNER (roof.wingCornersMeet, 2026-10-05), the Wings tab's switch: true or gone
+  // (absent is off). It moves the side wings' heights, so the older designer's approximation follows it, as it
+  // follows every list edit.
+  const calSetWingCornersMeet = (on) => setAdminCal((p) => {
+    const roof = { ...p.spec.roof };
+    if (on) roof.wingCornersMeet = true;
+    else delete roof.wingCornersMeet;
+    if (d3WingListOn(roof)) calWingListSync(roof, Number(p.spec.wallHeightFt) || D3.WALL_H);
     return { ...p, spec: { ...p.spec, roof } };
   });
   // One wing's keys: "", null or undefined DELETES a key (absent is its default), the calSetLeanTo rule.
@@ -25413,7 +26433,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const roof = spec.roof || {};
     // The 2026-09-24 keys are in the slice of the question whose panel sets them: which way the
     // building faces and the wings are the ROOF's shape, the attach height and width the PORCH's.
-    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt, roof.wingAttach, roof.wingAttachFt, roof.rearStepFt, roof.rearEaveRiseFt, roof.wingSides, roof.wingList]);
+    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand, roof.front, roof.highSide, roof.wingSide, roof.wingWidthFt, roof.wingPitch, roof.centerEaveFt, roof.wingAttach, roof.wingAttachFt, roof.rearStepFt, roof.rearEaveRiseFt, roof.wingSides, roof.wingList, roof.wingCornersMeet]);
     if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss, roof.porchAttachFt, roof.porchWidthFt, roof.porchPosts, roof.porchPitch, roof.porchSteps, roof.porchStepCount]);
     // What it stands on and how high (2026-09-25) are set in the walls panel, beside the wall.
     if (key === "walls") return JSON.stringify([spec.wallHeightFt, spec.foundation, spec.floorHeightFt, spec.gradeFallFt, spec.gradeFallToward, spec.gradeCornersFt]);
@@ -29869,6 +30889,63 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           r.porch ? `It runs in front of the ${r.porch === "recessed" ? "porch cut into" : "porch on"} this wall; the porch is drawn under it.` : null,
         ].filter(Boolean) : [];
         const dcWords = dc && dc.by === "lean-to" && r && r.kind === "eave" && r.mode === "roof" && r.dir === dc.dir ? d3DormerCoveredWords(dc, false) : null;
+        // ROOFS THAT MEET AT A CORNER (d3CornerJoins, 2026-10-04): with another lean-to that reaches the same
+        // corner, joined into one roof when the two match exactly, else what differs, with the numbers. The
+        // other is never moved to fit, and neither is this one.
+        const by = (ft) => fmtDimFtIn(Math.abs(ft));
+        const andList = (a) => (a.length > 1 ? a.slice(0, -1).join(", ") + " and " + a[a.length - 1] : a[0]);
+        const cornerSay = r && r.corner ? r.corner.map((c) => {
+          const o = rds.find((x) => x.i === c.with);
+          const lt = `Lean-to ${c.with + 1}`;
+          if (c.joined) {
+            const walls = (r.enclosed ? 1 : 0) + (o && o.enclosed ? 1 : 0);
+            return { joined: true, t: `Meets lean-to ${c.with + 1} around the ${c.at} corner: ${walls === 2 ? "one roof with a hip, walled in around the corner"
+              : walls ? "one roof with a hip, on a post at the outer corner" : "one roof, a hip and one corner post"}.` };
+          }
+          if (c.why.indexOf("roof") >= 0) {
+            return { joined: false, t: `${lt} also reaches the ${c.at} corner, but ${r.mode === "roof" ? "this one meets" : "it meets"} the roof, so the two roofs run past each other. Meet the wall with both to run one roof around it.` };
+          }
+          if (c.why.indexOf("endWings") >= 0) {
+            return { joined: false, t: `${lt} also reaches the ${c.at} corner. With end wings on this building, the two roofs run past each other there.` };
+          }
+          const diff = [
+            c.why.indexOf("height") >= 0 ? `it meets its wall ${by(c.dy)} ${c.dy < 0 ? "lower" : "higher"}` : null,
+            c.why.indexOf("drop") >= 0 ? `its outer edge is ${by(c.d1)} ${c.d1 < 0 ? "lower" : "higher"}` : null,
+            c.why.indexOf("width") >= 0 ? `it is ${by(c.dw)} ${c.dw < 0 ? "narrower" : "wider"}` : null,
+          ].filter(Boolean);
+          return { joined: false, t: `${lt} also reaches the ${c.at} corner, but ${andList(diff)}, so the two roofs run past each other. Give both the same width, the same height at the wall and the same outer-edge height to run one roof around it.` };
+        }) : [];
+        // MEETING THE PORCH (d3PorchJoins, 2026-10-05): only on a lean-to that runs to a corner of a projecting
+        // porch's wall. Asked and matching, one roof; asked and not, what differs, by how much, and what this card's
+        // own boxes would read to match (porchCorner.fix, to the hundredth of a foot, which is close enough to
+        // join); not asked, whether it already would. Neither the lean-to nor the porch is ever moved to fit. The
+        // porch's height is its roof's top, the one its own card prints; a lean-to's is its roof's underside, so
+        // the height this one has to meet its wall at (porch.ya) is said too, to the hundredth of an inch.
+        const pc = r && r.porchCorner;
+        const ft2 = (ft) => String(Math.round(ft * 100) / 100);
+        const porchSay = !pc ? null : (() => {
+          if (pc.joined) return { kind: "joined", t: `Meets the porch around the ${pc.at} corner: one roof with a hip, and one corner post.` };
+          if (!pc.asked) return pc.why.length ? null : { kind: "match", t: `It already matches the porch at the ${pc.at} corner. Pick "Meet the porch" to run one roof around it.` };
+          const w = pc.why;
+          if (w.indexOf("roof") >= 0) return { kind: "near", t: "It meets the roof, so it can't meet the porch. Meet the wall to run one roof with it." };
+          if (w.indexOf("wings") >= 0) return { kind: "near", t: `With wings on this building, it and the porch run past each other at the ${pc.at} corner.` };
+          if (w.indexOf("porchWidth") >= 0) return { kind: "near", t: `The porch is narrower than its wall, so it stops short of the ${pc.at} corner. Make the porch the whole wall to meet it.` };
+          if (w.indexOf("underLeanTo") >= 0) return { kind: "near", t: `Lean-to ${pc.over + 1} runs in front of the porch on its wall, so the porch is drawn under it and can't meet this one.` };
+          if (w.indexOf("leanTo") >= 0) return { kind: "near", t: `It already meets another lean-to around the ${pc.at} corner.` };
+          if (w.indexOf("taken") >= 0) return { kind: "near", t: `Another lean-to meets the porch at the ${pc.at} corner first.` };
+          if (w.indexOf("edge") >= 0) {
+            const o = pc.edge, ln = `lean-to ${o.i + 1}`;
+            return { kind: "near", t: `Lean-to ${o.i + 1}'s roof runs out over the porch at the ${o.at} corner, ${by(o.by)} below the porch roof, so the porch is drawn under it and can't meet this one. ${o.at === pc.at
+              ? `Shorten ${ln} or slide it off the corner` : `Have ${ln} meet the porch too`}, or hang the porch roof at least ${by(o.by)} lower ("Roof meets the wall at" on the Porch & steps tab).` };
+          }
+          const atWall = w.indexOf("height") >= 0 ? `meets its wall ${by(pc.dy)} ${pc.dy < 0 ? "higher" : "lower"} than that` : null;
+          const atEdge = w.indexOf("pitch") >= 0 ? `outer edge is ${by(pc.d1)} ${pc.d1 < 0 ? "higher" : "lower"} than the porch roof's slope puts it` : null;
+          const diff = atWall && atEdge ? `This lean-to ${atWall}, and its ${atEdge}` : atWall ? `This lean-to ${atWall}` : `This lean-to's ${atEdge}`;
+          const f = pc.fix;
+          const fixT = !f ? "Its boxes can't reach the porch's numbers here: change the porch roof's height or pitch on the Porch & steps tab."
+            : `To run one roof around it, ${f.attach === "wall" && attach !== "wall" ? 'pick "On the wall", ' : ""}${f.attach === "wall" ? `set "How far down the wall" to ${ft2(f.attachFt)} and ` : "set "}"Outer edge drop" to ${ft2(f.dropFt)}.`;
+          return { kind: "near", t: `The porch roof meets the wall at ${d3FtIn(pc.porch.yHigh)} and builds ${Math.round(pc.porch.pitch * 120) / 10} in 12. A lean-to's height is its roof's underside, so to run one roof with it this one meets its wall at ${fmtDimFtIn(pc.porch.ya)}. ${diff}, so the two roofs run past each other. ${fixT}` };
+        })();
         const half = Math.max(2, Math.round(len / 2));
         out.push(
           <div key={"lt" + i} className="ssd-card ss-adv-lt" data-ss-adv-lt={i}>
@@ -29927,8 +31004,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {advSeg({ f: "leanToEnclosed", label: "Sides", aria: ltAria("Sides"), value: e.enclosed === true ? "enclosed" : "open", pick: (v) => set({ enclosed: v === "enclosed" ? true : null }), full: true,
                 opts: [["open", "Open on posts"], ["enclosed", "Enclosed"]],
                 note: e.enclosed === true ? "Walled in with this building's siding." : "A roof on posts." })}
+              {/* Offered where it could meet the porch, and kept once asked so it can be switched back: one up the roof,
+                  beside wings, past a narrow porch's end, behind another lean-to on the porch's wall or already met
+                  round that corner can't, until that changes. */}
+              {pc && (pc.asked || !["roof", "wings", "porchWidth", "underLeanTo", "leanTo"].some((x) => pc.why.indexOf(x) >= 0)) && advSeg({ f: "leanToMeetPorch", label: "At the porch", aria: ltAria("At the porch"), value: e.meetPorch === true ? "meet" : "", pick: (v) => set({ meetPorch: v === "meet" ? true : null }), full: true,
+                opts: [["", "Runs past it"], ["meet", "Meet the porch"]],
+                note: e.meetPorch === true ? "One roof with the porch around the corner, when the two match." : `It reaches the ${pc.at} corner of the porch's wall.`,
+                children: porchSay ? advSay(porchSay.t, porchSay.kind === "near", { "data-ss-leanto-porch": porchSay.kind }) : null })}
               {clash.length > 0 && <div key="clash" className="ss-adv-f is-full">{clash.map((t, k) => <div key={k}>{advSay(t, true, { "data-ss-leanto-clash": "" })}</div>)}</div>}
               {r && r.endCross && <div key="endCross" className="ss-adv-f is-full">{advSay(`Runs past ${ltEndWords(r)}: hung at wall height.`, true, { "data-ss-leanto-endcross": "" })}</div>}
+              {cornerSay.length > 0 && <div key="corner" className="ss-adv-f is-full">{cornerSay.map((c, k) => <div key={k}>{advSay(c.t, !c.joined, { "data-ss-leanto-corner": c.joined ? "joined" : "near" })}</div>)}</div>}
             </div>
           </div>,
         );
@@ -30030,8 +31115,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const blankHc = d3Massing({ ...roof, centerEaveFt: null }, bldgW, bldgH, wallH).Hc;
       const pushWho = wm.hcRaised && wm.hcRaisedBy.length ? pushes(wm.hcRaisedBy.map(nameOf)) : null;
       const t1Ends = wm.ends.filter((t) => t.tier === 1);
-      const eMin = Math.min(wm.E["-1"], wm.E["1"]);
-      const endSay = t1Ends.length ? `${wm.wings.length ? "The long walls" : "The middle's long walls"} stand at ${d3FtIn(eMin)} over the middle stretch: ${endRoofs(t1Ends, "passes", "pass")} under their eaves (outside walls ${d3FtIn(wallH)}).` : null;
+      // A side whose wing's roof meets the end wings' around the corners (hipEnds, roof.wingCornersMeet) stands at
+      // the walls' height, and the corners block says so: this line speaks of the sides still stepping up.
+      const upSides = [-1, 1].filter((s) => !wm.wings.some((g) => g.side === s && g.hipEnds));
+      const eMin = upSides.length ? Math.min(...upSides.map((s) => wm.E[s])) : Math.min(wm.E["-1"], wm.E["1"]);
+      const sideWall = (s) => (ax.uAxisIsX ? (s < 0 ? "left" : "right") : (s < 0 ? "back" : "front"));
+      const endSay = !t1Ends.length || !upSides.length ? null
+        : upSides.length === 1 && wm.wings.length ? `The ${sideWall(upSides[0])} long wall stands at ${d3FtIn(eMin)} over the middle stretch: ${endRoofs(t1Ends, "passes", "pass")} under its eave (outside walls ${d3FtIn(wallH)}).`
+          : `${wm.wings.length ? "The long walls" : "The middle's long walls"} stand at ${d3FtIn(eMin)} over the middle stretch: ${endRoofs(t1Ends, "passes", "pass")} under their eaves (outside walls ${d3FtIn(wallH)}).`;
       out.push(
         <div key="wlc" className="ss-adv-flds">
           {advNum({ k: "centerEaveFt", label: "Middle section wall height (ft)", value: hc, min: 6, max: 26, step: 0.5, band: [6, 26],
@@ -30095,6 +31186,62 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             "There each side's wings are drawn as one wing (only the wider side's, when the two sides differ a lot), and end wings are not drawn. Turning the wings off on your live site leaves this list in place: turn them off here."])}</div>}
         </div>,
       );
+      // ── WING ROOFS THAT MEET AT A CORNER (roof.wingCornersMeet, 2026-10-05) ──
+      // Carolyn, 10-01, on her photo of a side wing whose roof steps up over the end wing's: she wants the two to
+      // run as one roof around the corner. The switch shows only where a side wing and an end wing share a corner
+      // at this size (d3WingCorners, the pairs as if it were on), and each corner says what it builds or, with the
+      // numbers, why it can't. Nothing is changed to make a corner meet: the builder changes the wings.
+      const wc = d3WingCorners(roof, bldgW, bldgH, wallH);
+      if (wc) {
+        const meetOn = roof.wingCornersMeet === true;
+        const in12 = (p) => Math.round(p * 1200) / 100;
+        // Two lengths said side by side: in whole inches, or to the hundredth where whole inches would read the same
+        // (a near-miss is a hair off: D3_WL_CORNER_TOL is an eighth of an inch).
+        const ftPair = (a, b) => (d3FtIn(a) === d3FtIn(b) ? [fmtDimFtIn(a), fmtDimFtIn(b)] : [d3FtIn(a), d3FtIn(b)]);
+        const andOf = (a) => (a.length > 1 ? a.slice(0, -1).join(", ") + " and " + a[a.length - 1] : a[0]);
+        const howMeets = (q) => (q.attach === "roof" ? "up its roof" : "on its wall");
+        const cornerLine = (c, joined) => {
+          const g = recOf(c.i), t = recOf(c.j), sN = nameOf(c.i), eN = nameOf(c.j);
+          const has = (w) => c.why.indexOf(w) >= 0;
+          if (joined) {
+            return meetOn ? `${sN} and ${eN} meet around the ${c.name} corner: one roof with a hip.`
+              : `${sN} and ${eN} match at the ${c.name} corner. On, they run one roof around it.`;
+          }
+          const lead = `${sN} and ${eN} share the ${c.name} corner, but`, steps = `so ${sN}'s roof steps up over ${eN}'s`;
+          if (has("stack")) {
+            const many = [wm.wings.filter((q) => q.side === c.s).length > 1 ? `the ${g.bwall} side` : null,
+              wm.ends.filter((q) => q.at === c.at).length > 1 ? `the ${t.bwall} end` : null].filter(Boolean);
+            return `${lead} ${andOf(many)} ${many.length > 1 ? "carry" : "carries"} more than one wing, ${steps}. Only a wing alone on its wall meets around a corner.`;
+          }
+          if (has("attach")) {
+            const set = [g.attach ? g : null, t.attach ? t : null].filter(Boolean);
+            const said = set.map((q) => `${nameOf(q.i)} meets the middle ${howMeets(q)}`);
+            return `${lead} ${andOf(said)}, ${steps}. Set ${set.length > 1 ? "both" : "it"} to Automatic to run one roof around it.`;
+          }
+          if (has("otherEnd")) {
+            const o = wc.near.find((q) => q.s === c.s && q !== c);
+            return `${sN} and ${eN} match at the ${c.name} corner, but ${sN} also runs to the ${o ? o.name : "other"} corner, where it does not. Its outside wall is one height its whole length, so it steps up over both.`;
+          }
+          const hPair = has("height") ? ftPair(g.ask, wallH) : null, wPair = has("width") ? ftPair(g.w, t.w) : null;
+          const diff = [
+            hPair ? `${sN}'s outside wall is set to ${hPair[0]}, not the walls' ${hPair[1]}` : null,
+            wPair ? `${sN} is ${g.shrunk ? "drawn " : ""}${wPair[0]} wide, and ${eN} is ${t.shrunk ? "drawn " : ""}${wPair[1]} wide` : null,
+            has("pitch") ? `${sN}'s roof is ${in12(g.pitch)} in 12, and ${eN}'s is ${in12(t.pitch)} in 12` : null,
+          ].filter(Boolean);
+          const same = [has("width") ? "width" : null, has("pitch") ? "pitch" : null].filter(Boolean);
+          const fix = [same.length ? `Give both the same ${andOf(same)} to run one roof around it.` : null, has("height") ? `Set ${sN}'s outside wall to Auto.` : null].filter(Boolean);
+          return `${lead} ${diff.join("; ")}, ${steps}. ${fix.join(" ")}`;
+        };
+        const lines = wc.joins.map((c) => [c, true]).concat(wc.near.map((c) => [c, false])).sort((p, q) => p[0].s - q[0].s || p[0].at - q[0].at);
+        out.push(advSeg({ f: "wingCornersMeet", label: "Wing roofs meet at the corner", aria: "Wing roofs meet at the corner", value: meetOn ? "on" : "", full: true,
+          opts: [["", "Off"], ["on", "On"]],
+          pick: (v) => calSetWingCornersMeet(v === "on"),
+          note: ["Where a side wing and an end wing are as wide and as steep, their roofs run around the corner as one, with a hip.",
+            "Off, the side wing's outside wall rises so its roof steps up over the end wing's. On, the side wing stays at the walls' height and the two roofs meet on the hip. Nothing is changed to make them meet: give both the same width and pitch."],
+          children: <>{lines.map(([c, joined]) => (
+            <div key={c.name}>{advSay(cornerLine(c, joined), !joined && meetOn, { "data-ss-adv-wl-corner": joined ? "joined" : "near", "data-ss-adv-wl-corner-at": c.name })}</div>
+          ))}</> }));
+      }
       // ── one card per wing ──
       const wlCard = (e, i, bw, k, n, end) => {
         const name = nameAt(bw, k);
@@ -30127,7 +31274,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         body.push(advSeg({ f: "wlAttach", label: meetsLabel, aria: `${name} meets ${k === 1 ? (end ? "the middle's end wall" : "the middle section") : parent}`, value: r && r.roofIgnored ? "" : asked, full: true,
           pick: (v) => set(v ? { attach: v, attachFt: typeof e.attachFt === "number" ? e.attachFt : 1 } : { attach: null }),
           opts: [["", "Automatic"], ["wall", "On the wall"], ["roof", "On the roof", !roofOk, roofOk ? undefined : "Only a wing against the middle can run up onto its roof"]],
-          note: longWalls ? (a ? "The long walls keep their height; this wing's slope follows." : ["Hung under the long walls' eaves.", "A steep roof set to Automatic pushes those walls up to fit."])
+          note: longWalls && r && r.hipSides ? ["Its roof runs around the corner into the side wing's.", "A steep roof set to Automatic pushes the middle's walls up to fit."]
+            : longWalls ? (a ? "The long walls keep their height; this wing's slope follows." : ["Hung under the long walls' eaves.", "A steep roof set to Automatic pushes those walls up to fit."])
             : a ? `${capFirst(innerPoss)} wall keeps its height; this wing's slope follows.` : [`Hung under ${innerPoss} eave.`, "A steep roof set to Automatic pushes that wall up to fit."],
           children: r && r.roofIgnored ? advSay("On the roof is only for a wing against the middle, so this one is built Automatic. On the roof stays saved for when it is moved back in.", true) : null }));
         if (a) {
@@ -30193,6 +31341,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             ) }));
         } else if (r) {
           body.push(<div key="wle" className="ss-adv-f is-full">{advNoteEl(`Its outside wall is the building's wall, ${d3FtIn(wallH)}.`)}</div>);
+        }
+        // Round a corner (roof.wingCornersMeet): which wing its roof runs into, and at which corner.
+        const hipsHere = wm.corners ? wm.corners.joins.filter((c) => c.i === i || c.j === i) : [];
+        if (hipsHere.length) {
+          body.push(<div key="wlhip" className="ss-adv-f is-full">{hipsHere.map((c) => (
+            <div key={c.name}>{advSay(`Meets ${nameOf(c.i === i ? c.j : c.i)} around the ${c.name} corner: one roof with a hip.`, false, { "data-ss-adv-wl-hip": c.name })}</div>
+          ))}</div>);
         }
         if (r && r.tight) body.push(<div key="wlt" className="ss-adv-f is-full">{advSay(r.attach && parent
           ? `Drawn, but ${innerPoss} roof edge passes closer over this wing's roof than it should. Raise ${innerPoss} outside wall, or meet it further down.`
@@ -30456,6 +31611,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   : "Cut out of the building: the roof and the footprint stay.", recessedLost)
                 : advNoteEl("In front of the building; the size and price stay the same.")}
               {prWords && advSay(prWords, warn, { "data-ss-adv-readout": "porch" })}
+              {pr && pr.meets && advSay(`${pr.meets.map((m, j) => `${j ? "lean-to" : "Lean-to"} ${m.i + 1} meets it around the ${m.at} corner`).join(", and ")}: one roof with a hip.${pr.edgeOver
+                ? " It sits just under the main roof's edge at the corner." : ""}`, false, { "data-ss-porch-meets": "" })}
             </> })}
           {advSeg({ f: "porchEnd", label: "Porch end", value: roof.porchEnd === "back" ? "back" : "front", pick: (v) => calSetRoof({ porchEnd: v }),
             opts: [["front", newFrame ? "Front wall" : "Front gable end"], ["back", newFrame ? "Back wall" : "Back gable end"]] })}

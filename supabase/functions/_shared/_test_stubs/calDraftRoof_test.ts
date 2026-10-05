@@ -272,10 +272,10 @@ Deno.test("⚠️ the lean-to list (roof.leanTos, 2026-09-29) goes with a typed 
   assertEquals(calDraftRoof(stored, { pitch: 0.5 }).leanTos, stored.leanTos, "a draft with no type keeps them");
 });
 
-Deno.test("⚠️ the wing list and the per-side wings (2026-09-29 / 10-01) go with a typed draft and stay without one", () => {
+Deno.test("⚠️ the wing list, the per-side wings and the corners switch (2026-09-29 / 10-01 / 10-05) go with a typed draft and stay without one", () => {
   const list = [{ wall: "left", widthFt: 8 }, { wall: "left", widthFt: 6 }, { wall: "front", widthFt: 8 }];
   const sides = { left: { widthFt: 6, attach: "wall", attachFt: 1 }, right: { widthFt: 10 } };
-  for (const [k, v] of [["wingList", list], ["wingSides", sides]] as const) {
+  for (const [k, v] of [["wingList", list], ["wingSides", sides], ["wingCornersMeet", true]] as const) {
     const stored = { type: "gable", wingSide: "both", wingWidthFt: 8, [k]: v };
     assert(!has(calDraftRoof(stored, { type: "gable", pitch: 0.5 }), k), `${k}: a typed draft without wings clears it`);
     assert(!has(calDraftRoof(stored, { type: "gable", wingSide: "both", wingWidthFt: 10 }), k), `${k}: a typed draft with its own wings replaces it`);
@@ -291,5 +291,5 @@ Deno.test("⚠️ dev/score.mjs's WING_KEYS is the browser's CAL_WING_KEYS, key 
   const scored = new Function(`${lift(score, "dev/score.mjs", "const WING_KEYS = ", "];")} return WING_KEYS;`)() as string[];
   const browser = new Function(`${blocks[0].cmp} return CAL_WING_KEYS;`)() as string[];
   assertEquals(browser, scored);
-  assertEquals(browser[browser.length - 1], "wingList", "the list is the last key of the set");
+  assertEquals(browser.slice(-2), ["wingList", "wingCornersMeet"], "the list, then its corners switch, end the set");
 });
