@@ -3,6 +3,11 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
 import type { GateTable } from "../_shared/access.ts";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
+import { addPhase, timedFetch, withServerTiming, type ServerTiming } from "../_shared/serverTiming.ts";
+import {
+  eachLimited, estimateTotalsById, listEstimates, listOpportunities, listOpportunitiesAtStages, type OppRead, planGhlReads,
+  settleStatuses, STAGE_RANK, stageMapOf,
+} from "../_shared/designStatusSync.ts";
 
 // This function exposes a single implicit action; everything it does is a read.
 // WHAT THIS FUNCTION REQUIRES (migration 100) — see _shared/access.ts.
@@ -41,14 +46,23 @@ const GATES: GateTable = { sync: { area: "designs", level: "view" } };
 // may call this (it only reads/derives their own tenant's statuses).
 //
 // GHL access mirrors submit-estimate: base https://services.leadconnectorhq.com,
-// header Version: 2021-07-28, Bearer <ghl_api_key>. Two bounded LIST calls per tenant
-// (estimates, and opportunities only if a delivered stage is configured) — not per design.
+// header Version: 2021-07-28, Bearer <ghl_api_key>. Bounded LIST calls per tenant, never per
+// design, and since 2026-10-05 only the ones this call will look at (_shared/designStatusSync.ts):
+// the estimate list when a design in the call has an estimate id, stopping at the page where
+// the last of those ids turns up; and, when a pipeline stage is mapped and a design whose status
+// this function decides has an opportunity, the location's opportunities: walked in full, as
+// before, unless SDS_STAGE_SEARCH=1, which asks for one search PER MAPPED STAGE instead (see
+// stageSearchOn below for why that waits). Server-Timing on the response says which read took
+// the time (est / opp, with page counts and which opportunity read ran) and what the database
+// and the writes cost (db / writes), so the next slow call answers "CRM or database?" from the
+// portal's own tab.
 //
 // VERIFIED against a live accepted estimate (EST-29, 2026-07-25): the list endpoint
 // returns the status in `estimateStatus` (top-level `status` does not exist / is null),
 // ids in `_id`, rows under `estimates`, and an `estimateActionHistory` array of
 // { estimateStatus, updatedAt } events. Values observed: "accepted". The mapping lives
-// in mapEstimateStatus(); GHL failures never throw — the design keeps its cached status.
+// in mapEstimateStatus() (_shared/designStatusSync.ts); GHL failures never throw — the design
+// keeps its cached status.
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -65,73 +79,34 @@ function json(body: unknown, status = 200) {
   });
 }
 
-const STAGE_RANK: Record<string, number> = { sent: 0, accepted: 1, invoiced: 2, delivered: 3 };
+// How many UPDATEs run at once (status and order-total writes). Each is scoped to its own row, so
+// their order never mattered; running them one after another made a burst of changes cost one
+// database round trip each. Small, because this project runs on the smallest database tier.
+const WRITE_LANES = 4;
+
+// THE PER-STAGE OPPORTUNITY SEARCH IS OFF UNTIL IT HAS BEEN SEEN TO WORK (2026-10-05 review).
+// listOpportunitiesAtStages catches a CRM that ignores pipeline_stage_id (rows at other stages)
+// or refuses it (400/422), and settleStatuses re-checks any downgrade. What neither can see is a
+// filter that answers EMPTY for a stage that has deals: a design whose deal was dragged to a
+// mapped stage would then never be promoted, with nothing logged, and that is where Send invoice,
+// the build board and the inventory auto-sale wait. So the default is the old full walk, and the
+// switch is a secret, flipped only after two things: one read-only GET of
+// /opportunities/search?location_id=…&pipeline_stage_id=<a stage that has deals> comes back
+// non-empty with every row at that stage, and a Server-Timing read that blames `opp`. Read per
+// request so a test can set it (and an isolate started after a secrets change sees the new value).
+const stageSearchOn = () => Deno.env.get("SDS_STAGE_SEARCH") === "1";
 /** Codes per PostgREST `in.(…)` — the list rides in the URL (see the designs read below). */
 const IN_CHUNK = 200;
-const enc = encodeURIComponent;
+const chunksOf = (codes: string[]): string[][] => {
+  const out: string[][] = [];
+  for (let i = 0; i < codes.length; i += IN_CHUNK) out.push(codes.slice(i, i + IN_CHUNK));
+  return out;
+};
 
-async function safeText(r: Response): Promise<string> {
-  try { return await r.text(); } catch { return "<no body>"; }
-}
-
-// Map a GHL estimate status → our stage (sent/accepted/invoiced). Delivered is decided
-// separately from the opportunity pipeline stage. Unknown/pre-accept states stay "sent".
-function mapEstimateStatus(raw: unknown): "sent" | "accepted" | "invoiced" {
-  const s = String(raw ?? "").toLowerCase();
-  if (s === "invoiced" || s === "paid") return "invoiced";
-  if (s === "accepted") return "accepted";
-  return "sent"; // draft, sent, viewed, declined, or unknown
-}
-
-// GET all estimates for a location (offset paginated, capped).
-//
-// `complete` is the load-bearing half of the return value. A caller that only sees rows cannot
-// tell "this location has no estimates" from "GHL refused to tell us" — and treating the second
-// as the first is what let a single 401/429/5xx rewrite every design's status down to 'sent'.
-// It is false when any page failed at the HTTP level, and also when the pagination cap is hit
-// while pages are still coming back full, because the tail we never fetched is indistinguishable
-// from data that does not exist.
-async function listEstimates(locationId: string, headers: HeadersInit): Promise<{ rows: any[]; complete: boolean }> {
-  const out: any[] = [];
-  const limit = 100;
-  let complete = false;
-  for (let offset = 0; offset < 2000; offset += limit) {
-    const url = `https://services.leadconnectorhq.com/invoices/estimate/list?altId=${enc(locationId)}&altType=location&limit=${limit}&offset=${offset}`;
-    const r = await fetch(url, { headers });
-    if (!r.ok) { console.warn("estimate list failed:", r.status, await safeText(r)); return { rows: out, complete: false }; }
-    const d = await r.json();
-    const arr = Array.isArray(d?.estimates) ? d.estimates : (Array.isArray(d?.data) ? d.data : []);
-    out.push(...arr);
-    if (arr.length < limit) { complete = true; break; }   // short page == the real end
-  }
-  return { rows: out, complete };
-}
-
-// GET opportunities for a location (follows GHL's meta.nextPageUrl, capped).
-// Same contract as listEstimates: `complete` false means "do not read absence as deletion".
-async function listOpportunities(locationId: string, headers: HeadersInit): Promise<{ rows: any[]; complete: boolean }> {
-  const out: any[] = [];
-  let complete = false;
-  let url: string | null =
-    `https://services.leadconnectorhq.com/opportunities/search?location_id=${enc(locationId)}&limit=100`;
-  for (let i = 0; i < 20 && url; i++) {
-    // r / d / next are annotated deliberately. `url` is both an input to the fetch and reassigned
-    // from that fetch's own response, so without these TypeScript hits a circular inference
-    // (TS7022) and silently degrades this whole function to `any` — which is precisely the state
-    // that lets a typo ship. Keep the annotations if you touch this loop.
-    const r: Response = await fetch(url, { headers });
-    if (!r.ok) { console.warn("opportunity search failed:", r.status, await safeText(r)); return { rows: out, complete: false }; }
-    const d: any = await r.json();
-    const arr: any[] = Array.isArray(d?.opportunities) ? d.opportunities : [];
-    out.push(...arr);
-    const next: string | null = d?.meta?.nextPageUrl ? String(d.meta.nextPageUrl) : null;
-    url = next && arr.length > 0 ? next : null;
-    if (!url) complete = true;   // GHL stopped offering pages == the real end
-  }
-  return { rows: out, complete };
-}
-
-Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
+// The CRM reads, the status rules and every fence live in _shared/designStatusSync.ts (moved there
+// on 2026-10-05 so each one is tested against fixtures). This file is the request around them:
+// who is asking, which rows, the reads, and the writes.
+Deno.serve(withErrorLog("sync-design-status", withServerTiming(async (req: Request, st: ServerTiming) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -159,9 +134,14 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   // precisely what lets a role-"user" team member refresh the Designs list — so do NOT
   // reclassify it as a write just because it caches `designs.status`. Doing so would
   // silently break every non-admin login.
-  const admin = createClient(supabaseUrl, serviceKey);
+  //
+  // `admin` is the timed client: every query through it lands in Server-Timing's `db`.
+  const admin = createClient(supabaseUrl, serviceKey, { global: { fetch: timedFetch(st) } });
+  const authStart = performance.now();
   const r = await resolveTenant(req, admin, { gates: GATES, readActions: new Set(), defaultAction: "sync" });
+  st.auth = performance.now() - authStart;
   if (!r.ok) return json(r.body, r.status);
+  st.authPath = r.ctx.authPath; // "local" = the fast path in _shared/resolveTenant.ts held
   const { clientId, payload } = r.ctx;
 
   const shortCodes: string[] = Array.isArray(payload?.shortCodes)
@@ -176,11 +156,9 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   // encoded, so the full 500 the Designs tab sends is an ~8 KB request line on its own — the size
   // at which the gateway starts refusing it, and a refused read here is a 500 that leaves every
   // status unrefreshed. 200 codes is ~3 KB (the chunking customer-designs and the inventory
-  // serial read already do for the same reason).
-  const codeChunks: string[][] = [];
-  for (let i = 0; i < shortCodes.length; i += IN_CHUNK) codeChunks.push(shortCodes.slice(i, i + IN_CHUNK));
+  // serial read already do for the same reason). The chunks run together.
   const [designsRes, settingsRes] = await Promise.all([
-    Promise.all(codeChunks.map((c) =>
+    Promise.all(chunksOf(shortCodes).map((c) =>
       admin.from("designs")
         .select("short_code, status, ghl_estimate_id, ghl_opportunity_id, delivered_at, inventory_unit_id, contact, ss_quote_number, accepted_at")
         .eq("client_id", clientId)
@@ -196,23 +174,18 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   ]);
   const { data: designs, error: dErr } = designsRes;
   if (dErr) return json({ error: dErr.message }, 500);
+  const rows = designs ?? [];
 
   // Cached statuses to return if we can't reach GHL (portal falls back to these anyway).
   const cached: Record<string, string> = {};
-  for (const d of designs ?? []) cached[d.short_code] = d.status || "sent";
+  for (const d of rows) cached[d.short_code] = d.status || "sent";
 
   const settings = settingsRes.data;
   const locationId = settings?.ghl_location_id || null;
   const apiKey = settings?.ghl_api_key || null;
-  const acceptedStageId = settings?.ghl_stage_accepted_id || null;
-  const invoicedStageId = settings?.ghl_stage_invoiced_id || null;
-  const deliveredStageId = settings?.ghl_stage_delivered_id || null;
-  // Map each configured pipeline-stage id → our fulfillment stage, so a design's status
+  // Each configured pipeline-stage id → our fulfillment stage, so a design's status
   // advances from wherever the tenant has moved its opportunity in GHL.
-  const stageIdToStatus = new Map<string, "accepted" | "invoiced" | "delivered">();
-  if (acceptedStageId)  stageIdToStatus.set(acceptedStageId, "accepted");
-  if (invoicedStageId)  stageIdToStatus.set(invoicedStageId, "invoiced");
-  if (deliveredStageId) stageIdToStatus.set(deliveredStageId, "delivered");
+  const stageIdToStatus = stageMapOf(settings);
   if (!locationId || !apiKey) {
     return json({ ok: true, statuses: cached, synced: false, reason: "GHL not configured" });
   }
@@ -224,127 +197,71 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
     Accept: "application/json",
   };
 
-  // 5. Bounded GHL reads. Opportunities only matter if any pipeline-stage is mapped.
+  // 5. Bounded GHL reads, only the ones this call will look at (planGhlReads), plus the orders
+  //    snapshot step 8 needs.
   //
-  // The two walks are independent, so they run together — this is the single biggest cost in
-  // the function and it used to pay for both in series. Two concurrent requests is well
-  // inside GHL's limits. ⛔ Do NOT parallelise the PAGES inside either walk: each one stops
-  // when it sees a short page, and guessing offsets ahead of that both hammers the API and
-  // breaks the `complete` flag that the promote-only fence below depends on.
-  const [estRes, oppRes] = await Promise.all([
-    listEstimates(locationId, ghlHeaders),
-    stageIdToStatus.size > 0 ? listOpportunities(locationId, ghlHeaders) : null,
+  // All three are independent, so they run together. The orders read used to wait until the
+  // status writes were done, one more database round trip in series for nothing it depended on;
+  // it is only worth making when there are estimate totals to compare it against. At most four
+  // CRM requests are in flight (the estimate walk, and the opportunity walk or, with the stage
+  // search on, one search per mapped stage), which is well inside GHL's burst limit. ⛔ Do NOT
+  // parallelise the PAGES inside any one walk: each stops when it sees a short page (the estimate
+  // walk also when the last id it needs turns up), and guessing ahead of that both hammers the
+  // API and breaks the `complete` flag that the promote-only fence depends on.
+  const plan = planGhlReads(rows, stageIdToStatus);
+  const codes = rows.map((d) => d.short_code);
+  // The full walk reports itself as one, so settleStatuses never walks the location a second time.
+  const readOpportunities = (): Promise<OppRead> => stageSearchOn()
+    ? listOpportunitiesAtStages(locationId, ghlHeaders, plan.oppStageIds)
+    : listOpportunities(locationId, ghlHeaders).then((r) => ({ ...r, mode: "full walk" as const }));
+  const readsStart = performance.now();
+  let estMs = 0;
+  let oppMs = 0;
+  const [estRes, oppRes, ordersRes] = await Promise.all([
+    plan.estimateIds.size > 0
+      ? listEstimates(locationId, ghlHeaders, plan.estimateIds).finally(() => { estMs = performance.now() - readsStart; })
+      : null,
+    plan.oppStageIds.length > 0
+      ? readOpportunities().finally(() => { oppMs = performance.now() - readsStart; })
+      : null,
+    plan.estimateIds.size > 0 && codes.length
+      // Chunked for the same URL-length reason as the designs read above.
+      ? Promise.all(chunksOf(codes).map((c) =>
+        admin.from("orders").select("id, short_code, total_source, total_cents").eq("client_id", clientId).in("short_code", c)
+      ))
+        // Best-effort, like the whole of step 8: a failed read means no totals this time (a chunk
+        // that errors contributes no rows, so its orders keep their total).
+        .then((rs) => ({ data: rs.flatMap((r) => r.data ?? []) }), () => ({ data: null }))
+      : null,
   ]);
-  const estimates = estRes.rows;
-  const estStatusById = new Map<string, string>();
-  for (const e of estimates) {
-    const id = String(e?._id ?? e?.id ?? "");
-    // GHL returns the status as `estimateStatus` (verified live 2026-07-25); the
-    // `status` fallback is kept in case older/newer API versions differ.
-    if (id) estStatusById.set(id, String(e?.estimateStatus ?? e?.status ?? "").toLowerCase());
-  }
 
-  const oppStageById = new Map<string, string>();
-  let oppsComplete = true;   // never read == nothing missing
-  if (oppRes) {
-    oppsComplete = oppRes.complete;
-    for (const o of oppRes.rows) {
-      const id = String(o?.id ?? o?._id ?? "");
-      if (id) oppStageById.set(id, String(o?.pipelineStageId ?? o?.pipeline_stage_id ?? ""));
-    }
-  }
-
-  // Whether absence of a row is allowed to mean "gone". When either GHL read was incomplete we
-  // only ever promote: the cached status becomes a floor, so a 401 from a rotated api key, a 429,
-  // or a location with more estimates than the pagination cap can no longer rewrite a tenant's
-  // fulfilled work back down to 'sent'. This is what the header comment already promised
-  // ("GHL failures never throw — the design keeps its cached status"), which previously held only
-  // for thrown network errors and not for HTTP-level refusals.
-  const dataComplete = estRes.complete && oppsComplete;
+  // 6. Compute the highest stage per design and collect changes (every fence and floor is in
+  //    computeStatuses). When a read this call made was incomplete, promotions only. With the
+  //    stage search on, a downgrade that rests on an opportunity missing from every stage list is
+  //    confirmed against the full walk first (settleStatuses); that walk's time is counted in `opp`.
+  const settled = await settleStatuses(rows, estRes, oppRes, stageIdToStatus, async () => {
+    const t0 = performance.now();
+    try { return await listOpportunities(locationId, ghlHeaders); } finally { oppMs += performance.now() - t0; }
+  });
+  const { statuses, updates, dataComplete } = settled;
   if (!dataComplete) console.warn("sync-design-status: incomplete GHL read — promotions only, no downgrades");
+  addPhase(st, "est", estMs, estRes ? `${estRes.pages} pages` : "skipped");
+  addPhase(st, "opp", oppMs, settled.opp ? `${settled.opp.pages} pages, ${settled.opp.mode}` : "skipped");
 
-  // 6. Compute the highest stage per design and collect changes.
-  const statuses: Record<string, string> = {};
-  const updates: { short_code: string; status: string }[] = [];
-  for (const d of designs ?? []) {
-    // Drafts (migration 063: a browsing lead's silently-saved design) have no estimate and
-    // no opportunity — there is nothing in GHL to derive from, and the 'sent' baseline
-    // below would otherwise promote every draft the moment the portal loads it. Their
-    // status is not this function's to move: submit-estimate turns draft into sent at the moment
-    // the estimate or quote is issued (migration 241, _shared/designPromotion.ts), and since 241
-    // no save_design call moves status at all.
-    // Inventory masters (migration 075: the design behind a physical unit on a sales lot)
-    // are the same shape of exception — no GHL estimate exists, the status is owned by
-    // portal-settings' save_inventory, and 'sent' here would surface a lot building as a
-    // customer estimate on the Designs tab.
-    if (d.status === "draft" || d.status === "inventory") { statuses[d.short_code] = d.status; continue; }
-    // THE DELIVERED FENCE (migration 091 / SCHEDULING_SCOPE.md): a delivery marked done in
-    // the portal sets designs.delivered_at + status='delivered' — a state GHL never reports
-    // (no tenant maps ghl_stage_delivered_id), so recomputing here would DOWNGRADE it back
-    // to invoiced on the very next sync. Locally-delivered is terminal: skip the recompute.
-    if (d.delivered_at) { statuses[d.short_code] = "delivered"; continue; }
-    // THE SS FENCE (migrations 121/122/124): a StructureStudio-issued quote has NO GHL
-    // estimate, and its status is written locally — customer-accept sets 'accepted', the
-    // SS invoice path sets 'invoiced'. The 'sent' baseline below would downgrade both on
-    // the very next portal load. Keyed on BOTH conditions so a design quoted through GHL
-    // before the tenant flipped the switch (it has a ghl_estimate_id) keeps GHL-derived
-    // sync. Trade-off, deliberate: SS designs give up opportunity-stage promotion —
-    // acceptance lives on our quote page, not in the CRM pipeline.
-    if (!d.ghl_estimate_id && d.ss_quote_number) { statuses[d.short_code] = d.status || "sent"; continue; }
-    // THE HYBRID FLOOR (mirror of the SS fence above, for the case it deliberately lets past).
-    // A design quoted through GHL BEFORE the tenant switched to StructureStudio quotes keeps its
-    // ghl_estimate_id forever, so the two-condition fence at the line above does not fire — but
-    // its paperwork is now LOCAL: the number came from allocate_ss_quote_number, the signature
-    // from customer-accept, the invoice from the SS invoice path. The old GHL estimate is frozen
-    // at whatever it said back then, so recomputing from the 'sent' baseline would DOWNGRADE a
-    // signed-and-invoiced design to that stale value. Cached status becomes a floor for anything
-    // carrying a local quote number; the hybrid still gets GHL-derived PROMOTION from both the
-    // estimate and the opportunity stage below, which is the whole point of letting it through.
-    // Keyed on ss_quote_number and deliberately NOT on ss_invoice_sent_at: that is stamped when
-    // the invoice is SENT, before the customer signs (migration 136 stopped send_invoice moving
-    // status), so flooring there would promote an unsigned invoice and hand it the build board.
-    const ssLocal = !!d.ss_quote_number;
-    // The baseline is 'sent' only when the GHL data is trustworthy enough to justify a downgrade.
-    // Otherwise start from what we already believe, so the computation below can raise the status
-    // but never lower it (see dataComplete above).
-    const cachedStage = (d.status && STAGE_RANK[d.status as keyof typeof STAGE_RANK] !== undefined)
-      ? (d.status as "sent" | "accepted" | "invoiced" | "delivered")
-      : "sent";
-    let stage: "sent" | "accepted" | "invoiced" | "delivered" = (dataComplete && !ssLocal) ? "sent" : cachedStage;
-
-    const estStatus = d.ghl_estimate_id ? estStatusById.get(String(d.ghl_estimate_id)) : undefined;
-    if (estStatus !== undefined) {
-      const mapped = mapEstimateStatus(estStatus);
-      if (STAGE_RANK[mapped] > STAGE_RANK[stage]) stage = mapped;
-    }
-
-    if (stageIdToStatus.size > 0 && d.ghl_opportunity_id) {
-      const oppStage = oppStageById.get(String(d.ghl_opportunity_id));
-      const mappedFromStage = oppStage ? stageIdToStatus.get(oppStage) : undefined;
-      if (mappedFromStage && STAGE_RANK[mappedFromStage] > STAGE_RANK[stage]) stage = mappedFromStage;
-    }
-
-    // THE ACCEPTED FLOOR (migration 124, mirror of the delivered fence): an in-app
-    // signature stamps designs.accepted_at — a state GHL may never report. Belt-and-braces
-    // under the SS fence above (which already skips pure-SS designs): this one also holds
-    // for a design that has BOTH a GHL estimate and a local signature. Floor, not pin —
-    // invoiced/delivered promotions still pass.
-    if (d.accepted_at && STAGE_RANK[stage] < STAGE_RANK.accepted) stage = "accepted";
-
-    statuses[d.short_code] = stage;
-    if (stage !== (d.status || "sent")) updates.push({ short_code: d.short_code, status: stage });
-  }
+  const writesStart = performance.now();
+  let writes = 0;
 
   // 7. Persist only changed rows (tenant + code scoped; service role bypasses the
-  //    missing owner-UPDATE RLS policy on designs).
-  for (const u of updates) {
+  //    missing owner-UPDATE RLS policy on designs). A few at a time (WRITE_LANES).
+  await eachLimited(updates, WRITE_LANES, async (u) => {
+    writes++;
     const { error: upErr } = await admin
       .from("designs")
       .update({ status: u.status, updated_at: new Date().toISOString() })
       .eq("client_id", clientId)
       .eq("short_code", u.short_code);
     if (upErr) { console.warn(`status update failed for ${u.short_code}:`, upErr.message); statuses[u.short_code] = cached[u.short_code] ?? u.status; }
-  }
+  });
 
   // 8. Sync order totals from the GHL estimate total (the Orders feature's `orders.total_cents`).
   //    This lived on the wip/orders branch and was clobbered off beta by an unrelated redeploy,
@@ -352,42 +269,33 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   //    owner-entered total (total_source='manual'); a missing estimate leaves the order untouched
   //    (never zeroed). Best-effort: a total failure must never fail the status sync.
   try {
-    const codes = (designs ?? []).map((d) => d.short_code);
-    if (codes.length) {
-      // Chunked for the same URL-length reason as the designs read above.
-      const orders: { id: string; short_code: string; total_source: string | null; total_cents: number | null }[] = [];
-      for (let i = 0; i < codes.length; i += IN_CHUNK) {
-        const { data: part } = await admin
-          .from("orders").select("id, short_code, total_source, total_cents").eq("client_id", clientId).in("short_code", codes.slice(i, i + IN_CHUNK));
-        orders.push(...(part ?? []));
+    const orders = ordersRes?.data;
+    if (estRes && orders && orders.length) {
+      const estTotalById = estimateTotalsById(estRes.rows);
+      const estIdByCode = new Map(rows.map((d) => [d.short_code, d.ghl_estimate_id]));
+      const due: { id: string; short_code: string; cents: number }[] = [];
+      for (const o of orders) {
+        if (o.total_source === "manual") continue;
+        const t = estTotalById.get(String(estIdByCode.get(o.short_code) ?? ""));
+        if (t == null) continue;
+        // Only write when the number actually moved. This function runs on every Designs,
+        // Contacts and Inventory load, and it used to re-stamp an unchanged total for
+        // every order on every one of them — one serial UPDATE each, all of them no-ops.
+        const cents = Math.round(t * 100);
+        if (o.total_cents === cents && o.total_source === "ghl") continue;
+        due.push({ id: o.id, short_code: o.short_code, cents });
       }
-      if (orders.length) {
-        const estTotalById = new Map<string, number>();
-        for (const e of estimates) {
-          const id = String(e?._id ?? e?.id ?? "");
-          const t = Number(e?.total ?? e?.totalamountInUSD);
-          if (id && Number.isFinite(t)) estTotalById.set(id, t);
-        }
-        const estIdByCode = new Map((designs ?? []).map((d) => [d.short_code, d.ghl_estimate_id]));
-        for (const o of orders) {
-          if (o.total_source === "manual") continue;
-          const t = estTotalById.get(String(estIdByCode.get(o.short_code) ?? ""));
-          if (t == null) continue;
-          // Only write when the number actually moved. This function runs on every Designs,
-          // Contacts and Inventory load, and it used to re-stamp an unchanged total for
-          // every order on every one of them — one serial UPDATE each, all of them no-ops.
-          const cents = Math.round(t * 100);
-          if (o.total_cents === cents && o.total_source === "ghl") continue;
-          // The manual check above read a snapshot; someone can set a manual total between that
-          // read and this write. Re-check it in the UPDATE itself so a manual total is never
-          // overwritten. `.or` and not `.neq`: total_source is nullable, and neq skips NULLs.
-          const { error: tErr } = await admin
-            .from("orders").update({ total_cents: cents, total_source: "ghl", updated_at: new Date().toISOString() })
-            .eq("id", o.id).eq("client_id", clientId)
-            .or("total_source.is.null,total_source.neq.manual");
-          if (tErr) console.warn(`order total update failed for ${o.short_code}:`, tErr.message);
-        }
-      }
+      await eachLimited(due, WRITE_LANES, async (o) => {
+        writes++;
+        // The manual check above read a snapshot; someone can set a manual total between that
+        // read and this write. Re-check it in the UPDATE itself so a manual total is never
+        // overwritten. `.or` and not `.neq`: total_source is nullable, and neq skips NULLs.
+        const { error: tErr } = await admin
+          .from("orders").update({ total_cents: o.cents, total_source: "ghl", updated_at: new Date().toISOString() })
+          .eq("id", o.id).eq("client_id", clientId)
+          .or("total_source.is.null,total_source.neq.manual");
+        if (tErr) console.warn(`order total update failed for ${o.short_code}:`, tErr.message);
+      });
     }
   } catch (e) { console.warn("order total sync failed:", (e as Error)?.message); }
 
@@ -414,12 +322,16 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   //
   //    Deliberately OUTSIDE the per-design loop above: the delivered fence `continue`s, so a
   //    buyer whose estimate is already delivered would never be reached from inside it.
+  //
+  //    Still one claim at a time, unlike steps 7 and 8: two designs can name the same unit, and
+  //    first-committed-wins means the first design in the list, not whichever request lands first.
   try {
-    const claimable = (designs ?? []).filter((d) =>
+    const claimable = rows.filter((d) =>
       d.inventory_unit_id &&
-      STAGE_RANK[(statuses[d.short_code] ?? "") as keyof typeof STAGE_RANK] >= STAGE_RANK.invoiced
+      STAGE_RANK[statuses[d.short_code] ?? ""] >= STAGE_RANK.invoiced
     );
     for (const d of claimable) {
+      writes++;
       const now = new Date().toISOString();
       // The buyer's first name for the "SOLD — Dave" label. contact.name is one flat field in
       // this product; this is the same split submit-estimate uses to title an estimate.
@@ -455,6 +367,7 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
       if (won) console.log(`inventory #${won.serial} auto-sold from ${d.short_code}`);
     }
   } catch (e) { console.warn("inventory auto-sale failed:", (e as Error)?.message); }
+  addPhase(st, "writes", performance.now() - writesStart, `${writes} rows`);
 
   return json({ ok: true, statuses, synced: true, changed: updates.length });
-}));
+})));

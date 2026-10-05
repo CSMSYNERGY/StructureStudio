@@ -2536,7 +2536,12 @@ async function ssTaxOutcome(res) {
 // is then only known when the tax stamp names it.
 //
 // ⚠️ NOTHING HERE PRICES ANYTHING. Every figure on screen after a change is the one the server
-// returned, and the lookup's cost is never stated as a number: the price is the server's to say.
+// returned, and the lookup's cost is the server's to say: the Verify confirm states it only as
+// tax_settings' lookupPriceCents gives it (2026-10-05), and names no figure while that is null —
+// the meter off, unpriced, hidden or the account exempt. Each press sends the figure it stated,
+// and a press that would cost another one comes back price_changed with the server's figure,
+// which is asked about before anything is charged. A browser that thought it knew the price
+// would be a second opinion about money.
 function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, totalCentsHint = null, canEditDesign = false, canVerify = false, canReadTaxSettings = false, onChanged = null }) {
   const [row, setRow] = useState(null);         // the design | { err } | null while loading
   const [locKnown, setLocKnown] = useState(true); // is row.sales_location_id the stored value?
@@ -2690,16 +2695,27 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
   };
 
   const verify = async () => {
-    if (!window.confirm(`Verify the sales tax on ${quoteNo} for the delivery address${deliveryAddr ? ` (${deliveryAddr})` : ""}?\n\nAvalara bills each verification. If the verified rate is different, the quote's tax and total change to it.`)) return;
+    // What one press costs the wallet, as the server priced it. A wallet that can't cover it is
+    // refused by the server before any lookup, and that sentence is shown like every refusal.
+    // Priced, the confirm names one charge, the wallet's: "Avalara bills" beside a wallet figure
+    // reads as two bills.
+    let quoted = taxCfg && Number(taxCfg.lookupPriceCents) > 0 ? Number(taxCfg.lookupPriceCents) : null;
+    const cost = quoted != null
+      ? `Each verification is a paid lookup: this one costs ${ssTaxMoney(quoted)} from your wallet.`
+      : "Avalara bills each verification.";
+    if (!window.confirm(`Verify the sales tax on ${quoteNo} for the delivery address${deliveryAddr ? ` (${deliveryAddr})` : ""}?\n\n${cost} If the verified rate is different, the quote's tax and total change to it.`)) return;
     setBusy("verify"); setMsg(null);
     const flags = {};
     // The server asks for each confirmation in turn — view-as first, then a quote the customer
-    // already has — so this is at most three calls, and every refusal after a confirmation is a
-    // real one whose sentence is shown. The per-minute limit (rate_limited) and the daily cap
+    // already has, then (price_changed) the price when the one this dialog stated is not what the
+    // press will cost — so this is at most four calls, and every refusal after a confirmation is
+    // a real one whose sentence is shown. The per-minute limit (rate_limited) and the daily cap
     // are among those: nothing was looked up, and pressing again at once would only repeat them.
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // Every call carries the price the builder agreed to (null: none was named), and the server
+    // never charges another one.
+    for (let attempt = 0; attempt < 4; attempt++) {
       const out = await ssTaxOutcome(await sb.functions.invoke("portal-settings", {
-        body: { action: "verify_tax", shortCode, ...flags },
+        body: { action: "verify_tax", shortCode, quotedPriceCents: quoted, ...flags },
       }));
       if (out.data) {
         const d = out.data;
@@ -2725,6 +2741,16 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         const qn = b.quoteNumber || row.ss_quote_number;
         if (!window.confirm(`The customer already has ${qn ? `quote ${qn}` : "this quote"}${b.totalCents != null ? ` at ${ssTaxMoney(b.totalCents)}` : ""}. If the verified tax rate is different, its total will change.\n\nVerify anyway?`)) break;
         flags.confirmResend = true;
+        continue;
+      }
+      // The press would cost something this dialog didn't say (the card was opened before the
+      // price was set, or its price couldn't be read). Ask once with the server's figure, and
+      // remember it for the next press.
+      if (out.reason === "price_changed" && Number(out.body.priceCents) > 0 && quoted !== Number(out.body.priceCents)) {
+        const price = Number(out.body.priceCents);
+        if (!window.confirm(`Verifying the sales tax on ${quoteNo} costs ${ssTaxMoney(price)} from your wallet.\n\nVerify anyway?`)) break;
+        quoted = price;
+        setTaxCfg((c) => (c ? { ...c, lookupPriceCents: price } : c));
         continue;
       }
       // Every other refusal — switched off, no address, today's limit, a failed lookup — is a
