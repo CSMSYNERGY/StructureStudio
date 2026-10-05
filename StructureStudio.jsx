@@ -371,6 +371,14 @@ function slabDepthFt(cfg, it) {
 const SS_REFUSE_WALL = "Something else is already on that part of the wall.";
 const SS_REFUSE_SLAB = "A workbench or shelf is in the way at that height — slide it along the wall, or raise it.";
 const SS_REFUSE_LOFT = "Lofts can't overlap — drop this one clear of the other.";
+// A wall SHORTER than the item being dragged onto it. snapToWall / snapToWallInterior clamp the
+// centre between half-widths from each corner, and when the item is longer than the wall that
+// clamp degenerates and parks it hanging past the far corner — out through the building on the
+// plan, the PDF and the 3D. Every placement path already refuses this case (both pickers, the
+// included chip, the size-change reflow's seat); a drag across to a short wall was the way round
+// all of them. Shared by the 2D and 3D drags like the three above.
+const SS_REFUSE_TOO_LONG = "That wall is too short for it — it stays on a wall it fits.";
+const ssLongerThanWall = (widthFt, wall, bldgW, bldgH) => Number(widthFt) > ((wall === "north" || wall === "south") ? bldgW : bldgH) + 1e-6;
 
 // ✅ THE 2026-09-04 GAP IS CLOSED (2026-09-09). It read: a wallOnly caller passes no `cand`, so
 // its candidate band defaults to full height and a RAISED door — or a transom — is refused
@@ -826,7 +834,12 @@ function ssPartitionSummary(items, wallFt) {
 // clears the zone, so a vent whose gable the new size took away (a landscape footprint's ends are
 // west/east) or made too small comes back down to the wall rather than being drawn in mid-air.
 // repairLoaded passes nothing, and then a gable vent keeps its zone exactly as saved.
-function reflowItems(items, prev, next, ITEMS, gablePlace) {
+//
+// `wallHeightFt` is optional and reaches only the collision checks below, where a vent's band is
+// measured down from the plate (ssVentSpan). Without it every vent is measured under an 8 ft plate,
+// so on a 10 ft wall a 4 ft window sitting legally under a top-spot vent "collides" and is slid
+// away — on a same-size repairLoaded that moved a saved design's window on every open.
+function reflowItems(items, prev, next, ITEMS, gablePlace, wallHeightFt) {
   const A = pageGeom(prev.w, prev.h), B = pageGeom(next.w, next.h);
   const events = [];
   const byId = new Map();
@@ -857,8 +870,8 @@ function reflowItems(items, prev, next, ITEMS, gablePlace) {
           out = g || { ...sn, ventZone: null, ventRiseFt: null };
           cand = { ...cand, ...out };
         }
-        if (checkDoorCollision(cand, { ...cfg, width: wFt }, placed, ITEMS, B.scale)) continue;
-        if (checkWallSlabOverlap(out, wFt * B.scale, placed, ITEMS, B.scale, cand)) continue;
+        if (checkDoorCollision(cand, { ...cfg, width: wFt }, placed, ITEMS, B.scale, wallHeightFt)) continue;
+        if (checkWallSlabOverlap(out, wFt * B.scale, placed, ITEMS, B.scale, cand, wallHeightFt)) continue;
         return out;
       }
     }
@@ -927,6 +940,29 @@ function reflowItems(items, prev, next, ITEMS, gablePlace) {
       if (wFt !== wasW || hFt !== wasH) events.push({ id: it.id, type: it.type, label: labelOf(it), kind: "resized", to: wFt });
       cxFt = Math.max(wFt / 2, Math.min(cxFt, next.w - wFt / 2));
       cyFt = Math.max(hFt / 2, Math.min(cyFt, next.h - hFt / 2));
+      // ⚠️ LOFTS MUST NOT OVERLAP AFTER THE MOVE EITHER. Scaling each loft's centre on its own
+      // keeps it inside the box but not clear of its neighbours: two lofts snapped flush grow a
+      // 4(1-k) ft overlap when the length shrinks by k, and side-by-side lofts collapse into each
+      // other when the width does — silently, and both are summed into the loft square footage on
+      // the quote. Every gesture refuses an overlap (0.1 ft slack, the same as here); this is the
+      // reflow's half. A loft that lands on one already placed goes FLUSH against it, on the
+      // nearest side that fits and is clear (the drag's magnets would put it there too); when no
+      // side does, it is blocked, and the size change is reverted with the reason, like any wall
+      // item that cannot be seated.
+      const others = placed.filter((o) => o.type === "loft").map((o) => {
+        const ocx = (o.x - B.mgX) / B.scale, ocy = (o.y - B.mgY) / B.scale;
+        return { l: ocx - o.widthFt / 2, r: ocx + o.widthFt / 2, t: ocy - o.heightFt / 2, b: ocy + o.heightFt / 2 };
+      });
+      const clearAt = (cx, cy) => !others.some((o) => cx - wFt / 2 < o.r - 0.1 && cx + wFt / 2 > o.l + 0.1 && cy - hFt / 2 < o.b - 0.1 && cy + hFt / 2 > o.t + 0.1);
+      const fitsAt = (cx, cy) => cx >= wFt / 2 - 1e-6 && cx <= next.w - wFt / 2 + 1e-6 && cy >= hFt / 2 - 1e-6 && cy <= next.h - hFt / 2 + 1e-6;
+      if (!clearAt(cxFt, cyFt)) {
+        const cands = [];
+        others.forEach((o) => { cands.push([cxFt, o.b + hFt / 2], [cxFt, o.t - hFt / 2], [o.r + wFt / 2, cyFt], [o.l - wFt / 2, cyFt]); });
+        const best = cands.filter(([cx, cy]) => fitsAt(cx, cy) && clearAt(cx, cy))
+          .sort((a, b) => Math.hypot(a[0] - cxFt, a[1] - cyFt) - Math.hypot(b[0] - cxFt, b[1] - cyFt))[0];
+        if (!best) { events.push({ id: it.id, type: it.type, label: labelOf(it), kind: "blocked" }); byId.set(it.id, it); continue; }
+        cxFt = best[0]; cyFt = best[1];
+      }
       const nit = { ...it, x: B.mgX + cxFt * B.scale, y: B.mgY + cyFt * B.scale, widthFt: wFt, heightFt: hFt };
       byId.set(it.id, nit); placed.push(nit);
       continue;
@@ -1764,7 +1800,7 @@ function ssRefitGableVents(items, roofCfg, bldgW, bldgH, wallHeightFt, itemTypes
   if (!Array.isArray(items) || !items.some(ssIsGableVent)) return null;
   const d = { w: bldgW, h: bldgH };
   const out = reflowItems(items, d, d, itemTypes, (cand, sn, g) =>
-    ssGableVentPlace(roofCfg, bldgW, bldgH, wallHeightFt, cand, sn, g.scale, g.mgX, g.mgY, ssVentAlongFt(sn, g.scale, g.mgX, g.mgY), cand.ventRiseFt)).items;
+    ssGableVentPlace(roofCfg, bldgW, bldgH, wallHeightFt, cand, sn, g.scale, g.mgX, g.mgY, ssVentAlongFt(sn, g.scale, g.mgX, g.mgY), cand.ventRiseFt), wallHeightFt).items;
   const G = pageGeom(bldgW, bldgH);
   const wasGable = new Set(items.filter(ssIsGableVent).map((i) => i.id));
   let dropped = 0;
@@ -2804,7 +2840,9 @@ function electricalAutoItems(cfg, o) {
       : fw === "west" ? { xFt: 0, yFt: d } : { xFt: W, yFt: d };
     const switchId = elecRoleItemId(cfg, "lightSwitch");
     if (!switchId) break;
-    if (tryWall(switchId, pt.xFt, pt.yFt, fw, cfg.switchHeightIn != null ? Number(cfg.switchHeightIn) : null)) break;
+    // A LIST, like the outlets' heights: tryWall reads `heights.length`, so a bare number here was
+    // read as no height at all and the builder's switchHeightIn never reached the switch.
+    if (tryWall(switchId, pt.xFt, pt.yFt, fw, cfg.switchHeightIn != null ? [Number(cfg.switchHeightIn)] : null)) break;
   }
   return out;
 }
@@ -8349,6 +8387,11 @@ function d3WingListSize(sizeLabel) {
   return { w: mm ? parseFloat(mm[1]) : 12, d: mm ? parseFloat(mm[2]) : 16 };
 }
 function d3WingListLit(focusKey, i) { return typeof focusKey === "string" && focusKey.indexOf("wl" + i + "-") === 0; }
+// A wing's number on its wall, as its card on the Wings tab names it ("Left wing 3"): its place among the
+// structural entries on that wall (d3WingListEntries), drawn at this size or not. 0 when it is not one.
+function d3WingListCardNo(roof, bwall, i) {
+  return (d3WingListEntries(roof) || []).filter((x) => x.e.wall === bwall).findIndex((x) => x.i === i) + 1;
+}
 // THE END VIEW OF STACKED WINGS: the lower storey across the whole span, each side wing's own walls up to its
 // outside wall where that stands above the building's, each wing's roof from its outer eave (out past the wall
 // by the overhang) up to the face inside it, the middle's walls and roof over them, and the lean-tos. An end
@@ -8432,7 +8475,7 @@ function d3WingListElevation(spec, sizeLabel, focusKey, frame) {
               : <rect x={X(-s2 - OV)} y={Y(t.ya)} width={(S + OV * 2) * sc} height={Math.max(1, (t.ya - lo) * sc)} fill="#FDE68A" fillOpacity="0.9"
                 stroke={lit(t.i) ? HL : INK} strokeWidth={lit(t.i) ? 2 : 1.2} />}
             <text x={X(0)} y={(Y(t.ya) + Y(lo)) / 2 + 3} textAnchor="middle" style={{ fontSize: fs, fontWeight: 700, fill: lit(t.i) ? HL : INK }}>
-              {`${t.bwall} end wing${t.tier > 1 ? " " + t.tier : ""}, ${in12(t.pitch)} in 12`}
+              {`${t.bwall} end wing${d3WingListCardNo(roof, t.bwall, t.i) > 1 ? " " + d3WingListCardNo(roof, t.bwall, t.i) : ""}, ${in12(t.pitch)} in 12`}
             </text>
           </g>
         );
@@ -8451,7 +8494,7 @@ function d3WingListElevation(spec, sizeLabel, focusKey, frame) {
           <text x={(X(g.u1) + X(g.u0)) / 2} y={Y(0) + 17} textAnchor="middle" style={{ fontSize: fs, fontWeight: 700, fill: lit(g.i) ? HL : INK }}>{d3FtIn(g.w)}</text>
           {g.ye > H + 1e-6 && (
             <text x={(X(g.u1) + X(g.u0)) / 2} y={Y(g.ye) + 11} textAnchor="middle" style={{ fontSize: fs - 0.5, fontWeight: 700, fill: lit(g.i) ? HL : DIM }}>
-              <title>{`${g.bwall} wing ${g.tier}: outside wall ${d3FtIn(g.ye)}`}</title>
+              <title>{`${g.bwall} wing ${d3WingListCardNo(roof, g.bwall, g.i)}: outside wall ${d3FtIn(g.ye)}`}</title>
               {d3FtIn(g.ye)}
             </text>
           )}
@@ -8558,6 +8601,9 @@ function d3WingListPlanSVG({ spec, sizeLabel, focusKey, onPick }) {
     return <polyline points={p3.map((p) => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ")} fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />;
   };
   const named = (bw, end, k) => `${bw.charAt(0).toUpperCase() + bw.slice(1)} ${end ? "end wing" : "wing"} ${k}`;
+  // A section is numbered as its card is, by its place among the wings on its wall: a wing not drawn at this
+  // size still holds its number, so the drawn tier is not the name (d3WingListCardNo).
+  const no = (q) => d3WingListCardNo(roof, q.bwall, q.i);
   // ROUND A CORNER (roof.wingCornersMeet) a side wing and an end wing share the corner square, split on its
   // diagonal, the hip: each one's outline runs out to the building's corner and in along the hip (`poly`).
   const sideHipPoly = (g) => {
@@ -8568,9 +8614,9 @@ function d3WingListPlanSVG({ spec, sizeLabel, focusKey, onPick }) {
     const gOn = (s) => (t.hipSides.indexOf(s) >= 0 ? m.wings.find((g) => g.side === s) : null), gl = gOn(-1), gr = gOn(1);
     return [[-S / 2, t.zO], [S / 2, t.zO], [gr ? gr.u0 : S / 2, t.zI], [gl ? gl.u0 : -S / 2, t.zI]];
   };
-  const secs = m.wings.map((g) => ({ i: g.i, short: g.bwall.charAt(0).toUpperCase() + g.tier, name: named(g.bwall, false, g.tier), ye: g.ye,
+  const secs = m.wings.map((g) => ({ i: g.i, short: g.bwall.charAt(0).toUpperCase() + no(g), name: named(g.bwall, false, no(g)), ye: g.ye,
     b: box(Math.min(g.u0, g.u1), Math.max(g.u0, g.u1), m.zA, m.zB), v: vec(g.side, 0), poly: g.hipEnds ? sideHipPoly(g) : null }))
-    .concat((m.ends || []).map((t) => ({ i: t.i, short: t.bwall.charAt(0).toUpperCase() + t.tier, name: named(t.bwall, true, t.tier), ye: t.ye,
+    .concat((m.ends || []).map((t) => ({ i: t.i, short: t.bwall.charAt(0).toUpperCase() + no(t), name: named(t.bwall, true, no(t)), ye: t.ye,
       b: box(-S / 2, S / 2, Math.min(t.zI, t.zO), Math.max(t.zI, t.zO)), v: vec(0, t.sz), poly: t.hipSides ? endHipPoly(t) : null })));
   const planPts = (poly) => poly.map(([u, z]) => { const p = at(u, z); return X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1); }).join(" ");
   const mid = box(m.uc - m.Sc / 2, m.uc + m.Sc / 2, m.zA, m.zB);
@@ -14492,7 +14538,10 @@ function buildShed3DModel(THREE, p) {
       const wf = WALLS[it.wall];
       if (!wf) return;
       const w = it.widthFt || 3;
-      const along = wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale;
+      // The plan's frame shifted into this wall's own, as buildOneWall shifts its door: a wall a
+      // recessed porch shortened at its along=0 end starts a0Ft further along (WALLS), and without
+      // the subtraction the ramp stood a porch-depth along the wall from its door.
+      const along = (wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale) - (wf.a0Ft || 0);
       // A RAISED FLOOR LENGTHENS THE RAMP (2026-09-25): it always runs from the floor down to the
       // grass, at 1 in 4 or gentler -- 3 ft as it has always been while that holds (a floor up to
       // 0.75 ft), and 4 ft of run for every foot of drop past it, so a 1.1 ft floor's ramp is 4.4 ft
@@ -14502,8 +14551,22 @@ function buildShed3DModel(THREE, p) {
       // floor height line says ramps are drawn longer. On a slab or skids drop is D3.FLOOR_T and the
       // run 3, exactly as before.
       // On a projecting porch's wall it starts at the deck's edge. The deck top is the floor, so the
-      // drop is unchanged. (The 2D plan still draws it at the wall.)
-      const rampOut = porchOut && it.wall === porchOut.wall ? porchOut.D : T / 2;
+      // drop is unchanged. (The 2D plan still draws it at the wall.) Only in front of the deck: a
+      // porch narrower than its wall (roof.porchWidthFt, or the centre section between wings) leaves
+      // the rest of the wall with no deck, and a ramp there starts at the wall like any other, rather
+      // than D out in mid-air. In front means its middle is within the deck's outer post faces
+      // (porchGeom.side either side of the porch's middle, d3PorchToRoot's origin on the wall line).
+      let rampOut = T / 2;
+      if (porchOut && porchGeom && it.wall === porchOut.wall) {
+        const pm = d3PorchToRoot(roofCfg, bldgW, bldgH)(0, 0);
+        const mid = (pm[0] - wf.O[0]) * wf.U[0] + (pm[1] - wf.O[1]) * wf.U[1];
+        if (Math.abs(along - mid) < porchGeom.side) rampOut = porchOut.D;
+      }
+      // A RECESSED porch's own wall is set back under the roof (WALLS: its O moves in porchDepth) and
+      // the porch floor runs on out to the footprint line in front of it, so a ramp to a door on that
+      // wall starts at the floor's edge, where it would on any other wall, rather than at the set-back
+      // wall with its whole run buried in the porch floor.
+      if (porchWall && it.wall === porchWall) rampOut = porchDepth + T / 2;
       // Where the ground falls away (FALL) the drop is the ground's depth at the ramp's own foot, and
       // the run that depth sets (rampOnGround).
       let drop = GRADE, run = Math.max(3, 4 * drop);
@@ -16429,6 +16492,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const pageY = mgY + (p.z + bldgH / 2) * scale;
             const wFt = it.widthFt || c.width || 3;
             const w = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
+            if (ssLongerThanWall(wFt, w, bldgW, bldgH)) { flash3(SS_REFUSE_TOO_LONG); return; }
             const sn0 = snapToWall(w, pageX, pageY, wFt * scale, (c.height || 0.5) * scale, pWpx, pHpx, mgX, mgY);
             // A VENT MOVES UP AND DOWN as well as along (Carolyn, 2026-09-14: the vent had to be
             // "draggable up"). The wall-plane hit's height is the vent's. Carried a quarter foot past
@@ -16522,6 +16586,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const pageY = mgY + (p.z + bldgH / 2) * scale;
             const wFt = it.widthFt || c.width || 6;
             const nw = getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
+            if (ssLongerThanWall(wFt, nw, bldgW, bldgH)) { flash3(SS_REFUSE_TOO_LONG); return; }
             const sn = snapToWallInterior(nw, pageX, pageY, wFt * scale, slabDepthFt(c, it) * scale, pWpx, pHpx, mgX, mgY);
             const others = liveItems.filter((i) => i.id !== it.id);
             // ⚠️ THE TENTH REFUSAL PATH, and it was missed the first time round. Nine drag
@@ -23388,18 +23453,39 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (!p) return;   // blank/unparseable (a style click just blanked it): keep the last real size
     const prev = parseSize(prevSizeRef.current);
     if (prev && (prev.w !== p.w || prev.h !== p.h) && items.length) {
+      // ⚠️ THE ELECTRICAL PACKAGE IS RE-LAID OUT FOR THE NEW SIZE, not carried across. What it covers
+      // is arithmetic on the building (electricalAutoCounts), and every device on the plan is
+      // charged at max(0, placed - covered) in the preview and in submit-estimate. Carrying the old size's
+      // devices across therefore BILLED the customer for extras they never added the moment the
+      // building got smaller (12x24 -> 10x12: 12 outlets placed, 7 covered, 5 charged), and drew
+      // fewer than the package includes when it got bigger. So the auto devices sit out the reflow
+      // and the standard layout is laid out again on the new building, exactly what switching the
+      // package off and on does; anything the customer placed by hand is reflowed like any item.
+      const elecPkg = sel.electrical ? electricalOffered(C) : null;
+      const reflowable = elecPkg ? items.filter((i) => !i.elecAuto) : items;
       // A vent in the gable is re-fitted to the NEW building's gable, or brought down to its wall
       // when the new size has none there (reflowItems' gablePlace).
       const vr = ventRoof2D();
-      const { items: nextItems, events } = reflowItems(items, prev, p, ITEMS, (cand, sn, g) =>
+      const { items: reflowed, events } = reflowItems(reflowable, prev, p, ITEMS, (cand, sn, g) =>
         ssGableVentPlace(vr.roof, p.w, p.h, vr.H, cand, sn, g.scale, g.mgX, g.mgY,
-          ((sn.wall === "north" || sn.wall === "south") ? sn.x - g.mgX : sn.y - g.mgY) / g.scale, cand.ventRiseFt));
+          ((sn.wall === "north" || sn.wall === "south") ? sn.x - g.mgX : sn.y - g.mgY) / g.scale, cand.ventRiseFt), vr.H);
       const blocked = events.filter((e) => e.kind === "blocked");
       if (blocked.length) {
         // Nothing has changed yet — put the size back and let them decide.
         setSizeBlock({ from: prevSizeRef.current, to: sel.size, items: blocked });
         setSel((s) => ({ ...s, size: prevSizeRef.current }));
         return;                       // prevSizeRef stays put; the revert re-runs this effect
+      }
+      let nextItems = reflowed;
+      if (elecPkg) {
+        const g = pageGeom(p.w, p.h);
+        const add = electricalAutoItems(elecPkg, {
+          widthFt: p.w, lengthFt: p.h, scale: g.scale, mgX: g.mgX, mgY: g.mgY, pW: g.pW, pH: g.pH,
+          itemTypes: { ...ITEMS, ...elecToolsFor(true) },
+          existing: reflowed, frontWall: getFrontWall(reflowed), startId: idCounter,
+        });
+        idCounter += add.length + 1;
+        nextItems = reflowed.concat(add);
       }
       setItems(nextItems);
       setSelectedId(null);
@@ -23503,10 +23589,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // back. Passing the SAME dimensions in and out makes the geometry conversion an identity,
   // so nothing moves that was already legal; the clamps and collision checks do the repair.
   // Silent by design: someone opening a link did not do anything to be told about.
-  const repairLoaded = (loaded, sizeLabel) => {
+  //
+  // Against the LOADED design's own wall height (its style, wall-height pick and foundation — the
+  // same resolver ventRoof2D reads for the design on screen), or a legal window under a top-spot
+  // vent on a 10 ft wall reads as a collision and is moved every time the design is opened.
+  const repairLoaded = (loaded, sizeLabel, selections) => {
     const d = parseSize(sizeLabel);
     if (!d || !loaded.length) return loaded;
-    try { return reflowItems(loaded, d, d, ITEMS).items; } catch (_e) { return loaded; }
+    try {
+      const s = selections || {};
+      const styleCfg = C.buildingStyles.find((x) => x.value === s.style);
+      const spec = d3ResolveStyleSpec(styleCfg, s.style, C.wallHeightFt, d3SidingOverride(C, s), d3CustomerWallHeightFt(C, styleCfg, s.style, s, d.w), d3CustomerFoundation(C, s));
+      return reflowItems(loaded, d, d, ITEMS, undefined, (spec && spec.wallHeightFt) || D3.WALL_H).items;
+    } catch (_e) { return loaded; }
   };
 
   // ─── Load a saved design by short code ───
@@ -23580,7 +23675,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (isCancelled()) return false;
     setViewingVersion(Number.isFinite(vParam) && vParam > 0 ? vParam : null);
 
-    setContact(data.contact || { name: "", email: "", phone: "", street: "", city: "", state: "", zip: "" });
+    // Merged OVER the blank shape, never used bare. Every inventory master is stored with
+    // contact: {} (portal-settings save_inventory), and a design saved before the address
+    // fields existed has no street/city/state/zip, so a bare row left contact.name undefined:
+    // Floorplan PDF -> Download PDF / PNG then threw on contact.name.trim() and saved nothing.
+    setContact({ name: "", email: "", phone: "", street: "", city: "", state: "", zip: "", ...(data.contact || {}) });
     // Pre-set prevSizeRef to what sel.size is ABOUT to become, so the size effect doesn't
     // treat this load as a user size-change and wipe the items set below (same guard
     // openVersion uses). "" (not the old size) because sel is REBUILT below, not merged.
@@ -23600,7 +23699,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setRoDimensions(design.ro_dimensions || {});
     // Items must be set after sel.size has propagated; the prevSizeRef guard
     // above keeps the size effect from wiping them.
-    const loadedItems = repairLoaded(Array.isArray(design.items) ? design.items : [], (design.selections || {}).size);
+    const loadedItems = repairLoaded(Array.isArray(design.items) ? design.items : [], (design.selections || {}).size, design.selections);
     setItems(loadedItems);
     // The persistent portal mount can carry a selection/note-edit from the PREVIOUS
     // design; item ids are small integers that collide across designs, so a stale
@@ -23801,7 +23900,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setPaintCustom({ body: false, trim: false });
     setCustomOptions(vrow.custom_options || []);
     setRoDimensions(vrow.ro_dimensions || {});
-    const loadedItems = repairLoaded(Array.isArray(vrow.items) ? vrow.items : [], (vrow.selections || {}).size);
+    const loadedItems = repairLoaded(Array.isArray(vrow.items) ? vrow.items : [], (vrow.selections || {}).size, vrow.selections);
     setItems(loadedItems);
     setSelectedId(null);
     idCounter = Math.max(idCounter, 0, ...loadedItems.map((i) => Number(i.id) || 0)) + 1;
@@ -23996,7 +24095,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (pendingRemoval) return;
     const pt = getSvgPt(e);
     if (!activeTool) {
-      const hit = [...items].reverse().find((it) => {
+      // TOPMOST FIRST, in the order the plan DRAWS them: ramps are painted first so the door sits on
+      // top of its ramp (the same sort as the SVG item map and renderExportCanvas), so they must be
+      // hit LAST. Raw reverse order asked the ramp first, because it is added after its door, and a
+      // ramp's box covers the whole door bar it hangs from: clicking the door selected the ramp
+      // under it, and a door with a ramp as wide as itself could not be selected by click at all.
+      const hit = [...items].sort((a, b) => (a.type === "ramp" ? 0 : 1) - (b.type === "ramp" ? 0 : 1)).reverse().find((it) => {
         const c = ITEMS[it.type]; if (!c) return false;
         if (ssIsPartition(it)) return ssPartitionHit(it, pt.x, pt.y, mgX, mgY, scale, Math.max(7, (SS_PARTITION_T_FT * scale) / 2 + 3)) != null;
         if (c.lineType) {
@@ -24227,7 +24331,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         return;
       }
       const doorCfg = ITEMS[closest.type];
-      const doorW = doorCfg ? doorCfg.width : 3;
+      // The DOOR'S OWN width first, as the 3D viewer's same branch has it. Every catalog door is a
+      // "fixtureDoor", whose shared config says 3 ft whatever the door measures, so reading the
+      // config alone drew a 3 ft ramp under a 6 ft double door on the plan, the PDF and the 3D.
+      const doorW = closest.widthFt || (doorCfg ? doorCfg.width : 3);
       const rampDepth = RAMP_SPACE_FT; // visual ramp depth in feet
       const rp = rampPlacementForDoor(closest, rampDepth, pW, pH, mgX, mgY, scale);
       if (!rp) return;
@@ -24362,6 +24469,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const wFt = (Number(fx.widthIn) || 36) / 12;
       const cur = items.find((it) => it.id === swapId);
       if (!cur || !cur.wall) { setSwapId(null); setDoorPick(null); return; }
+      // ⚠️ A RAISED DOOR IS NOT A RAMP ANCHOR (the loft door — see doorSillStamps). The ramp tool
+      // keeps raised doors out of its pool so a ramp is never priced and drawn on the ground under a
+      // door 7 ft up a gable end; swapping a ramped walk door FOR a loft door was the way round that
+      // rule, carrying the ramp along. Refuse, as the ramp tool refuses a second ramp, rather than
+      // silently deleting a priced item the customer chose.
+      if (ssDoorSillFt(doorSillStamps(fx)) && items.some((it) => it.type === "ramp" && it.snapDoorId === swapId)) {
+        setToast("That door sits up off the floor, so it can't have this door's ramp — remove the ramp first, then swap.");
+        setTimeout(() => setToast(null), 5000);
+        setSwapId(null); setDoorPick(null);
+        return;
+      }
       if (wFt > (cur.wall === "north" || cur.wall === "south" ? pW : pH) / scale + 1e-6) {
         setToast("That door is wider than this wall — pick a narrower door.");
         setTimeout(() => setToast(null), 4000);
@@ -24412,7 +24530,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // exactly like the drag path — else it detaches into the rasterized PDF.
         if (it.type === "ramp" && it.snapDoorId === swapId) {
           const rp = rampPlacementForDoor(sn, it.heightFt, pW, pH, mgX, mgY, scale);
-          return rp ? { ...it, ...rp } : it;
+          // A SIMPLE ramp (no catalog row) is as wide as its door, so it takes the new door's
+          // width too; a catalog ramp keeps the width its own style snapshotted.
+          return rp ? { ...it, ...rp, ...(it.fixtureItemId ? {} : { widthFt: wFt }) } : it;
         }
         return it;
       }));
@@ -24667,10 +24787,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     let maxEdge = wallLen; // wall end in ft
     
     // Find obstacles on same wall
+    //
+    // ⚠️ ONLY THINGS THAT WOULD ACTUALLY REFUSE IT. Every item on the wall used to count, so an
+    // outlet stopped a bench being stretched over it although the bench may be DRAGGED over that
+    // outlet (an outlet goes above a bench), and a door stopped a shelf mounted clear above it. With
+    // the electrical package on, outlets every 6 ft capped a workbench at the gap between two of
+    // them. Each candidate is asked the drag's own two questions, with the stretched item probed AT
+    // the obstacle's spot along the wall, so only the height bands decide.
+    const cfg = ITEMS[item.type] || {};
+    const wallH = ventRoof2D().H;
     items.forEach((other) => {
       if (other.id === item.id || other.wall !== item.wall) return;
       const oCfg = ITEMS[other.type];
       if (!oCfg) return;
+      const probe = isHoriz ? { ...item, x: other.x } : { ...item, y: other.y };
+      const probeW = probe.widthFt || cfg.width;
+      if (!checkDoorCollision(probe, { ...cfg, width: probeW }, [other], ITEMS, scale, wallH)
+        && !checkWallSlabOverlap(probe, probeW * scale, [other], ITEMS, scale, probe, wallH)) return;
       const oW = other.widthFt || oCfg.width;
       const oPos = isHoriz ? (other.x - mgX) / scale : (other.y - mgY) / scale;
       const oLeft = oPos - oW / 2;
@@ -24755,8 +24888,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         const origCyFt = (resizing.origY - mgY) / scale;
         const origW = resizing.origWidthFt;
         const origH = resizing.origHeightFt;
-        let oL = Math.round(origCxFt - origW / 2), oR = oL + origW;
-        let oT = Math.round(origCyFt - origH / 2), oB = oT + origH;
+        // The loft's edges AS THEY ARE, not rounded to the foot. The dragged edge still lands on the
+        // foot grid below; the three edges nobody is dragging must not move. Rounding them was
+        // harmless only while every loft sat on the grid, and the free drag ("NO GRID", below) and
+        // the size-change reflow both leave lofts off it now — so stretching one edge slid the
+        // opposite edge up to half a foot, straight into a loft that had been snapped flush to it.
+        const oL = origCxFt - origW / 2, oR = oL + origW;
+        const oT = origCyFt - origH / 2, oB = oT + origH;
         let nL = oL, nR = oR, nT = oT, nB = oB;
         if (hd === "right") nR = Math.max(oL + 2, Math.min(mouseXft, bldgW));
         else if (hd === "left") nL = Math.min(oR - 2, Math.max(mouseXft, 0));
@@ -24769,14 +24907,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           const ow = (o.widthFt || 6) / 2, oh = (o.heightFt || 4) / 2;
           const ocx = (o.x - mgX) / scale, ocy = (o.y - mgY) / scale;
           const olL = ocx - ow, olR = ocx + ow, olT = ocy - oh, olB = ocy + oh;
-          // Only clamp if the other dimensions overlap (2D check)
-          if (nT < olB && nB > olT) { // vertically overlapping
-            if (hd === "right" && nR > olL && oL < olL) nR = Math.round(olL);
-            if (hd === "left" && nL < olR && oR > olR) nL = Math.round(olR);
+          // Only clamp if the other dimensions overlap (2D check). With the 0.1 ft slack every other
+          // loft-overlap test uses: lofts snapped flush meet at an edge that, read back off the page,
+          // differs by float noise, and two lofts that merely TOUCH must not stop each other.
+          // Stop FLUSH on the other loft's edge, exactly. Rounding it to the foot put the edge up to
+          // half a foot inside a loft whose edge was off the grid (>= .5 rounds up into it), and
+          // left a gap wider than checkLoftAttached's 0.3 ft touch when it rounded the other way.
+          if (nT < olB - 0.1 && nB > olT + 0.1) { // vertically overlapping
+            if (hd === "right" && nR > olL && oL < olL) nR = olL;
+            if (hd === "left" && nL < olR && oR > olR) nL = olR;
           }
-          if (nL < olR && nR > olL) { // horizontally overlapping
-            if (hd === "bottom" && nB > olT && oT < olT) nB = Math.round(olT);
-            if (hd === "top" && nT < olB && oB > olB) nT = Math.round(olB);
+          if (nL < olR - 0.1 && nR > olL + 0.1) { // horizontally overlapping
+            if (hd === "bottom" && nB > olT && oT < olT) nB = olT;
+            if (hd === "top" && nT < olB && oB > olB) nT = olB;
           }
         }
 
@@ -24814,12 +24957,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // stopped at 6.04 ft, and the quote's qty cell prints a non-integer to 1 dp. With
       // whole feet back, the width is exactly 6 and it prints "6".
       const mouseFt = isHoriz ? (pt.x - mgX) / scale : (pt.y - mgY) / scale;
-      const mouseFtVal = isRO ? mouseFt : Math.round(mouseFt);
 
+      // ⚠️ THE END THAT IS NOT BEING DRAGGED STAYS EXACTLY WHERE IT IS. It used to be rounded to
+      // the nearest whole foot as well, which was harmless only while slabs sat on the foot grid.
+      // They do not: a click places one wherever the click lands and the drag above never rounds,
+      // so the first stretch of almost any slab slid its OTHER end up to half a foot — into the
+      // door it had been parked beside, because getResizeBounds only ever bounds the end being
+      // moved. "Position does not step at all" is the rule two paragraphs up; the LENGTH
+      // steps, so it is measured in whole feet from the fixed end instead.
       const origCenterFt = isHoriz ? (resizing.origX - mgX) / scale : (resizing.origY - mgY) / scale;
-      const origLeft = isRO
-        ? (origCenterFt - resizing.origWidthFt / 2)
-        : Math.round(origCenterFt - resizing.origWidthFt / 2);
+      const origLeft = origCenterFt - resizing.origWidthFt / 2;
       const origRight = origLeft + resizing.origWidthFt;
 
       const origItem = { ...it, x: resizing.origX, y: resizing.origY, widthFt: resizing.origWidthFt };
@@ -24827,17 +24974,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
       const minWidth = isRO ? 0.5 : 2;
 
-      let newLeft = origLeft, newRight = origRight;
-      // floor/ceil come back with the rounding. They keep a whole-foot edge inside a
-      // fractional bound: without them a slab rounds its edge PAST the wall it is allowed
-      // to reach, which is the corner-overhang the bounds exist to stop.
-      if (resizing.handle === "max") {
-        newRight = Math.max(origLeft + minWidth, Math.min(mouseFtVal, isRO ? maxEdge : Math.floor(maxEdge)));
+      let newLeft = origLeft, newRight = origRight, newWidthFt;
+      if (isRO) {
+        if (resizing.handle === "max") newRight = Math.max(origLeft + minWidth, Math.min(mouseFt, maxEdge));
+        else newLeft = Math.min(origRight - minWidth, Math.max(mouseFt, minEdge));
+        newWidthFt = newRight - newLeft;
       } else {
-        newLeft = Math.min(origRight - minWidth, Math.max(mouseFtVal, isRO ? minEdge : Math.ceil(minEdge)));
+        // Whole feet from the fixed end to the pointer, floored at the bound so a whole-foot
+        // length never reaches PAST the wall end or the neighbour it is allowed to touch (the
+        // corner-overhang the bounds exist to stop). The width is the integer itself, never a
+        // difference of two positions, so the quote and the plan print "5", not 4.999999.
+        const room = resizing.handle === "max" ? maxEdge - origLeft : origRight - minEdge;
+        const reach = resizing.handle === "max" ? mouseFt - origLeft : origRight - mouseFt;
+        newWidthFt = Math.max(minWidth, Math.min(Math.round(reach), Math.floor(room + 1e-6)));
+        if (resizing.handle === "max") newRight = origLeft + newWidthFt;
+        else newLeft = origRight - newWidthFt;
       }
-
-      const newWidthFt = newRight - newLeft;
       const newCenterFt = (newLeft + newRight) / 2;
       const newPos = (isHoriz ? mgX : mgY) + newCenterFt * scale;
 
@@ -24897,6 +25049,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // and doesn't get stuck off-wall. The door's ramp (if any) follows too —
       // its placement is derived from the door's position/wall.
       const w = getWallFromClick(rx, ry, pW, pH, mgX, mgY) || getNearestWall(rx, ry, pW, pH, mgX, mgY);
+      if (ssLongerThanWall(iWidthFt, w, bldgW, bldgH)) { refuseDrag(SS_REFUSE_TOO_LONG); return; }
       const sn0 = snapToWall(w, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY);
       // A vent in the gable slides along it, re-fitted under the rakes; dragged onto a wall with no
       // gable above it (or too small a one) it comes down to that wall. The 3D drag's rule.
@@ -24912,8 +25065,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // workbench silently succeeded, producing the exact layout the workbench-side toast prevents.
       const dOthers = items.filter((i) => i.id !== dragging.id);
       const dCand = { ...it, ...sn, widthFt: iWidthFt };
-      if (checkDoorCollision(dCand, { ...cfg, width: iWidthFt }, dOthers, ITEMS, scale)) { refuseDrag(SS_REFUSE_WALL); return; }
-      if (checkWallSlabOverlap(sn, iWidthFt * scale, dOthers, ITEMS, scale, dCand)) { refuseDrag(SS_REFUSE_SLAB); return; }
+      // Against the building's REAL plate, as the 3D wallOnly drag passes dH3: a vent's band is
+      // measured down from the plate (ssVentSpan), and without it every vent read as if under an
+      // 8 ft plate. On a 10 ft wall that put a top-spot vent 2 ft lower than drawn, so a 4 ft
+      // window dragged under it was refused here while the 3D let the same move through; on a 7 ft
+      // wall it put the vent a foot HIGHER, so a window could be dragged straight through it.
+      const dH = ventRoof2D().H;
+      if (checkDoorCollision(dCand, { ...cfg, width: iWidthFt }, dOthers, ITEMS, scale, dH)) { refuseDrag(SS_REFUSE_WALL); return; }
+      if (checkWallSlabOverlap(sn, iWidthFt * scale, dOthers, ITEMS, scale, dCand, dH)) { refuseDrag(SS_REFUSE_SLAB); return; }
       // A ramp snapped to this door must follow it (position + wall); otherwise it
       // detaches and the stale geometry is rasterized into the exported PDF. (audit #F4)
       // rampPlacementForDoor honours the ramp's own depth (catalog ramps vary), so it
@@ -24928,6 +25087,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }));
     } else if (cfg.wallSnap) {
       const nw = getNearestWall(rx, ry, pW, pH, mgX, mgY);
+      if (ssLongerThanWall(iWidthFt, nw, bldgW, bldgH)) { refuseDrag(SS_REFUSE_TOO_LONG); return; }
       const sn = snapToWallInterior(nw, rx, ry, iWidthFt * scale, slabDepthFt(cfg, it) * scale, pW, pH, mgX, mgY);
       const cand = { ...it, ...sn };
       // Check collision with doors AND other workbenches on same wall
@@ -25125,7 +25285,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       return;
     }
 
-    setItems((p) => p.map((i) => i.id !== selectedId ? i : { ...i, rotation: ((i.rotation || 0) + 90) % 360 }));
+    // Re-clamp into the building at the TURNED footprint, as the drag's rotation-aware clamp does.
+    // A long, thin item (a bicycle is 0.7 x 5.6 ft) parked against a wall and turned used to swing
+    // half its length out through that wall — on the plan, the PDF and the 3D — and stay there
+    // until someone happened to drag it. Notes live in page space and are not the building's.
+    setItems((p) => p.map((i) => {
+      if (i.id !== selectedId) return i;
+      const rot = ((i.rotation || 0) + 90) % 360;
+      if (!c || c.noteType) return { ...i, rotation: rot };
+      const w = i.widthFt || c.width || 0, h = i.heightFt || c.height || 0;
+      const turned = rot === 90 || rot === 270;
+      const hw = (turned ? h : w) / 2, hh = (turned ? w : h) / 2;
+      const cx = Math.max(hw, Math.min((i.x - mgX) / scale, bldgW - hw));
+      const cy = Math.max(hh, Math.min((i.y - mgY) / scale, bldgH - hh));
+      return { ...i, rotation: rot, x: mgX + cx * scale, y: mgY + cy * scale };
+    }));
   };
   // Centre the selected item on its wall. Carolyn relayed the request on 2026-09-03 from a
   // builder about to sign up: "he was asking, oh, can we not have it snap to the center?"
@@ -25757,7 +25931,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calSetPorch = (kind, depth) => setAdminCal((p) => {
     const roof = { ...p.spec.roof };
     const was = calPorchKind(roof);
-    const d = depth > 0.5 ? depth : was === "projecting" ? roof.porchOutFt : was === "recessed" ? roof.porchDepthFt : 6;
+    // Held to 12 ft, the sanitiser's band for both depths (styleD3.ts CLAMPS porchDepthFt / porchOutFt), so the
+    // preview never draws a porch deeper than Save keeps.
+    const d = Math.min(12, depth > 0.5 ? depth : was === "projecting" ? roof.porchOutFt : was === "recessed" ? roof.porchDepthFt : 6);
     delete roof.porchDepthFt;
     delete roof.porchOutFt;
     if (kind === "recessed") roof.porchDepthFt = d;
@@ -26033,8 +26209,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // A new wing on `wall` (a building word: left, right, front, back), outside any already there: 8 ft wide,
   // everything else blank.
   const calWingListAdd = (wall) => calEditWingList((list) => list.concat([{ wall, widthFt: 8 }]));
+  // Move and ✕ hand list indices to other wings, so a wing's focus key ("wl<i>-...", lit by a click on the Plan)
+  // would light a different wing: it goes.
+  const calWingListUnfocus = () => { if (typeof calFocus === "string" && /^wl\d+-/.test(calFocus)) setCalFocus(null); };
   // Move in (dir -1, toward the middle) or out (+1): swap places with the next wing in or out on that wall.
-  const calWingListMove = (i, dir) => calEditWingList((list) => {
+  const calWingListMove = (i, dir) => { calWingListUnfocus(); calEditWingList((list) => {
     const w = list[i] && list[i].wall;
     const on = (x) => !!(x && typeof x === "object" && x.wall === w && d3WlNum(x.widthFt) > 0.5);
     let j = i + dir;
@@ -26043,9 +26222,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const out = list.slice();
     out[i] = list[j]; out[j] = list[i];
     return out;
-  });
+  }); };
   // One wing off. The wings outside it move in and meet what it met; nothing else is removed.
-  const calWingListRemove = (i) => calEditWingList((list) => list.filter((_, j) => j !== i));
+  const calWingListRemove = (i) => { calWingListUnfocus(); calEditWingList((list) => list.filter((_, j) => j !== i)); };
   // WHERE A LEAN-TO OR THE WINGS MEET THE BUILDING (roof.leanToAttach / wingAttach, 2026-09-28). The
   // mode and its distance travel together: picking "roof" or "wall" with no distance yet starts it at
   // 1 ft (a switch never leaves an empty field, the calSetWings rule), and "At the eave" / "Automatic"
@@ -28779,6 +28958,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
       if (result.estimateNumber) ghlEstimateNumberRef.current = result.estimateNumber;
 
+      // Push to Invoice acts on "the quote just submitted" (see pushed), so a new submit starts
+      // it over. Left alone, the previous quote's invoice was printed under this one and its
+      // Push to Invoice button stayed hidden (`!pushed`).
+      setPushed(null); setPushErr("");
+      // Likewise the last change order's "Sent" / error line: it belongs to that change, not to
+      // the draft panel this submit may open for another one.
+      setAmendMsg(null);
       setSavedDesign({
         code: shortCode,
         viewUrl,
@@ -30464,10 +30650,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     Rounded for display because 10/12 round-trips to 9.999999999999998, and
                     a field that shows that after you typed 10 reads as broken. */}
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Pitch (rise, as in 6 for 6:12)
-                  <input type="number" step="0.5" min="0" max="12" {...calNumProps("pitch", Math.round((adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4) * 1200) / 100, (n) => calSetRoof({ pitch: n / 12 }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.5" min="0" max="12" {...calNumProps("pitch", Math.round((adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4) * 1200) / 100, (n) => calSetRoof({ pitch: Math.max(0, Math.min(2, n / 12)) }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Overhang (ft)
-                  <input type="number" step="0.05" {...calNumProps("overhang", adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6, (n) => calSetRoof({ overhang: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.05" {...calNumProps("overhang", adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6, (n) => calSetRoof({ overhang: Math.max(0, Math.min(3, n)) }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 {/* OVERHANG STYLE (2026-09-18). How the tail is FRAMED, which is a different
                     question from how far it projects -- Carolyn drew both off paused walk-around
@@ -30566,7 +30752,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </>)}
                 {calAdvShow("walls") && (<>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height (ft)
-                  <input type="number" step="0.5" {...calNumProps("wallHeightFt", adminCal.spec.wallHeightFt || 8, (n) => calSet({ wallHeightFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.5" {...calNumProps("wallHeightFt", adminCal.spec.wallHeightFt || 8, (n) => calSet({ wallHeightFt: Math.max(5, Math.min(20, n)) }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 {/* The empty "plain" option is gone (2026-08-25). It was the LABEL FOR null,
                     which the renderer draws as panel siding -- so it named a thing the
@@ -30857,7 +31043,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {calAdvShow("dormer") && (<>
                 {adminCal.spec.roof.type !== "shed" && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer width (ft, 0 = none)
-                    <input type="number" step="0.5" min="0" {...calNumProps("dormerWidthFt", adminCal.spec.roof.dormerWidthFt != null ? adminCal.spec.roof.dormerWidthFt : 0, (n) => calSetRoof({ dormerWidthFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.5" min="0" {...calNumProps("dormerWidthFt", adminCal.spec.roof.dormerWidthFt != null ? adminCal.spec.roof.dormerWidthFt : 0, (n) => calSetRoof({ dormerWidthFt: Math.min(100, n) }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                 )}
                 {/* Shape, not size, so it sits with the other dormer fields and only once
@@ -30873,7 +31059,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 )}
                 {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer rise (ft)
-                    <input type="number" step="0.25" min="0" {...calNumProps("dormerRiseFt", adminCal.spec.roof.dormerRiseFt != null ? adminCal.spec.roof.dormerRiseFt : 2.5, (n) => calSetRoof({ dormerRiseFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.25" min="0" {...calNumProps("dormerRiseFt", adminCal.spec.roof.dormerRiseFt != null ? adminCal.spec.roof.dormerRiseFt : 2.5, (n) => calSetRoof({ dormerRiseFt: Math.max(0, Math.min(6, n)) }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                     {/* WHAT IT WILL ACTUALLY BUILD. The run is clamped by the eave, so on a
                         short building a big rise is quietly impossible — a 14 ft gable at
                         7:12 turns a requested 5 ft into about 2 ft 6, and before this the box
@@ -31878,7 +32064,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <div key="gamSay" className="ss-adv-f is-full">{advSay(advFtIn(ssRoofInFeet(roof, advSpan, advCentre)))}</div>
               </>
             ) : advNum({ k: "pitch", label: "Pitch", unit: "in 12", value: Math.round((roof.pitch != null ? roof.pitch : 0.4) * 1200) / 100,
-              min: 0, max: 12, step: 0.5, commit: (n) => calSetRoof({ pitch: n / 12 }), ends: ["flat", "steep"], full: true,
+              min: 0, max: 12, step: 0.5, commit: (n) => calSetRoof({ pitch: Math.max(0, Math.min(2, n / 12)) }), ends: ["flat", "steep"], full: true,
               children: advSay(advFtIn(ssRoofInFeet(roof, advSpan, advCentre))) })}
             {/* WHICH WAY THE BUILDING FACES (2026-09-24): the front is the main door's wall (a porch can go on any wall, 2026-10-05). One control or
                 the other, never both -- the sanitiser keeps front on a gable or gambrel, highSide on a shed. */}
@@ -31908,7 +32094,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             {advSeg({ f: "eave", label: "Roof edge", value: roof.eave === "open" ? "open" : "fascia", pick: (v) => calSetRoofOpt("eave", v === "open" ? "open" : null),
               opts: [["fascia", "Boxed in"], ["open", "Rafter tails"]] })}
             {advNum({ k: "overhang", label: "Overhang", unit: "in", value: ohIn, min: 0, max: 24, step: 1,
-              commit: (n) => calSetRoof({ overhang: Math.round((n / 12) * 10000) / 10000 }), full: true,
+              commit: (n) => calSetRoof({ overhang: Math.round((Math.max(0, Math.min(36, n)) / 12) * 10000) / 10000 }), full: true,
               children: (
                 <div className="ss-adv-chips" role="group" aria-label="Overhang presets">
                   {[[0, "Flush"], [2, "2″"], [6, "6″"], [12, "12″"], [16, "16″"], [24, "24″"]].map(([n, l]) => (
@@ -32046,8 +32232,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <div className="ssd-card">
           <span className="ssd-card-t">Walls</span>
           <div className="ss-adv-flds">
+            {/* A NUMBER TYPED PAST THE SLIDERS is held to what Save keeps (styleD3.ts): a wall over 20 ft was drawn here
+                and then DROPPED by the sanitiser, so the saved style drew the account's default wall; a pitch past
+                24 in 12, an overhang past 36 in or a dormer rise past 6 ft was drawn and then cut back. */}
             {advNum({ k: "wallHeightFt", label: "Wall height (ft)", value: spec.wallHeightFt || 8, min: 5, max: 20, step: 0.5,
-              commit: (n) => calSet({ wallHeightFt: n }), full: true })}
+              commit: (n) => calSet({ wallHeightFt: Math.max(5, Math.min(20, n)) }), full: true })}
             {advTiles({ f: "siding", label: "Siding", value: d3NormalizeCladding(spec.siding), pick: (v) => calSet({ siding: v }),
               opts: [["panel", "Panel", "panel"], ["lap", "Lap", "lap"], ["batten", "Board & batten", "batten"], ["agpanel", "AG Panel", "agpanel"]],
               note: ["This style's standard siding.", "What the walls look like when a customer keeps the builder's standard siding."] })}
@@ -32184,7 +32373,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           ...r.overlaps.map((j) => `It overlaps lean-to ${j + 1} on the ${e.wall} wall. Shorten one or slide it along.`),
           r.porch ? `It runs in front of the ${r.porch === "recessed" ? "porch cut into" : "porch on"} this wall; the porch is drawn under it.` : null,
         ].filter(Boolean) : [];
-        const dcWords = dc && dc.by === "lean-to" && r && r.kind === "eave" && r.mode === "roof" && r.dir === dc.dir ? d3DormerCoveredWords(dc, false) : null;
+        // THIS lean-to's card says the dormer is under it only when THIS lean-to covers it: the same question asked
+        // of it alone (d3DormerCovered with just this entry). Every other lean-to up the roof on that side -- one
+        // elsewhere along the wall, or landing lower down than the dormer -- was told so too, and to pick
+        // "On the wall", which moves nothing off the dormer. The words themselves stay the whole roof's (dc).
+        const dcMine = dc && dc.by === "lean-to" && r && r.kind === "eave" && r.mode === "roof" && r.dir === dc.dir
+          ? d3DormerCovered({ ...spec, roof: { ...roof, leanTos: [e] } }, sel.size) : null;
+        const dcWords = dcMine && dcMine.by === "lean-to" && dcMine.dir === dc.dir ? d3DormerCoveredWords(dc, false) : null;
         // ROOFS THAT MEET AT A CORNER (d3CornerJoins, 2026-10-04): with another lean-to that reaches the same
         // corner, joined into one roof when the two match exactly, else what differs, with the numbers. The
         // other is never moved to fit, and neither is this one.
@@ -32445,9 +32640,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             <span className="ssd-plan-meta">{bldgW} × {bldgH} ft, from above</span>
           </div>
           {d3WingListPlanSVG({ spec, sizeLabel: sel.size, focusKey: calFocus, onPick: (i) => {
-            const e = roof.wingList[i];
-            setCalFocus("wl" + i + "-widthFt");
-            setCalDraft(e && e.widthFt != null ? String(e.widthFt) : "");
+            // A key no box carries, so it lights the card and the drawings and takes over no box's value: as
+            // "wl<i>-widthFt" with a draft, that box kept showing this wing's width after Move or ✕ handed its
+            // index to another wing (and after the wings went off and on), with no box ever focused to clear it.
+            setCalFocus("wl" + i + "-plan");
             const el = document.querySelector('[data-ss-adv-wl="' + i + '"]');
             if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
           } })}
@@ -32542,11 +32738,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const wlCard = (e, i, bw, k, n, end) => {
         const name = nameAt(bw, k);
         const r = recOf(i), drop = dropOf(i);
-        const parent = k > 1 ? nameAt(bw, k - 1) : null;
+        // The wing it meets AT THIS SIZE, named as its card is: one not drawn here (listDropped) is out of the
+        // chain, so this one meets the drawn wing inside it, or the middle (d3MassingList). By list place alone,
+        // a wing past a dropped one said "Meets Left wing 2" of a wing whose card says it is not drawn.
+        const pRec = r && r.tier > 1 ? (end ? wm.ends : wm.wings).find((q) => q.bwall === bw && q.tier === r.tier - 1) : null;
+        const parent = r ? (pRec ? nameOf(pRec.i) : null) : k > 1 ? nameAt(bw, k - 1) : null;
         // A tier-1 end wing beside side wings meets under the long walls (the side wings' outside walls over
         // the middle stretch, E), not under the middle's eave: the wings-ends line's subject, at its eMin. With
         // no side wings E is the middle's eave, and the card says "the middle's" (review, 2026-09-30).
-        const longWalls = end && k === 1 && wm.wings.length > 0;
+        const longWalls = end && !parent && wm.wings.length > 0;
         const longSame = Math.abs(wm.E["-1"] - wm.E["1"]) < 1e-6;
         const inner = parent || (longWalls ? "the long walls" : end ? "the middle" : "the middle section");
         const innerPoss = parent ? `${parent}'s` : longWalls ? "the long walls'" : end ? "the middle's" : "the middle section's";
@@ -32564,10 +32764,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           write: (v) => { if (v != null) set({ widthFt: Math.max(1, Math.min(16, v)) }); }, fallback: 8, full: true,
           note: drop ? (drop.why === "room" ? `Not drawn at ${sizeAt}: the middle keeps at least 4 ft. It stays saved.` : "Not drawn yet: wings across an end wall come in the next update. It stays saved.")
             : r && r.shrunk ? `Drawn ${d3FtIn(r.w)} wide: the middle keeps at least 4 ft.` : null }));
-        const meetsLabel = k === 1 ? (end ? "Meets the middle's end wall" : "Meets the middle section") : `Meets ${parent}`;
+        const meetsLabel = !parent ? (end ? "Meets the middle's end wall" : "Meets the middle section") : `Meets ${parent}`;
         // A wing asked "On the roof" that is built Automatic (roofIgnored) shows Automatic pressed, the mode that
         // is built, rather than a pressed and disabled chip (review, 2026-09-30); the sentence says the ask is kept.
-        body.push(advSeg({ f: "wlAttach", label: meetsLabel, aria: `${name} meets ${k === 1 ? (end ? "the middle's end wall" : "the middle section") : parent}`, value: r && r.roofIgnored ? "" : asked, full: true,
+        body.push(advSeg({ f: "wlAttach", label: meetsLabel, aria: `${name} meets ${!parent ? (end ? "the middle's end wall" : "the middle section") : parent}`, value: r && r.roofIgnored ? "" : asked, full: true,
           pick: (v) => set(v ? { attach: v, attachFt: typeof e.attachFt === "number" ? e.attachFt : 1 } : { attach: null }),
           opts: [["", "Automatic"], ["wall", "On the wall"], ["roof", "On the roof", !roofOk, roofOk ? undefined : "Only a wing against the middle can run up onto its roof"]],
           note: longWalls && r && r.hipSides ? ["Its roof runs around the corner into the side wing's.", "A steep roof set to Automatic pushes the middle's walls up to fit."]
@@ -32652,7 +32852,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           body.push(
             <div key="wlm" className="ss-adv-f is-full" data-ss-adv-f="wlMove">
               <div className="ss-adv-chips" role="group" aria-label={`${name}: move`} style={{ marginTop: 0 }}>
-                <button type="button" className="ssd-chip" style={advPill} disabled={k === 1} title={k === 1 ? `Already against ${inner}` : `Swap places with ${parent}`}
+                <button type="button" className="ssd-chip" style={advPill} disabled={k === 1} title={k === 1 ? `Already against ${inner}` : `Swap places with ${nameAt(bw, k - 1)}`}
                   onClick={() => calWingListMove(i, -1)}>Move in</button>
                 <button type="button" className="ssd-chip" style={advPill} disabled={k === n} title={k === n ? "Already the outermost" : `Swap places with ${nameAt(bw, k + 1)}`}
                   onClick={() => calWingListMove(i, 1)}>Move out</button>
@@ -32660,7 +32860,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>,
           );
         }
-        const sub = k === 1 ? (end ? `across the ${bw} end, against the middle` : "against the middle section") : `on ${parent}'s outer wall`;
+        const sub = !parent ? (end ? `across the ${bw} end, against the middle` : "against the middle section") : `on ${parent}'s outer wall`;
         const next = k < n ? nameAt(bw, k + 1) : null;
         const xTitle = next ? `Remove ${name}. ${next} moves in and meets ${inner}${n - k > 1 ? ", and the wings outside it move in with it" : ""}.` : `Remove ${name}. Nothing else moves.`;
         return (
@@ -32834,7 +33034,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             commit: (n) => calSetRoof({ dormerWidthFt: n }),
             children: !dEnd && dDrawn < (Number(roof.dormerWidthFt) || 0) - 1e-9 ? advSay(`Drawn ${d3FtIn(dDrawn)} wide on ${sizeWords}, stopping 3" in from each gable end`, false, { "data-ss-dormer-drawn": "" }) : null })}
           {advNum({ k: "dormerRiseFt", label: "Dormer rise (ft)", value: roof.dormerRiseFt != null ? roof.dormerRiseFt : 2.5, min: 0.5, max: 6, step: 0.25,
-            commit: (n) => calSetRoof({ dormerRiseFt: n }),
+            commit: (n) => calSetRoof({ dormerRiseFt: Math.max(0, Math.min(6, n)) }),
             children: dg ? advSay(dg.clamped ? `Builds ${d3FtIn(dg.face)} on ${sizeWords} — this roof runs out at ${d3FtIn(dg.maxFace)}` : `Builds ${d3FtIn(dg.face)} on ${sizeWords}`, dg.clamped) : null })}
           {advNum({ k: "dormerOffsetU", label: "Dormer position", value: roof.dormerOffsetU != null ? roof.dormerOffsetU : 0.45, min: -1, max: 1, step: 0.05,
             commit: (n) => calSetRoof({ dormerOffsetU: n }), ends: ["one eave", "the other eave"], full: true,
@@ -32897,7 +33097,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       out.push(
         <div key="pc" className="ss-adv-flds">
           {pjEnd && <div key="pjEnd" className="ss-adv-f is-full">{advSay(pjEnd === "end" ? "Not drawn: an end wing is on that end." : "Not drawn: a side-wall porch waits until the end wings are off.", true, { "data-ss-porch-endwing": "" })}</div>}
-          {advNum({ k: key, f: "porchDepth", label: "Depth (ft)", value: roof[key], min: 1, max: 16, step: 0.5,
+          {advNum({ k: key, f: "porchDepth", label: "Depth (ft)", value: roof[key], min: 1, max: 12, step: 0.5,
             commit: (n) => { if (n > 0.5) calSetPorch(kind, n); },
             children: <>
               {kind === "recessed"
@@ -35845,6 +36045,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 const madeQuote = savedDesign && savedDesign.ssQuote && savedDesign.estimateNumber;
                 setSubmitted(false);
                 setSavedDesign(null);
+                setPushed(null); setPushErr("");
+                // The change to a signed order ends with the building it was made on. Left set, the
+                // amber "Changing a signed order — CO-n" bar and its fee sat over the next, unrelated
+                // quote and its button read "Save the change" (openDesign clears it the same way).
+                setAmendment(null); setAmendMsg(null);
                 setItems([]);
                 setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
                 if (!keepPerson) setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
@@ -35878,7 +36083,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 setDesignCode(null);
                 setEstimateVersions([]);
                 setViewingVersion(null);
-                if (!embedded) window.history.replaceState({}, "", window.location.pathname);
+                // Drop the design (and version) from the URL, but KEEP ?client=. A bare pathname threw
+                // the tenant away too, so on a ?client= link (the one onboarding hands out) the next
+                // reload had no tenant and no design and was sent to /portal, the business login.
+                // Same shape as resetGate and signOutCustomer.
+                if (!embedded) {
+                  const p = new URLSearchParams(window.location.search);
+                  p.delete("id"); p.delete("v");
+                  window.history.replaceState({}, "", window.location.pathname + (p.toString() ? "?" + p.toString() : ""));
+                }
               }}
               style={{ ...S.btn(accent, pal.onAccent), borderRadius: 4, padding: "10px 24px", fontFamily: "inherit", fontSize: 14, lineHeight: "16px" }}
             >
@@ -36131,6 +36344,11 @@ export default function StructureStudio({ config: configProp = null, clientId: c
           }
         }
         if (!clientId) clientId = DEFAULT_CLIENT_ID;
+        // The tenant index.mount.jsx's ssLogError files every row under. It reads this global
+        // before ?client=, and nothing assigned it, so a tenant SUBDOMAIN or a bare ?id= share
+        // link (no ?client= in the URL) filed every designer error with client_id NULL.
+        // Public page only: in the portal the host's own logger owns the tenant.
+        if (!embedded) window.__SS_CLIENT_ID__ = clientId;
         // Fetch this tenant's config via the get_config RPC (capability read),
         // not a direct client_configs table query: anon can no longer bulk-read
         // every tenant's config — only the one client_id it asks for. The RPC is

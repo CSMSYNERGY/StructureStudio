@@ -494,8 +494,11 @@ test("Services › Delivery: priced from the address, and Details charges the sa
   o.rewrite = (j) => { j.delivery = { automate: true, configured: true, taxable: false, ruleType: "base_plus" }; };
   const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization, x-client-info, apikey, content-type", "access-control-allow-methods": "POST, OPTIONS" };
   const quotes = [];
-  // Registered after routeLayout, so it answers first.
-  await page.route(`${SUPABASE_URL}/functions/v1/delivery-quote`, (route) => {
+  // Registered after routeLayout, so it answers first. A pattern that tolerates a query string, not
+  // the bare URL: the designer pins every function call to the database's region with
+  // ?forceFunctionRegion=us-east-1 (ssDesignerFetch, 2026-10-01), and a glob of the bare URL no longer
+  // matches, so routeLayout answered {} and the panel read "Delivery will be priced on your quote".
+  await page.route(new RegExp(`^${SUPABASE_URL.replace(/[.]/g, "\\.")}/functions/v1/delivery-quote(?:[?#]|$)`), (route) => {
     if (route.request().method() === "OPTIONS") return route.fulfill({ status: 200, headers: CORS, body: "ok" });
     quotes.push(route.request().postData());
     return route.fulfill({ status: 200, headers: { ...CORS, "content-type": "application/json" },

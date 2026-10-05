@@ -212,6 +212,54 @@ export function ownsDesign(
 }
 
 /**
+ * Every design in this tenant that the session owns (ownsDesign), newest first, with `columns`
+ * (which must name short_code and contact). The customer's quote list.
+ *
+ * PAGED for the reason loadAddressStanding is: the ownership compare is phoneKey/normalizeEmail,
+ * which PostgREST cannot state, so the match happens here over the tenant's rows, and a single
+ * read stops at PostgREST's row cap (1000 on this project). Unpaged, a tenant past 1000 designs
+ * (drafts and inventory count) silently dropped every customer's older quotes from their list,
+ * the ones still waiting to be accepted, signed or paid among them. Only owned rows are kept, so
+ * memory is one page at a time. Ordered on created_at then the unique short_code; a design
+ * created mid-scan shifts the newest-first pages by one, so a row seen twice is kept once.
+ *
+ * `{rows: null, error}` on a failed read: the caller answers with its own dbFail.
+ */
+export async function loadOwnedDesigns(
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  clientId: string,
+  identity: VerifiedIdentity | null | undefined,
+  standing: AddressStanding,
+  columns: string,
+  // deno-lint-ignore no-explicit-any
+): Promise<{ rows: any[]; error: null } | { rows: null; error: unknown }> {
+  // deno-lint-ignore no-explicit-any
+  const rows: any[] = [];
+  const seen = new Set<string>();
+  for (let from = 0;; from += ADDRESS_SCAN_PAGE) {
+    const { data, error } = await admin.from("designs")
+      .select(columns)
+      .eq("client_id", clientId)
+      .order("created_at", { ascending: false })
+      .order("short_code")
+      .range(from, from + ADDRESS_SCAN_PAGE - 1);
+    if (error) return { rows: null, error };
+    const page = (data ?? []) as unknown[];
+    for (const row of page) {
+      if (!row || typeof row !== "object") continue;
+      const r = row as Record<string, unknown>;
+      const code = String(r.short_code ?? "");
+      if (seen.has(code)) continue;
+      seen.add(code);
+      if (ownsDesign(identity, r.contact, standing)) rows.push(r);
+    }
+    if (page.length < ADDRESS_SCAN_PAGE) break;
+  }
+  return { rows, error: null };
+}
+
+/**
  * The identity columns every `design_acceptances` insert made on a customer's behalf writes —
  * BOTH, each null unless that identity was proven. The row is legal evidence of who agreed, so it
  * records the session's verified keys as they are, never a value read off the design. One helper

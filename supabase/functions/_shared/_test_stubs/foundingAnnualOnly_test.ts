@@ -36,6 +36,7 @@ import { stubAuth, stubDb } from "./supabase_stub.ts";
 import {
   FOUNDING_ANNUAL_ONLY, FOUNDING_ANNUAL_ONLY_CODE, FOUNDING_ANNUAL_ONLY_MESSAGE, FOUNDING_ANNUAL_ONLY_STATUS,
 } from "../foundingPricing.ts";
+import { paidThroughOf } from "../billingPeriods.ts";
 
 const read = async (p: string) => (await Deno.readTextFile(new URL(p, import.meta.url))).replace(/\r\n/g, "\n");
 const SOURCE = await read("../../portal-billing/index.ts");
@@ -335,6 +336,23 @@ Deno.test("cancelling a monthly subscription still reaches the gateway and ends 
   assertEquals(r.status, 200, JSON.stringify(r.body));
   assertEquals(r.trace.gateway.map((g) => [g.recurring, g.subscription_id]), [["delete_subscription", "sub-monthly"]]);
   assertEquals(r.body.subscription.status, "cancelled");
+});
+
+// A monthly subscription that predates founding pricing keeps renewing (see the header), and its
+// stored current_period_end stays on the FIRST renewal date for good: only checkout writes it.
+// `status` sends the rolled-forward date as paid_through, which is what the Billing tab prints as
+// "renews"; the stored one would read as a renewal that already happened.
+Deno.test("status: a monthly subscription past its first renewal reports the NEXT renewal as paid_through", async () => {
+  const day = 86400000;
+  const stored = new Date(Date.now() - 40 * day).toISOString();
+  const sub = { id: "sub-old-monthly", plan_id: "crm_monthly", status: "active", price_cents: price("crm_monthly"), current_period_start: new Date(Date.now() - 70 * day).toISOString(), current_period_end: stored, canceled_at: null, created_at: new Date(Date.now() - 70 * day).toISOString() };
+  const r = await drive({ action: "status" }, { vault: "harness-vault", subs: [sub] });
+  assertEquals(r.status, 200, JSON.stringify(r.body));
+  const got = r.body.subscriptions.find((s: any) => s.id === "sub-old-monthly");
+  assertEquals(got.current_period_end, stored, "the stored column is passed through untouched");
+  assertEquals(got.paid_through, new Date(paidThroughOf(sub, "monthly")).toISOString());
+  assert(Date.parse(got.paid_through) > Date.now(), `paid_through ${got.paid_through} is not in the future`);
+  assert(Date.parse(got.paid_through) < Date.now() + 32 * day, `paid_through ${got.paid_through} is more than one month out`);
 });
 
 // ─── The wiring, read from the shipped source ─────────────────────────────────────────────────

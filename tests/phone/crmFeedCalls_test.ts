@@ -71,6 +71,23 @@ Deno.test("inbound: answered, missed, voicemail and live are told apart", () => 
   for (const e of events) assert(e.id.startsWith("pc:"), e.id);
 });
 
+Deno.test("a transfer nobody took that ended in voicemail is the VOICEMAIL line, with its player and transcript", () => {
+  // The Worker's row for it: answered once (answered_at), answered_by cleared by the transfer,
+  // status left 'completed' ("an answered call that ended in voicemail stays answered").
+  const [vm, forwarded] = callFeedEvents([
+    row({ answered_at: "2026-09-29T15:00:03Z", duration_s: 40, transferred_from: "00000000-0000-4000-8000-00000000000a",
+      phone_voicemails: { id: "vm-t", duration_s: 18, transcript: "Calling back about delivery.", listened_at: null, deleted_at: null } }),
+    // The route's forward number picked up: answered, no message, no answered_by.
+    row({ answered_at: "2026-09-29T15:10:03Z", duration_s: 90 }),
+  ], nameOf);
+  assertEquals(vm.type, "voicemail");
+  assertEquals(vm.title, "Voicemail from +15555550100");
+  assertEquals(vm.body, "Calling back about delivery.");
+  assertEquals(vm.meta?.voicemailId, "vm-t");
+  assertEquals(forwarded.type, "call");
+  assertEquals(forwarded.body, "Answered · talked 1m 30s");
+});
+
 Deno.test("an unknown number and a person who has left both read as words, never as null", () => {
   const [e] = callFeedEvents([row({ direction: "out", to_e164: null, placed_by: "00000000-0000-4000-8000-0000000000ff", status: "no_answer" })], nameOf);
   assertEquals(e.title, "Call to an unknown number");

@@ -33,7 +33,7 @@ for (const name of ["ssClampTab", "ssCanSeeTab", "ssFallbackTab", "supportView",
 }
 
 type Access = Record<string, string>;
-type Clamp = (tab: string, isOperator: boolean, canAdmin: boolean, access: Access | null, supportView?: boolean, canProjects?: boolean, advancedOn?: boolean) => string;
+type Clamp = (tab: string, isOperator: boolean, canAdmin: boolean, access: Access | null, supportView?: boolean, canProjects?: boolean, advancedOn?: boolean, sub?: string | null) => string;
 
 // `window` is injected because ssIsBetaHost reads `window.location.hostname`. Pinned to a
 // NON-beta host so the coming-soon routes behave as they do in production — that branch runs
@@ -176,4 +176,39 @@ Deno.test("a builder with Advanced mode on: /portal/advanced resolves for them l
   const off = ssAdvancedOn({ reason: "active", advancedMode: false });
   assertEquals(ssClampTab("advanced", false, true, OWNER_MAP, false, false, off), "designer");
   assertEquals(ssClampTab("advanced", true, true, OWNER_MAP, false, true, off), "designer");
+});
+
+// MY PROFILE (2026-10-04). Every title without a settings_* area — sales rep, dealer, scheduler,
+// crew, driver — was bounced off /portal/settings/myprofile to their fallback page, so the
+// account menu's My Profile and the needsDetails nudge's "Add details" did nothing for them.
+const SALES_REP: Access = {
+  designer: "edit", designs: "edit", contacts: "edit", phone: "own", inventory: "view", orders: "edit", commissions: "own",
+  settings_structures: "none", settings_options: "none", settings_branding: "none", settings_crm: "none",
+  settings_quickbooks: "none", settings_email: "none", settings_team: "none", settings_billing: "none",
+};
+const DRIVER: Access = { delivery_schedule: "edit", inventory: "view", orders: "view" };
+
+Deno.test("My Profile resolves for every role, settings area or not", () => {
+  for (const access of [SALES_REP, DRIVER, null]) {
+    assertEquals(ssClampTab("settings", false, false, access, false, false, false, "myprofile"), "settings", JSON.stringify(access));
+  }
+  // …and for owners and operators exactly as before.
+  assertEquals(ssClampTab("settings", false, true, OWNER_MAP, false, false, false, "myprofile"), "settings");
+});
+
+// Asked of a DRIVER, who holds no settings area at all. Not of a sales rep: since `phone` joined
+// SETTINGS_AREAS (Phone is a Settings card gated on the phone area itself), a rep's phone 'own'
+// rightly opens Settings, where their rail is Phone and My Profile.
+Deno.test("only My Profile: the rest of Settings still needs an area", () => {
+  for (const sub of [null, "structures", "team", "billing", "phone", "not-a-real-slug"]) {
+    assertEquals(ssClampTab("settings", false, false, DRIVER, false, false, false, sub), ssFallbackTab(DRIVER), String(sub));
+  }
+});
+
+Deno.test("the sub argument changes no other tab", () => {
+  for (const tab of ["designer", "designs", "orders", "accounts", "admin", "projects", "advanced"]) {
+    for (const access of [SALES_REP, OWNER_MAP]) {
+      assertEquals(ssClampTab(tab, false, false, access, false, false, false, "myprofile"), ssClampTab(tab, false, false, access, false, false, false));
+    }
+  }
 });

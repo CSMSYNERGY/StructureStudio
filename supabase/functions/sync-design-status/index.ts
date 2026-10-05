@@ -95,6 +95,13 @@ const WRITE_LANES = 4;
 // non-empty with every row at that stage, and a Server-Timing read that blames `opp`. Read per
 // request so a test can set it (and an isolate started after a secrets change sees the new value).
 const stageSearchOn = () => Deno.env.get("SDS_STAGE_SEARCH") === "1";
+/** Codes per PostgREST `in.(…)` — the list rides in the URL (see the designs read below). */
+const IN_CHUNK = 200;
+const chunksOf = (codes: string[]): string[][] => {
+  const out: string[][] = [];
+  for (let i = 0; i < codes.length; i += IN_CHUNK) out.push(codes.slice(i, i + IN_CHUNK));
+  return out;
+};
 
 // The CRM reads, the status rules and every fence live in _shared/designStatusSync.ts (moved there
 // on 2026-10-05 so each one is tested against fixtures). This file is the request around them:
@@ -144,11 +151,22 @@ Deno.serve(withErrorLog("sync-design-status", withServerTiming(async (req: Reque
 
   // 3+4. The tenant's designs for these codes, and the tenant's GHL creds. Neither needs the
   // other, and this function sits on the critical path of three tabs, so they go together.
+  //
+  // The designs read is CHUNKED: `in.(…)` rides in the URL, ~16 bytes a code once the commas are
+  // encoded, so the full 500 the Designs tab sends is an ~8 KB request line on its own — the size
+  // at which the gateway starts refusing it, and a refused read here is a 500 that leaves every
+  // status unrefreshed. 200 codes is ~3 KB (the chunking customer-designs and the inventory
+  // serial read already do for the same reason). The chunks run together.
   const [designsRes, settingsRes] = await Promise.all([
-    admin.from("designs")
-      .select("short_code, status, ghl_estimate_id, ghl_opportunity_id, delivered_at, inventory_unit_id, contact, ss_quote_number, accepted_at")
-      .eq("client_id", clientId)
-      .in("short_code", shortCodes),
+    Promise.all(chunksOf(shortCodes).map((c) =>
+      admin.from("designs")
+        .select("short_code, status, ghl_estimate_id, ghl_opportunity_id, delivered_at, inventory_unit_id, contact, ss_quote_number, accepted_at")
+        .eq("client_id", clientId)
+        .in("short_code", c)
+    )).then((rs) => {
+      const bad = rs.find((r) => r.error);
+      return bad ? { data: null, error: bad.error } : { data: rs.flatMap((r) => r.data ?? []), error: null };
+    }),
     admin.from("client_settings")
       .select("ghl_location_id, ghl_api_key, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id")
       .eq("client_id", clientId)
@@ -207,9 +225,13 @@ Deno.serve(withErrorLog("sync-design-status", withServerTiming(async (req: Reque
       ? readOpportunities().finally(() => { oppMs = performance.now() - readsStart; })
       : null,
     plan.estimateIds.size > 0 && codes.length
-      ? admin.from("orders").select("id, short_code, total_source, total_cents").eq("client_id", clientId).in("short_code", codes)
-        // Best-effort, like the whole of step 8: a failed read means no totals this time.
-        .then((res) => res, () => ({ data: null }))
+      // Chunked for the same URL-length reason as the designs read above.
+      ? Promise.all(chunksOf(codes).map((c) =>
+        admin.from("orders").select("id, short_code, total_source, total_cents").eq("client_id", clientId).in("short_code", c)
+      ))
+        // Best-effort, like the whole of step 8: a failed read means no totals this time (a chunk
+        // that errors contributes no rows, so its orders keep their total).
+        .then((rs) => ({ data: rs.flatMap((r) => r.data ?? []) }), () => ({ data: null }))
       : null,
   ]);
 

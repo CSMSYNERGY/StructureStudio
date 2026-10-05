@@ -2294,10 +2294,18 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const fr = await supabase.from("fixture_items").select("id, price").eq("client_id", clientId).in("id", declFxIds);
       for (const r of fr.data ?? []) if (r.price != null) declFxPrice.set(String(r.id), Number(r.price));
     }
+    // ONE CREDIT PER INCLUSION. Each credit below is the size's WHOLE included quantity, so a key
+    // declined twice is not two declines — and this list is body-supplied on an endpoint the anon
+    // key reaches. The designer toggles keys as a set and never repeats one; a hand-built POST
+    // repeating ["window", "window", …] used to collect the credit once per copy, walking the
+    // building line to $0 and spilling the rest into a discount on the other lines.
+    const creditedKeys = new Set<string>();
     for (const d of declinedItems) {
       const key = String(d?.key ?? "").trim();
       if (!key) continue;
       if (placedKeys.has(key)) continue;   // placed = kept, not a decline → no credit
+      if (creditedKeys.has(key)) continue;
+      creditedKeys.add(key);
       if (declFxPrice.has(key)) {
         const q = includedMap.get(key) || 0;
         if (q <= 0) continue;

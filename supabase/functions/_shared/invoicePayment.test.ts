@@ -669,3 +669,45 @@ Deno.test("a STALE open attempt is still resolvable, so the recovery route stays
   check("closed_declined", close?.state === "closed_declined", JSON.stringify(close));
   check("NO payments row", !log.some((c) => c.table === "payments" && c.op === "insert"));
 });
+
+Deno.test("recovery of a PARTIAL approval records nothing and keeps the block", async () => {
+  // The charge path voids a partial; when that void FAILS the attempt closes closed_unknown
+  // carrying the partial's retref. The gateway then answers the recovery with that partial
+  // ($500 of a $1,000 ask). Recording att.amount_cents here would credit the WHOLE balance for
+  // money that never moved in full — the order reads paid in full.
+  const log: Call[] = [];
+  stubGateway(() =>
+    new Response(JSON.stringify({ respstat: "A", respcode: "000", retref: "rp", amount: "500.00" }), { status: 200 })
+  );
+  const admin = makeAdmin(attemptAnswer({ ...UNKNOWN_ATT, retref: "rp" }), log);
+  const r = await ip.resolveUnknownAttempt(admin, "t1", 42);
+  restore();
+  check("NOT resolved", !r.resolved, JSON.stringify(r));
+  if (r.resolved) return;
+  check("reason", r.reason === "partial", r.reason);
+  check("NO payments row", !log.some((c) => c.table === "payments" && c.op === "insert"), JSON.stringify(log));
+  check(
+    "the attempt state was NOT touched — the block stands",
+    !log.some((c) => c.table === "payment_attempts" && c.op === "update"),
+    JSON.stringify(log),
+  );
+  const fault = log.find((c) => c.table === "app_errors")?.payload as Record<string, unknown>;
+  check("app_errors written", !!fault);
+  check("names the retref and the attempt", /rp/.test(String(fault?.message)) && /42/.test(String(fault?.message)), String(fault?.message));
+});
+
+Deno.test("recovery of a SURCHARGED charge still records the ask, with the surcharge beside it", async () => {
+  // The other side of the partial guard: an amount ABOVE the ask is the card fee, not a
+  // discrepancy, and must keep resolving exactly as before.
+  const log: Call[] = [];
+  stubGateway(() =>
+    new Response(JSON.stringify({ respstat: "A", respcode: "000", retref: "rs", amount: "1030.00" }), { status: 200 })
+  );
+  const admin = makeAdmin(attemptAnswer(UNKNOWN_ATT), log);
+  const r = await ip.resolveUnknownAttempt(admin, "t1", 42);
+  restore();
+  check("resolved", r.resolved, JSON.stringify(r));
+  const ins = log.find((c) => c.table === "payments" && c.op === "insert")?.payload as Record<string, unknown>;
+  check("records the ask", ins?.amount_cents === 100000, JSON.stringify(ins));
+  check("surcharge beside it", ins?.surcharge_cents === 3000, JSON.stringify(ins));
+});

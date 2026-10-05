@@ -134,7 +134,7 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
     defaultAction: "list",
   });
   if (!r.ok) return json(r.body, r.status);
-  const { clientId, payload, action, userId, userEmail, operator } = r.ctx;
+  const { clientId, payload, action, userId, userEmail, operator, role } = r.ctx;
 
   // deno-lint-ignore no-explicit-any
   const p: any = payload || {};
@@ -173,7 +173,11 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
           done: counted.filter((i) => i.completed_at).length,
           open: counted.filter((i) => !i.completed_at).length,
         },
-        canEdit: true,
+        // Whether THIS caller's `toggle` will be accepted — the same answer resolveTenant gives
+        // it: an operator in view-as needs can_write, a builder's own login needs the legacy
+        // owner/admin role (no GATES table here, see the header). This said `true` for everyone,
+        // so a sales rep's tick showed, then bounced back with "not change settings".
+        canEdit: operator ? !!operator.canWrite : (role === "owner" || role === "admin"),
       });
     }
 

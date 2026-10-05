@@ -74,6 +74,8 @@ interface World {
   // The Advanced page's route gate (2026-09-28): both lifted clamps read it. Off by default, which
   // is every tenant but ours — and the Advanced route is no part of what this file pins.
   advancedClampOn?: boolean;
+  // The route's sub-page; both lifted clamps read it (only /portal/settings/myprofile cares).
+  sub?: string | null;
 }
 // An owner-ish map for the support account's own row on the internal tenant. Deliberately wide:
 // "and yet Admin/Projects are refused" must not be an accident of a narrow map.
@@ -83,12 +85,12 @@ function shell(w: World) {
   const tenant = { role: w.role, access: OWN_MAP };
   const isAdmin = w.role === "owner" || w.role === "admin";
   const f = new Function(
-    "ssClampTab", "isOperator", "isSupportOp", "viewing", "tenant", "canProjects", "tab", "isAdmin", "myAccess", "entitlement", "adminOpened", "advancedClampOn",
+    "ssClampTab", "isOperator", "isSupportOp", "viewing", "tenant", "canProjects", "tab", "isAdmin", "myAccess", "entitlement", "adminOpened", "advancedClampOn", "sub",
     [SUPPORT_VIEW, CONSOLES_BARRED, CAN_ADMIN_FOR_URL, RESOLVED_TAB, GATES_RESOLVED, CAN_ADMIN, ACTIVE_TAB].join("\n") +
       `\nreturn { supportView, consolesBarred, resolvedTab, gatesResolved, canAdmin, activeTab, adminNav: !!(${NAV![1]}), adminMount: !!(${MOUNT![1]}) };`,
   );
   return f(ssClampTab, w.isOperator, w.isSupportOp, w.viewing, tenant, w.canProjects, w.tab, isAdmin, OWN_MAP,
-    w.entitlement === undefined ? { status: "active" } : w.entitlement, true, w.advancedClampOn === true) as {
+    w.entitlement === undefined ? { status: "active" } : w.entitlement, true, w.advancedClampOn === true, w.sub ?? null) as {
       supportView: unknown; consolesBarred: unknown; resolvedTab: string; gatesResolved: boolean; canAdmin: boolean;
       activeTab: string; adminNav: boolean; adminMount: boolean;
     };
