@@ -2526,6 +2526,95 @@ function ssRowSection(key) {
   return ssOpeningRank(key) >= 0 ? "openings" : "options";
 }
 
+// ── PRICE ROW KEYS ──
+// The Details row a priced line sits on, as one string: the designer keys its rows with it and
+// submit-estimate tags its lines with it (migration 277). _shared/priceRowKey.ts holds the same
+// text; change both together.
+//
+// A catalog door, window or ramp is grouped by its fixture id, or by name|price when the placed
+// item carries none (a fixture since deleted from the catalog, or a design from before ids).
+function ssPriceGroupId(fixtureItemId = "", name = "", price = 0) {
+  return fixtureItemId ? String(fixtureItemId) : name + "|" + price;
+}
+// kind  building | wallHeight | buildOnSite | cladding | paint | roof | electrical — one row each
+//       layout      id = the built-in item key (singleDoor, window, loft, workbench, ramp, ...)
+//       insul       id = the area (floor, walls, roof)
+//       foundation | elecItem | ro   id = the catalog item id, or the placed item's id for "ro"
+//       fx          id = the group id, a = colour id, b = trim colour id      (catalog doors)
+//       win         id = the group id, a = colour id                          (catalog windows)
+//       dress       id = shutters | flowerBox, a = colour id
+//       ramp        id = the group id, or "simple" for the tenant's one ramp price
+//       partition   id = the partition's id; a = a hosted opening's id      (reserved, not yet used)
+function ssPriceRowKey(kind = "", id = "", a = "", b = "") {
+  switch (kind) {
+    case "layout": return id;
+    case "fx": return "fx:" + id + "|" + a + "|" + b;
+    case "win": return "win:" + id + "|" + a;
+    case "dress": return "dress:" + id + "|" + a;
+    case "partition": return a ? "partition:" + id + ":open:" + a : "partition:" + id;
+    case "insul": case "foundation": case "elecItem": case "ro": case "ramp": return kind + ":" + id;
+    default: return kind;
+  }
+}
+// ── END PRICE ROW KEYS ──
+
+// ─── A rep's own price for a line (a builder's request; migration 277) ──────────
+// Someone holding "Override prices" (Settings → Team; owners and admins by default) types a line's
+// price on its Details row. sel.priceOverrides = { [rowKey]: { amount, was } }: `amount` is the unit
+// price as typed (a string while it is being edited, like a discount's), `was` the list unit price
+// it replaced. It is saved with the design the way sel.discounts is, and the customer's own view
+// shows the resulting numbers with no hint that anything was changed.
+//
+// The rows that may take one carry their list UNIT price and the quantity it multiplies
+// (ssPriceable) — exactly the line submit-estimate builds. The price replaces the unit amount and
+// never the quantity, so a measured line (per ft, per sq ft) is re-priced per unit. Never priceable:
+// tax, discounts, delivery, custom options, an "included" $0 row, a percentage row.
+//
+// The server decides, not this: submit-estimate honours the field only from someone holding the
+// area and strips it from anyone else, so these helpers only have to agree with it on WHICH line and
+// WHAT number (ssPriceRowKey above is that agreement).
+
+// The list unit price and charged quantity a priceable row carries, or {} for anything else.
+function ssPriceable(unit, qty, per) {
+  const u = Number(unit), q = Number(qty);
+  if (unit == null || !isFinite(u) || !isFinite(q) || q <= 0) return {};
+  return { listUnit: Math.round(u * 100) / 100, chargeQty: q, per: per || "each" };
+}
+// What a pricing basis charges per, in the words the staff hint uses.
+function ssPricePer(basis) {
+  if (basis === "lineal_ft" || basis === "perimeter_building") return "per ft";
+  if (basis === "sqft_option" || basis === "sqft_building" || basis === "sqft") return "per sq ft";
+  return "each";
+}
+// The rep's price for one row, or null when there is none to apply: missing, not a number, or
+// STALE — the list price it was set against has moved since (another size, a declined item, a
+// catalog change). A price set for one thing is never carried silently onto another; the row shows
+// its list price again and the staff hint says why. Capped like submit-estimate's.
+function ssPriceOverrideOf(ov, key, listUnit) {
+  if (!ov || typeof ov !== "object") return null;
+  const o = ov[key];
+  if (!o || typeof o !== "object") return null;
+  const t = String(o.amount == null ? "" : o.amount).trim();
+  if (t === "") return null;
+  const v = Number(t);
+  if (!isFinite(v) || v < 0) return null;
+  if (o.was != null && listUnit != null && Math.abs(Number(o.was) - Number(listUnit)) >= 0.005) return null;
+  return Math.round(Math.min(v, 1000000) * 100) / 100;
+}
+// A rough opening's unit price: the rep's for that one opening, else the rate. Each rough opening
+// is its own row and its own server line, keyed by the placed item's id.
+function ssRoPrice(ov, ro, rate) {
+  const v = ssPriceOverrideOf(ov, ssPriceRowKey("ro", ro && ro.id), Math.round((Number(rate) || 0) * 100) / 100);
+  return v != null ? v : rate;
+}
+// A rough-opening rate, per-style override first — the resolution the Details rows use.
+function ssRoRateOf(C, sel, key) {
+  const lp = C && C.layoutPricing && C.layoutPricing[key];
+  if (!lp) return 0;
+  const ov = (lp.byStyle && sel && sel.style) ? lp.byStyle[sel.style] : null;
+  return Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0;
+}
+
 // Fill in any selection row whose amount is "rate% of every OTHER line" — today only cladding
 // on pct_estimate_total. computeSelectionRows cannot do this itself: it runs before the other
 // lines exist and its own output is part of the base, so the row leaves it with total null and
@@ -2677,7 +2766,8 @@ function computeSelectionRows(sel, paintColors, C, items) {
   declinedTotal = Math.round(declinedTotal * 100) / 100;
   const styleSize = [styleLabel, sel && sel.size].filter(Boolean).join(" ") || "—";
   const buildingDetail = declinedLines.length ? [`Original building price: ${fmtMoney2(buildingPrice)}`, ...declinedLines].join("\n") : "";
-  rows.push({ key: "building", label: styleSize, detail: buildingDetail, total: showP ? Math.max(0, buildingPrice - declinedTotal) : null });
+  rows.push({ key: ssPriceRowKey("building"), label: styleSize, detail: buildingDetail, total: showP ? Math.max(0, buildingPrice - declinedTotal) : null,
+    ...(showP ? ssPriceable(Math.max(0, buildingPrice - declinedTotal), 1) : {}) });
   // Taller walls sit directly under the building because that is what they change. A selection
   // charge, so it is NOT in LAYOUT_PRICE_ORDER and never touches the inclusion machinery.
   // Insulation — one line per ticked area, the same shape the estimate emits. Priced from the
@@ -2687,12 +2777,13 @@ function computeSelectionRows(sel, paintColors, C, items) {
   if (whOpt) {
     const whRate = Number(whOpt.ratePerLf) || 0;
     rows.push({
-      key: "wallHeight",
+      key: ssPriceRowKey("wallHeight"),
       label: `Taller Walls (+${whOpt.deltaIn} in)`,
       qty: buildingPerimeter,
       unit: fmtMoney2(whRate) + " / ft",
       total: showP ? Math.round(whRate * buildingPerimeter * 100) / 100 : null,
       method: "lineal_ft",
+      ...(showP ? ssPriceable(whRate, buildingPerimeter, "per ft") : {}),
     });
     // BUILT ON SITE (183) — MIRRORS submit-estimate line for line, because this preview and the
     // estimate must agree to the penny. Walls this tall cannot go under a bridge, so the
@@ -2722,7 +2813,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
         : bosBasis === "pct_building_price" ? Math.round((bosRate / 100) * buildingPrice * 100) / 100
         : Math.round(bosRate * bosShape.qty * 100) / 100;
       rows.push({
-        key: "buildOnSite",
+        key: ssPriceRowKey("buildOnSite"),
         label: "Built On Site",
         detail: "Walls this tall cannot be hauled, so this building is assembled on your site.",
         qty: bosShape.qty,
@@ -2732,6 +2823,8 @@ function computeSelectionRows(sel, paintColors, C, items) {
         total: bosTotal,
         method: bosBasis,
         ...(bosShape.deferred && showP && bosRate > 0 ? { pct: bosRate } : {}),
+        // Priceable only when submit-estimate has a line for it: a real fee, not a percentage.
+        ...(bosTotal != null && bosRate > 0 && !bosShape.pctOf ? ssPriceable(bosRate, bosShape.qty, ssPricePer(bosBasis)) : {}),
       });
     }
   }
@@ -2756,12 +2849,13 @@ function computeSelectionRows(sel, paintColors, C, items) {
       const insOff = offered.find((o) => o.type === pick.type && o.area === area);
       const insRate = insOff && insOff.ratePerSqft != null ? Number(insOff.ratePerSqft) : null;
       rows.push({
-        key: "insul:" + area,
+        key: ssPriceRowKey("insul", area),
         label: `${INSULATION_TYPE_LABEL[pick.type] || pick.type} Insulation — ${INSULATION_AREA_LABEL[area]}`,
         qty: sqft,
         unit: insRate != null ? fmtMoney2(insRate) + " / sq ft" : "sq ft",
         total: showP && insRate != null ? Math.round(insRate * sqft * 100) / 100 : null,
         method: "sqft",
+        ...(showP && insRate != null ? ssPriceable(insRate, sqft, "per sq ft") : {}),
       });
     });
   }
@@ -2791,7 +2885,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
       : basis === "pct_building_price" ? Math.round((rate / 100) * buildingPrice * 100) / 100
       : Math.round(rate * qty * 100) / 100;
     rows.push({
-      key: "foundation:" + opt.id,
+      key: ssPriceRowKey("foundation", opt.id),
       label: foundationLabelOf(opt),
       ...(missing ? { detail: basis === "lineal_ft" ? "Enter the feet to remove" : "Enter a quantity" } : {}),
       qty: qty,
@@ -2799,6 +2893,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
       total: total,
       method: basis,
       ...(shape.deferred && showP && rate != null && !missing ? { pct: rate } : {}),
+      ...(total != null && !shape.pctOf ? ssPriceable(rate, qty, ssPricePer(basis)) : {}),
     });
   });
   // The electrical package: one fixed line. A SELECTION charge like taller walls, so it is not
@@ -2813,12 +2908,13 @@ function computeSelectionRows(sel, paintColors, C, items) {
          elecCfg.includePanel ? "panel included" : "no panel"].join(" · ")
       : "";
     rows.push({
-      key: "electrical",
+      key: ssPriceRowKey("electrical"),
       label: elecCfg.label || "Electrical Package",
       detail: detail,
       // Null when the tenant hides pricing — get_config already nulled it, so this reads
       // whatever arrived rather than deciding the policy a second time.
       total: showP && elecCfg.price != null ? Number(elecCfg.price) : null,
+      ...(showP && elecCfg.price != null ? ssPriceable(elecCfg.price, 1) : {}),
     });
   }
   // EVERY electrical item, one rule (Carolyn 2026-09-03 — the two lists became one):
@@ -2840,16 +2936,17 @@ function computeSelectionRows(sel, paintColors, C, items) {
       if (covered > 0 && chargeable <= 0) {
         // Wholly covered by the package: shown at zero so the customer can see it IS included
         // rather than wondering why the thing on their plan has no line.
-        rows.push({ key: "elecItem:" + ei.id, label: ei.name + " (in the package)", qty: n, unit: "included", total: 0, method: "each" });
+        rows.push({ key: ssPriceRowKey("elecItem", ei.id), label: ei.name + " (in the package)", qty: n, unit: "included", total: 0, method: "each" });
         return;
       }
       rows.push({
-        key: "elecItem:" + ei.id,
+        key: ssPriceRowKey("elecItem", ei.id),
         label: ei.name,
         qty: chargeable,
         unit: (price != null ? fmtMoney2(price) + " each" : "") + (covered > 0 ? ` · ${covered} in the package` : ""),
         total: showP && price != null ? Math.round(price * chargeable * 100) / 100 : null,
         method: "each",
+        ...(showP && price != null ? ssPriceable(price, chargeable, "each") : {}),
       });
     });
   }
@@ -2904,7 +3001,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
         : cladBasis === "pct_building_price" ? Math.round((cladRate / 100) * buildingPrice * 100) / 100
         : Math.round(cladRate * cladShape.qty * 100) / 100;
       rows.push({
-        key: "cladding",
+        key: ssPriceRowKey("cladding"),
         label: claddingLabelOf(cladOpt, cladOpt.id),
         qty: cladShape.qty,
         unit: cladRate == null ? cladShape.bare
@@ -2913,6 +3010,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
         total: total,
         method: cladBasis,
         ...(cladShape.deferred && showP && cladRate != null ? { pct: cladRate } : {}),
+        ...(total != null && !cladShape.pctOf ? ssPriceable(cladRate, cladShape.qty, ssPricePer(cladBasis)) : {}),
       });
     }
   }
@@ -2937,7 +3035,8 @@ function computeSelectionRows(sel, paintColors, C, items) {
   // dropdown, back when sel.cladding was expected to hold free text from a config option.
   const claddingTxt = claddingLabelOf(cladOpt, sel && sel.cladding);
   const pDetail = claddingTxt ? `${claddingTxt} — ${colourTxt}` : colourTxt;
-  rows.push({ key: "paint", label: claddingTxt ? "Cladding" : "Cladding & Colors", detail: pDetail, total: showP ? pTotal : null });
+  rows.push({ key: ssPriceRowKey("paint"), label: claddingTxt ? "Cladding" : "Cladding & Colors", detail: pDetail, total: showP ? pTotal : null,
+    ...(showP ? ssPriceable(pTotal, 1) : {}) });
   const offersRoof = colors.some((c) => c.shingle || c.metal);
   if (offersRoof) {
     const rt = (sel && sel.roofType) || "";
@@ -2947,8 +3046,12 @@ function computeSelectionRows(sel, paintColors, C, items) {
       rTotal = charge(rc);
       rDetail = (sel && sel.roofColor) ? `${rt} — ${sel.roofColor}` : `${rt} — (color TBD)`;
     }
-    rows.push({ key: "roof", label: "Roof", detail: rDetail, total: showP ? rTotal : null });
+    rows.push({ key: ssPriceRowKey("roof"), label: "Roof", detail: rDetail, total: showP ? rTotal : null,
+      ...(showP ? ssPriceable(rTotal, 1) : {}) });
   }
+  // A rep's own prices (migration 277). Applied HERE, inside the builder, so every caller — Details,
+  // the inventory asking price, computeLayoutPricingRows' percentage base — reads the same numbers.
+  ssApplyPriceOverrides(rows, sel && sel.priceOverrides);
   // One place decides the section, so the two builders cannot disagree about where a row goes.
   rows.forEach((r) => { r.section = ssRowSection(r.key); });
   return rows;
@@ -3090,7 +3193,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const placedMeasure = rp.method === "lineal_ft" ? (m.lengthFt || 0) : rp.method === "sqft_option" ? (m.optionSqft || 0) : (m.count || 0);
     const chargeable = Math.max(0, placedMeasure - inc);
     if (inc > 0 && chargeable <= 0) {
-      rows.push({ key, label: label + " (included)", qty: placedMeasure, unit: "included", total: 0, method: rp.method });
+      rows.push({ key: ssPriceRowKey("layout", key), label: label + " (included)", qty: placedMeasure, unit: "included", total: 0, method: rp.method });
       continue;
     }
     let mNet = m;
@@ -3110,7 +3213,13 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     } else {
       unit = ln.unit;
     }
-    const row = { key, label, qty: dispQty, unit, total: ln.total, method: rp.method };
+    const row = { key: ssPriceRowKey("layout", key), label, qty: dispQty, unit, total: ln.total, method: rp.method,
+      // Priceable as submit-estimate's pushItem line: the unit is the rate, or the rate times the
+      // building's area/perimeter for the two methods that multiply the COUNT; never a percentage.
+      ...(ln.total != null && rp.method !== "pct_building_price"
+        ? ssPriceable(rp.method === "sqft_building" ? rp.rate * buildingArea : rp.method === "perimeter_building" ? rp.rate * buildingPerimeter : rp.rate,
+          ln.qty, rp.method === "lineal_ft" ? "per ft" : rp.method === "sqft_option" ? "per sq ft" : "each")
+        : {}) };
     rows.push(row);
     if (ln.total == null) deferred.push({ row, pct: ln.pct });
     else nonPctSubtotal += ln.total;
@@ -3152,7 +3261,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   for (const it of items) {
     if (it.type !== "fixtureDoor") continue;
     const price = it.price != null ? Number(it.price) : 0;
-    const fid = it.fixtureItemId || `${it.doorName || "Door"}|${price}`;
+    const fid = ssPriceGroupId(it.fixtureItemId, it.doorName || "Door", price);
     const gk = `${fid}|${it.colorId || ""}|${it.trimColorId || ""}`;
     if (!fxGroups[gk]) {
       const colorBits = [it.colorLabel, it.trimColorLabel ? `${it.trimColorLabel} trim` : null].filter(Boolean);
@@ -3161,6 +3270,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
         label: (it.doorName || "Door") + (colorBits.length ? ` — ${colorBits.join(" / ")}` : ""),
         price: price + (priced ? doorRateOf(it.colorId) + doorRateOf(it.trimColorId) : 0),
         qty: 0, fid: it.fixtureItemId || null,
+        rowKey: ssPriceRowKey("fx", fid, it.colorId || "", it.trimColorId || ""),
       };
       fxOrder.push(gk);
     }
@@ -3171,12 +3281,13 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const inc = takeIncluded(g.fid, g.qty);
     const chargeable = Math.max(0, g.qty - inc);
     if (g.price > 0 && inc > 0 && chargeable <= 0) {
-      rows.push({ key: `fx:${gk}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
+      rows.push({ key: g.rowKey, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
       continue;
     }
     if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
     const total = Math.round(g.price * chargeable * 100) / 100;
-    rows.push({ key: `fx:${gk}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
+    rows.push({ key: g.rowKey, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each",
+      ...ssPriceable(g.price, chargeable, "each") });
     nonPctSubtotal += total;
   }
 
@@ -3193,13 +3304,14 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   const winOrder = [];
   for (const it of customWindows) {
     const price = it.price != null ? Number(it.price) : 0;
-    const fid = it.fixtureItemId || `${it.windowName || "Window"}|${price}`;
+    const fid = ssPriceGroupId(it.fixtureItemId, it.windowName || "Window", price);
     const gk = `${fid}|${it.colorId || ""}`;
     if (!winGroups[gk]) {
       winGroups[gk] = {
         label: (it.windowName || "Window") + (it.colorLabel ? ` — ${it.colorLabel}` : ""),
         price: price + windowRateOf(it.colorId),
         qty: 0, fid: it.fixtureItemId || null,
+        rowKey: ssPriceRowKey("win", fid, it.colorId || ""),
       };
       winOrder.push(gk);
     }
@@ -3210,12 +3322,13 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const inc = takeIncluded(g.fid, g.qty);
     const chargeable = Math.max(0, g.qty - inc);
     if (g.price > 0 && inc > 0 && chargeable <= 0) {
-      rows.push({ key: `win:${gk}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
+      rows.push({ key: g.rowKey, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
       continue;
     }
     if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
     const total = Math.round(g.price * chargeable * 100) / 100;
-    rows.push({ key: `win:${gk}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
+    rows.push({ key: g.rowKey, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each",
+      ...ssPriceable(g.price, chargeable, "each") });
     nonPctSubtotal += total;
   }
 
@@ -3266,7 +3379,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
       const g = groups[gk];
       const total = Math.round(rate * g.qty * 100) / 100;
       rows.push({
-        key: `dress:${d.key}|${gk}`,
+        key: ssPriceRowKey("dress", d.key, gk),
         label: d.label + (g.label ? ` — ${g.label}` : ""),
         unit: `${g.qty} window${g.qty === 1 ? "" : "s"} · ` + (rate > 0 ? fmtMoney2(rate) + " each" : "included"),
         total, method: "each",
@@ -3281,7 +3394,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   const rampGroups = {};
   for (const it of customRamps) {
     const price = it.price != null ? Number(it.price) : 0;
-    const fid = it.fixtureItemId || `${it.rampName || "Ramp"}|${price}`;
+    const fid = ssPriceGroupId(it.fixtureItemId, it.rampName || "Ramp", price);
     if (!rampGroups[fid]) rampGroups[fid] = { label: it.rampName || "Ramp", price, qty: 0, fid: it.fixtureItemId || null };
     rampGroups[fid].qty++;
   }
@@ -3290,12 +3403,13 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const inc = (g.fid && incForRows[g.fid]) ? Number(incForRows[g.fid]) : 0;
     const chargeable = Math.max(0, g.qty - inc);
     if (g.price > 0 && inc > 0 && chargeable <= 0) {
-      rows.push({ key: `ramp:${fid}`, label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
+      rows.push({ key: ssPriceRowKey("ramp", fid), label: g.label + " (included)", qty: g.qty, unit: "included", total: 0, method: "each" });
       continue;
     }
     if (!(g.price > 0)) continue;   // $0 / unpriced = free, no line
     const total = Math.round(g.price * chargeable * 100) / 100;
-    rows.push({ key: `ramp:${fid}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
+    rows.push({ key: ssPriceRowKey("ramp", fid), label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each",
+      ...ssPriceable(g.price, chargeable, "each") });
     nonPctSubtotal += total;
   }
   if (rampSimplePriced && simpleRamps.length) {
@@ -3313,14 +3427,20 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
           totalFt += dw;
         }
         totalFt = Math.round(totalFt * 100) / 100;
-        if (totalFt > 0) { const total = Math.round(rampPrice * totalFt * 100) / 100; rows.push({ key: "ramp:simple", label: "Ramp", qty: totalFt, unit: fmtMoney2(rampPrice) + " / ft", total, method: "lineal_ft" }); nonPctSubtotal += total; }
+        if (totalFt > 0) { const total = Math.round(rampPrice * totalFt * 100) / 100; rows.push({ key: ssPriceRowKey("ramp", "simple"), label: "Ramp", qty: totalFt, unit: fmtMoney2(rampPrice) + " / ft", total, method: "lineal_ft", ...ssPriceable(rampPrice, totalFt, "per ft") }); nonPctSubtotal += total; }
       } else {
         const total = Math.round(rampPrice * simpleRamps.length * 100) / 100;
-        rows.push({ key: "ramp:simple", label: "Ramp", qty: simpleRamps.length, unit: fmtMoney2(rampPrice) + " each", total, method: "each" });
+        rows.push({ key: ssPriceRowKey("ramp", "simple"), label: "Ramp", qty: simpleRamps.length, unit: fmtMoney2(rampPrice) + " each", total, method: "each", ...ssPriceable(rampPrice, simpleRamps.length, "each") });
         nonPctSubtotal += total;
       }
     }
   }
+
+  // A rep's own prices (migration 277), BEFORE the percentage pass below — submit-estimate applies
+  // them in step 7-PO, ahead of step 7a, so a "% of subtotal" line is a share of what the customer is
+  // charged. Each re-priced row moves the base by exactly its own change; with none, nothing moves.
+  ssApplyPriceOverrides(rows, sel && sel.priceOverrides);
+  rows.forEach((r) => { if (r.overridden) nonPctSubtotal += r.total - r.listTotal; });
 
   // Resolve pct_estimate_total rows LAST against the same base the edge function uses:
   // building (NET of declined-item credits — submit-estimate bakes them into the
@@ -3330,7 +3450,13 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     // One term per RO key: the door and window ROs price independently, and the legacy generic
     // key still prices for the designs that carry one.
     const roTotal = SS_RO_KEYS.reduce((s, k) =>
-      s + (resolve(k) || { rate: 0 }).rate * items.filter((i) => i.type === k).length, 0);
+      s + (resolve(k) || { rate: 0 }).rate * items.filter((i) => i.type === k).length, 0)
+      // ...moved by a rep's own price for any one opening (migration 277): its difference from the
+      // rate, so with no price set this adds exactly nothing.
+      + items.filter((i) => ssIsRO(i.type)).reduce((s, ro) => {
+        const r0 = (resolve(ro.type) || { rate: 0 }).rate;
+        return s + (ssRoPrice(sel && sel.priceOverrides, ro, r0) - r0);
+      }, 0);
     const customTotal = (customOptions || []).reduce((s, co) => {
       if (!co || !co.name || !String(co.name).trim()) return s;
       const amt = parseFloat(co.amount) || 0;
@@ -3356,6 +3482,50 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   // by computeSelectionRows, matching the GHL estimate.)
   rows.forEach((r) => { r.section = ssRowSection(r.key); });
   return { rows };
+}
+
+// Apply sel.priceOverrides to the rows that can take one (ssPriceable), in place. Called INSIDE
+// computeSelectionRows and computeLayoutPricingRows, before any percentage row is resolved, so every
+// total site — Details, the inventory asking price, the payload — reads the numbers submit-estimate
+// step 7-PO will charge. With no overrides it touches nothing.
+function ssApplyPriceOverrides(rows, ov) {
+  if (!ov || typeof ov !== "object") return rows;
+  (rows || []).forEach((r) => {
+    if (!r || r.listUnit == null || r.total == null) return;
+    const v = ssPriceOverrideOf(ov, r.key, r.listUnit);
+    if (v == null) return;
+    const from = fmtMoney2(r.listUnit), to = fmtMoney2(v);
+    r.listTotal = r.total;
+    r.unitPrice = v;
+    r.total = Math.round(v * r.chargeQty * 100) / 100;
+    r.overridden = true;
+    // The customer reads the row's unit text too, and it quotes the list price ("$1,250.00 each",
+    // "… billable @ $5.00/ft"). Re-spelled at the new price, or the list sits right beside it.
+    if (r.unit) r.unit = r.unit.indexOf(from) >= 0 ? r.unit.split(from).join(to) : to + (r.per === "each" ? " each" : " " + r.per);
+    // The building's detail is the declined-item breakdown, which opens with the original price;
+    // the rep's figure replaces the whole computed amount (submit-estimate drops it the same way).
+    if (r.key === "building") r.detail = "";
+  });
+  return rows;
+}
+// The overrides actually APPLIED right now, the way the payload sends them: [{ rowKey, amount }].
+// Built from the same rows Details shows, so a stale or half-typed entry never reaches the server and
+// what the rep saw is what is sent. Rough openings ride along, one entry per opening.
+function ssPriceOverrideList(sel, items, customOptions, C, paintColors) {
+  const ov = sel && sel.priceOverrides;
+  if (!ov || typeof ov !== "object" || !Object.keys(ov).length) return [];
+  const out = [];
+  computeSelectionRows(sel, paintColors, C, items)
+    .concat(C && C.showPricing ? computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows : [])
+    .forEach((r) => { if (r.overridden) out.push({ rowKey: r.key, amount: r.unitPrice }); });
+  if (C && C.showPricing) {
+    (items || []).filter((i) => ssIsRO(i.type)).forEach((ro) => {
+      const key = ssPriceRowKey("ro", ro.id);
+      const v = ssPriceOverrideOf(ov, key, Math.round(ssRoRateOf(C, sel, ro.type) * 100) / 100);
+      if (v != null) out.push({ rowKey: key, amount: v });
+    });
+  }
+  return out;
 }
 
 // Which placed items does a Details "Options on your plan" row cover? Built-in rows key by
@@ -20829,7 +20999,7 @@ function SSAdvArt({ kind }) {
   return <svg viewBox="0 0 56 38" width="56" height="38" aria-hidden="true" focusable="false" style={{ display: "block" }}>{art[kind] || null}</svg>;
 }
 
-function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false }) {
+function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false, canOverridePrice = false }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
   //   embedded = true  → the Designer tab inside portal.html: business users building
@@ -20891,6 +21061,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     C.options.forEach((o) => { init[o.id] = o.type === "counter" ? o.options[0] : ""; });
     return init;
   });
+  // ── What someone WITHOUT "Override prices" is shown (migration 277) ──
+  // A design can carry prices that someone holding the permission typed (sel.priceOverrides). In the
+  // portal, for anyone else, submit-estimate drops them and charges list, so the totals here must
+  // be list too, or Details promises one figure and the quote charges another. Only what is SHOWN
+  // moves: sel keeps the stored prices, save_design keeps them for the next person who holds the
+  // permission (migration 277), and the submit still sends them so the server logs that they were
+  // dropped. The public page and the share link are not embedded and show them, as before.
+  const priceSel = embedded && !canOverridePrice && sel.priceOverrides ? { ...sel, priceOverrides: undefined } : sel;
   // Catalog fixtures the current size INCLUDES → a placement tool keyed by the fixture id. Each
   // renders in the "included — place or decline" row and, when armed, drops that EXACT fixture on
   // the next wall click (doors/windows) or door (ramps). Empty until a style+size is chosen; the
@@ -21773,8 +21951,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // specific lines (delivery, discounts) — an asking price describes the building alone.
   const inventoryQuotePrefill = () => {
     try {
-      const selRows = computeSelectionRows(sel, paintColors, C, items);
-      const priceRows = C.showPricing ? computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows : [];
+      const selRows = computeSelectionRows(priceSel, paintColors, C, items);
+      const priceRows = C.showPricing ? computeLayoutPricingRows(items, priceSel, customOptions, C, paintColors).rows : [];
       const roList = items.filter((i) => ssIsRO(i.type));
       const roRateOf = (key) => {
         const lp = C.layoutPricing && C.layoutPricing[key];
@@ -21782,7 +21960,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         const ov = (lp.byStyle && sel.style) ? lp.byStyle[sel.style] : null;
         return Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0;
       };
-      const roTotal = roList.reduce((s, ro) => s + roRateOf(ro.type), 0);
+      const roTotal = roList.reduce((s, ro) => s + ssRoPrice(priceSel.priceOverrides, ro, roRateOf(ro.type)), 0);
       const customTotal = (customOptions || []).reduce((s, r) => {
         const amt = Math.max(0, parseFloat(r && r.amount) || 0);
         const q = r && r.qty ? Math.abs(parseInt(r.qty, 10)) || 1 : 1;
@@ -27468,7 +27646,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           itemKey: ro.type,
           dimensions: (roDimensions[ro.id] || "").trim(),
           qty: 1,
+          // The placed opening's id: its Details row key, so a rep's price for this one opening
+          // finds its own line on the server (migration 277). Ignored by everything else.
+          id: ro.id,
         })),
+        // A rep's own line prices (migration 277): only from the portal, and only when one is
+        // applied — otherwise the key is absent and the payload is exactly what it was. Sent for
+        // someone WITHOUT "Override prices" too, built from the stored prices their Details does not
+        // show: submit-estimate strips them and logs that it did, so a quote that went back to list
+        // leaves a trace. The server decides who may, whatever this screen believes.
+        ...(embedded ? (() => {
+          const list = ssPriceOverrideList(sel, items, customOptions, C, paintColors);
+          return list.length ? { priceOverrides: list } : {};
+        })() : {}),
         submittedAt: new Date().toISOString(),
       };
 
@@ -33628,8 +33818,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // Every row shares the same right-anchored grid: [qty 50px] [amount 85px]
             // [action 28px], gap 6 — so every amount lines up in one column. Rows with
             // no action get a 28px spacer; rows with no qty just omit that cell.
-            const selRows = computeSelectionRows(sel, paintColors, C, items);
-            const priceRows = C.showPricing ? computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows : [];
+            const selRows = computeSelectionRows(priceSel, paintColors, C, items);
+            const priceRows = C.showPricing ? computeLayoutPricingRows(items, priceSel, customOptions, C, paintColors).rows : [];
             const roList = items.filter((i) => ssIsRO(i.type));
             // Rough-opening rate: same per-style resolution as the estimate (layoutPricing,
             // byStyle override wins) — the old C.layoutPrices read was a stale key that
@@ -33641,7 +33831,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               const ov = (lp.byStyle && sel.style) ? lp.byStyle[sel.style] : null;
               return Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0;
             };
-            const roTotal = roList.reduce((s, ro) => s + roRateOf(ro.type), 0);
+            const roTotal = roList.reduce((s, ro) => s + ssRoPrice(priceSel.priceOverrides, ro, roRateOf(ro.type)), 0);
             const customTotal = customOptions.reduce((s, r) => {
               if (!r || !r.name || !String(r.name).trim()) return s;
               const amt = Math.max(0, parseFloat(r.amount) || 0);
@@ -33679,6 +33869,75 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // control would not fit, so the state is carried by colour + the title text. ON is
             // the default and reads as a quiet accent chip; OFF is amber, because "no tax on this line"
             // is the exceptional state a rep should be able to spot at a glance.
+            // ── A rep's own price for a row (migration 277) ─────────────────
+            // Only for someone holding "Override prices" — the portal passes canOverridePrice; the
+            // public page and the customer's share link never do, so they see plain numbers — and
+            // only on rows that can take one (ssPriceable). The field shows the rep's price, or the
+            // list price until they type one. The hint under the row's name is staff-only and is the
+            // one place the list price shows. submit-estimate re-checks the permission whatever
+            // this screen believes, and strips the field from anyone who does not hold it.
+            const priceOv = sel.priceOverrides || {};
+            const setPrice = (key, v, listUnit) => setSel((p) => ({ ...p,
+              priceOverrides: { ...(p.priceOverrides || {}), [key]: { amount: v, was: Math.round(Number(listUnit) * 100) / 100 } } }));
+            const clearPrice = (key) => setSel((p) => {
+              const next = { ...(p.priceOverrides || {}) };
+              delete next[key];
+              const out = { ...p, priceOverrides: next };
+              // The last one gone: the design stores no trace of the feature, as before it existed.
+              if (!Object.keys(next).length) delete out.priceOverrides;
+              return out;
+            });
+            // Leaving the field: an empty or unreadable entry, or one equal to the list price, is no
+            // price at all — the row goes back to the catalog's and nothing is stored for it.
+            const settlePrice = (key, listUnit) => {
+              if (!priceOv[key]) return;
+              const v = ssPriceOverrideOf(priceOv, key, listUnit);
+              if (v == null || Math.abs(v - Number(listUnit)) < 0.005) clearPrice(key);
+            };
+            const priceInput = (key, listUnit, label) => {
+              const o = priceOv[key];
+              const fresh = !!o && (o.was == null || Math.abs(Number(o.was) - Number(listUnit)) < 0.005);
+              return (
+                <div className="ssd-dt-money" title={`List price ${fmtMoney2(listUnit)}. Type a different price to change this line; the customer sees only the new price.`}>
+                  <span className="ssd-dt-cur">$</span>
+                  <input type="number" min="0" step="0.01" inputMode="decimal" data-ss-price-key={key}
+                    aria-label={`Price for ${label}`}
+                    value={fresh ? String(o.amount == null ? "" : o.amount) : Number(listUnit).toFixed(2)}
+                    onChange={(e) => setPrice(key, e.target.value.replace(/[^0-9.]/g, ""), listUnit)}
+                    onBlur={() => settlePrice(key, listUnit)}
+                    className="ssd-dt-money-in ssd-field" />
+                </div>
+              );
+            };
+            // "List $1,250.00 each · this line $2,400.00 · Use list price". A price set against a
+            // list that has since moved (another size, a declined item) is not applied, and says so.
+            const priceHint = (r) => {
+              const o = priceOv[r.key];
+              const stale = !!o && !r.overridden && o.was != null && Math.abs(Number(o.was) - Number(r.listUnit)) >= 0.005;
+              const per = r.per && r.per !== "each" ? " " + r.per : (Number(r.chargeQty) !== 1 ? " each" : "");
+              return (
+                <div className="ssd-dt-d" data-ss-price-hint={r.key}>
+                  {`List ${fmtMoney2(r.listUnit)}${per}`}
+                  {/* The field holds the UNIT price, so the line's total lives here whenever it differs. */}
+                  {Number(r.chargeQty) !== 1 ? ` · this line ${fmtMoney2(r.total)}` : ""}
+                  {stale ? ` · your ${fmtMoney2(Number(o.amount) || 0)} was set when the list was ${fmtMoney2(o.was)}, so it is not used` : ""}
+                  {(r.overridden || stale) && <button type="button" className="ssd-dt-suggest" onClick={() => clearPrice(r.key)}>Use list price</button>}
+                </div>
+              );
+            };
+            // In the portal, for someone WITHOUT the permission: a price someone who holds it set on
+            // this row, which their submit will not use (priceSel above). Staff-only, so they know why
+            // the row reads list and what sending the quote does. Null when there is nothing to say.
+            const droppedPrice = (key, listUnit) => {
+              if (!embedded || canOverridePrice || listUnit == null) return null;
+              const v = ssPriceOverrideOf(sel.priceOverrides, key, listUnit);
+              return v != null && Math.abs(v - Number(listUnit)) >= 0.005 ? v : null;
+            };
+            const droppedNote = (key, v, style) => (
+              <div className="ssd-dt-d" data-ss-price-dropped={key} style={style}>
+                {`Someone who can change prices set this to ${fmtMoney2(v)}. You can't change prices, so sending the quote from here uses the list price.`}
+              </div>
+            );
             const taxBtn = (taxable, onToggle) => (
               <button type="button" onClick={onToggle}
                 title={taxable
@@ -33781,17 +34040,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 // The mockup's "Included": in the unheaded building group only, a line priced at exactly $0 is part
                 // of the building's price (cladding, roof). Everywhere else a $0.00 stays a number.
                 const included = inBuilding && r.total != null && Number(r.total) === 0;
+                // Someone holding "Override prices" types this row's price (migration 277) — not on an
+                // "Included" one: a line that is part of the building's price has no price to change.
+                const pricing = embedded && canOverridePrice && r.listUnit != null && r.total != null
+                  && !(inBuilding && Number(r.listUnit) === 0);
+                const dropped = r.total != null ? droppedPrice(r.key, r.listUnit) : null;
                 return (
                   <div key={r.key} className={"ssd-dt-row" + (inBuilding ? " is-bldg" : "") + (r.key === "building" ? " is-main" : "")}>
                     <div className="ssd-dt-name">
                       <div className="ssd-dt-n">{r.label}{noTaxPill(r)}</div>
                       <div className="ssd-dt-d">{r.detail || r.unit}</div>
+                      {pricing && priceHint(r)}
+                      {dropped != null && droppedNote(r.key, dropped)}
                     </div>
                     <div className="ssd-dt-r">
                       {/* Qty is read-only (it changes by placing or removing on the plan), so it is a boxed number
                           in the stepper's shape with no − / + (redesign plan §0.2). */}
                       {onPlan && <div className="ssd-dt-qty">{Number.isInteger(r.qty) ? r.qty : Number(r.qty).toFixed(1)}</div>}
-                      {r.total != null
+                      {pricing
+                        ? priceInput(r.key, r.listUnit, r.label)
+                        : r.total != null
                         ? <div className={"ssd-dt-amt" + (included ? " is-incl" : "")}>{included ? "Included" : fmtMoney2(r.total)}</div>
                         : <div className="ssd-dt-amt" />}
                       {onPlan && !planLocked
@@ -33830,6 +34098,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {roList.map((ro) => {
                   const dim = roDimensions[ro.id] || "";
                   const invalid = !dim.trim();
+                  // A price someone with "Override prices" set on this opening, which this person's
+                  // submit will not use (migration 277; null for a holder and on the public page).
+                  const roDropped = C.showPricing ? droppedPrice(ssPriceRowKey("ro", ro.id), Math.round(roRateOf(ro.type) * 100) / 100) : null;
                   // The opening height, and for a window RO its sill, are the CUSTOMER's to set
                   // per opening (Carolyn 2026-09-08). They are written straight onto the item,
                   // where openingSpan / openSpanOf / ssItemVBand already read them — so the 3D
@@ -33874,13 +34145,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       <div className="ssd-dt-r">
                         {C.showPricing && (<>
                           <div className="ssd-dt-qty">1</div>
-                          <div className="ssd-dt-amt">{fmtMoney2(roRateOf(ro.type))}</div>
+                          {embedded && canOverridePrice
+                            ? priceInput(ssPriceRowKey("ro", ro.id), Math.round(roRateOf(ro.type) * 100) / 100, ssRoLabel(ro, items))
+                            : <div className="ssd-dt-amt">{fmtMoney2(ssRoPrice(priceSel.priceOverrides, ro, roRateOf(ro.type)))}</div>}
+                          {embedded && canOverridePrice && (sel.priceOverrides || {})[ssPriceRowKey("ro", ro.id)] && (
+                            <button type="button" className="ssd-dt-suggest" title={`Use the list price, ${fmtMoney2(roRateOf(ro.type))}`}
+                              onClick={() => clearPrice(ssPriceRowKey("ro", ro.id))}>Use list price</button>
+                          )}
                         </>)}
                         {!planLocked
                           ? <button type="button" className="ssd-dt-x" title="Remove this rough opening from the plan" aria-label={`Remove ${ssRoLabel(ro, items)}`}
                               onClick={() => { setItems((p) => p.filter((i) => i.id !== ro.id)); setSelectedId(null); }}>×</button>
                           : <div className="ssd-dt-sp" />}
                       </div>
+                      {/* The row wraps, so a full-width note sits on a line of its own under the fields. */}
+                      {roDropped != null && droppedNote(ssPriceRowKey("ro", ro.id), roDropped, { flex: "0 0 100%", marginTop: 0 })}
                     </div>
                   );
                 })}
@@ -34650,7 +34929,7 @@ class DesignerErrorBoundary extends Component {
 // bundle uses (multi-tenant RPC vs. legacy direct table access).
 console.log("[StructureStudio] multi-tenant build: config-loader + RPC data path");
 
-export default function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false }) {
+export default function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, advancedOnly = false, onAdvancedDirty = null, onOpenOrder = null, canPushInvoice = false, canOverridePrice = false }) {
   // state shape: { status: "ready", config } | { status: "loading" } | { status: "error", clientId, message }
   const [state, setState] = useState(() => (
     configProp ? { status: "ready", config: configProp } : { status: "loading" }
@@ -34808,5 +35087,5 @@ export default function StructureStudio({ config: configProp = null, clientId: c
       </div>
     );
   }
-  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} calibrationOnly={calibrationOnly} advancedOnly={advancedOnly} onAdvancedDirty={onAdvancedDirty} onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} /></DesignerErrorBoundary>;
+  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} calibrationOnly={calibrationOnly} advancedOnly={advancedOnly} onAdvancedDirty={onAdvancedDirty} onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} canOverridePrice={canOverridePrice} /></DesignerErrorBoundary>;
 }
