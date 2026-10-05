@@ -12,7 +12,14 @@ import type { SmsOutcome } from "../../../supabase/functions/_shared/smsSend.ts"
 const MSG_ID = "00000000-0000-4000-8000-00000000e002";
 const SERVICE = "MG" + "0".repeat(32);
 
-async function setup(opts: { optedOut?: boolean; consent?: boolean; twilioCode?: number } = {}) {
+type NumberRow = { phone_number: string; registration_status: string; messaging_service_sid: string | null; assigned_user_id: string | null };
+const MAIN_ROW: NumberRow = { phone_number: BUSINESS_NUMBER, registration_status: "registered", messaging_service_sid: "MG" + "0".repeat(32), assigned_user_id: null };
+
+async function setup(opts: {
+  optedOut?: boolean; consent?: boolean; twilioCode?: number;
+  /** Migration 266: the business's live numbers, and the newest text of the thread. */
+  numbers?: NumberRow[]; thread?: { direction: string; from_number: string; to_number: string }[];
+} = {}) {
   const net = new FakeNet().install();
   const auth = await new Auth().init();
   auth.serve(net);
@@ -22,7 +29,14 @@ async function setup(opts: { optedOut?: boolean; consent?: boolean; twilioCode?:
     : [{ id: CONTACT_1, phone: CUSTOMER, phone_digits: "5555550142" }]));
   net.rest("GET", "client_settings", () => [{ sms_number: BUSINESS_NUMBER, sms_status: "active" }]);
   net.rest("GET", "sms_registrations", () => [{ status: "active", messaging_service_sid: SERVICE }]);
-  net.rest("GET", "sms_numbers", () => [{ registration_status: "registered" }]);
+  // The list read (replyFromNumber) asks for assigned_user_id; the send's own check names one number.
+  net.rest("GET", "sms_numbers", (s) => {
+    const rows = opts.numbers ?? [MAIN_ROW];
+    const one = filter(s, "phone_number");
+    if (one) return rows.filter((r) => r.phone_number === one && filter(s, "client_id") === CLIENT);
+    return filter(s, "client_id") === CLIENT ? rows : [];
+  });
+  net.rest("GET", "sms_messages", () => opts.thread ?? []);
   net.rest("GET", "sms_opt_outs", () => (opts.optedOut ? [{ reason: "sms_stop" }] : []));
   net.rest("GET", "sms_consent_log", () => (opts.consent === false ? [] : [{ action: "granted" }]));
   net.rest("POST", "sms_messages", () => [{ id: MSG_ID }]);
@@ -143,5 +157,74 @@ describe("wiring", () => {
     const calls = [...src.matchAll(/sendTenantSms\(([\s\S]*?)\}\);/g)].filter((m) => !/import/.test(src.slice(Math.max(0, m.index! - 40), m.index)));
     expect(calls.length).toBe(1);
     for (const m of calls) expect(m[1]).toMatch(/bypassQuietHours:\s*true/);
+  });
+});
+
+// ── Which number a reply goes out from (migration 266) ─────────────────────────────────────
+describe("/sms/send from the number the customer last used", () => {
+  const SERVICE_SID = "MG" + "0".repeat(32);
+  const SALES = "+15555550101", MINE = "+15555550102", CALLS_ONLY = "+15555550103";
+  const NUMBERS: NumberRow[] = [
+    MAIN_ROW,
+    { phone_number: SALES, registration_status: "registered", messaging_service_sid: SERVICE_SID, assigned_user_id: null },
+    { phone_number: MINE, registration_status: "registered", messaging_service_sid: SERVICE_SID, assigned_user_id: USER_A },
+    { phone_number: CALLS_ONLY, registration_status: "pending_registration", messaging_service_sid: null, assigned_user_id: null },
+  ];
+  const from = (net: FakeNet) => new URLSearchParams(net.to(/Messages\.json$/)[0].body).get("From");
+
+  it("the customer texted the sales line: the reply goes out from the sales line, and the row says so", async () => {
+    const { net, token, env } = await setup({ numbers: NUMBERS, thread: [{ direction: "in", from_number: CUSTOMER, to_number: SALES }] });
+    const { res } = await call(env, send(token));
+    expect(res.status).toBe(200);
+    expect(from(net)).toBe(SALES);
+    expect(net.writes("sms_messages", "POST")[0].json).toMatchObject({ from_number: SALES, to_number: CUSTOMER });
+    // The thread is the contact's, on this business.
+    const thread = net.reads("sms_messages")[0];
+    expect(filter(thread, "client_id")).toBe(CLIENT);
+    expect(filter(thread, "contact_id")).toBe(CONTACT_1);
+  });
+
+  it("no thread yet: from the sender's own number; a thread on the main number: from the main number", async () => {
+    const fresh = await setup({ numbers: NUMBERS });
+    await call(fresh.env, send(fresh.token));
+    expect(from(fresh.net)).toBe(MINE);
+    const main = await setup({ numbers: NUMBERS, thread: [{ direction: "out", from_number: BUSINESS_NUMBER, to_number: CUSTOMER }] });
+    await call(main.env, send(main.token));
+    expect(from(main.net)).toBe(BUSINESS_NUMBER);
+  });
+
+  it("the number they texted can't text yet (calls only): the sender's own number instead, never a refusal", async () => {
+    const { net, token, env } = await setup({ numbers: NUMBERS, thread: [{ direction: "in", from_number: CUSTOMER, to_number: CALLS_ONLY }] });
+    const { res } = await call(env, send(token));
+    expect(res.status).toBe(200);
+    expect(from(net)).toBe(MINE);
+  });
+
+  it("one business number, as every business has today: exactly the old send, from the main number", async () => {
+    const { net, token, env } = await setup({ thread: [{ direction: "in", from_number: CUSTOMER, to_number: BUSINESS_NUMBER }] });
+    await call(env, send(token));
+    expect(from(net)).toBe(BUSINESS_NUMBER);
+  });
+
+  it("an unknown number's thread is read by that number among texts with no contact, and answered from the number it texted", async () => {
+    const { net, token, env } = await setup({ numbers: NUMBERS, thread: [{ direction: "in", from_number: CUSTOMER, to_number: SALES }] });
+    net.rest("GET", "crm_contacts", () => []);
+    const { res } = await call(env, appRequest("POST", "/sms/send", token, { to_e164: CUSTOMER, body: "Thanks!" }));
+    expect(res.status).toBe(200);
+    expect(from(net)).toBe(SALES);
+    const reads = net.reads("sms_messages");
+    expect(reads.some((s) => s.url.searchParams.get("or") === `(from_number.eq.${CUSTOMER},to_number.eq.${CUSTOMER})`)).toBe(true);
+  });
+
+  it("the number disappears between the pick and the send (released): refused in words, nothing sent from another number", async () => {
+    const { net, token, env } = await setup({ numbers: NUMBERS, thread: [{ direction: "in", from_number: CUSTOMER, to_number: SALES }] });
+    // The list still shows it; the send's own four-way check (this business, live) no longer finds it.
+    net.rest("GET", "sms_numbers", (s) => (filter(s, "phone_number") ? [] : NUMBERS));
+    const { res, json } = await call(env, send(token));
+    expect(res.status).toBe(409);
+    expect(json.error.code).toBe("number_not_registered");
+    expect(json.error.message).toContain("isn't one of your business's numbers");
+    expect(net.to(/Messages\.json$/)).toEqual([]);
+    expect(net.writes("sms_messages", "POST")).toEqual([]);
   });
 });

@@ -6,12 +6,13 @@
 //
 // WHICH GREETING (migration 264), first that applies:
 //   1. the person's own, recorded by phone (../greeting.ts), when the voicemail is theirs: a call
-//      transferred to them (the transfer passes them), or a line that is only theirs, a route
-//      whose answer list is exactly one person with phone access (lineOwner, the default);
+//      transferred to them (the transfer passes them), or a line that is theirs (lineOwner, the
+//      default): since migration 266 a number that belongs to someone (number_owner, whoever its
+//      answer list names), else a route whose answer list is exactly one person with phone access;
 //   2. the number's, the owner's link (phone_routes.greeting_url);
 //   3. the standard sentence (greetingText).
-// A shared number (two or more on the answer list) never plays one person's greeting: the
-// caller didn't ring them. When per-person numbers land, their owner field replaces lineOwner.
+// A shared number (two or more on the answer list, and nobody's own) never plays one person's
+// greeting: the caller didn't ring them.
 //
 // TRANSCRIPTION (release 2) is behind env TRANSCRIBE=on: <Record transcribe="true"> with a
 // transcribeCallback to /voice/transcription, which stores phone_voicemails.transcript.
@@ -42,11 +43,17 @@ export function transcribeOn(env: Env): boolean {
 }
 
 /**
- * The person a line belongs to: the one member of a route whose answer list is exactly them, while
- * they have phone access on the number's business. Null for a shared number (or none at all).
+ * The person a line belongs to, while they have phone access on the number's business: the
+ * number's own person (migration 266, number_owner), whoever its answer list names; else, for a
+ * team line, the one member of a route whose answer list is exactly them (264's rule). Null for a
+ * shared number (or none at all). A number whose person lost access is nobody's line: it plays
+ * the number's greeting, never a former teammate's.
  */
 export function lineOwner(info: RouteInfo | null): VoicemailFor | null {
-  if (!info || info.route.members.length !== 1) return null;
+  if (!info) return null;
+  const owner = info.number_owner;
+  if (owner) return owner.has_access ? { user_id: owner.user_id, greeting_sid: owner.greeting_sid ?? null } : null;
+  if (info.route.members.length !== 1) return null;
   const m = info.members.find((x) => x.user_id === info.route.members[0] && !x.cover_only);
   return m && m.has_access ? { user_id: m.user_id, greeting_sid: m.greeting_sid ?? null } : null;
 }

@@ -87,7 +87,16 @@ export interface CallerContext {
   contacts_level: Level;
   own_contacts_only: boolean;
   device_generation: number;
+  /**
+   * The number this person's calls show (migration 266: their own number first, then a team line,
+   * then the texting number, then the oldest). Before 266, the business's one number.
+   */
   number: { id: string; e164: string; voice_enabled: boolean; registration_status: string | null } | null;
+  /**
+   * Every live number of the business, E.164, oldest first (migration 266). A database before 266
+   * returns none: then it is `number` alone, which was the business's only number.
+   */
+  numbers: string[];
   full_name: string | null;
   /** The business's call recording settings (migration 263). */
   recording: RecordingSettings;
@@ -115,9 +124,27 @@ export async function callerContext(admin: Admin, userId: string): Promise<Calle
         registration_status: data.number.registration_status ?? null,
       }
       : null,
+    numbers: businessNumbersOf((data as { numbers?: unknown }).numbers, data.number?.e164),
     full_name: data.full_name ?? null,
     recording: recordingSettingsOf((data as { recording?: unknown }).recording),
   };
+}
+
+/**
+ * The RPC's `numbers`, E.164 strings only, at most 50, with `number` always in it: the list a
+ * ringing call's From is compared against (a teammate's transfer rings From a business number).
+ * Missing or malformed (a database before 266) reads as `number` alone.
+ */
+export function businessNumbersOf(v: unknown, number?: string | null): string[] {
+  const out: string[] = [];
+  for (const x of Array.isArray(v) ? v : []) {
+    const e = typeof x === "string" ? x.trim() : "";
+    if (/^\+[1-9]\d{6,14}$/.test(e) && !out.includes(e)) out.push(e);
+    if (out.length >= 50) break;
+  }
+  const own = typeof number === "string" ? number.trim() : "";
+  if (own && !out.includes(own)) out.unshift(own);
+  return out;
 }
 
 export function normLevel(v: unknown): Level {
@@ -184,6 +211,13 @@ export interface RouteInfo {
   members: RouteMember[];
   business_name: string | null;
   recent_emergency_user: string | null;
+  /**
+   * Migration 266: the person the dialled number belongs to (sms_numbers.assigned_user_id), with
+   * their own greeting and whether they have phone access on this business; null for a team line,
+   * and from a database before 266. Their greeting plays on the number's voicemail
+   * (../voicemail.ts lineOwner). Optional so the fixtures written before it read as a team line.
+   */
+  number_owner?: { user_id: string; greeting_sid: string | null; has_access: boolean } | null;
   /** The business's call recording settings (migration 263). */
   recording: RecordingSettings;
 }
@@ -243,7 +277,21 @@ export async function routeForNumber(admin: Admin, e164: string): Promise<RouteI
       : [],
     business_name: data.business_name ?? null,
     recent_emergency_user: data.recent_emergency_user ? String(data.recent_emergency_user) : null,
+    number_owner: numberOwnerOf((data as { number_owner?: unknown }).number_owner),
     recording: recordingSettingsOf(data.recording),
+  };
+}
+
+/** The RPC's `number_owner` (migration 266). Anything missing or malformed is a team line. */
+export function numberOwnerOf(v: unknown): RouteInfo["number_owner"] {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (typeof o.user_id !== "string" || !o.user_id) return null;
+  return {
+    user_id: o.user_id,
+    // Only a real recording sid: the Worker builds a URL from it.
+    greeting_sid: typeof o.greeting_sid === "string" && /^RE[0-9a-f]{32}$/.test(o.greeting_sid) ? o.greeting_sid : null,
+    has_access: o.has_access === true,
   };
 }
 

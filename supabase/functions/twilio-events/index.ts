@@ -3,7 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { timingSafeEqual } from "../_shared/emailInbound.ts";
 import { normalizeBrandStatus, normalizeCampaignStatus } from "../_shared/twilioTrustHub.ts";
-import { campaignVerdictPredatesResubmit, eventOccurrenceKey, eventOccurrenceStamp, numberEventTarget } from "../_shared/twilioEventKey.ts";
+import { campaignVerdictPredatesResubmit, eventOccurrenceKey, eventOccurrenceStamp, numberEventTarget, numberVerdictEffect } from "../_shared/twilioEventKey.ts";
 
 // Twilio Event Streams sink for A2P compliance events.
 //
@@ -209,7 +209,7 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
       // E.164 phone only if the SID finds no row.
       const setNumber = (col: string, val: string) => admin.from("sms_numbers")
         .update({ registration_status: status })
-        .eq("client_id", reg.client_id).eq(col, val).is("released_at", null).select("id");
+        .eq("client_id", reg.client_id).eq(col, val).is("released_at", null).select("id, phone_number");
       let numRes = numberTarget.sid ? await setNumber("twilio_sid", numberTarget.sid) : null;
       if (numberTarget.phone && !numRes?.error && !numRes?.data?.length) {
         numRes = await setNumber("phone_number", numberTarget.phone);
@@ -230,9 +230,24 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
         }).catch(() => {});
       }
 
+      // ⚠️ WHICH NUMBER (migration 266): only the main texting number's verdict is about the
+      // business's texting; another number's stays on its own row (numberVerdictEffect). The main
+      // number is read only for a verdict; a failed read counts as none on record, which is how
+      // every number event was read before 266.
+      let mainNumber: string | null = null;
+      if (status !== "pending_registration") {
+        const { data: csMain } = await admin.from("client_settings")
+          .select("sms_number").eq("client_id", reg.client_id).maybeSingle();
+        mainNumber = (csMain as { sms_number?: string | null } | null)?.sms_number ?? null;
+      }
+      const matchedRow = numberMatched ? (numRes!.data![0] as { id?: string; phone_number?: string | null }) : null;
+      const effect = numberVerdictEffect({
+        status, numberMatched, eventPhone: matchedRow?.phone_number || numberTarget.phone, mainNumber,
+      });
+
       // Only when the number row itself moved: smsSend checks THAT row on every send, so an
       // "active" builder whose number still reads pending is a switch that texts nobody.
-      if (status === "registered" && numberMatched) {
+      if (effect === "activate") {
         // THE MOMENT TEXTING BECOMES LEGAL for this builder. Both switches flip together:
         // sms_registrations.status gates the feature, client_settings.sms_status is what
         // smsSend reads on every send.
@@ -242,9 +257,20 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
         patch.attention_note = null;
         await admin.from("client_settings")
           .update({ sms_status: "active" }).eq("client_id", reg.client_id);
-      } else if (status === "failed") {
+      } else if (effect === "attention") {
         patch.needs_attention = true;
         patch.attention_note = "The carriers refused to register this number. It may need to be released and replaced.";
+      } else if (effect === "extra_failed") {
+        // The business still texts from its main number, and this one still takes calls; the
+        // Phone tab says so beside it. Logged so someone can look into the refusal.
+        await logEdgeError({
+          fn: "twilio-events",
+          clientId: reg.client_id,
+          code: "sms_extra_number_registration_failed",
+          message: `The carriers refused to register one of the business's other numbers for texting (${type}); the main texting number is unaffected`,
+          severity: "error",
+          context: { event_id: eventId, event_type: type, number_id: matchedRow?.id ?? null },
+        }).catch(() => {});
       }
       handled = true;
     }

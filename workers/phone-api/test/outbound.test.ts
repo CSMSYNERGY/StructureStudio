@@ -28,6 +28,15 @@ async function dialOut(env = makeEnv(), params: Record<string, string> = {}) {
 }
 
 describe("/voice/outbound", () => {
+  it("a person with their own number (migration 266) calls out from it: caller ID, number_id and from_e164 are that number's", async () => {
+    const own = { id: "00000000-0000-4000-8000-00000000a002", e164: "+15555550102", voice_enabled: true, registration_status: "pending_registration" };
+    const net = setup(callerCtx({ number: own, numbers: [BUSINESS_NUMBER, "+15555550102"] }), { contacts: [{ id: CONTACT_1 }] });
+    const { text } = await dialOut(makeEnv(), { ContactId: CONTACT_1 });
+    expect(attr(text, "Dial", "callerId")).toBe("+15555550102");
+    expect(numbersIn(text)).toEqual([CUSTOMER]);
+    expect(net.writes("phone_calls", "POST")[0].json).toMatchObject({ number_id: own.id, from_e164: "+15555550102", to_e164: CUSTOMER, placed_by: USER_A });
+  });
+
   it("dials with the builder's number as caller ID, answerOnBridge, and a status callback on the <Number>", async () => {
     const net = setup(undefined, { contacts: [{ id: CONTACT_1 }] });
     const { res, text } = await dialOut(makeEnv(), { ContactId: CONTACT_1, ClickAt: String(Date.now() - 80) });

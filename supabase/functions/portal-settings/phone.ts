@@ -592,3 +592,116 @@ export function createContactRefusal(error: { code?: unknown; message?: unknown 
   }
   return null;
 }
+
+// ── More than one number (migration 266) ──────────────────────────────────────────────────
+//
+// Carolyn, 2026-09-30: "What if they want more than one number?" and "all of these settings ...
+// needs to be for that individual number." The settings already were per number (phone_routes has
+// one row per sms_numbers row); what follows is the part of the Phone tab that names a number,
+// says whose it is, and decides which number a request is about. Safe defaults (contract):
+//   * a number is a TEAM LINE unless assigned to a person; one personal number per person;
+//   * at most MAX_NUMBERS live numbers per business;
+//   * a request that names no number means the FIRST (oldest) one, the number every screen before
+//     266 showed, so an older portal bundle keeps working unchanged.
+
+/** At most this many live numbers per business. */
+export const MAX_NUMBERS = 10;
+/** sms_numbers_label_len (migration 266). */
+export const NUMBER_LABEL_MAX = 40;
+
+/** The 23505 on sms_numbers_one_per_person, in words. */
+export const ONE_NUMBER_PER_PERSON =
+  "That person already has their own number. Make that one a team line first, or choose someone else.";
+/** A numberId that is not one of this business's live numbers (released meanwhile, or never ours). */
+export const NUMBER_GONE = "That number isn't on this account any more. Reload the page.";
+
+/**
+ * The number a request is about: `raw` (payload.numberId) when it is given, which must be one of
+ * `rows` (this business's live numbers, read by the caller on clientId), else the FIRST row, or
+ * null when there is none. A given id that matches nothing is refused, never read as "the first":
+ * changing the wrong number's settings is worse than asking for a reload.
+ */
+export function pickNumber<T extends { id: string }>(rows: T[], raw: unknown):
+  { ok: true; n: T | null } | { ok: false; error: string } {
+  const list = (rows ?? []).filter(Boolean);
+  if (raw === undefined || raw === null || raw === "") return { ok: true, n: list[0] ?? null };
+  if (!isUuid(raw)) return { ok: false, error: NUMBER_GONE };
+  const n = list.find((r) => String(r.id).toLowerCase() === raw.toLowerCase());
+  return n ? { ok: true, n } : { ok: false, error: NUMBER_GONE };
+}
+
+/** A number's name as typed → what is stored: spaces tidied, NULL for none, 1 to 40 characters. */
+export function parseNumberLabel(raw: unknown): { ok: true; value: string | null } | { ok: false; error: string } {
+  if (raw === null || raw === undefined) return { ok: true, value: null };
+  if (typeof raw !== "string") return { ok: false, error: "A number's name has to be text." };
+  const s = raw.replace(/\s+/g, " ").trim();
+  if (!s) return { ok: true, value: null };
+  // deno-lint-ignore no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(s)) return { ok: false, error: "A number's name can't have that character in it." };
+  if (s.length > NUMBER_LABEL_MAX) return { ok: false, error: `A number's name can be at most ${NUMBER_LABEL_MAX} characters.` };
+  return { ok: true, value: s };
+}
+
+/**
+ * "Whose number": empty / null = a team line; otherwise someone in `eligible` (every user id on
+ * THIS business with phone access, computed by the caller from client_users, never from the
+ * request), so a number can't be given to someone on another builder's team or with no phone.
+ */
+export function parseAssignee(
+  raw: unknown,
+  eligible: Set<string>,
+  names: Map<string, string | null> = new Map(),
+): { ok: true; value: string | null } | { ok: false; error: string } {
+  if (raw === null || raw === undefined || raw === "") return { ok: true, value: null };
+  if (!isUuid(raw)) return { ok: false, error: "The person this number is for isn't on your team." };
+  const id = raw.toLowerCase();
+  if (!eligible.has(id)) {
+    const who = names.get(id);
+    return {
+      ok: false,
+      error: who
+        ? `${who} doesn't have Phone access, so a number can't be theirs. Change it on the Team tab first.`
+        : "The person this number is for isn't on your team, or doesn't have Phone access.",
+    };
+  }
+  return { ok: true, value: id };
+}
+
+/** The keys of the answer-list form. A save that carries none of them changes no route. */
+export const ROUTE_KEYS = [
+  "mode", "members", "ringSeconds", "noAnswer", "forwardTo", "businessHours", "timeZone", "afterHours", "greetingUrl",
+] as const;
+export function carriesRoute(p: Record<string, unknown>): boolean {
+  return ROUTE_KEYS.some((k) => Object.prototype.hasOwnProperty.call(p ?? {}, k));
+}
+
+/**
+ * Who a number with no saved route is offered to ring (the Phone tab's first-time setup; nothing
+ * is saved until the owner presses Save): its person, when it is someone's and they have phone
+ * access, else the business's owners (plan section 7: "the list starts with the owner").
+ */
+export function suggestedMembersFor(
+  assignedUserId: string | null | undefined,
+  team: { userId: string; role: string | null; phoneLevel: string }[],
+): string[] {
+  const who = String(assignedUserId ?? "").toLowerCase();
+  if (who && team.some((t) => t.userId === who && t.phoneLevel !== "none")) return [who];
+  return team.filter((t) => t.role === "owner" && t.phoneLevel !== "none").map((t) => t.userId);
+}
+
+export type CallerNumberRow = { id: string; phone_number: string; purchased_at?: string | null; assigned_user_id?: string | null };
+
+/**
+ * The number a person's calls show, phone_caller_context's pick (migration 266) as the Phone tab
+ * tells someone with their own calls only: their own number, else a team line (the texting number
+ * first), else the oldest; somebody else's own number only when nothing else is live. `rows` are
+ * live and oldest first (phoneNumberRows), so "the oldest" is the first that qualifies.
+ */
+export function callerNumberFor<T extends CallerNumberRow>(rows: T[], userId: string | null | undefined, smsNumber: string | null | undefined): T | null {
+  const list = (rows ?? []).filter(Boolean);
+  const me = String(userId ?? "").toLowerCase();
+  const own = me ? list.find((n) => String(n.assigned_user_id ?? "").toLowerCase() === me) : undefined;
+  if (own) return own;
+  const team = list.filter((n) => !n.assigned_user_id);
+  return team.find((n) => smsNumber && n.phone_number === smsNumber) ?? team[0] ?? list[0] ?? null;
+}

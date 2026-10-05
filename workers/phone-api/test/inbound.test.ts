@@ -125,6 +125,36 @@ describe("/voice/inbound routing", () => {
       setup(routeInfo({ members: [member(USER_A, { dnd: true })] }, { members: [USER_A], greeting_url: LINK }));
       expect((await ringIn()).text).toContain(`<Play>${LINK}</Play>`);
     });
+
+    // Migration 266: a number that is someone's own plays THEIR greeting, whoever its answer list
+    // names (264 could only guess the owner from a list of exactly one).
+    it("someone's own number plays their greeting, even with a teammate on its answer list too", async () => {
+      setup(routeInfo({
+        members: [member(USER_A, { dnd: true, greeting_sid: SID }), member(USER_B, { dnd: true, greeting_sid: OTHER_SID })],
+        number_owner: { user_id: USER_A, greeting_sid: SID, has_access: true },
+      }, { members: [USER_A, USER_B], greeting_url: LINK }));
+      const text = (await ringIn()).text;
+      expect(text).toContain(own(USER_A));
+      expect(text).not.toContain(OTHER_SID);
+      expect(text).not.toContain(LINK);
+    });
+
+    it("...and even when its person isn't on the answer list at all (their greeting comes with number_owner)", async () => {
+      setup(routeInfo({ members: [member(USER_B, { dnd: true, greeting_sid: OTHER_SID })], number_owner: { user_id: USER_A, greeting_sid: SID, has_access: true } }, { members: [USER_B] }));
+      expect((await ringIn()).text).toContain(own(USER_A));
+    });
+
+    it("its person with no greeting: the number's link (never the one member's); its person without phone access: nobody's line", async () => {
+      setup(routeInfo({ members: [member(USER_B, { dnd: true, greeting_sid: OTHER_SID })], number_owner: { user_id: USER_A, greeting_sid: null, has_access: true } }, { members: [USER_B], greeting_url: LINK }));
+      const noGreeting = (await ringIn()).text;
+      expect(noGreeting).toContain(`<Play>${LINK}</Play>`);
+      expect(noGreeting).not.toContain("greeting-audio");
+      setup(routeInfo({ members: [member(USER_B, { dnd: true, greeting_sid: OTHER_SID })], number_owner: { user_id: USER_A, greeting_sid: SID, has_access: false } }, { members: [USER_B] }));
+      expect((await ringIn()).text).not.toContain("greeting-audio");
+      // A malformed number_owner (or none, a database before 266) is a team line: 264's rule.
+      setup(routeInfo({ members: [member(USER_B, { dnd: true, greeting_sid: OTHER_SID })], number_owner: { greeting_sid: SID } }, { members: [USER_B] }));
+      expect((await ringIn()).text).toContain(own(USER_B, OTHER_SID));
+    });
   });
 
   it("in_order rings one member per Dial and names its position for after-dial", async () => {

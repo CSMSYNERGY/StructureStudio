@@ -4,7 +4,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sendTenantSms = vi.fn();
-vi.mock("../../../supabase/functions/_shared/smsSend.ts", () => ({ sendTenantSms: (...a: unknown[]) => sendTenantSms(...a) }));
+// Which number it goes out from (migration 266): smsSend.test.ts runs the real chooser.
+const replyFromNumber = vi.fn();
+vi.mock("../../../supabase/functions/_shared/smsSend.ts", () => ({
+  sendTenantSms: (...a: unknown[]) => sendTenantSms(...a),
+  replyFromNumber: (...a: unknown[]) => replyFromNumber(...a),
+}));
 
 import { mapSmsRefusal } from "../src/routes/sms";
 import {
@@ -31,6 +36,8 @@ async function setup(opts: {
   net.rest("POST", "app_errors", () => []);
   sendTenantSms.mockReset();
   sendTenantSms.mockResolvedValue({ sent: true, id: MSG_ID });
+  replyFromNumber.mockReset();
+  replyFromNumber.mockResolvedValue(null);
   return { net, token: await auth.token(USER_A), env: makeEnv() };
 }
 
@@ -57,6 +64,20 @@ describe("/sms/send checks", () => {
     expect(tag.json).toEqual({ client_temp_id: "tmp-1", sent_via: "extension" });
     expect(filter(tag, "id")).toBe(MSG_ID);
     expect(filter(tag, "client_id")).toBe(CLIENT);
+  });
+
+  it("asks which number on the contact's thread for the sender, and sends from what it answers (migration 266)", async () => {
+    const { token, env } = await setup();
+    replyFromNumber.mockResolvedValue("+15555550101");
+    const { res } = await call(env, send(token, {}));
+    expect(res.status).toBe(200);
+    const [, clientId, o] = replyFromNumber.mock.calls[0];
+    expect([clientId, o]).toEqual([CLIENT, { contactId: CONTACT_1, userId: USER_A }]);
+    expect(sendTenantSms.mock.calls[0][2]).toMatchObject({ fromNumber: "+15555550101" });
+    // Asked only once every check has passed: a refused text never reads the thread.
+    const refused = await setup({ ctx: callerCtx({ contacts_level: "view" }) });
+    await call(refused.env, send(refused.token, {}));
+    expect(replyFromNumber).not.toHaveBeenCalled();
   });
 
   it("tags texts from the phone app as mobile", async () => {

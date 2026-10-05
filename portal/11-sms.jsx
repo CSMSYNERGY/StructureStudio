@@ -79,7 +79,7 @@ const SMS_ERROR_HELP = {
   "30886": {
     title: "The description of what you text about was not accepted",
     what: "The carriers read the sentence describing what you send, and could not tell from it who is texting, who they are texting, or why. Listing what you send — quotes, invoices, updates — is not enough on its own.",
-    fix: "Rewrite it so it names your business, says the customer asked you for a quote, and says what the texts are about. Something like: \"Junior Barns sends text messages to customers who have requested a quote from us, about their quote, their invoice and the delivery date of the building they ordered. Customers give permission on our quote form.\"",
+    fix: "Rewrite it so it names your business, says the customer asked you for a quote, and says what the texts are about. Something like: \"Acme Sheds sends text messages to customers who have requested a quote from us, about their quote, their invoice and the delivery date of the building they ordered. Customers give permission on our quote form.\"",
   },
   "30896": {
     title: "They could not verify how customers agree to be texted",
@@ -288,6 +288,17 @@ function SmsComplianceCard({ compliance, busy, onRun, readOnly, card }) {
  *  and the number stayed "Calls only" for good (review BE-5). */
 const SMS_ADOPT_STATES = ["campaign_approved", "number_pending", "active"];
 
+/** The calling-only number texting will take over (portal-sms buy_number, adoptNumber.ts buyPlan),
+ *  or null: only while NO number texts yet (one in a Messaging Service means the account already
+ *  has its texting number, and the server answers 409), and a team line before someone's own
+ *  number (migration 266: a business can have several, and its main texting number should not be
+ *  one person's). A server before 266 sends no `assigned`: the oldest, as before. */
+function smsAdoptNumber(numbers) {
+  const list = numbers || [];
+  if (!list.length || list.some((n) => !n.callingOnly)) return null;
+  return list.find((n) => !n.assigned) || list[0];
+}
+
 /** The progress rail. Five steps, because a builder who can see where they are stops
  *  emailing to ask. `number_pending` and `active` both read as step 5 — from the outside
  *  they are "nearly there" and "there". */
@@ -339,8 +350,12 @@ function SmsSteps({ status }) {
  *  reached after a page reload by definition — and until 2026-09-01 it rendered NO form at all,
  *  just a Continue button that posted a freshly-mounted state's two empty strings into a
  *  guaranteed 400, with nothing on screen to fix it. Two copies of this markup would drift
- *  straight back into that, so there is exactly one. */
-function SmsCopyForm({ copy, setCopy, readOnly, optInUrl }) {
+ *  straight back into that, so there is exactly one.
+ *
+ *  `suggested` is true while the boxes hold the wording portal-sms suggested (suggestedCopy,
+ *  _shared/smsCopyTemplate.ts) rather than anything the builder wrote or saved: the form says
+ *  so in one line, with "Start blank" for a builder who would rather write their own. */
+function SmsCopyForm({ copy, setCopy, readOnly, optInUrl, suggested = false, onStartBlank = null }) {
   return (
     <>
           <h4 style={{ margin: "0 0 6px", fontSize: 14 }}>What you will text people about</h4>
@@ -349,6 +364,22 @@ function SmsCopyForm({ copy, setCopy, readOnly, optInUrl }) {
         examples of messages you would actually send. Do not put a customer&rsquo;s name
         or number in an example — write <code>[Name]</code> instead.
       </p>
+      {suggested && (
+        <div data-ss-sms-copy-suggested=""
+          style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 8, padding: "10px 12px", margin: "0 0 12px", fontSize: 12.5, color: "#1E3A8A", lineHeight: 1.55 }}>
+          We filled this in with wording carriers have approved before. Check it describes your
+          business and change anything that doesn&rsquo;t.
+          {!readOnly && onStartBlank && (
+            <>
+              {" "}
+              <button type="button" data-ss-sms-copy-blank="" onClick={onStartBlank}
+                style={{ background: "none", border: "none", padding: 0, color: ACCENT, textDecoration: "underline", cursor: "pointer", fontSize: 12.5, fontWeight: 700, fontFamily: "inherit" }}>
+                Start blank
+              </button>
+            </>
+          )}
+        </div>
+      )}
       <SmsField label="In a sentence, what will you text customers about?">
         <textarea style={SMS_TEXTAREA} rows={4} value={copy.description} disabled={readOnly}
           placeholder="Quote follow-ups, delivery times and build updates for customers who asked us for a quote."
@@ -382,24 +413,33 @@ function SmsCopyForm({ copy, setCopy, readOnly, optInUrl }) {
             style={{ fontSize: 12, color: "#166534", wordBreak: "break-all", display: "block", marginBottom: 8 }}>
             {optInUrl}
           </a>
-          <button type="button"
-            onClick={() => {
-              const line = `The exact wording, the tick box and links to our privacy policy and terms can be seen at ${optInUrl}`;
-              if (String(copy.messageFlow || "").includes(optInUrl)) return;
-              const base = String(copy.messageFlow || "").trim();
-              setCopy({ ...copy, messageFlow: (base ? base.replace(/\s*$/, " ") : "") + line });
-            }}
-            style={{ background: "#166534", color: "#fff", border: "none", borderRadius: 7, padding: "7px 13px", cursor: "pointer", fontWeight: 700, fontSize: 12, fontFamily: "inherit" }}>
-            Add this link to my answer
-          </button>
+          {/* Says so when the address is already there — the suggested wording carries it, and a
+              button that silently does nothing reads as broken. */}
+          {String(copy.messageFlow || "").includes(optInUrl) ? (
+            <button type="button" disabled data-ss-sms-optin-link="present"
+              style={{ background: "#DCFCE7", color: "#166534", border: "1px solid #BBF7D0", borderRadius: 7, padding: "7px 13px", cursor: "default", fontWeight: 700, fontSize: 12, fontFamily: "inherit" }}>
+              Already in your answer &#10003;
+            </button>
+          ) : (
+            <button type="button" data-ss-sms-optin-link="add"
+              onClick={() => {
+                const line = `The exact wording, the tick box and links to our privacy policy and terms can be seen at ${optInUrl}`;
+                if (String(copy.messageFlow || "").includes(optInUrl)) return;
+                const base = String(copy.messageFlow || "").trim();
+                setCopy({ ...copy, messageFlow: (base ? base.replace(/\s*$/, " ") : "") + line });
+              }}
+              style={{ background: "#166534", color: "#fff", border: "none", borderRadius: 7, padding: "7px 13px", cursor: "pointer", fontWeight: 700, fontSize: 12, fontFamily: "inherit" }}>
+              Add this link to my answer
+            </button>
+          )}
         </div>
       )}
       {copy.messageSamples.map((sample, i) => (
         <SmsField key={i} label={`Example message ${i + 1}`}>
-          <input style={SMS_INPUT} value={sample} disabled={readOnly}
+          <textarea style={SMS_TEXTAREA} rows={3} value={sample} disabled={readOnly} data-ss-sms-sample={i}
             placeholder={i === 0
-              ? "Hi [Name], it's Junior Barns. Your 12x20 barn quote is ready — reply here with any questions. Reply STOP to opt out."
-              : "Hi [Name], your building is scheduled for delivery on [Date]. Reply STOP to opt out."}
+              ? "[Your business]: Hi [Name], your 12x20 barn quote is ready. Reply here with any questions. Reply STOP to opt out."
+              : "[Your business]: Hi [Name], your building is scheduled for delivery on [Date]. Reply HELP for help or STOP to opt out."}
             onChange={(e) => {
               const next = copy.messageSamples.slice();
               next[i] = e.target.value;
@@ -430,6 +470,61 @@ function smsCopyProblems(copy) {
   if (s.some((x) => x.length < 20)) out.push("Write each example out the way you would really send it.");
   if (s.length && !s.some((x) => /\bSTOP\b/i.test(x))) out.push("At least one example must show how to stop — keep “Reply STOP to opt out” in it.");
   return out;
+}
+
+/** Four empty boxes: the copy form before anything is in it. A fresh object every call. */
+function smsCopyBlank() {
+  return { description: "", messageFlow: "", messageSamples: ["", ""] };
+}
+
+/** Any copy-shaped value in the form's shape: three strings, two to five example boxes. */
+function smsCopyFrom(c) {
+  const s = (c && Array.isArray(c.messageSamples)) ? c.messageSamples.map((x) => String(x == null ? "" : x)) : [];
+  return {
+    description: String((c && c.description) || ""),
+    messageFlow: String((c && c.messageFlow) || ""),
+    messageSamples: s.length >= 2 ? s.slice(0, 5) : ["", ""],
+  };
+}
+
+/** Nothing typed anywhere. Deliberately untrimmed: one keystroke, even a space, means started. */
+function smsCopyEmpty(c) {
+  return !(c && c.description) && !(c && c.messageFlow) && !((c && c.messageSamples) || []).some(Boolean);
+}
+
+function smsCopySame(a, b) {
+  return !!a && !!b && a.description === b.description && a.messageFlow === b.messageFlow
+    && JSON.stringify(a.messageSamples || []) === JSON.stringify(b.messageSamples || []);
+}
+
+/** What the copy form holds after a status read.
+ *
+ *  `box` is { copy, suggested, declined }: `suggested` is the wording WE filled in (null when the
+ *  boxes are not ours), `declined` that they pressed "Start blank", so it is not filled in again
+ *  while the page is open. `d` is the portal-sms status answer.
+ *
+ *  ⚠️ THE BUILDER'S TYPING WINS, ALWAYS. refresh() runs after every action and on a 60-second
+ *  timer while pending, so the form is only (re)filled while it is empty or still holds exactly
+ *  our suggestion untouched. That second case is what lets the suggestion follow the facts it is
+ *  built from: filled in before the details screen is saved, it gains the policy links once it
+ *  is; and if the server stops suggesting (the tick box switched off), an untouched suggestion
+ *  is cleared rather than left claiming a box that is no longer there.
+ *
+ *  Saved wording beats a suggestion (the server only sends one while nothing is saved, and this
+ *  checks again). `canSuggest` is false for someone who cannot edit the form: a viewer sees what
+ *  is saved, never our wording dressed up as the business's. */
+function smsCopySeed(box, d, canSuggest) {
+  if (!d || !d.copy) return box;
+  const ours = !!box.suggested && smsCopySame(box.copy, box.suggested);
+  if (!smsCopyEmpty(box.copy) && !ours) return box;
+  const stored = smsCopyFrom(d.copy);
+  if (!smsCopyEmpty(stored)) return { ...box, copy: stored, suggested: null };
+  const s = (canSuggest && !box.declined && d.suggestedCopy) ? smsCopyFrom(d.suggestedCopy) : null;
+  if (s && !smsCopyEmpty(s)) {
+    if (ours && smsCopySame(s, box.suggested)) return box;
+    return { ...box, copy: s, suggested: s };
+  }
+  return ours ? { ...box, copy: smsCopyBlank(), suggested: null } : box;
 }
 
 /** Anything a human typed into a US phone box -> "+1XXXXXXXXXX", or "" if it is not one.
@@ -473,7 +568,10 @@ const SMS_INPUT = {
  *  typed, and the appended link lands where the builder cannot see it.
  *  The description answer uses it too (2026-09-16): its label says "in a sentence", but what
  *  the carriers accept names the sender, who is texted, what about and how they agreed, which
- *  is three or four sentences that a one-line input cut off mid-word. */
+ *  is three or four sentences that a one-line input cut off mid-word.
+ *  And both example messages (2026-10-05): an approved example runs past 100 characters (who it
+ *  is from, what it is about, how to stop), so in one line the "Reply STOP" the carriers look for
+ *  was always the part scrolled out of sight. */
 const SMS_TEXTAREA = {
   ...SMS_INPUT, minHeight: 92, lineHeight: 1.5, resize: "vertical", display: "block",
 };
@@ -494,11 +592,13 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
     repPhone: "", repBusinessTitle: "Owner", repJobPosition: "CEO",
   });
   const [urls, setUrls] = useState({ privacyPolicyUrl: "", termsUrl: "" });
-  const [copy, setCopy] = useState({
-    description: "",
-    messageFlow: "",
-    messageSamples: ["", ""],
-  });
+  // The copy form, plus whether what is in it is OUR suggestion (smsCopySeed). One state, so a
+  // status read can decide both at once from the same snapshot; `setCopy` keeps the shape the
+  // form and the submit buttons have always used.
+  const [copyBox, setCopyBox] = useState(() => ({ copy: smsCopyBlank(), suggested: null, declined: false }));
+  const copy = copyBox.copy;
+  const setCopy = useCallback((next) => setCopyBox((b) => ({ ...b, copy: typeof next === "function" ? next(b.copy) : next })), []);
+  const copySuggested = !!copyBox.suggested;
   const [areaCode, setAreaCode] = useState("");
   const [found, setFound] = useState(null);
   const [problems, setProblems] = useState([]);
@@ -529,19 +629,19 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
       // on a 60-second timer while pending, so an unconditional seed would delete a sentence the
       // builder was halfway through typing. Empty-on-all-three is the only safe "they have not
       // started" test — a partially typed form must win over the stored value every time.
-      if (d.copy) {
-        setCopy((c) => {
-          const pristine = !c.description && !c.messageFlow && !(c.messageSamples || []).some(Boolean);
-          if (!pristine) return c;
-          return {
-            description: d.copy.description || "",
-            messageFlow: d.copy.messageFlow || "",
-            messageSamples: (d.copy.messageSamples || []).length >= 2 ? d.copy.messageSamples.slice(0, 5) : ["", ""],
-          };
-        });
-      }
+      // smsCopySeed keeps that rule and adds the suggested wording (d.suggestedCopy) for a
+      // builder with nothing saved; "untouched suggestion" counts as not started.
+      setCopyBox((b) => smsCopySeed(b, d, !!canEdit));
     } catch (e) { setErr(e.message); }
-  }, [call, clientId]);
+  }, [call, clientId, canEdit]);
+
+  // "Start blank": clear the four boxes and do not fill them in again while the page is open.
+  // Asks first only when the builder has already changed our wording — that is their work.
+  const startBlank = () => {
+    if (copyBox.suggested && !smsCopySame(copyBox.copy, copyBox.suggested)
+      && !window.confirm("Clear what is in these boxes and start with them empty?")) return;
+    setCopyBox({ copy: smsCopyBlank(), suggested: null, declined: true });
+  };
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -560,7 +660,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
   // the row still calling-only, review BE-5) is the builder's move too: the "Finish connecting"
   // card below is the only way on, so the "nothing for you to do" line must not sit above it.
   const adoptUnfinished = !!data && data.status !== "campaign_approved" && SMS_ADOPT_STATES.includes(data.status)
-    && (data.numbers || []).some((n) => n.callingOnly);
+    && !!smsAdoptNumber(data.numbers);
   const waitingOnYou = data && (data.status === "profile_pending" || adoptUnfinished);
   const pending = data && ["profile_pending", "brand_pending", "campaign_pending", "number_pending"].includes(data.status);
   useEffect(() => {
@@ -848,7 +948,8 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
       {/* ── Step 3: what they will send, then submit ───────────────────────── */}
       {status === "ready" && (
         <div style={card}>
-          <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={readOnly} optInUrl={data.optInDisclosureUrl} />
+          <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={readOnly} optInUrl={data.optInDisclosureUrl}
+            suggested={copySuggested} onStartBlank={startBlank} />
 
           {!readOnly && (
             <>
@@ -948,7 +1049,8 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           {/* ⚠️ THE FORM MUST BE HERE. This card is reached DAYS later, so the page has certainly
               reloaded and the in-memory copy is empty. It used to render no fields at all and
               post that empty state straight into a refusal. It is pre-filled from the row now. */}
-          <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={readOnly} optInUrl={data.optInDisclosureUrl} />
+          <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={readOnly} optInUrl={data.optInDisclosureUrl}
+            suggested={copySuggested} onStartBlank={startBlank} />
           {smsCopyProblems(copy).length > 0 && (
             <ul style={{ margin: "0 0 10px", paddingLeft: 18, fontSize: 13, color: "#B91C1C", lineHeight: 1.6 }}>
               {smsCopyProblems(copy).map((pr, i) => <li key={i}>{pr}</li>)}
@@ -1024,7 +1126,8 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
                   fixed, and the yellow box beside it said that cost nothing. It cost the
                   vetting fee and a try, on the click. Editing in place is free and unlimited,
                   so the builder edits right here and presses send. */}
-              <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={false} optInUrl={data.optInDisclosureUrl} />
+              <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={false} optInUrl={data.optInDisclosureUrl}
+                suggested={copySuggested} onStartBlank={startBlank} />
               {/* ⚠️ AND THE TWO URLS, HERE, ON THIS CARD. They are judged by the carriers as
                   hard as the wording is (30908/30882/30932 all point at them), they are
                   re-sent from the row on every resubmit — and until 2026-09-03 this screen
@@ -1065,13 +1168,13 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           business's one number, so texting takes it over instead of buying a second one. The
           server adopts it on buy_number with no number picked, and takes no second charge (the
           first month was taken when it was bought). */}
-      {SMS_ADOPT_STATES.includes(status) && !readOnly && (data.numbers || []).some((n) => n.callingOnly) && (
+      {SMS_ADOPT_STATES.includes(status) && !readOnly && smsAdoptNumber(data.numbers) && (
         <div style={card} data-ss-sms-adopt={status === "campaign_approved" ? "offer" : "finish"}>
           {status === "campaign_approved" ? (
             <>
               <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Use your business number for texting</h4>
               <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
-                You already have <strong>{(data.numbers.find((n) => n.callingOnly) || {}).phoneNumber}</strong> for calls.
+                You already have <strong>{smsAdoptNumber(data.numbers).phoneNumber}</strong> for calls.
                 Texting uses the same number, so your customers see one number for both. No second number is bought.
               </p>
             </>
@@ -1079,7 +1182,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             <>
               <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Finish connecting your number for texting</h4>
               <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
-                Texting was being switched on for <strong>{(data.numbers.find((n) => n.callingOnly) || {}).phoneNumber}</strong>,
+                Texting was being switched on for <strong>{smsAdoptNumber(data.numbers).phoneNumber}</strong>,
                 but the last step didn&rsquo;t finish. Press below to finish it. No second number is bought and nothing is charged.
               </p>
             </>
@@ -1091,7 +1194,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           </button>
         </div>
       )}
-      {status === "campaign_approved" && !readOnly && !(data.numbers || []).some((n) => n.callingOnly) && (
+      {status === "campaign_approved" && !readOnly && !smsAdoptNumber(data.numbers) && (
         <div style={card}>
           <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Choose your number</h4>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 12 }}>
@@ -1367,7 +1470,44 @@ function phoneFormFrom(d) {
     timeZone: tz,
     afterHours: (r && r.afterHours) || "voicemail",
     greetingUrl: (r && r.greetingUrl) || "",
+    // Migration 266: the number's own name and whose it is ("" = a team line).
+    label: (d && d.label) || "",
+    assignedUserId: (d && d.assignedUserId) || "",
   };
+}
+
+// ── More than one number (migration 266) ────────────────────────────────────────────────
+// Carolyn, 09-30: "What if they want more than one number?" and "all of these settings ... needs
+// to be for that individual number." phone_settings_get sends `numbers`: every live number,
+// oldest first, each with its own name, person, caller ID and answer list. A server from before
+// sends only `number` and `route`, which is one number, read the same way here.
+function phoneNumbersOf(d) {
+  if (d && Array.isArray(d.numbers)) return d.numbers;
+  if (d && d.number) {
+    return [{ ...d.number, label: d.number.label || null, assignedUserId: null, callerId: d.callerId || null,
+      route: d.route || null, suggestedMembers: d.suggestedMembers || null }];
+  }
+  return [];
+}
+// Which number is the business's MAIN one: the number texting sends from (the server's `main`,
+// client_settings.sms_number), else one already in the texting setup, else the one texting WILL
+// take over when the carriers approve the business (portal-sms buyPlan, smsAdoptNumber above: the
+// oldest team line, else the oldest number). Not simply the first: a business that gives its first
+// number to a person keeps a team line as its main number.
+function phoneMainNumberId(list) {
+  const nums = (list || []).filter(Boolean);
+  const m = nums.find((n) => n.main) || nums.find((n) => n.callingOnly === false) || nums.find((n) => !n.assignedUserId) || nums[0];
+  return m ? m.id : null;
+}
+// Its name, or "Main number" (phoneMainNumberId) / "Number 2" for one nobody named.
+function phoneNumberName(n, i, mainId) {
+  return (n && n.label) || (n && mainId != null && n.id === mainId ? "Main number" : `Number ${i + 1}`);
+}
+// "Team line", or the person it belongs to.
+function phoneNumberOwner(n, team) {
+  if (!n || !n.assignedUserId) return "Team line";
+  const t = (team || []).find((x) => x.userId === n.assignedUserId);
+  return t ? (t.name || "Unnamed team member") : "Someone no longer on the team";
 }
 
 // ── Call recording (migration 263) ──────────────────────────────────────────────────────
@@ -1412,7 +1552,11 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [form, setForm] = useState(null);
+  // Migration 266: one form per number (keyed by its id, "none" before there is one), so moving
+  // between numbers never loses what somebody is halfway through choosing, and which is open.
+  const [forms, setForms] = useState({});
+  const [selId, setSelId] = useState(null);
+  const [adding, setAdding] = useState(false);     // "Add another number" opened
   const [note, setNote] = useState(null);          // { ok } | { err } after a save
   const [swNote, setSwNote] = useState(null);      // { ok } | { err } after the on/off switch, shown in the header only
   const [outNote, setOutNote] = useState(null);    // { userId, ok | err } after a sign-out
@@ -1436,9 +1580,18 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       const d = await phoneAction("phone_settings_get");
       setData(d);
       setErr(null);
-      // Seeded from the server only while the form is untouched, so a refresh never wipes what
+      // Seeded from the server only for a number with no form yet, so a refresh never wipes what
       // somebody is halfway through choosing.
-      setForm((f) => f || (d && d.scope === "team" ? phoneFormFrom(d) : null));
+      if (d && d.scope === "team") {
+        const list = phoneNumbersOf(d);
+        setForms((m) => {
+          const out = { ...m };
+          if (!list.length && !out.none) out.none = phoneFormFrom(d);
+          for (const n of list) if (!out[n.id]) out[n.id] = phoneFormFrom(n);
+          return out;
+        });
+        setSelId((cur) => (cur && list.some((n) => n.id === cur) ? cur : (list[0] ? list[0].id : null)));
+      }
       setRecForm((f) => f || (d && d.scope === "team" && d.recording ? phoneRecFormFrom(d.recording) : null));
     } catch (e) { setErr(e.message); }
   }, [clientId]);
@@ -1461,7 +1614,37 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
 
   const on = data.phoneStatus === "on";
   const team = data.team || [];
+  // The numbers, and the one open below (migration 266). Everything under the list is about it.
+  const numbers = phoneNumbersOf(data);
+  const many = numbers.length > 1;
+  const selIdx = Math.max(0, numbers.findIndex((n) => n.id === selId));
+  const sel = numbers[selIdx] || null;
+  const mainId = phoneMainNumberId(numbers);
+  const selName = sel ? phoneNumberName(sel, selIdx, mainId) : null;
+  const formKey = sel ? sel.id : "none";
+  // A number the last load didn't seed (it can't, normally) starts from what the server sent.
+  const formSeed = data.scope === "team" ? phoneFormFrom(sel || data) : null;
+  const form = forms[formKey] || formSeed;
+  const setForm = (fn) => setForms((m) => {
+    const cur = m[formKey] || formSeed;
+    return { ...m, [formKey]: typeof fn === "function" ? fn(cur) : fn };
+  });
   const setF = (patch) => setForm((f) => ({ ...f, ...patch }));
+  // One number's facts changed (connected, its caller ID, saved). A server before 266 keeps them
+  // on `number` / `callerId` / `route`, so those follow the first number.
+  const patchNumber = (id, patch) => setData((x) => {
+    if (!Array.isArray(x.numbers)) {
+      const { callerId: cidPatch, route: routePatch, ...rest } = patch;
+      return { ...x, number: x.number ? { ...x.number, ...rest } : x.number,
+        ...(cidPatch !== undefined ? { callerId: cidPatch } : {}), ...(routePatch !== undefined ? { route: routePatch, suggestedMembers: null } : {}) };
+    }
+    const nums = x.numbers.map((n) => (n.id === id ? { ...n, ...patch } : n));
+    const first = nums[0] && nums[0].id === id;
+    return { ...x, numbers: nums,
+      ...(first && x.number ? { number: { ...x.number, ...(patch.voiceReady !== undefined ? { voiceReady: patch.voiceReady } : {}), ...(patch.callingOnly !== undefined ? { callingOnly: patch.callingOnly } : {}) } } : {}),
+      ...(first && patch.route !== undefined ? { route: patch.route, suggestedMembers: null } : {}),
+      ...(first && patch.callerId !== undefined ? { callerId: patch.callerId } : {}) };
+  });
 
   // The switch. Turning it OFF also moves a connected number to voicemail (the server does it,
   // review SSB-2), so the confirm says what callers will get; turning it back ON reconnects a
@@ -1469,19 +1652,23 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const flip = async (wantOn = !on) => {
     // Only a CONNECTED number is moved to voicemail; one that never pointed at My Synergy Phone keeps
     // whatever it did before, so the words are only said where they are true.
-    const moves = !!(data.number && data.number.voiceReady);
+    const moving = numbers.filter((n) => n.voiceReady);
+    const moves = moving.length > 0;
     if (!wantOn && on && !window.confirm(moves
-      ? `Turn calling off? My Synergy Phone won't ring for anyone, and nobody can call out, until it's turned back on. Callers to ${phoneDisplay(data.number.e164)} go straight to voicemail instead.`
+      ? `Turn calling off? My Synergy Phone won't ring for anyone, and nobody can call out, until it's turned back on. Callers to ${moving.length > 1 ? "your numbers" : phoneDisplay(moving[0].e164)} go straight to voicemail instead.`
       : "Turn calling off? My Synergy Phone won't ring for anyone, and nobody can call out, until it's turned back on.")) return;
     setBusy(true); setSwNote(null);
     try {
       const d = await phoneAction("phone_status_set", { on: wantOn });
+      // Every number follows the switch (migration 266): `numbers` says where each one's calls go.
+      const ready = new Map((Array.isArray(d.numbers) ? d.numbers : []).map((n) => [n.id, !!n.voiceReady]));
       setData((x) => ({
         ...x, phoneStatus: d.phoneStatus,
         number: x.number && d.number ? { ...x.number, voiceReady: !!d.number.voiceReady } : x.number,
+        ...(Array.isArray(x.numbers) ? { numbers: x.numbers.map((n) => (ready.has(n.id) ? { ...n, voiceReady: ready.get(n.id) } : n)) } : {}),
       }));
       setSwNote(d.warning ? { err: d.warning }
-        : { ok: d.phoneStatus === "on" ? "Calling is on." : moves ? "Calling is off. Calls to your number go to voicemail." : "Calling is off." });
+        : { ok: d.phoneStatus === "on" ? "Calling is on." : moves ? `Calling is off. Calls to your ${moving.length > 1 ? "numbers" : "number"} go to voicemail.` : "Calling is off." });
     } catch (e) { setSwNote({ err: e.message }); }
     finally { setBusy(false); }
   };
@@ -1490,6 +1677,9 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     setBusy(true); setNote(null);
     try {
       const d = await phoneAction("phone_settings_save", {
+        // Which number, and (migration 266, where the server keeps them) its name and person.
+        ...(sel && sel.id ? { numberId: sel.id } : {}),
+        ...(data.perNumber && sel ? { label: form.label, assignedUserId: form.assignedUserId || null } : {}),
         mode: form.mode,
         members: form.members,
         ringSeconds: Number(form.ringSeconds),
@@ -1500,9 +1690,11 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
         afterHours: form.afterHours,
         greetingUrl: form.greetingUrl,
       });
-      setData((x) => ({ ...x, route: d.route, suggestedMembers: null }));
-      setForm(phoneFormFrom({ route: d.route }));
-      setNote({ ok: "Saved. Calls to your number follow these settings from now on." });
+      const saved = { route: d.route, ...(d.numberId ? { label: d.label || null, assignedUserId: d.assignedUserId || null } : {}) };
+      if (sel) patchNumber(sel.id, { ...saved, suggestedMembers: null });
+      else setData((x) => ({ ...x, route: d.route, suggestedMembers: null }));
+      setForm(phoneFormFrom({ ...(sel || {}), ...saved }));
+      setNote({ ok: many ? `Saved. Calls to ${selName} follow these settings from now on.` : "Saved. Calls to your number follow these settings from now on." });
     } catch (e) { setNote({ err: e.message }); }
     finally { setBusy(false); }
   };
@@ -1537,11 +1729,23 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   // CALLING-ONLY number for a builder with none, which texting reuses once its registration
   // clears. The server decides who may buy (canBuyNumber); this only offers what will work.
   const connect = async () => {
+    if (!sel) return;
     setBusy(true); setNumNote(null);
     try {
-      await phoneAction("phone_enable_number");
-      setData((x) => ({ ...x, number: { ...x.number, voiceReady: true } }));
+      await phoneAction("phone_enable_number", { numberId: sel.id });
+      patchNumber(sel.id, { voiceReady: true });
       setNumNote({ ok: "Connected. Calls to this number ring My Synergy Phone now." });
+    } catch (e) { setNumNote({ err: e.message }); }
+    finally { setBusy(false); }
+  };
+  // Migration 266: a calling-only number joins the business's texting (phone_number_texting).
+  const joinTexting = async () => {
+    if (!sel) return;
+    setBusy(true); setNumNote(null);
+    try {
+      await phoneAction("phone_number_texting", { numberId: sel.id });
+      patchNumber(sel.id, { callingOnly: false });
+      setNumNote({ ok: "Added to your texting. It can text once the carriers approve this number, usually within a few days." });
     } catch (e) { setNumNote({ err: e.message }); }
     finally { setBusy(false); }
   };
@@ -1557,13 +1761,22 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     // Before builder launch only an operator reaches this button (the server's rollout check).
     // Texting takes this same number over once the carriers approve the business (portal-sms
     // buy_number adopts a calling-only number, plan phase 6), so there is no caveat to give.
-    if (!window.confirm(`Get ${phoneDisplay(e164)} as your business number? It takes calls right away, and texting uses the same number once the carriers approve your business on the Text Messaging tab.`)) return;
+    if (!window.confirm(numbers.length
+      ? `Add ${phoneDisplay(e164)} as another business number? It takes calls right away${data.textingActive ? ", and it can text once the carriers approve it" : ""}. You can give it a name and a person after.`
+      : `Get ${phoneDisplay(e164)} as your business number? It takes calls right away, and texting uses the same number once the carriers approve your business on the Text Messaging tab.`)) return;
     setBusy(true); setNumNote(null);
     try {
       const d = await phoneAction("phone_buy_number", { phoneNumber: e164 });
       const n = d.number || {};
-      setData((x) => ({ ...x, number: { id: n.id, e164: n.e164 || e164, textingStatus: "pending_registration", voiceReady: !!n.voiceReady, callingOnly: true } }));
+      // The FIRST number: what was chosen on this screen before there was one (who answers, the
+      // order, the hours) becomes its form, so load() below doesn't swap it for the defaults.
+      if (!numbers.length && n.id) setForms((m) => (m.none && !m[n.id] ? { ...m, [n.id]: m.none } : m));
+      setData((x) => ({ ...x, number: x.number || { id: n.id, e164: n.e164 || e164, textingStatus: "pending_registration", voiceReady: !!n.voiceReady, callingOnly: true } }));
       setNumResults(null);
+      setAdding(false);
+      // The server's own view of every number (its route, caller ID and form), then open the new one.
+      await load();
+      if (n.id) setSelId(n.id);
       const done = n.voiceReady ? "Your number is ready and connected for calls." : "Your number is ready. Until calling is on, its callers go to voicemail.";
       // `note`: an earlier try had already got a number, and that one was kept (review SSB-4).
       setNumNote(d.warning ? { err: [d.note, d.warning].filter(Boolean).join(" ") } : { ok: [d.note, done].filter(Boolean).join(" ") });
@@ -1595,7 +1808,9 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
         {/* The own view has no answer list below it (a sales rep's, say), so it doesn't point at one. */}
         {on
           ? (data.scope === "team"
-            ? "Customers who call your number ring the people chosen below, in My Synergy Phone on their computer and phone."
+            ? (many
+              ? "Customers who call one of your numbers ring the people chosen for that number below, in My Synergy Phone on their computer and phone."
+              : "Customers who call your number ring the people chosen below, in My Synergy Phone on their computer and phone.")
             : "Customers who call your number ring your team in My Synergy Phone, on their computer and phone.")
           : "While calling is off, My Synergy Phone can't ring or call out for anyone on your team."}
       </p>
@@ -1609,17 +1824,104 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     </div>
   );
 
+  // ── The numbers (migration 266) ─────────────────────────────────────────────────────────
+  // One number: as it always was. More than one: a list at the top, each with its name and whose
+  // it is; picking one opens its own settings below (its name, its person, who answers it, its
+  // hours, its caller ID). Connect and "Use this number for texting too" act on the open one.
+  const textingWords = (n) => {
+    if (n.textingStatus === "registered") return "Texting is set up on this number too.";
+    if (n.textingStatus === "failed") return "The carriers turned down texting on this number; it still takes calls.";
+    if (!n.callingOnly) return "Calls work now; texting follows once the carriers approve it.";
+    if (data.textingActive) {
+      return canEdit && data.canJoinTexting
+        ? "Calls only for now. Add it to your texting below and it can text too, once the carriers approve it."
+        : "Calls only for now. The account owner, or someone with Billing access, can add it to your texting.";
+    }
+    return n.id === mainId ? "Calls only for now. Texting uses this same number once the carriers approve your business on the Text Messaging tab." : "Calls only for now.";
+  };
+  const ownerBadge = (n) => (
+    <span data-ss-phone-number-owner={n.assignedUserId || "team"} style={{
+      fontSize: 11.5, fontWeight: 800, borderRadius: 999, padding: "2px 9px", whiteSpace: "nowrap",
+      background: n.assignedUserId ? "#EEF2FF" : "#F1F5F9", color: n.assignedUserId ? "#3730A3" : "#475569",
+    }}>
+      {phoneNumberOwner(n, team)}
+    </span>
+  );
+  // Another number, for someone the purchase accepts, up to the server's limit (a server before
+  // 266 sends no maxNumbers: one number, as it allowed).
+  const canAdd = data.scope === "team" && !!data.canBuyNumber && !!data.numbersForSale && numbers.length > 0
+    && numbers.length < (data.maxNumbers || 1);
+  const searchBlock = (
+    <>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <input value={numQ} inputMode="numeric" maxLength={3} placeholder="Area code, e.g. 816"
+          onChange={(e) => setNumQ(e.target.value.replace(/\D/g, "").slice(0, 3))}
+          style={{ ...S.input, width: 170 }} data-ss-phone-areacode />
+        <button type="button" disabled={busy} onClick={searchNumbers} data-ss-phone-search
+          style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px" }}>
+          {busy && !numResults ? "Searching…" : "Search"}
+        </button>
+      </div>
+      {numResults && numResults.length === 0 && (
+        <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 8 }}>No numbers available there right now. Try a nearby area code, or leave it empty.</div>
+      )}
+      {numResults && numResults.length > 0 && (
+        <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+          {numResults.map((r) => (
+            <div key={r.e164} data-ss-phone-result={r.e164} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 14, fontWeight: 800, minWidth: 130 }}>{phoneDisplay(r.e164)}</span>
+              <span style={{ fontSize: 12, color: "#64748B", flex: "1 1 120px" }}>{[r.locality, r.region].filter(Boolean).join(", ")}</span>
+              <button type="button" disabled={busy} onClick={() => buyNumber(r.e164)}
+                style={{ ...S.btn(ACCENT, "#FFF"), padding: "5px 12px", fontSize: 12.5 }}>
+                Get this number
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+
   const numberCard = (
-    <div style={PHONE_CARD}>
-      <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>Your business number</h4>
-      {data.number ? (
+    <div style={PHONE_CARD} data-ss-phone-numbers={numbers.length}>
+      <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>
+        {many ? "Your business numbers" : data.scope !== "team" && sel && sel.mine ? "Your number" : "Your business number"}
+      </h4>
+      {many && (
+        <div data-ss-phone-number-list style={{ display: "grid", gap: 6, marginBottom: 12 }}>
+          {numbers.map((n, i) => {
+            const open = !!sel && n.id === sel.id;
+            return (
+              <button type="button" key={n.id || i} data-ss-phone-number-row={n.e164} aria-pressed={open}
+                onClick={() => { setSelId(n.id); setNote(null); setNumNote(null); setTrustNote(null); setViOpen(false); }}
+                style={{
+                  display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", width: "100%", textAlign: "left",
+                  padding: "9px 12px", borderRadius: 10, cursor: "pointer", fontFamily: "inherit",
+                  border: open ? `2px solid ${ACCENT}` : "1px solid #E2E8F0", background: open ? "#F8FAFF" : "#FFF",
+                }}>
+                <span style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", minWidth: 110 }}>{phoneNumberName(n, i, mainId)}</span>
+                <span style={{ fontSize: 14, fontWeight: 700, color: "#1E293B" }}>{phoneDisplay(n.e164)}</span>
+                {data.scope === "team" && ownerBadge(n)}
+                <span style={{ fontSize: 11.5, color: n.voiceReady ? "#047857" : "#94A3B8", marginLeft: "auto" }}>
+                  {n.voiceReady ? "Rings My Synergy Phone" : "Not connected for calls"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {sel ? (
         <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
-          <div data-ss-phone-number style={{ fontSize: 18, fontWeight: 800 }}>{phoneDisplay(data.number.e164)}</div>
+          {many && <div style={{ fontSize: 13, fontWeight: 800, color: "#475569" }}>{selName}:</div>}
+          <div data-ss-phone-number style={{ fontSize: 18, fontWeight: 800 }}>{phoneDisplay(sel.e164)}</div>
+          {!many && sel.label && <span style={{ fontSize: 13, fontWeight: 700, color: "#475569" }}>{sel.label}</span>}
+          {!many && data.scope === "team" && data.perNumber && ownerBadge(sel)}
           {data.scope === "team" && (
+            <span style={{ fontSize: 12, color: "#64748B" }}>{textingWords(sel)}</span>
+          )}
+          {data.scope !== "team" && (
             <span style={{ fontSize: 12, color: "#64748B" }}>
-              {data.number.textingStatus === "registered" ? "Texting is set up on this number too."
-                : data.number.callingOnly ? "Calls only for now. Texting uses this same number once the carriers approve your business on the Text Messaging tab."
-                : "Calls work now; texting follows once the carriers approve it."}
+              {sel.mine ? "Your own number: customers see it when you call them." : "Customers see this number when you call them."}
             </span>
           )}
         </div>
@@ -1641,11 +1943,11 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
       {/* ── Plan phase 6: CONNECT the number for calls ─────────────────────────────────────
           A number texting bought (or one bought while calling was off) does not ring My Synergy Phone
           until its voice webhooks point at the phone-api Worker. The owner does that here,
-          once calling is on. */}
+          once calling is on. With more than one number (migration 266), the open one. */}
       {/* Calling is OFF but the number still points at My Synergy Phone, which tells callers it can't
           take calls: the switch's move to voicemail did not finish (review SSB-2). Pressing
-          this asks the switch to move it again. */}
-      {data.scope === "team" && data.number && data.number.voiceReady && !on && (
+          this asks the switch to move it again (every number). */}
+      {data.scope === "team" && sel && sel.voiceReady && !on && (
         <div data-ss-phone-stuck style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
           <div style={{ fontSize: 13, color: "#B45309", marginBottom: canEdit ? 8 : 0 }}>
             Calling is off, but this number still sends its calls to My Synergy Phone, so callers hear that it can&rsquo;t take calls.
@@ -1658,7 +1960,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           )}
         </div>
       )}
-      {data.scope === "team" && data.number && !data.number.voiceReady && (
+      {data.scope === "team" && sel && !sel.voiceReady && (
         <div data-ss-phone-connect-card style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
           <div style={{ fontSize: 13, color: "#475569", marginBottom: canEdit && data.canConnect ? 8 : 0 }}>
             Calls to this number don&rsquo;t reach My Synergy Phone yet.
@@ -1673,49 +1975,109 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
           {canEdit && data.canConnect && !on && <span style={{ fontSize: 12, color: "#64748B", marginLeft: 10 }}>Turn calling on first.</span>}
         </div>
       )}
-      {data.scope === "team" && data.number && data.number.voiceReady && on && (
+      {data.scope === "team" && sel && sel.voiceReady && on && (
         <div data-ss-phone-connected style={{ marginTop: 8, fontSize: 12, color: "#047857", fontWeight: 700 }}>Connected for calls.</div>
+      )}
+      {/* Migration 266: a calling-only number while the business texts. A number bought after
+          texting was on joins it at purchase; this is for one whose join didn't finish, or one
+          bought before texting cleared (texting takes over only one: phoneMainNumberId). */}
+      {data.scope === "team" && sel && sel.callingOnly && data.textingActive && canEdit && data.canJoinTexting && (
+        <div data-ss-phone-texting-join style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
+          <div style={{ fontSize: 13, color: "#475569", marginBottom: 8 }}>
+            This number takes calls. Add it to your texting and customers can text it too, once the carriers approve it.
+          </div>
+          <button type="button" data-ss-phone-texting-join-button disabled={busy} onClick={joinTexting}
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px", opacity: busy ? 0.55 : 1 }}>
+            Use this number for texting too
+          </button>
+        </div>
       )}
 
       {/* ── Plan phase 6: a CALLING-ONLY number for a builder with none ────────────────────
           Offered only to someone the purchase will accept (the server's canBuyNumber: the
-          owner, or an admin they gave Billing). It is the account's one number: texting adopts
-          it after registration instead of buying a second. */}
+          owner, or an admin they gave Billing). Texting adopts the first number after
+          registration instead of buying a second. */}
       {data.scope === "team" && !data.number && data.canBuyNumber && data.numbersForSale && (
         <div data-ss-phone-buy style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B", marginBottom: 6 }}>Get a number for calls</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <input value={numQ} inputMode="numeric" maxLength={3} placeholder="Area code, e.g. 816"
-              onChange={(e) => setNumQ(e.target.value.replace(/\D/g, "").slice(0, 3))}
-              style={{ ...S.input, width: 170 }} data-ss-phone-areacode />
-            <button type="button" disabled={busy} onClick={searchNumbers} data-ss-phone-search
-              style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px" }}>
-              {busy && !numResults ? "Searching…" : "Search"}
+          {searchBlock}
+        </div>
+      )}
+      {/* ── Migration 266: ANOTHER number (a team line, or one person's) ──────────────────── */}
+      {canAdd && !adding && (
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
+          <button type="button" data-ss-phone-add disabled={busy} onClick={() => { setAdding(true); setNumResults(null); setNumNote(null); }}
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "7px 14px" }}>
+            Add another number
+          </button>
+          <span style={{ fontSize: 12, color: "#64748B", marginLeft: 10 }}>
+            A second line for the team, or someone&rsquo;s own number. Up to {data.maxNumbers} numbers.
+          </span>
+        </div>
+      )}
+      {canAdd && adding && (
+        <div data-ss-phone-buy="another" style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>Add another number</div>
+            <button type="button" onClick={() => { setAdding(false); setNumResults(null); }}
+              style={{ background: "none", border: "none", padding: 0, color: "#64748B", fontSize: 12, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
+              Cancel
             </button>
           </div>
-          {numResults && numResults.length === 0 && (
-            <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 8 }}>No numbers available there right now. Try a nearby area code, or leave it empty.</div>
-          )}
-          {numResults && numResults.length > 0 && (
-            <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
-              {numResults.map((r) => (
-                <div key={r.e164} data-ss-phone-result={r.e164} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                  <span style={{ fontSize: 14, fontWeight: 800, minWidth: 130 }}>{phoneDisplay(r.e164)}</span>
-                  <span style={{ fontSize: 12, color: "#64748B", flex: "1 1 120px" }}>{[r.locality, r.region].filter(Boolean).join(", ")}</span>
-                  <button type="button" disabled={busy} onClick={() => buyNumber(r.e164)}
-                    style={{ ...S.btn(ACCENT, "#FFF"), padding: "5px 12px", fontSize: 12.5 }}>
-                    Get this number
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
+          {searchBlock}
         </div>
       )}
       {numNote && numNote.ok && <div style={{ ...S.okMsg, margin: "10px 0 0" }}>{numNote.ok}</div>}
       {numNote && numNote.err && <div style={{ ...S.err, margin: "10px 0 0" }}>{numNote.err}</div>}
     </div>
   );
+
+  // ── This number's name and person (migration 266) ─────────────────────────────────────────
+  // Saved with the rest of this number's settings (Save below). A person can have one number of
+  // their own: someone who already has one is shown, not offered.
+  const thisNumberCard = data.scope === "team" && data.perNumber && sel && form ? (() => {
+    const locked = !canEdit;
+    const takenBy = new Set(numbers.filter((n) => n.id !== sel.id && n.assignedUserId).map((n) => n.assignedUserId));
+    const people = team.filter((t) => t.phoneLevel && t.phoneLevel !== "none");
+    const gone = form.assignedUserId && !people.some((t) => t.userId === form.assignedUserId);
+    // Whose number it is. A number nobody answers yet starts out ringing its person (or the owner
+    // again for a team line); a number already set up keeps its answer list.
+    const pickOwner = (v) => setForm((f) => ({
+      ...f, assignedUserId: v,
+      ...(!sel.route ? { members: v ? [v] : team.filter((t) => t.role === "owner" && t.phoneLevel !== "none").map((t) => t.userId) } : {}),
+    }));
+    return (
+      <div style={PHONE_CARD} data-ss-phone-this-number>
+        <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>{many ? `${selName}: name and owner` : "This number"}</h4>
+        <div style={{ display: "grid", gap: 10 }}>
+          <label style={{ display: "block" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 4 }}>Name (optional)</div>
+            <input value={form.label} disabled={locked} maxLength={40} placeholder={sel && sel.id === mainId ? "Main number" : "e.g. Sales line"}
+              onChange={(e) => setF({ label: e.target.value })} style={{ ...S.input, maxWidth: 280 }} data-ss-phone-number-label />
+            <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4 }}>So you can tell your numbers apart. Up to 40 characters.</div>
+          </label>
+          <label style={{ display: "block" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 4 }}>Whose number</div>
+            <select value={form.assignedUserId || ""} disabled={locked} onChange={(e) => pickOwner(e.target.value)}
+              style={{ ...S.input, width: "auto", minWidth: 220, padding: "5px 8px" }} data-ss-phone-number-owner-select>
+              <option value="">Team line</option>
+              {gone && <option value={form.assignedUserId}>Someone no longer on the team</option>}
+              {people.map((t) => (
+                <option key={t.userId} value={t.userId} disabled={takenBy.has(t.userId)}>
+                  {(t.name || "Unnamed team member") + (takenBy.has(t.userId) ? " (has their own number)" : "")}
+                </option>
+              ))}
+            </select>
+            <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4, lineHeight: 1.45 }}>
+              {form.assignedUserId
+                ? "Their calls out show this number, and it rings the people ticked below (just them, to start). Everyone else keeps calling out from a team line."
+                : "A team line rings the people ticked below. Anyone without a number of their own calls out from a team line."}
+            </div>
+          </label>
+        </div>
+      </div>
+    );
+  })() : null;
 
   // Your own Do Not Disturb cover (migration 264), saved on the Worker for the SIGNED-IN person's
   // own business: so never while an operator views someone else's, and only while calling is on
@@ -1733,14 +2095,15 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   // Where the number's two registrations stand, for everyone on the team screen; registering
   // and checking are a CSM Synergy operator's only (the server's phone_trust_* gate, reported as
   // canManageCallerId). Nothing here runs on its own: each press is one request.
-  const cid = data.callerId || null;
+  // Per number (migration 266): the open one's registrations, and each press names it.
+  const cid = (sel && sel.callerId) || null;
   const trustSetup = async (product) => {
     const what = product === "voice_integrity" ? "carrier spam-label protection (Voice Integrity)" : "verified caller ID (SHAKEN/STIR)";
-    if (!window.confirm(`Register ${phoneDisplay(data.number.e164)} for ${what}? This sends the business details on its Twilio business profile for Twilio's review.`)) return;
+    if (!window.confirm(`Register ${phoneDisplay(sel.e164)} for ${what}? This sends the business details on its Twilio business profile for Twilio's review.`)) return;
     setBusy(true); setTrustNote(null);
     try {
-      const d = await phoneAction("phone_trust_setup", { product, ...(product === "voice_integrity" ? { voiceIntegrity: viForm } : {}) });
-      setData((x) => ({ ...x, callerId: d.callerId || x.callerId }));
+      const d = await phoneAction("phone_trust_setup", { product, numberId: sel.id, ...(product === "voice_integrity" ? { voiceIntegrity: viForm } : {}) });
+      if (d.callerId) patchNumber(sel.id, { callerId: d.callerId });
       if (product === "voice_integrity") setViOpen(false);
       setTrustNote({ ok: d.submitted ? "Submitted. Twilio usually reviews it within one to two business days." : "It's already with Twilio, so nothing was sent again." });
     } catch (e) { setTrustNote({ err: e.message }); }
@@ -1749,8 +2112,8 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   const trustCheck = async () => {
     setBusy(true); setTrustNote(null);
     try {
-      const d = await phoneAction("phone_trust_status");
-      setData((x) => ({ ...x, callerId: d.callerId || x.callerId }));
+      const d = await phoneAction("phone_trust_status", { numberId: sel.id });
+      if (d.callerId) patchNumber(sel.id, { callerId: d.callerId });
       const codes = [...((d.errorCodes && d.errorCodes.shakenStir) || []), ...((d.errorCodes && d.errorCodes.voiceIntegrity) || [])];
       setTrustNote({ ok: codes.length ? `Checked. Twilio's rejection codes: ${codes.join(", ")}.` : "Checked with Twilio just now." });
     } catch (e) { setTrustNote({ err: e.message }); }
@@ -1787,11 +2150,11 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
   };
   const viValid = !!viForm.useCase && /^\d+$/.test(String(viForm.employeeCount).trim()) && Number(viForm.employeeCount) >= 1
     && /^\d+$/.test(String(viForm.averageDailyCalls).trim()) && Number(viForm.averageDailyCalls) >= 1;
-  const callerIdCard = data.scope === "team" && data.number ? (
+  const callerIdCard = data.scope === "team" && sel ? (
     <div style={PHONE_CARD} data-ss-phone-callerid>
-      <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Caller ID</h4>
+      <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>{many ? `Caller ID for ${selName}` : "Caller ID"}</h4>
       <p style={{ margin: "0 0 6px", fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
-        Registering {phoneDisplay(data.number.e164)} helps customers pick up: carriers show it as verified, and it is
+        Registering {phoneDisplay(sel.e164)} helps customers pick up: carriers show it as verified, and it is
         less likely to be labelled &ldquo;Spam Likely&rdquo;.
       </p>
       {!cid || !cid.available ? (
@@ -2051,7 +2414,7 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
               didn't ring. A zone they didn't save reads as the number's. */}
           {t.ringHours && (
             <div data-ss-phone-member-hours style={{ fontSize: 11.5, color: "#64748B" }}>
-              Their hours: {phoneHoursSummary(t.ringHours)} ({phoneZoneWord(t.ringHoursTz || (data.route && data.route.timeZone) || form.timeZone, PHONE_TIME_ZONES)})
+              Their hours: {phoneHoursSummary(t.ringHours)} ({phoneZoneWord(t.ringHoursTz || (sel && sel.route && sel.route.timeZone) || form.timeZone, PHONE_TIME_ZONES)})
             </div>
           )}
           {outNote && outNote.userId === t.userId && (
@@ -2081,12 +2444,13 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
     <div data-ss-phone-settings="team">
       {header}
       {numberCard}
+      {thisNumberCard}
       {callerIdCard}
 
       <div style={PHONE_CARD}>
         <h4 style={{ margin: "0 0 4px", fontSize: 14 }}>Who answers</h4>
         <p style={{ margin: "0 0 10px", fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
-          The people ticked here ring on every call to your number, in My Synergy Phone on their computer and
+          The people ticked here ring on every call to {many ? selName : "your number"}, in My Synergy Phone on their computer and
           phone. They don&rsquo;t need to set anything up beyond signing in. Up to 10 people.
         </p>
         <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginBottom: 10 }}>
@@ -2165,10 +2529,10 @@ function PhoneSettingsView({ clientId, viewingLabel = null, canEdit = false, onO
 
       {!ro && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-          <button type="button" disabled={busy || !data.number} onClick={save} data-ss-phone-save
-            title={data.number ? "" : "Get a number on the Text Messaging tab first"}
-            style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy || !data.number ? 0.6 : 1 }}>
-            {busy ? "Saving…" : data.route ? "Save phone settings" : "Save and finish setup"}
+          <button type="button" disabled={busy || !sel} onClick={save} data-ss-phone-save
+            title={sel ? "" : "Get a number on the Text Messaging tab first"}
+            style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy || !sel ? 0.6 : 1 }}>
+            {busy ? "Saving…" : sel && sel.route ? (many ? `Save ${selName}` : "Save phone settings") : "Save and finish setup"}
           </button>
           {note && note.err && <span style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 700 }}>{note.err}</span>}
           {note && note.ok && <span style={{ fontSize: 12.5, color: "#047857", fontWeight: 700 }}>{note.ok}</span>}

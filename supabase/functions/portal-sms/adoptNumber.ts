@@ -41,20 +41,27 @@ export type LiveNumber = {
   phone_number: string;
   twilio_sid: string | null;
   messaging_service_sid: string | null;
+  /** Whose number it is (migration 266), NULL for a team line. Absent before 266. */
+  assigned_user_id?: string | null;
 };
 
 /**
  * What buy_number does, from the tenant's live (unreleased) numbers, oldest first:
  *   none                                   → "buy" (the texting purchase, unchanged)
  *   one already in a Messaging Service     → "has_number" (the existing 409)
- *   otherwise, the oldest calling-only one → "adopt" it (the Phone tab reads the oldest too)
+ *   otherwise, a calling-only one          → "adopt" it: the oldest TEAM line (migration 266: a
+ *                                            number that is one person's never becomes the
+ *                                            business's main texting number while a team line
+ *                                            exists), else the oldest (the Phone tab's first)
+ * A business can hold several numbers since 266; texting adopts ONE of them as its main number,
+ * and the Phone tab's "Use this number for texting too" brings in the others.
  */
 export function buyPlan(live: LiveNumber[]):
   { kind: "buy" } | { kind: "has_number" } | { kind: "adopt"; number: LiveNumber } {
   const rows = (live ?? []).filter(Boolean);
   if (!rows.length) return { kind: "buy" };
   if (rows.some((n) => !!n.messaging_service_sid)) return { kind: "has_number" };
-  return { kind: "adopt", number: rows[0] };
+  return { kind: "adopt", number: rows.find((n) => !n.assigned_user_id) ?? rows[0] };
 }
 
 /** The registration states an adoption may run in. Before campaign_approved the carriers have
